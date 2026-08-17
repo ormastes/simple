@@ -1,0 +1,214 @@
+"""
+# Inter-Location Stock Transfers — dispatch, receive, conservation
+
+## Overview
+
+The stock-transfer flow of the Simple Enterprise Suite (lane W22-C) against the
+durable enterprise store: stock is seeded into a location, then moved between
+locations as a two-phase event log — dispatch decrements the SOURCE and marks
+in-transit, receive increments the DESTINATION and marks received. Per-location
+on-hand is a pure-Simple fold over an insert-only signed movement ledger
+(`xfer_moves`) — never an UPDATE.
+
+## Guarded sequence proven here
+
+| Rung | Denial reason | Scenario |
+|------|---------------|----------|
+| session | invalid-session | cross-tenant / inactive session rejected |
+| rbac | forbidden | sales role cannot dispatch |
+| validation | insufficient-stock | dispatch more than source on-hand |
+| transition | invalid-transition | receive before dispatch; double-receive |
+| idempotency | duplicate-key | replay returns recorded result, one effect |
+
+## Invariants
+
+- source decremented at dispatch; destination incremented only at receive.
+- a completed transfer conserves total on-hand across all locations.
+- tenant B sees none of tenant A's stock and cannot mutate it.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md (W22-C)
+**Design:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W22-C).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, audit_verify_chain}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope
+}
+use std.nogc_sync_mut.enterprise_transfer.transfer.{
+    xfer_setup, location_on_hand, transfer_status, transfer_route,
+    stock_seed, transfer_dispatch, transfer_receive
+}
+
+# Each scenario uses its own database path: the interpreter backend caches
+# open databases per path in-process.
+fn db_path(name: text) -> text:
+    "build/test-artifacts/transfer_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn keeper_a() -> ActorContext:
+    ActorContext(actor_id: "keeper-1", role: "procurement")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    xfer_setup(store)
+    store
+
+# seed_l1 seeds 10 units of SKU-1 into location L1 as the keeper.
+fn seed_l1(name: text):
+    val store = fresh_store(name)
+    val t = tenant_a()
+    val keeper = keeper_a()
+    val sk = session_for(keeper, t)
+    stock_seed(store, sk, t, keeper, envelope(name + "-sd", "transfer.stock.seed"), "L1", "SKU-1", 10)
+    store
+
+describe "transfer vertical — two-phase dispatch and receive":
+    it "dispatch decrements source, receive increments destination, total conserved":
+        step("Seed 10 units of SKU-1 into L1")
+        val store = seed_l1("e2e")
+        val t = tenant_a()
+        val keeper = keeper_a()
+        val sk = session_for(keeper, t)
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(10)
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(0)
+
+        step("Dispatch 4 units L1 -> L2 — source falls to 6, destination stays 0 (in transit)")
+        expect(transfer_dispatch(store, sk, t, keeper, envelope("e2e-dsp", "transfer.stock.dispatch"), "TR-1", "SKU-1", 4, "L1", "L2").reason).to_equal("accepted")
+        expect(transfer_status(store, "tenant-a", "TR-1")).to_equal("in-transit")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(6)
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(0)
+        step("Mid-flight the grand total dips by the in-transit quantity (6, not 10)")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1") + location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(6)
+
+        step("Receive TR-1 — destination rises to 4, transfer received")
+        expect(transfer_receive(store, sk, t, keeper, envelope("e2e-rcv", "transfer.stock.receive"), "TR-1").reason).to_equal("accepted")
+        expect(transfer_status(store, "tenant-a", "TR-1")).to_equal("received")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(6)
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(4)
+        step("Conservation: a completed transfer leaves the grand total unchanged at 10")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1") + location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(10)
+
+        step("Audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "transfer vertical — over-transfer denied (reproduce-first)":
+    it "denies dispatching more than the source location's on-hand with exact numbers and no effect":
+        val store = seed_l1("over")
+        val t = tenant_a()
+        val keeper = keeper_a()
+        val sk = session_for(keeper, t)
+        step("Attempt to dispatch 15 of the 10 on-hand from L1 — must be denied")
+        val r = transfer_dispatch(store, sk, t, keeper, envelope("ov-1", "transfer.stock.dispatch"), "TR-OV", "SKU-1", 15, "L1", "L2")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("insufficient-stock")
+        expect(r.detail).to_equal("over-transfer:TR-OV:SKU-1@L1:on_hand=10:got=15")
+        step("No effect — L1 on-hand unchanged, no transfer created")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(10)
+        expect(transfer_status(store, "tenant-a", "TR-OV")).to_equal("")
+        expect(transfer_route(store, "tenant-a", "TR-OV").1).to_equal(-1)
+        store_close(store)
+
+describe "transfer vertical — illegal transitions denied":
+    it "receiving before dispatch and receiving twice are both invalid-transition":
+        val store = seed_l1("trans")
+        val t = tenant_a()
+        val keeper = keeper_a()
+        val sk = session_for(keeper, t)
+        step("Receive an unknown/never-dispatched transfer — invalid-transition, no effect")
+        val early = transfer_receive(store, sk, t, keeper, envelope("tr-early", "transfer.stock.receive"), "TR-2")
+        expect(early.ok).to_be(false)
+        expect(early.reason).to_equal("invalid-transition")
+        expect(early.detail).to_equal("TR-2:")
+
+        step("Dispatch then receive TR-2 legitimately")
+        expect(transfer_dispatch(store, sk, t, keeper, envelope("tr-dsp", "transfer.stock.dispatch"), "TR-2", "SKU-1", 3, "L1", "L2").reason).to_equal("accepted")
+        expect(transfer_receive(store, sk, t, keeper, envelope("tr-rcv", "transfer.stock.receive"), "TR-2").reason).to_equal("accepted")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(3)
+
+        step("Receive TR-2 a SECOND time with a fresh key — invalid-transition (already received), no effect")
+        val again = transfer_receive(store, sk, t, keeper, envelope("tr-rcv2", "transfer.stock.receive"), "TR-2")
+        expect(again.ok).to_be(false)
+        expect(again.reason).to_equal("invalid-transition")
+        expect(again.detail).to_equal("TR-2:received")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L2")).to_equal(3)
+        store_close(store)
+
+describe "transfer vertical — guarded denials":
+    it "denies an unauthorized actor and an inactive session before any effect":
+        val store = seed_l1("rbac")
+        val t = tenant_a()
+        step("A sales-role actor attempts a dispatch — the rbac rung fires 'forbidden'")
+        val clerk = ActorContext(actor_id: "clerk-1", role: "sales")
+        val r = transfer_dispatch(store, session_for(clerk, t), t, clerk, envelope("rb-dsp", "transfer.stock.dispatch"), "TR-3", "SKU-1", 2, "L1", "L2")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        step("An inactive session is rejected before rbac")
+        val keeper = keeper_a()
+        var dead = session_for(keeper, t)
+        dead.active = false
+        expect(transfer_dispatch(store, dead, t, keeper, envelope("rb-dead", "transfer.stock.dispatch"), "TR-4", "SKU-1", 1, "L1", "L2").reason).to_equal("invalid-session")
+        step("The ledger is untouched by every denial")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(10)
+        store_close(store)
+
+describe "transfer vertical — idempotent replay produces exactly one effect":
+    it "replaying the same dispatch command changes nothing":
+        val store = seed_l1("replay")
+        val t = tenant_a()
+        val keeper = keeper_a()
+        val sk = session_for(keeper, t)
+        step("Dispatch once with a fixed key")
+        expect(transfer_dispatch(store, sk, t, keeper, envelope("same-key", "transfer.stock.dispatch"), "TR-5", "SKU-1", 4, "L1", "L2").reason).to_equal("accepted")
+        val src_after = location_on_hand(store, "tenant-a", "SKU-1", "L1")
+        val outbox_after = outbox_pending(store, "tenant-a").len()
+        step("Replay the SAME idempotency key")
+        val replay = transfer_dispatch(store, sk, t, keeper, envelope("same-key", "transfer.stock.dispatch"), "TR-5", "SKU-1", 4, "L1", "L2")
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(replay.detail).to_equal("TR-5")
+        step("No second effect — source on-hand and outbox unchanged")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(src_after)
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after)
+        store_close(store)
+
+describe "transfer vertical — tenant isolation":
+    it "tenant B sees none of tenant A's stock and cannot move it":
+        val store = seed_l1("iso")
+        step("Tenant B sees zero on-hand for the same SKU/location")
+        expect(location_on_hand(store, "tenant-b", "SKU-1", "L1")).to_equal(0)
+        step("A tenant-B keeper dispatching against tenant A's stock is denied (its own on-hand is 0)")
+        val tb = tenant_b()
+        val keeper_b = ActorContext(actor_id: "keeper-b", role: "procurement")
+        val sbb = session_for(keeper_b, tb)
+        expect(transfer_dispatch(store, sbb, tb, keeper_b, envelope("iso-dsp", "transfer.stock.dispatch"), "TR-B", "SKU-1", 1, "L1", "L2").reason).to_equal("insufficient-stock")
+        step("A cross-tenant session (tenant-B session against tenant-A context) is rejected outright")
+        val ta = tenant_a()
+        expect(transfer_dispatch(store, sbb, ta, keeper_b, envelope("iso-x", "transfer.stock.dispatch"), "TR-X", "SKU-1", 1, "L1", "L2").reason).to_equal("invalid-session")
+        step("Tenant A's ledger is untouched")
+        expect(location_on_hand(store, "tenant-a", "SKU-1", "L1")).to_equal(10)
+        store_close(store)

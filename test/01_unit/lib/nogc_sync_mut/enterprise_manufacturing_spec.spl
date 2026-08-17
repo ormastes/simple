@@ -1,0 +1,213 @@
+"""
+# Manufacturing / Bill-of-Materials Vertical — define BOM, release + complete WOs
+
+## Overview
+
+The manufacturing flow of the Simple Enterprise Suite (lane W20-A) against the
+durable enterprise store: a finished SKU is described by a bill-of-materials
+(component SKU + qty lines), a work order is released for that finished SKU ×
+quantity (only when a BOM exists), and completing the work order records
+finished-goods production. Work-order status is a pure-Simple fold over an
+insert-only event ledger (`mfg_wo_events`) — never an UPDATE.
+
+## Guarded sequence proven here
+
+| Rung | Denial reason | Scenario |
+|------|---------------|----------|
+| session | invalid-session | cross-tenant / inactive session rejected |
+| rbac | forbidden | sales role cannot define a BOM / release a WO |
+| validation | invalid-record | release with no BOM for the finished SKU |
+| validation | invalid-transition | completing a WO twice (double-complete) |
+| idempotency | duplicate-key | replay returns recorded result, one effect |
+
+## Invariants
+
+- a work order cannot be released for a SKU with no BOM.
+- status folds "" -> released -> completed; a completed WO cannot re-complete.
+- every mutation appends a sha256-chained audit row (verified end to end).
+- tenant B sees none of tenant A's BOMs / work orders and cannot mutate them.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md (W20-A)
+**Design:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W20-A).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, audit_verify_chain}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope
+}
+use std.nogc_sync_mut.enterprise_manufacturing.manufacturing.{
+    mfg_setup, bom_exists, bom_line_count, wo_status, produced_qty,
+    bom_define, work_order_release, work_order_complete
+}
+
+# Each scenario uses its own database path: the interpreter backend caches
+# open databases per path in-process.
+fn db_path(name: text) -> text:
+    "build/test-artifacts/manufacturing_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Works")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Fabrication")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn planner_a() -> ActorContext:
+    ActorContext(actor_id: "planner-1", role: "procurement")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+fn bom_lines() -> [(text, i64)]:
+    [("CMP-A", 2), ("CMP-B", 3)]
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    mfg_setup(store)
+    store
+
+# seed_bom defines a BOM for FG-1 as the planner.
+fn seed_bom(name: text):
+    val store = fresh_store(name)
+    val t = tenant_a()
+    val planner = planner_a()
+    val sk = session_for(planner, t)
+    bom_define(store, sk, t, planner, envelope(name + "-bom", "proc.po.create"), "FG-1", bom_lines())
+    store
+
+describe "manufacturing vertical — BOM, release, complete happy path":
+    it "defines a BOM, releases a WO, completes it, and records production":
+        step("Open a clean store and define a 2-line BOM for FG-1")
+        val store = fresh_store("e2e")
+        val t = tenant_a()
+        val planner = planner_a()
+        val sk = session_for(planner, t)
+        expect(bom_define(store, sk, t, planner, envelope("e2e-bom", "proc.po.create"), "FG-1", bom_lines()).reason).to_equal("accepted")
+        expect(bom_exists(store, "tenant-a", "FG-1")).to_be(true)
+        expect(bom_line_count(store, "tenant-a", "FG-1")).to_equal(2)
+
+        step("Release a work order for 5 units of FG-1")
+        expect(work_order_release(store, sk, t, planner, envelope("e2e-rel", "proc.po.create"), "WO-1", "FG-1", 5).reason).to_equal("accepted")
+        expect(wo_status(store, "tenant-a", "WO-1")).to_equal("released")
+        expect(produced_qty(store, "tenant-a", "FG-1")).to_equal(0)
+
+        step("Complete the work order — production booked, status completed")
+        expect(work_order_complete(store, sk, t, planner, envelope("e2e-cmp", "proc.po.receive"), "WO-1").reason).to_equal("accepted")
+        expect(wo_status(store, "tenant-a", "WO-1")).to_equal("completed")
+        expect(produced_qty(store, "tenant-a", "FG-1")).to_equal(5)
+
+        step("Audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "manufacturing vertical — guarded denials (reproduce-first)":
+    it "denies an unauthorized actor at the rbac rung":
+        val store = seed_bom("rbac")
+        val t = tenant_a()
+        step("A sales-role actor attempts to define a BOM — rbac fires 'forbidden'")
+        val clerk = ActorContext(actor_id: "clerk-1", role: "sales")
+        val r = bom_define(store, session_for(clerk, t), t, clerk, envelope("rbac-bom", "proc.po.create"), "FG-2", bom_lines())
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        step("A sales-role actor cannot release a work order either")
+        expect(work_order_release(store, session_for(clerk, t), t, clerk, envelope("rbac-rel", "proc.po.create"), "WO-9", "FG-1", 1).reason).to_equal("forbidden")
+        step("An inactive session is rejected before rbac")
+        val planner = planner_a()
+        var dead = session_for(planner, t)
+        dead.active = false
+        expect(work_order_release(store, dead, t, planner, envelope("rbac-dead", "proc.po.create"), "WO-9", "FG-1", 1).reason).to_equal("invalid-session")
+        step("No work order was opened by any denial")
+        expect(wo_status(store, "tenant-a", "WO-9")).to_equal("")
+        store_close(store)
+
+    it "denies releasing a work order for a SKU with no BOM (invalid-record)":
+        val store = seed_bom("nobom")
+        val t = tenant_a()
+        val planner = planner_a()
+        val sk = session_for(planner, t)
+        step("FG-404 has no BOM defined")
+        expect(bom_exists(store, "tenant-a", "FG-404")).to_be(false)
+        step("Releasing a WO for FG-404 is denied with invalid-record")
+        val r = work_order_release(store, sk, t, planner, envelope("nb-rel", "proc.po.create"), "WO-404", "FG-404", 1)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-record")
+        expect(r.detail).to_equal("no-bom:FG-404")
+        step("No effect — the work order was never opened")
+        expect(wo_status(store, "tenant-a", "WO-404")).to_equal("")
+        store_close(store)
+
+    it "denies completing an already-completed work order (invalid-transition)":
+        val store = seed_bom("dbl")
+        val t = tenant_a()
+        val planner = planner_a()
+        val sk = session_for(planner, t)
+        step("Release then complete WO-1 — accepted")
+        expect(work_order_release(store, sk, t, planner, envelope("dbl-rel", "proc.po.create"), "WO-1", "FG-1", 4).reason).to_equal("accepted")
+        expect(work_order_complete(store, sk, t, planner, envelope("dbl-cmp1", "proc.po.receive"), "WO-1").reason).to_equal("accepted")
+        expect(wo_status(store, "tenant-a", "WO-1")).to_equal("completed")
+        step("A SECOND complete with a NEW key is denied invalid-transition")
+        val r = work_order_complete(store, sk, t, planner, envelope("dbl-cmp2", "proc.po.receive"), "WO-1")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-transition")
+        expect(r.detail).to_equal("not-released:WO-1:status=completed")
+        step("Completing a never-released work order is likewise invalid-transition")
+        expect(work_order_complete(store, sk, t, planner, envelope("dbl-cmp3", "proc.po.receive"), "WO-ghost").reason).to_equal("invalid-transition")
+        step("Production stays at exactly one completion's worth")
+        expect(produced_qty(store, "tenant-a", "FG-1")).to_equal(4)
+        store_close(store)
+
+describe "manufacturing vertical — idempotent replay produces exactly one effect":
+    it "replaying the same complete command changes nothing":
+        val store = seed_bom("replay")
+        val t = tenant_a()
+        val planner = planner_a()
+        val sk = session_for(planner, t)
+        step("Release then complete WO-1 with a fixed complete key")
+        expect(work_order_release(store, sk, t, planner, envelope("rp-rel", "proc.po.create"), "WO-1", "FG-1", 6).reason).to_equal("accepted")
+        expect(work_order_complete(store, sk, t, planner, envelope("rp-cmp", "proc.po.receive"), "WO-1").reason).to_equal("accepted")
+        val produced_after = produced_qty(store, "tenant-a", "FG-1")
+        val outbox_after = outbox_pending(store, "tenant-a").len()
+        step("Replay the SAME complete idempotency key")
+        val replay = work_order_complete(store, sk, t, planner, envelope("rp-cmp", "proc.po.receive"), "WO-1")
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(replay.detail).to_equal("WO-1")
+        step("No second effect — production and outbox unchanged")
+        expect(produced_qty(store, "tenant-a", "FG-1")).to_equal(produced_after)
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after)
+        store_close(store)
+
+describe "manufacturing vertical — tenant isolation":
+    it "tenant B sees none of tenant A's BOMs / work orders and cannot mutate them":
+        val store = seed_bom("isolation")
+        step("Tenant B sees no BOM for FG-1 and no production")
+        expect(bom_exists(store, "tenant-b", "FG-1")).to_be(false)
+        expect(produced_qty(store, "tenant-b", "FG-1")).to_equal(0)
+        step("A tenant-B planner releasing against FG-1 is denied (its own BOM is absent)")
+        val tb = tenant_b()
+        val planner_b = ActorContext(actor_id: "planner-b", role: "procurement")
+        val sbb = session_for(planner_b, tb)
+        val r = work_order_release(store, sbb, tb, planner_b, envelope("iso-rel", "proc.po.create"), "WO-B", "FG-1", 1)
+        expect(r.reason).to_equal("invalid-record")
+        expect(r.detail).to_equal("no-bom:FG-1")
+        step("A cross-tenant session (tenant-B session against tenant-A context) is rejected outright")
+        val ta = tenant_a()
+        expect(work_order_release(store, sbb, ta, planner_b, envelope("iso-x", "proc.po.create"), "WO-B", "FG-1", 1).reason).to_equal("invalid-session")
+        step("Tenant A's BOM is untouched")
+        expect(bom_line_count(store, "tenant-a", "FG-1")).to_equal(2)
+        store_close(store)

@@ -1,0 +1,191 @@
+"""
+# Enterprise Tax — jurisdiction/category rate configuration + deterministic compute
+
+Tax vertical of the Simple Enterprise Suite over the durable enterprise store,
+following the FROZEN foundation contracts (`enterprise_sale/foundation.spl` is
+never edited). One guarded write configures rates; pure reads compute tax with
+EXACT integer minor-unit arithmetic — never floats.
+
+## Storage model (insert-only + pure fold)
+
+Rates are insert-only rows in `tax_rates (tenant_id, jurisdiction, category,
+rate_bp, set_by)`. There is no UPDATE: a re-rate appends a new row, and the
+EFFECTIVE rate for a (tenant, jurisdiction, category) is the LATEST row by
+insert order, derived by a pure fold (`tax_effective_rate_bp`). Rates are
+per-tenant: the fold filters on the session's authoritative tenant id, so
+tenant B's compute can never read tenant A's rates.
+
+## Rate unit
+
+Rates are integer BASIS POINTS (bp): 1 bp = 0.01% = 1/10000. An 8.75% rate is
+875 bp. Storing bp as an integer keeps the whole pipeline float-free.
+
+## Rounding rule (documented, deterministic)
+
+`tax = round_half_up(amount_cents * rate_bp / 10000)`, computed on integers as
+
+    (amount_cents * rate_bp + 5000) / 10000        # 5000 == 10000/2
+
+For non-negative `amount_cents` and `rate_bp` this is exact round-HALF-UP on the
+minor unit: a fractional part of exactly 0.5 rounds AWAY from zero (up). Example:
+1000 cents at 875 bp = 87.5 cents exactly, which rounds to 88 (the boundary case
+the spec asserts). A value strictly below the half (e.g. 87.4999) truncates
+down. A non-positive amount or rate yields 0 tax (no tax configured == 0%).
+
+## Line breakdown
+
+`tax_breakdown` computes tax PER LINE and sums the ALREADY-ROUNDED per-line
+taxes into the total (line-level rounding, the standard invoice convention):
+`total = sum(round_half_up(line_i))`, not `round_half_up(sum(line_i))`. Each
+line's tax is therefore self-consistent with the total.
+
+## RBAC (reuse, not a new grant)
+
+`tax_rate_set` REUSES the existing `finance` role via the LOCAL `tax_role_allows`
+gate for the `tax.rate.set` action. The frozen `role_allows` table is NOT
+edited, and `enterprise_sale/rbac_registry.spl` is deliberately NOT touched (its
+equivalence spec is byte-fenced to the frozen table; adding a tax grant there
+would turn it red). The frozen session -> rbac -> validation -> idempotency ->
+effects SEQUENCE is preserved exactly. Audit hashing goes only through
+`records.audit_append` (the `enterprise_store.audit_hash.audit_sha256_hex`
+facade) — this module never imports `std.common.crypto.sha256`.
+
+Lane: .spipe/simple_enterprise_suite (W20-B).
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid
+}
+
+# =============================================================================
+# Schema — insert-only rate rows
+# =============================================================================
+
+fn tax_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "tax_001_rates",
+        "CREATE TABLE IF NOT EXISTS tax_rates (id INTEGER PRIMARY KEY, tenant_id TEXT, jurisdiction TEXT, category TEXT, rate_bp TEXT, set_by TEXT)")
+
+# =============================================================================
+# RBAC — reuse the finance role (see module docstring)
+# =============================================================================
+
+# tax_role_allows gates tax configuration. admin passes for everything (matching
+# the frozen blanket rule); the finance role is REUSED for tax config actions.
+fn tax_role_allows(role: text, action: text) -> bool:
+    if role == "admin":
+        return true
+    if role == "finance":
+        return action == "tax.rate.set"
+    false
+
+# =============================================================================
+# Pure compute — deterministic, float-free (see rounding rule in docstring)
+# =============================================================================
+
+# tax_round_half_up applies rate_bp basis points to amount_cents with
+# round-half-up on the minor unit. Non-positive amount or rate yields 0.
+fn tax_round_half_up(amount_cents: i64, rate_bp: i64) -> i64:
+    if amount_cents <= 0 or rate_bp <= 0:
+        return 0
+    (amount_cents * rate_bp + 5000) / 10000
+
+# tax_effective_rate_bp folds the insert-only rate rows and returns the LATEST
+# rate (by insert order) for (tenant, jurisdiction, category), or -1 when no
+# rate has ever been set. Filters on tenant_id — the per-tenant isolation seam.
+fn tax_effective_rate_bp(store: EnterpriseStore, tenant_id: text, jurisdiction: text, category: text) -> i64:
+    var rate: i64 = -1
+    val rows = store_rows(store, "tax_rates", "id, tenant_id, jurisdiction, category, rate_bp, set_by")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "jurisdiction") == jurisdiction and sqlite_row_get(row, "category") == category:
+            rate = int(sqlite_row_get(row, "rate_bp"))
+    rate
+
+# tax_for computes the tax on `amount` for (jurisdiction, category) using the
+# session's authoritative tenant. A pure read gated by session validity (like
+# the finance reports): an invalid session yields 0 tax in the amount's currency.
+# No configured rate (or a 0% rate) also yields 0 tax.
+fn tax_for(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, jurisdiction: text, category: text, amount: Money) -> Money:
+    if not session_valid(session, tenant, who):
+        return Money(amount_cents: 0, currency: amount.currency)
+    val bp = tax_effective_rate_bp(store, session.tenant_id, jurisdiction, category)
+    Money(amount_cents: tax_round_half_up(amount.amount_cents, bp), currency: amount.currency)
+
+# One line of a tax breakdown: the input amount and its rounded tax.
+struct TaxLine:
+    amount_cents: i64
+    tax_cents: i64
+
+struct TaxBreakdown:
+    currency: text
+    rate_bp: i64
+    lines: [TaxLine]
+    total_tax_cents: i64
+
+# tax_breakdown computes per-line tax (each rounded independently) and the total
+# as the SUM of the rounded per-line taxes (line-level rounding). Session-gated
+# and tenant-isolated exactly like tax_for. On an invalid session it returns an
+# empty breakdown (rate_bp -1, total 0) in the given currency.
+fn tax_breakdown(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, jurisdiction: text, category: text, line_amounts: [i64], currency: text) -> TaxBreakdown:
+    if not session_valid(session, tenant, who):
+        return TaxBreakdown(currency: currency, rate_bp: -1, lines: [], total_tax_cents: 0)
+    val bp = tax_effective_rate_bp(store, session.tenant_id, jurisdiction, category)
+    var lines: [TaxLine] = []
+    var total: i64 = 0
+    for amount_cents in line_amounts:
+        val t = tax_round_half_up(amount_cents, bp)
+        lines.push(TaxLine(amount_cents: amount_cents, tax_cents: t))
+        total = total + t
+    TaxBreakdown(currency: currency, rate_bp: bp, lines: lines, total_tax_cents: total)
+
+# =============================================================================
+# Guarded command (frozen sequence)
+# =============================================================================
+
+# tax_rate_set records a new rate (basis points) for (jurisdiction, category)
+# under the session's tenant. Runs the frozen sequence
+# session -> rbac -> validation -> idempotency -> effects in one UoW. Insert-only:
+# a re-rate appends a new row and the latest wins. A replayed idempotency key
+# returns the recorded result with no second effect.
+fn tax_rate_set(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, jurisdiction: text, category: text, rate_bp: i64) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", jurisdiction + "/" + category)
+    # 2. rbac (reuse finance/admin)
+    if not tax_role_allows(who.role, "tax.rate.set"):
+        return denied("forbidden", jurisdiction + "/" + category)
+    # 3. domain validation — non-empty keys, non-negative rate (0% allowed).
+    if jurisdiction == "" or category == "" or rate_bp < 0:
+        return denied("invalid-record", jurisdiction + "/" + category)
+    # 4. idempotency — a replay returns the recorded outcome, no new effect.
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    val detail = jurisdiction + "/" + category + ":{rate_bp}"
+    uow_begin(store)
+    if not store_insert_row(store,
+        "INSERT INTO tax_rates (tenant_id, jurisdiction, category, rate_bp, set_by) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, jurisdiction, category, "{rate_bp}", who.actor_id]):
+        uow_rollback(store)
+        return denied("store-error", detail)
+    outbox_append(store, tenant.tenant_id, "tax.rate.set", detail)
+    audit_append(store, tenant.tenant_id, who.actor_id, "tax.rate.set", detail)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, detail)
+    uow_commit(store)
+    accepted(detail)
+
+export tax_setup
+export tax_role_allows
+export tax_round_half_up, tax_effective_rate_bp, tax_for
+export TaxLine, TaxBreakdown, tax_breakdown
+export tax_rate_set

@@ -1,0 +1,250 @@
+"""
+# Subscriptions / Recurring-Billing Vertical — end to end on the durable store
+
+## Overview
+
+The subscription-lifecycle + recurring-invoice flow of the Simple Enterprise
+Suite, against the durable enterprise store. A subscription is an EVENT LOG:
+
+    "" (unknown) -> active -> cancelled
+
+Recurring invoices are keyed by an explicit integer `period` the caller passes
+(period 1, 2, 3 …) — billing never reads wall-clock time, so the ledger is
+deterministic. The invoiced total is a pure SUM fold over the insert-only
+invoice stream; status is a pure fold over the lifecycle stream. Nothing is
+UPDATEd.
+
+## Guarded sequence proven here (frozen: session -> rbac -> validation ->
+## idempotency -> effects)
+
+| Rung | Denial reason | Scenario |
+|------|---------------|----------|
+| session | invalid-session | inactive / cross-tenant session rejected |
+| rbac | forbidden | a procurement-role actor cannot manage subscriptions |
+| validation | not-found | bill / cancel an unknown subscription |
+| validation | invalid-transition | bill after cancel; cancel twice |
+| validation | duplicate-key | re-bill an already-billed period |
+| idempotency | duplicate-key | replay returns recorded result, one effect |
+
+## RBAC reuse
+
+Authorization reuses the FROZEN `sales` role via a LOCAL gate
+(`sub_role_allows`); foundation.role_allows is not changed and rbac_registry.spl
+is not touched. A `procurement`-role actor therefore fails the rbac rung with
+`forbidden`.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md (W22-D)
+
+Lane: .spipe/simple_enterprise_suite (W22-D).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, audit_verify_chain}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money, CommandEnvelope,
+    reason_allowed
+}
+use std.nogc_sync_mut.enterprise_subscription.subscription.{
+    sub_setup, sub_status, sub_plan_amount, sub_period_billed, sub_invoiced_total,
+    sub_create, sub_bill, sub_cancel
+}
+
+# Each scenario uses its own database path: the interpreter backend caches
+# open databases per path in-process.
+fn db_path(name: text) -> text:
+    "build/test-artifacts/subscription_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+
+fn sales_a() -> ActorContext:
+    ActorContext(actor_id: "sales-1", role: "sales")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+fn money(cents: i64) -> Money:
+    Money(amount_cents: cents, currency: "USD")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    sub_setup(store)
+    store
+
+# seed_active opens a clean store with one active subscription sub-1 on the
+# "pro" plan at 1500 cents/period, and returns the store.
+fn seed_active(name: text):
+    val store = fresh_store(name)
+    val t = tenant_a()
+    val a = sales_a()
+    val s = session_for(a, t)
+    sub_create(store, s, t, a, envelope(name + "-cr", "sub.create"), "sub-1", "pro", money(1500))
+    store
+
+describe "subscription vertical — create, recurring-bill, invoiced-total end to end":
+    it "creates an active subscription, bills period 1 and 2, and proves the invoiced total":
+        step("Open a clean store; sales creates subscription sub-1 (pro, 1500c)")
+        val store = fresh_store("e2e")
+        val t = tenant_a()
+        val a = sales_a()
+        val s = session_for(a, t)
+        val cr = sub_create(store, s, t, a, envelope("e2e-cr", "sub.create"), "sub-1", "pro", money(1500))
+        expect(cr.reason).to_equal("accepted")
+        expect(reason_allowed(cr.reason)).to_be(true)
+        expect(sub_status(store, "tenant-a", "sub-1")).to_equal("active")
+        expect(sub_plan_amount(store, "tenant-a", "sub-1")).to_equal(1500)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+
+        step("Bill period 1 -> one immutable invoice for 1500c")
+        expect(sub_bill(store, s, t, a, envelope("e2e-b1", "sub.bill"), "sub-1", 1).reason).to_equal("accepted")
+        expect(sub_period_billed(store, "tenant-a", "sub-1", 1)).to_be(true)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(1500)
+        expect(sub_status(store, "tenant-a", "sub-1")).to_equal("active")
+
+        step("Bill period 2 -> invoiced total is now 1500 + 1500 = 3000")
+        expect(sub_bill(store, s, t, a, envelope("e2e-b2", "sub.bill"), "sub-1", 2).reason).to_equal("accepted")
+        expect(sub_period_billed(store, "tenant-a", "sub-1", 2)).to_be(true)
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(3000)
+
+        step("Audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "subscription vertical — guarded denials":
+    it "denies an unauthorized actor at the rbac rung (reproduce first)":
+        val store = seed_active("rbac")
+        val t = tenant_a()
+        step("A procurement-role actor is not granted any sub.* action -> forbidden")
+        val ops = ActorContext(actor_id: "ops-1", role: "procurement")
+        val r = sub_bill(store, session_for(ops, t), t, ops, envelope("rbac-b1", "sub.bill"), "sub-1", 1)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        step("No invoice was raised")
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        store_close(store)
+
+    it "denies an inactive session before any domain check":
+        val store = seed_active("session")
+        val t = tenant_a()
+        val a = sales_a()
+        var dead = session_for(a, t)
+        dead.active = false
+        val r = sub_bill(store, dead, t, a, envelope("s-b1", "sub.bill"), "sub-1", 1)
+        expect(r.reason).to_equal("invalid-session")
+        store_close(store)
+
+    it "denies billing an unknown subscription as not-found":
+        val store = fresh_store("unknown_bill")
+        val t = tenant_a()
+        val a = sales_a()
+        val r = sub_bill(store, session_for(a, t), t, a, envelope("u-b1", "sub.bill"), "sub-404", 1)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("not-found")
+        store_close(store)
+
+    it "denies cancelling an unknown subscription as not-found":
+        val store = fresh_store("unknown_cancel")
+        val t = tenant_a()
+        val a = sales_a()
+        val r = sub_cancel(store, session_for(a, t), t, a, envelope("u-cx", "sub.cancel"), "sub-404")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("not-found")
+        store_close(store)
+
+    it "denies re-billing an already-billed period as duplicate-key (reproduce first)":
+        val store = seed_active("rebill")
+        val t = tenant_a()
+        val a = sales_a()
+        val s = session_for(a, t)
+        step("Bill period 1")
+        expect(sub_bill(store, s, t, a, envelope("rb-b1", "sub.bill"), "sub-1", 1).reason).to_equal("accepted")
+        step("Bill period 1 AGAIN with a fresh idempotency key -> duplicate-key")
+        val r = sub_bill(store, s, t, a, envelope("rb-b1-again", "sub.bill"), "sub-1", 1)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("duplicate-key")
+        expect(r.detail).to_equal("sub-1:period=1")
+        step("No second invoice — total is still a single 1500c period")
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(1500)
+        store_close(store)
+
+    it "denies billing AFTER cancel as an illegal transition (reproduce first)":
+        val store = seed_active("bill_after_cancel")
+        val t = tenant_a()
+        val a = sales_a()
+        val s = session_for(a, t)
+        step("Cancel the subscription")
+        expect(sub_cancel(store, s, t, a, envelope("bac-cx", "sub.cancel"), "sub-1").reason).to_equal("accepted")
+        expect(sub_status(store, "tenant-a", "sub-1")).to_equal("cancelled")
+        step("Billing a cancelled subscription is an illegal lifecycle move")
+        val r = sub_bill(store, s, t, a, envelope("bac-b1", "sub.bill"), "sub-1", 1)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-transition")
+        expect(r.detail).to_equal("sub-1:cancelled")
+        step("No effect — nothing invoiced")
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        store_close(store)
+
+    it "denies cancelling twice as an illegal transition":
+        val store = seed_active("cancel_twice")
+        val t = tenant_a()
+        val a = sales_a()
+        val s = session_for(a, t)
+        step("Cancel once")
+        expect(sub_cancel(store, s, t, a, envelope("ct-cx1", "sub.cancel"), "sub-1").reason).to_equal("accepted")
+        step("Cancel again with a fresh key -> invalid-transition")
+        val r = sub_cancel(store, s, t, a, envelope("ct-cx2", "sub.cancel"), "sub-1")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-transition")
+        expect(r.detail).to_equal("sub-1:cancelled")
+        store_close(store)
+
+describe "subscription vertical — idempotent replay produces exactly one effect":
+    it "replaying the same bill command changes nothing":
+        val store = seed_active("replay")
+        val t = tenant_a()
+        val a = sales_a()
+        val s = session_for(a, t)
+        step("Bill period 1 once")
+        expect(sub_bill(store, s, t, a, envelope("same-key", "sub.bill"), "sub-1", 1).reason).to_equal("accepted")
+        val invoiced_after = sub_invoiced_total(store, "tenant-a", "sub-1")
+        val outbox_after = outbox_pending(store, "tenant-a").len()
+        step("Replay the SAME idempotency key")
+        val replay = sub_bill(store, s, t, a, envelope("same-key", "sub.bill"), "sub-1", 1)
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(replay.detail).to_equal("sub-1:1")
+        step("No second effect — invoiced total and outbox unchanged")
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(invoiced_after)
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after)
+        store_close(store)
+
+describe "subscription vertical — tenant isolation":
+    it "tenant B sees none of tenant A's subscriptions and cannot act on them":
+        val store = seed_active("isolation")
+        step("Tenant B sees no subscription state")
+        expect(sub_status(store, "tenant-b", "sub-1")).to_equal("")
+        expect(sub_invoiced_total(store, "tenant-b", "sub-1")).to_equal(0)
+        step("A tenant-B actor billing sub-1 sees it as unknown -> not-found")
+        val tb = tenant_b()
+        val b = ActorContext(actor_id: "sales-b", role: "sales")
+        val r = sub_bill(store, session_for(b, tb), tb, b, envelope("iso-b1", "sub.bill"), "sub-1", 1)
+        expect(r.reason).to_equal("not-found")
+        step("A cross-tenant session (B actor, A tenant) is rejected outright")
+        val ta = tenant_a()
+        expect(sub_bill(store, session_for(b, tb), ta, b, envelope("iso-b2", "sub.bill"), "sub-1", 1).reason).to_equal("invalid-session")
+        step("Tenant A's subscription is untouched — still active, nothing invoiced")
+        expect(sub_status(store, "tenant-a", "sub-1")).to_equal("active")
+        expect(sub_invoiced_total(store, "tenant-a", "sub-1")).to_equal(0)
+        store_close(store)

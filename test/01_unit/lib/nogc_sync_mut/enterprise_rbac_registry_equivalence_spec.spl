@@ -1,0 +1,119 @@
+"""
+# RBAC Registry Equivalence — data-driven table matches the frozen if-chain
+
+`foundation.role_allows` is a FROZEN hardcoded role→action if-chain; its
+behaviour may not change without an ADR. `rbac_registry.registry_role_allows`
+is the DATA-DRIVEN form of the same policy (residual risk 2 of the security
+posture doc). This spec is the equivalence FENCE between them.
+
+## What is proven
+
+For the FULL cross-product of every role × every action string in the suite —
+including an unknown role, an empty role, and deny-only actions no role owns —
+`registry_role_allows(role, action)` returns EXACTLY what
+`foundation.role_allows(role, action)` returns. This is behavioural identity,
+not a spot check: the loop compares every pair and fails on the first that
+disagrees.
+
+The action set is enumerated HERE, independently of both implementations, read
+straight out of `foundation.role_allows`'s grants (transcribed once, in this
+file), so the spec is a genuine external oracle and not a mirror of the
+registry data it checks.
+
+## Why it bites
+
+Dropping or altering a single registry grant makes exactly one pair disagree
+and turns this spec red on that pair. The bite proof (a temporary grant
+removal → red → restore → green) is recorded in the W15-B state entry.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md
+**Design:** src/lib/nogc_sync_mut/enterprise_sale/rbac_registry.spl
+
+Lane: .spipe/simple_enterprise_suite (W15-B).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.enterprise_sale.foundation.{role_allows}
+use std.nogc_sync_mut.enterprise_sale.rbac_registry.{
+    registry_role_allows, rbac_registry, RoleGrant
+}
+
+# every_role covers all seven roles the frozen policy names, plus three
+# non-granted roles (empty, and two unknown strings) that must map to nothing.
+fn every_role() -> [text]:
+    ["admin", "sales", "payments", "procurement", "booking", "finance", "hcm",
+     "", "customer", "root"]
+
+# every_action is the distinct union of every action string in the suite,
+# transcribed from foundation.role_allows, followed by deny-only actions that
+# no role owns (the negative half of the cross-product).
+fn every_action() -> [text]:
+    [
+        # sales
+        "sale.order.place", "sale.order.pay", "sale.order.refund",
+        # payments (sale.order.pay shared; distinct additions only)
+        "payment.intent.create", "payment.webhook.receive",
+        # procurement
+        "proc.requisition.create", "proc.requisition.approve",
+        "proc.po.create", "proc.po.receive", "proc.invoice.record",
+        # booking
+        "booking.hold", "booking.confirm", "booking.cancel", "booking.no_show",
+        # finance
+        "finance.period.close", "finance.journal.post",
+        # hcm
+        "hcm.hire", "hcm.contract.amend", "hcm.terminate",
+        "hcm.clock.in", "hcm.clock.out",
+        "hcm.leave.request", "hcm.leave.decide",
+        # deny-only: strings no role is granted
+        "", "bogus.action", "sale.order.cancel", "hcm.leave",
+        "admin.everything", "conformance",
+    ]
+
+describe "rbac registry equivalence — data-driven table matches frozen role_allows":
+    it "agrees with foundation.role_allows across the full role x action cross-product":
+        step("Cross-product every role x every action; each pair must agree")
+        val roles = every_role()
+        val actions = every_action()
+        var pairs: i64 = 0
+        var granted: i64 = 0
+        for r in roles:
+            for a in actions:
+                val frozen = role_allows(r, a)
+                val data = registry_role_allows(r, a)
+                expect(data).to_equal(frozen)
+                pairs = pairs + 1
+                if frozen:
+                    granted = granted + 1
+
+        step("The cross-product is the expected size and is non-trivial")
+        # 10 roles x 29 actions = 290 pairs compared.
+        expect(pairs).to_equal(290)
+        # admin grants all 29; sales 3; payments 3; procurement 5; booking 4;
+        # finance 2; hcm 7; the three ungranted roles 0 => 29+3+3+5+4+2+7 = 53.
+        expect(granted).to_equal(53)
+
+    it "admin is allowed every action and unknown roles are allowed none":
+        step("admin passes every action string in the suite")
+        for a in every_action():
+            expect(registry_role_allows("admin", a)).to_be(true)
+
+        step("an unknown role is denied every action string")
+        for a in every_action():
+            expect(registry_role_allows("customer", a)).to_be(false)
+
+    it "the registry data covers exactly the six non-admin roles":
+        step("rbac_registry has one row per non-admin role, admin absent")
+        val rows = rbac_registry()
+        expect(rows.len()).to_equal(6)
+        var has_admin_row: bool = false
+        for g in rows:
+            if g.role == "admin":
+                has_admin_row = true
+        expect(has_admin_row).to_be(false)
+
+    it "each granted action round-trips true through the data-driven oracle":
+        step("Every action listed in a grant row is allowed for that row's role")
+        for g in rbac_registry():
+            for a in g.actions:
+                expect(registry_role_allows(g.role, a)).to_be(true)
