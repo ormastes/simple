@@ -201,3 +201,96 @@ run-to-end.
   to jobs=2, N extra `simple` processes may make things worse, not better.
 - Whether `build_supervised` is CORRECT. It is written and commented in detail
   but has never executed — no caller, and I did not run its spec.
+
+## 2026-08-17 — P2 ANSWERED: one-module child compile is BLOCKED. No CLI built.
+
+P2 asked whether a child process can compile one unit. Both escape routes are
+closed, by code reading with citations. **No CLI was added** — there is nothing
+correct for `spawn_fn` to launch, and inventing one would fabricate objects.
+
+### (a) A child CANNOT re-derive the unit from its source path
+
+MIR lowering is not per-module-pure. A **single shared `MirLowering` instance**
+serves every module (`driver_pipeline_lowering.spl:202`, `:255`), and before any
+module is lowered a **whole-program prepass** registers every module's HIR struct
+layout into it (`driver_pipeline_lowering.spl:209-215`, `:262-263`). The comment
+at `:203-208` states the reason outright: without it an imported struct's field
+order is unknown and `resolve_field_index` defaulted to 0 — a cross-module SEGV.
+`lower_module` consumes that cross-module composite table and overrides it only
+for the module's own definitions (`_MirLowering/module_lowering.spl:896`,
+`:905-926`); imported struct layouts and chained field access resolve through it
+(`:142-150`, `:742-762`). Two further whole-program passes then MUTATE
+`mir_modules` after lowering — async state machines
+(`driver_pipeline_passes.spl:27`) and AOP/debug-trace rewrites
+(`driver_pipeline_aop.spl:94-126`).
+
+So a module's MIR — specifically its **field indices** — is a function of the
+whole program, not of its own source. A child re-deriving from the source path
+would silently emit an object with different field offsets. That is the
+already-diagnosed `hir_field_index_unwrap_or_zero` failure class, reintroduced
+per-process.
+
+The existing single-file entries do not help: `compile_file` / `jit_file` /
+`compile_to_smf` (`driver_api_compile_single.spl:12,18,25,34,55`) and
+`aot_native_file_with_backend` (`driver_api_native_single.spl:11,24`) each take
+one path but then load the **entire import closure** and lower it together
+(`driver_pipeline_lowering.spl:216-250`), emitting objects for all of
+`ctx.mir_modules` (`driver_aot_native_output.spl:551-590`). Per-unit isolation
+built on these would recompile the whole closure N times, which is the opposite
+of the goal.
+
+Even that would not satisfy the contract. `_compile_frozen_module_capsule`
+hard-fails with `capsule-registry-mismatch` unless
+`capsule.storage_snapshot.registry_identity == batch.registry_identity`, and that
+identity is a hash over **all** modules' storage rows plus the known-module set
+taken from `self.mir_modules.keys()` (`driver_types.spl:806-839`, `:812-813`,
+`:817-823`, `storage_binding_identity` at `:786-789`). A child holding only one
+module's import closure cannot reproduce it. Registration is refused once frozen
+(`driver_types.spl:618`, `:641`), so the child cannot rebuild it either.
+
+### (b) A capsule CANNOT be serialized today — the reader does not exist
+
+Probe (with a control that DID hit, per the measurement-trap rule):
+`grep -rn deserialize --include=*.spl src/compiler | grep -i mir` -> **0 hits**;
+control `grep -rn serialize_mir_module` -> 3 hits. There is **no MIR
+deserializer anywhere in the tree**. The only serializer,
+`mir_serialization.spl:13`, is explicitly a lossy "functions-only compatibility
+shape" — it writes `name` and `functions` and **drops `statics`, `constants` and
+`types`** — delegating to `mir_json.spl` (666 lines of emit-only JSON). A capsule
+also carries `FrozenStorageModuleSnapshotV1` (sites + evidence), which has no
+serializer at all.
+
+Writing a faithful MIR reader is a multi-thousand-line, correctness-critical
+project (every `MirInstKind`, terminator, type and const round-tripping
+byte-exactly, since `native_capsule_mir_identity_v1` must match). That is not
+"the smallest possible CLI"; it is a new artifact format for the compiler.
+
+### The receipt makes a shortcut unsafe, not merely ugly
+
+A child could be *handed* `capsule_identity` on argv and write a conforming
+`.capsule-receipt` (`driver_aot_native_output.spl:186-196`). Do not do this. The
+receipt would then attest an identity the child never verified, and
+`driver_native_collect_capsule_result_v1` (`:198`) would promote a
+wrong-field-offset object into the build cache as authenticated. The validation
+chain would report green while linking a miscompiled program — strictly worse
+than today's whole-build SIGSEGV, which at least fails loudly.
+
+### Precondition for unblocking (pick ONE, both are real projects)
+
+1. **A round-trippable MIR + storage-snapshot serialization format** with a
+   reader, gated by an identity round-trip test (`serialize -> deserialize ->
+   native_capsule_mir_identity_v1` must equal the original). Then the one-module
+   CLI is genuinely small: read capsule file, call the existing
+   `_compile_selected_module`, write object + receipt. Note `.capsule-receipt`
+   already exists and would carry over unchanged.
+2. **Or**: make per-module lowering independent of the whole-program prescan by
+   giving imported struct layouts a stable, source-derivable field ordering —
+   i.e. exactly the `interface_digest_of` work (`cache/action_key.spl:199`, still
+   zero callers) that CLAUDE.md records as designed-but-unwired.
+
+Until one lands, `build_supervised` stays uncalled and the build side keeps
+in-process `compile_fn` (`parallel.spl:424`). The run-to-end and classification
+halves already work in-process — only crash CONTAINMENT is blocked.
+
+**Not done here, deliberately:** no CLI, no capsule format, no edit to
+`parallel.spl` or `driver_aot_native_output.spl` (owned by another lane).
