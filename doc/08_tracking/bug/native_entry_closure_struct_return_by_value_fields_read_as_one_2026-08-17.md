@@ -95,3 +95,40 @@ The `[hir-field-type]` probe cited above is UNGATED and hard-codes two
 struct/field names. Per `.claude/rules/code-style.md` it should become a
 level-gated log rather than an always-on `eprint`; it was left in place
 deliberately because a live Stage-3 lane is currently reading its output.
+
+## Reproduce-first evidence
+
+`test/01_unit/compiler/codegen/native_struct_return_by_value_field_read_spec.spl`
+was written BEFORE any fix and run against the current tree. It is RED on
+exactly the subprocess example and green on the two interpreter guards, which
+is the intended shape — the interpreter is not affected:
+
+```
+  ✗ agrees between a locally built struct and a returned one after native-build
+    expected subject to be truthy, got false
+3 examples, 1 failure
+SPEC FILE VERDICT: ... declared>=3 executed=3 passed=2 failed=1 dropped=0
+Results: 3 total, 2 passed, 1 failed
+```
+
+The class sweep is
+`test/01_unit/compiler/codegen/native_aggregate_return_transport_class_spec.spl`
+(all-i64 struct, forwarded return, nested struct, tuple — one build).
+
+Both specs stay RED until the aggregate-return transport is fixed. Per
+`.claude/rules/testing.md` they are left red deliberately rather than softened;
+the unblock condition is a codegen fix on the `native-build --entry-closure`
+aggregate return path.
+
+## Not fixed here
+
+No codegen change was attempted. The defect is in the native return-value ABI
+and needs an owner who can change lowering and re-verify by rebuilding — which
+this lane could not do without contending with the live Stage-3 build.
+
+## Spec-authoring note
+
+The first draft embedded the fixture with `{inline_v.length}` interpolation.
+That is resolved by the SPEC's lexer, not the fixture's: the file died with
+`semantic: variable \`inline_v\` not found` and `executed=0 reason=zero-examples`
+before any example ran. Embedded fixture sources must avoid `{...}` entirely.
