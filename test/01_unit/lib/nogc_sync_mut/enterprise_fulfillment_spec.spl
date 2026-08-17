@@ -1,0 +1,228 @@
+"""
+# Fulfillment Vertical — order shipments over the durable enterprise store
+
+## Overview
+
+The logistics/fulfillment flow of the Simple Enterprise Suite, end to end
+against the durable enterprise store: a warehouse operator raises a shipment
+for an order ref, dispatches it, and delivers it. Shipment status is a pure
+fold over an append-only event stream (never an UPDATE):
+
+    "" (unknown) -> pending -> dispatched -> delivered
+                  \-> cancelled            (only from pending)
+
+## Guarded sequence proven here (frozen: session -> rbac -> validation ->
+## idempotency -> effects)
+
+| Rung | Denial reason | Scenario |
+|------|---------------|----------|
+| session | invalid-session | inactive / cross-tenant session rejected |
+| rbac | forbidden | a sales-role actor cannot fulfill |
+| validation | invalid-record | unknown shipment dispatched |
+| validation | invalid-transition | cancel after dispatch; deliver before dispatch |
+| validation | insufficient-stock | over-shipment (delivered > ordered) |
+| idempotency | duplicate-key | replay returns recorded result, one effect |
+
+## RBAC reuse
+
+Authorization reuses the FROZEN `procurement` role (foundation.role_allows is
+not changed, rbac_registry.spl is not touched): create/dispatch/deliver/cancel
+check existing `proc.*` action strings. A `sales`-role actor therefore fails
+the rbac rung with `forbidden`.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md (W19-B)
+
+Lane: .spipe/simple_enterprise_suite (W19-B).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, audit_verify_chain}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope,
+    reason_allowed
+}
+use std.nogc_sync_mut.enterprise_fulfillment.shipments.{
+    ful_setup, ful_shipment_status, ful_shipment_ordered, ful_delivered_qty,
+    ful_shipments_for_order,
+    shipment_create, shipment_dispatch, shipment_deliver, shipment_cancel
+}
+
+# Each scenario uses its own database path: the interpreter backend caches
+# open databases per path in-process.
+fn db_path(name: text) -> text:
+    "build/test-artifacts/fulfillment_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+
+fn ops_a() -> ActorContext:
+    ActorContext(actor_id: "ops-1", role: "procurement")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    ful_setup(store)
+    store
+
+# seed_pending opens a clean store with one pending shipment ship-1 for
+# order ord-1, SKU-1, 5 units, and returns the store.
+fn seed_pending(name: text):
+    val store = fresh_store(name)
+    val t = tenant_a()
+    val ops = ops_a()
+    val s = session_for(ops, t)
+    shipment_create(store, s, t, ops, envelope(name + "-cr", "fulfillment.shipment.create"), "ship-1", "ord-1", "SKU-1", 5)
+    store
+
+describe "fulfillment vertical — create, dispatch, deliver end to end":
+    it "moves a shipment pending -> dispatched -> delivered with a chained audit":
+        step("Open a clean store; operator raises a shipment for order ord-1")
+        val store = fresh_store("e2e")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        val cr = shipment_create(store, s, t, ops, envelope("e2e-cr", "fulfillment.shipment.create"), "ship-1", "ord-1", "SKU-1", 5)
+        expect(cr.reason).to_equal("accepted")
+        expect(reason_allowed(cr.reason)).to_be(true)
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("pending")
+        expect(ful_shipment_ordered(store, "tenant-a", "ship-1").1).to_equal(5)
+        expect(ful_shipments_for_order(store, "tenant-a", "ord-1")).to_equal(1)
+
+        step("Dispatch the pending shipment")
+        expect(shipment_dispatch(store, s, t, ops, envelope("e2e-di", "fulfillment.shipment.dispatch"), "ship-1").reason).to_equal("accepted")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("dispatched")
+
+        step("Deliver all 5 units")
+        expect(shipment_deliver(store, s, t, ops, envelope("e2e-de", "fulfillment.shipment.deliver"), "ship-1", 5).reason).to_equal("accepted")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("delivered")
+        expect(ful_delivered_qty(store, "tenant-a", "ship-1")).to_equal(5)
+
+        step("Audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "fulfillment vertical — guarded denials":
+    it "denies an unauthorized actor at the rbac rung (reproduce first)":
+        val store = seed_pending("rbac")
+        val t = tenant_a()
+        step("A sales-role actor is not granted any proc.* action -> forbidden")
+        val clerk = ActorContext(actor_id: "clerk-1", role: "sales")
+        val r = shipment_dispatch(store, session_for(clerk, t), t, clerk, envelope("rbac-di", "fulfillment.shipment.dispatch"), "ship-1")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        step("The shipment is untouched — still pending")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("pending")
+        store_close(store)
+
+    it "denies an inactive session before any domain check":
+        val store = seed_pending("session")
+        val t = tenant_a()
+        val ops = ops_a()
+        var dead = session_for(ops, t)
+        dead.active = false
+        val r = shipment_dispatch(store, dead, t, ops, envelope("s-di", "fulfillment.shipment.dispatch"), "ship-1")
+        expect(r.reason).to_equal("invalid-session")
+        store_close(store)
+
+    it "denies dispatch of an unknown shipment as invalid-record":
+        val store = fresh_store("unknown")
+        val t = tenant_a()
+        val ops = ops_a()
+        val r = shipment_dispatch(store, session_for(ops, t), t, ops, envelope("u-di", "fulfillment.shipment.dispatch"), "ship-404")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-record")
+        store_close(store)
+
+    it "denies cancel AFTER dispatch as an illegal transition (reproduce first)":
+        val store = seed_pending("cancel_after")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        step("Dispatch the shipment")
+        expect(shipment_dispatch(store, s, t, ops, envelope("ca-di", "fulfillment.shipment.dispatch"), "ship-1").reason).to_equal("accepted")
+        step("Cancel is only legal before dispatch -> invalid-transition")
+        val r = shipment_cancel(store, s, t, ops, envelope("ca-cx", "fulfillment.shipment.cancel"), "ship-1")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-transition")
+        expect(r.detail).to_equal("ship-1:dispatched")
+        step("No effect — status stays dispatched")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("dispatched")
+        store_close(store)
+
+    it "denies deliver before dispatch as an illegal transition":
+        val store = seed_pending("deliver_early")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        val r = shipment_deliver(store, s, t, ops, envelope("de-early", "fulfillment.shipment.deliver"), "ship-1", 5)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-transition")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("pending")
+        store_close(store)
+
+    it "denies over-shipment (delivered > ordered) with insufficient-stock":
+        val store = seed_pending("overship")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        shipment_dispatch(store, s, t, ops, envelope("os-di", "fulfillment.shipment.dispatch"), "ship-1")
+        step("Deliver 6 when only 5 were ordered")
+        val r = shipment_deliver(store, s, t, ops, envelope("os-de", "fulfillment.shipment.deliver"), "ship-1", 6)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("insufficient-stock")
+        expect(r.detail).to_equal("over-ship:ship-1:ordered=5:got=6")
+        step("No effect — still dispatched, nothing delivered")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("dispatched")
+        expect(ful_delivered_qty(store, "tenant-a", "ship-1")).to_equal(0)
+        store_close(store)
+
+describe "fulfillment vertical — idempotent replay produces exactly one effect":
+    it "replaying the same dispatch command changes nothing":
+        val store = seed_pending("replay")
+        val t = tenant_a()
+        val ops = ops_a()
+        val s = session_for(ops, t)
+        step("Dispatch once")
+        expect(shipment_dispatch(store, s, t, ops, envelope("same-key", "fulfillment.shipment.dispatch"), "ship-1").reason).to_equal("accepted")
+        val outbox_after = outbox_pending(store, "tenant-a").len()
+        step("Replay the SAME idempotency key")
+        val replay = shipment_dispatch(store, s, t, ops, envelope("same-key", "fulfillment.shipment.dispatch"), "ship-1")
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(replay.detail).to_equal("ship-1")
+        step("No second effect — status and outbox unchanged")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("dispatched")
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after)
+        store_close(store)
+
+describe "fulfillment vertical — tenant isolation":
+    it "tenant B sees none of tenant A's shipments and cannot act on them":
+        val store = seed_pending("isolation")
+        step("Tenant B sees no shipment state")
+        expect(ful_shipment_status(store, "tenant-b", "ship-1")).to_equal("")
+        expect(ful_shipments_for_order(store, "tenant-b", "ord-1")).to_equal(0)
+        step("A tenant-B operator dispatching ship-1 sees it as unknown -> invalid-record")
+        val tb = tenant_b()
+        val ops_b = ActorContext(actor_id: "ops-b", role: "procurement")
+        val r = shipment_dispatch(store, session_for(ops_b, tb), tb, ops_b, envelope("iso-di", "fulfillment.shipment.dispatch"), "ship-1")
+        expect(r.reason).to_equal("invalid-record")
+        step("A cross-tenant session (B actor, A tenant) is rejected outright")
+        val ta = tenant_a()
+        expect(shipment_dispatch(store, session_for(ops_b, tb), ta, ops_b, envelope("iso-di2", "fulfillment.shipment.dispatch"), "ship-1").reason).to_equal("invalid-session")
+        step("Tenant A's shipment is untouched — still pending")
+        expect(ful_shipment_status(store, "tenant-a", "ship-1")).to_equal("pending")
+        store_close(store)

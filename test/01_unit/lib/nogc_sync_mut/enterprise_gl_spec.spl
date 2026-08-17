@@ -1,0 +1,231 @@
+"""
+# Enterprise General Ledger Vertical — balanced double-entry posting over the store
+
+## Overview
+
+A finance actor posts double-entry journal entries to the durable enterprise
+store. The CORE invariant is enforced before any effect: `sum(debits) ==
+sum(credits)` across an entry's lines, each line touching exactly one side. An
+UNBALANCED entry is DENIED with `invalid-record` (a member of the frozen closed
+reason set — no new reason). Pure folds then prove per-account balances and the
+ledger-integrity invariant total debits == total credits (the ledger nets to
+zero). Money is integer minor units end to end — never floats.
+
+## Guarded sequence proven (reproduce-first for each denial)
+
+| Rung | Denial reason | Scenario |
+|------|---------------|----------|
+| session | invalid-session | an inactive session cannot post |
+| rbac | forbidden | a `sales` actor cannot post a journal entry |
+| validation | invalid-record | debits 1000 vs credits 900 (unbalanced) |
+| idempotency | duplicate-key | replay returns recorded result, no second effect |
+
+Plus: a balanced entry is accepted and folds prove account balances with
+numbers; the trial balance nets to zero; tenant isolation (tenant-B ledger
+reads only tenant-B lines).
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W22-A).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_store.records.{audit_verify_chain, outbox_pending}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope,
+    reason_allowed
+}
+use std.nogc_sync_mut.enterprise_gl.gl.{
+    gl_setup, gl_post, GlLine, gl_entry_balanced,
+    gl_account_balance, gl_account_balance_of,
+    gl_trial_balance, gl_trial_balance_of
+}
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/gl_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+
+fn cfo_a() -> ActorContext:
+    ActorContext(actor_id: "cfo-1", role: "finance")
+
+fn clerk_a() -> ActorContext:
+    ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: "gl.journal.post", payload: "")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    gl_setup(store)
+    store
+
+describe "gl vertical — an unbalanced entry is rejected (the core invariant)":
+    it "reproduce: debits 1000 vs credits 900 -> invalid-record, nothing posted":
+        val store = fresh_store("unbalanced")
+        val t = tenant_a()
+        val cfo = cfo_a()
+        val s = session_for(cfo, t)
+
+        step("Post an entry whose debits (1000) do not equal its credits (900)")
+        val lines = [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 900)]
+        expect(gl_entry_balanced(lines)).to_be(false)
+        val r = gl_post(store, s, t, cfo, envelope("e-bad"), "je-1", lines)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-record")
+        expect(reason_allowed(r.reason)).to_be(true)
+
+        step("No lines were posted — every account balance is 0")
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)
+        expect(gl_account_balance_of(store, "tenant-a", "revenue")).to_equal(0)
+        store_close(store)
+
+describe "gl vertical — a balanced entry is accepted and folds prove balances":
+    it "posts 1000 cash debit / 1000 revenue credit; account folds show the numbers":
+        val store = fresh_store("balanced")
+        val t = tenant_a()
+        val cfo = cfo_a()
+        val s = session_for(cfo, t)
+
+        step("Post a balanced two-line entry (1000 debit == 1000 credit)")
+        val r = gl_post(store, s, t, cfo, envelope("e-1"), "je-1", [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 1000)])
+        expect(r.reason).to_equal("accepted")
+        expect(reason_allowed(r.reason)).to_be(true)
+
+        step("Account-balance fold: cash is +1000 (debit-normal), revenue -1000 (credit-normal)")
+        expect(gl_account_balance(store, s, t, cfo, "cash")).to_equal(1000)
+        expect(gl_account_balance(store, s, t, cfo, "revenue")).to_equal(-1000)
+
+        step("A second balanced entry accumulates into the same accounts")
+        val r2 = gl_post(store, s, t, cfo, envelope("e-2"), "je-2", [
+            GlLine(account: "cash", debit_cents: 250, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 250)])
+        expect(r2.reason).to_equal("accepted")
+        expect(gl_account_balance(store, s, t, cfo, "cash")).to_equal(1250)
+        expect(gl_account_balance(store, s, t, cfo, "revenue")).to_equal(-1250)
+
+        step("The audit chain recomputes end to end")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "gl vertical — the trial balance nets to zero":
+    it "total debits == total credits across all posted entries":
+        val store = fresh_store("trial")
+        val t = tenant_a()
+        val cfo = cfo_a()
+        val s = session_for(cfo, t)
+
+        step("Post two balanced multi-line entries")
+        gl_post(store, s, t, cfo, envelope("t-1"), "je-1", [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 1000)])
+        gl_post(store, s, t, cfo, envelope("t-2"), "je-2", [
+            GlLine(account: "expense", debit_cents: 300, credit_cents: 0),
+            GlLine(account: "receivable", debit_cents: 400, credit_cents: 0),
+            GlLine(account: "cash", debit_cents: 0, credit_cents: 700)])
+
+        step("Trial balance: total debits (1000+300+400=1700) == total credits (1000+700=1700)")
+        val tb = gl_trial_balance(store, s, t, cfo)
+        expect(tb.debit_total).to_equal(1700)
+        expect(tb.credit_total).to_equal(1700)
+        expect(tb.balanced).to_be(true)
+        store_close(store)
+
+describe "gl vertical — session gate rejects an inactive session":
+    it "reproduce: an inactive session cannot post (invalid-session)":
+        val store = fresh_store("session")
+        val t = tenant_a()
+        val cfo = cfo_a()
+        val dead = SessionContext(token: "tok-cfo-1", actor_id: "cfo-1", tenant_id: "tenant-a", active: false)
+        val r = gl_post(store, dead, t, cfo, envelope("s-x"), "je-1", [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 1000)])
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-session")
+        expect(reason_allowed(r.reason)).to_be(true)
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)
+        store_close(store)
+
+describe "gl vertical — rbac denies an unauthorized actor":
+    it "reproduce: a sales actor cannot post a journal entry (forbidden)":
+        val store = fresh_store("rbac")
+        val t = tenant_a()
+        val clerk = clerk_a()
+        val r = gl_post(store, session_for(clerk, t), t, clerk, envelope("r-x"), "je-1", [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 1000)])
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("forbidden")
+        expect(reason_allowed(r.reason)).to_be(true)
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(0)
+        store_close(store)
+
+describe "gl vertical — idempotent replay produces exactly one effect":
+    it "replaying gl_post returns duplicate-key and does not post twice":
+        val store = fresh_store("replay")
+        val t = tenant_a()
+        val cfo = cfo_a()
+        val s = session_for(cfo, t)
+
+        step("Post a balanced entry under key same-key")
+        val first = gl_post(store, s, t, cfo, envelope("same-key"), "je-1", [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 1000)])
+        expect(first.reason).to_equal("accepted")
+        val outbox_after_first = outbox_pending(store, "tenant-a").len()
+
+        step("Replay the SAME key with a DIFFERENT entry — must not take effect")
+        val replay = gl_post(store, s, t, cfo, envelope("same-key"), "je-1", [
+            GlLine(account: "cash", debit_cents: 500, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 500)])
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        expect(reason_allowed(replay.reason)).to_be(true)
+
+        step("No second effect — cash still 1000, outbox unchanged")
+        expect(gl_account_balance_of(store, "tenant-a", "cash")).to_equal(1000)
+        expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after_first)
+        store_close(store)
+
+describe "gl vertical — tenant isolation":
+    it "tenant B ledger reads only tenant B lines":
+        val store = fresh_store("isolation")
+        val ta = tenant_a()
+        val cfo_a_actor = cfo_a()
+        val sa = session_for(cfo_a_actor, ta)
+        val tb = tenant_b()
+        val cfo_b = ActorContext(actor_id: "cfo-b", role: "finance")
+        val sb = session_for(cfo_b, tb)
+
+        step("Tenant A posts 1000 to cash; tenant B posts 2000 to the SAME account")
+        gl_post(store, sa, ta, cfo_a_actor, envelope("a-1"), "je-a", [
+            GlLine(account: "cash", debit_cents: 1000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 1000)])
+        gl_post(store, sb, tb, cfo_b, envelope("b-1"), "je-b", [
+            GlLine(account: "cash", debit_cents: 2000, credit_cents: 0),
+            GlLine(account: "revenue", debit_cents: 0, credit_cents: 2000)])
+
+        step("Each tenant's fold reads only its own lines")
+        expect(gl_account_balance(store, sa, ta, cfo_a_actor, "cash")).to_equal(1000)
+        expect(gl_account_balance(store, sb, tb, cfo_b, "cash")).to_equal(2000)
+        expect(gl_trial_balance_of(store, "tenant-a").debit_total).to_equal(1000)
+        expect(gl_trial_balance_of(store, "tenant-b").debit_total).to_equal(2000)
+        store_close(store)
