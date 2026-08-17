@@ -1,5 +1,22 @@
 # Spec Runner Silently Runs Only the LAST Top-Level `describe` (hollow green)
 
+## Status: NOT-REPRODUCED (2026-08-17)
+
+A three-sibling-top-level-`describe` probe run under
+`SIMPLE_EXECUTION_MODE=interpreter` executes ALL groups:
+
+```
+group A: A1, A2 | group B: B1 | group C: C1
+SPEC FILE VERDICT: ... declared>=4 executed=4 passed=4 failed=0 dropped=0
+```
+
+`declared>=4 executed=4` is the exact counter-evidence to the "only the LAST
+group runs" claim -- under the reported defect this would read `executed=1`.
+The pre-existing regression spec
+`test/01_unit/std/spec_sibling_top_level_describe_spec.spl` (3 sibling groups,
+6 examples) is also green: `declared>=6 executed=6 passed=6 failed=0 dropped=0`.
+
+
 Date: 2026-06-28
 
 Lane: `.spipe/simpleos-alpine-harden-musl-busybox`

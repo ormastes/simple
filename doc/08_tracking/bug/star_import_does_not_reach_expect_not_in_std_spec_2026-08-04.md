@@ -1,5 +1,37 @@
 # BUG: `use std.spec.*` does not import `expect_not` — only the explicit form does
 
+## Status 2026-08-17: REPRODUCED, root cause located, NOT fixable inside src/lib
+
+Reproduced under `SIMPLE_EXECUTION_MODE=interpreter`:
+
+```
+use std.spec.*
+...  expect_not(false)
+  x expect_not resolves via star import
+    semantic: function `expect_not` not found
+```
+
+**Root cause:** `std.spec` names two different things. The brace form
+`use std.spec.{expect_not}` resolves to the MODULE
+`src/lib/nogc_sync_mut/spec.spl` (where `pub fn expect_not` is at line 710);
+the star form `use std.spec.*` resolves to the PACKAGE directory
+`src/lib/nogc_sync_mut/spec/` and therefore only ever sees
+`spec/__init__.spl`'s export list.
+
+**A src/lib-only fix was attempted and does NOT work** (recorded so it is not
+retried): adding `use std.nogc_sync_mut.spec.{expect_not, before_all, after_all}`
+plus `export expect_not, before_all, after_all` to
+`src/lib/nogc_sync_mut/spec/__init__.spl` leaves the probe failing identically
+(`function 'expect_not' not found`) -- the star form does not pick up that
+re-export either. The change was reverted; `__init__.spl` is unmodified.
+
+This is a compiler module-resolution defect (package shadows same-named module
+under `*`), not a stdlib content gap. The same root cause was hit from the
+other side while fixing
+`spipe_before_all_after_all_not_found_t32_hw_2026-07-20.md`, where
+`export use std.spec.*` had to be abandoned for an explicit name list.
+
+
 **Status:** OPEN (re-verified 2026-08-10) — architectural, needs compiler
 module-resolution work, not a source-level fix
 **Found:** 2026-08-04

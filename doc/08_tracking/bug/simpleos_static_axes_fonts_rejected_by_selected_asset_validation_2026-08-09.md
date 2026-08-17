@@ -1,5 +1,34 @@
 # SimpleOS: the two `default_axes == "static"` faces are rejected by selected-asset validation -- 2026-08-09
 
+## Status 2026-08-17: the read-derived root cause below is FALSIFIED by execution
+
+The hypothesis in this doc -- that `default_axes == "static"` is what makes
+selected-asset validation refuse Bungee and UnifrakturCook -- was never
+executed. It has now been executed on the host lane
+(`bin/simple run`, `load_selected_font_file` on the real staged assets):
+
+```
+assets/.../ofl/bungee/Bungee-Regular.ttf            len=118996 valid=true reason=valid
+assets/.../ofl/unifrakturcook/UnifrakturCook-Bold.ttf len=42688 valid=true reason=valid
+```
+
+Both faces validate CLEANLY, reason=`valid`. The validator handles `"static"`
+deliberately: `sfnt_manifest_default_axes_match`
+(`src/lib/common/encoding/sfnt.spl:230`) returns `manifest == "static"` when the
+font has no `fvar` table, which is exactly these two faces.
+
+So the guest-side `rejected:<n>B` is NOT a `default-axes`/`format` validator
+refusal. Per `font_renderer_register_selected_bytes`
+(`src/lib/nogc_sync_mut/text_layout/font_renderer.spl:434-452`) the remaining
+candidates are `runtime` (validation passed, the `font_runtime_ttf_default_supported`
+probe refused) or `identity`. The guest already records which one via
+`font_renderer_last_selected_registration_reason()`; that receipt has to be
+read off a guest run before this doc names a cause again.
+
+Pinned as `test/01_unit/lib/common/encoding/font_registry_static_axes_validation_spec.spl`
+so the falsification cannot silently rot.
+
+
 ## Status: OPEN -- NOT a desktop-text blocker. Root cause below is READ-DERIVED AND UNVERIFIED (nothing was executed for this filing).
 
 ## Observed evidence

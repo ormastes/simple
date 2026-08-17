@@ -1,5 +1,14 @@
 # Bug: `to_be_true()` / `to_be_false()` matchers error inside interpreter `it` blocks
 
+## Status: NOT-REPRODUCED (2026-08-17)
+
+`expect(true).to_be_true()` and `expect(false).to_be_false()` inside `it`
+blocks under `SIMPLE_EXECUTION_MODE=interpreter` both pass:
+`declared>=2 executed=2 passed=2 failed=0 dropped=0`. Regression spec pinned at
+`test/01_unit/std/spec_to_be_true_matcher_spec.spl`; the `assert_true`
+workaround is no longer required.
+
+
 Status: Open (worked around)
 
 **Date:** 2026-06-04

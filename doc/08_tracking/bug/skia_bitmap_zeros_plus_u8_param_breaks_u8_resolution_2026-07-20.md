@@ -1,5 +1,12 @@
 # `Bitmap.zeros(...)` call + a `u8`-typed function param in the same file breaks all `u8` resolution
 
+## Status: ALREADY-FIXED (verified by execution 2026-08-17)
+
+`bin/simple run test/unit/lib/skia/mask_filter_spec.spl` reports
+`declared>=5 executed=5 passed=5 failed=0 dropped=0`. The recorded
+`semantic: variable u8 not found` no longer occurs under `run`.
+
+
 - **Status:** OPEN
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** compiler semantic analysis — primitive-type symbol resolution,
