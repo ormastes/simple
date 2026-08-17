@@ -74,6 +74,92 @@ empty predicate and the cursor lands on row 1.
 `Sheet.is_row_hidden`, `Sheet.hide_row`, and all three skip loops are verified
 correct in isolation (`hid2=true`, GUI/TUI land right).
 
+## Shared root cause with the sibling records (verified by source, 2026-08-17)
+
+This record is the **canonical carrier of the root cause** for the
+class-value-identity family. The mechanism, verified directly in this tree by
+grep (not inherited from another agent's report):
+
+- `Value::ClassInstance(Arc<ClassInstance>)` exists — `ClassInstance` is
+  declared at `src/compiler_rust/compiler/src/value.rs:1114` with its `impl`
+  block at `:1119`, and the variant is carried through `value_impl.rs`,
+  `value_bridge.rs`, `value_pointers.rs` and ~16 sites in
+  `interpreter/node_exec.rs`.
+- **It has ZERO producers.** `grep -rn "ClassInstance::new"` over
+  `src/compiler_rust` returns 0 hits; `grep -rn "ClassInstance::"` returns only
+  vendored Win32 `ID3D11ClassInstance` noise; there is no
+  `Arc::new(ClassInstance` and no `ClassInstance { .. }` struct literal outside
+  `value.rs` itself. Every `Value::ClassInstance` site in the interpreter is a
+  **consumer or a re-wrap of an already-existing instance** — nothing ever
+  constructs one. The variant is unreachable code.
+- Consequence: source-level `class` values are represented as `Value::Object`,
+  the copy-on-write STRUCT carrier (`Object { class: String, fields:
+  Arc<HashMap<..>> }`, `value.rs:1114` region). There is no class-vs-struct
+  discrimination in `src/compiler_rust/compiler/src/interpreter/`. Class
+  identity is *simulated* by path-based write-back at assignment/call
+  boundaries, which is exactly why in-place chained mutation
+  (`box.items[0].bump()`) works while bind-then-mutate silently loses the write.
+
+**Designed-but-unwired mechanism — second instance of a pattern.** A complete
+value variant landed with full consumer plumbing and zero producers. The other
+known instance in this codebase is `interface_digest_of`
+(`src/compiler/80.driver/.../action_key.spl`), documented in
+`.claude/rules/commands.md` as having exactly one grep hit — its own definition.
+Recorded as a **pattern worth watching for** (a designed mechanism can be merged,
+reviewed and documented while being wired to nothing, and every consumer-side
+grep will make it look live). No claim is made that the two are otherwise
+related.
+
+**Blast radius (reported by another agent, NOT verified here):** 274
+index-bind-then-mutate sites across 87 files, 66 of them without a compensating
+write-back. Treat as an unconfirmed estimate until re-counted.
+
+## Family status — the sibling records are CLOSED, so this is NOT a three-way merge
+
+The two sibling records below share this root cause but are **not** currently
+reproducing. They were deliberately left as independent records rather than
+folded in: each documents a separate discovery at a separate access site, and
+three independent discoveries are themselves evidence of severity.
+
+| record | access site | status |
+|---|---|---|
+| this one (2026-08-17) | list element read out of a `[Class]` field | **OPEN**, live RED spec |
+| `interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10.md` | class-typed **field** bind | CLOSED — did-not-reproduce 2026-08-17 |
+| `interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md` | `Dict.get()` | CLOSED — NOT REPRODUCED, two independent EXECUTION re-measurements 2026-08-17 |
+
+That split is consistent with the root cause rather than contrary to it: the
+path-based write-back simulation has been extended to cover the dict-get and
+field-bind sites, but not the list-element-read site. The engine defect (no real
+reference values) is unfixed; only two of its three surfaces are papered over.
+
+**Correction to the 2026-08-10 record.** Its closing triage section attributes
+the fix to "the `ClassInstance(Arc<ClassInstance>)` shared-identity value variant
+added in `a155bff913f4`". That attribution is **wrong**: per the zero-producer
+grep above, the variant is never constructed and therefore cannot be giving any
+value reference semantics. Its did-not-reproduce *observation* may still be
+sound — it rests on an execution run — but its stated *mechanism* is not.
+
+## Fix options
+
+- **A — construct `Value::ClassInstance` at class-constructor lowering and plumb
+  it through** field access, method dispatch, pattern matching, equality,
+  printing and FFI/bridging. This is the real fix: it gives `class` genuine
+  reference semantics and closes all three surfaces at once, including the ones
+  currently masked by write-back. Cost is a value-model change; the 2026-08-10
+  record notes ~210 non-vendor `Value::Object` match sites (reported there, not
+  re-counted here) and an existing test,
+  `interpreter/node_exec.rs::field_assignment_cow_protects_struct_local_alias`,
+  that locks the current COW behaviour and must be updated to register its
+  `Point` as a value type.
+- **B — narrow aliasing of `Expr::Index` only. REJECTED as unsound.** You cannot
+  alias without a shared cell; with `fields: Arc<HashMap<..>>` and
+  `Arc::make_mut`, any "alias" is a clone the moment it is written through. A
+  targeted `Expr::Index` change can only re-add another path-based write-back,
+  i.e. more of the simulation that already fails on the next unhandled shape.
+- **C — local workarounds** (`wb.sheets[i] = sh`, `caches.set(id, cache)`).
+  Papers over the engine defect. Already in tree at the office and
+  host-compositor call sites; not a fix, and not a reason to close this record.
+
 ## Not the same as existing records
 
 - `interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md` — Dict

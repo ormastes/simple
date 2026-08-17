@@ -1,5 +1,27 @@
 # Binding a class-typed FIELD to a local snapshots it — interpreter only
 
+> **Root cause lives elsewhere — see
+> `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`**,
+> the canonical record for the class-value-identity family (list index / field
+> bind / dict get). This record is retained in full: its symptom, its P1-P6
+> probe matrix, its `SjClient` production consequence and its history are
+> independent discovery evidence and are NOT superseded in content.
+>
+> **Correction (2026-08-17, source-verified).** The closing triage section of
+> this file attributes the did-not-reproduce result to "the
+> `ClassInstance(Arc<ClassInstance>)` shared-identity value variant added in
+> `a155bff913f4`". That mechanism claim is **false**. `Value::ClassInstance` has
+> **zero producers**: `grep -rn "ClassInstance::new" --include=*.rs
+> src/compiler_rust` returns 0, there is no `Arc::new(ClassInstance` and no
+> `ClassInstance { .. }` literal outside its own declaration at
+> `src/compiler_rust/compiler/src/value.rs:1114`. Every interpreter site
+> consumes or re-wraps an instance that nothing ever builds. Source `class`
+> values are therefore still `Value::Object`, the copy-on-write struct carrier,
+> exactly as the "Why it happens" section below says — that analysis stands and
+> was NOT superseded by the triage note. The triage note's *observation* (the
+> fixture printed `field=42`) rests on an execution run and is left as filed; only
+> its causal attribution is retracted here.
+
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-08-10
