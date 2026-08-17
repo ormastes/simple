@@ -1,6 +1,7 @@
 # `app_mcp_intensive_spec` is not hung — it is an 84s spec, RED with 8 real failures
 
-**Status:** MEASURED. The "hang" is a harness artefact. The spec itself is RED
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 against the product (8 real assertion failures) and is left RED.
 **Filed:** 2026-08-10
 
@@ -125,3 +126,20 @@ Then `35 total, 35 passed, 0 failed`. There is no harness change to make.
 Do not delete examples, mark the file pending, or split it up on the theory that
 it is "too slow" — it is an 84s spec that finishes, and the 8 failures are the
 point.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN on the part that matters. The doc`s primary claim — that this is a
+hang — was already falsified by its own measurement (`Results: 35 total, 27
+passed, 8 failed` in 84s); what remains unaddressed is the **8 real failures**,
+and nothing in this lane changed that. `test/02_integration/app/app_mcp_intensive_spec.spl`
+is still present in the tree.
+NOT PROVEN HERE, explicitly: the 84s / 35-total figure was NOT reproduced in
+this session, so the 8 failures were neither re-confirmed nor diagnosed. A
+stage-3 bootstrap held the host at ~98% CPU for the session and the shared test
+slot never freed. Recording this as an honest gap rather than restating the
+older `Results:` line as if this lane had observed it.
+Caution for whoever picks this up: per the fleet brief, a SIGTERMed spec dies
+before printing its header and, read through a pipe, launders as exit 0 with no
+`Results:` line — indistinguishable from a silent green. Only an explicit
+`Results:` line settles this row, and rc must be assigned on the line after the
+command, never read through a pipe.

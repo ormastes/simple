@@ -10,7 +10,8 @@
   within the test-runner's internal watchdog (~60s) or the outer harness
   timeout (90s); correctness of the underlying primitives is UNVERIFIED,
   not merely slow.
-- **Status:** OPEN. This is not one of the guide's literal ENV categories
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   (no missing tool/socket/GPU/network, not gui/webgpu/webgl/wm/ml/simpleos)
   — filing as a tracked bug/perf-gap rather than silently skipping, per
   instruction to not bare-skip ambiguous cases.
@@ -76,3 +77,15 @@ headers), or land the native fast-path helpers already tracked for bcrypt.
 - `test/unit/lib/crypto/rsa_pss_sha256_roundtrip_slow_spec.spl`
 - `test/unit/lib/crypto/slh_dsa_128s_spec.spl`
 - `test/unit/lib/crypto/slh_dsa_192s_256s_spec.spl`
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN and NOT re-measured. `test/unit/lib/crypto/bcrypt_kat_spec.spl` and
+its siblings are present. Two independent reasons this row was not settled here:
+1. It is a THROUGHPUT row, not a correctness row — the specs self-document
+   exceeding the 60s interpreter watchdog. Timing it against a box carrying a
+   98%-CPU bootstrap proves nothing.
+2. Per this fleet`s brief, `src/lib/common/crypto/**` is claimed by another lane,
+   so any fix would collide.
+Also note the doc`s original timings are from the `SIMPLE_TIMEOUT_SECONDS` era,
+when that variable was parsed and discarded — treat every number in this doc as
+suspect until re-taken with an explicit `--timeout <n>` on an idle host.

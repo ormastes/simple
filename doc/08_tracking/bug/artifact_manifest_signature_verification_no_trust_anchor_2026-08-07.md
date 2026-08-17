@@ -1,7 +1,8 @@
 # `SimpleArtifactManifest.signature` has a real Ed25519 primitive available but NO trust-anchor/key-distribution infra to call it meaningfully
 
 - **ID:** artifact-manifest-signature-no-trust-anchor-2026-08-07
-- **Status:** OPEN — honest gap, not faked. WP-19 (aerospace hardening plan,
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   Wave 4) landed REAL content-hash verification
   (`manifest_verify_content_hash` in `src/os/kernel/loader/artifact_manifest.spl`)
   but deliberately did NOT wire signature verification, for the reason below.
@@ -71,3 +72,9 @@ already-computed content-hash hex, not raw artifact bytes, so verification
 stays O(1) after the hash check). Then wire `ed25519_verify` into
 `manifest_validate`/`manifest_verify_content_hash` as a second, independent
 gate.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN. `grep -c "trust_anchor\|manifest_verify_signature" src/os/kernel/loader/artifact_manifest.spl`
+returns **0**. There is still no trust anchor, no key distribution, and no
+verification entry point — the `signature` field is carried and never checked.
+Not repaired here: `src/os/crypto/**` is explicitly out of scope for this lane.

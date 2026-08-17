@@ -1,5 +1,8 @@
 # Comment-cheat vacuity family #2 — ABSENT capabilities (stream Q5, 2026-08-10)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Specs whose source-scanning needle matches ONLY a comment in the product source.
 This record covers the **ABSENT** subset: sites where the capability the spec
 claims to prove **does not exist in code at all**. The vacuous needle was the
@@ -410,3 +413,11 @@ exclusion**: a negative assertion is vacuous whenever its receiver is empty,
 whether from a missing path, a failed read, or a renamed module. A future gate
 should assert that every path passed to a read call exists, independently of
 needle classification — the 7-site table above is the seed for it.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN. `src/os/kernel/arch/arm64/user_entry.spl` still carries, inside
+`dispatch_enter_user_blocking_live`, the comment:
+"# ponytail: one active EL0 handoff per CPU; PID-keyed recorded handoffs and
+nested kernel resume frames are required before concurrency is enabled."
+The capability is still absent from the tree — the comment documents a missing
+implementation, which is the comment-cheat ABSENT pattern this doc names.

@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-07-30
 - **Severity:** low — dead test scaffolding, not a product regression
-- **Status:** PARTIALLY RESOLVED 2026-07-30 (lane MTB1 `mir-test-builder-wiring`) —
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   the 14 Group 1/3/4 tests are implemented and wired against real backend
   behavior; the 20 Group 2/5/6 bare-`pass` tests remain open (need real
   assertions written from scratch, not API wiring — separate lane).
@@ -164,3 +165,18 @@ of hiding it.
 
 - `feedback_when_an_assumption_falls_reaudit_what_was_left` (session memory)
   — a sweep's skipped/commented sites are its unreviewed ones.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+PARTIALLY FIXED — reduced from 34 dead tests to 20, still STILL-OPEN.
+Measured on `test/01_unit/compiler/backend/backend_capability_spec.spl` (529 lines):
+- `src/compiler/70.backend/mir_test_builder.spl` now EXISTS.
+- the import at :6 (`use compiler.backend.mir_test_builder.{MirTestBuilder, BackendTarget}`) is LIVE, not commented.
+- 20 `it "` examples are live and 4 `describe` blocks are live; :189, :205, :216,
+  :228 really call `MirTestBuilder.new()`.
+- but 20 `# it "` examples inside 3 commented `# describe` blocks remain dead
+  scaffolding (236 comment lines total).
+So the "never-built API" half of this doc is resolved by content; the dead
+scaffolding half is not. Remaining work is to either implement or DELETE the 20
+commented examples — per CLAUDE.md, commented-out tests must not be left as
+permanent NOTEs. Not done here: `src/compiler/70.backend/**` is explicitly
+claimed by a sibling lane in this fleet.

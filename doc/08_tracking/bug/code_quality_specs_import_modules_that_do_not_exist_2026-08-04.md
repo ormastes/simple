@@ -1,6 +1,7 @@
 # `test/system/code_quality` specs import three modules/types that exist nowhere in the tree
 
-**Status:** OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-04
 
 ## Symptom
@@ -113,3 +114,8 @@ confirmed **ARCHITECTURAL-OPEN**: (2) `std.common.iterable` and (3) a `Set`
 collection type are still unwritten library surface (feature work owned by
 whoever owns `src/lib/common/`), not a test-repair fix. No code change
 lands with this re-verification.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN. `ls src/lib/common/iterable.spl src/lib/common/set_utils.spl` ->
+both "No such file or directory". `test/system/code_quality/deprecated_removed_spec.spl`
+is still present and still imports them. The specs remain unloadable.

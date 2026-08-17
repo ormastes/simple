@@ -1,6 +1,7 @@
 # `core_intensive_spec.spl` is VACUOUS — it tests local stub classes, not `std.database.core`
 
-**Status:** OPEN (re-confirmed 2026-08-10, ARCHITECTURAL-OPEN — see below)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-04
 
 ## Symptom
@@ -117,3 +118,22 @@ the fixture import path, rewrite the 32 examples against the real
 `get`/`get_id` naming), and move the file out of
 `test/02_integration/compiler/` to a database-lane location, verifying with a
 real `bin/simple test` run afterward since new failures are expected.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN, and the exact mechanism is unchanged. Head of
+`test/02_integration/compiler/core_intensive_spec.spl`:
+```
+5: # use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+6: # use test.lib.database_fixtures.{...}
+7: fn check(condition: bool):
+```
+Both real imports are still commented out, and the file then defines its own
+local `check`/`check_msg` helpers and stubs. Every example therefore exercises
+spec-local code and can never fail on a `std.database.core` regression — a
+vacuous-green spec of exactly the class this fleet is hunting.
+
+### Scope note (lane I, 2026-08-17)
+Not repaired here. Un-commenting :5-6 makes the spec depend on
+`std.database.core` and `test.lib.database_fixtures`; whether those resolve is a
+separate question from this lane`s slice, and a failed un-comment would leave
+the file unloadable rather than merely vacuous. Recorded as verified-live.

@@ -1,6 +1,7 @@
 # `src/lib/common/c_parser/` is specced by 56 system-test examples but has never existed (2026-08-04)
 
-**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-04
 
 ## 2026-08-10 re-verification
@@ -93,3 +94,10 @@ Two smaller follow-ups worth doing independently of the feature:
   there and their extra assertions (`array_size`, the preprocessor, the name
   matcher) filed as the real feature gaps — rather than a second parallel
   library being written under `src/lib/common/`.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN. `ls -d src/lib/common/c_parser` -> No such file or directory.
+`test/03_system/compiler/c_parser_spec.spl` is still present and still imports
+the absent library. The 56 system-test examples remain specced against nothing.
+Not fixable in this lane: this is "implement a C parser library", a feature, not
+a defect repair.

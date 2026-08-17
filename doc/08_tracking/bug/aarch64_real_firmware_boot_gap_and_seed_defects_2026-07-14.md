@@ -1,5 +1,8 @@
 # aarch64 SimpleOS: real-firmware boot gap + 2 seed/driver defects (launch sanity, 2026-07-14)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Found by Lane LAUNCH-OS-AARCH64 doing a real launch sanity check. The aarch64
 kernel boot gate (loader + FS-exec staging) reproduces GREEN
 (`ARM64_SIMPLE_TOOL_GATE_PASS` / `TEST PASSED`, `e_machine=183`, QEMU self-exit
@@ -1208,3 +1211,28 @@ real `limine_entry.spl` build was built but not similarly dissected — the
 minimal probe was sufficient to nail the mechanism and is a strictly cleaner
 signal); fixing anything (no bootstrap rebuild, no fix attempted, per task
 scope). Probe file deleted after use, nothing committed.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+The virtio-blk half is STILL-OPEN and the tree now carries an explicit,
+commented WORKAROUND for it rather than a fix. `src/os/services/vfs/arm_fs_exec_vfs.spl`:
+- :258-260 `_arm_cluster_sector` = `data_start + (cluster - 2) * g_arm_spc`, and
+  :255 logs the parsed `spc=` — so the spc value is live, not stubbed.
+- :271-289 `_arm_read_cluster` states in-source: "A single multi-sector
+  rt_arm_virtio_blk_read_prefix(first, spc*512) call truncates AND corrupts past
+  the first sector on this virtio-blk driver (the descriptor ring is
+  single-sector oriented). Read each sector with an independent single-sector
+  read_prefix (the proven-correct path) and concatenate". It then loops
+  `while i < spc` issuing one 512-byte `rt_arm_virtio_blk_read_prefix` per
+  sector.
+So the single-sector ring defect this doc reports is CONFIRMED PRESENT by
+content: the driver still cannot do a multi-sector descriptor read, and the VFS
+routes around it. The workaround is correct-but-slow, so the row stays open on
+the driver.
+NOT PROVEN HERE — stated explicitly rather than implied: no boot was run. Under
+this project`s OS/board rule a QEMU-only result would not settle it anyway, and
+a real-firmware EDK2/AAVMF boot could not be started because a stage-3
+self-hosting bootstrap held the host at ~98% CPU for the entire session (the
+user`s stated top priority, and this fleet was instructed not to start VMs
+against it). Board-run is therefore BLOCKED, not passed. The EFI half of this
+doc remains superseded by
+`arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.

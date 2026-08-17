@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-17 / 2026-07-18 (diagnosis update)
 **Lane:** L5 (test/02_integration and test/integration)  
-**Status:** ROOT CAUSE IDENTIFIED - Interpreter load time with 600+ files under 120s runner limit
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Root Cause (Confirmed)
 Spec invokes `bin/simple run` with `SIMPLE_LIB="$REPO/src"`, which forces the interpreter to load ALL 600+ .spl files from:
@@ -62,3 +63,21 @@ added for readers. Both files parse clean (fix --dry-run, 0 errors). Regular
 section runs will no longer die on this spec; the slow lane gives the 16
 interpreter spawns adequate budget. Durable improvement (retarget spec to
 compiled binaries once redeploy lands) remains listed above as option 1.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN and still UNSETTLED — this doc`s own status ("INCONCLUSIVE FIX") is
+the accurate one, and this lane could not upgrade it.
+Content check: `test/02_integration/app/add_remove_log_modes_spec.spl` is
+present and still carries a `SIMPLE_LIB`/`SIMPLE_TIMEOUT_SECONDS` reference,
+i.e. the SIMPLE_LIB=src whole-tree interpreter load this doc blames is still the
+shape of the test.
+Why every timing number in this doc must be re-taken, not trusted:
+`SIMPLE_TIMEOUT_SECONDS` was **parsed and then discarded** until recently, and
+even after that it misbehaved (a value of 600 truncated a run at 135s, while 0
+let it finish). Any conclusion in this doc that rests on that variable proves
+nothing about the real runtime. Re-measurement must use an explicit
+`--timeout <n>` flag.
+NOT PROVEN HERE: no re-run. A stage-3 self-hosting bootstrap held this host at
+~98% CPU for the whole session; the shared test slot never freed. A timeout row
+measured under that contention would be pure noise in the failing direction,
+which is worse than no measurement. Needs an idle host.

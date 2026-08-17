@@ -1,5 +1,8 @@
 # browser_demo app is a frozen "Loading..." placeholder, not a browser
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Open.
@@ -60,3 +63,13 @@ Two acceptable directions, either is sufficient:
    `os.apps.browser` / the Simple Web renderer, not this demo app).
 
 No navigation logic was implemented as part of filing this bug.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN, verbatim. `src/os/apps/browser_demo/browser_demo_hosted.spl:27` is
+still a single static `client.update_content("SimpleOS Browser\n\nLoading: " +
+BROWSER_DEMO_START_URL + ...)` call, and the body that follows it is only
+`while running: val event = client.wait_event(); if event.event_type ==
+WM_EVENT_CLOSE: running = false`. There is no fetch, no parse, no render, and
+no second `update_content` anywhere in the file — the window shows "Loading:"
+forever by construction. Not a defect to patch: making this a browser is a
+feature build, out of scope for a silent-wrong-result lane.

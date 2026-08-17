@@ -1,5 +1,8 @@
 # Cross-engine value-semantics differential harness — landed KNOWN-RED (2026-08-10)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Spec:** `test/03_system/language/value_semantics/cross_engine_value_semantics_spec.spl`
 **Probes:** `test/03_system/language/value_semantics/probe/p1..p9`
 **Related:** `doc/07_guide/language/value_semantics_by_engine.md`,
@@ -65,3 +68,14 @@ the other accepted classification — an UNKNOWN AOT failure fails the spec).
    reject it — clears p8 (accepted-syntax parity).
 4. AOT column stays informational until the llc-20 void-type defect is fixed
    and the host can complete a 60s native-build.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+NOT-A-DEFECT / working as designed — no action taken.
+`test/03_system/language/value_semantics/cross_engine_value_semantics_spec.spl`
+header (:6) reads: "Status: p2 deep-copy FIXED 2026-08-10 (recursive
+`AggregateCopy.deep_fields`) — p8 remains KNOWN-RED by design", and :10 points
+back at this very doc. The harness deliberately shells out to a JIT lane and
+FAILS on any divergence (:16), and the header records the discrimination proof
+in both directions (:19-21). This is an intentional known-red differential
+harness, not a silent-wrong-result bug, and closing it red would remove real
+coverage. Left exactly as is.

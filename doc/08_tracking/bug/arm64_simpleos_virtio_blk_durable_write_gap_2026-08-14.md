@@ -1,5 +1,8 @@
 # ARM64 SimpleOS VirtIO-BLK durable-write gap
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Claimed: 2026-08-14 by the ARM64 server-executable lane.
 
 ## Reproducer
@@ -73,3 +76,24 @@ descriptor constructor mirrors the `make_os_disk.c` provisioner fields and
 CRC32C. Focused coverage rejects corrupt CRC, journal start/count, and sector
 size. The gate neither publishes mount globals nor manufactures a production
 capability.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN exactly as the doc states: the fail-closed adapter is present and
+nothing beyond it has landed. `src/os/apps/servers_user/database_persistence_adapter.spl`
+opens with the boundary contract in its own words — "This module deliberately
+does not reimplement DbServerCapsule or SdnDatabase. It is the target boundary
+that decides whether the filesystem below std.database.atomic can honour that
+owner`s commit protocol. A target with only \"write then close\" is not a
+degraded durability mode: it is unavailable and must fail before a database
+listener is published." — and then defines the capability bitset
+(FILE_ATOMIC_EXCLUSIVE_CREATE / BOUNDED_LOCK / PRIVATE_TEMP_WRITE /
+DURABLE_SYNC / RENAME_OWNER), `file_atomic_cap`, and
+`struct SimpleOsDatabasePersistenceCaps`, over `extern fn rt_simpleos_file_atomic_caps()`.
+That is the gate, not the durable-write implementation the doc still requires.
+This is the correct failure mode (unavailable, not silently non-durable), so
+there is no silent-wrong-result defect to patch here — the row is a genuine
+implementation gap.
+NOT PROVEN: the required arm64 durability proof was not produced. It needs a
+real-firmware arm64 boot with a power-cut/no-sync replay, which could not be run
+(bootstrap at ~98% CPU held the host all session). Board-run BLOCKED, stated
+explicitly rather than shipped as a QEMU-only or paper result.

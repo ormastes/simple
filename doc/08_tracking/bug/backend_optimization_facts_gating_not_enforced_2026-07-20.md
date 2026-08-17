@@ -1,6 +1,7 @@
 # Bug: backend optimization skip reasons retain optional fact wrappers (8 failures)
 
-- **Status:** SOURCE-FIXED — focused self-hosted rerun pending
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Filed:** 2026-07-20
 - **Affected specs:** `test/{01_unit,unit}/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
 - **Command:**
@@ -77,3 +78,16 @@ The mirrored recommendation specs also use explicit `reason != nil` for their
 presence assertion. A focused rerun with a usable self-hosted test runner is
 still required; the currently deployed bootstrap-only binary cannot execute
 the test command.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN on the verification half, confirmed by content.
+`test/01_unit/compiler/mir_opt/general_patterns_backend_recommendation_spec.spl`
+still imports the fact-wrapper variants — :5 `backend_optimization_decisions_for_budget_with_facts`,
+:8 `backend_optimization_plan_for_budget_with_facts`, :16
+`optimization_rule_provider_skip_reason` — and :179 still reads
+`it "gates backend recommendation plans on required optimizer facts"`, i.e. the
+optional fact wrappers this doc says should have been removed are still the
+API the spec targets. The doc`s own status is SOURCE-FIXED with the focused
+self-hosted rerun pending; that rerun is still pending and was not run here
+(bootstrap contention, see the lane report). Not patched: the subject spec
+covers `src/compiler/70.backend/**`, claimed by a sibling lane.

@@ -1,5 +1,8 @@
 # Animation subsystems fully built and tested but unreachable in any live GUI lane
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 Open.
 
@@ -27,3 +30,13 @@ No page with CSS transitions or JS-driven timing (splash screens, fade-in/out, s
 
 ## Next Step
 Immediate: update documentation to not claim animation support until wiring is complete. Medium-term: wire WM animator into open/close/focus paths; drive `ScriptHost.tick()` from the web-render frame loop (after first-frame CSS perf fix lands). Related: see `browser_script_timer_deadline_absolute_relative_confusion_2026-07-05.md` for a latent bug in the timer/rAF deadline logic that would surface when wiring completes.
+
+## Verification 2026-08-17 (content classification, fleet lane I)
+STILL-OPEN, confirmed against current source (not commit ancestry).
+`grep -rn AnimationController src/os src/app src/lib/common/ui` returns 7 hits,
+ALL inside `src/os/compositor/animation_controller.spl` itself
+(:21 class, :25 impl, :26/:27 new, :109/:115/:121 the animate_* helpers).
+Zero production instantiation, zero external caller. The unwired claim holds
+verbatim. No fix attempted in this lane: wiring the animator into
+host_compositor_entry state-change paths is a feature change, not a
+silent-wrong-result defect, and it touches compositor files owned elsewhere.
