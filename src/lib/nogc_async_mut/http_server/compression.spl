@@ -69,22 +69,35 @@ fn compress_response_for(resp: HttpResponseData, accept_header: text) -> HttpRes
     val content_type = _find_header_value(resp.headers, "content-type")
     if not _is_compressible_content_type(content_type):
         return resp
-    val chosen = negotiate_encoding(accept_header, supported_encodings())
-    if chosen.len() == 0:
+    if negotiate_encoding(accept_header, supported_encodings()).len() == 0:
         return resp
     val body_bytes = _resp_body_as_bytes(resp)
     if body_bytes.len() < COMPRESSION_MIN_BODY_BYTES:
         return resp
-    val compressed_res = compress_response_body(body_bytes, chosen)
-    val compressed = match compressed_res:
-        Ok(value):
-            value
-        Err(_e):
-            # Compression failed — fall through to identity.
-            # DO NOT silently emit a Content-Encoding header without compressed bytes.
-            return resp
-    # Only use compressed form when it is actually smaller.
-    if compressed.len() >= body_bytes.len():
+    # Walk the server preference order and take the FIRST mutually-acceptable
+    # codec that actually produces a smaller body. Trying only the single
+    # top-preference codec left a real interop hole: several encoders here are
+    # container writers that emit a stored/raw frame and therefore never shrink
+    # anything (zstd and brotli today — see
+    # doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md).
+    # A client offering "zstd, lz4" negotiated zstd, zstd came back LARGER than
+    # the input, the size guard correctly refused it, and the response was sent
+    # uncompressed even though lz4 was on offer and compresses the same body
+    # 300 -> 36 bytes. Preference order is unchanged: a codec that does shrink
+    # still wins over every codec below it.
+    var chosen: text = ""
+    var compressed: [u8] = []
+    for candidate in supported_encodings():
+        if chosen.len() == 0 and negotiate_encoding(accept_header, [candidate]).len() > 0:
+            val res = compress_response_body(body_bytes, candidate)
+            if res.is_ok():
+                val value = res.unwrap()
+                # Only use a compressed form that is actually smaller. Never
+                # emit a Content-Encoding header without compressed bytes.
+                if value.len() < body_bytes.len():
+                    chosen = candidate
+                    compressed = value
+    if chosen.len() == 0:
         return resp
     val new_headers = _set_content_encoding_with_length(
         _strip_content_length(resp.headers), chosen, compressed.len()

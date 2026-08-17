@@ -900,3 +900,48 @@ New acceptance criteria (extends AC-1..AC-12 above):
   boundedness, never weaken a limit); percent_decode decodes BYTES not
   characters; and no route role-gates a WRITE, because that authority lives in
   the guarded commands by design.
+- SIX "STALE SPEC" REDS WERE THREE REAL DEFECTS (2026-08-17, lane W11-B).
+  (A) security_context_dispatch — A SECURITY BUG:
+  validate_remote_security_token_with_adapters did `val active = session`
+  after a nil guard, but a plain rebind does NOT narrow
+  RemoteSecuritySession?, so every field read raised "unknown property
+  'user_id' on Option", the function ABORTED, and the session/token
+  user-binding check NEVER RAN — adapter-backed auth silently degraded to
+  anonymous. Fixed with `session!`. 5/1 -> 6/6.
+  (A) protocol_handler — AN EARLIER LANE'S DISMISSAL WAS WRONG. That lane
+  recorded the failure as "a pre-existing string-vs-integer mismatch in the
+  spec's own case". Re-derived by bisecting with probe specs:
+  build_alpn_extension_block is correct (11 bytes, right framing), but
+  wire_to_bytes returned a list of the right LENGTH whose elements are
+  one-character TEXT, not integers — the declared [i64] was a lie from
+  delegating to generic to_bytes. The impl even carried a comment calling the
+  helper "NOT usable", i.e. the caller had been worked around instead of the
+  bug fixed. Rewrote it as the true inverse of bytes_to_wire. 7/1 -> 8/8.
+  (A)+(B) compression — A FULLY UNCOMPRESSED BODY WAS BEING SERVED. Measured
+  every codec on a 300-byte payload: br 304, gzip 42, deflate 28, zstd 310,
+  lz4 36. zstd_compress_frame is a CONTAINER WRITER THAT NEVER COMPRESSES, so
+  the size guard correctly refused it — but compress_response_for negotiated
+  exactly ONE codec and gave up on refusal, so `Accept-Encoding: zstd, lz4`
+  served an uncompressed body despite lz4 being offered. Fixed to walk
+  preference order to the first codec that actually shrinks (gzip,lz4 and
+  lz4,gzip both still pick gzip). Stored-only encoders FILED, not absorbed:
+  doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md.
+  (B) half: the spec predated br/gzip/deflate being wired and its
+  application/octet-stream fixture tripped the MIME allowlist BEFORE
+  negotiation was reached — three examples failed for an unrelated reason and
+  one passed vacuously. 11/8 -> 20/20.
+  (B) static_compression_cache — implementation was RIGHT; the LRU example
+  probed both entries then asserted eviction order ignoring its own second
+  probe. 7/1 -> 8/8.
+  (B) range_numeric_guard — THREE copies and they are NOT duplicates: same
+  shape, but each targets a different family's utilities.spl (gc_async_mut,
+  nogc_async_mut, nogc_sync_mut). The sync one was already corrected earlier;
+  the other two still demanded the dead `to_int() ?? 0` spelling back. 0/1 ->
+  3/3 each.
+  Sabotage, 6 of 6 green->red->green: compression 16/4, protocol_handler 7/1,
+  security 5/1, LRU 5/3, range async 1/2, range gc 1/2.
+  Lane sweep: 12 specs, 140 examples, 140 passed. HARNESS CAVEAT RECORDED:
+  under load avg 20-27, three runs were SIGTERM'd producing NO VERDICT LINE —
+  a missing verdict is NOT a pass, and those were re-run to completion.
+  Merged-tree reruns: compression 20/20, static_compression_cache 8/8,
+  range_numeric_guard 3/3, async_dynamic_dispatch 6/6, http_core 23/23.

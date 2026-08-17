@@ -1,10 +1,30 @@
 extern fn rt_file_read_text(path: text) -> text
 
-describe "http server range numeric guard":
-    it "defaults malformed range numeric parsing":
+# Regression guard for the Range header parser.
+#
+# History: this spec used to require `start = start_str.to_int() ?? 0` and
+# `end = end_str.to_int() ?? -1`. That pattern is DEAD -- `.to_int()` is typed
+# `i64?` but its runtime returns a plain int64_t and can never produce nil, so
+# the `??` arm never fired and `bytes=abc-def` was silently served as
+# `bytes=0-0`. `utilities.spl` now parses through `try_parse_int` and IGNORES a
+# malformed Range (serve the whole entity, RFC 9110 §14.2) instead of coercing
+# it. The assertions below pin that stronger behaviour; requiring the old
+# spelling would be requiring the defect back.
+describe "gc async http server range numeric guard":
+    it "parses range bounds through a parser that can actually fail":
         val source = rt_file_read_text("src/lib/gc_async_mut/http_server/utilities.spl") ?? ""
 
-        expect(source).to_contain("start = start_str.to_int() ?? 0")
-        expect(source).to_contain("end = end_str.to_int() ?? -1")
-        expect(source.contains("start = start_str.to_int()\n")).to_equal(false)
-        expect(source.contains("end = end_str.to_int()\n")).to_equal(false)
+        expect(source).to_contain("val parsed_start = try_parse_int(start_str)")
+        expect(source).to_contain("val parsed_end = try_parse_int(end_str)")
+
+    it "fails closed on a malformed bound instead of coercing it":
+        val source = rt_file_read_text("src/lib/gc_async_mut/http_server/utilities.spl") ?? ""
+
+        expect(source).to_contain("if parsed_start == nil:")
+        expect(source).to_contain("if parsed_end == nil:")
+
+    it "never reintroduces the coercing to_int spellings":
+        val source = rt_file_read_text("src/lib/gc_async_mut/http_server/utilities.spl") ?? ""
+
+        expect(source.contains("start = start_str.to_int()")).to_equal(false)
+        expect(source.contains("end = end_str.to_int()")).to_equal(false)

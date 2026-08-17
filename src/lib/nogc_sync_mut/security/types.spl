@@ -712,7 +712,14 @@ fn validate_remote_security_token_with_adapters(headers: RemoteSecurityContextHe
     val session = session_adapter.lookup_active_session(token_session_id, now_ms)
     if session == nil:
         return RemoteSecurityValidatedIdentity.invalid()
-    val active = session
+    # `val active = session` does NOT narrow `RemoteSecuritySession?` to
+    # `RemoteSecuritySession` -- the nil guard above is not propagated through a
+    # plain rebind, so every field access below raised
+    # "unknown property or method 'user_id' on Option" and the whole adapter
+    # validation path aborted. That silently downgraded adapter-backed auth to
+    # anonymous: the session/token user-binding check never ran. Force-unwrap
+    # after the explicit nil guard is the narrowing the guard was meant to give.
+    val active = session!
     if active.user_id != user_id:
         return RemoteSecurityValidatedIdentity.invalid()
     RemoteSecurityValidatedIdentity(
