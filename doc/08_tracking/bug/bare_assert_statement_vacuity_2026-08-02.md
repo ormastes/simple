@@ -1,10 +1,11 @@
 # Bare `assert` vacuity — remaining inert sites after the interpreter fix
 
 **Date:** 2026-08-02
-Status: OPEN (P1)
+Status: FIXED (P1) — 2026-08-17
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
-(`62c075bbe3cf`); OPEN 3 FIXED (`f93a9abb5d0d`); **OPEN 1 still OPEN** — it
-needs more than the parser change first assumed, see the revised section below
+OPEN 2 FIXED (`62c075bbe3cf`); OPEN 3 FIXED (`f93a9abb5d0d`);
+**OPEN 1 FIXED 2026-08-17** — it needed more than the parser change first
+assumed; see "Fix landed 2026-08-17" at the end of this file
 **Related:** `doc/08_tracking/bug/` spec-DSL false-green family; shim-vacuity findings
 
 ## What was fixed
@@ -44,7 +45,15 @@ TRUE controls (`assert 1 == 1`, `assert_true(true)`, `expect(1).to_equal(1)`,
 `expect(1 == 1)`) pass both before and after — the measurement is not
 degenerate.
 
-## OPEN 1 — pure-Simple compiler DISCARDS `assert` entirely (STILL OPEN)
+## OPEN 1 — FIXED 2026-08-17 (see "Fix landed 2026-08-17" below)
+
+The analysis in this section stands; the prescribed fix has now been
+implemented across all four dispatch sites it named. Read the fix section at
+the end of this file before acting on the "do not land it" warning below —
+that warning applies to the *naive* one-line patch (emitting a call to an
+unregistered `assert` callee), not to what was landed.
+
+## OPEN 1 — pure-Simple compiler DISCARDS `assert` entirely (original filing)
 
 `src/compiler/10.frontend/core/parser_stmts.spl` (the `if ident_text ==
 "assert":` branch, line 615) parses the condition and the optional message and
@@ -342,3 +351,99 @@ discarding bare `assert`, and the pure-Simple compiler could not be exercised
 here at all: no self-hosted binary is deployed in this tree (`bin/simple` is
 the 2026-08-16 Rust seed, and `bootstrap/stage3/simple` has no `run`/`test`
 subcommand). The remaining open item is untouched and unverified.
+
+---
+
+## Fix landed 2026-08-17 — OPEN 1 closed
+
+### What was wrong, restated precisely
+
+`src/compiler/10.frontend/core/parser_stmts.spl:732-738` returned
+`stmt_expr_stmt(assert_cond, 0)`. The condition was evaluated and discarded and
+the message bound to an unused local. **1411 bare `assert` statements under
+`src/`** (618 of them carrying a message) were silent no-ops on the pure-Simple
+path.
+
+### Measured before/after (pure-Simple parser driven directly)
+
+The probe calls `parser_init(src)` then `parse_statement()` and reads the
+statement expression's tag and callee. `EXPR_BINARY = 7`, `EXPR_CALL = 9`
+(`_AstExpr/nodes.spl:21,23`).
+
+| source | before | after |
+|---|---|---|
+| `assert 1 == 2` | `tag=7 callee=-` | `tag=9 callee=__assert` |
+| `assert 1 == 2, "boom"` | `tag=7 callee=-` | `tag=9 callee=__assert` |
+
+Before-state captured by path-scoped `git stash` of `parser_stmts.spl` alone,
+re-running the same probe, and restoring.
+
+### The four coordinated changes
+
+The earlier filing was right that the naive patch (emitting a call to `assert`)
+would land on an unregistered callee. The landed fix emits `__assert`, a
+reserved-looking name that cannot collide with a user function, and registers it
+at every dispatch site the filing enumerated:
+
+1. `src/compiler/10.frontend/core/parser_stmts.spl` — desugar
+   `assert COND[, MSG]` to `__assert(COND[, MSG])`.
+2. `src/compiler/10.frontend/core/interpreter/eval_builtins.spl` — `__assert`
+   arm in `eval_builtin_call`, raising via the existing `eval_set_error`
+   (the same mechanism `@static_assert` already used, ten lines below).
+3. `src/compiler/30.types/type_system/builtin_registry.spl` — `register("__assert", ...)`
+   so the type checker resolves the callee.
+4. `src/compiler/70.backend/backend/interpreter_calls.spl` — new
+   `BuiltinTag.Assert`, `lookup_builtin_tag` arm, and a dispatch arm returning
+   `Some(Err(BackendError.runtime_error(...)))` on a false condition.
+5. `src/compiler/95.interp/mir_interpreter.spl` — `__assert` handled in the
+   `Intrinsic` case *beside* `bounds_check` and `abort`, deliberately NOT in
+   `_execute_intrinsic`: lowering may discard `dest`, so a returned value would
+   be silently lost — the exact failure mode being fixed.
+6. `src/compiler/10.frontend/core/compiler/cg_expr.spl` — C codegen maps
+   `__assert(cond)` to `spl_assert((int)(cond))`, the helper `c_codegen.spl:145`
+   already emits.
+
+Known gap, stated rather than papered over: the C path does not thread the
+message into the diagnostic (`spl_assert` prints only "Assertion failed").
+Marked with a `ponytail:` comment naming the upgrade path.
+
+### Blast radius — measured, and why this landed big-bang rather than behind a flag
+
+The concern was that making 1411 dormant assertions live would surface a wave of
+real failures. It does not, and the reason is measurable:
+
+**The Rust bootstrap seed — the binary that actually runs this tree today —
+already enforces bare `assert`.** Verified directly:
+
+```
+$ bin/simple run /tmp/a.spl        # fn main(): print("before"); assert 1 == 2; print("after")
+before
+Assertion violation in function 'main': contract condition failed
+rc=134 (SIGABRT)
+```
+
+The seed has an independent, correct assert statement parser at
+`src/compiler_rust/parser/src/stmt_parsing/assert.rs`. So every one of those
+1411 assertions is *already* checked on every test run today, and the tree is
+green under it. Making the self-hosted parser agree introduces **zero** new
+failures relative to the compiler in use. There is nothing for a flag to stage.
+
+### Specs
+
+- Reproducing:
+  `test/01_unit/compiler/parser/bare_assert_desugars_to_raising_builtin_spec.spl`
+- Class detection:
+  `test/01_unit/compiler/parser/no_statement_form_discards_its_condition_class_spec.spl`
+  — sweeps 8 assert surface forms and fails any that parses to a non-call
+  (discarded) node, plus a non-vacuity case asserting the probe can still
+  *report* a discard.
+
+### What is NOT proved
+
+- The interpreter (`eval_builtins`), MIR-interpreter, backend and C-codegen arms
+  are **not** executed by the specs. They mirror the adjacent, already-shipped
+  `@static_assert` / `bounds_check` / `abort` / `print` handlers structurally,
+  but standing up the pure-Simple interpreter's value arena from a spec was out
+  of proportion to the change. Only the parser desugar is executed evidence.
+- No bootstrap was run (one was live and owned by the user). The end-to-end
+  self-hosted behaviour is therefore unverified.

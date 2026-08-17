@@ -52,6 +52,7 @@ enum BuiltinTag:
     FileDelete
     EnvGet
     EnvSet
+    Assert
     Unknown
 
 fn interp_binop_disc(op: HirBinOp) -> i64:
@@ -94,6 +95,9 @@ fn interp_binop_disc(op: HirBinOp) -> i64:
 
 fn lookup_builtin_tag(name: text) -> BuiltinTag:
     """Map a function name to its BuiltinTag."""
+    if name == "__assert":
+        # `assert COND[, MSG]` desugars to __assert(...) in parser_stmts.spl.
+        return BuiltinTag.Assert
     if name == "print":
         return BuiltinTag.Print
     if name == "println":
@@ -305,6 +309,23 @@ impl InterpreterBackendImpl:
                 else:
                     print ""
                 Some(Ok(Value.Nil))
+            case BuiltinTag.Assert:
+                # A false condition must RAISE. Returning the condition (the
+                # old parser behaviour) made every `assert` a silent no-op.
+                var assert_ok = false
+                if args.len() > 0:
+                    match args[0]:
+                        case Value.Bool(bv): assert_ok = bv
+                        case Value.Int(iv): assert_ok = iv != 0
+                        case Value.Nil: assert_ok = false
+                        case _: assert_ok = true
+                if assert_ok:
+                    Some(Ok(Value.Nil))
+                else:
+                    var assert_msg = "assertion failed"
+                    if args.len() > 1:
+                        assert_msg = "assertion failed: " + self.value_to_string(args[1])
+                    Some(Err(BackendError.runtime_error(assert_msg, nil)))
             case BuiltinTag.Println:
                 if args.len() > 0:
                     val arg = args[0]

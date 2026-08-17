@@ -1,0 +1,82 @@
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+"""
+# Bare `assert` desugars to a raising builtin
+
+**Category:** Language
+
+## Purpose and Audience
+
+`parse_statement` in the pure-Simple frontend used to parse `assert COND`,
+bind (and drop) the optional message, and then return
+`stmt_expr_stmt(assert_cond, 0)`. The condition was *evaluated and discarded* —
+never checked — so every bare `assert` in the tree was a silent no-op under the
+self-hosted compiler. 1411 `assert` statements under `src/` were affected.
+
+The fix desugars the statement to `__assert(cond)` / `__assert(cond, msg)`,
+a raising builtin implemented in
+`src/compiler/10.frontend/core/interpreter/eval_builtins.spl` (interpreter,
+via `eval_set_error`) and in
+`src/compiler/10.frontend/core/compiler/cg_expr.spl` (C codegen, via the
+`spl_assert` helper already emitted by `c_codegen.spl`).
+
+## Scope and Preconditions
+
+This spec drives the pure-Simple parser directly (`parser_init` +
+`parse_statement`) and inspects the resulting AST node. It does not depend on
+which binary hosts it: the code under test is Simple source, read live.
+
+## Primary Workflow
+
+Parse an assert statement; the statement's expression must be an `EXPR_CALL`
+whose callee is the identifier `__assert`, carrying the condition as its first
+argument and the message (when present) as its second.
+
+## Recovery and Troubleshooting
+
+A failure reporting tag 7 (`EXPR_BINARY`) is the original defect: the raw
+condition is being returned and discarded.
+
+## Compatibility and Limitations
+
+Covers the pure-Simple frontend only. The Rust bootstrap seed has an
+independent, already-correct `assert` statement parser
+(`src/compiler_rust/parser/src/stmt_parsing/assert.rs`).
+"""
+
+use std.spec.*
+use compiler.core.parser.{parser_init}
+use compiler.core.parser_stmts.{parse_statement}
+use compiler.core.ast.{stmt_get_expr, expr_get_tag, expr_get_left, expr_get_str, expr_get_args}
+
+const EXPR_CALL_TAG = 9
+
+fn parse_one(src: text) -> i64:
+    parser_init(src)
+    return stmt_get_expr(parse_statement())
+
+fn callee_of(eid: i64) -> text:
+    if expr_get_tag(eid) != EXPR_CALL_TAG:
+        return "<not-a-call:tag=" + str(expr_get_tag(eid)) + ">"
+    return expr_get_str(expr_get_left(eid))
+
+describe "bare assert desugars to a raising builtin":
+    it "routes a bare assert through __assert":
+        step("Parse `assert 1 == 2`")
+        val e = parse_one("assert 1 == 2\n")
+        step("The statement expression is a call, not the bare condition")
+        expect(expr_get_tag(e)).to_equal(EXPR_CALL_TAG)
+        expect(callee_of(e)).to_equal("__assert")
+        step("The condition is carried as the first argument")
+        expect(expr_get_args(e).len()).to_equal(1)
+
+    it "carries the optional message as a second argument":
+        step("Parse `assert 1 == 2, \"boom\"`")
+        val e = parse_one("assert 1 == 2, \"boom\"\n")
+        expect(callee_of(e)).to_equal("__assert")
+        step("Message is passed to the builtin instead of being dropped")
+        expect(expr_get_args(e).len()).to_equal(2)
+
+    it "still desugars a true assert (the check is not condition-dependent)":
+        step("Parse `assert 1 == 1`")
+        val e = parse_one("assert 1 == 1\n")
+        expect(callee_of(e)).to_equal("__assert")

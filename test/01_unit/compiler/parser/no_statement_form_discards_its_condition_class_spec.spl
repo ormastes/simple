@@ -1,0 +1,86 @@
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+"""
+# Class detection: no checking statement parses to a discarded expression
+
+**Category:** Language
+
+## Purpose and Audience
+
+The `assert` defect was not a typo — it was a *shape*: a statement whose whole
+purpose is to CHECK something parsed into `stmt_expr_stmt(<the thing>, 0)`,
+which evaluates the value and throws it away. Nothing in the parser distinguishes
+that from a legitimate expression statement, so the bug was invisible.
+
+This spec generalises past the one reproducer: it sweeps every surface form of
+`assert` the language accepts and requires each to land on a *call* node — the
+only AST shape that can raise. A future statement form that "checks" something
+by returning its bare operand fails here without anyone writing a new test.
+
+## Scope and Preconditions
+
+Drives the pure-Simple parser (`parser_init` + `parse_statement`) directly.
+Each case is parsed in isolation; no interpreter state is required.
+
+## Primary Workflow
+
+For each assert form: parse it, and require the resulting statement expression
+to be `EXPR_CALL` (tag 9) targeting `__assert`. Any form landing on a binary,
+unary, literal, identifier, or call-to-something-else node is a discarded
+condition and fails, naming the form.
+
+## Recovery and Troubleshooting
+
+A failure names the exact source form and the tag it produced. Tag 7 is
+`EXPR_BINARY`, the original `assert a == b` defect; tag 8 is unary
+(`assert not x`); a call to a non-`__assert` callee means `assert f()` returned
+`f()` itself rather than wrapping it.
+
+## Compatibility and Limitations
+
+Static, parse-level detection. It proves the condition reaches a raising
+builtin; it does not execute the builtin.
+"""
+
+use std.spec.*
+use compiler.core.parser.{parser_init}
+use compiler.core.parser_stmts.{parse_statement}
+use compiler.core.ast.{stmt_get_expr, expr_get_tag, expr_get_left, expr_get_str}
+
+const EXPR_CALL_TAG = 9
+
+fn describe_shape(src: text) -> text:
+    parser_init(src)
+    val e = stmt_get_expr(parse_statement())
+    val tag = expr_get_tag(e)
+    if tag != EXPR_CALL_TAG:
+        return "DISCARDED(tag=" + str(tag) + ")"
+    return expr_get_str(expr_get_left(e))
+
+fn assert_forms() -> [text]:
+    var forms: [text] = []
+    forms.push("assert 1 == 2\n")
+    forms.push("assert 1 == 2, \"msg\"\n")
+    forms.push("assert 1 != 2\n")
+    forms.push("assert true\n")
+    forms.push("assert false\n")
+    forms.push("assert not false\n")
+    forms.push("assert 1 < 2 and 3 > 2\n")
+    forms.push("assert (1 + 1) == 2\n")
+    return forms
+
+describe "no checking statement parses to a discarded expression":
+    it "every assert surface form reaches the raising builtin":
+        step("Sweep every accepted assert form through the parser")
+        var offenders: [text] = []
+        for form in assert_forms():
+            val shape = describe_shape(form)
+            if shape != "__assert":
+                offenders.push(form.trim() + " => " + shape)
+        step("No form may evaluate its condition and throw it away")
+        expect(offenders.len()).to_equal(0)
+
+    it "the sweep is non-vacuous":
+        step("The form list must actually contain cases")
+        expect(assert_forms().len()).to_equal(8)
+        step("And the shape probe must be able to report a discard")
+        expect(describe_shape("1 == 2\n")).to_equal("DISCARDED(tag=7)")
