@@ -192,3 +192,48 @@ staleness). If confirmed, the interpreter's environment capture for nested `fn`s
 be snapshotting the module binding's *storage location* at closure-creation time
 rather than resolving it dynamically on each access when the enclosing frame later
 rebinds it.
+
+## 2026-08-17 (lane w04) — STILL LIVE, and the trigger is NARROWER than documented
+
+Reproduced at spec level, verbatim:
+
+```
+Results: 19 total, 18 passed, 1 failed
+```
+(`test/01_unit/lib/std/concurrency/promise_spec.spl`, run with
+`--no-session-daemon`; the failing example is
+`✗ executor receives both callbacks` / `expected subject to be truthy, got false`.)
+
+**The title of this doc is wrong.** Neither `push`+reassign nor an executor
+parameter is required. Isolated on `bin/simple run`:
+
+| shape | result |
+|---|---|
+| module array, push+reassign, nested `fn`, called via executor param | `outer_read=0 module_read=0` — LOST |
+| module array, **in-place** `.push`, nested `fn`, via executor param | `inplace_outer=0 inplace_module=0` — LOST |
+| module array, push+reassign, **no** nested fn (write inline) | `no_closure_outer=42 no_closure_module=42` — OK |
+| module array, nested `fn` called **directly** (no executor param) | `direct_nested_fn=0` — LOST |
+| module **scalar** `var`, nested `fn` called directly | `scalar_module_var=42` — OK |
+
+Minimal trigger, with everything else stripped out:
+
+```
+var _reg: [i64] = []
+
+fn direct() -> i64:
+    _reg = _reg.push(0)
+    fn setv(v):
+        _reg[0] = v      # write from inside a nested fn
+    setv(42)
+    _reg[0]              # reads 0
+```
+
+So it is **not** about push semantics, reassignment, or higher-order calls. It
+is: *a nested named `fn` writing a module-level **container** element by index
+loses the write entirely* — invisible both to the enclosing function afterwards
+and to module scope after the call returns. The identical nested `fn` writing a
+module-level **scalar** var works. That container-vs-scalar split is the
+signature to look for in the interpreter's closure/global environment sync.
+
+Root cause remains in the Rust seed interpreter; out of scope for stdlib lanes.
+`src/lib/nogc_async_mut/async/promise.spl` remains innocent.

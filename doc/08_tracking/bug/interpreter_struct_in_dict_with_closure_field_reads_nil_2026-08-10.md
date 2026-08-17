@@ -45,3 +45,46 @@ needed (struct-in-Dict-in-struct where the leaf struct has a lambda-literal fiel
 - Once root-caused in the interpreter's struct/Dict/closure handling, fix there — do NOT
   patch around it in `actor.spl` (e.g. by avoiding lambda-typed fields), since that masks
   an engine defect that likely affects other callers with the same shape.
+
+## 2026-08-17 (lane w04) — STILL LIVE, reproduced on the real public API
+
+This doc previously had no surviving reproducer (the `probe_actor*.spl` files it
+cites were session-scratch and are gone). Reproduced fresh against the real
+`spawn_actor` API on `bin/simple run`:
+
+```
+use std.nogc_async_mut.actors.actor.{make_handlers, spawn_actor, get_actor_runtime}
+
+fn do_work(args: [text]) -> text:
+    "done"
+
+fn main():
+    var h = make_handlers()
+    h.register("process", do_work)
+    val worker = spawn_actor(h)
+    val rt = get_actor_runtime()
+    print("actor_count=" + rt.actor_count().to_string())
+    print("stats=" + rt.get_actor_stats(worker.actor_id))
+```
+
+Output, matching this doc's symptom exactly:
+
+```
+actor_count=0
+stats=Actor ActorId(value: 0): not found
+```
+
+The actor is silently lost: `spawn_actor` returns a live-looking `ActorRef`,
+`actor_count()` is 0, and the actor is unreachable, with no error raised
+anywhere. Confirms the severity — this is a silently-wrong-result defect on the
+documented public API, not merely an internal one.
+
+Per this doc's own instruction, `actor.spl` was NOT patched around (e.g. by
+dropping the lambda-typed `HandlerTable` field), since that would mask the
+engine defect for every other caller with the same shape. Root cause remains in
+the tree-walk interpreter's handling of a struct read back out of a `Dict` value
+slot when that struct has a closure-typed field; out of scope for stdlib lanes.
+
+Incidental second finding from the same run: `"Actor {actor_id}: not found"`
+interpolated the whole struct (`Actor ActorId(value: 0)`) rather than the id.
+Cosmetic, separate, not filed.

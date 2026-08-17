@@ -47,3 +47,15 @@ Open. Engine-divergence family
 The defect is a JIT-only nil-receiver fault. A spec body runs INTERPRETED, so it can never go red from a spec alone, and the CUDA execution port needs GPU hardware absent from this host. Not reproduced and not closed: this lane could neither exercise the path nor
 find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
 not mistaken for either a live confirmation or a close.
+
+### Location correction (lane m7c_lib_async, 2026-08-17)
+
+The triage row pointed at
+`src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/cuda_execution_port.spl`,
+but `layout_run_full_with_ports` is not defined there. It is defined at
+`src/lib/common/structural/layout/engine.spl:664` (self-call at :681, exported
+at :698), re-exported through `src/lib/common/structural/layout/__init__.spl:31`,
+and consumed by
+`src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/manager.spl:11`.
+Anyone picking this up should start at `common/structural/layout/engine.spl`,
+which is a different owner's file scope than the row implied.

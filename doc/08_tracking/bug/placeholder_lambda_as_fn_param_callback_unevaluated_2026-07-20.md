@@ -146,3 +146,44 @@ site rather than the runtime value's actual callable-ness. Not root-caused
 further (would require reading the placeholder-lambda desugaring/lowering
 code, out of scope for this triage pass — no Rust seed source fix per the
 fix-guide's scope).
+
+## 2026-08-17 (lane w04) — STILL LIVE, and its named repro spec no longer covers it
+
+Reproduced verbatim on `bin/simple run` using this doc's own minimal repro:
+
+```
+fn call_once(f):
+    return f(10)
+
+fn main():
+    print("placeholder=" + call_once(_1 + 1).to_string())
+    print("explicit=" + call_once(fn(x): x + 1).to_string())
+```
+
+Output:
+
+```
+<lambda>
+explicit=11
+```
+
+The placeholder-lambda line printed a bare `<lambda>` — note the `"placeholder="`
+prefix and the `.to_string()` call were both swallowed, so the unevaluated lambda
+escapes even string concatenation, making this even quieter than documented.
+The explicit `fn(x)` form in the identical position returns `11` correctly.
+
+**Coverage gap worth acting on:** the spec this row is filed against,
+`test/unit/lib/gc_async_immut/facade_resolution_spec.spl`, now reports
+
+```
+Results: 2 total, 2 passed, 0 failed
+```
+
+It is GREEN while the defect is LIVE — it has been reduced to 2 examples and no
+longer exercises a placeholder lambda through a user-defined free-function
+parameter. Do not read that spec's green as evidence for this row. A committed
+regression spec is still owed once the frontend fix lands.
+
+Root cause remains the placeholder-lambda desugaring in the frontend; out of
+scope for stdlib lanes. `src/lib/nogc_async_immut/combinators/__init__.spl` was
+not modified.

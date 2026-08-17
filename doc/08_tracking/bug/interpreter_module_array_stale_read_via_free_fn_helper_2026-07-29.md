@@ -202,3 +202,48 @@ instead: the 2026-07-29 update section of
 `doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`.
 Still not fixable from pure-Simple stdlib source; still belongs to the
 interpreter/compiler team.
+
+## 2026-08-17 (lane w04) — DID NOT REPRODUCE: classify as ALREADY-FIXED
+
+First execution evidence this doc has ever carried (all prior updates were
+source inspection only). Rebuilt the doc's own minimal shape as a standalone
+script and ran it on `bin/simple run`:
+
+```
+var _flags: [bool] = []
+fn alloc() -> i64:  ...            # both push forms tested, see below
+fn read_via_helper(id: i64) -> bool:
+    _flags[id]
+class Tok:
+    tid: i64
+    me set():             _flags[self.tid] = true
+    fn read_inline() -> bool:  _flags[self.tid]
+    fn read_helper() -> bool:  read_via_helper(self.tid)
+```
+
+Both push forms were tested, because this doc and its sibling disagreed about
+which was load-bearing:
+- in-place `_flags.push(false)`  -> `inline=true helper=true`
+- reassign `_flags = _flags.push(false)`, with THREE tokens allocated and the
+  middle one queried (the alloc-ordering condition from the depth-2 sibling
+  doc) -> `inline=true helper=true`
+
+The free-function helper and the inline read agree in every variant. The stale
+read is gone.
+
+**Consequence for `src/lib/nogc_async_mut/async/cancellation.spl`:** the
+inline-`while` workaround in `is_cancelled()` (`:84-115`) is now belt-and-braces
+rather than load-bearing *for this defect*. It was deliberately NOT reverted —
+the depth-2 sibling
+(`cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`)
+was not independently retested, and reverting to prove RED would risk
+reintroducing a CRITICAL cancellation bug for no gain.
+
+**Not the same root cause as
+`promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md`.** That
+row was retested in the same session and is still LIVE; the two were previously
+suspected to be one defect. They are not — see that doc's 2026-08-17 update for
+the re-characterized trigger.
+
+Spec-level corroboration: `test/01_unit/lib/nogc_async_mut/async_spec.spl` ->
+`Results: 10 total, 10 passed, 0 failed`.

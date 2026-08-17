@@ -58,3 +58,26 @@ whoever investigates either.
 Spec left unmodified — `file_exists_backend` is correctly declared and used
 per current import-aliasing syntax; this is an evaluator/resolver defect,
 not a stale test.
+
+## 2026-08-17 (lane w04) — DID NOT REPRODUCE: classify as ALREADY-FIXED
+
+```
+Results: 6 total, 6 passed, 0 failed
+```
+(`test/02_integration/app/mcp_bugdb_spec.spl`, `bin/simple test ... --no-session-daemon --timeout 900`, rc=0,
+`declared>=6 executed=6 passed=6 failed=0 dropped=0` — all six examples this doc
+lists as failing now pass.)
+
+The aliased import is UNCHANGED in source — `src/lib/nogc_async_mut/mcp/bugdb_resource.spl:13`
+still reads `use std.nogc_sync_mut.io.file_ops.{file_read_text, file_exists as file_exists_backend}`
+and `:16` still calls `file_exists_backend(path)` — so this is a resolver fix,
+not a workaround in the library file.
+
+Independently confirmed outside the harness: a standalone script importing
+`get_bug_stats` from that module ran it successfully (`stats_len=53`), so
+`file_exists_backend` resolves at runtime.
+
+**Caveat on the first attempt:** an earlier run of this same spec WITH the
+session daemon returned `rc=1 reason=daemon-no-response` and no `Results:` line,
+under 101 concurrent `bin/simple test` processes. That is UNVERIFIED
+infrastructure noise, not a RED — do not read it as a reproduction.
