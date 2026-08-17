@@ -1,0 +1,152 @@
+# Wide-Integer Boxing Round-Trip — Similar-Problem Detection Spec (defect CLASS)
+#
+# THE CLASS. The inline boxed-integer representation is `v << 3` with a 3-bit
+# tag in the low bits, so an inline box holds only a 61-bit SIGNED payload. Any
+# |v| >= 2^60 loses its top bits on the way in and the matching `>> 3`
+# sign-extends a DIFFERENT number on the way out. This is not one bug at one
+# call site: it fires at EVERY boundary where an i64 is boxed into a tagged
+# slot, and it fires silently — the program returns a plausible number, never a
+# crash.
+#
+# Three separately-filed docs turned out to be this single defect, each found
+# one call site at a time by a human noticing a wrong number:
+#   doc/08_tracking/bug/seed_jit_wide_i64_literal_miscompile_2026-07-27.md
+#     `print "{a} {b}"`, a=i64::MAX b=i64::MIN, printed `-1 0`. Filed as a
+#     LITERAL-materialization defect, which it is not: plain `print(a)` was
+#     already correct. The corruption is at the interpolation BOXING boundary.
+#   doc/08_tracking/bug/seed_jit_spl_f64_to_bits_miscompile_2026-07-23.md
+#     spl_f64_to_bits(3.0) = 0x4008000000000000 stored into `[i64]` read back
+#     as 2251799813685248, and `readback == b` was false. Filed as an
+#     extern-return retag defect; it is the same `<< 3` truncation:
+#     (0x4008000000000000 << 3) mod 2^64 >> 3 == 2251799813685248 exactly.
+#   doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md
+#     the DECODE half of the same arithmetic: an untyped `: list` element read
+#     yields value*8 because no unbox is emitted at all.
+#
+# This spec generalises instead of chasing call sites: it drives the probe over
+# six boundaries (interpolation, array element, extern return, nullable `T?`,
+# struct field, untyped `list` param) at five magnitudes (i64::MAX, i64::MIN,
+# +2^60, -2^60, 0x4008000000000000) plus an in-range control. On the deployed
+# seed the probe reports NINE FAIL lines where the two original reproducers
+# reported one case each.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT for this entire class. An in-process example
+# therefore cannot go red on this defect no matter what it asserts. The oracle
+# is the sibling run-path probe `probe_wide_int_box_roundtrip.spl`, executed as
+# a subprocess under both engines.
+#
+# Every oracle is an ABSOLUTE decimal literal the probe did not itself compute
+# — never "the two engines agree", which would pass while both are wrong.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_wide_int_box_roundtrip.spl"
+
+# Returns (stdout, exit_code). The exit code is taken from the process, NEVER
+# through a pipe — a pipeline reports the LAST stage's status and has produced
+# false greens in this repo before.
+fn run_probe(mode: text) -> (text, i64):
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    # process_run returns a THREE-tuple (stdout, stderr, exit_code) — the exit
+    # code is `.2`. Reading `.1` here would silently compare stderr to 0 and make
+    # the liveness guard below vacuous.
+    val out = process_run("sh", ["-c", cmd])
+    return (out.0, out.2)
+
+# Fail-closed liveness: a spec that shells out and only asserts `contains` cannot
+# tell "ran and was wrong" from "never ran". Assert rc and non-empty output and
+# the probe's own BEGIN/END sentinels FIRST, so a wrapper that refuses to run the
+# fixture is reported as a broken harness rather than as a codegen defect.
+fn assert_probe_actually_ran(out: text, rc: i64):
+    step("The probe process must exit 0 — a non-zero rc means it never ran, not that the engine is wrong")
+    expect(rc).to_equal(0)
+    step("stdout must be non-empty")
+    expect(out.len()).to_be_greater_than(0)
+    step("Both sentinels must be present: BEGIN proves it started, END proves it did not die midway")
+    expect(out).to_contain("WIDE_INT_BOX_PROBE: BEGIN")
+    expect(out).to_contain("WIDE_INT_BOX_PROBE: END")
+
+describe "full-width i64 survives every tagged-slot boxing boundary":
+
+    it "keeps every magnitude intact on the interpreter control arm":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val r = run_probe("interpreter")
+        assert_probe_actually_ran(r.0, r.1)
+
+        step("The interpreter was correct in all three filed bugs, so a red here means the PROBE is broken, not the engine")
+        expect(r.0).to_contain("INTERP_MAX=9223372036854775807")
+        expect(r.0).to_contain("INTERP_MIN=-9223372036854775808")
+        expect(r.0).to_contain("INTERP_P60=1152921504606846976")
+        expect(r.0).to_contain("INTERP_FBITS=4613937818241073152")
+
+        step("No boundary check may have failed on the control arm")
+        expect(r.0.contains("FAIL ")).to_equal(false)
+
+    it "keeps every magnitude intact on the cranelift JIT — the engine all three bugs lived in":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        val r = run_probe("jit")
+        assert_probe_actually_ran(r.0, r.1)
+
+        step("Boundary 1 — string interpolation. The 2026-07-27 bug printed `-1 0` here")
+        expect(r.0).to_contain("INTERP_MAX=9223372036854775807")
+        expect(r.0).to_contain("INTERP_MIN=-9223372036854775808")
+        expect(r.0).to_contain("INTERP_P60=1152921504606846976")
+        expect(r.0).to_contain("INTERP_N60=-1152921504606846976")
+        expect(r.0).to_contain("INTERP_FBITS=4613937818241073152")
+
+        step("Boundary 1 must not print the exact truncation signatures the bugs showed")
+        expect(r.0.contains("INTERP_MAX=-1")).to_equal(false)
+        expect(r.0.contains("INTERP_MIN=0")).to_equal(false)
+        expect(r.0.contains("INTERP_FBITS=2251799813685248")).to_equal(false)
+
+        step("Boundary 2 — [i64] array element store/read, at both signs and both extremes")
+        expect(r.0).to_contain("PASS array_i64_max")
+        expect(r.0).to_contain("PASS array_i64_min")
+        expect(r.0).to_contain("PASS array_i64_p60")
+        expect(r.0).to_contain("PASS array_i64_n60")
+        expect(r.0).to_contain("PASS array_i64_fbits")
+
+        step("Boundary 3 — extern-returned i64 through an array, plus the equality the 2026-07-23 bug reported false")
+        expect(r.0).to_contain("PASS extern_f64_bits_direct")
+        expect(r.0).to_contain("PASS extern_f64_bits_readback")
+        expect(r.0).to_contain("PASS extern_f64_bits_eq")
+
+        step("Boundary 4 — nullable `i64?`, a tagged slot by lowering")
+        expect(r.0).to_contain("PASS optional_i64_max")
+        expect(r.0).to_contain("PASS optional_i64_min")
+
+        step("Boundary 5 — struct field")
+        expect(r.0).to_contain("PASS field_i64_max")
+        expect(r.0).to_contain("PASS field_i64_fbits")
+
+        step("Boundary 6 — untyped `: list` parameter element read, the DECODE half of the same arithmetic")
+        expect(r.0).to_contain("PASS list_param_small")
+        expect(r.0).to_contain("PASS list_param_max")
+
+        step("Aggregate: not a single boundary may have failed")
+        expect(r.0.contains("FAIL ")).to_equal(false)
+
+    it "shows no tag-misread rendering signature under either engine":
+        step("Collect both engines' output")
+        val i = run_probe("interpreter")
+        val j = run_probe("jit")
+        assert_probe_actually_ran(i.0, i.1)
+        assert_probe_actually_ran(j.0, j.1)
+
+        step("A tagged word that was never unboxed leaks as `<value:0x..>`")
+        expect(j.0.contains("<value:0x")).to_equal(false)
+        expect(i.0.contains("<value:0x")).to_equal(false)
+
+        step("A payload re-read through the float tag renders as a sub-normal double")
+        expect(j.0.contains("0.0000000000000000000")).to_equal(false)
+        expect(i.0.contains("0.0000000000000000000")).to_equal(false)
+
+        step("An i64 handed to the heap tag renders as an invalid-heap marker")
+        expect(j.0.contains("<invalid-heap:")).to_equal(false)
+        expect(i.0.contains("<invalid-heap:")).to_equal(false)
