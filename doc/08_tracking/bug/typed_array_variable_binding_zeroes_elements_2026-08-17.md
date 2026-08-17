@@ -61,6 +61,65 @@ byte-packed source does the same with bytes. The byte-packed arm also closes the
 it is deliberately left in place to keep the change's blast radius bounded, and
 removing it is a separate, testable follow-up.
 
+## Verification
+
+Built with a persistent isolated `CARGO_TARGET_DIR`; `cargo build --release
+--bin simple` finished clean (0 errors). Reproduce-first, both specs, same
+command, only the binary differing:
+
+| spec | old binary | new binary |
+|---|---|---|
+| `packed_array_copy_roundtrip_spec.spl` | `5 total, 4 passed, 1 failed` | `5 total, 5 passed, 0 failed` |
+| `array_copy_element_type_matrix_spec.spl` | `9 total, 8 passed, 1 failed` | `9 total, 9 passed, 0 failed` |
+
+In both cases the single failure was the SUBPROCESS example — the only one that
+reaches the JIT — which is exactly the arm that should bite.
+
+Direct probes on the fixed binary:
+
+```
+u64-small orig 5                    copy 5                     want 5
+u64-big   orig 1234567890123456789  copy 1234567890123456789   want 1234567890123456789
+```
+
+Value semantics preserved (the copy must be a copy, not an alias):
+
+```
+u64 copy-mutated orig 5   want 5 (not 99)     # mutating the copy leaves the source alone
+u64 push-after   len 3, orig-len 2            # capacity/len sane after the memcpy
+```
+
+X25519 regression check on the fixed binary, both engines:
+
+```
+SHARED c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552  = RFC 7748 5.2
+```
+
+### `[u8]` still aliases — the codegen exclusion, not the runtime
+
+Measured on the fixed binary:
+
+```
+u8 copy-mutated orig 99   want 5 (not 99)
+```
+
+`rt_array_copy` now handles byte-packed sources correctly, but the codegen guard
+(`lowering_stmt.rs:216`, `elem != TypeId::U8`) still suppresses the copy for
+`[u8]`, so both names alias and mutating one mutates the other — a real value-
+semantics violation, pre-existing and unchanged by this fix. Removing that
+exclusion is now safe on the runtime side and is the obvious follow-up, but it
+changes behaviour for the most heavily used array type in the tree, so it wants
+its own change and its own evidence rather than riding along here.
+
+## Deployment note — the fix is NOT live yet
+
+This is a Rust-seed runtime change, so it takes effect only after `bin/simple`
+is redeployed. Until then the workaround in
+`src/lib/nogc_async_mut_noalloc/tls/x25519.spl` is load-bearing: reverting
+`var x_3 = _fe_from_bytes(u_masked)` back to `var x_3 = u` on the currently
+deployed binary silently restores a wrong shared secret. That line carries a
+comment saying so.
+
 ## Unrelated defect noticed while sweeping the matrix
 
 `[i8]` reads back wrong **before** any copy: `[5i8, 6i8]` gives `orig 43` for
