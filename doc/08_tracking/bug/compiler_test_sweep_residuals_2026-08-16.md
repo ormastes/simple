@@ -198,7 +198,40 @@ Two distinct symptoms came from this one cause:
 Regression + generalization coverage:
 `test/01_unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl`
 (mirror-synced to `test/unit/...`) pins the wrapper shape, the
-no-facade-shadows-the-driver invariant, and the alias surface.
+no-facade-shadows-the-driver invariant, and the alias surface —
+`declared>=9 executed=9 passed=9 failed=0`, exit 0.
+
+**Measured before/after** on `advanced_types_spec.spl`. Both runs use the same
+worker the daemon spawns (`bin/simple run
+src/app/test_runner_new/test_runner_single.spl <spec> --no-session-daemon
+--sequential --timeout 1500`), same tree, same binary:
+
+| | pre-fix | post-fix |
+|---|---|---|
+| verdict line | **none emitted** | `12 total, 4 passed, 8 failed` |
+| examples executed | 0 (`executed=1 timeout=1`) | 12 |
+| exit | 143 (SIGTERM at the 1500s outer timeout) | 1 |
+| `compile delegation loop detected` occurrences | every check/compile call | **0** |
+
+So the loop is gone and all 12 examples now execute against the real
+in-process compiler. Vacuous greens are gone too: the two examples that used to
+"pass" only because the guard error also satisfied "fails and emits no
+artifact" now assert against real behaviour.
+
+**Residual 8 failures are a different, genuine defect set** — real compiler
+diagnostics, no guard text — and stay RED per testing.md:
+- mutual recursive value layout reports only one side (`expected  to contain
+  Right`), both for the single-file and the cross-module case;
+- the in-process `check` REJECTS programs the spec expects to accept: union
+  with payloads + pattern matching, and `vec[4, f32]` SIMD signatures (check
+  and smf variants, 4 examples);
+- parser rejects intersection `&` / refinement `where` correctly but spells the
+  token differently than the asserted `Ampersand` / `Where`.
+
+Note the daemon path still caps a worker at a hard **120s** budget regardless of
+`SIMPLE_TIMEOUT_SECONDS` / `--timeout` (observed `budget_ms=119955`), so plain
+`bin/simple test <this spec>` reports `daemon-worker-timeout` rather than the
+verdict above — a separate harness limitation, not a delegation problem.
 
 ---
 
