@@ -86,3 +86,17 @@ Reviewed in the second-pass backlog sweep. Not actionable from this session:
 the record's own title states the capture host has no Intel GPU; the evidence this bug needs cannot be produced here by any code change. No code change is possible without that, so no
 speculative fix was attempted. Classification recorded here so future sweeps
 skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.
+
+## 2026-08-17 re-verification — still BLOCKED, host unchanged
+
+`lspci -nn | grep -i vga` on this host still lists exactly two NVIDIA VGA
+controllers and no Intel display/GPU device:
+
+```
+0a:00.0 ... NVIDIA GA102GL [RTX A6000] [10de:2230]
+42:00.0 ... NVIDIA TU102 [TITAN RTX] [10de:1e02]
+```
+
+Both stated blockers hold: no Mesa `anv` reference-capture hardware, and no
+command-stream encoder in `src/os/drivers/gpu/board_vulkan/`. Unblock requires
+an Intel Gen12/Xe-LP capture host; nothing in this lane can move it.
