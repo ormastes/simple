@@ -1,0 +1,97 @@
+"""
+# `Dict.clear()` survives native codegen — the reproducing spec
+
+**Category:** Codegen / MIR method-call dispatch
+**Fix commit:** 3c31fc3aa8b
+
+## Overview
+
+MIR method-call lowering dispatches on the method NAME only, with no receiver
+type. `clear` was absent from `is_dict_method_name`
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1367`), so a
+`Dict` receiver fell through to the `str.clear` arm. That arm calls the shared
+runtime guard `rt_refuse_non_text_receiver` (`src/runtime/runtime_native.c`
+~4626), which prints
+
+    Runtime error: str.clear was called on a receiver that is not text. This
+    method has no compiled implementation for that receiver type -- a
+    code-generation dispatch gap, not a program error.
+
+and `exit(70)`s. `rt_dict_clear` already existed in the runtime and was already
+declared in `llvm_lib_translate.spl:447` — it simply had ZERO MIR call sites.
+The fix adds `clear` to `is_dict_method_name` and a dispatch arm emitting a
+call to `rt_dict_clear`.
+
+## Why this spec shells out
+
+A spec body runs on the tree-walk INTERPRETER, where `Dict.clear()` was always
+correct. **No in-process example can ever go red on this defect.** The oracle
+is therefore a native build of the sibling probe
+`probe_nontext_receiver_dict_clear.spl`'s richer cousin,
+`probe_dict_clear_native.spl`, executed as a subprocess.
+
+The probe lives in its own file rather than an embedded string because it needs
+a dict literal, and a `{` inside a spec's own string literal is resolved by the
+SPEC's lexer — which kills the file with `zero-examples` before any example
+runs.
+
+## Oracles
+
+Absolute literals only, never "the before and after agree" (under the defect
+the process dies before either is printed, so an agreement check would be
+vacuous). The probe additionally proves the dict is *genuinely* empty
+(`has("a") == false`) and still usable afterwards (`set` then `len == 1`) —
+`len` alone could be satisfied by a counter reset that leaked the entries.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_SRC: text = "test/01_unit/compiler/codegen/probe_dict_clear_native.spl"
+
+fn native_build_and_run_probe() -> text:
+    val dir = "build/test-artifacts/dict_clear_native_dispatch"
+    val src = dir + "/probe.spl"
+    val bin_out = dir + "/probe.bin"
+    # bin/release/simple is NOT the compiler — it is a production-guard wrapper
+    # that refuses the deployed seed, exits 1 and prints nothing, producing a
+    # compiler-shaped false RED. Use bin/simple.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out +
+        " && cp " + PROBE_SRC + " " + src])
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "Dict.clear() empties the dict under native codegen":
+
+    it "clears, reports empty, and stays usable in a natively built binary":
+        # ONE example: each call is a full native build (~3 min). Spec module
+        # globals do not persist across examples, so splitting would rebuild.
+        step("Native-build the run-path probe and execute the resulting binary")
+        val out = native_build_and_run_probe()
+
+        step("Refuse to pass on a build that produced nothing — without this, every `not contains` assertion below would be vacuously satisfied")
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("PROBE-DONE")
+
+        step("The name-keyed dispatch gap must not have routed a Dict receiver into str.clear")
+        expect(out.contains("was called on a receiver that is not text")).to_equal(false)
+        expect(out.contains("str.clear")).to_equal(false)
+
+        step("The dict held three entries before the clear")
+        expect(out).to_contain("BEFORE=3")
+
+        step("And reports zero after it")
+        expect(out).to_contain("AFTER=0")
+
+        step("Genuinely empty, not merely a reset count — the cleared key must no longer be present")
+        expect(out).to_contain("HAS_A=false")
+
+        step("And the dict is still a live, usable dict after the clear")
+        expect(out).to_contain("REFILL=1")
