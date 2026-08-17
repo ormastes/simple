@@ -1,0 +1,84 @@
+# Generalization spec for the "no verdict means not green" defect class.
+#
+# @req REQ-TESTRUNNER-VERDICT-001
+#
+# The reproducing spec (silent_green_verdict_spec.spl) pins the one shape that
+# was reported. This spec fences the whole class: every way a run can end with
+# no trustworthy verdict must be loud and non-zero, never green.
+#
+#   - zero examples executed (discovery found nothing, or the suite aborted)
+#   - the module graph failed to load, so no summary was ever produced
+#   - the process was killed mid-run (the 60s CPU kill-monitor SIGTERM), so the
+#     summary never reached the stream
+#   - a genuinely red run, which must stay classified as a real result and not
+#     be laundered into "infrastructure noise"
+
+use std.spec.*
+use std.io_runtime.{process_run, file_write, dir_create_all}
+
+val GUARD = "scripts/check/check-test-verdict-not-silent.shs"
+val WORK = "build/test-artifacts/test_runner_silent_green_class"
+
+fn write_fixture(name: text, body: text) -> text:
+    dir_create_all(WORK)
+    val path = "{WORK}/{name}.sh"
+    file_write(path, body)
+    path
+
+fn guard_exit(fixture_path: text) -> i64:
+    val (out, err, code) = process_run("sh", [
+        "-c",
+        "SIMPLE_TEST_CMD='sh {fixture_path}' sh {GUARD} dummy_target",
+    ])
+    code
+
+fn guard_output(fixture_path: text) -> text:
+    val (out, err, code) = process_run("sh", [
+        "-c",
+        "SIMPLE_TEST_CMD='sh {fixture_path}' sh {GUARD} dummy_target",
+    ])
+    out + err
+
+describe "No verdict is never green":
+    """
+    Four different ways a test run can fail to produce evidence. A verifier
+    reading only the exit code must be told the truth in every one of them.
+    """
+
+    it "treats a zero-example run as a failure, not a pass":
+        step("A runner that discovers nothing and exits 0 with no counts")
+        val fixture = write_fixture("zero_examples", "echo 'No tests discovered'\nexit 0\n")
+
+        step("Judge the run")
+        expect(guard_exit(fixture)).to_equal(1)
+
+    it "treats a loader failure with no summary as a failure":
+        step("A runner whose module graph fails to load, leaving no summary behind")
+        val fixture = write_fixture("loader_fail", "echo 'error: unresolved name: describe'\nexit 0\n")
+
+        step("Judge the run")
+        expect(guard_exit(fixture)).to_equal(1)
+
+    it "reports a signal-killed run as ERROR rather than a result":
+        step("A runner killed by SIGTERM mid-run, as the 60s CPU guard does")
+        val fixture = write_fixture("sigterm", "echo 'warning: noise'\nkill -TERM $$\n")
+
+        step("Judge the run")
+        expect(guard_output(fixture)).to_contain("ERROR")
+        expect(guard_exit(fixture)).to_equal(2)
+
+    it "leaves a genuinely red run classified as a real result":
+        step("A runner that printed its counts and failed honestly")
+        val fixture = write_fixture("honest_red", "echo 'Results: 4 total, 3 passed, 1 failed'\nexit 1\n")
+
+        step("The gate does not relabel a real failure as missing evidence")
+        expect(guard_output(fixture)).to_contain("PASS")
+        expect(guard_exit(fixture)).to_equal(0)
+
+    it "refuses to pass when it was given nothing to check":
+        step("Invoke the gate with no targets at all")
+        val (out, err, code) = process_run("sh", ["-c", "sh {GUARD}"])
+
+        step("A run that checked nothing is ERROR, never a vacuous pass")
+        expect(out + err).to_contain("ERROR — nothing was checked")
+        expect(code).to_equal(2)
