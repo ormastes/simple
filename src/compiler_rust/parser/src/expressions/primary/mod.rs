@@ -153,7 +153,10 @@ impl<'a> Parser<'a> {
             | TokenKind::Unwrap
             | TokenKind::Lazy
             | TokenKind::Skip => self.parse_primary_identifier(),
-            TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
+            TokenKind::Backslash | TokenKind::Pipe => self.parse_primary_lambda(),
+            // `move \x: ...` is a move-closure; a bare `move` is an identifier.
+            TokenKind::Move if self.peek_is(&TokenKind::Backslash) => self.parse_primary_lambda(),
+            TokenKind::Move => self.parse_primary_identifier(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions
             // fn(): ... => lambda
