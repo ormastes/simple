@@ -20,7 +20,7 @@
 set -eu
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-DISK=${DISK:-$REPO_ROOT/build/os/x86_64_board_usb/board-usb.img}
+DISK=${DISK:-$REPO_ROOT/build/os/up-squared-apollo-lake/usb/board-usb.img}
 
 fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
 err()  { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
@@ -31,9 +31,17 @@ command -v mdir >/dev/null 2>&1 || err "mtools (mdir) not installed"
 
 CHECKS=0
 
-# 1. GPT signature present.
-sgdisk --print "$DISK" >/tmp/simpleos_usb_gpt_check.$$ 2>&1 || fail "sgdisk could not read GPT from $DISK"
-grep -q "GPT: present" /tmp/simpleos_usb_gpt_check.$$ || fail "no valid GPT signature in $DISK"
+# 1. Both GPT copies and their CRCs validate. `sgdisk --print` output differs
+# across releases and does not universally include the phrase `GPT: present`.
+# The verifier is the stable semantic oracle; retain print output for the
+# partition-shape checks below.
+sgdisk --verify "$DISK" >/tmp/simpleos_usb_gpt_verify.$$ 2>&1 \
+    || fail "primary/backup GPT verification failed for $DISK"
+grep -q "No problems found" /tmp/simpleos_usb_gpt_verify.$$ \
+    || fail "GPT verifier did not confirm a clean primary/backup table"
+rm -f /tmp/simpleos_usb_gpt_verify.$$
+sgdisk --print "$DISK" >/tmp/simpleos_usb_gpt_check.$$ 2>&1 \
+    || fail "sgdisk could not read GPT from $DISK"
 CHECKS=$((CHECKS + 1))
 
 # 2. Exactly one partition, typed EF00 (EFI System Partition).
@@ -74,12 +82,14 @@ echo "$EFI_LISTING" | grep -qi "BOOTX64" || fail "BOOTX64.EFI missing from EFI/B
 CHECKS=$((CHECKS + 1))
 
 # 5. BOOTX64.EFI is non-trivially sized (a truncated/zero-byte write must not
-#    read as success).
-BOOTX64_SIZE=$(echo "$EFI_LISTING" | grep -i "BOOTX64" | awk '{print $2}' | head -1)
-case "$BOOTX64_SIZE" in
-    ''|*[!0-9]*) fail "could not parse BOOTX64.EFI size from mdir output" ;;
-esac
+#    read as success). Use mcopy directly to avoid fragile mdir field parsing.
+BOOTX64_TMP="$(mktemp)"
+trap 'rm -f "$BOOTX64_TMP"' EXIT
+mcopy -i "${DISK}@@${OFFSET_BYTES}" "::EFI/BOOT/BOOTX64.EFI" "$BOOTX64_TMP" \
+    || fail "could not copy BOOTX64.EFI from ESP"
+BOOTX64_SIZE="$(wc -c < "$BOOTX64_TMP")"
 [ "$BOOTX64_SIZE" -gt 1024 ] || fail "BOOTX64.EFI is only $BOOTX64_SIZE bytes (< 1024 floor)"
+rm -f "$BOOTX64_TMP"
 CHECKS=$((CHECKS + 1))
 
 [ "$CHECKS" -gt 0 ] || err "no checks executed"
