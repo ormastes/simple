@@ -1,0 +1,58 @@
+extern fn rt_file_read_text(path: text) -> text
+use std.spec.{describe, it, expect}
+use app.cli.dispatch.table.{get_command_table}
+
+# Regression + detection guard for
+# doc/08_tracking/bug/windows_build_subcommand_silent_noop_stale_binary_2026-08-05.md
+#
+# `CommandEntry.has_simple_impl()` (src/app/cli/dispatch/types.spl) only checks
+# `app_path.len() > 0` — it never checks that the file EXISTS. A renamed or
+# deleted app therefore leaves a table entry that looks implemented, and the
+# failure only surfaces at `cli_run_file` time as a misleading
+# "command not implemented in Simple" from `dispatch_to_rust`.
+# Two entries were stale when this guard was written: `wrapper-gen`
+# (src/app/wrapper_gen/main.spl -> mod.spl) and `migrate` (no app dir at all;
+# handled statically by cli_run_migrate).
+
+fn readable(path: text) -> bool:
+    (rt_file_read_text(path) ?? "").len() > 0
+
+describe "CLI dispatch table app_path integrity":
+    it "resolves the two entries that were found stale":
+        # Reproducer: these two names regressed. Named explicitly so the
+        # reproducer keeps failing if either is reverted.
+        for entry in get_command_table():
+            if entry.name == "wrapper-gen":
+                expect(readable(entry.app_path)).to_equal(true)
+            if entry.name == "migrate":
+                # `migrate` has no app directory; the entry must not claim one.
+                expect(entry.app_path).to_equal("")
+
+    it "resolves every declared app_path to a readable source file":
+        # Detection spec: generalizes to the whole defect CLASS. Any future
+        # rename that leaves a table entry behind fails here, naming the entry.
+        var broken: [text] = []
+        var checked = 0
+        for entry in get_command_table():
+            if entry.app_path.len() > 0:
+                checked = checked + 1
+                if not readable(entry.app_path):
+                    broken.push("{entry.name} -> {entry.app_path}")
+        # Non-vacuity: a run that checked nothing is a broken guard, not a pass.
+        expect(checked).to_be_greater_than(50)
+        expect(broken.len()).to_equal(0)
+
+    it "declares each command name exactly once":
+        # Same family: a duplicated name makes the second entry dead code,
+        # which is how a stale path survives unnoticed.
+        var dupes: [text] = []
+        val table = get_command_table()
+        var i = 0
+        while i < table.len():
+            var j = i + 1
+            while j < table.len():
+                if table[i].name == table[j].name:
+                    dupes.push(table[i].name)
+                j = j + 1
+            i = i + 1
+        expect(dupes.len()).to_equal(0)
