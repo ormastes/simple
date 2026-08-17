@@ -140,6 +140,7 @@ same_file_reference() {
 }
 
 GATE_COUNT=0
+GATE_TOTAL=0
 GATE_LIST=
 READINESS_STATUS=blocked
 READINESS_REASON=
@@ -157,6 +158,7 @@ record_gate() {
     gate=$1
     status=$2
     reason=$3
+    GATE_TOTAL=$((GATE_TOTAL + 1))
     if [ "$status" != ready ]; then
         GATE_COUNT=$((GATE_COUNT + 1))
         if [ -n "$GATE_LIST" ]; then GATE_LIST="$GATE_LIST,$gate"; else GATE_LIST=$gate; fi
@@ -423,6 +425,7 @@ check_simpleos() {
 evaluate_readiness() {
     configure_paths
     GATE_COUNT=0
+    GATE_TOTAL=0
     GATE_LIST=
     READINESS_REASON=
     check_stage3 || :
@@ -474,6 +477,49 @@ emit_result() {
     printf 'bootstrap_handoff_remaining_gate_count=%s\n' "$GATE_COUNT"
     printf 'bootstrap_handoff_remaining_gate_list=%s\n' "$GATE_LIST"
     printf 'platform_acceptance_claimed=false\n'
+    emit_verdict "$GATE_TOTAL" "$GATE_COUNT" "$GATE_LIST"
+}
+
+# Verdict convention (.claude/rules/vcs.md).  Every handoff gate is evaluated
+# from committed receipts on this host, so there is no "unavailable" axis: a
+# gate is either ready or not.  Zero gates evaluated means the check ran
+# vacuously -> ERROR.
+emit_verdict() {
+    ev_total="$1"; ev_blocked="$2"; ev_list="$3"
+    if [ "$ev_total" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 handoff gates evaluated)"
+        return 2
+    fi
+    if [ "$ev_blocked" -gt 0 ]; then
+        echo "FAIL — $ev_total handoff gate(s) checked, $ev_blocked not ready: $ev_list"
+        return 1
+    fi
+    echo "PASS — $ev_total handoff gate(s) checked, all ready"
+    return 0
+}
+
+verdict_self_test() {
+    vt_fail=0
+    vt_case() { # name total blocked list expect_exit expect_substr
+        vt_out="$(emit_verdict "$2" "$3" "$4")"; vt_ec=$?
+        if [ "$vt_ec" -ne "$5" ]; then
+            echo "verdict selftest FAIL $1: exit $vt_ec expected $5 ($vt_out)" >&2
+            vt_fail=$((vt_fail + 1)); return 0
+        fi
+        case "$vt_out" in
+            *"$6"*) ;;
+            *) echo "verdict selftest FAIL $1: '$vt_out' lacks '$6'" >&2; vt_fail=$((vt_fail + 1)) ;;
+        esac
+    }
+    vt_case must-pass 10 0 none 0 "PASS — 10 handoff gate(s) checked, all ready"
+    vt_case must-fail 10 2 "stage3_candidate,stage4_candidate" 1 "FAIL — 10 handoff gate(s) checked, 2 not ready: stage3_candidate,stage4_candidate"
+    vt_case must-error-empty 0 0 none 2 "ERROR — nothing was checked (0 handoff gates evaluated)"
+    if [ "$vt_fail" -gt 0 ]; then
+        echo "bootstrap_handoff_verdict_selftest status=FAIL cases_failed=$vt_fail" >&2
+        return 1
+    fi
+    echo "bootstrap_handoff_verdict_selftest status=PASS cases=3"
+    return 0
 }
 
 self_test_file() { printf '%b\n' "$2" >"$1"; }
@@ -618,12 +664,24 @@ usage() {
 configure_paths
 case "${1:-}" in
     '')
+        if [ "${BOOTSTRAP_HANDOFF_SELFTEST_CHILD:-0}" != 1 ]; then
+            if ! verdict_self_test; then
+                echo "ERROR — nothing was checked (verdict selftest failed)"
+                exit 2
+            fi
+            if ! BOOTSTRAP_HANDOFF_SELFTEST_CHILD=1 sh "$0" --self-test >/dev/null 2>&1; then
+                echo "ERROR — nothing was checked (fixture selftest failed)"
+                exit 2
+            fi
+        fi
         evaluate_readiness || :
         emit_result
-        [ "$READINESS_STATUS" = ready ]
+        emit_verdict "$GATE_TOTAL" "$GATE_COUNT" "$GATE_LIST" >/dev/null
+        exit $?
         ;;
     --self-test)
         [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        verdict_self_test || exit 1
         self_test
         ;;
     -h|--help)

@@ -126,3 +126,93 @@ Current source already carries the two guards this bug needed
   exist, and its result still flows through callers that are self-exec guarded.
 
 Verdict: **ALREADY-FIXED / NOT-REPRODUCED**. No patch applied.
+
+## 2026-08-17, second pass (dedicated lane) — PARTIALLY FIXED, guard added
+
+### The earlier NOT-REPRODUCED verdict above is not sound evidence
+
+`bin/simple run <hello.spl>` completing with `rc=0` does **not** exercise the
+suspect code. The deployed `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, Aug 16 22:59)
+self-identifies as a **Rust bootstrap seed**, and the loop's marker string
+exists in exactly one place in the tree:
+
+```
+$ /usr/bin/grep -rn "seed sibling not found" --include=*.rs --include=*.spl src/
+src/app/io/cli_ops.spl:277
+```
+
+Zero hits under `src/compiler_rust/**`. The seed has no such delegation logic,
+so a green seed run says nothing about `_cli_driver_binary()`. Any future
+re-triage of this bug must drive `src/app/io/cli_ops.spl` directly.
+
+### Driving the real path
+
+Probe (`use app.io.cli_ops.{_cli_driver_binary, cli_current_exe_path}`), run
+under interpretation from the repo root:
+
+```
+exe=[/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple]
+simple: seed sibling not found, skipping delegation: .../simple_seed
+driver=[]
+```
+
+### Exact delegation chain, and where the cycle closes
+
+1. `cli_run_file` / `cli_run_code`
+   (`src/app/io/_CliCommands/run_commands.spl:68,100`) ask
+   `_cli_driver_binary()` for a binary and, if non-empty, spawn it as a child
+   via `process_run_inherit` / `_cli_process_run`.
+2. `_cli_driver_binary()` has four exits: `SIMPLE_BOOTSTRAP_DRIVER` override
+   (259), seed sibling (271), **repo seed `bin/simple_seed` (274-276)**, and the
+   `bin/simple{ext}` candidate (287).
+3. The cycle closes at the `bin/simple` candidate: `bin/simple` is a symlink to
+   `bin/release/<triple>/simple`, i.e. to the running process itself, so
+   returning it means spawning ourselves, which recomputes the same value —
+   unbounded, one eprint per generation, which is exactly the linear
+   bytes-vs-timeout scaling recorded above.
+4. **That exit is now correctly guarded** and is why the loop no longer
+   reproduces. `_cli_is_current_exe()` (205-219) canonicalizes the *candidate*
+   too via `rt_path_absolute` (`std::fs::canonicalize`), so the relative
+   `bin/simple` resolves to the absolute release binary and matches
+   `/proc/self/exe`; measured `driver=[]` confirms it fires. It also fails
+   CLOSED (returns `true`) when identity cannot be established (209-212). The
+   original hypothesis in this doc blamed the repo-seed branch for the observed
+   loop; that was wrong — the loop ran through the `bin/simple` branch, whose
+   candidate-side canonicalization had been dropped on 2026-07-24 and restored
+   on 2026-07-25.
+
+### What was still unguarded, and was fixed
+
+The `repo_seed` exit (274-276) was the one remaining exit with **no**
+`_cli_is_current_exe` check — the asymmetry this doc originally flagged is real,
+even though it was not the cause of the 2026-07-25 loop. `_cli_repo_seed_path()`
+(199) tests the **cwd-relative** path `bin/simple_seed`, so it names whatever
+`bin/simple_seed` sits next to the current working directory; in a deploy layout
+that can be a symlink onto the running executable, reopening the same fork bomb.
+Fixed by adding the guard, symmetric with the other three exits.
+
+Not currently live on this host: neither `bin/simple_seed` nor the sibling
+`bin/release/x86_64-unknown-linux-gnu/simple_seed` exists, which is why control
+reaches the eprint at 277 and then the (guarded) `bin/simple` candidate.
+
+Regression check after the edit, from the repo root: probe still prints
+`driver=[]`, `bin/simple run hello.spl` still prints `hi` — no behavior change
+on the live path, which is the intent (the guard can only ever turn a
+delegate-to-self into the in-process `interpret_file()` fallback).
+
+### Not a contributor to today's other symptoms
+
+Asked whether this explains the 45-minute zero-result test run and the
+`reason=daemon-no-response` timeout: **no**, on two independent grounds — the
+deployed binary is a Rust seed that never executes `cli_ops.spl` at all, and
+even when the pure-Simple path IS driven, `_cli_driver_binary()` measurably
+returns `""` (no child spawned). No shared root cause with
+`deployed_seed_test_runner_init_hang_2026-07-17.md` was found via this path.
+
+Status: the P1 hang is not reproducible and its cycle-closing exit is guarded.
+Remaining follow-up is a regression spec pinning all four exits of
+`_cli_driver_binary()` against self-delegation; the repo-seed branch is not
+unit-testable as written (`_cli_repo_seed_path()` is private and hardcodes a
+relative path), so the guard here is verified by construction plus the
+no-regression run above, not by a spec.

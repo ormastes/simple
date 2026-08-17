@@ -1110,6 +1110,12 @@ impl<'a> Parser<'a> {
         let saved_previous = self.previous.clone();
         let saved_pending = self.pending_tokens.clone();
         let saved_lexer = self.lexer.clone();
+        // `parse_type` below PUSHES diagnostics (notably the `name[...]`
+        // deprecated-generics warning) as a side effect. Token state is
+        // restored on backtrack but `error_hints` is not, so a speculative
+        // parse that is later abandoned still leaks its warnings. Record the
+        // watermark and truncate back to it when we backtrack.
+        let saved_hints_len = self.error_hints.len();
 
         // Try to parse generic args
         self.advance(); // consume '<'
@@ -1182,6 +1188,7 @@ impl<'a> Parser<'a> {
             self.previous = saved_previous;
             self.pending_tokens = saved_pending;
             self.lexer = saved_lexer;
+            self.error_hints.truncate(saved_hints_len);
             Vec::new()
         }
     }
@@ -1202,6 +1209,13 @@ impl<'a> Parser<'a> {
         let saved_previous = self.previous.clone();
         let saved_pending = self.pending_tokens.clone();
         let saved_lexer = self.lexer.clone();
+        // See try_parse_method_generic_args: `parse_type` pushes diagnostics as
+        // a side effect, and backtracking restored only token state. For
+        // `a < arr[i]` this leaked a bogus "Use angle brackets: arr<...>"
+        // deprecation warning even though the speculative type parse was
+        // correctly abandoned and the comparison parsed fine.
+        // See doc/08_tracking/bug/parser_bracket_index_after_less_than_still_misread_as_generics_2026-08-17.md
+        let saved_hints_len = self.error_hints.len();
 
         self.advance(); // consume '<'
 
@@ -1345,6 +1359,7 @@ impl<'a> Parser<'a> {
             self.previous = saved_previous;
             self.pending_tokens = saved_pending;
             self.lexer = saved_lexer;
+            self.error_hints.truncate(saved_hints_len);
             return Ok(());
         }
         // The shape is confirmed: a closed `<...>` followed by `(`, `.`, `::` or

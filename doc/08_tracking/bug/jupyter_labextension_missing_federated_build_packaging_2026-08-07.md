@@ -1,7 +1,29 @@
 # JupyterLab labextension has no installable federated-extension build pipeline
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (independent re-verification
+pass; supersedes the shard-02 OPEN stamp, which was stale — the body of this
+doc already recorded "Fixed 2026-08-08" while the header stayed OPEN).
+
+Both builders the record calls missing are present:
+- `tools/jupyter/labextension/pyproject.toml:13-15` — `[build-system]`
+  `requires = ["hatchling>=1.5.0", "jupyterlab>=4.0.0,<5",
+  "hatch-jupyter-builder>=0.5"]`, `build-backend = "hatchling.build"`, i.e. the
+  pip-installable Python package whose absence produced the
+  `missing the setup.py file` error in the Symptom section.
+- `tools/jupyter/labextension/pyproject.toml:37-41` — shared-data mapping of
+  `simple_labextension/labextension` and `install.json` into
+  `share/jupyter/labextensions/@simple-lang/jupyterlab-simple`, plus the
+  `hatch-jupyter-builder>=0.5` build hook dependency.
+- `tools/jupyter/labextension/package.json:51` — `@jupyterlab/builder ^4.0.0`
+  in `devDependencies`, with the federated
+  `"jupyterlab": { ... "outputDir": "simple_labextension/labextension" }` block
+  at `package.json:24-26` pointing at exactly the directory pyproject.toml
+  installs.
+
+**Verified by source inspection only** — `jupyter labextension develop
+--overwrite .` was not re-run and no JupyterLab instance was launched, so this
+closes the *missing packaging* defect, not an end-to-end load of the extension.
 
 **Found:** 2026-08-07, during notebook-lanes X2 implementation (extension core + LSP
 wiring), blocking galata/browser verification.

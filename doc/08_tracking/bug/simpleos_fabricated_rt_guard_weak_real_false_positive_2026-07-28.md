@@ -1,6 +1,35 @@
 # Fabricated-`rt_*` link guard misclassifies weak-but-real definitions — blocks landing
 
-- **Status:** OPEN — guard is UNCOMMITTED and must not land as written
+- **Status:** FIXED
+- Status re-verified 2026-08-17 by source inspection (independent
+  re-verification pass). Both halves of the record are resolved:
+  1. *No longer uncommitted.* The guard is committed and tracked —
+     `git log -1 -- src/compiler/70.backend/backend/llvm_native_link.spl` =
+     `e14a2ffb4df` ("fix(backend,mir): three fail-open sites made fail-closed"),
+     and `git show HEAD:...llvm_native_link.spl` contains
+     `simpleos_defined_symbols_any_binding` (5 occurrences). Working tree is
+     clean against HEAD for that file.
+  2. *The weak-vs-real false positive is gone.* The guard no longer classifies
+     via `extract_symbols_nm` (which drops `W/w/V/v` at
+     `backend/llvm_backend_tools.spl:42`). It uses the dedicated
+     `simpleos_defined_symbols_any_binding`
+     (`src/compiler/70.backend/backend/llvm_native_link.spl:1850-1880`), whose
+     docstring cites this bug by filename and states the rule explicitly:
+     weak definitions are INCLUDED, only `U`/`u` are skipped, and the actual
+     fabricated/real classifier is the disassembled BODY check
+     (`simpleos_trivial_body_rt_symbols`). It also records why
+     `extract_symbols_nm` was deliberately not widened (it is exported at
+     `backend/__init__.spl:174,182` and its weak-dropping is load-bearing for
+     `llvm_backend.spl` codegen symbol tables).
+
+  So the six real weak implementations named in this record (`rt_memcpy`,
+  `rt_memset`, `rt_dma_alloc`, `rt_dma_phys_of`, `rt_dma_virt_of`,
+  `rt_file_read_bytes` in `baremetal_stubs.c`) are now visible to the guard as
+  defined and can only be flagged on body evidence.
+
+  **Verified by source inspection only** — no SimpleOS x86_64 link was
+  executed, so the "guard passes on the real production link" claim is not
+  re-established by this pass.
 - **Severity:** BLOCKER (would break every SimpleOS x86_64 production link)
 - **Area:** `src/compiler/70.backend/backend/llvm_native_link.spl`
   (`simpleos_check_no_fabricated_rt_stubs`, ~`:1950`)

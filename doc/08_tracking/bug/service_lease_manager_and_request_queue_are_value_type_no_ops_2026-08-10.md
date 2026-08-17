@@ -21,7 +21,7 @@ count_after=0
 
 # `std.service` LeaseManager and RequestQueue are total no-ops (struct value semantics)
 
-- **Status:** OPEN (RED)
+- **Status:** RESOLVED 2026-08-17 (was OPEN) — src/lib/nogc_sync_mut/service/lease_manager.spl:77 is now `class LeaseManager`; RequestQueue module deleted (no owned-source hits)
 - **Filed:** 2026-08-10
 - **Severity:** HIGH — the `sj` daemon's mutation serialization does not serialize anything.
 - **Found by:** rewriting three specs that had been testing their own private

@@ -188,16 +188,43 @@ scripts/bootstrap/bootstrap-from-scratch.sh \
   --bootstrap-receipt=build/bootstrap/planner-admission-v2.env
 ```
 
-The authorization leaf is deliberately non-authoritative. Only a future
+The authorization leaf is deliberately non-authoritative. Only the canonical
 non-circular producer, executing a planner built by an independently admitted
 Stage 2 parent under an owned pre-exec lock and capturing exact build lineage,
 argv, environment, stdout, exit status, and smoke evidence, may wrap it in the
-29-field planner admission v2 envelope. That producer does not yet exist.
+29-field planner admission v2 envelope.
 
-Consequently both normal execution and `--validate-bootstrap-receipt`
-intentionally fail with `planner-admission-v2-producer-unavailable`, even for a
-structurally perfect shell-authored envelope. No stage starts. Direct Stage 3
-resume and Stage 4 continuation enforce the same public verifier. The exact
+**That producer now exists** (2026-08-17):
+`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`. It is the only
+supported way to obtain an admissible receipt:
+
+```text
+scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+  --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+  --parent-compiler=build/bootstrap/stage2/<triple>/simple
+```
+
+The parent must be a Stage 2 artifact under `build/bootstrap/stage2/` carrying
+`stage2-sanity.receipt` (`stage2-sanity: pass`) and
+`stage2-provenance.receipt` (`stage2-provenance: pure-simple`) beside it; a
+Rust seed, a hand-placed binary, or a parent with no provenance evidence is
+refused with a typed `bootstrap-admission-error:` reason and no stage starts.
+All receipt-named artifacts are pinned under
+`build/bootstrap/admission/<cache_scope_key>/`, and the verifier **re-derives**
+`build_argv_sha256` / `build_env_sha256` from the receipt's own fields rather
+than shape-checking them — the canonical argv and environment are defined once,
+in `bootstrap_planner_v2_canonical_argv_text` /
+`bootstrap_planner_v2_canonical_env_text`, and read by both producer and
+verifier so they cannot drift. Gate:
+`scripts/check/check-bootstrap-planner-admission-producer.shs` (8 fatal
+fixtures; proves both that the gate is satisfiable and that forged argv/env
+digests, out-of-root artifacts, seed parents, and non-gating planners are all
+still refused).
+
+A shell-authored envelope, however structurally perfect, is refused with
+`planner-admission-v2-unbound`, as is any legacy v1 receipt. No stage starts.
+Direct Stage 3 resume and Stage 4 continuation enforce the same public
+verifier. The exact
 Stage 3 target is `--bootstrap-target=//bootstrap:stage3`; Stage 4 is
 `--bootstrap-target=//bootstrap:stage4`. Missing receipts still fail earlier
 with `reason-receipt-required`.

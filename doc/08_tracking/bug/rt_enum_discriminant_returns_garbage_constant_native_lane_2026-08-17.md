@@ -83,6 +83,33 @@ families sharing a variant name (`Named`, `Tuple`, …) yield identical
 discriminants. `method_calls_literals.spl:1180-1181` compares two discriminants
 directly and is exactly the shape that trap targets.
 
+## Re-measured 2026-08-17 across THREE call sites
+
+Running the guard against the pre-fix source (`b9a68e7eebd~1`, whose probe is
+still present) produced, verbatim:
+
+```
+unresolved-static method=bump srn='' disc=1337030607 found=false
+unresolved-static method=greet srn='' disc=1337030607 found=false
+unresolved-static method=stat srn='' disc=1337030607 found=true
+```
+
+The identical constant at three *different* method call sites is now measured,
+not assumed — the original single-observation claim holds up.
+
+It does **not** yet discriminate between the two live explanations, because all
+three receivers are plausibly the *same* `HirExprKind` variant (they are all
+static-shaped receivers, most likely `NamedVar`). Under the name-hash mechanism
+described below, the same variant must yield the same hash, so this result is
+exactly what the name-hash theory predicts too. Settling it still requires
+probing a receiver of a provably different variant.
+
+Also worth noting: `found=true` for `method=stat` at the PRE-FIX revision. That
+is inconsistent with the `found=false` recorded during the original
+investigation, and is unexplained. It may mean the probe's `found` flag tracks
+something other than the owner-resolution outcome the fix addresses. Flagged,
+not resolved.
+
 ## Scope of what is verified
 
 - **Verified:** the returned value is 1337030607, on the native lane, for the

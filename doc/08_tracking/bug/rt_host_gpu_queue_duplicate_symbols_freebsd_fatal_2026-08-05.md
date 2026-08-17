@@ -1,5 +1,7 @@
 # `rt_host_gpu_queue_*` duplicated between C and Rust — fatal under FreeBSD's `lld`
 
+- **Re-verified by content 2026-08-17 (os/runtime lane):** `src/compiler_rust/runtime/build.rs` lists `"runtime_native_gpu_stub.c"` and no literal `"runtime_native.c"` c_source entry (grep shows the name only inside explanatory comments at lines 148-184). Both per-lane implementations are still present as intended: 20+ `rt_host_gpu_queue_*` definitions in `src/runtime/runtime_native.c` and 10 `pub extern "C" fn rt_host_gpu_queue_*` in `src/compiler_rust/runtime/src/host_gpu_lane.rs`. The guard spec `test/01_unit/compiler/backend/runtime_native_gpu_stub_duplicate_symbol_guard_spec.spl` exists. The in-guest FreeBSD link was NOT re-run in this lane.
+
 **Found by:** Lane B (FreeBSD WM seam), 2026-08-05, while trying to link
 `simple-runtime` inside a real FreeBSD 14.4-RELEASE QEMU guest per
 `.claude/rules/board-runnable.md`. Board-run is currently **blocked** by this

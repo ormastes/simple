@@ -463,3 +463,143 @@ watchdog kill, so **143 without a monotonic RSS trace is not a reproduction.**
 `Results: 5 total, 5 passed, 0 failed`. It fails if a deep-free call is
 reintroduced into the driver context, if the measured hazard rationale is
 deleted, or if the HIR loop goes back to constructing a lowerer per source.
+
+---
+
+## 2026-08-17 (P0 scoped lane) — GROWTH IS LINEAR-UNRECLAIMED, NOT AN ALGORITHMIC BLOWUP; STILL BLOCKED-CROSS-OWNER
+
+Method: static source tracing plus arithmetic on the already-retained
+Restart-12 series. **No new Stage-3 run was performed** and no new RSS number
+was produced (see "What was not measured" below). Host load average at session
+start 35.85, at 12:25 44.18 — any timing here is contended by construction.
+
+### 1. The retained series is a LINEAR slope, which changes the diagnosis
+
+From the Restart-12 numbers already in this record: RSS went 2,713,164 KiB at
+parse file 200/617 through 29,019,120 KiB at external termination. That is
+**25.1 GiB consumed across at most 417 further modules = >=63 MiB per module**,
+against a measured **7,288 B mean `.spl` source size** (`find src/compiler
+src/lib src/app -name '*.spl'`: 12,114 files, 88,284,967 B total). So each
+module retains **>=8,600x its own source text**, and the series is *monotonic
+and near-constant-slope*, not accelerating.
+
+This is the discriminating observation the earlier cycles never made: a
+quadratic/superlinear owner (retained aggregate copied per module, a growing
+registry re-walked per module) would show a *rising* slope. A constant slope of
+~63 MiB/module is the signature of **linear accumulation with zero
+reclamation** — i.e. every module's AST+HIR simply stays live to the end of the
+phase. That is consistent with, and independently corroborates, the
+`driver_types.spl:1080-1100` probe-P0 finding that eviction reclaims 0 of 2001
+allocations. It also *retires* the "retained aggregate boundary" hypothesis as
+the dominant term: the 08-14 lowerer-hoist fix was correct and is still the
+right shape, but it cannot have been worth 25 GiB.
+
+### 2. Stage 3 runs with `low_memory == false` — every gated eviction is OFF
+
+Traced in source, no run required:
+
+- `src/compiler/80.driver/bootstrap_api_low_memory.spl:4-9` requires all three
+  of `SIMPLE_BOOTSTRAP`, `SIMPLE_BOOTSTRAP_STAGE4`, `SIMPLE_BOOTSTRAP_LOW_MEMORY`
+  to be `"1"` (predicate `bootstrap_low_memory_opt_ins_requested`,
+  `src/compiler/00.common/bootstrap_low_memory_config.spl:6-11`).
+- The **only** producer of those two latter variables, and of the `--low-memory`
+  flag, is `bootstrap_native_build_main()` —
+  `scripts/bootstrap/bootstrap-from-scratch.sh:1062-1095` — which is the
+  **Stage 4** builder (`--entry src/app/cli/main.spl`).
+- The **Stage 3** invocation (`scripts/bootstrap/bootstrap-from-scratch.sh:2068-2102`)
+  passes neither the flag nor those variables. Therefore
+  `ctx.options.low_memory == false` for the whole Stage-3 transaction.
+
+Consequently these are all inert on Stage 3:
+`driver_orchestration.spl:137` (source reclaim), `:175` and `:240`
+(`evict_ast`), `driver_aot_pipeline.spl:88` and
+`driver_pipeline_execution.spl:19` (`evict_hir`),
+`driver_aot_native_output.spl:550` (MIR eviction), and the
+`not ctx.options.low_memory` content-retention branch at
+`driver_hir_pipeline_lowering.spl:513`.
+
+### 3. …but enabling it would not fix this, and the number says so
+
+The streaming-surface HIR path *is* live on Stage 3, contrary to what the
+`SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=0` comment at
+`bootstrap-from-scratch.sh:2061` suggests on a first read:
+`driver_streaming_surface_enabled` (`driver_orchestration.spl:28-36`) requires
+`ENTRY_CLOSURE == "1"`, and the driver's own closure walk sets exactly that at
+`driver_source_pipeline_loading.spl:262` before HIR runs. So
+`driver_hir_pipeline_lowering.spl:334-341` already executes `ast_reset()`,
+`phase_ctx.modules = {}`, `lexer_release_parse_source_globals()` and an
+**unconditional** `reclaim_source_contents()` on Stage 3.
+
+`reclaim_source_contents` (`driver_types.spl:1057-1063`) is the one path that
+genuinely frees, because `rt_string_free` is registry-checked and source text
+is a registered RuntimeValue. Its entire ceiling is the Stage-3 closure's
+source text: 617 modules x 7,288 B ~= **4.4 MiB, i.e. 0.018% of the 25.1 GiB
+growth.** Turning on `--low-memory` for Stage 3 would therefore be a defensible
+tidy-up but is **not** a fix for this P0, and must not be presented as one.
+No such change was made in this lane.
+
+### 4. Confirmed: the remaining owner is a runtime representation change
+
+Re-derived independently this session with fresh citations, agreeing with the
+W2 verdict:
+
+- Class/struct instances are allocated as bare `rt_alloc` blocks with no header
+  and no registration: LLVM lane
+  `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:105-135`;
+  Cranelift lane `backend/cranelift_codegen_adapter.spl:623-633`.
+- `rt_alloc` (`src/runtime/runtime_native.c:5506-5530`) is `malloc` +
+  `rt_core_transient_raw_register`, which is a **no-op unless a transient array
+  scope is active** (`:1331-1345`) — so there is no permanent registration and
+  no kind byte.
+- The runtime states the blocker itself at `runtime_native.c:6041-6058`
+  ("SECOND LIMIT"): an instance "carries NO kind header, is NOT heap-tagged, and
+  is NOT in any registry", so `rt_core_deep_free_classify` (`:6147`) must call
+  it LEAF; fixable "only upstream, by giving `rt_alloc`'d aggregates a kind
+  header or an unconditional registration."
+- Nearest existing hook: the unused-from-Simple `rt_struct_alloc` /
+  `rt_struct_alloc_register` / `rt_struct_alloc_lookup_size` ptr->size table
+  (`:5344-5348`, `:5439`, `:5484`, `:5536`; declared `runtime.h:309-310`; no
+  `.spl` emitter calls it).
+- Scope of the real fix: both aggregate emitters (incl. their Tuple cases),
+  a new registering `rt_object_new`, a new deep-free kind + child-word scan in
+  `runtime_native.c`, `runtime.h`, and regenerated `runtime_symbol_entries.rs`.
+  **The risky part is not the registry — it is that a header word shifts every
+  struct field GEP in two backends, which must stay byte-identical with
+  `translate_get_field`.** Hazard 4 (external key aliasing, probe P3) is *not*
+  addressed by any of it.
+
+**Backend asymmetry, not previously recorded here, and possibly a cheaper way
+in.** The two lanes do *not* represent structs the same way. Cranelift ORs a
+`heap_tag = 1` into the struct base pointer
+(`cranelift_codegen_adapter.spl:631-633`), so a Cranelift struct pointer has low
+bit 1 and does **not** satisfy the classifier's LEAF precondition ("`>= 4096`
+with low bits `0b000`", `runtime_native.c:6147`). The LLVM lane yields the raw
+`rt_alloc` pointer untagged (`aggregate_intrinsics.spl:127-135`) — and LLVM is
+the bootstrap default backend, i.e. exactly the lane this P0 reproduces on.
+Whoever picks this up should check whether the Cranelift tagging convention can
+be adopted by the LLVM aggregate lowering, since a low-bit tag costs no header
+word and therefore **does not shift any field GEP** — which is the expensive,
+risky half of the change scoped above. This is an untested reading of the two
+emitters, not a proposal that has been validated; the tag's interaction with
+`translate_get_field` addressing and with every other consumer of a struct
+pointer has not been checked.
+
+That is outside `80.driver` ownership and cannot be validated without a full
+bootstrap, so nothing was edited there. **Row stays OPEN / BLOCKED-CROSS-OWNER.**
+
+### What was NOT measured, stated plainly
+
+- No Stage-3 run. This worktree has **no `build/bootstrap/stage2` or `stage3`
+  at all** (only `logs/`, two `rust-authority-*` dirs, `stage4-owner-20260815`),
+  so acceptance item 3 would require a full multi-hour bootstrap from scratch on
+  a box at load 35-44 with ~20 foreign `bin/simple` processes. Not attempted.
+- **The durable evidence this record points at is GONE from this worktree:**
+  `build/bootstrap-restart12-current/bootstrap-retry-progress.log` and
+  `build/native_probe/stage3-fresh/build-cycle3.log` do not exist here. The
+  Restart-12 figures above are therefore quoted from *this document*, not
+  re-read from a retained artifact. Whoever resumes should not assume those
+  logs are recoverable.
+- `bin/simple` in this worktree is the **Rust seed** (it prints the seed
+  banner), so it cannot produce pure-Simple-lane RSS evidence for this row.
+- The 08-14 warning still stands: status 143 without a monotonic RSS trace is
+  not a reproduction of this bug.

@@ -6,6 +6,45 @@
 - **Headline:** most of them are **not bad source**. A parser built from `origin/main` **rejects 32 files
   that the currently deployed `bin/simple` accepts.** `origin/main` carries a Rust parser regression.
 
+## UPDATE 2026-08-17 — the regression half is FIXED and now ABLATED
+
+The 32-file regression is the relative-import defect and nothing else. Root cause confirmed by
+reading the diffs, not inferred:
+
+- **Introduced by `3c4e6551b7a`** ("11 soft keywords could not be used as identifiers"), which added
+  `TokenKind::Use` to the `soft_kw_stmt_as_ident` `.`-peek predicate in
+  `parser/src/parser_impl/core.rs`. `use .mod.X` *is* the relative-import statement form, so `Use`
+  followed by `Dot` was rerouted to an expression. That commit's own message admits `--bin simple`
+  was never built.
+- **Fixed by `579a0e1a171`**, which excludes `use` from the `.`-peek half only.
+
+**Why the sweep still saw it:** `3c4e6551b7a` IS an ancestor of the swept revision
+`eb4d4d9cd25`; `579a0e1a171` and `c3506bfbc4b` are **not**. The fix was committed locally and had
+not reached `origin/main` when the sweep ran. Verified with `git merge-base --is-ancestor`. So the
+sweep is accurate for the revision it names — no re-derivation needed.
+
+`579a0e1a171` landed labelled *"the RED is proven on a full binary, the GREEN is not"*. That gap is
+now closed at the parser-crate level. Ablation, both arms verbatim, on a real corpus harvested from
+the tree rather than hand-written fixtures (`parser/tests/relative_import_brace_glob_corpus.rs`):
+
+| arm | `relative_import_brace_glob_corpus` | `relative_import_not_soft_keyword_ident` |
+|---|---|---|
+| fix APPLIED (HEAD) | `test result: ok. 2 passed; 0 failed` | `test result: ok. 7 passed; 0 failed` |
+| fix REVERTED (control) | `test result: FAILED. 1 passed; 1 failed` — **`106 of 130 real relative brace/glob imports failed to parse`** | `test result: FAILED. 4 passed; 3 failed` |
+
+The control fails, so the test discriminates. Reverted-arm messages are the census's exact two:
+`expected identifier, found LBrace` and `found Star`.
+
+**A finding about the pre-existing fixture test:** under the reverted fix,
+`double_dot_relative_import_with_glob_parses` still PASSES. The hand-written fixture set is weaker
+than the defect — 3 of its 7 cases discriminate. This is the same failure mode the Calibration
+section below records for the or-pattern repro, and is why the new test harvests real lines and
+asserts a non-vacuity floor instead.
+
+**Not fixed by this, and not the same defect** — these remain open and are NOT parser regressions:
+the 7 genuine `src/lib` source defects, the 9 de-symlinked files committed as regular blobs (the 12
+`Slash` failures), and the continuation-line-indentation family. They need separate work.
+
 ## Method
 
 The probe is `simple compile <file> --emit-ast=/dev/null -o <tmp>`, not `simple run`:

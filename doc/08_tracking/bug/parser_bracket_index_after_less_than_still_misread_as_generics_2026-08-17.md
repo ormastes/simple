@@ -3,7 +3,8 @@
 - **ID:** parser_bracket_index_after_less_than_still_misread_as_generics_2026-08-17
 - **Severity:** P1 — bootstrap-blocking. The seed cannot parse the compiler's own source.
 - **Discovered:** 2026-08-17, while re-baselining an unrelated MIR finding against a fresh seed.
-- **Status:** OPEN
+- **Status:** FIXED 2026-08-17 — see "Verdict" at the bottom. Severity corrected from
+  P1 to P3: the parse was never wrong, only a diagnostic leaked.
 - **Reopens:** `parser_array_index_misread_as_generics_2026-06-14.md`, which was marked
   `CLOSED 2026-08-17 — the parser false positive no longer fires`. It still fires.
 
@@ -72,11 +73,106 @@ class. The `<`-precedes-index shape was never enumerated, so a second live insta
 standing rule: one reproducing `regalloc.spl:158`, and one defect-CLASS spec that walks
 `a < b[i]`, `a <= b[i]`, and the `and`-chained form from the style.spl case.
 
-## Not yet done
+## Verdict (2026-08-17) — FIXED, and the severity in the header above was wrong
 
-- No parser fix attempted. Filing only.
-- The class spec above is unwritten (the lane assigned to it was killed by a session limit).
-- Root cause in the Rust seed parser not localised; note that another lane has
-  uncommitted edits under `src/compiler_rust/parser/` (`parser_impl/core.rs`,
-  `stmt_parsing/control_flow.rs`, `expressions/postfix.rs`), so whoever picks this up
-  should check whether it is already being addressed there before editing.
+### The parse was always correct; only the diagnostic leaked
+
+The report's framing ("the seed cannot parse the compiler's own source",
+"bootstrap-blocking") is **not what was measured**. On the unpatched seed
+`/mnt/data/cgtw2/release/simple`:
+
+```
+$ simple compile src/compiler/70.backend/backend/native/regalloc.spl
+rc=0     # compiled successfully, emitting regalloc.smf
+angle-bracket warnings: 1   (at regalloc.spl:158:58 — the exact reported site)
+```
+
+and a minimal reproducer `if a < arr[i]:` **ran and produced the correct answer**
+(`ge`, i.e. `5 < 1` correctly false) with `rc=0`. The message is a `warning`, not
+an error. So the real defect is a **spurious diagnostic**, not a parse failure —
+severity P3, not P1. Nothing here blocked bootstrap. (The original filing's
+"cannot parse" reading appears to come from the `[INFO] JIT compilation failed …
+function \`fun\` not found` line that accompanied it; that is an **unrelated**
+artifact of writing `fun` instead of `fn`, and reproduces identically on a
+control file with no `<` at all.)
+
+### Root cause
+
+`src/compiler_rust/parser/src/expressions/postfix.rs`, two speculative
+generic-argument parsers: `try_skip_ident_generic_args` (the one that fires here)
+and `try_parse_method_generic_args`.
+
+On `a < arr[i]` the postfix layer cannot know whether `<` opens a generic
+argument list (`Foo<T>(…)`) or is a less-than operator, so it **speculates**: it
+saves `current` / `previous` / `pending_tokens` / `lexer`, tries to read a type
+list, and restores all four if the shape does not pan out. That backtracking is
+correct, which is why the comparison parses and evaluates fine.
+
+The leak is that the speculation calls `parse_type`, and `parse_type`
+(`parser_types.rs:414-429`) treats a following `[` as a `[...]`-style generic
+argument list and **pushes an `ErrorHint` into `self.error_hints` as a side
+effect**. `error_hints` is not part of the saved state, so the warning produced
+by an abandoned parse survives the backtrack and is reported against the user's
+source. The trigger is the `<` because only a `<` starts the speculation — which
+is exactly the observation in the "Why the trigger is `<`" section above, and why
+the 2026-06-14 row and this one are the same defect.
+
+### Fix
+
+Four lines: record `self.error_hints.len()` as a watermark alongside the existing
+saved state, and `truncate` back to it on each of the two backtrack paths. The
+expression parser is otherwise untouched.
+
+### Ablation (proves causation)
+
+Built from a clean `origin/main` extract with an isolated `CARGO_TARGET_DIR`
+(`/mnt/data/cargo-brk`), `cargo build --release --bin simple` rc=0, rc read
+directly rather than through a pipe.
+
+| build | `regalloc.spl` angle-bracket warnings | parser gate |
+|---|---|---|
+| unpatched (`origin/main`) | **1**, at `regalloc.spl:158:58` | 2 of 4 FAILED |
+| patched | **0**, `rc=0`, compiles to `.smf` | 4 of 4 ok |
+| patch reverted again (`sed` removed only the 2 `truncate` calls) | — | 2 of 4 FAILED again |
+| patch re-applied | — | 4 of 4 ok |
+
+Full parser suite, same tree, both ways: **282 passed / 6 failed unpatched →
+284 passed / 4 failed patched**. The 4 residual failures are pre-existing
+f-string/lexer tests (`test_interpolated_strings`, `test_triple_fstring_literals`,
+`double_braces_collapse_to_one_literal_brace`,
+`test_double_brace_escape_still_works`), present identically with and without the
+patch, and unrelated to this change.
+
+### Specs
+
+- `src/compiler_rust/parser/src/lt_index_hint_leak_tests.rs` — the
+  **ablation-sensitive** gate, because a leaked warning is not observable from a
+  running program; it asserts on `error_hints()` directly. Covers the reproducer,
+  the class (`<`, `<=`, the `and`-chained `x >= 0 and y < arr[j].field`, nested
+  `a < b[c[d]]`, `b[i].len()`), a control, and an **over-correction guard** so the
+  fix cannot be "passed" by deleting the warning outright (a real `List[i64]`
+  annotation must still warn).
+- `test/01_unit/compiler/parser/lt_then_bracket_index_repro_spec.spl` —
+  `Results: 2 total, 2 passed, 0 failed`.
+- `test/01_unit/compiler/parser/comparison_then_bracket_index_class_spec.spl` —
+  `Results: 5 total, 5 passed, 0 failed`.
+
+  Note honestly: these two `.spl` specs pin the **semantics** of the shape, which
+  were already correct before the fix, so they are green on both sides of the
+  ablation. They guard against a future regression that breaks the backtrack
+  itself; they do not by themselves demonstrate this fix.
+
+### Ownership check
+
+The other lane's uncommitted `src/compiler_rust/parser/` edits mentioned above
+have since landed as `579a0e1a171` (relative-import soft-keyword regression) and
+`c3506bfbc4b` (multi-line or-pattern). Neither touches the speculative
+generic-argument backtrack, and `src/compiler_rust/parser/` was clean at the time
+of this work. No competing fix.
+
+### Not covered
+
+`peek_brace_is_lambda_block` (`parser_helpers.rs:315`) is a third speculative
+backtrack that also restores only token state, but it never calls `parse_type`
+and pushes no hints, so it is not a member of this defect class today. It would
+become one if it ever grew a type-parsing path.

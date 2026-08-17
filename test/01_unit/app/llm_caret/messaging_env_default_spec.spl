@@ -1,0 +1,33 @@
+"""Reproducing spec for env_get_nil_coalesce_dead_fallback_2026-07-25 (app lane).
+
+The LLM Caret messaging workers read their database path, identity, workspace
+and scopes from the environment with a `?? default` fallback. Against the
+`text`-returning `env_get` that fallback is DEAD: an unset variable comes back
+as `""`, `??` never fires, and the worker silently runs with an empty database
+path. `env_get_opt` returns nil for an unset (or explicitly empty) variable, so
+the default is actually taken.
+"""
+
+use std.io_runtime.{env_get_opt}
+use app.io.mod.{env_get}
+
+describe "llm_caret messaging environment defaults":
+
+    it "takes the default for an unset messaging database path":
+        val database = env_get_opt("LLM_CARET_MESSAGING_DB_UNSET_PROBE") ?? ".simple/state/llm-caret-messaging.db"
+        expect(database).to_equal(".simple/state/llm-caret-messaging.db")
+
+    it "takes the default for an unset identity, workspace and scopes":
+        val identity = env_get_opt("LLM_CARET_MESSAGING_IDENTITY_UNSET_PROBE") ?? "local-agent"
+        val workspace = env_get_opt("LLM_CARET_MESSAGING_WORKSPACE_UNSET_PROBE") ?? "default"
+        val scopes = env_get_opt("LLM_CARET_MESSAGING_SCOPES_UNSET_PROBE") ?? "room:read,room:write"
+        expect(identity).to_equal("local-agent")
+        expect(workspace).to_equal("default")
+        expect(scopes).to_equal("room:read,room:write")
+
+    it "keeps the old text-returning env_get producing the empty string (the defect)":
+        # Control: this is the shape that was wrong at the call sites. It is
+        # asserted here so the spec fails loudly if `env_get`'s return type ever
+        # changes underneath the migrated call sites.
+        val dead = env_get("LLM_CARET_MESSAGING_DB_UNSET_PROBE") ?? "unreachable-default"
+        expect(dead).to_equal("")

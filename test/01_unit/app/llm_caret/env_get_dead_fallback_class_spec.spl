@@ -1,0 +1,75 @@
+"""Class-detection spec for env_get_nil_coalesce_dead_fallback_2026-07-25.
+
+`env_get` (both `std.io_runtime.env_get` and `std.nogc_sync_mut.io.env_ops.env_get`,
+the latter re-exported as `app.io.mod.env_get`) returns a NON-nullable `text`.
+`env_get(k) ?? default` is therefore a DEAD fallback: an unset variable arrives
+as `""`, `??` never fires, and the caller silently receives the empty string.
+
+A `?? ""` site is harmless (the dead default equals the value produced anyway).
+A site whose default is NON-empty is a live wrong-value defect. The correct-by-
+construction sibling is `std.io_runtime.env_get_opt`.
+
+Scope is deliberately `src/app/llm_caret/messaging/**` plus `bridgeConfig.spl`, the sites this lane migrated and
+verified import-by-import. The bug record warns that a blind tree-wide sweep
+would be WRONG, because some `env_get` names in scope elsewhere (`rt_env_get`,
+local `*_env_get` wrappers) genuinely return `text?` and their `??` is correct.
+Widening this root requires doing that per-file import audit first.
+"""
+
+use std.io_runtime.{list_dir, is_dir, file_read}
+
+val SCAN_ROOT = "src/app/llm_caret/messaging"
+val EXTRA_FILES = ["src/app/llm_caret/claude_full/bridge/bridgeConfig.spl"]
+
+fn collect_spl(root: text, out: [text]) -> [text]:
+    var acc = out
+    for entry in list_dir(root):
+        if entry == "." or entry == "..": continue
+        val full = root + "/" + entry
+        if is_dir(full):
+            acc = collect_spl(full, acc)
+        else:
+            if full.ends_with(".spl"): acc.push(full)
+    acc
+
+fn live_dead_fallback_lines(body: text, label: text) -> [text]:
+    var hits: [text] = []
+    var line_no = 0
+    for line in body.split("\n"):
+        line_no = line_no + 1
+        if line.contains("env_get_opt("): continue
+        if not line.contains("env_get("): continue
+        val idx = line.index_of("??")
+        if idx < 0: continue
+        val tail = line.substring(idx + 2, line.len()).trim()
+        # `?? ""` is a benign no-op; anything else is a live wrong-value site.
+        # An empty tail means the default continues on the next line, which is
+        # never the empty literal, so it counts as live.
+        if tail.starts_with("\"\""): continue
+        hits.push(label + ":" + line_no.to_text())
+    hits
+
+describe "env_get dead-fallback class detection":
+
+    it "detects the known-bad shape and ignores the benign one (detector control)":
+        # Without this control a scan that silently matched nothing would look
+        # identical to a clean tree.
+        val fixture = "val a = env_get(\"X\") ?? \"default\"\n" +
+            "val b = env_get(\"Y\") ?? \"\"\n" +
+            "val c = env_get_opt(\"Z\") ?? \"default\"\n" +
+            "val d = env_get(\"W\") ?? \"\",\n" +
+            "val e = (env_get(\"V\") ?? \"\") != \"\"\n"
+        val found = live_dead_fallback_lines(fixture, "fixture")
+        expect(found.len()).to_equal(1)
+        expect(found[0]).to_equal("fixture:1")
+
+    it "scans a non-empty set of source files (non-vacuity control)":
+        val files = collect_spl(SCAN_ROOT, [])
+        expect(files.len()).to_be_greater_than(40)
+
+    it "has no env_get(...) ?? <non-empty-default> site in the migrated subtree":
+        var offenders: [text] = []
+        for f in collect_spl(SCAN_ROOT, EXTRA_FILES):
+            for hit in live_dead_fallback_lines(file_read(f), f):
+                offenders.push(hit)
+        expect(offenders.len()).to_equal(0)

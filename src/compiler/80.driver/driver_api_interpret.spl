@@ -7,12 +7,13 @@
 
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, OutputFormat, driver_core_compile_options_default)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
-use lazy compiler.driver.watcher.smf_manifest (SmfManifestEntry, load_smf_manifest_default, smf_manifest_find)
+use lazy compiler.driver.watcher.smf_manifest (SmfManifestEntry, load_smf_manifest_default, smf_manifest_find, smf_manifest_entry_new, smf_manifest_entry_matches_source)
 use compiler.driver.cache.cache_types (CacheCheckResult)
 use compiler.driver.cache.compile_options_hash (compile_options_hash_zero)
 use lazy compiler.driver.cache.cache_validator (validate_smf)
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
 pub fn interpret_file(path: text) -> CompileResult:
     val cached = try_load_smf_cached(path)
@@ -30,14 +31,28 @@ pub fn try_load_smf_cached(path: text) -> CompileResult?:
     if not entry.?:
         return nil
 
-    var smf_entry = manifest.entries[0]
+    # Fail-closed sentinel: source_hash 0 is rejected by
+    # smf_manifest_entry_matches_source, so an unreplaced sentinel can never
+    # be used to load an artifact. (Was `manifest.entries[0]` — an integer
+    # index into a text-keyed Dict.)
+    var resolved = smf_manifest_entry_new("", "", 0, "", 0, false, false, false, "", [])
     if val found_entry = entry:
-        smf_entry = found_entry
+        resolved = found_entry
     else:
         return nil
-    val smf_path: text = smf_entry.smf_path
+    val smf_path: text = resolved.smf_path
 
     if not rt_file_exists(smf_path):
+        return nil
+
+    # Verify the MANIFEST ROW itself against the live source before trusting
+    # anything it points at. Without this, the only freshness evidence was the
+    # hash inside the .smf the (possibly stale) row named, and every other
+    # recorded field was parsed and discarded. Fail closed: a zero/unknown
+    # recorded hash, an unreadable source, or any mismatch rejects the cache
+    # and falls back to a full interpret.
+    val current_source = rt_file_read_text(path) ?? ""
+    if not smf_manifest_entry_matches_source(resolved, current_source):
         return nil
 
     val freshness: CacheCheckResult = validate_smf(path, smf_path, compile_options_hash_zero())

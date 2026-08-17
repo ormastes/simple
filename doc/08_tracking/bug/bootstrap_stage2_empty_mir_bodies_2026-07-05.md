@@ -32,6 +32,91 @@ proven to fire on an all-stub (0-instruction) module. The build now fails
 *loudly* at a deeper, still-unfinished layer (MIR→LLVM lowering, see Remaining
 Work) rather than silently shipping an empty binary.
 
+## 2026-08-17 (W2) — all 5 chain links source-verified fixed; the original defect is SUPERSEDED
+
+Full re-audit of the current working tree by reading every source point this doc
+names (no SHA ancestry, no full bootstrap — that is T3 and was explicitly out of
+scope). Verdict on the question this bug actually asks — *which declarations lower
+to empty bodies, and why*:
+
+**On the live bootstrap MIR path today: none.** Every declaration in the entry
+HIR module goes through the normal `lowering.lower_function(hir_fn)`
+(`50.mir/_MirLowering/bootstrap_globals.spl:753`) inside
+`bootstrap_lower_hir_globals_to_mir_module`. There is no name-based
+short-circuit, no stub fallback, and no gate on that loop.
+
+Link-by-link, in current source:
+
+1. **Flat-bridge entry gate — fixed.** `flat_is_bootstrap_entry_path`
+   (`10.frontend/_FlatAstBridge/convert_nodes.spl:62-85`) returns `true`
+   unconditionally under `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`, and otherwise
+   matches `path == native_entry or path.ends_with("/" + native_entry)`, then
+   falls back to `ends_with("bootstrap_main.spl")`.
+2. **HIR `lower_module` bootstrap branch — fixed.** The
+   `SIMPLE_BOOTSTRAP_DECL_TAG_*` / `SIMPLE_BOOTSTRAP_REAL_HIR` env-driven
+   deferred branch survives only as an explanatory comment
+   (`20.hir/hir_lowering/_Items/module_lowering.spl:2187-2189`).
+3. **MIR free path — fixed.** See the `lower_function` call above.
+4. **MIR name-based stubs — fixed on the live path.** `SIMPLE_BOOTSTRAP_REAL_LOWER`
+   survives only as a comment (`50.mir/_MirLowering/function_lowering.spl:119`).
+5. **Flat-bridge dropped call args — fixed** (no empty `Call`/`MethodCall`
+   reconstruction remains).
+
+**Loud-failure guard is live and fail-closed**, at two independent sites:
+`bootstrap_globals.spl:776-779` (`real_instr_total == 0` -> `rt_exit(1)`),
+`:782-783` (entry HIR module never set -> `rt_exit(1)`), and
+`:406-408` for the flat-HIR variant. So the silent-wrong-code shape this bug is
+named for — a linked stage-2 binary full of ret-0 stubs — cannot be shipped
+silently; it aborts the build.
+
+### The only remaining empty-body producers, and why they are intentional
+
+- `flat_empty_module(path)` (`10.frontend/_FlatAstBridge/module_assembly.spl:123`)
+  is still returned, but only when `SIMPLE_BOOTSTRAP=1` **and** the path is not
+  the entry **and** `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE` is unset — i.e. the
+  deliberate single-entry stage-2/3 lane, where only `bootstrap_main.spl` is
+  meant to be assembled. Under `--entry-closure` this branch is unreachable
+  (link 1 above).
+- Extern declarations are deliberately SKIPPED, not stubbed
+  (`bootstrap_globals.spl:741-748`): lowering a body-less extern would emit a
+  strong `define ... { ret 0 }` that shadows the real runtime archive symbol at
+  link. The comment there is correct and the skip is the fix, not a defect.
+
+### Residual landmine (NOT fixed here — deleting it breaks two specs)
+
+`50.mir/_MirLowering/module_lowering.spl` still contains two **callerless**
+stub-emitting methods — verified zero call sites across `src/` and `test/`:
+
+- `lower_bootstrap_stub_function` (`:534-545`) — emits a bare ret-0 body.
+- `lower_bootstrap_flat_function` (`:547-594`) — hardcodes `bootstrap_version`
+  to the string `"0.9.8"` and `native_build_help` to const `0`, ignoring the
+  real bodies. `"0.9.8"` is **stale**: `src/app/cli/bootstrap_identity.spl:5`
+  returns `"1.0.0-beta"`. (`native_build_help`'s real body in
+  `bootstrap_main.spl:18-19` genuinely is `0`, so only the version string
+  diverges.)
+
+These are dead today, so they cause no wrong code — but they are exactly the
+shape of defect this bug records, sitting one call site away from returning.
+They were deliberately left in place rather than deleted because two source-text
+specs pin their scaffolding and would fail on removal:
+`test/01_unit/compiler/mir/bootstrap_signature_source_spec.spl:9-15` and
+`test/01_unit/compiler/driver/native_build_cache_plumbing_spec.spl:294-295`
+(both assert on `self.bootstrap_function_signature(name)` /
+`self.bootstrap_default_return_operand(`, whose only remaining callers are these
+two dead methods). Removing the dead code therefore requires amending those two
+specs — a separate, reviewable change, not a drive-by cleanup in this lane.
+
+### Status
+
+The five-link root-cause chain named by this bug is **resolved in source**. This
+row is kept open only for the "Remaining work" items further down, and the
+current stage-2 blocker has moved on: per the 2026-07-24 entry at the bottom,
+the next distinct failure is tracked in
+`bootstrap_stage2_interpreted_parser_empty_array_2026-07-24.md`. No stage-2
+rebuild was run today (T3; ~20 foreign `bin/simple` processes live on this box),
+so there is deliberately **no before/after verdict line** for a build here — the
+evidence above is source-inspection only, and is labelled as such.
+
 ## 2026-08-17 (W1) — chain link 1 confirmed still fixed in current source
 
 Checked by reading current source, not SHA ancestry, because the

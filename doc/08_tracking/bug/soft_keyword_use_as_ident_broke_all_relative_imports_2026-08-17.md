@@ -145,3 +145,54 @@ So the parser-crate 7/7 is no longer standing in for end-to-end proof: a real
 binary loads a relative import again. Note the stale seed also returns `rc=0`
 here — it predates `3c4e6551b7a` and never had the regression, which is why the
 RED is only observable on a binary built from that commit (recorded above).
+
+## Independent re-verification 2026-08-17 (clean `origin/main` extract, isolated target dir)
+
+A later lane was handed this same symptom as a fresh, unfiled P1 described as a
+bracket-write defect (`handles[K] = 1`, "generics `<>` not `[]`"). **That framing
+was wrong on every point** and is recorded here so the next reader does not chase
+it: `vhdl_backend.spl` contains **zero** `handles[` / `STATICS_FAILED_KEY` lines,
+the file is 407 lines, and bisecting a truncated prefix pins the first failing
+line at **14**, which is `use .vhdl.vhdl_builder.{VhdlBuilder}` — the relative
+import this doc is about. The symptom was only visible because that lane's
+binary (`/mnt/data/cgtw2/release/simple`, built 11:10) is a **mid-regression**
+build: made after `3c4e6551b7a` and before the fix.
+
+Site census (working tree, `^use \.`): **18 lines across 9 files** — 6 in
+`vhdl_backend.spl` alone, plus `vhdl_expr.spl`, `vhdl_validation.spl`,
+`vhdl_codegen_helpers.spl`, `vhdl_entity_compile.spl`, `99.loader/module_loader.spl`
+(`..parent` form), and three under `src/app/mcp/`.
+
+Bucket: **seed-PARSER defect, not source.** The pure-Simple parser documents and
+implements the form (`src/compiler/10.frontend/core/parser_decls_use.spl:79-80,
+406-407` — "RELATIVE path ('.' + name) … normalizes a leading-dot module against
+the importing module's own name"), and the seed's own `parse_module_path`
+(`module_system.rs:22-64`) has a leading-`Dot` branch. Only the statement
+dispatcher was wrong.
+
+Ablation, both binaries built from a `git archive origin/main` extract into
+`CARGO_TARGET_DIR=/mnt/data/cargo-vhdl`, rc read on the line after the command:
+
+| build | `core.rs:464` | `compile --emit-ast=/dev/null vhdl_backend.spl` |
+|---|---|---|
+| origin/main as-is | `Use && peek_is(Assign)` | parse OK — reaches semantic (`undefined identifier: panic`, expected for a lone file) |
+| ablated (Dot re-added) | `Use && (Assign \|\| Dot)` | `parse: Unexpected token: expected identifier, found LBrace` |
+| restored | `Use && peek_is(Assign)` | parse OK (same binary as row 1) |
+
+Gate re-run, `SIMPLE_BINARY=<seed built from origin/main>
+sh scripts/check/check-native-trailing-default-param.shs`:
+
+```
+FAIL — native-build failed to compile the fixture (exit 1, log saved to /tmp/check-native-trailing-default-param.1996874.log)
+```
+
+**Still RED, but no longer for this reason** — the `LBrace` parse error is gone
+from the log entirely. It now fails much later, inside the fixture's real
+native-build, on two unrelated defects: `semantic: method 'compile' not found on
+type 'object'` (receiver is a `CompilerDriver`) and `error[E1002]: function
+'TMPDIR' not found`. Those belong to whoever owns the current `origin/main`
+native-build breakage; they are not this bug and are not fixed by it.
+
+No new specs were added: `parser/tests/relative_import_not_soft_keyword_ident.rs`
+(reproducer) and `parser/tests/relative_import_brace_glob_corpus.rs` (defect
+class) already landed with the fix.

@@ -1,0 +1,259 @@
+#!/bin/sh
+# Canonical producer for planner admission v2.
+#
+# This is the missing half of the admission design: the verifier in
+# scripts/check/lib/bootstrap-planner-admission-bound.shs checks structure,
+# pinned paths, and re-derived argv/env digests, but until this script existed
+# nothing ever EMITTED a receipt that could satisfy it, so the admission path
+# was not fail-closed — it was closed, and no bootstrap could start. See
+# doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md
+#
+# Non-circular by construction, in order:
+#   1. take a pre-exec lock so nothing measured can change under us
+#   2. verify the parent authority (stage2 compiler + sanity + provenance) —
+#      fail closed, never the Rust seed, never an unverified binary
+#   3. hash parent, runtime snapshot, planner source + closure, git state
+#   4. build the planner with the parent compiler
+#   5. EXECUTE it under the canonical argv/env and hash what was actually run
+#   6. run the negative smoke check and record its transcript
+#   7. re-measure everything and only then emit the 29-field receipt
+#
+# Verdict is the last line of stdout:
+#   bootstrap-admission: produced <receipt>            exit 0
+#   bootstrap-admission-error: <typed-reason>          exit 64
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+root=$(CDPATH= cd -- "$root/.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+
+adm_fail() {
+    echo "bootstrap-admission-error: $1" >&2
+    echo "bootstrap-admission-error: $1"
+    exit 64
+}
+
+usage() {
+    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "       $0 --selftest" >&2
+}
+
+selftest=0
+adm_target=''
+adm_reason=''
+adm_parent=''
+adm_runtime=''
+adm_out=''
+adm_root=$root
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest=1 ;;
+        --target=*) adm_target=${1#*=} ;;
+        --reason=*) adm_reason=${1#*=} ;;
+        --parent-compiler=*) adm_parent=${1#*=} ;;
+        --runtime-dir=*) adm_runtime=${1#*=} ;;
+        --out=*) adm_out=${1#*=} ;;
+        --root=*) adm_root=${1#*=} ;;
+        --help|-h) usage; exit 0 ;;
+        *) usage; exit 2 ;;
+    esac
+    shift
+done
+
+if [ "$selftest" -eq 1 ]; then
+    sh "$root/scripts/check/check-bootstrap-planner-admission-producer.shs"
+    exit $?
+fi
+
+[ -n "$adm_target" ] && [ -n "$adm_reason" ] && [ -n "$adm_parent" ] || { usage; exit 2; }
+
+adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
+bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
+
+case "$adm_parent" in /*) ;; *) adm_parent="$PWD/$adm_parent" ;; esac
+if [ -z "$adm_runtime" ]; then adm_runtime="$adm_root/src/runtime"; fi
+case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
+
+# --- 2. parent authority -----------------------------------------------------
+# The parent must be a stage2 artifact carrying sanity + provenance evidence.
+# A Rust seed, a hand-placed binary, or a stage2 dir with no evidence is
+# refused: the whole point of v2 is that admission descends from an admitted
+# parent, so an unverifiable parent must not produce an authoritative receipt.
+stage2_root="$adm_root/build/bootstrap/stage2"
+case "$adm_parent" in
+    "$stage2_root"/*) ;;
+    *) adm_fail parent-compiler-not-under-build-bootstrap-stage2 ;;
+esac
+parent_file=$(bootstrap_planner_v2_canonical_file "$adm_parent") || adm_fail parent-compiler-missing-or-not-canonical
+parent_dir=$(dirname -- "$parent_file")
+sanity_file="$parent_dir/stage2-sanity.receipt"
+prov_file="$parent_dir/stage2-provenance.receipt"
+bootstrap_planner_v2_canonical_file "$sanity_file" >/dev/null 2>&1 || adm_fail parent-stage2-sanity-unavailable
+bootstrap_planner_v2_canonical_file "$prov_file" >/dev/null 2>&1 || adm_fail parent-stage2-provenance-unavailable
+grep -Fq 'stage2-sanity: pass' "$sanity_file" || adm_fail parent-stage2-sanity-not-pass
+if grep -Fq 'rust-seed' "$prov_file"; then adm_fail parent-compiler-is-rust-seed; fi
+grep -Fq 'stage2-provenance: pure-simple' "$prov_file" || adm_fail parent-stage2-provenance-not-pure-simple
+
+planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
+bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
+bootstrap_planner_v2_canonical_dir "$adm_runtime" >/dev/null || adm_fail runtime-dir-missing
+case "$adm_runtime" in "$adm_root"/*) ;; *) adm_fail runtime-dir-outside-root ;; esac
+
+# --- 1. pre-exec lock --------------------------------------------------------
+lock_dir="$adm_root/build/bootstrap/admission/.lock"
+mkdir -p "$adm_root/build/bootstrap/admission"
+mkdir "$lock_dir" 2>/dev/null || adm_fail admission-lock-held
+trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
+
+# --- 3. measure --------------------------------------------------------------
+parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
+sanity_sha=$(bootstrap_planner_v2_hash_file "$sanity_file")
+prov_sha=$(bootstrap_planner_v2_hash_file "$prov_file")
+planner_source_sha=$(bootstrap_planner_v2_hash_file "$planner_source")
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/simple-admission.XXXXXX")
+trap 'rm -rf -- "$stage"; rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
+
+# Runtime snapshot: sorted relative-path + sha256 over every runtime file, so
+# the digest names content rather than a directory mtime.
+( cd "$adm_runtime" && find . -type f ! -path './vendor/*' -print0 |
+    LC_ALL=C sort -z |
+    xargs -0 -r sha256sum -- ) >"$stage/runtime.snapshot"
+runtime_sha=$(bootstrap_planner_v2_hash_file "$stage/runtime.snapshot")
+
+# Source closure: the planner imports no modules (only externs), so its closure
+# is itself plus the runtime extern surface it names. Recorded explicitly.
+{
+    printf 'closure-schema: simple-planner-source-closure-v1\n'
+    printf '%s  %s\n' "$planner_source_sha" "src/app/cli/bootstrap_reason_planner.spl"
+    grep -n '^extern fn ' "$planner_source" || true
+} >"$stage/planner-source-closure.snapshot"
+closure_sha=$(bootstrap_planner_v2_hash_file "$stage/planner-source-closure.snapshot")
+
+{
+    printf 'git-head: %s\n' "$(cd "$adm_root" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf 'git-dirty-paths:\n'
+    ( cd "$adm_root" && git status --porcelain 2>/dev/null || true )
+} >"$stage/git-state.txt"
+
+scope_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | sha256sum | awk '{print $1}')
+adm_dir=$(bootstrap_planner_v2_admission_dir "$adm_root" "$scope_key")
+rm -rf -- "$adm_dir"
+mkdir -p "$adm_dir"
+adm_dir=$(bootstrap_planner_v2_canonical_dir "$adm_dir") || adm_fail admission-dir-not-canonical
+cp -- "$stage/runtime.snapshot" "$adm_dir/runtime.snapshot"
+cp -- "$stage/planner-source-closure.snapshot" "$adm_dir/planner-source-closure.snapshot"
+cp -- "$stage/git-state.txt" "$adm_dir/git-state.txt"
+git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
+
+# --- 4. build the planner with the parent compiler ---------------------------
+if ! SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" "$parent_file" \
+        native-build --source "$adm_root/src/app/cli" --source "$adm_root/src/lib" \
+        --entry "$planner_source" -o "$adm_dir/planner" >"$adm_dir/planner-build.log" 2>&1; then
+    adm_fail planner-build-failed
+fi
+[ -x "$adm_dir/planner" ] || adm_fail planner-build-produced-no-executable
+planner_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/planner")
+
+# --- 5. execute under the canonical argv/env --------------------------------
+# The digests below are hashed from the argv/env actually used for this exec,
+# which the verifier re-derives from the receipt fields. Both sides read the
+# same two functions in the bound library, so they cannot drift apart.
+auth_path="$adm_dir/authorization.receipt"
+argv_text=$(bootstrap_planner_v2_canonical_argv_text \
+    "$adm_dir/planner" "$adm_reason" "$adm_target" \
+    "$parent_sha" "$runtime_sha" "$closure_sha" "$planner_sha" "$auth_path")
+env_text=$(bootstrap_planner_v2_canonical_env_text "$adm_runtime")
+argv_sha=$(bootstrap_planner_v2_hash_text "$argv_text")
+env_sha=$(bootstrap_planner_v2_hash_text "$env_text")
+
+planner_rc=0
+env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
+    SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
+    "$adm_dir/planner" \
+    "--bootstrap-reason=$adm_reason" \
+    "--bootstrap-target=$adm_target" \
+    "--parent-compiler-sha256=$parent_sha" \
+    "--runtime-snapshot-sha256=$runtime_sha" \
+    "--planner-source-closure-sha256=$closure_sha" \
+    "--planner-sha256=$planner_sha" \
+    "--bootstrap-receipt=$auth_path" >"$adm_dir/planner-stdout.txt" 2>&1 || planner_rc=$?
+[ "$planner_rc" -eq 0 ] || adm_fail planner-execution-nonzero-exit
+bootstrap_planner_v2_canonical_file "$auth_path" >/dev/null || adm_fail planner-emitted-no-authorization
+
+expected_auth=$(bootstrap_planner_v2_authorization_text \
+    "$adm_target" "$adm_reason" "$parent_sha" "$runtime_sha" "$closure_sha" "$planner_sha")
+[ "$(cat -- "$auth_path")" = "$expected_auth" ] || adm_fail authorization-text-mismatch
+
+# --- 6. negative smoke check -------------------------------------------------
+# An admitted planner must REFUSE an untyped reason. A planner that accepts
+# anything is not a policy gate, so we prove refusal before trusting its pass.
+smoke_rc=0
+env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
+    SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
+    "$adm_dir/planner" \
+    '--bootstrap-reason=none' \
+    "--bootstrap-target=$adm_target" \
+    "--parent-compiler-sha256=$parent_sha" \
+    "--runtime-snapshot-sha256=$runtime_sha" \
+    "--planner-source-closure-sha256=$closure_sha" \
+    "--planner-sha256=$planner_sha" \
+    "--bootstrap-receipt=$stage/smoke.receipt" >"$stage/smoke.out" 2>&1 || smoke_rc=$?
+[ "$smoke_rc" -ne 0 ] || adm_fail planner-smoke-accepted-untyped-reason
+[ ! -e "$stage/smoke.receipt" ] || adm_fail planner-smoke-wrote-receipt-on-refusal
+{
+    printf 'smoke-schema: simple-planner-smoke-v1\n'
+    printf 'untyped-reason-exit: %s\n' "$smoke_rc"
+    printf 'untyped-reason-wrote-receipt: no\n'
+    cat -- "$stage/smoke.out"
+} >"$adm_dir/planner-smoke.txt"
+smoke_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/planner-smoke.txt")
+auth_sha=$(bootstrap_planner_v2_hash_file "$auth_path")
+
+# --- 7. re-measure, then emit ------------------------------------------------
+# The lock has been held throughout; re-hashing proves it, so the receipt
+# describes one consistent instant rather than a drifting tree.
+[ "$(bootstrap_planner_v2_hash_file "$parent_file")" = "$parent_sha" ] || adm_fail parent-compiler-changed-during-admission
+[ "$(bootstrap_planner_v2_hash_file "$planner_source")" = "$planner_source_sha" ] || adm_fail planner-source-changed-during-admission
+[ "$(bootstrap_planner_v2_hash_file "$adm_dir/planner")" = "$planner_sha" ] || adm_fail planner-changed-during-admission
+[ "$(bootstrap_planner_v2_hash_file "$adm_dir/runtime.snapshot")" = "$runtime_sha" ] || adm_fail runtime-snapshot-changed-during-admission
+
+if [ -z "$adm_out" ]; then adm_out="$adm_dir/planner-admission-v2.env"; fi
+case "$adm_out" in /*) ;; *) adm_out="$PWD/$adm_out" ;; esac
+platform=$(uname -m 2>/dev/null || echo unknown)
+
+{
+    printf 'schema=simple-bootstrap-planner-admission-v2\n'
+    printf 'status=pass\n'
+    printf 'platform=%s\n' "$platform"
+    printf 'target=%s\n' "$adm_target"
+    printf 'reason=%s\n' "$adm_reason"
+    printf 'parent_compiler_path=%s\n' "$parent_file"
+    printf 'parent_compiler_sha256=%s\n' "$parent_sha"
+    printf 'parent_stage2_sanity_path=%s\n' "$sanity_file"
+    printf 'parent_stage2_sanity_sha256=%s\n' "$sanity_sha"
+    printf 'parent_stage2_provenance_path=%s\n' "$prov_file"
+    printf 'parent_stage2_provenance_sha256=%s\n' "$prov_sha"
+    printf 'runtime_dir=%s\n' "$adm_runtime"
+    printf 'runtime_snapshot_path=%s\n' "$adm_dir/runtime.snapshot"
+    printf 'runtime_snapshot_sha256=%s\n' "$runtime_sha"
+    printf 'planner_source_path=%s\n' "$planner_source"
+    printf 'planner_source_sha256=%s\n' "$planner_source_sha"
+    printf 'planner_source_closure_snapshot_path=%s\n' "$adm_dir/planner-source-closure.snapshot"
+    printf 'planner_source_closure_snapshot_sha256=%s\n' "$closure_sha"
+    printf 'git_state_path=%s\n' "$adm_dir/git-state.txt"
+    printf 'git_state_sha256=%s\n' "$git_sha"
+    printf 'build_argv_sha256=%s\n' "$argv_sha"
+    printf 'build_env_sha256=%s\n' "$env_sha"
+    printf 'cache_scope_key=%s\n' "$scope_key"
+    printf 'planner_path=%s\n' "$adm_dir/planner"
+    printf 'planner_sha256=%s\n' "$planner_sha"
+    printf 'planner_smoke_path=%s\n' "$adm_dir/planner-smoke.txt"
+    printf 'planner_smoke_sha256=%s\n' "$smoke_sha"
+    printf 'authorization_receipt_path=%s\n' "$auth_path"
+    printf 'authorization_receipt_sha256=%s\n' "$auth_sha"
+} >"$adm_out"
+
+bootstrap_planner_v2_verify "$adm_out" "$adm_root" || adm_fail produced-receipt-fails-own-verifier
+echo "bootstrap-admission: produced $adm_out"

@@ -1,7 +1,34 @@
 # char_code_at scans are quadratic (non-ASCII), and core_string's ASCII fast path is itself O(index)
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: PARTIALLY FIXED — still OPEN for Defect 2 (SimpleOS `core_string` lane)
+Status re-verified 2026-08-17 by source inspection (independent
+re-verification pass). This record holds two defects in two lanes; exactly one
+of them is repaired, so it is re-described rather than closed:
+
+- **Defect 1 (hosted Rust runtime) — FIXED.**
+  `src/compiler_rust/runtime/src/value/collections.rs:3604-3620`
+  `rt_string_char_code_at` now has the four-way ladder documented in its own
+  doc comment: cached `RT_STRING_FLAG_ASCII` header flag -> O(1) direct byte
+  read; whole-string-ASCII -> sets the flag then O(1); `index` inside the ASCII
+  prefix -> O(1); otherwise the original codepoint walk. The flag is
+  positive-only and Simple strings are immutable, so a missed cache costs a
+  rescan, never a wrong answer.
+
+- **Defect 2 (freestanding SimpleOS lane) — NOT FIXED, and known so in-source.**
+  `src/runtime/simple_core/core_string.spl:297-322` `rt_string_char_code_at`
+  still runs the linear probe at :313-316
+  (`while probe <= index and (spl_load_u8(data, probe) & 255) < 128`) on every
+  call. Its own comment at :291-296 states the gap plainly: this lane "does NOT
+  cache the all-ASCII result in the string header, so it stays O(index) per
+  call rather than becoming O(1)", because the header bit the hosted runtimes
+  use (bit 31 of `reserved`) lands on the sign bit of the i64 word at offset 0
+  and is awkward to set from Simple. The change there was a constant-factor
+  improvement (byte compare instead of full UTF-8 decode), not a complexity fix
+  — which is precisely what Defect 2 alleges.
+
+**Verified by source inspection only** — the timing method in the Defect 1
+section was not re-run, so the FIXED verdict on the Rust lane rests on the
+algorithm in the code, not on a re-measured curve.
 campaign. Must be fixed as the Stage 1 perf prerequisite in
 `doc/03_plan/language/text_index_character_alignment_inventory_2026-07-30.md`,
 because character indexing multiplies the number of index→offset

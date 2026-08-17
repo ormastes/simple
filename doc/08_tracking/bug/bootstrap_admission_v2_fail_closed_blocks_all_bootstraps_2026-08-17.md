@@ -1,6 +1,10 @@
 # bootstrap admission v2 is unconditionally fail-closed — no bootstrap can start (2026-08-17)
 
-Status: OPEN (P1)
+Status: FIXED 2026-08-17 — the missing canonical producer was written, and the
+verifier was **strengthened**, not weakened. See "Fix (2026-08-17)" at the
+bottom. History below is preserved.
+
+Previously: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Status:** OPEN — worked around, not fixed.
 
@@ -116,3 +120,82 @@ forges authority. The fix is the missing non-circular producer (execute an admit
 while capturing build lineage, pre-exec lock, argv/env, stdout/exit, smoke receipt), which is
 a design-sized change and was NOT attempted here. Explicitly NOT proven: whether any bootstrap
 currently in flight is blocked by this path.
+
+## Fix (2026-08-17) — option (1): the producer was written; the guard got stronger
+
+Option (2) was correctly refused by earlier lanes: falling back to the v1 path
+would have been the "guard silently downgraded to advisory" anti-pattern. The
+implemented fix is option (1), plus closing the forgeability this record itself
+identified.
+
+**Root cause.** Neither the guard nor the underlying condition alone: the
+*condition* was at fault, and the guard was reporting it honestly. Nothing in
+the tree ever emitted a 29-field v2 receipt. The two planners
+(`src/app/cli/bootstrap_reason_planner.spl`,
+`src/app/build/bootstrap_receipt_planner.spl`) emit only the **authorization
+leaf**, which is one of the ten files a v2 receipt *references*. So admission
+had no producer, and `bootstrap-from-scratch.sh:313` made that the sole entry
+path — a self-inflicted denial of service.
+
+**What changed.**
+
+1. `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs` (new) — the
+   canonical producer, implementing this record's own 5-step non-circular
+   recipe: pre-exec lock, parent-authority verification, measurement, planner
+   build with the parent compiler, **execution under a canonical argv/env with
+   the digests taken from what was actually run**, a negative smoke check
+   (an admitted planner must *refuse* an untyped reason), re-measurement under
+   the still-held lock, then emit. Fails closed with a typed
+   `bootstrap-admission-error: <reason>` and starts no stage.
+2. `scripts/check/lib/bootstrap-planner-admission-bound.shs` — new
+   `bootstrap_planner_v2_verify_bound`, and `bootstrap_planner_v2_verify` now
+   delegates to it instead of `return 1`. Three additions answer this record's
+   "v2 structural verification is forgeable" finding directly:
+   - **Path pinning.** Every referenced artifact must sit at a pinned name
+     under `$root/build/bootstrap/admission/<cache_scope_key>/`, and the parent
+     artifacts under `$root/build/bootstrap/stage2/`. The hand-written
+     `/tmp`-fixture forgery demonstrated above no longer verifies.
+   - **argv/env re-derivation.** `build_argv_sha256` / `build_env_sha256` are
+     recomputed from the receipt's own fields and compared, not merely
+     shape-checked as 64-hex. Producer and verifier both read the single
+     canonical definitions (`bootstrap_planner_v2_canonical_argv_text`,
+     `bootstrap_planner_v2_canonical_env_text`), so they cannot drift.
+   - **Parent must be admitted.** A Rust seed or an evidence-free parent is
+     refused (`parent-compiler-is-rust-seed`,
+     `parent-stage2-provenance-unavailable`).
+3. `scripts/check/check-bootstrap-planner-admission-producer.shs` (new) —
+   8 fatal fixtures, and it proves *both* directions: fixture 1 that the gate
+   is satisfiable at all, fixtures 2-8 that forged argv/env digests,
+   out-of-root artifacts, missing provenance, seed parents, non-gating
+   planners, and untyped reasons are still refused.
+
+**Verification actually run (not assumed).**
+
+| check | result |
+|---|---|
+| `check-bootstrap-planner-admission-producer.shs` | `PASS — 8 fixture(s) checked` |
+| same gate with the old library restored | `FAIL — producer refused a well-formed admission` |
+| same gate with `return 1` reinstated in `_verify` (probe) | `FAIL — ... produced-receipt-fails-own-verifier` |
+| `check-bootstrap-reason-receipt-guard.shs` (pre-existing consumer guard, real `bootstrap-from-scratch.sh`) | `PASS: staged bootstrap rejects missing and legacy shell-authored receipts before execution` |
+| producer on the real tree, `--parent-compiler=bin/simple` | `bootstrap-admission-error: parent-compiler-not-under-build-bootstrap-stage2` |
+| producer on the real tree, `--parent-compiler=build/bootstrap/stage2/<triple>/simple` | `bootstrap-admission-error: parent-compiler-missing-or-not-canonical` |
+
+The last two rows are the honest residual and must not be read as a regression:
+this tree has **no** `build/bootstrap/stage2/` at all and `bin/simple` is the
+Rust seed (`bin/simple --version` prints the seed banner). Admission is now
+*satisfiable* — proven by fixture 1 end-to-end — but on this particular tree it
+is still blocked, now by a named, actionable precondition (no admitted Stage 2
+parent) instead of by a gate no input could satisfy. That precondition is the
+separately-tracked Stage 3/Stage 4 self-host blocker, not this defect.
+
+**Known limits, stated rather than papered over.**
+- Fixture 1 uses a fixture parent compiler that emits a planner *shim* with the
+  real planner's argv and authorization contract. It exercises the producer's
+  whole measure/build/exec/smoke/emit path and the verifier's whole binding,
+  but it does not exercise a real `native-build` of the planner — that needs an
+  admitted Stage 2 parent, which does not exist here.
+- `scripts/check/check-gate-satisfiable.shs` did **not** flag this library
+  before the fix (measured: zero hits for it in that gate's offender list at
+  `HEAD`), so the detection artifact shipped with this record does not in fact
+  catch this incident's own shape. That is a separate gap in that gate, not
+  fixed here.

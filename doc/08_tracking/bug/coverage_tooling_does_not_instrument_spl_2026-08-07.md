@@ -7,8 +7,30 @@
   built branch-coverage and line-coverage closure units on top of tooling that
   does not currently work end-to-end. No product functionality is broken by
   this; it blocks trustworthy coverage MEASUREMENT, both branch and line.
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: OPEN (P2) — **blocker cleared, end-to-end still unverified**
+- Status re-verified 2026-08-17 by source inspection (independent
+  re-verification pass). Deliberately NOT closed. What changed is the caveat
+  recorded in the fourth-pass section below, not the defect:
+  - That caveat said prereqs 1 and 2 depended on Rust seed source that was
+    "uncommitted local working-copy state, not yet landed". That is no longer
+    true. `src/compiler_rust/compiler/src/interpreter_extern/coverage.rs` is
+    tracked and committed (`git log -1` -> `ae55a7467197`), and
+    `git status --porcelain` reports it clean against HEAD.
+  - The `spl-coverage` CLI is registered in the deployed driver:
+    `src/compiler_rust/driver/src/main.rs:963-966` declares
+    `name: "spl-coverage"` -> `app_path: "src/app/spl_coverage/main.spl"`, and
+    it appears in the command dispatch list at `main.rs:310`
+    (alongside `coverage` :309 / `main.rs:952`).
+  - So the specific *blocker* this record names — no such CLI, and the
+    supporting seed source not landed — is gone.
+  - **Still unverified, which is why this stays OPEN:** no coverage run was
+    executed in this pass, so nothing here establishes that MIR lowering
+    actually emits branch probes or that the spipe/`.spl` test-runner path
+    writes a coverage artifact. Registering a subcommand is not the same as the
+    export working end to end, and that end-to-end claim is the substance of
+    this bug.
+
+  **Verified by source inspection only.**
   the "Gate rebuilt with real mechanical probes for all 5 prerequisites
   (fourth pass)" section near the end of this doc,
   `check-render2d-coverage.shs` mechanically probes all five prerequisites

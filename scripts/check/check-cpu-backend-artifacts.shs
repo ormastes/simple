@@ -5,16 +5,62 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
 BUILD_DIR="${BUILD_DIR:-build/check/cpu-backend-artifacts}"
-FIXTURE="test/fixtures/compiler/backend_artifact_validation/probe.spl"
+# Canonical committed fixture.  CPU_BACKEND_FIXTURE overrides only the SCAN
+# target (used by the selftest's end-to-end cases and by ablation); the
+# selftest's must-PASS case always asserts the canonical path, so an override
+# can never make the selftest vacuous.
+CANONICAL_FIXTURE="test/fixtures/compiler/backend_artifact_validation/probe.spl"
+FIXTURE="${CPU_BACKEND_FIXTURE:-$CANONICAL_FIXTURE}"
 FIXTURE_DIR="test/fixtures/compiler/backend_artifact_validation"
 REQUESTED_BACKEND=all
 REQUIRE_ALL="${CPU_BACKEND_REQUIRE_ALL:-0}"
 FAILURES=0
 SKIPS=0
+PASSES=0
+SELFTEST_ONLY=0
+
+# The exit code a correctly-codegen'd probe executable must return.  The
+# run/readback stage asserts this literal; the artifact-first tier below proves
+# the FIXTURE actually computes it, so the two can never drift apart silently.
+EXPECT_RUN_CODE=41
+
+# Committed pure-Simple backend registry.  BackendKind.to_text() is the list of
+# names the compiler actually knows; the three backends this guard drives must
+# each be registered there.  Checkable from source, no compiler needed.
+CANONICAL_REGISTRY="src/compiler/70.backend/backend/backend_types.spl"
+BACKEND_REGISTRY="${CPU_BACKEND_REGISTRY:-$CANONICAL_REGISTRY}"
 
 usage() {
-    echo "usage: $0 [--backend llvm|cranelift|wasm|all] [--require-all]" >&2
+    echo "usage: $0 [--backend llvm|cranelift|wasm|all] [--require-all] [--selftest]" >&2
     exit 2
+}
+
+# Verdict convention (.claude/rules/vcs.md).  A run that verified ZERO things is
+# never a pass.  Skips are legitimate only ALONGSIDE real verified steps, and
+# the counts are always stated.  The artifact-first tier exists precisely so
+# that a compiler-less host still verifies something rather than reporting
+# ERROR and wedging the pre-push hook.
+emit_verdict() {
+    ev_pass="$1"; ev_fail="$2"; ev_skip="$3"; ev_req="$4"
+    ev_total=$((ev_pass + ev_fail + ev_skip))
+    if [ "$ev_total" -eq 0 ]; then
+        echo "ERROR — nothing was checked (no backend step was executed)"
+        return 2
+    fi
+    if [ "$ev_fail" -gt 0 ]; then
+        echo "FAIL — $ev_total backend step(s) checked, $ev_fail failure(s), $ev_skip skip(s)"
+        return 1
+    fi
+    if [ "$ev_req" = 1 ] && [ "$ev_skip" -gt 0 ]; then
+        echo "FAIL — $ev_total backend step(s) checked, $ev_skip skip(s) not allowed under --require-all"
+        return 1
+    fi
+    if [ "$ev_pass" -eq 0 ]; then
+        echo "ERROR — nothing was checked ($ev_skip backend step(s) skipped as unavailable, 0 verified)"
+        return 2
+    fi
+    echo "PASS — $ev_total backend step(s) checked, $ev_pass verified, $ev_skip recorded skip(s)"
+    return 0
 }
 
 while [ "$#" -gt 0 ]; do
@@ -26,6 +72,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --require-all)
             REQUIRE_ALL=1
+            shift
+            ;;
+        --selftest)
+            SELFTEST_ONLY=1
             shift
             ;;
         -h|--help) usage ;;
@@ -49,6 +99,7 @@ record_result() {
     echo "backend=$backend step=$stage status=$status reason=$reason artifact=$artifact"
     case "$status" in
         FAIL) FAILURES=$((FAILURES + 1)) ;;
+        PASS) PASSES=$((PASSES + 1)) ;;
         SKIP_UNAVAILABLE) SKIPS=$((SKIPS + 1)) ;;
     esac
 }
@@ -153,7 +204,119 @@ run_expect_41() {
             run_code=$?
         fi
     fi
-    [ "$run_code" -eq 41 ] && [ ! -s "$stdout_path" ] && [ ! -s "$stderr_path" ]
+    [ "$run_code" -eq "$EXPECT_RUN_CODE" ] && [ ! -s "$stdout_path" ] && [ ! -s "$stderr_path" ]
+}
+
+# ---------------------------------------------------------------------------
+# Artifact-first tier: claims the 18 compiler-driven steps PRESUPPOSE, checked
+# from committed content alone.  These need no compiler and therefore verify
+# real things on a seed-only host.  Every one of them can fail.
+# ---------------------------------------------------------------------------
+
+# Recompute the probe fixture's main() return value from its own source text.
+# Prints the value, or nothing if the fixture does not have the expected shape.
+probe_expected_exit_code() {
+    pf="$1"
+    [ -s "$pf" ] || return 1
+    p_thr="$(sed -n 's/.*if input > \(-\{0,1\}[0-9]\{1,\}\).*/\1/p' "$pf" | head -n 1)"
+    p_mul="$(sed -n 's/.*input \* \(-\{0,1\}[0-9]\{1,\}\) + \(-\{0,1\}[0-9]\{1,\}\).*/\1/p' "$pf" | head -n 1)"
+    p_add="$(sed -n 's/.*input \* \(-\{0,1\}[0-9]\{1,\}\) + \(-\{0,1\}[0-9]\{1,\}\).*/\2/p' "$pf" | head -n 1)"
+    p_els="$(sed -n 's/.*input - \(-\{0,1\}[0-9]\{1,\}\).*/\1/p' "$pf" | head -n 1)"
+    p_arg="$(sed -n 's/.*backend_probe_value(\(-\{0,1\}[0-9]\{1,\}\)).*/\1/p' "$pf" | tail -n 1)"
+    for p_v in "$p_thr" "$p_mul" "$p_add" "$p_els" "$p_arg"; do
+        [ -n "$p_v" ] || return 1
+    done
+    if [ "$p_arg" -gt "$p_thr" ]; then
+        printf '%s\n' "$((p_arg * p_mul + p_add))"
+    else
+        printf '%s\n' "$((p_arg - p_els))"
+    fi
+}
+
+check_artifact_first_tier() {
+    # --- fixture presence -------------------------------------------------
+    if [ -s "$FIXTURE" ]; then
+        record_result contract "fixture present" PASS committed-fixture "$FIXTURE"
+    else
+        record_result contract "fixture present" FAIL missing-or-empty-fixture "$FIXTURE"
+    fi
+
+    # --- fixture return-code contract ------------------------------------
+    if [ -s "$FIXTURE" ]; then
+        computed="$(probe_expected_exit_code "$FIXTURE" || true)"
+        if [ -z "$computed" ]; then
+            record_result contract "fixture return contract" FAIL \
+                unparseable-probe-shape "$FIXTURE"
+        elif [ "$computed" = "$EXPECT_RUN_CODE" ]; then
+            record_result contract "fixture return contract" PASS \
+                "computes-$computed" "$FIXTURE"
+        else
+            record_result contract "fixture return contract" FAIL \
+                "computes-$computed-expected-$EXPECT_RUN_CODE" "$FIXTURE"
+        fi
+    else
+        record_result contract "fixture return contract" FAIL \
+            missing-or-empty-fixture "$FIXTURE"
+    fi
+
+    # --- run-stage assertion agrees with the constant ---------------------
+    # The run/readback stage must assert EXPECT_RUN_CODE, not an inlined
+    # literal.  A literal reintroduced here would drift from the fixture.
+    if grep -q 'run_code" -eq "\$EXPECT_RUN_CODE"' "$0"; then
+        record_result contract "run assertion wired to constant" PASS \
+            expect-run-code-constant "$0"
+    else
+        record_result contract "run assertion wired to constant" FAIL \
+            run-stage-uses-inline-literal "$0"
+    fi
+
+    # --- declared-vs-driven backend registration --------------------------
+    # Every backend this guard drives must be a registered BackendKind with the
+    # exact lowercase name the guard passes to --backend.  A renamed variant or
+    # a renamed string breaks the guard's own premise, and is caught here
+    # without running anything.
+    for backend in llvm cranelift wasm; do
+        if [ "$REQUESTED_BACKEND" != all ] && [ "$REQUESTED_BACKEND" != "$backend" ]; then
+            continue
+        fi
+        check_backend_registered "$backend"
+    done
+}
+
+# Enum variant that must map to a given lowercase backend name.
+backend_registry_variant() {
+    case "$1" in
+        llvm) printf 'Llvm\n' ;;
+        cranelift) printf 'Cranelift\n' ;;
+        wasm) printf 'Wasm\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+check_backend_registered() {
+    br_name="$1"
+    br_variant="$(backend_registry_variant "$br_name")" || {
+        record_result "$br_name" "backend registered" FAIL \
+            no-expected-variant "$BACKEND_REGISTRY"
+        return
+    }
+    if [ ! -s "$BACKEND_REGISTRY" ]; then
+        record_result "$br_name" "backend registered" FAIL \
+            missing-backend-registry "$BACKEND_REGISTRY"
+        return
+    fi
+    if ! grep -q "^[[:space:]]*$br_variant\([[:space:]]\|\$\|#\)" "$BACKEND_REGISTRY"; then
+        record_result "$br_name" "backend registered" FAIL \
+            "missing-enum-variant-$br_variant" "$BACKEND_REGISTRY"
+        return
+    fi
+    if ! grep -q "case $br_variant: \"$br_name\"" "$BACKEND_REGISTRY"; then
+        record_result "$br_name" "backend registered" FAIL \
+            "variant-$br_variant-does-not-map-to-$br_name" "$BACKEND_REGISTRY"
+        return
+    fi
+    record_result "$br_name" "backend registered" PASS \
+        "backendkind-$br_variant" "$BACKEND_REGISTRY"
 }
 
 skip_backend() {
@@ -166,6 +329,118 @@ skip_backend() {
     record_result "$backend" "link artifact" SKIP_UNAVAILABLE "$reason"
     record_result "$backend" "run or read back" SKIP_UNAVAILABLE "$reason"
 }
+
+selftest() {
+    st_fail=0
+    st_dir="${TMPDIR:-/tmp}/cpu-backend-selftest.$$"
+    mkdir -p "$st_dir"
+
+    st_verdict() { # name passes failures skips require_all expect_exit expect_substr
+        st_out="$(emit_verdict "$2" "$3" "$4" "$5")"
+        st_ec=$?
+        if [ "$st_ec" -ne "$6" ]; then
+            echo "selftest FAIL $1: exit $st_ec expected $6 ($st_out)" >&2
+            st_fail=$((st_fail + 1)); return 0
+        fi
+        case "$st_out" in
+            *"$7"*) ;;
+            *) echo "selftest FAIL $1: verdict '$st_out' lacks '$7'" >&2
+               st_fail=$((st_fail + 1)) ;;
+        esac
+    }
+
+    # ---- verdict contract ------------------------------------------------
+    st_verdict must-pass 12 0 8 0 0 "PASS — 20 backend step(s) checked, 12 verified, 8 recorded skip(s)"
+    st_verdict must-pass-clean 21 0 0 0 0 "PASS — 21 backend step(s) checked, 21 verified, 0 recorded skip(s)"
+    st_verdict must-fail 15 3 0 0 1 "FAIL — 18 backend step(s) checked, 3 failure(s)"
+    st_verdict must-fail-require-all 3 0 18 1 1 "not allowed under --require-all"
+    st_verdict must-error-all-skipped 0 0 18 0 2 "ERROR — nothing was checked (18 backend step(s) skipped as unavailable, 0 verified)"
+    st_verdict must-error-empty 0 0 0 0 2 "ERROR — nothing was checked"
+
+    # ---- artifact-first check class: probe fixture return contract -------
+    st_probe() { # name file expect_value_or_empty
+        st_got="$(probe_expected_exit_code "$2" 2>/dev/null || true)"
+        if [ "$st_got" != "$3" ]; then
+            echo "selftest FAIL $1: probe value '$st_got' expected '$3'" >&2
+            st_fail=$((st_fail + 1))
+        fi
+    }
+    # must-PASS: the real committed fixture must compute EXPECT_RUN_CODE
+    st_probe must-pass-real-fixture "$CANONICAL_FIXTURE" "$EXPECT_RUN_CODE"
+    # must-FAIL: arithmetic tampered -> different value, so the guard FAILs
+    sed 's/input \* 2 + 1/input * 2 + 7/' "$CANONICAL_FIXTURE" >"$st_dir/tampered.spl"
+    st_probe must-fail-tampered-arithmetic "$st_dir/tampered.spl" 47
+    # must-FAIL: call argument tampered -> takes the else branch
+    sed 's/backend_probe_value(20)/backend_probe_value(5)/' "$CANONICAL_FIXTURE" >"$st_dir/tampered_arg.spl"
+    st_probe must-fail-tampered-argument "$st_dir/tampered_arg.spl" 4
+    # must-FAIL: unparseable shape -> empty, guard reports unparseable-probe-shape
+    printf 'fn main() -> i64:\n    0\n' >"$st_dir/unparseable.spl"
+    st_probe must-fail-unparseable "$st_dir/unparseable.spl" ""
+    # must-FAIL: missing/empty fixture -> empty
+    : >"$st_dir/empty.spl"
+    st_probe must-fail-empty "$st_dir/empty.spl" ""
+    st_probe must-fail-missing "$st_dir/does-not-exist.spl" ""
+
+    # ---- artifact-first check class: backend registration ---------------
+    st_reg() { # name registry_file backend expect_status
+        st_rout="$(BACKEND_REGISTRY="$2" check_backend_registered "$3")"
+        case "$st_rout" in
+            *"status=$4"*) ;;
+            *) echo "selftest FAIL $1: '$st_rout' lacks status=$4" >&2
+               st_fail=$((st_fail + 1)) ;;
+        esac
+    }
+    # must-PASS: the real committed registry registers all three
+    for st_b in llvm cranelift wasm; do
+        st_reg "must-pass-registry-$st_b" "$CANONICAL_REGISTRY" "$st_b" PASS
+    done
+    # must-FAIL: enum variant renamed
+    sed 's/^\( *\)Wasm\b/\1WasmRenamed/' "$CANONICAL_REGISTRY" >"$st_dir/reg_novariant.spl"
+    st_reg must-fail-registry-renamed-variant "$st_dir/reg_novariant.spl" wasm FAIL
+    # must-FAIL: variant present but mapped to a different name string
+    sed 's/case Llvm: "llvm"/case Llvm: "llvm2"/' "$CANONICAL_REGISTRY" >"$st_dir/reg_badname.spl"
+    st_reg must-fail-registry-renamed-string "$st_dir/reg_badname.spl" llvm FAIL
+    # must-FAIL: registry file missing
+    st_reg must-fail-registry-missing "$st_dir/no-such-registry.spl" cranelift FAIL
+
+    # ---- end-to-end: fixture removed must make the whole guard FAIL ------
+    st_e2e_dir="$st_dir/e2e"
+    mkdir -p "$st_e2e_dir"
+    CPU_BACKEND_SELFTEST_CHILD=1 FIXTURE_OVERRIDE="$st_dir/does-not-exist.spl" \
+        CPU_BACKEND_FIXTURE="$st_dir/does-not-exist.spl" \
+        BUILD_DIR="$st_e2e_dir/build" sh "$0" >"$st_e2e_dir/out.txt" 2>&1
+    st_e2e_ec=$?
+    st_e2e_line="$(tail -n 1 "$st_e2e_dir/out.txt")"
+    if [ "$st_e2e_ec" -ne 1 ]; then
+        echo "selftest FAIL missing-fixture-e2e: exit $st_e2e_ec expected 1 ($st_e2e_line)" >&2
+        st_fail=$((st_fail + 1))
+    fi
+    case "$st_e2e_line" in
+        FAIL*) ;;
+        *) echo "selftest FAIL missing-fixture-e2e: last line '$st_e2e_line'" >&2
+           st_fail=$((st_fail + 1)) ;;
+    esac
+
+    rm -rf "$st_dir"
+    if [ "$st_fail" -gt 0 ]; then
+        echo "cpu_backend_selftest status=FAIL cases_failed=$st_fail" >&2
+        return 1
+    fi
+    echo "cpu_backend_selftest status=PASS cases=20"
+    return 0
+}
+
+# Selftest is FATAL and runs before every scan (suppressed only inside the
+# selftest's own child invocations, to avoid infinite recursion).
+if [ "${CPU_BACKEND_SELFTEST_CHILD:-0}" != 1 ]; then
+    if ! selftest; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+fi
+[ "$SELFTEST_ONLY" = 1 ] && exit 0
+
+check_artifact_first_tier
 
 SIMPLE_BIN="$(find_simple_binary)"
 if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
@@ -480,15 +755,18 @@ NODE
 fi
 
 if [ "$FAILURES" -gt 0 ]; then
-    echo "cpu_backend_matrix status=FAIL failures=$FAILURES skips=$SKIPS require_all=$REQUIRE_ALL"
-    exit 1
-fi
-if [ "$SKIPS" -gt 0 ]; then
+    MATRIX_STATUS=FAIL
+elif [ "$SKIPS" -gt 0 ]; then
     if [ "$REQUIRE_ALL" = 1 ]; then
-        echo "cpu_backend_matrix status=FAIL failures=0 skips=$SKIPS require_all=1"
-        exit 1
+        MATRIX_STATUS=FAIL
+    elif [ "$PASSES" -eq 0 ]; then
+        MATRIX_STATUS=SKIP_UNAVAILABLE
+    else
+        MATRIX_STATUS=PASS_WITH_SKIPS
     fi
-    echo "cpu_backend_matrix status=SKIP_UNAVAILABLE failures=0 skips=$SKIPS require_all=0"
-    exit 0
+else
+    MATRIX_STATUS=PASS
 fi
-echo "cpu_backend_matrix status=PASS failures=0 skips=0 require_all=$REQUIRE_ALL"
+echo "cpu_backend_matrix status=$MATRIX_STATUS pass=$PASSES failures=$FAILURES skips=$SKIPS require_all=$REQUIRE_ALL"
+emit_verdict "$PASSES" "$FAILURES" "$SKIPS" "$REQUIRE_ALL"
+exit $?

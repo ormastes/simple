@@ -2,7 +2,27 @@
 
 - **Date:** 2026-07-28
 - Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- Status re-verified 2026-08-17 by source inspection (independent
+  re-verification pass). **Remains OPEN — no fix found.** A prior triage pass
+  reported "JIT bodies now execute; only the interpreter gap survives"; this
+  pass could NOT reproduce that claim from the source and therefore does not
+  act on it. What was actually checked:
+  - `src/compiler_rust/compiler/src/codegen/instr/calls.rs` and
+    `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs` —
+    the two sites this record names under "Likely cause" — contain no
+    enum-associated-function handling and no reference to this bug
+    (`grep -n 'enum_assoc|enum associated|EnumName\.'` over both files: no
+    matches).
+  - No file under `src/` cites
+    `enum_associated_fn_never_called_on_jit_2026-07-28.md`, so there is no
+    in-tree fix annotation to corroborate a repair.
+
+  Both defects in this record therefore stay open on the evidence available
+  here: the JIT half (a defined `static fn` on an enum returning a value that
+  matches no `case` arm) and the separate interpreter half (enum payload
+  deep-copied at the `case Dict(d)` binding). Reproducing the JIT half needs
+  actual execution on both engines; that was deliberately not done in this
+  pass, so nothing here is verified by execution in either direction.
 - **Severity:** critical (silent wrong values codebase-wide on the default engine; engines disagree)
 - **Found by:** lane S3 while diagnosing "SdnValue insert does not persist"; reproduced independently by the coordinator
 

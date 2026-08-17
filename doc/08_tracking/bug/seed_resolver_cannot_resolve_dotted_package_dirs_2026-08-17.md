@@ -70,7 +70,7 @@ Three additional facts found while verifying, all worth knowing:
 # Rust seed resolver cannot resolve dotted package directories; `simple info` is dead in seed mode
 
 - **Date:** 2026-08-17
-- **Status:** OPEN
+- **Status:** OPEN — source fix present (Strategy 5 dotted-directory join, `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs:303`) but the deployed seed has NOT been rebuilt, so the user-visible symptom still reproduces. Re-triage after redeploy. (Triage 2026-08-17: bucket B, not closable.)
 - **Severity:** medium (blocks `simple info`, `search`, `yank`, `publish` whenever `bin/simple` is the seed)
 - **Component:** `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`
 

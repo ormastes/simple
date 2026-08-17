@@ -1,8 +1,33 @@
 # Co-compiled symbol collisions — root cause, distribution, and decision
 
 **Date:** 2026-08-09
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: OPEN — reproducible.
+
+**The earlier `CLOSED (not reproducible)` stamp (and its 2026-08-17
+"re-verified by source inspection") was wrong and is retracted.** It was
+contradicted by this document's own body, which measures **375** co-compiled
+warnings (350 Class B silently-winning identical signatures, 296 public).
+
+Re-reproduced 2026-08-17 by execution, not inspection:
+`bin/simple test test/01_unit/app/debug/remote/trace32_client_spec.spl`
+emitted
+
+```
+warning: class `DebugConfig` has 2 co-compiled definitions across 2 modules ...
+  Defined in: src/app/debug/remote/types.spl,
+              src/lib/nogc_sync_mut/debug/remote/types.spl
+```
+
+Both emitters (`src/compiler_rust/compiler/src/pipeline/module_loader.rs:1727`
+and `src/compiler/10.frontend/core/interpreter/eval_tables.spl:618`) are
+DIAGNOSTICS ONLY — there is no dedup and no module-scoped member resolution
+anywhere, so the method-body-substitution hazard is real and unmitigated.
+
+Two duplicates were removed on 2026-08-17 (`app/debug/remote/types.spl`,
+`app/dap/adapter/trace32.spl`), which clears the `DebugConfig` warning in the
+spec above. The remaining population is untouched; see §3 below for the
+sync/async stdlib mirror pairs, which are a deliberate lane split and need
+namespacing rather than deletion.
 **Supersedes the analysis in:** `duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md`
 **Measured from:** the SHARED working copy at `/home/ormastes/dev/pub/simple` (a worktree cannot measure this — `use std.X` resolves only to the main repo)
 

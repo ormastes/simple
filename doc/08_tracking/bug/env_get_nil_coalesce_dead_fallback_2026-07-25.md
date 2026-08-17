@@ -85,6 +85,65 @@ Highest-count files (import not yet verified per-file):
 Note the two other host-WM showcase wrappers (2D, web) each carry 9 — the cells
 I have not yet run. Expect the same class of failure there.
 
+## App-lane partial fix, 2026-08-17 (measured)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes,
+2026-08-16 22:59:37 (Rust seed).
+
+**Key refinement to the census above: most `src/app` occurrences are `?? ""`,
+which is a benign no-op** (the dead default equals the value produced anyway).
+Only a NON-empty default is a live wrong-value site. Filtering `src/app/**`
+that way cuts 192 occurrences to **32 live sites**.
+
+RED (both engines, `SIMPLE_EXECUTION_MODE=interpret` and `=jit` agree), through
+the exact import chain used by the messaging workers
+(`app.io.mod.env_get` -> `std.nogc_sync_mut.io.env_ops.env_get -> text`):
+
+```
+database=[]        # expected .simple/state/llm-caret-messaging.db
+identity=[]        # expected local-agent
+```
+
+GREEN with `std.io_runtime.env_get_opt`, same tree, same binary, both engines,
+plus a set-variable control proving the value is read and not hardcoded:
+
+```
+database=[.simple/state/llm-caret-messaging.db]
+identity=[local-agent]
+LLM_CARET_MESSAGING_IDENTITY=agent-7 -> identity=[agent-7]
+```
+
+Migrated (15 live sites, 6 files) — each file was import-audited first; all six
+already imported `std.io_runtime` under a brace list, so no new module edge:
+
+- `src/app/llm_caret/messaging/mcp_worker.spl` (DB path, identity, workspace, scopes)
+- `src/app/llm_caret/messaging/server_worker.spl` (identity, workspace)
+- `src/app/llm_caret/messaging/bridge_worker.spl` (DB path)
+- `src/app/llm_caret/messaging/adapter/agent/hook_command.spl` (DB path)
+- `src/app/llm_caret/messaging/cli.spl` (6 x `SIMPLE_BINARY` -> `bin/simple`)
+- `src/app/llm_caret/claude_full/bridge/bridgeConfig.spl` (`CLAUDE_BASE_API_URL`)
+
+Ablation (same tree, same binary, both engines): the six files at `HEAD`
+content scan to **15 offenders**; with the fix applied, **0**.
+
+Specs:
+- `test/01_unit/app/llm_caret/messaging_env_default_spec.spl` (reproducing;
+  `Results: 3 total, 3 passed, 0 failed`)
+- `test/01_unit/app/llm_caret/env_get_dead_fallback_class_spec.spl`
+  (class detection with a positive-control fixture and a non-vacuity control;
+  `Results: 3 total, 3 passed, 0 failed`)
+
+Still OPEN — the remaining 17 live `src/app` sites, deliberately NOT swept
+because their `env_get` is a different symbol whose return type must be audited
+per file first (`rt_env_get` extern, and local `qmp_env_get` / `mdi_env_get`
+wrappers, some of which may legitimately return `text?`):
+`src/app/test/simpleos_desktop_qmp_launch.spl` (3),
+`src/app/test/ci_runner.spl` (4), `src/app/ui_shared_mdi/main.spl` (2),
+`src/app/play/wm_daemon.spl`, `src/app/play/wm_daemon_ensure.spl`,
+`src/app/cli/native_build_main.spl`,
+`src/app/test/renderdoc_vulkan_widget_capture.spl`,
+`src/app/io/_CliCommands/run_commands.spl` (`rt_env_get`, likely correct).
+
 ## Recommended real fix (pick one, do it deliberately)
 
 1. **Unify `env_get` on `text?`** and let `??` mean what every call site already

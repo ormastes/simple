@@ -1,5 +1,7 @@
 # SimpleOS `rt_free` ABI signature mismatch
 
+- **Re-verified by content 2026-08-17 (os/runtime lane):** `src/os/libc/simpleos_simple_runtime.c:72` is `void rt_free(void *ptr) {` (one arg) and `src/os/sdk/include/simpleos.h:98` is `void rt_free(void *ptr);` — signatures agree; no second `size` parameter survives anywhere under `src/os/libc/`. `sh scripts/check/check-c-runtime-compiles-push.shs` = `PASS — 104 file(s) compiled, 0 errors`.
+
 - **ID:** `simpleos_rt_free_abi_signature_mismatch_2026-08-02`
 - **Status:** FIXED — claimed and repaired by `pure_parser_close` on 2026-08-02
 - **Severity:** High (allocator ABI / undefined behavior)

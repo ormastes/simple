@@ -1,22 +1,26 @@
 # `rt_dir_list` C platform-header helper collides with the real extern
 
 **Date:** 2026-08-10
-**Status:** RESOLVED 2026-08-17 — the rename this doc requested was applied
-(worker is `rt_dir_list_cpath` in both `unix_common.h:108` and
-`platform_win.h:120`, with in-header comments explaining the old collision).
-`scripts/check/check-extern-abi-signatures.shs` no longer emits any
-`rt_dir_list` mismatch row (verified 2026-08-17; the gate's residual FAIL is
-10 unrelated pre-existing rows — `rt_db_get/delete`, `rt_dir_glob`,
-`rt_file_find`, `rt_file_open` in `descriptor.rs`, `rt_invlpg`,
-`rt_process_run_with_limits`, `rt_struct_alloc`, `rt_write_cr3` — same family,
-separate work). Regression specs (green):
-`test/01_unit/runtime/rt_dir_list_header_no_collision_spec.spl` (repro +
-renamed-worker generalization) and mirror
-`test/unit/runtime/rt_dir_list_header_no_collision_spec.spl`. Related fix same
-day: the pure-Simple backends' 3-arg `rt_file_open` declaration was corrected
-to the 4-arg (ptr,len,ptr,len) ABI in `llvm_backend.spl:386` and
-`llvm_lib_translate.spl:286`, gated by
-`test/01_unit/compiler/backend/rt_extern_decl_arity_spec.spl` (+ mirror).
+**Status:** FIXED — verified by content grep 2026-08-17 (os/runtime lane). The
+suggested rename landed as `rt_dir_list_cpath` (not `rt_dir_list_entries`), and a
+real `rt_dir_list` extern now exists in C:
+
+- `src/runtime/platform/unix_common.h:108` — `const char** rt_dir_list_cpath(const char* path, int64_t* out_count)`
+- `src/runtime/platform/platform_win.h:110` — same rename, same comment block
+- `src/runtime/runtime.c:2206` — `int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len)`,
+  which matches `runtime_sffi.rs:1877` `RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64])` exactly.
+- `/usr/bin/grep -rn "rt_dir_list" src/runtime/` shows **one** non-static global
+  `rt_dir_list` definition; no C copy takes an out-pointer any more.
+
+**The "gate is RED because of this row" claim has DECAYED and is no longer true.**
+Re-ran `sh scripts/check/check-extern-abi-signatures.shs` (exit 1, read off the
+line after the command, not through a pipe): the failure is now
+`FAIL — 289 pure-Simple backend declarations checked, 2 arity mismatch(es)` on
+`rt_file_open 4 vs 3` in `llvm_backend.spl` / `llvm_lib_translate.spl`. The run
+short-circuits at that earlier pure-Simple-declaration check and **never emits the
+`470 symbols checked` C-header comparison at all**, so it neither confirms nor
+denies this row — the content grep above is what closes it. The new RED is filed
+separately as `rt_file_open_arity_oracle_disagrees_with_only_definition_2026-08-17.md`.
 **Family:** `doc/08_tracking/bug/rt_extern_abi_divergence_family_2026-08-10.md`
 
 ## Symptom

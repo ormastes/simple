@@ -6,6 +6,28 @@
 # OS reclaims all child memory on _exit().
 # src/runtime/runtime_fork.c independently applies the same 4 MiB-per-stream
 # head/tail capture contract because fork mode does not use the process facade.
+#
+# UNSTABLE-MODE LIMITATION (documented, not fixed here).
+# Unstable mode's contract is a SEPARATE PROCESS per unit. Fork mode gives a
+# child process per spec, so a crash IS contained and never ends the suite --
+# but the child is COW-forked from the parent's ALREADY-LOADED interpreter
+# image, so accumulated in-process state (module tables, caches, globals) is
+# INHERITED rather than reset. That is crash isolation, NOT the
+# fresh-process-per-unit guarantee the other modes (interpreter/smf/native/
+# compile/safe, all of which `process_run_*` a real binary) provide. Fork mode
+# is off by default and opt-in via `--fork` / `--fork-mode`; treat a fork-mode
+# unstable run as weaker evidence than a subprocess-mode one.
+#
+# WHAT FORK MODE HAS THAT THE SUBPROCESS PATH DOES NOT: the real signal number.
+# `rt_fork_parent_wait` reads waitpid status directly and returns
+# `128 + WTERMSIG` on death-by-signal (runtime_fork.c:463-465), plus exported
+# `rt_fork_parent_signaled()` / `rt_fork_parent_timed_out()` predicates. The
+# subprocess path collapses BOTH timeout and every signal into a single `-1`
+# sentinel (env_process.rs:508,535), which is why SIGSEGV and an earlyoom
+# SIGTERM are indistinguishable there. Here they are not: 139 is SIGSEGV,
+# 143 is SIGTERM. `classify_fork_exit` below uses that directly, so fork mode
+# does not need the crash-sentinel heuristic to tell a genuine crash from an
+# outside kill.
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_execute.{make_result_from_output}
@@ -17,9 +39,59 @@ extern fn rt_fork_parent_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_fork_parent_stdout() -> text
 extern fn rt_fork_parent_stderr() -> text
 extern fn rt_fork_child_exit(code: i64)
+extern fn rt_fork_parent_signaled() -> bool
+extern fn rt_fork_parent_timed_out() -> bool
 
 # SFFI declaration for running interpreter on a file (Rust-side, already in binary)
 extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64
+
+# =========================================================================
+# Outcome classification (fork-specific — uses the REAL signal number)
+# =========================================================================
+
+fn signal_name_of(signo: i64) -> text:
+    """Human name for the signals that actually reach a forked test child."""
+    if signo == 2: return "SIGINT"
+    if signo == 4: return "SIGILL"
+    if signo == 6: return "SIGABRT"
+    if signo == 7: return "SIGBUS"
+    if signo == 8: return "SIGFPE"
+    if signo == 9: return "SIGKILL"
+    if signo == 11: return "SIGSEGV"
+    if signo == 15: return "SIGTERM"
+    return "signal {signo}"
+
+fn is_outside_kill(signo: i64) -> bool:
+    """SIGTERM/SIGINT/SIGKILL/SIGHUP are what an EXTERNAL killer sends.
+
+    earlyoom SIGTERMs (and then SIGKILLs) processes named `simple` at 10%
+    memory on this zero-swap host, so these say nothing about the test itself:
+    they are UNVERIFIED, never failures. A fault signal (SIGSEGV/SIGABRT/
+    SIGBUS/SIGILL/SIGFPE) is the program's own defect and IS a failure."""
+    signo == 1 or signo == 2 or signo == 9 or signo == 15
+
+fn classify_fork_exit(file_path: text, exit_code: i64, timeout_secs: i64, duration_ms: i64, setup_ms: i64) -> TestFileResult:
+    """Classify a fork child's death without the -1 sentinel guesswork.
+
+    Returns a result whose `error` is ALWAYS non-empty, so `is_ok()` stays
+    false and a crash can never read as a pass or as silently absent.
+    TERMINATED and TIMEOUT carry `failed: 0` — unverified, not failures."""
+    if rt_fork_parent_timed_out():
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "TIMEOUT: fork child produced no result after {timeout_secs}s (unverified)", timed_out: true, cached: false)
+
+    if rt_fork_parent_signaled() and exit_code > 128:
+        val signo = exit_code - 128
+        val name = signal_name_of(signo)
+        if is_outside_kill(signo):
+            return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "TERMINATED: fork child killed by {name} (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "CRASHED: fork child died by {name}", timed_out: false, cached: false)
+
+    # -1 with neither predicate set is a waitpid/plumbing failure, not a
+    # verdict about the test. Unverified, but never silently absent.
+    if exit_code < 0:
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "TERMINATED: fork parent could not reap the child (unverified)", timed_out: false, cached: false)
+
+    return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: setup_ms, error: "", timed_out: false, cached: false)
 
 # =========================================================================
 # Fork Mode Execution
@@ -81,6 +153,14 @@ fn run_test_file_fork(file_path: text, options: TestOptions) -> TestFileResult:
     val end = time_now_unix_micros()
     # duration_ms = only test execution time (excludes fork setup)
     val duration_ms = (end - after_fork) / 1000
+
+    # Signal death and timeout are classified HERE, from waitpid's real status,
+    # before make_result_from_output ever sees the code. That path only knows
+    # the `-1` sentinel plus a shell-propagated 143/144, so it cannot tell a
+    # SIGSEGV (139) from an earlyoom SIGTERM (143) — fork mode can, and must
+    # not throw that information away by deferring to the weaker classifier.
+    if rt_fork_parent_timed_out() or rt_fork_parent_signaled() or exit_code < 0:
+        return classify_fork_exit(file_path, exit_code, options.timeout, duration_ms, setup_ms)
 
     val result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
     # Attach setup_ms to the result

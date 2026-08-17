@@ -1,0 +1,73 @@
+# Runnable check: SMF manifest rows must be verified against the live source.
+#
+# Guards the fail-closed contract of
+# `compiler.driver.watcher.smf_manifest.smf_manifest_entry_matches_source`,
+# the predicate that now gates the interpreter's SMF cache hit in
+# `driver_api_interpret.try_load_smf_cached`. Before 2026-08-17 the manifest's
+# recorded `source_hash` was parsed and discarded, so a stale row could route
+# the interpreter at an artifact on the strength of the artifact's own header
+# alone.
+#
+# Run:  bin/simple run scripts/check/check-smf-manifest-source-hash-verification.spl
+# Verdict line is the LAST line of stdout. Exit 0 = PASS, 1 = FAIL.
+
+use compiler.driver.watcher.smf_manifest.{
+    SmfManifestEntry, smf_manifest_entry_new, smf_manifest_entry_matches_source
+}
+
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_exit(code: i32) -> ()
+
+fn entry_with_hash(h: i64) -> SmfManifestEntry:
+    smf_manifest_entry_new(
+        "src/demo.spl", "build/smf/src_demo.smf", h,
+        "cranelift", 0, false, true, false, "dev", []
+    )
+
+var check_checked: i64 = 0
+var check_failed: i64 = 0
+
+fn expect_case(name: text, got: bool, want: bool):
+    check_checked = check_checked + 1
+    if got != want:
+        check_failed = check_failed + 1
+        print "FAIL case: {name} — expected {want}, got {got}"
+
+fn main():
+    val src = "fn main(): print \"hi\"\n"
+    val edited = "fn main(): print \"edited\"\n"
+    val h = rt_hash_text(src)
+
+    # rt_hash_text is implemented ONLY as an interpreter extern
+    # (src/compiler_rust/compiler/src/interpreter_extern/conversion.rs); under
+    # JIT/native it resolves to a zero stub, so every source hashes to 0 and
+    # every source-hash freshness check in cache_validator.spl is vacuous.
+    # See doc/08_tracking/bug/rt_hash_text_returns_zero_under_jit_cache_freshness_vacuous_2026-08-17.md
+    # The REJECT cases below are the safety property and are asserted
+    # unconditionally — they are exactly what fail-closes the degenerate case.
+    if h == 0 and rt_hash_text(edited) == 0:
+        print "NOTE: rt_hash_text is degenerate (returns 0) on this execution path;"
+        print "      the accept case is not assertable here. Reject cases still enforced."
+    else:
+        expect_case("matching hash accepts",
+            smf_manifest_entry_matches_source(entry_with_hash(h), src), true)
+        expect_case("stale hash rejects",
+            smf_manifest_entry_matches_source(entry_with_hash(h), edited), false)
+    expect_case("zero sentinel rejects against content",
+        smf_manifest_entry_matches_source(entry_with_hash(0), "anything"), false)
+    expect_case("zero sentinel rejects against empty content",
+        smf_manifest_entry_matches_source(entry_with_hash(0), ""), false)
+    expect_case("unreadable live source rejects",
+        smf_manifest_entry_matches_source(entry_with_hash(1234567), ""), false)
+    expect_case("mismatched non-zero hash rejects",
+        smf_manifest_entry_matches_source(entry_with_hash(1234567), src), false)
+
+    val checked = check_checked
+    val failed = check_failed
+    if checked == 0:
+        print "ERROR — nothing was checked"
+        rt_exit(2)
+    if failed > 0:
+        print "FAIL — {checked} case(s) checked, {failed} failed"
+        rt_exit(1)
+    print "PASS — {checked} case(s) checked, 0 failed"

@@ -55,7 +55,7 @@ Closeable. The 2026-08-17 triage line "no retag landed" was a source-inspection
 inference (it read a stale comment at `closures_structs.rs:1379`) and was not
 confirmed by execution.
 
-- **Status:** OPEN (pre-existing; found while landing an unrelated interpreter-lane fix)
+- **Status:** RESOLVED 2026-08-17 (was OPEN) — string method result typed i64 at src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:44 and :1389; re-verified by execution on both engines
 - **Severity:** high — silent wrong values, not a crash. `"42".to_i64() == 42`
   evaluates to **false**.
 - **Lane:** Rust bootstrap seed, **JIT (cranelift) lane**. `bin/simple run` is

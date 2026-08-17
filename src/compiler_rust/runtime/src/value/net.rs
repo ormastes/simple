@@ -770,7 +770,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let acceptor = std::thread::spawn(move || listener.accept().unwrap());
 
-        let stream = connect_tls_client_socket(&addr.to_string()).unwrap();
+        // `connect_tls_client_socket` gained an explicit `connect_timeout`
+        // parameter; this loopback connect is instant, so the same bounded
+        // budget the assertions below check against is the right argument.
+        let stream = connect_tls_client_socket(&addr.to_string(), TLS_CLIENT_IO_TIMEOUT).unwrap();
         let read_timeout = stream.read_timeout().unwrap().unwrap();
         let write_timeout = stream.write_timeout().unwrap().unwrap();
         assert!(read_timeout > Duration::ZERO);

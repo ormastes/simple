@@ -1,0 +1,191 @@
+#!/bin/sh
+# Fail-closed gate for the planner admission v2 producer/verifier pair.
+#
+# Two things are proven here, and the first is the reason this file exists:
+#   SATISFIABILITY — some input is admitted. Before the canonical producer
+#     landed, bootstrap_planner_v2_verify ended in an unconditional `return 1`,
+#     so no receipt could ever pass and no bootstrap could start. A gate no
+#     input satisfies is a denial of service, not a control.
+#   BINDING — only receipts bound to a real, provenance-verified planner
+#     execution are admitted. Weakening the guard was never the fix, so every
+#     negative fixture below must still be refused.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> fixture(s) checked   exit 0
+#   FAIL — <what>                   exit 1
+#   ERROR — nothing was checked     exit 2
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+producer="$root/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs"
+
+checked=0
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-admission-gate.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL — $1"
+    exit 1
+}
+
+# Build a self-contained fixture repository root.
+#   $1 destination, $2 provenance body, $3 planner-shim policy
+#      (strict = refuses an untyped reason; permissive = accepts anything)
+make_fixture() {
+    mf_dst=$1 mf_prov=$2 mf_policy=$3
+    mkdir -p "$mf_dst/src/app/cli" "$mf_dst/src/runtime" \
+        "$mf_dst/build/bootstrap/stage2/fixture-triple"
+    cp -- "$root/src/app/cli/bootstrap_reason_planner.spl" \
+        "$mf_dst/src/app/cli/bootstrap_reason_planner.spl"
+    printf 'int fixture_runtime(void) { return 0; }\n' >"$mf_dst/src/runtime/fixture.c"
+    printf 'stage2-sanity: pass\n' >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-sanity.receipt"
+    printf '%s\n' "$mf_prov" >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-provenance.receipt"
+
+    # Fixture parent compiler: on `native-build ... -o OUT` it emits a planner
+    # shim with the same argv contract and authorization text as the real
+    # planner. This exercises the producer's measure/exec/smoke/emit path
+    # without needing a real stage2 compiler in the tree.
+    cat >"$mf_dst/build/bootstrap/stage2/fixture-triple/simple" <<'FIXTURE_CC'
+#!/bin/sh
+set -eu
+out=''
+prev=''
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out=$a; fi
+    prev=$a
+done
+[ -n "$out" ] || { echo "fixture-cc: no -o" >&2; exit 1; }
+cat >"$out" <<'PLANNER'
+#!/bin/sh
+set -eu
+reason='' target='' parent='' runtime='' closure='' planner='' receipt=''
+for a in "$@"; do
+    case "$a" in
+        --bootstrap-reason=*) reason=${a#*=} ;;
+        --bootstrap-target=*) target=${a#*=} ;;
+        --parent-compiler-sha256=*) parent=${a#*=} ;;
+        --runtime-snapshot-sha256=*) runtime=${a#*=} ;;
+        --planner-source-closure-sha256=*) closure=${a#*=} ;;
+        --planner-sha256=*) planner=${a#*=} ;;
+        --bootstrap-receipt=*) receipt=${a#*=} ;;
+    esac
+done
+if [ "@POLICY@" = strict ]; then
+    case "$target:$reason" in
+        //bootstrap:stage3:seed-missing|\
+        //bootstrap:stage4:self-host-convergence-check|\
+        //bootstrap:stage4:release-trust-verification|\
+        //bootstrap:stage4:diverse-double-compilation) ;;
+        *) echo "bootstrap-policy-error: typed-reason-required"; exit 2 ;;
+    esac
+fi
+printf '%s\n' "simple-bootstrap-authorization-v2|producer=simple-build-planner-v2|target=$target|reason=$reason|parent_sha256=$parent|runtime_sha256=$runtime|source_closure_sha256=$closure|planner_sha256=$planner" >"$receipt"
+echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
+PLANNER
+chmod +x "$out"
+FIXTURE_CC
+    sed -i "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+}
+
+run_producer() {
+    rp_root=$1
+    sh "$producer" --root="$rp_root" \
+        --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple" \
+        --runtime-dir="$rp_root/src/runtime" \
+        --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+        --out="$rp_root/receipt.env"
+}
+
+# --- fixture 1: the gate is satisfiable -------------------------------------
+ok_root="$scratch/ok"
+make_fixture "$ok_root" 'stage2-provenance: pure-simple' strict
+ok_root=$(CDPATH= cd -- "$ok_root" && pwd -P)
+run_producer "$ok_root" >"$scratch/ok.log" 2>&1 ||
+    fail "producer refused a well-formed admission: $(tail -3 "$scratch/ok.log" | tr '\n' ' ')"
+grep -q '^bootstrap-admission: produced ' "$scratch/ok.log" ||
+    fail "producer emitted no verdict line"
+bootstrap_planner_v2_verify "$ok_root/receipt.env" "$ok_root" >/dev/null 2>&1 ||
+    fail "verifier rejected the canonical producer's own receipt (gate unsatisfiable)"
+checked=$((checked + 1))
+
+# --- fixture 2: a forged argv digest is refused ------------------------------
+cp -- "$ok_root/receipt.env" "$scratch/argv.env"
+sed -i 's/^build_argv_sha256=.*/build_argv_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$scratch/argv.env"
+bootstrap_planner_v2_verify_structure "$scratch/argv.env" "$ok_root" >/dev/null 2>&1 ||
+    fail "argv fixture no longer passes the structural layer, so it does not isolate the argv binding"
+if bootstrap_planner_v2_verify "$scratch/argv.env" "$ok_root" >/dev/null 2>&1; then
+    fail "a receipt with a forged build_argv_sha256 was admitted"
+fi
+checked=$((checked + 1))
+
+# --- fixture 3: a forged env digest is refused -------------------------------
+cp -- "$ok_root/receipt.env" "$scratch/env.env"
+sed -i 's/^build_env_sha256=.*/build_env_sha256=1111111111111111111111111111111111111111111111111111111111111111/' "$scratch/env.env"
+if bootstrap_planner_v2_verify "$scratch/env.env" "$ok_root" >/dev/null 2>&1; then
+    fail "a receipt with a forged build_env_sha256 was admitted"
+fi
+checked=$((checked + 1))
+
+# --- fixture 4: an out-of-root artifact is refused ---------------------------
+# This is the forgery the original bug report demonstrated: hand-written
+# fixtures whose hashes match because the forger authored the files.
+cp -- "$ok_root/receipt.env" "$scratch/outside.env"
+cp -- "$ok_root/build/bootstrap/admission/"*/git-state.txt "$scratch/git-state.txt"
+esc=$(printf '%s' "$scratch/git-state.txt" | sed 's/[\/&]/\\&/g')
+sed -i "s/^git_state_path=.*/git_state_path=$esc/" "$scratch/outside.env"
+bootstrap_planner_v2_verify_structure "$scratch/outside.env" "$ok_root" >/dev/null 2>&1 ||
+    fail "out-of-root fixture no longer passes the structural layer, so it does not isolate path pinning"
+if bootstrap_planner_v2_verify "$scratch/outside.env" "$ok_root" >/dev/null 2>&1; then
+    fail "a receipt naming an out-of-root artifact was admitted"
+fi
+checked=$((checked + 1))
+
+# --- fixture 5: a parent with no provenance evidence is refused --------------
+noprov_root="$scratch/noprov"
+make_fixture "$noprov_root" 'stage2-provenance: pure-simple' strict
+rm -f -- "$noprov_root/build/bootstrap/stage2/fixture-triple/stage2-provenance.receipt"
+noprov_root=$(CDPATH= cd -- "$noprov_root" && pwd -P)
+if run_producer "$noprov_root" >"$scratch/noprov.log" 2>&1; then
+    fail "producer admitted a parent with no stage2 provenance"
+fi
+grep -q 'parent-stage2-provenance-unavailable' "$scratch/noprov.log" ||
+    fail "missing provenance did not yield the typed diagnostic"
+checked=$((checked + 1))
+
+# --- fixture 6: a Rust-seed parent is refused --------------------------------
+seed_root="$scratch/seed"
+make_fixture "$seed_root" 'stage2-provenance: rust-seed' strict
+seed_root=$(CDPATH= cd -- "$seed_root" && pwd -P)
+if run_producer "$seed_root" >"$scratch/seed.log" 2>&1; then
+    fail "producer admitted a Rust-seed parent compiler"
+fi
+grep -q 'parent-compiler-is-rust-seed' "$scratch/seed.log" ||
+    fail "seed parent did not yield the typed diagnostic"
+checked=$((checked + 1))
+
+# --- fixture 7: a planner that is not a policy gate is refused --------------
+perm_root="$scratch/permissive"
+make_fixture "$perm_root" 'stage2-provenance: pure-simple' permissive
+perm_root=$(CDPATH= cd -- "$perm_root" && pwd -P)
+if run_producer "$perm_root" >"$scratch/perm.log" 2>&1; then
+    fail "producer admitted a planner that accepts an untyped reason"
+fi
+grep -q 'planner-smoke-accepted-untyped-reason' "$scratch/perm.log" ||
+    fail "permissive planner did not yield the typed smoke diagnostic"
+checked=$((checked + 1))
+
+# --- fixture 8: a target/reason pair outside the typed set is refused -------
+if sh "$producer" --root="$ok_root" \
+        --parent-compiler="$ok_root/build/bootstrap/stage2/fixture-triple/simple" \
+        --target=//bootstrap:stage4 --reason=because-i-said-so \
+        --out="$scratch/bad.env" >"$scratch/bad.log" 2>&1; then
+    fail "producer accepted an untyped reason on the command line"
+fi
+grep -q 'typed-reason-not-allowed-for-target' "$scratch/bad.log" ||
+    fail "untyped CLI reason did not yield the typed diagnostic"
+checked=$((checked + 1))
+
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+echo "PASS — $checked fixture(s) checked"

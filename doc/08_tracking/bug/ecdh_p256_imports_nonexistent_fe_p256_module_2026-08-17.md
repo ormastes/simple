@@ -1,6 +1,18 @@
 # P-256 ECDH imports a field-arithmetic module that has never existed
 
-- Status: OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (independent re-verification pass).
+  The module now exists at the exact imported path and defines every imported
+  name. Checked `src/lib/common/math/field/fe_p256.spl`: `struct FeP256` :33,
+  `fe_zero` :53, `fe_one` :56, `fe_add` :115, `fe_sub` :136, `fe_mul` :239,
+  `fe_sq` :296, `fe_inv` :299, `fe_from_bytes` :337, `fe_to_bytes` :357,
+  `fe_eq` :91 — all 11 names on the `use std.common.math.field.fe_p256.{...}`
+  list at `src/os/crypto/ecdh_p256.spl:46-53` resolve. Landed by
+  `306aebd15daa` ("feat(crypto): implement the P-256 field layer that p256.spl
+  imported but did not exist"). **Verified by source inspection only** — the
+  `p256_ct_property_spec.spl` run in the Symptom section was not re-executed,
+  so this closes the *missing-module* defect, not any arithmetic-correctness
+  claim about the new field layer.
 - Found: 2026-08-17, `test/01_unit/lib/crypto` sweep
 - Severity: **HIGH** — P-256 ECDH is non-functional, and it fails at *runtime*,
   not at build time. Security-relevant surface.

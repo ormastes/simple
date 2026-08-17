@@ -1,7 +1,6 @@
 # `LspEmitter` / `LspCodeAction` are imported and called but were never implemented
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- Status: RESOLVED 2026-08-17 (was OPEN) — `src/lib/common/report/emitter/lsp.spl:22,25` declares `class LspEmitter` with `static fn default_emitter()`; `LspCodeAction` no longer referenced in `src/`
 
 **Date:** 2026-07-28 · **Status:** FIXED 2026-08-17 · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped

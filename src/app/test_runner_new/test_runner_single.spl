@@ -26,6 +26,15 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use app.io.mod.{env_get}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+# Single source of truth for the six-class outcome contract
+# (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN) frozen in
+# .spipe/unstable_test_mode/state.md. The single-spec path used to have NO
+# abnormal-termination classification at all: a SIGSEGV arrived as the runtime's
+# -1 sentinel with an empty stdout and fell through to the zero-executed branch,
+# so a crash reported "no examples executed" instead of CRASHED. Reused rather
+# than reimplemented on purpose -- a second copy of this classification would
+# drift out of sync exactly as the duplicated composite-grammar parsers did.
+use std.test_runner.test_executor_parsing.{make_result_from_output}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
@@ -1040,25 +1049,37 @@ fn main() -> i64:
         print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} trunc={was_truncated}"
     var failed = 0
     var passed = 0
-    if code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
-        # process_run_bounded killed the child at the configured per-file
-        # budget: it never got a chance to finish, so nothing it printed
-        # (partial summary lines included) can be trusted as a real result.
-        # Bug: test_runner_60s_silent_kill_greenwash — a killed file must
-        # never read as PASS just because the pre-kill output looked clean.
-        failed = 1
-        passed = 0
-        print "error: test-runner: file timed out"
-        # Emit a verdict line for the KILLED file. Without it this branch
-        # produced "Process timed out" and nothing else, so a sweep that
-        # counts `^SPEC FILE VERDICT:` lines saw the file as NEVER RUN rather
-        # than BROKEN, and the breakage was invisible. Suppressed when the
-        # child somehow already printed one, so a real verdict is never
-        # shadowed by a synthetic one.
-        # Bug: killed_spec_emits_no_verdict_line_2026-08-09.
+    # Non-empty only for the UNVERIFIED classes (TERMINATED / TIMEOUT), which
+    # carry failed: 0 by contract. Without it those two would collapse into
+    # `failed == 0` -> exit 0, i.e. a silent green for a run that produced no
+    # verified result at all.
+    var unverified_error = ""
+    if code == -1 or code == 143 or code == 144:
+        # The runtime collapses timeout AND death-by-signal onto the one -1
+        # sentinel; 143/144 arrive when an intermediate shell propagates a
+        # SIGTERM. Both shapes need the frozen six-class classification, so
+        # they are handed to the SAME classifier the parent (session-daemon)
+        # path uses. This is the whole point of the reuse: `bin/simple test
+        # <one_file.spl>` and any `--no-session-daemon` run route here, and
+        # previously got none of the classification.
+        # Bug: test_runner_60s_silent_kill_greenwash (a killed file must never
+        # read as PASS from pre-kill output) and
+        # killed_spec_emits_no_verdict_line_2026-08-09 (a killed file must
+        # still emit a verdict line so verdict-counting sweeps see it as
+        # BROKEN, not NEVER RUN).
+        val outcome = make_result_from_output(run.path, child_stdout, stderr, code, duration_ms, run.timeout_secs)
+        passed = outcome.passed
+        failed = outcome.failed
+        if outcome.error != "":
+            print "error: test-runner: {outcome.error}"
+        if failed == 0:
+            unverified_error = outcome.error
         if not has_verdict_line(combined):
-            print "error: test-runner: {exit_code_reason(code)} after {run.timeout_secs}s budget"
-            print timeout_verdict_line(run.path, "child-timeout", timeout_ms)
+            if outcome.timed_out:
+                print "error: test-runner: {exit_code_reason(code)} after {run.timeout_secs}s budget"
+                print timeout_verdict_line(run.path, "child-timeout", timeout_ms)
+            else:
+                print unrun_verdict_line(run.path, "child-died-by-signal")
     elif code != 0 and assert_ran:
         passed = if has_evidence == 1: evidence_passed else: 0
         failed = if has_evidence == 1 and evidence_failed > 0: evidence_failed else: 1
@@ -1193,6 +1214,12 @@ fn main() -> i64:
     print_summary(run.path, passed, failed, 0, 0, duration_ms)
     if cov_on and cov_sdn != "":
         _cov_print_report(run.path, cov_sdn)
+    if failed == 0 and unverified_error != "":
+        # TERMINATED / TIMEOUT: not a failure (earlyoom is SIGTERMing `simple`
+        # on this host, so a signal death says nothing about the code under
+        # test) but emphatically not a pass either. Distinct exit code so an
+        # unverified run can never be read as green.
+        return 2
     if failed == 0:
         return 0
     1

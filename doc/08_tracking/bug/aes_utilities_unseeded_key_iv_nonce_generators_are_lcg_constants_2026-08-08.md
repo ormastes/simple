@@ -3,8 +3,45 @@
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 - **Date:** 2026-08-08
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (independent re-verification
+  pass; supersedes the earlier shard-00 OPEN stamp and the CLAIMED-OFFHOST note
+  above — no code was changed by this pass, only the status corrected to match
+  the tree).
+
+  All three named generators now draw from the OS CSPRNG, not an LCG:
+  - `src/lib/common/aes/utilities.spl:292` `generate_aes_key` -> `csprng_bytes(size)`
+  - `src/lib/common/aes/utilities.spl:303` `generate_iv` -> `csprng_bytes(16)`
+  - `src/lib/common/aes/utilities.spl:307` `generate_nonce` -> `csprng_bytes(16)`
+
+  `csprng_bytes` is genuinely a CSPRNG, not a renamed LCG — traced end to end
+  rather than taken on the name:
+  - `utilities.spl:17-28` — no seed, no state, no multiplier/addend. It loops
+    `count` times calling the extern `rt_random_i64()` (declared :14), taking
+    the low byte and normalising the sign so the result is exactly
+    `value mod 256` with no modulo bias.
+  - Rust/interpreter lane: `src/compiler_rust/compiler/src/interpreter_extern/random.rs:177-181`
+    `rt_random_i64_fn` = `rand::rngs::OsRng.gen()`; registered at
+    `interpreter_extern/mod.rs:1675`. `OsRng` panics rather than degrading on
+    entropy failure.
+  - Native lane: `src/runtime/runtime.c:2518-2545` `rt_random_i64` reads
+    `/dev/urandom` on Unix and `BCryptGenRandom` (`BCRYPT_USE_SYSTEM_PREFERRED_RNG`)
+    on Windows.
+
+  The LCG survives only in the explicitly `DEPRECATED — NOT CRYPTOGRAPHICALLY
+  SUITABLE` `generate_iv_from_seed` (`utilities.spl:309+`), which is documented
+  as such in-source and is not one of the three functions this record names.
+
+  **Residual, NOT part of this defect and not closed by it:** the C lane at
+  `runtime.c:2536-2542` returns `0` if `open("/dev/urandom")` or the `read`
+  fails, and the Windows branch returns `0` if `bcrypt.dll` / `BCryptGenRandom`
+  cannot be resolved — a silent degrade to all-zero bytes, unlike the Rust lane
+  which panics. That is the same failure shape already filed as
+  `doc/08_tracking/bug/crypto_sffi_random_hex_degrades_to_empty_string_on_entropy_failure_2026-08-08.md`
+  and should be tracked there.
+
+  **Verified by source inspection only** — no AES key/IV/nonce generation was
+  executed and no output distribution was sampled.
 - **Severity:** Medium *as currently wired* (zero callers), High as a latent trap
 - **Component:** `src/lib/common/aes/utilities.spl`
 - **Related:** `doc/08_tracking/bug/credential_store_aes_cbc_label_is_actually_ctr_with_deterministic_iv_2026-08-06.md`

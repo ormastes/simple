@@ -1,7 +1,7 @@
 # SDN-roundtripped Draw IR composition fails render: "cannot assign field on non-object value"
 
 - **Date:** 2026-08-15
-- Status: OPEN (P2)
+- Status: RESOLVED 2026-08-17 (was OPEN) — interpreter ClassInstance nested-field-assign arms present at src/compiler_rust/compiler/src/interpreter/node_exec.rs:788,825,909; doc records specs 4/4 and 7/7 green
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Component:** common.ui.draw_ir_sdn / gc_async_mut.gpu.engine2d.draw_ir_adv (interpreter path)
 

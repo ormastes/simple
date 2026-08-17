@@ -1,6 +1,6 @@
 # Hosted `rt_string_trim`/`rt_string_ascii_case` family degrades on a raw receiver
 
-Status: OPEN (P1)
+Status: RESOLVED 2026-08-17 (was OPEN) — rt_string_promote_raw_receiver defined at src/runtime/runtime_native.c:5037 and called from rt_string_trim/trim_start/trim_end/ascii_case (5048, 5066, 5082, 3801)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Status

@@ -1,0 +1,63 @@
+"""
+# SMF Manifest Source-Hash Verification Specification
+
+**Category:** Infrastructure
+**Bug:** doc/08_tracking/bug/smf_manifest_written_but_never_verified_2026-08-17.md
+
+## Overview
+
+`SmfManifestEntry` records `source_hash` at compile time, but until 2026-08-17
+`try_load_smf_cached` parsed every recorded field and used only `smf_path` —
+the manifest row itself was never verified. `smf_manifest_entry_matches_source`
+is the fail-closed predicate that now gates the cache hit.
+
+Fail-closed contract:
+  - `source_hash == 0` (the sentinel both writers record when the source could
+    not be read at compile time) is NEVER trusted, even against empty source.
+  - unreadable / empty live source is NEVER trusted.
+  - any hash mismatch rejects.
+  - only a non-zero recorded hash equal to the live hash accepts.
+"""
+
+use std.spec.*
+use compiler.driver.watcher.smf_manifest.{
+    SmfManifestEntry, smf_manifest_entry_new, smf_manifest_entry_matches_source
+}
+
+extern fn rt_hash_text(s: text) -> i64
+
+fn entry_with_hash(h: i64) -> SmfManifestEntry:
+    var e = smf_manifest_entry_new(
+        "src/demo.spl", "build/smf/src_demo.smf", h,
+        "cranelift", 0, false, true, false, "dev", []
+    )
+    e
+
+# NOTE: no "accepts a matching hash" case here on purpose. `rt_hash_text` is
+# implemented only as an interpreter extern and resolves to a zero stub under
+# JIT/native, so a live-hash round trip is not assertable across execution
+# paths — see
+# doc/08_tracking/bug/rt_hash_text_returns_zero_under_jit_cache_freshness_vacuous_2026-08-17.md
+# The reject cases below are the safety property, and they hold on every path.
+# The accept case is covered, guarded, by
+# scripts/check/check-smf-manifest-source-hash-verification.spl.
+
+describe "smf_manifest_entry_matches_source":
+    it "rejects an entry whose recorded hash does not match the live source":
+        val src = "fn main(): print \"hi\"\n"
+        val e = entry_with_hash(1234567)
+        expect(smf_manifest_entry_matches_source(e, src)).to_equal(false)
+
+    it "rejects the zero source_hash sentinel against matching content":
+        # The writers record 0 when the source could not be read. A 0 must
+        # never authorise a cache hit, however the live source hashes.
+        val e = entry_with_hash(0)
+        expect(smf_manifest_entry_matches_source(e, "anything")).to_equal(false)
+
+    it "rejects the zero source_hash sentinel against empty content":
+        val e = entry_with_hash(0)
+        expect(smf_manifest_entry_matches_source(e, "")).to_equal(false)
+
+    it "rejects when the live source is unreadable (empty text)":
+        val e = entry_with_hash(1234567)
+        expect(smf_manifest_entry_matches_source(e, "")).to_equal(false)

@@ -32,6 +32,11 @@ pub fn print_help() {
     eprintln!("  simple test --system        Run system tests only");
     eprintln!("  simple test --tag <name>    Filter by tag");
     eprintln!("  simple test --fail-fast     Stop on first failure");
+    eprintln!("  simple test --unstable      Per-unit process, run to end of list, classify outcomes");
+    eprintln!("                              (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN); TERMINATED");
+    eprintln!("                              and TIMEOUT are unverified, not failures. Default: ON for");
+    eprintln!("                              the bootstrap path, OFF for interactive runs");
+    eprintln!("  simple test --no-unstable   Force unstable mode off");
     eprintln!("  simple test --seed <N>      Deterministic shuffle");
     eprintln!("  simple test --format <fmt>  Output format: text, json, doc");
     eprintln!("  simple test --json          Shorthand for --format json");
@@ -300,6 +305,11 @@ Execution:\n\
   --threads, -j <N>       Set worker threads\n\
   --timeout <sec>         Safe-mode timeout\n\
   --fail-fast             Stop on first failure\n\
+  --unstable              Run each unit in its own process and continue to the end of the\n\
+                          list, classifying outcomes (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/\n\
+                          NOT_RUN). TERMINATED and TIMEOUT are unverified, not failures.\n\
+                          Default: ON for the bootstrap path, OFF for interactive runs\n\
+  --no-unstable           Force unstable mode off\n\
 \n\
 Run Management:\n\
   --list-runs             Show tracked test runs\n\
