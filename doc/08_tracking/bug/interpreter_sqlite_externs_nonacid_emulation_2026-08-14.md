@@ -7,6 +7,31 @@
 - Found by: `.spipe/simple_enterprise_suite` Wave B probe
   (enterprise durable-store lane)
 
+## RESOLVED 2026-08-17 (emulation-side fix): transactions + UNIQUE now enforced in the emulation
+
+`src/compiler_rust/compiler/src/interpreter_extern/sffi_db.rs` now implements
+the "at minimum" path from the Suggested fix:
+
+- `rt_sqlite_begin/commit/rollback` take the connection handle and do real
+  snapshot semantics: BEGIN clones the in-memory `SqlDatabase` into
+  `SqlConn.tx_snapshot`; ROLLBACK restores it; COMMIT drops it. Nested BEGIN,
+  and COMMIT/ROLLBACK with no active transaction, set an error and return 0.
+  SQL-text `BEGIN`/`COMMIT`/`END`/`ROLLBACK` via `sqlite_execute` route to the
+  same helpers (previously they hit "unsupported SQL").
+- CREATE TABLE now records per-column `UNIQUE`/`PRIMARY KEY` constraints, and
+  INSERT rejects duplicates with `UNIQUE constraint failed: table.col`
+  (NULLs exempt, as in SQLite).
+- Companion fix: DELETE now honours a single-equality WHERE and fails closed
+  on anything more complex (see
+  `seed_sqlite_emulation_ignores_delete_where_2026-08-17.md`).
+
+Verified with `cargo check --release --bin simple` (clean). The re-verification
+probe (`after_rollback` empty, `dup_insert_ok=false`) becomes runnable in
+interpreter mode once a rebuilt seed is deployed — the concurrently running
+bootstrap owns that. Still out of scope for the emulation: FK/CHECK
+constraints and PRAGMAs (unchanged), and the `int()`-over-rt_string and
+`store_backend_acid` follow-ups below.
+
 ## Status 2026-08-17 (lane W10-C): PARTIALLY RESOLVED — a real ACID path now exists
 
 `sh scripts/check/check-sqlite-backend-acid.shs` prints

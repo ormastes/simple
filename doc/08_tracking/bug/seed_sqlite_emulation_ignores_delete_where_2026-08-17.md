@@ -3,7 +3,7 @@
 Found: 2026-08-17, lane `.spipe/simple_enterprise_suite` W12-B, while bounding
 the enterprise request throttle's counter table.
 
-Status: OPEN (worked around in the enterprise store; the seed defect stands).
+Status: RESOLVED 2026-08-17 — see the note at the bottom.
 
 ## What happens
 
@@ -62,3 +62,20 @@ predicate ("every retained row belongs to an elapsed window") in pure Simple
 first, so the unconditional delete is provably equal to the conditional one at
 the moment it runs. No conditional DELETE exists anywhere in the enterprise
 suite.
+
+## RESOLVED 2026-08-17
+
+Fixed in `src/compiler_rust/compiler/src/interpreter_extern/sffi_db.rs`
+(`sqlite_execute_statement` DELETE branch):
+
+- `DELETE FROM t` with no WHERE keeps its full-truncate behaviour.
+- `DELETE FROM t WHERE lhs = rhs` (single equality; operands may be a column
+  name or a literal, numeric or quoted text) now deletes only matching rows
+  and sets `conn.changes` to the actual deleted count. `WHERE 1=0` deletes
+  nothing.
+- Any other WHERE clause (AND/OR/NOT, comparisons, LIKE, IN, CAST/parens)
+  **fails closed**: `sqlite_set_error("unsupported DELETE WHERE clause
+  (emulation): ...")` and returns 0 — never a silent widened delete.
+
+Verified with `cargo check --release --bin simple` (clean) — the running
+`bin/simple` seed predates this fix until the next full bootstrap redeploys it.
