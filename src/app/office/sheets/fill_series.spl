@@ -1,0 +1,356 @@
+# Fill Series
+#
+# Autofill: extend a seed range into a target range the way a spreadsheet
+# drag-fill does. A seed of numbers becomes an arithmetic progression, a seed
+# of "Item1"-style labels increments its trailing number, month and weekday
+# names cycle through their list, and anything else is copied cyclically.
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellValue, CellRef, cell_ref_to_string, empty_cell, text_cell, number_cell}
+use app.office.sheets.cell_ref.{CellRange, parse_range}
+
+# =========================================================================
+# Pattern Model
+# =========================================================================
+
+enum FillPattern:
+    CopyCycle                                                            # repeat the seed values verbatim
+    Linear(start: f64, step: f64)                                        # arithmetic progression
+    TextNumber(prefix: text, start: i64, step: i64, pad: i32)            # "Item1" -> "Item2"
+    NameCycle(list_id: i32, start_index: i32, step: i32)                 # months / weekdays
+
+# =========================================================================
+# Pattern Detection
+# =========================================================================
+
+fn detect_fill_pattern(seed: [Cell]) -> FillPattern:
+    """Infer the fill pattern of a seed range.
+
+    A single numeric or numbered-text seed implies a step of 1, matching the
+    Fill > Series default. Seeds with an inconsistent step fall back to
+    CopyCycle so the fill never invents values the user did not ask for.
+    """
+    if seed.len() == 0:
+        return FillPattern.CopyCycle
+
+    val nums = _seed_numbers(seed)
+    if nums != nil:
+        return _linear_from(nums)
+
+    val strs = _seed_strings(seed)
+    if strs == nil:
+        return FillPattern.CopyCycle
+
+    val names = _name_cycle_from(strs)
+    if names != nil:
+        return names
+
+    val numbered = _text_number_from(strs)
+    if numbered != nil:
+        return numbered
+
+    FillPattern.CopyCycle
+
+fn _seed_numbers(seed: [Cell]) -> [f64]?:
+    """Return the seed's numeric values, or nil when any cell is not a number."""
+    var out: [f64] = []
+    for c in seed:
+        match c.value:
+            CellValue.NumberVal(v):
+                out.push(v)
+            _:
+                return nil
+    out
+
+fn _seed_strings(seed: [Cell]) -> [text]?:
+    """Return the seed's text values, or nil when any cell is not text."""
+    var out: [text] = []
+    for c in seed:
+        match c.value:
+            CellValue.TextVal(v):
+                out.push(v)
+            _:
+                return nil
+    out
+
+fn _linear_from(nums: [f64]) -> FillPattern:
+    """Build a Linear pattern from numeric seeds with a constant difference."""
+    if nums.len() == 1:
+        return FillPattern.Linear(start: nums[0], step: 1.0)
+    val step = nums[1] - nums[0]
+    var i = 2
+    while i < nums.len():
+        if not _near(nums[i] - nums[i - 1], step):
+            return FillPattern.CopyCycle
+        i = i + 1
+    FillPattern.Linear(start: nums[0], step: step)
+
+fn _text_number_from(strs: [text]) -> FillPattern?:
+    """Build a TextNumber pattern from labels sharing a prefix and trailing digits."""
+    val first = _split_trailing_digits(strs[0])
+    if first == nil:
+        return nil
+    val prefix = first.prefix
+    val pad = first.pad
+    if strs.len() == 1:
+        return FillPattern.TextNumber(prefix: prefix, start: first.number, step: 1, pad: pad)
+
+    val second = _split_trailing_digits(strs[1])
+    if second == nil or second.prefix != prefix:
+        return nil
+    val step = second.number - first.number
+    var prev = second.number
+    var i = 2
+    while i < strs.len():
+        val part = _split_trailing_digits(strs[i])
+        if part == nil or part.prefix != prefix or (part.number - prev) != step:
+            return nil
+        prev = part.number
+        i = i + 1
+    FillPattern.TextNumber(prefix: prefix, start: first.number, step: step, pad: pad)
+
+fn _name_cycle_from(strs: [text]) -> FillPattern?:
+    """Build a NameCycle pattern when every seed belongs to one built-in list."""
+    var list_id = 0
+    while list_id < 4:
+        val names = _name_list(list_id)
+        val size = names.len().to_i32()
+        val first = _index_of_name(names, strs[0])
+        if first >= 0:
+            if strs.len() == 1:
+                return FillPattern.NameCycle(list_id: list_id, start_index: first, step: 1)
+            val second = _index_of_name(names, strs[1])
+            if second >= 0:
+                val step = _wrap(second - first, size)
+                var prev = second
+                var ok = true
+                var i = 2
+                while i < strs.len():
+                    val cur = _index_of_name(names, strs[i])
+                    if cur < 0 or _wrap(cur - prev, size) != step:
+                        ok = false
+                        break
+                    prev = cur
+                    i = i + 1
+                if ok:
+                    return FillPattern.NameCycle(list_id: list_id, start_index: first, step: step)
+        list_id = list_id + 1
+    nil
+
+# =========================================================================
+# Value Generation
+# =========================================================================
+
+fn fill_series_cells(seed: [Cell], count: i32) -> [Cell]:
+    """Generate `count` cells continuing the seed range forward.
+
+    Index 0 is the cell immediately after the last seed cell.
+    """
+    val pattern = detect_fill_pattern(seed)
+    var out: [Cell] = []
+    var i = 0
+    while i < count:
+        out.push(fill_series_value(pattern, seed, i))
+        i = i + 1
+    out
+
+fn fill_series_value(pattern: FillPattern, seed: [Cell], index: i32) -> Cell:
+    """Produce the cell at `index` steps past the end of the seed.
+
+    Negative indices extend the series backwards: -1 is the cell immediately
+    before the seed's first cell.
+    """
+    if seed.len() == 0:
+        return empty_cell()
+    match pattern:
+        FillPattern.Linear(start, step):
+            val base = if index >= 0: seed.len().to_i32() + index else: index
+            number_cell(start + step * base.to_f64())
+        FillPattern.TextNumber(prefix, start, step, pad):
+            val base = if index >= 0: seed.len().to_i32() + index else: index
+            val n = start + step.to_i64() * base.to_i64()
+            text_cell("{prefix}{_pad_number(n, pad)}")
+        FillPattern.NameCycle(list_id, start_index, step):
+            val names = _name_list(list_id)
+            val size = names.len().to_i32()
+            val base = if index >= 0: seed.len().to_i32() + index else: index
+            text_cell(names[_wrap(start_index + step * base, size)])
+        _:
+            val n = seed.len().to_i32()
+            seed[_wrap(index, n)]
+
+# =========================================================================
+# Sheet Fill
+# =========================================================================
+
+fn sheet_fill_series(sheet: Sheet, source_a1: text, target_a1: text) -> i32:
+    """Fill `target_a1` by extending the series seeded by `source_a1`.
+
+    Both ranges must lie on the same single column or single row, and the
+    target must sit entirely before or entirely after the source. Returns the
+    number of cells written, or 0 when the request is rejected.
+    """
+    val src = parse_range(source_a1)
+    val dst = parse_range(target_a1)
+    if src == nil or dst == nil:
+        return 0
+
+    val s = _normalize(src)
+    val t = _normalize(dst)
+
+    val src_vertical = s.min_col == s.max_col
+    val src_horizontal = s.min_row == s.max_row
+    val dst_vertical = t.min_col == t.max_col
+    val dst_horizontal = t.min_row == t.max_row
+
+    # A 1x1 source takes its orientation from the target.
+    val vertical = if src_vertical and src_horizontal: dst_vertical else: src_vertical
+    if vertical:
+        if not dst_vertical or s.min_col != t.min_col:
+            return 0
+    else:
+        if not src_horizontal or not dst_horizontal or s.min_row != t.min_row:
+            return 0
+
+    val forward = if vertical: t.min_row > s.max_row else: t.min_col > s.max_col
+    val behind = if vertical: t.max_row < s.min_row else: t.max_col < s.min_col
+    if not forward and not behind:
+        return 0
+
+    var seed: [Cell] = []
+    if vertical:
+        var r = s.min_row
+        while r <= s.max_row:
+            seed.push(sheet.get_cell(cell_ref_to_string(CellRef(col: s.min_col, row: r))))
+            r = r + 1
+    else:
+        var c = s.min_col
+        while c <= s.max_col:
+            seed.push(sheet.get_cell(cell_ref_to_string(CellRef(col: c, row: s.min_row))))
+            c = c + 1
+
+    val pattern = detect_fill_pattern(seed)
+    val span = if vertical: t.max_row - t.min_row + 1 else: t.max_col - t.min_col + 1
+
+    var written = 0
+    var k = 0
+    while k < span:
+        # Forward fills run outward from the seed; backward fills count down
+        # from the cell nearest the seed so the series reverses cleanly.
+        val index = if forward: k else: (k - span)
+        val cell = fill_series_value(pattern, seed, index)
+        val ref_str = if vertical:
+            cell_ref_to_string(CellRef(col: t.min_col, row: t.min_row + k))
+        else:
+            cell_ref_to_string(CellRef(col: t.min_col + k, row: t.min_row))
+        sheet.set_cell(ref_str, cell)
+        written = written + 1
+        k = k + 1
+    written
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+struct _Bounds:
+    min_col: i32
+    max_col: i32
+    min_row: i32
+    max_row: i32
+
+struct _NumberedText:
+    prefix: text
+    number: i64
+    pad: i32
+
+fn _normalize(range: CellRange) -> _Bounds:
+    """Order a range's corners so min/max are well defined."""
+    _Bounds(
+        min_col: _min_i32(range.start.col, range.end_ref.col),
+        max_col: _max_i32(range.start.col, range.end_ref.col),
+        min_row: _min_i32(range.start.row, range.end_ref.row),
+        max_row: _max_i32(range.start.row, range.end_ref.row)
+    )
+
+fn _split_trailing_digits(s: text) -> _NumberedText?:
+    """Split "Item007" into prefix "Item", number 7 and zero-pad width 3."""
+    val n = s.len()
+    if n == 0:
+        return nil
+    var start = n
+    while start > 0 and _is_digit(s.substring(start - 1, start)):
+        start = start - 1
+    if start == n:
+        return nil
+    val digits = s.substring(start, n)
+    var value: i64 = 0
+    var i = 0
+    while i < digits.len():
+        value = value * 10 + _digit_val(digits.substring(i, i + 1)).to_i64()
+        i = i + 1
+    var pad = 0
+    if digits.len() > 1 and digits.substring(0, 1) == "0":
+        pad = digits.len().to_i32()
+    _NumberedText(prefix: s.substring(0, start), number: value, pad: pad)
+
+fn _pad_number(n: i64, pad: i32) -> text:
+    """Render a number, left-padding with zeros to `pad` digits when asked."""
+    if n < 0:
+        return "{n}"
+    var out = "{n}"
+    while out.len().to_i32() < pad:
+        out = "0{out}"
+    out
+
+fn _name_list(list_id: i32) -> [text]:
+    """Return one of the built-in fill lists: month/weekday, short and full."""
+    if list_id == 0:
+        return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    if list_id == 1:
+        return ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    if list_id == 2:
+        return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+fn _index_of_name(names: [text], s: text) -> i32:
+    """Case-insensitive lookup of a name in a fill list; -1 when absent."""
+    val needle = s.trim().lower()
+    var i = 0
+    while i < names.len():
+        if names[i].lower() == needle:
+            return i.to_i32()
+        i = i + 1
+    -1
+
+fn _wrap(v: i32, m: i32) -> i32:
+    """Wrap `v` into 0..m-1, handling negative indices."""
+    if m <= 0:
+        return 0
+    var r = v % m
+    if r < 0:
+        r = r + m
+    r
+
+fn _near(a: f64, b: f64) -> bool:
+    """Compare two steps with a tolerance so 0.1 increments stay linear."""
+    val d = a - b
+    if d < 0.0:
+        return (0.0 - d) < 0.000000001
+    d < 0.000000001
+
+fn _is_digit(c: text) -> bool:
+    """True when the one-character text is an ASCII digit."""
+    c >= "0" and c <= "9"
+
+fn _digit_val(c: text) -> i32:
+    """Numeric value of an ASCII digit character."""
+    val code = c.char_code_at(0)
+    (code - 48).to_i32()
+
+fn _min_i32(a: i32, b: i32) -> i32:
+    """Smaller of two i32 values."""
+    if a < b: a else: b
+
+fn _max_i32(a: i32, b: i32) -> i32:
+    """Larger of two i32 values."""
+    if a > b: a else: b

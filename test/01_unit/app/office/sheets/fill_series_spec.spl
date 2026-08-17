@@ -1,0 +1,137 @@
+"""Office sheets fill-series spec.
+
+Core autofill behaviour: numeric progressions, numbered labels, month and
+weekday cycles, verbatim copy fills, and writing them into a sheet.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.fill_series.{FillPattern, detect_fill_pattern, fill_series_cells, sheet_fill_series}
+use app.office.sheets.cell.{Cell, CellValue, cell_display_text, number_cell, text_cell}
+
+fn _cells(values: [text]) -> [Cell]:
+    var out: [Cell] = []
+    for v in values:
+        out.push(text_cell(v))
+    out
+
+fn _nums(values: [f64]) -> [Cell]:
+    var out: [Cell] = []
+    for v in values:
+        out.push(number_cell(v))
+    out
+
+describe "detect_fill_pattern: numeric seeds":
+    """Numbers with a constant difference become an arithmetic progression."""
+
+    it "detects a step of 2 from 1,3":
+        match detect_fill_pattern(_nums([1.0, 3.0])):
+            FillPattern.Linear(start, step):
+                assert_true(start == 1.0)
+                assert_true(step == 2.0)
+            _:
+                assert_true(false)
+
+    it "defaults a single numeric seed to step 1":
+        match detect_fill_pattern(_nums([7.0])):
+            FillPattern.Linear(start, step):
+                assert_true(start == 7.0)
+                assert_true(step == 1.0)
+            _:
+                assert_true(false)
+
+    it "falls back to copy when the difference is inconsistent":
+        match detect_fill_pattern(_nums([1.0, 2.0, 9.0])):
+            FillPattern.CopyCycle:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+describe "detect_fill_pattern: labels and names":
+    """Numbered labels increment; month and weekday names cycle."""
+
+    it "detects a numbered label prefix":
+        match detect_fill_pattern(_cells(["Item1", "Item2"])):
+            FillPattern.TextNumber(prefix, start, step, pad):
+                assert_true(prefix == "Item")
+                assert_true(start == 1)
+                assert_true(step == 1)
+                assert_true(pad == 0)
+            _:
+                assert_true(false)
+
+    it "detects a month name cycle":
+        match detect_fill_pattern(_cells(["Jan", "Feb"])):
+            FillPattern.NameCycle(list_id, start_index, step):
+                assert_true(list_id == 0)
+                assert_true(start_index == 0)
+                assert_true(step == 1)
+            _:
+                assert_true(false)
+
+    it "treats unrelated text as a copy fill":
+        match detect_fill_pattern(_cells(["red", "blue"])):
+            FillPattern.CopyCycle:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+describe "fill_series_cells: value generation":
+    """Generated values continue past the end of the seed."""
+
+    it "continues an arithmetic progression":
+        val out = fill_series_cells(_nums([1.0, 3.0]), 3)
+        assert_true(out.len() == 3)
+        assert_true(cell_display_text(out[0]) == "5")
+        assert_true(cell_display_text(out[1]) == "7")
+        assert_true(cell_display_text(out[2]) == "9")
+
+    it "increments a numbered label":
+        val out = fill_series_cells(_cells(["Item1"]), 2)
+        assert_true(cell_display_text(out[0]) == "Item2")
+        assert_true(cell_display_text(out[1]) == "Item3")
+
+    it "wraps a weekday cycle past the end of the list":
+        val out = fill_series_cells(_cells(["Fri"]), 3)
+        assert_true(cell_display_text(out[0]) == "Sat")
+        assert_true(cell_display_text(out[1]) == "Sun")
+        assert_true(cell_display_text(out[2]) == "Mon")
+
+    it "repeats a copy fill cyclically":
+        val out = fill_series_cells(_cells(["red", "blue"]), 3)
+        assert_true(cell_display_text(out[0]) == "red")
+        assert_true(cell_display_text(out[1]) == "blue")
+        assert_true(cell_display_text(out[2]) == "red")
+
+describe "sheet_fill_series: writing into a sheet":
+    """Fills run down a column or across a row and report the cells written."""
+
+    it "fills a column downward":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "1")
+        sheet.set_value("A2", "3")
+
+        val written = sheet_fill_series(sheet, "A1:A2", "A3:A5")
+
+        assert_true(written == 3)
+        assert_true(cell_display_text(sheet.get_cell("A3")) == "5")
+        assert_true(cell_display_text(sheet.get_cell("A4")) == "7")
+        assert_true(cell_display_text(sheet.get_cell("A5")) == "9")
+
+    it "fills a row rightward":
+        var sheet = Sheet.new("S2")
+        sheet.set_value("B1", "10")
+        sheet.set_value("C1", "20")
+
+        val written = sheet_fill_series(sheet, "B1:C1", "D1:E1")
+
+        assert_true(written == 2)
+        assert_true(cell_display_text(sheet.get_cell("D1")) == "30")
+        assert_true(cell_display_text(sheet.get_cell("E1")) == "40")
+
+    it "leaves the seed cells untouched":
+        var sheet = Sheet.new("S3")
+        sheet.set_value("A1", "5")
+        sheet_fill_series(sheet, "A1:A1", "A2:A3")
+        assert_true(cell_display_text(sheet.get_cell("A1")) == "5")
+        assert_true(cell_display_text(sheet.get_cell("A2")) == "6")

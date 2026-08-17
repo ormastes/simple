@@ -1,0 +1,123 @@
+"""Office sheets fill-series edge-case spec.
+
+Backward fills, zero-padded labels, negative and fractional steps, mixed or
+empty seeds, and every shape of malformed fill request.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.fill_series.{FillPattern, detect_fill_pattern, fill_series_cells, sheet_fill_series}
+use app.office.sheets.cell.{Cell, CellValue, cell_display_text, empty_cell, number_cell, text_cell}
+
+describe "sheet_fill_series: backward fills":
+    """A target before the seed extends the series in reverse."""
+
+    it "extends a numeric series upward":
+        var sheet = Sheet.new("B1")
+        sheet.set_value("A5", "10")
+        sheet.set_value("A6", "12")
+
+        val written = sheet_fill_series(sheet, "A5:A6", "A3:A4")
+
+        assert_true(written == 2)
+        assert_true(cell_display_text(sheet.get_cell("A4")) == "8")
+        assert_true(cell_display_text(sheet.get_cell("A3")) == "6")
+
+    it "extends a month cycle leftward across the list start":
+        var sheet = Sheet.new("B2")
+        sheet.set_value("C1", "Feb")
+
+        val written = sheet_fill_series(sheet, "C1:C1", "A1:B1")
+
+        assert_true(written == 2)
+        assert_true(cell_display_text(sheet.get_cell("B1")) == "Jan")
+        assert_true(cell_display_text(sheet.get_cell("A1")) == "Dec")
+
+    it "reverses a copy fill so the nearest cell repeats the last seed":
+        var sheet = Sheet.new("B3")
+        sheet.set_value("A4", "red")
+        sheet.set_value("A5", "blue")
+
+        val written = sheet_fill_series(sheet, "A4:A5", "A2:A3")
+
+        assert_true(written == 2)
+        assert_true(cell_display_text(sheet.get_cell("A3")) == "blue")
+        assert_true(cell_display_text(sheet.get_cell("A2")) == "red")
+
+describe "fill_series_cells: numeric edges":
+    """Negative and fractional steps stay linear."""
+
+    it "handles a descending series through zero":
+        var seed: [Cell] = [number_cell(2.0), number_cell(1.0)]
+        val out = fill_series_cells(seed, 3)
+        assert_true(cell_display_text(out[0]) == "0")
+        assert_true(cell_display_text(out[1]) == "-1")
+        assert_true(cell_display_text(out[2]) == "-2")
+
+    it "handles a fractional step":
+        var seed: [Cell] = [number_cell(1.0), number_cell(1.5)]
+        val out = fill_series_cells(seed, 2)
+        assert_true(cell_display_text(out[0]) == "2")
+        assert_true(cell_display_text(out[1]) == "2.5")
+
+describe "fill_series_cells: label edges":
+    """Zero padding is preserved; non-numbered and mixed seeds copy."""
+
+    it "preserves zero padding":
+        var seed: [Cell] = [text_cell("Q007")]
+        val out = fill_series_cells(seed, 2)
+        assert_true(cell_display_text(out[0]) == "Q008")
+        assert_true(cell_display_text(out[1]) == "Q009")
+
+    it "keeps a bare number label as a numbered fill with an empty prefix":
+        var seed: [Cell] = [text_cell("41")]
+        val out = fill_series_cells(seed, 1)
+        assert_true(cell_display_text(out[0]) == "42")
+
+    it "copies labels whose prefixes differ":
+        var seed: [Cell] = [text_cell("A1"), text_cell("B2")]
+        val out = fill_series_cells(seed, 2)
+        assert_true(cell_display_text(out[0]) == "A1")
+        assert_true(cell_display_text(out[1]) == "B2")
+
+    it "copies a seed mixing numbers and text":
+        var seed: [Cell] = [number_cell(1.0), text_cell("x")]
+        val out = fill_series_cells(seed, 2)
+        assert_true(cell_display_text(out[0]) == "1")
+        assert_true(cell_display_text(out[1]) == "x")
+
+    it "returns nothing for an empty seed":
+        var seed: [Cell] = []
+        assert_true(fill_series_cells(seed, 3).len() == 3)
+
+describe "sheet_fill_series: rejected requests":
+    """Malformed or ambiguous fills write nothing and report 0."""
+
+    it "rejects an unparseable range":
+        var sheet = Sheet.new("R1")
+        sheet.set_value("A1", "1")
+        assert_true(sheet_fill_series(sheet, "A1:A2", "not-a-range") == 0)
+
+    it "rejects a target in a different column":
+        var sheet = Sheet.new("R2")
+        sheet.set_value("A1", "1")
+        sheet.set_value("A2", "2")
+        assert_true(sheet_fill_series(sheet, "A1:A2", "B3:B4") == 0)
+        assert_true(cell_display_text(sheet.get_cell("B3")) == "")
+
+    it "rejects a target overlapping the seed":
+        var sheet = Sheet.new("R3")
+        sheet.set_value("A1", "1")
+        sheet.set_value("A2", "2")
+        assert_true(sheet_fill_series(sheet, "A1:A2", "A2:A4") == 0)
+
+    it "rejects a rectangular target":
+        var sheet = Sheet.new("R4")
+        sheet.set_value("A1", "1")
+        assert_true(sheet_fill_series(sheet, "A1:A1", "B2:C3") == 0)
+
+    it "fills empty seed cells as an empty copy":
+        var sheet = Sheet.new("R5")
+        val written = sheet_fill_series(sheet, "A1:A1", "A2:A3")
+        assert_true(written == 2)
+        assert_true(cell_display_text(sheet.get_cell("A2")) == "")
