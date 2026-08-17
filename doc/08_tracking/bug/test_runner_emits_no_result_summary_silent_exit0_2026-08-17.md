@@ -57,6 +57,57 @@ real verdict appears. The pure-Simple runner itself is already fail-closed on
 an empty selection (`classify_test_run_result` +
 `test_empty_selection_is_success`, `test_runner_main.spl:1066`).
 
+### Independent confirmation of cause 1, plus why it is NONDETERMINISTIC (2026-08-17, old-bug-backlog audit)
+
+A second lane reproduced cause 1 from scratch and initially mis-attributed it to
+"seed vs self-hosted binary". That model is **wrong** and should not be
+inherited: `readlink -f bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` — one 59,536,728-byte file, one
+symlink. The kill monitor's matcher is also not path-sensitive
+(`is_simple_run_or_test` matches `*/simple:test`, so both spellings match).
+
+Controlled A/B, same binary, same spec, same cwd, only the env differs:
+
+| invocation | result |
+|---|---|
+| `timeout 200 bin/simple test .../arch_check_spec.spl` | killed at 63s, `error: TIMEOUT: killed by kill_simple_monitor (cpu=97.2% age=63s>=60s)`, exit 143 |
+| `SIMPLE_TIMEOUT_SECONDS=600 nice -n 19 bin/simple test <same>` | 2151 lines, `Results: 74 total, 74 passed, 0 failed`, exit 0 |
+
+**The new finding: whether a given run dies is a race, not a property of the
+command.** `ps` `pcpu` is a **lifetime average**, and these specs are
+compile-heavy early (~100% CPU) then I/O-bound later, so the average *decays*:
+
+| run | wall | user+sys | lifetime avg CPU | outcome |
+|---|---|---|---|---|
+| A | 111.3s | 83.6s | 75.1% | survived |
+| B | killed at 63s | — | 97.2% (sampled) | **killed** |
+| C | 114.8s | 79.5s | 69.2% | survived |
+
+`CPU_THRESHOLD=95`, `MIN_AGE_SECS=60`. The guard fires only if the average is
+still ≥95% at the first sample after t=60s. For a ~115s unit spec the average
+crosses below 95% somewhere around the one-minute mark — i.e. **right where the
+guard samples** — so identical commands land on either side of the threshold
+depending on machine load. Two monitor instances are running concurrently from
+different worktrees (pids 2015 and 929105), doubling the sampling opportunities.
+
+Tuning defect, independent of the seed fix: **`MIN_AGE_SECS=60` is below the
+normal runtime of an ordinary unit spec (~115s measured)**, so the guard's
+default kills legitimate work rather than runaways. Either raise the default
+above the p99 spec runtime or exempt `test` the way `native_build_*.spl` is
+already exempted.
+
+Two measurement traps this lane fell into, worth recording because both
+manufacture a false "no results" reading from a run that was actually fine:
+
+- **`| tail -6` lands past the summary.** `Results:` sits at line 2103 of 2151
+  — 48 lines from EOF, because per-module warnings continue after it. Tailing
+  fewer than ~50 lines shows only `[gc-warning]` and reads as "no summary".
+  Use `grep -E '^Results:'`, never a small tail.
+- **A killed run looks like an empty run.** It is not silent: it prints an
+  explicit `error: TIMEOUT: killed by kill_simple_monitor ...` line (that is
+  what `notify_victim` exists for) and exits 143. Any report of *silent* exit 0
+  should first be checked against `grep kill_simple_monitor` on the capture.
+
 **2. A genuine latent silent green in the seed's Rust runner path.**
 `TestRunResult::success()` was literally `self.total_failed == 0`
 (`src/compiler_rust/driver/src/cli/test_runner/types.rs:369`). A run with zero
