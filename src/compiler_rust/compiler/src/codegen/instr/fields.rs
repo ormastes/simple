@@ -108,6 +108,52 @@ pub fn compile_field_set<M: Module>(
     let store_width = type_id_to_cranelift(field_type).bytes() as usize;
     guard_nonnull_receiver(ctx, builder, obj_value, byte_offset, store_width)?;
     let val = get_vreg_or_default(ctx, builder, &value);
+    if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+        eprintln!(
+            "[TRACE FieldSet] object={:?} byte_offset={} field_type={:?} val_ty={:?} func={}",
+            object,
+            byte_offset,
+            field_type,
+            builder.func.dfg.value_type(val),
+            ctx.func.name
+        );
+    }
+    let val = coerce_to_field_type(builder, val, type_id_to_cranelift(field_type));
     builder.ins().store(MemFlags::new(), val, obj_ptr, byte_offset as i32);
     Ok(())
+}
+
+/// Narrow/widen a value to the field slot's native type before storing it.
+///
+/// `compile_field_get` loads each field with `type_id_to_cranelift(field_type)`,
+/// i.e. the field's DECLARED width. The store side used to write whatever type
+/// the source vreg happened to carry, so an `f32` field written from an f64
+/// literal stored 8 bytes of f64 and the 4-byte F32 load read back only the
+/// low half of the f64 bit pattern: `2.5f64` is `0x4004000000000000`, whose
+/// low 32 bits are zero, so `s.a` read back as `0.0`; `0.1f64` read back as
+/// `-1.588e-23`. Float stores are demoted/promoted (a value conversion, not a
+/// bit truncation) and integer stores are narrowed, so the store width always
+/// matches the load width.
+fn coerce_to_field_type(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    want: cranelift_codegen::ir::Type,
+) -> cranelift_codegen::ir::Value {
+    let have = builder.func.dfg.value_type(val);
+    if have == want {
+        return val;
+    }
+    if have.is_float() && want.is_float() {
+        return if want.bits() < have.bits() {
+            builder.ins().fdemote(want, val)
+        } else {
+            builder.ins().fpromote(want, val)
+        };
+    }
+    // Integer field slots narrower than the incoming value would otherwise
+    // store past the slot and be read back truncated at a different width.
+    if have.is_int() && want.is_int() && want.bits() < have.bits() {
+        return builder.ins().ireduce(want, val);
+    }
+    val
 }
