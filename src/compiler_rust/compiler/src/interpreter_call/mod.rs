@@ -261,7 +261,7 @@ where
 /// resolution chain. This is the single place that knows which `Value` variants
 /// are invocable; both the bare-identifier callee path and the field-access
 /// callee path route through it so `f(x)`, `(self.f)(x)` and `(obj.f)(x)` agree.
-fn call_value_as_callable(
+pub(crate) fn call_value_as_callable(
     val: Value,
     args: &[Argument],
     env: &mut Env,

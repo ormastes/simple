@@ -226,7 +226,11 @@ pub(crate) fn evaluate_method_call(
         let receiver_is_enum = enums.contains_key(module_name)
             || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(module_name))
             || BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().contains_key(module_name));
-        if use_bare_module_fallback(env.get(module_name).is_some(), classes.contains_key(module_name), receiver_is_enum) {
+        if use_bare_module_fallback(
+            env.get(module_name).is_some(),
+            classes.contains_key(module_name),
+            receiver_is_enum,
+        ) {
             if let Some(func) = functions.get(method).cloned() {
                 return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
@@ -364,9 +368,7 @@ pub(crate) fn evaluate_method_call(
             | "not_to"
             | "to_not"
     ) {
-        use crate::interpreter::interpreter_call::{
-            BDD_EXPECT_PROVISIONAL, BDD_MATCHER_COUNT, BDD_MATCHER_RAN,
-        };
+        use crate::interpreter::interpreter_call::{BDD_EXPECT_PROVISIONAL, BDD_MATCHER_COUNT, BDD_MATCHER_RAN};
         BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
         // Monotonic within an example: records that a matcher checked the expect
         // receiver, so a re-set provisional flag can't false-fail the example.
@@ -851,7 +853,15 @@ pub(crate) fn evaluate_method_call(
         }
         Value::ByteArray(bytes) => {
             if let Some(result) = collections::handle_byte_array_methods(
-                bytes, false, method, args, env, functions, classes, enums, impl_methods,
+                bytes,
+                false,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
             )? {
                 return Ok(result);
             }
@@ -872,7 +882,15 @@ pub(crate) fn evaluate_method_call(
         }
         Value::FrozenByteArray(bytes) => {
             if let Some(result) = collections::handle_byte_array_methods(
-                bytes, true, method, args, env, functions, classes, enums, impl_methods,
+                bytes,
+                true,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
             )? {
                 return Ok(result);
             }
@@ -1262,7 +1280,33 @@ pub(crate) fn evaluate_method_call(
                             impl_methods,
                         );
                     }
-                    _ => {}
+                    // Any OTHER callable field shape (block closure, native
+                    // function, constructor, or an object implementing the
+                    // `__call__` protocol) routes through the single place that
+                    // knows which `Value` variants are invocable, so
+                    // `obj.handler(x)` agrees with `(obj.handler)(x)`.
+                    other => {
+                        let candidate = other.clone();
+                        if matches!(
+                            candidate,
+                            Value::BlockClosure { .. }
+                                | Value::NativeFunction(_)
+                                | Value::Constructor { .. }
+                                | Value::Object { .. }
+                        ) {
+                            if let Some(result) = crate::interpreter::interpreter_call::call_value_as_callable(
+                                candidate,
+                                args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )? {
+                                return Ok(result);
+                            }
+                        }
+                    }
                 }
             }
             // Try method_missing hook
@@ -1690,12 +1734,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
-        if method == "new"
-            && matches!(
-                module_name.as_str(),
-                "Map" | "Dict" | "HashMap" | "BTreeMap"
-            )
-        {
+        if method == "new" && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap") {
             let value = Value::Dict(Arc::new(HashMap::new()));
             return Ok((value, None));
         }
@@ -1821,8 +1860,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
     }
 
     // For non-objects (Array, Dict, String, etc.), check if the method returns a mutated value
-    let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)
-        .map_err(|e| {
+    let result =
+        evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods).map_err(|e| {
             // Env-gated: names the receiver EXPRESSION (not just its value) so a
             // "method not found on i64" can be traced to the .spl source site.
             if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
@@ -2117,8 +2156,7 @@ main = c.double_add()
             );
             let mut parser = Parser::new(&source);
             let module = parser.parse().unwrap_or_else(|e| panic!("parse {expr}: {e:?}"));
-            let result =
-                evaluate_module(&module.items).unwrap_or_else(|e| panic!("evaluate {expr}: {e:?}"));
+            let result = evaluate_module(&module.items).unwrap_or_else(|e| panic!("evaluate {expr}: {e:?}"));
             assert_eq!(
                 result, 11,
                 "{expr}: tens digit = expression value is {expected:?}, \
