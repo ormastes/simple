@@ -107,23 +107,3 @@ them one file at a time with `--no-session-daemon --sequential`. That is the
 A redeployed self-hosted `bin/simple` in which `test <spec>` on the default
 (daemon) path completes within the 90s budget enforced by the gate above, with
 `test <dir>` no longer forced onto the re-resolving path.
-
-## Re-verification 2026-08-17 (fresh repro, no code change)
-
-Confirmed by reading current source: `src/app/test_daemon/light_daemon.spl:132`
-still spawns `["run", "src/app/test_runner_new/test_runner_single.spl", ...]`
-(re-resolved from source every request), unchanged from the doc's citation.
-
-Fresh independent repro (different spec than the ones tabulated above):
-`bin/simple test test/03_system/check/test_daemon_env_override_passthrough_spec.spl
---no-session-daemon --sequential --timeout 180` — this spec's own body shells
-out to nested daemon-path `bin/simple test` invocations, each paying the fixed
-setup cost, so the outer file could not finish inside a 180s per-file budget:
-`Results: 1 total, 0 passed, 1 failed` /
-`SPEC FILE VERDICT: ... timeout=1 reason=child-timeout budget_ms=180000`. This
-is a new, independent data point for the same defect class (a spec whose body
-itself invokes `bin/simple test` is capped by the same fixed cost, compounded
-per nested invocation) — consistent with, not contradicting, the doc's
-existing measurements. **Verdict: confirmed OPEN, root cause and fix scope
-unchanged (seed-side). No code change made in this pass — not a one-file
-narrow fix per the doc's own "Fix status" section.**

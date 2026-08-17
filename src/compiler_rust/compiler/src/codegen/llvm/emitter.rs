@@ -344,7 +344,8 @@ impl LlvmEmitter<'_> {
             "to_lower" | "lower" => Some("rt_string_to_lower"),
             "to_string" | "str" => Some("rt_to_string"),
             "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
-            "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+            "to_int" | "to_i64" => Some("rt_string_to_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
             // Receiver-polymorphic: `index_of` must NOT go straight to the
             // string-only `rt_string_find`, which returns its -1 receiver-
             // mismatch sentinel for an array receiver. That made every

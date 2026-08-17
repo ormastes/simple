@@ -1838,7 +1838,8 @@ fn free_transient_heap(value: RuntimeValue) {
             | HeapObjectType::Closure
             | HeapObjectType::Enum
             | HeapObjectType::Float
-            | HeapObjectType::UInt,
+            | HeapObjectType::UInt
+            | HeapObjectType::Int,
         ) => unsafe {
             let ptr = value.as_heap_ptr();
             let size = (*ptr).size as usize;
@@ -4182,6 +4183,40 @@ pub extern "C" fn rt_string_to_float(string: RuntimeValue) -> RuntimeValue {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
         match s.trim().parse::<f64>() {
             Ok(f) => RuntimeValue::from_float(f),
+            Err(_) => RuntimeValue::NIL,
+        }
+    }
+}
+
+/// `parse_int` / `parse_i32` / `parse_i64`: parse a string to an integer,
+/// returning a TAGGED `RuntimeValue` — the integer on success, `NIL` on
+/// failure — so the absent case is representable.
+///
+/// This is the integer twin of `rt_string_to_float` above, and exists for the
+/// same reason. It is deliberately NOT `rt_string_to_int`: that function
+/// returns a bare `i64` and answers `0` for both `"0"` and `"abc"`, which
+/// cannot express `None`. The `parse_*` methods are specified to return
+/// `Option`, and the seed lanes were all aliasing them onto that bare-i64
+/// symbol, so `"42".parse_int()` evaluated to the plain integer `42` and
+/// `.is_some()` on it failed with `Function 'i64.is_some' not found` — the
+/// Option was silently erased at the type level. `to_int` / `to_i64` keep
+/// using `rt_string_to_int`: those are specified to be total and yield `0` on
+/// failure, so a bare i64 is correct for them.
+///
+/// See doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#[no_mangle]
+pub extern "C" fn rt_string_parse_int(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return RuntimeValue::NIL;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        match s.trim().parse::<i64>() {
+            // from_int, not a raw `<< 3`: wide values must heap-box rather
+            // than silently truncate to the 61-bit inline payload.
+            Ok(n) => RuntimeValue::from_int(n),
             Err(_) => RuntimeValue::NIL,
         }
     }

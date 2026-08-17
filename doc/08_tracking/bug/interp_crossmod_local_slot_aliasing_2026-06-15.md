@@ -1,8 +1,5 @@
 # Bug: Interpreter local-slot aliasing when cross-module fn receives local object arg
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
-
 **ID:** interp_crossmod_local_slot_aliasing_2026-06-15
 **Severity:** P1 (silent data corruption, hard to diagnose)
 **Discovered:** 2026-06-15 while building deflate_typed codec
@@ -68,8 +65,3 @@ describe "B":
 ```
 
 Fix: inline `MyHelper` into `MyFn` body.
-
-
-## 2026-08-17 CORE-P1 triage: UNPROVEN -- fix present in source, could not be executed
-
-The COW write-back this doc needs IS present in current source: `merge_shared_collection_fields` at `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975`, called at :1140, landed in `d8951833a74` ("container fields of a value-type struct are shared handles, not silent no-ops") and hardened by `fb065e87ab5`. It carries Array/Dict/ByteArray fields from callee back to caller and recurses through nested `Value::Object` fields, while deliberately keeping scalar and struct fields value-typed.\n\n**Reproduced RED, but the RED is not trustworthy.** A cross-module fixture (`helper.fill(b)` doing `b.items.push(7)` on a struct with an `items: [i64]` field) printed `len=0` under the deployed `bin/simple`. That binary is a RUST SEED with mtime 2026-08-16 22:59, which PREDATES the 06:39 fix -- so this RED is the expected stale-binary artifact, not evidence the defect survives.\n\nAn isolated `cargo build --release --bin simple` was started to re-test against a binary that contains the fix, and did NOT complete: the host was at load average 302-361 with 116 concurrent rustc processes. **No after-Results line was obtained. This row is an already-fixed CANDIDATE and remains UNPROVEN either way.** Re-run the fixture above against a binary built at or after `d8951833a74` to close it.

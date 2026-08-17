@@ -1,8 +1,5 @@
 # BUG: `bin/simple run` (interpreter) loses cross-module DB Option/struct returns + field mutations
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 - **ID:** `interp_run_cross_module_db_option_mutation`
 - **Severity:** P1 (db unusable from a cross-module interpreter `run` driver; works in compiled `test`)
 - **Found:** 2026-06-13, perf-umbrella db benchmark driver (AC-5 emit).
@@ -78,8 +75,3 @@ Regression fixture: `test/fixtures/interp_nil_option/nil_option_eq.spl`.
 ## Status
 FIXED 2026-06-14 — interpreter `==`/`!=`/`is` now bridge the `nil` literal and
 `Option::None`. db RAM-insert workload runs in interpreter/script mode.
-
-
-## 2026-08-17 CORE-P1 triage: UNPROVEN -- fix present in source, could not be executed
-
-Same status and same evidence as `interp_crossmod_local_slot_aliasing_2026-06-15.md` -- these two are the same COW-write-back family. The fix (`merge_shared_collection_fields`, `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975`, called :1140, from `d8951833a74` + `fb065e87ab5`) is present in current source and carries Array/Dict/ByteArray fields callee->caller, recursing through nested `Value::Object`.\n\nNOT VERIFIED. The deployed `bin/simple` is a Rust seed from 2026-08-16 22:59, predating that fix, so any RED it produces is a stale-binary artifact; an isolated cargo rebuild did not finish under a host load average of 302-361. **Already-fixed CANDIDATE, UNPROVEN.** Note the doc also records that the compiled path already worked, so what is being closed is an interpreter-only divergence -- which is exactly what this fix addresses.

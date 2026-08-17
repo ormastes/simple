@@ -1,5 +1,30 @@
 # rt_vulkan_* Only Execute Under Classic Interpreter - 2026-06-17
 
+## VERIFIED FIXED 2026-08-17 — hardcoded zero is gone
+
+Classified by content (brief correction #1). `src/runtime/runtime_native.c` no
+longer answers a constant 0. `rt_vulkan_is_available` / `rt_vulkan_device_count`
+now call `spl_hosted_provider_i64_probe`, which `dlsym(RTLD_DEFAULT, ...)` a
+PROVIDER-only symbol (`rt_vulkan_provider_*`) and calls it when present:
+
+```c
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
+    return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
+}
+```
+
+The symbols are `__attribute__((weak))` and the file documents why: a native
+program linking a real backend (e.g. `libsimple_runtime_wm` built with the
+Vulkan feature) must bind to that provider rather than being pinned to a
+core-runtime fallback. The provider-only symbol name is used precisely so the
+lookup cannot resolve back to this executable's own weak definition.
+
+Residual, and by design rather than a defect: with no provider linked the probe
+still returns 0. That is the honest answer for "no Vulkan backend present", not
+the original defect, which was returning 0 even when a backend WAS available.
+The remaining `rt_cuda_available` / `rt_vk_available` in the same file are still
+literal `return 0;` — a separate gap, noted here rather than silently folded in.
+
 ## Severity
 P1 — GPU backends silently no-op (report zero devices) outside the classic
 interpreter, with no error surfaced. This is the substrate that makes

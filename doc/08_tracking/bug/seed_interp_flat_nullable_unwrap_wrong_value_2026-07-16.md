@@ -1,5 +1,30 @@
 # seed_interp: flat-nullable `.unwrap()` returns wrong value
 
+## VERIFIED FIXED 2026-08-17 — does not reproduce
+
+The "pending seed redeploy" above is stale: verified by execution against the
+deployed `bin/simple`, default lane. Classified by content and execution, not
+SHA ancestry (brief correction #1).
+
+```
+fn f() -> i64?:
+    7
+fn main():
+    val a = f()
+    print(a.unwrap())   # => 7    (reported: wrong value via rt_enum_payload)
+    val b: i64? = 42
+    print(b.unwrap())   # => 42
+```
+
+Both the function-return and the annotated-local form of flat-nullable `T?`
+unwrap correctly.
+
+**Adjacent defect that is NOT fixed:** `.unwrap_or(default)` on an ABSENT
+optional returns nil instead of the default on the JIT lane, for every type.
+That is a different code path from bare `.unwrap()` on a present value and is
+filed separately as
+`jit_unwrap_or_on_absent_optional_ignores_default_2026-08-17.md`.
+
 - Status: fix ready, pending seed redeploy
 - Component: Rust seed interpreter (`bin/simple run`, SIMPLE_BOOTSTRAP unset) — actually the seed's default JIT-first execution path (Cranelift codegen), not the AST tree-walking interpreter; `SIMPLE_EXECUTION_MODE=interpret` was already correct before this fix
 - Severity: medium (oracle landmine — corrupts oracle-vs-native parity comparisons)
@@ -129,3 +154,31 @@ For parity test cases requiring Optional `.unwrap()` semantics:
 ## Not a native path bug
 
 Native-build's handling of flat-nullable `.unwrap()` is correct (verified by `native_text_option_unwrap_pointer_value_2026-07-15.md` which shows native prints `"opt"` as expected). This is a seed-only (Rust interpreter) defect.
+
+## 2026-08-17 — ALREADY FIXED IN-TREE (classified by CONTENT, triage shard A6)
+
+The fix described above is present in current source, not merely staged in a
+scratchpad patch as the header still says.
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` now carries,
+in `try_compile_builtin_method_call`'s runtime-function table (~line 1763-1791),
+the flat-nullable rationale comment verbatim ("... `rt_enum_payload` ... stores
+its payload directly rather than as a boxed `Option::Some` enum object ...
+`rt_unwrap_or_self` has the correct fallback semantics ...") and the mappings:
+
+    "unwrap" => "rt_unwrap_or_trap",
+
+with `unwrap_or` routed to `rt_unwrap_or_self` and a note that `??` alone must
+keep using the latter. `rt_enum_payload` survives only in comments and in one
+unrelated array branch (~line 1951). The unconditional
+`"unwrap" | "unwrap_or" => "rt_enum_payload"` mapping this bug is about no
+longer exists.
+
+Existing class coverage for this defect already lives at
+`test/01_unit/compiler/codegen/probe_optional_payload_extraction_jit.spl` and
+`native_optional_payload_extraction_class_spec.spl` (subprocess-based, so they
+can actually reach the JIT lane a spec body cannot).
+
+Status: **closeable as fixed.** No new patch written. NOT independently
+re-verified by a fresh binary run in this shard — host contention made a seed
+rebuild unreliable — so the close rests on source content, which is the
+classification standard set for this sweep.

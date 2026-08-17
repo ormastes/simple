@@ -2506,7 +2506,8 @@ impl LlvmBackend {
                     "replace" => Some("rt_string_replace"),
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
-                    "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                    "to_int" | "to_i64" => Some("rt_string_to_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
                     "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
                         Some("rt_string_to_float")
                     }

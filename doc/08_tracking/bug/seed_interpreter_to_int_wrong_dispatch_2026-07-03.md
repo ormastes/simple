@@ -1,5 +1,20 @@
 # Seed interpreter: `.to_int()` misdispatches on split()-produced strings
 
+## VERIFIED FIXED 2026-08-17 — does not reproduce
+
+Classified by content and execution, not SHA ancestry (brief correction #1).
+Executed against the deployed `bin/simple`, default lane:
+
+```
+val parts = "10,20,30".split(",")
+print(parts[1])                              # => 20
+print(parts[1].to_int())                     # => 20   (reported: pointer-like garbage)
+print(parts[0].to_int() + parts[2].to_int()) # => 40
+```
+
+A `split()`-produced string now dispatches `.to_int()` the same as a literal.
+The sum is included so a coincidentally-right single read cannot pass this.
+
 ## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane) — does not reproduce
 
 The "Minimal repro" below was re-run verbatim and prints `10`, correctly, under

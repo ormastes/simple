@@ -1,0 +1,106 @@
+# Run-path probe: the text `parse_*` family must return an Option, and the
+# `to_*` family must stay total. Executed as a SUBPROCESS by
+# parse_family_option_preserved_spec.spl and
+# option_returning_method_not_scalar_aliased_spec.spl under BOTH
+# SIMPLE_EXECUTION_MODE=interpreter and =jit.
+#
+# Bug: doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#   `parse_int` was aliased to the bare-i64 runtime symbol `rt_string_to_int`
+#   and HIR-typed `TypeId::I64`, so the Option was erased: `"42".parse_int()`
+#   evaluated to the plain integer `42` and `.is_some()` on it failed with
+#   `Function 'i64.is_some' not found`.
+#
+# Every oracle below is an ABSOLUTE literal. Nothing here compares one engine
+# against the other -- that would pass while both engines are wrong the same way.
+#
+# This file is deliberately small and self-contained: a single unsupported
+# operation demotes the WHOLE program to the interpreter, which would make the
+# jit arm silently measure the interpreter.
+
+var failures: i64 = 0
+
+fn check(name: text, ok: bool):
+    if ok:
+        print("PASS " + name)
+    else:
+        failures = failures + 1
+        print("FAIL " + name)
+
+fn main():
+    # ---- parse_int: present case -------------------------------------------
+    val a = "42".parse_int()
+    check("parse_int_some_is_some", a.is_some() == true)
+    check("parse_int_some_unwrap", a.unwrap_or(-1) == 42)
+
+    # ---- parse_int: absent case. The whole point of the Option: "abc" and
+    # "0" must be DISTINGUISHABLE, which a bare i64 returning 0 cannot do.
+    val b = "abc".parse_int()
+    check("parse_int_none_is_some", b.is_some() == false)
+
+    # These two checks belong to a DIFFERENT, pre-existing defect and are named
+    # so the failure is attributable rather than looking parse-specific:
+    # `.unwrap_or(d)` on an absent optional returns nil instead of `d` on the
+    # JIT, for every type and every way of becoming absent. The nil_* control
+    # below never touches parse_int and fails identically, which is the proof
+    # that this is not the parse family's problem.
+    # doc/08_tracking/bug/jit_unwrap_or_on_absent_optional_ignores_default_2026-08-17.md
+    check("unwrap_or_absent_default", b.unwrap_or(-1) == -1)
+    val nil_opt: i64? = nil
+    check("nil_unwrap_or_default", nil_opt.unwrap_or(-1) == -1)
+
+    val z = "0".parse_int()
+    check("parse_int_zero_is_some", z.is_some() == true)
+    check("parse_int_zero_unwrap", z.unwrap_or(-1) == 0)
+
+    # ---- the alias spellings must agree with each other --------------------
+    val c = "7".parse_i64()
+    check("parse_i64_some_is_some", c.is_some() == true)
+    check("parse_i64_some_unwrap", c.unwrap_or(-1) == 7)
+
+    val d = "7".parse_i32()
+    check("parse_i32_some_is_some", d.is_some() == true)
+    check("parse_i32_some_unwrap", d.unwrap_or(-1) == 7)
+
+    val e = "nope".parse_i64()
+    check("parse_i64_none_is_some", e.is_some() == false)
+
+    # ---- negative and wide values ------------------------------------------
+    val f = "-5".parse_int()
+    check("parse_int_negative_unwrap", f.unwrap_or(0) == -5)
+
+    # 2^61 does not fit the inline 61-bit boxed-int payload, so a parse that
+    # boxes with a raw `<< 3` truncates it here rather than at the parse.
+    val g = "2305843009213693952".parse_int()
+    check("parse_int_wide_is_some", g.is_some() == true)
+    check("parse_int_wide_unwrap", g.unwrap_or(0) == 2305843009213693952)
+
+    # ---- the float family: already correct before the fix, kept as a control
+    # arm. If these go red, the regression is broader than the int family.
+    val h = "3.5".parse_float()
+    check("parse_float_some_is_some", h.is_some() == true)
+    check("parse_float_some_unwrap", h.unwrap_or(-1.0) == 3.5)
+
+    val i = "abc".parse_float()
+    check("parse_float_none_is_some", i.is_some() == false)
+
+    val j = "3.5".parse_f64()
+    check("parse_f64_some_unwrap", j.unwrap_or(-1.0) == 3.5)
+
+    # ---- the to_* family must stay TOTAL ----------------------------------
+    # These are specified to yield 0 / 0.0 on failure and must NOT become
+    # Options: fixing the parse family by making everything an Option would
+    # break every caller of these, so the fix is pinned from both sides.
+    check("to_int_ok", "42".to_int() == 42)
+    check("to_i64_ok", "42".to_i64() == 42)
+    check("to_int_negative", "-5".to_i64() == -5)
+    check("to_int_failure_is_zero", "abc".to_int() == 0)
+    check("to_float_ok", "3.5".to_float() == 3.5)
+    check("to_float_failure_is_zero", "abc".to_f64() == 0.0)
+
+    # `int(text)` is the lenient sibling and must keep its prefix semantics.
+    check("int_cast_ok", int("42") == 42)
+
+    if failures == 0:
+        print("PARSE_FAMILY_OPTION PROBE: ALL PASS")
+    else:
+        print("PARSE_FAMILY_OPTION PROBE: FAILURES")

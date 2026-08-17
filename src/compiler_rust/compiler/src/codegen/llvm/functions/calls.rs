@@ -72,7 +72,7 @@ fn module_has_method_leaf(module: &Module<'static>, leaf: &str) -> bool {
 
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
-        "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_to_float" | "rt_string_to_upper"
+        "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_parse_int" | "rt_string_to_float" | "rt_string_to_upper"
         | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_string_lines"
         | "rt_array_pop" | "rt_array_sort" | "rt_array_reverse" | "rt_array_clear" | "rt_dict_keys"
         | "rt_dict_values" | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => Some(1),
@@ -2048,7 +2048,8 @@ impl LlvmBackend {
             "char_code_at" => Some("rt_string_char_code_at"),
             "byte_at" => Some("rt_string_byte_at"),
             "to_text" | "to_string" => Some("rt_to_string"),
-            "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+            "to_int" | "to_i64" => Some("rt_string_to_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
             "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
             "concat" => Some("rt_string_concat"),
             // Array methods (verified as T symbols)
@@ -2219,7 +2220,8 @@ impl LlvmBackend {
                 "char_code_at" => Some("rt_string_char_code_at"),
                 "byte_at" => Some("rt_string_byte_at"),
                 "to_text" | "to_string" | "str" => Some("rt_to_string"),
-                "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                "to_int" | "to_i64" => Some("rt_string_to_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
                 "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
                 "concat" => Some("rt_string_concat"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),

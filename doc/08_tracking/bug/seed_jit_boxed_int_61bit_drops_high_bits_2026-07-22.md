@@ -1,5 +1,38 @@
 # Bug: JIT boxes i64 as `(value << 3) | TAG_INT` — drops the top 3 bits (bit-63 loss); miscompiles RV64 SoC
 
+## VERIFIED FIXED 2026-08-17 — and now actually covered by tests
+
+Classified by content (brief correction #1). `RuntimeValue::from_int`
+(`src/compiler_rust/runtime/src/value/core.rs:260`) now range-checks before
+boxing: values that round-trip keep the bit-identical inline `i << 3`, and
+anything outside it goes to `from_wide_int`, which heap-boxes a full-width i64.
+`fits_inline_int` is written as an explicit `[-(1<<60), (1<<60)-1]` range test
+rather than `(i << 3) >> 3 == i`, because that shift overflows for exactly the
+inputs being screened.
+
+**The fix had ZERO test coverage.** `grep -rn 'from_wide_int|fits_inline_int'`
+across `src/compiler_rust/` returned only the definitions in `core.rs` itself —
+no caller, no test — so a revert would have been silent. Added
+`src/compiler_rust/runtime/tests/boxed_int_wide_roundtrip.rs`:
+
+- the four values named in this report (`0x8010000000000000`, `2^62`,
+  `i64::MAX`, `i64::MIN`), each additionally asserted NOT to equal what the
+  pre-fix encoding produced, so the test cannot pass vacuously
+- a class sweep: every power-of-two magnitude and neighbour, both signs, plus
+  all-ones and alternating bit patterns, straight across the 2^60 boundary —
+  asserting the representation actually CHOSEN alongside the value, so a wide
+  value cannot claim to be an inline int while holding a truncated payload
+- `fits_inline_int` checked against the raw encoding's real capacity, computed
+  independently of its own range constants
+
+```
+Results: 3 passed; 0 failed; 0 ignored
+  cargo test -p simple-runtime --test boxed_int_wide_roundtrip
+```
+
+The crate sets `autotests = false`, so the `[[test]]` block in
+`runtime/Cargo.toml` is required or the file is silently never compiled.
+
 ## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane)
 
 Fixed by `2a240d9b0b2` ("fix(jit): i64 values >= 2^60 silently became a

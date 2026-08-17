@@ -1372,7 +1372,22 @@ impl Lowerer {
                 // `<invalid-heap:0xfffffffffffffff9>` (raw -7 read as a
                 // pointer), while `"0"` happened to be right because bit
                 // pattern 0 decodes to 0.
-                "parse_int" | "parse_i32" | "parse_i64" | "to_int" | "to_i64" => Some(TypeId::I64),
+                //
+                // SPLIT (2026-08-17): `to_int`/`to_i64` are TOTAL — specified to
+                // yield `0` on failure — so `TypeId::I64` is right for them and
+                // they keep the bare-i64 `rt_string_to_int`. The `parse_*`
+                // family is NOT total: it returns `Option`. Typing it `I64`
+                // here erased that Option at the type level, which is why
+                // `"42".parse_int()` evaluated to the plain integer `42` and
+                // `.is_some()` on it died with `Function 'i64.is_some' not
+                // found`. It now takes `TypeId::ANY` and the tagged
+                // `rt_string_parse_int` (NIL on failure), exactly mirroring the
+                // `parse_f64`/`parse_float` family below, which was already
+                // ANY-typed and already behaved correctly — that working twin
+                // is the template this follows rather than a new invention.
+                // See doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+                "to_int" | "to_i64" => Some(TypeId::I64),
+                "parse_int" | "parse_i32" | "parse_i64" => Some(TypeId::ANY),
                 _ => None,
             };
 

@@ -1,5 +1,34 @@
 # Seed JIT: `text.to_i64()` / `.to_int()` return a FLOAT-tagged value — silent wrong results
 
+## VERIFIED FIXED 2026-08-17 — does not reproduce
+
+Classified by **content and execution**, not by SHA ancestry (per the
+batch brief's correction: cited commits are not reachable from `origin/main`,
+so "closed by commit X" proves nothing in either direction).
+
+Executed against the deployed `bin/simple` under `SIMPLE_EXECUTION_MODE=jit`:
+
+```
+print("42".to_i64())   # => 42     (reported: 0.00000000000000000)
+print("42".to_int())   # => 42     (reported: 0.00000000000000000)
+val v = "42".to_i64()
+print(v == 42)         # => true   (reported: false)
+print("-5".to_i64())   # => -5     (reported: <special:2305843009213693951>)
+```
+
+Root cause of the fix, found in current source: `hir/lower/expr/mod.rs` now
+carries `"to_int" | "to_i64" => Some(TypeId::I64)` in the string-method result
+type table. The bug's own analysis was right that the parse was always correct
+and only the decode was wrong; typing the method makes MIR emit the int-boxing
+that `rt_println_value` needs, so the raw i64 is no longer decoded by bit
+pattern.
+
+**Caveat worth recording:** that same fix arm originally also covered
+`parse_int`, which fixed this bug but ENTRENCHED
+`parse_family_strips_option_jit_native_2026-08-02.md` by typing an
+Option-returning method as `i64`. The two are the same site. Fixing this one
+without the other is what made the second one durable — see that file.
+
 ## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane) — does not reproduce
 
 The reproduction block below was re-run **verbatim** and every value is now

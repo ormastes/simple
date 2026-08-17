@@ -167,7 +167,8 @@ mod tests {
     fn conversion_aliases_resolve_to_runtime_symbols() {
         assert_eq!(sffi_alias_target("to_int"), Some("rt_string_to_int"));
         assert_eq!(sffi_alias_target("to_i64"), Some("rt_string_to_int"));
-        assert_eq!(sffi_alias_target("parse_int"), Some("rt_string_to_int"));
+        assert_eq!(sffi_alias_target("parse_int"), Some("rt_string_parse_int"));
+        assert_eq!(sffi_alias_target("parse_i64"), Some("rt_string_parse_int"));
         assert_eq!(sffi_alias_target("to_float"), Some("rt_string_to_float"));
         assert_eq!(sffi_alias_target("to_f64"), Some("rt_string_to_float"));
         assert_eq!(sffi_alias_target("to_string"), Some("rt_to_string"));
@@ -3032,7 +3033,8 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "dealloc" | "free" => Some("rt_free"),
         "len" | "length" => Some("rt_len"),
         "to_text" | "to_string" | "str" => Some("rt_to_string"),
-        "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+        "to_int" | "to_i64" => Some("rt_string_to_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
         _ => None,
     }
@@ -3579,17 +3581,21 @@ pub fn compile_call<M: Module>(
                 // lowercase counterparts failed on the JIT alone.
                 "to_upper" | "upper" | "up" | "uppercase" | "to_uppercase" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => Some("rt_string_to_lower"),
-                // `parse_i64` is deliberately NOT added here. The interpreter's
-                // `parse_int | parse_i32 | parse_i64` arm returns an OPTION
-                // (`Value::some`/`Value::none`, string.rs:354), while
-                // rt_string_to_int returns a raw i64. The existing `parse_int`
-                // entry below is therefore already wrong -- it strips the Option,
-                // so `"42".parse_int() + 1` yields 43 on the JIT but a type error
-                // on the interpreter. Routing `parse_i64` here too would spread
-                // that defect to another spelling instead of fixing it. Tracked
-                // in doc/08_tracking/bug/jit_text_repeat_dispatch_and_silent_
-                // error_substitution_2026-08-01.md.
-                "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                // FIXED 2026-08-17. This arm used to route only `parse_int`, and
+                // onto `rt_string_to_int`, which returns a raw i64 -- so the JIT
+                // STRIPPED the Option the interpreter returns
+                // (`Value::some`/`Value::none`, interpreter_method/string.rs).
+                // `"42".parse_int()` evaluated to the plain integer `42` and
+                // `.is_some()` on it died with `Function 'i64.is_some' not
+                // found`. `parse_i64` was left unrouted on purpose so the defect
+                // would not spread to a second spelling before someone fixed the
+                // first. Both now route to `rt_string_parse_int`, which returns a
+                // TAGGED value (NIL on failure) the way the already-correct
+                // `parse_float` family does, so all three spellings agree with
+                // the interpreter. `to_int`/`to_i64` stay on the bare-i64 symbol:
+                // they are specified to be total and yield 0 on failure.
+                "to_int" | "to_i64" => Some("rt_string_to_int"),
+                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
                 "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
                 // `index_of` is receiver-polymorphic (array or text): routing it
                 // to rt_string_find made every `[T].index_of(v)` return -1.

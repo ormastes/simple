@@ -1,16 +1,8 @@
 # SimpleOS WM IPC protocol: 8 status/event symbols imported by live code were never implemented
 
-**Status:** OPEN (partially fixed) — re-verified 2026-08-17 by content grep, not
-SHA ancestry, per session correction. `WmStatus`, `WM_STATUS_OK`,
-`WM_STATUS_ERROR`, `WM_STATUS_NO_SPACE` now exist at
-`src/lib/common/window_protocol/window_protocol.spl:11-16`. The remaining 4 of
-the original 8 symbols are still declared in no `src/**/*.spl` file:
-`WmCreateResponse`, `WmFocusEvent`, `WM_EVENT_FOCUS`, `WM_EVENT_RESIZE`,
-`wm_input_event`, `wm_focus_event` (confirmed via
-`grep -n "WmCreateResponse\|WmFocusEvent\|WM_EVENT_FOCUS\|WM_EVENT_RESIZE\|wm_input_event\|wm_focus_event" src/lib/common/window_protocol/window_protocol.spl`
-= no output). Still needs a WM wire-protocol design decision from an owner who
-can fix it against the codec byte-for-byte on real hardware; re-confirmed
-2026-08-10.
+**Status:** OPEN — architectural (needs a WM wire-protocol design decision from
+an owner who can fix it against the codec byte-for-byte on real hardware;
+re-confirmed 2026-08-10)
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
 **Area:** `src/lib/common/window_protocol/window_protocol.spl`,
 `src/os/services/wm/`, `src/os/userlib/_Window/`, `src/os/desktop/`

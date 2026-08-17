@@ -1,0 +1,113 @@
+# Text `parse_*` Family Preserves Its Option — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#
+# `"42".parse_int()` is specified to return `Option<i64>`. On the JIT and native
+# lanes it returned the plain integer `42`: the method was aliased to the
+# bare-i64 runtime symbol `rt_string_to_int` and HIR-typed `TypeId::I64`, so the
+# Option was erased at the type level. The observable symptoms were
+#
+#   * `print("42".parse_int())` -> `42`, not `Some(42)`  (SILENT wrong result)
+#   * `.is_some()` on the result -> `Function 'i64.is_some' not found`
+#   * `"abc".parse_int()` indistinguishable from `"0".parse_int()`, because a
+#     bare i64 answering 0 cannot express None
+#
+# The interpreter lane was always correct, which is exactly why this needs a
+# subprocess: `bin/simple test` runs spec bodies on the tree-walk INTERPRETER,
+# so an in-process example here can never go red on this defect. The oracle is
+# the sibling probe `probe_parse_family_option_jit.spl`, run as a subprocess
+# under both engines, self-checking absolute literals.
+#
+# Root cause fixed at:
+#   src/compiler_rust/compiler/src/hir/lower/expr/mod.rs  (parse_* -> TypeId::ANY)
+#   src/compiler_rust/compiler/src/codegen/instr/calls.rs  (+ 4 sibling emitters)
+#   src/compiler_rust/runtime/src/value/collections.rs     (rt_string_parse_int)
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_parse_family_option_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "text parse_* returns an Option on every engine":
+    it "returns Some/None from parse_int on the interpreter":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was correct before the fix, so it is the control arm: a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("PASS parse_int_some_is_some")
+        expect(interp).to_contain("PASS parse_int_none_is_some")
+        expect(interp).to_contain("PARSE_FAMILY_OPTION PROBE: ALL PASS")
+
+    it "returns Some/None from parse_int on the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit -- the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("`\"42\".parse_int()` must be a Some, not the bare integer 42. Pre-fix this printed `FAIL parse_int_some_is_some`, because `.is_some()` was being called on an i64")
+        expect(jit).to_contain("PASS parse_int_some_is_some")
+        expect(jit).to_contain("PASS parse_int_some_unwrap")
+
+        step("`\"abc\".parse_int()` must be None, and must stay distinguishable from `\"0\".parse_int()` -- the property a bare i64 return cannot have")
+        expect(jit).to_contain("PASS parse_int_none_is_some")
+        expect(jit).to_contain("PASS parse_int_zero_is_some")
+        expect(jit).to_contain("PASS parse_int_zero_unwrap")
+
+    it "applies the unwrap_or default to an absent optional":
+        # KNOWN RED on the JIT arm. This asserts correct behaviour that the JIT
+        # does not yet have, and is deliberately left failing rather than
+        # weakened, per .claude/rules/testing.md.
+        # doc/08_tracking/bug/jit_unwrap_or_on_absent_optional_ignores_default_2026-08-17.md
+        step("Run the probe under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("`.unwrap_or(-1)` on an absent optional must yield -1, not nil")
+        expect(jit).to_contain("PASS unwrap_or_absent_default")
+
+        step("The nil control never touches parse_int, so if it fails too the defect is in unwrap_or rather than in the parse family")
+        expect(jit).to_contain("PASS nil_unwrap_or_default")
+
+    it "resolves every spelling of the int parse method on the JIT":
+        step("Run the probe under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("`parse_i64` and `parse_i32` were not routed at all pre-fix: the probe died on `Function 'str.parse_i64' not found`")
+        expect(jit).to_contain("PASS parse_i64_some_is_some")
+        expect(jit).to_contain("PASS parse_i32_some_is_some")
+        expect(jit).to_contain("PASS parse_i64_none_is_some")
+
+        step("No unresolved-dispatch error may appear")
+        expect(jit.contains("not found")).to_equal(false)
+        expect(jit.contains("unresolved symbol")).to_equal(false)
+
+    it "keeps the total to_* family total rather than converting it to Options":
+        step("Run the probe under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("`to_int`/`to_i64`/`to_float` are specified to be TOTAL and yield 0 on failure. Turning them into Options would have been the lazy way to fix the parse family and would break every caller, so the fix is pinned from both sides")
+        expect(jit).to_contain("PASS to_int_ok")
+        expect(jit).to_contain("PASS to_int_failure_is_zero")
+        expect(jit).to_contain("PASS to_float_failure_is_zero")
+        expect(jit).to_contain("PASS int_cast_ok")
+
+    it "shows no failing check under either engine":
+        step("Collect both engines")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("A single FAIL line means the probe found a wrong answer")
+        expect(jit.contains("FAIL parse_")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)
+
+        step("An empty capture would make every `contains(...) == false` above vacuously true, so require the verdict line on both arms")
+        expect(jit).to_contain("PARSE_FAMILY_OPTION PROBE:")
+        expect(interp).to_contain("PARSE_FAMILY_OPTION PROBE:")

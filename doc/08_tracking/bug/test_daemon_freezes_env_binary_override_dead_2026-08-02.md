@@ -259,28 +259,3 @@ pointed at a stub that exits 42):
 The ladders are deliberate (they absorb a deployed binary that predates a newly
 added extern), so removing them is a separate decision, but they must not be
 mistaken for override coverage.
-
-## Re-verification 2026-08-17 (content check + attempted repro, no code change)
-
-Confirmed by reading current `src/app/test_runner_new/test_runner_client.spl`:
-`_binary_override_vars()` (line 466) still exists and is consulted at lines
-486 and 494, and `src/app/test_daemon/light_protocol.spl` still has **no**
-env field on the wire (`light_request_encode`/`light_request_parse` carry only
-header/expiry/path) — matching the doc's own "client-side fixed,
-protocol-level fix still open" status exactly.
-
-Attempted to re-run `test/03_system/check/test_daemon_env_override_passthrough_spec.spl`
-(the cited regression coverage) as fresh evidence. It did not complete within
-budget: `bin/simple test <spec> --no-session-daemon --sequential --timeout 180`
-produced `Results: 1 total, 0 passed, 1 failed` with
-`SPEC FILE VERDICT: ... timeout=1 reason=child-timeout budget_ms=180000` — the
-spec's own body shells out to nested `bin/simple test` invocations, each of
-which pays the fixed ~310s daemon-path setup cost documented in
-`test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md`, so it can no
-longer finish inside a 180s per-file budget. This is INCONCLUSIVE for the
-env-override behavior itself (the timeout is the row-3 defect, not a
-regression here) — it does not contradict the client-side-fixed verdict, but
-the regression spec is currently unable to produce a fresh PASS/FAIL signal on
-this host without a longer timeout. **Verdict: ALREADY-FIXED-CLOSED for the
-client-side/allowlist fix (content-confirmed); protocol-level fix remains
-correctly OPEN. No code change made in this pass.**

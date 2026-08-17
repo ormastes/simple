@@ -1,5 +1,48 @@
 # Seed interpreter: `.?` boolean-context consumers re-decide presence from payload truthiness ("0 is falsy" landmine)
 
+## FIXED IN SOURCE 2026-08-17 — but it still reproduces on the DEPLOYED binary
+
+Read this before re-testing: this bug is a worked example of the stale-seed
+trap, and it cost time here.
+
+**It reproduces against the deployed `bin/simple`**, on the DEFAULT lane, not
+just under a forced `SIMPLE_EXECUTION_MODE=jit`:
+
+```
+fn zero() -> i64?: 0
+fn five() -> i64?: 5
+fn nothing() -> i64?: nil
+# deployed bin/simple, default lane:
+#   zero:  ABSENT   <- WRONG, Some(0) must be present
+#   five:  PRESENT
+#   nil:   ABSENT
+```
+
+**But the defect is already fixed in current source.** `rt_is_none`
+(`src/compiler_rust/runtime/src/value/objects.rs:508`) no longer tests
+`value.0 == 0`, and its doc comment names this bug file by path as one of the
+two symptoms it existed to cause. Integers box as `(v << 3) | TAG_INT` with
+`TAG_INT == 0b000`, so the integer 0 boxes to the bit pattern `0x0` — identical
+to the old "raw nil" the predicate used to accept. It now tests `is_nil()`
+(`self.0 == 3`) plus a real Option-enum discriminant check.
+
+The deployed binary is a Rust seed that predates that change, so it happily
+reproduces a dead bug. **Classify by content, never by what the deployed
+binary does** — and never by SHA ancestry either (brief correction #1).
+Confirmed by building a seed from current source: the wrong answers disappear.
+
+Also worth recording, because it looks like a second bug and is not: `.?` on an
+empty `text?` answers ABSENT on the interpreter. That is INTENDED — the
+interpreter's `Expr::ExistsCheck` arm (`interpreter/expr.rs`) deliberately
+treats empty strings, arrays and dicts as absent, per
+`doc/07_guide/quick_reference/syntax_quick_reference.md` "Existence Check
+(`.?`)". Do not "fix" it.
+
+The HIR side was never wrong: `lower_condition`
+(`hir/lower/expr/control.rs:1943`) already emits the `rt_is_some` presence
+predicate directly for a bare `.?` condition rather than re-testing the
+payload's truthiness. The whole defect was in the runtime predicate.
+
 ## 2026-08-17 (independent corroboration, interpreter lane)
 
 Independently re-classified by CONTENT, not by SHA: `is_condition_present` is

@@ -2046,7 +2046,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => "rt_string_to_lower",
         // `parse_i64` intentionally omitted: parse_* returns an Option in the
         // interpreter but a raw i64 here. See the note in calls.rs.
-        "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
+        "to_int" | "to_i64" => "rt_string_to_int",
+        "parse_int" | "parse_i32" | "parse_i64" => "rt_string_parse_int",
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => "rt_string_to_float",
         // Receiver-polymorphic: see rt_index_of.
         "index_of" => "rt_index_of",

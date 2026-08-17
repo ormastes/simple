@@ -1,0 +1,126 @@
+# Option-Returning Methods Are Never Scalar-Aliased — SIMILAR-PROBLEM DETECTION
+#
+# Generalises doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+# from the one method that was found to the DEFECT CLASS that produced it.
+#
+# THE CLASS. The seed lowers a builtin method call by mapping the method NAME to
+# a runtime symbol name, through a `match` table. That table records only names —
+# it carries no notion of the symbol's RETURN REPRESENTATION. So a method whose
+# contract is `Option<T>` can be pointed at a runtime symbol returning a bare
+# machine scalar, and nothing anywhere objects. The Option is then erased at the
+# type level, silently: the program compiles, exits 0, and answers with the
+# unwrapped payload, with `None` and a legitimate zero collapsed together.
+#
+# That is what happened to `parse_int` -> `rt_string_to_int` (bare `i64`). It
+# went unnoticed for months because the interpreter, which the spec suite runs
+# on, returns the Option correctly.
+#
+# WHY THIS SPEC IS STATIC. The behavioural reproducer for this class is
+# parse_family_option_preserved_spec.spl, and it can only cover the spellings
+# someone thought to write down. The recurrence risk here is structural: the
+# name->symbol table is DUPLICATED across five emitters (cranelift instr x2,
+# LLVM emitter, LLVM functions x2). A fix applied to four of the five is the
+# most likely next instance of this bug, and no behavioural test of one lane
+# detects it. So this spec asserts the invariant directly over the source of
+# every copy:
+#
+#   No `parse_*` method name may appear on the same match arm as a runtime
+#   symbol that is known to return a bare scalar.
+#
+# It also pins the inverse, so the class cannot be "fixed" by flattening
+# everything into Options: the TOTAL conversions (`to_int`/`to_i64`/`to_float`/
+# `to_f64`) must KEEP their bare-scalar symbols.
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Every emitter that carries a copy of the method-name -> runtime-symbol table.
+val EMITTERS: [text] = [
+    "src/compiler_rust/compiler/src/codegen/instr/calls.rs",
+    "src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs",
+    "src/compiler_rust/compiler/src/codegen/llvm/emitter.rs",
+    "src/compiler_rust/compiler/src/codegen/llvm/functions.rs",
+    "src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs",
+]
+
+fn source_of(path: text) -> text:
+    val body = rt_file_read_text(path)
+    # A missing file must FAIL, never pass vacuously: a scan that finds nothing
+    # may have scanned nothing.
+    if body.is_none():
+        return ""
+    body.unwrap_or("")
+
+# Count how many lines of `body` contain BOTH needles -- i.e. a match arm that
+# maps an Option-returning method name onto a scalar-returning symbol.
+fn lines_with_both(body: text, a: text, b: text) -> i64:
+    var hits = 0
+    for line in body.lines():
+        if line.contains(a) and line.contains(b):
+            hits = hits + 1
+    hits
+
+describe "no Option-returning method is aliased to a scalar-returning runtime symbol":
+    it "reads every emitter that carries a copy of the alias table":
+        step("The invariant is only meaningful if the sources were actually read -- an unreadable path would make every absence check below vacuously true")
+        for path in EMITTERS:
+            val body = source_of(path)
+            assert_true(body.len() > 0)
+            step("Each emitter must actually contain an alias table mentioning the string conversions")
+            assert_true(body.contains("rt_string_to_int"))
+
+    it "never maps a parse_* method onto the bare-i64 rt_string_to_int":
+        step("`rt_string_to_int` returns a bare `i64` and answers 0 for both \"0\" and \"abc\", so it cannot represent None. This is the exact pairing that produced the bug")
+        for path in EMITTERS:
+            val body = source_of(path)
+            assert_equal(lines_with_both(body, "parse_int", "rt_string_to_int"), 0)
+            assert_equal(lines_with_both(body, "parse_i64", "rt_string_to_int"), 0)
+            assert_equal(lines_with_both(body, "parse_i32", "rt_string_to_int"), 0)
+
+    it "routes every int parse spelling to the Option-shaped rt_string_parse_int":
+        step("All five emitters must be fixed, not four: a partial fix is this class's most likely recurrence, and no single-lane behavioural test would see it")
+        for path in EMITTERS:
+            val body = source_of(path)
+            assert_true(body.contains("rt_string_parse_int"))
+            step("All three spellings the interpreter accepts must be routed, or the unrouted one dies with `Function 'str.parse_i64' not found`")
+            assert_true(lines_with_both(body, "parse_int", "rt_string_parse_int") > 0)
+            assert_true(lines_with_both(body, "parse_i64", "rt_string_parse_int") > 0)
+            assert_true(lines_with_both(body, "parse_i32", "rt_string_parse_int") > 0)
+
+    it "keeps the TOTAL conversions on their bare-scalar symbols":
+        step("The inverse failure mode: making every conversion an Option would break each caller of the total ones. `to_int`/`to_i64` are specified to yield 0 on failure, so they must stay on rt_string_to_int")
+        for path in EMITTERS:
+            val body = source_of(path)
+            assert_true(lines_with_both(body, "to_int", "rt_string_to_int") > 0)
+            assert_equal(lines_with_both(body, "to_int", "rt_string_parse_int"), 0)
+            assert_equal(lines_with_both(body, "to_i64", "rt_string_parse_int"), 0)
+
+    it "types the parse family as a tagged value and the total family as i64 in HIR":
+        step("The name->symbol table is only half the defect. HIR typed `parse_int` as TypeId::I64, which is what erased the Option at the type level -- so the HIR table has to agree with the emitters")
+        val hir = source_of("src/compiler_rust/compiler/src/hir/lower/expr/mod.rs")
+        assert_true(hir.len() > 0)
+
+        step("The parse family must NOT be typed I64 on the same arm as the total conversions")
+        assert_equal(lines_with_both(hir, "\"parse_int\"", "TypeId::I64"), 0)
+        assert_equal(lines_with_both(hir, "\"parse_i64\"", "TypeId::I64"), 0)
+
+        step("It must be ANY -- the tagged/erased slot the already-correct parse_f64 family uses")
+        assert_true(lines_with_both(hir, "\"parse_int\"", "TypeId::ANY") > 0)
+
+        step("And the total conversions must still be I64")
+        assert_true(lines_with_both(hir, "\"to_int\"", "TypeId::I64") > 0)
+
+    it "backs the Option-shaped symbol with a real runtime definition":
+        step("A routed symbol with no definition trades a silent wrong answer for an unresolved-symbol failure -- better, but still broken")
+        val rt = source_of("src/compiler_rust/runtime/src/value/collections.rs")
+        assert_true(rt.len() > 0)
+        assert_true(rt.contains("pub extern \"C\" fn rt_string_parse_int"))
+
+        step("It must return a RuntimeValue, not an i64 -- returning a scalar under an Option-shaped name would reintroduce the defect behind a correct-looking name")
+        assert_true(lines_with_both(rt, "fn rt_string_parse_int", "-> RuntimeValue") > 0)
+
+        step("And it must be exported, or the JIT cannot resolve it at all")
+        val exports = source_of("src/compiler_rust/runtime/src/value/mod.rs")
+        assert_true(exports.len() > 0)
+        assert_true(exports.contains("rt_string_parse_int"))

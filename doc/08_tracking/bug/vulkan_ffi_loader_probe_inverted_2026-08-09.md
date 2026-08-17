@@ -1,16 +1,5 @@
 # `VulkanFfi.loader_probe()` reports false on a host with a working Vulkan loader
 
-**Status: RESOLVED — closed on source-content evidence, not re-executed (2026-08-17).**
-Current `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl:148-158` no longer
-calls `call0(...) != 0`. It resolves the symbol via
-`self._dyn_lib.sym("vkEnumerateInstanceVersion") != 0` and carries an inline
-comment explaining exactly the two defects this doc reported (inverted
-`VK_SUCCESS == 0` comparison, and the missing out-pointer argument to
-`call0`). This matches the fix this doc itself recommended in "The deeper
-problem" section below (a resolution check distinct from the call's return
-value). Closing as already-fixed-but-stale; no further action needed on the
-`loader_probe()` logic itself.
-
 **Filed:** 2026-08-09 (stream F4)
 **Subject:** `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl`, `loader_probe()`
 **Host:** Linux x86_64, `libvulkan.so.1 -> libvulkan.so.1.3.275`

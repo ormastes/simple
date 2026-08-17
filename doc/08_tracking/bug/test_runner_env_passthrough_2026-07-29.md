@@ -184,26 +184,3 @@ from "empty".
 - `src/app/test_daemon/client.spl:30-58` (`test_daemon_ensure_responsive`/`start_test_daemon_process`)
 
 Probe file (scratch, not committed): `/tmp/env_probe_spec.spl`.
-
-## Re-verification 2026-08-17 (content check, no code change)
-
-Confirmed by reading current source, line numbers essentially unchanged
-(minor drift only, same shape):
-- `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl:254-255` —
-  `var session_share = true` / `var session_daemon = true` (doc cited
-  250-251) — still on by default.
-- `src/app/test_daemon/light_daemon.spl:132` still spawns the runner with
-  `["run", "src/app/test_runner_new/test_runner_single.spl", ...]`, inheriting
-  the daemon's own frozen environment (no `.env()`/env-forwarding call visible
-  at the call site).
-- `src/app/test_daemon/light_protocol.spl` request encoding still carries only
-  header/expiry/path — no env field, consistent with `light_request_encode`/
-  `light_request_parse` reviewed for the sibling row 2 (`test_daemon_freezes_env_binary_override_dead_2026-08-02.md`).
-
-This is the same underlying wire-format gap as row 2's "still open" section —
-both require the same protocol-level fix (env field on the light-daemon
-request). **Verdict: confirmed OPEN, architectural, unchanged from the doc's
-own root-cause analysis. No code change made in this pass** — per the doc's
-own scoping, a real fix here requires the wire-protocol + reuse-semantics
-change already described in "3. Why this is not a small fix", not a
-minimal/additive patch.

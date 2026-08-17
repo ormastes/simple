@@ -1,5 +1,26 @@
 # Rust-seed native codegen: bool-arg function call returns wrong value after inlining
 
+## VERIFIED FIXED 2026-08-17 — does not reproduce
+
+Classified by content and execution, not SHA ancestry (brief correction #1).
+Executed against the deployed `bin/simple`, default lane:
+
+```
+fn pick(flag: bool) -> i64:
+    if flag: 111
+    else:    222
+print(pick(true))   # => 111
+print(pick(false))  # => 222
+val t = true; val f = false
+print(pick(t))      # => 111
+print(pick(f))      # => 222
+```
+
+Both the literal-argument form (which is what gets inlined and const-folded)
+and the variable-argument form return the correct value. Two distinct
+non-zero constants are used deliberately: a 0/1 pair would pass even if the
+bool were being reinterpreted as its raw payload.
+
 **Status:** Found, NOT fixed (out of scope for the lane that found it) **Found:** 2026-07-17,
 while verifying the C3 (`and`/`or` short-circuit) fix in
 `simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md`.
@@ -83,3 +104,25 @@ instrumentation (temporary — none currently lands with this doc) around
 `compiler/src/codegen/instr/body.rs`'s per-function compile loop, focused on
 how a `false`-literal/computed argument's `Value` gets propagated across the
 inlined call boundary vs. a `true`-valued one (which works).
+
+## 2026-08-17 — triage shard A6: reproducer located, class spec added
+
+- The doc names `codegen/instr/body.rs` as the suspect file. That file contains
+  no inliner at all: it is MIR vreg type stamping (`build_vreg_types`), and its
+  only "inline" occurrence is a comment at line 71. The "inlining" in the title
+  is the original author's inference from a CLIF dump, not a located code site.
+  Root cause is therefore still UNLOCATED; do not treat body.rs as confirmed.
+- A live reproducer already exists in-tree and is currently disabled:
+  `src/compiler_rust/compiler/tests/compile_and_run.rs:241-256`,
+  `#[ignore = "OPEN: Rust-seed native inlining corrupts false bool arguments; ..."]`
+  `fn native_bool_argument_false_survives_inlined_calls()`, asserting
+  `compile_native_and_run("... return f(false) * 10 + f(true)") == 1`.
+  Un-ignore it the moment it passes; that is the reproducing gate.
+- Class-detection spec added:
+  `test/01_unit/compiler/codegen/native_bool_argument_marshalling_class_spec.spl`
+  — sweeps seven members of the bool-argument-marshalling class in a single
+  native-build subprocess (literal `false`, runtime falsy expr, both polarities
+  packed into one decimal, bool RETURNED not branched on, bool in the second
+  parameter slot, bool forwarded through two hops, `not`-produced bool), each
+  asserted against absolute literals plus an explicit absence check for the
+  false-arrives-truthy fingerprint.
