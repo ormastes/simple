@@ -80,3 +80,60 @@ still-correct shape in `declaration_lowering.spl:569-586`. Do **not** revert
 pinned by `test/01_unit/compiler/common/module_path_naming_spec.spl`. A human
 should confirm whether the removal was accidental (stale snapshot) or an
 intentional change made elsewhere, before restoring.
+
+---
+
+## RESOLVED 2026-08-17 — commit `153e331d605`
+
+The three deleted lines are restored in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`'s flat-AST
+impl-block loop, matching the still-correct shape in
+`declaration_lowering.spl:632-649` and `trait_impl_lowering.spl:202-231`:
+`previous_impl_self_symbol_id` is saved next to `previous_impl_self_type`,
+`self.current_method_self_symbol_id = impl_owner_symbol.id` is set inside the
+same `is_valid()` guard, and the saved value is restored next to the self type
+at the end of the loop. `83d21f1808`'s module-path-naming consolidation is
+untouched.
+
+### Specs
+
+- Reproducing: `test/01_unit/compiler/hir/impl_self_symbol_id_scope_spec.spl`
+  (mirror: `test/unit/compiler/hir/impl_self_symbol_id_scope_spec.spl`)
+- Similar-problem generalization:
+  `test/01_unit/compiler/hir/self_context_pair_consistency_spec.spl`
+  (mirror: `test/unit/compiler/hir/self_context_pair_consistency_spec.spl`) —
+  holds *every* lowering path that publishes `current_method_self_type` to also
+  publish and restore `current_method_self_symbol_id`, which is what the
+  pre-existing `impl_lowering_self_symbol_id_spec.spl` did not do (it was green
+  throughout this regression because it only covers `declaration_lowering.spl`).
+
+### Evidence (reproduce-first)
+
+Pre-fix source restored under the new spec — all three examples RED:
+
+```
+✗ saves the previous owner symbol id before entering an impl block
+✗ publishes the impl owner as the self symbol for the method loop
+✗ restores the outer owner symbol id when the impl block ends
+SPEC FILE VERDICT: .../impl_self_symbol_id_scope_spec.spl declared>=3 executed=3 passed=0 failed=3 dropped=0
+Results: 3 total, 0 passed, 3 failed
+```
+
+Post-fix:
+
+```
+SPEC FILE VERDICT: .../impl_self_symbol_id_scope_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
+SPEC FILE VERDICT: .../self_context_pair_consistency_spec.spl declared>=2 executed=2 passed=2 failed=0 dropped=0
+Results: 2 total, 2 passed, 0 failed
+```
+
+### Why the specs are source-contract, not behavioural
+
+Stated explicitly rather than omitted: the defective loop is the flat-AST
+(`SIMPLE_BOOTSTRAP`) path, entered only by the self-hosted compiler during
+bootstrap. The host `bin/simple` here is the Rust seed and never executes it, so
+a `self.<field>` mistyping repro requires a self-hosted bootstrap binary — which
+this lane is not permitted to build. Both specs therefore pin the save/set/restore
+discipline that actually regressed; a behavioural repro remains open for whoever
+next runs a full bootstrap.
