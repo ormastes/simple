@@ -142,6 +142,10 @@ walk after that point. Driver order is
 Exact source function is **not** identified: the artifact is stripped, so the walker at `0x517880`
 could not be mapped back to a `.spl` line. Identifying it requires an unstripped stage3 (see Unblock).
 
+> **SUPERSEDED 2026-08-16** — the phase *is* now identified, on the same stripped artifact, without
+> an unstripped rebuild. Crash B is in **`aot:borrow_check`** (post-MIR-lowering, pre-codegen).
+> See "Phase identified on the stripped artifact (2026-08-16)" at the end of this file.
+
 ## REFUTED (2026-08-11): the mid-merge hypothesis below
 
 The section that follows was written while the shared worktree held 12 unmerged (`UU`) files.
@@ -241,3 +245,77 @@ git status --porcelain | grep '^UU'
 `--version` and `--help` exit 0; `native-build` on a missing file exits 1 with a clean
 `native entry source not found` — so argv handling, startup and error reporting are all intact.
 Only the compile path is broken.
+
+## Phase identified on the stripped artifact (2026-08-16)
+
+Crash B reproduced independently against the **same** artifact (md5 `2244f18ce2e694fb7ca395e9916404c3`),
+from a clean worktree at `f6cadcc36aff` — every register in the table above matched
+(`0x517880` entry, `rax=0x110`, `r15=0x111`, `si_addr=0x118`). This section only adds what is new;
+the root-cause analysis above is unchanged and still stands.
+
+**The phase is `aot:borrow_check`** (post-MIR-lowering, pre-codegen). No unstripped rebuild was
+needed — two independent lines of evidence agree:
+
+1. **String-literal anchoring of the stripped frames.** `0x67ac9c` lies in the function owning the
+   literals `running borrow check` / `borrow check skipped (--no-borrow-check)` →
+   `CompilerDriver.borrow_check()` (`src/compiler/80.driver/driver_pipeline_passes.spl:10-19`).
+   `0x66b368` lies between the `aot:borrow_check:start` and `aot:borrow_check:done` literals
+   (`driver_aot_pipeline.spl:97-102`). `0x5183ae` → `check_mir_module`
+   (`src/compiler/borrow/borrow_check/mod.spl:405`).
+2. **`SIMPLE_COMPILER_TRACE=1`** (gate at `driver_log_helpers.spl:20`). Last line before death:
+   `[BOOTSTRAP-PHASE] +512ms aot:borrow_check:start heap_registry=3545`.
+
+This supersedes the "Where in the pipeline" note above, which placed the crash in the first
+structural walk after LLVM capability detection and recorded the source function as unidentifiable.
+LLVM detection is still the last thing visible under `strace`, but only because borrow check issues
+no syscalls — it is not the crashing phase.
+
+### Three findings not previously recorded
+
+1. **`--no-borrow-check` does not bypass it.** Same PC, same trace, `aot:borrow_check:start` still
+   emitted. The flag is not honoured on the `compile` path — so the obvious workaround for crash B
+   is unavailable, and that is a second defect in its own right.
+2. **`SIMPLE_BOOTSTRAP=1` does skip borrow check** (`bootstrap_flat_aot`), which exposes a **third**
+   distinct fault, not either of the two this file names: PC `0x4942cd`,
+   `mov 0x18(%r15),%rdi` after a list-element load, `rdi=0x29aa29188`, inside MIR lowering
+   (frame `0x66b005`, ~10 lowering frames deep). Same tagged-value-seam family, different site.
+   It is **not** the baked `call 0` fault listed as crash A.
+3. **`Dict.len()` returns -1 in this artifact.** The trace emits
+   `aot:lower_to_mir:module:done … functions=-1` from `driver_pipeline_lowering.spl:229`, i.e.
+   `MirModule.functions.len()` is -1 — the native `Dict.len()` defect that
+   `.claude/rules/code-style.md` marks RESOLVED (routing fix 2026-08-01) is **live here**, and it
+   sits immediately upstream of the `module.functions.keys()` loop that crashes. Whether it is
+   causal or merely adjacent is not established; it is recorded because the two are one statement
+   apart.
+
+**Not** LIM-010 (load-time duplicate-LLVM-ctor, SIGABRT-shaped), **not** the 2026-07-09 LLVM ICMP
+bug (inside LLVM, downstream of borrow check), **not** the 2026-08-01 placeholder-nil bug
+(SIGILL/`ud2`, pre-HIR, fixed).
+
+### Consequence for other lanes
+
+`bootstrap/stage3/simple` is the only self-hosting-fixpoint binary present
+(stage1 ≡ stage2 ≡ stage3, byte-identical) and it cannot compile a three-line hello world, in either
+`compile --format=smf` or `native-build`. It also exposes no `test` subcommand — only `compile` and
+`native-build`. Any lane whose evidence rule requires pure-Simple self-hosted execution and forbids
+the Rust seed is therefore **blocked at the toolchain**, not at its own subject matter. Tracked as
+`.spipe/stage3-segfault-fix/` AC-3 and AC-4, both still open.
+
+This is not local to one worktree. A fleet-wide sweep (2026-08-16) of every git worktree plus
+`/dev/shm/*`, `/home/ormastes/dev/{,pub/}*`, `/mnt/data/{worktrees,tmp,.simple}/*`, `~/.local/bin`,
+`/usr/local/bin`, `/usr/bin` found **1099 binary instances → 19 unique by md5**. Fourteen print the
+`bootstrap seed only` WARNING and are disqualified as pure-Simple evidence. Of the five remaining
+self-hosted artifacts, **none works**:
+
+| md5 | size | banner | result |
+|---|---|---|---|
+| `2244f18ce2e6…` | 3.46M | `simple-bootstrap` | 139 on both commands (this bug; 936 copies — the fleet's dominant artifact) |
+| `3e268a376d70…` | 3.43M | `simple-bootstrap` | 139 on both commands — a **second, independent build with the identical failure** |
+| `75fa8f23269a…` | 126.9M | `simple-bootstrap` | no `test`; SMF compile rc=1 `success without creating 'hello.smf'`; `native-build` rc=0 but **emits no artifact** (vacuous success) |
+| `943465748bd1…` | 48.8M | `Simple v1.0.0-beta` | only candidate exposing `simple test`; runner starts then dies — `seed sibling not found, skipping delegation` + `field access on nil receiver`, 0 passed. In its own contemporaneous worktree: `HIR lowering error: unresolved name: describe / it / assert_equal` — cannot resolve the SSpec DSL at all. `native-build` → 139 |
+| `2b2fa4d057b7…` | 126K | n/a | Mach-O arm64 — cannot execute on this host |
+
+Note the `943465748bd1` failure mode specifically: the one self-hosted binary that *has* a test
+runner cannot run a spec without **delegating to a Rust seed sibling**. Even had it worked, evidence
+produced that way would not be pure-Simple. The 936-copy dominance of `2244f18` also rules out the
+hope that some other worktree is quietly holding a good binary.

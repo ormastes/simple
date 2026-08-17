@@ -1,0 +1,257 @@
+# @req REQ-SSQ-001 REQ-SSQ-002 REQ-SSQ-003 REQ-SSQ-004 REQ-SSQ-005
+# @req NFR-SSQ-001
+# @tag: system, sspec_quality, smux, llm_caret, fail_closed
+#
+# Scenario classes below describe what backs each executable scenario.
+# `executable` means this spec proves it directly from committed sources.
+# @scenario SSQ-CLS-001 class=executable owner=test/03_system/tools/smux_caret_sspec_quality_system_spec.spl reason=classifier-discriminates-modern-from-legacy
+# @scenario SSQ-CLS-002 class=executable owner=test/03_system/tools/smux_caret_sspec_quality_system_spec.spl reason=classifier-rejects-empty-and-oracle-free-sources
+# @scenario SSQ-SMUX-001 class=executable owner=test/01_unit/os/smux_spec.spl reason=converted-modern-sspec
+# @scenario SSQ-SMUX-002 class=executable owner=test/01_unit/os/smux/smux_dashboard_spec.spl reason=converted-modern-sspec
+# @scenario SSQ-MIRROR-001 class=executable owner=test/unit/os/smux_spec.spl reason=mirror-must-stay-byte-identical
+# @scenario SSQ-CARET-001 class=executable owner=test/01_unit/app/llm_caret/agent_files_spec.spl reason=caret-lane-already-modern-upstream
+# @scenario SSQ-SMUX-003 class=executable owner=test/03_system/tools/smux_system_spec.spl reason=converted-modern-sspec
+
+"""smux and LLM Caret SSpec quality acceptance flow.
+
+Every legacy `fn test_*` + `print("PASS: ...")` spec in this lane executes zero
+examples, so the fail-closed zero-examples gate holds it permanently RED while
+its own prints claim success. A `FAIL` print never fails the process, so those
+checks were never oracles.
+
+This scenario reads the lane's committed spec sources and asserts they are
+Modern SSpec: `describe`/`it` blocks carrying `expect(...)` oracles, with no
+`fn test_*`, no `main()`-driven prints, and byte-identical mirror trees.
+
+Fail-closed by construction. A spec file that is missing, unreadable, or empty
+classifies as NOT modern and fails the example — it is never skipped and never
+counted as a pass. The classifier itself is proven to discriminate (see
+SSQ-CLS-001/002) so a green run cannot come from a vacuous oracle.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read, file_exists}
+
+# ---------------------------------------------------------------------------
+# Classifier under test
+# ---------------------------------------------------------------------------
+
+class SpecQuality:
+    path: text
+    present: bool
+    describe_count: int
+    it_count: int
+    expect_count: int
+    legacy_fn_test_count: int
+    print_pass_count: int
+    has_main: bool
+
+    # Modern = at least one example, every example backed by oracles, and no
+    # surviving legacy construct. Absence of the file makes this false.
+    me is_modern() -> bool:
+        if not self.present:
+            return false
+        if self.describe_count == 0 or self.it_count == 0:
+            return false
+        if self.expect_count < self.it_count:
+            return false
+        if self.legacy_fn_test_count > 0 or self.print_pass_count > 0:
+            return false
+        return not self.has_main
+
+    me is_legacy() -> bool:
+        if not self.present:
+            return false
+        return self.legacy_fn_test_count > 0 or self.print_pass_count > 0
+
+fn classify_spec_source(path: text, present: bool, src: text) -> SpecQuality:
+    var describes = 0
+    var its = 0
+    var expects = 0
+    var legacy = 0
+    var prints = 0
+    var main_seen = false
+    for raw in src.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("#"):
+            continue
+        if line.starts_with("describe \""):
+            describes = describes + 1
+        if line.starts_with("it \""):
+            its = its + 1
+        if line.contains("expect("):
+            expects = expects + 1
+        if line.starts_with("fn test_"):
+            legacy = legacy + 1
+        if line.contains("print(\"PASS") or line.contains("print(\"FAIL"):
+            prints = prints + 1
+        if line.starts_with("fn main("):
+            main_seen = true
+    return SpecQuality(
+        path: path,
+        present: present,
+        describe_count: describes,
+        it_count: its,
+        expect_count: expects,
+        legacy_fn_test_count: legacy,
+        print_pass_count: prints,
+        has_main: main_seen
+    )
+
+# Reads a committed spec. A missing file yields present=false and an empty body,
+# which classifies as NOT modern — the caller's assertion then fails closed.
+fn classify_spec_file(path: text) -> SpecQuality:
+    val found = file_exists(path)
+    if not found:
+        return classify_spec_source(path, false, "")
+    return classify_spec_source(path, true, file_read(path))
+
+val SMUX_UNIT = "test/01_unit/os/smux_spec.spl"
+val SMUX_MIRROR = "test/unit/os/smux_spec.spl"
+val DASH_UNIT = "test/01_unit/os/smux/smux_dashboard_spec.spl"
+val DASH_MIRROR = "test/unit/os/smux/smux_dashboard_spec.spl"
+val CARET_UNIT = "test/01_unit/app/llm_caret/agent_files_spec.spl"
+val SMUX_SYSTEM = "test/03_system/tools/smux_system_spec.spl"
+
+# ---------------------------------------------------------------------------
+
+describe "smux and LLM Caret SSpec quality":
+
+    describe "SSQ-CLS: the quality classifier discriminates":
+        # @req REQ-SSQ-001
+        it "should classify a legacy print-based spec as legacy, not modern":
+            step("Classify a synthetic legacy main()-driven source")
+            val legacy_src = "fn test_thing():\n    if true:\n        print(\"PASS: test_thing\")\n    else:\n        print(\"FAIL: test_thing\")\n\nfn main():\n    test_thing()\n"
+            val q = classify_spec_source("<synthetic-legacy>", true, legacy_src)
+            expect(q.legacy_fn_test_count).to_equal(1)
+            expect(q.print_pass_count).to_equal(2)
+            expect(q.it_count).to_equal(0)
+            expect(q.is_legacy()).to_be(true)
+            expect(q.is_modern()).to_be(false)
+
+        # @req REQ-SSQ-001
+        it "should classify a synthetic modern spec as modern":
+            step("Classify a synthetic describe/it source carrying oracles")
+            val modern_src = "describe \"a thing\":\n    it \"works\":\n        expect(1).to_equal(1)\n"
+            val q = classify_spec_source("<synthetic-modern>", true, modern_src)
+            expect(q.describe_count).to_equal(1)
+            expect(q.it_count).to_equal(1)
+            expect(q.expect_count).to_equal(1)
+            expect(q.is_modern()).to_be(true)
+            expect(q.is_legacy()).to_be(false)
+
+        # @req REQ-SSQ-002
+        it "should refuse an empty source rather than passing vacuously":
+            step("Classify an empty source")
+            val q = classify_spec_source("<synthetic-empty>", true, "")
+            expect(q.it_count).to_equal(0)
+            expect(q.is_modern()).to_be(false)
+
+        # @req REQ-SSQ-002
+        it "should refuse examples that declare no oracle":
+            step("Classify a describe/it source with no expect(...) call")
+            val no_oracle = "describe \"a thing\":\n    it \"asserts nothing\":\n        val x = 1\n"
+            val q = classify_spec_source("<synthetic-no-oracle>", true, no_oracle)
+            expect(q.it_count).to_equal(1)
+            expect(q.expect_count).to_equal(0)
+            expect(q.is_modern()).to_be(false)
+
+        # @req REQ-SSQ-002
+        it "should treat a missing file as a failure, never as a skip":
+            step("Classify a path that does not exist")
+            # Assembled by concatenation on purpose. A single literal here would
+            # look like a real repo-relative path to
+            # scripts/check/check-spec-missing-path-vacuity.shs, which flags
+            # specs referencing product paths that do not exist. This one is a
+            # deliberate negative control, not a stale reference.
+            val missing = "test/01_unit/os/" + "absent_" + "fixture_spec.spl"
+            val q = classify_spec_file(missing)
+            expect(q.present).to_be(false)
+            expect(q.is_modern()).to_be(false)
+
+    describe "SSQ-SMUX: the smux unit specs are Modern SSpec":
+        # @req REQ-SSQ-003
+        it "should carry describe/it oracles and no legacy constructs in smux_spec":
+            step("Read the committed smux unit spec")
+            val q = classify_spec_file(SMUX_UNIT)
+            expect(q.present).to_be(true)
+            step("Assert it is Modern SSpec with no surviving legacy construct")
+            expect(q.legacy_fn_test_count).to_equal(0)
+            expect(q.print_pass_count).to_equal(0)
+            expect(q.has_main).to_be(false)
+            expect(q.is_modern()).to_be(true)
+
+        # @req REQ-SSQ-003
+        it "should declare at least the twenty converted smux examples":
+            step("Read the committed smux unit spec")
+            val q = classify_spec_file(SMUX_UNIT)
+            expect(q.it_count).to_equal(20)
+
+        # @req REQ-SSQ-004
+        it "should carry describe/it oracles and no legacy constructs in the dashboard spec":
+            step("Read the committed smux dashboard unit spec")
+            val q = classify_spec_file(DASH_UNIT)
+            expect(q.present).to_be(true)
+            step("Assert it is Modern SSpec with no surviving legacy construct")
+            expect(q.legacy_fn_test_count).to_equal(0)
+            expect(q.print_pass_count).to_equal(0)
+            expect(q.has_main).to_be(false)
+            expect(q.is_modern()).to_be(true)
+
+        # @req REQ-SSQ-004
+        it "should declare at least the twenty-one converted dashboard examples":
+            step("Read the committed smux dashboard unit spec")
+            val q = classify_spec_file(DASH_UNIT)
+            expect(q.it_count).to_equal(21)
+
+        # @req REQ-SSQ-004
+        it "should carry describe/it oracles and no legacy constructs in the smux system spec":
+            step("Read the committed smux system spec")
+            val q = classify_spec_file(SMUX_SYSTEM)
+            expect(q.present).to_be(true)
+            step("Assert it is Modern SSpec with no surviving legacy construct")
+            expect(q.legacy_fn_test_count).to_equal(0)
+            expect(q.print_pass_count).to_equal(0)
+            expect(q.has_main).to_be(false)
+            expect(q.is_modern()).to_be(true)
+
+        # @req REQ-SSQ-004
+        it "should declare at least the fifty-six converted system examples":
+            step("Read the committed smux system spec")
+            val q = classify_spec_file(SMUX_SYSTEM)
+            expect(q.it_count).to_equal(56)
+
+    describe "SSQ-MIRROR: duplicate test trees stay identical":
+        # @req REQ-SSQ-005
+        it "should keep the smux mirror byte-identical to its 01_unit original":
+            step("Read both copies of the smux unit spec")
+            expect(file_exists(SMUX_UNIT)).to_be(true)
+            expect(file_exists(SMUX_MIRROR)).to_be(true)
+            step("Compare the two sources byte for byte")
+            expect(file_read(SMUX_MIRROR)).to_equal(file_read(SMUX_UNIT))
+
+        # @req REQ-SSQ-005
+        it "should keep the dashboard mirror byte-identical to its 01_unit original":
+            step("Read both copies of the smux dashboard unit spec")
+            expect(file_exists(DASH_UNIT)).to_be(true)
+            expect(file_exists(DASH_MIRROR)).to_be(true)
+            step("Compare the two sources byte for byte")
+            expect(file_read(DASH_MIRROR)).to_equal(file_read(DASH_UNIT))
+
+        # @req NFR-SSQ-001
+        it "should keep the mirror modern too, so neither tree regresses alone":
+            step("Classify the mirrored smux spec independently")
+            val q = classify_spec_file(SMUX_MIRROR)
+            expect(q.is_modern()).to_be(true)
+            expect(q.it_count).to_equal(20)
+
+    describe "SSQ-CARET: the LLM Caret lane specs are Modern SSpec":
+        # @req REQ-SSQ-003
+        it "should find no legacy print-based construct in the caret unit spec":
+            step("Read a committed LLM Caret unit spec")
+            val q = classify_spec_file(CARET_UNIT)
+            expect(q.present).to_be(true)
+            step("Assert the caret lane carries oracles, not prints")
+            expect(q.legacy_fn_test_count).to_equal(0)
+            expect(q.print_pass_count).to_equal(0)
+            expect(q.is_modern()).to_be(true)

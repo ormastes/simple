@@ -18,6 +18,7 @@ response bounds.
   stdlib-enterprise layer expert exists; the storage half (enterprise_store)
   is covered by the feature expert, not a layer template.
 - Feature expert: [secure_pure_simple_servers](../../feature_expert/secure_pure_simple_servers/skill.md)
+- Shared HTTP protocol policy: `src/lib/common/net/http_core.spl`
 - Web listener/parser/router/response: `src/lib/nogc_sync_mut/http_server/`
 - DB transport/protocol/capsule: `src/lib/nogc_sync_mut/database/server/`
 - Owned TCP facade: `src/lib/nogc_sync_mut/io/tcp.spl`
@@ -25,8 +26,19 @@ response bounds.
 ## Boundary Rules
 
 - Reject malformed, ambiguous, unsupported, or oversized frames before effects.
+- A synchronous transport with no transfer-coding decoder rejects every
+  non-empty `Transfer-Encoding`, even when shared policy supports other tiers.
 - Bounds cover bytes, fields, iterations, lifetime, connections, and responses.
+- Response writes select one complete bounded response and use write-all
+  semantics; a partial syntactically valid prefix is not success.
 - Listener owners close every accepted connection and expose bounded shutdown.
+- Listener controls keep listener values owner-local and share only a scalar
+  mutex lease/terminal receipt; bounded accept and close serialize through it.
+- Cross-owner shutdown retains only `DbStopControl`, observes its shared
+  accept-attempt receipt, then requests stop. It never receives or closes the
+  raw listener fd.
+- Recheck stop after a bounded accept completes; a transport accepted after
+  stop publication is cleanup-only and must not reach auth or dispatch.
 - Authentication failure does not distinguish unknown principal, absent secret,
   or wrong secret and never logs/echoes credentials.
 - A session captures a deny-by-default capability only after authentication.
@@ -45,6 +57,10 @@ The DB listener, sequential owner, durable versions/commit identity, bounded
 batch/range, requirements/designs, and focused manuals are present but remain
 uncredited until admitted Stage-4 execution. Do not mark this layer complete
 from static, unit-only, or benchmark evidence.
+
+Continuation source includes an unexecuted UTF-8 parser correction and real
+ephemeral-loopback bind/OPEN/EOF/cleanup/rebind fixture. Existing mirrors are
+hand-authored; maintenance scorecards and docgen receipts remain open.
 
 ## Verification Rule
 

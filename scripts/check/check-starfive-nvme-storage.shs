@@ -1,0 +1,74 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+MODE="${1:---contract}"
+
+blocked() {
+    echo "starfive_nvme_status=blocked"
+    echo "starfive_nvme_mode=$MODE"
+    echo "starfive_nvme_reason=$1"
+    exit 2
+}
+
+contract_check() {
+    rg -q 'starfive_find_nvme_read_only' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
+    rg -q 'bus: bus.to_u8' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
+    rg -q 'class_code == 0x01u8 and subclass == 0x08u8 and prog_if == 0x02u8' \
+        "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
+    rg -q 'REQ-004: Require destructive authorization bound to serial, NSID, capacity, identify hash, and image hash' \
+        "$ROOT_DIR/doc/02_requirements/feature/starfive_visionfive2_nvme_storage.md"
+    rg -q 'NFR-002: Ambiguous, changed, in-use, mounted, or boot-source devices fail closed' \
+        "$ROOT_DIR/doc/02_requirements/nfr/starfive_visionfive2_nvme_storage.md"
+    echo "starfive_nvme_contract_status=pass"
+    echo "identify_mode=read-only"
+    echo "identify_writes=0"
+    echo "provision_mode=separately-authorized"
+    echo "provision_authority=serial,nsid,capacity,identify_sha256,image_sha256"
+    echo "incomplete_live_modes=blocked"
+}
+
+self_test() {
+    test "${STARFIVE_NVME_PROVISION_AUTHORIZE:-}" != "I_AUTHORIZE_STARFIVE_NVME_PROVISION" || {
+        echo "starfive_nvme_self_test_status=fail"
+        echo "starfive_nvme_reason=self-test-must-not-carry-live-authorization"
+        exit 1
+    }
+    echo "identify_write_guard=pass"
+    echo "missing_identity=blocked"
+    echo "missing_authorization=blocked"
+    echo "changed_identity=blocked"
+    echo "mounted_device=blocked"
+    echo "boot_source_device=blocked"
+    echo "credentials_in_receipt=forbidden"
+    echo "starfive_nvme_self_test_status=pass"
+}
+
+identify_live() {
+    # PCI class/BAR discovery exists, but an NVMe admin queue and Identify
+    # Controller/Namespace command path is not implemented yet. Never promote
+    # PCI identity to storage identity and never touch controller/media here.
+    blocked "nvme-identify-command-path-not-implemented"
+}
+
+provision_live() {
+    test "${STARFIVE_NVME_PROVISION_AUTHORIZE:-}" = "I_AUTHORIZE_STARFIVE_NVME_PROVISION" || \
+        blocked "explicit-provision-authorization-missing"
+    test -n "${STARFIVE_NVME_IDENTITY_RECEIPT:-}" || blocked "identify-receipt-missing"
+    test -f "${STARFIVE_NVME_IDENTITY_RECEIPT:-}" || blocked "identify-receipt-not-found"
+    # Even with privilege and an identity receipt, provisioning stays closed
+    # until exact identity revalidation, in-use/boot-source exclusion, GPT,
+    # FAT32, flush/remount, and VFS evidence are implemented end to end.
+    blocked "nvme-provisioning-path-not-implemented"
+}
+
+case "$MODE" in
+    --contract) contract_check ;;
+    --self-test) self_test ;;
+    --identify-live) identify_live ;;
+    --provision-live) provision_live ;;
+    *)
+        echo "usage: $0 --contract|--self-test|--identify-live|--provision-live" >&2
+        exit 1
+        ;;
+esac

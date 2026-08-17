@@ -1,0 +1,74 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+. "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
+
+TARGET=x86_64-unknown-none
+BOARD_TARGET=x86_64-up-squared-apollo-lake
+ENTRY=src/os/kernel/arch/x86_64/up_squared/entry.spl
+LINKER=src/os/kernel/arch/x86_64/up_squared/linker.ld
+OUTPUT=${UP2_ELF:-build/os/up-squared-apollo-lake/simpleos.elf}
+RECEIPT="$OUTPUT.receipt"
+BACKEND=${SIMPLE_NATIVE_BACKEND:-cranelift}
+
+COMPILER="$(simple_compiler_select --root "$ROOT_DIR" --builder-target "$TARGET")" || {
+    echo "error: no admitted self-hosted compiler for $TARGET" >&2
+    exit 1
+}
+simple_compiler_is_seed "$COMPILER" && {
+    echo "error: implicit Rust bootstrap seed is forbidden" >&2
+    exit 1
+}
+PROVENANCE="$(dirname "$COMPILER")/provenance.env"
+test -f "$PROVENANCE" || { echo "error: missing compiler provenance" >&2; exit 1; }
+test "$(awk -F= '/^status=/ {print $2}' "$PROVENANCE")" = pass || {
+    echo "error: compiler provenance is not admitted PASS" >&2
+    exit 1
+}
+test "$(awk -F= '/^stage3_sha256=/ {print $2}' "$PROVENANCE")" = "$(sha256sum "$COMPILER" | awk '{print $1}')" || {
+    echo "error: compiler hash does not match provenance" >&2
+    exit 1
+}
+
+mkdir -p "$(dirname "$OUTPUT")" build/os/generated
+timeout 300 "$COMPILER" native-build \
+    --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os/arch/x86_64 \
+    --backend "$BACKEND" --cpu x86-64-v1 --opt-level=aggressive --log off \
+    --entry-closure --entry "$ENTRY" --target "$TARGET" \
+    --linker-script "$LINKER" -o "$OUTPUT"
+
+test -s "$OUTPUT"
+file "$OUTPUT" | grep -Eq 'ELF 64-bit.*x86-64'
+
+TMP="$RECEIPT.tmp.$$"
+trap 'rm -f "$TMP"' EXIT HUP INT TERM
+{
+    echo schema=up2-simpleos-receipt-v1
+    echo target="$BOARD_TARGET"
+    echo firmware=uefi
+    echo loader=EFI/BOOT/BOOTX64.EFI
+    echo artifact="$OUTPUT"
+    echo artifact_size="$(wc -c < "$OUTPUT")"
+    echo artifact_sha256="$(sha256sum "$OUTPUT" | awk '{print $1}')"
+    echo compiler="$COMPILER"
+    echo compiler_sha256="$(sha256sum "$COMPILER" | awk '{print $1}')"
+    echo compiler_provenance="$PROVENANCE"
+    echo entry_source="$ENTRY"
+    echo entry_source_sha256="$(sha256sum "$ENTRY" | awk '{print $1}')"
+    echo linker="$LINKER"
+    echo linker_sha256="$(sha256sum "$LINKER" | awk '{print $1}')"
+    echo root_entries=bin,etc,README.txt
+    echo console_contract=cn16-3v3-ttl-115200-8n1-provider-live-unproven
+    echo persistent_writes=none
+    echo built_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$TMP"
+mv "$TMP" "$RECEIPT"
+trap - EXIT HUP INT TERM
+
+echo up2_build_status=pass
+echo target="$BOARD_TARGET"
+echo artifact="$OUTPUT"
+echo receipt="$RECEIPT"

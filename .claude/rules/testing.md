@@ -14,6 +14,10 @@ alwaysApply: false
   report it as a genuine failure. Never weaken the assertion, mark it pending,
   or rewrite it until it passes — a known-failing spec documents a real defect;
   a quietly-softened one hides it.
+- **Every bug fix ships two specs** (2026-08-17): one reproducing the exact
+  defect, plus a generalization spec probing similar problems nearby (same
+  pattern, adjacent code paths). Cite both in the `doc/08_tracking/bug/` record.
+  A fix without its reproducing spec is not done.
 - **NEVER disable** sdoctest (md-embedded) or spl_doctest (comment-embedded) — both must stay on
 - **Test database sequential access** (F2): Section/directory test runs must be SEQUENTIAL — parallel `simple test path/to/dir` invocations corrupt the shared test database. Use single-spec targets or wrap in a serial runner. See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats".
 - **Results line is authoritative** (F3): Only the final `Results: N total, ...` summary line is authoritative test verdict. Compile diagnostics quote runner source with "passed"/"failed" tokens — grepping those misleads. Always inspect the bottom-line result summary. See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats".

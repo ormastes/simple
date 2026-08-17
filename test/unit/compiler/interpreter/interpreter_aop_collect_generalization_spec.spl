@@ -1,0 +1,74 @@
+"""
+# interp_aop_collect generalization (2026-08-17)
+
+Generalization coverage for the val/push accumulation defect fixed in
+`src/compiler/70.backend/backend/interpreter_aop_weave.spl` (interp_aop_collect
+declared its accumulator `val` and called mutating `push`, so any example that
+reached a matching advice died with `semantic: cannot call mutating method
+'push' on immutable array 'out'`). The reproducing spec is
+`interpreter_aop_weave_spec.spl` ("collects only advices whose form and
+pointcut both match" — RED before the fix, GREEN after).
+
+This spec probes adjacent cases of the same gap class: accumulation across
+multiple matches, form partitioning, chained collect -> sort, and repeated
+calls over the same advice list (a stale-accumulator regression guard).
+"""
+
+use std.spec.*
+
+use compiler.backend.backend.interpreter_aop_weave.{
+    interp_aop_collect, interp_aop_sort_by_priority
+}
+use compiler.hir.hir.{HirAopAdvice}
+use compiler.common.diagnostics.span.{Span}
+
+fn mk_advice(pred: text, handler: text, form: text, priority: i64) -> HirAopAdvice:
+    HirAopAdvice(
+        predicate_text: pred,
+        advice_function: handler,
+        form: form,
+        priority: priority,
+        span: Span.empty()
+    )
+
+describe "interp_aop_collect — accumulation generalization":
+    it "accumulates every matching advice, not just the first":
+        val advices = [
+            mk_advice("execution ( * target ( .. ) )", "h1", "before", 1),
+            mk_advice("execution ( * target ( .. ) )", "h2", "before", 2),
+            mk_advice("execution ( * target ( .. ) )", "h3", "before", 3)
+        ]
+        val got = interp_aop_collect(advices, "before", "target")
+        expect(got.len()).to_equal(3)
+        expect(got[0].advice_function).to_equal("h1")
+        expect(got[2].advice_function).to_equal("h3")
+
+    it "partitions by form while accumulating":
+        val advices = [
+            mk_advice("execution ( * target ( .. ) )", "b1", "before", 1),
+            mk_advice("execution ( * target ( .. ) )", "a1", "after_success", 1),
+            mk_advice("execution ( * target ( .. ) )", "b2", "before", 2)
+        ]
+        val before = interp_aop_collect(advices, "before", "target")
+        val after = interp_aop_collect(advices, "after_success", "target")
+        expect(before.len()).to_equal(2)
+        expect(after.len()).to_equal(1)
+        expect(after[0].advice_function).to_equal("a1")
+
+    it "feeds the accumulated result through priority sorting":
+        val advices = [
+            mk_advice("execution ( * target ( .. ) )", "low", "before", 1),
+            mk_advice("execution ( * target ( .. ) )", "high", "before", 9)
+        ]
+        val sorted = interp_aop_sort_by_priority(interp_aop_collect(advices, "before", "target"), true)
+        expect(sorted.len()).to_equal(2)
+        expect(sorted[0].advice_function).to_equal("high")
+
+    it "returns a fresh accumulator on every call":
+        val advices = [
+            mk_advice("execution ( * target ( .. ) )", "h1", "before", 1)
+        ]
+        val first = interp_aop_collect(advices, "before", "target")
+        val second = interp_aop_collect(advices, "before", "target")
+        expect(first.len()).to_equal(1)
+        expect(second.len()).to_equal(1)

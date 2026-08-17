@@ -26,9 +26,17 @@ evidence bytes, cross-checks identities, and validates canonical PASS artifact
 sets. Its only release API accepts a collector root; the structural parser is
 not re-exported as admission.
 
+The structural parser and trusted importer also now parenthesize every
+multiline boolean condition, initializer, return, and implicit result, as
+required by the Simple grammar. This is a grammar-only correction: the exact
+13-field admission record, 31-field row layout, 749-line manifest, canonical
+row order, and hash bindings are unchanged.
+
 Focused specs cover admission mutation, a malformed late row, and retained
-artifact mutation. They have not executed because no provenance-admitted
-Stage-4 CLI is available. The current filesystem API also cannot hold an
+artifact mutation. Each focused spec was attempted once with the deployed
+self-hosted CLI and exited 139 before scenario output. A third bounded
+diagnostic, `check src/os/sosix/qemu_evidence`, printed `Checking` and then
+exited 139. No Rust seed or Stage-3 substitute was used. The current filesystem API also cannot hold an
 fd-pinned snapshot across read/hash checks, so a hostile concurrent filesystem
 can still race replacement between checks; the importer performs pre/post
 regular-file/path/hash validation but does not claim to eliminate that TOCTOU.

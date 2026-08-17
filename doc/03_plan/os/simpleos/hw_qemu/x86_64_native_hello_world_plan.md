@@ -54,7 +54,7 @@ later sections remain non-PASS.
 | Production desktop kernel | `build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf` (canonical `gui_entry_desktop.spl` output) | ABSENT / B-IMAGE |
 | Deployment image | `build/os/elfexec_simple/fat32-simple.img` | ABSENT / B-IMAGE |
 | Embedded/external admission records | `/SYS/SIMPLETOOL.SDN`; `build/os/evidence/simpleos-toolchain-image-admission-v1.sdn` | ABSENT / B-IMAGE |
-| Combined desktop/toolchain wrapper | `scripts/check/check-simpleos-toolchain-desktop-boot.shs` | ABSENT / B-DESKTOP-LIVE |
+| Combined desktop/toolchain wrapper | `scripts/check/check-simpleos-toolchain-desktop-boot.shs` | SOURCE COMPLETE canonical admission/preflight/receipt contract; live owner BLOCKED / B-DESKTOP-LIVE |
 | Frozen executable/manual | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`; `doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md` | SOURCE COMPLETE / runtime B-SPEC |
 | Same-run live evidence | manifest, QEMU argv, serial, SSH, framebuffer/readback, guest output receipts | ABSENT / B-DESKTOP-LIVE |
 
@@ -93,8 +93,13 @@ It supplies the owner file/line and unblock condition for every row below.
    pinned LLVM fork build; host Mach-O/Linux binaries and wrappers are invalid.
 4. **B-IMAGE:** no manifest-bound kernel/deployment image containing the exact
    admitted payload, linker, runtime input, source, and canonical aliases.
-5. **B-DESKTOP-LIVE:** no fresh OVMF/GRUB serial plus SSH transcript for version,
-   compile, link, mounted-filesystem execution, exact output, and exit status.
+5. **B-DESKTOP-LIVE:** the production wrapper, canonical Stage-4 admission,
+   shared sorted/hashed receipt validator, and 16-case hermetic self-test now
+   exist. Live composition remains blocked because the canonical fullscreen
+   owner launches with `-net none`, terminates QEMU after capture, and
+   `gui_entry_desktop.spl` does not start or cooperatively poll SSHD. No fresh
+   same-run OVMF/GRUB desktop plus SSH transcript exists for version, compile,
+   link, mounted-filesystem execution, exact output, and exit status.
 6. **B-SPEC:** the duplicated opt-in Clang/Rust live specs were removed. The
    canonical frozen executable/manual now call the production combined-wrapper
    path and fail closed while it or any receipt is unavailable. Stage-4
@@ -217,7 +222,7 @@ implementation row.
 | AC-1 current truth | PASS | BLOCKED | Dated path-by-path inventory above; refresh after every produced artifact | root | higher-capability reviewer |
 | AC-2 admitted compiler and target payload | PASS | BLOCKED / B-HOST-CLI, B-TARGET-SIMPLE | After B-HOST-CLI, `SIMPLE_BUILD_COMPILER=<admitted-stage4> SIMPLE_NO_STUB_FALLBACK=1 sh scripts/os/simpleos-native-build.shs --target x86_64-unknown-simpleos` | root/bootstrap owner | higher-capability reviewer |
 | AC-3 deployment records | PASS | BLOCKED / B-GUEST-LLD, B-IMAGE | Frozen embedded, pre-boot image-admission and post-boot desktop/guest v1 schemas above; complete payload, linker, kernel and image | root/image owner | higher-capability reviewer |
-| AC-4 production desktop boot | PASS | BLOCKED / B-DESKTOP-LIVE | After wrapper implementation, run `scripts/check/check-simpleos-toolchain-desktop-boot.shs`; same-run receipt contract above | root/QEMU+desktop owner | higher-capability reviewer |
+| AC-4 production desktop boot | PASS | SOURCE COMPLETE preflight / LIVE BLOCKED B-DESKTOP-LIVE | Receipt-contract self-test is green; add cooperative SSHD polling and same-run guest-command hook to canonical desktop owner, then run `scripts/check/check-simpleos-toolchain-desktop-boot.shs` | root/QEMU+desktop owner | higher-capability reviewer |
 | AC-5 in-guest Simple compile/run | PASS | BLOCKED / B-DESKTOP-LIVE | Literal guest commands, output/hash/identity, exact `Hello World`, rc=0 frozen above | root/toolchain owner | higher-capability reviewer |
 | AC-6 frozen SSpec flow | PASS | SOURCE COMPLETE / EXECUTION BLOCKED | Canonical target contains exact helpers/visible steps, calls the production wrapper, and has no skip/non-execution pass; run once with Stage 4 after B-DESKTOP exists | root/spec owner | higher-capability reviewer |
 | AC-7 operator manual and traceability | PASS | SOURCE COMPLETE / QUALITY GATES BLOCKED | Manual and REQ matrix exist; pure-Simple docgen plus all seven `sspec-maintain` scores remain required | root/doc owner | higher-capability reviewer |
@@ -353,13 +358,19 @@ creating another contract.
 4. Stage every manifest identity, build the kernel/image, and make manifest
    validation fail before boot on any missing, stale, wrong-target, or
    non-byte-identical input.
-5. Implement the frozen combined wrapper
+5. Complete the frozen combined wrapper
    `scripts/check/check-simpleos-toolchain-desktop-boot.shs`. It must build and
    boot canonical `gui_entry_desktop.spl`, keep that exact QEMU guest alive,
    capture same-run desktop readiness and scanout/framebuffer evidence, run literal
    `/usr/bin/simple --version`, compile `/HELLO.SPL` using embedded
    `/usr/bin/ld.lld` and `/usr/lib/SIMAIN.O`, execute the mounted-filesystem ELF,
-   and bind exact output/rc to the manifest.
+   and bind exact output/rc to the manifest. Its canonical Stage-4 admission,
+   preflight, shared receipt validator, forbidden-route policy, and hermetic
+   self-test are implemented. The remaining production change is a same-run
+   network/SSHD service hook in the canonical desktop owner; the wrapper fails
+   closed with
+   `blocked:canonical-desktop-owner-lacks-same-run-guest-command-interface`
+   until that exists.
 6. Replace/repair the existing supporting specs with the frozen SSpec, generate
    and review the operator manual, and update every affected knowledge owner.
 7. Run the one-pass criteria, merge review, and stop on PASS or bounded WARN.

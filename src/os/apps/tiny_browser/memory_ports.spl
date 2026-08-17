@@ -1,0 +1,136 @@
+# codex-impl
+
+use std.tiny.common.event.{TinyEvent}
+use std.tiny.common.abi.{TinyRenderedSurfaceV1, TINY_2D_CAP_ARGB8888, TINY_2D_CAP_READBACK, TINY_2D_CAP_RGB565, tiny_rendered_surface_validate}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_UNSUPPORTED}
+use std.tiny.common.types.{TinyRect}
+use std.tiny.engine2d.pixel_format.{TINY_PIXEL_ARGB8888, TINY_PIXEL_RGB565}
+use std.tiny.wm_contract.ports.{TinyInputPortV1, TinyPresentPortV1}
+
+class TinyMemoryPresent:
+    surface_width: i32
+    surface_height: i32
+    max_damage: i32
+    last_damage: [TinyRect]
+    last_damage_count: i32
+    frame_count: i32
+    frame_open: bool
+    last_surface: TinyRenderedSurfaceV1
+
+    static fn create(width: i32, height: i32, max_damage: i32) -> TinyMemoryPresent:
+        var damage: [TinyRect] = []
+        var pixels: [i32] = []
+        var pixel_count = 0
+        if width > 0 and height > 0 and width <= 2147483647 / height:
+            pixel_count = width * height
+        var index = 0
+        while index < max_damage:
+            damage.push(TinyRect.empty())
+            index = index + 1
+        index = 0
+        while index < pixel_count:
+            pixels.push(0)
+            index = index + 1
+        var retained_surface = TinyRenderedSurfaceV1.empty()
+        retained_surface.width = width
+        retained_surface.height = height
+        retained_surface.pixels = pixels
+        retained_surface.pixel_count = pixel_count
+        TinyMemoryPresent(
+            surface_width: width, surface_height: height, max_damage: max_damage,
+            last_damage: damage, last_damage_count: 0, frame_count: 0, frame_open: false,
+            last_surface: retained_surface,
+        )
+
+    me begin(damage: [TinyRect], damage_count: i32) -> TinyStatus:
+        if self.frame_open:
+            return TinyStatus.error(TINY_ERR_INVALID, self.frame_count)
+        if self.max_damage < 0 or damage_count < 0 or damage_count > self.max_damage or damage_count > damage.len():
+            return TinyStatus.error(TINY_ERR_CAPACITY, damage_count)
+        var index = 0
+        while index < damage_count:
+            self.last_damage[index] = damage[index]
+            index = index + 1
+        self.last_damage_count = damage_count
+        self.frame_open = true
+        TinyStatus.ok()
+
+    me finish(surface: TinyRenderedSurfaceV1) -> TinyStatus:
+        if not self.frame_open:
+            return TinyStatus.error(TINY_ERR_INVALID, self.frame_count)
+        self.frame_open = false
+        if self.surface_width <= 0 or self.surface_height <= 0 or self.surface_width > 2147483647 / self.surface_height:
+            return TinyStatus.error(TINY_ERR_INVALID, self.surface_width)
+        val valid = tiny_rendered_surface_validate(surface, self.surface_width * self.surface_height)
+        if not valid.is_ok(): return valid
+        if surface.width != self.surface_width or surface.height != self.surface_height:
+            return TinyStatus.error(TINY_ERR_INVALID, surface.surface_id as i32)
+        if (surface.backend_capability_bits & TINY_2D_CAP_READBACK) == 0:
+            return TinyStatus.error(TINY_ERR_UNSUPPORTED, surface.pixel_format)
+        if surface.pixel_format == TINY_PIXEL_ARGB8888:
+            if (surface.backend_capability_bits & TINY_2D_CAP_ARGB8888) == 0:
+                return TinyStatus.error(TINY_ERR_UNSUPPORTED, surface.pixel_format)
+        else if surface.pixel_format == TINY_PIXEL_RGB565:
+            if (surface.backend_capability_bits & TINY_2D_CAP_RGB565) == 0:
+                return TinyStatus.error(TINY_ERR_UNSUPPORTED, surface.pixel_format)
+        else:
+            return TinyStatus.error(TINY_ERR_UNSUPPORTED, surface.pixel_format)
+        self.last_surface.abi_major = surface.abi_major
+        self.last_surface.abi_minor = surface.abi_minor
+        self.last_surface.surface_id = surface.surface_id
+        self.last_surface.frame_id = surface.frame_id
+        self.last_surface.source_stream_hash = surface.source_stream_hash
+        self.last_surface.source_word_count = surface.source_word_count
+        self.last_surface.backend_capability_bits = surface.backend_capability_bits
+        self.last_surface.width = surface.width
+        self.last_surface.height = surface.height
+        self.last_surface.pixel_format = surface.pixel_format
+        self.last_surface.pixel_count = surface.pixel_count
+        self.last_surface.checksum = surface.checksum
+        var index = 0
+        while index < surface.pixel_count:
+            self.last_surface.pixels[index] = surface.pixels[index]
+            index = index + 1
+        self.frame_count = self.frame_count + 1
+        TinyStatus.ok()
+
+impl TinyPresentPortV1 for TinyMemoryPresent:
+    fn width(self) -> i32: self.surface_width
+    fn height(self) -> i32: self.surface_height
+    me begin_frame(damage: [TinyRect], damage_count: i32) -> TinyStatus: self.begin(damage, damage_count)
+    me present(surface: TinyRenderedSurfaceV1) -> TinyStatus: self.finish(surface)
+
+class TinyMemoryInput:
+    events: [TinyEvent]
+    read_index: i32
+    write_index: i32
+    event_count: i32
+    max_events: i32
+
+    static fn create(max_events: i32) -> TinyMemoryInput:
+        var events: [TinyEvent] = []
+        var index = 0
+        while index < max_events:
+            events.push(TinyEvent.none())
+            index = index + 1
+        TinyMemoryInput(events: events, read_index: 0, write_index: 0, event_count: 0, max_events: max_events)
+
+    me enqueue(event: TinyEvent) -> TinyStatus:
+        if self.event_count >= self.max_events:
+            return TinyStatus.error(TINY_ERR_CAPACITY, self.event_count)
+        self.events[self.write_index] = event
+        self.write_index = self.write_index + 1
+        if self.write_index == self.max_events: self.write_index = 0
+        self.event_count = self.event_count + 1
+        TinyStatus.ok()
+
+    me next() -> TinyEvent:
+        if self.event_count == 0: return TinyEvent.none()
+        val event = self.events[self.read_index]
+        self.read_index = self.read_index + 1
+        if self.read_index == self.max_events: self.read_index = 0
+        self.event_count = self.event_count - 1
+        event
+
+impl TinyInputPortV1 for TinyMemoryInput:
+    me poll_event() -> TinyEvent: self.next()

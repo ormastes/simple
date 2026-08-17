@@ -595,11 +595,40 @@ impl Lowerer {
                 // nil tag). Only the built-in `T?` optional representation, whose
                 // subject type is a Pointer/Option rather than an Enum owning
                 // these names, may take the fast paths.
-                let subject_enum_owns_variant = matches!(
+                // EXCEPTION: the BUILTIN `Option<T>` annotation registers as a
+                // HirType::Enum named "Option" owning Some/None (see
+                // hir/lower/type_resolver.rs instantiate_builtin_generic_enum),
+                // but its RUNTIME representation is nil-boxing (`None` lowers to
+                // the nil sentinel, `Some(x)` to a boxed optional), not an enum
+                // object. Taking the discriminant path for it made the `None`
+                // arm unmatched at runtime (nil 0x3 fall-through: has_fvar
+                // probe printed `error`; see
+                // doc/08_tracking/bug/seed_jit_option_generic_match_none_arm_unmatched_2026-08-16.md),
+                // so the optional-shaped fast paths below MUST fire for it.
+                // The name alone does NOT identify the builtin: a user may declare
+                // `enum Option: Some(i64) / None`, which is an ordinary enum object
+                // with an ordinary enum id, and whose `Some`/`None` arms MUST take
+                // the discriminant path. Only the builtin is generic — it is
+                // registered above with `generic_params: vec!["T"]`, while a
+                // user-declared enum clones its own (empty) `generic_params`. Keying
+                // on genericity keeps the nil-boxing fast path for `Option<T>` and
+                // keeps user enums on the discriminant path. See
+                // doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_enum_2026-08-16.md
+                let subject_is_builtin_option = matches!(
                     self.module.types.get(subject_ty),
-                    Some(HirType::Enum { variants, .. })
-                        if variants.iter().any(|(name, _)| name == variant)
+                    Some(HirType::Enum { name, variants, generic_params, .. })
+                        if name == "Option"
+                            && !generic_params.is_empty()
+                            && variants.len() == 2
+                            && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
+                            && variants.iter().any(|(n, p)| n == "None" && p.is_none())
                 );
+                let subject_enum_owns_variant = !subject_is_builtin_option
+                    && matches!(
+                        self.module.types.get(subject_ty),
+                        Some(HirType::Enum { variants, .. })
+                            if variants.iter().any(|(name, _)| name == variant)
+                    );
 
                 // Special handling for None - check both nil and enum None
                 if variant == "None" && !subject_enum_owns_variant {

@@ -1,0 +1,152 @@
+# @cover src/app/browser/sandbox_routing.spl 90%
+# @cover src/app/browser/sandbox_render.spl 60%
+# @req REQ-WEB-BROWSER-014
+"""
+# Browser Sandbox Worker Routing: Fail-Closed Capability Probe
+
+**Category:** Browser / Security
+**Status:** Active
+
+## Purpose and Audience
+
+Routing the in-process browser's page rendering through the jailed renderer
+worker needs a worker-capable executable to re-exec. This app's own binary is
+not one: the worker arg is dispatched only by
+`src/os/hosted/hosted_entry.spl:285`, and importing that into the CLI would
+drag `os.hosted.*` into the closure of every `simple` invocation. So the
+executable is operator-supplied via `SIMPLE_BROWSER_RENDERER_WORKER` and the
+capability is PROBED.
+
+The contract this spec defends is that every probe failure keeps the honest
+refusal. There must be no path from "probe failed" to "rendered unjailed",
+and no path from "render failed inside the jail" to "re-rendered in this
+process".
+
+The render route is now wired: `app.browser.sandbox_render` drives
+broker -> jailed worker -> Draw IR -> software raster -> pixels. So the
+remaining risk this spec guards is the quiet downgrade — a sandboxed render
+that fails and gets silently replaced by an in-process one, which the caller
+cannot distinguish from success.
+
+## Scope
+
+Covers `src/app/browser/sandbox_routing.spl` and the routing half of
+`src/app/browser/sandbox_status.spl`. The jail itself is proven natively by
+`scripts/check/check-browser-renderer-sandbox-seccomp.shs`.
+Tracking: doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md
+"""
+
+use std.spec.*
+use app.browser.sandbox_routing.{
+    BROWSER_SANDBOX_WORKER_ENV,
+    BROWSER_SANDBOX_ROUTING_UNSET,
+    BROWSER_SANDBOX_ROUTING_MISSING,
+    BROWSER_SANDBOX_ROUTING_READY,
+    browser_sandbox_worker_executable,
+    browser_sandbox_routing_reason,
+    browser_sandbox_routing_probe
+}
+use app.browser.sandbox_status.{
+    browser_sandbox_render_route_wired,
+    browser_sandbox_worker_routing_available,
+    browser_sandbox_unavailable_reason,
+    browser_sandbox_status
+}
+use app.browser.sandbox_render.{browser_sandbox_render_pixels}
+use std.io_runtime.{env_get}
+
+describe "browser sandbox worker routing fails closed":
+    it "reports a precise reason instead of a bare false":
+        """
+        An operator who asks for a sandbox and does not get one needs to know
+        which of two very different things went wrong: they never pointed the
+        browser at a worker binary, or the browser cannot route pages yet no
+        matter what they configure. A bare `false` conflates those and sends
+        them debugging the wrong thing.
+        """
+        step("Read the configured worker executable and the derived reason")
+        val configured = browser_sandbox_worker_executable()
+        val reason = browser_sandbox_routing_reason()
+
+        step("The reason is one of the three declared states, never empty")
+        val known = (reason == BROWSER_SANDBOX_ROUTING_UNSET or
+                     reason == BROWSER_SANDBOX_ROUTING_MISSING or
+                     reason == BROWSER_SANDBOX_ROUTING_READY)
+        expect(known).to_equal(true)
+
+        step("An unset knob reports exactly the unset state")
+        if configured.trim().len() == 0:
+            expect(reason).to_equal(BROWSER_SANDBOX_ROUTING_UNSET)
+            expect(browser_sandbox_routing_probe()).to_equal(false)
+
+    it "never claims jailed without a configured worker executable":
+        """
+        This is the load-bearing guarantee. The render route is now wired, so
+        the browser CAN hand pages to the jailed worker — but only if an
+        operator actually supplied a worker-capable binary. If capability and
+        configuration were conflated, a browser with the code present but no
+        worker configured would claim a sandbox it never entered.
+        """
+        step("The render route is wired, so code capability is present")
+        expect(browser_sandbox_render_route_wired()).to_equal(true)
+
+        step("With no worker executable configured, routing stays unavailable")
+        if not browser_sandbox_routing_probe():
+            expect(browser_sandbox_worker_routing_available()).to_equal(false)
+
+            step("And the posture never claims jailed, whatever was requested")
+            expect(browser_sandbox_status().jailed).to_equal(false)
+
+            step("The reason names the missing configuration, not the code")
+            expect(browser_sandbox_unavailable_reason())
+                .to_equal(browser_sandbox_routing_reason())
+
+    it "refuses rather than falling back when the jail cannot render":
+        """
+        The dangerous failure is not a crash, it is a quiet downgrade. If a
+        sandboxed render fails and the browser silently re-rendered the page
+        in this process, the caller would receive perfectly good pixels and
+        have no way to know page script had just run unconfined. So the
+        sandboxed path reports failure instead of substituting an in-process
+        render.
+        """
+        step("A sandboxed render against a non-existent worker must fail")
+        match browser_sandbox_render_pixels(
+            "/nonexistent/worker-binary", "<html><body>x</body></html>", 8, 8
+        ):
+            Ok(_):
+                step("A missing worker binary must never yield pixels")
+                expect(false).to_equal(true)
+            Err(reason):
+                step("The failure is reported, with a reason, and no pixels")
+                expect(reason.len() > 0).to_equal(true)
+
+    it "requires both halves before routing is available":
+        """
+        Availability is the conjunction of an operator-supplied worker binary
+        and a wired render route. Either half missing must keep the refusal,
+        so a future edit that satisfies only one half cannot quietly enable a
+        half-built jail.
+        """
+        step("Compute both halves independently")
+        val probe = browser_sandbox_routing_probe()
+        val wired = browser_sandbox_render_route_wired()
+
+        step("Availability equals their conjunction, with no third path")
+        expect(browser_sandbox_worker_routing_available()).to_equal(probe and wired)
+
+        step("A false half is sufficient to make routing unavailable")
+        if not probe or not wired:
+            expect(browser_sandbox_worker_routing_available()).to_equal(false)
+
+    it "names the env knob so the capability is discoverable":
+        """
+        A security knob nobody can find is a knob nobody uses. The environment
+        variable name is exported rather than spelled inline at call sites, so
+        docs, tests and the app cannot drift apart.
+        """
+        step("The exported env name is the documented one")
+        expect(BROWSER_SANDBOX_WORKER_ENV).to_equal("SIMPLE_BROWSER_RENDERER_WORKER")
+
+        step("Reading it through the facade agrees with the module accessor")
+        expect(browser_sandbox_worker_executable()).to_equal(env_get(BROWSER_SANDBOX_WORKER_ENV))

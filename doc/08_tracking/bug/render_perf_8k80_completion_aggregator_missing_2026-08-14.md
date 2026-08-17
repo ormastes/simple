@@ -1,4 +1,20 @@
 ## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
+## 2026-08-17 Darwin ARM host closure
+
+The parent aggregator remains implemented; the host-fixable gap was Darwin
+portability in its own bounded contract matrix. The checker assumed GNU
+`sha256sum`, GNU `sed -i`, and GNU `mv -T`, so its self-test failed on macOS
+before it could validate any receipts. It now selects `sha256sum` or
+`shasum -a 256`, rewrites fixtures through a portable temporary file, and
+updates the `current` symlink with `ln -sfn`. The exact bounded positive and
+deliberate-red matrix passes on macOS ARM64.
+
+This host is an Apple M4 with Metal 4 and a 2880x1864 built-in display. It has
+no NVIDIA runtime and cannot produce the NVIDIA Vulkan container receipt or a
+7680x4320@80 physical-presentation receipt. Those live A4/A5/physical receipts
+remain explicitly pending; no synthetic receipt was created.
+
+## Triage 2026-08-17 — superseded host description
 
 Blocker: unchanged and self-declared in this doc — the A7 aggregator is
 IMPLEMENTED (`scripts/check/check-render-perf-8k80-container.shs`); what is

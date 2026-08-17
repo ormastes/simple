@@ -14,6 +14,33 @@ use std.fs_driver.nvfs_driver.{NvfsDriver}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
+use std.fs_driver.gpt_partition.{GptPartition, gpt_partition_sector_count}
+
+fn vfs_nvme_partition_lease(parent: NvmeFilesystemLease, part: GptPartition) -> Result<NvmeFilesystemLease, text>:
+    """Narrow an existing namespace lease to a validated GPT partition.
+
+    GPT LBAs are relative to the parent BlockDevice window. No hardware or
+    platform knowledge enters this translation, and no I/O is performed.
+    """
+    val count_result = gpt_partition_sector_count(part)
+    if count_result.is_err():
+        return Err(count_result.unwrap_err())
+    val count = count_result.unwrap()
+    if part.first_lba >= parent.lba_count or count > parent.lba_count - part.first_lba:
+        return Err("nvme-gpt-partition-outside-parent-lease")
+    if parent.base_lba > 0xffffffffffffffffu64 - part.first_lba:
+        return Err("nvme-gpt-partition-base-overflow")
+    Ok(NvmeFilesystemLease(
+        namespace_identity: parent.namespace_identity,
+        base_lba: parent.base_lba + part.first_lba,
+        lba_count: count,
+        mode: parent.mode,
+        queue: parent.queue,
+        provider: parent.provider,
+        grant_kind: parent.grant_kind,
+        shared_block_interface: parent.shared_block_interface,
+        iommu_or_broker: parent.iommu_or_broker
+    ))
 
 fn vfs_nvme_fs_error_name(err: FsError) -> text:
     match err:

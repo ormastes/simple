@@ -194,6 +194,9 @@ attempting it was killed by an outer `timeout 900` before emitting one).
 on `source.independence_group` instead of `source.provider_id`, and skip the
 empty group so the candidate's deliberately-blank group can never count as an
 independent reference.
+Both specs were committed RED-first in `a046b58ebc7`. **Verdict capture is
+still pending** and the fix is deliberately NOT applied until the RED is quoted;
+applying it first would destroy the reproduce-first evidence.
 
 Recorded here because it cost this session an hour and will cost the next one the
 same: `scripts/check/check-test-verdict-not-silent.shs` printed
@@ -254,3 +257,14 @@ fabricated-output defect this doc filed is closed.
 Status: closed as ALREADY-FIXED. Not re-verified by execution — the
 `test-slot` queue was saturated this session — but the fabrication claim is
 refuted by source inspection alone, which is sufficient for this row.
+## 2026-08-17 L3 production wiring
+
+The readback boundary no longer accepts caller-authored reference bytes.
+`lavapipe_readback_reference` pins the lavapipe ICD and launches an admitted
+cached Engine2D Vulkan readback worker artifact through the portable bounded
+process facade (30-second wall bound, 4 MiB capture bound). The captured execution is
+projected through `ExecCapture` / `exec_to_evidence`; only an exit-zero
+transcript naming the Vulkan backend, `device_readback`, `overall=pass`, and a
+non-empty checksum can become the reference image identity. Missing workers,
+empty output, incomplete transcripts, and nonzero exits remain unavailable or
+crashed and are rejected by the gate. No GNU `timeout` command is involved.

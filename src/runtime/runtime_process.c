@@ -1856,6 +1856,93 @@ static bool browser_renderer_apply_startup_seccomp(void) {
 #endif
 }
 
+/* Namespace flags are spelled out rather than pulled from <sched.h>, which
+   would need _GNU_SOURCE for unshare(); the syscall is issued through
+   syscall(SYS_unshare, ...) exactly like the landlock/seccomp calls above. */
+#ifndef CLONE_NEWIPC
+#define CLONE_NEWIPC 0x08000000
+#endif
+#ifndef CLONE_NEWUSER
+#define CLONE_NEWUSER 0x10000000
+#endif
+#ifndef CLONE_NEWNET
+#define CLONE_NEWNET 0x40000000
+#endif
+
+static bool browser_renderer_write_proc(const char* path, const char* data) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    size_t len = strlen(data);
+    ssize_t written = write(fd, data, len);
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return written == (ssize_t)len;
+}
+
+/* Unshare the user, network and IPC namespaces and drop to an unprivileged
+   identity inside the new user namespace.
+
+   This MUST run before browser_renderer_apply_landlock(). The landlock ruleset
+   below declares handled_access_fs with NO allow rules, which denies
+   LANDLOCK_ACCESS_FS_WRITE_FILE process-wide — so /proc/self/uid_map becomes
+   unwritable the moment landlock is applied, and the uid/gid drop would be
+   impossible afterwards. It must equally run before the seccomp filters, whose
+   allow-list contains neither unshare nor openat.
+
+   The network namespace is the load-bearing part: it removes the renderer's
+   route to the network outright, instead of relying on every socket-creating
+   syscall staying denied. seccomp already kills socket(), so the two are
+   defence in depth, not duplicates — a future kernel syscall that reaches the
+   network would defeat the filter but not an empty netns.
+
+   PID namespace is deliberately NOT unshared: CLONE_NEWPID only takes effect
+   for children created after the unshare, so it would change nothing for a
+   worker that never forks (and the jail sets RLIMIT_NPROC=0 precisely so it
+   cannot). Claiming it here would be theatre. */
+static bool browser_renderer_enter_namespaces(void) {
+#if !defined(SYS_unshare)
+    return false;
+#else
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+
+    /* The user namespace must come first and alone: it is what grants the
+       privilege needed to unshare the remaining namespaces unprivileged. */
+    if (syscall(SYS_unshare, CLONE_NEWUSER) != 0) return false;
+
+    /* setgroups must be denied BEFORE gid_map is writable, otherwise the
+       kernel rejects the gid mapping for an unprivileged writer. */
+    if (!browser_renderer_write_proc("/proc/self/setgroups", "deny\n")) {
+        return false;
+    }
+
+    char map[64];
+    int n = snprintf(map, sizeof map, "%u %u 1\n", (unsigned)gid, (unsigned)gid);
+    if (n <= 0 || (size_t)n >= sizeof map) return false;
+    if (!browser_renderer_write_proc("/proc/self/gid_map", map)) return false;
+
+    n = snprintf(map, sizeof map, "%u %u 1\n", (unsigned)uid, (unsigned)uid);
+    if (n <= 0 || (size_t)n >= sizeof map) return false;
+    if (!browser_renderer_write_proc("/proc/self/uid_map", map)) return false;
+
+    /* Now unprivileged inside the new user namespace: take the rest. */
+    if (syscall(SYS_unshare, CLONE_NEWNET | CLONE_NEWIPC) != 0) return false;
+
+    return true;
+#endif
+}
+
+static bool s_browser_renderer_namespaces_active = false;
+
+/* Posture accessor. The namespace layer is REPORTED, never silently assumed:
+   a caller or gate that wants to know whether this renderer actually lost its
+   route to the network must read this rather than infer it from a successful
+   sandbox_enter(). */
+bool rt_browser_renderer_namespaces_active(void) {
+    return s_browser_renderer_namespaces_active;
+}
+
 typedef void (*BrowserRendererPreinitFn)(int, char**, char**);
 
 static void browser_renderer_preinit(int argc, char** argv, char** envp) {
@@ -1864,8 +1951,26 @@ static void browser_renderer_preinit(int argc, char** argv, char** envp) {
         return;
     }
     if (!envp || envp[0] != NULL ||
-        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
-        !browser_renderer_apply_landlock() ||
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        _exit(126);
+    }
+
+    /* Order is load-bearing: namespaces (needs openat + a writable /proc)
+       before landlock (declares handled_access_fs with no allow rules, so all
+       writes die) before seccomp (allow-list contains neither unshare nor
+       openat).
+
+       Namespace loss is recorded, not fatal. Ubuntu 24.04 ships
+       kernel.apparmor_restrict_unprivileged_userns=1, which lets an unconfined
+       binary create a user namespace but strips its capabilities, so the
+       follow-up CLONE_NEWNET returns EPERM. Treating that as fatal would turn
+       a working seccomp+landlock jail into NO jail on every default Ubuntu
+       host — strictly worse security for a stricter-looking check. The honest
+       posture is: enter the strongest jail available and publish which layers
+       were obtained via rt_browser_renderer_namespaces_active(). */
+    s_browser_renderer_namespaces_active = browser_renderer_enter_namespaces();
+
+    if (!browser_renderer_apply_landlock() ||
         !browser_renderer_apply_startup_seccomp()) {
         _exit(126);
     }

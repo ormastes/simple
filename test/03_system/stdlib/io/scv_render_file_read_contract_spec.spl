@@ -1,0 +1,232 @@
+# @cover src/lib/nogc_sync_mut/io/file_ops.spl 60%
+# @req REQ-IOREAD-001 REQ-IOREAD-002 REQ-IOREAD-003 REQ-IOREAD-004 REQ-IOREAD-005 REQ-IOREAD-006
+# @engine-reach: interpreter-only — this specification asserts stdlib file-read
+# byte contracts through ordinary library calls; it makes no claim about which
+# execution engine lowers those calls, so an engine probe would add no evidence.
+
+"""
+# SCV and rendering file-read byte contract
+
+**Feature IDs:** #SCV-IOREAD
+**Category:** Stdlib
+**Status:** In Progress
+**Plan:** doc/03_plan/sys_test/scv_render_file_read_coverage.md
+**Guide:** doc/07_guide/lib/io/file_read_byte_contracts.md
+
+## Purpose and Audience
+
+This executable system specification pins the byte-level contract of the two
+canonical file-read entry points in `src/lib/nogc_sync_mut/io/file_ops.spl`, as
+they were unified on 2026-08-16: `file_read_bytes` returns `[u8]` and
+`file_read_bytes_i64` returns the same bytes in `[i64]` form. It is written for
+stdlib, SCV, and rendering maintainers.
+
+Both SCV and the font/rendering path read files as bytes. SCV reads through
+`file_read_bytes_i64` and narrows to `[u8]`; the font path reads `[u8]`
+directly. A return-type change to either entry point silently reshapes every
+one of those readers, which is precisely what happened when the two shapes were
+reconciled. These scenarios make that reshaping observable instead of latent.
+
+## Scope and Preconditions
+
+Scope is the byte fidelity of the read APIs themselves — length, element range,
+agreement between the two shapes, and lossless round-trip of every byte value
+including those above 0x7F, where an `[i64]`/`[u8]` confusion shows up first.
+
+Preconditions: a writable scratch directory, and the in-repo font asset
+`assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf`. Both are asserted,
+never assumed. This specification is fail-closed: when a precondition cannot be
+met it FAILS. No scenario skips, and no oracle is stubbed to pass, so an
+environment that cannot satisfy the contract can never report green.
+
+## Primary Workflow
+
+Write a known byte sequence, read it back through both entry points, and assert
+the two agree with each other and with what was written. Then read a real font
+asset and assert the sfnt version bytes survive the read unchanged.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Canonical byte read | `file_read_bytes(path) -> [u8]`, the unified signature |
+| Raw i64 byte read | `file_read_bytes_i64(path) -> [i64]`, the shape SCV consumes |
+| Shape agreement | Both entry points must report identical bytes for one file |
+| sfnt version | The four leading bytes `00 01 00 00` of a TrueType font |
+
+## Related Specifications
+
+- [file_read single return type](../../../01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.md) — static return-type guard for the text family (REQ-IOREAD-007/008)
+- `test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl` — static definition-count guard for the byte family
+
+## Evidence and Provenance
+
+Requirements REQ-IOREAD-001..006 are defined in
+`doc/03_plan/sys_test/scv_render_file_read_coverage.md`. Contract pinned against
+`src/lib/nogc_sync_mut/io/file_ops.spl` at the 2026-08-16 signature unification.
+
+## Recovery and Troubleshooting
+
+A failure in the agreement scenario means the two entry points have diverged
+again — compare their return types before changing any caller. A failure only
+for byte values above 0x7F indicates sign extension in the `[i64]` path.
+
+## Compatibility and Limitations
+
+Requires a qualified pure-Simple runtime. At the time of authoring no such
+runtime was available in this workspace, so these scenarios are committed
+unexecuted and are designed to run unchanged once one is. They must not be
+reported as passing until they have actually run.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_read_bytes_i64, file_write_bytes, file_read_text, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+fn scratch_dir() -> text:
+    "build/test/stdlib_io_read_contract"
+
+fn scratch_file() -> text:
+    "build/test/stdlib_io_read_contract/bytes.bin"
+
+fn font_asset() -> text:
+    "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+
+# Every byte value 0..255, so the high-bit half is exercised explicitly.
+fn all_byte_values() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 256:
+        out.push((i & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn prepare_scratch_bytes() -> [u8]:
+    dir_create_all(scratch_dir())
+    val payload = all_byte_values()
+    val wrote = file_write_bytes(scratch_file(), payload)
+    if not wrote:
+        fail("precondition failed: could not write scratch fixture " + scratch_file())
+    payload
+
+fn require_font_asset():
+    if not file_exists(font_asset()):
+        fail("precondition failed: missing font asset " + font_asset())
+
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+# @manual_section: Byte Contract
+
+describe "stdlib file-read byte contract":
+    # @inline
+    it "writes a scratch fixture covering every byte value":
+        step("Create the scratch directory and write bytes 0..255")
+        val payload = prepare_scratch_bytes()
+        step("Confirm the fixture covers the full byte range")
+        expect(payload.len()).to_equal(256)
+        expect(file_exists(scratch_file())).to_equal(true)
+
+    # @prev("writes a scratch fixture covering every byte value")
+    it "should return unsigned bytes from the canonical read":
+        step("Read the fixture through the canonical byte entry point")
+        val bytes = file_read_bytes(scratch_file())
+        step("Verify length is preserved")
+        expect(bytes.len()).to_equal(256)
+        step("Verify every element is a value in 0..255 at its written index")
+        var i = 0
+        var mismatches = 0
+        while i < 256:
+            if bytes[i].to_i64() != i:
+                mismatches = mismatches + 1
+            i = i + 1
+        expect(mismatches).to_equal(0)
+
+    # @prev("writes a scratch fixture covering every byte value")
+    it "should return the same bytes from the raw i64 read":
+        step("Read the fixture through the raw i64 entry point")
+        val raw = file_read_bytes_i64(scratch_file())
+        step("Verify length is preserved")
+        expect(raw.len()).to_equal(256)
+        step("Verify no element carries sign extension above 0x7F")
+        var i = 0
+        var negatives = 0
+        while i < 256:
+            if raw[i] < 0:
+                negatives = negatives + 1
+            i = i + 1
+        expect(negatives).to_equal(0)
+
+    # @prev("writes a scratch fixture covering every byte value")
+    it "should agree between the unsigned and raw read shapes":
+        step("Read the same fixture through both entry points")
+        val bytes = file_read_bytes(scratch_file())
+        val raw = file_read_bytes_i64(scratch_file())
+        step("Verify both shapes report the same length")
+        expect(bytes.len()).to_equal(raw.len())
+        step("Verify both shapes report the same byte at every index")
+        var i = 0
+        var disagreements = 0
+        while i < bytes.len():
+            if bytes[i].to_i64() != (raw[i] & 0xFF):
+                disagreements = disagreements + 1
+            i = i + 1
+        expect(disagreements).to_equal(0)
+
+
+# ============================================================================
+# Rendering Read Path
+# ============================================================================
+# @manual_section: Rendering Read Path
+
+describe "rendering font read byte contract":
+    # @inline
+    it "requires the in-repo font asset":
+        step("Confirm the font asset is present")
+        require_font_asset()
+        expect(file_exists(font_asset())).to_equal(true)
+
+    # @prev("requires the in-repo font asset")
+    it "should preserve the sfnt version bytes of a real font":
+        step("Read the font asset as bytes")
+        val font = file_read_bytes(font_asset())
+        step("Verify the read returned a non-empty font body")
+        expect(font.len()).to_be_greater_than(4)
+        step("Verify the leading sfnt version bytes are 00 01 00 00")
+        expect(font[0].to_i64()).to_equal(0)
+        expect(font[1].to_i64()).to_equal(1)
+        expect(font[2].to_i64()).to_equal(0)
+        expect(font[3].to_i64()).to_equal(0)
+
+
+# ============================================================================
+# Cross-API Agreement
+# ============================================================================
+# @manual_section: Cross-API Agreement
+
+describe "text and byte read agreement":
+    it "should report the same ASCII content through both read families":
+        step("Write a known ASCII payload")
+        dir_create_all(scratch_dir())
+        val ascii_path = scratch_dir() + "/ascii.txt"
+        var ascii: [u8] = []
+        ascii.push(83.to_u8())
+        ascii.push(67.to_u8())
+        ascii.push(86.to_u8())
+        val wrote = file_write_bytes(ascii_path, ascii)
+        if not wrote:
+            fail("precondition failed: could not write " + ascii_path)
+        step("Read it through the text family")
+        val as_text = file_read_text(ascii_path)
+        step("Read it through the byte family")
+        val as_bytes = file_read_bytes(ascii_path)
+        step("Verify the two families agree on length and content")
+        expect(as_text).to_equal("SCV")
+        expect(as_bytes.len()).to_equal(3)
+        expect(as_bytes[0].to_i64()).to_equal(83)

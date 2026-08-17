@@ -16,6 +16,10 @@
 #   - the default (knob unset) renders unjailed and SAYS so on query.
 
 use std.io_runtime.{env_get}
+use app.browser.sandbox_routing.{
+    browser_sandbox_routing_probe, browser_sandbox_routing_reason,
+    BROWSER_SANDBOX_WORKER_ENV
+}
 
 pub val BROWSER_SANDBOX_ENV: text = "SIMPLE_BROWSER_SANDBOX"
 
@@ -33,13 +37,52 @@ pub fn browser_sandbox_requested() -> bool:
     """True when SIMPLE_BROWSER_SANDBOX=1 asks for jailed page rendering."""
     env_get(BROWSER_SANDBOX_ENV) == "1"
 
+pub fn browser_sandbox_render_route_wired() -> bool:
+    """Whether this app's render path actually hands pages to the renderer
+    worker.
+
+    Now true: `app.browser.sandbox_render.browser_sandbox_render_pixels`
+    drives broker -> jailed worker -> Draw IR -> software raster -> pixels.
+
+    This was previously false on the stated grounds that a
+    `DrawIrComposition -> [u32]` rasterization step did not exist. That was a
+    FALSE NEGATIVE, not a real blocker:
+    `Engine2dCompositorBackend.render_draw_ir_composition`
+    (src/os/compositor/compositor_engine2d.spl:364) has always existed, and
+    src/os/hosted/hosted_browser_render_evidence.spl:77 already used it for
+    exactly this sequence. The search that "proved" it absent used the repo's
+    default `grep`, a .gitignore-honouring ugrep wrapper that returned zero
+    hits where /usr/bin/grep returns 20 — the trap documented in
+    .claude/rules/commands.md § Fast Path.
+
+    The second stated blocker was real but was never a blocker on THIS flag:
+    the worker arg is dispatched only at `src/os/hosted/hosted_entry.spl:285`,
+    so the CLI must not gain it. It does not need to — the broker takes the
+    worker executable as a parameter, which is why the executable stays
+    operator-supplied via `sandbox_routing.spl`.
+
+    Still gated behind the routing probe: this flag says the CODE can route,
+    not that an operator configured a worker binary."""
+    true
+
 pub fn browser_sandbox_worker_routing_available() -> bool:
     """Whether this app can route page rendering through the sandboxed
-    renderer worker. Always false today: the broker exists
-    (hosted_browser_renderer_process.spl) but this app's render path is not
-    wired through it — see the bug doc in the header. This function is the
-    single line to flip when that routing lands."""
-    false
+    renderer worker.
+
+    Requires BOTH a worker-capable executable (probed, operator-supplied) AND
+    a wired render route. Fail-closed: either half missing means unavailable,
+    which keeps the honest refusal rather than an unjailed render."""
+    browser_sandbox_routing_probe() and browser_sandbox_render_route_wired()
+
+pub fn browser_sandbox_unavailable_reason() -> text:
+    """Precise, machine-readable reason routing is unavailable, so an operator
+    can tell 'you never set the env var' apart from 'the code cannot do this
+    yet'. Empty when routing IS available."""
+    if not browser_sandbox_routing_probe():
+        return browser_sandbox_routing_reason()
+    if not browser_sandbox_render_route_wired():
+        return "render-route-not-wired"
+    ""
 
 pub fn browser_sandbox_status() -> BrowserSandboxStatus:
     """Honest sandbox posture for this process. Fail-closed reporting:
@@ -57,10 +100,13 @@ pub fn browser_sandbox_status() -> BrowserSandboxStatus:
             requested: true, jailed: true,
             mode: BROWSER_SANDBOX_MODE_JAILED,
             reason: "")
+    # Report the ACTUAL cause, not a fixed sentence. The render route is wired
+    # now, so blaming it would send an operator to read code when what they
+    # really need is to set SIMPLE_BROWSER_RENDERER_WORKER.
     BrowserSandboxStatus(
         requested: true, jailed: false,
         mode: BROWSER_SANDBOX_MODE_REFUSED,
-        reason: "sandbox requested but in-process browser cannot yet route page rendering through the jailed renderer worker (hosted_browser_renderer_process.spl); refusing to render unjailed — see doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md")
+        reason: "sandbox requested but unavailable ({browser_sandbox_unavailable_reason()}); refusing to render unjailed — set {BROWSER_SANDBOX_WORKER_ENV} to a worker-capable executable, see doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md")
 
 pub fn browser_sandbox_status_line(status: BrowserSandboxStatus) -> text:
     """One-line human/CLI rendering of the posture."""
@@ -73,4 +119,5 @@ export BROWSER_SANDBOX_ENV
 export BROWSER_SANDBOX_MODE_UNJAILED, BROWSER_SANDBOX_MODE_JAILED, BROWSER_SANDBOX_MODE_REFUSED
 export BrowserSandboxStatus
 export browser_sandbox_requested, browser_sandbox_worker_routing_available
+export browser_sandbox_render_route_wired, browser_sandbox_unavailable_reason
 export browser_sandbox_status, browser_sandbox_status_line

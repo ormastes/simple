@@ -146,3 +146,23 @@ Build wall time was 20.17 s with 172,288 KiB peak RSS. Static follow-up review
 added alias first-write guarding, per-module reset, stronger non-leak checks,
 and non-type collision rejection without a fourth runtime cycle, honoring the
 three-cycle cap. The full x86 Stage 4 graph remains the final closure proof.
+
+## Current verification status (2026-08-17)
+
+The implementation and regression matrix remain present on current main. The
+exact hard-exit probe
+`test/03_system/native/hir_materialized_enum_payload_dependencies.spl` covers
+declaration-only prebinding followed by explicit facade materialization,
+owner-private payload closure, generic bounds/defaults, unrelated-symbol
+exclusion, and conflicting terminal identity. The adjacent
+`hir_package_sibling_enum_declaration_only.spl` probe preserves the original
+package-sibling non-leak invariant while proving an explicit glob still
+materializes the enum.
+
+One fresh focused replay was attempted with the canonical
+`bin/release/simple` wrapper. It stopped before compilation because the
+deployed runtime identity probe could not find a valid
+`release/x86_64-unknown-linux-gnu/simple` target. No second replay was made.
+The row is therefore `fix-implemented-verification-pending`, not `fixed`, until
+an admitted pure-Simple runner repeats the focused hard-exit checks and the
+full Stage 4 graph crosses the former HIR frontier.

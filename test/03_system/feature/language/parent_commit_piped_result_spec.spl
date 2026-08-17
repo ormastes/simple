@@ -49,6 +49,9 @@ use std.common.structural.transfer.process_frame_codec.{
     process_transfer_frame_v1,
     process_transfer_text_line_encode
 }
+use std.common.structural.transfer.process_frame_auth.{
+    process_transfer_authenticated_text_line_encode
+}
 use std.common.structural.transfer.transfer_contracts.{
     ParallelExecutionDomain,
     ParallelTransferMode,
@@ -67,7 +70,11 @@ use std.nogc_async_mut.parent_commit_owner.{
     parent_commit_owner_v1_with_application_root
 }
 use std.nogc_async_mut.parent_commit_piped_process.{
-    parent_commit_piped_process_session_v1
+    parent_commit_piped_process_session_v1,
+    parent_commit_authenticated_piped_process_session_v2
+}
+use std.nogc_async_mut.parent_commit_authenticated_session.{
+    parent_process_session_identity_v2
 }
 use std.thread_sffi.{thread_sleep}
 
@@ -96,6 +103,20 @@ fn child_result_line(generation: i64) -> text:
     process_transfer_text_line_encode(process_transfer_frame_v1(
         envelope, encode_result_envelope(result))).trim()
 
+fn child_result_authenticated_line(generation: i64, auth_key: text,
+                                   session_id: text) -> text:
+    val result = result_envelope_v1(4, 7, 0, 7,
+        ParallelResultKind.Patch, 707, "child-7")
+    val envelope = transfer_envelope_v1(7, generation,
+        ParallelExecutionDomain.Process,
+        ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy,
+        0, false)
+    process_transfer_authenticated_text_line_encode(
+        process_transfer_frame_v1(envelope, encode_result_envelope(result)),
+        auth_key, session_id, generation).trim()
+
 fn fragmented_replay_child_script(line: text) -> text:
     val split_at = line.len() / 2
     val first = line.substring(0, split_at)
@@ -116,6 +137,54 @@ fn drain_process_result_batch(owner: ParentCommitOwnerV1,
     owner.commit_process_result_frames_with_candidate([received.frame], candidate)
 
 describe "parent-authoritative piped child results":
+    it "should authenticate an exec child, reject wrong-session replay, and revoke on cancellation":
+        step("Issue the authenticated identity used by the production spawn adapter")
+        val generation = 61
+        val identity = parent_process_session_identity_v2(
+            "authority-secret", "boot-epoch-a", "pidns-a", 17, generation)
+        val replacement = parent_process_session_identity_v2(
+            "authority-secret", "boot-epoch-b", "pidns-a", 17, generation)
+        val valid_line = child_result_authenticated_line(
+            generation, "wire-key", identity.session_id)
+        val wrong_session_line = child_result_authenticated_line(
+            generation, "wire-key", replacement.session_id)
+        val script = "printf '%s\\n' '" + wrong_session_line
+            + "'; printf '%s\\n' '" + valid_line
+            + "'; printf '%s\\n' '" + valid_line + "'; sleep 5"
+        val session = parent_commit_authenticated_piped_process_session_v2(
+            "/bin/sh", ["-c", script], 3, "wire-key", "authority-secret",
+            "boot-epoch-a", "pidns-a", 17, generation)
+        val issued = session.status()
+        expect(issued.process_handle).to_be_greater_than(0)
+        expect(issued.authenticated).to_equal(true)
+        expect(issued.session_id).to_equal(identity.session_id)
+
+        step("Require authentication before replay and generation admission")
+        var accepted = 0
+        var rejected = 0
+        var polls = 0
+        while polls < 80 and (accepted < 1 or rejected < 2):
+            val read = session.poll(3)
+            accepted = accepted + read.accepted
+            rejected = rejected + read.rejected
+            if accepted < 1 or rejected < 2:
+                thread_sleep(5)
+            polls = polls + 1
+        expect(accepted).to_equal(1)
+        expect(rejected).to_equal(2)
+        expect(session.reader.inbox.depth()).to_equal(1)
+        expect(session.reader.inbox.stats().rejected_replay_frames).to_equal(1)
+
+        step("Cancel the live child and revoke the authenticated accepted frame")
+        expect(session.cancel()).to_equal(true)
+        expect(session.cancel()).to_equal(true)
+        val terminal = session.status()
+        expect(terminal.cancelled).to_equal(true)
+        expect(terminal.closed).to_equal(true)
+        expect(terminal.close_attempts).to_equal(1)
+        expect(session.reader.inbox.depth()).to_equal(0)
+        expect(session.reader.inbox.receive().reason).to_equal("closed")
+
     it "should validate, commit, and close one fragmented child result":
         step("Create a bounded parent-owned process session")
         val owner = parent_commit_owner_v1(

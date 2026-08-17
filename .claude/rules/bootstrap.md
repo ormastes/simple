@@ -280,3 +280,32 @@ does not set it. Ensure the wrapper sets both when invoking native-build in
 hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`).
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.
+
+## Building a stage: use the script, never a hand-rolled native-build (2026-08-17)
+
+`bin/simple build bootstrap` is the **legacy slow path**. Its stage invocation
+hardcodes `--threads 1` and passes no `--cache-dir`, no `--low-memory`, no
+`--runtime-bundle`, no `--mode` — a cold uncached single-threaded recompile
+every time. Adding `--bootstrap-reason=`/`--bootstrap-receipt=` does not switch
+it to the good path.
+
+Use `scripts/bootstrap/bootstrap-from-scratch.sh` (without `--full-bootstrap` it
+reuses the existing seed and never runs cargo). Its `bootstrap_native_build_main`
+passes the flags that make a stage finish — above all **`--cache-dir`**, absence
+of which is the #1 cause of "bootstrap takes forever", and **`--low-memory`**,
+absence of which OOMs the host.
+
+**A native-build "timeout" is often an OOM.** `earlyoom` runs here with
+`--prefer ^(simple|...)` and fires at ~10% free; the parent then misreports the
+killed child as `timed out after 14400s` — observed 7 minutes into a 4-hour
+budget. Check `journalctl -u earlyoom` before believing any timeout.
+
+**Budget memory before starting.** One `simple test` process peaks ~3 GB; the
+stage worker holds ~2.9 GB. Bootstrap and broad test sweeps must alternate — 25
+concurrent spec processes measured 46 GB and pushed a 128 GB box into the kill
+zone.
+
+**Healthy stage-1 shape:** the parent `native-build` sleeps in `futex_wait` by
+design; the spawned `native_build_worker` grandchild does the work. Measure the
+grandchild (elapsed ≈ CPU, RSS ~2.9 GB). Measuring the parent reads as "starved"
+and is a misdiagnosis.

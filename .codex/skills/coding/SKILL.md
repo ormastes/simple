@@ -331,6 +331,7 @@ use lib.common.text            # Also works (std -> lib internally)
 
 ## Code Quality
 
+- **One App, One Host Interface:** When coding `src/app/` or `src/os/apps/`, write once for all OSes. Platform difference lives only behind HAL (SOSIX, CompositorBackend, DedicatedHost). Never add per-OS app files, platform conditionals in app logic, or adapter copies in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - NEVER over-engineer — only make requested changes
 - NEVER add unused code — delete completely
 - STUB001 = hard fail — no `pass_todo` in production code

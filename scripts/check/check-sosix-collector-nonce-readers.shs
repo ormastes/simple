@@ -1,0 +1,133 @@
+#!/bin/sh
+# Source contract for the distinct SOSIX collector nonce on all six guests.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+fail() {
+    echo "sosix-collector-nonce-readers: $*" >&2
+    return 1
+}
+
+require_entry() {
+    arch=$1
+    entry=$2
+    [ -f "$entry" ] || { fail "$arch entry missing: $entry"; return 1; }
+    grep -F 'extern fn rt_sosix_collector_nonce_echo()' "$entry" >/dev/null ||
+        { fail "$arch entry lacks the frozen collector nonce extern"; return 1; }
+    call_line=$(awk '/if rt_sosix_collector_nonce_echo\(\)/ { print NR; exit }' "$entry")
+    guest_line=$(awk '/(serial_println\("guest-entry"\)|print "guest-entry")/ { print NR; exit }' "$entry")
+    [ -n "$call_line" ] && [ -n "$guest_line" ] && [ "$call_line" -lt "$guest_line" ] ||
+        { fail "$arch collector nonce call must precede guest-entry"; return 1; }
+    grep -F 'collector-nonce' "$entry" >/dev/null ||
+        { fail "$arch entry lacks a fail-closed collector nonce diagnostic"; return 1; }
+}
+
+extract_c_function() {
+    file=$1
+    symbol=$2
+    awk -v symbol="$symbol" '
+        !inside && index($0, symbol "(") { inside = 1 }
+        inside {
+            print
+            scan = $0
+            opens = gsub(/\{/, "{", scan)
+            scan = $0
+            closes = gsub(/\}/, "}", scan)
+            depth += opens - closes
+            if (opens > 0) opened = 1
+            if (opened && depth == 0) exit
+        }
+    ' "$file"
+}
+
+require_runtime() {
+    arch=$1
+    runtime=$2
+    contract=${3:-$runtime}
+    [ -f "$runtime" ] || { fail "$arch runtime missing: $runtime"; return 1; }
+    [ -f "$contract" ] || { fail "$arch nonce contract missing: $contract"; return 1; }
+    grep -E '(^|[[:space:]])(int64_t|RuntimeValue)[[:space:]]+rt_sosix_collector_nonce_echo\(void\)' "$runtime" >/dev/null ||
+        { fail "$arch runtime lacks the frozen collector nonce leaf"; return 1; }
+    body=$(extract_c_function "$runtime" rt_sosix_collector_nonce_echo)
+    [ -n "$body" ] || { fail "$arch collector nonce leaf body is missing"; return 1; }
+    printf '%s\n' "$body" | grep -E '(/SOSIXNON\.TXT|SOSIXNONTXT)' >/dev/null ||
+        { fail "$arch runtime does not read the dedicated collector nonce file"; return 1; }
+    validation=$body
+    prefix_scope=$body
+    case "$arch" in
+        x86_64)
+            validation=$(extract_c_function "$contract" x86_64_nonce_slot_line_length_with_prefix)
+            prefix_scope=$(extract_c_function "$contract" x86_64_collector_nonce_slot_line_length)
+            ;;
+        arm64)
+            validation=$(extract_c_function "$runtime" _arm64_collector_nonce_line_length)
+            prefix_scope=$validation
+            ;;
+        riscv32)
+            validation=$(extract_c_function "$runtime" riscv32_collector_nonce_line_length)
+            prefix_scope=$validation
+            ;;
+    esac
+    [ -n "$validation" ] && [ -n "$prefix_scope" ] ||
+        { fail "$arch validator body is missing"; return 1; }
+    printf '%s\n' "$prefix_scope" | grep -F 'SOSIX_COLLECTOR_RUN_NONCE=' >/dev/null ||
+        { fail "$arch runtime does not validate the collector nonce prefix"; return 1; }
+    printf '%s\n' "$validation" | grep -F '118' >/dev/null ||
+        { fail "$arch runtime does not retain the bounded nonce slot"; return 1; }
+    printf '%s\n' "$validation" | grep -F "'\n'" >/dev/null ||
+        { fail "$arch runtime does not require the record newline"; return 1; }
+    printf '%s\n' "$validation" | grep -E '!= (0|0U)' >/dev/null ||
+        { fail "$arch runtime does not reject nonzero trailing padding"; return 1; }
+    if printf '%s\n' "$body" | grep -F 'QEMUNONC' >/dev/null; then
+        fail "$arch runtime aliases the workload nonce"
+    fi
+}
+
+check_sources() {
+    require_entry x86_32 "$repo_root/examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl"
+    require_runtime x86_32 "$repo_root/examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c"
+    require_entry x86_64 "$repo_root/examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl"
+    require_runtime x86_64 \
+        "$repo_root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c" \
+        "$repo_root/examples/09_embedded/simple_os/arch/x86_64/boot/x86_64_nonce_slot_contract.h"
+    require_entry arm32 "$repo_root/examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl"
+    require_runtime arm32 "$repo_root/examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c"
+    require_entry arm64 "$repo_root/examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl"
+    require_runtime arm64 "$repo_root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+    require_entry riscv32 "$repo_root/examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl"
+    require_runtime riscv32 "$repo_root/examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c"
+    require_entry riscv64 "$repo_root/examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl"
+    require_runtime riscv64 "$repo_root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c"
+    descriptors="$repo_root/scripts/check/sosix-qemu-windows-descriptors.ps1"
+    [ -f "$descriptors" ] || { fail "Windows descriptor owner is missing"; return 1; }
+    enabled=$(grep -Fc 'CollectorNonceEcho=$true' "$descriptors")
+    disabled=$(grep -Fc 'CollectorNonceEcho=$false' "$descriptors" || true)
+    [ "$enabled" -eq 6 ] && [ "$disabled" -eq 0 ] ||
+        { fail "Windows descriptors must enable exactly six source-proven readers"; return 1; }
+    run_ready=$(grep -Fc 'RunContractReady=$true' "$descriptors")
+    run_blocked=$(grep -Fc 'RunContractReady=$false' "$descriptors")
+    [ "$run_ready" -eq 2 ] && [ "$run_blocked" -eq 4 ] ||
+        { fail "Windows descriptors must separate nonce readiness from complete run readiness"; return 1; }
+}
+
+self_test() {
+    check_sources
+    work=$(mktemp -d "${TMPDIR:-/tmp}/sosix-collector-nonce-readers.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    runtime="$repo_root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+    cp "$runtime" "$work/good.c"
+    require_runtime arm64 "$work/good.c"
+    sed 's/SOSIX_COLLECTOR_RUN_NONCE=/BROKEN_COLLECTOR_NONCE=/' "$runtime" > "$work/broken.c"
+    if require_runtime arm64 "$work/broken.c" >/dev/null 2>&1; then
+        fail "prefix sabotage was accepted"
+        return 1
+    fi
+    echo 'sosix_collector_nonce_readers_self_test=pass'
+}
+
+case "${1:-}" in
+    '') check_sources; echo 'sosix_collector_nonce_readers_source_status=pass' ;;
+    --self-test) [ "$#" -eq 1 ] || exit 64; self_test ;;
+    *) echo 'usage: check-sosix-collector-nonce-readers.shs [--self-test]' >&2; exit 64 ;;
+esac

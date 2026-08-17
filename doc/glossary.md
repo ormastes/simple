@@ -1165,3 +1165,43 @@ unrelated work and it makes **no claim** — a skipped lane is never counted as 
 one, and the group summary surfaces the count. Contrast `ERROR — nothing was checked`
 (exit 2), which is what a gate run that evaluated zero gates reports, because failing
 open by checking nothing is this repo's most common guard defect.
+
+**Jailed render session** — `os.hosted.hosted_browser_render_session`, the single home
+for the broker + software-raster handshake used to obtain a render from the sandboxed
+browser worker: `open(executable, generation, w, h, timeout)` -> `render_frame(kind,
+payload)` -> `close()`. It is a **session**, not a one-shot `html -> pixels` call,
+because the animation evidence path holds one worker across `init` -> `begin_advance`
+-> poll -> a second rasterize. Anyone needing a jailed render opens a session; nobody
+re-derives the sequence. It was written out three times before this module existed.
+
+**Re-derived sequence (anti-pattern)** — Writing out a multi-step handshake against a
+subsystem (broker/raster, spawn/present, submit/complete) at a new call site instead of
+calling the shared helper. It compiles, passes review, and then drifts: a protocol change
+has to find every copy. Two instances were found in this tree and BOTH are now fixed (2026-08-16): the
+browser jailed-render sequence, collapsed into [[Jailed render session]]; and the
+triplicated `_completion`/`_rejected` helpers in
+`src/os/compositor/host_services/{cocoa,win32,sdl2}_display_adapter.spl`, collapsed into
+`display_adapter_common.spl`. A fourth display backend is now added by calling that
+helper, not by copying the third adapter.
+Before adding a call site, search for an existing driver of the same subsystem with
+`/usr/bin/grep` — and see **Absence claim** for why the plain wrapper will not do.
+
+**Absence claim** — An assertion that some function, type, or capability does not exist.
+In this repo it requires `/usr/bin/grep -rn`, never the default `grep`, which is a
+wrapped ugrep honouring `.gitignore` and silently returns fewer hits. A zero-hit result
+from the wrapper reads exactly like proof of absence and has produced a false blocker
+that sat in code comments, a plan doc, a bug record and the feature wiki for two
+sessions (the browser Draw IR rasterizer, which had 20 call sites the whole time). A
+blocker recorded in a doc is a claim to re-verify, not a fact to build around.
+
+**Host interface (hosted apps)** — The boundary that lets `src/os/apps/**` stay
+platform-agnostic: SOSIX `service_contract` + `CompositorBackend` + `DedicatedHost`,
+with per-OS backends chosen at one dispatch site (`select_hosted_backend`). The
+invariant is that SimpleOS and other OSes differ **only** inside that layer. Verified
+2026-08-16: `src/os/apps/` contains zero platform conditionals. The one asymmetry that
+remains is deliberate: `src/os/hosted/hosted_win32_mdi_probe.spl` re-declares the Win32
+externs and bypasses `CompositorBackend` on purpose, because it is a raw-Win32
+diagnostic harness driven by `scripts/check/check-windows-native-mdi-evidence.{shs,ps1}`
+and needs a message pump, window lifecycle and pixel readback that `CompositorBackend`
+does not expose. It is not duplication debt; do not "fix" it by routing it through the
+backend, which would destroy what it measures.

@@ -1,0 +1,47 @@
+"""
+Regression coverage for compiled_checker_asm_volatile_indent_gap_2026_08_03.
+"""
+
+use std.spec
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+
+fn asm_parses_clean(name: text, source: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    not parser_has_errors()
+
+describe "asm volatile indented blocks":
+    it "parses the exact RISC-V instruction and input constraint form":
+        val source = "fn cbo_clean(addr: u64):\n" +
+            "    unsafe:\n" +
+            "        asm volatile:\n" +
+            "            \"cbo.clean 0(\{addr\})\"\n" +
+            "            in(reg) addr\n"
+        expect(asm_parses_clean("asm_volatile_riscv_exact.spl", source)).to_equal(true)
+
+    it "preserves adjacent named output inout and option directives":
+        val source = "fn update(src: u64):\n" +
+            "    var dst = 0\n" +
+            "    asm volatile:\n" +
+            "        \"add \{dst\}, \{src\}, 1\"\n" +
+            "        dst = out(reg) dst\n" +
+            "        src = in(reg) src\n" +
+            "        options(nostack, readonly)\n"
+        expect(asm_parses_clean("asm_volatile_adjacent_operands.spl", source)).to_equal(true)
+
+    it "rejects an unknown directive then recovers for a valid block":
+        val malformed = "fn bad(addr: u64):\n" +
+            "    asm volatile:\n" +
+            "        \"nop\"\n" +
+            "        mystery(reg) addr\n"
+        expect(asm_parses_clean("asm_volatile_bad_directive.spl", malformed)).to_equal(false)
+        val valid = "fn good():\n" +
+            "    asm volatile:\n" +
+            "        \"fence.i\"\n"
+        expect(asm_parses_clean("asm_volatile_recovery.spl", valid)).to_equal(true)
+
+    it "keeps braced and parenthesized neighboring forms accepted":
+        val source = "fn neighbors(value: u64):\n" +
+            "    asm volatile \{ fence.i \}\n" +
+            "    asm volatile(\"mv a0, \{value\}\", in(reg) value)\n"
+        expect(asm_parses_clean("asm_volatile_neighbors.spl", source)).to_equal(true)

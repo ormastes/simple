@@ -149,6 +149,50 @@ fn verify_namespace_owner_lowering(reverse: bool, tier: text):
     expect(direct_join2).to_equal(true)
     expect(direct_detect_os).to_equal(true)
 
+fn verify_selective_env_import_lowering(alias_env_get: bool):
+    """Exercise the exact env/paths import topology.  Unlike the namespace
+    cases above, paths.spl selectively imports env_get from the variables
+    module; the module tail must never escape as a `variables` GlobalLoad."""
+    val surfaces_result = namespace_owner_surfaces(false, "nogc_async_mut")
+    expect(surfaces_result.is_ok()).to_equal(true)
+    if surfaces_result.is_err():
+        return
+    val imported_name = if alias_env_get: "read_env" else: "env_get"
+    val import_item = if alias_env_get: "env_get as read_env" else: "env_get"
+    val consumer_source = "use std.env.variables.{" + import_item + "}\n" +
+        "fn main() -> text:\n" +
+        "    " + imported_name + "(\"PATH\")"
+    val consumer = parse_full_frontend(
+        consumer_source, "src/lib/nogc_async_mut/env/paths_probe.spl",
+        "lib.nogc_async_mut.env.paths_probe", Logger(level: 0))
+    var lowering = hirlowering_for_module(
+        "lib.nogc_async_mut.env.paths_probe", surfaces_result.unwrap())
+    val hir = lowering.lower_module(consumer)
+    expect(lowering.errors.len()).to_equal(0)
+
+    val mir = MirLowering.new(hir.symbols).lower_module(hir)
+    var load_global_variables = false
+    var direct_env_get = false
+    for function in mir.functions.values():
+        if function.name == "main":
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.LoadGlobal(name, _):
+                            if name == "variables" or name.ends_with(".variables"):
+                                load_global_variables = true
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name.ends_with(".env_get") or name == "env_get":
+                                        direct_env_get = true
+                                case _:
+                                    pass
+                        case _:
+                            pass
+    expect(load_global_variables).to_equal(false)
+    expect(direct_env_get).to_equal(true)
+
 describe "module namespace retained surface ownership":
     it "lowers async env path namespaces through retained lib owners":
         verify_namespace_owner_lowering(false, "nogc_async_mut")
@@ -158,3 +202,9 @@ describe "module namespace retained surface ownership":
 
     it "keeps sync env path namespaces on their retained owners":
         verify_namespace_owner_lowering(false, "nogc_sync_mut")
+
+    it "lowers the env paths selective import without a variables global":
+        verify_selective_env_import_lowering(false)
+
+    it "keeps the adjacent aliased selective import on the env_get owner":
+        verify_selective_env_import_lowering(true)

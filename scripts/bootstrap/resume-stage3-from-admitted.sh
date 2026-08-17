@@ -23,12 +23,15 @@ platform=$(bootstrap_stage3_host_platform)
 stage3="$output/stage3/$platform"
 stage2="$output/stage2/$platform/simple"
 admitted="$stage3/stage2-admitted/simple"
+stage2_admission="$stage3/stage2-admitted/admission.env"
 runtime="$stage3/stage2-runtime-authority"
 seed="$runtime/simple"
 stamp="$seed.inputs.sha256"
 native_all="$runtime/libsimple_native_all.a"
 backfill="$runtime/libsimple_compiler_backfill.a"
 stage2_sanity="$stage3/stage2-sanity.env"
+stage2_receiver="$stage3/stage2-receiver.env"
+stage2_receiver_log="$stage3/stage2-receiver.log"
 stage2_transcript="$stage3/stage2-command.transcript"
 stage2_log="$output/logs/$platform/stage2-native-build.log"
 candidate="$stage3/simple"
@@ -52,8 +55,10 @@ runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/recovery-threads1"
 
-for required in "$stage2" "$admitted" "$seed" "$stamp" "$native_all" \
-  "$stage2_sanity" "$stage2_transcript" "$stage2_log" "$source_before" \
+for required in "$stage2" "$admitted" "$stage2_admission" "$seed" "$stamp" "$native_all" \
+  "$stage2_sanity" "$stage2_receiver" "$stage2_receiver_log" \
+  "$stage2_transcript" "$stage2_log" "$source_before" \
+  "$git_before" \
   "$runtime_origin_before" "$runtime_origin_after" "$runtime_admitted" \
   "$tool_before"; do
   [ -f "$required" ] && [ ! -L "$required" ] || exit 1
@@ -69,10 +74,35 @@ admitted_sha=$(bootstrap_stage3_hash_file "$admitted")
 [ "$stage2_sha" = "$admitted_sha" ] || exit 1
 [ "$(bootstrap_stage3_manifest_value status "$stage2_sanity")" = pass ] || exit 1
 [ "$(bootstrap_stage3_manifest_value candidate_sha256_after "$stage2_sanity")" = "$admitted_sha" ] || exit 1
-bootstrap_stage3_verify_sanity_evidence "$stage2_sanity" "$stage2" "$root" \
-  cranelift "$(bootstrap_stage3_transcript_host_value "$stage2_transcript" HOME)" \
-  "$(bootstrap_stage3_transcript_host_value "$stage2_transcript" TMPDIR)" \
-  "$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)"
+stage2_backend=$(bootstrap_stage3_transcript_argv_value_after \
+  "$stage2_transcript" --backend) || exit 1
+stage2_threads=$(bootstrap_stage3_transcript_argv_value_after \
+  "$stage2_transcript" --threads) || exit 1
+stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
+  "$stage2_transcript" --compile-stack-mib) || exit 1
+stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
+case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
+case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
+case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) exit 1 ;; esac
+stage2_args=$(bootstrap_stage3_args_sha256 \
+  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
+  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
+  native-build --target "$platform" --backend "$stage2_backend" \
+  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
+  --source src/lib --entry-closure --threads "$stage2_threads" \
+  --compile-stack-mib "$stage2_compile_stack_mib" \
+  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "$runtime" -o "$stage2")
+bootstrap_stage3_verify_sanity_evidence_receipt \
+  "$stage2_sanity" "$stage2"
+bootstrap_stage3_verify_receiver_evidence_receipt \
+  "$stage2_receiver" "$stage2" "$runtime_admitted" "$stage2_receiver_log"
+bootstrap_stage3_verify_stage2_admission_receipt \
+  "$stage2_admission" "$admitted" "$source_before" "$runtime_admitted" \
+  "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_receiver"
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
@@ -81,6 +111,21 @@ mkdir -p "$archive"
 bootstrap_stage3_directory_snapshot "$runtime_check" "$runtime"
 cmp -s "$runtime_admitted" "$runtime_check"
 rm -f "$runtime_check"
+
+# The Stage-2 source, Git, and tool files are immutable admission receipts.
+# Compare fresh resume-time snapshots through separate temporary paths before
+# acquiring the output lock or removing any prior recovery artifact; never
+# overwrite the admitted records to manufacture a matching interval.
+resume_source_check="$archive/source-preflight.$$"
+resume_git_check="$archive/git-preflight.$$"
+resume_tool_check="$archive/tool-preflight.$$"
+bootstrap_stage3_source_snapshot "$resume_source_check" "$root"
+bootstrap_stage3_git_state "$root" "$resume_git_check"
+bootstrap_stage3_tool_authority_snapshot "$resume_tool_check" "$path" "$root"
+cmp -s "$source_before" "$resume_source_check"
+cmp -s "$git_before" "$resume_git_check"
+cmp -s "$tool_before" "$resume_tool_check"
+rm -f "$resume_source_check" "$resume_git_check" "$resume_tool_check"
 
 if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate" >/dev/null 2>&1; then
   echo "error: canonical Stage 3 already converged: $manifest" >&2
@@ -144,6 +189,8 @@ else
 fi
 mkdir -p "$stage3_cache" "$home" "$tmp" "$(dirname "$stage3_log")"
 
+# Stage-2 authority files remain the immutable pre-build bindings. Fresh
+# post-build evidence is written only to the distinct `*_after` paths below.
 # Per-lane private caches: stage2 and stage3 run different compiler binaries over
 # the same source tree, so each cache dir is fenced to its own lane and reuse of a
 # foreign lane's dir is refused. Additive: old checkouts without the guard skip it.
@@ -172,18 +219,6 @@ evidence_run_id="stage3-${platform}-$$"
 [ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
 [ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
 
-stage2_threads=$(sed -n '/^argv:[0-9][0-9]*:--threads$/{n;s/^argv:[0-9][0-9]*://p;q;}' "$stage2_transcript")
-case "$stage2_threads" in ''|*[!0-9]*) exit 1 ;; esac
-stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend cranelift \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -199,7 +234,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=1" \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
-  native-build --target "$platform" --backend cranelift \
+  native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl)
@@ -219,7 +254,7 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS=1 \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \
   SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" -- \
-  "$admitted" native-build --target "$platform" --backend cranelift \
+  "$admitted" native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl
@@ -256,7 +291,17 @@ bootstrap_stage_sanity() (
   unsupported_status=0
   unsupported=$(run_timeout 10 "$candidate_sanity" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1) || unsupported_status=$?
   frontend_status=0
-  CANDIDATE_FRONTEND_BACKEND=cranelift candidate_frontend_smoke "$candidate_sanity" >"$frontend_log" 2>&1 || frontend_status=$?
+  CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
+    CANDIDATE_FRONTEND_BOOTSTRAP=0 \
+    candidate_frontend_smoke "$candidate_sanity" >"$frontend_log" 2>&1 || frontend_status=$?
+  frontend_bootstrap_status=0
+  if [ "$frontend_status" -eq 0 ]; then
+    CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
+      CANDIDATE_FRONTEND_BOOTSTRAP=1 \
+      candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log" 2>&1 || \
+      frontend_bootstrap_status=$?
+    frontend_status=$frontend_bootstrap_status
+  fi
   after=$(bootstrap_stage3_hash_file "$candidate_sanity")
   sanity_status=fail
   if [ "$version_status" -eq 0 ] && [ "$version" = "simple-bootstrap 1.0.0-beta" ] && \
@@ -267,6 +312,7 @@ bootstrap_stage_sanity() (
     echo version_output="$version"; echo unsupported_status="$unsupported_status"; \
     printf 'unsupported_output_sha256=%s\n' "$(printf %s "$unsupported" | bootstrap_stage3_hash_stream)"; \
     echo frontend_smoke_status="$frontend_status"; \
+    echo frontend_smoke_bootstrap_mode_status="$frontend_bootstrap_status"; \
     echo frontend_smoke_output_sha256="$(bootstrap_stage3_hash_file "$frontend_log")"; \
     echo candidate_sha256_after="$after"; } >"$evidence_tmp"
   mv "$evidence_tmp" "$evidence"; rm -f "$frontend_log"; [ "$sanity_status" = pass ]
@@ -280,11 +326,13 @@ cmp -s "$git_before" "$git_after"
 cmp -s "$tool_before" "$tool_after"
 
 BSTAGE3_ROOT=$root BSTAGE3_MANIFEST=$manifest BSTAGE3_PLATFORM=$platform
-BSTAGE3_BACKEND=cranelift BSTAGE3_MODE=dynload BSTAGE3_SEED=$seed
+BSTAGE3_BACKEND=$stage2_backend BSTAGE3_MODE=dynload BSTAGE3_SEED=$seed
 BSTAGE3_SEED_STAMP=$stamp BSTAGE3_NATIVE_ALL=$native_all BSTAGE3_BACKFILL=$backfill
 BSTAGE3_RUNTIME_ORIGIN_BEFORE=$runtime_origin_before BSTAGE3_RUNTIME_ORIGIN_AFTER=$runtime_origin_after
 BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT=$runtime_admitted BSTAGE3_TOOL_AUTHORITY=$tool_after
-BSTAGE3_STAGE2=$stage2 BSTAGE3_STAGE2_ADMITTED=$admitted BSTAGE3_STAGE3=$candidate
+BSTAGE3_TOOL_AUTHORITY_BEFORE=$tool_before
+BSTAGE3_STAGE2=$stage2 BSTAGE3_STAGE2_ADMITTED=$admitted
+BSTAGE3_STAGE2_ADMISSION=$stage2_admission BSTAGE3_STAGE3=$candidate
 BSTAGE3_SOURCE_BEFORE=$source_before BSTAGE3_SOURCE_AFTER=$source_after
 BSTAGE3_STAGE2_LOG=$stage2_log BSTAGE3_STAGE3_LOG=$stage3_log
 BSTAGE3_STAGE2_ARGS_SHA256=$stage2_args BSTAGE3_STAGE3_ARGS_SHA256=$stage3_args
@@ -298,13 +346,15 @@ BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE=$script_sha_before
 BSTAGE3_SEED_INPUTS_FINGERPRINT=$seed_fingerprint BSTAGE3_SEED_FEATURES=
 BSTAGE3_GIT_BEFORE=$git_before BSTAGE3_GIT_AFTER=$git_after
 BSTAGE3_STAGE2_TRANSCRIPT=$stage2_transcript BSTAGE3_STAGE3_TRANSCRIPT=$stage3_transcript
-BSTAGE3_STAGE2_SANITY=$stage2_sanity BSTAGE3_STAGE3_SANITY=$stage3_sanity
+BSTAGE3_STAGE2_SANITY=$stage2_sanity BSTAGE3_STAGE2_RECEIVER=$stage2_receiver
+BSTAGE3_STAGE3_SANITY=$stage3_sanity
 BSTAGE3_LOCK=$lock BSTAGE3_RUST_LOG=error
 export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MODE \
   BSTAGE3_SEED BSTAGE3_SEED_STAMP BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
   BSTAGE3_RUNTIME_ORIGIN_BEFORE BSTAGE3_RUNTIME_ORIGIN_AFTER \
-  BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT BSTAGE3_TOOL_AUTHORITY BSTAGE3_STAGE2 \
-  BSTAGE3_STAGE2_ADMITTED BSTAGE3_STAGE3 BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER \
+  BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT BSTAGE3_TOOL_AUTHORITY \
+  BSTAGE3_TOOL_AUTHORITY_BEFORE BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED \
+  BSTAGE3_STAGE2_ADMISSION BSTAGE3_STAGE3 BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER \
   BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG BSTAGE3_STAGE2_ARGS_SHA256 \
   BSTAGE3_STAGE3_ARGS_SHA256 BSTAGE3_STAGE2_THREADS BSTAGE3_STAGE3_THREADS \
   BSTAGE3_STAGE2_CACHE_DIR BSTAGE3_STAGE3_CACHE_DIR BSTAGE3_RUNTIME_PATH \
@@ -313,6 +363,6 @@ export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MO
   BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE BSTAGE3_SEED_INPUTS_FINGERPRINT \
   BSTAGE3_SEED_FEATURES BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
   BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT BSTAGE3_STAGE2_SANITY \
-  BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+  BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
 bootstrap_stage3_write_manifest
 bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate"

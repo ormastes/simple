@@ -1,0 +1,56 @@
+"""
+# High-bit u64 Option-of-struct round trip
+
+Regression for `interp_u64_high_bit_option_unwrap_corruption`. A `u64` field
+must keep unsigned ordering when the enclosing struct is selected in a loop,
+returned as `Frame?`, and consumed by `if val`.
+"""
+
+use std.spec.*
+
+struct Frame:
+    id: text
+    checksum: u64
+
+fn find_positive(frames: [Frame], target_id: text) -> Frame?:
+    var found: Frame? = nil
+    var matching_count = 0
+    for frame in frames:
+        if frame.id == target_id:
+            if frame.checksum > 0u64:
+                found = frame
+            matching_count = matching_count + 1
+    if matching_count == 1:
+        return found
+    nil
+
+fn selected_checksum(value: u64) -> u64:
+    val frames = [Frame(id: "target", checksum: value)]
+    if val frame = find_positive(frames, "target"):
+        return frame.checksum
+    0u64
+
+describe "high-bit u64 optional struct unwrap":
+    it "preserves the exact 2^63 boundary through selection return and unwrap":
+        step("Select a struct whose u64 field has the first high-bit value")
+        val edge = 9223372036854775808u64
+
+        step("Return it as Frame? and unwrap it with if val")
+        expect(selected_checksum(edge).to_text()).to_equal("9223372036854775808")
+
+    it "preserves adjacent and maximum u64 values through the same boundary":
+        step("Exercise the value immediately below the high bit")
+        expect(selected_checksum(9223372036854775807u64).to_text()).to_equal("9223372036854775807")
+
+        step("Exercise the value immediately above the high bit")
+        expect(selected_checksum(9223372036854775809u64).to_text()).to_equal("9223372036854775809")
+
+        step("Exercise the maximum u64 value")
+        expect(selected_checksum(18446744073709551615u64).to_text()).to_equal("18446744073709551615")
+
+    it "keeps mixed signed and unsigned ordering semantic at the same boundary":
+        step("Compare the maximum u64 against the maximum i64")
+        expect(18446744073709551615u64 > 9223372036854775807).to_equal(true)
+
+        step("Compare a negative i64 against a high-bit u64")
+        expect(-1 < 9223372036854775808u64).to_equal(true)

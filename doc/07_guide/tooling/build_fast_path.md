@@ -202,6 +202,35 @@ is still impractical. Fixing that means making the rule passes cheaper inside
 `lint_cli_source` (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`),
 which needs a bootstrap rebuild to measure and was out of scope here.
 
+## Bootstrap stage builds: the cache flag is the whole story (2026-08-17)
+
+`bin/simple build bootstrap` hardcodes `--threads 1` and passes **no
+`--cache-dir`** (`src/compiler_rust/driver/src/cli/commands/misc_commands.rs`,
+both branches), so every invocation is a cold uncached recompile — measured 15+
+minutes at 100% of one core without reaching codegen. Use
+`scripts/bootstrap/bootstrap-from-scratch.sh`, which passes `--cache-dir`,
+`--low-memory`, `--mode one-binary` and `--runtime-bundle core-c-bootstrap`.
+
+Memory is the binding constraint on this host, not CPU: one `simple test`
+process peaks ~3 GB and the stage worker holds ~2.9 GB, while `earlyoom` kills
+`simple` preferentially at ~10% free. Bootstrap and broad test sweeps must
+alternate. A native-build "timeout" should be checked against
+`journalctl -u earlyoom` before it is believed.
+
+## 6. Build-lane doctrine (2026-08-17)
+
+- **One compile-build owner at a time.** Two concurrent stage-2 builds nearly
+  triggered earlyoom on this host. Deconfliction: the script-driven run
+  survives; ad-hoc builds yield, wait, or pin to a
+  `build/phase_snapshots/` snapshot.
+- **Phase builds never block on verification.** Sanity/tool-harness checks run
+  in a parallel `nice`d lane (<=2 concurrent test processes) beside the build.
+- Phase 2 can complete via dynload; the phase-4 relink then needs
+  `--full-cli` / `--mode=one-binary` to produce the one-binary artifact.
+- Pipeline traps observed 2026-08-17 (unfiled — file on next touch): silent
+  stage-2 exit-1 with a 0-byte log under the transcribed sandbox env; a
+  phantom `stage2-capability.log` reference; native-build has no keep-going
+  flag, so sweeps run per-directory under `timeout`, per-file on crash.
 ## 6. Evidence hazards and lane priority (2026-08-17)
 
 - **Silent green.** `bin/simple test <spec>` can emit ~1897 warning lines, no

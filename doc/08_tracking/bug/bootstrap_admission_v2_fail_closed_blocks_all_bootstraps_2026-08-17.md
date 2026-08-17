@@ -2,6 +2,7 @@
 
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** OPEN — worked around, not fixed.
 
 `scripts/check/lib/bootstrap-planner-admission-bound.shs` (working-copy edit
 02:14, also present on origin/main) ends `bootstrap_planner_v2_verify` with:

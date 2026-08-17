@@ -16,7 +16,8 @@ use std.fs_driver.extension.{Extension, DirectIoExt}
 use std.fs_driver.direct_io.{DirectIoExtent}
 use std.storage.storage_class.{StorageClass}
 use std.storage.nvme_feature_policy.{samsung_mzql2960hcjr_sysfs_facts, nvme_policy_for_class}
-use std.fs_driver.bytes_util.{text_to_bytes_pure}
+
+val _NVFS_MAX_POSITIONED_OFFSET: i64 = 9223372036854775807
 
 struct NvfsDriver:
     name: text
@@ -96,8 +97,10 @@ impl NvfsDriver:
         self.inner.close_handle(handle)
 
     fn read(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
-        val content = self.inner.pread_handle(handle, offset, buf.len() as i64)?
-        val bytes = text_to_bytes_pure(content)
+        val length = buf.len() as i64
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        val bytes = self.inner.pread_bytes_handle(handle, offset, length)?
         var i: i64 = 0
         while i < bytes.len() as i64 and i < buf.len() as i64:
             buf[i] = bytes[i]
@@ -105,21 +108,21 @@ impl NvfsDriver:
         Ok(i)
 
     fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
+        val length = buf.len() as i64
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
         if offset != 0:
             return Err(FsError.Unsupported)
-        var content = ""
-        var i: i64 = 0
-        while i < buf.len() as i64:
-            content = content + buf[i as i32].chr()
-            i = i + 1
-        self.inner.pwrite_handle(handle, content, offset)?
-        Ok(buf.len() as i64)
+        self.inner.pwrite_bytes_handle(handle, offset, buf)
 
     fn pread(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
         self.read(handle, offset, buf)
 
     fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        self.write(handle, offset, buf)
+        val length = buf.len() as i64
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        self.inner.pwrite_bytes_handle(handle, offset, buf)
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         Ok(FileStat(
@@ -198,3 +201,6 @@ impl NvfsDriver:
 
     fn capabilities() -> FsCapabilitySet:
         self.inner.capabilities()
+
+fn _nvfs_positioned_range_valid(offset: i64, length: i64) -> bool:
+    offset >= 0 and length >= 0 and offset <= _NVFS_MAX_POSITIONED_OFFSET - length

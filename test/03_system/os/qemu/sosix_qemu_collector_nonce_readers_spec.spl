@@ -1,0 +1,68 @@
+# codex-system-test
+# @req REQ-SQ-005 REQ-SQ-011 REQ-SQ-017
+"""# SOSIX collector nonce guest readers
+
+Proves that every guest has a dedicated mounted-media reader for the parent
+collector nonce, calls it before `guest-entry`, and enables the corresponding
+Windows descriptor only after the shared source gate admits all six readers.
+This is source-contract evidence, not a native-host or QEMU row PASS.
+"""
+
+use app.io.mod.{file_read_text}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.spec.*
+
+val MAX_NONCE_GATE_OUTPUT_BYTES: i64 = 1048576
+
+struct CollectorNonceReaderSource:
+    arch: text
+    entry: text
+    runtime: text
+
+fn collector_nonce_readers() -> [CollectorNonceReaderSource]:
+    [
+        CollectorNonceReaderSource(arch: "x86_32", entry: "examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl", runtime: "examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c"),
+        CollectorNonceReaderSource(arch: "x86_64", entry: "examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl", runtime: "examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"),
+        CollectorNonceReaderSource(arch: "arm32", entry: "examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl", runtime: "examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c"),
+        CollectorNonceReaderSource(arch: "arm64", entry: "examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl", runtime: "examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"),
+        CollectorNonceReaderSource(arch: "riscv32", entry: "examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl", runtime: "examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c"),
+        CollectorNonceReaderSource(arch: "riscv64", entry: "examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl", runtime: "examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c"),
+    ]
+
+describe "SOSIX collector nonce readers":
+    it "reads the distinct collector nonce before every guest entry":
+        step("Read the distinct collector nonce")
+        val readers = collector_nonce_readers()
+        expect(readers.len()).to_equal(6)
+        for reader in readers:
+            val entry = file_read_text(reader.entry)
+            val runtime = file_read_text(reader.runtime)
+            val call_position = entry.index_of("if rt_sosix_collector_nonce_echo()")
+            val guest_position = entry.index_of("\"guest-entry\"")
+            expect(call_position).to_be_greater_than(0)
+            expect(guest_position).to_be_greater_than(call_position)
+            expect(runtime).to_contain("rt_sosix_collector_nonce_echo(void)")
+            expect(runtime).to_contain("SOSIX_COLLECTOR_RUN_NONCE=")
+            expect(runtime.contains("/SOSIXNON.TXT") or runtime.contains("SOSIXNONTXT")).to_be(true)
+
+    it "rejects workload nonce aliasing and malformed reader source":
+        step("Reject workload nonce aliasing")
+        val (stdout, stderr, exit_code) = process_run_bounded(
+            "/bin/sh", ["scripts/check/check-sosix-collector-nonce-readers.shs", "--self-test"],
+            30000, MAX_NONCE_GATE_OUTPUT_BYTES)
+        expect(exit_code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("sosix_collector_nonce_readers_self_test=pass")
+        val media = file_read_text("scripts/os/prepare_qemu_nonce_media.shs")
+        expect(media).to_contain("QEMUNONC.TXT")
+        expect(media).to_contain("SOSIXNON.TXT")
+        expect(media).to_contain("collector_nonce")
+
+    it "enables every Windows descriptor only after the source gate":
+        step("Enable the native Windows row")
+        val windows = file_read_text("scripts/check/check-sosix-qemu-matrix.ps1")
+        expect(windows.contains("CollectorNonceEcho=$false")).to_equal(false)
+        expect(windows).to_contain("all six source-proven collector nonce echoes must be enabled")
+        expect(windows).to_contain("only x86_64 and arm32 have the complete source-proven run contract")
+        expect(windows).to_contain("Assert-SosixOrderedTranscript")
+        expect(windows).to_contain("collector-nonce-count:$collectorCount")

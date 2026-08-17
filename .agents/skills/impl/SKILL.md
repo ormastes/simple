@@ -37,6 +37,7 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
 
 ## Rules
 
+- **One App, One Host Interface:** Implement apps for all OSes identically; platform difference lives only in HAL backends (SOSIX, CompositorBackend, DedicatedHost), config, or optional capabilities. Never add per-OS app files, platform conditionals in app code, or duplicated adapters. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - Standalone target products such as Office are not compiler bootstrap: consume
   an explicitly admitted Phase 3 compiler, write cache/output outside
   `build/bootstrap`, and fail closed if its receipt is absent. Never use the

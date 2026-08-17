@@ -33,16 +33,16 @@ is derived from payload-specific constants.
   observed failing with the exact symptom before any fix: C.EBREAK unhandled, compressed
   all-zero illegal, `rv32_arm_amo` null, `rv32_arm_unknown` null, ECALL/EBREAK holding the
   PC instead of trapping.
-- **AC-5:** ~~The payload-specific load addresses are removed from the architectural
-  datapath~~ **DOWNGRADED 2026-07-27 — audit proved the construct UNREACHABLE.**
-  `mem_idx` ∈ 0..16383 (`rv32_exec_core.vhd:253-257`) but `SCRATCH_BASE_WORD = 16384`
-  (`:43`), so all 27 scratch guards are unsatisfiable; `stack_ra_ab*_q` has no write
-  side at all. The passing 568-byte boot lane builds `rv32_exec_core_flat.vhd`, which
-  contains zero occurrences. The real defect (64 KB address aliasing) was already fixed
-  by the flat core + confined linker script. **Revised AC:** delete as dead code (the
-  three arms, the 27 guards, and the unreachable 512-word `scratch` array) and
-  regenerate goldens in the same change. Severity low, not a correctness blocker.
-  Evidence: `doc/09_report/riscv_truth_audit_2026-07-27.md`.
+- **AC-5 / REQ-RISCV-HARDEN-005: IMPLEMENTATION COMPLETE 2026-08-16.** The
+  accepted audit proved `mem_idx` could never reach the old scratch geometry.
+  The structured generator and pinned RV32 golden now delete the unreachable
+  scratch storage/guards plus all `stack_ra_ab*` payload overrides. The flat
+  core remains the wide-memory owner and its comments no longer advertise the
+  deleted behavior. Audit: `doc/09_report/riscv_truth_audit_2026-07-27.md`.
+  Modern system coverage is future-executable at
+  `test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl`.
+  Runtime/docgen/maintenance evidence is `TEST_BLOCKED` pending an admitted
+  full CLI; no seed or fallback-stub result may close that test gate.
 - **AC-6:** Advertised ISA profile strings are audited against implemented+tested hardware:
   a `GC` march or hard-float `*d` ABI claim requires implemented and tested F/D; soft-float
   lanes advertise `imac_zicsr_zifencei` / `ilp32` / `lp64`. Every mismatch is corrected or filed.
@@ -376,3 +376,23 @@ decision.
 - [ ] 6-refactor
 - [ ] 7-verify (Lane H redeploy ACTIVE: stage 2+3 PASS again 2026-07-27; stage-4 now blocked on focused-build star-import resolution, see bug doc above; final bootstrap+deploy+gate-reverify pending)
 - [ ] 8-ship
+
+## 2026-08-16 AC-5 scoped recovery
+
+- Requirement: `REQ-RISCV-HARDEN-005` (AC-5).
+- Implementation: deleted `SCRATCH_*`, `scratch_t`, `scratch`/
+  `scratch_bytes`, all scratch branches, and `stack_ra_ab*` from the structured
+  RV32 base generator; refreshed the base/flat goldens and manifest pins.
+- System spec:
+  `test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl`.
+- Manual:
+  `doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md`.
+- Test plan: `doc/03_plan/sys_test/simple_riscv_hardening_ac5.md`.
+- Evidence status: `TEST_BLOCKED`. Admitted Stage-2 SHA-256
+  `2ec71042dd69cf0001fc3f61640c28038a450048f34e416103988b1627431950`
+  strictly built the generator with no stub fallback, but the artifact exited
+  132 with `runtime error: invalid field receiver`. Stage 2 cannot establish
+  general SSpec/docgen acceptance, and no admitted full CLI was available.
+- Resume: use the exact commands in the test plan once a full-CLI provenance
+  receipt is admitted. Run each runtime criterion once; do not use the Rust
+  seed, rerun the failed Stage-2 artifact, or infer PASS from static checks.

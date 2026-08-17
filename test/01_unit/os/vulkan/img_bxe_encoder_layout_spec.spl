@@ -22,51 +22,67 @@
 
 use std.spec.{describe, it, step, assert_true, assert_false, assert_equal}
 use os.drivers.gpu.board_vulkan.encoder_img_bxe.{
-    ImgBxeSyncOp, ImgBxeJobDesc, img_bxe_sync_op, img_bxe_job_desc,
+    ImgBxeSyncOp, ImgBxeJobDesc, img_bxe_sync_op, img_bxe_job_desc, img_bxe_uapi_job_desc,
     img_bxe_job_field_offset, img_bxe_sync_op_offset, img_bxe_job_payload_size,
-    img_bxe_job_is_valid, img_bxe_encode_job,
+    img_bxe_job_is_valid, img_bxe_encode_job, img_bxe_job_type_u32,
     IMG_BXE_HEADER_DWORDS, IMG_BXE_SYNC_OP_DWORDS, IMG_BXE_DWORD_BYTES
 }
+use os.drivers.gpu.board_vulkan.pvr_drm_uapi_layout.{
+    PVR_DRM_UAPI_LINUX_COMMIT, PVR_DRM_UAPI_HEADER_PATH,
+    PVR_UAPI_JOB_SIZE, PVR_UAPI_OBJ_ARRAY_SIZE, PVR_UAPI_SYNC_OP_SIZE,
+    pvr_drm_uapi_layout_is_valid
+}
 
-describe("img_bxe submission envelope encoder"):
+describe "img_bxe submission envelope encoder":
 
-    it("header field offsets follow the declared dword stride"):
-        step("offset of field index 0 is byte 0")
-        assert_equal(img_bxe_job_field_offset(0), 0)
+    it "pins the exact upstream Linux PowerVR UAPI authority":
+        assert_equal(PVR_DRM_UAPI_LINUX_COMMIT, "8d3ae59288f1e7d58d76558a6ee96d533bc5019f")
+        assert_equal(PVR_DRM_UAPI_HEADER_PATH, "include/uapi/drm/pvr_drm.h")
+        assert_true(pvr_drm_uapi_layout_is_valid())
 
-        step("offset of field index 4 (stream_len) is 16 bytes in")
-        assert_equal(img_bxe_job_field_offset(4), 16)
+    it "matches every drm_pvr_job member offset and total size":
+        assert_equal(img_bxe_job_field_offset("type"), 0)
+        assert_equal(img_bxe_job_field_offset("context_handle"), 4)
+        assert_equal(img_bxe_job_field_offset("flags"), 8)
+        assert_equal(img_bxe_job_field_offset("cmd_stream_len"), 12)
+        assert_equal(img_bxe_job_field_offset("cmd_stream"), 16)
+        assert_equal(img_bxe_job_field_offset("sync_ops"), 24)
+        assert_equal(img_bxe_job_field_offset("hwrt"), 40)
+        assert_equal(PVR_UAPI_JOB_SIZE, 48)
+        assert_equal(img_bxe_job_field_offset("not-a-uapi-field"), -1)
 
-        step("offsets increase by exactly one dword per index")
-        assert_equal(img_bxe_job_field_offset(2) - img_bxe_job_field_offset(1), IMG_BXE_DWORD_BYTES)
+        step("pin the upstream enum's append-only numeric values")
+        assert_equal(img_bxe_job_type_u32("geometry"), 0)
+        assert_equal(img_bxe_job_type_u32("fragment"), 1)
+        assert_equal(img_bxe_job_type_u32("compute"), 2)
+        assert_equal(img_bxe_job_type_u32("transfer"), 3)
+        assert_equal(img_bxe_job_type_u32("unknown"), -1)
 
-    it("sync-op region starts immediately after the header and is 3-dword strided"):
-        step("first sync op sits right after the 5-dword header")
-        assert_equal(img_bxe_sync_op_offset(IMG_BXE_HEADER_DWORDS, 0), IMG_BXE_HEADER_DWORDS * IMG_BXE_DWORD_BYTES)
+    it "matches the indirect drm_pvr_sync_op layout":
+        assert_equal(img_bxe_sync_op_offset("handle"), 0)
+        assert_equal(img_bxe_sync_op_offset("flags"), 4)
+        assert_equal(img_bxe_sync_op_offset("value"), 8)
+        assert_equal(PVR_UAPI_SYNC_OP_SIZE, 16)
+        assert_equal(PVR_UAPI_OBJ_ARRAY_SIZE, 16)
+        assert_equal(img_bxe_sync_op_offset("unknown"), -1)
 
-        step("second sync op is offset by exactly one sync-op stride")
-        val first = img_bxe_sync_op_offset(IMG_BXE_HEADER_DWORDS, 0)
-        val second = img_bxe_sync_op_offset(IMG_BXE_HEADER_DWORDS, 1)
-        assert_equal(second - first, IMG_BXE_SYNC_OP_DWORDS * IMG_BXE_DWORD_BYTES)
-
-    it("payload size field equals the true encoded byte length, for zero and multiple sync ops"):
-        step("zero sync ops: size is exactly the header size")
+    it "payload size field equals the true encoded byte length, for zero and multiple sync ops":
+        step("drm_pvr_job is fixed-size because sync ops are indirect")
         val job_a = img_bxe_job_desc("geometry", 1, 2, 64, [])
-        assert_equal(img_bxe_job_payload_size(job_a), IMG_BXE_HEADER_DWORDS * IMG_BXE_DWORD_BYTES)
+        assert_equal(img_bxe_job_payload_size(job_a), 48)
 
         step("two sync ops: size is header plus two full sync-op strides")
         val ops = [img_bxe_sync_op(9, 0, 1), img_bxe_sync_op(10, 1, 2)]
         val job_b = img_bxe_job_desc("fragment", 1, 2, 128, ops)
-        val expected = (IMG_BXE_HEADER_DWORDS + 2 * IMG_BXE_SYNC_OP_DWORDS) * IMG_BXE_DWORD_BYTES
-        assert_equal(img_bxe_job_payload_size(job_b), expected)
+        assert_equal(img_bxe_job_payload_size(job_b), 48)
 
         step("encoded packet's dword length matches payload_size / dword_bytes exactly")
         val ops_c = [img_bxe_sync_op(9, 0, 1)]
-        val job_c = img_bxe_job_desc("compute", 3, 4, 256, ops_c)
+        val job_c = img_bxe_uapi_job_desc("compute", 3, 0, 256, 0x1000, 0x2000, ops_c, 0, 0)
         val packet = img_bxe_encode_job(job_c)
         assert_equal(packet.length, img_bxe_job_payload_size(job_c) / IMG_BXE_DWORD_BYTES)
 
-    it("rejects malformed jobs that no real submission could carry"):
+    it "rejects malformed jobs that no real submission could carry":
         step("unknown job type is rejected")
         val job_bad_type = img_bxe_job_desc("rasterize-everything", 1, 2, 10, [])
         assert_false(img_bxe_job_is_valid(job_bad_type))
@@ -84,24 +100,31 @@ describe("img_bxe submission envelope encoder"):
         assert_false(img_bxe_job_is_valid(job_bad_sync))
 
         step("a well-formed job is accepted")
-        val job_ok = img_bxe_job_desc("transfer", 1, 2, 10, [img_bxe_sync_op(5, 0, 1)])
+        val job_ok = img_bxe_uapi_job_desc("transfer", 1, 0, 10, 0x1000, 0x2000, [img_bxe_sync_op(5, 0, 1)], 0, 0)
         assert_true(img_bxe_job_is_valid(job_ok))
 
-    it("carries stream length faithfully without fabricating firmware-stream content"):
+    it "carries stream length faithfully without fabricating firmware-stream content":
         step("the opaque blob field states the length but never claims decoded content")
         val job = img_bxe_job_desc("geometry", 1, 2, 512, [])
         val packet = img_bxe_encode_job(job)
         var found = false
         for field in packet.payload:
-            if field.name == "opaque_firmware_blob":
-                found = field.value == "<512-byte-firmware-ccb-not-decoded>"
+            if field.name == "cmd_stream_contract":
+                found = field.value == "<512-byte-firmware-ccb-opaque>"
         assert_true(found)
 
-    it("packet size field tracks the real header field count (sabotage target: see encoder_img_bxe.spl edit during verification)"):
-        step("five header fields are pushed by img_bxe_encode_job: job_type, context_handle, hwrt_data_set_handle, stream_len, opaque_firmware_blob")
+    it "packet size field tracks the real 48-byte UAPI struct":
         val job = img_bxe_job_desc("geometry", 1, 2, 0, [])
         val packet = img_bxe_encode_job(job)
-        assert_equal(packet.payload.len(), 5)
+        assert_equal(packet.length, 12)
+        assert_equal(IMG_BXE_HEADER_DWORDS, 12)
 
-        step("IMG_BXE_HEADER_DWORDS matches that same count of five")
-        assert_equal(IMG_BXE_HEADER_DWORDS, 5)
+    it "fails closed on unaligned indirect UAPI pointers":
+        val bad_stream = img_bxe_uapi_job_desc("compute", 1, 0, 16, 0x1004, 0, [], 0, 0)
+        assert_false(img_bxe_job_is_valid(bad_stream))
+        val bad_sync = img_bxe_uapi_job_desc("compute", 1, 0, 0, 0, 0x2004, [img_bxe_sync_op(1, 0, 0)], 0, 0)
+        assert_false(img_bxe_job_is_valid(bad_sync))
+
+    it "requires non-render jobs to zero the HWRT reference":
+        val bad = img_bxe_uapi_job_desc("compute", 1, 0, 0, 0, 0, [], 7, 1)
+        assert_false(img_bxe_job_is_valid(bad))

@@ -21,6 +21,8 @@ This agent requires the following MCP server (not loaded by default — enable w
 
 **Use when:** Designing UI screens, generating HTML/CSS components, creating layouts, prototyping interfaces, or converting design descriptions into production-ready HTML.
 
+**Scope rule:** Apps run ONCE on all OSes (SimpleOS, Linux, macOS, Windows). Per-OS rendering difference goes through `CompositorBackend` (hosted backends: Cocoa, Win32, SDL2) or optional capability traits — never as app-level branches. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
+
 **Skills:** `/design`
 
 ## Stitch MCP Tools

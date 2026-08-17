@@ -124,6 +124,27 @@ until it passes.
   hardcoded `ConversionLoss.identity` that made the exactness gate dead code on the
   production path. Expect more of this shape; sabotage every guard you add.
 
+## Current state addendum (2026-08-15)
+
+- **First real upstream provider landed: Chrome.**
+  `src/lib/nogc_sync_mut/spec/evidence/counterpart/chrome_dom_snapshot_provider.spl`
+  drives real Chrome over the pure-Simple CDP client at boundary
+  `chrome.dom_snapshot@1`. Spec:
+  `test/01_unit/infra/counterpart/chrome_counterpart_compare_spec.spl` (green).
+  Run: `SIMPLE_TIMEOUT_SECONDS=600 bin/simple run test/01_unit/infra/counterpart/chrome_counterpart_compare_spec.spl`
+  (still `run`, not the daemon — 800-module cap note above holds).
+- **Branch coverage closed to 100% recordable** across the counterpart
+  library. Evidence and per-file table:
+  `doc/08_tracking/test/counterpart_branch_coverage_closure_2026-08-15.md`.
+  Coverage only records under `SIMPLE_COVERAGE=1`, and "recordable" is the
+  honest ceiling — the collector skips `pub val` initializers, match heads,
+  and struct-method decisions (bugs
+  `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md`,
+  `coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md`).
+- Related same-session lanes on the browser side (vector-font differential
+  vs Chrome, docker+vulkan browser lane): see the
+  [browser feature expert](../browser/skill.md) 2026-08-15 handoff.
+
 ## Related feature experts applying this methodology
 
 - [board_vulkan](../board_vulkan/skill.md) — applies the same real-executed-counterpart /

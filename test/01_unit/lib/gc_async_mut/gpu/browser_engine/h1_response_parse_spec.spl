@@ -1,0 +1,64 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{parse_http_response_bytes}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+describe "Browser HTTP/1 response parsing":
+
+    it "parses a status-only response with no body":
+        match parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\n\r\n"
+        )):
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body.len()).to_equal(0)
+            Err(error):
+                fail("status-only response unexpectedly rejected: {error}")
+
+    it "parses a Content-Length delimited body":
+        match parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHI"
+        )):
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body.len()).to_equal(2)
+                expect(response.body).to_equal([72u8, 73u8])
+            Err(error):
+                fail("Content-Length response unexpectedly rejected: {error}")
+
+    it "decodes a single-chunk Transfer-Encoding: chunked body":
+        # Regression case: the chunked decode path used a `var [u8]`
+        # accumulator reassigned via `+`, which died under the Rust seed
+        # interpreter with "semantic: cannot convert array to int". Fixed by
+        # switching to per-byte `.push()` in parse_chunked_body_bytes.
+        match parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nHI\r\n0\r\n\r\n"
+        )):
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body.len()).to_equal(2)
+                expect(response.body).to_equal([72u8, 73u8])
+            Err(error):
+                fail("chunked response unexpectedly rejected: {error}")
+
+    it "concatenates multiple data chunks in order":
+        match parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nHI\r\n3\r\n!!!\r\n0\r\n\r\n"
+        )):
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body.len()).to_equal(5)
+                expect(response.body).to_equal([72u8, 73u8, 33u8, 33u8, 33u8])
+            Err(error):
+                fail("multi-chunk response unexpectedly rejected: {error}")
+
+    it "rejects a chunk whose declared size exceeds the available data":
+        expect(parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHI\r\n0\r\n\r\n"
+        )).is_err()).to_equal(true)
+
+    it "rejects a chunked body missing the terminal zero-length chunk":
+        expect(parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nHI\r\n"
+        )).is_err()).to_equal(true)

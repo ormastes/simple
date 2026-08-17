@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect}
+use std.tiny.web.model.{TINY_WEB_A, TINY_WEB_BODY, TINY_WEB_BR, TINY_WEB_BUTTON, TINY_WEB_DIV, TINY_WEB_HEADING, TINY_WEB_INPUT, TINY_WEB_LABEL, TINY_WEB_LI, TINY_WEB_TEXT, TINY_WEB_TITLE}
+use std.tiny.web.parser.{tiny_web_parse}
+use std.tiny.web.token.{tiny_html_tokenize}
+
+describe("bounded tiny HTML tokenizer and parser"):
+    it("parses admitted body div text button and input nodes"):
+        val parsed = tiny_web_parse("<body><div>Hello<button>Go</button><input></div></body>", 16, 8, 64)
+        expect(parsed.status.is_ok()).to_be(true)
+        expect(parsed.nodes.len()).to_equal(7)
+        expect(parsed.nodes[1].kind).to_equal(TINY_WEB_BODY)
+        expect(parsed.nodes[2].kind).to_equal(TINY_WEB_DIV)
+        expect(parsed.nodes[3].kind).to_equal(TINY_WEB_TEXT)
+        expect(parsed.nodes[4].kind).to_equal(TINY_WEB_BUTTON)
+        expect(parsed.nodes[6].kind).to_equal(TINY_WEB_INPUT)
+
+    it("reports unsupported tags without pretending full support"):
+        val parsed = tiny_web_parse("<body><script>x</script><p>ok</p></body>", 16, 8, 64)
+        expect(parsed.status.is_ok()).to_be(false)
+        expect(parsed.unsupported_count).to_equal(2)
+        expect(parsed.nodes.len()).to_be_greater_than(2)
+
+    it("admits the bounded document heading list link label and break vocabulary"):
+        val parsed = tiny_web_parse("<html><head><title>T</title></head><body><h1>H</h1><label>L</label><ul><li><a href='/x'>X</a><br></li></ul></body></html>", 32, 12, 128)
+        expect(parsed.status.is_ok()).to_be(true)
+        expect(parsed.nodes[3].kind).to_equal(TINY_WEB_TITLE)
+        expect(parsed.nodes[5].kind).to_equal(TINY_WEB_HEADING)
+        expect(parsed.nodes[7].kind).to_equal(TINY_WEB_LABEL)
+        expect(parsed.nodes[10].kind).to_equal(TINY_WEB_LI)
+        expect(parsed.nodes[11].kind).to_equal(TINY_WEB_A)
+        expect(parsed.nodes[13].kind).to_equal(TINY_WEB_BR)
+
+    it("preserves admitted control and selector attributes while suppressing metadata text"):
+        val parsed = tiny_web_parse("<html><head><title>Product</title><style>.primary { color: blue }</style></head><body><input id='name' class='primary field' type='text' name='user' value='Ada' placeholder='Name' maxlength='12' disabled><input type='checkbox' checked><a href='/next'>Next</a></body></html>", 24, 10, 384)
+        expect(parsed.status.is_ok()).to_be(true)
+        expect(parsed.title_text).to_equal("Product")
+        expect(parsed.style_source).to_contain(".primary")
+        expect(parsed.nodes[6].id_value).to_equal("name")
+        expect(parsed.nodes[6].class_value).to_equal("primary field")
+        expect(parsed.nodes[6].type_value).to_equal("text")
+        expect(parsed.nodes[6].value_attribute).to_equal("Ada")
+        expect(parsed.nodes[6].name_value).to_equal("user")
+        expect(parsed.nodes[6].placeholder_value).to_equal("Name")
+        expect(parsed.nodes[6].max_length_value).to_equal("12")
+        expect(parsed.nodes[6].disabled).to_be(true)
+        expect(parsed.nodes[7].checked).to_be(true)
+        expect(parsed.nodes[8].href_value).to_equal("/next")
+        var metadata_text_rendered = false
+        for node in parsed.nodes:
+            if node.kind == TINY_WEB_TEXT and (node.text_value == "Product" or node.text_value.contains("primary")):
+                metadata_text_rendered = true
+        expect(metadata_text_rendered).to_be(false)
+
+    it("suppresses unsupported subtrees and their text"):
+        val parsed = tiny_web_parse("<body><script><span>secret</span></script><p>shown</p></body>", 20, 8, 128)
+        expect(parsed.status.is_ok()).to_be(false)
+        expect(parsed.unsupported_count).to_equal(4)
+        expect(parsed.nodes.len()).to_equal(4)
+        expect(parsed.nodes[3].text_value).to_equal("shown")
+
+    it("reports malformed input and bounded capacities"):
+        expect(tiny_html_tokenize("<body", 8, 64).status.is_ok()).to_be(false)
+        expect(tiny_web_parse("<body><div></body>", 8, 8, 64).status.is_ok()).to_be(false)
+        expect(tiny_web_parse("<body><div><p>x</p></div></body>", 3, 8, 64).status.is_ok()).to_be(false)
+        expect(tiny_web_parse("<body>long text</body>", 8, 8, 3).status.is_ok()).to_be(false)
+        expect(tiny_web_parse("<body><div><p>x</p></div></body>", 12, 1, 64).status.is_ok()).to_be(false)

@@ -5,6 +5,7 @@
 
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_append}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_flush}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_stdout_flush()
@@ -153,7 +154,15 @@ pub fn log_build_progress(
     else:
         -1
     val line = "event=build_progress phase={_build_progress_token(phase)} unit_kind={_build_progress_token(unit_kind)} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} tasks_done={_build_progress_number(tasks_done)} tasks_total={_build_progress_number(tasks_total)} tasks_remaining={_build_progress_number(tasks_remaining)} failed={_build_progress_number(failed)} cached={_build_progress_number(cached)} current={_build_progress_token(current)} terminal={_build_progress_token(terminal)}\n"
-    val _ = file_append(path, line)
+    # A native-build can spend minutes here with stdout/stderr redirected to a
+    # stage log.  Emit and flush every already-cadenced progress event even
+    # when no optional SIMPLE_BUILD_PROGRESS_EVENTS file was configured, so a
+    # crash cannot leave a misleading zero-byte build log.
+    eprint(line)
+    stderr_flush()
+    val path = _build_progress_path()
+    if path != "":
+        val _ = file_append(path, line)
 
 pub fn log_module_surface_released(path: text, seq: i64):
     eprint("phase2:surface:file:released path={path} seq={seq}\n")

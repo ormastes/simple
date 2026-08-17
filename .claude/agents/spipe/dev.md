@@ -69,6 +69,10 @@ non-bootstrap output/cache, strict no-stub flags, and fail-closed behavior when
 the receipt is unavailable. It must not turn a missing compiler into an implicit
 Stage 1/2/3 bootstrap.
 
+## App-Layer Constraint
+
+**For app-layer tasks**, verify the refined goal enforces one codebase across OSes: no per-OS sibling files, target-OS branches, or adapter duplication. See `doc/04_architecture/os/one_app_host_interface_rule.md` — all platform difference lives in HAL layers only (SOSIX, CompositorBackend, DedicatedHost).
+
 ## Entry Criteria
 
 - User has provided a raw request (text, issue link, or conversation excerpt)

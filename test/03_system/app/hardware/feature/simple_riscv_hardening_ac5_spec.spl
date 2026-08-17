@@ -1,0 +1,76 @@
+# codex-system-test
+# @manual_section RISC-V AC-5 dead scratch elimination
+# @evidence-display: links
+# @req REQ-RISCV-HARDEN-005
+"""RISC-V hardening AC-5 removes the unreachable RV32 scratch array and the
+payload-specific return-address overrides from the production structured VHDL
+generator and its checked-in golden. These scenarios are source/product
+contract evidence. They do not claim FPGA, QEMU, or deployed Stage-4 evidence.
+"""
+
+use std.spec.*
+use std.io.{file_read_text}
+use std.hardware.riscv_common.xlen.XlenConfig
+use std.hardware.vhdl_gen.exec_core_gen.{generate_exec_core}
+
+val RV32_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
+
+fn rv32_dead_scratch_contract_error(vhdl: text) -> text:
+    if not vhdl.contains("architecture rtl of rv32_exec_core is"):
+        return "RSH-AC5-E-NOT-RV32-CORE"
+    if vhdl.contains("SCRATCH_BASE_WORD") or vhdl.contains("SCRATCH_WORDS"):
+        return "RSH-AC5-E-SCRATCH-GEOMETRY"
+    if vhdl.contains("scratch_t") or vhdl.contains("signal scratch"):
+        return "RSH-AC5-E-SCRATCH-STORAGE"
+    if vhdl.contains("stack_ra_ab"):
+        return "RSH-AC5-E-PAYLOAD-REGISTER"
+    if vhdl.contains("8002AB5C") or vhdl.contains("8002AB6C") or vhdl.contains("8002AB8C"):
+        return "RSH-AC5-E-PAYLOAD-ADDRESS"
+    ""
+
+describe "Simple RISC-V hardening AC-5":
+    # @req REQ-RISCV-HARDEN-005
+    it "should emit the production RV32 core without unreachable scratch RTL":
+        step("Generate the production RV32 base core with debug taps enabled")
+        val generated = generate_exec_core(XlenConfig.rv32(), "", true)
+        step("Confirm the generated artifact is the real RV32 core and retains its ROM owners")
+        expect(generated).to_start_with("library ieee;")
+        expect(generated).to_contain("architecture rtl of rv32_exec_core is")
+        expect(generated).to_contain("signal rom_a : rom_t := init_rom;")
+        expect(generated).to_contain("signal data_rom : data_rom_t := init_data_rom;")
+        step("Apply the fail-closed dead-scratch contract")
+        expect(rv32_dead_scratch_contract_error(generated)).to_equal("")
+
+    # @req REQ-RISCV-HARDEN-005
+    it "should keep the checked-in golden identical to production generation":
+        step("Generate the RV32 base core and load the pinned golden")
+        val generated = generate_exec_core(XlenConfig.rv32(), "", true)
+        val golden = file_read_text(RV32_GOLDEN_PATH)
+        step("Reject a missing or stale golden before comparing bytes")
+        expect(rv32_dead_scratch_contract_error(golden)).to_equal("")
+        expect(golden.len()).to_be_greater_than(0)
+        step("Compare the complete generated and checked-in artifacts")
+        expect(golden).to_equal(generated)
+
+    # @req REQ-RISCV-HARDEN-005
+    it "should remain scratch-free across the optional debug-tap edge":
+        step("Generate the same RV32 core with debug taps disabled and enabled")
+        val without_debug = generate_exec_core(XlenConfig.rv32(), "", false)
+        val with_debug = generate_exec_core(XlenConfig.rv32(), "", true)
+        step("Confirm the aspect switch changes only the intended debug surface")
+        expect(without_debug.contains("dbg_reg_addr")).to_equal(false)
+        expect(with_debug.contains("dbg_reg_addr")).to_equal(true)
+        step("Apply the dead-scratch contract to both aspect products")
+        expect(rv32_dead_scratch_contract_error(without_debug)).to_equal("")
+        expect(rv32_dead_scratch_contract_error(with_debug)).to_equal("")
+
+    # @req REQ-RISCV-HARDEN-005
+    it "should reject missing and historical scratch artifacts with stable errors":
+        step("Submit an empty artifact to calibrate missing-core rejection")
+        expect(rv32_dead_scratch_contract_error("")).to_equal("RSH-AC5-E-NOT-RV32-CORE")
+        val core = "architecture rtl of rv32_exec_core is\n"
+        step("Submit each historical stale-artifact class independently")
+        expect(rv32_dead_scratch_contract_error(core + "constant SCRATCH_BASE_WORD")).to_equal("RSH-AC5-E-SCRATCH-GEOMETRY")
+        expect(rv32_dead_scratch_contract_error(core + "signal scratch : scratch_t")).to_equal("RSH-AC5-E-SCRATCH-STORAGE")
+        expect(rv32_dead_scratch_contract_error(core + "signal stack_ra_ab5c_q")).to_equal("RSH-AC5-E-PAYLOAD-REGISTER")
+        expect(rv32_dead_scratch_contract_error(core + "x\"8002AB5C\"")).to_equal("RSH-AC5-E-PAYLOAD-ADDRESS")

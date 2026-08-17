@@ -13,6 +13,12 @@ use std.fs_driver.capability.{FsCapabilitySet}
 use common.string_core.{str_char_at}
 use std.fs_driver.bytes_util.{alloc_zeroed_bytes, text_to_bytes_pure}
 
+val POSITIONED_DRIVER_MAX_BYTES: u64 = 0x7fffffffu64
+
+enum PositionedDriverKind:
+    Nvfs
+    Dbfs
+
 fn _bytes_to_text_prefix(buf: [u8], count: i64) -> text:
     var out = ""
     var i: i64 = 0
@@ -155,6 +161,57 @@ fn _driver_pread_text_handle(driver: DriverInstance, handle: FileHandle, offset:
                     Ok(_bytes_to_text_prefix(buf, n))
         case DriverInstance.DbFs(d): d.pread_handle(handle, offset, length)
         case _:                      Err(FsError.Unsupported)
+
+fn _positioned_prefix(buf: [u8], count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count and i < buf.len() as i64:
+        out.push(buf[i as i32])
+        i = i + 1
+    out
+
+fn _driver_positioned_read_bytes(
+    driver: DriverInstance, kind: PositionedDriverKind,
+    handle: FileHandle, offset: i64, length: i64
+) -> Result<[u8], FsError>:
+    match kind:
+        case PositionedDriverKind.Nvfs:
+            match driver:
+                case DriverInstance.Nvfs(d):
+                    var buf = alloc_zeroed_bytes(length)
+                    val read_n = d.pread(handle, offset, buf)?
+                    if read_n < 0 or read_n > length:
+                        return Err(FsError.IoError(code: 0u32))
+                    Ok(_positioned_prefix(buf, read_n))
+                case DriverInstance.NvfsPosix(d):
+                    var buf = alloc_zeroed_bytes(length)
+                    val read_n = d.pread(handle, offset, buf)?
+                    if read_n < 0 or read_n > length:
+                        return Err(FsError.IoError(code: 0u32))
+                    Ok(_positioned_prefix(buf, read_n))
+                case _:
+                    Err(FsError.Unsupported)
+        case PositionedDriverKind.Dbfs:
+            match driver:
+                case DriverInstance.DbFs(d):
+                    d.pread_bytes_handle(handle, offset, length)
+                case _:
+                    Err(FsError.Unsupported)
+
+fn _driver_positioned_write_bytes(
+    driver: DriverInstance, kind: PositionedDriverKind,
+    handle: FileHandle, offset: i64, data: [u8]
+) -> Result<i64, FsError>:
+    match kind:
+        case PositionedDriverKind.Nvfs:
+            match driver:
+                case DriverInstance.Nvfs(d): d.pwrite(handle, offset, data)
+                case DriverInstance.NvfsPosix(d): d.pwrite(handle, offset, data)
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Dbfs:
+            match driver:
+                case DriverInstance.DbFs(d): d.pwrite_bytes_handle(handle, offset, data)
+                case _: Err(FsError.Unsupported)
 
 fn _driver_close_handle(driver: DriverInstance, handle: FileHandle) -> Result<(), FsError>:
     match driver:
@@ -350,6 +407,55 @@ impl MountTable:
         else:
             Some(self.mounts[best_idx])
 
+    me fn positioned_read_bytes(
+        file_object_id: u64, kind: PositionedDriverKind,
+        offset: u64, length: u64
+    ) -> Result<[u8], FsError>:
+        """Read through one live MountTable virtual handle without a cursor."""
+        if file_object_id == 0 or length > POSITIONED_DRIVER_MAX_BYTES:
+            return Err(FsError.InvalidArg)
+        if offset > 0x7fffffffffffffffu64 or offset + length < offset:
+            return Err(FsError.InvalidArg)
+        val binding_opt = self._file_binding(FileHandle(id: file_object_id))
+        match binding_opt:
+            case nil:
+                Err(FsError.StaleHandle)
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_positioned_read_bytes(
+                            self.mounts[i].driver, kind, binding.inner_handle,
+                            offset as i64, length as i64)
+                    i = i + 1
+                Err(FsError.StaleHandle)
+
+    me fn positioned_write_bytes(
+        file_object_id: u64, kind: PositionedDriverKind,
+        offset: u64, data: [u8]
+    ) -> Result<u64, FsError>:
+        """Write through one live MountTable virtual handle without a cursor."""
+        val length = data.len() as u64
+        if file_object_id == 0 or length > POSITIONED_DRIVER_MAX_BYTES:
+            return Err(FsError.InvalidArg)
+        if offset > 0x7fffffffffffffffu64 or offset + length < offset:
+            return Err(FsError.InvalidArg)
+        val binding_opt = self._file_binding(FileHandle(id: file_object_id))
+        match binding_opt:
+            case nil:
+                Err(FsError.StaleHandle)
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        val written = _driver_positioned_write_bytes(
+                            self.mounts[i].driver, kind, binding.inner_handle,
+                            offset as i64, data)?
+                        if written < 0 or written > data.len() as i64:
+                            return Err(FsError.IoError(code: 0u32))
+                        return Ok(written as u64)
+                    i = i + 1
+                Err(FsError.StaleHandle)
     me fn lookup(path: Path) -> MountEntry?:
         """Return the MountEntry whose mount_point is the longest prefix of path."""
         self.lookup_text(path.raw)
@@ -421,6 +527,9 @@ impl MountTable:
                                 return Err(e)
                             case Ok(inner):
                                 val virtual_handle = self.next_file_handle
+                                if virtual_handle == 0 or virtual_handle == 0xffffffffffffffffu64:
+                                    val _ = _driver_close_handle(self.mounts[i].driver, inner)
+                                    return Err(FsError.TooLarge)
                                 self.next_file_handle = self.next_file_handle + 1u64
                                 self.open_files = self.open_files.push(OpenFileBinding(
                                     virtual_handle: virtual_handle,

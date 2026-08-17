@@ -127,6 +127,8 @@ impl NvmeBlockAdapter:
             return Ok(lba)
         if lba >= self.lease_lba_count:
             return Err("NvmeBlockAdapter: lba beyond filesystem lease")
+        if self.lease_base_lba > 0xFFFFFFFFFFFFFFFFu64 - lba:
+            return Err("NvmeBlockAdapter: absolute lba overflow")
         Ok(self.lease_base_lba + lba)
 
     fn sector_count() -> u64:
@@ -676,17 +678,15 @@ impl BlockDevice for NvmeBlockAdapter:
         """Write one sector to NVMe from byte buffer via DMA bounce."""
         if not self.ready:
             return Result.Err("NvmeBlockAdapter: not initialized")
+        if data.len() != self.lease_sector_size.to_i32():
+            return Result.Err("NvmeBlockAdapter: write must be exactly one sector")
         val absolute_lba = self.translate_lba(lba)
         if absolute_lba.is_err():
             return Result.Err(absolute_lba.unwrap_err())
-        # Clear the whole bounce sector, then copy caller bytes into it.
+        # Copy one exact caller sector. Partial-sector zero padding is unsafe.
         val ss = self.lease_sector_size.to_u64()
         var i: u64 = 0
         while i < ss:
-            mmio_write8(self.bounce_virt + i, 0u8)
-            i = i + 1
-        i = 0
-        while i < ss and i.to_i32() < data.len():
             mmio_write8(self.bounce_virt + i, data[i.to_i32()])
             i = i + 1
 

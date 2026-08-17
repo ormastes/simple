@@ -1,0 +1,49 @@
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008
+"""# StarFive VisionFive 2 NVMe safety contract
+
+Keep read-only identification separate from explicitly authorized provisioning.
+Incomplete live paths must report BLOCKED and must never claim physical PASS.
+"""
+
+use std.spec.*
+use app.io.mod.{process_run_timeout}
+
+fn run_nvme_check(mode: text) -> (text, text, i64):
+    process_run_timeout(
+        "/bin/sh",
+        ["scripts/check/check-starfive-nvme-storage.shs", mode],
+        30000
+    )
+
+describe "StarFive VisionFive 2 NVMe storage safety":
+    it "publishes distinct identify and provision contracts":
+        val (out, err, code) = run_nvme_check("--contract")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_contract_status=pass")
+        expect(out).to_contain("identify_mode=read-only")
+        expect(out).to_contain("identify_writes=0")
+        expect(out).to_contain("provision_mode=separately-authorized")
+
+    it "checks the fail-closed storage policy":
+        val (out, err, code) = run_nvme_check("--self-test")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_self_test_status=pass")
+        expect(out).to_contain("changed_identity=blocked")
+        expect(out).to_contain("mounted_device=blocked")
+        expect(out).to_contain("boot_source_device=blocked")
+
+    it "blocks live identify until real NVMe Identify exists":
+        val (out, err, code) = run_nvme_check("--identify-live")
+        expect(code).to_equal(2)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_status=blocked")
+        expect(out).to_contain("starfive_nvme_reason=nvme-identify-command-path-not-implemented")
+
+    it "blocks provisioning without separate authorization":
+        val (out, err, code) = run_nvme_check("--provision-live")
+        expect(code).to_equal(2)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_nvme_status=blocked")
+        expect(out).to_contain("starfive_nvme_reason=explicit-provision-authorization-missing")

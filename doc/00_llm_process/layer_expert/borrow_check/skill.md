@@ -101,3 +101,46 @@ call-site wiring, refresh this skill with new patterns, call-site counts, and
 regression findings.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Stage 3 `native-build` SIGSEGV lands in THIS layer (2026-08-16)
+
+The self-hosted bootstrap compiler cannot compile a three-line hello world —
+`compile --format=smf` and `native-build` both exit 139. The crash is in
+**`aot:borrow_check`**, post-MIR-lowering and pre-codegen. Own it here.
+
+Pinned two independent ways on the *stripped* artifact (md5 `2244f18ce2e6…`),
+so no unstripped rebuild is needed:
+
+1. String-literal anchoring of stripped frames: `0x67ac9c` owns
+   `running borrow check` / `borrow check skipped (--no-borrow-check)` →
+   `CompilerDriver.borrow_check()` (`driver_pipeline_passes.spl:10-19`);
+   `0x66b368` sits between the `aot:borrow_check:start` / `:done` literals
+   (`driver_aot_pipeline.spl:97-102`); `0x5183ae` → `check_mir_module`
+   (`borrow/borrow_check/mod.spl:405`).
+2. `SIMPLE_COMPILER_TRACE=1` (gate at `driver_log_helpers.spl:20`) — last line
+   before death is
+   `[BOOTSTRAP-PHASE] +512ms aot:borrow_check:start heap_registry=3545`.
+
+Fault shape: PC `0x5178e6`, `mov 0x8(%rax),%r14` reading a list length word,
+`SEGV_MAPERR si_addr=0x118`. The value at field +0x58 is `0x111` — a tag-1
+value whose pointer part `0x110` is below the first mapped page. The runtime
+helper at `0x6a178b` correctly *refuses* it and returns it verbatim; the caller
+then masks with `and $~7`, rejects only `0..7`, and dereferences.
+
+### Three traps when working this crash
+
+- **`--no-borrow-check` does not bypass it.** Same PC, same trace,
+  `aot:borrow_check:start` still emitted. The flag is not honoured on the
+  `compile` path — do not assume you can route around this layer.
+- **`SIMPLE_BOOTSTRAP=1` does skip it** (`bootstrap_flat_aot`), which exposes a
+  *different* fault at PC `0x4942cd` in MIR lowering. Do not conflate the two.
+- **`Dict.len()` returns -1 in this artifact** (`functions=-1` from
+  `driver_pipeline_lowering.spl:229`), one statement upstream of the
+  `module.functions.keys()` loop that crashes. Adjacency is recorded; causality
+  is not established.
+
+Not LIM-010 (SIGABRT-shaped), not the 2026-07-09 LLVM ICMP bug (downstream of
+this layer), not the 2026-08-01 placeholder-nil bug (SIGILL, pre-HIR).
+
+Detail: `doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`.
+Tracked: `.spipe/stage3-segfault-fix/` AC-3, AC-4.

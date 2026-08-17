@@ -9,6 +9,40 @@ FORMAL_SBY="${FORMAL_SBY:-}"
 FORMAL_MANIFEST="${FORMAL_MANIFEST:-}"
 REQUIRE_RVFI="${REQUIRE_RVFI:-0}"
 
+if [ "${1:-}" = "--self-test" ]; then
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    mkdir -p "$tmp_dir/bin"
+    {
+        printf '%s\n' '#!/usr/bin/env sh'
+        printf '%s\n' 'exit 0'
+    } >"$tmp_dir/bin/sby"
+    chmod +x "$tmp_dir/bin/sby"
+    core="$tmp_dir/rv32i_core.vhd"
+    for port in \
+        rvfi_valid rvfi_order rvfi_insn rvfi_trap rvfi_halt rvfi_intr \
+        rvfi_mode rvfi_ixl \
+        rvfi_rs1_addr rvfi_rs2_addr rvfi_rs1_rdata rvfi_rs2_rdata \
+        rvfi_rd_addr rvfi_rd_wdata rvfi_pc_rdata rvfi_pc_wdata \
+        rvfi_mem_addr rvfi_mem_rmask rvfi_mem_wmask rvfi_mem_rdata rvfi_mem_wdata
+    do
+        printf '%s\n' "    $port : out std_logic;"
+    done >"$core"
+    for omitted in rvfi_halt rvfi_intr rvfi_mode rvfi_ixl; do
+        candidate="$tmp_dir/missing_$omitted.vhd"
+        grep -Fv "    $omitted :" "$core" >"$candidate"
+        if PATH="$tmp_dir/bin:$PATH" CORE_VHDL="$candidate" REQUIRE_RVFI=1 \
+                /bin/sh "$0" >/dev/null 2>&1; then
+            echo "STATUS: FAIL rvfi-formal-readiness self-test: missing $omitted was accepted" >&2
+            exit 1
+        fi
+    done
+    PATH="$tmp_dir/bin:$PATH" CORE_VHDL="$core" REQUIRE_RVFI=1 \
+        /bin/sh "$0" >/dev/null
+    echo "STATUS: PASS rvfi-formal-readiness self-test"
+    exit 0
+fi
+
 if [ ! -f "$CORE_VHDL" ]; then
     echo "ERROR: RV32I core VHDL not found: $CORE_VHDL" >&2
     exit 1
@@ -16,7 +50,8 @@ fi
 
 missing=""
 for port in \
-    rvfi_valid rvfi_order rvfi_insn rvfi_trap \
+    rvfi_valid rvfi_order rvfi_insn rvfi_trap rvfi_halt rvfi_intr \
+    rvfi_mode rvfi_ixl \
     rvfi_rs1_addr rvfi_rs2_addr rvfi_rs1_rdata rvfi_rs2_rdata \
     rvfi_rd_addr rvfi_rd_wdata rvfi_pc_rdata rvfi_pc_wdata \
     rvfi_mem_addr rvfi_mem_rmask rvfi_mem_wmask rvfi_mem_rdata rvfi_mem_wdata

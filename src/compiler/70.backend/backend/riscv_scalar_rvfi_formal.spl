@@ -207,9 +207,15 @@ pub fn reduce_rv32_add_formal_evidence(artifacts: RiscvScalarFormalArtifactsV1,
     HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
         rtl_hash: artifacts.rtl_hash, netlist_hash: "",
         rvfi_contract_hash: artifacts.rvfi_contract_hash,
-        property_ids: ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"],
-        cover_ids: ["rv32i.add.retirement-reachable"],
-        mutation_ids: ["rv32i.add.substitution-mutant"],
+        property_ids: if structurally_closed:
+            ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"]
+        else: [],
+        cover_ids: if structurally_closed:
+            ["rv32i.add.retirement-reachable"]
+        else: [],
+        mutation_ids: if structurally_closed:
+            ["rv32i.add.substitution-mutant"]
+        else: [],
         engine_versions: [prove.engine_version, cover.engine_version,
             mutant.engine_version],
         evidence_receipt_hashes: [prove.hash(), cover.hash(), mutant.hash()],
@@ -271,7 +277,7 @@ pub fn reduce_rv32_add_external_receipt_v1(
         receipt_unique_field_v1(receipt, "rtl_sha256") == artifacts.rtl_hash and
         receipt_unique_field_v1(receipt, "rvfi_contract_sha256") == artifacts.rvfi_contract_hash and
         receipt_unique_field_v1(receipt, "assumption_manifest_sha256") == artifacts.assumption_manifest_hash
-    val closed = artifacts.diagnostic() == "" and inputs_match and
+    val structurally_closed = artifacts.diagnostic() == "" and inputs_match and
         results_match and tools_match and identities_match
     HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
         rtl_hash: artifacts.rtl_hash, netlist_hash: "",
@@ -279,12 +285,13 @@ pub fn reduce_rv32_add_external_receipt_v1(
         property_ids: ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"],
         cover_ids: ["rv32i.add.retirement-reachable"],
         mutation_ids: ["rv32i.add.substitution-mutant"],
-        engine_versions: if tools_match:
-            [sby_version, yosys_version, ghdl_version, boolector_version]
-        else: [],
-        evidence_receipt_hashes: if closed: [sha256_text(receipt)] else: [],
+        # Caller-authored receipt text can be structurally reviewed but cannot
+        # attest that these tools ran.  A future runner-owned path must retain
+        # and consume the observed processes before issuing evidence.
+        engine_versions: [],
+        evidence_receipt_hashes: [],
         assumption_manifest_hash: artifacts.assumption_manifest_hash,
-        status: if closed: FormalStatus.ModelProven else: FormalStatus.Failed)
+        status: FormalStatus.Failed)
 
 pub fn reduce_rv32_add_external_equivalence_receipt_v1(
     artifacts: RiscvScalarFormalArtifactsV1, receipt: text) -> HardwareProofReceiptV1:
@@ -344,7 +351,7 @@ pub fn reduce_rv32_add_external_sail_receipt_v1(
         receipt, "probe_disassembly_sha256")
     val trace_hash = receipt_unique_field_v1(receipt, "trace_sha256")
     val output_hash = receipt_unique_field_v1(receipt, "run_output_sha256")
-    val closed = artifacts.diagnostic() == "" and
+    val structurally_closed = artifacts.diagnostic() == "" and
         receipt_unique_field_v1(receipt, "schema") ==
             "fv2-rv32-add-sail-receipt-v1" and
         receipt_unique_field_v1(receipt, "status") == "agreed" and
@@ -372,20 +379,18 @@ pub fn reduce_rv32_add_external_sail_receipt_v1(
     HardwareProofReceiptV1(hwir_hash: artifacts.hwir_hash,
         rtl_hash: artifacts.rtl_hash, netlist_hash: "",
         rvfi_contract_hash: artifacts.rvfi_contract_hash,
-        property_ids: ["rv32i.add.sail-result-agreement"],
-        cover_ids: ["rv32i.add.sail-retirement-witness"],
-        mutation_ids: ["rv32i.add.sail-independent-oracle"],
-        engine_versions: if closed:
-            [lock_hash, simulator_hash, config_hash, sail_compiler_version_hash]
+        property_ids: if structurally_closed:
+            ["rv32i.add.sail-result-agreement"]
         else: [],
-        evidence_receipt_hashes: if closed:
-            # The pinned lock is a retained part of the external-evidence
-            # closure.  A receipt that merely *names* an unmaterialized lock
-            # cannot establish independent-oracle provenance.
-            [lock_hash, source_hash, elf_hash, disassembly_hash, trace_hash,
-                output_hash, sha256_text(receipt)]
+        cover_ids: if structurally_closed:
+            ["rv32i.add.sail-retirement-witness"]
         else: [],
+        mutation_ids: if structurally_closed:
+            ["rv32i.add.sail-independent-oracle"]
+        else: [],
+        # These identities are caller-provided until a runner-owned Sail
+        # authority observes and retains the exact execution closure.
+        engine_versions: [],
+        evidence_receipt_hashes: [],
         assumption_manifest_hash: artifacts.assumption_manifest_hash,
-        # One concrete independent oracle trace is model evidence, not a
-        # universal ISA theorem or an artifact-release authorization.
-        status: if closed: FormalStatus.ModelProven else: FormalStatus.Failed)
+        status: FormalStatus.Failed)

@@ -106,6 +106,35 @@ sha256_stream() {
     fi
 }
 
+canonical_directory() {
+    [ -d "$1" ] || return 1
+    (CDPATH= cd -- "$1" && pwd -P)
+}
+
+driver_has_runtime_provider_rpath() {
+    expected_runtime_dir="$(
+        canonical_directory "$(dirname -- "$SIMPLE_RUNTIME_DYLIB")"
+    )" || return 1
+    runtime_rpaths="$(
+        otool -l "$SELECTED_DRIVER_PATH" |
+        awk '
+            $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
+            in_rpath && $1 == "path" { print $2; in_rpath = 0 }
+        ' |
+        sed '/^$/d'
+    )" || return 1
+    [ -n "$runtime_rpaths" ] || return 1
+    while IFS= read -r runtime_rpath; do
+        canonical_runtime_dir="$(
+            canonical_directory "$runtime_rpath" 2>/dev/null
+        )" || continue
+        [ "$canonical_runtime_dir" = "$expected_runtime_dir" ] && return 0
+    done <<EOF
+$runtime_rpaths
+EOF
+    return 1
+}
+
 pid_matches_executable() {
     target_pid="$1"
     target_executable="$2"
@@ -488,8 +517,7 @@ done
 winit_provider_sha256="$(sha256_file "$SPL_WINIT_LIB")"
 simple_runtime_provider_sha256="$(sha256_file "$SIMPLE_RUNTIME_DYLIB")"
 simple_runtime_c_provider_sha256="$(sha256_file "$SIMPLE_RUNTIME_C_DYLIB")"
-otool -l "$SELECTED_DRIVER_PATH" |
-    grep -Fq "$(dirname -- "$SIMPLE_RUNTIME_DYLIB")" ||
+driver_has_runtime_provider_rpath ||
     fail "runtime-provider-rpath-missing"
 for input_symbol in \
     rt_winit_event_key_keycode rt_winit_event_mouse_button \

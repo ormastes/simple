@@ -123,6 +123,41 @@ automatic baseline creation, or `UPDATE_BASELINE` behavior to this gate. While
 the current pure-Simple compiler is unavailable, the live rows remain blocked;
 source inspection or a cached PPM is not a QEMU PASS.
 
+## QEMU SIMD Object Gate — Static Prerequisite Tier
+
+`scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs` is the static
+prerequisite for every SimpleOS SIMD backend claim: it compiles the arm64 and
+x86_64 baremetal stubs and asserts the emitted `rt_gui_fill4` actually contains
+NEON (`dup`, `st1`) and SSE2 (`pshufd`, `movdqu`) instructions plus the
+`rt_gui_simd_fill_*` receipt symbols. Passing it does **not** mark a backend
+verified — guest hit/chunk receipts and QMP captures remain mandatory.
+
+**Read the gate's own exit status, never a pipeline's.** On 2026-08-16 this
+gate was found exiting 1 with **zero lines of output**: its `st1` assertion
+used a doubled-backslash ERE, which matches a literal backslash, while
+llvm-objdump emits `st1` + tab + `{ v0.4s }, [x0]`. Under `set -eu` the
+unmatched `grep -Eq` aborted the script before its three remaining assertions
+ran, so the gate had never passed. `sh gate.shs | tail` reports `tail`'s 0 and
+hides this completely. Assign the status on the line after the invocation:
+
+```sh
+sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs > gate.log 2>&1
+rc=$?
+```
+
+Repaired at `25dc443e44a`. The regression is now pinned by the step-based
+system spec `test/03_system/check/qemu_simd_coverage_gate_lane_spec.spl`
+(mirror: `doc/06_spec/03_system/check/qemu_simd_coverage_gate_lane_spec.md`,
+plan: `doc/03_plan/sys_test/qemu_simd_coverage_gate_lane.md`), which asserts
+the gate's exit status, its non-empty verdict text, the spelling of every
+instruction assertion, and — as a negative control — that the historical
+over-escaped pattern still matches nothing in real disassembly.
+
+That spec is fail-closed: a host without `clang` or `llvm-objdump` FAILS it.
+Do not add a skip path, tolerance, or automatic baseline. Its scenarios have
+not yet been executed by a pure-Simple runner; see the TEST_BLOCKED section of
+its plan before citing it as a passing result.
+
 ## Production Desktop DrawIR Path
 
 The x86 desktop source entry creates one persistent `Engine2dWmFrameExecutor` and

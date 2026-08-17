@@ -9,6 +9,10 @@
 Path: `.spipe/<feature>/state.md`
 Read the existing state file. Append your architecture doc. Do not modify earlier sections.
 
+## Key Principle: One App, All OSes
+
+Apps must run on all OSes (SimpleOS, Linux, macOS, Windows) with a single codebase. Platform differences live ONLY in HAL layers (SOSIX adapters, CompositorBackend, DedicatedHost). Never design per-OS app sibling files, target-OS branches in app logic, or adapter duplication. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
+
 ## Instructions
 
 1. Read `.spipe/<feature>/state.md` — extract requirements and research summary

@@ -3,8 +3,13 @@
 
 ## Fixed contract before sidecars
 
-Shared interfaces: `SecureServerPolicy`, `DbTransport`, `DbListener`,
+Shared interfaces: `SecureServerPolicy`, `ConnectionAdmission`, `DbTransport`,
+`DbListener`, `DbListenerControl`, `DbStopControl`,
 `AuthenticatedPrincipal`, `CommitIdentity`, `BoundedQuery`.
+
+`std.common.net.http_core` owns the transport-neutral HTTP limits, header/body
+policy, path safety, and route matching now consumed by the synchronous server.
+That reuse is source structure, not live-listener or production-TLS evidence.
 
 Manual step and fixture/checker names are fixed in
 `doc/05_design/secure_pure_simple_servers.md`. Any unfinished helper must call
@@ -24,6 +29,14 @@ Lower-model sidecars: permitted for the bounded WEB, DB, and DOC inventories
 after the fixed contract above. Broad findings, generated-manual quality,
 exclusions, and done marks require normal/highest-capability review.
 
+## Scope boundary
+
+This is the accepted shortened Phase-6 secure synchronous web/database lane.
+It does not mark the broader original
+`simpleos_secure_web_db_servers.md` waves for async SSR, pgwire, SSH/PQC,
+cross-server performance, or GPU acceleration complete. Those require their
+own canonical requirements and executable evidence.
+
 ## Merge order and ownership
 
 Merge owner: root Codex agent in this detached worktree. Reconcile shared
@@ -35,8 +48,22 @@ agent after integration and before delivery integration.
 
 - GAP-TLS-3 (no owned encrypted `TcpStream` overlay) blocks production HTTPS.
 - An unhealthy Stage-4 self-hosted CLI blocks runtime acceptance evidence.
-- Missing DB listener, synchronization, batch/range, or mirrored manuals remain
-  open until implementation and independent oracles prove them.
+- DB listener/stop ownership, sequential synchronization, batch/range logic,
+  and Markdown mirrors exist in source. After review cycle 1, retained listener
+  controls share one scalar mutex lease/terminal receipt around owner-local
+  listener values, while the stopping domain
+  retains only `DbStopControl`; an idle-stop fixture exercises the accept
+  receipt, stop, join, and rebind without a client. A second fixture connects
+  after that receipt and stop publication and requires zero dispatch/session
+  state. The loopback lifecycle, stop races, and UTF-8 corrections remain
+  unexecuted; existence is not independent proof.
+- The shared-core extraction regressed synchronous rejection of non-chunked
+  `Transfer-Encoding`; the continuation source fix and bounded response writer
+  require focused execution before WEB-1/2 can receive credit.
+- Existing mirrors are hand-authored and uncredited. Current scorecards,
+  docgen receipts, deliberate-red calibration, and operator-manual review are
+  still required; the working web-spec quality corrections do not satisfy
+  AC-10 until the maintenance and generated-manual gates run.
 - Each criterion runs once per session; stop after three fix cycles and report
   WARN rather than looping.
 

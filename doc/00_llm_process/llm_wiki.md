@@ -9,18 +9,21 @@ names a repository capability whose implementation owner is ambiguous.
   `ParentCommitOwnerV1` owns canonical process-result publication.
 - **Actor boundary:** `ActorRef` is `(actor_id, scheduler authority)` and fails
   closed outside the scheduler creator thread. It is not synchronized
-  cross-thread ingress and does not authorize heap/graph payloads.
+  cross-thread ingress and does not authorize heap/graph payloads. Off-domain
+  scheduler queries and reply lifecycle calls return nil/false/zero/empty or
+  the explicit unavailable stats sentinel without exposing or mutating state.
 - **Process boundary:** child results cross as bounded pointer-free `SPRF1` /
   `SPRS` encoded copies into a generation/replay-bound parent inbox, then one
   validated candidate batch publishes under the parent owner.
 - **Modern SSpec:** `actor_channel_authority_spec.spl` uses closed
-  `actor-channel-authority/v1`; `parent_commit_piped_result_spec.spl` uses
+  `actor-channel-authority/v1` plus owner-guard schema
+  `actor-owner-domain-rejection/v1`; `parent_commit_piped_result_spec.spl` uses
   closed `parent-commit-piped-result/v1`. Their mirrors and exact commands are
   linked from `doc/07_guide/language/parallel_apps.md`.
 - **Current status:** source and authored manuals are partial evidence. The
-  deployed Stage-4 test ABI probe blocks native execution, docgen, and
-  maintenance; never substitute the Rust seed or label authored mirrors as
-  generated PASS.
+  admitted Stage-2 compiler has no qualified self-hosted test/docgen surface,
+  so execution and generated-manual maintenance remain blocked; never
+  substitute the Rust seed or label authored mirrors as generated PASS.
 
 ### Agent lookup rule
 
@@ -41,6 +44,22 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Docgen:** the sidecar loader is wired; a missing live provider or evidence
   sidecar means no retained execution provenance, not a generated evidence PASS.
 - **Primary guide:** `doc/07_guide/infra/sspec_typed_evidence.md`.
+
+## UP Squared Apollo Lake SimpleOS bring-up
+
+- **Current status:** paused partial implementation; no physical boot or `ls`
+  PASS yet.
+- **Canonical handoff:**
+  `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
+- **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
+  `EFI/BOOT/BOOTX64.EFI`, selected once with F7.
+- **Debug:** CN16 3.3 V TTL UART. Do not use CN22 as CPU JTAG; it is documented
+  as a 1.8 V CPLD/BIOS-update connector.
+- **Never write:** host system disk, UP2 internal eMMC/NVMe, BIOS/SPI, or UEFI
+  variables during first light.
+- **Verdict rule:** offline image structure, Tigard enumeration, or retained
+  partial source is not live board evidence. PASS requires ordered UART boot
+  markers and a command-correlated VFS-backed `ls /` response.
 
 ## StarFive JH7110 software reset over Tigard JTAG
 
@@ -66,6 +85,27 @@ the SBI SRST helper and capture UART concurrently. Do not substitute OpenOCD
 `reset run`, a direct PC write, or hardware-reset claims. If the expected fresh
 firmware sequence is absent, report reset as failed or blocked rather than
 PASS.
+
+## StarFive VisionFive 2 NVMe storage
+
+- **Hardware lane:** JH7110 PCIe1/domain 1 drives the M.2 M-key socket; PCIe0 is
+  the USB-controller lane.
+- **Layering:** the StarFive port owns DT validation, PHY/clocks/resets/PERST,
+  PLDA quirks and link state. Common PCI/NVMe owns ECAM enumeration, controller
+  and namespace commands; GPT/FAT32/VFS consume a partition-bounded lease.
+- **Identify first:** record PCI BDF/vendor/device/class plus NVMe model, serial,
+  firmware, NSID, LBA size/count and capacity with zero storage writes.
+- **Do not infer:** Tigard presence, ECAM identity, or missing U-Boot commands
+  does not establish an NVMe namespace identity.
+- **Provision:** require exact identity-bound authorization, write GPT/FAT32 only
+  inside the selected non-boot namespace/partition, then flush, unmount,
+  remount, hash-read, and run command-correlated VFS `ls /nvme`.
+- **Recovery:** if OpenOCD cannot examine the selected U74 hart after a failed
+  high-address access, do not loop software reset; request one physical reset or
+  power-cycle.
+- **Primary documents:**
+  `doc/04_architecture/starfive_visionfive2_nvme_storage.md` and
+  `doc/07_guide/platform/simpleos/starfive_visionfive2_simpleos.md`.
 
 ## Simple embedded DB / Simple SQLite
 
@@ -269,6 +309,26 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
 - **Handoff:** small sidecars may inventory Web/CSS, GUI/button/key, WM/drag/scroll,
   or 2D/font/QEMU independently. `/root` is merge owner; Sol reviews before
   done/release claims.
+
+## QEMU SIMD and coverage gate lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/qemu_simd_coverage_gate_lane/skill.md`.
+- **Scope:** the static-prerequisite tier only — the baremetal SIMD object gate
+  plus the coverage gates that need no deployed compiler. It does not own guest
+  hit/chunk receipts, QMP captures, the arch matrix, or `check-render2d-coverage.shs`.
+- **Load-bearing rule:** read a gate's exit status on the line after the
+  invocation, never through a pipe. `check-simpleos-qemu-engine2d-simd-kernels.shs`
+  exited 1 with ZERO output for its whole life — a doubled-backslash ERE in its
+  `st1` assertion matched a literal backslash, and `set -eu` aborted the script
+  before three further assertions ran. `sh gate.shs | tail` reports `tail`'s 0.
+  Repaired 2026-08-16; pinned by
+  `test/03_system/check/qemu_simd_coverage_gate_lane_spec.spl`.
+- **Honesty rule:** an `engine2d-simd-8k-ops` PASS is not an 80fps proof — the
+  gate requires its own receipt to state
+  `engine2d_8k_full_dynamic_frame_80fps_proven=false`.
+- **Capability claims in `guard_wiring_optout.txt` are not evidence.** Two of
+  this lane's gates were justified as needing "a real GPU or display"; both were
+  measured GREEN on a plain Linux host with neither. Corrected 2026-08-16.
 
 ## Robust lifecycle persistence
 
@@ -534,6 +594,28 @@ profile.
 RV64 has a real result-boundary spec but still requires a provenance-admitted
 Stage-4 runner and fresh producer bundle. Do not use Stage 3 or the Rust seed.
 
+The SOSIX positioned-I/O L10 source lane now includes true FAT32
+`read_at`/`write_at`, generation-safe aliased file objects, concrete owned-copy
+backend dispatch, and dup/fork/exit lifecycle hooks. Qualify it only with
+`scripts/check/check-sosix-fat32-positioned-io.shs --admit RUNTIME RECEIPT
+KERNEL_ELF`, followed by the focused system SSpec and docgen using that same
+receipt-bound Stage-4 runtime. Source self-tests and older linked kernels are
+not runtime or QEMU evidence.
+
+The continuation adds exact binary NVFS/DBFS positioned primitives while
+retaining `MountTable` virtual handles as the sole SOSIX object authority. The
+SimpleOS provider is honestly named `nvfs-dbfs-backed-v1`; its qualified gate
+is `scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit RUNTIME
+STAGE4_PROVENANCE RECEIPT KERNEL_ELF IMAGE IMAGE_MANIFEST`. It executes focused
+owners once and requires two boots of one private image copy with exact mount,
+cursor-independent round-trip, persistence, and hash evidence. Construct the
+inputs first with `build-simpleos-nvfs-positioned-qemu.shs`; its closed receipt
+binds the dedicated entry, current source, kernel, and admitted Stage-4 runtime.
+The gate also retains both boot transcript hashes. Its modern
+seven-step manual is future-executable/unrun until an admitted pure-Simple
+Stage-4 environment exists. The Rust seed, Stage 2/3, source self-tests, and a
+handwritten manual cannot claim live PASS or change the 24-row ledger.
+
 Canonical operator detail is
 `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
 
@@ -590,6 +672,28 @@ Core maintenance is offline: it must not call an LLM or transmit source.
 improve preview/conflict/reparse/write diagnostics to stderr; machine report
 stdout stays serialization-only. Do not infer documentation-quality acceptance
 from timing output or a zero-stub count alone.
+
+## FV2 RISC-V dual-track verification
+
+Route formal-verification work through
+`doc/00_llm_process/feature_expert/formal_verification/skill.md`. The focused
+system contract is
+`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`, mirrored as
+Markdown only at
+`doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`.
+The lane traces REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009.
+
+The readiness checker requires all 21 canonical RVFI ports. Its synthetic
+fixture proves checker behavior only; it is not a generated-CPU, Sail-oracle,
+refinement, equivalence, or SymbiYosys proof result. Production acceptance
+requires both `sh scripts/check/check-riscv-formal-dual-track.shs` and
+`sh scripts/check/check-riscv-rtl-sby-proof.shs` to pass in a qualified
+environment.
+
+Run the SSpec, `spipe-docgen`, and `sspec-maintain` only with an admitted,
+current-source pure-Simple Stage-4 CLI. If that runtime is absent, retain
+`TEST_BLOCKED`; never substitute the Rust seed, a stale Stage-2/3 artifact,
+readiness-only output, or a hand-authored receipt for executable evidence.
 
 ## Minimal-bootstrap feature development
 

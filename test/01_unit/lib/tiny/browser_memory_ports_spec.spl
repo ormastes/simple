@@ -1,0 +1,65 @@
+use std.spec.*
+use std.tiny.common.abi.{TinyDrawStreamV1, TINY_2D_CAP_DRAW_STREAM_V1}
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_KEY}
+use std.tiny.common.status.{TINY_ERR_MALFORMED, TINY_ERR_UNSUPPORTED}
+use std.tiny.common.types.{TinyPoint, TinyRect}
+use std.tiny.draw.opcode.{TINY_DRAW_CLEAR, TINY_DRAW_END}
+use std.tiny.draw.writer.{TinyDrawWriter}
+use std.tiny.engine2d.pixel_format.{TINY_PIXEL_ARGB8888}
+use std.tiny.engine2d.software.{TinySoftware2D}
+use std.tiny.wm_contract.ports.{TinyPresentPortV1}
+use os.apps.tiny_browser.memory_ports.{TinyMemoryInput, TinyMemoryPresent}
+
+describe "Tiny browser bounded memory ports":
+    it "records bounded frame damage and presentation":
+        var present = TinyMemoryPresent.create(80, 60, 2)
+        var renderer = TinySoftware2D.create(80, 60, TINY_PIXEL_ARGB8888)
+        var writer = TinyDrawWriter.create(8)
+        expect(writer.clear(17).code).to_equal(0)
+        expect(writer.end_stream().code).to_equal(0)
+        expect(renderer.execute_stream(writer.envelope(TINY_2D_CAP_DRAW_STREAM_V1)).code).to_equal(0)
+        var surface = renderer.surface_receipt()
+        expect(present.begin_frame([TinyRect(x: 0, y: 0, width: 10, height: 10)], 1).code).to_equal(0)
+        expect(present.present(surface).code).to_equal(0)
+        expect(present.frame_count).to_equal(1)
+        expect(present.last_damage_count).to_equal(1)
+        expect(present.last_surface.surface_id).to_equal(surface.surface_id)
+        expect(present.last_surface.frame_id).to_equal(surface.frame_id)
+        expect(present.last_surface.pixel_count).to_equal(4800)
+        expect(present.last_surface.pixels[0]).to_equal(17)
+        expect(present.last_surface.checksum).to_equal(renderer.checksum())
+        surface.pixels[0] = 99
+        expect(present.last_surface.pixels[0]).to_equal(17)
+        expect(present.begin([
+            TinyRect(x: 0, y: 0, width: 1, height: 1),
+            TinyRect(x: 1, y: 1, width: 1, height: 1),
+            TinyRect(x: 2, y: 2, width: 1, height: 1),
+        ], 3).code).to_equal(1)
+
+    it "rejects a surface whose pixels do not match its checksum":
+        var present = TinyMemoryPresent.create(2, 1, 1)
+        var renderer = TinySoftware2D.create(2, 1, TINY_PIXEL_ARGB8888)
+        val stream = TinyDrawStreamV1.create([TINY_DRAW_CLEAR, 23, TINY_DRAW_END], TINY_2D_CAP_DRAW_STREAM_V1)
+        expect(renderer.execute_stream(stream).code).to_equal(0)
+        var surface = renderer.surface_receipt()
+        surface.checksum = surface.checksum + 1
+        expect(present.begin([TinyRect(x: 0, y: 0, width: 2, height: 1)], 1).code).to_equal(0)
+        expect(present.finish(surface).code).to_equal(TINY_ERR_MALFORMED)
+        expect(present.frame_count).to_equal(0)
+        surface = renderer.surface_receipt()
+        surface.backend_capability_bits = TINY_2D_CAP_DRAW_STREAM_V1
+        expect(present.begin([TinyRect(x: 0, y: 0, width: 2, height: 1)], 1).code).to_equal(0)
+        expect(present.finish(surface).code).to_equal(TINY_ERR_UNSUPPORTED)
+        expect(present.frame_count).to_equal(0)
+
+    it "delivers input in order and rejects queue overflow":
+        var input = TinyMemoryInput.create(1)
+        val event = TinyEvent(kind: TINY_EVENT_KEY, point: TinyPoint(x: 0, y: 0), code: 9, value: 0)
+        expect(input.enqueue(event).code).to_equal(0)
+        expect(input.enqueue(event).code).to_equal(1)
+        expect(input.next().code).to_equal(9)
+        expect(input.next().kind).to_equal(0)
+        expect(input.enqueue(event).code).to_equal(0)
+        expect(input.next().code).to_equal(9)
+        expect(input.event_count).to_equal(0)
+        expect(input.events.len()).to_equal(1)

@@ -1,0 +1,80 @@
+# codex-impl: read-only JH7110 PCIe1/NVMe discovery.
+#
+# Linux ownership model mirrored here:
+# - this board module owns JH7110 link/config discovery;
+# - common NVMe owns Identify and block commands after resources are admitted.
+
+use os.drivers.pci.pci_provider.{PciConfigTarget, PciHostDescriptor, pci_host_config_addr}
+use os.kernel.arch.riscv64.starfive.pcie_host.{starfive_jh7110_pcie1_firmware_defaults}
+
+extern fn rt_starfive_mmio_read32(addr: u64) -> u64
+
+val JH7110_PCIE1_LINK_STATUS: u64 = 0x10240368u64
+val JH7110_PCIE_LINK_UP: u64 = 1u64 << 5
+
+struct StarFiveNvmePciIdentity:
+    domain: u32
+    bus: u8
+    device: u8
+    func: u8
+    vendor_id: u16
+    device_id: u16
+    class_code: u8
+    subclass: u8
+    prog_if: u8
+    bar0_raw: u32
+    bar1_raw: u32
+
+fn starfive_pcie1_link_up() -> bool:
+    (rt_starfive_mmio_read32(JH7110_PCIE1_LINK_STATUS) & JH7110_PCIE_LINK_UP) != 0u64
+
+fn _starfive_pci_read32(host: PciHostDescriptor, target: PciConfigTarget) -> Result<u32, text>:
+    val address = pci_host_config_addr(host, target)
+    if address.is_err():
+        return Err(address.unwrap_err())
+    Ok(rt_starfive_mmio_read32(address.unwrap()).to_u32())
+
+fn starfive_find_nvme_read_only() -> Result<StarFiveNvmePciIdentity, text>:
+    """Scan PCIe1 downstream bus 1 without config or media writes.
+
+    The PLDA root port's own bus-0 configuration is not ordinary ECAM and must
+    be handled by the StarFive host provider. Linux exposes the M.2 endpoint on
+    domain 1, bus 1, so this read-only first-light probe never touches bus 0.
+    """
+    if not starfive_pcie1_link_up():
+        return Err("starfive-pcie1-link-down")
+    val host_result = starfive_jh7110_pcie1_firmware_defaults()
+    if host_result.is_err():
+        return Err(host_result.unwrap_err())
+    val host = host_result.unwrap()
+    var bus: u16 = 1u16
+    while bus <= 1u16:
+        var device: u8 = 0u8
+        while device < 32u8:
+            val target = PciConfigTarget(bus: bus.to_u8(), device: device, func: 0u8, offset: 0u16)
+            val id = _starfive_pci_read32(host, target)
+            if id.is_ok():
+                val id_raw = id.unwrap()
+                val vendor = (id_raw & 0xFFFFu32).to_u16()
+                if vendor != 0xFFFFu16 and vendor != 0u16:
+                    val class_target = PciConfigTarget(bus: bus.to_u8(), device: device, func: 0u8, offset: 0x08u16)
+                    val class_result = _starfive_pci_read32(host, class_target)
+                    if class_result.is_ok():
+                        val class_raw = class_result.unwrap()
+                        val class_code = ((class_raw >> 24) & 0xFFu32).to_u8()
+                        val subclass = ((class_raw >> 16) & 0xFFu32).to_u8()
+                        val prog_if = ((class_raw >> 8) & 0xFFu32).to_u8()
+                        if class_code == 0x01u8 and subclass == 0x08u8 and prog_if == 0x02u8:
+                            val bar0 = _starfive_pci_read32(host, PciConfigTarget(bus: bus.to_u8(), device: device, func: 0u8, offset: 0x10u16))
+                            val bar1 = _starfive_pci_read32(host, PciConfigTarget(bus: bus.to_u8(), device: device, func: 0u8, offset: 0x14u16))
+                            if bar0.is_err() or bar1.is_err():
+                                return Err("starfive-nvme-bar-read-failed")
+                            return Ok(StarFiveNvmePciIdentity(
+                                domain: host.domain, bus: bus.to_u8(), device: device, func: 0u8,
+                                vendor_id: vendor, device_id: ((id_raw >> 16) & 0xFFFFu32).to_u16(),
+                                class_code: class_code, subclass: subclass, prog_if: prog_if,
+                                bar0_raw: bar0.unwrap(), bar1_raw: bar1.unwrap()
+                            ))
+            device = device + 1u8
+        bus = bus + 1u16
+    Err("starfive-nvme-pci-function-not-found")

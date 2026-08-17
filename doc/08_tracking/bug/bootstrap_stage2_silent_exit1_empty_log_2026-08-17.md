@@ -1,6 +1,7 @@
 # Bootstrap stage2: silent exit-1 with a 0-byte stage2-native-build.log
 
 - **Date:** 2026-08-17
+- **Status:** MITIGATED (diagnostic added); root output-buffering defect still open
 - **Status:** PARTIALLY FIXED 2026-08-17 (diagnosis path landed for real - the earlier MITIGATED claim was false, see the correction below); root output-buffering defect still open
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh`, `native-build` output behavior
 
@@ -129,3 +130,17 @@ the line AFTER the build (not through a pipe), and :1973 unconditionally announc
 is not addressed by that code and remains open.
 Related fix landed this session in the SAME file — see
 `bootstrap_stage2_capability_log_phantom_2026-08-17.md`.
+## 2026-08-17 root fix — progress survives redirected non-TTY builds
+
+`driver_log_helpers.log_build_progress` previously returned immediately when
+`SIMPLE_BUILD_PROGRESS_EVENTS` was unset. Stage 2 does not configure that
+optional durable-event path, so all already-cadenced load/parse/HIR/MIR/native
+compile/link progress was discarded. A crash before the final diagnostic could
+therefore leave the redirected stage log at zero bytes.
+
+The helper now writes every existing cadence event to stderr and explicitly
+flushes it before optionally appending the same line to the configured event
+file. The event-file sink remains optional; it no longer controls whether
+human-readable process output exists. The focused source contract pins both
+the flush ordering and the adjacent durable-file behavior in
+`test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl`.

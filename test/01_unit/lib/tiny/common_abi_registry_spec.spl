@@ -1,0 +1,56 @@
+use std.spec.{describe, it, expect}
+use std.tiny.common.abi.{TINY_ABI_MAJOR, TINY_ABI_MINOR, TINY_DRAW_STREAM_FORMAT_V1, TinyClassDescriptorV1, TinyDrawStreamV1, TinyModuleV1, tiny_draw_stream_validate, tiny_module_validate}
+use std.tiny.common.status.{TINY_OK, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_ABI, TINY_ERR_MALFORMED}
+use std.tiny.common.static_registry.{TinyStaticRegistryV1}
+use std.tiny.gui.component.{TINY_COMPONENT_PANE, TINY_COMPONENT_PROGRESS}
+
+fn pane_descriptor() -> TinyClassDescriptorV1:
+    TinyClassDescriptorV1(class_id: TINY_COMPONENT_PANE, stable_name_hash: 4097, name_offset: 4, name_length: 4, capability_bits: 1, dependency_first: 0, dependency_count: 1, factory_entry_id: 101, destroy_entry_id: 102)
+
+fn gui_module(classes: [TinyClassDescriptorV1]) -> TinyModuleV1:
+    module_with_id(1, classes)
+
+fn module_with_id(module_id: i64, classes: [TinyClassDescriptorV1]) -> TinyModuleV1:
+    TinyModuleV1(abi_major: TINY_ABI_MAJOR, abi_minor: TINY_ABI_MINOR, module_id: module_id, stable_name_hash: 7000 + module_id, name_offset: 0, name_length: 4, name_bytes_length: 8, capability_bits: 1, init_entry_id: 11, shutdown_entry_id: 12, query_entry_id: 13, classes: classes, dependencies: [31])
+
+describe("tiny ABI descriptors and static registry"):
+    it("keeps runtime component IDs aligned with the manifest range"):
+        expect(TINY_COMPONENT_PANE).to_equal(4097)
+        expect(TINY_COMPONENT_PROGRESS).to_equal(4110)
+
+    it("accepts complete module metadata and bounded dependency spans"):
+        expect(tiny_module_validate(gui_module([pane_descriptor()]), 2, 2).code).to_equal(TINY_OK)
+
+    it("rejects invalid dependency spans and duplicate class IDs"):
+        val pane = pane_descriptor()
+        val bad_span = TinyClassDescriptorV1(class_id: 4098, stable_name_hash: 4098, name_offset: 4, name_length: 4, capability_bits: 1, dependency_first: 1, dependency_count: 1, factory_entry_id: 103, destroy_entry_id: 104)
+        expect(tiny_module_validate(gui_module([bad_span]), 2, 2).code).to_equal(TINY_ERR_MALFORMED)
+        expect(tiny_module_validate(gui_module([pane, pane]), 2, 2).code).to_equal(TINY_ERR_MALFORMED)
+
+    it("validates the versioned draw stream envelope"):
+        val stream = TinyDrawStreamV1(abi_major: TINY_ABI_MAJOR, abi_minor: TINY_ABI_MINOR, format_id: TINY_DRAW_STREAM_FORMAT_V1, stable_name_hash: 9001, name_offset: 0, name_length: 8, words: [0], word_count: 1)
+        expect(tiny_draw_stream_validate(stream, 4, 8).code).to_equal(TINY_OK)
+        val oversized = TinyDrawStreamV1(abi_major: TINY_ABI_MAJOR, abi_minor: TINY_ABI_MINOR, format_id: TINY_DRAW_STREAM_FORMAT_V1, stable_name_hash: 9001, name_offset: 0, name_length: 8, words: [0], word_count: 2)
+        expect(tiny_draw_stream_validate(oversized, 4, 8).code).to_equal(TINY_ERR_CAPACITY)
+
+    it("registers and queries modules and classes without symbol lookup"):
+        var registry = TinyStaticRegistryV1.bounded(2, 2, 2)
+        expect(registry.register(gui_module([pane_descriptor()])).code).to_equal(TINY_OK)
+        expect(registry.require_module(1).code).to_equal(TINY_OK)
+        expect(registry.require_class(TINY_COMPONENT_PANE).code).to_equal(TINY_OK)
+        expect(registry.require_class(9999).code).to_equal(TINY_ERR_INVALID)
+        expect(registry.register(gui_module([pane_descriptor()])).code).to_equal(TINY_ERR_INVALID)
+
+    it("rejects class IDs already owned by another registered module"):
+        var registry = TinyStaticRegistryV1.bounded(3, 2, 2)
+        expect(registry.register(module_with_id(1, [pane_descriptor()])).code).to_equal(TINY_OK)
+        expect(registry.register(module_with_id(2, [pane_descriptor()])).code).to_equal(TINY_ERR_INVALID)
+        expect(registry.modules.len()).to_equal(1)
+        expect(registry.modules[0].classes[0].factory_entry_id).to_equal(101)
+
+    it("rejects an incompatible ABI before mutating registry state"):
+        var registry = TinyStaticRegistryV1.bounded(2, 2, 2)
+        val valid = module_with_id(1, [pane_descriptor()])
+        val incompatible = TinyModuleV1(abi_major: TINY_ABI_MAJOR + 1, abi_minor: valid.abi_minor, module_id: valid.module_id, stable_name_hash: valid.stable_name_hash, name_offset: valid.name_offset, name_length: valid.name_length, name_bytes_length: valid.name_bytes_length, capability_bits: valid.capability_bits, init_entry_id: valid.init_entry_id, shutdown_entry_id: valid.shutdown_entry_id, query_entry_id: valid.query_entry_id, classes: valid.classes, dependencies: valid.dependencies)
+        expect(registry.register(incompatible).code).to_equal(TINY_ERR_ABI)
+        expect(registry.modules.len()).to_equal(0)

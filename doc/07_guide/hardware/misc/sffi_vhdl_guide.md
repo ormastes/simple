@@ -32,7 +32,7 @@ Path 1: Compilation (Simple -> VHDL)
                           VhdlConstraintChecker (E07xx errors)
 
 Path 2: Tool Invocation (SFFI -> GHDL/Yosys)
-   .spl source  ->  vhdl_ffi.spl  ->  rt_process_run_capture()
+   .spl source  ->  vhdl_sffi.spl  ->  process_ops.process_run()
                           |
                     ghdl_analyze() / ghdl_elaborate() / ghdl_run()
                     yosys_synth_ghdl()
@@ -234,13 +234,15 @@ fn main():
 
 ## SFFI Tool Bindings Reference
 
-All hardware tool bindings live in `src/lib/nogc_sync_mut/io/vhdl_ffi.spl`.
+All hardware tool bindings live in `src/lib/nogc_sync_mut/io/vhdl_sffi.spl`.
+Process execution is owned by `io/process_ops.spl`; compatibility modules only
+re-export this canonical boundary.
 
 ### Tier 1: Raw Externs
 
 ```simple
-extern fn rt_process_run(command: text, args: [text]) -> i64
-extern fn rt_process_run_capture(command: text, args: [text]) -> (i64, text, text)
+# Owned by io/process_ops.spl and consumed through process_run():
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -271,6 +273,30 @@ struct VhdlToolResult:
     stdout: text        # standard output
     stderr: text        # standard error
 ```
+
+### Qualified system acceptance
+
+The canonical fail-closed system spec is
+`test/03_system/feature/usage/vhdl_spec.spl` (`REQ-VHDL-SFFI-001`), mirrored at
+`doc/06_spec/03_system/feature/usage/vhdl_spec.md`. It covers:
+
+1. a positive qualified GHDL analysis through the public async compatibility
+   facade and canonical `process_ops.process_run` owner;
+2. exact quiet/noisy `VhdlToolResult` edge semantics; and
+3. invalid VHDL returning failure, a nonzero code, and captured diagnostics.
+
+Run it only with an admitted pure-Simple full CLI:
+
+```sh
+SIMPLE_VHDL_TEST=1 SIMPLE_TIMEOUT_SECONDS=3600 \
+  <admitted-simple> test test/03_system/feature/usage/vhdl_spec.spl
+```
+
+The gate is deliberately fail-closed. Without `SIMPLE_VHDL_TEST=1`, the
+tool-backed scenarios print `TEST_BLOCKED`, fail the environment matcher, and
+return before invoking GHDL/Yosys. Do not turn this into an environment-skip
+PASS, and do not use the Rust seed or a bootstrap-only CLI as evidence. See
+`doc/03_plan/sys_test/vhdl_process_facade.md` for docgen and maintenance gates.
 
 ---
 
@@ -498,7 +524,7 @@ bin/simple test --only-slow test/03_system/feature/baremetal/
 |------|--------|-------|
 | Write .spl RTL | Done | `rv32i_rtl/`, `soc_rtl/` modules exist |
 | VHDL backend compilation | Done | 18-file backend, type mapper, constraint checker |
-| SFFI tool bindings | Done | `vhdl_ffi.spl` wraps GHDL + Yosys |
+| SFFI tool bindings | Done | canonical `vhdl_sffi.spl` wraps GHDL + Yosys through `process_ops` |
 | GHDL simulation (reference VHDL) | Working | Handwritten VHDL at `examples/09_embedded/` passes |
 | GHDL simulation (generated VHDL) | Gap | `write_stub_rtl()` produces placeholders, not real VHDL |
 | FPGA bundle generation | Working | Board profiles, manifests, TCL scaffolds |

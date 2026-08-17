@@ -3953,6 +3953,55 @@ static uint32_t _simpleos_read_chain(uint32_t first_cluster, uint32_t size,
     return copied;
 }
 
+static size_t _arm64_collector_nonce_line_length(const uint8_t *slot,
+                                                  size_t slot_len)
+{
+    static const char prefix[] = "SOSIX_COLLECTOR_RUN_NONCE=";
+    const size_t prefix_len = sizeof(prefix) - 1U;
+    if (!slot || slot_len <= prefix_len || slot_len > 118U) return 0U;
+    for (size_t i = 0; i < prefix_len; i++) {
+        if (slot[i] != (uint8_t)prefix[i]) return 0U;
+    }
+
+    size_t i = prefix_len;
+    const size_t nonce_begin = i;
+    while (i < slot_len && slot[i] != '\n') {
+        const uint8_t c = slot[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == ':' || c == '-')) return 0U;
+        i++;
+    }
+    if (i == nonce_begin || i >= slot_len || slot[i] != '\n') return 0U;
+
+    const size_t line_len = i + 1U;
+    for (i = line_len; i < slot_len; i++) {
+        if (slot[i] != 0U) return 0U;
+    }
+    return line_len;
+}
+
+/* Canonical evidence nonce: distinct from every workload nonce. */
+RuntimeValue rt_sosix_collector_nonce_echo(void)
+{
+    static const char path[] = "/SOSIXNON.TXT";
+    uint8_t nonce_file[118];
+    uint32_t file_size = 0U;
+    if (!_simpleos_blk_bringup()) return 0;
+    const uint32_t cluster = _simpleos_resolve_path(
+        path, (int64_t)(sizeof(path) - 1U), &file_size);
+    if (cluster < 2U || file_size == 0U || file_size > sizeof(nonce_file)) return 0;
+    const uint32_t bytes_read = _simpleos_read_chain(
+        cluster, file_size, nonce_file, sizeof(nonce_file));
+    if (bytes_read != file_size) return 0;
+
+    const size_t line_len = _arm64_collector_nonce_line_length(
+        nonce_file, bytes_read);
+    if (line_len == 0U) return 0;
+    for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
+    return 1;
+}
+
 /* ---- simpleos_fat32_* bridges (text -> (const char*, int64_t)) ---- */
 
 int64_t simpleos_fat32_read_path_size(const char *path, int64_t path_len)

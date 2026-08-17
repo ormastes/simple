@@ -1,0 +1,64 @@
+# codex-impl
+
+use std.tiny.common.generational_pool.{TinyGenerationalPool}
+use std.tiny.common.status.{TinyStatus, TINY_OK, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
+use std.tiny.common.types.{TinyHandle, TinyRect}
+use std.tiny.pane.model.{TinyPane}
+
+class TinyPaneResult:
+    status: TinyStatus
+    handle: TinyHandle
+
+class TinyPaneLookupResult:
+    status: TinyStatus
+    pane: TinyPane
+
+fn tiny_invalid_pane() -> TinyPane:
+    TinyPane(
+        id: TinyHandle.invalid(), parent: TinyHandle.invalid(),
+        local: TinyRect.empty(), clip_local: TinyRect.empty(),
+        scroll_x: 0, scroll_y: 0, z: 0, flags: 0, content_id: 0,
+    )
+
+class TinyPaneStore:
+    handles: TinyGenerationalPool
+    panes: [TinyPane]
+
+    static fn with_capacity(capacity: i32) -> TinyPaneStore:
+        var panes: [TinyPane] = []
+        var i = 0
+        while i < capacity:
+            panes.push(TinyPane(
+                id: TinyHandle.invalid(), parent: TinyHandle.invalid(),
+                local: TinyRect.empty(), clip_local: TinyRect.empty(),
+                scroll_x: 0, scroll_y: 0, z: 0, flags: 0, content_id: 0,
+            ))
+            i = i + 1
+        TinyPaneStore(handles: TinyGenerationalPool.with_capacity(capacity), panes: panes)
+
+    me insert(pane: TinyPane) -> TinyPaneResult:
+        val acquired = self.handles.acquire()
+        if acquired.status.code != TINY_OK:
+            return TinyPaneResult(status: acquired.status, handle: TinyHandle.invalid())
+        var stored = pane
+        stored.id = acquired.handle
+        self.panes[acquired.handle.index] = stored
+        TinyPaneResult(status: TinyStatus.ok(), handle: acquired.handle)
+
+    fn validate(handle: TinyHandle) -> TinyStatus:
+        self.handles.validate(handle)
+
+    fn get(handle: TinyHandle) -> TinyPaneLookupResult:
+        val status = self.validate(handle)
+        if status.code != TINY_OK:
+            return TinyPaneLookupResult(status: status, pane: tiny_invalid_pane())
+        TinyPaneLookupResult(status: TinyStatus.ok(), pane: self.panes[handle.index])
+
+    me update(pane: TinyPane) -> TinyStatus:
+        val status = self.validate(pane.id)
+        if status.code != TINY_OK: return status
+        self.panes[pane.id.index] = pane
+        TinyStatus.ok()
+
+    me remove(handle: TinyHandle) -> TinyStatus:
+        self.handles.release(handle)
