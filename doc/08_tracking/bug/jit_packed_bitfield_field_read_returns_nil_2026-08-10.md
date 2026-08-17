@@ -1,3 +1,13 @@
+## Re-verified 2026-08-17 — STILL OPEN, symptom unchanged
+
+`bin/simple run` on the exact repro from this doc still prints:
+```
+ready=nil ro=nil rsv=0
+```
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed banner). Fix
+requires a seed/JIT change plus a rebuild — recorded as a blocker, not fixed
+here (resource rules forbid building the main compiler in this lane).
+
 # JIT: `@packed` bitfield field reads return `nil` (positional raw constructor)
 
 **Status:** OPEN

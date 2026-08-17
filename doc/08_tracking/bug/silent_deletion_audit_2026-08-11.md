@@ -1,3 +1,10 @@
+## Row #3 re-verified 2026-08-17 — RESTORED, close this row
+
+`src/compiler_rust/runtime/src/value/collections.rs` is back at **6148 lines /
+210 `fn rt_*`** (audit recorded 4211/198 as still-missing). `rt_array_reduce`
+and `rt_array_free_deep` are present. No double-restore needed; the "STILL
+MISSING" verdict for `6e2f613d302` is stale.
+
 # Silent Mass-Deletion Audit — commits landed 2026-08-10 12:00 .. 2026-08-11 (origin/main)
 
 ## Scope and method

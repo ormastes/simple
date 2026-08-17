@@ -1,3 +1,24 @@
+## RESOLVED 2026-08-17
+
+`_paint_box` deleted from `src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl`
+(with its now-unused imports). Confirmed dead: zero importers; the live paint walk is
+`_browser_paint_boxes` in `browser_renderer.spl:207`.
+
+Specs (mirror-synced, `diff -q` identical):
+- repro/contract pin: `test/01_unit/browser_engine/layout_paint_contract_pin_spec.spl`
+  and `test/unit/browser_engine/layout_paint_contract_pin_spec.spl`
+- generalization/surviving surface: same file, `describe "layout_paint surviving surface (generalization)"`
+- pre-existing coverage: `test/01_unit/browser_engine/layout_paint_coverage_closure_spec.spl`
+
+Evidence:
+```
+SPEC FILE VERDICT: .../layout_paint_contract_pin_spec.spl declared>=6 executed=6 passed=6 failed=0 dropped=0
+Results: 6 total, 6 passed, 0 failed
+SPEC FILE VERDICT: .../layout_paint_coverage_closure_spec.spl declared>=4 executed=4 passed=4 failed=0 dropped=0
+```
+The pin spec asserts the REAL contract the dead code violated: `node_id` (no `node`
+field), and `content_x()/content_y()/content_width()/content_height()` as METHODS.
+
 # layout_paint.spl `_paint_box` is latent dead code built against the wrong BeLayoutBox shape
 
 - **Date:** 2026-08-15

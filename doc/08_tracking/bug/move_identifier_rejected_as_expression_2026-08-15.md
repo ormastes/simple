@@ -1,3 +1,14 @@
+## Re-verified 2026-08-17 — STILL OPEN
+
+Minimal repro (`var move = 3u32` then `while move + 1u32 < 10u32:`) still fails:
+```
+error: compile failed: parse: Unexpected token: expected expression, found Plus
+```
+Same defect class as `pub`/`examples`: a reserved token rejected at the USE
+site. Blocker: the fix is in the Rust seed lexer/parser
+(`src/compiler_rust/parser/src/expressions/helpers.rs` family) and cannot be
+verified without a seed rebuild + redeploy.
+
 # `move` identifier rejected in expression position ("expected expression, found Plus")
 
 - **Date:** 2026-08-15

@@ -1,3 +1,14 @@
+## Re-verified 2026-08-17 — STILL OPEN
+
+`bin/simple info` still exits with:
+```
+error: semantic: Cannot resolve module: app.package.registry.config
+```
+Blocker: fix lives in `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`
+(accumulate a pending dotted prefix instead of the one-level, current-dir-anchored
+join at :292-295). Verification requires a seed rebuild + redeploy, which this
+lane may not perform.
+
 # Rust seed resolver cannot resolve dotted package directories; `simple info` is dead in seed mode
 
 - **Date:** 2026-08-17

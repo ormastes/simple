@@ -1,3 +1,24 @@
+## RESOLVED — re-verified 2026-08-17 (STALE, close)
+
+Both halves are fixed in the tree.
+
+* `LeaseManager` is now `class LeaseManager` (`lease_manager.spl:77`) with `me`
+  methods; the free `fn`s at :197-213 are thin delegates. The file header
+  documents the struct->class rationale.
+* `RequestQueue` no longer exists — module deleted as dead code in
+  `5f4b65fe885b` ("refactor(service): delete the dead RequestQueue module");
+  `grep -rl RequestQueue src/ test/` returns nothing.
+
+Direct `bin/simple run` repro over the free-function API (every row from the
+defect table above):
+```
+r1.ok=true id=lease-1
+r2.ok=false            <- second exclusive acquire is BUSY (was ok:true)
+count=1 excl=true      <- active_lease_count/has_active_exclusive (were 0/false)
+released=true          <- release_lease finds the lease (was always false)
+count_after=0
+```
+
 # `std.service` LeaseManager and RequestQueue are total no-ops (struct value semantics)
 
 - **Status:** OPEN (RED)
