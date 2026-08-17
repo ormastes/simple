@@ -75,6 +75,41 @@ This construct is idiomatic, so other typed-array code is likely affected. Any
 `[u64]`/`[u8]` value passed around by rebinding rather than by call result
 should be treated as suspect until this is fixed.
 
+## Runner divergence — the spec does NOT bite, the probe does
+
+Measured 2026-08-17, and it must not be glossed over:
+
+| runner | engine | result |
+|---|---|---|
+| `bin/simple run` | JIT, falls back to interpreter | **5 of 7 checks FAIL** — defect reproduces |
+| `bin/simple test` | tree-walk interpreter | `6 total, 6 passed, 0 failed` — defect absent |
+
+So `test/01_unit/compiler/typed_array_variable_binding_spec.spl` is **green today
+and therefore proves nothing**; it is retained as the assertion that should hold
+and will catch the defect if it spreads to the spec engine. The biting evidence
+is the run-path mirror
+`test/01_unit/compiler/probe_typed_array_variable_binding.spl`:
+
+```
+PASS val<-call: got 5
+FAIL val<-val: got 0 want 5
+FAIL var<-val: got 0 want 5
+FAIL var<-var: got 0 want 5
+FAIL val<-literal: got 0 want 3
+PASS length-preserved: got 2
+FAIL swap-carries-value: got 0 want 5
+TYPED_ARRAY_BINDING PROBE: 5 FAILED
+```
+
+Two things to note. The `length-preserved` check PASSES in the failing run —
+it is exactly the assertion that would miss this defect, which is why the
+element checks exist. And the probe **exits 0 while failing**, so the verdict
+line is the authoritative signal, never the exit status.
+
+This is the documented `run`-vs-`test` divergence class
+(`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`): the two
+runners are different engines, and a green spec does not cover the run path.
+
 ## Verification remaining
 
 - Determine whether this reproduces on a freshly built self-hosted binary or is
