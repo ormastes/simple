@@ -1,0 +1,88 @@
+# Minimal executable root for the configuration-composed CLI.
+#
+# CLI-0 remains available when SCI is missing or invalid. Ordinary commands
+# require an admitted immutable image and are routed through provider ABI v1.
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.composition.codec.{decode_composition_image_v1}
+use std.nogc_sync_mut.composition.types.{
+    CompositionReadResultV1, composition_read_error_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{SIMPLE_PROVIDER_QUERY_V1_ABI, simple_cli_status_valid_v1}
+use app.io.composition_image_io.{read_composition_image_file_v1}
+use app.simple_core.executor.{
+    SIMPLE_CORE_EXECUTION_OK, SimpleCoreExecutionV1, simple_core_execute_v1
+}
+
+val SIMPLE_CORE_DEFAULT_COMPOSITION_V1 = "build/composition/default.sci"
+val SIMPLE_CORE_VERSION_V1 = "1.0.0-beta"
+
+class SimpleCoreInvocationV1:
+    ok: bool
+    composition_path: text
+    args: [text]
+    diagnostic: text
+
+fn simple_core_invocation_v1(raw_args: [text]) -> SimpleCoreInvocationV1:
+    var path = SIMPLE_CORE_DEFAULT_COMPOSITION_V1
+    var args: [text] = []
+    var path_seen = false
+    var i = 0
+    while i < raw_args.len():
+        val arg = raw_args[i]
+        if arg == "--composition":
+            if path_seen or i + 1 >= raw_args.len() or raw_args[i + 1].starts_with("--"):
+                return SimpleCoreInvocationV1(false, path, args, "invalid --composition argument")
+            path = raw_args[i + 1]
+            path_seen = true
+            i = i + 1
+        elif arg.starts_with("--composition="):
+            if path_seen or arg.len() <= 14:
+                return SimpleCoreInvocationV1(false, path, args, "invalid --composition argument")
+            path = arg[14:]
+            path_seen = true
+        else:
+            args.push(arg)
+        i = i + 1
+    SimpleCoreInvocationV1(true, path, args, "")
+
+fn _simple_core_load_composition_v1(path: text) -> CompositionReadResultV1:
+    val loaded = read_composition_image_file_v1(path)
+    if not loaded.ok:
+        return composition_read_error_v1(
+            "SCI_MISSING", path, "composition image is missing"
+        )
+    decode_composition_image_v1(loaded.bytes)
+
+fn _simple_core_exit_code_v1(result: SimpleCoreExecutionV1) -> i64:
+    if result.status == SIMPLE_CORE_EXECUTION_OK:
+        if not simple_cli_status_valid_v1(result.command_status):
+            return 2
+        if result.command_status > 0:
+            return result.command_status as i64
+        return 0
+    if result.core_status > 0:
+        return result.core_status as i64
+    2
+
+fn simple_core_main_v1(raw_args: [text]) -> i64:
+    val invocation = simple_core_invocation_v1(raw_args)
+    if not invocation.ok:
+        print "simple-core: " + invocation.diagnostic
+        return 2
+    val config = _simple_core_load_composition_v1(invocation.composition_path)
+    val result = simple_core_execute_v1(
+        invocation.args, config, SIMPLE_CORE_VERSION_V1,
+        SIMPLE_PROVIDER_QUERY_V1_ABI as u64, 0
+    )
+    if result.output != "":
+        print result.output
+    if result.diagnostic != "":
+        print "simple-core: " + result.diagnostic
+    _simple_core_exit_code_v1(result)
+
+fn main() -> i64:
+    simple_core_main_v1(get_cli_args())
+
+export SIMPLE_CORE_DEFAULT_COMPOSITION_V1, SIMPLE_CORE_VERSION_V1
+export SimpleCoreInvocationV1, simple_core_invocation_v1, simple_core_main_v1
