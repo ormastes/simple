@@ -1,0 +1,106 @@
+# Run-path probe: conditions on TAGGED slots must decode the tag.
+#
+# Executed as a SUBPROCESS by condition_tag_decode_spec.spl under both
+# SIMPLE_EXECUTION_MODE=interpreter and =jit. A spec body runs interpreted and
+# can never observe a JIT-only wrong-branch, so the oracle has to live here.
+#
+# Defect being pinned (2026-08-17): the Cranelift `Terminator::Branch` lowering
+# (src/compiler_rust/compiler/src/codegen/instr/body.rs) tested the condition
+# word with a bare `icmp_imm(NotEqual, cond, 0)` — no tag decode, no nil check.
+# Runtime tags live in the LOW 3 BITS and the canonical nil sentinel is the
+# NON-ZERO word 3 (TAG_SPECIAL | SPECIAL_NIL), so `val n: text? = nil; if n:`
+# took the TRUE branch under the JIT and the FALSE branch under the
+# interpreter — rc=0 on both engines, no diagnostic, silently wrong.
+#
+# Every check below asserts an ABSOLUTE expected branch, never "both engines
+# agree" (which would pass while both are wrong the same way).
+#
+# CANONICAL SEMANTICS pinned here: `if x:` on an optional / reference-typed `x`
+# means PRESENCE — "x is not nil" — exactly what `x.?` already means in
+# condition position. It is deliberately NOT `RuntimeValue::truthy`'s
+# emptiness-aware rule; see the residual note in the spec.
+
+var failures: i64 = 0
+
+fn check(name: text, actual: bool, expected: bool):
+    if actual == expected:
+        print("PASS " + name)
+    else:
+        failures = failures + 1
+        print("FAIL " + name + " expected=" + expected.to_string() + " actual=" + actual.to_string())
+
+fn taken_nil_text() -> bool:
+    val n: text? = nil
+    if n:
+        return true
+    return false
+
+fn taken_some_text() -> bool:
+    val n: text? = "hi"
+    if n:
+        return true
+    return false
+
+fn taken_nil_int() -> bool:
+    val n: i64? = nil
+    if n:
+        return true
+    return false
+
+fn taken_some_int() -> bool:
+    val n: i64? = 41
+    if n:
+        return true
+    return false
+
+fn taken_nil_exists() -> bool:
+    val n: text? = nil
+    if n.?:
+        return true
+    return false
+
+fn taken_some_exists() -> bool:
+    val n: i64? = 41
+    if n.?:
+        return true
+    return false
+
+fn taken_not_nil() -> bool:
+    val n: text? = nil
+    if not n:
+        return true
+    return false
+
+fn taken_while_nil() -> i64:
+    val n: text? = nil
+    var iterations: i64 = 0
+    while n:
+        iterations = iterations + 1
+        if iterations > 3:
+            return iterations
+    return iterations
+
+fn main():
+    # A nil optional is ABSENT, so the else arm runs. Word 3 must not read as true.
+    check("nil_text_condition", taken_nil_text(), false)
+    check("nil_i64_condition", taken_nil_int(), false)
+
+    # A present optional is truthy regardless of payload.
+    check("some_text_condition", taken_some_text(), true)
+    check("some_i64_condition", taken_some_int(), true)
+
+    # `.?` in condition position was already correct; it is the reference
+    # semantics the bare-identifier form is being aligned to.
+    check("nil_exists_check", taken_nil_exists(), false)
+    check("some_exists_check", taken_some_exists(), true)
+
+    # `not` over a tagged condition must negate the DECODED value.
+    check("not_nil_condition", taken_not_nil(), true)
+
+    # A `while` on a nil optional must not enter the loop at all.
+    check("while_nil_zero_iterations", taken_while_nil() == 0, true)
+
+    if failures == 0:
+        print("CONDITION_TAG_DECODE PROBE: ALL PASS")
+    else:
+        print("CONDITION_TAG_DECODE PROBE: " + failures.to_string() + " FAILURE(S)")

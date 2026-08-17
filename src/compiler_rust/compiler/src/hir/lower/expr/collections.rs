@@ -436,10 +436,28 @@ impl Lowerer {
         let mut pos_iter = positional.into_iter();
         let mut out = Vec::with_capacity(declared.len());
         for field_name in &declared {
+            // Cloned OUT of `self` first: an `if let` on a borrow of
+            // `self.struct_field_defaults` would keep that borrow alive across
+            // the `self.lower_expr(&mut self, ..)` call in its body.
+            let declared_default: Option<Expr> = self
+                .struct_field_defaults
+                .get(bare_name)
+                .and_then(|m| m.get(field_name.as_str()))
+                .cloned();
             if let Some(expr) = named.get(field_name.as_str()) {
                 out.push(self.lower_expr(expr, ctx)?);
             } else if let Some(expr) = pos_iter.next() {
                 out.push(self.lower_expr(expr, ctx)?);
+            } else if let Some(default_expr) = declared_default {
+                // ROOT FIX (JIT omitted-field-default, 2026-08-17): a declared
+                // `= default` fills its own slot. Previously EVERY unwritten
+                // slot got the `Nil` placeholder below, which MIR lowers to the
+                // raw nil tag `3`; read back through an `i64` field that
+                // surfaced as the literal `3`, so `D()` on
+                // `class D: var n: i64 = 0; var m: i64 = 7` printed `n=3 m=3`
+                // under the JIT against `n=0 m=7` in the interpreter.
+                // A field with NO declared default still gets `Nil`, unchanged.
+                out.push(self.lower_expr(&default_expr, ctx)?);
             } else {
                 out.push(HirExpr {
                     kind: HirExprKind::Nil,

@@ -1,0 +1,104 @@
+# Omitted Field Default — DEFECT-CLASS detection spec.
+#
+# The reported bug was narrow: `class D: var n: i64 = 0; var m: i64 = 7`
+# constructed as `D()` printed `n=0 m=7` on the interpreter and `n=3 m=3` under
+# the JIT. This spec does NOT stop at that one repro, because the mechanism
+# generalises far past it.
+#
+# MECHANISM. `lower_struct_init_fields`
+# (src/compiler_rust/compiler/src/hir/lower/expr/collections.rs) built the field
+# list in DECLARED order and filled every slot the construction site did not
+# write with a `HirExprKind::Nil` placeholder — the field's declared `= default`
+# expression was never consulted at all. MIR lowers that placeholder to the raw
+# nil tag `3` (TAG_SPECIAL | SPECIAL_NIL). Read back through a scalar-typed
+# field, the tag surfaces UNTAGGED as the literal value `3`.
+#
+# CLASS, not instance. Because the corruption is "every unwritten declared slot
+# gets the same tag", it is independent of:
+#   * the field's type — an i64 reads 3, an f64 reads 3.0, a bool reads true
+#     (3 is non-zero), a text field reads the tag;
+#   * WHICH fields are omitted — all of them, a trailing run, or a hole in the
+#     middle left by named-argument construction;
+#   * the construction form — bare `D()`, positional, or named.
+# The probe sweeps all three axes so a fix that only handles the all-omitted
+# case fails here instead of shipping. The diagnostic tell, worth remembering:
+# any JIT field value equal to "the correct value + 3", or to a bare `3`, is
+# this bug.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which evaluates declared defaults directly and was correct
+# throughout. An in-process example can therefore never go red on this defect.
+# The oracle is the sibling run-path probe
+# `probe_omitted_field_default_jit.spl`, executed as a subprocess under BOTH
+# engines. Modelled on
+# `test/01_unit/compiler/codegen/scalar_slot_roundtrip_class_spec.spl`.
+#
+# Every oracle in the probe is an ABSOLUTE literal the probe did not itself
+# compute — never "the two engines agree", which would pass while both engines
+# are wrong in the same way.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_omitted_field_default_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate binary
+    # without deploying it over the shared bin/simple.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "omitted declared fields receive their declared default":
+    it "applies every declared default under the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm — it evaluated declared defaults correctly even before the fix, so a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("PASS all_omitted_first_field")
+        expect(interp).to_contain("PASS all_omitted_second_field")
+        expect(interp).to_contain("OMITTED_FIELD_DEFAULT PROBE: ALL PASS")
+
+    it "applies every declared default under the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("Axis 1 — the originally reported shape: every field omitted")
+        expect(jit).to_contain("PASS all_omitted_first_field")
+        expect(jit).to_contain("PASS all_omitted_second_field")
+
+        step("Axis 2 — the leak is type-independent: i64, f64, bool and text defaults must all survive")
+        expect(jit).to_contain("PASS mixed_i64_default")
+        expect(jit).to_contain("PASS mixed_f64_default")
+        expect(jit).to_contain("PASS mixed_bool_default")
+        expect(jit).to_contain("PASS mixed_text_default")
+
+        step("Axis 3 — a TRAILING run of omitted fields after a positional argument")
+        expect(jit).to_contain("PASS trailing_written")
+        expect(jit).to_contain("PASS trailing_omitted_b")
+        expect(jit).to_contain("PASS trailing_omitted_c")
+
+        step("Axis 3 — a HOLE left in the middle and at the front by named-argument construction")
+        expect(jit).to_contain("PASS interleaved_omitted_a")
+        expect(jit).to_contain("PASS interleaved_written_b")
+        expect(jit).to_contain("PASS interleaved_omitted_c")
+
+        step("Axis 4 — a defaulted field must survive next to one with no declared default")
+        expect(jit).to_contain("PASS defaulted_beside_plain")
+
+        step("Name the mechanism directly: no defaulted scalar field may read back as the raw nil tag 3")
+        expect(jit).to_contain("PASS no_nil_tag_leak_all_omitted")
+        expect(jit).to_contain("PASS no_nil_tag_leak_partial")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("OMITTED_FIELD_DEFAULT PROBE: ALL PASS")
+
+    it "agrees between the two engines on every field it checks":
+        step("Engine agreement is a SECONDARY check — the absolute-literal assertions above are what prove correctness, since agreement alone would pass while both engines are wrong the same way")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_equal(interp)
