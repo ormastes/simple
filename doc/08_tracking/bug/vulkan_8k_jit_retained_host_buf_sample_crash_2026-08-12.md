@@ -89,3 +89,54 @@ reproduce a JIT-path sample crash. Not reproducible headless on this host.
 
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
+
+---
+
+## 2026-08-17 — BOTH 2026-08-17 triage notes above are FALSE and are retracted
+
+The two deferrals above assert this bug is "GPU-hardware gated", "needs a working
+Vulkan device", and is "not reproducible headless on this host". All three claims
+are wrong, for two independent reasons.
+
+**1. The reproducer never needed a GPU.** This doc's own "Reproducer shape"
+section, five lines long, states `backend: Vulkan compute on **pinned lavapipe**`.
+lavapipe is Mesa's software rasterizer; it needs no GPU by design, and it is
+installed and enumerating on this host:
+
+```
+$ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json vulkaninfo | grep -E 'deviceName|apiVersion'
+	apiVersion        = 1.4.318 (4211006)
+	deviceName        = llvmpipe (LLVM 20.1.2, 256 bits)
+```
+
+The deferrals were derived from the word "Vulkan" in the title rather than from
+the reproducer, which is the failure mode this doc's own closing line warns
+against ("Do not replace the missing proof with an expected checksum").
+
+**2. Real Vulkan hardware exists here regardless.** Two NVIDIA GPUs (RTX A6000
+49140 MiB, TITAN RTX 24576 MiB, driver 580.126.16) enumerate under
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json vulkaninfo` with
+`vendorID = 0x10de`, `apiVersion = 1.4.312`.
+
+### What the actual blocker is
+
+Read against the body rather than the title, this bug is already root-caused and
+the fix already landed: two physical classes were both named `VulkanBackend`
+(Engine2D's retained backend and Skia's command translator), so materializing
+`backend.host_buf` resolved against the wrong class and yielded length zero — the
+`SkiaVulkanBackend` rename plus the `type VulkanBackend = SkiaVulkanBackend`
+alias is recorded above as done, with its focused spec at 11/11. The reduction
+fixture `test/fixtures/jit_class_u32_array_retained_read/main.spl` independently
+proves generic large class-owned `[u32]` access is not at fault.
+
+What remains is a single re-run of the 8K benchmark to replace the empty timing
+receipt, and the doc already states why that run failed: "the shared host was
+saturated by unrelated compiler builds ... This is host-concurrency/build-capacity
+evidence, not a rendering failure or pass. Do not retry until the host can compile
+the fixture without competing high-memory builds." That condition still holds
+today (a stage-3 self-host build is live in this session), so the re-run was again
+not attempted.
+
+**Correct classification: capacity-gated re-verification of an already-landed fix.
+Not hardware-gated.** Any future sweep that re-defers this as "needs a Vulkan GPU"
+is repeating an error that has now been made twice.
