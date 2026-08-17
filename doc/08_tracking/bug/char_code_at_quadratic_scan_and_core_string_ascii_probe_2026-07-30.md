@@ -1,6 +1,7 @@
 # char_code_at scans are quadratic (non-ASCII), and core_string's ASCII fast path is itself O(index)
 
-**Status:** open — measured/read baseline for the CHARACTER-alignment
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 campaign. Must be fixed as the Stage 1 perf prerequisite in
 `doc/03_plan/language/text_index_character_alignment_inventory_2026-07-30.md`,
 because character indexing multiplies the number of index→offset
@@ -795,3 +796,26 @@ lane it is linked/interpreted against.
 
 No source edit was made this pass; nothing was reverted (there was nothing
 to revert).
+
+## 2026-08-17 verification — runtime lane
+
+**Verdict: STILL OPEN, confirmed by source. Correctness is fine; only cost is wrong.**
+
+`src/runtime/simple_core/core_string.spl:296-337` (`rt_string_char_code_at`)
+confirms the doc. The ASCII short-circuit at `:312-317` scans `probe` from 0 up
+to `index` on every call, so the "fast path" is itself O(index) and a loop over
+a string is O(n^2). The freestanding lane's own comment at `:290-295` states
+this explicitly:
+
+> "this freestanding lane does NOT cache the all-ASCII result in the string
+> header, so it stays O(index) per call rather than becoming O(1). The header bit
+> the hosted runtimes use is bit 31 of the `reserved` field, which lands on the
+> sign bit of the i64 word at offset 0 and is awkward to set safely from Simple."
+
+Not attempted here: the O(1) form needs the all-ASCII header bit to be settable
+from Simple, which is the same i64-sign-bit obstacle the comment names. That is a
+real design task, not a local edit, and no measurement was taken to size the win.
+
+**What was NOT proven.** No timing was re-measured this session (the host was
+running a bootstrap at ~98% CPU, so any timing taken now would be noise). This
+verification is a source-shape confirmation only.

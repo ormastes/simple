@@ -1,5 +1,8 @@
 # CPU-SIMD Engine2D RVV native target proof missing
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Resolved — proof evidence recorded; RVV native path proven via native binaries with `vsetvli`, `vmv.v.x`, `vle64.v`, and `vse64.v` instructions.
@@ -84,3 +87,18 @@ in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`. The matrix's
   Cross toolchains and qemu-user are NOT the gap — `aarch64-linux-gnu-gcc`,
   `riscv64-linux-gnu-gcc`, `qemu-aarch64`, `qemu-riscv64` and both sysroots
   are all present on this host.
+
+## 2026-08-17 verification — runtime lane
+
+**Verdict: STILL OPEN. Matches the doc's own 2026-08-15 update; out of this lane's scope.**
+
+The remaining gap is the `.spl` detection-branch legs, not
+`src/runtime/runtime_simd_dispatch.c` — the QEMU arch-matrix legs already run per
+the doc's 2026-08-15 note. Closing it therefore requires edits outside
+`src/runtime/**` plus a RISC-V QEMU matrix run
+(`scripts/check/check-cpu-simd-engine2d-arch-matrix.shs`), which was not run:
+the host was dedicated to a stage-3 bootstrap and a QEMU arch matrix is exactly
+the kind of mass run that was forbidden for this session.
+
+**What was NOT proven.** Nothing was executed. No claim is made here about
+whether the dispatch C is correct; only that the filed gap is elsewhere.

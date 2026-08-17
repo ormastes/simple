@@ -1,5 +1,8 @@
 # Secret files are created world/group-readable, then narrowed — no write-with-mode primitive
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-08-08
 - **Severity:** MED (residual after the 0600 chmod landed)
 - **Area:** runtime file I/O / `src/lib/nogc_sync_mut/terminal/credential/store.spl`
@@ -66,3 +69,35 @@ installed executables and is not affected.
 
 - `doc/09_report/lib/crypto/credential_store_aes_cbc_adversarial_review_2026-08-08.md` (finding F3)
 - `doc/08_tracking/bug/credential_store_aes_cbc_label_is_actually_ctr_with_deterministic_iv_2026-08-07.md`
+
+## 2026-08-17 verification — runtime lane
+
+**Verdict: STILL OPEN. Confirmed by source; fix is scope-blocked, not disputed.**
+
+Line reference correction: the `open(...)` cited as `runtime_native.c:8425` has
+drifted — 8425 is now inside `rt_file_exists_probe_end`. The real hard-coded
+mode sites in current source are:
+
+- `src/runtime/runtime_native.c:9654` — `rt_file_write_text_at`: `open(path, O_WRONLY | O_CREAT, 0644)`
+- `src/runtime/runtime_native.c:10121` — `rt_file_truncate`: `open(path, O_WRONLY | O_CREAT, 0644)`
+- `src/runtime/runtime_native.c:9742-9765` — `rt_core_file_write_data` (backs
+  `rt_file_write_text` / `_append` / `rt_file_write_bytes`) uses `fopen(path, "wb")`,
+  i.e. `0666 & ~umask`.
+
+The one counter-example proving the primitive is expressible is `:9550`,
+`open(temp_path, O_WRONLY | O_CREAT | O_EXCL, 0600)` — a single call site that
+hard-codes the restrictive mode rather than accepting one.
+
+So the doc's core claim holds exactly as written: **no write path in the tree
+accepts a caller-supplied mode**, and every secret writer must create-loose then
+chmod-tight.
+
+**Why this lane did not fix it.** The fix is a three-part change and only the
+first part is in this lane's scope (`src/runtime/**`): the runtime primitive
+`rt_file_write_text_mode`, the Rust seed's `file_io.rs` `OpenOptionsExt` path
+(`src/compiler_rust/**`, another lane), and the routing of
+`credential_key_generate` in `src/lib/nogc_sync_mut/terminal/credential/store.spl`
+(another lane). Landing the C primitive alone would add an unreachable extern —
+dead code by the project's own code-style rule — and, as the doc notes, it needs
+a bootstrap rebuild, which was excluded while a stage-3 bootstrap held the host.
+**This wants a single owner across all three paths, not a runtime-only patch.**

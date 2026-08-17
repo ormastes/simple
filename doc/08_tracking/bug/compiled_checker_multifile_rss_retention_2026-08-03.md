@@ -1,7 +1,8 @@
 # Compiled checker per-file transient ownership
 
 - **Id:** `compiled_checker_multifile_rss_retention_2026-08-03`
-- **Status:** fixed for non-string transient parser objects; residual
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   process-persistent strings remain tracked separately as
   `compiled_checker_transient_string_retention_2026-08-03`
 - **Severity:** P1
@@ -76,3 +77,35 @@ therefore dominate the remaining slope even after non-string transient objects
 are reclaimed. Fixing string ownership safely is a runtime-wide lifetime change,
 not a checker-only cleanup, and is intentionally outside this pure-Simple lane.
 It remains open under `compiled_checker_transient_string_retention_2026-08-03`.
+
+## 2026-08-17 verification — runtime lane (classified by CONTENT, not SHA)
+
+**Verdict on the residual item only: ALREADY-FIXED in source.**
+
+The "Residual retention (not fixed here)" section above states that
+`runtime_native.c::rt_core_reclaim_transient_immortal` *"deliberately skips
+strings"*. That is no longer true of current source. At
+`src/runtime/runtime_native.c:1527`, the function's `switch` now has an explicit
+string arm ahead of the scope-id arms:
+
+```c
+case RT_VALUE_HEAP_STRING: {
+    RtCoreString* string = (RtCoreString*)ptr;
+    reclaim_string =
+        (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+        (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
+    break;
+}
+```
+
+and the guard `if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;`
+lets a transient, non-shared string through to the erase/free path. Strings that
+must outlive the scope are excluded by `RT_CORE_STRING_FLAG_SHARED`, which
+interned literals set at `:2511`.
+
+**What was NOT proven.** No RSS re-measurement was taken — the 32.7 MiB/file
+residual slope quoted above has not been re-run, so the *magnitude* of the
+remaining retention is unknown. The prose claim ("skips strings") is refuted by
+source; the perf number is simply stale and unverified. The sibling doc
+`compiled_checker_transient_string_retention_2026-08-03` should be re-measured
+before either is closed.

@@ -1,6 +1,7 @@
 # Browser renderer Linux pre-exec sandbox gap
 
-Status: implemented and admission-guarded; installed production evidence
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 pending, release-blocking
 
 `rt_browser_renderer_spawn_sandboxed` scrubs descriptors/environment and then
@@ -56,3 +57,18 @@ a hostile site renderer from disclosing the same-UID broker's robust futex-list
 address. The focused host C containment gate passes. Installed pure-Simple
 READY/frame evidence remains compiler-blocked and no bootstrap/seed substitute
 is accepted.
+
+## 2026-08-17 verification — runtime lane
+
+**Verdict: STILL OPEN as an EVIDENCE gap, not a code defect.**
+
+The doc's own remaining item is un-landed *installed-production evidence*, not a
+missing implementation — stage one is implemented and admission-guarded. No
+source defect in `src/runtime/runtime_process.c` was identified or fixed by this
+lane, and none is claimed.
+
+**What was NOT proven.** The named reproducer
+`test/01_unit/runtime/run_process_piped_write_test.shs` was not executed this
+session (host reserved for a stage-3 bootstrap), so there is no `Results:` line
+either way. Closing this row requires the installed-production transcript the
+doc asks for; a source read cannot supply it.

@@ -1,6 +1,7 @@
 # core-c MCP stdin hang — C runtime stdin_read_char uses fgetc (2026-06-02) — FIXED (worked around)
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Summary
 
@@ -47,3 +48,17 @@ core-c deploy.
 
 - `core_c_string_len_registry_2026-06-02.md`
 - `mcp_redeploy_smoke_failures_2026-06-01.md`
+
+## 2026-08-17 verification — runtime lane
+
+**Verdict: STILL OPEN. Workaround confirmed in place; proper fix is out of this lane's scope.**
+
+The immediate MCP hang remains worked around in `main_lazy_protocol.spl`, and the
+doc's "Proper long-term fix" section is still unimplemented: `json_helpers.spl`
+continues to use the C `fgetc`-based `stdin_read_char`. Both of those files are
+under `src/lib/**` / `src/app/**`, outside this lane's `src/runtime/**` scope, so
+no edit was made.
+
+**What was NOT proven.** No reproduction was attempted — the row carries
+`reproducible_by: NONE` and no runnable reproducer exists in the doc. This entry
+records scope, not evidence of behaviour.
