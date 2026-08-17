@@ -1,0 +1,79 @@
+"""
+# A `case` or-pattern may wrap onto a continuation line
+
+**Category:** Parser / match-arm patterns
+**Bug:** multiline_or_pattern_in_case_arm_fails_to_parse_2026-08-17
+
+## Overview
+
+`case A | B |` followed by the remaining alternatives on the next line died
+with `Unexpected token: expected pattern, found Indent`. The continuation line
+opens a lexer pseudo-INDENT whose compensating DEDENT arrives *before* the arm
+body (`Newline Dedent Indent <body>`), but `parse_match_arm` reconciled it only
+*after* the body. `parse_inline_or_block` then found a DEDENT where it wanted
+an INDENT, and the arm loop read the body's INDENT as the next pattern — hence
+the misleading diagnostic, which never mentioned `match`.
+
+The fix routes the pattern continuation through `deferred_dedent_count`, the
+channel `if`/`while` header continuations already use, which handles both the
+deep and shallow continuation shapes.
+
+## Coverage
+
+Both wrap styles are covered, because they take different paths through
+`parse_pattern_inner`: a TRAILING `|` reaches the continuation via the
+`while self.check(Pipe)` body, a LEADING `|` via
+`peek_through_newlines_and_indents_is(Pipe)`. The single-line form is the
+control — it parsed correctly on the buggy lane, so a red control means the
+harness, not the defect.
+
+Values, not merely parseability, are asserted: a pattern that parses but
+selects the wrong alternative would be a silent wrong result.
+"""
+
+use std.spec
+
+# Trailing `|` at end of line.
+fn wrap_trailing(n: i64) -> i64:
+    match n:
+        case 1 | 2 |
+                3:
+            return 9
+        case _:
+            return 0
+
+# Leading `|` on the continuation line.
+fn wrap_leading(n: i64) -> i64:
+    match n:
+        case 1 | 2
+                | 3:
+            return 9
+        case _:
+            return 0
+
+# Control: the one-line form, which always parsed.
+fn one_line(n: i64) -> i64:
+    match n:
+        case 1 | 2 | 3:
+            return 9
+        case _:
+            return 0
+
+describe("multi-line or-pattern in a case arm"):
+    it("parses and selects with a trailing pipe continuation"):
+        assert_equal(wrap_trailing(3), 9)
+
+    it("does not over-match with a trailing pipe continuation"):
+        assert_equal(wrap_trailing(4), 0)
+
+    it("parses and selects with a leading pipe continuation"):
+        assert_equal(wrap_leading(3), 9)
+
+    it("does not over-match with a leading pipe continuation"):
+        assert_equal(wrap_leading(4), 0)
+
+    it("keeps the one-line control form correct"):
+        assert_equal(one_line(2), 9)
+
+    it("keeps the one-line control form from over-matching"):
+        assert_equal(one_line(4), 0)

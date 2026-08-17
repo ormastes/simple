@@ -1,0 +1,80 @@
+"""
+# An or-pattern with mixed-arity alternatives must bind from the alternative
+# that actually matched
+
+**Category:** HIR lowering / pattern bindings
+**Bug:** or_pattern_mixed_arity_binds_wrong_slot_2026-08-17
+
+## Overview
+
+`build_pattern_binding_stmts` normalized `Pattern::Or` to its FIRST alternative,
+on the theory that "every alternative binds the same names". Binding the same
+NAMES does not imply binding them from the same payload SLOT. So
+
+    case Ptr(inner, _) | Ref(inner, _) | Slice(inner):
+
+selected correctly for `Slice(7)` and then extracted `inner` using `Ptr`'s
+two-field shape, yielding **3** instead of 7 — no error, no warning. The
+arity-2 alternatives were correct, which is what made it hide: two of the three
+inputs looked right.
+
+Each alternative now gets its own extraction, guarded by its own condition and
+chained as if/else-if, so exactly one runs — the one that matched.
+
+## Coverage
+
+Actual VALUES are asserted for every alternative, not merely that the arm was
+selected: selection was never broken, only the slot the binding was read from.
+`Slice(7)` is the discriminating case; `Ptr` and `Ref` are controls that were
+green on the buggy lane, so a red control means the harness, not the defect.
+The same-arity grouping is the workaround that was correct before the fix and
+must stay correct after it.
+"""
+
+use std.spec
+
+enum K:
+    Ptr(i64, i64)
+    Ref(i64, i64)
+    Slice(i64)
+    Plain
+
+# Mixed arity in ONE or-pattern: the defective shape.
+fn mixed(k: K) -> i64:
+    match k:
+        case Ptr(inner, _) | Ref(inner, _) | Slice(inner):
+            return inner
+        case Plain:
+            return -1
+
+# Control: the workaround — same-arity alternatives grouped per arm.
+fn grouped(k: K) -> i64:
+    match k:
+        case Ptr(inner, _) | Ref(inner, _):
+            return inner
+        case Slice(inner):
+            return inner
+        case Plain:
+            return -1
+
+describe("or-pattern with mixed-arity alternatives"):
+    it("binds the arity-1 alternative from its own slot"):
+        assert_equal(mixed(K.Slice(7)), 7)
+
+    it("binds the first arity-2 alternative"):
+        assert_equal(mixed(K.Ptr(5, 9)), 5)
+
+    it("binds the second arity-2 alternative"):
+        assert_equal(mixed(K.Ref(4, 8)), 4)
+
+    it("still reaches the payload-free arm"):
+        assert_equal(mixed(K.Plain), -1)
+
+    it("keeps the same-arity grouped control correct for Slice"):
+        assert_equal(grouped(K.Slice(7)), 7)
+
+    it("keeps the same-arity grouped control correct for Ptr"):
+        assert_equal(grouped(K.Ptr(5, 9)), 5)
+
+    it("keeps the same-arity grouped control correct for Ref"):
+        assert_equal(grouped(K.Ref(4, 8)), 4)
