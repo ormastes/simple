@@ -1,0 +1,97 @@
+# @cover scripts/check/check-cache-scope-ownership.shs 80%
+"""
+# Per-Lane Private Build Caches
+
+**Category:** Infrastructure
+**Status:** Implemented
+**Design:** doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+
+## Purpose and Audience
+
+The bootstrap runs several lanes at once — phase-1 seed, phase-2 stage, phase-3
+self-host, phase-4 full CLI, plus census and tool-build lanes. Each may drive a
+DIFFERENT compiler binary over the SAME source tree. Until 2026-08-17 they all
+shared one `build/bootstrap/native_cache`, so an object produced by the phase-2
+compiler could be picked up by a phase-3 lane, and a fix landing mid-run could
+leave a stale entry that is silently wrong.
+
+This spec is the REPRODUCING spec for that defect: it drives the real ownership
+guard over two lanes pointed at one cache directory and requires the second lane
+to be REFUSED. A cache change that keeps hitting across scopes is worse than no
+change, so the cross-scope refusal is asserted directly, not inferred.
+
+## Scope and Preconditions
+
+Runs the shell guard `scripts/check/check-cache-scope-ownership.shs` as a
+subprocess over throwaway directories under `build/test-artifacts/`. It touches
+no compiler and needs no build.
+
+## Primary Workflow
+
+A lane claims an unowned cache directory; the same lane reuses it; a second lane
+asking for the same directory is refused by name; the second lane's own private
+directory is granted.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| lane | The declared private-cache scope, `SIMPLE_CACHE_SCOPE` / `--cache-scope` |
+| `.cache_scope` marker | File inside a cache dir recording the lane that owns it |
+| verdict line | Last line of stdout: `PASS`/`FAIL`/`ERROR`, exit 0/1/2 |
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, dir_create_all, file_write, file_exists}
+
+val guard = "scripts/check/check-cache-scope-ownership.shs"
+
+fn run_guard(dir: text, lane: text) -> (text, i64):
+    val (out, _err, code) = process_run("sh", [guard, dir, lane])
+    (out, code)
+
+fn scratch(name: text) -> text:
+    val dir = "build/test-artifacts/cache_scope/" + name
+    dir_create_all(dir)
+    dir
+
+describe "Per-lane private build caches":
+
+    it "grants a lane its own cache and lets that same lane reuse it":
+        step("A phase-2 lane claims an unowned cache directory")
+        val dir = scratch("reuse")
+        val (first, first_code) = run_guard(dir, "stage2")
+        expect(first).to_contain("PASS")
+        expect(first).to_contain("stage2")
+        expect(first_code).to_equal(0)
+
+        step("The ownership marker records the lane that claimed it")
+        expect(file_exists(dir + "/.cache_scope")).to_be(true)
+
+        step("The same lane asks again and is granted the same directory")
+        val (second, second_code) = run_guard(dir, "stage2")
+        expect(second).to_contain("PASS")
+        expect(second_code).to_equal(0)
+
+    it "refuses a second lane that points at the first lane's cache":
+        step("A phase-2 lane owns the cache directory")
+        val dir = scratch("crossscope")
+        val (_claim, claim_code) = run_guard(dir, "stage2")
+        expect(claim_code).to_equal(0)
+
+        step("A phase-3 lane, running a different compiler, asks for the same dir")
+        val (refusal, refusal_code) = run_guard(dir, "stage3")
+
+        step("The guard refuses and names BOTH scopes, so the miss is auditable")
+        expect(refusal).to_contain("FAIL")
+        expect(refusal).to_contain("stage2")
+        expect(refusal).to_contain("stage3")
+        expect(refusal_code).to_equal(1)
+
+    it "grants the second lane its own private directory instead":
+        step("The phase-3 lane uses its own private cache dir")
+        val dir = scratch("stage3_private")
+        val (out, code) = run_guard(dir, "stage3")
+        expect(out).to_contain("PASS")
+        expect(out).to_contain("stage3")
+        expect(code).to_equal(0)

@@ -1,0 +1,104 @@
+"""
+# Per-Lane Cache Scope — Prevention
+
+**Category:** Infrastructure
+**Status:** Implemented
+**Design:** doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+
+## Purpose and Audience
+
+The reproducing spec (`per_lane_cache_scope_spec.spl`) proves the one case that
+motivated the work: two lanes over one cache directory. This spec probes the
+ADJACENT cases where the same defect class would reappear, and the fail-closed
+properties that keep the guard from degrading into a rubber stamp.
+
+The failure mode being prevented is specific: a cache guard that keeps returning
+PASS is indistinguishable from no guard at all. So every case below asserts a
+NON-pass outcome where one is required, and the guard's own fixture selftest is
+run as a case in its own right.
+
+## Scope and Preconditions
+
+Subprocess-only; no compiler and no build.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| fail-closed | Nothing checked is ERROR (exit 2), never a pass |
+| unset default | An undeclared lane resolves to `default`, preserving single-lane behaviour |
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, dir_create_all, file_write}
+
+val guard = "scripts/check/check-cache-scope-ownership.shs"
+
+fn run_args(args: [text]) -> (text, i64):
+    val (out, _err, code) = process_run("sh", args)
+    (out, code)
+
+fn scratch(name: text) -> text:
+    val dir = "build/test-artifacts/cache_scope_prevention/" + name
+    dir_create_all(dir)
+    dir
+
+describe "Per-lane cache scope prevention":
+
+    it "passes its own fixture selftest before it is trusted to gate anything":
+        step("Run the guard's built-in fixtures")
+        val (out, code) = run_args([guard, "--selftest"])
+        expect(out).to_contain("PASS")
+        expect(out).to_contain("fixture")
+        expect(code).to_equal(0)
+
+    it "reports ERROR rather than PASS when it was given nothing to check":
+        step("Invoke the guard with no cache directory and no lane")
+        val (out, code) = run_args([guard])
+        step("A run that checked nothing must never look like a clean run")
+        expect(out).to_contain("ERROR")
+        expect(code).to_equal(2)
+
+    it "refuses a cache whose ownership marker is unreadable":
+        step("A cache directory carries an empty, corrupt ownership marker")
+        val dir = scratch("corrupt")
+        file_write(dir + "/.cache_scope", "")
+
+        step("A lane asks to reuse it")
+        val (out, code) = run_args([guard, dir, "stage2"])
+
+        step("Unknown ownership is treated as foreign, not as unowned")
+        expect(out).to_contain("FAIL")
+        expect(code).to_equal(1)
+
+    it "keeps the unset-scope default usable as an ordinary single-lane cache":
+        step("A build that never declared a lane uses the documented `default` scope")
+        val dir = scratch("unset_default")
+        val (first, first_code) = run_args([guard, dir, "default"])
+        expect(first).to_contain("PASS")
+        expect(first_code).to_equal(0)
+
+        step("Repeated single-lane builds keep reusing it, as before the change")
+        val (second, second_code) = run_args([guard, dir, "default"])
+        expect(second).to_contain("PASS")
+        expect(second_code).to_equal(0)
+
+        step("But a declared lane still cannot borrow the default lane's cache")
+        val (third, third_code) = run_args([guard, dir, "stage4"])
+        expect(third).to_contain("FAIL")
+        expect(third).to_contain("default")
+        expect(third_code).to_equal(1)
+
+    it "separates two lanes that share one compiler binary":
+        step("Phase-4 tool builds and the census lane run the SAME compiler")
+        val tools = scratch("tools")
+        val census = scratch("census")
+        val (a, a_code) = run_args([guard, tools, "stage4-tools"])
+        val (b, b_code) = run_args([guard, census, "stage4-census"])
+        expect(a_code).to_equal(0)
+        expect(b_code).to_equal(0)
+
+        step("Identical compiler identity is NOT enough to share a cache")
+        val (cross, cross_code) = run_args([guard, tools, "stage4-census"])
+        expect(cross).to_contain("FAIL")
+        expect(cross_code).to_equal(1)
