@@ -1,0 +1,77 @@
+# Similar-problem DETECTION spec (defect CLASS), sibling of
+# test/01_unit/lib/gc_async_mut/gpu/engine2d/ffi_facade_target_resolves_spec.spl
+#
+# THE CLASS. `export use std.<module>.*` naming a module that does not exist is
+# accepted silently by the resolver. Nothing errors, nothing warns about the
+# missing target, the importing program exits 0, and the facade re-exports an
+# empty set. Every consumer of such a facade therefore sees an API that is
+# present in the source tree and absent at runtime — a wrong ANSWER, not a
+# crash.
+#
+# WHY GENERALISE. The filed bug named four engine2d facades. A tree-wide scan on
+# 2026-08-17 found 35 dangling targets across src/lib, from one single cause: a
+# layer-wide rename `ffi_* -> sffi_*` in nogc_async_mut that the gc_async_mut
+# compatibility facades never followed. Fixing only the four named files would
+# have left 31 identical defects in place and this spec green-by-omission. The
+# invariant below is therefore stated over ALL of src/lib/gc_async_mut, so the
+# next rename that forgets a facade fails HERE instead of shipping.
+#
+# KNOWN-OPEN, deliberately carved out rather than hidden: three targets have no
+# counterpart anywhere in the tree, so they cannot be repointed, only removed by
+# an owner:
+#   nogc_async_mut.package_ffi
+#   nogc_async_mut.spostgre_if.__init__
+#   nogc_async_mut.torch.ffi
+# They are listed as an explicit allowlist below. Shrinking that list is the
+# goal; growing it silently is the failure this spec exists to prevent.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn allowed_open() -> [text]:
+    """Targets with no counterpart anywhere in the tree; owner-removal only."""
+    ["nogc_async_mut.package_ffi",
+     "nogc_async_mut.spostgre_if.__init__",
+     "nogc_async_mut.torch.ffi"]
+
+fn scan_missing(root: text) -> [text]:
+    val cmd = "/usr/bin/grep -rhoE '^export use std[.][a-zA-Z0-9_.]+[.][*]' " +
+        root + " --include=*.spl 2>/dev/null " +
+        "| sed 's/^export use std[.]//; s/[.][*]$//' | sort -u " +
+        "| while read m; do p=\"src/lib/$(echo \"$m\" | tr '.' '/')\"; " +
+        "if [ ! -f \"$p.spl\" ] && [ ! -d \"$p\" ]; then echo \"$m\"; fi; done"
+    val res = process_run("sh", ["-c", cmd])
+    var out: [text] = []
+    for line in res.stdout.split("\n"):
+        val t = line.trim()
+        if t != "":
+            out.push(t)
+    out
+
+describe "export use targets exist (dangling-facade defect class)":
+    """Every `export use std.X.*` under gc_async_mut must name a module that
+    exists on disk, so a layer rename cannot silently empty a facade."""
+
+    it "no export-use-star in gc_async_mut names a nonexistent module":
+        val missing = scan_missing("src/lib/gc_async_mut")
+        var unexpected: [text] = []
+        for m in missing:
+            var allowed = false
+            for a in allowed_open():
+                if a == m:
+                    allowed = true
+            if not allowed:
+                unexpected.push(m)
+        expect(unexpected.join(", ")).to_equal("")
+
+    it "the known-open allowlist does not silently grow":
+        expect(allowed_open().len()).to_equal(3)
+
+    it "the scan is non-vacuous - it parses real export-use lines":
+        val cmd = "/usr/bin/grep -rhcE '^export use std[.]' src/lib/gc_async_mut " +
+            "--include=*.spl 2>/dev/null | paste -sd+ - | bc"
+        val res = process_run("sh", ["-c", cmd])
+        val n = res.stdout.trim().to_i64()
+        # A run that examined zero export-use lines proves nothing; treat it as
+        # a failure, never as a pass (see BRIEF: non-vacuity is absolute).
+        expect(n > 20).to_be_true()
