@@ -5,8 +5,15 @@
 
 - `SecureServerPolicy`: immutable web limits, timeout/read budgets, TLS-required
   flag, and explicit plaintext-development constructor.
-- `DbListener` / `TcpDbListener`: concrete listener port and production owner;
-  `DbServerCapsule.listen/stop_listening` composes lifecycle and capacity.
+- `DbListener` / `TcpDbListener`: concrete listener port and production owner.
+  `DbListenerControl` keeps its listener owner-local and stores only a scalar
+  open/closed lease in the shared mutex; bounded accept and close serialize
+  through that gate without transporting a class value through `Mutex`.
+  `DbServerCapsule.listen/serve_listener` composes lifecycle and capacity.
+  Cross-owner shutdown retains only `DbStopControl`; its
+  `accept_attempt_count` supplies the idle-stop synchronization receipt. The
+  serving owner rechecks stop after accept and rejects a just-completed
+  transport before dispatch.
 - `DbTransport`: bounded framed `read`, bounded `write`, idempotent `close`.
 - `TcpDbTransport`: concrete production adapter implementing `DbTransport`.
 - `AuthenticatedPrincipal`: non-secret principal identity produced only by the
@@ -25,8 +32,11 @@
 4. Read with line/header/body/iteration/timeout limits. Reject ambiguous
    framing, duplicate security-sensitive headers, unsupported coding, or
    traversal before constructing a routed request.
-5. Attach request identity, route once, apply security headers, write a bounded
-   response, then close at the keep-alive bound and release accounting.
+5. Attach request identity, route once, apply security headers, then serialize
+   through the sole framing owner. The writer supplies canonical
+   `Content-Length` and `Connection: close`, excludes application-provided
+   framing headers, invalid field names, and control-bearing values, writes one
+   bounded response, then closes at the keep-alive bound and releases accounting.
 
 ## DB flow (REQ-004..008)
 
@@ -62,7 +72,8 @@ The production `serve_tcp` and scripted adapters both route through
 
 Errors are data, not panics: invalid policy, unavailable TLS, bad frame,
 unauthorized, forbidden, conflict, capacity, persistence, response-too-large,
-and shutdown. Shutdown stops new accepts, closes the listener, drains or closes
+and shutdown. Shutdown stops new dispatch, rejects an accept completed after
+stop, closes the listener, drains or closes
 bounded active transports, rolls back open overlays, and reaches zero slots.
 
 ## SSpec/manual contract

@@ -73,7 +73,7 @@ implementation." Status values:
   structured; the gap is interpreter-bound perf, not a duplicate path);
   full Simple DB server tier.
 
-#### Restart12 secure Pure-Simple server acceptance ledger (2026-08-14)
+#### Restart12 secure Pure-Simple server acceptance ledger (audited 2026-08-16)
 
 Highest-capability review: **REJECTED (2026-08-14)**. The implementation is a
 partial hardening checkpoint, not an accepted handoff. Production TLS remains
@@ -198,21 +198,26 @@ and bug record are diagnostic WARN evidence only.
   `/tmp/simple-main-restart12-push.lock`, pushed without force to `main`, and
   the pushed commit is proven reachable from the refetched `origin/main`.
 
-Current blockers after highest-capability review:
+Historical review findings and current disposition:
 
 1. Production HTTPS lacks an encrypted accepted-stream owner and certificate /
    key parse-and-match path. Plaintext now requires an audited capability and
    all synchronous callers handle typed startup failure, but this is not a
    substitute for GAP-TLS-3.
-2. The accepted HTTP path now attaches peer identity, adds baseline security
-   headers, and rejects premature EOF/surplus request-line tokens. Its remaining
-   static blocker is bounded connection admission/backpressure and cleanup.
+2. The accepted HTTP path attaches peer identity, adds baseline security
+   headers, rejects premature EOF/surplus request-line tokens, and has shared
+   atomic connection admission/backpressure with deferred release. A later
+   shared-`http_core` extraction exposed a synchronous non-chunked
+   `Transfer-Encoding` regression, and the production writer lacked a complete
+   response-byte/write-all bound. Continuation fixes are present only as
+   unexecuted working-tree changes; WEB-1/2 remain open.
 3. DB authentication now returns `AuthenticatedPrincipal?`, hashes every
    candidate, compares 64 digest characters, and has exact missing/wrong/unknown
    response-equality coverage. Runtime timing evidence remains unavailable.
-4. DB accept/read/write/shutdown behavior does not yet expose a usable control
-   owner that can stop an idle synchronous accept and prove close/rebind; TCP
-   write failure also needs to terminate and clean up the connection.
+4. DB source now exposes shared stop control that closes an idle listener, and
+   failed writes terminate and clean up the connection. A continuation fixture
+   binds an ephemeral loopback address, exchanges `OPEN`, observes EOF cleanup,
+   closes, and rebinds; it is unexecuted and therefore does not yet prove DB-1.
 5. Durable retry receipts are capped, schema-validated, principal-bound, and
    transaction-fingerprinted; restart/lost-ACK execution evidence is still
    unavailable.
@@ -247,6 +252,19 @@ version `simple-bootstrap 1.0.0-beta`. The adjacent stage2-command transcript
 records an LLVM/core-c-bootstrap build with no stub fallback, but the artifact
 has only an unverified operator observation of `unknown command` for `check`
 and `test`. It is not an admitted Stage-4 CLI and credits no ledger row.
+
+Continuation source audit (2026-08-16, no PASS promotion): the detached
+baseline was `00496db6f95a12dfc7d7c0ecd21648093be61322`, equal to the then-local
+`origin/main`. The synchronous server now consumes transport-neutral HTTP
+policy and route matching from `src/lib/common/net/http_core.spl`; its retained
+green counts came from a runner with a seed-banner caveat and are not accepted
+Stage-4 evidence here. Bounded sidecars prepared the synchronous transfer-
+coding/response-writer repairs, the DB UTF-8 byte-slice repair with adjacent
+oracle, and the real loopback DB lifecycle fixture. No build or test was run in
+the documentation lane. AC-9/10/12/13 remain open because current
+`sspec-maintain` scorecards, docgen receipts, deliberate-red calibration,
+focused runtime results, and final review are absent. The exact once-only resume
+sequence is in `doc/03_plan/sys_test/secure_pure_simple_servers.md`.
 
 Implementation progress (2026-08-14, not yet credited as PASS):
 

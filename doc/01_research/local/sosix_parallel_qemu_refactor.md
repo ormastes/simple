@@ -18,6 +18,16 @@ diagnostic or blocked, not release PASS evidence. The current implementation
 and unblock commands are authoritative in the agent plan, platform guide, and
 remaining-owners tracker linked below.
 
+## 2026-08-16 positioned-I/O continuation
+
+The correction above records the state before this scoped continuation. The
+current lane now adds FAT32 explicit-offset primitives, generation-safe
+canonical file objects with alias retirement, a concrete owned-copy SOSIX
+backend, and production shim retention. Authenticated registry installation is
+still explicit and fail closed. Runtime, linked-kernel, and QEMU claims remain
+blocked until a receipt-bound source-matched Stage-4 runtime executes the
+focused gates; the Rust seed and earlier retained ELF are inadmissible.
+
 ## Existing architecture and implementation surfaces
 
 The repository now has one configurable large-artifact owner:
@@ -86,6 +96,50 @@ syntax failure is an undeclared `rt_value_u64`, followed by stale
 - `doc/05_design/sosix_parallel_qemu_refactor.md`
 - `doc/03_plan/sys_test/sosix_parallel_qemu_completion_audit_2026-08-11.md`
 - `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`
+
+## 2026-08-16 NVFS/DBFS positioned-I/O research extension
+
+<!-- codex-research -->
+
+Parallel source, driver, and QEMU research found that DBFS already owned the
+durable byte store used by both `DbFsDriver` and the current NVFS facades, but
+its positioned surface converted through `text`, padded reads past EOF, and
+did not expose a binary primitive. `NvfsDriver` rejected nonzero write offsets;
+`NvfsPosixDriver` also converted positioned writes through text. Raw driver
+handle IDs collide across driver instances and therefore cannot be SOSIX file
+object identities.
+
+The accepted owner is the existing `MountTable` virtual handle table. It
+allocates monotonically increasing IDs, binds each ID to exactly one mount and
+opaque inner handle, and removes the binding on close. NVFS/DBFS SOSIX
+backends resolve that table and reject missing, retired, raw, or
+wrong-filesystem identities. A second registry was rejected because its close,
+duplication, and mount-generation state could diverge from VFS.
+
+The SimpleOS NVFS boot path was probe-only: it recognized the LBA 0
+superblock, mounted a hosted in-memory facade, and logged success without
+installing a device-backed VFS root. The selected implementation makes the
+existing architecture explicit as `nvfs-dbfs-backed-v1`: NVFS superblocks
+occupy LBA 0/1, canonical DBFS backing metadata occupies LBA 2/3, and the
+device-backed NVFS driver owns LBA 4 onward. This is honest current NVFS
+support; it is not a claim that the separate native NVFS engine has replaced
+the DBFS backing store.
+
+Live QEMU admission requires a source-matched Stage-4 pure-Simple runtime,
+adjacent provenance, runtime receipt, linked kernel, immutable image manifest,
+two boots of one private image copy, a byte-exact positioned-I/O marker, and
+reboot persistence. The existing FAT32-carrier NVFS marker and RV64 arena
+probe are diagnostic only and cannot satisfy this requirement.
+
+Highest-capability review found that the generic x86_64 fs-exec entry never
+called `boot_fs_sequence`, so that ELF could not emit the new NVFS
+mount/oracle markers. The accepted live owner is a dedicated
+`nvfs_positioned_entry.spl` built by the admitted Stage-4 runtime with a closed
+entry/target/source/compiler/kernel receipt. Review also required explicit
+root-kind shim installation, checksum-valid replica failover, bounded DBFS
+materialization, rollback on namespace publication failure, and hashes for
+both boot transcripts.
+
 ## 2026-08-12 evidence-contract update (append-only)
 
 The current immutable collector remains **0 PASS / 24 non-PASS cells**. Linux

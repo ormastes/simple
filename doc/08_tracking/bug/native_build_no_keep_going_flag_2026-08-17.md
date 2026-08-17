@@ -3,6 +3,7 @@
 - **Date:** 2026-08-17
 - Status: OPEN (P3)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** OPEN (feature request)
 - **Component:** `src/app/cli/native_build_main.spl`, pure-Simple driver
   (`src/compiler/80.driver/`), Rust seed `native_project` pipeline
 

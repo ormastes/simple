@@ -1,0 +1,95 @@
+# Shared broker + software-raster session for the sandboxed browser renderer.
+#
+# Single home for the sequence every caller of the jailed renderer repeats:
+#
+#     HostedBrowserRendererProcess.create -> Engine2dCompositorBackend.create_named
+#       -> start(executable) -> render(kind, payload) -> render_draw_ir_composition
+#       -> close + shutdown
+#
+# It was written three times before this module existed (twice in
+# hosted_browser_render_evidence.spl, once in app/browser/sandbox_render.spl),
+# so a change to the broker handshake had three places to miss.
+#
+# Deliberately a SESSION, not a one-shot `html -> pixels` call. The animation
+# evidence path keeps one renderer alive across `init` -> `begin_advance` ->
+# poll -> a second rasterize, and collapsing that into a one-shot helper would
+# have broken it. `open`/`render_frame`/`close` fits all three callers; a
+# one-shot fits only two.
+#
+# The raster stays on the "software" backend on purpose: this process must not
+# need a GPU to receive a jailed render, and the pixels have to be
+# byte-comparable for evidence assertions.
+
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend, Engine2dDrawIrAdvResult}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess, HostedBrowserRendererResult
+}
+
+pub class HostedBrowserRenderSession:
+    """A started jailed renderer paired with the software raster that turns its
+    Draw IR into pixels. Both are owned together because neither is useful
+    alone and both must be torn down together."""
+    renderer: HostedBrowserRendererProcess
+    raster: Engine2dCompositorBackend
+
+pub class HostedBrowserRenderedFrame:
+    """One rendered frame: the Draw IR the jailed worker produced and the
+    pixels this process rasterized from it. Both are kept because callers
+    legitimately assert on either — evidence paths inspect draw commands,
+    product paths want pixels."""
+    result: HostedBrowserRendererResult
+    raster: Engine2dDrawIrAdvResult
+
+pub fn hosted_browser_render_session_open(
+    executable: text, generation: i64, width: i32, height: i32, timeout_ms: i64
+) -> Result<HostedBrowserRenderSession, text>:
+    """Start the jailed renderer worker and its paired software raster.
+
+    `executable` must be a binary that dispatches the renderer worker argv
+    marker. The broker takes it as a parameter rather than assuming the current
+    executable, which is what lets a caller supply one without the worker arg
+    reaching a general-purpose CLI entry.
+
+    On launch failure the raster is shut down before returning, so a failed
+    open leaks nothing."""
+    var renderer = HostedBrowserRendererProcess.create(generation, width, height)
+    val raster = Engine2dCompositorBackend.create_named(width, height, "software")
+    val started = renderer.start(executable, timeout_ms)
+    if not started.ok:
+        raster.shutdown()
+        return Err("renderer launch failed: {started.reason}")
+    Ok(HostedBrowserRenderSession(renderer: renderer, raster: raster))
+
+pub fn hosted_browser_render_session_close(session: HostedBrowserRenderSession) -> bool:
+    """Tear down worker and raster together. False if the worker did not close
+    cleanly — callers treat that as a failure rather than ignoring it, because
+    a worker that will not die is a jail that did not end."""
+    val closed = session.renderer.close()
+    session.raster.shutdown()
+    closed
+
+pub fn hosted_browser_render_session_rasterize(
+    session: HostedBrowserRenderSession, result: HostedBrowserRendererResult
+) -> HostedBrowserRenderedFrame:
+    """Rasterize a Draw IR composition the worker already returned. Split from
+    `render_frame` because the animation path obtains its second composition by
+    polling rather than by issuing a request."""
+    HostedBrowserRenderedFrame(
+        result: result,
+        raster: session.raster.render_draw_ir_composition(result.composition, []))
+
+pub fn hosted_browser_render_session_frame(
+    session: HostedBrowserRenderSession, kind: text, payload: text, timeout_ms: i64
+) -> Result<HostedBrowserRenderedFrame, text>:
+    """Send one request to the jailed worker and rasterize what comes back.
+
+    The worker parses, cascades, lays out, paints and runs any script; only
+    Draw IR crosses back. This process never evaluates page content."""
+    val result = session.renderer.render(kind, payload, timeout_ms)
+    if not result.ok:
+        return Err("render failed: {result.reason}")
+    Ok(hosted_browser_render_session_rasterize(session, result))
+
+export HostedBrowserRenderSession, HostedBrowserRenderedFrame
+export hosted_browser_render_session_open, hosted_browser_render_session_close
+export hosted_browser_render_session_frame, hosted_browser_render_session_rasterize

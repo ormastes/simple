@@ -23,6 +23,9 @@ pub struct DbfsSuperblock:
     mount_generation: u64
     valid:            bool
     checksum:         u32
+    # Zero is the explicit unknown value used by version-1 callers/images that
+    # predate serialized capacity. New boot media must format with a count.
+    block_count:       u64 = 0u64
 
 # ---------------------------------------------------------------------------
 # Module-level block device store
@@ -91,7 +94,8 @@ fn _dbfs_crc_of(sb: DbfsSuperblock) -> u32:
     val h0 = sb.magic + sb.version
     val h1 = (sb.uuid_hi + sb.uuid_lo) % 0xFFFFFFFF
     val h2 = (sb.mount_generation) % 0xFFFFFFFF
-    ((h0 + h1 + h2) % 0xFFFFFFFF) as u32
+    val h3 = sb.block_count % 0xFFFFFFFF
+    ((h0 + h1 + h2 + h3) % 0xFFFFFFFF) as u32
 
 fn _dbfs_replica_write(sb: DbfsSuperblock, replica: u8):
     _dbfs_ensure_init()
@@ -103,7 +107,8 @@ fn _dbfs_replica_write(sb: DbfsSuperblock, replica: u8):
         uuid_lo:          sb.uuid_lo,
         mount_generation: sb.mount_generation,
         valid:            true,
-        checksum:         csum
+        checksum:         csum,
+        block_count:      sb.block_count
     )
     val idx = replica as i64
     if idx == 0:
@@ -162,6 +167,9 @@ fn _dbfs_sb_to_bytes(sb: DbfsSuperblock) -> [u8]:
     buf = _write_u64_le(buf, 24, sb.mount_generation)
     buf[32] = if sb.valid: 1u8 else: 0u8
     buf = _write_u32_le(buf, 33, sb.checksum)
+    # Appended after the original 37-byte record. Existing 512-byte images
+    # decode their zero-filled tail as the documented unknown capacity.
+    buf = _write_u64_le(buf, 37, sb.block_count)
     buf
 
 fn _dbfs_sb_from_bytes(buf: [u8]) -> DbfsSuperblock:
@@ -177,32 +185,37 @@ fn _dbfs_sb_from_bytes(buf: [u8]) -> DbfsSuperblock:
     val mg    = _get_u64_le(buf, 24)
     val vld   = buf[32] != 0u8
     val csum  = _get_u32_le(buf, 33)
+    val blocks = if buf.len() >= 45: _get_u64_le(buf, 37) else: 0u64
     DbfsSuperblock(
         magic: magic, version: ver, uuid_hi: uhi, uuid_lo: ulo,
-        mount_generation: mg, valid: magic == DBFS_MAGIC and vld, checksum: csum
+        mount_generation: mg, valid: magic == DBFS_MAGIC and vld,
+        checksum: csum, block_count: blocks
     )
 
 # ---------------------------------------------------------------------------
 # Public disk I/O API
 # ---------------------------------------------------------------------------
 
-# @tag(uuid_hi=uuid_hi, uuid_lo=uuid_lo)
-pub fn dbfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
-    """Write a fresh DBFS superblock to sector 2 (replica A) and sector 3 (replica B).
-    Requires dbfs_superblock_set_device() first."""
+# @tag(uuid_hi=uuid_hi, uuid_lo=uuid_lo, block_count=block_count)
+pub fn dbfs_superblock_format_disk_with_block_count(
+    uuid_hi: u64, uuid_lo: u64, block_count: u64
+) -> bool:
+    """Write both DBFS replicas with an explicit device block count."""
     if not _dbfs_has_device():
         return false
     val sb_a = DbfsSuperblock(
         magic: DBFS_MAGIC, version: DBFS_VERSION,
         uuid_hi: uuid_hi, uuid_lo: uuid_lo,
-        mount_generation: 1, valid: true, checksum: 0
+        mount_generation: 1, valid: true, checksum: 0,
+        block_count: block_count
     )
     val csum_a = _dbfs_crc_of(sb_a)
     val sb_a_final = DbfsSuperblock(
         magic: sb_a.magic, version: sb_a.version,
         uuid_hi: sb_a.uuid_hi, uuid_lo: sb_a.uuid_lo,
         mount_generation: sb_a.mount_generation,
-        valid: true, checksum: csum_a
+        valid: true, checksum: csum_a,
+        block_count: sb_a.block_count
     )
     val bytes_a = _dbfs_sb_to_bytes(sb_a_final)
     if not _dbfs_raw_write_sector(2u64, bytes_a):
@@ -211,7 +224,8 @@ pub fn dbfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
         magic: sb_a_final.magic, version: sb_a_final.version,
         uuid_hi: sb_a_final.uuid_hi, uuid_lo: sb_a_final.uuid_lo,
         mount_generation: sb_a_final.mount_generation,
-        valid: true, checksum: csum_a
+        valid: true, checksum: csum_a,
+        block_count: sb_a_final.block_count
     )
     val bytes_b = _dbfs_sb_to_bytes(sb_b_final)
     if not _dbfs_raw_write_sector(3u64, bytes_b):
@@ -219,6 +233,15 @@ pub fn dbfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
     _dbfs_replica_write(sb_a_final, 0)
     _dbfs_replica_write(sb_b_final, 1)
     true
+
+# @tag(uuid_hi=uuid_hi, uuid_lo=uuid_lo)
+pub fn dbfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
+    """Compatibility formatter for legacy callers.
+
+    A zero block_count is serialized as an explicit unknown value. Production
+    boot media must call dbfs_superblock_format_disk_with_block_count instead.
+    """
+    dbfs_superblock_format_disk_with_block_count(uuid_hi, uuid_lo, 0u64)
 
 pub fn dbfs_superblock_probe_disk() -> bool:
     """Read sector 2 and check for DBFS_MAGIC. Requires dbfs_superblock_set_device() first."""
@@ -280,7 +303,8 @@ pub fn dbfs_superblock_bump_mount_gen() -> bool:
         uuid_lo:          old_sb.uuid_lo,
         mount_generation: new_gen,
         valid:            true,
-        checksum:         0u32
+        checksum:         0u32,
+        block_count:      old_sb.block_count
     )
     val csum = _dbfs_crc_of(new_sb)
     val final_sb = DbfsSuperblock(
@@ -290,7 +314,8 @@ pub fn dbfs_superblock_bump_mount_gen() -> bool:
         uuid_lo:          new_sb.uuid_lo,
         mount_generation: new_sb.mount_generation,
         valid:            true,
-        checksum:         csum
+        checksum:         csum,
+        block_count:      new_sb.block_count
     )
     val bytes_a = _dbfs_sb_to_bytes(final_sb)
     if not _dbfs_raw_write_sector(2u64, bytes_a):

@@ -16,10 +16,15 @@ lane. It describes current repository state, not an advertised production
 claim. The lane remains blocked until its executable evidence passes on an
 admitted Stage-4 self-hosted CLI.
 
+Continuation audit (2026-08-16): the audited detached baseline was
+`00496db6f95a12dfc7d7c0ecd21648093be61322`, equal to the then-local
+`origin/main`. Documentation-only inspection ran no build or test.
+
 ## Ownership and Reachability
 
 | Surface | Canonical owner | Current reachability |
 |---|---|---|
+| Shared HTTP protocol policy | `src/lib/common/net/http_core.spl` | Owns transport-neutral limits, header/body policy, path safety, route matching, and bounded chunk decoding. The sync parser/router delegate to it; this structure is not live-listener evidence. |
 | Synchronous HTTP listener and routing | `src/lib/nogc_sync_mut/http_server/{server,parser,router,response,static_file}.spl` | The capability-gated plaintext-development listener binds, accepts, obtains peer identity, performs bounded parsing, dispatches, adds default security headers, writes, and closes; runtime evidence remains blocked. |
 | Asynchronous HTTP stack | `src/lib/nogc_async_mut/http_server/` | Separate stack; do not use its benchmark fixtures as proof for the synchronous production entrypoint. |
 | HTTPS composition | `src/lib/nogc_sync_mut/http_server/tls_server.spl` | **Not production reachable:** missing/invalid material and absent encrypted transport fail closed; GAP-TLS-3 still blocks HTTPS. |
@@ -55,6 +60,23 @@ boundary+1 immediately, and releases after either threaded or synchronous handle
 completion. Worker copies retain the atomic handle, not a copied counter.
 The handler wrapper registers release with `defer` before application dispatch,
 so early return or unwinding cannot strand capacity.
+
+The shared-core extraction left the synchronous wrapper responsible for
+rejecting *every* non-empty `Transfer-Encoding`, because that transport does
+not implement any transfer coding. The continuation fix restores that
+fail-closed boundary. `SecureServerPolicy.max_response_bytes` and the canonical
+writer now prepare one bounded complete response (or one bounded hardened 500)
+and use `write_all`; if even the fallback cannot fit, the connection closes
+without emitting a partial response. The writer is also the sole framing owner:
+application `Content-Length`, `Transfer-Encoding`, and `Connection` fields are
+suppressed case-insensitively. Non-token field names and control-bearing values
+are dropped before serialization and cannot suppress a safe default security
+header. Modern REQ-002 SSpec coverage makes that ownership visible as three
+step-based flows: valid application header plus canonical framing, conflicting
+and control-bearing header rejection, and a real-loopback hostile-handler wire
+response. The flows use built-in matchers and exact positive, edge/error, and
+integration oracles; they contain no placeholder pass. These changes remain
+`TEST_BLOCKED`, not PASS, until the focused Stage-4 commands run.
 
 The present TLS configuration check recognizes only a hex-DER envelope. The
 existing certificate owner can parse PEM X.509, but exposes no typed parser for
@@ -92,6 +114,22 @@ The concrete DB surface includes `DbServerCapsule`, `DbTransport`,
 `bounded_message_response`, so neither structurally bypasses the final encoded
 response-byte check; runtime TCP proof remains uncredited.
 
+The continuation DB fix uses byte-compatible slice bounds when parsing an
+argument after `index_of`, preserving quoted and unquoted multibyte UTF-8. The
+new lifecycle fixture uses `DbListenerControl.local_addr()` to bind an
+ephemeral loopback listener, prequeue one client, exchange `OPEN`, observe EOF
+session cleanup and zero active connections, close, and rebind after both
+normal completion and explicit stop. After two review cycles, every control
+copy references one scalar mutex lease/terminal-close receipt around its
+owner-local listener; bounded accept and close serialize through that gate
+without class-valued mutex payloads. The stopping domain retains only `DbStopControl`,
+observes its positive accept-attempt receipt, requests stop, and lets the
+serving owner close after the bounded accept returns. The owner rechecks stop
+after accept and closes a just-completed transport before auth or dispatch; the
+adjacent fixture requires an empty response and zero accepted/session state. This is the
+required real-owner shape, but it remains uncredited until executed on the
+admitted Stage-4 CLI.
+
 ## Evidence Map
 
 - Acceptance ledger and resume blocker:
@@ -111,6 +149,9 @@ response-byte check; runtime TCP proof remains uncredited.
 - Focused modern web and DB scenarios and mirrored manuals live under
   `test/03_system/{web/server,database/server}/` and
   `doc/06_spec/03_system/{web/server,database/server}/`.
+- Shared HTTP policy regression coverage lives at
+  `test/01_unit/lib/common/net/http_core_spec.spl`; its mirror is
+  `doc/06_spec/01_unit/lib/common/net/http_core_spec.md`.
 - TLS blockers GAP-TLS-1..3 have matching open records under
   `doc/08_tracking/bug/`; GAP-TLS-3 blocks production HTTPS completion.
 
@@ -150,29 +191,39 @@ Observed result (no retained immutable command receipt): exit 1,
 `hir: Unsupported feature: cannot infer field type while
 lowering main: struct 'ANY' field 'error?'`.
 
-Use the admitted self-hosted binary, record its path and hash, and do not repeat
-an unchanged passing command. The focused evidence inventory is:
+Use the admitted self-hosted binary, record its absolute path, SHA-256, and
+adjacent admission/provenance receipt, and do not repeat an unchanged passing
+command. The authoritative exact order (including maintenance, docgen,
+dependency, audit, layout, and whole-suite gates) is
+`doc/03_plan/sys_test/secure_pure_simple_servers.md`. Its focused runtime core
+is:
 
 ```sh
-bin/simple check src/lib/nogc_sync_mut/http_server
-bin/simple check src/lib/nogc_sync_mut/database/server
-bin/simple lint <changed-simple-files>
-bin/simple test test/03_system/database/server/db_server_tier_spec.spl --mode=interpreter
-bin/simple test test/03_system/database/server/db_durability_spec.spl --mode=interpreter
-bin/simple test test/03_system/database/server/secure_pure_simple_db_server_spec.spl --mode=interpreter
-bin/simple test test/03_system/web/server/secure_pure_simple_web_server_spec.spl --mode=interpreter
-bin/simple duplicate-check src/lib/nogc_sync_mut/http_server --mode token --min-lines 5
-bin/simple duplicate-check src/lib/nogc_sync_mut/database/server --mode token --min-lines 5
-sh scripts/audit/direct-env-runtime-guard.shs --working
-sh scripts/audit/direct-env-runtime-guard.shs --staged
-find doc/06_spec -name '*_spec.spl' -print
-bin/simple test test --whole --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" check src/lib/common/net/http_core.spl
+"$ADMITTED_STAGE4_SIMPLE" check src/lib/nogc_sync_mut/http_server
+"$ADMITTED_STAGE4_SIMPLE" check src/lib/nogc_sync_mut/database/server
+"$ADMITTED_STAGE4_SIMPLE" test test/01_unit/lib/common/net/http_core_spec.spl --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" test test/01_unit/lib/http_server/chunked_rejection_spec.spl --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" test test/03_system/web/server/secure_pure_simple_web_server_spec.spl --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" test test/03_system/database/server/db_server_tier_spec.spl --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" test test/03_system/database/server/db_durability_spec.spl --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" test test/03_system/database/server/secure_pure_simple_db_server_spec.spl --mode=interpreter
+"$ADMITTED_STAGE4_SIMPLE" test test/03_system/os/simpleos_riscv_network_gate_spec.spl --mode=interpreter
 ```
 
 Each changed SSpec also needs one `sspec-maintain scan`,
 REQ/AC traceability, deliberate-red calibration, `0 stubs`, and an operator-
 readable mirrored Markdown manual. The whole interpreter suite is the final
 release-bound gate, not a substitute for the focused scenarios.
+
+At this audit point the mirrors are hand-authored, not current docgen receipts.
+No local binary has an adjacent receipt admitting it as the current-source,
+pure-Simple Stage-4 full CLI, so runtime, docgen, and `sspec-maintain` are not
+run. The secure web response-framing scenarios and their Markdown manual are
+therefore explicitly `TEST_BLOCKED`; a fresh focused run, maintenance scan,
+generated-manual review, and zero-stub receipt are still required before AC-10
+can pass. Static source shape, historical seed diagnostics, and unexecuted
+fixtures cannot upgrade those gaps.
 
 ## Update Rule
 

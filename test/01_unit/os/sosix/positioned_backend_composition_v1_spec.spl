@@ -1,0 +1,83 @@
+# @cover src/os/sosix/fs/positioned_backend_composition_v1.spl 80%
+# @cover src/os/sosix/fs/positioned_acceptance_route_v1.spl 80%
+"""Typed production routing and canonical SOSIX positioned acceptance path."""
+
+use std.spec.*
+use std.fs_driver.instance.DriverInstance
+use std.fs_driver.nvfs_driver.NvfsDriver
+use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs}
+use os.sosix.fs.positioned_acceptance_route_v1.{
+    sosix_positioned_acceptance_round_trip_v1
+}
+use os.sosix.fs.positioned_backend_composition_v1.*
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "SOSIX typed positioned backend composition v1":
+    # @req: REQ-SQ-021
+    it "installs the typed owner in the production shim with FAT32 default":
+        val source = rt_file_read_text(
+            "src/os/kernel/abi/syscall_shim_positioned.spl") ?? ""
+        expect(source.contains(
+            "g_shim_positioned_backend: SosixPositionedBackendOwnerV1")).to_be(true)
+        expect(source.contains("sosix_positioned_backend_default_v1()")).to_be(true)
+        expect(source.contains("shim_positioned_install_backend_route_v1(")).to_be(true)
+        expect(source.contains(
+            "g_shim_positioned_backend = SosixFat32PositionedVfsBackendV1()")).to_be(false)
+
+    # @req: REQ-SQ-021
+    # @req: REQ-SQ-022
+    it "preserves FAT32 default and installs each filesystem by explicit enum":
+        val default_owner = sosix_positioned_backend_default_v1()
+        expect(sosix_positioned_backend_route_name_v1(default_owner)).to_equal("fat32")
+        expect(default_owner.route_generation).to_equal(1u64)
+
+        val nvfs = sosix_positioned_backend_install_v1(
+            default_owner, SosixPositionedBackendKindV1.Nvfs)
+        val dbfs = sosix_positioned_backend_install_v1(
+            nvfs.owner, SosixPositionedBackendKindV1.Dbfs)
+        val fat32 = sosix_positioned_backend_install_v1(
+            dbfs.owner, SosixPositionedBackendKindV1.Fat32)
+        expect(nvfs.accepted).to_be(true)
+        expect(sosix_positioned_backend_route_name_v1(nvfs.owner)).to_equal("nvfs")
+        expect(sosix_positioned_backend_route_name_v1(dbfs.owner)).to_equal("dbfs")
+        expect(sosix_positioned_backend_route_name_v1(fat32.owner)).to_equal("fat32")
+        expect(fat32.owner.route_generation).to_equal(4u64)
+
+    # @req: REQ-SQ-022
+    it "rejects unavailable and exhausted route installs without changing owner":
+        val owner = sosix_positioned_backend_default_v1()
+        val unavailable = sosix_positioned_backend_install_v1(
+            owner, SosixPositionedBackendKindV1.Unavailable)
+        val exhausted = sosix_positioned_backend_install_v1(
+            SosixPositionedBackendOwnerV1(
+                kind: SosixPositionedBackendKindV1.Fat32,
+                route_generation: 0xffffffffffffffffu64),
+            SosixPositionedBackendKindV1.Nvfs)
+        expect(unavailable.accepted).to_be(false)
+        expect(unavailable.reason).to_equal("positioned-backend-route-unavailable")
+        expect(unavailable.owner.route_generation).to_equal(1u64)
+        expect(exhausted.accepted).to_be(false)
+        expect(exhausted.reason).to_equal("positioned-backend-route-generation-exhausted")
+
+    # @req: REQ-SQ-021
+    # @req: REQ-SQ-022
+    # @req: REQ-SQ-023
+    it "round-trips NVFS through registered syscall dispatch and a virtual object":
+        _clear_vfs_rootfs_for_test()
+        vfs_mount_rootfs(DriverInstance.Nvfs(NvfsDriver.new("sosix-route"))).unwrap()
+        val result = sosix_positioned_acceptance_round_trip_v1(
+            SosixPositionedBackendKindV1.Nvfs, "/route.bin")
+        expect(result.accepted).to_be(true)
+        expect(result.reason).to_equal("positioned-acceptance-round-trip")
+        expect(result.bytes).to_equal([0u8, 0u8, 11u8, 22u8])
+
+    # @req: REQ-SQ-022
+    it "does not infer a DBFS route from an NVFS virtual object identity":
+        _clear_vfs_rootfs_for_test()
+        vfs_mount_rootfs(DriverInstance.Nvfs(NvfsDriver.new("sosix-kind"))).unwrap()
+        val result = sosix_positioned_acceptance_round_trip_v1(
+            SosixPositionedBackendKindV1.Dbfs, "/wrong-kind.bin")
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_contain("dbfs-positioned-unsupported")

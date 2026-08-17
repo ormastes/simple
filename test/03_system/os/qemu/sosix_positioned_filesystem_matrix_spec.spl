@@ -1,0 +1,123 @@
+"""
+# SOSIX positioned filesystem matrix acceptance
+
+This specification admits FAT32, NVFS, and DBFS positioned owners and the
+SimpleOS NVFS live guest only through a source-matched Stage-4 pure-Simple
+runtime, exact runtime receipt, linked kernel, and immutable image manifest.
+Source checks or missing prerequisites never become live-guest PASS evidence.
+
+**Plan:** `doc/03_plan/sys_test/sosix_qemu_remaining_owners.md`
+**Guide:** `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`
+"""
+
+# codex-system-test
+# @tag: system, simpleos, qemu, sosix, fat32, nvfs, dbfs, positioned-io
+# @evidence-display: links
+
+use app.io.mod.{env_get}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.spec.*
+
+val SOSIX_FILESYSTEM_MATRIX_MAX_OUTPUT: i64 = 8388608
+
+class PositionedFilesystemEvidence:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn run_positioned_filesystem_gate(args: [text]) -> PositionedFilesystemEvidence:
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "/bin/sh",
+        ["scripts/check/check-sosix-positioned-filesystem-matrix.shs"] + args,
+        1200000,
+        SOSIX_FILESYSTEM_MATRIX_MAX_OUTPUT)
+    PositionedFilesystemEvidence(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn run_nvfs_qemu_gate(args: [text]) -> PositionedFilesystemEvidence:
+    val (stdout, stderr, exit_code) = process_run_bounded(
+        "/bin/sh",
+        ["scripts/check/check-simpleos-nvfs-root-qemu.shs"] + args,
+        300000,
+        SOSIX_FILESYSTEM_MATRIX_MAX_OUTPUT)
+    PositionedFilesystemEvidence(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn qualified_positioned_environment() -> [text]:
+    val values = [
+        env_get("SOSIX_POSITIONED_SIMPLE_RUNTIME"),
+        env_get("SOSIX_POSITIONED_STAGE4_PROVENANCE"),
+        env_get("SOSIX_POSITIONED_RUNTIME_RECEIPT"),
+        env_get("SOSIX_POSITIONED_KERNEL_ELF"),
+        env_get("SIMPLEOS_NVFS_ROOT_IMAGE"),
+        env_get("SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST"),
+    ]
+    var i: i32 = 0
+    while i < values.len():
+        if values[i] == "":
+            fail("blocked: qualified SOSIX positioned filesystem environment is incomplete")
+        i = i + 1
+    values
+
+fn expect_positioned_backend_evidence(evidence: PositionedFilesystemEvidence):
+    expect(evidence.exit_code).to_equal(0)
+    expect(evidence.stderr).to_equal("")
+    expect(evidence.stdout).to_contain("sosix_fat32_positioned_acceptance=pass")
+    expect(evidence.stdout).to_contain("sosix_dbfs_positioned_primitives=pass")
+    expect(evidence.stdout).to_contain("sosix_nvfs_positioned_primitives=pass")
+    expect(evidence.stdout).to_contain("sosix_positioned_mount_object_backends=pass")
+    expect(evidence.stdout).to_contain("sosix_positioned_production_composition=pass")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_image_builder=pass")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_boot_contract=pass")
+
+fn expect_nvfs_live_guest_evidence(evidence: PositionedFilesystemEvidence):
+    expect(evidence.exit_code).to_equal(0)
+    expect(evidence.stderr).to_equal("")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_runtime_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_kernel_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_kernel_build_receipt_path=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_kernel_build_receipt_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_source_revision=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_image_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_qemu_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_boot1_transcript_path=")
+    expect(evidence.stdout).to_contain("/build/test-artifacts/simpleos-nvfs-root-qemu/boot1.log")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_boot1_transcript_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_boot2_transcript_path=")
+    expect(evidence.stdout).to_contain("/build/test-artifacts/simpleos-nvfs-root-qemu/boot2.log")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_boot2_transcript_sha256=")
+    expect(evidence.stdout).to_contain("simpleos_nvfs_positioned_live_guest=pass")
+
+describe "SOSIX positioned filesystem matrix":
+    # @req: REQ-SQ-021
+    # @req: REQ-SQ-022
+    # @tag:evidence-source-contract
+    it "should validate source contracts and reject an unqualified guest environment":
+        step("Validate positioned filesystem source contracts")
+        val source = run_positioned_filesystem_gate(["--self-test"])
+        expect(source.exit_code).to_equal(0)
+        expect(source.stderr).to_equal("")
+        expect(source.stdout).to_contain("sosix_positioned_filesystem_source_contract=pass")
+        expect(source.stdout).to_contain("simpleos_nvfs_image_manifest_sabotage_rejection=pass")
+        expect(source.stdout).to_contain("simpleos_nvfs_kernel_build_receipt_sabotage_rejection=pass")
+        step("Reject an unqualified live-guest environment")
+        val rejected = run_nvfs_qemu_gate(["--admit", "", "", "", "", "", ""])
+        expect(rejected.exit_code).to_be_greater_than(0)
+        expect(rejected.stdout).to_equal("")
+        expect(rejected.stderr).to_contain("stage4-admission-failed")
+
+    # @req: REQ-SQ-021
+    # @req: REQ-SQ-022
+    # @req: REQ-SQ-023
+    # @tag:evidence-live-guest
+    # @capture(artifact)
+    it "should exercise qualified filesystem owners and the NVFS live guest":
+        step("Bind the admitted pure-Simple runtime")
+        val environment = qualified_positioned_environment()
+        step("Exercise NVFS and DBFS positioned owners")
+        val evidence = run_positioned_filesystem_gate(["--admit"] + environment)
+        expect_positioned_backend_evidence(evidence)
+        step("Boot the NVFS-backed SimpleOS guest")
+        expect_nvfs_live_guest_evidence(evidence)
+        step("Verify cursor-independent guest I/O")
+        expect(evidence.stdout).to_contain("simpleos_nvfs_positioned_live_guest=pass")
+        step("Retain filesystem matrix evidence")
+        expect(evidence.stdout).to_contain("sosix_positioned_filesystem_matrix_acceptance=pass")

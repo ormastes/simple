@@ -7,10 +7,12 @@
 This system specification exercises the public scalar-text actor compatibility
 surface through one explicit scheduler owner. It proves finite mailbox and
 reply admission, admission-time argument copying, copied-reference routing,
-and one terminal scheduler removal. It does not claim cross-thread ActorRef
-safety, typed heap payload transport, or C/interpreter provider parity.
+one terminal scheduler removal, and fail-closed owner-domain queries over
+populated state. The owner-domain scenario deterministically injects an
+identity mismatch; it does not claim synchronized cross-thread ActorRef safety,
+typed heap payload transport, or C/interpreter provider parity.
 
-Run only with an admitted pure-Simple Stage-4 test surface:
+Run only with a qualified pure-Simple self-hosted test surface:
 
     SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/actor_channel_authority_spec.spl --mode=native
 
@@ -132,3 +134,95 @@ describe "scheduler-owned actor channel authority":
         expect(unknown.has_messages()).to_equal(false)
         expect(unknown.stop()).to_equal(false)
         expect(scheduler.outstanding_reply_count()).to_equal(0)
+
+    # @req REQ-PAR-006 NFR-PAR-003
+    it "should hide and preserve populated scheduler state outside its owner domain":
+        step("Seed reply actor pending-message and error state in the owner domain")
+        val scheduler = ActorScheduler.with_reply_capacity(2)
+        var handlers = HandlerTable.new()
+        handlers.register("echo", authority_echo)
+        val actor_id = scheduler.register_actor(Actor.new(handlers))
+        val reply_id = scheduler.ask_message(actor_id, "echo", ["retained"])
+        scheduler.run_until_idle()
+        expect(scheduler.send_message(actor_id, "missing", [])).to_equal(true)
+        scheduler.run_once()
+        expect(scheduler.send_message(actor_id, "echo", ["pending"])).to_equal(true)
+        val owner_thread_id = scheduler.owner_thread_id
+        expect(scheduler.outstanding_reply_count()).to_equal(1)
+        expect(scheduler.actor_count()).to_equal(1)
+        expect(scheduler.pending_message_count()).to_equal(1)
+        expect(scheduler.actor_error_count(actor_id)).to_equal(1)
+
+        step("Reject every query and reply lifecycle operation outside the owner domain")
+        scheduler.owner_thread_id = -1
+        val hidden_reply = scheduler.get_reply(reply_id)
+        val hidden_capacity = scheduler.reply_capacity()
+        val hidden_outstanding = scheduler.outstanding_reply_count()
+        val rejected_consume = scheduler.consume_reply(reply_id)
+        val rejected_cancel = scheduler.cancel_reply(reply_id)
+        val hidden_actors = scheduler.actor_count()
+        val hidden_pending = scheduler.pending_message_count()
+        val hidden_errors = scheduler.actor_error_count(actor_id)
+        val hidden_last_error = scheduler.actor_last_error(actor_id)
+        val hidden_stats = scheduler.stats_string()
+        expect(hidden_reply).to_be_nil()
+        expect(hidden_capacity).to_equal(0)
+        expect(hidden_outstanding).to_equal(0)
+        expect(rejected_consume).to_be_nil()
+        expect(rejected_cancel).to_equal(false)
+        expect(hidden_actors).to_equal(0)
+        expect(hidden_pending).to_equal(0)
+        expect(hidden_errors).to_equal(0)
+        expect(hidden_last_error).to_equal("")
+        expect(hidden_stats).to_equal("Scheduler(unavailable: wrong thread)")
+
+        step("Restore owner authority and prove rejected access changed no retained state")
+        scheduler.owner_thread_id = owner_thread_id
+        var restored_reply = "missing"
+        if val completed = scheduler.get_reply(reply_id):
+            restored_reply = completed
+        else:
+            fail("off-domain rejection must preserve the completed reply")
+        expect(restored_reply).to_equal("retained")
+        expect(scheduler.reply_capacity()).to_equal(2)
+        expect(scheduler.outstanding_reply_count()).to_equal(1)
+        expect(scheduler.actor_count()).to_equal(1)
+        expect(scheduler.pending_message_count()).to_equal(1)
+        expect(scheduler.actor_error_count(actor_id)).to_equal(1)
+        expect(scheduler.actor_last_error(actor_id)).to_equal("method not found: missing")
+
+        val evidence = canonical_evidence(
+            "protocol",
+            "actor-owner-domain-rejection/v1",
+            [
+                evidence_node("off_domain.reply_visible", "{hidden_reply.?}"),
+                evidence_node("off_domain.reply_capacity", "{hidden_capacity}"),
+                evidence_node("off_domain.reply_outstanding", "{hidden_outstanding}"),
+                evidence_node("off_domain.cancel_accepted", "{rejected_cancel}"),
+                evidence_node("off_domain.actor_count", "{hidden_actors}"),
+                evidence_node("off_domain.pending_count", "{hidden_pending}"),
+                evidence_node("off_domain.error_count", "{hidden_errors}"),
+                evidence_node("restored.reply", restored_reply),
+                evidence_node("restored.pending_count", "{scheduler.pending_message_count()}"),
+                evidence_node("restored.error_count", "{scheduler.actor_error_count(actor_id)}")
+            ]
+        )
+        val oracle = oracle_spec(
+            "actor-owner-domain-rejection/v1",
+            [
+                check_exact("off_domain.reply_visible", "false"),
+                check_exact("off_domain.reply_capacity", "0"),
+                check_exact("off_domain.reply_outstanding", "0"),
+                check_exact("off_domain.cancel_accepted", "false"),
+                check_exact("off_domain.actor_count", "0"),
+                check_exact("off_domain.pending_count", "0"),
+                check_exact("off_domain.error_count", "0"),
+                check_exact("restored.reply", "retained"),
+                check_exact("restored.pending_count", "1"),
+                check_exact("restored.error_count", "1")
+            ]
+        )
+        val comparison = compare_evidence(evidence, oracle)
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+        expect(comparison.summary).to_equal("10 check(s) passed")
+        expect(scheduler.cancel_reply(reply_id)).to_equal(true)

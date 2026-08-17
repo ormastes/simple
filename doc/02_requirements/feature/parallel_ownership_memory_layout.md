@@ -49,6 +49,9 @@ mirror
 `doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`
 map the implemented scalar-text portion of REQ-PAR-002 and REQ-PAR-006 to one
 scheduler-owned bounded mailbox/reply authority, copied argument retention,
-finite backpressure, unknown/stopped rejection, and unique terminal removal.
-Coverage is partial: synchronized cross-thread ingress and typed heap/owned
-payload transport remain open, and native execution is Stage-4 blocked.
+finite backpressure, unknown/stopped rejection, unique terminal removal, and
+fail-closed owner-domain query/reply lifecycle guards over populated state.
+Coverage is partial: the owner-domain scenario injects an identity mismatch;
+synchronized cross-thread ingress and typed heap/owned payload transport remain
+open. Native execution remains TEST_BLOCKED because the admitted Stage-2
+compiler has no qualified self-hosted test/docgen/maintenance surface.

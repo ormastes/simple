@@ -1,4 +1,4 @@
-# CSRF Protection Specification
+# CSRF Protection Specification (mirror-tree subset)
 #
 # **Feature IDs:** #SEC-011
 # **Category:** HTTP Server Security
@@ -6,68 +6,96 @@
 # **Status:** Implemented
 #
 # ## Overview
-# Tests for CSRF token generation, validation, and method exemptions.
-# Validates that tokens are generated, matched, and that safe methods are exempt.
+# Focused checks on the CSRF primitives: the fail-closed empty-secret guard on
+# token generation, constant-time token comparison, CsrfConfig defaults, and
+# the header/cookie extraction helpers.
+#
+# ## API note (2026-08-17, lane W14-A)
+# This file previously imported `validate_csrf_token`, `is_csrf_exempt_method`
+# and `default_csrf_config`, and called `generate_csrf_token()` with no
+# arguments. None of those symbols has ever existed in
+# `src/lib/nogc_async_mut/http_server/csrf.spl` — the shipped API is
+# `CsrfConfig.default()` plus `generate_csrf_token(config, session_id)`,
+# `constant_time_eq`, `get_header_value` and `get_cookie_value`. The spec is
+# therefore repointed at the real API rather than deleted: the behaviour it
+# asserts (fail-closed generation, timing-safe comparison, safe-method
+# exemption defaults) is real and wanted.
+#
+# ## Divergence note
+# `unit:lib/http_server/csrf_spec.spl` is a BASELINED divergent pair in
+# `scripts/check/test_tree_divergence_baseline.txt` (line 618). This copy is
+# deliberately a compact subset of the `test/01_unit` version — it must NOT be
+# converged with it, or the divergence guard fails on a stale baseline.
 
-use std.http_server.csrf.{generate_csrf_token, validate_csrf_token, is_csrf_exempt_method, CsrfConfig, default_csrf_config}
+use std.http_server.csrf.{
+    CsrfConfig,
+    generate_csrf_token,
+    constant_time_eq,
+    get_header_value,
+    get_cookie_value
+}
 
 # ============================================================================
-# Test Group 1: Token generation
+# Test Group 1: Fail-closed token generation
 # ============================================================================
 
-describe "CSRF token generation":
-    it "generates a non-empty token":
-        val token = generate_csrf_token()
-        val is_non_empty = token.len() > 0
-        expect(is_non_empty).to_equal(true)
-
-    it "generates tokens of sufficient length":
-        val token = generate_csrf_token()
-        val is_long_enough = token.len() >= 32
-        expect(is_long_enough).to_equal(true)
+describe "CSRF token generation fail-closed guard":
+    it "returns empty string when secret_key is empty":
+        val config = CsrfConfig.default()
+        val token = generate_csrf_token(config, "session-abc")
+        expect(token).to_equal("")
 
 # ============================================================================
-# Test Group 2: Token validation
+# Test Group 2: Constant-time comparison
 # ============================================================================
 
-describe "CSRF token validation":
-    it "validates matching tokens":
+describe "CSRF constant-time token comparison":
+    it "accepts identical tokens":
         val token = "abc123def456ghi789jkl012mno345pq"
-        val result = validate_csrf_token(token, token)
-        expect(result).to_equal(true)
+        expect(constant_time_eq(token, token)).to_equal(true)
 
     it "rejects mismatched tokens":
         val token_a = "abc123def456ghi789jkl012mno345pq"
         val token_b = "zzz999yyy888xxx777www666vvv555uu"
-        val result = validate_csrf_token(token_a, token_b)
-        expect(result).to_equal(false)
+        expect(constant_time_eq(token_a, token_b)).to_equal(false)
 
-    it "rejects empty token against valid token":
+    it "rejects an empty token against a valid token":
         val token = "abc123def456ghi789jkl012mno345pq"
-        val result = validate_csrf_token("", token)
-        expect(result).to_equal(false)
+        expect(constant_time_eq("", token)).to_equal(false)
 
 # ============================================================================
-# Test Group 3: Method exemptions
+# Test Group 3: CsrfConfig defaults (safe-method exemptions)
 # ============================================================================
 
-describe "CSRF method exemptions":
-    it "exempts GET by default":
-        val result = is_csrf_exempt_method("GET")
-        expect(result).to_equal(true)
+describe "CsrfConfig defaults":
+    it "ships with no secret key so generation stays fail-closed":
+        expect(CsrfConfig.default().secret_key).to_equal("")
 
-    it "exempts HEAD by default":
-        val result = is_csrf_exempt_method("HEAD")
-        expect(result).to_equal(true)
+    it "exempts GET":
+        expect(CsrfConfig.default().exempt_methods.contains("GET")).to_equal(true)
 
-    it "exempts OPTIONS by default":
-        val result = is_csrf_exempt_method("OPTIONS")
-        expect(result).to_equal(true)
+    it "exempts HEAD":
+        expect(CsrfConfig.default().exempt_methods.contains("HEAD")).to_equal(true)
+
+    it "exempts OPTIONS":
+        expect(CsrfConfig.default().exempt_methods.contains("OPTIONS")).to_equal(true)
 
     it "does not exempt POST":
-        val result = is_csrf_exempt_method("POST")
-        expect(result).to_equal(false)
+        expect(CsrfConfig.default().exempt_methods.contains("POST")).to_equal(false)
 
     it "does not exempt DELETE":
-        val result = is_csrf_exempt_method("DELETE")
-        expect(result).to_equal(false)
+        expect(CsrfConfig.default().exempt_methods.contains("DELETE")).to_equal(false)
+
+# ============================================================================
+# Test Group 4: Header and cookie extraction
+# ============================================================================
+
+describe "CSRF header and cookie extraction":
+    it "finds the token header case-insensitively":
+        expect(get_header_value([("X-CSRF-Token", "mytoken123")], "x-csrf-token")).to_equal("mytoken123")
+
+    it "extracts the named cookie from a multi-cookie header":
+        expect(get_cookie_value([("Cookie", "session=abc; csrf_token=tok456")], "csrf_token")).to_equal("tok456")
+
+    it "returns empty when no Cookie header is present":
+        expect(get_cookie_value([("Content-Type", "application/json")], "csrf_token")).to_equal("")

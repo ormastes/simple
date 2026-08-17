@@ -24,6 +24,7 @@ field), and `content_x()/content_y()/content_width()/content_height()` as METHOD
 - **Date:** 2026-08-15
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** RESOLVED (2026-08-17, deleted dead code — see RESOLVED section)
 - **Component:** `src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl`
 - **Severity:** low (dead code), but a semantic landmine
 
@@ -56,3 +57,31 @@ Either delete `_paint_box` (and any helpers only it uses), or port it to
 the real `BeLayoutBox` contract: resolve the DOM node via `node_id`
 where needed, and call `content_x()` etc. as methods. Deletion is the
 ponytail choice unless a paint pipeline is about to consume it.
+
+## RESOLVED (2026-08-17)
+
+Fixed by deletion, per this record's suggested ponytail fix. `_paint_box`
+was doubly stale: wrong BeLayoutBox shape (fields vs methods, `box.node`
+vs `node_id`) AND wrong dom_accessors contracts (`.value` reads on plain
+`f64`/`text` returns — verified against `dom_accessors.spl:524-531`). It
+had zero callers; the live painters are `layout.spl:paint_box` and
+`browser_renderer.spl:_browser_paint_boxes`. `_apply_opacity` (the only
+used export) is kept.
+
+Evidence and specs:
+- Change: `src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl`
+  (function removed, header NOTE added).
+- Repro-class / recurrence spec (pins the real BeLayoutBox contract the
+  dead code violated — `node_id` field, `content_*()` as methods — plus
+  `_apply_opacity` adjacent cases):
+  `test/01_unit/browser_engine/layout_paint_contract_pin_spec.spl`
+  (mirrored at `test/unit/browser_engine/layout_paint_contract_pin_spec.spl`),
+  run 2026-08-17: 6 executed, 6 passed, 0 failed.
+- Surviving-surface spec stays green:
+  `test/01_unit/browser_engine/layout_paint_coverage_closure_spec.spl`
+  (docstring refreshed).
+
+Note on "fails before, passes after": no spec could fail before this fix —
+the defect was uncallable dead code, only diagnosable at call time; any
+spec calling `_paint_box` fails both before (semantic error) and after
+(symbol gone). The contract-pin spec is the recurrence guard instead.

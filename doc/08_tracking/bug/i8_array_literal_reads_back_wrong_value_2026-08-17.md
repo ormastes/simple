@@ -6,6 +6,7 @@
 copy defect because it needs an `[i8]` array, which is rare in this tree.
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** OPEN — noticed and measured, not investigated.
 
 ## Summary
 

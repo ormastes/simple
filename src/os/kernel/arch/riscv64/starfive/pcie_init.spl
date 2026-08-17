@@ -1,0 +1,116 @@
+# codex-impl: JH7110 PCIe1 host-controller admission and cold initialization.
+#
+# Register ownership and ordering follow Linux pcie-starfive.c and
+# phy-jh7110-pcie.c.  This module intentionally does not guess clock/reset or
+# PERST GPIO controller programming: U-Boot must leave those resources enabled
+# and PERST deasserted before SimpleOS may touch the PLDA bridge.
+
+extern fn rt_starfive_mmio_read32(addr: u64) -> u64
+extern fn rt_starfive_mmio_write32(addr: u64, value: u64)
+extern fn rt_starfive_delay_ms(milliseconds: u64)
+
+val JH7110_STG_SYSCON_BASE: u64 = 0x10240000u64
+val JH7110_PCIE1_STG_BASE: u64 = 0x1F8u64
+val JH7110_PCIE1_APB_BASE: u64 = 0x2C000000u64
+val JH7110_PCIE1_PHY_BASE: u64 = 0x10220000u64
+
+val JH7110_STG_AR: u64 = JH7110_STG_SYSCON_BASE + JH7110_PCIE1_STG_BASE + 0x78u64
+val JH7110_STG_AW: u64 = JH7110_STG_SYSCON_BASE + JH7110_PCIE1_STG_BASE + 0x7Cu64
+val JH7110_STG_RP_NEP: u64 = JH7110_STG_SYSCON_BASE + JH7110_PCIE1_STG_BASE + 0xE8u64
+val JH7110_STG_LINK_STATUS: u64 = JH7110_STG_SYSCON_BASE + JH7110_PCIE1_STG_BASE + 0x170u64
+
+val JH7110_STG_AR_MASK: u64 = 0x007FFF00u64
+val JH7110_STG_AW_MASK: u64 = 0x00007FFFu64
+val JH7110_STG_PHY_AR_SHIFT: u64 = 17u64
+val JH7110_STG_PHY_AW_SHIFT: u64 = 9u64
+val JH7110_STG_RP_ENABLE: u64 = 1u64 << 8
+val JH7110_STG_CLKREQ: u64 = 1u64 << 22
+val JH7110_STG_REFCLK_MASK: u64 = 3u64 << 18
+val JH7110_STG_REFCLK_EXTERNAL: u64 = 2u64 << 18
+val JH7110_STG_LINK_ACTIVE: u64 = 1u64 << 5
+
+val JH7110_PHY_KVCO_LEVEL: u64 = JH7110_PCIE1_PHY_BASE + 0x28u64
+val JH7110_PHY_PLL_CONTROL: u64 = JH7110_PCIE1_PHY_BASE + 0x7Cu64
+val JH7110_PHY_KVCO_SIGNALS: u64 = JH7110_PCIE1_PHY_BASE + 0x80u64
+val JH7110_PHY_USB3_ENABLE: u64 = 1u64 << 4
+
+val PLDA_GEN_SETTINGS: u64 = JH7110_PCIE1_APB_BASE + 0x80u64
+val PLDA_PCI_IDS_DW1: u64 = JH7110_PCIE1_APB_BASE + 0x9Cu64
+val PLDA_PCI_MISC: u64 = JH7110_PCIE1_APB_BASE + 0xB4u64
+val PLDA_PCIE_WINROM: u64 = JH7110_PCIE1_APB_BASE + 0xFCu64
+val PLDA_PMSG_SUPPORT_RX: u64 = JH7110_PCIE1_APB_BASE + 0x3F0u64
+val PLDA_CONFIG_BAR0: u64 = JH7110_PCIE1_APB_BASE + 0x1010u64
+val PLDA_CONFIG_BAR1: u64 = JH7110_PCIE1_APB_BASE + 0x1014u64
+
+fn _jh7110_rmw32(address: u64, mask: u64, value: u64) -> bool:
+    val old_value = rt_starfive_mmio_read32(address)
+    if old_value == 0xFFFFFFFFu64:
+        return false
+    val next_value = (old_value & ~mask) | (value & mask)
+    rt_starfive_mmio_write32(address, next_value)
+    (rt_starfive_mmio_read32(address) & mask) == (value & mask)
+
+fn starfive_jh7110_pcie1_link_up() -> bool:
+    (rt_starfive_mmio_read32(JH7110_STG_LINK_STATUS) & JH7110_STG_LINK_ACTIVE) != 0u64
+
+fn _jh7110_select_function(function: u64) -> bool:
+    _jh7110_rmw32(JH7110_STG_AR, JH7110_STG_AR_MASK, function << JH7110_STG_PHY_AR_SHIFT) and
+        _jh7110_rmw32(JH7110_STG_AW, JH7110_STG_AW_MASK, function << JH7110_STG_PHY_AW_SHIFT)
+
+fn starfive_jh7110_pcie1_initialize() -> Result<text, text>:
+    """Admit or initialize PCIe1 without touching PCI configuration or media.
+
+    A responsive PLDA APB aperture proves that firmware enabled the named
+    clocks and deasserted the six PCIe1 resets.  An inaccessible aperture fails
+    closed; SimpleOS never guesses CRG bit positions or drives GPIO28.
+    """
+    if starfive_jh7110_pcie1_link_up():
+        return Ok("firmware-link-ready")
+
+    val bridge_probe = rt_starfive_mmio_read32(PLDA_GEN_SETTINGS)
+    if bridge_probe == 0xFFFFFFFFu64:
+        return Err("starfive-pcie1-apb-inaccessible-clocks-or-resets")
+
+    # PCIe1 PHY has no syscon mode mux in the upstream DT; PCIe is its default.
+    rt_starfive_mmio_write32(JH7110_PHY_KVCO_LEVEL, 0x91u64)
+    rt_starfive_mmio_write32(JH7110_PHY_KVCO_SIGNALS, 0x0Cu64)
+    if not _jh7110_rmw32(JH7110_PHY_PLL_CONTROL, JH7110_PHY_USB3_ENABLE, 0u64):
+        return Err("starfive-pcie1-phy-program-failed")
+
+    if not _jh7110_rmw32(JH7110_STG_RP_NEP, JH7110_STG_RP_ENABLE, JH7110_STG_RP_ENABLE):
+        return Err("starfive-pcie1-root-mode-failed")
+    if not _jh7110_rmw32(JH7110_STG_AW, JH7110_STG_REFCLK_MASK, JH7110_STG_REFCLK_EXTERNAL):
+        return Err("starfive-pcie1-refclk-source-failed")
+    if not _jh7110_rmw32(JH7110_STG_AW, JH7110_STG_CLKREQ, JH7110_STG_CLKREQ):
+        return Err("starfive-pcie1-clkreq-failed")
+
+    # Linux selects functions 1..3 through STG AR/AW and disables each one.
+    var function: u64 = 1u64
+    while function < 4u64:
+        if not _jh7110_select_function(function):
+            return Err("starfive-pcie1-function-select-failed")
+        if not _jh7110_rmw32(PLDA_PCI_MISC, 1u64 << 15, 1u64 << 15):
+            return Err("starfive-pcie1-function-disable-failed")
+        function = function + 1u64
+    if not _jh7110_select_function(0u64):
+        return Err("starfive-pcie1-function-zero-restore-failed")
+
+    if not _jh7110_rmw32(PLDA_GEN_SETTINGS, 1u64, 1u64):
+        return Err("starfive-pcie1-root-port-enable-failed")
+    rt_starfive_mmio_write32(PLDA_CONFIG_BAR0, 0u64)
+    rt_starfive_mmio_write32(PLDA_CONFIG_BAR1, 0u64)
+    val revision = rt_starfive_mmio_read32(PLDA_PCI_IDS_DW1) & 0xFFu64
+    rt_starfive_mmio_write32(PLDA_PCI_IDS_DW1, revision | (0x060400u64 << 8))
+    if not _jh7110_rmw32(PLDA_PMSG_SUPPORT_RX, 1u64 << 2, 0u64):
+        return Err("starfive-pcie1-ltr-disable-failed")
+    if not _jh7110_rmw32(PLDA_PCIE_WINROM, 1u64 << 3, 1u64 << 3):
+        return Err("starfive-pcie1-pref64-enable-failed")
+
+    # Firmware owns GPIO28/PERST. Wait the Linux-equivalent ten 100 ms slots.
+    var retry: u64 = 0u64
+    while retry < 10u64:
+        if starfive_jh7110_pcie1_link_up():
+            return Ok("cold-init-link-ready")
+        rt_starfive_delay_ms(100u64)
+        retry = retry + 1u64
+    Err("starfive-pcie1-link-timeout-perst-or-endpoint")

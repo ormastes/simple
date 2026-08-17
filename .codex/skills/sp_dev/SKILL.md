@@ -172,6 +172,14 @@ receipt; do not assume `timeout head -c <large-count>` preserves reset bursts.
 If a direct read sees bytes while the wrapper reports silence, classify the
 wrapper as failed and repair it before diagnosing target wiring.
 
+For original UP Squared Apollo Lake bring-up, use removable x64 UEFI media and
+the fallback path `EFI/BOOT/BOOTX64.EFI`; never use the host system disk or the
+board's internal eMMC for first light. CN16 is 3.3 V TTL UART. CN22 is a 1.8 V
+CPLD/BIOS-update connector, not a proven Apollo Lake CPU JTAG port, so do not
+drive it with Tigard/OpenOCD. The retained handoff is
+`doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`; its offline image and
+partial source state are not physical boot or `ls` evidence.
+
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo
 DB. It may end the coding turn only after code and host-independent tests are
@@ -1052,3 +1060,21 @@ oracle. Do not claim reset from the OpenOCD command alone: the retained UART
 transcript must show a fresh BootROM/OpenSBI/U-Boot sequence. For immutable
 packaged roots, a VFS-owned manifest is valid evidence when the shell calls
 public `readdir`; names must not be embedded in the shell output path.
+
+For StarFive VisionFive 2 NVMe work, separate PCI identity, NVMe Identify, and
+destructive provisioning. The M.2 socket is JH7110 PCIe1/domain 1; DT parsing,
+clocks, resets, PHY, PERST, PLDA quirks, and link validation remain in the
+StarFive port, while ECAM enumeration, NVMe commands, GPT, FAT32, and VFS remain
+host-neutral. A missing `pci`/`nvme` command in vendor U-Boot is firmware-build
+evidence, not proof that the SSD is absent. JTAG/ECAM can at most establish PCI
+vendor/device/class and cannot substitute for an NVMe Identify command.
+
+Run identification without writes and retain exact controller serial, model,
+firmware, NSID, LBA size/count, and capacity. Provisioning requires a separate
+explicit action bound to that immutable identity; never use a password as the
+destructive confirmation. Reject mounted, in-use, ambiguous, changed, or boot-
+source targets. Format only a bounded GPT partition, never namespace LBA 0 as a
+filesystem. Persistence PASS requires write, flush, unmount, remount, hash-
+equal read, and command-correlated VFS `ls /nvme` from one retained transcript.
+If failed high-address debug access leaves a hart unexaminable, stop software-
+reset retries and require a physical reset/power-cycle.

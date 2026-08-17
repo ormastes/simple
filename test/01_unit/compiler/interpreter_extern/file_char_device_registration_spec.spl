@@ -1,11 +1,24 @@
 # @req REQ-INTERP-EXTERN-FILE-CHAR-DEVICE-001
+# Updated 2026-08-17: this spec previously asserted the OLD design — a verbatim
+# C copy of rt_file_is_char_device inside runtime_native_gpu_stub.c with a
+# `const char* path` signature. That copy was a real defect (duplicate symbol
+# with an incompatible one-arg ABI that silently won under -z muldefs and
+# misreported /dev/zero); it was deliberately removed per
+# doc/08_tracking/bug/rt_file_is_char_device_dejit_and_dual_abi_2026-08-10.md.
+# The spec now asserts the CURRENT design: canonical (ptr, len) ABI in the C
+# runtime, the Rust runtime as the seed/JIT provider, the gpu stub explicitly
+# forbidding re-adding a C copy, and the interpreter extern-table registration.
 describe "rt_file_is_char_device seed/JIT registration":
-    it "links the no-shell device probe through the seed satellite runtime":
-        val satellite = rt_file_read_text("src/runtime/runtime_native_gpu_stub.c") ?? ""
-        val build = rt_file_read_text("src/compiler_rust/runtime/build.rs") ?? ""
-        val static_table_start = build.find("const LINKED_C_SOURCES")
-        val static_table = if static_table_start >= 0: build.substring(static_table_start) else: ""
-        expect(satellite).to_contain("int rt_file_is_char_device(const char* path)")
-        expect(satellite).to_contain("stat(path, &st) == 0 && S_ISCHR(st.st_mode)")
-        expect(build).to_contain("\"runtime_native_gpu_stub.c\"")
-        expect(static_table).to_contain("\"runtime_native_gpu_stub.c\"")
+    it "keeps the canonical (ptr, len) ABI with no stale C copy in the gpu stub":
+        val stub = rt_file_read_text("src/runtime/runtime_native_gpu_stub.c") ?? ""
+        val runtime_c = rt_file_read_text("src/runtime/runtime.c") ?? ""
+        val mod_rs = rt_file_read_text("src/compiler_rust/compiler/src/interpreter_extern/mod.rs") ?? ""
+        # The gpu stub must document the removal and must NOT define the symbol.
+        expect(stub).to_contain("do not")
+        expect(stub).to_contain("re-add a C copy")
+        assert_false(stub.contains("int rt_file_is_char_device(const char* path)"))
+        # The canonical C runtime definition uses the two-argument (ptr, len) ABI.
+        expect(runtime_c).to_contain("int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len)")
+        expect(runtime_c).to_contain("S_ISCHR(st.st_mode)")
+        # The interpreter extern table registers the name.
+        expect(mod_rs).to_contain("\"rt_file_is_char_device\"")

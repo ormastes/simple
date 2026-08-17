@@ -13,18 +13,30 @@ use os.services.vfs.vfs_init.{
     vfs_boot_init_production, g_vfs_initialized, g_vfs_read_file_bytes,
     g_c_adapter, CNvmeBlockAdapter,
     vfs_mount_rootfs, vfs_boot_probe_pure_simple_nvme_adapter,
-    g_vfs_file_exists
+    g_vfs_file_exists, g_vfs_write_file_text, g_vfs_read_file_text
+}
+use os.sosix.fs.positioned_acceptance_route_v1.{
+    sosix_positioned_acceptance_round_trip_v1
+}
+use os.sosix.fs.positioned_backend_composition_v1.{
+    SosixPositionedBackendKindV1
+}
+use os.kernel.abi.syscall_shim_positioned.{
+    shim_positioned_install_backend_route_v1
 }
 use os.services.block_device.{BlockDevice}
 use os.userlib.process.{spawn_binary}
 use std.fs_driver.nvfs_superblock.{
-    nvfs_superblock_set_device, nvfs_superblock_probe_disk, nvfs_superblock_read_from_disk
+    NvfsSuperblock, NVFS_VERSION,
+    nvfs_superblock_set_device, nvfs_superblock_probe_disk,
+    nvfs_superblock_read_from_disk, nvfs_superblock_read_from_bytes
 }
 use std.db.dbfs_engine.superblock.{
     dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk,
-    DbfsSuperblock
+    dbfs_superblock_validate, DbfsSuperblock
 }
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
 use std.fs_driver.types.{MountOptions}
 use std.db.dbfs_driver.{DbFsDriver}
 use std.fs_driver.instance.{DriverInstance}
@@ -33,6 +45,11 @@ use os.services.dbfs.dbfs_filesystem_ops.{
 }
 
 val DBFS_ARENA_BASE_LBA: i64 = 4
+val NVFS_DBFS_BACKED_PROVIDER: text = "nvfs-dbfs-backed-v1"
+val NVFS_PERSISTENCE_PATH: text = "/boot-marker.txt"
+val NVFS_PERSISTENCE_CONTENT: text = "nvfs-persist-ok"
+val NVFS_POSITIONED_PATH: text = "/boot-positioned.bin"
+val NVFS_MAX_ARENA_BLOCK_COUNT: u64 = 9223372036854775807u64
 
 extern fn serial_println(msg: text)
 
@@ -86,7 +103,7 @@ fn boot_fs_sequence_uses_c_bridge_roots_for_test() -> bool:
 fn boot_fs_development_sequence_uses_c_bridge_roots_for_test() -> bool:
     true
 
-fn boot_fs_sequence() -> Result<BootFsResult, text>:
+pub fn boot_fs_sequence() -> Result<BootFsResult, text>:
     """Production hosted boot sequence: fail closed on C-backed NVFS/DBFS roots.
 
     The legacy C-bridge NVFS/DBFS probe (_try_nvfs_root/_try_dbfs_root, used
@@ -301,31 +318,121 @@ fn _try_dbfs_root() -> bool:
     log_raw_println("[DBFS] mounted as root filesystem")
     true
 
+fn _nvfs_boot_valid_replica(
+    dev: BlockDevice, lba: u64, expected_replica: u8
+) -> NvfsSuperblock?:
+    val bytes = dev.read_sector(lba)
+    if bytes.is_err():
+        return nil
+    val parsed = nvfs_superblock_read_from_bytes(bytes.unwrap())
+    if parsed.is_err():
+        return nil
+    val sb = parsed.unwrap()
+    if sb.version != NVFS_VERSION or sb.replica_id != expected_replica:
+        return nil
+    Some(sb)
+
+pub fn nvfs_boot_select_valid_superblock(
+    dev: BlockDevice
+) -> NvfsSuperblock?:
+    """Select the newest checksum-valid replica and fail over on corruption."""
+    val replica_a = _nvfs_boot_valid_replica(dev, 0u64, 0u8)
+    val replica_b = _nvfs_boot_valid_replica(dev, 1u64, 1u8)
+    if replica_a.? and replica_b.?:
+        val a = replica_a.unwrap()
+        val b = replica_b.unwrap()
+        if b.mount_generation > a.mount_generation:
+            return Some(b)
+        return Some(a)
+    if replica_a.?:
+        return replica_a
+    if replica_b.?:
+        return replica_b
+    nil
+
+export nvfs_boot_select_valid_superblock
+
 fn _try_nvfs_root_pure_simple(dev: BlockDevice) -> bool:
-    """Production NVFS probe: same superblock/mount logic as _try_nvfs_root,
-    but against a caller-supplied pure-Simple BlockDevice instead of the
-    permanently-stubbed g_c_adapter. NVFS stays probe-only for now (no
-    dedicated root-mount consumer yet) -- see module doc TODO.
+    """Mount the current NVFS POSIX compatibility root on its DBFS backing.
+
+    The provider boundary is explicit: NVFS replicas select the root at LBA
+    0/1, while a validated DBFS superblock supplies the persistent arena size
+    for the namespace and byte owner at LBA 4+.
     """
     log_raw_println("[boot-fs] Probing NVMe (pure-Simple) for NVFS superblock...")
 
-    nvfs_superblock_set_device(dev)
-
-    val found = nvfs_superblock_probe_disk()
-    if not found:
-        log_raw_println("[boot-fs] No NVFS superblock at LBA 0 — trying next FS")
+    val selected = nvfs_boot_select_valid_superblock(dev)
+    if not selected.?:
+        log_raw_println("[boot-fs] No checksum-valid NVFS superblock replica — trying next FS")
         return false
-
-    val sb = nvfs_superblock_read_from_disk()
+    val sb = selected.unwrap()
     log_raw_println("[boot-fs] NVFS superblock found: gen={sb.mount_generation}")
 
-    val opts = MountOptions(read_only: false)
-    val mount_r = _nvfs_driver.mount(opts)
-    if mount_r.is_err():
-        log_raw_println("[boot-fs] NVFS mount failed")
+    dbfs_superblock_set_device(dev)
+    if not dbfs_superblock_probe_disk():
+        log_raw_println("[boot-fs] NVFS DBFS backing superblock missing at LBA 2")
+        return false
+    val backing_sb = dbfs_superblock_read_from_disk()
+    if not dbfs_superblock_validate(backing_sb):
+        log_raw_println("[boot-fs] NVFS DBFS backing superblock invalid")
+        return false
+    if backing_sb.block_count < 3u64 or backing_sb.block_count > NVFS_MAX_ARENA_BLOCK_COUNT:
+        log_raw_println("[boot-fs] NVFS DBFS backing block count invalid: {backing_sb.block_count}")
         return false
 
-    log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+    val driver_r = NvfsDriver.new_on_device(
+        NVFS_DBFS_BACKED_PROVIDER, dev, DBFS_ARENA_BASE_LBA,
+        backing_sb.block_count.to_i64()
+    )
+    if driver_r.is_err():
+        log_raw_println("[boot-fs] NVFS DBFS-backed provider open failed")
+        return false
+    val mount_r = vfs_mount_rootfs(DriverInstance.Nvfs(driver_r.unwrap()))
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] NVFS VFS mount failed")
+        return false
+    val route_install = shim_positioned_install_backend_route_v1(
+        SosixPositionedBackendKindV1.Nvfs)
+    if not route_install.accepted:
+        log_raw_println("[boot-fs] NVFS SOSIX positioned route install failed")
+        return false
+
+    if not _nvfs_root_persistence_check():
+        return false
+    if not _nvfs_root_positioned_io_check():
+        return false
+    log_raw_println("[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1")
+    true
+
+fn _nvfs_root_persistence_check() -> bool:
+    if g_vfs_file_exists(NVFS_PERSISTENCE_PATH):
+        val content = g_vfs_read_file_text(NVFS_PERSISTENCE_PATH)
+        if content == NVFS_PERSISTENCE_CONTENT:
+            log_raw_println("[boot-fs] NVFS persistence check: persisted:match content=nvfs-persist-ok")
+            return true
+        log_raw_println("[boot-fs] NVFS persistence check: FAILED content-mismatch")
+        return false
+
+    if not g_vfs_write_file_text(NVFS_PERSISTENCE_PATH, NVFS_PERSISTENCE_CONTENT):
+        log_raw_println("[boot-fs] NVFS persistence check: FAILED first-boot-write")
+        return false
+    log_raw_println("[boot-fs] NVFS persistence check: written:first-boot")
+    true
+
+fn _nvfs_positioned_round_trip_matches(data: [u8]) -> bool:
+    data.len() == 4 and data[0] == 0u8 and data[1] == 0u8 and data[2] == 11u8 and data[3] == 22u8
+
+fn _nvfs_root_positioned_io_check() -> bool:
+    val result = sosix_positioned_acceptance_round_trip_v1(
+        SosixPositionedBackendKindV1.Nvfs, NVFS_POSITIONED_PATH)
+    if not result.accepted:
+        log_raw_println("[boot-fs] NVFS positioned I/O: FAILED {result.reason}")
+        return false
+    if not _nvfs_positioned_round_trip_matches(result.bytes):
+        log_raw_println("[boot-fs] NVFS positioned I/O: FAILED byte-mismatch")
+        return false
+
+    log_raw_println("[boot-fs] NVFS positioned I/O: cursor-independent round-trip")
     true
 
 fn _try_dbfs_root_pure_simple(dev: BlockDevice) -> DbFsDriver?:
@@ -357,6 +464,12 @@ fn _try_dbfs_root_pure_simple(dev: BlockDevice) -> DbFsDriver?:
     val mount_r = vfs_mount_rootfs(DriverInstance.DbFs(driver))
     if mount_r.is_err():
         log_raw_println("[boot-fs] DBFS VFS mount failed — falling through")
+        return nil
+
+    val route_install = shim_positioned_install_backend_route_v1(
+        SosixPositionedBackendKindV1.Dbfs)
+    if not route_install.accepted:
+        log_raw_println("[boot-fs] DBFS SOSIX positioned route install failed — falling through")
         return nil
 
     log_raw_println("[DBFS] mounted as root filesystem")
@@ -432,3 +545,5 @@ fn boot_fs_spawn_executable(path: text, priority: u8) -> Result<i64, text>:
     if pid_result.is_err():
         return Err("spawn failed: {pid_result.unwrap_err()}")
     Ok(pid_result.unwrap() as i64)
+
+export boot_fs_sequence

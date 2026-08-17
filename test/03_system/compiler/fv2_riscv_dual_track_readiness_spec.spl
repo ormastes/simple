@@ -1,0 +1,150 @@
+# codex-system-test
+# @evidence-display: links
+"""
+# FV2 RISC-V Dual-Track Readiness
+
+This system specification verifies the exact RVFI readiness boundary hardened
+for REQ-FV2-015 and REQ-FV2-019. Synthetic cores exercise checker behavior;
+they never count as RTL proof. Product acceptance additionally requires the
+aggregate Lean/BYL sidecar gate and the strict SymbiYosys proof gate.
+"""
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{dir_create_all, file_write, process_run_timeout}
+
+val ARTIFACT_DIR = "build/test-artifacts/03_system/compiler/fv2_riscv_dual_track_readiness"
+val TOOL_DIR = ARTIFACT_DIR + "/bin"
+val RVFI_CHECK = "scripts/rtl/check-rvfi-formal-readiness.shs"
+val DUAL_TRACK_CHECK = "scripts/check/check-riscv-formal-dual-track.shs"
+val STRICT_SBY_CHECK = "scripts/check/check-riscv-rtl-sby-proof.shs"
+
+fn canonical_rvfi_port_names() -> [text]:
+    ["rvfi_valid", "rvfi_order", "rvfi_insn", "rvfi_trap", "rvfi_halt",
+        "rvfi_intr", "rvfi_mode", "rvfi_ixl", "rvfi_rs1_addr",
+        "rvfi_rs2_addr", "rvfi_rs1_rdata", "rvfi_rs2_rdata",
+        "rvfi_rd_addr", "rvfi_rd_wdata", "rvfi_pc_rdata",
+        "rvfi_pc_wdata", "rvfi_mem_addr", "rvfi_mem_rmask",
+        "rvfi_mem_wmask", "rvfi_mem_rdata", "rvfi_mem_wdata"]
+
+fn rvfi_core_fixture(omitted: text = "") -> text:
+    var rows: [text] = []
+    for name in canonical_rvfi_port_names():
+        if name != omitted:
+            rows.push("    " + name + " : out std_logic;")
+    rows.join("\n") + "\n"
+
+fn prepare_readiness_fixture(name: text, omitted: text = "") -> text:
+    val core_path = ARTIFACT_DIR + "/" + name + ".vhd"
+    expect(dir_create_all(TOOL_DIR)).to_be(true)
+    expect(file_write(core_path, rvfi_core_fixture(omitted))).to_be(true)
+    expect(file_write(TOOL_DIR + "/sby", "#!/bin/sh\nexit 0\n")).to_be(true)
+    val (_chmod_stdout, _chmod_stderr, chmod_code) = process_run_timeout(
+        "chmod", ["+x", TOOL_DIR + "/sby"], 5000)
+    expect(chmod_code).to_equal(0)
+    core_path
+
+fn run_readiness(core_path: text) -> (text, text, i32):
+    process_run_timeout("/usr/bin/env", [
+        "PATH=" + TOOL_DIR + ":/usr/bin:/bin",
+        "CORE_VHDL=" + core_path,
+        "REQUIRE_RVFI=1",
+        "/bin/sh", RVFI_CHECK
+    ], 30000)
+
+describe "FV2 RISC-V dual-track readiness":
+    # @manual_section: Readiness checker contract
+    # @req REQ-FV2-015
+    # @req REQ-FV2-019
+    # @req NFR-FV2-002
+    it "should accept exactly the canonical 21-port RVFI readiness manifest":
+        step("Prepare a canonical 21-port RVFI core fixture")
+        val core_path = prepare_readiness_fixture("complete_rvfi_core")
+
+        step("Run the strict RVFI readiness checker")
+        val (stdout, stderr, code) = run_readiness(core_path)
+        val report = stdout + stderr
+        expect(code).to_equal(0)
+        expect(report).to_contain("PASS: RVFI port manifest present")
+        expect(report).to_contain("READY: riscv-formal SymbiYosys runner can be wired")
+        expect(report.contains("ERROR:")).to_be(false)
+
+    # @manual_section: Fail-closed interface mutations
+    # @req REQ-FV2-015
+    # @req REQ-FV2-019
+    # @req NFR-FV2-002
+    it "should reject an RVFI core missing an extended control port":
+        step("Remove the rvfi_mode control port from the canonical fixture")
+        val core_path = prepare_readiness_fixture(
+            "missing_rvfi_mode_core", "rvfi_mode")
+
+        step("Confirm the checker rejects the incomplete RVFI interface")
+        val (stdout, stderr, code) = run_readiness(core_path)
+        val report = stdout + stderr
+        expect(code).to_equal(1)
+        expect(report).to_contain("RVFI readiness: missing RVFI ports")
+        expect(report).to_contain("rvfi_mode")
+        expect(report).to_contain(
+            "ERROR: RVFI formal flow requires all RVFI ports")
+        expect(report.contains("READY:")).to_be(false)
+
+    # @manual_section: Missing-artifact rejection
+    # @req REQ-FV2-019
+    # @req NFR-FV2-002
+    it "should reject a missing generated core instead of reporting readiness":
+        step("Present a missing generated RVFI core path")
+        expect(dir_create_all(TOOL_DIR)).to_be(true)
+        val missing_path = ARTIFACT_DIR + "/missing_generated_core.vhd"
+
+        step("Confirm missing Stage-4 artifacts remain blocked")
+        val (stdout, stderr, code) = run_readiness(missing_path)
+        val report = stdout + stderr
+        expect(code).to_equal(1)
+        expect(report).to_contain("ERROR: RV32I core VHDL not found")
+        expect(report.contains("READY:")).to_be(false)
+
+    # @manual_section: Checker mutation calibration
+    # @req REQ-FV2-019
+    # @req NFR-FV2-002
+    it "should keep all four extended RVFI port omissions fail closed":
+        step("Run the readiness checker's deliberate-red mutation matrix")
+        val (stdout, stderr, code) = process_run_timeout(
+            "/bin/sh", [RVFI_CHECK, "--self-test"], 30000)
+        val report = stdout + stderr
+
+        step("Confirm every omitted control port was rejected")
+        expect(code).to_equal(0)
+        expect(report).to_contain(
+            "STATUS: PASS rvfi-formal-readiness self-test")
+        expect(report.contains("STATUS: FAIL")).to_be(false)
+
+    # @manual_section: Qualified dual-track execution
+    # @capture(log)
+    # @req REQ-FV2-015
+    # @req REQ-FV2-019
+    # @req NFR-FV2-009
+    it "should pass the aggregate generated and manual RISC-V proof-model gate":
+        step("Run the dual-track aggregate proof gate")
+        val (stdout, stderr, code) = process_run_timeout(
+            "/bin/sh", [DUAL_TRACK_CHECK], 600000)
+        val report = stdout + stderr
+
+        step("Require the generated sidecar and durable manual proof layers")
+        expect(code).to_equal(0)
+        expect(report).to_contain("STATUS: PASS riscv-formal-dual-track")
+        expect(report.contains("STATUS: FAIL")).to_be(false)
+
+    # @manual_section: Qualified dual-track execution
+    # @capture(log)
+    # @req REQ-FV2-015
+    # @req REQ-FV2-019
+    # @req NFR-FV2-009
+    it "should require a strict SymbiYosys proof pass after readiness":
+        step("Run the strict RVFI SymbiYosys proof gate")
+        val (stdout, stderr, code) = process_run_timeout(
+            "/bin/sh", [STRICT_SBY_CHECK], 600000)
+        val report = stdout + stderr
+
+        step("Reject readiness-only or missing-artifact evidence")
+        expect(code).to_equal(0)
+        expect(report).to_contain("STATUS: PASS riscv-rtl-sby-proof")
+        expect(report.contains("STATUS: FAIL")).to_be(false)

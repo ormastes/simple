@@ -1,0 +1,285 @@
+#!/bin/sh
+# Qualified two-boot SimpleOS NVFS positioned-I/O QEMU acceptance.
+#
+# KERNEL_ELF.build_stamp is a closed receipt with exactly these keys:
+# schema_version=1, target=x86_64-unknown-none, entry, kernel_path, kernel_sha256,
+# compiler_path, compiler_sha256, runtime_path, runtime_sha256, and
+# source_revision. Both tool paths and hashes must identify the admitted
+# Stage-4 pure-Simple runtime, and source_revision must equal the current HEAD.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runtime_gate=$root/scripts/check/check-sosix-qemu-runtime-admission.shs
+stage4_gate=$root/scripts/check/check-post-bootstrap-stage4-sspec.shs
+linked_gate=$root/scripts/check/check-sosix-positioned-live-route.shs
+
+fail() { printf '%s\n' "simpleos-nvfs-root-qemu: $*" >&2; exit 1; }
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else fail missing-sha256-tool
+    fi
+}
+
+canonical_file() {
+    [ -f "$1" ] || return 1
+    readlink -f -- "$1" 2>/dev/null || {
+        leaf=$(basename -- "$1")
+        parent=$(dirname -- "$1")
+        (CDPATH= cd -P -- "$parent" && printf '%s/%s\n' "$PWD" "$leaf")
+    }
+}
+
+field() {
+    key=$1 manifest=$2
+    count=$(awk -F= -v k="$key" '$1 == k { n++ } END { print n+0 }' "$manifest")
+    [ "$count" -eq 1 ] || fail "manifest-field-count:${key}:${count}"
+    awk -F= -v k="$key" '$1 == k { print substr($0,index($0,"=")+1) }' "$manifest"
+}
+
+require_sha256() {
+    label=$1 value=$2
+    case "$value" in ''|*[!0-9a-f]*|?????????????????????????????????????????????????????????????????*)
+        fail "${label}-sha256-invalid" ;;
+    esac
+    [ "${#value}" -eq 64 ] || fail "${label}-sha256-invalid"
+}
+
+require_closed_record() {
+    record=$1 kind=$2 allowed=$3
+    awk -F= -v allowed="$allowed" '
+        BEGIN {
+            count = split(allowed, keys, " ")
+            for (i = 1; i <= count; i++) known[keys[i]] = 1
+        }
+        !/^[A-Za-z0-9_]+=/ || !($1 in known) { bad = 1 }
+        END { exit bad }
+    ' "$record" || fail "${kind}-open-or-malformed:${record}"
+}
+
+require_marker() {
+    log=$1 marker=$2
+    grep -a -F -q "$marker" "$log" || fail "missing-live-marker:${marker}"
+}
+
+source_contract() {
+    grep -Fq 'class SosixNvfsPositionedVfsBackendV1' "$root/src/os/sosix/fs/nvfs_positioned_vfs_backend.spl" || fail missing-nvfs-backend
+    grep -Fq 'class SosixDbfsPositionedVfsBackendV1' "$root/src/os/sosix/fs/dbfs_positioned_vfs_backend.spl" || fail missing-dbfs-backend
+    grep -Fq 'positioned_read_bytes' "$root/src/lib/nogc_async_mut/fs_driver/mount_table.spl" || fail missing-positioned-object-owner
+    grep -Fq 'provider=nvfs-dbfs-backed-v1' "$root/src/os/kernel/boot/boot_fs.spl" || fail missing-live-provider-boundary
+    grep -Fq 'NVFS positioned I/O: cursor-independent round-trip' "$root/src/os/kernel/boot/boot_fs.spl" || fail missing-live-positioned-oracle
+    grep -Fq 'boot_fs_sequence()' "$root/examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl" || fail missing-live-nvfs-entry
+    grep -Fq 'simpleos_nvfs_positioned_build=pass' "$root/scripts/check/build-simpleos-nvfs-positioned-qemu.shs" || fail missing-live-build-owner
+    grep -Fq -- '-device "loader,file=${kernel},cpu-num=0"' "$0" || fail missing-qemu-kernel-loader
+    grep -Fq -- '-device nvme,id=nvfs,serial=simpleos-nvfs0' "$0" || fail missing-qemu-nvme-controller
+    grep -Fq -- '-device nvme-ns,drive=nvfsns1,bus=nvfs,nsid=1' "$0" || fail missing-qemu-nvme-namespace
+    printf '%s\n' simpleos_nvfs_positioned_source_contract=pass
+}
+
+admit_manifest() {
+    image=$1 manifest=$2 runtime_sha=$3 revision=$4
+    [ -f "$manifest" ] || fail "missing-image-manifest:${manifest}"
+    require_closed_record "$manifest" image-manifest \
+        'schema_version provider image_path image_sha256 source_revision runtime_sha256'
+    [ "$(field schema_version "$manifest")" = 1 ] || fail image-manifest-schema-mismatch
+    [ "$(field provider "$manifest")" = nvfs-dbfs-backed-v1 ] || fail image-provider-mismatch
+    image_real=$(canonical_file "$image") || fail "missing-image:${image}"
+    manifest_image=$(canonical_file "$(field image_path "$manifest")") || fail manifest-image-missing
+    [ "$image_real" = "$manifest_image" ] || fail image-identity-mismatch
+    image_sha=$(field image_sha256 "$manifest")
+    require_sha256 image "$image_sha"
+    [ "$image_sha" = "$(sha256_file "$image_real")" ] || fail image-sha256-mismatch
+    manifest_runtime_sha=$(field runtime_sha256 "$manifest")
+    require_sha256 image-runtime "$manifest_runtime_sha"
+    [ "$manifest_runtime_sha" = "$runtime_sha" ] || fail image-runtime-mismatch
+    [ "$(field source_revision "$manifest")" = "$revision" ] || fail image-source-revision-mismatch
+    printf '%s\n' "$image_real"
+}
+
+admit_kernel_receipt() {
+    kernel=$1 runtime_path=$2 runtime_sha=$3 revision=$4
+    receipt=${kernel}.build_stamp
+    [ -f "$receipt" ] || fail "missing-kernel-build-receipt:${receipt}"
+    require_closed_record "$receipt" kernel-build-receipt \
+        'schema_version target entry kernel_path kernel_sha256 compiler_path compiler_sha256 runtime_path runtime_sha256 source_revision'
+    [ "$(field schema_version "$receipt")" = 1 ] || fail kernel-build-receipt-schema-mismatch
+    [ "$(field target "$receipt")" = x86_64-unknown-none ] || fail kernel-build-target-mismatch
+    [ "$(field entry "$receipt")" = examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl ] ||
+        fail kernel-build-entry-mismatch
+
+    kernel_real=$(canonical_file "$kernel") || fail "missing-kernel:${kernel}"
+    receipt_kernel=$(canonical_file "$(field kernel_path "$receipt")") || fail kernel-build-artifact-missing
+    [ "$kernel_real" = "$receipt_kernel" ] || fail kernel-build-artifact-identity-mismatch
+    kernel_sha=$(field kernel_sha256 "$receipt")
+    require_sha256 kernel "$kernel_sha"
+    [ "$kernel_sha" = "$(sha256_file "$kernel_real")" ] || fail kernel-build-artifact-sha256-mismatch
+
+    admitted_runtime=$(canonical_file "$runtime_path") || fail kernel-build-runtime-missing
+    compiler=$(canonical_file "$(field compiler_path "$receipt")") || fail kernel-build-compiler-missing
+    receipt_runtime=$(canonical_file "$(field runtime_path "$receipt")") || fail kernel-build-runtime-missing
+    [ "$compiler" = "$admitted_runtime" ] || fail kernel-build-compiler-identity-mismatch
+    [ "$receipt_runtime" = "$admitted_runtime" ] || fail kernel-build-runtime-identity-mismatch
+    compiler_sha=$(field compiler_sha256 "$receipt")
+    receipt_runtime_sha=$(field runtime_sha256 "$receipt")
+    require_sha256 kernel-compiler "$compiler_sha"
+    require_sha256 kernel-runtime "$receipt_runtime_sha"
+    [ "$compiler_sha" = "$runtime_sha" ] || fail kernel-build-compiler-sha256-mismatch
+    [ "$receipt_runtime_sha" = "$runtime_sha" ] || fail kernel-build-runtime-sha256-mismatch
+    [ "$compiler_sha" = "$receipt_runtime_sha" ] || fail kernel-build-toolchain-divergence
+    [ "$(field source_revision "$receipt")" = "$revision" ] || fail kernel-build-source-revision-mismatch
+    printf '%s\n' "$kernel_real"
+}
+
+boot_once() {
+    qemu=$1 kernel=$2 image=$3 log=$4 timeout_seconds=$5
+    rm -f "$log"
+    set +e
+    timeout "${timeout_seconds}s" "$qemu" \
+        -machine q35 -cpu qemu64 -m 512M \
+        -serial "file:${log}" -monitor none -display none -no-reboot \
+        -device "loader,file=${kernel},cpu-num=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -device nvme,id=nvfs,serial=simpleos-nvfs0 \
+        -drive "file=${image},if=none,id=nvfsns1,format=raw" \
+        -device nvme-ns,drive=nvfsns1,bus=nvfs,nsid=1 >/dev/null 2>&1
+    code=$?
+    set -e
+    # isa-debug-exit reports a guest value as an odd host exit status. Exact
+    # serial oracles below, rather than that encoded status, decide acceptance.
+    [ "$code" -eq 0 ] || [ "$code" -eq 124 ] || [ $((code % 2)) -eq 1 ] || fail "qemu-exit:${code}"
+    [ -s "$log" ] || fail missing-serial-log
+}
+
+admit() {
+    [ "$#" -eq 6 ] || fail 'usage: --admit RUNTIME STAGE4_PROVENANCE RUNTIME_RECEIPT KERNEL_ELF IMAGE IMAGE_MANIFEST'
+    runtime=$1 provenance=$2 receipt=$3 kernel=$4 image=$5 manifest=$6
+    source_contract >/dev/null
+    stage4=$($stage4_gate "$runtime" "$provenance") || fail stage4-admission-failed
+    printf '%s\n' "$stage4" | grep -Fq 'post_bootstrap_stage4_acceptance=true' || fail stage4-acceptance-marker-missing
+    identity=$($runtime_gate --verify "$runtime" "$receipt") || fail runtime-admission-failed
+    runtime_sha=$(printf '%s\n' "$identity" | sed -n 's/^runtime_sha256=//p')
+    runtime_path=$(printf '%s\n' "$identity" | sed -n 's/^runtime_path=//p')
+    [ -n "$runtime_sha" ] && [ -n "$runtime_path" ] || fail runtime-identity-missing
+    $linked_gate --admit "$kernel" >/dev/null || fail kernel-linked-route-admission-failed
+    revision=$(git -C "$root" rev-parse HEAD)
+    kernel_real=$(admit_kernel_receipt "$kernel" "$runtime_path" "$runtime_sha" "$revision")
+    image_real=$(admit_manifest "$image" "$manifest" "$runtime_sha" "$revision")
+    qemu=$(command -v qemu-system-x86_64 || true)
+    [ -n "$qemu" ] || fail missing-qemu-system-x86_64
+    command -v timeout >/dev/null 2>&1 || fail missing-timeout
+
+    out=$root/build/test-artifacts/simpleos-nvfs-root-qemu
+    mkdir -p "$out"
+    run_image=$out/nvfs-root-run.img
+    cp "$image_real" "$run_image"
+    boot_once "$qemu" "$kernel_real" "$run_image" "$out/boot1.log" "${SIMPLEOS_NVFS_ROOT_TIMEOUT:-45}"
+    require_marker "$out/boot1.log" '[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1'
+    require_marker "$out/boot1.log" '[boot-fs] NVFS positioned I/O: cursor-independent round-trip'
+    require_marker "$out/boot1.log" '[boot-fs] NVFS persistence check: written:first-boot'
+    require_marker "$out/boot1.log" 'NVFS_POSITIONED_QEMU_PASSED'
+    boot_once "$qemu" "$kernel_real" "$run_image" "$out/boot2.log" "${SIMPLEOS_NVFS_ROOT_TIMEOUT:-45}"
+    require_marker "$out/boot2.log" '[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1'
+    require_marker "$out/boot2.log" '[boot-fs] NVFS positioned I/O: cursor-independent round-trip'
+    require_marker "$out/boot2.log" '[boot-fs] NVFS persistence check: persisted:match content=nvfs-persist-ok'
+    require_marker "$out/boot2.log" 'NVFS_POSITIONED_QEMU_PASSED'
+
+    boot1_real=$(canonical_file "$out/boot1.log") || fail missing-boot1-transcript
+    boot2_real=$(canonical_file "$out/boot2.log") || fail missing-boot2-transcript
+
+    printf 'simpleos_nvfs_runtime_sha256=%s\n' "$runtime_sha"
+    printf 'simpleos_nvfs_kernel_sha256=%s\n' "$(sha256_file "$kernel_real")"
+    printf 'simpleos_nvfs_kernel_build_receipt_path=%s\n' "$(canonical_file "${kernel}.build_stamp")"
+    printf 'simpleos_nvfs_kernel_build_receipt_sha256=%s\n' "$(sha256_file "${kernel}.build_stamp")"
+    printf 'simpleos_nvfs_source_revision=%s\n' "$revision"
+    printf 'simpleos_nvfs_image_sha256=%s\n' "$(sha256_file "$image_real")"
+    printf 'simpleos_nvfs_qemu_sha256=%s\n' "$(sha256_file "$qemu")"
+    printf 'simpleos_nvfs_boot1_transcript_path=%s\n' "$boot1_real"
+    printf 'simpleos_nvfs_boot1_transcript_sha256=%s\n' "$(sha256_file "$boot1_real")"
+    printf 'simpleos_nvfs_boot2_transcript_path=%s\n' "$boot2_real"
+    printf 'simpleos_nvfs_boot2_transcript_sha256=%s\n' "$(sha256_file "$boot2_real")"
+    printf '%s\n' simpleos_nvfs_positioned_live_guest=pass
+}
+
+self_test() {
+    source_contract >/dev/null
+    if "$0" --admit '' '' '' '' '' '' >/dev/null 2>&1; then fail unqualified-environment-accepted; fi
+
+    tmp=${TMPDIR:-/tmp}/simpleos-nvfs-root-qemu.$$
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    mkdir -p "$tmp"
+    image=$tmp/image.img
+    runtime=$tmp/simple
+    kernel=$tmp/kernel.elf
+    printf '%s\n' image-fixture >"$image"
+    printf '%s\n' runtime-fixture >"$runtime"
+    printf '%s\n' kernel-fixture >"$kernel"
+    runtime_sha=$(sha256_file "$runtime")
+    image_sha=$(sha256_file "$image")
+    kernel_sha=$(sha256_file "$kernel")
+    revision=$(git -C "$root" rev-parse HEAD)
+    manifest=$tmp/image.manifest.env
+    {
+        printf '%s\n' schema_version=1 provider=nvfs-dbfs-backed-v1
+        printf 'image_path=%s\nimage_sha256=%s\nsource_revision=%s\nruntime_sha256=%s\n' \
+            "$image" "$image_sha" "$revision" "$runtime_sha"
+    } >"$manifest"
+    admit_manifest "$image" "$manifest" "$runtime_sha" "$revision" >/dev/null
+
+    cp "$manifest" "$tmp/image-unknown.env"
+    printf '%s\n' unbound_claim=pass >>"$tmp/image-unknown.env"
+    if (admit_manifest "$image" "$tmp/image-unknown.env" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail image-manifest-unknown-key-accepted
+    fi
+    printf '%s\n' not-a-key-value-record >"$tmp/image-malformed.env"
+    if (admit_manifest "$image" "$tmp/image-malformed.env" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail image-manifest-malformed-record-accepted
+    fi
+    sed 's/^image_sha256=.*/image_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+        "$manifest" >"$tmp/image-stale.env"
+    if (admit_manifest "$image" "$tmp/image-stale.env" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail image-manifest-stale-sha-accepted
+    fi
+    cp "$manifest" "$tmp/image-duplicate.env"
+    printf 'image_sha256=%s\n' "$image_sha" >>"$tmp/image-duplicate.env"
+    if (admit_manifest "$image" "$tmp/image-duplicate.env" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail image-manifest-duplicate-key-accepted
+    fi
+
+    kernel_receipt=${kernel}.build_stamp
+    {
+        printf '%s\n' schema_version=1 target=x86_64-unknown-none
+        printf '%s\n' entry=examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl
+        printf 'kernel_path=%s\nkernel_sha256=%s\n' "$kernel" "$kernel_sha"
+        printf 'compiler_path=%s\ncompiler_sha256=%s\n' "$runtime" "$runtime_sha"
+        printf 'runtime_path=%s\nruntime_sha256=%s\nsource_revision=%s\n' \
+            "$runtime" "$runtime_sha" "$revision"
+    } >"$kernel_receipt"
+    cp "$kernel_receipt" "$tmp/kernel-valid.env"
+    admit_kernel_receipt "$kernel" "$runtime" "$runtime_sha" "$revision" >/dev/null
+    sed 's/^target=.*/target=aarch64-unknown-none/' "$tmp/kernel-valid.env" >"$tmp/kernel-wrong-target.env"
+    cp "$tmp/kernel-wrong-target.env" "$kernel_receipt"
+    if (admit_kernel_receipt "$kernel" "$runtime" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail kernel-build-wrong-target-accepted
+    fi
+    sed 's/^kernel_sha256=.*/kernel_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+        "$tmp/kernel-valid.env" >"$kernel_receipt"
+    if (admit_kernel_receipt "$kernel" "$runtime" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail kernel-build-stale-artifact-sha-accepted
+    fi
+    sed 's/^source_revision=.*/source_revision=stale/' "$tmp/kernel-valid.env" >"$kernel_receipt"
+    if (admit_kernel_receipt "$kernel" "$runtime" "$runtime_sha" "$revision") >/dev/null 2>&1; then
+        fail kernel-build-stale-source-revision-accepted
+    fi
+    printf '%s\n' simpleos_nvfs_positioned_source_contract=pass
+    printf '%s\n' simpleos_nvfs_unqualified_rejection=pass
+    printf '%s\n' simpleos_nvfs_image_manifest_sabotage_rejection=pass
+    printf '%s\n' simpleos_nvfs_kernel_build_receipt_sabotage_rejection=pass
+    printf '%s\n' simpleos_nvfs_root_qemu_self_test=pass
+}
+
+case "${1:-}" in
+    --admit) [ "$#" -eq 7 ] || fail 'usage: --admit RUNTIME STAGE4_PROVENANCE RUNTIME_RECEIPT KERNEL_ELF IMAGE IMAGE_MANIFEST'; admit "$2" "$3" "$4" "$5" "$6" "$7" ;;
+    --self-test) [ "$#" -eq 1 ] || fail 'usage: --self-test'; self_test ;;
+    *) fail 'usage: --admit RUNTIME STAGE4_PROVENANCE RUNTIME_RECEIPT KERNEL_ELF IMAGE IMAGE_MANIFEST | --self-test' ;;
+esac

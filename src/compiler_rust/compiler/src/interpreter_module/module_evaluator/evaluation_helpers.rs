@@ -685,6 +685,19 @@ fn process_use_stmt(
                         }
                     }
                 }
+                ImportTarget::Group(items) => {
+                    // A Group import that explicitly names an item equal to the module's
+                    // own name (`use pkg.Mod.{Mod}`) must bind the member, not the
+                    // enclosing module dict -- don't clobber it.
+                    let group_binds_name = items.iter().any(|item| match item {
+                        ImportTarget::Single(name) => name == &binding_name,
+                        ImportTarget::Aliased { alias, .. } => alias == &binding_name,
+                        _ => false,
+                    });
+                    if !group_binds_name {
+                        env.insert(binding_name.clone(), value);
+                    }
+                }
                 _ => {
                     // For non-glob imports, keep the module dict under its name for qualified access
                     env.insert(binding_name.clone(), value);

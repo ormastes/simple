@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use simple_parser::ast::{BinOp, Expr, PointerKind, UnaryOp};
@@ -28,6 +29,35 @@ fn uint_wrap_width(left: &Value, right: &Value) -> Option<u8> {
     match (left, right) {
         (Value::UInt { width: a, .. }, Value::UInt { width: b, .. }) => Some(*a.max(b)),
         (Value::UInt { width, .. }, _) | (_, Value::UInt { width, .. }) => Some(*width),
+        _ => None,
+    }
+}
+
+/// Compare integer values without routing `u64` through signed `i64` storage.
+///
+/// `Value::as_int()` intentionally exposes the raw machine word as `i64` for
+/// bitwise operations, but ordering is semantic: every high-bit `u64` is
+/// greater than every non-negative `i64`, not negative. Keep this owner next
+/// to unsigned arithmetic dispatch so all four relational operators share the
+/// same signed/unsigned boundary policy.
+fn integer_ordering(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::UInt { value: a, .. }, Value::UInt { value: b, .. }) => Some(a.cmp(b)),
+        (Value::Int(a), Value::UInt { value: b, .. }) => {
+            if *a < 0 {
+                Some(Ordering::Less)
+            } else {
+                Some((*a as u64).cmp(b))
+            }
+        }
+        (Value::UInt { value: a, .. }, Value::Int(b)) => {
+            if *b < 0 {
+                Some(Ordering::Greater)
+            } else {
+                Some(a.cmp(&(*b as u64)))
+            }
+        }
         _ => None,
     }
 }
@@ -725,6 +755,36 @@ pub(super) fn eval_op_expr(
                         Arc::make_mut(&mut arc).extend(b.iter().cloned());
                         Ok(Value::Array(arc))
                     }
+                    // Packed byte-array concatenation: without these arms
+                    // ByteArray fell through to the numeric-coercion fallback
+                    // and errored "cannot convert array to int" (bug:
+                    // seed_optional_query_comparison_divergence_2026-08-16.md
+                    // § Divergence D). The mixed arms cover `var acc: [u8] = []`
+                    // — an empty array LITERAL lowers to a generic Array, so
+                    // the first `acc + bytes` in a loop mixes representations.
+                    (
+                        Value::ByteArray(a) | Value::FrozenByteArray(a),
+                        Value::ByteArray(b) | Value::FrozenByteArray(b),
+                    ) => {
+                        let mut joined = a.as_ref().clone();
+                        joined.extend_from_slice(b);
+                        Ok(Value::ByteArray(Arc::new(joined)))
+                    }
+                    (Value::Array(a), Value::ByteArray(b) | Value::FrozenByteArray(b))
+                        if a.iter().all(|v| matches!(v.as_int(), Ok(0..=255))) =>
+                    {
+                        let mut joined: Vec<u8> =
+                            a.iter().map(|v| v.as_int().unwrap_or(0) as u8).collect();
+                        joined.extend_from_slice(b);
+                        Ok(Value::ByteArray(Arc::new(joined)))
+                    }
+                    (Value::ByteArray(a) | Value::FrozenByteArray(a), Value::Array(b))
+                        if b.iter().all(|v| matches!(v.as_int(), Ok(0..=255))) =>
+                    {
+                        let mut joined = a.as_ref().clone();
+                        joined.extend(b.iter().map(|v| v.as_int().unwrap_or(0) as u8));
+                        Ok(Value::ByteArray(Arc::new(joined)))
+                    }
                     _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? + as_f32(&right_val)?)),
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => {
@@ -1030,7 +1090,9 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_object_binop_method(
+                        if let Some(ordering) = integer_ordering(&left_val, &right_val) {
+                            Ok(Value::Bool(ordering.is_lt()))
+                        } else if let Some(result) = try_object_binop_method(
                             "__lt__",
                             &left_val,
                             &right_val,
@@ -1065,7 +1127,9 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_object_binop_method(
+                        if let Some(ordering) = integer_ordering(&left_val, &right_val) {
+                            Ok(Value::Bool(ordering.is_gt()))
+                        } else if let Some(result) = try_object_binop_method(
                             "__gt__",
                             &left_val,
                             &right_val,
@@ -1100,7 +1164,9 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_object_binop_method(
+                        if let Some(ordering) = integer_ordering(&left_val, &right_val) {
+                            Ok(Value::Bool(ordering.is_lt() || ordering.is_eq()))
+                        } else if let Some(result) = try_object_binop_method(
                             "__le__",
                             &left_val,
                             &right_val,
@@ -1135,7 +1201,9 @@ pub(super) fn eval_op_expr(
                     }
                     _ if use_float => Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?)),
                     _ => {
-                        if let Some(result) = try_object_binop_method(
+                        if let Some(ordering) = integer_ordering(&left_val, &right_val) {
+                            Ok(Value::Bool(ordering.is_gt() || ordering.is_eq()))
+                        } else if let Some(result) = try_object_binop_method(
                             "__ge__",
                             &left_val,
                             &right_val,
@@ -2118,6 +2186,55 @@ mod tests {
         assert_eq!(fast_value(BinOp::Eq, 7, 7), Value::Bool(true));
         assert_eq!(fast_value(BinOp::Is, 7, 8), Value::Bool(false));
         assert_eq!(fast_value(BinOp::NotEq, 7, 8), Value::Bool(true));
+    }
+
+    #[test]
+    fn integer_ordering_preserves_u64_high_bit_domain() {
+        let below = Value::UInt {
+            value: (1u64 << 63) - 1,
+            width: 64,
+        };
+        let edge = Value::UInt {
+            value: 1u64 << 63,
+            width: 64,
+        };
+        let above = Value::UInt {
+            value: (1u64 << 63) + 1,
+            width: 64,
+        };
+        let max = Value::UInt {
+            value: u64::MAX,
+            width: 64,
+        };
+        let zero = Value::UInt {
+            value: 0,
+            width: 64,
+        };
+
+        assert_eq!(integer_ordering(&below, &zero), Some(Ordering::Greater));
+        assert_eq!(integer_ordering(&edge, &zero), Some(Ordering::Greater));
+        assert_eq!(integer_ordering(&above, &edge), Some(Ordering::Greater));
+        assert_eq!(integer_ordering(&max, &above), Some(Ordering::Greater));
+    }
+
+    #[test]
+    fn integer_ordering_handles_mixed_signed_boundaries() {
+        let max = Value::UInt {
+            value: u64::MAX,
+            width: 64,
+        };
+        assert_eq!(integer_ordering(&max, &Value::Int(i64::MAX)), Some(Ordering::Greater));
+        assert_eq!(integer_ordering(&Value::Int(-1), &max), Some(Ordering::Less));
+        assert_eq!(
+            integer_ordering(
+                &Value::Int(7),
+                &Value::UInt {
+                    value: 7,
+                    width: 64,
+                },
+            ),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]

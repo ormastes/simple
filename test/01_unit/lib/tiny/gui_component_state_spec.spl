@@ -1,0 +1,58 @@
+use std.spec.{describe, it, expect}
+use std.tiny.common.types.{TinyHandle, TinyRect}
+use std.tiny.gui.component.{TINY_COMPONENT_BORDER, TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_COLUMN, TINY_COMPONENT_DIVIDER, TINY_COMPONENT_LIST, TINY_COMPONENT_PANE, TINY_COMPONENT_PROGRESS, TINY_COMPONENT_ROW, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_SPACER, TINY_COMPONENT_STACK, TINY_COMPONENT_TEXT, TINY_COMPONENT_TEXT_INPUT, tiny_component_metadata, tiny_component_supported}
+use std.tiny.gui.state.{TinyGuiState}
+
+describe("tiny GUI component metadata and bounded state"):
+    it("exposes the base component metadata and rejects unknown IDs"):
+        expect(tiny_component_supported(TINY_COMPONENT_BUTTON)).to_be(true)
+        expect(tiny_component_metadata(TINY_COMPONENT_CHECKBOX)).to_not_be_nil()
+        expect(tiny_component_supported(999)).to_be(false)
+        val base_components = [TINY_COMPONENT_PANE, TINY_COMPONENT_ROW, TINY_COMPONENT_COLUMN, TINY_COMPONENT_STACK, TINY_COMPONENT_TEXT, TINY_COMPONENT_SPACER, TINY_COMPONENT_DIVIDER, TINY_COMPONENT_BORDER, TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_TEXT_INPUT, TINY_COMPONENT_LIST, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_PROGRESS]
+        for class_id in base_components:
+            expect(tiny_component_supported(class_id)).to_be(true)
+
+    it("adds nodes within capacity and rejects overflow and stale parents"):
+        var state = TinyGuiState.bounded(2)
+        val root = state.add(TinyHandle.invalid(), TINY_COMPONENT_PANE, TinyRect(x: 0, y: 0, width: 100, height: 50), "")
+        expect(root.is_ok()).to_be(true)
+        val child = state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 2, y: 2, width: 20, height: 8), "hello")
+        expect(child.is_ok()).to_be(true)
+        expect(state.add(TinyHandle.invalid(), TINY_COMPONENT_TEXT, TinyRect.empty(), "").is_ok()).to_be(false)
+
+        var other = TinyGuiState.bounded(2)
+        val stale = TinyHandle(index: 0, generation: 99)
+        expect(other.add(stale, TINY_COMPONENT_TEXT, TinyRect.empty(), "").is_ok()).to_be(false)
+        expect(other.add(TinyHandle.invalid(), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: -1, height: 1), "").is_ok()).to_be(false)
+
+    it("cycles focus over focusable controls only"):
+        var state = TinyGuiState.bounded(4)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_TEXT, TinyRect.empty(), "label")
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_BUTTON, TinyRect.empty(), "go")
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_CHECKBOX, TinyRect.empty(), "check")
+        expect(state.focus_next().is_ok()).to_be(true)
+        expect(state.focused_index).to_equal(1)
+        expect(state.focus_next().is_ok()).to_be(true)
+        expect(state.focused_index).to_equal(2)
+
+        var empty = TinyGuiState.bounded(0)
+        expect(empty.focus_next().is_ok()).to_be(false)
+
+    it("lays out Row Column and Stack children through the shared pane invariant"):
+        var state = TinyGuiState.bounded(9)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_ROW, TinyRect(x: 0, y: 0, width: 30, height: 3), "")
+        state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 9, y: 9, width: 5, height: 1), "a")
+        state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 9, y: 9, width: 6, height: 1), "b")
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_COLUMN, TinyRect(x: 0, y: 5, width: 30, height: 3), "")
+        state.add(state.handle_at(3), TINY_COMPONENT_TEXT, TinyRect(x: 7, y: 7, width: 5, height: 1), "c")
+        state.add(state.handle_at(3), TINY_COMPONENT_TEXT, TinyRect(x: 7, y: 7, width: 5, height: 2), "d")
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_STACK, TinyRect(x: 0, y: 10, width: 30, height: 4), "")
+        state.add(state.handle_at(6), TINY_COMPONENT_TEXT, TinyRect(x: 2, y: 1, width: 5, height: 1), "under")
+        state.add(state.handle_at(6), TINY_COMPONENT_TEXT, TinyRect(x: 2, y: 1, width: 5, height: 1), "over")
+        val panes = state.resolved_panes(TinyRect(x: 0, y: 0, width: 40, height: 20))
+        expect(panes[1].absolute.x).to_equal(0)
+        expect(panes[2].absolute.x).to_equal(5)
+        expect(panes[4].absolute.y).to_equal(5)
+        expect(panes[5].absolute.y).to_equal(6)
+        expect(panes[7].absolute.x).to_equal(panes[8].absolute.x)
+        expect(panes[7].absolute.y).to_equal(panes[8].absolute.y)

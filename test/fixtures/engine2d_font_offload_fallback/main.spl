@@ -1,0 +1,48 @@
+# Fixture for test/03_system/lib/gpu/engine2d/engine2d_font_offload_fallback_system_spec.spl
+#
+# Drives the Engine2D configured-font execution path through a REAL compiled
+# binary, so the fallback ledger is observed end-to-end rather than in-process.
+# The unit lane (test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl)
+# already covers the in-process shape; this fixture exists because only a
+# native-built binary exercises the lowering + runtime seam that
+# doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md
+# currently blocks.
+#
+# Prints one `key=value` line per assertion the system spec makes. Every value
+# is derived from the engine, never hardcoded.
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gc_async_mut.text_layout.font_renderer.{
+    FontExecutionPolicy, FontRenderConfig
+}
+
+fn font_config(target: text, policy: FontExecutionPolicy) -> FontRenderConfig:
+    FontRenderConfig(
+        family: "Noto Sans Mono", category: "mono", language: "en", script: "latn", size: 18,
+        weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+        atlas_policy: "shared-alpha-1024", execution_target: target, execution_policy: policy
+    )
+
+fn main() -> i32:
+    var engine = Engine2D.create_with_backend(64, 48, "cpu")
+
+    # An attached CUDA backend that reports initialized but has no generated
+    # font companion: the documented "attempted, failed, fell through" case.
+    var cuda = CudaBackend.create()
+    cuda.initialized = true
+    engine.cuda_backend = cuda
+
+    val drew = engine.draw_text_configured(
+        2, 2, "A", 0xffffffffu32, font_config("cuda", FontExecutionPolicy.Suggested)
+    )
+    print("suggested_drew=" + (if drew: "true" else: "false"))
+    print("suggested_attempts=" + engine.font_execution_attempts().join(","))
+
+    val drew_preferred = engine.draw_text_configured(
+        2, 2, "A", 0xffffffffu32, font_config("cuda", FontExecutionPolicy.Preferred)
+    )
+    print("preferred_drew=" + (if drew_preferred: "true" else: "false"))
+    print("preferred_attempts=" + engine.font_execution_attempts().join(","))
+
+    return 0

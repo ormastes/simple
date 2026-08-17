@@ -224,3 +224,43 @@ shared event -> layout -> `DrawIrComposition` path. A host test is not QEMU GPU
 evidence: the QEMU row still requires admitted pure-Simple execution, fenced
 device readback, exact parity, font provenance, and warm p95/RSS receipts.
 macOS and UNO Q are explicit deferred rows, not fallback passes.
+
+## Engine2D backend readiness guards — scope rule (2026-08-16, from `b10f1b4309c`)
+
+Primitive/readback routing is one five-arm chain repeated at ~28 sites. **Only
+the Vulkan arm needs an `.initialized` guard**, and adding one elsewhere is dead
+code:
+
+- `virtio_gpu_backend` / `baremetal_backend` — their create paths (L824, L791)
+  pass the **same object** as both `backend:` and the sibling field; they cannot
+  diverge.
+- `cuda_backend` — gated on `selected_backend_name == "cuda"`, set only at L632
+  where `cuda.init()` already returned true on that same object.
+- `metal` / `opencl` / `rocm` / `software` — **not in the chain at all**; they
+  reach drawing only via `self.backend`.
+- `vulkan_backend` — the sole arm where `self.backend` is swapped while the
+  sibling stays non-nil (`_poison_vulkan_font_surface` L391), plus tests attach a
+  bare `VulkanBackend.create()`. An uninitialized Vulkan backend has no
+  framebuffer: every dispatch is a silent no-op returning empty pixels.
+
+**Do not "simplify" that guard to `backend_probe_initialized`.** It takes a
+`BackendProbeResult` and tests `probe.status == BackendStatus.Initialized`
+(`backend_probe.spl:36`); `VulkanBackend.initialized` is a plain `bool` field
+(`backend_vulkan.spl:247`). The substitution does not compile. The import at
+`engine.spl:57` serves the strict-create paths.
+
+Font offload (`_draw_font_batch_staged` L1607-1720) is a **separate** mechanism:
+each target is tried and judged by `quad_index == batch.quads.len()`, recording
+`<name>:failed` and falling through. A ledger not ending in a success entry means
+the batch was dropped, not offloaded.
+
+Canonicalization (`backend_lane.spl:86`) does `.trim().lower()` before folding
+aliases; the preference order list is all-lowercase and must stay that way.
+
+Open, recorded not patched: the rocm arms (L1700, L1941, L2006) do
+`if rocm.initialized: self.backend = rocm`, hijacking `self.backend` on an engine
+selected as something else — asymmetric with the name-gated cuda arm, currently
+unreachable from any construction path.
+
+Guide: `doc/07_guide/ui/engine2d_font_offload_fallback.md`.
+Feature expert: `doc/00_llm_process/feature_expert/engine2d_font_offload/skill.md`.

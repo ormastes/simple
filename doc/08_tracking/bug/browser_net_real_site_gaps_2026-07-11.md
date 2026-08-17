@@ -43,7 +43,14 @@ session" note at the bottom). The three items below need a Rust seed change
 `rt_tls_client_*`) which is out of scope for this pass — documented per the
 "do NOT fix, file a bug" instruction.
 
-## 1. Pure-Simple TLS transport is a stub (`rt_tls_client_* == -1`)
+## 1. Pure-Simple TLS transport is a stub (`rt_tls_client_* == -1`) — RESOLVED 2026-08-16
+
+**RESOLVED:** the seed interpreter's `rt_tls_client_*` externs now delegate to
+the runtime rustls client (`interpreter_extern/net_tls_client.rs`, driver
+`runtime-tls` feature). The pure-Simple H1/TLS path (`TlsManager.handshake`,
+`execute_tls_http`, chunked decoding) is exercised live under the seed:
+`https://example.com` loads (559 bytes) and `https://self-signed.badssl.com`
+is rejected by the certificate verifier. Original report kept below.
 
 `TlsManager.handshake()` (net/tls.spl) always fails because
 `rt_tls_client_connect_with_sni` etc. are unimplemented in the interpreter
@@ -66,7 +73,8 @@ Rust seed.
 `ureq::Response` headers are read (`response.status()`,
 `response.into_string()`) and then dropped without ever being surfaced to
 the tuple. This means every fetch that falls back to the host-HTTPS
-transport (i.e. every real HTTPS fetch today, since TLS is stubbed per #1)
+transport (at the time of this report, every real HTTPS fetch — #1 was still
+stubbed; since #1's 2026-08-16 resolution the pure-Simple path carries HTTPS)
 loses `Content-Type`, `Set-Cookie`, `Cache-Control`, `ETag`, etc. — cookie
 storage and cache freshness policy silently see nothing for HTTPS responses.
 Confirmed the Rust extern discards headers (read-only review, not edited):

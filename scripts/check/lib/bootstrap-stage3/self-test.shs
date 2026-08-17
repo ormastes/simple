@@ -28,6 +28,8 @@ bootstrap_stage3_provenance_self_test() {
         >"$bootstrap_stage3_test_root/repo/src/runtime/hosted/Cargo.toml"
     printf 'pub fn hosted() {}\n' \
         >"$bootstrap_stage3_test_root/repo/src/runtime/hosted/lib.rs"
+    printf 'void runtime_fixture(void) {}\n' \
+        >"$bootstrap_stage3_test_root/repo/src/runtime/runtime.c"
     bootstrap_stage3_test_tool_path=
     for bootstrap_stage3_test_tool_name in \
         cargo rustc cc clang ld ar ranlib sh env perl sed file \
@@ -77,6 +79,80 @@ bootstrap_stage3_provenance_self_test() {
             "$bootstrap_stage3_test_root/repo" cranelift none \
             "$bootstrap_stage3_test_tool_path"
     ) || return 1
+    mkdir -p \
+        "$bootstrap_stage3_test_root/repo/src/compiler_rust/compiler/build/simple-core" \
+        "$bootstrap_stage3_test_root/repo/src/compiler_rust/compiler/.simple/logs"
+    printf 'generated core runtime\n' >\
+"$bootstrap_stage3_test_root/repo/src/compiler_rust/compiler/build/simple-core/runtime.o"
+    printf 'generated crash log\n' >\
+"$bootstrap_stage3_test_root/repo/src/compiler_rust/compiler/.simple/logs/crash.log"
+    bootstrap_stage3_test_seed_generated=$(
+        bootstrap_stage3_seed_inputs_fingerprint \
+            "$bootstrap_stage3_test_root/repo" cranelift none \
+            "$bootstrap_stage3_test_tool_path"
+    ) || return 1
+    [ "$bootstrap_stage3_test_seed_before" = \
+        "$bootstrap_stage3_test_seed_generated" ] || return 1
+
+    mkdir -p \
+        "$bootstrap_stage3_test_root/repo/src/compiler_rust/vendor/fixture/build"
+    printf 'pub fn probe() {}\n' >\
+"$bootstrap_stage3_test_root/repo/src/compiler_rust/vendor/fixture/build/probe.rs"
+    bootstrap_stage3_test_seed_vendor_build=$(
+        bootstrap_stage3_seed_inputs_fingerprint \
+            "$bootstrap_stage3_test_root/repo" cranelift none \
+            "$bootstrap_stage3_test_tool_path"
+    ) || return 1
+    [ "$bootstrap_stage3_test_seed_before" != \
+        "$bootstrap_stage3_test_seed_vendor_build" ] || return 1
+    rm -rf "$bootstrap_stage3_test_root/repo/src/compiler_rust/vendor"
+
+    printf '// Rust source input changed\n' \
+        >>"$bootstrap_stage3_test_root/repo/src/compiler_rust/driver/src/main.rs"
+    bootstrap_stage3_test_seed_rust_changed=$(
+        bootstrap_stage3_seed_inputs_fingerprint \
+            "$bootstrap_stage3_test_root/repo" cranelift none \
+            "$bootstrap_stage3_test_tool_path"
+    ) || return 1
+    [ "$bootstrap_stage3_test_seed_before" != \
+        "$bootstrap_stage3_test_seed_rust_changed" ] || return 1
+    printf 'fn main() {}\n' \
+        >"$bootstrap_stage3_test_root/repo/src/compiler_rust/driver/src/main.rs"
+
+    printf '# Cargo input changed\n' \
+        >>"$bootstrap_stage3_test_root/repo/src/compiler_rust/driver/Cargo.toml"
+    bootstrap_stage3_test_seed_cargo_changed=$(
+        bootstrap_stage3_seed_inputs_fingerprint \
+            "$bootstrap_stage3_test_root/repo" cranelift none \
+            "$bootstrap_stage3_test_tool_path"
+    ) || return 1
+    [ "$bootstrap_stage3_test_seed_before" != \
+        "$bootstrap_stage3_test_seed_cargo_changed" ] || return 1
+    bootstrap_stage3_test_write_driver_manifest
+
+    ln -s main.rs \
+        "$bootstrap_stage3_test_root/repo/src/compiler_rust/driver/src/main-link.rs"
+    if bootstrap_stage3_seed_inputs_fingerprint \
+        "$bootstrap_stage3_test_root/repo" cranelift none \
+        "$bootstrap_stage3_test_tool_path" >/dev/null 2>&1; then
+        return 1
+    fi
+    rm "$bootstrap_stage3_test_root/repo/src/compiler_rust/driver/src/main-link.rs"
+
+    mkdir -p "$bootstrap_stage3_test_root/outside-dependency"
+    printf '%s\n' '[package]' 'name = "outside_dependency"' \
+        'version = "0.0.0"' \
+        >"$bootstrap_stage3_test_root/outside-dependency/Cargo.toml"
+    printf '%s\n' '[build-dependencies.outside_dependency]' \
+        'path = "../../../../outside-dependency"' \
+        >>"$bootstrap_stage3_test_root/repo/src/compiler_rust/driver/Cargo.toml"
+    if bootstrap_stage3_seed_inputs_fingerprint \
+        "$bootstrap_stage3_test_root/repo" cranelift none \
+        "$bootstrap_stage3_test_tool_path" >/dev/null 2>&1; then
+        return 1
+    fi
+    bootstrap_stage3_test_write_driver_manifest
+
     bootstrap_stage3_test_seed_ambient_a=$(
         SDKROOT=/missing/a CFLAGS=-O0 LLVM_SYS_180_PREFIX=/missing/a \
             bootstrap_stage3_seed_inputs_fingerprint \
@@ -105,8 +181,8 @@ bootstrap_stage3_provenance_self_test() {
     ) || return 1
     [ "$bootstrap_stage3_test_seed_rustup_stable" = \
         "$bootstrap_stage3_test_seed_rustup_nightly" ] || return 1
-    printf 'pub fn changed() {}\n' \
-        >>"$bootstrap_stage3_test_root/repo/src/runtime/hosted/lib.rs"
+    printf 'void runtime_changed(void) {}\n' \
+        >>"$bootstrap_stage3_test_root/repo/src/runtime/runtime.c"
     bootstrap_stage3_test_seed_after=$(
         bootstrap_stage3_seed_inputs_fingerprint \
             "$bootstrap_stage3_test_root/repo" cranelift none \
@@ -330,6 +406,49 @@ bootstrap_stage3_provenance_self_test() {
         "$bootstrap_stage3_test_root/env-tmp" "/usr/bin:/bin" \
         "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
         /bin/sh -c 'exit 0' || return 1
+    bootstrap_stage3_test_argv_transcript=\
+"$bootstrap_stage3_test_root/argv-values.transcript"
+    bootstrap_stage3_write_command_transcript \
+        "$bootstrap_stage3_test_argv_transcript" \
+        "$bootstrap_stage3_test_root" \
+        "$bootstrap_stage3_test_root/env-home" \
+        "$bootstrap_stage3_test_root/env-tmp" "/usr/bin:/bin" \
+        "SIMPLE_BUILD_PROGRESS_EVENTS=" -- /bin/sh native-build \
+        --backend llvm --threads 16 --compile-stack-mib 64 --jobs 1 \
+        --label alpha:beta || return 1
+    [ "$(bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript" --backend)" = llvm ] || return 1
+    [ "$(bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript" --threads)" = 16 ] || return 1
+    [ "$(bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript" --compile-stack-mib)" = 64 ] || return 1
+    [ "$(bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript" --jobs)" = 1 ] || return 1
+    [ "$(bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript" --label)" = alpha:beta ] || return 1
+    [ "$(bootstrap_stage3_transcript_explicit_env_value \
+        "$bootstrap_stage3_test_argv_transcript" \
+        SIMPLE_BUILD_PROGRESS_EVENTS)" = "" ] || return 1
+    if bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript" --missing >/dev/null 2>&1; then
+        return 1
+    fi
+    sed 's/argv:4:llvm/argv:4:llvm\nargv:9:--backend\nargv:4:llvm/' \
+        "$bootstrap_stage3_test_argv_transcript" \
+        >"$bootstrap_stage3_test_argv_transcript.duplicate" || return 1
+    if bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript.duplicate" --backend \
+        >/dev/null 2>&1; then
+        return 1
+    fi
+    sed 's/argv:2:64/argv:3:64/' \
+        "$bootstrap_stage3_test_argv_transcript" \
+        >"$bootstrap_stage3_test_argv_transcript.bad-length" || return 1
+    if bootstrap_stage3_transcript_argv_value_after \
+        "$bootstrap_stage3_test_argv_transcript.bad-length" \
+        --compile-stack-mib >/dev/null 2>&1; then
+        return 1
+    fi
     bootstrap_stage3_verify_command_transcript \
         "$bootstrap_stage3_test_transcript" "$bootstrap_stage3_test_root" \
         "RUST_LOG=error" "SIMPLE_BOOTSTRAP=1" -- \
@@ -442,10 +561,14 @@ poison"; then
             "$bootstrap_stage3_test_unsupported" | \
             bootstrap_stage3_hash_stream)"
         echo "frontend_smoke_status=0"
+        echo "frontend_smoke_bootstrap_mode_status=0"
         echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file \
             "$bootstrap_stage3_test_frontend")"
         echo "candidate_sha256_after=$bootstrap_stage3_test_candidate_sha"
     } >"$bootstrap_stage3_test_sanity" || return 1
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_test_sanity" \
+        "$bootstrap_stage3_test_candidate" || return 1
     bootstrap_stage3_verify_sanity_evidence \
         "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
@@ -454,6 +577,11 @@ poison"; then
     cp -p "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_candidate.saved" || return 1
     printf '# candidate tamper\n' >>"$bootstrap_stage3_test_candidate"
+    if bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_test_sanity" \
+        "$bootstrap_stage3_test_candidate"; then
+        return 1
+    fi
     if bootstrap_stage3_verify_sanity_evidence \
         "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
@@ -466,6 +594,9 @@ poison"; then
     candidate_frontend_smoke() {
         printf 'frontend-helper-tampered\n'
     }
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$bootstrap_stage3_test_sanity" \
+        "$bootstrap_stage3_test_candidate" || return 1
     if bootstrap_stage3_verify_sanity_evidence \
         "$bootstrap_stage3_test_sanity" "$bootstrap_stage3_test_candidate" \
         "$bootstrap_stage3_test_root/repo" cranelift \
@@ -496,6 +627,51 @@ poison"; then
         "$bootstrap_stage3_test_root/repo" cranelift \
         "$bootstrap_stage3_test_root/env-home" \
         "$bootstrap_stage3_test_root/env-tmp" "/usr/bin:/bin"; then
+        return 1
+    fi
+
+    bootstrap_stage3_test_runtime_snapshot=\
+"$bootstrap_stage3_test_root/runtime.snapshot"
+    printf 'runtime authority\n' >"$bootstrap_stage3_test_runtime_snapshot"
+    bootstrap_stage3_test_receiver_log=\
+"$bootstrap_stage3_test_root/receiver.log"
+    printf 'receiver PASS\n' >"$bootstrap_stage3_test_receiver_log"
+    bootstrap_stage3_test_receiver=\
+"$bootstrap_stage3_test_root/stage2-receiver.env"
+    {
+        echo 'schema=simple-bootstrap-stage2-receiver-evidence-v1'
+        echo 'status=pass'
+        echo 'probe_exit=0'
+        echo "candidate_sha256_before=$bootstrap_stage3_test_candidate_sha"
+        echo "candidate_sha256_after=$bootstrap_stage3_test_candidate_sha"
+        echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_test_runtime_snapshot")"
+        echo "probe_log=$bootstrap_stage3_test_receiver_log"
+        echo "probe_log_sha256=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_test_receiver_log")"
+    } >"$bootstrap_stage3_test_receiver" || return 1
+    bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$bootstrap_stage3_test_receiver" \
+        "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_runtime_snapshot" \
+        "$bootstrap_stage3_test_receiver_log" || return 1
+    printf 'receiver tampered\n' >>"$bootstrap_stage3_test_receiver_log"
+    if bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$bootstrap_stage3_test_receiver" \
+        "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_runtime_snapshot" \
+        "$bootstrap_stage3_test_receiver_log"; then
+        return 1
+    fi
+    printf 'receiver PASS\n' >"$bootstrap_stage3_test_receiver_log"
+    sed 's/^probe_exit=0$/probe_exit=1/' \
+        "$bootstrap_stage3_test_receiver" \
+        >"$bootstrap_stage3_test_receiver.status-tampered" || return 1
+    if bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$bootstrap_stage3_test_receiver.status-tampered" \
+        "$bootstrap_stage3_test_candidate" \
+        "$bootstrap_stage3_test_runtime_snapshot" \
+        "$bootstrap_stage3_test_receiver_log"; then
         return 1
     fi
 

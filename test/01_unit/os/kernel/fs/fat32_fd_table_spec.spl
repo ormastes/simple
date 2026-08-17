@@ -1,5 +1,5 @@
 """
-# Per-task FAT32 fd table: register / write / guard / clear
+# FAT32 descriptor aliases and canonical file objects
 
 **Feature:** kernel FAT32 driver (IF-07), fd read/write wiring lane, 2026-08-06
 
@@ -13,52 +13,17 @@ FAT32-opened fd silently never touched the mounted filesystem. This module
 `_handle_file_open`/`_handle_file_read`/`_handle_file_write`/
 `_handle_file_close` now delegate to.
 
-**A second, more consequential wall was found WHILE testing this** — see the
-dated update in the bug doc, "fat32_mount_dev()/fat32_mount_fs() do not
-share write-visible state across separate calls". Reproduced with a minimal
-4-step probe (not committed — throwaway diagnostic): calling `.write_sector`
-via one `fat32_mount_dev()` fetch and `.read_sector` via a SECOND
-`fat32_mount_dev()` fetch on the SAME published device does not observe the
-first call's write, even though the identical write+read via a single held
-reference to the SAME fetch is internally consistent. This blocks verifying
-ANY write-then-read round trip that spans two separate calls into this
-module (or into `_handle_file_*`) against the in-memory mock device this
-test suite (and `fat32_mount_and_dir_ops_spec.spl`) uses — not something
-this lane introduced or can fix within its own scope; recorded as observed
-behavior only, not a diagnosed root cause (ruled out: `me`-declared
-mutating trait methods on the mock — retried with `me read_sector`/
-`me write_sector` and the failure persisted unchanged).
+The current owner separates per-task descriptor aliases from monotonic,
+generation-safe `Fat32FileObject` identities. Dup/fork aliases share cursor and
+metadata, last-alias close retires the object, and a reused fd cannot revive a
+stale positioned capability. Sequential writes lower through the true
+explicit-offset primitive at the shared cursor; positioned operations preserve
+that cursor while committing returned allocation and file-size metadata.
 
-Given that wall, this spec tests exactly what CAN be verified without a
-cross-call round trip:
-- a single write's return value (byte count) — real disk I/O within ONE
-  call, proven by `Fat32Filesystem`'s own existing suites
-  (`fat32_write_path_spec.spl` 25/25, `fat32_read_spec.spl` 10/10) to
-  actually reach the block device when `dev` is NOT accessor-derived;
-- the append-only honesty guard (`offset != file_size` -> ENOSYS), which is
-  evaluated entirely from the registered handle's own fields BEFORE any disk
-  I/O is attempted, so it does not depend on cross-call persistence;
-- the (task_id, fd) table mechanics — register / is_registered / clear /
-  EBADF on an unregistered fd — pure in-memory bookkeeping, no disk I/O.
-
-Reading a file's content back is NOT exercised here because doing so
-honestly requires a write-then-read round trip, which the wall above blocks.
-`Fat32Filesystem.read`'s own correctness is already covered end-to-end by
-`fat32_read_spec.spl` (10/10) and is unaffected by this lane's change (this
-lane only added the fd-keyed dispatch layer in front of it).
-
-**Sabotage-verified this session:**
-1. Replacing `fat32_fd_write_from`'s `Ok(bytes.len() as u64)` with
-   `Ok(0u64)` turned the "write returns the real byte count" example red
-   (expected 12, got 0). Restored.
-2. Replacing the `handle.offset != handle.file_size` guard with `false`
-   (never refuse) turned the "refuses to silently append-instead-of-
-   overwrite" example red (expected an Err, got Ok). Restored.
-3. Removing `task_id` from `_fat32_fd_index`'s equality check (comparing fd
-   alone) turned the "two tasks, same fd number, independent writes" example
-   red (task B's write, expected to succeed on its own distinct file,
-   instead errored/misbehaved because it collided with task A's entry).
-   Restored.
+Focused cases cover task scoping, alias lifetime, stale object rejection,
+sequential overwrite, positioned cursor preservation, and metadata extension.
+The qualified system gate reruns this spec only with a receipt-bound
+pure-Simple Stage-4 runtime.
 """
 
 use std.spec.{describe, it, expect, step, assert_true, assert_false}
@@ -67,8 +32,11 @@ use os.kernel.fs.fat32.{
     fat32_mount_publish, fat32_mount_clear
 }
 use os.kernel.fs.fat32_fd_table.{
-    fat32_fd_register, fat32_fd_is_registered, fat32_fd_clear,
-    fat32_fd_read_into, fat32_fd_write_from, fat32_fd_clear_for_test
+    fat32_fd_register, fat32_fd_alias, fat32_fd_is_registered,
+    fat32_fd_object_id, fat32_fd_clear, fat32_fd_clear_task,
+    fat32_fd_read_into, fat32_fd_write_from,
+    fat32_fd_read_object_at_into, fat32_fd_write_object_at_from,
+    fat32_fd_clear_for_test
 }
 
 # ============================================================================
@@ -174,10 +142,19 @@ fn _fdt_root_dir() -> [u8]:
     s = _fdt_put_entry(s, 0, "FILE", "O", 0x20u8, 15u32, 11u32)
     s
 
+fn _fdt_file_data() -> [u8]:
+    var s = _fdt_zero_sector()
+    var i = 0
+    while i < 11:
+        s[i] = (i + 1).to_u8()
+        i = i + 1
+    s
+
 fn _fdt_make_dev() -> FdtMockDev:
     var dev = FdtMockDev.new()
     dev = dev.with_sector(32u64, _fdt_fat_sector())
     dev = dev.with_sector(64u64, _fdt_root_dir())
+    dev = dev.with_sector(77u64, _fdt_file_data())
     dev
 
 fn _fdt_fs_from(dev: FdtMockDev) -> Fat32Filesystem:
@@ -191,6 +168,13 @@ fn _fdt_bytes(s: text) -> [u8]:
         out.push(s.byte_at(i))
         i = i + 1
     out
+
+fn _fdt_handle(cluster: u32, offset: u64, size: u64) -> FileHandle:
+    FileHandle(
+        fd: 0u64, start_cluster: cluster, current_cluster: cluster,
+        offset: offset, file_size: size, is_open: true,
+        dirent_sector: 64u64, dirent_offset: 0
+    )
 
 # ============================================================================
 # Scenarios
@@ -280,9 +264,121 @@ describe "fat32_fd_table: (task_id, fd) table mechanics":
         assert_true(fat32_fd_is_registered(2, fd))
         fat32_mount_clear()
 
-describe "fat32_fd_table: append-only honesty guard (evaluated before any disk I/O)":
+describe "fat32_fd_table: canonical generation-safe file objects":
 
-    it "allows a write when offset == file_size (the only case Fat32Filesystem.write supports)":
+    it "registration assigns monotonic nonzero identities and fd reuse never revives the retired identity":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        fat32_fd_register(7u64, 3, _fdt_handle(15u32, 0u64, 11u64))
+        val first_id = fat32_fd_object_id(7u64, 3)
+        assert_true(first_id > 0u64)
+
+        fat32_fd_clear(7u64, 3)
+        expect(fat32_fd_object_id(7u64, 3)).to_equal(0u64)
+        val stale = fat32_fd_read_object_at_into(first_id, 0u64, [])
+        assert_true(stale.is_err())
+        expect(stale.unwrap_err()).to_equal(-9)
+
+        fat32_fd_register(7u64, 3, _fdt_handle(16u32, 0u64, 4u64))
+        val replacement_id = fat32_fd_object_id(7u64, 3)
+        assert_true(replacement_id > first_id)
+
+    it "dup-style aliases share one identity and clearing one alias keeps the object live":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        fat32_fd_register(8u64, 4, _fdt_handle(15u32, 2u64, 11u64))
+        val object_id = fat32_fd_object_id(8u64, 4)
+        val alias_r = fat32_fd_alias(8u64, 4, 8u64, 9)
+        assert_true(alias_r.is_ok())
+        expect(alias_r.unwrap()).to_equal(object_id)
+        expect(fat32_fd_object_id(8u64, 9)).to_equal(object_id)
+
+        fat32_fd_clear(8u64, 4)
+        expect(fat32_fd_object_id(8u64, 4)).to_equal(0u64)
+        expect(fat32_fd_object_id(8u64, 9)).to_equal(object_id)
+        val live_but_unmounted = fat32_fd_read_object_at_into(object_id, 0u64, [])
+        assert_true(live_but_unmounted.is_err())
+        expect(live_but_unmounted.unwrap_err()).to_equal(-38)
+
+        fat32_fd_clear(8u64, 9)
+        val retired = fat32_fd_read_object_at_into(object_id, 0u64, [])
+        assert_true(retired.is_err())
+        expect(retired.unwrap_err()).to_equal(-9)
+
+    it "task teardown retires only that task's aliases and preserves a cross-task alias":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        fat32_fd_register(10u64, 5, _fdt_handle(15u32, 0u64, 11u64))
+        val object_id = fat32_fd_object_id(10u64, 5)
+        val alias_r = fat32_fd_alias(10u64, 5, 11u64, 5)
+        assert_true(alias_r.is_ok())
+
+        fat32_fd_clear_task(10u64)
+        expect(fat32_fd_object_id(10u64, 5)).to_equal(0u64)
+        expect(fat32_fd_object_id(11u64, 5)).to_equal(object_id)
+
+        fat32_fd_clear_task(11u64)
+        val retired = fat32_fd_read_object_at_into(object_id, 0u64, [])
+        assert_true(retired.is_err())
+        expect(retired.unwrap_err()).to_equal(-9)
+
+describe "fat32_fd_table: positioned operations preserve the shared cursor":
+
+    it "positioned read leaves the next sequential read at the alias-shared cursor":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        val dev = _fdt_make_dev()
+        val fs = _fdt_fs_from(dev)
+        fat32_mount_publish(fs, dev)
+        fat32_fd_register(20u64, 6, _fdt_handle(15u32, 2u64, 11u64))
+        val object_id = fat32_fd_object_id(20u64, 6)
+        val alias_r = fat32_fd_alias(20u64, 6, 20u64, 7)
+        assert_true(alias_r.is_ok())
+
+        var positioned = [0u8]
+        val positioned_r = fat32_fd_read_object_at_into(object_id, 5u64, positioned)
+        assert_true(positioned_r.is_ok())
+        expect(positioned_r.unwrap()).to_equal(1u64)
+        expect(positioned[0]).to_equal(6u8)
+
+        var sequential = [0u8]
+        val sequential_r = fat32_fd_read_into(20u64, 7, sequential)
+        assert_true(sequential_r.is_ok())
+        expect(sequential_r.unwrap()).to_equal(1u64)
+        expect(sequential[0]).to_equal(3u8)
+        fat32_mount_clear()
+
+    it "positioned write commits extended metadata but does not advance the cursor":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        val dev = _fdt_make_dev()
+        val fs = _fdt_fs_from(dev)
+        fat32_mount_publish(fs, dev)
+        val handle = fs.create_at(dev, "/POS.BIN").unwrap()
+        fat32_fd_register(21u64, 8, handle)
+        val object_id = fat32_fd_object_id(21u64, 8)
+
+        val positioned_r = fat32_fd_write_object_at_from(
+            object_id, 0u64, _fdt_bytes("abc"))
+        assert_true(positioned_r.is_ok())
+        expect(positioned_r.unwrap()).to_equal(3u64)
+
+        # Metadata now says file_size=3 while the preserved cursor is still 0.
+        # A sequential write must therefore overwrite from zero and advance
+        # the canonical cursor to four.
+        val sequential_r = fat32_fd_write_from(
+            21u64, 8, _fdt_bytes("next"))
+        assert_true(sequential_r.is_ok())
+        expect(sequential_r.unwrap()).to_equal(4u64)
+        var next_byte = [0u8]
+        val cursor_read = fat32_fd_read_into(21u64, 8, next_byte)
+        assert_true(cursor_read.is_ok())
+        expect(cursor_read.unwrap()).to_equal(0u64)
+        fat32_mount_clear()
+
+describe "fat32_fd_table: sequential writes use the canonical cursor":
+
+    it "appends when the cursor is already at end of file":
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -295,7 +391,7 @@ describe "fat32_fd_table: append-only honesty guard (evaluated before any disk I
         assert_true(w.is_ok())
         fat32_mount_clear()
 
-    it "refuses (ENOSYS) a write when offset != file_size, instead of silently appending at the wrong place":
+    it "overwrites from a reopened file cursor instead of silently appending":
         fat32_mount_clear()
         fat32_fd_clear_for_test()
         val dev = _fdt_make_dev()
@@ -310,6 +406,12 @@ describe "fat32_fd_table: append-only honesty guard (evaluated before any disk I
         )
         fat32_fd_register(1, 21, fake)
         val w = fat32_fd_write_from(1, 21, _fdt_bytes("clobber"))
-        assert_true(w.is_err())
-        expect(w.unwrap_err()).to_equal(-38)
+        assert_true(w.is_ok())
+        expect(w.unwrap()).to_equal(7u64)
+        val object_id = fat32_fd_object_id(1, 21)
+        var first = [0u8]
+        val positioned = fat32_fd_read_object_at_into(object_id, 0u64, first)
+        assert_true(positioned.is_ok())
+        expect(positioned.unwrap()).to_equal(1u64)
+        expect(first[0]).to_equal(0x63u8)
         fat32_mount_clear()

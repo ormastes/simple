@@ -3,6 +3,7 @@
 - **Date:** 2026-08-17
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN
 - **Severity:** HIGH — silently wrong numerics, no error, no warning
 - **Found by:** `test/03_system/` sweep (test/03_system/game_net, test/03_system/game3d)
 

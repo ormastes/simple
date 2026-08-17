@@ -42,6 +42,8 @@ Workaround: rename the identifier (`move` -> `shift`, `result` -> `res`,
 `move_identifier_rejected_as_expression_2026-08-15.md`,
 `examples_identifier_rejected_in_named_argument_position_2026-08-10.md`).
 
+**Reserved keywords that cannot be used as identifiers:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`, and `pub` — `pub` lexes as a keyword token everywhere, so `val pub = ...` fails with `expected pattern, found Pub`; pick another name.
+
 ---
 
 ## Table of Contents

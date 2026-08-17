@@ -92,6 +92,7 @@ description: Create architecture, UI design, system tests, and detail design for
 
 ## Rules
 
+- **One App, One Host Interface:** Design apps for all OSes identically; only HAL/backend, config, and optional capabilities vary. No per-OS code forks, platform conditionals, or adapter copying in app logic. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - If requirements missing, do research first
 - If another LLM already created artifacts, review and extend — never overwrite
 - Every REQ-NNN must have test coverage

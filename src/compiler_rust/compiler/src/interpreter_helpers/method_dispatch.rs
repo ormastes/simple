@@ -2,10 +2,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
-use crate::value::{
-    format_f32_display, format_f64_display, Env, OptionVariant, ResultVariant, Value,
-    METHOD_MISSING,
-};
+use crate::value::{format_f32_display, format_f64_display, Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -427,10 +424,18 @@ pub(crate) fn call_method_on_value(
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
                     (Value::UInt { value: x, .. }, Value::UInt { value: y, .. }) => x.cmp(y),
                     (Value::Int(x), Value::UInt { value: y, .. }) => {
-                        if *x < 0 { std::cmp::Ordering::Less } else { (*x as u64).cmp(y) }
+                        if *x < 0 {
+                            std::cmp::Ordering::Less
+                        } else {
+                            (*x as u64).cmp(y)
+                        }
                     }
                     (Value::UInt { value: x, .. }, Value::Int(y)) => {
-                        if *y < 0 { std::cmp::Ordering::Greater } else { x.cmp(&(*y as u64)) }
+                        if *y < 0 {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            x.cmp(&(*y as u64))
+                        }
                     }
                     (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
@@ -744,6 +749,67 @@ pub(crate) fn call_method_on_value(
             // Not found — fall through to trait/UFCS/error below.
         }
 
+        // Mutable class instances in chained/nested position (e.g.
+        // `LlvmBackend.create(...).with_llvm_ir()`). The primary method
+        // evaluator handles Value::ClassInstance receivers, but this
+        // nested-call dispatcher previously had no arm for them and errored
+        // with "method '...' not found on value of type object in nested call
+        // context" (type_name() reports ClassInstance as "object"). Mirror the
+        // primary path: class-body methods, then impl-block methods (local map,
+        // then GLOBAL_IMPL_METHODS for cross-module classes), then TRAIT_IMPLS.
+        Value::ClassInstance(instance) => {
+            let class_name = instance.class().to_string();
+            let method_def: Option<Arc<simple_parser::ast::FunctionDef>> = _classes
+                .get(class_name.as_str())
+                .and_then(|class_def| {
+                    class_def
+                        .methods
+                        .iter()
+                        .find(|candidate| candidate.name == method)
+                        .cloned()
+                })
+                .map(Arc::new)
+                .or_else(|| {
+                    _impl_methods
+                        .get(class_name.as_str())
+                        .and_then(|methods| methods.iter().find(|candidate| candidate.name == method).cloned())
+                })
+                .or_else(|| {
+                    crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+                        cell.borrow()
+                            .get(class_name.as_str())
+                            .and_then(|methods| methods.iter().find(|candidate| candidate.name == method).cloned())
+                    })
+                })
+                .or_else(|| {
+                    TRAIT_IMPLS.with(|cell| {
+                        cell.borrow().iter().find_map(|((_trait_name, type_name), methods)| {
+                            (type_name == &class_name)
+                                .then(|| methods.iter().find(|candidate| candidate.name == method).cloned())
+                                .flatten()
+                        })
+                    })
+                });
+            if let Some(method_def) = method_def {
+                // Bind `self` to the ClassInstance value directly via the
+                // single-entry "self" fields convention (same as the Enum arm).
+                let mut self_fields = HashMap::new();
+                self_fields.insert("self".to_string(), recv_val.clone());
+                let self_fields = Arc::new(self_fields);
+                return exec_function_with_values_and_self(
+                    method_def.as_ref(),
+                    _args,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                    Some((class_name.as_str(), &self_fields)),
+                );
+            }
+            // Not found — fall through to trait/UFCS/error below.
+        }
+
         _ => {}
     }
 
@@ -756,11 +822,7 @@ pub(crate) fn call_method_on_value(
             Value::Float(_) => &["f64", "float"],
             Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],
-            Value::Array(_)
-            | Value::FrozenArray(_)
-            | Value::ByteArray(_)
-            | Value::FrozenByteArray(_)
-            | Value::FixedSizeArray { .. } => &["array", "Array"],
+            Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
             Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
             Value::Tuple(_) => &["tuple", "Tuple"],
             _ => &[],
@@ -855,6 +917,19 @@ pub(crate) fn call_method_on_value(
         }
     }
 
+    if std::env::var("SIMPLE_DEBUG_NESTED_DISPATCH").is_ok() {
+        let variant = match &recv_val {
+            Value::Object { class, .. } => format!("Object(class={})", class),
+            other => format!("variant={:?}", std::mem::discriminant(other)),
+        };
+        eprintln!(
+            "[nested-dispatch] method='{}' recv={} type_name={} classes_len={}",
+            method,
+            variant,
+            recv_val.type_name(),
+            _classes.len()
+        );
+    }
     let ctx = ErrorContext::new()
         .with_code(codes::METHOD_NOT_FOUND)
         .with_help("check that the method is defined on this type");
@@ -1047,6 +1122,47 @@ mod tests {
         .expect("chained replace should dispatch");
 
         assert_eq!(chained, Value::text("HEllo".to_string()));
+    }
+
+    #[test]
+    fn string_split_honors_limit_and_unicode_empty_separator() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let bounded = call_method_on_value(
+            Value::text("a:b:c"),
+            "split",
+            &[Value::text(":"), Value::Int(2)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("bounded split should dispatch");
+        assert_eq!(
+            bounded,
+            Value::array(vec![Value::text("a"), Value::text("b:c")])
+        );
+
+        let unicode = call_method_on_value(
+            Value::text("한글끝"),
+            "split",
+            &[Value::text(""), Value::Int(2)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("unicode character split should dispatch");
+        assert_eq!(
+            unicode,
+            Value::array(vec![Value::text("한"), Value::text("글끝")])
+        );
     }
 }
 

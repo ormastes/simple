@@ -2,7 +2,7 @@
 set -u
 
 usage() {
-  echo "Usage: scripts/check/bootstrap-diagnostic-sweep.shs --compiler=<simple> [--child-compiler=<simple>] [--root=<path>] [--cache-dir=<dir>] [--jobs=<n>] [--timeout=<seconds>]"
+  echo "Usage: scripts/check/bootstrap-diagnostic-sweep.shs --compiler=<simple> [--child-compiler=<simple>] [--root=<path>] [--cache-dir=<dir>] [--evidence-dir=<dir>] [--jobs=<n>] [--timeout=<seconds>] [--resume]"
   echo "Checks independent .spl files, aggregates failures, and never builds or deploys an artifact."
 }
 
@@ -10,9 +10,12 @@ compiler=""
 child_compiler="bin/simple"
 roots=""
 cache_root="build/bootstrap/diagnostic-cache"
+evidence_dir=""
 jobs=1
 timeout_seconds=600
 timeout_grace_seconds=5
+resume=0
+classification_policy=observer-outside-child-pgid-v2
 
 for arg in "$@"; do
   case "$arg" in
@@ -21,68 +24,342 @@ for arg in "$@"; do
     --root=*) roots="${roots}${roots:+
 }${arg#*=}" ;;
     --cache-dir=*) cache_root=${arg#*=} ;;
+    --evidence-dir=*) evidence_dir=${arg#*=} ;;
     --jobs=*) jobs=${arg#*=} ;;
     --timeout=*) timeout_seconds=${arg#*=} ;;
     --timeout-grace=*) timeout_grace_seconds=${arg#*=} ;;
+    --resume) resume=1 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown diagnostic-sweep option '$arg'" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-case "$jobs" in
-  ''|*[!0-9]*|0) echo "error: --jobs must be a positive integer" >&2; exit 2 ;;
-esac
-case "$timeout_seconds" in
-  ''|*[!0-9]*|0) echo "error: --timeout must be a positive integer" >&2; exit 2 ;;
-esac
-case "$timeout_grace_seconds" in
-  ''|*[!0-9]*|0) echo "error: --timeout-grace must be a positive integer" >&2; exit 2 ;;
-esac
+case "$jobs" in ''|*[!0-9]*|0) echo "error: --jobs must be a positive integer" >&2; exit 2 ;; esac
+case "$timeout_seconds" in ''|*[!0-9]*|0) echo "error: --timeout must be a positive integer" >&2; exit 2 ;; esac
+case "$timeout_grace_seconds" in ''|*[!0-9]*|0) echo "error: --timeout-grace must be a positive integer" >&2; exit 2 ;; esac
 [ -n "$compiler" ] || { echo "error: --compiler is required" >&2; exit 2; }
 [ -x "$compiler" ] || { echo "error: compiler is not executable: $compiler" >&2; exit 2; }
 command -v perl >/dev/null 2>&1 || { echo "error: perl is required for isolated diagnostic process groups" >&2; exit 2; }
 [ -n "$roots" ] || roots="src/compiler"
 
-# The bootstrap seed's `check` command delegates frontend work to the admitted
-# pure-Simple CLI at this canonical repo-relative path. Fail before dispatching
-# thousands of workers when an isolated worktree omitted that ignored artifact.
 [ -x "$child_compiler" ] || {
   echo "error: diagnostic child compiler is not executable: $child_compiler" >&2
   echo "Provide an admitted pure-Simple bin/simple before diagnostic sweep." >&2
   exit 2
 }
-child_compiler_dir=$(CDPATH= cd -- "$(dirname -- "$child_compiler")" && pwd -P) || exit 2
-child_compiler="$child_compiler_dir/$(basename -- "$child_compiler")"
+
+absolute_executable() {
+  executable_input=$1
+  executable_dir=$(CDPATH= cd -- "$(dirname -- "$executable_input")" && pwd -P) || return 1
+  printf '%s/%s\n' "$executable_dir" "$(basename -- "$executable_input")"
+}
+
+compiler=$(absolute_executable "$compiler") || exit 2
+child_compiler=$(absolute_executable "$child_compiler") || exit 2
+runner_path=$(absolute_executable "$0") || exit 2
+runner_hash=$(sha256sum "$runner_path" | awk '{print $1}') || exit 2
+mkdir -p "$cache_root" || exit 2
+cache_root=$(CDPATH= cd -- "$cache_root" && pwd -P) || exit 2
+
 case "${SIMPLE_COMPILER_PHASE_PROFILE:-0}" in
   1) check_profile_arg="--phase-profile" ;;
   *) check_profile_arg="" ;;
 esac
 
-mkdir -p "$cache_root" || exit 2
-run_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic.XXXXXX") || exit 2
+if [ -z "$evidence_dir" ]; then
+  [ "$resume" -eq 0 ] || {
+    echo "error: --resume requires --evidence-dir" >&2
+    exit 2
+  }
+  evidence_dir=$(mktemp -d "$cache_root/evidence.XXXXXX") || exit 2
+fi
+
+if [ "$resume" -eq 0 ]; then
+  if [ -e "$evidence_dir" ] && [ -n "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    echo "error: diagnostic evidence directory is not empty: $evidence_dir" >&2
+    echo "Use a new evidence directory, or pass --resume for an exact frozen inventory." >&2
+    exit 2
+  fi
+  mkdir -p "$evidence_dir/logs" "$evidence_dir/state" || exit 2
+else
+  [ -d "$evidence_dir/logs" ] && [ -d "$evidence_dir/state" ] || {
+    echo "error: --resume requires an existing diagnostic evidence directory" >&2
+    exit 2
+  }
+fi
+evidence_dir=$(CDPATH= cd -- "$evidence_dir" && pwd -P) || exit 2
+run_dir="$evidence_dir/state"
+results_file="$evidence_dir/results.tsv"
+summary_file="$evidence_dir/summary.env"
+manifest_file="$evidence_dir/manifest.tsv"
+run_file="$evidence_dir/run.env"
+lock_dir="$evidence_dir/.active"
+
+mkdir "$lock_dir" 2>/dev/null || {
+  echo "error: diagnostic evidence lane is already active: $evidence_dir" >&2
+  exit 2
+}
+
+identity_tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-identity.XXXXXX") || {
+  rmdir "$lock_dir" 2>/dev/null || true
+  exit 2
+}
+expected_files="$identity_tmp/files"
+expected_manifest="$identity_tmp/manifest.tsv"
+expected_run="$identity_tmp/run.env"
+
+identity_fail() {
+  echo "error: diagnostic resume identity mismatch: $*" >&2
+  rm -rf "$identity_tmp"
+  rmdir "$lock_dir" 2>/dev/null || true
+  exit 2
+}
+
+: >"$expected_files"
+old_ifs=$IFS
+IFS='
+'
+for root in $roots; do
+  [ -e "$root" ] || identity_fail "diagnostic root does not exist: $root"
+  if [ -d "$root" ]; then
+    find "$root" -type f -name '*.spl' -print
+  else
+    case "$root" in
+      *.spl) echo "$root" ;;
+      *) identity_fail "diagnostic input is not .spl: $root" ;;
+    esac
+  fi
+done | LC_ALL=C sort -u >"$expected_files"
+IFS=$old_ifs
+[ -s "$expected_files" ] || identity_fail "diagnostic sweep selected no .spl files"
+
+: >"$expected_manifest"
+manifest_id=0
+while IFS= read -r manifest_path; do
+  manifest_id=$((manifest_id + 1))
+  manifest_sha=$(sha256sum "$manifest_path" | awk '{print $1}') || identity_fail "cannot hash $manifest_path"
+  printf '%s\t%s\t%s\n' "$manifest_id" "$manifest_sha" "$manifest_path" >>"$expected_manifest"
+done <"$expected_files"
+
+{
+  echo 'format=simple-bootstrap-diagnostic-run-v2'
+  echo "classification_policy=$classification_policy"
+  echo "runner_path=$runner_path"
+  echo "runner_hash=$runner_hash"
+  echo "compiler=$compiler"
+  echo "child_compiler=$child_compiler"
+  echo "cache_root=$cache_root"
+  echo "jobs=$jobs"
+  echo "timeout_seconds=$timeout_seconds"
+  echo "timeout_grace_seconds=$timeout_grace_seconds"
+  echo "phase_profile=${SIMPLE_COMPILER_PHASE_PROFILE:-0}"
+  while IFS= read -r run_root; do echo "root=$run_root"; done <<EOF
+$roots
+EOF
+} >"$expected_run"
+
+hash_receipt_valid() {
+  receipt_path=$1
+  receipt_target=$2
+  [ -f "$receipt_path" ] || return 1
+  [ "$(sed -n '1p' "$receipt_path")" = "$(sha256sum "$receipt_target")" ] || return 1
+  [ "$(wc -l <"$receipt_path" | tr -d ' ')" -eq 1 ]
+}
+
+if [ "$resume" -eq 1 ]; then
+  [ -f "$evidence_dir/format" ] || identity_fail "format receipt missing"
+  [ "$(sed -n '1p' "$evidence_dir/format")" = simple-bootstrap-diagnostic-sweep-v1 ] || identity_fail "format receipt changed"
+  [ "$(wc -l <"$evidence_dir/format" | tr -d ' ')" -eq 1 ] || identity_fail "format receipt malformed"
+  [ -f "$manifest_file" ] && cmp -s "$expected_manifest" "$manifest_file" || identity_fail "manifest changed"
+  [ -f "$run_file" ] && cmp -s "$expected_run" "$run_file" || identity_fail "run identity changed"
+  hash_receipt_valid "$evidence_dir/manifest.sha256" "$manifest_file" || identity_fail "manifest hash receipt invalid"
+  hash_receipt_valid "$evidence_dir/compiler.sha256" "$compiler" || identity_fail "compiler hash receipt invalid"
+  hash_receipt_valid "$evidence_dir/child-compiler.sha256" "$child_compiler" || identity_fail "child compiler hash receipt invalid"
+else
+  mv "$expected_manifest" "$manifest_file"
+  mv "$expected_run" "$run_file"
+  : >"$results_file"
+  printf '%s\n' simple-bootstrap-diagnostic-sweep-v1 >"$evidence_dir/format"
+  sha256sum "$manifest_file" >"$evidence_dir/manifest.sha256"
+  sha256sum "$compiler" >"$evidence_dir/compiler.sha256"
+  sha256sum "$child_compiler" >"$evidence_dir/child-compiler.sha256"
+fi
+
 active_workers=""
-cleanup_sweep() {
-  cleanup_status=$?
-  [ "$#" -eq 0 ] || cleanup_status=$1
-  trap - EXIT INT TERM HUP
+active_count=0
+
+artifact_hash_or_missing() {
+  artifact_path=$1
+  if [ -f "$artifact_path" ] && [ ! -L "$artifact_path" ]; then
+    sha256sum "$artifact_path" | awk '{print $1}'
+  else
+    printf 'MISSING\n'
+  fi
+}
+
+write_row_evidence_receipt() {
+  evidence_id=$1
+  evidence_receipt="$run_dir/$evidence_id.evidence.sha256"
+  evidence_receipt_tmp="$evidence_receipt.tmp.$$"
+  {
+    echo 'schema=simple-bootstrap-diagnostic-evidence-v2'
+    echo "classification_policy=$classification_policy"
+    echo "result_sha256=$(artifact_hash_or_missing "$run_dir/$evidence_id.result")"
+    echo "log_sha256=$(artifact_hash_or_missing "$evidence_dir/logs/$evidence_id.log")"
+    echo "command_sha256=$(artifact_hash_or_missing "$run_dir/$evidence_id.command")"
+    echo "deadline_sha256=$(artifact_hash_or_missing "$run_dir/$evidence_id.deadline")"
+    echo "watchdog_sha256=$(artifact_hash_or_missing "$run_dir/$evidence_id.watchdog")"
+  } >"$evidence_receipt_tmp"
+  mv "$evidence_receipt_tmp" "$evidence_receipt"
+}
+
+valid_row_evidence_receipt() {
+  evidence_id=$1
+  evidence_class=$2
+  evidence_receipt="$run_dir/$evidence_id.evidence.sha256"
+  [ -f "$evidence_receipt" ] && [ ! -L "$evidence_receipt" ] || return 1
+  [ "$(wc -l <"$evidence_receipt" | tr -d ' ')" -eq 7 ] || return 1
+  evidence_result_hash=$(artifact_hash_or_missing "$run_dir/$evidence_id.result")
+  evidence_log_hash=$(artifact_hash_or_missing "$evidence_dir/logs/$evidence_id.log")
+  evidence_command_hash=$(artifact_hash_or_missing "$run_dir/$evidence_id.command")
+  evidence_deadline_hash=$(artifact_hash_or_missing "$run_dir/$evidence_id.deadline")
+  evidence_watchdog_hash=$(artifact_hash_or_missing "$run_dir/$evidence_id.watchdog")
+  [ "$evidence_result_hash" != MISSING ] && [ "$evidence_log_hash" != MISSING ] || return 1
+  [ "$(sed -n '1p' "$evidence_receipt")" = 'schema=simple-bootstrap-diagnostic-evidence-v2' ] || return 1
+  [ "$(sed -n '2p' "$evidence_receipt")" = "classification_policy=$classification_policy" ] || return 1
+  [ "$(sed -n '3p' "$evidence_receipt")" = "result_sha256=$evidence_result_hash" ] || return 1
+  [ "$(sed -n '4p' "$evidence_receipt")" = "log_sha256=$evidence_log_hash" ] || return 1
+  [ "$(sed -n '5p' "$evidence_receipt")" = "command_sha256=$evidence_command_hash" ] || return 1
+  [ "$(sed -n '6p' "$evidence_receipt")" = "deadline_sha256=$evidence_deadline_hash" ] || return 1
+  [ "$(sed -n '7p' "$evidence_receipt")" = "watchdog_sha256=$evidence_watchdog_hash" ] || return 1
+  case "$evidence_class" in
+    pass|failure)
+      [ "$evidence_command_hash" != MISSING ] && [ "$evidence_deadline_hash" = MISSING ] && [ "$evidence_watchdog_hash" = MISSING ]
+      ;;
+    signal)
+      [ "$evidence_command_hash" != MISSING ] && { { [ "$evidence_deadline_hash" = MISSING ] && [ "$evidence_watchdog_hash" = MISSING ]; } || { [ "$evidence_deadline_hash" != MISSING ] && [ "$evidence_watchdog_hash" != MISSING ]; }; }
+      ;;
+    timeout)
+      [ "$evidence_command_hash" != MISSING ] && [ "$evidence_deadline_hash" != MISSING ] && [ "$evidence_watchdog_hash" != MISSING ]
+      ;;
+    infrastructure) ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_terminal_result() {
+  terminal_id=$1
+  terminal_path=$2
+  terminal_file="$run_dir/$terminal_id.result"
+  [ -f "$terminal_file" ] && [ ! -L "$terminal_file" ] || return 1
+  [ "$(wc -l <"$terminal_file" | tr -d ' ')" -eq 1 ] || return 1
+  IFS="	" read -r terminal_schema row_id row_status row_class row_exit row_signal row_path row_extra <"$terminal_file" || return 1
+  [ "$terminal_schema" = simple-bootstrap-diagnostic-result-v1 ] || return 1
+  [ "$row_id" = "$terminal_id" ] || return 1
+  [ "$row_path" = "$terminal_path" ] || return 1
+  [ -z "${row_extra:-}" ] || return 1
+  case "$row_status" in ''|*[!0-9]*) return 1 ;; esac
+  case "$row_exit" in ''|*[!0-9]*) return 1 ;; esac
+  case "$row_signal" in ''|*[!0-9]*) return 1 ;; esac
+  case "$row_class" in
+    pass)
+      [ "$row_status" -eq 0 ] && [ "$row_exit" -eq 0 ] && [ "$row_signal" -eq 0 ] || return 1
+      ;;
+    failure)
+      [ "$row_status" -ne 0 ] && [ "$row_exit" -eq "$row_status" ] && [ "$row_signal" -eq 0 ] || return 1
+      ;;
+    timeout)
+      [ "$row_status" -eq 124 ] && [ "$row_exit" -eq 124 ] && [ "$row_signal" -eq 0 ] || return 1
+      ;;
+    signal)
+      [ "$row_signal" -gt 0 ] && [ "$row_status" -eq $((128 + row_signal)) ] && [ "$row_exit" -eq "$row_status" ] || return 1
+      ;;
+    infrastructure)
+      [ "$row_status" -eq 125 ] && [ "$row_signal" -eq 0 ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ -f "$evidence_dir/logs/$terminal_id.log" ] && [ ! -L "$evidence_dir/logs/$terminal_id.log" ] || return 1
+  valid_row_evidence_receipt "$terminal_id" "$row_class"
+}
+
+publish_results() {
+  : >"$results_file.tmp"
+  while IFS="	" read -r publish_id publish_sha publish_path; do
+    if valid_terminal_result "$publish_id" "$publish_path"; then
+      sed -n '1p' "$run_dir/$publish_id.result" >>"$results_file.tmp"
+    fi
+  done <"$manifest_file"
+  mv "$results_file.tmp" "$results_file"
+}
+
+write_summary() {
+  summary_requested_complete=$1
+  publish_results
+  summary_passed=0
+  summary_failed=0
+  summary_signaled=0
+  summary_timed_out=0
+  summary_terminal=0
+  while IFS="	" read -r summary_schema summary_id summary_status summary_class summary_exit summary_signal summary_path; do
+    [ -n "$summary_id" ] || continue
+    summary_terminal=$((summary_terminal + 1))
+    case "$summary_class" in
+      pass) summary_passed=$((summary_passed + 1)) ;;
+      timeout) summary_failed=$((summary_failed + 1)); summary_timed_out=$((summary_timed_out + 1)) ;;
+      signal) summary_failed=$((summary_failed + 1)); summary_signaled=$((summary_signaled + 1)) ;;
+      *) summary_failed=$((summary_failed + 1)) ;;
+    esac
+  done <"$results_file"
+  summary_total=$(wc -l <"$manifest_file" | tr -d ' ')
+  summary_complete=false
+  if [ "$summary_requested_complete" = true ] && [ "$summary_terminal" -eq "$summary_total" ]; then
+    summary_complete=true
+  fi
+  {
+    echo 'format=simple-bootstrap-diagnostic-summary-v1'
+    echo "complete=$summary_complete"
+    echo "source_total=$summary_total"
+    echo "terminal_count=$summary_terminal"
+    echo "passed=$summary_passed"
+    echo "failed=$summary_failed"
+    echo "signaled=$summary_signaled"
+    echo "timed_out=$summary_timed_out"
+    echo "remaining=$((summary_total - summary_terminal))"
+  } >"$summary_file.tmp"
+  mv "$summary_file.tmp" "$summary_file"
+}
+
+cleanup_current_workers() {
   for cleanup_worker in $active_workers; do
     cleanup_worker_pid=${cleanup_worker%%:*}
+    cleanup_worker_id=${cleanup_worker#*:}
     kill -TERM "$cleanup_worker_pid" 2>/dev/null || true
-  done
-  for cleanup_pgid_file in "$run_dir"/*.pgid; do
+    cleanup_pgid_file="$run_dir/$cleanup_worker_id.pgid"
     [ -f "$cleanup_pgid_file" ] || continue
-    IFS= read -r cleanup_pgid < "$cleanup_pgid_file" || cleanup_pgid=""
+    IFS= read -r cleanup_pgid <"$cleanup_pgid_file" || cleanup_pgid=""
     case "$cleanup_pgid" in ''|*[!0-9]*) continue ;; esac
     kill -TERM "-$cleanup_pgid" 2>/dev/null || true
   done
   /bin/sleep 0.1
-  for cleanup_pgid_file in "$run_dir"/*.pgid; do
+  for cleanup_worker in $active_workers; do
+    cleanup_worker_id=${cleanup_worker#*:}
+    cleanup_pgid_file="$run_dir/$cleanup_worker_id.pgid"
     [ -f "$cleanup_pgid_file" ] || continue
-    IFS= read -r cleanup_pgid < "$cleanup_pgid_file" || cleanup_pgid=""
+    IFS= read -r cleanup_pgid <"$cleanup_pgid_file" || cleanup_pgid=""
     case "$cleanup_pgid" in ''|*[!0-9]*) continue ;; esac
     kill -KILL "-$cleanup_pgid" 2>/dev/null || true
   done
-  rm -rf "$run_dir"
+}
+
+cleanup_sweep() {
+  cleanup_status=$?
+  [ "$#" -eq 0 ] || cleanup_status=$1
+  trap - EXIT INT TERM HUP
+  cleanup_current_workers
+  write_summary false
+  rm -rf "$identity_tmp"
+  rmdir "$lock_dir" 2>/dev/null || true
   exit "$cleanup_status"
 }
 trap cleanup_sweep EXIT
@@ -90,113 +367,247 @@ trap 'cleanup_sweep 130' INT
 trap 'cleanup_sweep 143' TERM
 trap 'cleanup_sweep 129' HUP
 
-# Prove the exact seed -> delegated pure-Simple child route once before
-# dispatching the full file inventory. An executable but stale/incomplete
-# child can otherwise return a silent nonzero for every input, fabricating a
-# whole-tree source failure inventory (observed: 76/76 MIR optimizer files).
-preflight_source="$run_dir/diagnostic_preflight.spl"
-preflight_log="$run_dir/diagnostic_preflight.log"
-printf '%s\n' 'fn diagnostic_preflight() -> i64: 1' > "$preflight_source"
-preflight_status=0
-if command -v timeout >/dev/null 2>&1; then
-  env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
-    timeout -k 1s 30s "$compiler" check "$preflight_source" \
-    >"$preflight_log" 2>&1 || preflight_status=$?
-elif command -v gtimeout >/dev/null 2>&1; then
-  env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
-    gtimeout -k 1s 30s "$compiler" check "$preflight_source" \
-    >"$preflight_log" 2>&1 || preflight_status=$?
-else
-  env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
-    "$compiler" check "$preflight_source" >"$preflight_log" 2>&1 ||
-    preflight_status=$?
-fi
-if [ "$preflight_status" -ne 0 ]; then
-  echo "error: diagnostic compiler/child preflight failed with exit $preflight_status" >&2
-  sed -n '1,40p' "$preflight_log" >&2
-  exit 2
-fi
+rejected_dir="$run_dir/rejected"
+quarantine_nonterminal() {
+  rejected_id=$1
+  mkdir -p "$rejected_dir"
+  rejected_index=1
+  rejected_slot_used() {
+    for rejected_existing_suffix in result status command deadline watchdog pgid claim evidence.sha256 log; do
+      [ ! -e "$rejected_dir/$rejected_id.$rejected_index.$rejected_existing_suffix" ] || return 0
+    done
+    return 1
+  }
+  while rejected_slot_used; do
+    rejected_index=$((rejected_index + 1))
+  done
+  for rejected_suffix in result status command deadline watchdog pgid claim evidence.sha256; do
+    rejected_source="$run_dir/$rejected_id.$rejected_suffix"
+    [ ! -e "$rejected_source" ] || mv "$rejected_source" "$rejected_dir/$rejected_id.$rejected_index.$rejected_suffix"
+  done
+  rejected_log="$evidence_dir/logs/$rejected_id.log"
+  [ ! -e "$rejected_log" ] || mv "$rejected_log" "$rejected_dir/$rejected_id.$rejected_index.log"
+}
 
-files_list="$run_dir/files"
-: > "$files_list"
-
-old_ifs=$IFS
-IFS='
-'
-for root in $roots; do
-  [ -e "$root" ] || { echo "error: diagnostic root does not exist: $root" >&2; exit 2; }
-  if [ -d "$root" ]; then
-    find "$root" -type f -name '*.spl' -print
-  else
-    case "$root" in *.spl) echo "$root" ;; *) echo "error: diagnostic input is not .spl: $root" >&2; exit 2 ;; esac
+# Rebuild the deterministic id/path index and count only schema-valid terminal
+# rows. Corrupt or partial rows remain preserved under state/rejected and are
+# the only previously attempted ids eligible for redispatch.
+: >"$run_dir/index.tmp"
+pending_count=0
+while IFS="	" read -r resume_id resume_sha resume_path; do
+  printf '%s\t%s\n' "$resume_id" "$resume_path" >>"$run_dir/index.tmp"
+  if ! valid_terminal_result "$resume_id" "$resume_path"; then
+    quarantine_nonterminal "$resume_id"
+    pending_count=$((pending_count + 1))
   fi
-done | LC_ALL=C sort -u > "$files_list"
-IFS=$old_ifs
+done <"$manifest_file"
+mv "$run_dir/index.tmp" "$run_dir/index"
+write_summary false
 
-[ -s "$files_list" ] || { echo "error: diagnostic sweep selected no .spl files" >&2; exit 2; }
+# Prove the seed -> delegated admitted child route before dispatching any
+# missing id. A fully terminal resume performs no compiler invocation.
+if [ "$pending_count" -gt 0 ]; then
+  preflight_source="$run_dir/diagnostic_preflight.spl"
+  preflight_log="$evidence_dir/logs/diagnostic_preflight.log"
+  printf '%s\n' 'fn diagnostic_preflight() -> i64: 1' >"$preflight_source"
+  preflight_status=0
+  if command -v timeout >/dev/null 2>&1; then
+    env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+      timeout -k 1s 30s "$compiler" check "$preflight_source" >"$preflight_log" 2>&1 || preflight_status=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+      gtimeout -k 1s 30s "$compiler" check "$preflight_source" >"$preflight_log" 2>&1 || preflight_status=$?
+  else
+    env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+      "$compiler" check "$preflight_source" >"$preflight_log" 2>&1 || preflight_status=$?
+  fi
+  if [ "$preflight_status" -ne 0 ]; then
+    echo "error: diagnostic compiler/child preflight failed with exit $preflight_status" >&2
+    sed -n '1,40p' "$preflight_log" >&2
+    exit 2
+  fi
+fi
 
 run_one() {
   item_id=$1
   source_path=$2
-  cache_checksum=$(printf '%s\n' "$source_path" | cksum)
-  cache_key=${cache_checksum%% *}
+  cache_key=$(printf '%s\n' "$source_path" | sha256sum | awk '{print $1}')
   item_cache="$cache_root/$cache_key"
   mkdir -p "$item_cache"
-  timeout_marker="$run_dir/$item_id.timeout"
-  # Each compiler owns a new process group. Parser/semantic globals therefore
-  # remain process-isolated, and a timed-out compiler cannot leave a delegated
-  # bin/simple descendant holding output or consuming a worker slot.
-  perl -MPOSIX=setsid -e \
-    'defined(POSIX::setsid()) or die "setsid failed\n"; exec @ARGV or die "exec failed: $!\n"' \
+  claim_dir="$run_dir/$item_id.claim"
+  deadline_receipt="$run_dir/$item_id.deadline"
+  watchdog_receipt="$run_dir/$item_id.watchdog"
+  command_outcome="$run_dir/$item_id.command"
+  pgid_receipt="$run_dir/$item_id.pgid"
+  perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC,sleep -e '
+    my ($item_id, $timeout, $grace, $out, $pgid_out, $claim, $deadline_out, $watchdog_out, @command) = @ARGV;
+    sub atomic_line {
+      my ($path, $line) = @_;
+      open(my $fh, ">", "$path.tmp") or die "receipt open failed: $!\n";
+      print $fh $line;
+      close($fh) or die "receipt close failed: $!\n";
+      rename("$path.tmp", $path) or die "receipt rename failed: $!\n";
+    }
+    my $child = fork();
+    defined($child) or die "fork failed\n";
+    if ($child == 0) {
+      defined(POSIX::setsid()) or die "setsid failed\n";
+      exec "/bin/sh", "-c", "ulimit -c 0 2>/dev/null || :; exec \"\$@\"", "diagnostic-child", @command;
+      exit 125;
+    }
+    atomic_line($pgid_out, "$child\n");
+    my $deadline = clock_gettime(CLOCK_MONOTONIC) + $timeout;
+    my $claim_owner = "terminal";
+    my $raw = -1;
+    while (1) {
+      my $waited = waitpid($child, WNOHANG);
+      if ($waited == $child) {
+        $raw = $?;
+        last;
+      }
+      die "waitpid failed: $!\n" if $waited == -1;
+      if (clock_gettime(CLOCK_MONOTONIC) >= $deadline) {
+        # Close the poll-to-deadline edge: a child that became waitable after
+        # the first poll owns a terminal outcome, not a watchdog timeout.
+        $waited = waitpid($child, WNOHANG);
+        if ($waited == $child) {
+          $raw = $?;
+          last;
+        }
+        die "deadline-edge waitpid failed: $!\n" if $waited == -1;
+        $claim_owner = "deadline";
+        mkdir($claim, 0700) or die "deadline claim failed: $!\n";
+        atomic_line("$claim/decision", "deadline\n");
+        atomic_line($deadline_out, "simple-bootstrap-diagnostic-deadline-v2\t$item_id\t$child\n");
+        my $watchdog_action = kill("TERM", -$child) ? "term_requested" : "unavailable";
+        atomic_line($watchdog_out, "simple-bootstrap-diagnostic-watchdog-v2\t$item_id\t$child\t$watchdog_action\n");
+        my $grace_deadline = clock_gettime(CLOCK_MONOTONIC) + $grace;
+        while (1) {
+          $waited = waitpid($child, WNOHANG);
+          if ($waited == $child) {
+            $raw = $?;
+            last;
+          }
+          die "waitpid failed after deadline: $!\n" if $waited == -1;
+          if (clock_gettime(CLOCK_MONOTONIC) >= $grace_deadline) {
+            if (kill("KILL", -$child)) {
+              $watchdog_action = "kill_requested";
+              atomic_line($watchdog_out, "simple-bootstrap-diagnostic-watchdog-v2\t$item_id\t$child\t$watchdog_action\n");
+            }
+            waitpid($child, 0) == $child or die "final waitpid failed: $!\n";
+            $raw = $?;
+            last;
+          }
+          sleep(0.005);
+        }
+        last;
+      }
+      sleep(0.005);
+    }
+    if ($claim_owner eq "terminal") {
+      mkdir($claim, 0700) or die "terminal claim failed: $!\n";
+      atomic_line("$claim/decision", "terminal\n");
+      if (kill("TERM", -$child)) {
+        sleep($grace);
+        kill("KILL", -$child);
+      }
+    }
+    my ($kind, $exit_code, $signal) = ("infrastructure", 125, 0);
+    if ($raw != -1 && ($raw & 127)) {
+      $signal = $raw & 127;
+      $exit_code = 128 + $signal;
+      $kind = "signal";
+    } elsif ($raw != -1) {
+      $exit_code = $raw >> 8;
+      $kind = "exit";
+    }
+    open(my $fh, ">", "$out.tmp") or die "outcome open failed: $!\n";
+    print $fh "simple-bootstrap-diagnostic-command-v2\t$kind\t$exit_code\t$signal\t$claim_owner\n";
+    close($fh) or die "outcome close failed: $!\n";
+    rename("$out.tmp", $out) or die "outcome rename failed: $!\n";
+    exit($exit_code > 125 ? 125 : $exit_code);
+  ' "$item_id" "$timeout_seconds" "$timeout_grace_seconds" \
+    "$command_outcome" "$pgid_receipt" "$claim_dir" "$deadline_receipt" "$watchdog_receipt" \
     env SIMPLE_NATIVE_BUILD_CACHE_DIR="$item_cache" \
     SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
-    "$compiler" check "$source_path" $check_profile_arg >"$run_dir/$item_id.log" 2>&1 &
+    "$compiler" check "$source_path" $check_profile_arg >"$evidence_dir/logs/$item_id.log" 2>&1 &
   compiler_pid=$!
-  printf '%s\n' "$compiler_pid" > "$run_dir/$item_id.pgid.tmp"
-  mv "$run_dir/$item_id.pgid.tmp" "$run_dir/$item_id.pgid"
-  (
-    /bin/sleep "$timeout_seconds"
-    if kill -0 "$compiler_pid" 2>/dev/null; then
-      : > "$timeout_marker.tmp"
-      mv "$timeout_marker.tmp" "$timeout_marker"
-      kill -TERM "-$compiler_pid" 2>/dev/null || true
-      /bin/sleep "$timeout_grace_seconds"
-      kill -KILL "-$compiler_pid" 2>/dev/null || true
-    fi
-  ) &
-  watchdog_pid=$!
-
   command_status=0
-  wait "$compiler_pid" || command_status=$?
-  if [ -f "$timeout_marker" ]; then
-    wait "$watchdog_pid" 2>/dev/null || true
-  else
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
-  fi
-  # A compiler may exit while a delegated descendant still owns the group's
-  # stdout/stderr. Always reap that group before publishing completion.
-  if kill -TERM "-$compiler_pid" 2>/dev/null; then
-    /bin/sleep "$timeout_grace_seconds"
-    kill -KILL "-$compiler_pid" 2>/dev/null || true
-  fi
-  : > "$run_dir/$item_id.pgid"
+  wait "$compiler_pid" 2>>"$evidence_dir/logs/$item_id.log" || command_status=$?
 
-  if [ -f "$timeout_marker" ]; then
-    printf 'error: diagnostic timeout after %ss: %s\n' \
-      "$timeout_seconds" "$source_path" >> "$run_dir/$item_id.log"
-    result_status=124
-  elif [ "$command_status" -eq 0 ]; then
-    result_status=0
+  if [ -f "$command_outcome" ]; then
+    IFS="	" read -r outcome_schema outcome_kind outcome_exit outcome_signal outcome_claim outcome_extra <"$command_outcome"
+    outcome_valid=1
+    [ "$outcome_schema" = simple-bootstrap-diagnostic-command-v2 ] || outcome_valid=0
+    case "$outcome_kind" in exit|signal|infrastructure) ;; *) outcome_valid=0 ;; esac
+    case "$outcome_exit" in ''|*[!0-9]*) outcome_valid=0 ;; esac
+    case "$outcome_signal" in ''|*[!0-9]*) outcome_valid=0 ;; esac
+    case "$outcome_claim" in terminal|deadline) ;; *) outcome_valid=0 ;; esac
+    [ -z "${outcome_extra:-}" ] || outcome_valid=0
   else
-    result_status=1
+    outcome_valid=0
   fi
-  printf '%s\n' "$result_status" > "$run_dir/$item_id.status.tmp"
+  deadline_valid=0
+  deadline_pgid=""
+  if [ -f "$deadline_receipt" ]; then
+    IFS="	" read -r deadline_schema deadline_id deadline_pgid deadline_extra <"$deadline_receipt"
+    if [ "$deadline_schema" = simple-bootstrap-diagnostic-deadline-v2 ] && [ "$deadline_id" = "$item_id" ] && [ -z "${deadline_extra:-}" ]; then
+      case "$deadline_pgid" in ''|*[!0-9]*) ;; *) deadline_valid=1 ;; esac
+    fi
+  fi
+  watchdog_valid=0
+  watchdog_action=""
+  if [ -f "$watchdog_receipt" ]; then
+    IFS="	" read -r watchdog_schema watchdog_id watchdog_pgid watchdog_action watchdog_extra <"$watchdog_receipt"
+    if [ "$watchdog_schema" = simple-bootstrap-diagnostic-watchdog-v2 ] && [ "$watchdog_id" = "$item_id" ] && [ "$watchdog_pgid" = "$deadline_pgid" ] && [ -z "${watchdog_extra:-}" ]; then
+      case "$watchdog_action" in term_requested|kill_requested) watchdog_valid=1 ;; esac
+    fi
+  fi
+  if [ "$outcome_valid" -ne 1 ]; then
+    result_status=125
+    result_exit=$command_status
+    result_signal=0
+    result_class=infrastructure
+  elif [ "$outcome_claim" = deadline ] && [ "$deadline_valid" -eq 1 ] && [ "$watchdog_valid" -eq 1 ] && { [ "$outcome_kind" != signal ] || [ "$outcome_signal" -eq 9 ] || [ "$outcome_signal" -eq 15 ]; }; then
+    printf 'error: diagnostic timeout after %ss: %s\n' "$timeout_seconds" "$source_path" >>"$evidence_dir/logs/$item_id.log"
+    result_status=124
+    result_class=timeout
+    result_exit=124
+    result_signal=0
+  elif [ "$outcome_kind" = signal ]; then
+    result_status=$outcome_exit
+    result_class=signal
+    result_exit=$outcome_exit
+    result_signal=$outcome_signal
+  elif [ "$outcome_claim" = deadline ]; then
+    printf 'error: deadline claim lacks a valid watchdog receipt: %s\n' "$source_path" >>"$evidence_dir/logs/$item_id.log"
+    result_status=125
+    result_class=infrastructure
+    result_exit=$outcome_exit
+    result_signal=0
+  else
+    result_status=$outcome_exit
+    result_exit=$outcome_exit
+    result_signal=$outcome_signal
+    if [ "$outcome_kind" = signal ]; then
+      result_class=signal
+    elif [ "$outcome_kind" = exit ] && [ "$outcome_exit" -eq 0 ]; then
+      result_class=pass
+    elif [ "$outcome_kind" = exit ]; then
+      result_class=failure
+    else
+      result_class=infrastructure
+    fi
+  fi
+  printf 'simple-bootstrap-diagnostic-result-v1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$item_id" "$result_status" "$result_class" "$result_exit" "$result_signal" "$source_path" \
+    >"$run_dir/$item_id.result.tmp"
+  mv "$run_dir/$item_id.result.tmp" "$run_dir/$item_id.result"
+  printf '%s\n' "$result_status" >"$run_dir/$item_id.status.tmp"
   mv "$run_dir/$item_id.status.tmp" "$run_dir/$item_id.status"
+  write_row_evidence_receipt "$item_id"
 }
 
-item_id=0
-active_count=0
 reap_completed() {
   remaining_workers=""
   reaped_any=0
@@ -207,6 +618,20 @@ reap_completed() {
       wait "$worker_pid" 2>/dev/null || true
       active_count=$((active_count - 1))
       reaped_any=1
+    elif ! kill -0 "$worker_pid" 2>/dev/null; then
+      wait "$worker_pid" 2>/dev/null || true
+      if [ ! -f "$run_dir/$worker_id.result" ]; then
+        worker_path=$(sed -n "${worker_id}p" "$run_dir/index" | cut -f2-)
+        printf 'simple-bootstrap-diagnostic-result-v1\t%s\t125\tinfrastructure\t125\t0\t%s\n' \
+          "$worker_id" "$worker_path" >"$run_dir/$worker_id.result.tmp"
+        mv "$run_dir/$worker_id.result.tmp" "$run_dir/$worker_id.result"
+        printf '%s\n' 125 >"$run_dir/$worker_id.status.tmp"
+        mv "$run_dir/$worker_id.status.tmp" "$run_dir/$worker_id.status"
+        [ -f "$evidence_dir/logs/$worker_id.log" ] || : >"$evidence_dir/logs/$worker_id.log"
+        write_row_evidence_receipt "$worker_id"
+      fi
+      active_count=$((active_count - 1))
+      reaped_any=1
     else
       remaining_workers="$remaining_workers $worker"
     fi
@@ -214,43 +639,68 @@ reap_completed() {
   active_workers=$remaining_workers
 }
 
-while IFS= read -r source_path; do
+while IFS="	" read -r item_id item_sha source_path; do
+  valid_terminal_result "$item_id" "$source_path" && continue
   while [ "$active_count" -ge "$jobs" ]; do
     reap_completed
     [ "$reaped_any" -eq 1 ] || /bin/sleep 0.02
   done
-  item_id=$((item_id + 1))
-  printf '%s\t%s\n' "$item_id" "$source_path" >> "$run_dir/index"
   run_one "$item_id" "$source_path" &
   active_workers="$active_workers $!:$item_id"
   active_count=$((active_count + 1))
-done < "$files_list"
+done <"$manifest_file"
 while [ "$active_count" -gt 0 ]; do
   reap_completed
   [ "$reaped_any" -eq 1 ] || /bin/sleep 0.02
 done
 
+# Fail closed at the manifest boundary. Preserve any partial/corrupt state, then
+# terminalize it as infrastructure so aggregate completeness is never inferred.
+while IFS="	" read -r final_id final_sha final_path; do
+  if ! valid_terminal_result "$final_id" "$final_path"; then
+    quarantine_nonterminal "$final_id"
+    printf 'error: diagnostic worker produced no schema-valid atomic outcome: %s\n' \
+      "$final_path" >"$evidence_dir/logs/$final_id.log"
+    printf 'simple-bootstrap-diagnostic-result-v1\t%s\t125\tinfrastructure\t125\t0\t%s\n' \
+      "$final_id" "$final_path" >"$run_dir/$final_id.result.tmp"
+    mv "$run_dir/$final_id.result.tmp" "$run_dir/$final_id.result"
+    printf '%s\n' 125 >"$run_dir/$final_id.status.tmp"
+    mv "$run_dir/$final_id.status.tmp" "$run_dir/$final_id.status"
+    write_row_evidence_receipt "$final_id"
+  fi
+done <"$manifest_file"
+
+publish_results
 passed=0
 failed=0
 timed_out=0
-while IFS="	" read -r result_id source_path; do
-  IFS= read -r status < "$run_dir/$result_id.status"
+signaled=0
+final_incomplete=0
+while IFS="	" read -r result_id result_sha source_path; do
+  if ! valid_terminal_result "$result_id" "$source_path"; then
+    final_incomplete=1
+    continue
+  fi
+  IFS="	" read -r result_schema row_id status result_class result_exit result_signal row_path <"$run_dir/$result_id.result"
   if [ "$status" -eq 0 ]; then
     passed=$((passed + 1))
   else
     failed=$((failed + 1))
-    if [ "$status" -eq 124 ]; then
-      timed_out=$((timed_out + 1))
-      echo "=== diagnostic timeout: $source_path ==="
-    else
-      echo "=== diagnostic failure: $source_path ==="
-    fi
-    cat "$run_dir/$result_id.log"
+    case "$result_class" in
+      timeout) timed_out=$((timed_out + 1)); echo "=== diagnostic timeout: $source_path ===" ;;
+      signal) signaled=$((signaled + 1)); echo "=== diagnostic crash (exit $status): $source_path ===" ;;
+      *) echo "=== diagnostic failure: $source_path ===" ;;
+    esac
+    sed -n '1,200p' "$evidence_dir/logs/$result_id.log"
   fi
-done < "$run_dir/index"
+done <"$manifest_file"
 
-echo "bootstrap diagnostic summary: checked=$((passed + failed)) passed=$passed failed=$failed timed_out=$timed_out"
-if [ "$failed" -ne 0 ]; then
-  exit 1
-fi
+write_summary true
+final_complete=$(sed -n 's/^complete=//p' "$summary_file")
+echo "bootstrap diagnostic summary: checked=$((passed + failed)) passed=$passed failed=$failed signaled=$signaled timed_out=$timed_out complete=$final_complete"
+trap - EXIT INT TERM HUP
+rm -rf "$identity_tmp"
+rmdir "$lock_dir" 2>/dev/null || true
+[ "$final_incomplete" -eq 0 ] || exit 2
+if [ "$failed" -ne 0 ]; then exit 1; fi
 exit 0

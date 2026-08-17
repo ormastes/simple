@@ -2,7 +2,7 @@
 # SOSIX Refactor and Multi-Host QEMU Architecture
 
 **Status:** implementation architecture
-**Requirements:** `REQ-SQ-001` through `REQ-SQ-015`
+**Requirements:** `REQ-SQ-001` through `REQ-SQ-017`
 **Date:** 2026-08-11
 
 ## Decision
@@ -107,6 +107,12 @@ firmware, accelerator, memory, disk, serial, QMP, timeout, and marker settings.
 Host overlays select only proven KVM/HVF/WHPX/NVMM support; TCG is correctness
 evidence, never native-performance evidence.
 
+Windows descriptors keep collector-nonce capability separate from complete
+run-contract readiness. All six guests may own a bounded `/SOSIXNON.TXT`
+reader, while only rows with workload nonce, mounted listing, program/exit,
+and exact-reap markers may reach ready or QEMU execution. Incomplete rows fail
+before ready with `guest-run-contract-not-implemented:<guest>`.
+
 Large storage resolves in this order:
 
 1. `SIMPLE_BIG_STORAGE_ROOT`;
@@ -186,6 +192,31 @@ is tracked in
 Fixed responses, host-side `ls`, replayed nonces, stale descriptor hashes,
 missing native accelerators, and nonzero program exits fail closed.
 
+## FAT32 positioned-I/O owner closure
+
+The production positioned route now has one concrete ownership chain:
+
+```text
+syscall 134/135
+  -> kernel positioned dispatch owner
+  -> authenticated capability + owned-buffer registry
+  -> SosixFat32PositionedVfsBackendV1
+  -> generation-safe Fat32FileObject
+  -> Fat32Filesystem.read_at/write_at
+```
+
+`Fat32FileObject` is the canonical mutable open-file description. Descriptor
+aliases are handles to it; dup/fork publish aliases, close/task exit retire
+them, and a monotonic nonzero object identity is never reused. Positioned
+operations carry explicit offsets and owned byte arrays, preserve the shared
+sequential cursor, and commit returned allocation/file-size metadata at the
+object owner. FAT32 mutation remains serialized by `Fat32Filesystem`.
+
+The kernel shim retains the concrete backend, but registry installation remains
+an explicit authenticated composition step. An absent owner, capability,
+buffer registration, mount, or live object fails closed. No compatibility path
+may manufacture success with seek/read-or-write/restore.
+
 ## Deployment sequence
 
 1. Consolidate typed core and compatibility notification waits.
@@ -229,3 +260,36 @@ x86_64 is blocked before boot by image payload capacity; ARM64 is blocked in
 FAT/VFS directory-buffer handling after the three-cycle cap. External-host
 non-PASS receipts remain required. This snapshot describes admission, not an
 absence of implemented guest capability.
+
+## Positioned filesystem owner extension (2026-08-16)
+
+REQ-SQ-021 and REQ-SQ-022 extend the existing positioned-I/O lane without
+creating another handle authority. `MountTable` remains the canonical owner:
+its monotonically allocated virtual handle binds one mount, one driver kind,
+and one opaque driver handle. NVFS and DBFS dispatch therefore follows
+
+`SOSIX backend -> global VFS positioned facade -> MountTable virtual handle -> driver read_at/write_at`.
+
+The raw NVFS or DBFS handle is never a SOSIX object ID. Close retires the
+virtual binding, stale handles fail, cross-driver use fails, and offset/count
+validation occurs before driver dispatch. The concrete fieldless
+`SosixNvfsPositionedVfsBackendV1` and `SosixDbfsPositionedVfsBackendV1`
+adapters deliberately reuse that owner and return stable typed errors. The
+production shim retains a generation-bound typed route owner; boot installs
+the explicit root kind and never infers it from a numeric object ID. The live
+oracle crosses registered-buffer SOSIX kernel dispatch before the adapter.
+
+REQ-SQ-023 adds a narrow x86_64 live-guest route. The current NVFS facade is
+honestly named `nvfs-dbfs-backed-v1`: NVFS metadata occupies logical sectors
+0-1, the DBFS backing superblock occupies sectors 2-3, and its arena begins at
+sector 4. The image builder and boot path must retain that label; they may not
+claim a separate native NVFS storage engine. The guest mounts the device via
+`DriverInstance.Nvfs`, performs a cursor-independent positioned round trip,
+then proves persistence by observing the same private image on a second boot.
+
+Live evidence is admitted only when a source-matched pure-Simple Stage-4
+runtime, runtime receipt, closed dedicated-entry kernel receipt, immutable
+image manifest, both transcript hashes, and QEMU binary all validate. Source
+inspection, `--self-test`, Stage 2/3, the Rust
+seed, or one boot cannot promote this row. The evidence gate remains additive
+to the 24-row matrix and does not change any existing host/guest row state.

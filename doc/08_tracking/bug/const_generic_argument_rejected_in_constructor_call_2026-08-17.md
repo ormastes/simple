@@ -47,6 +47,7 @@ deployed binary older than 2026-08-17 still reports the stale
 
 - Status: OPEN (P3)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: FIXED (diagnostic); const generics themselves remain unimplemented by design
 - Original report follows.
 
 - Status: OPEN

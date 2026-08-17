@@ -1,0 +1,56 @@
+# Depth-first hit testing for blink block-flow layout boxes.
+
+use std.skia.entity.geometry.{SkRect}
+use std.blink.layout.block_flow.{LayoutContext}
+use std.blink.input.event.{InputEvent}
+
+struct HitTestResult:
+    hit_box_id: i64
+    local_x: f64
+    local_y: f64
+    ancestors: [i64]
+
+fn hit_test_empty() -> HitTestResult:
+    HitTestResult(hit_box_id: -1, local_x: 0.0, local_y: 0.0, ancestors: [])
+
+fn point_in_rect(rect: SkRect, x: f64, y: f64) -> bool:
+    x >= rect.left and x < rect.right and y >= rect.top and y < rect.bottom
+
+fn _hit_box(ctx: LayoutContext, box_id: i64, x: f64, y: f64, ancestors: [i64]) -> HitTestResult:
+    val box_opt = ctx.get_box(box_id)
+    if box_opt is None:
+        return hit_test_empty()
+    if val box = box_opt:
+        if not point_in_rect(box.computed_rect, x, y):
+            return hit_test_empty()
+        var child_ancestors = ancestors
+        child_ancestors.push(box.id)
+        # Later siblings paint above earlier siblings, so inspect in reverse.
+        var i = box.children_ids.len() - 1
+        while i >= 0:
+            val child = _hit_box(ctx, box.children_ids[i as i32], x, y, child_ancestors)
+            if child.hit_box_id >= 0:
+                return child
+            i = i - 1
+        return HitTestResult(hit_box_id: box.id,
+            local_x: x - box.computed_rect.left,
+            local_y: y - box.computed_rect.top,
+            ancestors: ancestors)
+    hit_test_empty()
+
+fn hit_test(ctx: LayoutContext, x: f64, y: f64) -> HitTestResult:
+    if ctx.root_id < 0:
+        return hit_test_empty()
+    _hit_box(ctx, ctx.root_id, x, y, [])
+
+fn hit_test_event(ctx: LayoutContext, event: InputEvent) -> HitTestResult:
+    if not event.is_mouse() and not event.is_touch():
+        return hit_test_empty()
+    hit_test(ctx, event.position.x, event.position.y)
+
+fn hit_test_ancestors(ctx: LayoutContext, x: f64, y: f64) -> [i64]:
+    val result = hit_test(ctx, x, y)
+    var ids = result.ancestors
+    if result.hit_box_id >= 0:
+        ids.push(result.hit_box_id)
+    ids

@@ -7,14 +7,14 @@ use ieee.std_logic_textio.all;
 -- rv32_exec_core_flat: full-RAM behavioral sibling of rv32_exec_core.
 --
 -- The synthesizable rv32_exec_core confines code+data to a 64 KB window
--- (word_index = off(15 downto 2)) with a small scratch region and per-address
--- return-address hacks, all tuned to run the 64 KB NVMe self-test firmware.
+-- (word_index = off(15 downto 2)) and therefore runs only payloads linked
+-- wholly inside that window, such as the 64 KB NVMe self-test firmware.
 -- The full rv32 SimpleOS kernel needs ~8.5 MB of contiguous RAM
 -- (sp=_stack_top=0x8081d010, heap=0x8081e000), so this variant keeps the SAME
 -- decode / ALU / CSR / M-extension / RVC logic but backs it with ONE flat
 -- 16 MB behavioral RAM (word_index = off(23 downto 2), covering
 -- 0x80000000..0x80FFFFFF). Memory access here is asynchronous single-cycle
--- (behavioral, NOT a BRAM model) so all the scratch/deferral/replication
+-- (behavioral, NOT a BRAM model) so all the windowing/deferral/replication
 -- machinery is gone; on silicon this 16 MB is PS DDR, not fabric BRAM.
 --
 -- Additions over the synthesizable core's memory front-end: lh/lhu/sh are

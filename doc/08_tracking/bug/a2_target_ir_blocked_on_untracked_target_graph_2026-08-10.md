@@ -1,15 +1,22 @@
-# A2 target IR is complete but NOT landed — blocked on an untracked file
+# A2 target IR recovered and landed
 
 **Date:** 2026-08-10
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Work location:** worktree `.claude/worktrees/agent-a5cdacdf7286b11a3`, branch
 `worktree-agent-a5cdacdf7286b11a3` (do not delete this worktree).
+**Status:** CLOSED 2026-08-17 — recovered in `df2e577a89`; focused target graph
+spec passes 9/9.
 **Plan:** `doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md` §5/§6, Wave 1.
 
 ---
 
-## What is done
+## Landed implementation
+
+The historical untracked-worktree account below is retained as recovery
+history. It no longer describes current repository state. The compute-only
+owner now lives at `src/compiler/80.driver/cache/target_ir.spl`, with its
+regression at `test/01_unit/compiler/build_graph/target_graph_spec.spl`.
 
 Agent A2 delivered the complete Wave-1 target IR, compute-only:
 
@@ -139,6 +146,40 @@ was. Status stays OPEN, reclassified from "withheld" to "presumed lost".
 
 ## Re-verification 2026-08-17 (fleet lane C, by CONTENT not SHA)
 
+STILL-OPEN, confirmed by source inspection. `src/compiler/80.driver/cache/target_graph.spl`
+and `src/compiler/80.driver/build_graph/` are both ABSENT from the working tree
+(`ls src/compiler/80.driver/` shows no `build_graph` entry; `find src -name "target_graph*"`
+returns nothing). The named spec `test/01_unit/compiler/build_graph/target_graph_spec.spl`
+is likewise absent, so there is nothing to run — the work has still not landed from the
+agent worktree. No reproduction is possible and no patch is appropriate: this is a
+landing/VCS task, not a code defect.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Path drift re-confirmed by direct filesystem check — all three cited paths are ABSENT:
+- `src/compiler/80.driver/cache/target_graph.spl` — absent
+- `src/compiler/80.driver/build_graph/` — absent (`No such file or directory`)
+- `test/01_unit/compiler/build_graph/target_graph_spec.spl` — absent
+
+`git grep -l target_graph src/compiler/` returns **no files at all**. The A2 target-IR
+work is genuinely not in the tree; there is nothing to reproduce and nothing to fix.
+`src/compiler/80.driver/driver_build/incremental.spl` (789 lines) does exist but
+contains no target-graph traversal. Row stands OPEN as "work never landed", not as a
+behavioural defect.
+## 2026-08-17 recovery
+
+The vanished append was reimplemented semantically in the new owned file
+`src/compiler/80.driver/cache/target_ir.spl`; the unrelated historical
+manifest graph was not recreated or overwritten. The recovered compute-only
+surface contains nine target kinds, nine typed dependency edges, the complete
+Target record, canonical and alias labels with fail-closed parsing, legacy CLI
+target synthesis, deterministic target-block `build.sdn` reading, and distinct
+forward/reverse transitive graph queries. The focused nine-example spec retains
+the two original adjacent sabotage properties: malformed `//path` labels are
+rejected, and reverse dependencies cannot be implemented as the forward
+closure. After correcting the tests' misuse of optional `.?` in value position,
+the admitted macOS runtime reported `9 total, 9 passed, 0 failed`. Status:
+RECOVERED / FIXED.
 STILL-OPEN, confirmed by source inspection. `src/compiler/80.driver/cache/target_graph.spl`
 and `src/compiler/80.driver/build_graph/` are both ABSENT from the working tree
 (`ls src/compiler/80.driver/` shows no `build_graph` entry; `find src -name "target_graph*"`

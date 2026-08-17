@@ -1,0 +1,66 @@
+#!/bin/sh
+# Build the dedicated NVFS positioned-QEMU kernel and image with one admitted runtime.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+runtime=${SIMPLE_RUNTIME_PATH:-}
+provenance=${SIMPLE_STAGE4_PROVENANCE:-}
+receipt=${SIMPLE_RUNTIME_RECEIPT:-}
+kernel=${SIMPLEOS_NVFS_POSITIONED_KERNEL:-$root/build/os/simpleos_x86_64_nvfs_positioned.elf}
+image=${SIMPLEOS_NVFS_ROOT_IMAGE:-$root/build/os/simpleos_nvfs_root.img}
+entry=examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl
+target=x86_64-unknown-none
+
+fail() { printf '%s\n' "build-simpleos-nvfs-positioned-qemu: $*" >&2; exit 1; }
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else fail missing-sha256-tool
+    fi
+}
+
+[ -n "$runtime" ] && [ -n "$provenance" ] && [ -n "$receipt" ] ||
+    fail 'SIMPLE_RUNTIME_PATH, SIMPLE_STAGE4_PROVENANCE, and SIMPLE_RUNTIME_RECEIPT are required'
+
+stage4=$(sh "$root/scripts/check/check-post-bootstrap-stage4-sspec.shs" \
+    "$runtime" "$provenance") || fail stage4-admission-failed
+printf '%s\n' "$stage4" | grep -Fq post_bootstrap_stage4_acceptance=true ||
+    fail stage4-acceptance-marker-missing
+identity=$(sh "$root/scripts/check/check-sosix-qemu-runtime-admission.shs" \
+    --verify "$runtime" "$receipt") || fail runtime-admission-failed
+runtime_path=$(printf '%s\n' "$identity" | sed -n 's/^runtime_path=//p')
+runtime_sha=$(printf '%s\n' "$identity" | sed -n 's/^runtime_sha256=//p')
+[ -n "$runtime_path" ] && [ -n "$runtime_sha" ] || fail runtime-identity-missing
+
+cd "$root"
+mkdir -p build/os build/os/generated "$(dirname -- "$kernel")" "$(dirname -- "$image")"
+"$runtime_path" native-build \
+    --cache-dir build/os/nvfs-positioned-native-cache \
+    --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os \
+    --backend cranelift --cpu x86-64-v1 --opt-level=aggressive \
+    --log off --timeout 240 --entry-closure --entry "$entry" \
+    --target "$target" --output "$kernel" \
+    --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
+[ -s "$kernel" ] || fail kernel-build-missing
+
+kernel_real=$(readlink -f -- "$kernel")
+source_revision=$(git rev-parse HEAD)
+{
+    printf '%s\n' schema_version=1
+    printf 'target=%s\nentry=%s\n' "$target" "$entry"
+    printf 'kernel_path=%s\nkernel_sha256=%s\n' "$kernel_real" "$(sha256_file "$kernel_real")"
+    printf 'compiler_path=%s\ncompiler_sha256=%s\n' "$runtime_path" "$runtime_sha"
+    printf 'runtime_path=%s\nruntime_sha256=%s\n' "$runtime_path" "$runtime_sha"
+    printf 'source_revision=%s\n' "$source_revision"
+} >"${kernel}.build_stamp"
+
+SIMPLE_RUNTIME_PATH="$runtime_path" SIMPLE_RUNTIME_RECEIPT="$receipt" \
+    sh scripts/os/mkfs-nvfs.shs "$image" 65536
+
+printf 'simpleos_nvfs_positioned_kernel=%s\n' "$kernel_real"
+printf 'simpleos_nvfs_positioned_kernel_receipt=%s\n' "$(readlink -f -- "${kernel}.build_stamp")"
+printf 'simpleos_nvfs_positioned_image=%s\n' "$(readlink -f -- "$image")"
+printf 'simpleos_nvfs_positioned_image_manifest=%s\n' "$(readlink -f -- "${image}.manifest.env")"
+printf '%s\n' simpleos_nvfs_positioned_build=pass

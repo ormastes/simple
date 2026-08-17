@@ -1,0 +1,111 @@
+# @req REQ-IOREAD-007 REQ-IOREAD-008
+use std.io_runtime.{shell_output}
+
+# Sibling of file_read_bytes_single_definition_spec.spl, for the TEXT family.
+#
+# Guards the convergence done in
+# doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md
+#
+# `file_read(path: text)` had 23 definitions across TWO incompatible return
+# types: 20 `-> text` and 3 `-> text?`. The compiler's flat function registry is
+# keyed on NAME ALONE (`warn_duplicate_private_signatures` in
+# `src/compiler_rust/compiler/src/pipeline/module_loader.rs`), so which one a
+# call site received depended on the import closure of the compiling module, and
+# nothing at the call site changed. A caller written against `-> text` has no
+# nil case, so being handed the `-> text?` definition deletes the absence path
+# silently — the same hazard that made the `[i64]?` arm of the byte family the
+# dangerous one.
+#
+# The three optional definitions were module-local and non-exported
+# (`40.mono/monomorphize/hot_reload.spl`, `99.loader/module_resolver/manifest.spl`,
+# `99.loader/module_resolver/resolution.spl`). They were renamed to
+# `file_read_opt`, which removes the name collision outright.
+#
+# SCOPE: this spec asserts SINGLE RETURN TYPE, not single definition. Twenty
+# same-named `-> text` definitions remain. They are mutually substitutable —
+# identical signature, so no misdispatch hazard — which is exactly the state the
+# byte family reached on 2026-08-16. Converging them to one is separate tracked
+# work; it is deliberately NOT asserted here, because an assertion that fails
+# for work this spec's change did not attempt is noise, not a guard.
+
+fn definition_count(pattern: text) -> i64:
+    # Counts top-level definitions matching an anchored pattern under src/,
+    # ignoring vendored third-party source per CLAUDE.md Owned-Code Scope.
+    val cmd = "/usr/bin/grep -rn --include='*.spl' -E '" + pattern + "' src/"
+        + " | /usr/bin/grep -v '/vendor/' | wc -l"
+    shell_output(cmd).trim().to_i64()
+
+fn definition_owners(pattern: text) -> text:
+    val cmd = "/usr/bin/grep -rln --include='*.spl' -E '" + pattern + "' src/"
+        + " | /usr/bin/grep -v '/vendor/' | sort"
+    shell_output(cmd).trim()
+
+describe "file_read has a single return type":
+
+    # --- Oracle self-checks -------------------------------------------------
+    # A symbol-sweep oracle fails open three ways: it can match nothing, match
+    # everything, or return empty because the command errored. These two close
+    # those holes, so a green verdict on the real assertions means something.
+
+    it "positive control: the scanner finds a definition that certainly exists":
+        # `file_read_opt` is introduced by the same change this spec guards.
+        expect(definition_count("^[[:space:]]*(pub )?fn file_read_opt\\(") >= 1).to_equal(true)
+
+    it "negative control: the scanner does not match a symbol that cannot exist":
+        expect(definition_count("^[[:space:]]*(pub )?fn file_read_no_such_symbol_xyzzy\\(")).to_equal(0)
+
+    # --- The actual property ------------------------------------------------
+
+    it "no definition of file_read returns an optional":
+        # This is the property that was fixed. `-> text?` and `-> text` are not
+        # substitutable: the optional form carries an absence case the plain
+        # form does not.
+        val owners = definition_owners("^[[:space:]]*(pub )?fn file_read\\(path: text\\) -> text\\?:")
+        # Surfacing the owner list makes a failure self-diagnosing: it names the
+        # file that reintroduced the optional shape.
+        expect(owners).to_equal("")
+        expect(definition_count("^[[:space:]]*(pub )?fn file_read\\(path: text\\) -> text\\?:")).to_equal(0)
+
+    it "every definition of file_read shares the plain text return type":
+        # Total count and plain-text count must agree: any definition with some
+        # third return type would make these diverge.
+        val total = definition_count("^[[:space:]]*(pub )?fn file_read\\(path: text\\)")
+        val plain = definition_count("^[[:space:]]*(pub )?fn file_read\\(path: text\\) -> text:")
+        expect(total >= 1).to_equal(true)
+        expect(plain).to_equal(total)
+
+    it "the optional-returning reads live under their own name":
+        # All three relocated definitions must still return the optional shape;
+        # if one silently became `-> text` the absence path was dropped rather
+        # than renamed.
+        val opt_total = definition_count("^[[:space:]]*(pub )?fn file_read_opt\\(path: text\\)")
+        val opt_typed = definition_count("^[[:space:]]*(pub )?fn file_read_opt\\(path: text\\) -> text\\?:")
+        expect(opt_typed).to_equal(opt_total)
+
+    it "the canonical text read is still exported exactly once":
+        # `io_runtime.spl` holds the single `pub` definition; the others are
+        # module-local. A second `pub` would reintroduce cross-module ambiguity.
+        expect(definition_count("^[[:space:]]*pub fn file_read\\(path: text\\)")).to_equal(1)
+
+
+fn shim_exports(symbol: text) -> i64:
+    # The `app.io.mod` shim must both IMPORT and EXPORT a symbol for a
+    # `use app.io.mod (...)` caller to reach it — one without the other is a
+    # dangling re-export. Requiring 2 lines catches the half-wired case.
+    val cmd = "/usr/bin/grep -cE '(^use std\\.nogc_sync_mut\\.io\\.file_ops\\.\\{|^export ).*\\b"
+        + symbol + "\\b' src/app/io/mod.spl"
+    shell_output(cmd).trim().to_i64()
+
+describe "app.io.mod re-exports both byte-read shapes":
+    # The 2026-08-16 unification left the shim asymmetric: it re-exported the
+    # canonical `[u8]` reader but not the raw `[i64]` one, so a caller going
+    # through `use app.io.mod (...)` could not reach the shape SCV consumes.
+
+    it "negative control: the scanner does not match an absent symbol":
+        expect(shim_exports("file_read_bytes_no_such_symbol_xyzzy")).to_equal(0)
+
+    it "re-exports the canonical [u8] byte read":
+        expect(shim_exports("file_read_bytes")).to_equal(2)
+
+    it "re-exports the raw [i64] byte read":
+        expect(shim_exports("file_read_bytes_i64")).to_equal(2)

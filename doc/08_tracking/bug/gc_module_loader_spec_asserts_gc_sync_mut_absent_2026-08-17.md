@@ -3,6 +3,7 @@
 - **Filed:** 2026-08-17
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN — needs an architecture decision, not a test edit
 - **Severity:** medium (1 RED example; the spec is an architecture gate)
 - **Spec:** `test/feature/lib/gc_parity/gc_module_loader_spec.spl`
 

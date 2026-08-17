@@ -58,16 +58,19 @@ bootstrap_stage3_write_manifest() {
 
     for bootstrap_stage3_required in \
         "$BSTAGE3_SEED" "$BSTAGE3_NATIVE_ALL" "$BSTAGE3_STAGE2" \
-        "$BSTAGE3_STAGE2_ADMITTED" "$BSTAGE3_STAGE3" \
+        "$BSTAGE3_STAGE2_ADMITTED" "$BSTAGE3_STAGE2_ADMISSION" \
+        "$BSTAGE3_STAGE3" \
         "$BSTAGE3_STAGE2_LOG" "$BSTAGE3_STAGE3_LOG" \
         "$BSTAGE3_SEED_STAMP" "$BSTAGE3_HELPER" \
         "$BSTAGE3_GIT_BEFORE" "$BSTAGE3_GIT_AFTER" \
         "$BSTAGE3_STAGE2_TRANSCRIPT" \
         "$BSTAGE3_STAGE3_TRANSCRIPT" "$BSTAGE3_STAGE2_SANITY" \
-        "$BSTAGE3_STAGE3_SANITY" "$BSTAGE3_BOOTSTRAP_SCRIPT" \
+        "$BSTAGE3_STAGE2_RECEIVER" "$BSTAGE3_STAGE3_SANITY" \
+        "$BSTAGE3_BOOTSTRAP_SCRIPT" \
         "$BSTAGE3_SOURCE_BEFORE" "$BSTAGE3_SOURCE_AFTER" \
         "$BSTAGE3_RUNTIME_ORIGIN_BEFORE" "$BSTAGE3_RUNTIME_ORIGIN_AFTER" \
-        "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" "$BSTAGE3_TOOL_AUTHORITY"; do
+        "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" "$BSTAGE3_TOOL_AUTHORITY" \
+        "$BSTAGE3_TOOL_AUTHORITY_BEFORE"; do
         [ -f "$bootstrap_stage3_required" ] &&
             [ ! -L "$bootstrap_stage3_required" ] ||
             bootstrap_stage3_provenance_fail "required-input-missing" ||
@@ -104,17 +107,27 @@ bootstrap_stage3_write_manifest() {
         bootstrap_stage3_provenance_fail \
             "seed-input-fingerprint-not-rederived" ||
         return 1
-    bootstrap_stage3_verify_sanity_evidence \
-        "$BSTAGE3_STAGE2_SANITY" "$BSTAGE3_STAGE2" \
-        "$BSTAGE3_ROOT" "$BSTAGE3_BACKEND" \
-        "$(bootstrap_stage3_transcript_host_value \
-            "$BSTAGE3_STAGE2_TRANSCRIPT" HOME)" \
-        "$(bootstrap_stage3_transcript_host_value \
-            "$BSTAGE3_STAGE2_TRANSCRIPT" TMPDIR)" \
-        "$(bootstrap_stage3_transcript_host_value \
-            "$BSTAGE3_STAGE2_TRANSCRIPT" PATH)" ||
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "$BSTAGE3_STAGE2_SANITY" "$BSTAGE3_STAGE2" ||
         bootstrap_stage3_provenance_fail "stage2-sanity-evidence-invalid" ||
         return 1
+    bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$BSTAGE3_STAGE2_RECEIVER" "$BSTAGE3_STAGE2" \
+        "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" \
+        "$(dirname -- "$BSTAGE3_STAGE2_RECEIVER")/stage2-receiver.log" ||
+        bootstrap_stage3_provenance_fail \
+            "stage2-receiver-evidence-invalid" || return 1
+    [ "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2")" = \
+        "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_ADMITTED")" ] ||
+        bootstrap_stage3_provenance_fail \
+            "stage2-admitted-artifact-mismatch" || return 1
+    bootstrap_stage3_verify_stage2_admission_receipt \
+        "$BSTAGE3_STAGE2_ADMISSION" "$BSTAGE3_STAGE2_ADMITTED" \
+        "$BSTAGE3_SOURCE_BEFORE" "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT" \
+        "$BSTAGE3_TOOL_AUTHORITY_BEFORE" "$BSTAGE3_STAGE2_ARGS_SHA256" \
+        "$BSTAGE3_STAGE2_SANITY" "$BSTAGE3_STAGE2_RECEIVER" ||
+        bootstrap_stage3_provenance_fail \
+            "stage2-admission-receipt-invalid" || return 1
     bootstrap_stage3_verify_sanity_evidence \
         "$BSTAGE3_STAGE3_SANITY" "$BSTAGE3_STAGE3" \
         "$BSTAGE3_ROOT" "$BSTAGE3_BACKEND" \
@@ -137,6 +150,22 @@ bootstrap_stage3_write_manifest() {
     bootstrap_stage3_source_sha=$(
         bootstrap_stage3_hash_file "$BSTAGE3_SOURCE_AFTER"
     ) || return 1
+    bootstrap_stage3_stage2_admission_identity=$(
+        bootstrap_stage3_stage2_admission_identity \
+            "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2")" \
+            "$bootstrap_stage3_source_sha" \
+            "$(bootstrap_stage3_hash_file \
+                "$BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT")" \
+            "$(bootstrap_stage3_hash_file "$BSTAGE3_TOOL_AUTHORITY")" \
+            "$BSTAGE3_STAGE2_ARGS_SHA256" \
+            "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_SANITY")" \
+            "$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_RECEIVER")"
+    ) || return 1
+    [ "$(bootstrap_stage3_manifest_value admission_identity \
+        "$BSTAGE3_STAGE2_ADMISSION")" = \
+        "$bootstrap_stage3_stage2_admission_identity" ] ||
+        bootstrap_stage3_provenance_fail \
+            "stage2-admission-identity-mismatch" || return 1
     bootstrap_stage3_backfill_status=absent
     bootstrap_stage3_backfill_sha=absent
     if [ -f "$BSTAGE3_BACKFILL" ]; then
@@ -155,7 +184,7 @@ bootstrap_stage3_write_manifest() {
     bootstrap_stage3_manifest_tmp="${BSTAGE3_MANIFEST}.tmp.$$"
     umask 077
     {
-        echo "schema=simple-bootstrap-stage3-provenance-v3"
+        echo "schema=simple-bootstrap-stage3-provenance-v4"
         echo "status=pass"
         echo "artifact_kind=pure-simple-bootstrap-compiler"
         echo "full_cli_status=separate-not-proven"
@@ -200,6 +229,15 @@ bootstrap_stage3_write_manifest() {
         echo "stage2_sanity_status=pass"
         echo "stage2_sanity_evidence_path=$BSTAGE3_STAGE2_SANITY"
         echo "stage2_sanity_evidence_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_SANITY")"
+        echo "stage2_receiver_status=pass"
+        echo "stage2_receiver_evidence_path=$BSTAGE3_STAGE2_RECEIVER"
+        echo "stage2_receiver_evidence_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_RECEIVER")"
+        echo "stage2_check_policy=identity-scoped-receipt-reuse"
+        echo "stage2_admission_identity=$bootstrap_stage3_stage2_admission_identity"
+        echo "stage2_admission_receipt_path=$BSTAGE3_STAGE2_ADMISSION"
+        echo "stage2_admission_receipt_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE2_ADMISSION")"
+        echo "stage2_checks_executed_at_admission=1"
+        echo "stage2_checks_replayed_during_stage3=0"
         echo "stage3_path=$BSTAGE3_STAGE3"
         echo "stage3_sha256=$(bootstrap_stage3_hash_file "$BSTAGE3_STAGE3")"
         echo "stage3_threads=$BSTAGE3_STAGE3_THREADS"

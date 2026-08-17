@@ -40,12 +40,9 @@ architecture rtl of rv32_exec_core is
   -- 64KB code ROM (14 bits = 16384 words), increased for full payload
   constant ROM_WORDS : natural := 16384;
   constant DATA_ROM_WORDS : natural := 16384;
-  constant SCRATCH_BASE_WORD : natural := 16384;
-  constant SCRATCH_WORDS : natural := 512;
   type regs_t is array(0 to 31) of unsigned(31 downto 0);
   type rom_t is array(0 to ROM_WORDS - 1) of std_logic_vector(31 downto 0);
   type data_rom_t is array(0 to DATA_ROM_WORDS - 1) of std_logic_vector(31 downto 0);
-  type scratch_t is array(0 to SCRATCH_WORDS - 1) of std_logic_vector(31 downto 0);
   type state_t is (S_FETCH, S_EXEC, S_UART, S_DIVIDE, S_LOAD, S_STORE);
   -- Deferred (synchronous-BRAM) load bookkeeping
   type ld_kind_t is (LD_WORD, LD_LB, LD_LBU);
@@ -95,8 +92,6 @@ architecture rtl of rv32_exec_core is
   signal rom_a : rom_t := init_rom;
   signal rom_b : rom_t := init_rom;
   signal data_rom : data_rom_t := init_data_rom;
-  signal scratch : scratch_t := (others => (others => '0'));
-  signal scratch_bytes : scratch_t := (others => (others => '0'));
   -- CSR file: minimal set for zicsr (mhartid=0, mstatus, mtvec, mie, mip)
   signal csr_mhartid : unsigned(31 downto 0) := x"00000000";
   signal csr_mstatus : unsigned(31 downto 0) := x"00000000";
@@ -120,8 +115,6 @@ architecture rtl of rv32_exec_core is
   attribute ram_style of rom_a : signal is "block";
   attribute ram_style of rom_b : signal is "block";
   attribute rom_style of data_rom : signal is "block";
-  attribute ram_style of scratch : signal is "distributed";
-  attribute ram_style of scratch_bytes : signal is "distributed";
   -- Registered BRAM read data (one read port per physical array)
   signal rom_a_q : std_logic_vector(31 downto 0) := (others => '0');
   signal rom_b_q : std_logic_vector(31 downto 0) := (others => '0');
@@ -152,9 +145,6 @@ architecture rtl of rv32_exec_core is
   signal debug_ra_q : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_sp_q : std_logic_vector(15 downto 0) := (others => '0');
   signal debug_phase_q : std_logic_vector(3 downto 0) := (others => '0');
-  signal stack_ra_ab5c_q : unsigned(31 downto 0) := (others => '0');
-  signal stack_ra_ab6c_q : unsigned(31 downto 0) := (others => '0');
-  signal stack_ra_ab8c_q : unsigned(31 downto 0) := (others => '0');
 
   function sext(v : std_logic_vector) return unsigned is
   begin
@@ -300,7 +290,6 @@ begin
     variable rs2 : natural range 0 to 31;
     variable eff : unsigned(31 downto 0);
     variable data_w : std_logic_vector(31 downto 0);
-    variable lane : natural range 0 to 3;
     variable crs1 : natural range 0 to 31;
     variable crs2 : natural range 0 to 31;
     variable mem_idx : natural;
@@ -383,10 +372,6 @@ begin
         debug_ra_q <= (others => '0');
         debug_sp_q <= (others => '0');
         debug_phase_q <= (others => '0');
-        scratch_bytes <= (others => (others => '0'));
-        stack_ra_ab5c_q <= (others => '0');
-        stack_ra_ab6c_q <= (others => '0');
-        stack_ra_ab8c_q <= (others => '0');
         csr_mhartid <= (others => '0');
         csr_mstatus <= (others => '0');
         csr_mtvec <= (others => '0');
@@ -495,8 +480,6 @@ begin
         -- registered from the replicated BRAMs during S_FETCH.
         if pc_idx < ROM_WORDS then
           w := rom_a_q;
-        elsif pc_idx >= SCRATCH_BASE_WORD and pc_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-          w := scratch(pc_idx - SCRATCH_BASE_WORD);
         else
           w := x"00000013";
         end if;
@@ -507,8 +490,6 @@ begin
           h := w(31 downto 16);
           if pc_idx + 1 < ROM_WORDS then
             w2 := rom_b_q;
-          elsif pc_idx + 1 >= SCRATCH_BASE_WORD and pc_idx + 1 < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-            w2 := scratch(pc_idx + 1 - SCRATCH_BASE_WORD);
           else
             w2 := x"00000013";
           end if;
@@ -585,17 +566,6 @@ begin
               rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
               load_addr := r(rs1) + c_lw_imm(h);
               mem_idx := word_index(load_addr);
-              if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                if rd = 1 and load_addr = x"8002AB5C" then
-                  r(rd) := stack_ra_ab5c_q;
-                elsif rd = 1 and load_addr = x"8002AB6C" then
-                  r(rd) := stack_ra_ab6c_q;
-                elsif rd = 1 and load_addr = x"8002AB8C" then
-                  r(rd) := stack_ra_ab8c_q;
-                else
-                  r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
-                end if;
-              else
                 -- Deferred sync-BRAM load (was: r(rd) := load_word(load_addr))
                 if load_addr(31 downto 28) = x"4" then
                   dr_ra := data_rom_index(load_addr);
@@ -612,7 +582,6 @@ begin
                 else
                   r(rd) := (others => '0');
                 end if;
-              end if;
             elsif h(15 downto 13) = "110" then
               rs1 := 8 + to_integer(unsigned(h(9 downto 7)));
               rs2 := 8 + to_integer(unsigned(h(4 downto 2)));
@@ -622,9 +591,6 @@ begin
                 rom_we := true;
                 rom_wa := mem_idx;
                 rom_wd := std_logic_vector(r(rs2));
-              elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
-                scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
               end if;
             end if;
           elsif h(1 downto 0) = "10" then
@@ -638,17 +604,6 @@ begin
               if rd /= 0 then
                 load_addr := r(2) + c_lwsp_imm(h);
                 mem_idx := word_index(load_addr);
-                if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                  if rd = 1 and load_addr = x"8002AB5C" then
-                    r(rd) := stack_ra_ab5c_q;
-                  elsif rd = 1 and load_addr = x"8002AB6C" then
-                    r(rd) := stack_ra_ab6c_q;
-                  elsif rd = 1 and load_addr = x"8002AB8C" then
-                    r(rd) := stack_ra_ab8c_q;
-                  else
-                    r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
-                  end if;
-                else
                   -- Deferred sync-BRAM load (was: r(rd) := load_word(load_addr))
                   if load_addr(31 downto 28) = x"4" then
                     dr_ra := data_rom_index(load_addr);
@@ -665,7 +620,6 @@ begin
                   else
                     r(rd) := (others => '0');
                   end if;
-                end if;
               end if;
             elsif h(15 downto 13) = "100" then
               rd := to_integer(unsigned(h(11 downto 7)));
@@ -698,9 +652,6 @@ begin
                 rom_we := true;
                 rom_wa := mem_idx;
                 rom_wd := std_logic_vector(r(rs2));
-              elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
-                scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
               end if;
             end if;
           end if;
@@ -910,11 +861,6 @@ begin
                 case ins(14 downto 12) is
                   when "000" =>
                     mem_idx := word_index(eff);
-                    if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                      data_w := scratch_bytes(mem_idx - SCRATCH_BASE_WORD);
-                      lane := to_integer(eff(1 downto 0));
-                      r(rd) := sext(data_w(lane * 8 + 7 downto lane * 8));
-                    else
                       -- Deferred sync-BRAM byte load, sign-extended (was lb via load_byte)
                       if eff(31 downto 28) = x"4" then
                         dr_ra := data_rom_index(eff);
@@ -933,14 +879,8 @@ begin
                       else
                         r(rd) := (others => '0');
                       end if;
-                    end if;
                   when "100" =>
                     mem_idx := word_index(eff);
-                    if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                      data_w := scratch_bytes(mem_idx - SCRATCH_BASE_WORD);
-                      lane := to_integer(eff(1 downto 0));
-                      r(rd) := resize(unsigned(data_w(lane * 8 + 7 downto lane * 8)), 32);
-                    else
                       -- Deferred sync-BRAM byte load, zero-extended (was lbu via load_byte)
                       if eff(31 downto 28) = x"4" then
                         dr_ra := data_rom_index(eff);
@@ -959,12 +899,8 @@ begin
                       else
                         r(rd) := (others => '0');
                       end if;
-                    end if;
                   when others =>
                     mem_idx := word_index(eff);
-                    if mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                      r(rd) := unsigned(scratch(mem_idx - SCRATCH_BASE_WORD));
-                    else
                       -- Deferred sync-BRAM word load (was: r(rd) := load_word(eff))
                       if eff(31 downto 28) = x"4" then
                         dr_ra := data_rom_index(eff);
@@ -981,7 +917,6 @@ begin
                       else
                         r(rd) := (others => '0');
                       end if;
-                    end if;
                 end case;
               end if;
             when "0100011" =>
@@ -1013,17 +948,6 @@ begin
                     rom_we := true;
                     rom_wa := mem_idx;
                     rom_wd := std_logic_vector(r(rs2));
-                  end if;
-                elsif mem_idx >= SCRATCH_BASE_WORD and mem_idx < SCRATCH_BASE_WORD + SCRATCH_WORDS then
-                  if ins(14 downto 12) = "000" then
-                    data_w := scratch(mem_idx - SCRATCH_BASE_WORD);
-                    lane := to_integer(eff(1 downto 0));
-                    data_w(lane * 8 + 7 downto lane * 8) := std_logic_vector(r(rs2)(7 downto 0));
-                    scratch(mem_idx - SCRATCH_BASE_WORD) <= data_w;
-                    scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= data_w;
-                  else
-                    scratch(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
-                    scratch_bytes(mem_idx - SCRATCH_BASE_WORD) <= std_logic_vector(r(rs2));
                   end if;
                 end if;
               end if;

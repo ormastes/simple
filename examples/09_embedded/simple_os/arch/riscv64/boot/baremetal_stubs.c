@@ -1739,6 +1739,45 @@ static int rv64_fs_elf_header_valid(const unsigned char *elf)
         rd32(elf + 20U) == 1U && rd16(elf + 52U) == 64U;
 }
 
+/* Canonical collector evidence nonce.  This is deliberately independent of
+ * any workload nonce: /SOSIXNON.TXT is the "SOSIXNONTXT" FAT 8.3 root entry,
+ * and it is emitted only after the complete bounded slot validates. */
+RuntimeValue rt_sosix_collector_nonce_echo(void)
+{
+    static const char prefix[] = "SOSIX_COLLECTOR_RUN_NONCE=";
+    unsigned char nonce_file[118];
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+
+    uint32_t file_size = 0;
+    uint32_t cluster = fat32_find_entry_cluster(
+        &fat, fat.root_cluster, "SOSIXNONTXT", 0, &file_size);
+    if (cluster < 2U || file_size <= sizeof(prefix) - 1U ||
+        file_size > sizeof(nonce_file)) return 0;
+    if (fat32_read_file_into(&fat, cluster, file_size, nonce_file,
+                             sizeof(nonce_file)) != file_size) return 0;
+
+    for (uint32_t i = 0; i < sizeof(prefix) - 1U; i++) {
+        if (nonce_file[i] != (unsigned char)prefix[i]) return 0;
+    }
+    uint32_t i = sizeof(prefix) - 1U;
+    uint32_t nonce_begin = i;
+    while (i < file_size && nonce_file[i] != '\n') {
+        unsigned char c = nonce_file[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == ':' || c == '-')) return 0;
+        i++;
+    }
+    if (i == nonce_begin || i >= file_size || nonce_file[i] != '\n') return 0;
+    uint32_t line_len = i + 1U;
+    for (i = line_len; i < file_size; i++) {
+        if (nonce_file[i] != 0U) return 0;
+    }
+    for (i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
+    return 1;
+}
+
 RuntimeValue rt_riscv_fs_exec_probe(void)
 {
     Fat32Probe fat;

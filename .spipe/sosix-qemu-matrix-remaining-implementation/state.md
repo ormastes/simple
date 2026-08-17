@@ -24,6 +24,10 @@ Implement every host-independent and current-Linux SOSIX QEMU matrix blocker, co
 - AC-8: Todo DB has explicit open rows for the three Linux guest closures, shared L0 defects until verified, six Windows rows, six FreeBSD rows, and six macOS rows; each names prerequisites, exact resume command, retained artifact root, execution owner, merge owner, and high-capability reviewer.
 - AC-9: Guide, canonical plan, evidence ledger, feature/layer experts, architecture/design, executable spec, generated manual, and open-owner tracking agree with the final implementation and evidence.
 - AC-10: Each focused gate runs once; at most three fix/verify cycles are used. Unavailable native hosts remain BLOCKED/POSTPONED and prevent umbrella matrix completion.
+- AC-11: FAT32 provides true cursor-independent positioned primitives and generation-safe aliased file objects; the production syscall 134/135 shim retains the concrete owned-copy backend, and a modern SSpec admits it only through a receipt-bound pure-Simple runtime plus strong linked kernel symbols.
+- AC-12: DBFS and NVFS expose binary-safe positioned primitives with short EOF reads, suffix-preserving overwrite, zero-filled extension, range rejection, and device-backed persistence.
+- AC-13: SOSIX NVFS and DBFS positioned calls resolve only live monotonic `MountTable` virtual file objects and reject raw, retired, ambiguous, wrong-family, and overflowing identities.
+- AC-14: A qualified x86_64 QEMU run boots the honestly labeled `nvfs-dbfs-backed-v1` SimpleOS root twice from one private image copy and proves VFS mounting, byte-exact positioned I/O, and reboot persistence with bound runtime, kernel, image, QEMU, and transcript identities.
 
 ## Scope Exclusions
 
@@ -72,3 +76,31 @@ blocked
   later owner. The mandatory three-cycle cap was reached; no Stage 4 artifact
   was deployed and SSpec/docgen were not retried with the stale release binary.
 - tracking: Todo DB rows 784-805 retain all shared, Linux, Windows, FreeBSD, and macOS owners.
+- impl: AC-11 host-independent source is complete: FAT32 overwrite/extension/
+  zero-hole semantics, canonical object IDs and alias retirement, concrete
+  SOSIX backend, shim retention, and dup/fork/exit lifecycle hooks are present.
+- tests: `sosix_fat32_positioned_io_spec.spl` and its mirrored operator manual
+  retain fail-closed source, missing-environment, and qualified admission flows
+  with REQ-SQ-018..020 traceability. The qualified wrapper runs each focused
+  spec once only after runtime and linked-kernel admission.
+- blocked: No admitted source-matched Stage-4 runtime or fresh positioned
+  x86_64 kernel ELF exists. Runtime SSpec, docgen, `sspec-maintain`, and live
+  QEMU PASS remain open; source self-test and the Rust seed cannot close them.
+- impl: AC-12 / REQ-SQ-021 adds exact binary DBFS and NVFS positioned
+  primitives, including short EOF reads, overwrite/extension, zero holes, and
+  device-backed persistence. Focused integration specs are source-complete.
+- impl: AC-13 / REQ-SQ-022 retains `MountTable` as the sole virtual-handle
+  owner and adds global VFS plus concrete SOSIX NVFS/DBFS adapters. Stale,
+  raw, wrong-family, and invalid-range access fails closed.
+- impl: AC-14 / REQ-SQ-023 adds the honestly labeled
+  `nvfs-dbfs-backed-v1` image/root path, two-boot persistence oracle, qualified
+  QEMU wrapper, and the seven-step modern system spec with real assertions.
+- impl: Highest-capability review closed the live-route gaps with explicit
+  FAT32/NVFS/DBFS shim composition, checksum-valid replica failover, bounded
+  and rollback-safe DBFS pwrite, a dedicated x86_64 entry that actually calls
+  `boot_fs_sequence`, a closed source/runtime-bound kernel receipt, and both
+  boot transcript hashes.
+- blocked: AC-12 through AC-14 have not executed with a source-matched admitted
+  pure-Simple Stage-4 runtime. The manual is a future-executable handwritten
+  mirror pending qualified docgen; it is not runtime PASS, and the Rust seed
+  remains inadmissible.

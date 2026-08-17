@@ -119,6 +119,32 @@ failure; do not call it deployed pure-Simple without provenance, essential-smoke
 and deploy receipts. Open bug:
 `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
+## Phase snapshots for side-lane native builds (2026-08-17)
+
+Never build or test against `bin/simple` or an in-place stage output while a
+bootstrap is running — both get replaced under you. Pin to an immutable
+lineage-named snapshot under `build/phase_snapshots/`
+(`phase1_<t1>_phase2_<t2>/simple`; see its README). New fix landed = new
+generation; in-flight tasks finish on their pinned lineage. The bootstrap
+build owns CPU/memory: run native-build side lanes `nice`d with <=2 concurrent
+test processes — earlyoom kills `simple` first (a 3.1 GB worker died at 9.97%
+free), so an OOM kill can masquerade as a codegen crash. For sweep-style
+find-and-fix, go per-directory under `timeout` and drop to per-file on crash;
+fixes landed in the source tree get compiled into later stages for free.
+Runtime parity note: `rt_file_atomic_write` now exists in the Rust staticlib
+(`src/compiler_rust/native_all/src/lib.rs:1155`).
+
+Standing test rule (2026-08-17): every native-build bug fix ships a spec
+reproducing the exact defect plus a generalization spec probing similar
+problems nearby, both cited in the bug doc. A fix without its reproducing
+spec is not done.
+
+Family-owned pure-Simple consumers must import their `std.<family>.*` facade,
+not the interpreter-compatibility `src.std.*` shim. Native-project deliberately
+refuses to choose a bare function when duplicate family providers exist. For
+aliased imports, regress both the production facade chain and an adjacent
+same-named decoy; see
+`native_project_src_std_platform_alias_owner_loss_2026_08_03.md`.
 ## Per-phase run-to-end loop and evidence bar (2026-08-17)
 
 A phase build runs to completion and yields a full error census; the landed
