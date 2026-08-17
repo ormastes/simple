@@ -208,3 +208,29 @@ Two sibling collisions were reported in the same run and are likely the same
 class of defect, filed here only as a pointer:
 - `dir_remove_all` — 2 definitions, `(text)->bool` vs `(text)->i32`
 - `shell` — 3 definitions, `(text)->ProcessResult` vs `(text)->ShellResult`
+
+### Guard-spec run 2026-08-17 — still correctly RED, and precisely one example red
+
+```
+Results: 7 total, 6 passed, 1 failed
+
+  ✓ positive control: the scanner finds the declarations that certainly exist
+  ✓ negative control: the anchor does not match a return type nobody uses
+  ✓ control: the scan produces a non-empty type set
+  ✓ no module declares the raw i64 handle form
+  ✓ no module declares a List<i32> element width
+  ✗ declares exactly one return type repo-wide
+  ✓ the one return type matches the C runtime ABI
+
+SPEC FILE VERDICT: test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl declared>=7 executed=7 passed=6 failed=1 dropped=0
+```
+
+Both control examples and both narrowed-form examples pass, so the scanner is
+working and the red is real rather than infrastructural. The single failing
+example is exactly the convergence assertion, which matches the 4-type census
+recorded above. Nothing in this spec needs changing; it goes green when the
+declarations converge on `[u8]`.
+
+(First attempt at this run exited `rc=2` with a zero-byte log — the resource
+slot wrapper never launched it. That is UNVERIFIED, not a failure; the numbers
+above come from the retry.)
