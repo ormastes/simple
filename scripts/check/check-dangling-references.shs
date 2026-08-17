@@ -61,22 +61,124 @@
 #   2026-07-28). A plain `use m.{A as B}` binds B file-locally and does not
 #   re-export it, so it contributes no definition.
 #
+# ---------------------------------------------------------------------------
+# NON-VACUITY (2026-08-17). Until this date both scan passes were `xargs | awk`
+# whose exit status was never read, so ANY awk failure was laundered into a
+# clean verdict: awk's `fatal:` aborts the whole batch, every remaining file in
+# it went unscanned, `viol.txt` came back empty and the script printed
+# `OK -- no dangling references` and exited 0. Reproduced with a real dangling
+# reference present: a single unreadable tracked .spl file (the exact shape a
+# concurrent jj checkout produces) turned `FAIL -- 1 dangling reference(s)`
+# (exit 1) into `OK` (exit 0). Now: both passes have their status read on the
+# line AFTER the command (never through a pipe -- a pipeline's $? is the last
+# stage's), pass 2 counts the files awk actually opened and requires that count
+# to equal the target count, and the verdict states the count so a run that
+# scanned nothing cannot be mistaken for a clean one. `--selftest` runs three
+# fixtures (clean must-PASS, dangling must-FAIL, unreadable-file must-ERROR)
+# and is fatal.
+#
 # Usage: check-dangling-references.shs [--quiet] [--path FILE|DIR]...
 #   --quiet    print only the final verdict line
 #   --path P   check P instead of the default tracked-src set; repeatable.
 #              Definitions are still indexed from the whole tree, so this can
 #              be pointed at a scratch copy of a historical blob.
-# Exit 0 = clean, 1 = dangling references found, 2 = could not run.
+#   --selftest run the fixture self-check only, then exit
+# Verdict (always the last line of stdout):
+#   PASS -- <n> file(s) checked, 0 dangling references     exit 0
+#   FAIL -- <n> dangling reference(s) in <m> file(s)       exit 1
+#   ERROR -- nothing was checked: <why>                    exit 2
+# A run that scanned 0 files is ERROR, never a pass.
 
 set -u
 
 quiet=0
 targets=""
 have_targets=0
+selftest_only=0
+
+self_path=$(cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
+
+# --------------------------------------------------------------------------
+# Self-check. Three fixture repos, each a throwaway git repo scanned by THIS
+# script through its normal entry point, so neutering any branch above turns
+# the selftest red.
+#   1. clean tree                -> must PASS, exit 0, count > 0
+#   2. one dangling self.method  -> must FAIL, exit 1
+#   3. fixture 2 plus ONE unreadable tracked .spl (the incident replay)
+#                                -> must ERROR, exit 2 (never PASS)
+# --------------------------------------------------------------------------
+selftest_repo() {
+    _st_dir=$1
+    mkdir -p "$_st_dir/src/lib"
+    ( cd "$_st_dir" \
+      && git init -q . \
+      && git config user.email selftest@invalid \
+      && git config user.name selftest ) >/dev/null 2>&1 || return 1
+    printf 'fn alpha():\n    pass\n' > "$_st_dir/src/lib/alpha.spl"
+    printf 'fn beta():\n    pass\n' > "$_st_dir/src/lib/beta.spl"
+    printf 'fn gamma():\n    pass\n' > "$_st_dir/src/lib/gamma.spl"
+    ( cd "$_st_dir" && git add -A && git commit -qm fixture ) >/dev/null 2>&1
+}
+
+run_selftest() {
+    _st_fail=0
+    _st_root=$(mktemp -d) || { echo "ERROR -- nothing was checked: selftest mktemp failed"; return 2; }
+
+    # Fixture 1 -- clean.
+    selftest_repo "$_st_root/clean" || { echo "selftest: cannot build fixture 1" >&2; rm -rf "$_st_root"; return 2; }
+    _st_out=$( cd "$_st_root/clean" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    case "$_st_rc:$_st_out" in
+        0:*PASS\ --\ [1-9]*) : ;;
+        *) echo "selftest: FIXTURE 1 (clean) expected exit 0 and a PASS with a nonzero count, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
+    # Fixture 2 -- a genuine dangling reference must be reported.
+    selftest_repo "$_st_root/dirty" || { echo "selftest: cannot build fixture 2" >&2; rm -rf "$_st_root"; return 2; }
+    printf 'fn delta():\n    self.no_such_method_selftest_xyz()\n' > "$_st_root/dirty/src/lib/zzz.spl"
+    ( cd "$_st_root/dirty" && git add -A && git commit -qm dirty ) >/dev/null 2>&1
+    _st_out=$( cd "$_st_root/dirty" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    case "$_st_rc:$_st_out" in
+        1:*FAIL\ --*) : ;;
+        *) echo "selftest: FIXTURE 2 (dangling) expected exit 1 and a FAIL verdict, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
+    # Fixture 3 -- incident replay: the same dangling reference, plus one
+    # tracked file awk cannot open. Before 2026-08-17 this printed OK/exit 0.
+    selftest_repo "$_st_root/poison" || { echo "selftest: cannot build fixture 3" >&2; rm -rf "$_st_root"; return 2; }
+    printf 'fn delta():\n    self.no_such_method_selftest_xyz()\n' > "$_st_root/poison/src/lib/zzz.spl"
+    ( cd "$_st_root/poison" && git add -A && git commit -qm dirty ) >/dev/null 2>&1
+    chmod 000 "$_st_root/poison/src/lib/beta.spl"
+    if [ -r "$_st_root/poison/src/lib/beta.spl" ]; then
+        # Running as root (or on a filesystem ignoring the mode): the fixture
+        # cannot be constructed, so the incident cannot be replayed. Absence of
+        # evidence is not a pass.
+        chmod 644 "$_st_root/poison/src/lib/beta.spl"
+        rm -rf "$_st_root"
+        echo "ERROR -- nothing was checked: selftest cannot build the unreadable-file fixture (running as uid $(id -u)?)"
+        return 2
+    fi
+    _st_out=$( cd "$_st_root/poison" && DANGLING_REF_SELFTEST_CHILD=1 sh "$self_path" --quiet 2>/dev/null )
+    _st_rc=$?
+    chmod 644 "$_st_root/poison/src/lib/beta.spl"
+    case "$_st_rc:$_st_out" in
+        2:*ERROR\ --*) : ;;
+        *) echo "selftest: FIXTURE 3 (unreadable file) expected exit 2 and an ERROR verdict, got rc=$_st_rc out='$_st_out'" >&2; _st_fail=$((_st_fail + 1)) ;;
+    esac
+
+    rm -rf "$_st_root"
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "ERROR -- nothing was checked: selftest failed with $_st_fail fixture failure(s)"
+        return 2
+    fi
+    return 0
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --quiet|-q) quiet=1 ;;
+        --selftest) selftest_only=1 ;;
         --path)
             shift
             [ $# -gt 0 ] || { echo "check-dangling-references: --path needs an argument" >&2; exit 2; }
@@ -89,14 +191,20 @@ $1"
 ${1#--path=}"
             have_targets=1
             ;;
-        -h|--help) sed -n '2,71p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,90p' "$0"; exit 0 ;;
         *) echo "check-dangling-references: unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
 done
 
+# The selftest re-enters this script, so the recursive children skip it.
+if [ "${DANGLING_REF_SELFTEST_CHILD:-0}" != 1 ]; then
+    run_selftest || exit 2
+fi
+[ "$selftest_only" -eq 1 ] && { echo "check-dangling-references: selftest 3/3 fixtures correct"; exit 0; }
+
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
-    echo "check-dangling-references: not inside a git repository" >&2
+    echo "check-dangling-references: ERROR -- nothing was checked: not inside a git repository"
     exit 2
 }
 cd "$repo_root" || exit 2
@@ -111,7 +219,7 @@ git ls-files -- 'src/*.spl' 2>/dev/null \
     > "$tmp/all.txt"
 
 if [ ! -s "$tmp/all.txt" ]; then
-    echo "check-dangling-references: no tracked src/**/*.spl files found" >&2
+    echo "check-dangling-references: ERROR -- nothing was checked: no tracked src/**/*.spl files found"
     exit 2
 fi
 
@@ -127,7 +235,7 @@ done < "$tmp/all.txt" > "$tmp/present.txt"
 present=$(wc -l < "$tmp/present.txt" | tr -d ' ')
 missing=$((tracked - present))
 if [ "$present" -eq 0 ] || [ $((missing * 10)) -gt "$tracked" ]; then
-    echo "check-dangling-references: $missing of $tracked tracked src files absent from the working copy -- refusing to index a partial tree" >&2
+    echo "check-dangling-references: ERROR -- nothing was checked: $missing of $tracked tracked src files absent from the working copy -- refusing to index a partial tree"
     exit 2
 fi
 mv "$tmp/present.txt" "$tmp/all.txt"
@@ -141,7 +249,7 @@ if [ "$have_targets" -eq 1 ]; then
         elif [ -f "$p" ]; then
             printf '%s\n' "$p" >> "$tmp/targets.txt"
         else
-            echo "check-dangling-references: no such path: $p" >&2
+            echo "check-dangling-references: ERROR -- nothing was checked: no such path: $p"
             exit 2
         fi
     done < "$tmp/raw_targets.txt"
@@ -150,7 +258,7 @@ else
 fi
 
 if [ ! -s "$tmp/targets.txt" ]; then
-    echo "check-dangling-references: nothing to check" >&2
+    echo "check-dangling-references: ERROR -- nothing was checked: target set resolved to 0 files"
     exit 2
 fi
 
@@ -299,8 +407,15 @@ FNR == 1 {
 }
 INDEX_AWK
 
-xargs -a "$tmp/all.txt" -d '\n' awk -f "$tmp/index.awk" \
-    | sort -u > "$tmp/index.txt"
+# Status is read on the line AFTER the command, never through a pipe: a
+# pipeline's $? is `sort`'s, which is 0 even when every awk in the batch died.
+xargs -a "$tmp/all.txt" -d '\n' awk -f "$tmp/index.awk" > "$tmp/index.raw"
+index_rc=$?
+if [ "$index_rc" -ne 0 ]; then
+    echo "check-dangling-references: ERROR -- nothing was checked: index pass exited $index_rc (awk could not read part of the tree); the definition index would be incomplete and every finding unsound"
+    exit 2
+fi
+sort -u "$tmp/index.raw" > "$tmp/index.txt"
 
 if [ ! -s "$tmp/index.txt" ]; then
     echo "check-dangling-references: indexing produced nothing" >&2
@@ -399,7 +514,7 @@ function check_items(blob, f, ln,   n, a, i, t) {
             report(f, ln, "SYMBOL: imported name `" t "` is declared in no src file")
     }
 }
-FNR == 1 { pend = 0; buf = ""; bufln = 0; indoc = 0 }
+FNR == 1 { scanned++; pend = 0; buf = ""; bufln = 0; indoc = 0 }
 # Docstrings routinely contain ```simple fenced examples whose `use` lines are
 # illustrative, not real imports. Skip everything inside a triple-quoted block.
 {
@@ -458,18 +573,52 @@ FNR == 1 { pend = 0; buf = ""; bufln = 0; indoc = 0 }
             report(FILENAME, FNR, "METHOD: self." tok "(...) -- no `me " tok "` or `fn " tok "` anywhere in src")
     }
 }
+END { printf "#SCANNED\t%d\n", scanned + 0 }
 CHECK_AWK
 
+# Same rule as pass 1: capture the status on the NEXT line, not through a pipe.
 xargs -a "$tmp/targets.txt" -d '\n' \
-    awk -v idx="$tmp/index.txt" -f "$tmp/check.awk" > "$tmp/viol.txt"
+    awk -v idx="$tmp/index.txt" -f "$tmp/check.awk" > "$tmp/raw.txt"
+scan_rc=$?
+
+# xargs may split the target list across several awk invocations, so the
+# per-invocation scan counters are summed.
+scanned=$(awk -F'\t' '$1 == "#SCANNED" { s += $2 } END { print s + 0 }' "$tmp/raw.txt")
+grep -v '^#SCANNED	' "$tmp/raw.txt" > "$tmp/viol.txt" || :
+targets_n=$(wc -l < "$tmp/targets.txt" | tr -d ' ')
+
+if [ "$scan_rc" -ne 0 ]; then
+    echo "check-dangling-references: ERROR -- nothing was checked: scan pass exited $scan_rc after opening $scanned of $targets_n target file(s); an aborted awk batch leaves its remaining files unscanned, so a clean result would be a lie"
+    exit 2
+fi
+
+# A 0-byte file produces no records, so awk's per-file counter never fires for
+# it even though the file WAS opened and holds nothing to find. Six such files
+# exist under src/ (empty 99.loader stubs), so the accounting excludes them
+# rather than false-ERRORing on a healthy tree.
+empty_n=0
+while IFS= read -r f; do
+    [ -s "$f" ] || empty_n=$((empty_n + 1))
+done < "$tmp/targets.txt"
+expected_n=$((targets_n - empty_n))
+
+if [ "$scanned" -ne "$expected_n" ]; then
+    echo "check-dangling-references: ERROR -- nothing was checked: scan pass opened $scanned of $expected_n non-empty target file(s) ($targets_n targets, $empty_n empty); an aborted awk batch leaves its remaining files unscanned"
+    exit 2
+fi
+
+if [ "$scanned" -eq 0 ]; then
+    echo "check-dangling-references: ERROR -- nothing was checked: scan pass opened 0 files"
+    exit 2
+fi
 
 n=$(wc -l < "$tmp/viol.txt" | tr -d ' ')
 
 if [ "$n" -gt 0 ]; then
     [ "$quiet" -eq 1 ] || sort "$tmp/viol.txt" >&2
-    echo "check-dangling-references: FAIL -- $n dangling reference(s)" >&2
+    echo "check-dangling-references: FAIL -- $n dangling reference(s) in $scanned file(s)"
     exit 1
 fi
 
-[ "$quiet" -eq 1 ] || echo "check-dangling-references: OK -- no dangling references"
+echo "check-dangling-references: PASS -- $scanned file(s) checked, 0 dangling references"
 exit 0

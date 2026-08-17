@@ -162,3 +162,33 @@ with `FIXTURE 3 ... got rc=0 out='... PASS -- 0 file(s) checked ...'`.
 The four guards are deliberately redundant — disabling any three still catches
 the incident (awk dies before `END`, so no `#SCANNED` sentinel is emitted at
 all).
+
+### Live confirmation on the real tree
+
+The first full-repo run of the fixed guard returned
+
+```
+check-dangling-references: ERROR -- nothing was checked: scan pass opened 14685 of 14691 target file(s)
+real-repo rc=2
+```
+
+with `scan_rc == 0` — i.e. **no** awk fatal, and the pre-fix script would have
+printed a clean-looking verdict. The 6-file gap turned out to be benign: six
+tracked `.spl` files under `src/` are 0 bytes (five `src/compiler/99.loader/*`
+stubs and `src/compiler/test_pkg/mod.spl`), and a 0-byte file produces no
+records, so the per-file counter never fires for it even though awk did open it.
+The accounting now excludes empty targets (`expected_n = targets_n - empty_n`)
+rather than false-ERRORing on a healthy tree. This is exactly the kind of
+discrepancy the old `OK`-with-no-count verdict could never have surfaced.
+
+Final full-repo verdict with the fix in place (`nice -n 19`, ~13 min):
+
+```
+check-dangling-references: FAIL -- 179 dangling reference(s) in 14685 file(s)
+real-repo rc=1
+```
+
+Non-vacuous and honest: the count of files actually scanned is now part of the
+verdict. The 179 findings are pre-existing content debt (including the two
+false-positive classes documented above, which remain OPEN) and are not
+addressed here.
