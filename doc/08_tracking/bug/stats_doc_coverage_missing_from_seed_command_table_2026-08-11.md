@@ -106,3 +106,33 @@ here. Filing as a blocker so it isn't silently stepped over.
   currently blocked anyway, and this fix only affects the seed binary, which
   users won't see until the next `--full-bootstrap --deploy`.
 - Board-runnable: N/A — this is a CLI dispatch fix, not board/QEMU-related.
+
+---
+
+## RESOLVED 2026-08-17 — dispatch gap closed; residual is the known bootstrap blocker
+
+Re-measured on the deployed `bin/simple` (still the Rust seed), output
+redirected to a file, exit code read directly (not through a pipe):
+
+```
+$ bin/simple stats        -> rc=1
+WARNING: this Rust-built Simple binary is a bootstrap seed only; ...
+error: pure-Simple tool 'stats' unavailable; refusing Rust fallback
+
+$ bin/simple doc-coverage -> rc=1
+error: pure-Simple tool 'doc-coverage' unavailable; refusing Rust fallback
+```
+
+The reported defect was that `COMMAND_TABLE` had **no entries at all** for these
+two commands, so `real_main()` fell through to `handle_file_execution` and
+mis-reported them as `error: file not found: stats`. That is fixed:
+`src/compiler_rust/driver/src/main.rs` now carries both names in the dispatch
+table (`main.rs:318-319` in the recognised-command list, `main.rs:823` and
+`main.rs:833` as table entries), and the commands are recognised — the message
+is now an accurate statement of the real situation instead of a misleading
+"file not found".
+
+The remaining non-zero exit is **not this bug**: it is the seed correctly
+refusing a Rust fallback for a pure-Simple-only tool, which is the documented
+KNOWN BLOCKER in `.claude/rules/bootstrap.md`. Tracking of that belongs to the
+bootstrap/self-host records, not here. Closing.
