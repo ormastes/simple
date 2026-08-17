@@ -30,19 +30,28 @@ Findings:
    local_globals") re-keys every `global_init_values` entry to the mangled name,
    with the parallel `global_init_strings` map handled the same way.
    `mir.local_globals` is likewise re-keyed (lines 336-341).
-3. **The other half — entry-module `Node::Let` classified as data — is NOT
-   confirmed.** `grep 'Node::Let'` over `native_project/mod.rs` returns nothing;
-   the only `is_entry` uses there (lines 959-968, 1340, 1374-1379, 1517-1526)
-   concern `main`->`spl_main` renaming and object-cache eligibility, not global
-   classification. So there is no positive evidence that an entry-file
-   module-level scalar `val` is emitted as initialised data rather than left
-   undefined and then fabricated as a weak zero-returning body by
-   `native_project/stubs.rs`.
+3. **The other half — entry-module `Node::Let` classified as data — IS present,
+   in a file I first looked in the wrong place for.** My initial grep covered
+   only `native_project/mod.rs` (where `Node::Let` genuinely does not appear;
+   its `is_entry` uses at lines 959-968, 1340, 1374-1379, 1517-1526 concern
+   `main`->`spl_main` renaming and object-cache eligibility). The classification
+   lives one file over, and a parallel lane's "Source status 2026-08-17" section
+   below is correct: `native_project/compiler.rs:350` has
+   `let is_module_level_decl = matches!(item, Node::Let(_) | Node::Const(_) |
+   Node::Static(_))`, with further `Node::Let` handling at lines 210, 273 and
+   287, alongside `native_project/module_global_init.rs` and
+   `native_project/entry_closure_global_init_tests.rs`. Recorded here as a
+   correction so the wrong-place grep is not repeated a third time.
 
-**Why this stays OPEN rather than being retired:** the mechanism in item 3 is
-unverified, and a wrong close loses a real, silent, wrong-answer defect in
-kernel hardware bring-up. Retiring on "the file that showed the symptom was
-deleted" would be classification by absence, not by content.
+**Why this stays OPEN rather than being retired:** both halves of the "Required
+Fix" now have source-side implementations (item 2 and the corrected item 3), but
+the row's actual observable — weak text symbols with `xor eax,eax; ret` bodies in
+a *Cranelift freestanding* symbol table — has never been re-observed after those
+landed. No freestanding build was run in this triage or, per the parallel lane's
+note, in the W4 wave. Retiring on "the required-fix code exists somewhere" plus
+"the file that showed the symptom was deleted" would be classification by
+absence, not by content, and a wrong close loses a real, silent, wrong-answer
+defect in kernel hardware bring-up.
 
 **What the next lane needs (this row currently has none):** an actual
 reproduction — a two-file freestanding tree, entry file declaring
