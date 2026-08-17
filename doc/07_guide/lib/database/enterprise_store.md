@@ -131,8 +131,78 @@ research track and must not carry finance/PII/stock truth.
   stay green and correctly see `store_backend_acid == false`. Real SQLite is
   reachable today only through an AOT `--native` binary.
 
+- **RESOLVED 2026-08-17 (lane W12-A) — the acid probe was telling the truth;
+  `ROLLBACK` never reached sqlite.** The W10-C refined blocked row below is
+  closed. Root cause, one layer BELOW everything W10-C suspected (not the WAL
+  pragma, not the CREATEs, not the marker write, and not an unfinalized
+  statement): **`src/runtime/runtime_sqlite.c` passed sqlite3 a
+  non-NUL-terminated string.** Simple's `rt_string` is `(data, len)` and its
+  payload carries no terminator, but `get_string()` returned
+  `rt_string_data()` straight to `sqlite3_exec` / `sqlite3_prepare_v2`, which
+  read on into adjacent heap bytes. Printed by
+  `test/fixture/enterprise_store/store_open_acid_probe.spl` under an AOT
+  `--native` binary — these are the literal values that revealed it:
+
+  ```
+   A begin=false err=[near "BEGINX": syntax error]
+   B rollback=false err=[near "ROLLBACKï¿½ï¿½Sï¿½X": syntax error]
+   C begin=false err=[cannot start a transaction within a transaction]
+  ```
+
+  `rt_sqlite_begin/commit/rollback` build their SQL with
+  `make_string("BEGIN")` etc., so those three were the most exposed. Whether a
+  given call worked depended purely on the byte that happened to follow the
+  allocation — which is exactly why the same primitives looked correct run
+  standalone and failed inside `store_open()`. And the failure **cascades**: a
+  ROLLBACK rejected as a syntax error leaves the transaction OPEN, so every
+  later `BEGIN` dies with *cannot start a transaction within a transaction*
+  and `probe_backend_acid()` honestly returns false. `acid=false` was never a
+  reporting bug. Two collateral symptoms fell out with it: the
+  in-transaction INSERT was invisible (`mid=[0]` where it should read `[1]`),
+  and `PRAGMA busy_timeout=5000` silently returned false.
+
+  **Fix (C runtime layer, `runtime_sqlite.c`):** `get_string` is replaced by
+  `borrow_string`/`release_string`, which copy `rt_string_len` bytes into a
+  NUL-terminated buffer (128-byte inline, malloc beyond). All five call sites
+  — open, execute, query/prepare, bind_text — use it. Nothing in Simple, in
+  the seed, or in `store.spl` changed.
+
+  **Evidence.** New gate `sh scripts/check/check-store-open-acid.shs` replays
+  `store_open()`'s prologue in four cumulative stages (bare table / + pragmas
+  / + system CREATEs / + marker write) on both `:memory:` and a file, running
+  the probe after each. Post-fix, driven by a locally rebuilt seed
+  (`target/w12a/release/simple`, 59530280 bytes):
+  `PASS — 8 stage(s) checked, probe_backend_acid true at every stage`, with
+  `pragmas=true/true/true`, `mid=[1]`, `rollback=true`, `after=[0]` at every
+  stage. **Discrimination proven:** reverting only `runtime_sqlite.c` and
+  re-running the same gate yields
+  `BLOCKED — probe is vacuous: 0 of 8 stages showed the in-transaction insert`
+  — the non-vacuity precondition catches it, because the naive reading of the
+  pre-fix output is a *false* `acid=true` (before and after both `[0]` only
+  because the insert never happened). `check-sqlite-backend-acid.shs` still
+  reports `ACID — rollback removed the row, UNIQUE violation rejected`.
+
+  **What is still not measured, and why.** `store_backend_acid()` itself has
+  not been read from a real AOT-native binary: importing
+  `std.enterprise_store` fails to link with
+  `undefined symbol: rt_file_atomic_write` (from `file_backend.spl`), filed as
+  `doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md`.
+  The probe the flag is computed from is proven; the last hop, the struct
+  field, is not. Under the interpreter `store_backend_acid` remains **false**
+  and that is still correct — the Rust `rt_sqlite` externs are an emulation,
+  untouched by this fix.
+
+  **Gated atomicity assertion is now live.** `enterprise_store_harden_spec`
+  gained *"rolls back a multi-row transaction with zero survivors when the
+  backend is ACID"* (6/6 passing). It branches on the live probe and asserts a
+  definite count either way — `0` survivors when `acid`, exactly `2` under the
+  emulation — so it can never pass by skipping, and drift in either direction
+  fails loudly.
+
   **Refined blocked row — `store_backend_acid` is false even natively, and it
-  is not sqlite's fault.** Measured 2026-08-17 in an AOT `--native` binary,
+  is not sqlite's fault.** (SUPERSEDED by the RESOLVED block above; retained
+  for its reasoning. Its leading suspect — an unfinalized statement — was
+  wrong; the real cause was string termination.) Measured 2026-08-17 in an AOT `--native` binary,
   every primitive `probe_backend_acid` uses is correct end to end:
   `store_count_text` before=`[0]`, `sqlite_begin` true, `store_insert2` true,
   mid=`[1]`, `sqlite_rollback` true, after=`[0]` — run by hand that is exactly

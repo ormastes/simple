@@ -63,10 +63,51 @@ static RtValue make_string(const char *s) {
     return (RtValue)rt_string_new((const uint8_t *)s, c_string_len(s));
 }
 
-static const char *get_string(RtValue v) {
+/*
+ * Simple's rt_string is (data, len) and its payload is NOT guaranteed to be
+ * NUL-terminated. Every sqlite3 entry point below takes a C string, so
+ * handing it rt_string_data() directly makes sqlite read past the end of the
+ * payload into whatever follows it on the heap.
+ *
+ * That is not theoretical. Measured 2026-08-17 (lane W12-A) in an AOT
+ * --native binary: rt_sqlite_begin/rollback pass make_string("BEGIN") /
+ * make_string("ROLLBACK") and sqlite reported
+ *     near "BEGINX": syntax error
+ *     near "ROLLBACK\xef\xbf\xbd\xef\xbf\xbdS\xef\xbf\xbdX": syntax error
+ * — the literal plus trailing heap garbage. Whether it fails depends purely
+ * on the byte that happens to follow the allocation, which is why the same
+ * primitive sequence looked correct when run standalone and failed inside
+ * store_open(): a failed ROLLBACK leaves the transaction open, so every
+ * later BEGIN dies with "cannot start a transaction within a transaction"
+ * and enterprise_store's probe_backend_acid() honestly reported acid=false.
+ *
+ * borrow_string() therefore copies the payload into a NUL-terminated buffer.
+ * Callers must release it with release_string(). rt_string_len() is the
+ * authority on length; the payload may legitimately contain no NUL at all.
+ */
+typedef struct { char *ptr; char inline_buf[128]; } CStr;
+
+static const char *borrow_string(RtValue v, CStr *out) {
+    out->ptr = NULL;
     if (is_nil(v)) return NULL;
-    if ((v & TAG_MASK) == TAG_HEAP) return (const char *)rt_string_data((int64_t)v);
-    return NULL;
+    if ((v & TAG_MASK) != TAG_HEAP) return NULL;
+    const uint8_t *data = rt_string_data((int64_t)v);
+    if (!data) return NULL;
+    int64_t len = rt_string_len((int64_t)v);
+    if (len < 0) return NULL;
+    char *buf = out->inline_buf;
+    if ((uint64_t)len + 1 > sizeof(out->inline_buf)) {
+        buf = (char *)malloc((size_t)len + 1);
+        if (!buf) return NULL;
+        out->ptr = buf;
+    }
+    for (int64_t i = 0; i < len; i++) buf[i] = (char)data[i];
+    buf[len] = '\0';
+    return buf;
+}
+
+static void release_string(CStr *s) {
+    if (s->ptr) { free(s->ptr); s->ptr = NULL; }
 }
 
 /* ================================================================
@@ -74,10 +115,12 @@ static const char *get_string(RtValue v) {
  * ================================================================ */
 
 RtValue rt_sqlite_open(RtValue path) {
-    const char *p = get_string(path);
+    CStr pbuf;
+    const char *p = borrow_string(path, &pbuf);
     if (!p) return (RtValue)SPECIAL_NIL;
     sqlite3 *db = NULL;
     int rc = sqlite3_open(p, &db);
+    release_string(&pbuf);
     if (rc != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return (RtValue)SPECIAL_NIL;
@@ -117,11 +160,13 @@ RtValue rt_sqlite_close(RtValue handle) {
 RtValue rt_sqlite_execute(RtValue conn, RtValue sql) {
     if (is_nil(conn)) return from_int(0);
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
-    const char *s = get_string(sql);
+    CStr sbuf;
+    const char *s = borrow_string(sql, &sbuf);
     if (!s) return from_int(0);
     char *err = NULL;
     int rc = sqlite3_exec(db, s, NULL, NULL, &err);
     if (err) sqlite3_free(err);
+    release_string(&sbuf);
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
@@ -132,10 +177,12 @@ RtValue rt_sqlite_execute_batch(RtValue conn, RtValue sql) {
 RtValue rt_sqlite_query(RtValue conn, RtValue sql) {
     if (is_nil(conn)) return (RtValue)SPECIAL_NIL;
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
-    const char *s = get_string(sql);
+    CStr sbuf;
+    const char *s = borrow_string(sql, &sbuf);
     if (!s) return (RtValue)SPECIAL_NIL;
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db, s, -1, &stmt, NULL);
+    release_string(&sbuf);
     if (rc != SQLITE_OK || !stmt) return (RtValue)SPECIAL_NIL;
     return from_ptr(stmt);
 }
@@ -203,10 +250,12 @@ RtValue rt_sqlite_column_type(RtValue stmt_val, RtValue idx) {
 RtValue rt_sqlite_prepare(RtValue conn, RtValue sql) {
     if (is_nil(conn)) return (RtValue)SPECIAL_NIL;
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
-    const char *s = get_string(sql);
+    CStr sbuf;
+    const char *s = borrow_string(sql, &sbuf);
     if (!s) return (RtValue)SPECIAL_NIL;
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db, s, -1, &stmt, NULL);
+    release_string(&sbuf);
     if (rc != SQLITE_OK || !stmt) return (RtValue)SPECIAL_NIL;
     return from_ptr(stmt);
 }
@@ -214,8 +263,12 @@ RtValue rt_sqlite_prepare(RtValue conn, RtValue sql) {
 RtValue rt_sqlite_bind_text(RtValue stmt_val, RtValue idx, RtValue value) {
     if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
-    const char *s = get_string(value);
+    CStr vbuf;
+    const char *s = borrow_string(value, &vbuf);
+    /* SQLITE_TRANSIENT: sqlite copies immediately, so releasing right after
+       the call is safe. */
     int rc = sqlite3_bind_text(stmt, (int)as_int(idx), s ? s : "", -1, SQLITE_TRANSIENT);
+    release_string(&vbuf);
     return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 

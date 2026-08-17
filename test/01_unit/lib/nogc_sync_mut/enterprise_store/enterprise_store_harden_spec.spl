@@ -36,9 +36,10 @@ use std.spec.*
 use std.nogc_sync_mut.enterprise_store.store.{
     store_open, store_close, store_verify, store_open_verified,
     store_faults_none, store_faults_failing_commit,
-    buffered_uow_new, buffered_write, buffered_commit
+    buffered_uow_new, buffered_write, buffered_commit,
+    store_backend_acid, uow_begin, uow_rollback
 }
-use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, idempotency_seen}
+use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, idempotency_seen, outbox_append}
 use std.io_runtime.{file_exists, file_delete, file_write, dir_create_all}
 
 describe "enterprise store harden — corruption detection":
@@ -111,4 +112,35 @@ describe "enterprise store harden — write-failure commit (injected seam)":
         step("Verify NO partial effects are observable — neither staged write landed")
         expect(outbox_pending(store, "tenant-a").len()).to_equal(0)
         expect(idempotency_seen(store, "tenant-a", "ord-1")).to_be(false)
+        store_close(store)
+
+describe "enterprise store harden — raw transaction atomicity, gated on the live ACID probe":
+    it "rolls back a multi-row transaction with zero survivors when the backend is ACID":
+        # This is the assertion the suite could not carry until 2026-08-17.
+        # It is GATED on store_backend_acid(), a live probe, not on a build
+        # flag: whichever branch runs, it asserts a definite number, so the
+        # scenario can never pass by doing nothing.
+        #
+        # - Real SQLite (AOT `--native`, links libsqlite3): probe true, both
+        #   rows must be gone.
+        # - Interpreter rt_sqlite emulation (`bin/simple test`): probe false,
+        #   raw ROLLBACK is a no-op, so both rows MUST still be there. The
+        #   emulation is not silently tolerated — it is pinned to its exact
+        #   non-ACID behaviour, and drift in either direction fails loudly.
+        #   Atomic multi-write on that backend is BufferedUow, covered above.
+        val store = store_open(":memory:")
+        step("Read the live backend capability probe")
+        val acid = store_backend_acid(store)
+        step("Write two rows inside one raw transaction and roll it back")
+        uow_begin(store)
+        outbox_append(store, "tenant-tx", "sales.order.created", "o1")
+        outbox_append(store, "tenant-tx", "sales.order.created", "o2")
+        uow_rollback(store)
+        val survivors = outbox_pending(store, "tenant-tx").len()
+        if acid:
+            step("Backend is ACID — the rollback must have removed BOTH rows")
+            expect(survivors).to_equal(0)
+        else:
+            step("Backend is NOT ACID (interpreter rt_sqlite emulation) — both rows must survive, the honest negative")
+            expect(survivors).to_equal(2)
         store_close(store)

@@ -1,0 +1,117 @@
+use std.nogc_sync_mut.io.sqlite_sffi
+
+# store_open()'s ACID probe, stage by stage, for the AOT `--native` path.
+#
+# Why this exists (lane W12-A, 2026-08-17): enterprise_store's
+# probe_backend_acid() reported acid=false natively even though the same
+# primitives looked correct when run standalone. This fixture replays
+# store_open()'s prologue in four cumulative stages -- bare table (A),
+# + durability pragmas (B), + system-table CREATEs (C), + the store-format
+# marker write (D) -- running the probe after each one and PRINTING every
+# intermediate value. The stage where the answer flips is the culprit.
+#
+# It found one: rt_sqlite_* handed sqlite3 a non-NUL-terminated rt_string
+# payload, so `ROLLBACK` reached sqlite as `ROLLBACK<heap garbage>` and was a
+# syntax error. Fixed in src/runtime/runtime_sqlite.c (borrow_string).
+# Gate: scripts/check/check-store-open-acid.shs
+#
+# This fixture uses sqlite_sffi directly rather than importing
+# std.enterprise_store because the store module pulls in file_backend, whose
+# rt_file_atomic_write does not link on the single-file --native path
+# (doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md).
+
+# W12-A diagnostic: replicate store_open() step by step, printing every
+# intermediate value, to find why probe_backend_acid() reports false natively
+# while the standalone primitive sequence is correct.
+
+val MARKER = "__store_format_v1"
+
+fn cnt(conn: SqliteConnection, table: text) -> text:
+    sqlite_query_value(conn, "SELECT COUNT(*) FROM " + table)
+
+fn insert2(conn: SqliteConnection, sql: text, v1: text, v2: text) -> bool:
+    val stmt = sqlite_prepare(conn, sql)
+    if not stmt.is_valid:
+        print("    insert2: stmt INVALID")
+        return false
+    sqlite_bind_text(stmt, 1, v1)
+    if sql.contains("?, ?"):
+        sqlite_bind_text(stmt, 2, v2)
+    val ran = rt_sqlite_query_next(stmt.handle)
+    print("    insert2: query_next=" + ran.to_text())
+    sqlite_finalize(stmt)
+    ran == 1 or ran == 0
+
+fn marker_present(conn: SqliteConnection) -> bool:
+    val rows = sqlite_query_all(conn, "SELECT id, marker FROM acid_probe")
+    print("    marker rows=" + rows.len().to_text())
+    for row in rows:
+        if sqlite_row_get(row, "marker") == MARKER:
+            return true
+    false
+
+fn probe(conn: SqliteConnection, tag: text) -> bool:
+    val before = cnt(conn, "acid_probe")
+    print(tag + " before=[" + before + "]")
+    val b = sqlite_begin(conn)
+    print(tag + " begin=" + b.to_text() + " err=[" + sqlite_error_message(conn) + "]")
+    if not b:
+        return false
+    val ins = insert2(conn, "INSERT INTO acid_probe (marker) VALUES (?)", "probe", "")
+    print(tag + " insert=" + ins.to_text() + " mid=[" + cnt(conn, "acid_probe") + "]")
+    val r = sqlite_rollback(conn)
+    print(tag + " rollback=" + r.to_text() + " err=[" + sqlite_error_message(conn) + "]")
+    if not r:
+        return false
+    val after = cnt(conn, "acid_probe")
+    print(tag + " after=[" + after + "] eq=" + (before == after).to_text()
+        + " eq_lit=" + (after == "0").to_text()
+        + " len=" + before.len().to_text() + "/" + after.len().to_text())
+    before == after
+
+fn run(path: text):
+    print("=== path=" + path)
+    val conn = if path == ":memory:":
+        sqlite_open_memory()
+    else:
+        sqlite_open(path)
+    print("  conn.is_valid=" + conn.is_valid.to_text() + " handle=" + conn.handle.to_text())
+    if not conn.is_valid:
+        return
+
+    # A: probe BEFORE anything else (only the table it needs).
+    print("  -- A: bare table, no pragmas, no marker")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS acid_probe (id INTEGER PRIMARY KEY, marker TEXT)")
+    print("  acidA=" + probe(conn, "   A").to_text())
+
+    # B: now the pragmas.
+    print("  -- B: after pragmas")
+    val p1 = sqlite_execute(conn, "PRAGMA journal_mode=WAL")
+    val p2 = sqlite_execute(conn, "PRAGMA busy_timeout=5000")
+    val p3 = sqlite_execute(conn, "PRAGMA foreign_keys=ON")
+    print("  pragmas=" + p1.to_text() + "/" + p2.to_text() + "/" + p3.to_text())
+    print("  acidB=" + probe(conn, "   B").to_text())
+
+    # C: now the system table CREATEs.
+    print("  -- C: after system CREATEs")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, name TEXT, applied_seq TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS idempotency_keys (id INTEGER PRIMARY KEY, tenant_id TEXT, idem_key TEXT, result TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, tenant_id TEXT, event_type TEXT, payload TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, tenant_id TEXT, actor TEXT, action TEXT, detail TEXT, prev_hash TEXT, hash TEXT)")
+    print("  acidC=" + probe(conn, "   C").to_text())
+
+    # D: now the marker write, exactly as store_open does it.
+    print("  -- D: after marker write")
+    val mp = marker_present(conn)
+    print("  marker_present=" + mp.to_text())
+    if not mp:
+        val mi = insert2(conn, "INSERT INTO acid_probe (marker) VALUES (?)", MARKER, "")
+        print("  marker_insert=" + mi.to_text())
+    print("  marker_present_now=" + marker_present(conn).to_text())
+    print("  acidD=" + probe(conn, "   D").to_text())
+
+    sqlite_close(conn)
+
+fn main():
+    run(":memory:")
+    run("/tmp/store_open_acid_probe/s1.db")

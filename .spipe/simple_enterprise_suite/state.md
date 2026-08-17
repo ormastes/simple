@@ -813,3 +813,44 @@ New acceptance criteria (extends AC-1..AC-12 above):
   test/unit/ mirrors were byte-identical, so both trees were updated in
   lockstep and the test-tree divergence baseline is unchanged.
   Merged-tree reruns: 9/9, 7/7, 12/12.
+- ROOT CAUSE OF THE NATIVE-ACID FRONTIER: SQL STRINGS WERE NOT NUL-TERMINATED
+  (2026-08-17, lane W12-A). src/runtime/runtime_sqlite.c's get_string()
+  returned rt_string_data() DIRECTLY to sqlite3_exec/sqlite3_prepare_v2, but
+  Simple's rt_string is (data, len) with NO NUL terminator — so sqlite read on
+  into adjacent heap bytes on every statement. Values from an AOT --native
+  stage-by-stage fixture that revealed it:
+    A begin=false    err=[near "BEGINX": syntax error]
+    B rollback=false err=[near "ROLLBACK<heap garbage>": syntax error]
+    C begin=false    err=[cannot start a transaction within a transaction]
+    A insert=true mid=[0]   <- the in-tx INSERT was invisible too
+    pragmas=true/false/true <- busy_timeout silently failing
+  Success depended purely on the byte after the allocation, which is exactly
+  why the standalone sequence looked correct while store_open() failed. It
+  CASCADES: a rejected ROLLBACK leaves the transaction open, so every later
+  BEGIN fails. THE PROBE WAS RIGHT ALL ALONG — probe_backend_acid() honestly
+  returned false, and no flag was forced. W10-C's suspects (WAL pragma,
+  CREATEs, marker write, unfinalized statement) were ALL WRONG.
+  FIX at the C runtime layer only: get_string -> borrow_string/release_string
+  copying rt_string_len bytes into a NUL-terminated buffer (128B inline,
+  malloc beyond) at all five call sites. No Simple, seed or store.spl change.
+  DISCRIMINATION PROVEN: reverting ONLY runtime_sqlite.c makes the new gate
+  report `BLOCKED — probe is vacuous: 0 of 8 stages showed the in-transaction
+  insert` — i.e. the naive pre-fix reading would have been a FALSE acid=true.
+  New gate scripts/check/check-store-open-acid.shs + fixture:
+  `PASS — 8 stage(s) checked, probe_backend_acid true at every stage`
+  (:memory: and file x 4 cumulative stages), driven by a locally built seed
+  (bin/release/** was never touched). check-sqlite-backend-acid probe fields:
+  in_tx=[alpha] after_rollback=[] dup=false committed=[beta] rejected=[] =ACID.
+  New gated spec in harden: "rolls back a multi-row transaction with zero
+  survivors when the backend is ACID" asserts a DEFINITE count on both
+  branches (0 when acid, exactly 2 under the emulation) so it cannot pass by
+  skipping. Interpreter verdicts: harden 6/6 (was 5), enterprise_store 10/10,
+  goods_sale 10/10; c-runtime-compiles PASS. Merged-tree: PASS (120 files),
+  harden 6/6.
+  HONEST GAP FILED, NOT HIDDEN: store_backend_acid still cannot be READ from a
+  native binary — importing std.enterprise_store fails with `undefined symbol:
+  rt_file_atomic_write` (from file_backend.spl). The symbol is defined in
+  runtime_native.c and present in the only build/*.a; adding a RuntimeFuncSpec
+  did not help and was REVERTED rather than left in unverified. Filed:
+  doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md.
+  Under the interpreter the flag stays false, correctly.
