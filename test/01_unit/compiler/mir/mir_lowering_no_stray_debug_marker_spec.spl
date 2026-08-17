@@ -1,0 +1,86 @@
+# MIR lowering must not emit unguarded debug markers — reproducing + class spec
+#
+# DEFECT (found 2026-08-17 while triaging
+# doc/08_tracking/bug/native_option_bool_eq_against_raw_literal_2026-08-08.md):
+#
+#   src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2239
+#       eprint("MARKER_RT_IS_NONE_ARM_REACHED")
+#
+# sat unguarded on the `x == nil` / `x != nil` lowering path of the pure-Simple
+# self-hosted compiler. It was a one-off investigation probe (the bug doc's own
+# "marker confirmed live" methodology) that was never removed. Every nil
+# comparison in every module of a self-hosted build writes that line to stderr.
+#
+# WHY THIS IS NOT COSMETIC. The self-hosted compiler's stderr is consumed by
+# machinery, not only by humans: the repo's own gate scripts under
+# scripts/check/ classify runs by grepping compiler output, and several
+# bootstrap lanes capture stderr into logs that are then pattern-matched. A
+# marker on a hot lowering path is unbounded output injected into that channel.
+# It is also, per .claude/rules/code-style.md, exactly the "one-off
+# non-reusable dump" that the log-retention policy says to delete rather than
+# level-gate.
+#
+# WHY A SOURCE SCAN RATHER THAN A SUBPROCESS. The usual trap applies in
+# reverse here. A spec body runs INTERPRETED, and the interpreter is the RUST
+# SEED — which never executes src/compiler/**.spl at all. Observing this
+# marker at runtime therefore requires a full self-hosted stage2/stage3
+# bootstrap, which no binary on a normal dev box can do cheaply and which the
+# repo forbids running opportunistically. The defect is nonetheless fully
+# decidable from source: the marker either is or is not in the tree. So this
+# spec asserts on the source text, which is the strongest oracle that is
+# actually available, and is not vacuous — it reads the real files that the
+# self-hosted compiler is built from.
+#
+# CLASS GENERALISATION. The reproducing example pins the exact known site. The
+# remaining examples generalise to the defect CLASS: ANY unguarded debug-marker
+# print anywhere under src/compiler/50.mir/**, under any of the marker spellings
+# this repo has actually used. That is what stops the next investigation probe
+# from shipping.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val MIR_DIR: text = "src/compiler/50.mir"
+
+# Grep the MIR lowering tree and return matching "file:line:text" lines.
+# `grep -r` exits 1 with empty stdout when there are no matches, which is the
+# passing case; stdout is the whole oracle, so the exit code is never read
+# through a pipe.
+fn grep_mir(pattern: text) -> text:
+    val cmd = "/usr/bin/grep -rn -- '" + pattern + "' " + MIR_DIR + " || true"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "pure-Simple MIR lowering carries no unguarded debug markers":
+
+    it "does not print MARKER_RT_IS_NONE_ARM_REACHED on the nil-comparison path":
+        step("Scan src/compiler/50.mir for the exact marker left behind by the Option/nil investigation")
+        val hits = grep_mir("MARKER_RT_IS_NONE_ARM_REACHED")
+
+        step("The `x == nil` lowering arm is on the hot path of every module, so this marker must not exist at all")
+        expect(hits).to_equal("")
+
+    it "has no MARKER_-prefixed probe strings anywhere in MIR lowering":
+        step("Generalise to the marker spelling this repo actually used for one-off lowering probes")
+        val hits = grep_mir("MARKER_")
+
+        step("Any MARKER_ string under 50.mir is an investigation probe that was never cleaned up")
+        expect(hits).to_equal("")
+
+    it "has no unguarded eprint of a bare debug-probe literal in MIR lowering":
+        step("Scan for eprint calls whose argument is a shouty ALL-CAPS probe literal — the shape every such probe has taken here")
+        val hits = grep_mir("eprint(\"[A-Z_]*MARKER[A-Z_]*\"")
+
+        step("Diagnostics must go through the compiler's error/warning reporting, never a raw eprint probe")
+        expect(hits).to_equal("")
+
+    it "proves the scan is live and would actually catch a marker":
+        step("Non-vacuity control: the same grep for a string that IS present must find it")
+        # `decode_runtime_value` is a real, load-bearing function in
+        # _MirLoweringExpr/expr_dispatch.spl. If this comes back empty the scan
+        # itself is broken (wrong path, grep missing, sandbox cwd wrong) and
+        # every green above would be meaningless.
+        val control = grep_mir("decode_runtime_value")
+
+        step("A green suite above is only meaningful if this control is non-empty")
+        expect(control).to_contain("decode_runtime_value")
