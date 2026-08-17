@@ -163,7 +163,7 @@ $ echo $?
 
 # positive control (an absence check that scanned nothing is not evidence):
 $ /usr/bin/grep -rc --include=*.spl runtime_objects src/compiler/70.backend/backend/llvm_native_link.spl
-27
+66
 ```
 
 `/usr/bin/grep` is used deliberately: the bare `grep` on this host is a wrapped
