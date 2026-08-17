@@ -100,3 +100,30 @@ controllers and no Intel display/GPU device:
 Both stated blockers hold: no Mesa `anv` reference-capture hardware, and no
 command-stream encoder in `src/os/drivers/gpu/board_vulkan/`. Unblock requires
 an Intel Gen12/Xe-LP capture host; nothing in this lane can move it.
+
+---
+
+## 2026-08-17 — scope question answered: the capture path IS genuinely Intel-specific
+
+Asked explicitly whether this boundary merely needs *a* GPU (this host has two
+real NVIDIA GPUs: RTX A6000 and TITAN RTX, driver 580.126.16, both enumerating
+under `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json vulkaninfo` with
+`vendorID = 0x10de`). Answer: **no — a non-Intel GPU does not unblock it.**
+
+Both halves of the reference-capture path are Intel-only by construction:
+
+- `INTEL_DEBUG=bat` is a debug knob of Mesa's `anv` driver; it decodes batches
+  `anv` itself submits. NVIDIA's proprietary driver is not Mesa and submits no
+  `anv` batch. `nouveau` is Mesa but is a different driver with no Gen12
+  command-stream encoding.
+- `aubinator` / `intel_error_decode` / `intel_dump_gpu` ship in `intel-gpu-tools`
+  and decode Intel GPU command streams specifically; there is no vendor-neutral
+  equivalent, and the canonical packet schema in
+  `boundary_cmdstream_canonicalize.spl` is a Gen12 opcode/dword-length schema.
+
+So the hardware claim in this doc is accurate and remains accurate on a real-GPU
+host. Note the second, hardware-independent blocker is unchanged and is the one
+that could be worked without any silicon: there is still no command-stream
+encoder under `src/os/drivers/gpu/board_vulkan/`, so even with Intel hardware the
+candidate side stays `ProviderStatus.unavailable`. Status: OPEN, correctly
+hardware-gated on the counterpart side, encoder-gated on the candidate side.
