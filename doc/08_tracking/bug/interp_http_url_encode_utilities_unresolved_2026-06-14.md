@@ -5,6 +5,28 @@
 - Area: interpreter / module resolution
 - Found: 2026-06-14 (writing test/01_unit/app/itf/adapter_outlook_curl_spec.spl)
 
+**Status:** RESOLVED — re-verified 2026-08-17, now covered by a spec
+
+## Resolution (2026-08-17, old-bug-backlog audit)
+
+The documented repro no longer reproduces. Running it verbatim under
+`bin/simple run` now prints both lines:
+
+```
+START
+ENC=ops%40acme.com
+```
+
+The module resolves and the calling function returns; the silent death after
+`CLIENT_OK` is gone. This doc had no `Status:` line and no surviving covering
+spec, so nothing had confirmed the fix since it was filed.
+
+Covered from now on by
+`test/01_unit/lib/nogc_sync_mut/http_client/url_encode_spec.spl`
+(`Results: 5 total, 5 passed, 0 failed`; sabotage-proved — corrupting the
+expected `%40` gives `5 total, 4 passed, 1 failed`). Run it with
+`--no-session-daemon`.
+
 ## Symptom
 
 Any code path that calls `url_encode` fails to execute under `bin/simple run`
