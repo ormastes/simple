@@ -1,0 +1,96 @@
+# @cover scripts/check/check-no-phantom-module-imports.shs 80%
+"""
+# An import of a module that does not exist must not compile
+
+**Category:** Compiler
+**Status:** Implemented
+
+## Purpose and Audience
+
+Six stdlib files shipped `use string.{char_from_code}`. The module path `string`
+has never existed anywhere in this tree. The Rust seed reported it only as
+`[WARN] Failed to load imported types`, the JIT fallback then swallowed the
+lowering failure and dropped the module to the interpreter, and the files
+compiled clean. Every call died at RUNTIME with `semantic: function
+char_from_code not found` -- a diagnostic that never mentions the import that
+caused it -- leaving DNS label/TXT rdata decoding and SMTP base64 and
+quoted-printable broken in shipped code.
+
+One warning-level diagnostic let six broken files through. This spec pins the
+two mechanisms that now stop it.
+
+## Scope and Preconditions
+
+Two independent guards, checked separately here because they fail at different
+times and neither subsumes the other:
+
+1. **Compile-time (the fix).** `1478ca64460` makes the resolver's E1034
+   `cannot resolve import` a `LowerError::UnresolvedImport`, and escalates it
+   unconditionally past the JIT interpreter fallback. This only takes effect in
+   a binary built after that commit.
+2. **Source-level (the gate).** `check-no-phantom-module-imports.shs` resolves
+   every bare single-segment `use` in `src/**` against the tree with no
+   compiler involved, and fails closed on any import root that resolves
+   nowhere. It gates the source regardless of which binary is deployed.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| phantom module import | a `use` whose module path exists nowhere on the resolution path |
+| baseline | the 22 findings that predate the gate; the gate fails on anything NOT in it |
+
+## Recovery and Troubleshooting
+
+A FAIL naming a new phantom means the import is a typo or names a module that
+was never written. Fix the import or add the module. `SIMPLE_ALLOW_UNRESOLVED_IMPORTS=1`
+restores the compiler's old warn-and-continue behaviour and exists only as a
+break-glass for bisecting an unrelated failure.
+
+## Compatibility and Limitations
+
+The gate covers bare single-segment import roots -- the exact shape of the
+incident, and the only shape resolvable without reimplementing the module
+resolver. Dotted paths (`use std.x.y`) are left to the compiler's own resolver.
+The separate class of a RESOLVED module that does not provide a NAMED item is
+still only a `[use-warning]`; 16 distinct instances exist in the loaded stdlib
+closure today, so it could not be escalated in the same change.
+"""
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+
+describe "Phantom module imports are gated at the source level":
+    it "reports no new phantom import in the tree":
+        # step: "Run the phantom-import gate over src/"
+        val (out, err, status) = rt_process_run("sh", [
+            "scripts/check/check-no-phantom-module-imports.shs"
+        ])
+        # step: "The gate passes and says how many imports it actually checked"
+        expect(status).to_equal(0)
+        expect(out).to_contain("0 new phantom")
+        expect(out).to_contain("import(s) checked")
+
+    it "never reports a vacuous pass":
+        # step: "Read the count the gate claims to have checked"
+        val (out, err, status) = rt_process_run("sh", [
+            "-c",
+            "sh scripts/check/check-no-phantom-module-imports.shs | tail -1"
+        ])
+        # step: "A run that examined zero imports must be an ERROR, never a PASS"
+        expect(out).to_not_contain("0 import(s) checked")
+        expect(out).to_not_contain("ERROR")
+
+describe "Phantom module imports are rejected when introduced":
+    it "fails closed on a newly introduced phantom import":
+        # step: "Run the gate's own selftest, which injects a phantom import,
+        #        asserts the gate FAILS and names it, removes the file, and
+        #        asserts the tree returns to PASS"
+        val (out, err, status) = rt_process_run("sh", [
+            "scripts/check/check-no-phantom-module-imports.shs",
+            "--selftest"
+        ])
+        # step: "Both fixtures pass, so a later PASS is evidence and not a
+        #        gate that cannot fail"
+        expect(status).to_equal(0)
+        expect(out).to_contain("selftest: 2 fixture(s) passed")
+        expect(out).to_not_contain("selftest fixture")
