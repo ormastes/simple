@@ -155,42 +155,42 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 
 ## Per-bug entries
 
-### 1. `dns_aaaa_query_qtype_not_28_2026-08-17.md` — PENDING (host-verifiable)
+### 1. `dns_aaaa_query_qtype_not_28_2026-08-17.md` — CLOSED (stale spec offset; 35/35 green)
 - **Symptom:** `AAAA query has QTYPE=28` asserts truthy, gets `0`; 34/35 in `dns_spec.spl`.
 - **Root cause:** suspected, localised. `DNS_TYPE_AAAA` is declared in `src/lib/nogc_sync_mut/dns/types.spl` and imported by `wire.spl`; the field is left unset or the accessor reads the wrong offset. Only visible now because a phantom `use string.{char_from_code}` import in `wire.spl` masked it until `3d56c94653e`; that fix touched the label/TXT *decode* path, so this is pre-existing, not a regression.
 - **Fix guide:** stdlib only — **no engine choice, no build** (`src/lib/**` is read as source every run). In `src/lib/nogc_sync_mut/dns/wire.spl`, make the AAAA query builder write `DNS_TYPE_AAAA` into the QTYPE bytes; check the reader offset the spec uses.
 - **Reproduce here:** `bin/simple test test/01_unit/lib/nogc_sync_mut/dns/dns_spec.spl` → expect 35/35. Sabotage: write 27, expect RED.
 - **Hardware:** none — host-fixable. **Unblock:** nothing.
 
-### 2. `simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md` — PENDING (host-verifiable)
+### 2. `simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md` — FIXED (`dc8545a772`)
 - **Symptom:** `SIMPLE_TIMEOUT_SECONDS=840` still dies at `budget_ms=120000` with `reason=daemon-no-response` and `failed=1`; `--timeout 800` on the same spec passes. High tooling-honesty severity: 6 of 17 formal-verification specs were recorded RED this way in one sweep.
 - **Root cause:** known by location — `src/app/test_runner_new/test_runner_client.spl` and `src/app/test_daemon/light_protocol.spl`; the flag path sets the budget, the env path does not.
 - **Fix guide:** pure-Simple only (`src/app/**`); the Rust seed is not involved. Make the code path that `--timeout` feeds also read `SIMPLE_TIMEOUT_SECONDS` (×1000) when the flag is absent, flag winning on conflict. Separately, a daemon no-response must emit an INCONCLUSIVE verdict, never `failed=1`.
 - **Reproduce here:** `SIMPLE_TIMEOUT_SECONDS=840 timeout 900 bin/simple test test/00_formal_verification/compiler/lean_basic_spec.spl` (currently 0/1 timeout) vs `bin/simple test … --timeout 800` (4/4). Fix = both give 4/4.
 - **Hardware:** none. **Unblock:** nothing.
 
-### 3. `blink_specs_import_unimplemented_modules_2026-08-10.md` — PENDING (host-verifiable)
+### 3. `blink_specs_import_unimplemented_modules_2026-08-10.md` — PARTIAL (form/input fixed; paint open)
 - **Symptom:** four blink specs RED, `semantic: Cannot resolve module: std.blink.dom.form_state` and siblings.
 - **Root cause:** known — feature gap, not a compiler defect. **[false blocker]** the reported `STATICS_FAILED_KEY` failure mode was console-noise misreading; that constant is `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:298` and is unrelated. A separate still-unfiled defect is documented there: the `Use <> instead of [] for generics` warning is a **false positive** on dict bracket-assignment (`handles[K] = 1`, line 305), emitted on every parse of the compiler tree.
 - **Fix guide:** write the missing `std.blink.dom.*` modules (`form_state` + the three other `geo.*`/`BoxModel` dependants) under `src/lib/`. Stdlib, no build. Then file the bracket-assignment warning separately.
 - **Reproduce here:** `SIMPLE_TIMEOUT_SECONDS=3600 bin/simple test test/01_unit/lib/blink` — currently `89 total, 52 passed, 37 failed`.
 - **Hardware:** none. **Unblock:** nothing.
 
-### 4. `lint_timeout_hwir_zca_rows_2026-08-17.md` — PENDING (host-verifiable)
+### 4. `lint_timeout_hwir_zca_rows_2026-08-17.md` — FIX IMPLEMENTED (`8c50d36609`; full timing pending)
 - **Symptom:** lint of `src/compiler/50.mir/hwir/zca_rows.spl` exceeds **900s** (re-verified worse than the 600s at filing), no verdict line, log frozen at 382 lines.
 - **Root cause:** suspected — superlinear per-decl lint cost. Measured: 1901 lines, 30 function decls; the published model (~11.7s startup + ~3.3–4.0s/decl) predicts ~130s, so observed is **~7× above even the linear prediction**. The published cost model under-predicts badly here.
 - **Fix guide:** profile `bin/simple lint` on this one file (sampling profiler or in-linter timing counters); the likely shape is a per-decl pass rescanning all prior decls. Fix in **pure-Simple** (`src/app/lint` / the lint pass in `src/compiler`) — the seed cannot be the fix target since no pure-Simple binary can lint today. Correct `.claude/rules/commands.md`'s cost model afterwards.
 - **Reproduce here:** `nice -n 19 timeout 900 sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl` — **CPU-bound for 15+ min; do not run while a bootstrap is compiling.**
 - **Hardware:** none — but wants an idle box. **Unblock:** CPU time.
 
-### 5. `bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md` — PENDING (host-verifiable)
+### 5. `bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md` — FIXED (`17b9c0d72d`)
 - **Symptom:** stage2 exits 1 with a **0-byte** `stage2-native-build.log`. Status MITIGATED (a diagnostic block now distinguishes the three silent cases); the root defect is open.
 - **Root cause:** **known.** Replay against `build/phase_snapshots/phase1_1786935122/simple` proved the restricted `env -i` sandbox does *not* break the seed (`--version`, `native-build --help` both exit 0). The defect is that `native-build` writes **nothing** to a non-tty stdout/stderr until completion or a flushed error — 580s of real CPU work with a 0-byte log throughout. `SIMPLE_BUILD_PROGRESS_EVENTS` is a file path, not a verbosity flag, so it yields no progress evidence either.
 - **Fix guide:** line-buffer or explicitly flush progress/diagnostics when stdout is not a tty — a tty check is selecting full buffering. Pure-Simple driver (`src/app/cli`, `src/compiler/80.driver`).
 - **Verify here:** rerun the transcript's exact command redirected to a file; the log must grow *during* the build, not only at exit.
 - **Hardware:** none. **Unblock:** nothing.
 
-### 6. `board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11.md` — PENDING (host-verifiable)
+### 6. `board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11.md` — FIXED (`1358b28f0c`)
 - **Symptom:** none of the eight board-Vulkan boundary lanes ever executed an open-source counterpart; every "comparison" ran against bytes the lane authored itself. L2 device enumeration returns a hand-typed lavapipe literal at `boundary_enumeration_provider.spl:104-137`; L4's measured hashes were gathered by the agent's own shell, not the spec.
 - **Root cause:** **known, and the lanes' stated cause is false** — see "Blockers that were FALSE" #3 for the four exported exec/evidence APIs with file:line.
 - **Fix guide:** delete the literal at `boundary_enumeration_provider.spl:104-137`; have the spec invoke `vulkaninfo` through `process_run_with_limits` and feed the output to `exec_to_evidence`. Same for the L4 inventory hashes. L3's receipt gate is already sound and sabotage-proven; it just needs a real `libvulkan_lvp.so` invocation behind it.
@@ -211,14 +211,14 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Fix guide:** run the existing wrapper with explicit DrawIR, producer, optional-physical, and report inputs. It must correlate A4 and A5 for the same workload/damage class/revision/provenance, requiring p95 ≤ 12.5 ms, nonzero RSS/checksum, exact readback scope, and no disallowed fallback. Contract: `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §0-B A7; owner TODO811. The AOT lane going green at `3463d698fee` unblocks the draw_ir 8K path feeding A4.
 - **Hardware:** none — already present. A physical display is needed only for the **optional** presentation receipt, which A7 does not require. **Unblock:** run it.
 
-### 9. `vulkan_8k_jit_retained_host_buf_sample_crash_2026-08-12.md` — PENDING (host-verifiable)
+### 9. `vulkan_8k_jit_retained_host_buf_sample_crash_2026-08-12.md` — FIXED (`4051bc8c494`; 8K capacity rerun pending)
 - **Symptom:** the retained Vulkan 8K workload completes 200 timed frames, then strict JIT SIGSEGVs when the harness samples `VulkanBackend.host_buf` for readback parity. Peak RSS 2,137,920 KiB. The preceding run (before direct sample assertions) gave p50 1,040,146 ns / p95 1,539,488 ns, 3,276,800 transfer bytes, zero full fallbacks — but an invalid **zero checksum**.
 - **Root cause:** unknown, **narrowed by a negative result**: `test/fixtures/jit_class_u32_array_retained_read/main.spl` — same 33,177,600-element `[u32]`, class field, 210 frames of mutation, aliased, first/changed/last reads under strict JIT — **passes**. So plain class-field `[u32]` retained reads are not the defect; something Vulkan-specific (mirror lifetime, or the host-visible mapping) is.
 - **Fix guide:** extend that reduction toward the real shape (add the host-visible mapping and the strided 64-row mirror transfer) until it reproduces. Required closure per the doc: isolate class-field array borrowing vs direct indexed access vs retained-mirror lifetime; add a strict-JIT regression reading first/middle/last from a class-owned `[u32]` after repeated mutation; preserve a nonzero checksum or an explicit sampled-parity receipt. Engines: JIT in `src/compiler/70.backend` **and** the Vulkan SFFI in `src/compiler_rust/runtime/src/value/gpu_vulkan/` — both, since the crash straddles them. **Never substitute an expected checksum for the missing proof**; a timing-only row is not an admissible 8K/80 pass.
 - **Reproduce here:** viewport 7680×4320, pinned lavapipe (`lvp_icd.json` present), one 64×64 damage rect, 10 warmup / 200 timed frames, `SIMPLE_JIT_STRICT=1`. Needs ~2.1 GiB RSS — trivially available.
 - **Hardware:** none — lavapipe is CPU-side, and real NVIDIA Vulkan is present besides. **Unblock:** nothing.
 
-### 10. `stage3_post_file_copy_exit139_2026-08-14.md` — bootstrap-gated
+### 10. `stage3_post_file_copy_exit139_2026-08-14.md` — FIX IMPLEMENTED / STAGE 3 VERIFICATION PENDING
 - **Symptom:** Stage 3 exits 139 in a high-memory region after lowering `dir_create_all`/`file_copy`, then again entering statement 1 of `eval_binop`.
 - **Root cause:** **known and symbolized.** GDB stack: `MirLowering.remember_local_hir_type` ← `maybe_copy_array_value` ← `lower_stmt_impl` ← `lower_block_expected`. `maybe_copy_array_value` passes a `HirType` aggregate into another native method; under the Stage 2 ABI that aggregate transport corrupts the callee — the already-proven static-receiver class. Source: **`src/compiler/50.mir/mir_lowering_types.spl:414`**. GDB log `build/native_probe/stage3-gdb/gdb.log` SHA `25f6fb3c…`.
 - **Fix guide:** the repair is already written — `copy_local_hir_type_metadata(source_id, destination_id)`, scalar args only, copying the aggregate inside the owning aligned arrays, rejecting the same nil/raw-zero sentinel `find_local_hir_type` does. `sh scripts/check/check-native-scalar-metadata-copy.shs` passed once with an admitted pure-Simple compiler on 2026-08-16. **Only Stage-3 verification remains.** Engine: pure-Simple `src/compiler/50.mir`.
@@ -231,14 +231,14 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Fix guide:** re-run the recorded `bootstrap-from-scratch.sh --pure-simple --full-cli --no-mcp --diagnostics=test …` command **retaining the console**, then symbolize under GDB exactly as bug 10 did. Retained Stage 2: `build/restart12-bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, SHA `7617c924…`. The crash is in the **pure-Simple** Stage 2 compiler, so any fix lands in `src/compiler`, not the seed.
 - **Hardware:** none. **Unblock:** a retained, reproducible Stage-2→Stage-3 diagnostic run (likely the same defect as bug 10).
 
-### 12. `stage4_resume_from_admitted_gap_2026-08-14.md` — bootstrap-gated
+### 12. `stage4_resume_from_admitted_gap_2026-08-14.md` — FIXED (`f32fc3ebcb`; live continuation pending authority)
 - **Symptom:** Stage 4 cannot continue from an admitted, already-built Stage 3.
 - **Root cause:** known — the canonical wrapper has no `--resume-stage4-from-admitted=<output>`.
 - **Fix guide:** fully specified in the doc. Add the flag to `scripts/bootstrap/bootstrap-from-scratch.sh`, requiring a planner-authored `//bootstrap:stage4` typed-reason receipt, validating the Stage 3 candidate + provenance manifest, acquiring the output lock, binding a continuation-lock receipt **without mutating Stage 2/3**, then entering the existing Stage 4 / essential-tools / provenance / deployment gates. Candidate repair `scripts/bootstrap/resume-stage4-from-admitted.sh`, sourced only after receipt validation. `SimpleBootstrapStage4ContinuationV1` binds planner receipt + Stage 3 manifest/candidate + lock + snapshot. Acceptance: Stage 2/3 hashes unchanged; provenance verifier green before any Stage 4 process; `bin/release/x86_64-unknown-linux-gnu/bootstrap-deploy-receipt.env` records `schema=bootstrap-deploy-receipt-v1` / `deployment_status=pass`; **no Rust seed row accepted as Stage 4 evidence.**
 - **Fix vs verification:** the implementation is host-work today; only live acceptance is blocked.
 - **Hardware:** none. **Unblock:** an admitted Stage 3 lane + planner receipt (bug 10 landing).
 
-### 13. `stage4_bootstrap_rust_inputs_changed_2026-08-15.md` — bootstrap-gated
+### 13. `stage4_bootstrap_rust_inputs_changed_2026-08-15.md` — RESOLVED (intended fail-closed authority rejection)
 - **Symptom:** `--full-bootstrap --deploy` aborts with `Rust inputs changed during full bootstrap; refusing to publish a stale seed`; zero Simple files ever compiled.
 - **Root cause:** known — **a provenance failure, not a compile failure.** 17 dirty `src/compiler_rust/**` paths (across `common`, `compiler`, `parser`, `runtime`, `native_all`); ordered dirty-path fingerprint `91339a9a75…`.
 - **Fix guide:** **Rust seed engine only.** Land or revert the 17 dirty paths so the tree is quiescent, re-take the fingerprint, and start the full bootstrap from a clean checkout so the guard cannot fire mid-run. **Do not weaken the guard** — refusing to publish a stale seed is correct. Verify: the run reaches Stage 2 source discovery with a nonzero Simple file count.
