@@ -1,7 +1,23 @@
 # Bug: `excel_floor`/`excel_ceiling` mishandle negative `significance` (should use `abs(significance)`)
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: FIXED (2026-08-17)
+
+Fix applied at `src/app/office/sheets/math_bridge.spl:224-236`: both
+`excel_floor` and `excel_ceiling` now bind `val sig = math_abs(significance)`
+and divide/multiply by `sig`, so the step's sign is no longer observable in
+the result.
+
+Evidence (same tree, same binary, only the two functions changed):
+
+- BEFORE: `Results: 23 total, 19 passed, 4 failed`
+  (`test/01_unit/app/office/sheets/math_bridge_extended_spec.spl`) and
+  `Results: 6 total, 1 passed, 5 failed`
+  (`test/01_unit/app/office/sheets/math_bridge_significance_sign_class_spec.spl`)
+- AFTER: `Results: 23 total, 23 passed, 0 failed` and
+  `Results: 6 total, 6 passed, 0 failed`, rc=0
+
+Earlier status line (now superseded): OPEN (P2), re-verified 2026-08-17 by
+source inspection (triage shard 01).
 
 Date: 2026-07-20
 
