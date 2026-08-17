@@ -56,22 +56,45 @@ fn compiler_bin() -> text:
     val override = rt_env_get("SIMPLE_SPEC_COMPILER")
     if override != "":
         return override
-    return "bin/release/simple"
+    # NOT `bin/release/simple`: that is the production-guard wrapper, which
+    # refuses to exec a non-production runtime ("refusing non-production Simple
+    # runtime") and exits WITHOUT running the fixture. Every assertion below
+    # then fails on empty stdout, so the spec reported a permanent false RED on
+    # a compiler where the defect is fixed (fixture prints erased=6/typed=6/
+    # user=999 when run directly). `bin/simple` is the documented default tool
+    # path and execs whatever is deployed.
+    return "bin/simple"
 
 fn run_fixture_on_jit() -> (text, text, i64):
     """Run the fixture through the compiler's JIT `run` path."""
     rt_process_run(compiler_bin(), ["run", FIXTURE])
 
-describe "bare index_of on an erased receiver":
-    it "uses the text builtin, not a same-named user struct method":
+describe "the fixture subprocess actually ran":
+    # Detection spec for the CLASS, not this one bug: every assertion below is a
+    # `contains(...)` on the fixture's stdout, so a subprocess that never ran
+    # (bad binary path, a wrapper that refuses to exec, a missing fixture) fails
+    # all of them with "expected true" and looks exactly like a live codegen
+    # defect. That misread this spec as RED against a compiler that was already
+    # fixed. Assert the subprocess produced output BEFORE asserting anything
+    # about its content, so "did not run" can never masquerade as "ran wrong".
+    it "produces fixture output rather than failing silently":
         val result = run_fixture_on_jit()
+        assert_equal(result.2, 0)
+        assert_false(result.0 == "")
+        assert_true(result.0.contains("erased="))
+
+describe "bare index_of on an erased receiver":
+    # All three receiver shapes are asserted from a SINGLE fixture run. Each
+    # `it` here costs a full compiler subprocess launch, and on a loaded host
+    # four launches exceeded the test daemon's 120s budget, which reports as
+    # `timeout=1 reason=daemon-no-response` with NO `Results:` line at all --
+    # an inconclusive run that is easily misread as a failing one.
+    it "binds every receiver shape to the method its own type owns":
+        val result = run_fixture_on_jit()
+        # erased receiver must reach the text builtin, not Str.index_of (999)
         assert_false(result.0.contains("erased=999"))
         assert_true(result.0.contains("erased=6"))
-
-    it "keeps resolving a typed text receiver to the builtin":
-        val result = run_fixture_on_jit()
+        # a typed text receiver must keep reaching the builtin
         assert_true(result.0.contains("typed=6"))
-
-    it "still dispatches a typed user receiver to its own index_of":
-        val result = run_fixture_on_jit()
+        # and a typed user receiver must still get its OWN index_of
         assert_true(result.0.contains("user=999"))
