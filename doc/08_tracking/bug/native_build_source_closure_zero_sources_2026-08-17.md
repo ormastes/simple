@@ -222,6 +222,34 @@ the entry and stating the path-vs-module-path contract. It is gated on
 `not native_entry_closure_pre`, the same condition that made the entry the sole
 seed, so a re-entrant worker seeded from `--source` roots is unaffected.
 
+### What the four guards are ACTUALLY blocked on: `parse` makes no progress
+
+Arm A was allowed to run unwrapped to completion (no short timeout). It does not
+fail at discovery — **it never leaves `parse`**:
+
+```
+[build] load_sources 3/3 step 1/6 complete
+[build] parse 0/2 step 1/6 pending
+[build] parse 0/2 step 1/6 test/fixtures/native_trailing_default_param/main.spl
+error: native-build worker timed out after 7200s before producing a binary.
+```
+
+rc=**255**, read from a variable on the line after the command. The `parse`
+counter stayed at `0/2` for the whole two hours — zero of two files parsed. Host
+load average was 26-31 with 9 concurrent `simple native-build` processes from
+other lanes, so the absolute wall time is an envelope, not a clean number; but no
+amount of contention explains `0/2` progress on a 2-file fixture across 7200s.
+
+This is a **different, and the real, blocker** for
+`check-native-trailing-default-param` (and, by the same invocation shape, for
+`check-predicate-parser-native-build`,
+`check-native-object-cache-granularity` and
+`check-native-inprocess-positional-nonvacuous`): the worker's 7200s budget
+expires in `parse`, so those guards can only report FAIL/ERROR on a timeout, not
+on the property they exist to test. It is **not** fixed by this row's change and
+is not diagnosed here — it needs its own investigation, starting at the `parse`
+step emitter in `driver_source_pipeline_parsing.spl`.
+
 ### Consequences for the four guards
 
 `check-predicate-parser-native-build`, `check-native-trailing-default-param`,
