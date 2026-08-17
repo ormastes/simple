@@ -151,11 +151,28 @@ one identity across two families must count 2; no identity-keyed implementation
 can satisfy both.)
 
 Both specs were committed RED-first in `a046b58ebc7`. **Verdict capture is
-pending:** the host is running a stage-3 self-host build with 174 concurrent
-`simple` processes and neither spec run had emitted a verdict line after ~45
-minutes, so the before/after verdict pair required to land the one-line key fix
-was not obtained in this session. The fix is deliberately NOT applied until the
-RED is quoted — applying it first would destroy the reproduce-first evidence.
+still pending** and the fix is deliberately NOT applied until the RED is quoted;
+applying it first would destroy the reproduce-first evidence.
+
+Recorded here because it cost this session an hour and will cost the next one the
+same: `scripts/check/check-test-verdict-not-silent.shs` printed
+
+```
+  OK  test/01_unit/os/vulkan/independence_group_key_regression_spec.spl
+```
+
+for the reproducer, and **that `OK` is not a pass.** That guard classifies only
+*silence* — whether a run emitted any verdict/counts line at all. Its own
+selftest (lines 97-103) feeds it fixture 4, `Results: 4 total, 3 passed, 1
+failed` with exit 1, and requires the classification `OK` (`red:OK`). So `OK`
+covers GREEN and honest RED identically and can never distinguish them. Only an
+explicit `Results: N total, N passed` line settles a spec's outcome; a bare `OK`
+from that wrapper must never be quoted as evidence that a spec passed.
+
+Host conditions for the record: a stage-3 self-host build was live with ~174
+concurrent `simple` processes, `bin/simple` currently resolves to the Rust
+bootstrap seed (it says so on startup), and a single spec run took roughly an
+hour to reach its first output.
 
 Status: OPEN. Items 1 and 2 are closed by measurement; item 3 is unchanged; item
 4 is now a concrete, specified, spec-covered code defect rather than a lane-rework
