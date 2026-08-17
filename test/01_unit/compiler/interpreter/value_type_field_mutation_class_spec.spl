@@ -1,0 +1,100 @@
+# Value-type field mutation — Similar-Problem Detection Spec
+#
+# Prevention companion to
+# test/01_unit/compiler/interpreter/struct_container_field_mutation_spec.spl.
+# That spec pins the one reported shape (a Dict field written by a free
+# function). This spec generalises to the DEFECT CLASS: "a mutation through a
+# by-value struct receiver is silently discarded", across the axes the original
+# report never covered.
+#
+#   container kind   Dict, array
+#   mutation route   free function, method (`me`), a second hop through a helper
+#   depth            direct field, field of a nested struct field
+#
+# It also pins the OTHER half of the contract, which is what stops the fix from
+# over-correcting into "structs are reference types": a SCALAR field written
+# through a by-value struct receiver must NOT be visible to the caller. Value
+# semantics for scalars and reference semantics for container handles are both
+# load-bearing; a fix that made the whole struct write back would turn this
+# example red, which is exactly what it is here to catch.
+#
+# Every positive assertion carries an absence control.
+
+use std.spec.*
+
+struct DictBox:
+    values: Dict<text, i32>
+
+struct ArrayBox:
+    items: [i32]
+
+struct ScalarBox:
+    count: i32
+
+struct NestedBox:
+    inner: DictBox
+
+    me write_through_method(key: text, next: i32):
+        self.inner.values[key] = next
+
+fn write_dict(self: DictBox, key: text, next: i32):
+    self.values[key] = next
+
+fn write_dict_second_hop(self: DictBox, key: text, next: i32):
+    write_dict(self, key, next)
+
+fn write_array(self: ArrayBox, index: i64, next: i32):
+    self.items[index] = next
+
+fn write_scalar(self: ScalarBox, next: i32):
+    self.count = next
+
+fn write_nested_dict(self: NestedBox, key: text, next: i32):
+    self.inner.values[key] = next
+
+describe "value-type field mutation across the defect class":
+    it "keeps an array-element write made through a by-value struct receiver":
+        step("An array field is the same shared-handle shape as a dict field")
+        val box = ArrayBox(items: [10, 20, 30])
+        write_array(box, 1, 99)
+
+        step("The written slot changed")
+        expect(box.items[1]).to_equal(99)
+
+        step("Absence controls: the untouched slots did not change")
+        expect(box.items[0]).to_equal(10)
+        expect(box.items[2]).to_equal(30)
+
+    it "keeps a dict write that reaches the field through a second function hop":
+        step("The mutation route is one hop further from the caller")
+        val box = DictBox(values: {})
+        write_dict_second_hop(box, "answer", 42)
+
+        expect(box.values.has("answer")).to_equal(true)
+        expect(box.values["answer"]).to_equal(42)
+        expect(box.values.has("never-written")).to_equal(false)
+
+    it "keeps a dict write made through a method on the struct":
+        step("A `me` method is the other mutation route users reach for")
+        val box = NestedBox(inner: DictBox(values: {}))
+        box.write_through_method("answer", 42)
+
+        expect(box.inner.values.has("answer")).to_equal(true)
+        expect(box.inner.values["answer"]).to_equal(42)
+        expect(box.inner.values.has("never-written")).to_equal(false)
+
+    it "keeps a dict write one struct level deeper than the receiver":
+        step("The container lives in a struct field of a struct field")
+        val box = NestedBox(inner: DictBox(values: {}))
+        write_nested_dict(box, "answer", 42)
+
+        expect(box.inner.values.has("answer")).to_equal(true)
+        expect(box.inner.values.has("never-written")).to_equal(false)
+
+    it "does NOT leak a scalar field write back through a by-value struct receiver":
+        step("Scalars keep strict value semantics — the other half of the contract")
+        val box = ScalarBox(count: 7)
+        write_scalar(box, 99)
+
+        step("The caller's copy is unchanged; a whole-struct write-back would fail here")
+        expect(box.count).to_equal(7)

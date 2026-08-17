@@ -1,0 +1,169 @@
+# @cover src/lib/nogc_async_mut_noalloc/tls/x25519.spl 80%
+# @req REQ-CRYPTO-X25519-001
+"""
+# X25519 key agreement — RFC 7748 known-answer vectors
+
+**Category:** Stdlib
+**Status:** Implemented
+
+## Purpose and Audience
+
+X25519 is the key-agreement primitive behind TLS 1.3 and SSH key exchange in
+this tree. Everyone who relies on those transports relies on this function
+returning the one shared secret RFC 7748 defines — not merely 32 plausible
+bytes. This scenario is the reproducing case for
+`doc/08_tracking/bug/x25519_extern_not_registered_interp_2026-06-15.md`, which
+was closed as "source fixed" without anyone ever running the arithmetic.
+
+## Scope and Preconditions
+
+Covers the pure-Simple Montgomery ladder in
+`src/lib/nogc_async_mut_noalloc/tls/x25519.spl`, which is the sole X25519
+implementation — there is no runtime extern to fall back to. No host
+capability, network, or hardware is required.
+
+## Primary Workflow
+
+An operator agreeing a key supplies a 32-byte private scalar and the peer's
+32-byte u-coordinate, and receives a 32-byte shared secret. The scenario pins
+that output against the RFC's own vectors, then checks the property that makes
+key agreement useful at all: both sides must independently arrive at the same
+secret.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| RFC 7748 5.2 | Scalar-multiplication vector: fixed scalar and u give one defined output |
+| RFC 7748 6.1 | Alice's private key maps to one defined public key on base point 9 |
+| DH agreement | `x25519(a, pub_b)` must equal `x25519(b, pub_a)` |
+
+## Evidence and Provenance
+
+Expected values are transcribed from RFC 7748 sections 5.2 and 6.1. They are
+external to this repository and cannot be satisfied by any self-consistent but
+incorrect implementation — which is exactly how the original defect survived.
+
+## Recovery and Troubleshooting
+
+A wrong hex value here means the field arithmetic or the ladder is broken, not
+the test. Do not adjust the expected constants: they are the standard. Probe
+the field layer first (round-trip, `a * a^-1 == 1`, `2^100 * 2^50 == 2^150`),
+then the ladder's starting state.
+
+## Compatibility and Limitations
+
+Runs anywhere the interpreter runs. Timing side channels are out of scope.
+"""
+
+use std.spec.*
+use src.lib.nogc_async_mut_noalloc.tls.x25519.{x25519, x25519_pubkey}
+
+# ============================================================================
+# Vectors and helpers — module level so `it` bodies stay free of var mutation
+# ============================================================================
+
+fn _hex(b: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < b.length():
+        val v = b[i].to_i64()
+        out = out + digits.substring(v / 16, v / 16 + 1) + digits.substring(v % 16, v % 16 + 1)
+        i = i + 1
+    out
+
+fn _rfc7748_5_2_scalar() -> [u8]:
+    # a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4
+    [
+        0xa5u8, 0x46u8, 0xe3u8, 0x6bu8, 0xf0u8, 0x52u8, 0x7cu8, 0x9du8,
+        0x3bu8, 0x16u8, 0x15u8, 0x4bu8, 0x82u8, 0x46u8, 0x5eu8, 0xddu8,
+        0x62u8, 0x14u8, 0x4cu8, 0x0au8, 0xc1u8, 0xfcu8, 0x5au8, 0x18u8,
+        0x50u8, 0x6au8, 0x22u8, 0x44u8, 0xbau8, 0x44u8, 0x9au8, 0xc4u8
+    ]
+
+fn _rfc7748_5_2_u() -> [u8]:
+    # e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c
+    [
+        0xe6u8, 0xdbu8, 0x68u8, 0x67u8, 0x58u8, 0x30u8, 0x30u8, 0xdbu8,
+        0x35u8, 0x94u8, 0xc1u8, 0xa4u8, 0x24u8, 0xb1u8, 0x5fu8, 0x7cu8,
+        0x72u8, 0x66u8, 0x24u8, 0xecu8, 0x26u8, 0xb3u8, 0x35u8, 0x3bu8,
+        0x10u8, 0xa9u8, 0x03u8, 0xa6u8, 0xd0u8, 0xabu8, 0x1cu8, 0x4cu8
+    ]
+
+fn _rfc7748_6_1_alice_private() -> [u8]:
+    # 77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a
+    [
+        0x77u8, 0x07u8, 0x6du8, 0x0au8, 0x73u8, 0x18u8, 0xa5u8, 0x7du8,
+        0x3cu8, 0x16u8, 0xc1u8, 0x72u8, 0x51u8, 0xb2u8, 0x66u8, 0x45u8,
+        0xdfu8, 0x4cu8, 0x2fu8, 0x87u8, 0xebu8, 0xc0u8, 0x99u8, 0x2au8,
+        0xb1u8, 0x77u8, 0xfbu8, 0xa5u8, 0x1du8, 0xb9u8, 0x2cu8, 0x2au8
+    ]
+
+fn _rfc7748_6_1_bob_private() -> [u8]:
+    # 5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb
+    [
+        0x5du8, 0xabu8, 0x08u8, 0x7eu8, 0x62u8, 0x4au8, 0x8au8, 0x4bu8,
+        0x79u8, 0xe1u8, 0x7fu8, 0x8bu8, 0x83u8, 0x80u8, 0x0eu8, 0xe6u8,
+        0x6fu8, 0x3bu8, 0xb1u8, 0x29u8, 0x26u8, 0x18u8, 0xb6u8, 0xfdu8,
+        0x1cu8, 0x2fu8, 0x8bu8, 0x27u8, 0xffu8, 0x88u8, 0xe0u8, 0xebu8
+    ]
+
+fn _shared_5_2() -> text:
+    _hex(x25519(_rfc7748_5_2_scalar(), _rfc7748_5_2_u()))
+
+fn _alice_public() -> text:
+    _hex(x25519_pubkey(_rfc7748_6_1_alice_private()))
+
+fn _bob_public() -> text:
+    _hex(x25519_pubkey(_rfc7748_6_1_bob_private()))
+
+fn _alice_side_secret() -> text:
+    _hex(x25519(_rfc7748_6_1_alice_private(), x25519_pubkey(_rfc7748_6_1_bob_private())))
+
+fn _bob_side_secret() -> text:
+    _hex(x25519(_rfc7748_6_1_bob_private(), x25519_pubkey(_rfc7748_6_1_alice_private())))
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "X25519 scalar multiplication reproduces RFC 7748 5.2":
+
+    it "derives the shared secret the standard defines":
+        step("Supply the RFC 7748 5.2 private scalar and peer u-coordinate")
+        step("Read back the 32-byte shared secret as hex")
+        # The value below is RFC 7748 5.2's stated output. Before the field
+        # arithmetic was corrected this returned 23af31d7...3600 — note the
+        # trailing 00, the signature of a serializer that emitted 31 real
+        # bytes and padded the last one.
+        expect(_shared_5_2()).to_equal("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552")
+
+    it "returns exactly 32 bytes":
+        step("Confirm the secret is a full 256-bit value")
+        expect(x25519(_rfc7748_5_2_scalar(), _rfc7748_5_2_u()).length()).to_equal(32)
+
+describe "X25519 public-key derivation reproduces RFC 7748 6.1":
+
+    it "maps Alice's private key to her published public key":
+        step("Multiply Alice's private scalar by the curve base point 9")
+        expect(_alice_public()).to_equal("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+
+    it "maps Bob's private key to his published public key":
+        step("Multiply Bob's private scalar by the curve base point 9")
+        expect(_bob_public()).to_equal("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+
+describe "X25519 key agreement converges from both sides":
+
+    it "gives both parties the same secret":
+        # A ladder can be self-consistent and still wrong, so the RFC vectors
+        # above are the primary oracle. This case adds the property that makes
+        # the primitive usable: the two independently computed secrets agree.
+        # It was 'no' while the ladder started from a zeroed x_3.
+        step("Alice combines her private key with Bob's public key")
+        step("Bob combines his private key with Alice's public key")
+        expect(_alice_side_secret()).to_equal(_bob_side_secret())
+
+    it "agrees on the secret RFC 7748 6.1 publishes":
+        step("Compare the agreed secret against the standard's stated value")
+        expect(_alice_side_secret()).to_equal("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")

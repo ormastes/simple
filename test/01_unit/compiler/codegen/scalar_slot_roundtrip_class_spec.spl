@@ -1,0 +1,97 @@
+# Scalar Slot Round-Trip — Similar-Problem Detection Spec (defect CLASS)
+#
+# Two HIGH bugs filed 2026-08-17 were the same shape: a primitive value written
+# into a slot whose READ re-interprets it at a different type or width.
+#
+#   doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+#     a raw i64 stored unboxed into an `i64?` slot; `42 & 7 == 2` is the runtime
+#     TAG_FLOAT, so rt_to_string re-read it as an inline f64 -> ~2.08e-322.
+#   doc/08_tracking/bug/f32_struct_field_reads_as_zero_2026-08-17.md
+#     an f32 field stored 8 bytes wide and loaded 4 -> 2.5f64's low half is zero.
+#
+# Both were found ONE TYPE AT A TIME, by a human noticing a wrong number. This
+# spec generalises the class instead: EVERY primitive type across all three
+# erased-slot boundaries — nullable `T?`, struct field, array element — so the
+# next omission fails here rather than shipping as plausible garbage.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes specs on the tree-walk
+# INTERPRETER, which was correct in both bugs. In-process examples therefore
+# cannot go red on a JIT defect, no matter how many types they cover. The
+# oracle here is the sibling run-path probe
+# `probe_scalar_slot_roundtrip_jit.spl`, executed as a subprocess under BOTH
+# engines; it self-checks ~60 absolute literals and prints one verdict line.
+#
+# Every oracle in the probe is an ABSOLUTE literal the probe did not itself
+# compute — never "the two engines agree", which would pass while both are
+# wrong in the same way.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_scalar_slot_roundtrip_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "scalar slot round-trip across every erased-slot boundary":
+    it "round-trips every primitive type through the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm: it was correct in both bugs, so a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("SCALAR_SLOT_ROUNDTRIP PROBE: ALL PASS")
+
+        step("The probe must actually have executed its checks, not exited early")
+        expect(interp).to_contain("PASS opt_i64_local")
+        expect(interp).to_contain("PASS field_f32_init")
+        expect(interp).to_contain("PASS array_i64_elem")
+
+    it "round-trips every primitive type through the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine both bugs lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("Nullable `T?` slots must carry i8/i16/i32/i64/u8/u16/u32/u64/f32/f64/bool/text payloads")
+        expect(jit).to_contain("PASS opt_i64_local")
+        expect(jit).to_contain("PASS opt_u64_local")
+        expect(jit).to_contain("PASS opt_f64_local")
+        expect(jit).to_contain("PASS opt_bool_local")
+        expect(jit).to_contain("PASS opt_i64_coalesce")
+        expect(jit).to_contain("PASS opt_i64_return")
+
+        step("Struct fields must round-trip on both the construction and the assignment path")
+        expect(jit).to_contain("PASS field_f32_init")
+        expect(jit).to_contain("PASS field_f32_set")
+        expect(jit).to_contain("PASS field_i32_init")
+        expect(jit).to_contain("PASS field_u64_set")
+
+        step("Array elements, including a struct read out of an array")
+        expect(jit).to_contain("PASS array_f64_elem")
+        expect(jit).to_contain("PASS array_struct_f32_field")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("SCALAR_SLOT_ROUNDTRIP PROBE: ALL PASS")
+
+    it "shows no reinterpretation signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("A payload read through the wrong tag renders as a sub-normal double")
+        expect(jit.contains("0.0000000000000000000")).to_equal(false)
+        expect(interp.contains("0.0000000000000000000")).to_equal(false)
+
+        step("A never-unboxed tagged word leaks as `<value:0x..>`")
+        expect(jit.contains("<value:0x")).to_equal(false)
+        expect(interp.contains("<value:0x")).to_equal(false)
+
+        step("No check may have failed under either engine")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

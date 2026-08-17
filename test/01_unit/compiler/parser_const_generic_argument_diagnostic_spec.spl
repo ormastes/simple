@@ -1,0 +1,84 @@
+# Const-generic argument diagnostic — Reproducing Spec
+#
+# Reproduces doc/08_tracking/bug/const_generic_argument_rejected_in_constructor_call_2026-08-17.md.
+#
+#     val tensor = Tensor<i64, 2>(_handle: 0, _shape: [2, 3], _device: Device.cpu())
+#
+# failed the WHOLE FILE with
+#
+#     Unexpected token: expected expression, found Comma
+#
+# which names neither the construct nor the limitation, and points at a comma
+# several tokens past the real problem.
+#
+# The bug report's first stated cause — "no turbofish in expression position" —
+# is WRONG, and this spec pins that down: `Box2<i64, i32>(v: 7)` parses and runs
+# today. `try_skip_ident_generic_args` already commits when the closing `>` is
+# followed by `(`. The real limitation is narrower: `2` is a VALUE, and Simple
+# has no const generic parameters, so `parse_type` rejected it, the whole
+# generic-argument list silently backtracked into a comparison chain, and the
+# failure surfaced far away at the next comma.
+#
+# Resolution: not const generics (a language feature, out of scope) but an
+# honest diagnostic. The parser now consumes the numeric argument, CONFIRMS the
+# shape really is a generic argument list, and reports the const-generic
+# limitation by name.
+#
+# This is a whole-file PARSE failure, so it cannot be an in-process example —
+# a spec that contained the offending source would not load at all. Every
+# example therefore drives a subprocess, which also pins BOTH engine lanes.
+#
+# NOTE ON PROVENANCE: the fix lands in the Rust seed parser
+# (src/compiler_rust/parser/src/expressions/postfix.rs) and in the pure-Simple
+# parser (src/compiler/10.frontend/core/parser_expr.spl). A deployed binary
+# older than the fix still reports the stale "expected expression, found Comma".
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+fn compile_source(name: text, source: text) -> text:
+    val path = "build/test-artifacts/const_generic_" + name + ".spl"
+    file_write(path, source)
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = bin + " run " + path + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+val CONST_ARG_SOURCE: text = "struct Box2<T, N>:\n" +
+    "    v: T\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val a = Box2<i64, 2>(v: 7)\n" +
+    "    print(a.v.to_text())\n"
+
+val TYPE_ARG_SOURCE: text = "struct Box2<T, N>:\n" +
+    "    v: T\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val a = Box2<i64, i32>(v: 7)\n" +
+    "    print(\"built ok\")\n"
+
+describe "const-generic argument in constructor-call position":
+    it "reports the const-generic limitation instead of blaming a later comma":
+        step("Compile a constructor call carrying a numeric generic argument")
+        val out = compile_source("reject", CONST_ARG_SOURCE)
+
+        step("The diagnostic names const generics — the actual limitation")
+        expect(out).to_contain("const generic")
+
+        step("It no longer blames the comma that merely followed the real problem")
+        expect(out.contains("expected expression, found Comma")).to_equal(false)
+
+    it "still accepts a turbofish whose arguments are all real types":
+        step("Turbofish in expression position was never the limitation")
+        val out = compile_source("accept", TYPE_ARG_SOURCE)
+
+        step("The program runs to completion")
+        expect(out).to_contain("built ok")
+
+        step("Absence control: an accepted call emits no const-generic diagnostic")
+        expect(out.contains("const generic")).to_equal(false)

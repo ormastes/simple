@@ -1,0 +1,118 @@
+# Struct container-field mutation through a by-value receiver — Reproducing Spec
+#
+# Reproduces doc/08_tracking/bug/struct_field_dict_mutation_through_free_function_is_a_noop_2026-08-10.md
+# and its superseding framing
+# doc/08_tracking/bug/struct_dict_field_mutation_engine_divergence_2026-08-10.md.
+#
+#     fn write_h(self: H, key: text, next: i32) -> i32:
+#         self.values[key] = next
+#
+# The assignment executed, the function returned normally, and the caller's
+# `h.values.has("answer")` was still `false` — a SILENT NO-OP, the dangerous
+# kind: no diagnostic, no exception, and any positive-only assertion passes.
+#
+# ENGINES DIVERGED, which is why this is a defect no matter which semantics are
+# intended: measured on the deployed binary before the fix, with an absence
+# control in every run,
+#
+#     interpreter  struct has("answer") = false     <- the defect
+#     jit          struct has("answer") = true
+#     class        true in both engines (reference type, never in question)
+#
+# Root cause: the interpreter stores dicts/arrays as `Arc<..>` with copy-on-
+# write, so a callee mutation forks the Arc and dies with the frame, and
+# `write_back_mutable_arguments` excluded EVERY value-type struct from the
+# post-call write-back. Fix (resolution B, shallow struct copy): container-
+# valued fields of a value-type struct are shared handles and ARE carried back;
+# scalar and nested-struct fields keep strict value semantics.
+#
+# Every reading assertion is paired with an ABSENCE CONTROL, so a container that
+# answers `true` to everything cannot fake a pass.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+struct StructDictHolder:
+    values: Dict<text, i32>
+
+class ClassDictHolder:
+    values: Dict<text, i32>
+
+fn write_struct_dict(self: StructDictHolder, key: text, next: i32) -> i32:
+    self.values[key] = next
+    1
+
+fn write_class_dict(self: ClassDictHolder, key: text, next: i32) -> i32:
+    self.values[key] = next
+    1
+
+val CROSS_ENGINE_SOURCE: text = "struct H:\n" +
+    "    values: Dict<text, i32>\n" +
+    "\n" +
+    "fn write_h(self: H, key: text, next: i32) -> i32:\n" +
+    "    self.values[key] = next\n" +
+    "    1\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val h = H(values: {})\n" +
+    "    val r = write_h(h, \"answer\", 42)\n" +
+    "    print(\"r=\" + r.to_text())\n" +
+    "    print(\"present=\" + h.values.has(\"answer\").to_text())\n" +
+    "    print(\"absent=\" + h.values.has(\"never-written\").to_text())\n"
+
+fn run_cross_engine(mode: text) -> text:
+    val path = "build/test-artifacts/struct_container_field_mutation_repro.spl"
+    file_write(path, CROSS_ENGINE_SOURCE)
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "struct container-field mutation through a by-value receiver":
+    it "keeps a dict write made by a free function taking the struct as self":
+        step("Build a struct whose only field is an empty dict")
+        val holder = StructDictHolder(values: {})
+
+        step("Mutate that dict through a free function whose parameter is named self")
+        val result = write_struct_dict(holder, "answer", 42)
+        expect(result).to_equal(1)
+
+        step("The caller must observe the write — this is the assertion that was red")
+        expect(holder.values.has("answer")).to_equal(true)
+
+        step("Absence control: a key nobody wrote must still be absent")
+        expect(holder.values.has("never-written")).to_equal(false)
+
+        step("The stored VALUE must survive, not merely the key")
+        expect(holder.values["answer"]).to_equal(42)
+
+    it "keeps the same dict write when the holder is a reference-typed class":
+        step("A class receiver was never in question — it is the A/B control")
+        val holder = ClassDictHolder(values: {})
+        val result = write_class_dict(holder, "answer", 42)
+        expect(result).to_equal(1)
+
+        step("Present key observed, absent key still absent")
+        expect(holder.values.has("answer")).to_equal(true)
+        expect(holder.values.has("never-written")).to_equal(false)
+
+    it "agrees between the interpreter and the JIT on the same source":
+        step("Run one identical program through both engines as subprocesses")
+        val interpreted = run_cross_engine("interpreter")
+        val jitted = run_cross_engine("jit")
+
+        step("Both engines must report the write as visible")
+        expect(interpreted).to_contain("present=true")
+        expect(jitted).to_contain("present=true")
+
+        step("Both engines must report the absence control as absent")
+        expect(interpreted).to_contain("absent=false")
+        expect(jitted).to_contain("absent=false")
+
+        step("Both engines must have actually run the helper")
+        expect(interpreted).to_contain("r=1")
+        expect(jitted).to_contain("r=1")

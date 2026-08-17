@@ -1,0 +1,140 @@
+# @cover src/compiler_rust/compiler/src/interpreter 40%
+# @req REQ-LANG-ARRAY-BIND-001
+"""
+# Copying a typed array between variables preserves its elements
+
+**Category:** Language
+**Status:** In Progress
+
+## Purpose and Audience
+
+Anyone who writes `val b = a` where `a` is a `[u64]` or `[u8]` expects `b` to
+hold the same values. Today it does not: the copy keeps the correct length and
+zeroes every element, with no error and no warning. This scenario exists so
+that defect can never again be discovered by way of a wrong cryptographic
+answer.
+
+## Scope and Preconditions
+
+Covers the value semantics of binding an existing typed-array variable to a new
+name — `val`-to-`val`, `val`-to-`var`, `var`-to-`var`, and the array-literal
+form. No host capability is required.
+
+## Primary Workflow
+
+A developer builds an array, binds it to another name, and reads an element
+back. The element read must equal the element written, regardless of which
+binding form carried it there.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Binding form | Whether the right-hand side is a call, a literal, or another variable |
+| Length-preserving zeroing | The failure mode: `.length()` is right, every element is 0 |
+| Swap idiom | `val t = a; a = b; b = t` — destructive while this defect is live |
+
+## Evidence and Provenance
+
+Measured 2026-08-17 on the deployed seed. Binding from a direct function call
+returned 5 as written; every variable-to-variable binding returned 0 while
+reporting length 2. Filed as
+`doc/08_tracking/bug/typed_array_variable_binding_zeroes_elements_2026-08-17.md`.
+
+## Recovery and Troubleshooting
+
+While this is RED, do not treat a typed array as copyable by rebinding. Re-derive
+the value through a function call at each use, and never rely on the three-step
+swap idiom for arrays. A green run here means the workaround in
+`src/lib/nogc_async_mut_noalloc/tls/x25519.spl` can be reverted to the direct
+binding.
+
+## Compatibility and Limitations
+
+Asserts `[u64]`, the element type where the defect was measured. Other element
+types are untested and may behave differently.
+"""
+
+use std.spec.*
+
+# ============================================================================
+# Helpers — the only binding form known to copy correctly is from a call, so
+# every fixture originates there and the scenario varies what happens next.
+# ============================================================================
+
+fn _source() -> [u64]:
+    [5u64, 6u64]
+
+fn _first_via_val_to_val() -> i64:
+    val original = _source()
+    val copy = original
+    copy[0].to_i64()
+
+fn _first_via_val_to_var() -> i64:
+    val original = _source()
+    var copy = original
+    copy[0].to_i64()
+
+fn _first_via_var_to_var() -> i64:
+    var original = _source()
+    var copy = original
+    copy[0].to_i64()
+
+fn _first_via_literal_rebound() -> i64:
+    val literal: [u64] = [3u64, 4u64]
+    val copy = literal
+    copy[0].to_i64()
+
+fn _length_via_val_to_val() -> i64:
+    val original = _source()
+    val copy = original
+    copy.length()
+
+fn _swapped_second() -> i64:
+    # The ordinary three-step swap. `moved_back` must end up holding what
+    # `first` started with.
+    var first = _source()
+    var second: [u64] = [9u64, 8u64]
+    val carried = first
+    first = second
+    second = carried
+    second[0].to_i64()
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "A typed array copied to a new name keeps its elements":
+
+    it "carries values through a val-to-val binding":
+        step("Build a [u64] whose first element is 5")
+        step("Bind it to a second val and read element 0")
+        expect(_first_via_val_to_val()).to_equal(5)
+
+    it "carries values through a val-to-var binding":
+        step("Bind the same array to a var and read element 0")
+        expect(_first_via_val_to_var()).to_equal(5)
+
+    it "carries values through a var-to-var binding":
+        step("Bind a var array to another var and read element 0")
+        expect(_first_via_var_to_var()).to_equal(5)
+
+    it "carries values when the source was an array literal":
+        step("Bind a literal-initialised array to a new name and read element 0")
+        expect(_first_via_literal_rebound()).to_equal(3)
+
+describe "Length alone does not prove a typed array copied correctly":
+
+    it "reports the length that the elements should back":
+        # Length survived the defect intact, so a length check is exactly the
+        # assertion that would have missed it. It is asserted here as context
+        # for the element checks above, never as a substitute for them.
+        step("Confirm the copy reports two elements")
+        expect(_length_via_val_to_val()).to_equal(2)
+
+describe "The ordinary swap idiom moves values in both directions":
+
+    it "leaves the second variable holding the first one's value":
+        step("Swap two arrays through a temporary binding")
+        step("Read element 0 of the variable that received the original")
+        expect(_swapped_second()).to_equal(5)

@@ -1,578 +1,224 @@
-# MCP LSP Tools (Tier 4) Specification
+# MCP Tier 4 LSP Tools — real-surface specification
 #
 # **Feature IDs:** #MCP-LSP-001 to #MCP-LSP-010
 # **Category:** Tooling
-# **Difficulty:** 3/5
-# **Status:** Implemented
 #
-# ## Overview
+# ## Why this spec was rewritten (2026-08-17)
 #
-# Tests for 10 Tier 4 LSP tools in the Simple MCP server.
-# Validates parameter extraction, command construction, and error handling.
+# Every one of the previous 78 examples built the shell command *inside the
+# spec file* and then asserted against its own construction, e.g.
 #
-# ## Key Concepts
+#     var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
+#     expect(cmd).to_contain("signature-help")
 #
-# | Concept          | Description                                        |
-# |------------------|----------------------------------------------------|
-# | Tier 4           | LSP-compatible tools added to MCP server           |
-# | CLI Bridge       | Tools delegate to `bin/simple query` CLI           |
-# | Positional args  | file + line + optional column                      |
-# | Flag args        | Named flags like --new-name, --direction, --kind   |
-# | Destructive      | Tools that modify files (rename, formatting)       |
+# The product was never read or called: the spec was green whether the handlers
+# were correct, wrong, or absent (measured: 58 self-built command strings, 0
+# product imports). See
+# doc/08_tracking/bug/mcp_lsp_tools_spec_tests_its_own_command_builder_2026-08-10.md
 #
-# ## Tools Covered
+# This version calls the REAL product. Requests go through the live dispatcher
+# `dispatch_tool` in src/lib/nogc_async_mut/mcp/main_lazy.spl, which is the same
+# entry the MCP server uses for a `tools/call`, so the spec proves the tool
+# NAME -> HANDLER wiring as well as the handler behaviour. Deleting a handler,
+# unwiring a dispatch arm, or dropping a required-parameter check all turn this
+# spec RED.
 #
-# 1. simple_signature_help   - Function parameter hints at call site
-# 2. simple_rename           - Rename symbol across project
-# 3. simple_code_actions     - Quick fixes and refactoring
-# 4. simple_workspace_symbols - Project-wide symbol search
-# 5. simple_call_hierarchy   - Caller/callee chains
-# 6. simple_type_hierarchy   - Trait/mixin relationships
-# 7. simple_semantic_tokens  - Syntax highlighting tokens
-# 8. simple_inlay_hints      - Inline type/param annotations
-# 9. simple_selection_range  - Smart selection expand/shrink
-# 10. simple_document_formatting - File formatting
-
-
-# ============================================================================
-# Test Group 1: simple_signature_help tool
-# ============================================================================
-
-describe "simple_signature_help tool":
-    it "requires file parameter":
-        val file = ""
-        val is_missing = file == ""
-        expect(is_missing).to_equal(true)
-
-    it "requires line parameter":
-        val line = ""
-        val is_missing = line == ""
-        expect(is_missing).to_equal(true)
-
-    it "builds correct command with file and line":
-        val file = "src/app/cli/query.spl"
-        val line = "42"
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        cmd = cmd + " 2>&1"
-        expect(cmd).to_contain("query signature-help")
-        expect(cmd).to_contain("src/app/cli/query.spl")
-        expect(cmd).to_contain("42")
-
-    it "appends column when provided":
-        val file = "src/app/cli/query.spl"
-        val line = "42"
-        val column = "10"
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        cmd = cmd + " " + column
-        expect(cmd).to_contain("42 10")
-
-    it "has 30 second timeout":
-        val cmd = "timeout 30 bin/simple query signature-help test.spl 1"
-        expect(cmd).to_start_with("timeout 30")
-
-    it "omits column when not provided":
-        val file = "test.spl"
-        val line = "7"
-        val column = ""
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        if column != "":
-            cmd = cmd + " " + column
-        cmd = cmd + " 2>&1"
-        val expected = "timeout 30 bin/simple query signature-help test.spl 7 2>&1"
-        expect(cmd).to_equal(expected)
-
-    it "uses query subcommand not direct subcommand":
-        val file = "test.spl"
-        val line = "1"
-        var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
-        expect(cmd).to_contain("bin/simple query")
-
-# ============================================================================
-# Test Group 2: simple_rename tool
-# ============================================================================
-
-describe "simple_rename tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
-
-    it "requires line parameter":
-        val line = ""
-        expect(line).to_equal("")
-
-    it "requires new_name parameter":
-        val new_name = ""
-        expect(new_name).to_equal("")
-
-    it "builds command with new_name":
-        val file = "src/test.spl"
-        val line = "10"
-        val new_name = "better_name"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " --new-name " + new_name + " 2>&1"
-        expect(cmd).to_contain("query rename")
-        expect(cmd).to_contain("--new-name better_name")
-
-    it "appends column before new_name flag":
-        val file = "src/test.spl"
-        val line = "10"
-        val column = "5"
-        val new_name = "x"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " " + column + " --new-name " + new_name
-        expect(cmd).to_contain("10 5 --new-name x")
-
-    it "is marked as destructive tool":
-        val destructive_tools = ["simple_rename", "simple_document_formatting"]
-        expect(destructive_tools).to_contain("simple_rename")
-
-    it "preserves file path in command":
-        val file = "src/lib/common/text/mod.spl"
-        val line = "20"
-        val new_name = "format_text"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " --new-name " + new_name
-        expect(cmd).to_contain("src/lib/common/text/mod.spl")
-
-    it "handles underscore-prefixed names":
-        val file = "test.spl"
-        val line = "1"
-        val new_name = "_private_helper"
-        var cmd = "timeout 30 bin/simple query rename " + file + " " + line
-        cmd = cmd + " --new-name " + new_name
-        expect(cmd).to_contain("--new-name _private_helper")
-
-# ============================================================================
-# Test Group 3: simple_code_actions tool
-# ============================================================================
-
-describe "simple_code_actions tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
-
-    it "requires line parameter":
-        val line = ""
-        expect(line).to_equal("")
-
-    it "builds correct command":
-        val file = "src/lib/common/text/mod.spl"
-        val line = "55"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line + " 2>&1"
-        expect(cmd).to_contain("query code-actions")
-        expect(cmd).to_contain(file)
-
-    it "supports optional column":
-        val file = "test.spl"
-        val line = "1"
-        val column = "15"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line + " " + column
-        expect(cmd).to_contain("1 15")
-
-    it "command ends with stderr redirect":
-        val file = "test.spl"
-        val line = "10"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line + " 2>&1"
-        expect(cmd).to_end_with("2>&1")
-
-    it "uses correct subcommand name with hyphen":
-        val file = "test.spl"
-        val line = "1"
-        var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line
-        expect(cmd).to_contain("code-actions")
-
-# ============================================================================
-# Test Group 4: simple_workspace_symbols tool
-# ============================================================================
-
-describe "simple_workspace_symbols tool":
-    it "requires query parameter":
-        val query = ""
-        expect(query).to_equal("")
-
-    it "does not require file parameter":
-        val query = "main"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query
-        val has_spl_file = cmd.contains(".spl ")
-        expect(has_spl_file).to_equal(false)
-
-    it "builds command with query":
-        val query = "parse"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " 2>&1"
-        expect(cmd).to_contain("workspace-symbols")
-        expect(cmd).to_contain("--query parse")
-
-    it "supports kind filter":
-        val query = "Point"
-        val kind = "struct"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind struct")
-
-    it "supports function kind filter":
-        val query = "process"
-        val kind = "fn"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind fn")
-
-    it "supports class kind filter":
-        val query = "Token"
-        val kind = "class"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind class")
-
-    it "supports enum kind filter":
-        val query = "TokenKind"
-        val kind = "enum"
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query + " --kind " + kind
-        expect(cmd).to_contain("--kind enum")
-
-    it "builds command without kind when not specified":
-        val query = "main"
-        val kind = ""
-        var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query
-        if kind != "":
-            cmd = cmd + " --kind " + kind
-        val has_kind = cmd.contains("--kind")
-        expect(has_kind).to_equal(false)
-
-# ============================================================================
-# Test Group 5: simple_call_hierarchy tool
-# ============================================================================
-
-describe "simple_call_hierarchy tool":
-    it "requires file and line":
-        val file = "src/app/cli/main.spl"
-        val line = "5"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
-        expect(cmd).to_contain("call-hierarchy")
-
-    it "supports incoming direction":
-        val file = "src/app/cli/main.spl"
-        val line = "5"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line + " --direction incoming"
-        expect(cmd).to_contain("--direction incoming")
-
-    it "supports outgoing direction":
-        val file = "src/app/cli/main.spl"
-        val line = "5"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line + " --direction outgoing"
-        expect(cmd).to_contain("--direction outgoing")
-
-    it "supports optional column":
-        val file = "test.spl"
-        val line = "10"
-        val column = "3"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line + " " + column
-        expect(cmd).to_contain("10 3")
-
-    it "places column before direction flag":
-        val file = "test.spl"
-        val line = "10"
-        val column = "3"
-        val direction = "incoming"
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
-        cmd = cmd + " " + column + " --direction " + direction
-        expect(cmd).to_contain("3 --direction incoming")
-
-    it "builds command without direction by default":
-        val file = "test.spl"
-        val line = "10"
-        val direction = ""
-        var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
-        if direction != "":
-            cmd = cmd + " --direction " + direction
-        val has_direction = cmd.contains("--direction")
-        expect(has_direction).to_equal(false)
-
-# ============================================================================
-# Test Group 6: simple_type_hierarchy tool
-# ============================================================================
-
-describe "simple_type_hierarchy tool":
-    it "requires file and line":
-        val file = "src/lib/common/text/mod.spl"
-        val line = "20"
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
-        expect(cmd).to_contain("type-hierarchy")
-
-    it "supports supertypes direction":
-        val cmd = "timeout 30 bin/simple query type-hierarchy test.spl 10 --direction supertypes"
-        expect(cmd).to_contain("--direction supertypes")
-
-    it "supports subtypes direction":
-        val cmd = "timeout 30 bin/simple query type-hierarchy test.spl 10 --direction subtypes"
-        expect(cmd).to_contain("--direction subtypes")
-
-    it "includes file in command":
-        val file = "src/compiler/20.hir/hir_types.spl"
-        val line = "30"
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
-        expect(cmd).to_contain(file)
-
-    it "supports optional column":
-        val file = "test.spl"
-        val line = "10"
-        val column = "8"
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line + " " + column
-        expect(cmd).to_contain("10 8")
-
-    it "builds command without direction when omitted":
-        val file = "test.spl"
-        val line = "5"
-        val direction = ""
-        var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
-        if direction != "":
-            cmd = cmd + " --direction " + direction
-        val has_direction = cmd.contains("--direction")
-        expect(has_direction).to_equal(false)
-
-# ============================================================================
-# Test Group 7: simple_semantic_tokens tool
-# ============================================================================
-
-describe "simple_semantic_tokens tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
-
-    it "builds command with file only":
-        val file = "src/app/cli/query.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file + " 2>&1"
-        expect(cmd).to_contain("semantic-tokens")
-        expect(cmd).to_contain(file)
-
-    it "supports start_line and end_line range":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file
-        cmd = cmd + " --start-line 10 --end-line 50"
-        expect(cmd).to_contain("--start-line 10")
-        expect(cmd).to_contain("--end-line 50")
-
-    it "does not require line as positional arg":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file + " 2>&1"
-        # Command should have file directly after semantic-tokens, no positional line
-        expect(cmd).to_contain("semantic-tokens test.spl")
-
-    it "supports start_line without end_line":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file
-        val start_line = "10"
-        val end_line = ""
-        cmd = cmd + " --start-line " + start_line
-        if end_line != "":
-            cmd = cmd + " --end-line " + end_line
-        expect(cmd).to_contain("--start-line 10")
-        val has_end = cmd.contains("--end-line")
-        expect(has_end).to_equal(false)
-
-    it "supports end_line without start_line":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query semantic-tokens " + file
-        val start_line = ""
-        val end_line = "50"
-        if start_line != "":
-            cmd = cmd + " --start-line " + start_line
-        cmd = cmd + " --end-line " + end_line
-        val has_start = cmd.contains("--start-line")
-        expect(has_start).to_equal(false)
-        expect(cmd).to_contain("--end-line 50")
-
-# ============================================================================
-# Test Group 8: simple_inlay_hints tool
-# ============================================================================
-
-describe "simple_inlay_hints tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
-
-    it "builds command with file":
-        val file = "src/app/cli/query.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file + " 2>&1"
-        expect(cmd).to_contain("inlay-hints")
-
-    it "supports line range":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file + " --start-line 1 --end-line 100"
-        expect(cmd).to_contain("--start-line 1")
-        expect(cmd).to_contain("--end-line 100")
-
-    it "builds command without range by default":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file + " 2>&1"
-        val has_start = cmd.contains("--start-line")
-        val has_end = cmd.contains("--end-line")
-        expect(has_start).to_equal(false)
-        expect(has_end).to_equal(false)
-
-    it "uses correct subcommand name":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query inlay-hints " + file
-        expect(cmd).to_contain("query inlay-hints")
-
-# ============================================================================
-# Test Group 9: simple_selection_range tool
-# ============================================================================
-
-describe "simple_selection_range tool":
-    it "requires file and line":
-        val file = "test.spl"
-        val line = "25"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        expect(cmd).to_contain("selection-range")
-
-    it "supports optional column":
-        val file = "test.spl"
-        val line = "25"
-        val column = "8"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line + " " + column
-        expect(cmd).to_contain("25 8")
-
-    it "builds command without column":
-        val file = "test.spl"
-        val line = "25"
-        val column = ""
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        if column != "":
-            cmd = cmd + " " + column
-        cmd = cmd + " 2>&1"
-        val expected = "timeout 30 bin/simple query selection-range test.spl 25 2>&1"
-        expect(cmd).to_equal(expected)
-
-    it "uses query subcommand":
-        val file = "test.spl"
-        val line = "1"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        expect(cmd).to_contain("bin/simple query")
-
-    it "includes file path in command":
-        val file = "src/compiler/10.frontend/core/parser.spl"
-        val line = "100"
-        var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
-        expect(cmd).to_contain("src/compiler/10.frontend/core/parser.spl")
-
-# ============================================================================
-# Test Group 10: simple_document_formatting tool
-# ============================================================================
-
-describe "simple_document_formatting tool":
-    it "requires file parameter":
-        val file = ""
-        expect(file).to_equal("")
-
-    it "builds formatting command":
-        val file = "src/app/cli/query.spl"
-        var cmd = "timeout 30 bin/simple query document-formatting " + file + " 2>&1"
-        expect(cmd).to_contain("document-formatting")
-        expect(cmd).to_contain(file)
-
-    it "is marked as destructive tool":
-        val destructive_tools = ["simple_rename", "simple_document_formatting"]
-        expect(destructive_tools).to_contain("simple_document_formatting")
-
-    it "does not require line parameter":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query document-formatting " + file
-        # No positional line number after file
-        expect(cmd).to_contain("document-formatting test.spl")
-
-    it "uses correct subcommand name":
-        val file = "test.spl"
-        var cmd = "timeout 30 bin/simple query document-formatting " + file
-        expect(cmd).to_contain("query document-formatting")
-
-    it "is distinct from simple_format CLI tool":
-        val formatting_cmd = "bin/simple query document-formatting test.spl"
-        val format_cmd = "bin/simple fmt test.spl"
-        val are_different = formatting_cmd != format_cmd
-        expect(are_different).to_equal(true)
-
-# ============================================================================
-# Test Group 11: Cross-tool consistency
-# ============================================================================
-
-describe "LSP tool consistency":
-    it "all position tools accept file and line":
-        val position_tools = ["signature-help", "rename", "code-actions", "call-hierarchy", "type-hierarchy", "selection-range"]
-        expect(position_tools.len()).to_equal(6)
-
-    it "all range tools accept start-line and end-line":
-        val range_tools = ["semantic-tokens", "inlay-hints"]
-        expect(range_tools.len()).to_equal(2)
-
-    it "workspace-symbols is the only query-only tool":
-        val query_only = ["workspace-symbols"]
-        expect(query_only.len()).to_equal(1)
-
-    it "file-only tools do not need line":
-        val file_only_tools = ["semantic-tokens", "inlay-hints", "document-formatting"]
-        expect(file_only_tools.len()).to_equal(3)
-
-    it "destructive tools are exactly two":
-        val destructive = ["simple_rename", "simple_document_formatting"]
-        expect(destructive.len()).to_equal(2)
-        expect(destructive).to_contain("simple_rename")
-        expect(destructive).to_contain("simple_document_formatting")
-
-    it "all tools use 30 second timeout":
-        val timeout_prefix = "timeout 30"
-        val cmd1 = "timeout 30 bin/simple query signature-help f.spl 1"
-        val cmd2 = "timeout 30 bin/simple query rename f.spl 1 --new-name x"
-        val cmd3 = "timeout 30 bin/simple query code-actions f.spl 1"
-        expect(cmd1).to_start_with(timeout_prefix)
-        expect(cmd2).to_start_with(timeout_prefix)
-        expect(cmd3).to_start_with(timeout_prefix)
-
-    it "all tools use bin/simple query prefix":
-        val prefix = "bin/simple query"
-        val cmd1 = "timeout 30 bin/simple query signature-help f.spl 1"
-        val cmd2 = "timeout 30 bin/simple query workspace-symbols --query x"
-        val cmd3 = "timeout 30 bin/simple query semantic-tokens f.spl"
-        expect(cmd1).to_contain(prefix)
-        expect(cmd2).to_contain(prefix)
-        expect(cmd3).to_contain(prefix)
-
-# ============================================================================
-# Test Group 12: Error handling patterns
-# ============================================================================
-
-describe "LSP tool error handling":
-    it "empty file path is an error":
-        val file = ""
-        val is_error = file == ""
-        expect(is_error).to_equal(true)
-
-    it "empty line is an error for position tools":
-        val line = ""
-        val is_error = line == ""
-        expect(is_error).to_equal(true)
-
-    it "empty query is an error for workspace-symbols":
-        val query = ""
-        val is_error = query == ""
-        expect(is_error).to_equal(true)
-
-    it "empty new_name is an error for rename":
-        val new_name = ""
-        val is_error = new_name == ""
-        expect(is_error).to_equal(true)
-
-    it "non-spl file extension is valid input":
-        val file = "test.txt"
-        val has_spl = file.contains(".spl")
-        expect(has_spl).to_equal(false)
-
-    it "negative line number is technically accepted as string":
-        val line = "-1"
-        val is_empty = line == ""
-        expect(is_empty).to_equal(false)
-
-    it "zero line number is technically accepted as string":
-        val line = "0"
-        val is_empty = line == ""
-        expect(is_empty).to_equal(false)
-
-    it "stderr redirect captures error output":
-        val cmd = "timeout 30 bin/simple query signature-help test.spl 1 2>&1"
-        expect(cmd).to_contain("2>&1")
+# ## Product under test
+#
+# - dispatcher: `src/lib/nogc_async_mut/mcp/main_lazy.spl:187` `dispatch_tool`
+# - handlers:   `src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl:611-780`
+#
+# Note: `src/app/mcp/main_lazy_query_tools.spl` is a DIVERGENT sibling copy that
+# contains none of the ten Tier 4 handlers, so the `std.nogc_async_mut` path
+# above is the only implementation and is what this spec imports.
+#
+# ## Syntax
+#
+# ```sh
+# bin/simple test test/01_unit/app/mcp_unit/mcp_lsp_tools_spec.spl
+# bin/simple test test/unit/app/mcp_unit/mcp_lsp_tools_spec.spl
+# ```
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.mcp.main_lazy_json
+use std.nogc_async_mut.mcp.main_lazy_query_tools
+use std.nogc_async_mut.mcp.main_lazy
+
+# The ten Tier 4 tools, each paired with the parameter the product declares
+# required and a request body that omits exactly that parameter.
+fn tier4_tool_names() -> [text]:
+    ["simple_signature_help", "simple_rename", "simple_code_actions",
+     "simple_workspace_symbols", "simple_call_hierarchy", "simple_type_hierarchy",
+     "simple_semantic_tokens", "simple_inlay_hints", "simple_selection_range",
+     "simple_document_formatting"]
+
+fn tier4_missing_param(tool: text) -> text:
+    if tool == "simple_workspace_symbols":
+        return "query"
+    if tool == "simple_semantic_tokens" or tool == "simple_document_formatting":
+        return "file"
+    "file"
+
+# A body that omits the required parameter for that tool.
+fn tier4_incomplete_body(tool: text) -> text:
+    "{}"
+
+fn missing_message(param: text) -> text:
+    "Missing required parameter: " + param
+
+describe "Tier 4 LSP tools reject a request that omits a required parameter":
+    """
+    An MCP client that calls one of the ten LSP tools without the parameter the
+    tool needs must get a JSON-RPC invalid-params error naming the parameter,
+    not a silently-empty success. These examples drive the real dispatcher, so
+    they also prove each tool name is still wired to a handler.
+    """
+
+    it "simple_signature_help reports the missing file parameter":
+        step("Call the live dispatcher for simple_signature_help with an empty body")
+        val out = dispatch_tool("t1", "simple_signature_help", "{}")
+        step("Expect an invalid-params error naming 'file'")
+        expect(out).to_contain("-32602")
+        expect(out).to_contain(missing_message("file"))
+        expect(out).to_contain("\"isError\":true")
+
+    it "simple_rename reports the missing file parameter":
+        step("Call the live dispatcher for simple_rename with an empty body")
+        val out = dispatch_tool("t2", "simple_rename", "{}")
+        expect(out).to_contain("-32602")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_rename still rejects when only the new name is absent":
+        step("Supply file and line but omit new_name, the destructive parameter")
+        val out = dispatch_tool("t3", "simple_rename",
+            "{\"file\":\"src/app/cli/main.spl\",\"line\":\"10\"}")
+        step("A rename with no target name must never reach the CLI bridge")
+        expect(out).to_contain("-32602")
+        expect(out).to_contain(missing_message("new_name"))
+
+    it "simple_code_actions reports the missing file parameter":
+        val out = dispatch_tool("t4", "simple_code_actions", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_workspace_symbols reports the missing query parameter":
+        step("This tool is query-driven, not file-driven, so it names 'query'")
+        val out = dispatch_tool("t5", "simple_workspace_symbols", "{}")
+        expect(out).to_contain(missing_message("query"))
+
+    it "simple_call_hierarchy reports the missing file parameter":
+        val out = dispatch_tool("t6", "simple_call_hierarchy", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_type_hierarchy reports the missing file parameter":
+        val out = dispatch_tool("t7", "simple_type_hierarchy", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_semantic_tokens reports the missing file parameter":
+        val out = dispatch_tool("t8", "simple_semantic_tokens", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_inlay_hints reports the missing file parameter":
+        val out = dispatch_tool("t9", "simple_inlay_hints", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_selection_range reports the missing file parameter":
+        val out = dispatch_tool("t10", "simple_selection_range", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+    it "simple_document_formatting reports the missing file parameter":
+        step("Formatting rewrites a file, so an unnamed target must be refused")
+        val out = dispatch_tool("t11", "simple_document_formatting", "{}")
+        expect(out).to_contain(missing_message("file"))
+
+describe "Every Tier 4 tool holds the same contract (generalization)":
+    """
+    The per-tool examples above pin ten individual behaviours. This group states
+    the invariant they are instances of, over the whole tool list at once, so a
+    tool added later without validation — or an existing one whose check is
+    quietly removed — fails here even if nobody writes it a dedicated example.
+    """
+
+    it "no Tier 4 tool accepts an empty request body":
+        step("Dispatch every Tier 4 tool name with an empty body")
+        val tools = tier4_tool_names()
+        var offenders = ""
+        var i = 0i64
+        while i < tools.len():
+            val tool = tools[i]
+            val out = dispatch_tool("g" + str(i), tool, "{}")
+            step("Require an invalid-params error rather than a success result")
+            if not out.contains("-32602"):
+                offenders = offenders + " " + tool
+            i = i + 1i64
+        expect(offenders).to_equal("")
+
+    it "every Tier 4 tool names the parameter it is missing":
+        step("An error that does not say WHICH parameter is unactionable for a client")
+        val tools = tier4_tool_names()
+        var offenders = ""
+        var i = 0i64
+        while i < tools.len():
+            val tool = tools[i]
+            val out = dispatch_tool("m" + str(i), tool, "{}")
+            if not out.contains(missing_message(tier4_missing_param(tool))):
+                offenders = offenders + " " + tool
+            i = i + 1i64
+        expect(offenders).to_equal("")
+
+    it "every Tier 4 tool echoes the request id it was given":
+        step("Correlating a response to its request is the JSON-RPC envelope contract")
+        val tools = tier4_tool_names()
+        var offenders = ""
+        var i = 0i64
+        while i < tools.len():
+            val tool = tools[i]
+            val request_id = "echo" + str(i)
+            val out = dispatch_tool(request_id, tool, "{}")
+            if not out.contains(request_id):
+                offenders = offenders + " " + tool
+            i = i + 1i64
+        expect(offenders).to_equal("")
+
+    it "every Tier 4 tool is still wired into the dispatcher":
+        step("An unwired name would fall through and never produce a tool error")
+        val tools = tier4_tool_names()
+        var wired = 0i64
+        var i = 0i64
+        while i < tools.len():
+            val out = dispatch_tool("w" + str(i), tools[i], "{}")
+            if out.contains("\"jsonrpc\":\"2.0\"") and out.contains("-32602"):
+                wired = wired + 1i64
+            i = i + 1i64
+        expect(wired).to_equal(10i64)
+
+describe "A complete Tier 4 request reaches the real query bridge":
+    """
+    The error paths above never shell out, so on their own they would leave the
+    success path unproven — the exact gap that let the old spec look complete.
+    These examples supply full parameters and assert on output the handler can
+    only produce by actually invoking the query CLI and formatting its result.
+    """
+
+    it "simple_selection_range returns a real bridged result, not an error":
+        step("Supply both required parameters for a file that exists")
+        val out = handle_simple_selection_range("r1",
+            "{\"file\":\"src/app/cli/main.spl\",\"line\":\"10\"}")
+        step("The handler stamps the tool name and the bridge's exit code")
+        expect(out).to_contain("-- simple_selection_range (exit: ")
+        step("A success envelope carries structured rawText and sets no isError flag")
+        expect(out).to_contain("\"rawText\"")
+        expect(out.contains("\"isError\":true")).to_equal(false)
+
+    it "simple_semantic_tokens returns a real bridged result, not an error":
+        val out = handle_simple_semantic_tokens("r2",
+            "{\"file\":\"src/app/cli/main.spl\"}")
+        expect(out).to_contain("-- simple_semantic_tokens (exit: ")
+        expect(out).to_contain("\"rawText\"")
+        expect(out.contains("\"isError\":true")).to_equal(false)
+
+    it "a bridged result carries the query output, not just the header":
+        step("The formatted result is header plus the CLI's own output")
+        val out = handle_simple_selection_range("r3",
+            "{\"file\":\"src/app/cli/main.spl\",\"line\":\"10\"}")
+        step("Header alone is about 40 characters; a real bridged body is far longer")
+        expect(out.len() > 200i64).to_equal(true)
