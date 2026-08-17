@@ -447,3 +447,21 @@ failed` **with and without** this change — pre-existing, not introduced.
 With `timeout_ms > 0` the grace counter is skipped (line 368) and a descendant
 holding an inherited pipe fd makes the loop spin to the full deadline rather
 than break early. That is a latency cost, not data loss, and is unchanged here.
+
+## RESOLVED 2026-08-17 — closed by ablation, not by reading
+
+The fix is in-tree at `src/runtime/runtime_fork.c:316-325` (`exited_grace_polls` /
+`FORK_EXIT_GRACE_POLLS=40`), consumed at `:365-373`. The triage evidence column
+for this row was stale.
+
+Proven with a positive control rather than inspection. Harness: parent forks; the
+child spawns a grandchild that inherits the pipe fd and writes `TAIL_MARKER`
+300 ms *after* the tracked child exits.
+
+| tree | result |
+|---|---|
+| current source | `rc=0 head=1 tail=1 len=24` — full capture |
+| ablated (`if (exited_grace_polls >= FORK_EXIT_GRACE_POLLS)` -> `if (1)`, i.e. break on the first post-exit poll) | `rc=0 head=1 tail=0 len=12` — the exact reported truncation |
+
+Removing the grace loop reproduces the filed symptom precisely, so the loop is
+load-bearing and the defect is closed. Status: RESOLVED.

@@ -115,3 +115,28 @@ its loader probes only `libvulkan.so.1` and `libvulkan.so` under `cfg(unix)`,
 so Darwin never tries `libvulkan.1.dylib` or `libvulkan.dylib`. That source
 file was already dirty in another active compiler lane and was not modified
 by this investigation.
+
+## NOT REPRODUCIBLE 2026-08-17 — the evidence column is factually wrong
+
+`runtime_native.c:241` is **not** a weak stub returning 0. It is
+`spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count")`, a
+`dlsym(RTLD_DEFAULT, ...)` bridge (`:227-235`). The provider exists
+(`src/compiler_rust/runtime/src/vulkan_graphics_runtime_device.rs:43`) and the
+linker force-references it (`llvm_native_link.spl:119`,
+`native_all_support.spl:18`).
+
+Three pinned engine arms agree exactly — there is no engine divergence:
+
+| `SIMPLE_EXECUTION_MODE` | rc | result |
+|---|---|---|
+| unset (JIT) | 0 | `avail=1 count=0` |
+| `jit` | 0 | `avail=1 count=0` |
+| `interpret` | 0 | `avail=1 count=0` |
+
+`avail=1` proves the bridge resolves. `count=0` is environmental — a headless box
+with no device and no lavapipe — not an interpreter-only-execution defect.
+Recommend closing as not-reproducible.
+
+Method note: the arms were pinned deliberately. A bare `bin/simple run` JITs, so
+an unpinned run cannot distinguish these engines, and three lanes mis-attributed
+JIT-only defects to the interpreter that way today.
