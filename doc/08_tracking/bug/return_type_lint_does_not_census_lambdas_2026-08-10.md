@@ -55,3 +55,24 @@ Either of:
   silent. A lambda walker with no silent-half control is not accepted — the
   same fail-open shape has already produced two rounds of false positives in
   this rule (`loop`/`loopback`, then `break`/`pass_`).
+
+---
+
+## CLOSED 2026-08-17 — WONTFIX, corpus re-measured and still empty
+
+Re-ran the exhaustive scan the original record based its decision on, on
+today's tree:
+
+```
+$ /usr/bin/grep -rnE "(fn\s*\(|\|[a-z_, ]*\|)\s*->" --include=*.spl src | wc -l
+0
+```
+
+Still **zero** lambdas in owned source declare a return type, one week later.
+This lint compares a *declared* type against what a body yields, so with an
+empty corpus a lambda walker can only add cost and false-positive surface while
+proving nothing. The decision recorded on 2026-08-10 stands and is now
+re-evidenced rather than merely restated.
+
+Reopen condition (mechanical, so this does not rot): the grep above returning a
+non-zero count. Until then this is not a gap, it is a scope boundary.

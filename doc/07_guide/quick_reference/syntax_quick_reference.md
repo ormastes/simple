@@ -4,7 +4,43 @@
 
 A concise reference for the canonical public Simple syntax. Legacy or parser-compatibility forms are called out explicitly instead of being presented as current style.
 
-**See also:** [Grammar keyword reference](../../06_spec/app/compiler/modules/grammar/keyword_reference.md) — keyword/status tables generated from the grammar registry.
+**See also:** [Grammar keyword reference](../../06_spec/app/compiler/modules/grammar/keyword_reference.md) — keyword/status tables generated from the grammar registry. (That generated file is currently absent from the tree; the list below is the authoritative extract until it is regenerated.)
+
+---
+
+## Reserved Words (cannot be used as identifiers)
+
+Extracted from the lexer keyword table
+(`src/compiler_rust/parser/src/lexer/identifiers.rs`, 124 entries). Any of these
+lexes as a keyword token **everywhere**, so it cannot name a variable, parameter,
+field, or named argument — even where the keyword meaning would be nonsensical.
+The failure surfaces as a parse error at the *use* site (e.g. `expected
+expression, found Plus`, `expected pattern, found Pub`) and often not at the
+declaration, which makes it read like a parser bug rather than a rule.
+
+```
+_ actor alias allow and and_then as asm async auto await bim bind bitfield
+bounds break by cad case city class common comptime const context continue
+crate decreases defer dyn elif else ensures enum errdefer examples exists
+export extend extends extern false feature flat fn for forall forbid from gen
+ghost given go gpu grid handle_pool if impl import in into invariant is kernel
+lazy let literal loop macro match me mixin mock mod move music mut new newtype
+nil not not_to old on onto out out_err outline priv pub repr requires result
+return rtl scenario schema self shared slice spawn struct structured_export
+style super sync then to trait true type ui union unwrap use val var vec when
+where while with xor yield
+```
+
+Non-obvious ones that have actually broken real code: `pub`, `move`,
+`examples`, `result`, `style`, `grid`, `city`, `music`, `common`, `context`,
+`schema`, `slice`, `vec`, `outline`, `handle_pool`, `feature`, `given`, `to`,
+`by`, `on`, `in`, `is`, `new`, `gen`.
+
+Workaround: rename the identifier (`move` -> `shift`, `result` -> `res`,
+`pub` -> `published`). Related bug records live under `doc/08_tracking/bug/`
+(`pub_reserved_identifier_undocumented_2026-08-10.md`,
+`move_identifier_rejected_as_expression_2026-08-15.md`,
+`examples_identifier_rejected_in_named_argument_position_2026-08-10.md`).
 
 **Reserved keywords that cannot be used as identifiers:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`, and `pub` — `pub` lexes as a keyword token everywhere, so `val pub = ...` fails with `expected pattern, found Pub`; pick another name.
 

@@ -68,3 +68,12 @@ explicitly enabled. Until then, B0 stays unreachable in this environment and
 - `doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md:68`
   ("reportedly fails to load") — should be updated by its owning lane to cite
   this measurement instead of hedging.
+
+---
+
+## Triage classification 2026-08-17 — DEFERRED: requires QEMU host GL stack
+
+Reviewed in the second-pass backlog sweep. Not actionable from this session:
+the missing EGL symbol is a property of the host's virtio-gpu/GL libraries, diagnosable only on a machine with that stack installed and a QEMU run. No code change is possible without that, so no
+speculative fix was attempted. Classification recorded here so future sweeps
+skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.
