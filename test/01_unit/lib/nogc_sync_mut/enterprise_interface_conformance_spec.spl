@@ -1,0 +1,196 @@
+"""
+# Interface Conformance — the frozen contract surface, mechanically asserted
+
+## Overview
+
+`enterprise_conformance_spec.spl` proves the guarded-command SEQUENCE (replay,
+one-effect, tenant scoping) by driving full business flows. This spec is its
+narrower sibling: it fences the two INTERFACE invariants of the frozen contract
+layer (`enterprise_sale/foundation.spl` + the `enterprise_store` durable API),
+independent of any single vertical's business logic, so a drift in the contract
+surface is caught even if every vertical's flow still passes.
+
+Two invariants, both executable — never grep, never prose:
+
+1. **Closed reason set.** `reason_set()` is the single source of truth for
+   machine-readable `CommandResult.reason` values, and `reason_allowed` is its
+   executable membership oracle. Every vertical denies ONLY with a member.
+   Proven three ways: (a) the frozen list has exactly 16 entries and each is
+   `reason_allowed`; (b) a live denial driven out of EVERY vertical is a member;
+   (c) **reproduce-first bite** — a value that is deliberately NOT in the set is
+   rejected. If a lane widened the set to admit a bogus reason, assertion (c)
+   goes red immediately.
+
+2. **Cross-OS hashing facade.** Audit and credential hashing route through
+   `enterprise_store/audit_hash.audit_sha256_hex`, NOT `std.common.crypto.sha256`
+   directly. The facade exists because `sha256_text` drags slice / `[v; n]`
+   CollectionOps into the compile closure that standalone-SMF (SimpleOS) codegen
+   rejects (see `audit_hash.spl` header). The facade's contract is that it is
+   DIGEST-IDENTICAL to the std hash, so a vertical that routes through it gets a
+   byte-identical audit chain on every OS. This spec pins that identity to the
+   canonical SHA-256 test vectors AND to `sha256_text` itself, so a divergence
+   in the facade (which would silently corrupt the cross-OS audit chain) goes
+   red. The audit chain, built through the facade, is then verified end to end.
+
+## Known coherence finding (recorded, not fixed here — W19-C audit)
+
+`enterprise_payment/payment.spl:59,78` imports and calls `sha256_text` DIRECTLY
+for `provider_sign` / `provider_verify`, bypassing the facade. That is a
+cross-OS invariant violation owned by the payment lane, not the contract layer:
+it does not affect the audit chain (payment's own audit rows still route through
+the store's facade), but it means the payment vertical will not build under
+standalone-SMF. Recorded in the guide's coherence matrix
+(`doc/07_guide/app/enterprise/README.md`) and the feature-expert wiki. This spec
+guards the FACADE's correctness so that the fix (swap the import to
+`audit_sha256_hex`) is provably digest-preserving.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md
+**Design:** doc/07_guide/app/enterprise/README.md
+
+Lane: .spipe/simple_enterprise_suite (W19-C).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_open, store_close
+}
+use std.nogc_sync_mut.enterprise_store.records.{audit_verify_chain}
+use std.nogc_sync_mut.enterprise_store.audit_hash.{audit_sha256_hex}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, Money,
+    reason_allowed, reason_set
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{sale_setup, sale_place_order}
+use std.nogc_sync_mut.enterprise_booking.booking.{booking_setup, booking_hold}
+use std.nogc_sync_mut.enterprise_restaurant.restaurant.{restaurant_setup, order_add_line}
+use std.nogc_sync_mut.enterprise_payment.payment.{payment_setup, payment_create_intent}
+use std.nogc_sync_mut.enterprise_hcm.hcm.{hcm_setup, hcm_clock_in}
+use std.nogc_sync_mut.enterprise_procurement.procurement.{proc_setup, proc_requisition_create}
+use std.nogc_sync_mut.enterprise_finance.finance.{fin_setup, fin_period_close}
+use std.nogc_sync_mut.enterprise_channel.channel_hub.{channel_setup, channel_register}
+use std.nogc_sync_mut.enterprise_session.session.{session_setup, credential_seed, session_issue}
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+fn usd(amount_cents: i64) -> Money:
+    Money(amount_cents: amount_cents, currency: "USD")
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/iface_conformance_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn envelope(key: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: "iface", payload: "body")
+
+fn dead_session() -> SessionContext:
+    # A well-formed but INACTIVE session: session_valid fails at the first rung,
+    # so every guarded command must answer invalid-session and nothing leaks.
+    SessionContext(token: "tok-admin-1", actor_id: "admin-1", tenant_id: "tenant-a", active: false)
+
+fn admin_session() -> SessionContext:
+    SessionContext(token: "tok-admin-1", actor_id: "admin-1", tenant_id: "tenant-a", active: true)
+
+fn fresh_store(name: text) -> EnterpriseStore:
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    store_open(db_path(name))
+
+# =============================================================================
+# Invariant 1 — closed reason set is the executable oracle
+# =============================================================================
+
+describe "interface conformance — closed reason set":
+    it "the frozen set has exactly 16 members and each is reason_allowed":
+        step("reason_set is the frozen source of truth")
+        expect(reason_set().len()).to_equal(16)
+        for r in reason_set():
+            expect(reason_allowed(r)).to_be(true)
+
+    it "reproduce-first bite: a value outside the set is rejected":
+        step("Values that are NOT machine-readable members must fail the oracle")
+        # If a lane widened reason_set() to admit any of these, this scenario
+        # goes red — that is the whole point of a CLOSED set.
+        expect(reason_allowed("__spec_bogus_reason__")).to_be(false)
+        expect(reason_allowed("")).to_be(false)
+        expect(reason_allowed("Accepted")).to_be(false)       # case matters
+        expect(reason_allowed("duplicate_key")).to_be(false)  # underscore, not hyphen
+        expect(reason_allowed("ok")).to_be(false)
+
+    it "a live denial driven out of EVERY vertical is a member of the closed set":
+        step("Seed one store shared across every vertical's migrations")
+        val store = fresh_store("reasons")
+        val t = tenant_a()
+        val admin = admin_a()
+        val dead = dead_session()
+        sale_setup(store)
+        booking_setup(store)
+        restaurant_setup(store)
+        payment_setup(store)
+        hcm_setup(store)
+        proc_setup(store)
+        fin_setup(store)
+        channel_setup(store)
+        session_setup(store)
+
+        step("Guarded verticals: an inactive session denies at the first rung")
+        var reasons: [text] = []
+        reasons.push(sale_place_order(store, dead, t, admin, envelope("if-1"), "o-1", "SKU-1", 1).reason)
+        reasons.push(booking_hold(store, dead, t, admin, envelope("if-2"), "b-1", "res-1", 1, 2, 1, "", 0, 10).reason)
+        reasons.push(order_add_line(store, dead, t, admin, envelope("if-3"), "sess-1", "l-1", "SKU-1", 1, "").reason)
+        reasons.push(payment_create_intent(store, dead, t, admin, envelope("if-4"), "int-1", "o-1", 1).reason)
+        reasons.push(hcm_clock_in(store, dead, t, admin, envelope("if-5"), "emp-1", 1).reason)
+        reasons.push(proc_requisition_create(store, dead, t, admin, envelope("if-6"), "req-1", "SKU-1", 1).reason)
+        reasons.push(fin_period_close(store, dead, t, admin, envelope("if-7"), 100, 200).reason)
+        reasons.push(channel_register(store, dead, t, admin, "ch-1", "mock").reason)
+
+        step("Session vertical: a wrong-secret issuance is the generic, non-enumerating denial")
+        # credential_seed is itself a guarded write and needs an ACTIVE admin
+        # session; only the subsequent session_issue is the unauthenticated path.
+        credential_seed(store, admin_session(), t, admin, "user-1", "sales", "salt", "secret")
+        reasons.push(session_issue(store, "tenant-a", "user-1", "wrong", 100, 900, "entropy-conformance-x").reason)
+
+        step("Every collected reason is inside the closed set; the set is non-trivial")
+        expect(reasons.len()).to_equal(9)
+        for r in reasons:
+            expect(reason_allowed(r)).to_be(true)
+        store_close(store)
+
+# =============================================================================
+# Invariant 2 — cross-OS hashing facade is digest-identical to std sha256
+# =============================================================================
+
+describe "interface conformance — cross-OS hashing facade":
+    it "audit_sha256_hex matches the canonical SHA-256 test vectors":
+        step("Known-answer vectors pin the facade (bite: any drift goes red here)")
+        expect(audit_sha256_hex("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        expect(audit_sha256_hex("abc")).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    it "the facade is digest-identical to std.common.crypto.sha256.sha256_text":
+        step("The facade contract: same digest as the std hash, on every OS")
+        val samples = ["", "abc", "tenant-a|admin-1|sale.order.place|o-1", "the quick brown fox"]
+        for s in samples:
+            expect(audit_sha256_hex(s)).to_equal(sha256_text(s))
+
+    it "the store's audit chain, built through the facade, verifies end to end":
+        step("A guarded write records an audit row hashed via the facade")
+        val store = fresh_store("facade")
+        val t = tenant_a()
+        val admin = admin_a()
+        session_setup(store)
+        # credential_seed is an accepted guarded write: it appends a
+        # facade-hashed audit row for tenant-a.
+        expect(credential_seed(store, admin_session(), t, admin, "user-1", "sales", "salt", "secret").reason).to_equal("accepted")
+        step("The facade-hashed chain is internally consistent")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
