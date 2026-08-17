@@ -329,12 +329,34 @@ if [ "$QUICK" -eq 0 ]; then
     BRC=$?
     if [ "$BRC" -ne 0 ] || [ ! -x "$NATIVE_BIN" ]; then
         # A native lane that will not BUILD is a finding, not a skip. It is
-        # reported and it is fatal: silently continuing with two engines while
-        # the caller believes three ran is the exact fail-open shape this gate
-        # exists to prevent.
+        # fatal: silently continuing with two engines while the caller believes
+        # three ran is the exact fail-open shape this gate exists to prevent.
+        #
+        # But the failure must not SWALLOW the comparison already in hand. An
+        # earlier revision exited here announcing "0 cell(s) checked", which hid
+        # 29 real interpreter-vs-JIT disagreements behind an unrelated build
+        # timeout — a build problem masquerading as an absence of findings,
+        # which is itself an instance of this defect class. So the two engines
+        # that DID run are compared and reported first, and the verdict states
+        # both facts.
         echo "native-build FAILED (rc=$BRC); last lines:"
         tail -5 "$DIR/native.build.log" | sed 's/^/    /'
-        echo "FAIL — 0 cell(s) checked across 2 engine(s), native lane did not build"
+        [ "$BRC" -eq 124 ] && echo "    (rc=124 is a TIMEOUT at ${BUILD_TIMEOUT}s — raise ENGINE_DIFF_BUILD_TIMEOUT on a loaded box)"
+        echo ""
+        echo "Comparing the two engines that DID run, so this build failure does not hide their findings:"
+        echo "$NAMES" > "$DIR/names"
+        : > "$DIR/agreements"
+        PARTIAL=$(compare_engines "$DIR/names" "$DIR")
+        P_CELLS=$(echo "$PARTIAL" | cut -d'|' -f1)
+        P_DIS=$(echo "$PARTIAL" | cut -d'|' -f3)
+        P_LIST=$(echo "$PARTIAL" | cut -d'|' -f4)
+        echo ""
+        echo "=== partial cell matrix (interpreter vs jit) ==="
+        cat "$DIR/agreements" 2>/dev/null
+        cat "$DIR/report" 2>/dev/null
+        echo "=== end matrix ==="
+        echo ""
+        echo "FAIL — $P_CELLS cell(s) checked across 2 of 3 engine(s), native lane did not build; $P_DIS disagree among the two that ran:$P_LIST"
         exit 1
     fi
     nice -n 19 timeout "$RUN_TIMEOUT" "$NATIVE_BIN" > "$DIR/native.raw" 2>"$DIR/native.err"
