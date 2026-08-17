@@ -206,13 +206,45 @@ is not later mistaken for a contradiction.
   against this session's working `src/` with only `module_surface.spl` swapped.
 mtime 2026-08-16 22:59:37 UTC.
 
-| version | `ELAPSED_MS` for `module_surfaces_from_modules` | `ORIGIN_COUNT` |
-|---|---|---|
-| BEFORE (linear scan) | see ablation log | — |
-| AFTER (Dict lookup) | see ablation log | — |
+| version | `ELAPSED_MS` (`module_surfaces_from_modules`) | `ORIGIN_COUNT` | rc |
+|---|---|---|---|
+| BEFORE (linear scan) | **1012** | 72 | 0 |
+| AFTER (Dict lookup) | **794** | 72 | 0 |
 
-Correctness gate: the sorted `ORIGIN ...` dumps must be **byte-identical**. A
-faster pass that resolves differently is a regression, not a fix.
+1.27x at M=43. The saving is proportional to the module count, so the effect at
+the Stage-3 M≈619 is expected to be far larger — that extrapolation is
+**inference, not measurement**; only the 43-module numbers above were measured.
+
+Correctness gate — **PASSED**: the sorted `ORIGIN ...` dumps are byte-identical.
+
+```
+ORIGIN_SET_VERDICT: IDENTICAL
+e23df20c7d58bc5d7125057c6d2747b3  orig_before.txt
+e23df20c7d58bc5d7125057c6d2747b3  orig_after.txt
+```
+
+Process wall-clock for the two runs was 75s (before) and 109s (after), i.e.
+inverted relative to the in-process measurement. That is startup + 43x
+`parse_full_frontend` on a heavily loaded shared box (20+ concurrent `simple`
+processes), all of it outside the timed region; the in-process `ELAPSED_MS` is
+the measurement, and the wall figures are recorded here only so the discrepancy
+is not later mistaken for a contradiction.
+
+### Spec evidence
+
+- `test/01_unit/compiler/hir/module_surface_spec.spl` — `RC=0`.
+- `test/01_unit/compiler/hir/module_surface_glob_export_origin_spec.spl`:
+  `SPEC FILE VERDICT: ... declared>=4 executed=4 passed=3 failed=1 dropped=0`.
+  All three **origin-resolution** examples pass. The failure is
+  `✗ keeps a missing named import owner as an unresolved export` with
+  `semantic: variable \`missing_value\` not found` — a semantic error raised
+  inside the spec's own body, not an export-origin mismatch, and it reproduces
+  identically with `module_surface.spl` at the BEFORE version, so it is
+  pre-existing and unrelated.
+- Pristine `origin/main` cannot run these specs at all:
+  `error: compile failed: parse: in ".../src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl": Unexpected token: expected Fn, found Assign`.
+  That is a separate, pre-existing origin/main break; the ablation therefore ran
+  against this session's working `src/` with only `module_surface.spl` swapped.
 
 ## Progress receipts (so this window is never dark again)
 
