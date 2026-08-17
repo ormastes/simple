@@ -1,5 +1,7 @@
 # `SimpleArtifactManifest.signature` has a real Ed25519 primitive available but NO trust-anchor/key-distribution infra to call it meaningfully
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **ID:** artifact-manifest-signature-no-trust-anchor-2026-08-07
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).

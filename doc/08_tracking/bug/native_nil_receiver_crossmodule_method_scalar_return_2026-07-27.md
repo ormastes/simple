@@ -1,5 +1,7 @@
 # Bug: cranelift AOT mis-tags the return value of a cross-module struct method returning a primitive scalar
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Filed:** 2026-07-27
 - **Lane:** BB2 (board-build, team BOARD)
 - **Severity:** HIGH — **silent wrong value**, not just a crash. `x as i64` yields `0`

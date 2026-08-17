@@ -1,5 +1,7 @@
 # `me`-method mutation through an OPTION-typed binding is silently discarded
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Date:** 2026-08-04
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).

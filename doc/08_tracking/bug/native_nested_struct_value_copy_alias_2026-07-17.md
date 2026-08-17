@@ -1,5 +1,7 @@
 # Native nested struct copies retain aliases
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - Date: 2026-07-17
 - Status: source fixed; execution pending
 - Severity: P1 silent wrong result

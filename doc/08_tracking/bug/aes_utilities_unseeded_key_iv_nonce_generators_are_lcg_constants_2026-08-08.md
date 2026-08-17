@@ -1,5 +1,7 @@
 # AES utilities: `generate_aes_key` / `generate_iv` / `generate_nonce` are constant-seeded LCGs
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-08-08
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).

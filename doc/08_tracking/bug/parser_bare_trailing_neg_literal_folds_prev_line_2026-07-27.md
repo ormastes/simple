@@ -1,5 +1,7 @@
 # Bug: bare trailing `-1` line folds into the previous line (silent wrong value)
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-07-27
 - **Status:** open
 - **Severity:** high (silent miscompute, no diagnostic)

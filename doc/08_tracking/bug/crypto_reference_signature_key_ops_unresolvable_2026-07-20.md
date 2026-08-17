@@ -1,5 +1,7 @@
 # `std.signature.key_ops` has only a compiled `.smf` artifact, no `.spl` source — module unresolvable under test
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/signature/key_ops.smf` (and siblings)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).

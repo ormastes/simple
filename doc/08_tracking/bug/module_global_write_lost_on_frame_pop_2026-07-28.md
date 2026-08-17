@@ -1,5 +1,7 @@
 # Module-level `var` write silently reverted on frame pop (interpreted lane)
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Id:** module_global_write_lost_on_frame_pop_2026-07-28
 - **Found:** 2026-07-28, while root-causing `bin/simple lint` reporting
   "all files clean" on files that do not parse (fixed in `f4adc39bf39d`).

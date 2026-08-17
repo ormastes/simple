@@ -1,5 +1,7 @@
 # Curve448 (X448) scalar-mult and ECDH KAT mismatches across all RFC 7748 vectors
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-07-20
 - **Area:** Curve448/X448 implementation exercised via
   `test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl`

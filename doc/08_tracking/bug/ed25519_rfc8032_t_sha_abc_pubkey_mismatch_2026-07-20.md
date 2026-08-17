@@ -1,5 +1,7 @@
 # Ed25519 RFC 8032 §7.1 `T_SHA_ABC` vector: derived public key and signature-verify wrong
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-07-20
 - **Area:** `src/os/crypto/ed25519_ops.spl` / `src/os/crypto/ed25519.spl`
 - **Severity:** high (pubkey derivation / signature correctness for at least

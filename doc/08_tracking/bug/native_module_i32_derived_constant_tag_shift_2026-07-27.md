@@ -1,5 +1,7 @@
 # Native module-level derived `i32` constant is tag-shifted
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Observed:** 2026-07-27 on the pure-Simple Cranelift Stage 3 lane.
 - **Scope:** focused 300-DPI Engine2D font producer probe.
 

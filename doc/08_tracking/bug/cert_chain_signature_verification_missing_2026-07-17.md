@@ -1,5 +1,7 @@
 # TLS chain-of-trust signature verification (`verify_signature`) has no implementation anywhere
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Date:** 2026-07-17
 **Scope:** `src/lib/nogc_sync_mut/tls/validation.spl` (deleted `validate_chain`)
 Status: OPEN (P1)

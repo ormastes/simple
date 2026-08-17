@@ -1,5 +1,7 @@
 # ECDSA P-256: fresh sign+verify round-trip fails; NIST CAVP vector fails verify
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-07-20
 - **Area:** ECDSA-P256 implementation exercised via
   `test/unit/lib/crypto/ecdsa_p256_spec.spl`

@@ -1,5 +1,7 @@
 # `set` method: dict returns nil on the JIT; array/tuple silently no-op when a dict `.set` shares the module
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 Date: 2026-08-02
 Status: ARCHITECTURAL-OPEN — re-verified 2026-08-09 and again fresh
 2026-08-10; still architectural/out-of-scope for a .spl/.shs-only lane.

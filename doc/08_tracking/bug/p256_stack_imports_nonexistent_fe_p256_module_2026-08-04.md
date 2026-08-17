@@ -1,5 +1,7 @@
 # The whole P-256 stack imports `std.common.math.field.fe_p256`, which was never written
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Status:** OPEN
 **Found:** 2026-08-04
 

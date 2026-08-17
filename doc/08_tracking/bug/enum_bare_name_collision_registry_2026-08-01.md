@@ -1,5 +1,7 @@
 # Enum bare-name collisions: enumeration, mechanism correction, and resolution options
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Date:** 2026-08-01
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).

@@ -1,5 +1,7 @@
 # Ed25519 `ed_scalar_mul`/`ed_scalar_mul_basepoint` regressed to a branch-on-secret-bit form (constant-time regression)
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Date:** 2026-07-20
 - **Area:** `src/os/crypto/ed25519_ops.spl` (pure-Simple Ed25519 point arithmetic)
 - **Severity:** high (timing side-channel on the secret-scalar code path — the

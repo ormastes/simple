@@ -1,5 +1,7 @@
 # JIT/compiled mode corrupts `[u8]` built via `((hi<<4)|lo).to_u8()` loop
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Filed:** 2026-06-30
 - **Severity:** High (silently corrupts byte arrays under JIT/native; interpreter is correct)
 - **Area:** compiler — JIT/native codegen for `i64 -> u8` (`to_u8()`) and/or u8 array push in a tight loop

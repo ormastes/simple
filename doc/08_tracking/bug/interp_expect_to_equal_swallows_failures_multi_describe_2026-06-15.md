@@ -1,5 +1,7 @@
 # Bug: expect().to_equal() swallows failures in multi-describe-block specs
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **ID:** interp_expect_to_equal_swallows_failures_multi_describe_2026-06-15
 **Severity:** P1
 Status: OPEN (P1)

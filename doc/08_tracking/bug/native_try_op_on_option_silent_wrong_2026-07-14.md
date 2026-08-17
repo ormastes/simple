@@ -1,5 +1,7 @@
 # native-build: `?` on `Option` silently miscompiles (treated as `Result`)
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
 **Status:** enum-id-1 Option migration is source-implemented across typed boundaries; strict LLVM/Cranelift execution remains opt-in and pending

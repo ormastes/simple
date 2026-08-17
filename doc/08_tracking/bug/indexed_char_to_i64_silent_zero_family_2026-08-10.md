@@ -1,5 +1,7 @@
 # `s[i].to_i64()` on a string-indexed char silently returns 0 — family census
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Filed:** 2026-08-10
 **Parent:** `blink_selector_engine_totally_red_and_dom_node_builder_missing_2026-08-10.md` (Defect 2)
 Status: OPEN (P1)

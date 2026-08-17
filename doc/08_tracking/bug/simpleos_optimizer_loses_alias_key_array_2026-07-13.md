@@ -1,5 +1,7 @@
 # SimpleOS optimizer passes tagged nil as `local_ids`
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 ## Symptom
 
 Filesystem `emit-llvm` reached HIR and MIR, then faulted at `local_count_index+0x29` while loading array length from offset 8. `CR2=0x8` proved the `[i64]` receiver was nil.

@@ -1,5 +1,7 @@
 # seed JIT: `me`-method write-back into a `self` array-of-structs field crashes ("nil receiver")
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 **Status:** ARCHITECTURAL-OPEN (seed JIT/native only; interpreter correct). Workaround in place.
 Root cause lives in the Rust seed's cranelift/native lowering
 (`src/compiler_rust/**`), which is off-limits to edit from pure-Simple sessions

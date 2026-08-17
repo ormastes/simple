@@ -1,5 +1,7 @@
 # Passing one array as both a `mut` and a non-`mut` parameter silently discards the mutation (interpreter)
 
+> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+
 - **Filed:** 2026-08-06
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
