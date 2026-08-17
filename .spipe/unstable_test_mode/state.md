@@ -506,3 +506,43 @@ disguise, and the standing instruction forbids it. Blocked and reported instead.
 clobber pattern this repo keeps suffering. The owning lane must repair the
 assignment-at-impl-level inside that addition. The main tree's parsing copy is
 the reference for what a working version looks like.
+
+## 2026-08-17 — sync status, and a guard-integrity finding
+
+**Landed at origin (verified BY CONTENT, not by commit success):**
+
+| lane | probe at `origin/main` | hits |
+|---|---|---|
+| A flags | `unstable_mode` in `test_runner_types.spl` | 3 |
+| B classification | `CRASHED:` in `test_executor_parsing.spl` | 2 |
+| F timeout | `limit_is_unverified` in `test_runner_execute.spl` | 4 |
+| C fixtures | `test/fixtures/unstable_mode/` | 5 files |
+
+These reached origin via OTHER lanes' pushes sweeping them out of the shared
+tree — not via any push of mine.
+
+**NOT landed:** the single-spec fix `d03b800c7d6`
+(`make_result_from_output` in `test_runner_single.spl` = **0** at origin). It is
+the largest fix of the lane: without it every `bin/simple test <one_file.spl>`
+has no abnormal-termination classification at all. Cherry-picks cleanly onto the
+current tip (`74f796c4566`), still blocked at the pre-push hook.
+
+### Guard-integrity finding: the verdict depends on the WORKING TREE, not on what is pushed
+
+`check-native-trailing-default-param.shs` runs a real `native-build`, which reads
+`src/` as SOURCE **from the tree it is invoked in**. Consequences, both observed:
+
+- From a clean worktree checked out at `origin/main`: the broken
+  `expr_dispatch.spl` fails the guard's own selftest -> push BLOCKED.
+- From `/mnt/data/worktrees/simple-main`, whose working copy holds a *parsing*
+  version of that file: the guard proceeds -> push ALLOWED.
+
+**Same commits, opposite verdicts.** That is how other lanes are landing while a
+clean checkout of origin cannot. It also means the guard can green a push while
+origin itself is unbuildable — the precise failure class the guards exist to
+prevent.
+
+**Deliberately NOT worked around.** Dropping the main tree's parsing copy into
+the landing worktree would let the guard run and the push succeed, but the
+verdict would describe a tree nobody is pushing. That is `--no-verify` wearing a
+disguise, and the standing instruction forbids it. Blocked and reported instead.
