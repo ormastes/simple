@@ -1,7 +1,8 @@
 # `simple replay` self-spawns an unbounded chain of `simple` processes (~8 GB/min host-wide)
 
 - **ID:** simple_replay_self_spawns_unbounded_process_chain_2026-08-10
-- **Status:** OPEN — mechanism measured, spawn site not yet located in source.
+- **Status:** RESOLVED 2026-08-17 — spawn site located and fixed; regression
+  specs landed. See "Resolution" at the bottom.
 - **Severity:** critical (host-level). It exhausts a 128 GB host in minutes and,
   because `earlyoom` is configured with `--prefer '^(simple|...)'`, the
   resulting kills land on **unrelated, healthy `simple` processes** — Stage-3

@@ -155,3 +155,30 @@ Evidence bar addition: exit 0 from `bin/simple test <spec>` is not a pass —
 Require a results/count line, else INCONCLUSIVE plus a `bin/simple run` repro.
 This is the same failure family as the exit-0 native build with no fresh
 artifact above.
+
+## Per-lane private build caches (2026-08-17)
+
+Concurrent bootstrap lanes (phase-1 seed, phase-2 stage, phase-3 self-host,
+phase-4 full CLI, census, tool builds) may run DIFFERENT compiler binaries over
+the SAME source tree. Both engines' native-build cache scope keys now carry a
+**lane** axis on top of the compiler identity they already had:
+`SIMPLE_CACHE_SCOPE=<name>`, or `--cache-scope <name>` on the Rust
+native-build / native-all CLIs. Unset ⇒ `default` (previous behaviour).
+
+Entries are partitioned by a scope-derived DIRECTORY, so a cross-scope lookup
+cannot name an out-of-scope entry — the miss is structural, not a hash compare.
+Each cache dir records its owner in a `.cache_scope` marker; check ownership
+without running a compiler via `scripts/check/check-cache-scope-ownership.shs
+<cache-dir> <lane>` (PASS/FAIL/ERROR, `--selftest`). `bootstrap-from-scratch.sh`
+gives each stage `build/bootstrap/native_cache/<lane>/` and refuses fail-closed
+to build against another lane's cache; `resume-stage3-from-admitted.sh` fences
+its stage2/stage3 dirs the same way.
+
+- Design: `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`
+- Rust: `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`
+  (`cache_lane`, `cache_scope_segment`, `cache_dir`, `object_cache_key`)
+- Pure Simple: `src/compiler/80.driver/driver_build/incremental.spl`
+  (`native_build_cache_lane`, `native_build_cache_scope_key`)
+- Specs: `test/01_unit/compiler/cache/per_lane_cache_scope{,_prevention}_spec.spl`
+- NOT changed: dependency-aware partial rebuild (`interface_digest_of`,
+  `simple.sdn` traversal, `SmfManifest` load-verification remain uncalled).

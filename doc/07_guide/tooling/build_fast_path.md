@@ -247,3 +247,33 @@ alternate. A native-build "timeout" should be checked against
   full error census in one run rather than fixing one error per rebuild; the
   same applies to tool builds during phase verification (attempt all, even when
   some fail).
+
+## Per-lane private build caches (2026-08-17)
+
+Concurrent bootstrap lanes may drive DIFFERENT compiler binaries over the SAME
+source tree. Both engines' native-build caches now carry a **lane** axis on top
+of the compiler-identity axis they already had:
+
+```bash
+bin/simple native-build --cache-dir build/bootstrap/native_cache --cache-scope stage3 ...
+SIMPLE_CACHE_SCOPE=stage3 bin/simple native-build --cache-dir ... ...   # same thing
+```
+
+- Unset ⇒ lane `default`; single-lane builds behave exactly as before.
+- Entries are partitioned by a scope-derived **directory**, so a cross-scope
+  lookup cannot name an out-of-scope entry — the miss is structural, not a hash
+  comparison. The lane is folded into the object key as well.
+- Each cache dir records its owner in a `.cache_scope` marker. Check ownership
+  without running a compiler:
+
+```bash
+sh scripts/check/check-cache-scope-ownership.shs <cache-dir> <lane>   # PASS/FAIL/ERROR
+sh scripts/check/check-cache-scope-ownership.shs --selftest
+```
+
+- `scripts/bootstrap/bootstrap-from-scratch.sh` now gives each stage
+  `build/bootstrap/native_cache/<lane>/` and refuses, fail-closed, to build
+  against a directory another lane owns.
+
+Design: `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`.
+Specs: `test/01_unit/compiler/cache/per_lane_cache_scope{,_prevention}_spec.spl`.

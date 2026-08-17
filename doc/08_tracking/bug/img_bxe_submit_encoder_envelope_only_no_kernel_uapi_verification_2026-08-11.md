@@ -1,3 +1,10 @@
+## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
+
+Blocker: needs the upstream `drivers/gpu/drm/imagination` `struct drm_pvr_job`
+header text (not vendored in this tree) to confirm field offsets, plus PowerVR
+hardware to validate against. No fetch route in this lane. Unblock = vendor the
+UAPI header (or cite a pinned upstream revision) and re-derive
+`img_bxe_job_field_offset`/`img_bxe_sync_op_offset` against it. Unchanged.
 # IMG BXE-4-32 submit encoder: envelope-only, no verified kernel UAPI byte layout
 
 **Date:** 2026-08-11

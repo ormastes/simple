@@ -1,3 +1,11 @@
+## Re-verified 2026-08-17 — STILL OPEN, unchanged
+
+`test/01_unit/app/mcp_unit/mcp_lsp_tools_spec.spl` still builds the shell command
+inside the spec (58 `timeout 30 bin/simple` string constructions) and imports the
+product **zero** times (`grep -c "use std\|use app"` = 0). The spec remains
+vacuously green: it cannot fail if the handlers in
+`src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl` are wrong or absent.
+
 # `mcp_lsp_tools_spec` tests its own command builder; product has no testable seam
 
 - **Status:** OPEN (spec is vacuously GREEN — 78/78 — and proves nothing)

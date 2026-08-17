@@ -1,3 +1,12 @@
+## Triage 2026-08-17 — OPEN, design work not re-verifiable by inspection
+
+Not stale: the 2026-08-14 partial mitigation (`ParentCommitFrameInboxV1`,
+`ParentCommitPipedProcessSessionV1`) covers the bounded-session half only. The
+remaining acceptance rows — cryptographic wire-hash authentication (FNV-1a is
+not authentication), PID-reuse/namespace simulation, and exec-isolated child
+tests — are unimplemented. Left OPEN; out of scope for a bug-doc verification
+pass because it needs the admitted crypto wire-hash contract first.
+
 # Process transfer session and replay identity
 
 Status: open
@@ -46,3 +55,25 @@ SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_co
 Extend that scenario with parent-issued session identity, stale PID/session
 replay, cancellation revocation, and bounded terminal cleanup before changing
 `Status: open`.
+
+## 2026-08-17 — resume precondition re-checked, still blocked
+
+This record's own resume gate is `bin/release/simple test --help`. Run today from
+the repo root:
+
+```
+$ bin/release/simple test --help
+error: refusing non-production Simple runtime: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+EXIT=1
+```
+
+The deployed binary is the stale Rust seed and the wrapper fail-closes on it, so
+`test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native`
+cannot be run, let alone extended. Blocked on a Stage 4 redeploy.
+
+Independently of that, the largest remaining acceptance row is a DESIGN gap, not
+a test gap: "cryptographic wire-hash authentication (FNV-1a is not
+authentication)" needs the admitted crypto wire-hash contract to exist before a
+spec can assert against it. Writing a spec now would pin FNV-1a, the very thing
+this record says must be replaced. Status stays open; do not re-derive this
+blocker on the next sweep.
