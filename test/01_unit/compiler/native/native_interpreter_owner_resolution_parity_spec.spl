@@ -1,0 +1,139 @@
+# @req REQ-COMPILER-NATIVE-OWNER-PARITY-001
+"""
+# Similar-Problem Detection: Owner/Static Resolution Parity Across Lowering Lanes
+
+## Overview
+
+This is a CLASS detector, not a single-bug regression test. Its sibling
+(`native_static_method_owner_resolution_spec.spl`) pins one instance --
+`Widget.stat(2)` reported as `undefined variable Widget` under `native-build`.
+This spec exists because that instance is the third of its kind, and the
+previous two were each fixed narrowly and then recurred in a different shape:
+
+  * `File.delete(path)` -> `undefined variable: File`
+    (native_build_mir_lowering_undefined_file_symbol_2026-08-08) -- fixed by
+    skipping a Dict-name-collision probe for known class receivers.
+  * `Widget.stat(2)` -> `undefined variable Widget` (2026-08-17) -- fixed by
+    deriving the owner from the receiver's syntactic name when its symbol id is
+    unresolved.
+
+The invariant behind all of them is one sentence: **a method call's owner must
+resolve to the same thing regardless of which engine lowers it.** Whenever the
+native lane loses an owner the interpreter keeps, the symptom is a bare type or
+receiver name escaping into value-lowering and surfacing as `undefined
+variable <Name>`.
+
+## Method: differential, not absolute
+
+The interpreter is the ORACLE. For each call shape, the same fixture is executed
+twice -- once through `SIMPLE_EXECUTION_MODE=interpreter` (`run`, tree-walk) and
+once through `native-build` (AOT MIR lowering + codegen). The assertion is that
+the two AGREE on stdout.
+
+This is deliberately not a table of expected strings. A hardcoded expectation
+tells you a lane broke but not that the lanes DIVERGED, and it silently rots
+when the fixture is edited. Comparing lanes means a future call shape added to
+the fixture is covered without touching this file.
+
+## Why `bin/simple test` cannot host the measurement
+
+`test` is the tree-walk interpreter and `run` is the Cranelift JIT; neither runs
+the AOT native pipeline. A spec BODY therefore cannot observe a native-only
+defect at all -- it would be measuring the oracle against itself. Every arm here
+shells out.
+
+## Hazards this spec is built around
+
+  * **Signals are not failures.** `earlyoom` on this host is configured to
+    prefer `simple` as a kill target, so a build can die with rc 143/144 and no
+    output. That is UNVERIFIED. Colouring it red trains people to ignore this
+    spec; colouring it green defeats the point. It is reported as pending.
+  * **Exit 0 is never a pass.** Both lanes must emit non-empty stdout before any
+    comparison is meaningful; a runner has been observed exiting 0 having
+    printed nothing but warnings.
+  * **rc is never read through a pipe.** A pipeline's `$?` belongs to its last
+    stage.
+  * **Silent interpreter demotion.** One unsupported operation demotes a whole
+    program off the native lane, which would make a native defect vanish and this
+    spec pass vacuously. The fixtures are kept minimal and single-purpose so
+    there is nothing to trip that demotion.
+"""
+
+use std.spec.*
+use std.io_runtime.process_run
+
+# Each fixture is a distinct OWNER-RESOLUTION shape. The point of the list is
+# that adding a shape requires no change to the assertions below.
+val FIXTURE_STATIC = "test/fixtures/native_static_method_owner/main.spl"
+val FIXTURE_TRAILING = "test/fixtures/native_trailing_default_param/main.spl"
+
+# Run the fixture on the INTERPRETER lane (the oracle).
+fn interpreter_output(entry: text) -> text:
+    val cmd = "SIMPLE_EXECUTION_MODE=interpreter \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run '{entry}' 2>/dev/null"
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out
+
+# Run the fixture on the NATIVE (AOT) lane. Emits a BUILD_RC= line so a
+# signalled run is distinguishable from a genuine compile failure.
+fn native_output(source_dir: text, entry: text) -> text:
+    val cmd = "set +e
+        d=$(mktemp -d)
+        env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+            \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" native-build \
+            --source '{source_dir}' --entry-closure --entry '{entry}' \
+            --cache-dir \"$d/cache\" --output \"$d/prog\" >\"$d/log\" 2>&1
+        build_rc=$?
+        echo \"BUILD_RC=$build_rc\"
+        if [ \"$build_rc\" -eq 0 ]; then
+            \"$d/prog\" 2>/dev/null
+        else
+            grep -h 'undefined variable' \"$d/log\" | head -5
+        fi
+        rm -rf \"$d\""
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out
+
+# Strip the BUILD_RC bookkeeping line so only program stdout is compared.
+fn program_lines(raw: text) -> text:
+    var kept: [text] = []
+    for line in raw.split("\n"):
+        if not line.starts_with("BUILD_RC="):
+            if line != "":
+                kept.push(line)
+    kept.join("\n")
+
+fn check_parity(source_dir: text, entry: text) -> ():
+    step("Run {entry} on the interpreter lane (the oracle)")
+    val oracle = program_lines(interpreter_output(entry))
+
+    step("The oracle must actually produce output - exit 0 with no output proves nothing")
+    assert_equal(oracle != "", true)
+
+    step("Run the same fixture on the native AOT lane")
+    val raw_native = native_output(source_dir, entry)
+
+    step("A signalled native build is UNVERIFIED, never a pass and never a failure")
+    if not raw_native.contains("BUILD_RC="):
+        pending("native-build produced no verdict line (likely SIGTERMed by earlyoom) - UNVERIFIED")
+    else:
+        step("No owner/static resolution name escaped into value lowering")
+        # This is the CLASS signature: a bare type or receiver name that the
+        # native lane failed to recognise as an owner, lowered as a value.
+        assert_equal(raw_native.contains("undefined variable"), false)
+
+        step("The native lane must agree with the interpreter, line for line")
+        assert_equal(program_lines(raw_native), oracle)
+
+describe "owner and static-method resolution agree between the native and interpreter lowering lanes":
+
+    it "agrees on a bare-class-name static call (`Widget.stat(2)`)":
+        # Instance shape of the 2026-08-17 defect.
+        check_parity("test/fixtures", FIXTURE_STATIC)
+
+    it "agrees on the mixed free/cross-module/instance/static/trait call fixture":
+        # The broadest owner-resolution fixture in the tree: same-module and
+        # cross-module free functions, an instance method, a STATIC method, and a
+        # trait-typed receiver. It is also what
+        # scripts/check/check-native-trailing-default-param.shs drives, so a
+        # divergence here and a red pre-push guard can never disagree silently.
+        check_parity("test/fixtures", FIXTURE_TRAILING)

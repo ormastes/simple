@@ -1,0 +1,113 @@
+# @req REQ-COMPILER-NATIVE-STATIC-OWNER-001
+"""
+# Static-Method Owner Resolution Must Not Diverge Between Lowering Lanes
+
+## Overview
+
+A call of the form `Widget.stat(2)` names its owner SYNTACTICALLY: the receiver
+is a bare type name, not a runtime value. MIR lowering has to recognise that
+before it lowers the receiver, because a bare type name has no value form -- the
+`Var`/`NamedVar` lowering path knows only locals, module globals, and two
+hardcoded constants, so handing it a class name produces the generic
+
+    error: MIR lowering error: undefined variable Widget
+
+Root cause found 2026-08-17 in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`. The owner name
+was recovered ONLY by resolving the `NamedVar`'s attached symbol id through
+`self.symbols.get_symbol_raw(...)`. Under `native-build` that symbol id is
+frequently unresolved, so the lookup returned nil and `static_receiver_name`
+stayed `""` -- even though the `NamedVar` arm already carries the literal source
+text `"Widget"` in its second payload slot. With an empty owner the Unresolved
+method-call arm never builds the `static::Widget::stat` key, never tries
+`lookup_method_in_type`, and falls straight through to lowering the bare class
+name as a value.
+
+The fix supplies a NAME-DERIVED fallback: resolve the syntactic name in the
+symbol table and accept it as an owner only when it really names a
+Class/Struct/Enum/Import -- the same kind test the symbol-id path already
+applies, so a local variable that happens to shadow a type name can never be
+mistaken for a static receiver.
+
+## Why this cannot be a normal spec body
+
+`bin/simple test` is the TREE-WALK INTERPRETER. It never runs MIR lowering at
+all, so a spec body that simply calls `Widget.stat(2)` passes on a completely
+broken native lane -- it is measuring a different compiler. This spec therefore
+shells out to `native-build`, which is the only lane that exercises the defect.
+
+## Why an exit code alone is not the assertion
+
+Two hazards make a bare exit code worthless here:
+
+  * `native-build` on this host is regularly SIGTERMed by `earlyoom`, which
+    prefers `simple` as a kill target. That yields rc 143/144 with no output --
+    UNVERIFIED, not a failure. Treating it as a failure makes this spec flaky in
+    the direction that wastes the most time.
+  * a swallowed diagnostic can fail a build with no message at all.
+
+So the assertion is positive and textual: the compiled program must PRINT the
+expected line. A run that produced neither the success text nor a genuine
+compile error is reported as unverified rather than either colour.
+"""
+
+use std.spec.*
+use std.io_runtime.process_run
+
+# Self-contained fixture: a class whose STATIC method is called through the bare
+# class name, which is the exact shape that regressed. Kept minimal and in its
+# own file on purpose -- ONE unsupported operation silently demotes a whole
+# program to the interpreter, which would make a native-only defect vanish.
+val FIXTURE = "test/fixtures/native_static_method_owner/main.spl"
+val EXPECTED = "stat a=2 b=55 c=false"
+val MARKER_UNDEFINED = "undefined variable Widget"
+
+# Returns (stdout_of_compiled_binary, compiler_log, rc_of_build).
+# rc is captured on its own line, never through a pipe: a pipeline's `$?` is the
+# LAST stage's status and has produced false greens in this repo before.
+fn native_build_and_run(source_dir: text, entry: text) -> (text, text, i64):
+    # NB: `{{`/`}}` are escaped braces -- a bare `{...}` in a Simple text literal
+    # is string interpolation, so an unescaped `${VAR:-default}` would be parsed
+    # as an interpolation and fail to compile rather than reaching the shell.
+    val cmd = "set +e
+        d=$(mktemp -d)
+        env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+            \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" native-build \
+            --source '{source_dir}' --entry-closure --entry '{entry}' \
+            --cache-dir \"$d/cache\" --output \"$d/prog\" >\"$d/log\" 2>&1
+        build_rc=$?
+        echo \"BUILD_RC=$build_rc\"
+        if [ \"$build_rc\" -eq 0 ]; then
+            echo '--- PROGRAM OUTPUT ---'
+            \"$d/prog\" 2>&1
+        fi
+        echo '--- COMPILER LOG ---'
+        cat \"$d/log\"
+        rm -rf \"$d\""
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    val rc = if out.contains("BUILD_RC=0"): 0 else: 1
+    (out, out, rc)
+
+describe "native-build resolves a static method's owner from the receiver's syntactic name":
+
+    it "compiles and runs `Widget.stat(2)` through the native lowering lane":
+        step("native-build the bare-class-name static call fixture")
+        val (out, log, rc) = native_build_and_run("test/fixtures", FIXTURE)
+
+        step("A signalled build is UNVERIFIED, never a pass and never a failure")
+        # earlyoom kills `simple` preferentially on this host. A run that
+        # produced no verdict text at all measured nothing -- say so loudly
+        # instead of colouring it.
+        if not out.contains("BUILD_RC="):
+            pending("native-build produced no verdict line (likely SIGTERMed by earlyoom) - UNVERIFIED")
+        else:
+            step("The owner-resolution regression marker must be absent")
+            # This is the precise 2026-08-17 failure. Asserting on the marker
+            # rather than only on rc names the defect when it returns.
+            assert_equal(log.contains(MARKER_UNDEFINED), false)
+
+            step("The build must succeed")
+            assert_equal(rc, 0)
+
+            step("The compiled program must PRINT the expected line - exit 0 is never accepted as a pass")
+            assert_equal(out.contains(EXPECTED), true)

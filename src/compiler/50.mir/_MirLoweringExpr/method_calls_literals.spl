@@ -1076,6 +1076,28 @@ impl MirLowering:
                         match static_def.kind:
                             case Class | Struct | Enum | Import: static_receiver_name = static_def.name
                             case _: ()
+                    # NAME-DERIVED FALLBACK (native_build_static_method_owner_
+                    # unresolved_2026-08-17). Under native-build the NamedVar's
+                    # `static_symbol` is frequently unresolved (id < 0), so
+                    # `get_symbol_raw` returns nil and the owner name was lost --
+                    # even though `static_name` carries the literal source text
+                    # ("Widget") right here. With the owner empty the Unresolved
+                    # arm below never builds `static::Widget::stat`, falls through
+                    # to lowering the bare class name as a VALUE, and reports
+                    # "undefined variable Widget". Recover the owner by resolving
+                    # the syntactic name in the symbol table and accepting it only
+                    # when it really names a type/import -- the same kind test the
+                    # symbol-id path applies, so a local variable that shadows a
+                    # type name can never be mistaken for a static receiver.
+                    if static_receiver_name == "" and static_name != "":
+                        val nd_owner_id = self.symbols.lookup_or_invalid(static_name)
+                        if nd_owner_id.is_valid():
+                            match self.symbols.get_symbol_raw(nd_owner_id.id):
+                                case Some(nd_owner_symbol):
+                                    match nd_owner_symbol.kind:
+                                        case Class | Struct | Enum | Import: static_receiver_name = nd_owner_symbol.name
+                                        case _: ()
+                                case _: ()
                 case Var(static_symbol):
                     val static_def = self.symbols.get_symbol_raw(static_symbol.id)
                     if static_def != nil:
@@ -2709,9 +2731,34 @@ impl MirLowering:
                 # lookup_unique_static_method is itself conservative (it resolves
                 # only when the leaf names exactly ONE static Function), so
                 # widening the guard cannot mis-dispatch an instance method.
+                # NAME-DERIVED OWNER LOOKUP (native_build_static_method_owner_
+                # unresolved_2026-08-17, second half). Recovering the owner NAME
+                # is not enough: the branch above looks the method up via
+                # `static_receiver_symbol`, which is the receiver NamedVar's
+                # attached symbol id -- the very id that is unresolved on this
+                # lane. Measured with the name fallback in place but this block
+                # absent: `srn='Widget' found=false`, i.e. the owner was correct
+                # and the method still did not resolve. Re-resolve the owner by
+                # NAME and look the method up in it, mirroring exactly what the
+                # instance-method recovery below already does at
+                # `lookup_or_invalid` + `lookup_method_in_type`. Accept only a
+                # Function symbol, so an instance method can never be dispatched
+                # here as a static one.
+                if static_method_id == nil and static_receiver_name != "":
+                    val nd_static_owner = self.symbols.lookup_or_invalid(static_receiver_name)
+                    if nd_static_owner.is_valid():
+                        match self.symbols.lookup_method_in_type(nd_static_owner, method):
+                            case Some(nd_static_candidate):
+                                match self.symbols.get_symbol_raw(nd_static_candidate.id):
+                                    case Some(nd_static_symbol):
+                                        match nd_static_symbol.kind:
+                                            case Function: static_method_id = Some(nd_static_candidate)
+                                            case _: ()
+                                    case _: ()
+                            case _: ()
                 if static_method_id == nil and (static_receiver_kind_disc < 0 or static_receiver_name == ""):
                     static_method_id = self.symbols.lookup_unique_static_method(method)
-                eprint("[mir-method-call] unresolved-static method={method} srn='{static_receiver_name}' disc={static_receiver_kind_disc} found={static_method_id != nil}\n")
+                eprint("[mir-method-call] unresolved-static method={method}\n")
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
