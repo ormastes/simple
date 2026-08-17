@@ -40,8 +40,10 @@ Expected `v=20`. The negated `pow` proves the JIT arm actually compiled. Both
 arms rc=0, so this is a wrong value, not a crash — NOT an rc=143/137/144
 UNVERIFIED. `6126812864993` is an unrelated-looking integer read out of a
 still-tagged slot, the same shape as `native_to_i64_nil_coalesce_print_tagbox_leak`'s
-`3775049836129` and `interp_array_param_indexing`'s `480 == 60 << 3`: this row is
-part of the same array-element-read unboxing family.
+`3775049836129`. NOT ASSERTED: a shared root cause with those rows. Another lane
+has since refuted the single-untag-root hypothesis (the `<value:0x...>` symptom
+is the inverse direction from the `480 == 60 << 3` symptom), so this row is
+recorded on its own measurement only.
 **Parent bug:** `array_at_returns_nil_for_every_index_2026-08-01.md`
 **Prior lanes:** interpreter `f18c5963132`, JIT `ceee960ca8e`
 **Severity:** CRITICAL — silent wrong answer, no error, no crash
