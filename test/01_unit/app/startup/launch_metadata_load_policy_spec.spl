@@ -1,0 +1,129 @@
+# Launch metadata load_policy axis unit specification (Phase A,
+# startup_perf_plan_2026-08-17): default policy per artifact kind, mmap_hint
+# compat mapping in both directions, unknown policy fails closed.
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use app.startup.launch_metadata.{
+    LOAD_POLICY_AUTO,
+    LOAD_POLICY_DIRECT_EXEC,
+    LOAD_POLICY_INDEX_ONLY,
+    LOAD_POLICY_INVALID,
+    LOAD_POLICY_MAP_SELECTED_SEGMENTS,
+    LOAD_POLICY_NORMAL,
+    LOAD_POLICY_READ_AHEAD_SELECTED,
+    launch_metadata_default,
+    launch_metadata_effective_load_policy,
+    launch_metadata_for_native_build,
+    launch_metadata_for_simpleos_path,
+    load_policy_from_mmap_hint,
+    load_policy_implies_mmap_hint,
+    load_policy_is_valid,
+    parse_launch_metadata_sidecar,
+    render_launch_metadata_sidecar,
+    startup_feature_summary,
+    startup_plan_from_metadata
+}
+
+describe "load_policy value set":
+    it "accepts exactly the six declared policies":
+        assert_true(load_policy_is_valid(LOAD_POLICY_NORMAL))
+        assert_true(load_policy_is_valid(LOAD_POLICY_INDEX_ONLY))
+        assert_true(load_policy_is_valid(LOAD_POLICY_MAP_SELECTED_SEGMENTS))
+        assert_true(load_policy_is_valid(LOAD_POLICY_READ_AHEAD_SELECTED))
+        assert_true(load_policy_is_valid(LOAD_POLICY_DIRECT_EXEC))
+        assert_true(load_policy_is_valid(LOAD_POLICY_AUTO))
+
+    it "rejects unknown and sentinel values":
+        assert_false(load_policy_is_valid("turbo"))
+        assert_false(load_policy_is_valid(""))
+        assert_false(load_policy_is_valid(LOAD_POLICY_INVALID))
+
+describe "default load_policy per artifact kind":
+    it "defaults scripts and smf to map_selected_segments":
+        val script_meta = launch_metadata_default("script")
+        val smf_meta = launch_metadata_default("smf")
+        expect(script_meta.load_policy).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+        expect(smf_meta.load_policy).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+        assert_true(script_meta.mmap_hint)
+
+    it "defaults native builds to normal":
+        val native_meta = launch_metadata_for_native_build("linux", "x86_64", "gnu")
+        expect(native_meta.load_policy).to_equal(LOAD_POLICY_NORMAL)
+        assert_false(native_meta.mmap_hint)
+
+    it "defaults simpleos paths to map_selected_segments":
+        val meta = launch_metadata_for_simpleos_path("app.smf")
+        expect(meta.load_policy).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+
+describe "mmap_hint compat mapping":
+    it "maps legacy mmap_hint to load_policy old-to-new":
+        expect(load_policy_from_mmap_hint(true)).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+        expect(load_policy_from_mmap_hint(false)).to_equal(LOAD_POLICY_NORMAL)
+
+    it "derives legacy mmap_hint from load_policy new-to-old":
+        assert_true(load_policy_implies_mmap_hint(LOAD_POLICY_MAP_SELECTED_SEGMENTS))
+        assert_true(load_policy_implies_mmap_hint(LOAD_POLICY_READ_AHEAD_SELECTED))
+        assert_true(load_policy_implies_mmap_hint(LOAD_POLICY_AUTO))
+        assert_false(load_policy_implies_mmap_hint(LOAD_POLICY_NORMAL))
+        assert_false(load_policy_implies_mmap_hint(LOAD_POLICY_DIRECT_EXEC))
+
+    it "decodes a pre-policy sidecar via mmap_hint":
+        val legacy = "simple_launch_metadata:\n  entry_kind: \"native\"\n  mmap_hint: true\n"
+        val meta = parse_launch_metadata_sidecar(legacy, "native")
+        expect(meta.load_policy).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+        val legacy_off = "simple_launch_metadata:\n  entry_kind: \"native\"\n  mmap_hint: false\n"
+        val meta_off = parse_launch_metadata_sidecar(legacy_off, "native")
+        expect(meta_off.load_policy).to_equal(LOAD_POLICY_NORMAL)
+
+    it "lets an explicit load_policy win over the legacy hint and re-derives it":
+        val content = "simple_launch_metadata:\n  mmap_hint: true\n  load_policy: \"normal\"\n"
+        val meta = parse_launch_metadata_sidecar(content, "script")
+        expect(meta.load_policy).to_equal(LOAD_POLICY_NORMAL)
+        assert_false(meta.mmap_hint)
+
+    it "round-trips load_policy through the sidecar text":
+        var meta = launch_metadata_default("script")
+        meta.load_policy = LOAD_POLICY_READ_AHEAD_SELECTED
+        val rendered = render_launch_metadata_sidecar(meta)
+        val parsed = parse_launch_metadata_sidecar(rendered, "script")
+        expect(parsed.load_policy).to_equal(LOAD_POLICY_READ_AHEAD_SELECTED)
+        assert_true(parsed.mmap_hint)
+
+    it "plans the alias and the mapped policy identically":
+        var alias_meta = launch_metadata_default("script")
+        alias_meta.load_policy = LOAD_POLICY_AUTO
+        var mapped_meta = launch_metadata_default("script")
+        mapped_meta.load_policy = LOAD_POLICY_MAP_SELECTED_SEGMENTS
+        val alias_plan = startup_plan_from_metadata("a.spl", [], alias_meta, true, false)
+        val mapped_plan = startup_plan_from_metadata("a.spl", [], mapped_meta, true, false)
+        expect(startup_feature_summary(alias_plan)).to_equal(startup_feature_summary(mapped_plan))
+        expect(alias_plan.load_policy).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+        expect(alias_plan.cache_strategy).to_equal("mmap")
+
+describe "unknown load_policy fails closed":
+    it "parses an unknown declared policy to the invalid sentinel":
+        val content = "simple_launch_metadata:\n  load_policy: \"turbo\"\n"
+        val meta = parse_launch_metadata_sidecar(content, "script")
+        expect(meta.load_policy).to_equal(LOAD_POLICY_INVALID)
+
+    it "refuses to build a supported plan from an invalid policy":
+        val content = "simple_launch_metadata:\n  load_policy: \"turbo\"\n"
+        val meta = parse_launch_metadata_sidecar(content, "script")
+        val plan = startup_plan_from_metadata("a.spl", [], meta, true, true)
+        assert_false(plan.supported)
+        expect(plan.load_policy).to_equal(LOAD_POLICY_INVALID)
+        assert_false(plan.include_mmap_cache)
+        assert_true(plan.error.len() > 0)
+
+describe "plan carries the resolved policy":
+    it "resolves normal policy to a normal_read strategy":
+        val meta = launch_metadata_for_native_build("linux", "x86_64", "gnu")
+        val plan = startup_plan_from_metadata("app", [], meta, true, true)
+        expect(plan.load_policy).to_equal(LOAD_POLICY_NORMAL)
+        expect(plan.cache_strategy).to_equal("normal_read")
+        assert_true(plan.supported)
+
+    it "resolves effective policy for empty legacy metadata fields":
+        var meta = launch_metadata_default("script")
+        meta.load_policy = ""
+        expect(launch_metadata_effective_load_policy(meta)).to_equal(LOAD_POLICY_MAP_SELECTED_SEGMENTS)

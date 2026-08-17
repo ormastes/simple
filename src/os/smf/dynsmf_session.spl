@@ -583,7 +583,193 @@ fn dynsmf_session_unload(session: DynSmfSession, id: text) -> DynSmfSession:
         out.loaded = loaded
     out
 
+# --- Phase B: config-driven dynload settings (presence/placement/activation) ---
+# Three independent axes per research doc §5.1/§5.3/§5.4, expressed as
+# val-constant text dispatch (not payload enums). The settings layer is an
+# OVERLAY keyed by library_id so the existing DynSmfManifestEntry constructor
+# contract (and every existing spec that builds entries) stays unchanged.
+# Back-compat mapping: default_autoload:false == presence=auto +
+# activation=first_use; default_autoload:true == presence=auto +
+# activation=startup. Placement defaults to auto either way.
+
+fn dynsmf_presence_off() -> text:
+    "off"
+fn dynsmf_presence_auto() -> text:
+    "auto"
+fn dynsmf_presence_on() -> text:
+    "on"
+
+fn dynsmf_placement_auto() -> text:
+    "auto"
+fn dynsmf_placement_static() -> text:
+    "static"
+fn dynsmf_placement_dynamic() -> text:
+    "dynamic"
+
+fn dynsmf_activation_startup() -> text:
+    "startup"
+fn dynsmf_activation_command() -> text:
+    "command"
+fn dynsmf_activation_first_use() -> text:
+    "first_use"
+fn dynsmf_activation_manual() -> text:
+    "manual"
+
+fn dynsmf_outcome_absent() -> text:
+    "absent"
+fn dynsmf_outcome_static() -> text:
+    "static"
+fn dynsmf_outcome_dynamic() -> text:
+    "dynamic"
+fn dynsmf_outcome_error() -> text:
+    "error"
+
+class DynSmfDynloadSetting:
+    library_id: text
+    presence: text
+    placement: text
+    activation: text
+
+class DynSmfDynloadParse:
+    ok: bool
+    reason: text
+    setting: DynSmfDynloadSetting
+
+class DynSmfDynloadDecision:
+    library_id: text
+    outcome: text
+    activation: text
+    reason: text
+
+    me to_text() -> text:
+        return self.library_id + ":" + self.outcome + ":" + self.activation + ":" + self.reason
+
+fn dynsmf_presence_valid(v: text) -> bool:
+    v == dynsmf_presence_off() or v == dynsmf_presence_auto() or v == dynsmf_presence_on()
+
+fn dynsmf_placement_valid(v: text) -> bool:
+    v == dynsmf_placement_auto() or v == dynsmf_placement_static() or v == dynsmf_placement_dynamic()
+
+fn dynsmf_activation_valid(v: text) -> bool:
+    v == dynsmf_activation_startup() or v == dynsmf_activation_command() or
+        v == dynsmf_activation_first_use() or v == dynsmf_activation_manual()
+
+fn dynsmf_dynload_setting_default(entry: DynSmfManifestEntry) -> DynSmfDynloadSetting:
+    val activation = if entry.default_autoload: dynsmf_activation_startup() else: dynsmf_activation_first_use()
+    DynSmfDynloadSetting(library_id: entry.id, presence: dynsmf_presence_auto(), placement: dynsmf_placement_auto(), activation: activation)
+
+# Parse a comma-separated `key=value` axis spec, e.g.
+# "presence=off,placement=dynamic,activation=manual". Omitted axes keep the
+# entry's back-compat defaults. Unknown keys and unknown values are hard
+# parse failures (fail closed, no silent fallback to a default axis value).
+fn dynsmf_dynload_setting_parse(entry: DynSmfManifestEntry, spec: text) -> DynSmfDynloadParse:
+    var setting = dynsmf_dynload_setting_default(entry)
+    val trimmed_spec = spec.trim()
+    if trimmed_spec == "":
+        return DynSmfDynloadParse(ok: true, reason: "defaults", setting: setting)
+    val parts = trimmed_spec.split(",")
+    var idx = 0
+    while idx < parts.len():
+        val part = parts[idx].trim()
+        if part != "":
+            val kv = part.split("=")
+            if kv.len() != 2:
+                return DynSmfDynloadParse(ok: false, reason: "malformed_axis:" + part, setting: setting)
+            val key = kv[0].trim()
+            val value = kv[1].trim()
+            if key == "presence":
+                if not dynsmf_presence_valid(value):
+                    return DynSmfDynloadParse(ok: false, reason: "unknown_presence:" + value, setting: setting)
+                setting.presence = value
+            elif key == "placement":
+                if not dynsmf_placement_valid(value):
+                    return DynSmfDynloadParse(ok: false, reason: "unknown_placement:" + value, setting: setting)
+                setting.placement = value
+            elif key == "activation":
+                if not dynsmf_activation_valid(value):
+                    return DynSmfDynloadParse(ok: false, reason: "unknown_activation:" + value, setting: setting)
+                setting.activation = value
+            else:
+                return DynSmfDynloadParse(ok: false, reason: "unknown_axis:" + key, setting: setting)
+        idx = idx + 1
+    DynSmfDynloadParse(ok: true, reason: "parsed", setting: setting)
+
+fn dynsmf_dynload_setting_find(settings: [DynSmfDynloadSetting], id: text) -> DynSmfDynloadSetting?:
+    var idx = 0
+    while idx < settings.len():
+        if settings[idx].library_id == id:
+            return settings[idx]
+        idx = idx + 1
+    nil
+
+# Resolution per research doc §5.3. static_impl_hash / configured_impl_hash
+# use -1 as "unknown"; an unknown configured hash can never certify a static
+# fold, so placement=auto falls through to dynamic (fail toward the external
+# artifact, never toward a stale static pick). Unknown axis values resolve to
+# an ERROR outcome — never to a silent default.
+fn dynsmf_resolve_dynload(setting: DynSmfDynloadSetting, static_present: bool, static_impl_hash: i64, configured_impl_hash: i64) -> DynSmfDynloadDecision:
+    if not dynsmf_presence_valid(setting.presence):
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "unknown_presence:" + setting.presence)
+    if not dynsmf_placement_valid(setting.placement):
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "unknown_placement:" + setting.placement)
+    if not dynsmf_activation_valid(setting.activation):
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "unknown_activation:" + setting.activation)
+    if setting.presence == dynsmf_presence_off():
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_absent(), activation: setting.activation, reason: "presence_off")
+    val static_hash_matches = static_present and configured_impl_hash != -1 and static_impl_hash == configured_impl_hash
+    if setting.placement == dynsmf_placement_static():
+        if not static_present:
+            return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "static_required_missing")
+        if not static_hash_matches:
+            return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_error(), activation: setting.activation, reason: "static_required_stale")
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_static(), activation: setting.activation, reason: "static_pinned")
+    if setting.placement == dynsmf_placement_dynamic():
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_dynamic(), activation: setting.activation, reason: "dynamic_pinned")
+    if static_hash_matches:
+        return DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_static(), activation: setting.activation, reason: "auto_static_match")
+    DynSmfDynloadDecision(library_id: setting.library_id, outcome: dynsmf_outcome_dynamic(), activation: setting.activation, reason: "auto_dynamic")
+
+# Build the load plan for a manifest under a settings overlay. presence=off
+# entries (e.g. an aspect log/trace pack) contribute ZERO plan rows — no
+# registration residue at all. Error decisions ARE kept in the plan so a
+# misconfigured entry is visible and fail-closed rather than silently loaded.
+fn dynsmf_dynload_load_plan(manifest: [DynSmfManifestEntry], settings: [DynSmfDynloadSetting]) -> [DynSmfDynloadDecision]:
+    var plan: [DynSmfDynloadDecision] = []
+    var idx = 0
+    while idx < manifest.len():
+        val entry = manifest[idx]
+        val found = dynsmf_dynload_setting_find(settings, entry.id)
+        var setting = dynsmf_dynload_setting_default(entry)
+        if found.?:
+            setting = found!
+        # No static table exists for dynSMF entries today: every entry is an
+        # external precompiled artifact, so static_present=false and hashes
+        # are unknown. placement=auto therefore resolves dynamic; a future
+        # static-table provider passes real values via dynsmf_resolve_dynload.
+        val decision = dynsmf_resolve_dynload(setting, false, -1, -1)
+        if decision.outcome != dynsmf_outcome_absent():
+            plan.push(decision)
+        idx = idx + 1
+    plan
+
+fn dynsmf_dynload_plan_has_errors(plan: [DynSmfDynloadDecision]) -> bool:
+    var idx = 0
+    while idx < plan.len():
+        if plan[idx].outcome == dynsmf_outcome_error():
+            return true
+        idx = idx + 1
+    false
+
 export DynSmfManifestEntry, DynSmfPolicy, DynSmfLoadedLibrary, DynSmfEvidenceRow, DynSmfSession, DynSmfBuildPlan, DynSmfArtifactStatus
+export DynSmfDynloadSetting, DynSmfDynloadParse, DynSmfDynloadDecision
+export dynsmf_presence_off, dynsmf_presence_auto, dynsmf_presence_on
+export dynsmf_placement_auto, dynsmf_placement_static, dynsmf_placement_dynamic
+export dynsmf_activation_startup, dynsmf_activation_command, dynsmf_activation_first_use, dynsmf_activation_manual
+export dynsmf_outcome_absent, dynsmf_outcome_static, dynsmf_outcome_dynamic, dynsmf_outcome_error
+export dynsmf_presence_valid, dynsmf_placement_valid, dynsmf_activation_valid
+export dynsmf_dynload_setting_default, dynsmf_dynload_setting_parse, dynsmf_dynload_setting_find
+export dynsmf_resolve_dynload, dynsmf_dynload_load_plan, dynsmf_dynload_plan_has_errors
+export dynsmf_background_compile_action, dynsmf_session_add_evidence
 export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest_source_path
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready

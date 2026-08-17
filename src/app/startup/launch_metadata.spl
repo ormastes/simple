@@ -4,13 +4,55 @@
 # tests. Startup should read metadata once, then include arg parsing, mmap/cache,
 # and dynlib loading only when the launch mode and target need them.
 
+# load_policy axis (Phase A of startup_perf_plan_2026-08-17): public metadata
+# expresses loading INTENT; providers pick the mechanism (mmap/pread/read/...).
+# Val-constant dispatch by repo convention (no payload enums).
+pub val LOAD_POLICY_NORMAL: text = "normal"
+pub val LOAD_POLICY_INDEX_ONLY: text = "index_only"
+pub val LOAD_POLICY_MAP_SELECTED_SEGMENTS: text = "map_selected_segments"
+pub val LOAD_POLICY_READ_AHEAD_SELECTED: text = "read_ahead_selected"
+pub val LOAD_POLICY_DIRECT_EXEC: text = "direct_exec"
+pub val LOAD_POLICY_AUTO: text = "auto"
+# Fail-closed sentinel: an unknown declared policy parses to this, and any plan
+# built from it is unsupported. Never a valid input value.
+pub val LOAD_POLICY_INVALID: text = "invalid"
+
+pub fn load_policy_is_valid(value: text) -> bool:
+    value == LOAD_POLICY_NORMAL or
+        value == LOAD_POLICY_INDEX_ONLY or
+        value == LOAD_POLICY_MAP_SELECTED_SEGMENTS or
+        value == LOAD_POLICY_READ_AHEAD_SELECTED or
+        value == LOAD_POLICY_DIRECT_EXEC or
+        value == LOAD_POLICY_AUTO
+
+# Compat mapping, old -> new: legacy mmap_hint=true means "map the selected
+# segments"; false means plain reads.
+pub fn load_policy_from_mmap_hint(mmap_hint: bool) -> text:
+    if mmap_hint:
+        return LOAD_POLICY_MAP_SELECTED_SEGMENTS
+    LOAD_POLICY_NORMAL
+
+# Compat mapping, new -> old: derived mmap_hint for legacy readers. auto keeps
+# the legacy default-on behavior for cacheable kinds resolved at plan time; at
+# the metadata level auto maps to hint=true (matches the pre-change defaults).
+pub fn load_policy_implies_mmap_hint(load_policy: text) -> bool:
+    load_policy == LOAD_POLICY_MAP_SELECTED_SEGMENTS or
+        load_policy == LOAD_POLICY_READ_AHEAD_SELECTED or
+        load_policy == LOAD_POLICY_AUTO
+
 pub struct LaunchMetadata:
     entry_kind: text
     target_os: text
     target_arch: text
     target_abi: text
     uses_arg_parser: bool
+    # DERIVED/COMPAT (do not remove): legacy mechanism flag kept so existing
+    # artifacts and readers keep working; load_policy is the source of truth.
     mmap_hint: bool
+    # Empty means "not declared": effective policy is then derived from the
+    # legacy mmap_hint (see launch_metadata_effective_load_policy). Default
+    # keeps pre-load_policy constructor call sites compiling unchanged.
+    load_policy: text = ""
     required_native_dynlibs: [text]
     required_smf_dynlibs: [text]
 
@@ -27,6 +69,9 @@ pub struct StartupLaunchPlan:
     load_native_dynlibs: [text]
     load_smf_dynlibs: [text]
     executable_source: text
+    load_policy: text
+    # DERIVED/COMPAT (do not remove): "mmap"/"normal_read"/... strategy names a
+    # mechanism; kept for existing consumers, computed from load_policy.
     cache_strategy: text
     supported: bool
     error: text
@@ -48,13 +93,15 @@ pub fn startup_normalize_program_args(entry_path: text, args: [text]) -> [text]:
     normalized
 
 pub fn launch_metadata_default(entry_kind: text) -> LaunchMetadata:
+    val cacheable = entry_kind == "script" or entry_kind == "smf"
     LaunchMetadata(
         entry_kind: entry_kind,
         target_os: "",
         target_arch: "",
         target_abi: "",
-        uses_arg_parser: entry_kind == "script" or entry_kind == "smf",
-        mmap_hint: entry_kind == "script" or entry_kind == "smf",
+        uses_arg_parser: cacheable,
+        mmap_hint: cacheable,
+        load_policy: load_policy_from_mmap_hint(cacheable),
         required_native_dynlibs: [],
         required_smf_dynlibs: []
     )
@@ -70,6 +117,7 @@ pub fn launch_metadata_for_native_build(target_os: text, target_arch: text, targ
         target_abi: target_abi,
         uses_arg_parser: false,
         mmap_hint: false,
+        load_policy: LOAD_POLICY_NORMAL,
         required_native_dynlibs: [],
         required_smf_dynlibs: []
     )
@@ -84,6 +132,7 @@ pub fn launch_metadata_for_simpleos_path(path: text) -> LaunchMetadata:
         target_abi: "simpleos",
         uses_arg_parser: uses_args,
         mmap_hint: true,
+        load_policy: LOAD_POLICY_MAP_SELECTED_SEGMENTS,
         required_native_dynlibs: [],
         required_smf_dynlibs: []
     )
@@ -97,6 +146,7 @@ pub fn launch_metadata_for_simpleos_baremetal_path(path: text) -> LaunchMetadata
         target_abi: "simpleos-baremetal",
         uses_arg_parser: metadata.uses_arg_parser,
         mmap_hint: metadata.mmap_hint,
+        load_policy: metadata.load_policy,
         required_native_dynlibs: metadata.required_native_dynlibs,
         required_smf_dynlibs: metadata.required_smf_dynlibs
     )
@@ -104,8 +154,18 @@ pub fn launch_metadata_for_simpleos_baremetal_path(path: text) -> LaunchMetadata
 fn _has_dynlibs(metadata: LaunchMetadata) -> bool:
     metadata.required_native_dynlibs.len() > 0 or metadata.required_smf_dynlibs.len() > 0
 
+# Resolve the declared policy to an effective one: auto follows the legacy
+# per-kind default (derived mmap_hint); empty (pre-policy metadata) falls back
+# to the mmap_hint compat mapping.
+pub fn launch_metadata_effective_load_policy(metadata: LaunchMetadata) -> text:
+    if metadata.load_policy == "" or metadata.load_policy == LOAD_POLICY_AUTO:
+        return load_policy_from_mmap_hint(metadata.mmap_hint)
+    metadata.load_policy
+
+# DERIVED/COMPAT: legacy mechanism-named strategy computed from load_policy.
 fn _cache_strategy(metadata: LaunchMetadata, host_mmap_supported: bool, simpleos_cache_supported: bool) -> text:
-    if not metadata.mmap_hint:
+    val policy = launch_metadata_effective_load_policy(metadata)
+    if policy != LOAD_POLICY_MAP_SELECTED_SEGMENTS and policy != LOAD_POLICY_READ_AHEAD_SELECTED:
         return "normal_read"
     if host_mmap_supported:
         return "mmap"
@@ -119,6 +179,27 @@ fn _executable_source(metadata: LaunchMetadata) -> text:
     "filesystem"
 
 pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: LaunchMetadata, host_mmap_supported: bool, simpleos_cache_supported: bool) -> StartupLaunchPlan:
+    val effective_policy = launch_metadata_effective_load_policy(metadata)
+    # Fail closed: an unknown declared policy never launches.
+    if not load_policy_is_valid(effective_policy):
+        return StartupLaunchPlan(
+            entry_path: entry_path,
+            entry_kind: metadata.entry_kind,
+            target_os: metadata.target_os,
+            target_arch: metadata.target_arch,
+            target_abi: metadata.target_abi,
+            program_args: startup_normalize_program_args(entry_path, args),
+            include_arg_parser: false,
+            include_mmap_cache: false,
+            include_dynlib_loader: false,
+            load_native_dynlibs: [],
+            load_smf_dynlibs: [],
+            executable_source: _executable_source(metadata),
+            load_policy: LOAD_POLICY_INVALID,
+            cache_strategy: "normal_read",
+            supported: false,
+            error: "unknown load_policy value"
+        )
     val strategy = _cache_strategy(metadata, host_mmap_supported, simpleos_cache_supported)
     val use_cache = strategy != "normal_read"
     val dynlibs_needed = _has_dynlibs(metadata)
@@ -135,6 +216,7 @@ pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: Laun
         load_native_dynlibs: metadata.required_native_dynlibs,
         load_smf_dynlibs: metadata.required_smf_dynlibs,
         executable_source: _executable_source(metadata),
+        load_policy: effective_policy,
         cache_strategy: strategy,
         supported: true,
         error: ""
@@ -163,7 +245,9 @@ pub fn render_launch_metadata_sidecar(metadata: LaunchMetadata) -> text:
     out = out + "  target_arch: \"" + metadata.target_arch + "\"\n"
     out = out + "  target_abi: \"" + metadata.target_abi + "\"\n"
     out = out + "  uses_arg_parser: " + _metadata_bool_text(metadata.uses_arg_parser) + "\n"
-    out = out + "  mmap_hint: " + _metadata_bool_text(metadata.mmap_hint) + "\n"
+    # mmap_hint is DERIVED/COMPAT emission for pre-load_policy readers.
+    out = out + "  mmap_hint: " + _metadata_bool_text(load_policy_implies_mmap_hint(launch_metadata_effective_load_policy(metadata))) + "\n"
+    out = out + "  load_policy: \"" + launch_metadata_effective_load_policy(metadata) + "\"\n"
     for dep in metadata.required_native_dynlibs:
         out = out + "  native_dynlib: \"" + dep + "\"\n"
     for dep in metadata.required_smf_dynlibs:
@@ -187,6 +271,8 @@ pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> Laun
     var metadata = launch_metadata_default(fallback_kind)
     var native_dynlibs: [text] = []
     var smf_dynlibs: [text] = []
+    var declared_policy = ""
+    var saw_policy = false
     for line in content.split("\n"):
         val entry_kind = _metadata_value(line, "entry_kind")
         if entry_kind != "":
@@ -206,6 +292,10 @@ pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> Laun
         val mmap_hint = _metadata_value(line, "mmap_hint")
         if mmap_hint != "":
             metadata.mmap_hint = mmap_hint == "true"
+        val load_policy = _metadata_value(line, "load_policy")
+        if load_policy != "":
+            declared_policy = load_policy
+            saw_policy = true
         val native_dynlib = _metadata_value(line, "native_dynlib")
         if native_dynlib != "":
             native_dynlibs.push(native_dynlib)
@@ -214,6 +304,18 @@ pub fn parse_launch_metadata_sidecar(content: text, fallback_kind: text) -> Laun
             smf_dynlibs.push(smf_dynlib)
     metadata.required_native_dynlibs = native_dynlibs
     metadata.required_smf_dynlibs = smf_dynlibs
+    if saw_policy:
+        if load_policy_is_valid(declared_policy):
+            # New axis wins; mmap_hint becomes DERIVED for legacy consumers.
+            metadata.load_policy = declared_policy
+            metadata.mmap_hint = load_policy_implies_mmap_hint(declared_policy)
+        else:
+            # Fail closed: unknown declared policy poisons the metadata so any
+            # plan built from it is unsupported.
+            metadata.load_policy = LOAD_POLICY_INVALID
+    else:
+        # COMPAT: pre-load_policy sidecar — derive policy from legacy mmap_hint.
+        metadata.load_policy = load_policy_from_mmap_hint(metadata.mmap_hint)
     metadata
 
 fn _launch_meta_le_u32(bytes: [u8], offset: i64) -> i64:

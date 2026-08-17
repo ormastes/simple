@@ -7,6 +7,13 @@ use os.smf.dynsmf_session.{
     dynsmf_session_autoload_checked,
     dynsmf_session_new,
     dynsmf_session_queue_missing_background_compiles,
+    DynSmfDynloadSetting,
+    DynSmfDynloadDecision,
+    dynsmf_dynload_load_plan,
+    dynsmf_activation_startup,
+    dynsmf_outcome_error,
+    dynsmf_session_load_checked,
+    dynsmf_session_add_evidence,
     dynsmf_srchash_path,
     dynsmf_source_hash_current,
     dynsmf_manifest_source_path,
@@ -76,6 +83,31 @@ pub fn dynsmf_startup_session(args: [text], session_id: text) -> DynSmfSession:
         env_get("SIMPLE_DYNSMF_DISABLE") ?? "",
         session_id
     )
+
+# Phase B: settings-aware startup. The dynload load plan (presence/placement/
+# activation overlay) decides which entries startup touches:
+# - presence=off entries contribute ZERO plan rows and are never loaded;
+# - only activation=startup rows are loaded here, via the CHECKED path, so
+#   the fail-closed artifact validation (SMF\0 magic, stub floor, abi/hash
+#   sidecars) still gates every actual load;
+# - error rows (unknown axis values, static pin without a static impl) are
+#   recorded as failed evidence and never loaded — fail closed, no fallback.
+# Non-startup activations (command/first_use/manual) load later through their
+# own callers; startup only queues background-compile evidence for them via
+# the existing default_autoload prewarm rule.
+pub fn dynsmf_startup_session_with_dynload_settings(args: [text], env_dynsmf: text, env_disable: text, session_id: text, manifest: [DynSmfManifestEntry], settings: [DynSmfDynloadSetting]) -> DynSmfSession:
+    val policy = dynsmf_policy_from_args_env(args, env_dynsmf, env_disable)
+    var out = dynsmf_session_queue_missing_background_compiles(dynsmf_session_new(session_id, policy), manifest)
+    val plan = dynsmf_dynload_load_plan(manifest, settings)
+    var idx = 0
+    while idx < plan.len():
+        val decision = plan[idx]
+        if decision.outcome == dynsmf_outcome_error():
+            out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: decision.library_id, action: "dynload_resolve", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: decision.reason))
+        elif decision.activation == dynsmf_activation_startup():
+            out = dynsmf_session_load_checked(out, manifest, decision.library_id)
+        idx = idx + 1
+    out
 
 pub fn dynsmf_startup_summary(session: DynSmfSession) -> text:
     var loaded = 0
