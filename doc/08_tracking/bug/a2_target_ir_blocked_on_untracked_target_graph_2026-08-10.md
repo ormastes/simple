@@ -106,3 +106,32 @@ Re-checked independently, not just relayed:
 changes made. Next agent to touch this: re-run the exact three fetch/cat-file/status
 commands above before doing anything else — if `origin/main` now has the file tracked,
 follow the existing unblock steps 1-4 verbatim.
+
+## 2026-08-17 re-verification — the withheld work appears to be LOST, not merely unlanded
+
+Escalating the status. All three places the work could have survived are empty:
+
+- The worktree this doc says must not be deleted,
+  `.claude/worktrees/agent-a5cdacdf7286b11a3`, **does not exist**
+  (`ls` → No such file or directory). It is also absent from `git worktree list`
+  (400 entries scanned).
+- The branch `worktree-agent-a5cdacdf7286b11a3` is **gone** —
+  `git branch -a --list '*a5cdacdf7286b11a3*'` returns nothing, so no local or
+  remote-tracking ref holds the commits.
+- The code never reached the tree: `git grep -l parse_target_label -- src/`
+  returns nothing, and `TargetGraph` is absent from `origin/main`.
+
+Deliberately withholding finished work in an untracked worktree, on a machine
+where parallel sessions prune worktrees, is what this doc's own framing made
+risky; that risk has now materialised. Unless the owning session still holds the
+objects locally, `TargetKind`/`DependencyEdgeKind`/`Target`/`TargetLabel`/
+`parse_target_label`/the `build.sdn` reader/`synthesize_legacy_target`/
+`TargetGraph` must be re-implemented from the plan
+(`doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md`
+§5/§6, Wave 1), which is unchanged and still authoritative.
+
+**Recovery attempt worth making before rewriting:** the objects may still be
+reachable in the git object database even with the ref deleted — try
+`git fsck --lost-found` / `git reflog` on whatever clone the agent used. This
+lane did not attempt object recovery because it does not know which clone that
+was. Status stays OPEN, reclassified from "withheld" to "presumed lost".
