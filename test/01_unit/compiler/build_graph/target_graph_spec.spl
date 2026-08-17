@@ -1,0 +1,54 @@
+use std.spec.*
+use compiler.driver.cache.target_ir.*
+
+fn label(raw: text) -> TargetLabel:
+    parse_target_label(raw) ?? TargetLabel(path: "invalid", name: "invalid", alias: false)
+
+fn fixture_target(raw: text) -> Target:
+    Target(stable_id: label(raw), kind: TargetKind.binary, entry_points: [], source_roots: [], declared_inputs: [], inferred_module_closure: [], output_artifacts: [], target_platform: "", runtime_family: "", enabled_features: [], build_profile: "test")
+
+fn target_label_present(raw: text) -> bool:
+    if parse_target_label(raw).?:
+        return true
+    false
+
+fn target_list_present(raw: text) -> bool:
+    if parse_build_sdn_targets(raw).?:
+        return true
+    false
+
+describe("target IR"):
+    it("defines nine target kinds"):
+        expect([TargetKind.module, TargetKind.smf_library, TargetKind.dynamic_library, TargetKind.static_library, TargetKind.binary, TargetKind.test, TargetKind.generated, TargetKind.bootstrap_stage, TargetKind.aggregate].len()).to_equal(9)
+    it("defines nine typed dependency edges"):
+        expect([DependencyEdgeKind.compile_interface, DependencyEdgeKind.abi, DependencyEdgeKind.link, DependencyEdgeKind.runtime, DependencyEdgeKind.compile_semantic, DependencyEdgeKind.tool, DependencyEdgeKind.generated, DependencyEdgeKind.resolution, DependencyEdgeKind.aop_selection].len()).to_equal(9)
+    it("round trips canonical labels"):
+        expect(target_label_to_text(label("//src/compiler:compiler"))).to_equal("//src/compiler:compiler")
+    it("supports bare aliases"):
+        expect(target_label_to_text(label("compiler"))).to_equal("compiler")
+    it("rejects malformed labels adjacent to the valid form"):
+        expect(target_label_present("//src/compiler")).to_equal(false)
+        expect(target_label_present("//src/compiler:")).to_equal(false)
+        expect(target_label_present("src/compiler:compiler")).to_equal(false)
+        expect(target_label_present("//src:compiler:extra")).to_equal(false)
+    it("synthesizes legacy CLI targets"):
+        val target = synthesize_legacy_target("src/app/main.spl", ["src/app"], "bin/app")
+        expect(target.output_artifacts[0]).to_equal("bin/app")
+    it("reads target blocks from build sdn"):
+        val parsed = parse_build_sdn_targets("target compiler:\n  kind: binary\n  entry: src/app/cli/main.spl\n  source_roots: src/compiler, src/app, src/lib\n  output: bin/simple\ntarget compiler_tests:\n  kind: test\n  roots: test/01_unit/compiler\n  depends: compiler\n")
+        expect(target_list_present("target compiler:\n  kind: binary\n  entry: src/app/cli/main.spl\ntarget compiler_tests:\n  kind: test\n  roots: test/01_unit/compiler\n")).to_equal(true)
+        expect((parsed ?? []).len()).to_equal(2)
+    it("computes forward dependency closure"):
+        val a = label("//a:a")
+        val b = label("//b:b")
+        val c = label("//c:c")
+        val graph = target_graph([fixture_target("//a:a"), fixture_target("//b:b"), fixture_target("//c:c")], [TargetEdge(source: a, destination: b, kind: DependencyEdgeKind.link), TargetEdge(source: b, destination: c, kind: DependencyEdgeKind.runtime)])
+        expect(target_graph_deps(graph, a).len()).to_equal(2)
+    it("computes reverse rather than forward closure"):
+        val a = label("//a:a")
+        val b = label("//b:b")
+        val c = label("//c:c")
+        val graph = target_graph([fixture_target("//a:a"), fixture_target("//b:b"), fixture_target("//c:c")], [TargetEdge(source: a, destination: b, kind: DependencyEdgeKind.link), TargetEdge(source: b, destination: c, kind: DependencyEdgeKind.runtime)])
+        val reverse = target_graph_rdeps(graph, c)
+        expect(reverse.len()).to_equal(2)
+        expect(target_label_to_text(reverse[0])).to_equal("//b:b")

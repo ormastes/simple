@@ -1,7 +1,22 @@
 # `rt_dir_list` C platform-header helper collides with the real extern
 
 **Date:** 2026-08-10
-**Status:** OPEN — gate is RED at origin because of this row
+**Status:** RESOLVED 2026-08-17 — the rename this doc requested was applied
+(worker is `rt_dir_list_cpath` in both `unix_common.h:108` and
+`platform_win.h:120`, with in-header comments explaining the old collision).
+`scripts/check/check-extern-abi-signatures.shs` no longer emits any
+`rt_dir_list` mismatch row (verified 2026-08-17; the gate's residual FAIL is
+10 unrelated pre-existing rows — `rt_db_get/delete`, `rt_dir_glob`,
+`rt_file_find`, `rt_file_open` in `descriptor.rs`, `rt_invlpg`,
+`rt_process_run_with_limits`, `rt_struct_alloc`, `rt_write_cr3` — same family,
+separate work). Regression specs (green):
+`test/01_unit/runtime/rt_dir_list_header_no_collision_spec.spl` (repro +
+renamed-worker generalization) and mirror
+`test/unit/runtime/rt_dir_list_header_no_collision_spec.spl`. Related fix same
+day: the pure-Simple backends' 3-arg `rt_file_open` declaration was corrected
+to the 4-arg (ptr,len,ptr,len) ABI in `llvm_backend.spl:386` and
+`llvm_lib_translate.spl:286`, gated by
+`test/01_unit/compiler/backend/rt_extern_decl_arity_spec.spl` (+ mirror).
 **Family:** `doc/08_tracking/bug/rt_extern_abi_divergence_family_2026-08-10.md`
 
 ## Symptom

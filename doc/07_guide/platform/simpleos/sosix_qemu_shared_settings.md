@@ -112,14 +112,27 @@ The host-independent positioned-I/O slice lives under
 `src/os/sosix/{core,fs}`. Syscall 134/135 requests cross an authenticated,
 owned-copy provider/registry boundary and its backend contract permits only
 true `read_at`/`write_at`; compatibility code must not emulate positioned I/O
-with seek/read-or-write/restore. The x86_64 trap dispatcher now reaches strong
-Simple shim leaves and adopts the returned owner state, but boot initializes an
-explicit unavailable backend and no production owner installs a replacement.
-The current FAT32 driver has no positioned primitive, so this is a live
-fail-closed route rather than successful production I/O. Run
-`scripts/check/check-sosix-positioned-live-route.shs --admit KERNEL_ELF` after
-the next admitted rebuild. Focused specs require a provenance-admitted Stage-4
-CLI; exit 139 is not permission to use Stage 3 or the Rust seed.
+with seek/read-or-write/restore. FAT32 now owns explicit-offset primitives,
+generation-safe open-file objects, alias/retirement lifecycle hooks, and a
+concrete SOSIX backend retained by the x86_64 shim. Boot still requires an
+authenticated registry owner before dispatch; missing capabilities, owned
+buffer registrations, mounts, or live objects fail closed.
+
+After the next admitted rebuild, run the linked/focused gate once:
+
+```sh
+sh scripts/check/check-sosix-fat32-positioned-io.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF"
+```
+
+Then execute and documentize
+`test/03_system/os/qemu/sosix_fat32_positioned_io_spec.spl` once with that same
+runtime. The wrapper verifies the receipt and linked strong symbols before it
+runs the three focused specs. Exit 139, missing PASS summaries, a Stage 2/3
+binary, the Rust seed, or a handwritten manual cannot become runtime PASS.
+This focused admission is not QEMU guest or 24-row matrix evidence.
 
 Hosted display/input integration uses the sibling `src/os/sosix/host` seam.
 Surface state binds generation and frame sequence with bounded in-flight work;
@@ -128,15 +141,59 @@ declared adjacent pointer-motion case. Headless, SDL2, Win32, and Cocoa
 adapters are source-present and have focused specs, but source/static checks do
 not prove native fence completion or platform parity.
 
-The Windows PowerShell peer retains fail-closed `-Preflight`. Its x86_64 `-Run`
-source path prepares nonce-isolated media, extracts and hashes the exact mounted
-ELF, invokes QEMU with bounded serial capture, validates ordered
-listing/program/exit-37/exact-reap markers, and delegates to the canonical
-producer. The other five descriptors stop explicitly because their guest
-sources do not yet echo `/SOSIXNON.TXT`; sharing the workload nonce is not an
-acceptable substitute. None of these paths has been parsed or executed on
-Windows. After the guest readers land, a native operator runs `-AllGuests -Run`
-serially and retains six bundles.
+The Windows PowerShell peer retains fail-closed `-Preflight`. Every guest has a
+distinct bounded `/SOSIXNON.TXT` reader in source; sharing the workload nonce
+remains forbidden. Only x86_64 and ARM32 also have the complete ordered
+workload/listing/program/exit-37/reap source contract. The other four
+descriptors return `guest-run-contract-not-implemented:<guest>` before a ready
+receipt. The fail-closed source gate
+`sh scripts/check/check-sosix-collector-nonce-readers.shs --self-test` passed
+once on 2026-08-16. This is not native evidence: none of these paths has been
+parsed or executed on Windows. Complete the four guest contracts, then a native
+operator must run `-AllGuests -Run` serially and retain six bundles.
 FreeBSD first requires checksum-admitted 14.4 media. macOS TCG rows may prove
 correctness but never native timing. All non-PASS acceptance IDs remain active;
 this is an implementation handoff, not feature completion.
+
+## NVFS/DBFS positioned acceptance
+
+The current SimpleOS NVFS root provider is explicitly
+`nvfs-dbfs-backed-v1`. It uses NVFS metadata over a DBFS backing engine; do not
+describe it as an independent native NVFS disk engine. SOSIX-facing NVFS and
+DBFS backends use `MountTable` virtual handles through the global VFS
+positioned facade. Raw driver handles are not capabilities and must not be
+passed to SOSIX.
+
+Build the dedicated kernel, closed kernel receipt, image, and image manifest
+with the same qualified runtime:
+
+```sh
+SIMPLE_RUNTIME_PATH="$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+SIMPLE_STAGE4_PROVENANCE="$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+SIMPLE_RUNTIME_RECEIPT="$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+sh scripts/check/build-simpleos-nvfs-positioned-qemu.shs
+```
+
+Set `SOSIX_POSITIONED_KERNEL_ELF` to the emitted
+`build/os/simpleos_x86_64_nvfs_positioned.elf`. The adjacent receipt binds the
+dedicated entry, target, kernel hash, admitted compiler/runtime identity, and
+source revision. Then execute exactly once:
+
+```sh
+sh scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST"
+```
+
+The gate first verifies the source and rejection contracts, then runs the
+focused FAT32, DBFS, NVFS, and SOSIX owner specs, makes a private image copy,
+and boots that copy twice. PASS requires the exact provider marker, the
+cursor-independent read/write marker, the first-boot write marker, the
+second-boot persistence match, and retained runtime/kernel/image/QEMU plus
+boot1/boot2 transcript hashes.
+`--self-test`, missing inputs, Stage 2/3, the Rust seed, one boot, or a manual
+Markdown mirror is not live QEMU evidence and cannot promote a matrix row.

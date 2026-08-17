@@ -28,10 +28,66 @@
 use std.common.spec.evidence.counterpart.model.{
     ComponentManifest,
     ProviderKind,
-    ProviderManifest,
+    ProviderManifest, ProviderStatus,
     COUNTERPART_ABI_VERSION
 }
+use std.common.spec.evidence.format.exec_capture.{ExecCapture, exec_to_evidence}
+use std.common.spec.evidence.model.{CanonicalEvidence}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use os.drivers.gpu.board_vulkan.soc_profile.{board_vulkan_boundary_readback}
+
+pub val LAVAPIPE_READBACK_TIMEOUT_MS: i64 = 30000
+pub val LAVAPIPE_READBACK_MAX_OUTPUT_BYTES: i64 = 4194304
+
+pub struct LavapipeReadbackResult:
+    status: ProviderStatus
+    reference_image_bytes: text
+    diagnostic: text
+    evidence: CanonicalEvidence
+
+fn transcript_value(output: text, key: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with(key + "="):
+            return line.slice(key.len() + 1, line.len()).trim()
+    ""
+
+# Portable bounded execution: timeout and capture limits are enforced by the
+# runtime facade, not a host `timeout` utility. Only a successful Vulkan
+# device-readback transcript can supply the reference image identity.
+pub fn lavapipe_readback_worker(command: text, args: [text]) -> LavapipeReadbackResult:
+    val (stdout, stderr, code) = process_run_bounded(
+        command, args, LAVAPIPE_READBACK_TIMEOUT_MS,
+        LAVAPIPE_READBACK_MAX_OUTPUT_BYTES)
+    val capture = ExecCapture(
+        command: command, args: args, exit_code: code,
+        stdout: stdout, stderr: stderr, duration_ms: 0,
+        launch_ok: code != -1,
+        launch_error: if code == -1: "process spawn failed" else: "")
+    val evidence = exec_to_evidence(capture, "board_vulkan.lavapipe_readback")
+    if code == -1 or code == 126 or code == 127:
+        return LavapipeReadbackResult(status: ProviderStatus.unavailable, reference_image_bytes: "", diagnostic: stderr, evidence: evidence)
+    if code != 0:
+        return LavapipeReadbackResult(status: ProviderStatus.crashed, reference_image_bytes: "", diagnostic: stderr, evidence: evidence)
+    val checksum = transcript_value(stdout, "rect_actual_checksum")
+    if transcript_value(stdout, "overall") != "pass" or
+       transcript_value(stdout, "backend_name") != "vulkan" or
+       transcript_value(stdout, "rect_readback_source") != "device_readback" or
+       checksum == "":
+        return LavapipeReadbackResult(
+            status: ProviderStatus.crashed, reference_image_bytes: "",
+            diagnostic: "worker produced no admissible device readback", evidence: evidence)
+    LavapipeReadbackResult(
+        status: ProviderStatus.executed, reference_image_bytes: "checksum:" + checksum,
+        diagnostic: "", evidence: evidence)
+
+# Production owner: pin lavapipe through `env`, then execute the caller's
+# admitted cached Engine2D readback worker artifact. Its checksum is computed
+# from captured device pixels; no expected value is passed into this function.
+pub fn lavapipe_readback_reference(worker_binary: text) -> LavapipeReadbackResult:
+    lavapipe_readback_worker("/usr/bin/env", [
+        "VK_ICD_FILENAMES=" + lavapipe_icd_manifest_path(),
+        worker_binary
+    ])
 
 pub fn lavapipe_provider_id() -> text:
     "lavapipe"

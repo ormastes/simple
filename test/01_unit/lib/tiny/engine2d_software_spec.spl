@@ -1,0 +1,102 @@
+# @cover src/lib/nogc_sync_mut/tiny/engine2d/software.spl 80%
+# @cover src/lib/nogc_sync_mut/tiny/engine2d/pixel_format.spl 80%
+use std.spec
+use std.tiny.common.abi.{TinyDrawStreamV1, TINY_2D_CAP_DRAW_STREAM_V1, TINY_2D_CAP_READBACK, TINY_DRAW_STREAM_V1_NAME_HASH}
+use std.tiny.common.status.{TINY_OK, TINY_ERR_INVALID, TINY_ERR_MALFORMED, TINY_ERR_UNSUPPORTED}
+use std.tiny.draw.opcode.*
+use std.tiny.draw.writer.{TinyDrawWriter}
+use std.tiny.engine2d.pixel_format.*
+use std.tiny.engine2d.software.{TinySoftware2D}
+use std.tiny.wm_contract.ports.{Tiny2DBackendV1}
+
+fn _stream(words: [i32]) -> TinyDrawStreamV1:
+    TinyDrawStreamV1.create(words, TINY_2D_CAP_DRAW_STREAM_V1)
+
+fn _scene_stream() -> TinyDrawStreamV1:
+    var writer = TinyDrawWriter.create(96)
+    writer.clear(-16777216)
+    writer.push_translate(1, 1)
+    writer.push_clip(0, 0, 3, 3)
+    writer.fill_rect(-1, -1, 4, 4, -65536)
+    writer.border_rect(0, 0, 3, 3, -16711936)
+    writer.glyph_mono(0, 0, 3, 2, -1, [5, 2])
+    writer.blit_argb(1, 1, 2, 1, [-16776961, -256])
+    writer.pop_clip()
+    writer.pop_translate()
+    writer.end_stream()
+    writer.envelope(TINY_2D_CAP_DRAW_STREAM_V1)
+
+describe "Tiny software 2D ARGB backend":
+    it "executes clip translate fill border glyph and blit deterministically":
+        var backend = TinySoftware2D.create(5, 5, TINY_PIXEL_ARGB8888)
+        val status = backend.execute(_scene_stream())
+        expect(status.code).to_equal(TINY_OK)
+        expect(backend.pixel_at(0, 0)).to_equal(-16777216)
+        expect(backend.pixel_at(1, 1)).to_equal(-1)
+        expect(backend.pixel_at(2, 2)).to_equal(-16776961)
+        expect(backend.pixel_at(3, 2)).to_equal(-256)
+        expect(backend.pixel_at(4, 4)).to_equal(-16777216)
+        expect(backend.checksum()).to_equal(1450534539)
+        val surface = backend.rendered_surface()
+        expect(surface.source_stream_hash).to_equal(TINY_DRAW_STREAM_V1_NAME_HASH)
+        expect(surface.source_word_count).to_equal(_scene_stream().word_count)
+        expect(surface.pixel_count).to_equal(25)
+        expect(surface.pixels[12]).to_equal(-16776961)
+        expect(surface.checksum).to_equal(backend.checksum())
+        expect(surface.backend_capability_bits & TINY_2D_CAP_READBACK).to_equal(TINY_2D_CAP_READBACK)
+
+    it "clips drawing to the surface":
+        var backend = TinySoftware2D.create(2, 2, TINY_PIXEL_ARGB8888)
+        val stream: [i32] = [TINY_DRAW_FILL_RECT, -2, -2, 3, 3, 17, TINY_DRAW_END]
+        expect(backend.execute_stream(_stream(stream)).code).to_equal(TINY_OK)
+        expect(backend.pixel_at(0, 0)).to_equal(17)
+        expect(backend.pixel_at(1, 0)).to_equal(0)
+
+    it "fails closed without mutating on malformed input":
+        var backend = TinySoftware2D.create(2, 2, TINY_PIXEL_ARGB8888)
+        val before = backend.checksum()
+        val status = backend.execute_stream(_stream([TINY_DRAW_FILL_RECT, 0, 0]))
+        expect(status.code).to_equal(TINY_ERR_MALFORMED)
+        expect(backend.checksum()).to_equal(before)
+
+    it "rejects invalid surfaces and unsupported formats":
+        var invalid = TinySoftware2D.create(0, 2, TINY_PIXEL_ARGB8888)
+        expect(invalid.execute_stream(_stream([TINY_DRAW_END])).code).to_equal(TINY_ERR_INVALID)
+        var overflow = TinySoftware2D.create(2147483647, 2, TINY_PIXEL_ARGB8888)
+        expect(overflow.execute_stream(_stream([TINY_DRAW_END])).code).to_equal(TINY_ERR_INVALID)
+        expect(overflow.pixel_at(0, 1)).to_equal(0)
+        var unsupported = TinySoftware2D.create(2, 2, 99)
+        expect(unsupported.execute_stream(_stream([TINY_DRAW_END])).code).to_equal(TINY_ERR_UNSUPPORTED)
+
+    it "rejects unsupported stream capabilities before raster mutation":
+        var backend = TinySoftware2D.create(2, 2, TINY_PIXEL_ARGB8888)
+        val before = backend.checksum()
+        val unsupported = TinyDrawStreamV1.create([TINY_DRAW_CLEAR, 7, TINY_DRAW_END], 16)
+        expect(backend.execute_stream(unsupported).code).to_equal(TINY_ERR_UNSUPPORTED)
+        expect(backend.checksum()).to_equal(before)
+        expect(backend.frame_id).to_equal(0)
+
+    it "saturates nested translation without coordinate wraparound":
+        var backend = TinySoftware2D.create(3, 1, TINY_PIXEL_ARGB8888)
+        var writer = TinyDrawWriter.create(24)
+        writer.clear(1)
+        writer.push_translate(2147483647, 0)
+        writer.push_translate(2, 0)
+        writer.fill_rect(-2147483647, 0, 1, 1, 9)
+        writer.pop_translate()
+        writer.pop_translate()
+        writer.end_stream()
+        expect(backend.execute_stream(writer.envelope(TINY_2D_CAP_DRAW_STREAM_V1)).code).to_equal(TINY_OK)
+        expect(backend.pixel_at(0, 0)).to_equal(9)
+        expect(backend.pixel_at(1, 0)).to_equal(1)
+
+describe "Tiny software 2D RGB565 backend":
+    it "converts primary colors and produces a deterministic checksum":
+        expect(tiny_argb_to_rgb565(-65536)).to_equal(63488)
+        expect(tiny_rgb565_to_argb(63488)).to_equal(-65536)
+        var backend = TinySoftware2D.create(2, 1, TINY_PIXEL_RGB565)
+        val stream: [i32] = [TINY_DRAW_BLIT_ARGB, 0, 0, 2, 1, -65536, -16711936, TINY_DRAW_END]
+        expect(backend.execute_stream(_stream(stream)).code).to_equal(TINY_OK)
+        expect(backend.pixel_at(0, 0)).to_equal(63488)
+        expect(backend.pixel_at(1, 0)).to_equal(2016)
+        expect(backend.checksum()).to_equal(1763174514)

@@ -32,6 +32,9 @@ native verdict and do not substitute for the full portability matrix.
 `test/03_system/feature/language/actor_channel_authority_spec.spl` adds partial
 NFR-PAR-002/NFR-PAR-003 coverage through one-slot mailbox/reply budgets, retained
 high-water evidence, returned credit after consumption, and fail-closed unknown,
-full, and stopped operations. Its authored mirror is
+full, stopped, and owner-domain operations. The populated-state identity-mismatch
+scenario proves query/reply lifecycle rejection does not mutate retained work;
+it is not synchronized cross-thread ingress evidence. Its authored mirror is
 `doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`; it is
-not NFR-PAR-006 parity evidence and remains native/docgen blocked.
+not NFR-PAR-006 parity evidence and remains TEST_BLOCKED because the admitted
+Stage-2 compiler has no qualified self-hosted test/docgen/maintenance surface.

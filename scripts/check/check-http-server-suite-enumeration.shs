@@ -1,0 +1,201 @@
+#!/bin/sh
+# http_server suite-enumeration gate (lane W14-C, 2026-08-17).
+#
+# WHY: the enterprise lane's recorded spec suite in
+# doc/00_llm_process/feature_expert/enterprise_suite/skill.md was
+# SELF-SELECTED — a hand-maintained list of `bin/simple test <path>` lines.
+# On 2026-08-17 an on-disk enumeration found 20 `*/http_server/*_spec.spl`
+# files the recorded suite had never run, 9 of them RED, while "the suite is
+# green" was reported for months. A hand list drifts silently: a spec that is
+# never named is never run, and nothing complains.
+#
+# The fix is DISCOVERY: the suite's http_server tier is defined by a glob over
+# the tree, so a new spec file is in the suite the moment it lands. This gate
+# exists to keep it that way — it FAILS if someone replaces the discovery loop
+# with a hand list again, and in that case falls back to a literal path diff so
+# the specific missing specs are named.
+#
+# Scope note: like check-c-runtime-compiles-push.shs this gate checks a TREE
+# (--root DIR, default the working tree), not a BASE..NEW delta — enumeration
+# completeness is a property of a tree, and a push that only ADDS a spec file
+# would be invisible to a changed-files-only scan.
+#
+# Canonical set = every `*_spec.spl` whose path contains `http_server`,
+# EXCLUDING `test/unit/**`, which is the legacy duplicate mirror fenced by
+# scripts/check/check-test-tree-divergence.shs (13 mirror files, all with
+# canonical `test/01_unit/**` counterparts, 8 of them stale/diverged).
+#
+# Verdict convention (matches the other scripts/check gates; last line of stdout):
+#   PASS — <n> spec(s) checked, list matches tree     exit 0
+#   FAIL — <details>                                  exit 1
+#   ERROR — nothing was checked (...)                 exit 2
+# Non-vacuity is absolute: 0 specs found is ERROR, never PASS.
+# --selftest runs before every scan and is fatal.
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+
+DOC_DEFAULT="doc/00_llm_process/feature_expert/enterprise_suite/skill.md"
+
+# The exact discovery line the recorded suite must carry. Whitespace-normalized
+# before comparison; nothing else about the markdown is parsed. Deliberately NOT
+# an eval of shell out of a doc — exact-line-or-literal-diff is the whole parser.
+DISCOVERY_LINE='for s in $(find test -path "*http_server*" -name "*_spec.spl" -not -path "test/unit/*" | sort); do bin/simple test "$s"; done'
+
+# on_disk_specs ROOTDIR -> newline-separated sorted canonical spec paths.
+on_disk_specs() {
+    # Only the `test/` tree is the suite's source of truth: a repo root also
+    # contains build/ dirs and lane worktrees whose copies are not the suite.
+    ( cd "$1" 2>/dev/null || return 0
+      [ -d test ] || return 0
+      find test -path '*http_server*' -name '*_spec.spl' \
+           -not -path 'test/unit/*' 2>/dev/null | sort )
+}
+
+# normalize: collapse whitespace runs, strip leading/trailing blanks and quotes
+# so `'a'` and `"a"` compare equal.
+normalize() { tr -s ' \t' ' ' | sed "s/[\"']//g; s/^ *//; s/ *$//"; }
+
+# doc_has_discovery DOCFILE -> 0 when the doc carries the discovery loop.
+doc_has_discovery() {
+    want=$(printf '%s\n' "$DISCOVERY_LINE" | normalize)
+    normalize < "$1" | grep -qxF "$want"
+}
+
+# doc_recorded_specs DOCFILE -> literal http_server spec paths named in the doc.
+doc_recorded_specs() {
+    grep -o 'test/[A-Za-z0-9_./-]*http_server[A-Za-z0-9_./-]*_spec\.spl' "$1" \
+      | grep -v '^test/unit/' | sort -u
+}
+
+# scan ROOTDIR DOCFILE -> prints verdict, returns 0/1/2.
+scan() {
+    s_root=$1; s_doc=$2
+    if [ ! -d "$s_root" ]; then
+        echo "ERROR — nothing was checked (root '$s_root' is not a directory)"
+        return 2
+    fi
+    if [ ! -f "$s_doc" ]; then
+        echo "ERROR — nothing was checked (recorded-suite doc '$s_doc' missing)"
+        return 2
+    fi
+    s_disk=$(on_disk_specs "$s_root")
+    s_n=$(printf '%s' "$s_disk" | grep -c . )
+    if [ "$s_n" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 http_server spec files under '$s_root')"
+        return 2
+    fi
+
+    if doc_has_discovery "$s_doc"; then
+        echo "PASS — $s_n spec(s) checked, list matches tree (discovery loop present in $s_doc; every http_server spec is in the suite by construction)"
+        return 0
+    fi
+
+    # Hand-list fallback: literal path diff, both directions.
+    s_tmp=$(mktemp -d "${TMPDIR:-/tmp}/httpsuite_scan.XXXXXX") || {
+        echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    doc_recorded_specs "$s_doc" > "$s_tmp/recorded"
+    printf '%s\n' "$s_disk" > "$s_tmp/disk"
+    s_missing=$(grep -vxF -f "$s_tmp/recorded" "$s_tmp/disk" 2>/dev/null | grep .)
+    s_stale=$(while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        [ -f "$s_root/$p" ] || echo "$p"
+    done < "$s_tmp/recorded" | grep .)
+    rm -rf "$s_tmp"
+    if [ -n "$s_missing" ] || [ -n "$s_stale" ]; then
+        s_msg="FAIL — $s_n spec(s) checked in '$s_root', recorded suite in $s_doc uses a hand list and it does not match the tree"
+        [ -n "$s_missing" ] && s_msg="$s_msg; $(printf '%s' "$s_missing" | grep -c .) on disk but NOT recorded: $(printf '%s' "$s_missing" | tr '\n' ' ')"
+        [ -n "$s_stale" ] && s_msg="$s_msg; $(printf '%s' "$s_stale" | grep -c .) recorded but NOT on disk: $(printf '%s' "$s_stale" | tr '\n' ' ')"
+        s_msg="$s_msg; fix by restoring the discovery loop"
+        echo "$s_msg"
+        return 1
+    fi
+    echo "PASS — $s_n spec(s) checked, list matches tree (hand list in $s_doc is currently complete; prefer the discovery loop — a hand list drifts silently)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — runs before every scan, fatal. Four fixtures:
+#   1 discovery-loop doc          -> PASS
+#   2 hand list missing one spec  -> FAIL naming it
+#   3 hand list naming a deleted spec -> FAIL naming it
+#   4 tree with 0 http_server specs   -> ERROR (never a vacuous pass)
+# ---------------------------------------------------------------------------
+selftest() {
+    st_tmp=$(mktemp -d "${TMPDIR:-/tmp}/httpsuite_st.XXXXXX") || return 1
+    st_fail=0
+
+    st_tree="$st_tmp/tree"
+    mkdir -p "$st_tree/test/01_unit/lib/http_server" \
+             "$st_tree/test/01_unit/lib/nogc_async_mut/http_server" \
+             "$st_tree/test/unit/lib/http_server"
+    : > "$st_tree/test/01_unit/lib/http_server/alpha_spec.spl"
+    : > "$st_tree/test/01_unit/lib/nogc_async_mut/http_server/beta_spec.spl"
+    : > "$st_tree/test/unit/lib/http_server/alpha_spec.spl"   # mirror, must be ignored
+
+    # fixture 1
+    printf 'blah\n%s\nblah\n' "$DISCOVERY_LINE" > "$st_tmp/doc_ok.md"
+    st_out=$(scan "$st_tree" "$st_tmp/doc_ok.md"); st_rc=$?
+    case "$st_out" in
+        "PASS — 2 spec(s) checked, list matches tree"*) : ;;
+        *) echo "selftest FIXTURE 1 (discovery loop) expected PASS with 2 specs, got: $st_out"; st_fail=1 ;;
+    esac
+    [ $st_rc -eq 0 ] || { echo "selftest FIXTURE 1 exit $st_rc, want 0"; st_fail=1; }
+
+    # fixture 2 — hand list omits beta_spec
+    printf 'bin/simple test test/01_unit/lib/http_server/alpha_spec.spl\n' > "$st_tmp/doc_missing.md"
+    st_out=$(scan "$st_tree" "$st_tmp/doc_missing.md"); st_rc=$?
+    case "$st_out" in
+        FAIL*beta_spec.spl*) : ;;
+        *) echo "selftest FIXTURE 2 (missing spec) expected FAIL naming beta_spec, got: $st_out"; st_fail=1 ;;
+    esac
+    [ $st_rc -eq 1 ] || { echo "selftest FIXTURE 2 exit $st_rc, want 1"; st_fail=1; }
+
+    # fixture 3 — hand list is complete but names a deleted spec
+    printf 'bin/simple test test/01_unit/lib/http_server/alpha_spec.spl\nbin/simple test test/01_unit/lib/nogc_async_mut/http_server/beta_spec.spl\nbin/simple test test/01_unit/lib/http_server/gone_spec.spl\n' > "$st_tmp/doc_stale.md"
+    st_out=$(scan "$st_tree" "$st_tmp/doc_stale.md"); st_rc=$?
+    case "$st_out" in
+        FAIL*gone_spec.spl*) : ;;
+        *) echo "selftest FIXTURE 3 (stale entry) expected FAIL naming gone_spec, got: $st_out"; st_fail=1 ;;
+    esac
+    [ $st_rc -eq 1 ] || { echo "selftest FIXTURE 3 exit $st_rc, want 1"; st_fail=1; }
+
+    # fixture 4 — empty tree must be ERROR, never a pass
+    mkdir -p "$st_tmp/empty"
+    st_out=$(scan "$st_tmp/empty" "$st_tmp/doc_ok.md"); st_rc=$?
+    case "$st_out" in
+        ERROR*) : ;;
+        *) echo "selftest FIXTURE 4 (empty tree) expected ERROR, got: $st_out"; st_fail=1 ;;
+    esac
+    [ $st_rc -eq 2 ] || { echo "selftest FIXTURE 4 exit $st_rc, want 2"; st_fail=1; }
+
+    rm -rf "$st_tmp"
+    if [ $st_fail -eq 0 ]; then
+        echo "selftest: 4/4 fixtures OK"
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+SCAN_ROOT=$ROOT
+SCAN_DOC=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --root) SCAN_ROOT=${2:-}; shift 2 ;;
+        --doc)  SCAN_DOC=${2:-};  shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument '$1')"; exit 2 ;;
+    esac
+done
+[ -n "$SCAN_DOC" ] || SCAN_DOC="$SCAN_ROOT/$DOC_DEFAULT"
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed; gate is not trustworthy)"
+    exit 2
+fi
+[ $SELFTEST_ONLY -eq 1 ] && exit 0
+
+scan "$SCAN_ROOT" "$SCAN_DOC"
+exit $?

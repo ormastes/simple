@@ -725,6 +725,36 @@ pub(super) fn eval_op_expr(
                         Arc::make_mut(&mut arc).extend(b.iter().cloned());
                         Ok(Value::Array(arc))
                     }
+                    // Packed byte-array concatenation: without these arms
+                    // ByteArray fell through to the numeric-coercion fallback
+                    // and errored "cannot convert array to int" (bug:
+                    // seed_optional_query_comparison_divergence_2026-08-16.md
+                    // § Divergence D). The mixed arms cover `var acc: [u8] = []`
+                    // — an empty array LITERAL lowers to a generic Array, so
+                    // the first `acc + bytes` in a loop mixes representations.
+                    (
+                        Value::ByteArray(a) | Value::FrozenByteArray(a),
+                        Value::ByteArray(b) | Value::FrozenByteArray(b),
+                    ) => {
+                        let mut joined = a.as_ref().clone();
+                        joined.extend_from_slice(b);
+                        Ok(Value::ByteArray(Arc::new(joined)))
+                    }
+                    (Value::Array(a), Value::ByteArray(b) | Value::FrozenByteArray(b))
+                        if a.iter().all(|v| matches!(v.as_int(), Ok(0..=255))) =>
+                    {
+                        let mut joined: Vec<u8> =
+                            a.iter().map(|v| v.as_int().unwrap_or(0) as u8).collect();
+                        joined.extend_from_slice(b);
+                        Ok(Value::ByteArray(Arc::new(joined)))
+                    }
+                    (Value::ByteArray(a) | Value::FrozenByteArray(a), Value::Array(b))
+                        if b.iter().all(|v| matches!(v.as_int(), Ok(0..=255))) =>
+                    {
+                        let mut joined = a.as_ref().clone();
+                        joined.extend(b.iter().map(|v| v.as_int().unwrap_or(0) as u8));
+                        Ok(Value::ByteArray(Arc::new(joined)))
+                    }
                     _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? + as_f32(&right_val)?)),
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => {

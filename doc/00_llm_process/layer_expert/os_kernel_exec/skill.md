@@ -342,8 +342,12 @@ The current image owner must emit embedded
 `simpleos_toolchain_deployment_manifest` component identity and a separate
 external `simpleos_toolchain_image_admission_receipt` after the image closes.
 The planned combined desktop/toolchain wrapper is
-`scripts/check/check-simpleos-toolchain-desktop-boot.shs`; it remains absent and
-B-DESKTOP-LIVE. One OVMF/GRUB `gui_entry_desktop.spl` lifetime must bind
+`scripts/check/check-simpleos-toolchain-desktop-boot.shs`. Its canonical
+Stage-4 admission, fail-closed preflight, and shared sorted/hashed receipt
+validator are implemented and pass a 16-case hermetic self-test, but live mode
+remains B-DESKTOP-LIVE: the canonical fullscreen owner uses `-net none`, exits
+after capture, and `gui_entry_desktop.spl` does not cooperatively poll SSHD. One
+OVMF/GRUB `gui_entry_desktop.spl` lifetime must bind
 desktop/scanout/framebuffer and mounted-filesystem toolchain execution to the
 same kernel/image hashes. Canonical details and blocker truth:
 `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

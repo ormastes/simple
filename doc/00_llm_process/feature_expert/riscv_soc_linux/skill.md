@@ -178,8 +178,14 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
 - `rv64gc_core_product*` renamed `rv64imac_core_product*` (was a false `gc`
   claim over an IMAC netlist). The `simple_rv{32,64}gc_core` family remains
   unrenamed (woven into formal gates; needs its own lane).
-- Payload addresses `0x8002AB5C/6C/8C` in `rv32_exec_core.vhd` are UNREACHABLE
-  dead code (`SCRATCH_BASE_WORD=16384` vs `word_index()` max 16383).
+- `REQ-RISCV-HARDEN-005` removes the unreachable RV32 scratch array and the
+  payload addresses `0x8002AB5C/6C/8C` from the structured generator and
+  pinned golden. Do not restore address-specific datapath exceptions. The
+  fail-closed system contract is
+  `test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl`;
+  its manual and exact resume commands live under the matching
+  `doc/06_spec/03_system/...` mirror and
+  `doc/03_plan/sys_test/simple_riscv_hardening_ac5.md`.
 - Full ledger: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`.
 
 ## 2026-08-06 riscv64 kernel-closure campaign

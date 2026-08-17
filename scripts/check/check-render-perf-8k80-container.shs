@@ -6,9 +6,25 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build/render_perf/8k80_container}"
 BUDGET_NS=12500000
 CAMPAIGN_CONTRACT_ID=render-perf-8k80-container-v3
-CAMPAIGN_CONTRACT_HASH="$(printf '%s' 'render-perf-8k80-container-v3;7680x4320;budget_ns=12500000;a4=drawir-prepared-retained-damage;a5=web-semantic-vulkan-retained-damage' | sha256sum | awk '{print $1}')"
-A4_DRAWIR_WORKLOAD_HASH="$(printf '%s' 'a4;drawir-prepared-content-bound-damage;7680x4320;frames=20;damage=128,128,256,128;commands=514;considered=2;culled=512;rendered=2;skipped=512' | sha256sum | awk '{print $1}')"
-A5_SEMANTIC_WORKLOAD_HASH="$(printf '%s' 'a5;web-semantic-vulkan-retained-damage-v1;7680x4320;damage=128,128,256,128;warmup=1;samples=60;full-seed-before-timing;device-readback-oracle;timed-readback-bytes=0' | sha256sum | awk '{print $1}')"
+
+sha256_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    else shasum -a 256 | awk '{print $1}'
+    fi
+}
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+replace_in_file() {
+    expression=$1 file=$2 temporary="${2}.replace.$$"
+    sed "$expression" "$file" > "$temporary" && mv -f "$temporary" "$file"
+}
+
+CAMPAIGN_CONTRACT_HASH="$(printf '%s' 'render-perf-8k80-container-v3;7680x4320;budget_ns=12500000;a4=drawir-prepared-retained-damage;a5=web-semantic-vulkan-retained-damage' | sha256_stream)"
+A4_DRAWIR_WORKLOAD_HASH="$(printf '%s' 'a4;drawir-prepared-content-bound-damage;7680x4320;frames=20;damage=128,128,256,128;commands=514;considered=2;culled=512;rendered=2;skipped=512' | sha256_stream)"
+A5_SEMANTIC_WORKLOAD_HASH="$(printf '%s' 'a5;web-semantic-vulkan-retained-damage-v1;7680x4320;damage=128,128,256,128;warmup=1;samples=60;full-seed-before-timing;device-readback-oracle;timed-readback-bytes=0' | sha256_stream)"
 
 die() { echo "render_perf_8k80_container_status=failed reason=$1" >&2; exit 1; }
 blocked() { echo "render_perf_8k80_container_status=blocked reason=$1" >&2; exit 2; }
@@ -161,14 +177,16 @@ aggregate() {
         echo a4_drawir_workload_hash="$A4_DRAWIR_WORKLOAD_HASH"
         echo a5_semantic_workload_hash="$A5_SEMANTIC_WORKLOAD_HASH"
         echo source_hash="$(value "$draw" source_hash)"
-        echo drawir_receipt_hash="$(sha256sum "$draw" | awk '{print $1}')"
-        echo producer_receipt_hash="$(sha256sum "$producer" | awk '{print $1}')"
-        [ -z "$physical" ] || echo physical_receipt_hash="$(sha256sum "$physical" | awk '{print $1}')"
-        [ ! -f "$tmp/evidence_manifest.sha256" ] || echo evidence_manifest_hash="$(sha256sum "$tmp/evidence_manifest.sha256" | awk '{print $1}')"
+        echo drawir_receipt_hash="$(sha256_file "$draw")"
+        echo producer_receipt_hash="$(sha256_file "$producer")"
+        [ -z "$physical" ] || echo physical_receipt_hash="$(sha256_file "$physical")"
+        [ ! -f "$tmp/evidence_manifest.sha256" ] || echo evidence_manifest_hash="$(sha256_file "$tmp/evidence_manifest.sha256")"
     } > "$tmp/aggregate_receipt.env"
     mv "$tmp" "$final"
     chmod -R a-w "$final"
-    link="$BUILD_DIR/.current.$$"; ln -s "runs/$run_id" "$link"; mv -Tf "$link" "$BUILD_DIR/current"
+    # BSD mv follows a destination symlink to its directory target. ln -sfn
+    # replaces the link itself on both Darwin and GNU hosts.
+    ln -sfn "runs/$run_id" "$BUILD_DIR/current"
     trap - EXIT HUP INT TERM
     echo "render_perf_8k80_container_status=$status aggregate_receipt=$BUILD_DIR/current/aggregate_receipt.env"
     [ "$status" = pass ] || return 2
@@ -283,67 +301,67 @@ self_test() {
     BUILD_DIR="$t/out"; export BUILD_DIR
     rc=0; aggregate "$t/draw" "$t/producer" >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 2 ] && grep -Fxq status=blocked-physical "$t/out/current/aggregate_receipt.env" && [ ! -e "$t/out/current/physical_receipt.env" ] || die selftest-blocked-physical
-    for f in "$t/draw" "$t/producer" "$t/physical"; do sed -i 's/run_id=fixture-run/run_id=fixture-run2/' "$f"; done
+    for f in "$t/draw" "$t/producer" "$t/physical"; do replace_in_file 's/run_id=fixture-run/run_id=fixture-run2/' "$f"; done
     aggregate "$t/draw" "$t/producer" "$t/physical" >/dev/null
     grep -Fxq status=pass "$t/out/current/aggregate_receipt.env" && [ -f "$t/out/current/physical_receipt.env" ] || die selftest-physical-pass
-    for f in "$t/draw" "$t/producer"; do sed -i 's/run_id=fixture-run2/run_id=fixture-run3/' "$f"; done
+    for f in "$t/draw" "$t/producer"; do replace_in_file 's/run_id=fixture-run2/run_id=fixture-run3/' "$f"; done
     rc=0; aggregate "$t/draw" "$t/producer" >/dev/null 2>&1 || rc=$?
     [ "$rc" -eq 2 ] && [ "$(readlink "$t/out/current")" = runs/fixture-run3 ] && [ ! -e "$t/out/current/physical_receipt.env" ] || die selftest-current-swap-stale-physical
     ! validate_drawir "$t/missing" || die selftest-missing-input-accepted
     cp "$t/draw" "$t/bad"; echo status=pass >> "$t/bad"
     ! validate_drawir "$t/bad" || die selftest-duplicate-key-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/source_hash=aaaa/source_hash=ffff/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/source_hash=aaaa/source_hash=ffff/' "$t/bad"
     [ "$(value "$t/draw" source_hash)" != "$(value "$t/bad" source_hash)" ] || die selftest-source-mismatch-missed
-    cp "$t/producer" "$t/bad"; sed -i 's/workload_hash=.*/workload_hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/workload_hash=.*/workload_hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-workload-mismatch-accepted
-    cp "$t/draw" "$t/bad"; sed -i "s/workload_hash=.*/workload_hash=$A5_SEMANTIC_WORKLOAD_HASH/" "$t/bad"
+    cp "$t/draw" "$t/bad"; replace_in_file "s/workload_hash=.*/workload_hash=$A5_SEMANTIC_WORKLOAD_HASH/" "$t/bad"
     ! validate_drawir "$t/bad" || die selftest-cross-lane-workload-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/campaign_contract_hash=.*/campaign_contract_hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/campaign_contract_hash=.*/campaign_contract_hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-campaign-contract-mismatch-accepted
     for counter in commands_considered_per_frame commands_culled_per_frame commands_rendered_per_frame commands_skipped_per_frame commands_considered_total commands_culled_total commands_rendered_total commands_skipped_total; do
-        cp "$t/draw" "$t/bad"; sed -i "s/^${counter}=.*/${counter}=999/" "$t/bad"
+        cp "$t/draw" "$t/bad"; replace_in_file "s/^${counter}=.*/${counter}=999/" "$t/bad"
         ! validate_drawir "$t/bad" || die "selftest-inexact-${counter}-accepted"
     done
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_fallback_used=false/producer_receipt_fallback_used=true/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_fallback_used=false/producer_receipt_fallback_used=true/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-fallback-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_completion_known=true/producer_receipt_completion_known=false/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_completion_known=true/producer_receipt_completion_known=false/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-unknown-completion-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/max_rss_kib=23456/max_rss_kib=0/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/max_rss_kib=23456/max_rss_kib=0/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-zero-metric-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_checksum_end=789/producer_receipt_checksum_end=0/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_checksum_end=789/producer_receipt_checksum_end=0/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-zero-checksum-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_timed_readback_bytes=0/producer_receipt_timed_readback_bytes=4/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_timed_readback_bytes=0/producer_receipt_timed_readback_bytes=4/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-timed-readback-accepted
     for counter in producer_receipt_device_submit_count producer_receipt_device_fence_count; do
-        cp "$t/producer" "$t/bad"; sed -i "s/^${counter}=62/${counter}=0/" "$t/bad"
+        cp "$t/producer" "$t/bad"; replace_in_file "s/^${counter}=62/${counter}=0/" "$t/bad"
         ! validate_producer "$t/bad" || die "selftest-zero-${counter}-accepted"
-        cp "$t/producer" "$t/bad"; sed -i "s/^${counter}=62/${counter}=61/" "$t/bad"
+        cp "$t/producer" "$t/bad"; replace_in_file "s/^${counter}=62/${counter}=61/" "$t/bad"
         ! validate_producer "$t/bad" || die "selftest-wrong-${counter}-accepted"
     done
-    cp "$t/draw" "$t/bad"; sed -i 's/p95_ns=2000000/p95_ns=13000000/' "$t/bad"
+    cp "$t/draw" "$t/bad"; replace_in_file 's/p95_ns=2000000/p95_ns=13000000/' "$t/bad"
     ! validate_drawir "$t/bad" || die selftest-over-budget-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_p95_ns=2000000/producer_receipt_p95_ns=13000000/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_p95_ns=2000000/producer_receipt_p95_ns=13000000/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-over-budget-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_damage_width=256/producer_receipt_damage_width=257/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_damage_width=256/producer_receipt_damage_width=257/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-damage-drift-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_checksum_parity=true/producer_receipt_checksum_parity=false/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_checksum_parity=true/producer_receipt_checksum_parity=false/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-checksum-mismatch-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_revision_end=2/producer_receipt_revision_end=3/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_revision_end=2/producer_receipt_revision_end=3/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-nonadjacent-revision-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_device_identity=42/producer_receipt_device_identity=0/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_device_identity=42/producer_receipt_device_identity=0/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-zero-device-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_checksum_start=123/producer_receipt_checksum_start=0/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/producer_receipt_checksum_start=123/producer_receipt_checksum_start=0/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-zero-start-checksum-accepted
     cp "$t/producer" "$t/bad"; echo unknown_key=x >> "$t/bad"
     ! validate_producer "$t/bad" || die selftest-unknown-key-accepted
-    cp "$t/producer" "$t/bad"; sed -i 's/captured_at_utc=.*/captured_at_utc=1/' "$t/bad"
+    cp "$t/producer" "$t/bad"; replace_in_file 's/captured_at_utc=.*/captured_at_utc=1/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-stale-receipt-accepted
-    cp "$t/physical" "$t/bad"; sed -i 's/device_hash=cccc/device_hash=ffff/' "$t/bad"
+    cp "$t/physical" "$t/bad"; replace_in_file 's/device_hash=cccc/device_hash=ffff/' "$t/bad"
     [ "$(value "$t/producer" device_hash)" != "$(value "$t/bad" device_hash)" ] || die selftest-device-mismatch-missed
     printf '%s\n' fixture-compiler > "$t/compiler"
     {
       echo status=pass
-      echo compiler_hash="$(sha256sum "$t/compiler" | awk '{print $1}')"
+      echo compiler_hash="$(sha256_file "$t/compiler")"
       echo source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       echo compiler_lineage=pure-simple-stage4
       echo compiler_admission=source-matched-native-build-pass
@@ -374,7 +392,7 @@ validate_compiler_provenance() {
     allowed='status compiler_hash source_hash compiler_lineage compiler_admission'
     reject_unknown "$f" "$allowed" || return 1
     [ "$(value "$f" status)" = pass ] || return 1
-    [ "$(value "$f" compiler_hash)" = "$(sha256sum "$compiler" | awk '{print $1}')" ] || return 1
+    [ "$(value "$f" compiler_hash)" = "$(sha256_file "$compiler")" ] || return 1
     [ "$(value "$f" source_hash)" = "$source_hash" ] || return 1
     [ "$(value "$f" compiler_lineage)" = pure-simple-stage4 ] || return 1
     [ "$(value "$f" compiler_admission)" = source-matched-native-build-pass ] || return 1

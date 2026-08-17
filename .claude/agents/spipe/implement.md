@@ -42,6 +42,7 @@
 
 ## Rules
 
+- **One app, all platforms:** App logic must never branch on OS (no `if target_os`, `is_windows()`, or sibling `_simpleos.spl` files). Platform differences belong in HAL layers: SOSIX adapters, CompositorBackend dispatch, DedicatedHost. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - **Superpowers TDD:** Spec already exists. Your ONLY job is to make it green.
 - **Minimum viable code:** Do not add features beyond what specs require
 - **No gold-plating:** No extra methods, no extra error handling, no "nice to have"

@@ -1,7 +1,8 @@
 # Simple Formal Verification 2.0 — System Test Plan
 
-**Status:** Implemented modern SSpec and manual mirror; runtime execution blocked
-**Date:** 2026-08-14
+**Status:** Implemented modern SSpec and manual mirrors; focused RVFI readiness
+coverage prepared as `TEST_BLOCKED` pending an admitted Stage-4 CLI
+**Date:** 2026-08-16
 **Independent high-review:** **PASS (cycle 3, final)** for interface consistency,
 status truthfulness, ownership, executable command closure, and Lean links.
 
@@ -9,6 +10,13 @@ status truthfulness, ownership, executable command closure, and Lean links.
 
 - Executable: `test/03_system/compiler/formal_verification_2_0_spec.spl`
 - Generated manual: `doc/06_spec/03_system/compiler/formal_verification_2_0_spec.md`
+- Focused RVFI readiness executable:
+  `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`
+- Focused blocked manual mirror:
+  `doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`
+- Focused feature-expert and LLM lookup:
+  `doc/00_llm_process/feature_expert/formal_verification/skill.md` and
+  `doc/00_llm_process/llm_wiki.md#fv2-risc-v-dual-track-verification`
 - Focused implemented foundation:
   `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl`
 
@@ -34,7 +42,7 @@ captures.
 | Trust and compiler refinement | REQ-FV2-009, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017; NFR-FV2-003, NFR-FV2-004 | hidden axiom, forged/stale receipt, unsound transform, mutation, and incompatible dynamic receipt reject | Implemented; external replay blocked |
 | Incremental performance | REQ-FV2-010; NFR-FV2-006, NFR-FV2-010 | warm SymbolId/SCC checks retain timing, cache, scheduler, and max-RSS evidence without repeated full-tree scans | Blocked by unavailable self-hosted CLI |
 | SimpleOS vertical slice | REQ-FV2-014, REQ-FV2-020; NFR-FV2-009, NFR-FV2-010 | stable manual Lean roots plus product-linked receipts survive adversarial lifecycle/interleaving/crash cases | Blocked; no current-main accepted slice |
-| RISC-V dual track | REQ-FV2-015, REQ-FV2-020; NFR-FV2-009 | exact RVFI/SBY proof, independent ISA oracle, refinement/equivalence, and artifact identities agree | Blocked; readiness is not proof |
+| RISC-V dual track | REQ-FV2-015, REQ-FV2-019, REQ-FV2-020; NFR-FV2-002, NFR-FV2-009 | focused checker accepts exactly 21 canonical RVFI ports; missing extended ports/core reject; aggregate Lean/BYL and strict SBY gates both pass | Focused source/manual prepared; `TEST_BLOCKED`; readiness is not proof |
 | Independent release replay | REQ-FV2-001, REQ-FV2-009, REQ-FV2-010, REQ-FV2-016, REQ-FV2-019, REQ-FV2-020; NFR-FV2-001, NFR-FV2-003, NFR-FV2-009 | fresh Lean and independent checker replay exact shipped bytes with closed trust | Blocked by all predecessors |
 
 Every selected REQ must have a happy path, boundary case, and rejection path
@@ -44,7 +52,9 @@ before PASS. Current zero-case rows are failures, not exclusions.
 
 In the trace table, `FV2SYS` labels
 `test/03_system/compiler/formal_verification_2_0_spec.spl`; it is not a literal
-shell command. Every eventual system-test invocation uses the exact path shown
+shell command. `RVFIREADY` labels
+`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`.
+Every eventual system-test invocation uses the exact path shown
 in the one-pass ledger below. Scenario names are
 frozen acceptance names for its implementation. Unless a row names a narrower
 reviewer, the reviewer is the independent highest-capability FV2 reviewer.
@@ -68,11 +78,11 @@ runtime/tool command succeeds on the unchanged tree.
 | REQ-FV2-012 | typed effect and call closure | FV2SYS `propagates transitive typed effects`; `accepts pure leaf`; `rejects renamed/generated/indirect/external call without binding` | resolver-originated closure missing | `bin/simple check src/compiler/50.mir`; then run the exact system-spec ledger command | exact SymbolId closure; unresolved-call diagnostic | effects / compiler reviewer |
 | REQ-FV2-013 | MIR/pass/backend validators | FV2SYS `accepts sound selected transform`; `maps boundary counterexample`; `rejects intentionally unsound transform or broken chain` | selected certificate pipeline missing | focused MIR spec, then `bin/simple check src/compiler` | checked `CompilerCertificate v1` chain | refinement / compiler reviewer |
 | REQ-FV2-014 | stable SimpleOS manual proofs/adapters | FV2SYS `composes exact vertical slice`; `tests bounded lifecycle/crash edge`; `rejects missing/reordered/model-only subsystem receipt` | reviewed design accepted; product execution absent | `sh scripts/check/check-simpleos-critical-formal-proofs.shs` | stable Lean entry points plus source-bound receipts | SimpleOS formal / mission-critical reviewer |
-| REQ-FV2-015 | RISC-V generated RVFI, manual proof, oracle/equivalence | FV2SYS `accepts complete RV32 chain`; `checks RV64/trap boundary`; `rejects readiness-only, missing SBY, oracle drift, or artifact drift` | tools/product evidence unavailable | `sh scripts/check/check-riscv-formal-dual-track.shs` then strict SBY | `STATUS: PASS`; `HardwareProofReceipt v1` | hardware formal / RTL reviewer |
+| REQ-FV2-015 | RISC-V generated RVFI, manual proof, oracle/equivalence | FV2SYS bounded product checks + RVFIREADY complete 21-port manifest, aggregate proof-model gate, and strict SBY; rejects readiness-only evidence | focused source/manual prepared; admitted runtime/tools/artifacts unavailable | Run RVFIREADY once, then its aggregate and strict gates | both `STATUS: PASS` markers; `HardwareProofReceipt v1` remains broader closure | hardware formal / RTL reviewer |
 | REQ-FV2-016 | mutation/vacuity/adversarial suite | FV2SYS `kills declared mutations`; `retains satisfiability/cover witness`; `rejects surviving property/implementation/evidence mutation` | complete matrix missing | Run the exact system-spec command followed by the formal ledger gates | mutation ledger with zero unexplained survivors | adversarial tests / independent FV2 |
 | REQ-FV2-017 | dynamic composition receipt gate | FV2SYS `accepts compatible signed receipt`; `classifies explicit bounded TCB`; `rejects profile/interface/compiler-lineage/signature mismatch` | signed composition implementation unconfirmed | Run the exact system-spec ledger command after receipt support exists | compatible composition receipt or explicit bounded-TCB blocker | dynamic boundary / security reviewer |
 | REQ-FV2-018 | existing proof syntax and external modules | FV2SYS `uses existing annotations/proof uses`; `handles external theorem dependency`; `rejects new grammar or unresolved theorem` | end-to-end emission/replay absent | `bin/simple test test/00_formal_verification/compiler/proof_reference_spec.spl --mode=interpreter` | deterministic external dependency in receipt | language/Lean / language reviewer |
-| REQ-FV2-019 | every admission and target consumer | focused MIR spec + FV2SYS `accepts supported evidence`; `reports bounded unsupported`; `rejects malformed/stale/timeout/unknown/missing-tool and wildcard erasure` | backend closure and self-hosted run pending | `bin/simple test test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl --mode=interpreter` | distinct `MIRCOV-PROBE-E-*`; no successful unhandled target | all lane owners / merge owner |
+| REQ-FV2-019 | every admission and target consumer | focused MIR spec + FV2SYS + RVFIREADY missing extended port, missing core, and deliberate-red mutation matrix | backend closure and admitted self-hosted run pending | Run the MIR spec and RVFIREADY once with the qualified CLI | distinct diagnostics; no readiness marker after incomplete input | all lane owners / merge owner |
 | REQ-FV2-020 | ordered gate state machine/release | FV2SYS `advances gates in order`; `retains honest partial state`; `rejects skipped predecessor or premature verified release` | waves 0–6 incomplete | run full ledger below on unchanged tree | Gates 0–7 complete; `release_blockers=none` | merge/release / independent FV2 |
 | NFR-FV2-001 | deterministic producers/receipts | FV2SYS `reproduces hashes twice`; `ignores formatting-only change`; `rejects source/tool/artifact drift` | canonical producers incomplete | repeat generation only after first run succeeds | identical semantic/certificate/receipt hashes | evidence / independent FV2 |
 | NFR-FV2-002 | fail-closed reducers and wrappers | FV2SYS `accepts valid evidence`; `classifies supported blocker`; `rejects stale/contradictory/timeout/missing/unknown` | system matrix missing | Run the focused MIR command followed by the exact system-spec ledger command | nonzero rejection and retained diagnostic | every lane / merge owner |
@@ -109,9 +119,13 @@ Focused and system evidence:
 ```sh
 bin/simple test test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl --mode=interpreter
 bin/simple test test/03_system/compiler/formal_verification_2_0_spec.spl --mode=interpreter
+bin/simple test test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl --mode=interpreter --clean --timeout 900 --sequential
 bin/simple spipe-docgen test/03_system/compiler/formal_verification_2_0_spec.spl --output doc/06_spec --no-index
 bin/simple sspec-maintain scan test/03_system/compiler/formal_verification_2_0_spec.spl
 bin/simple lint test/03_system/compiler/formal_verification_2_0_spec.spl
+bin/simple spipe-docgen test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl --output doc/06_spec --no-index
+bin/simple sspec-maintain scan test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl
+bin/simple lint test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl
 sh scripts/check/check-duplication.shs
 ```
 
@@ -183,10 +197,13 @@ absent retained artifact remains a blocker.
 
 ## Manual-quality gate
 
-The manual must show the four frozen steps before folded implementation detail,
+The main manual must show the four frozen steps before folded implementation detail,
 name both generated artifacts and durable proof entry points, expose every
 named helper, contain zero placeholders, and remain readable without opening
-the source. `doc/06_spec` must contain zero executable `.spl` files. The merge
+the source. The focused RVFI manual must show its readiness, mutation,
+missing-artifact, aggregate, and strict-proof steps while stating
+`TEST_BLOCKED` until admitted docgen replaces the hand-maintained mirror.
+`doc/06_spec` must contain zero executable `.spl` files. The merge
 owner reviews all seven `sspec-maintain` component scores; the independent
 final reviewer accepts traceability, exclusions, blocker truthfulness, and done
 marks.

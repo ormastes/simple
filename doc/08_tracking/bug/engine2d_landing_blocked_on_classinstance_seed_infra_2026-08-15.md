@@ -24,6 +24,7 @@ origin/main — then re-cherry-pick e210ff2af19 (or d0e976ffef4) and push; or
   origin lib (expected [0,0,64,128,128,0,64,128], got [0,0,256,128]).
 Status: FIXED
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: OPEN — do not push until unblocked.
 
 ## 2026-08-17 re-verification — UNBLOCKED: unblock condition (a) is now satisfied
 

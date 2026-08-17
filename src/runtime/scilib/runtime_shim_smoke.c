@@ -5,7 +5,11 @@
  * the check path stays within repo-native source plus the system C toolchain.
  */
 
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include <dlfcn.h>
 #include <math.h>

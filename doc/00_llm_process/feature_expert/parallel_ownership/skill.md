@@ -62,7 +62,9 @@
 6. `ActorRef` now uses one scheduler-owned admission/lifecycle route with an
    explicit single-thread domain guard. Do not upgrade fail-closed copied refs
    into a cross-thread concurrency claim; a synchronized ingress would still
-   be required for that contract.
+   be required for that contract. All scheduler observations and reply
+   lifecycle calls are guarded too: off-domain nil/false/zero/empty/unavailable
+   sentinels hide state and must not mutate it.
 7. Parent-issued generation, cancellation revocation, and natural-exit reap
    receipts are landed. Collision-resistant session identity, PID reuse, and
    provider cleanup parity remain open. Track them in
@@ -87,7 +89,11 @@ SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_co
 
 The actor executable has the five-step same-thread scheduler-authority flow,
 finite mailbox/reply backpressure, copied argument isolation, unique stop, and
-closed `actor-channel-authority/v1` typed evidence. The process executable has
+closed `actor-channel-authority/v1` typed evidence. Its three-step
+owner-identity-mismatch flow seeds non-empty state, proves all query/reply
+lifecycle guards hide it without mutation, and emits closed
+`actor-owner-domain-rejection/v1` evidence. This deterministic branch test is
+not live cross-thread ingress evidence. The process executable has
 the frozen five-step process flow, copied-frame
 isolation, typed candidate-root mutation/rollback assertions, no SKIP path, and
 explicit natural-exit/close-once checks plus closed
@@ -97,10 +103,11 @@ explicit natural-exit/close-once checks plus closed
 the exact evidence and resume gates are in the matching focused plans under
 `doc/03_plan/sys_test/`.
 
-Do not run them until `bin/release/simple test --help` passes its bounded ABI
-probe; status 139 is a deployment blocker, not a spec verdict. The authored
-mirrors are not generated-manual or `sspec-maintain` PASS until those commands
-run successfully on an admitted pure-Simple runtime.
+Run them only with an admitted pure-Simple self-hosted test surface. A Stage-2
+compiler that lacks the test runner may establish source buildability but not
+SSpec execution, docgen, maintenance, or runtime PASS. The authored mirrors are
+not generated-manual or `sspec-maintain` PASS until those commands run
+successfully on a qualified runtime.
 
 Current `origin/main` has an unrelated missing `rt_io_tcp_probe_peer` re-export;
 do not count a temporary isolated-worktree omission of that export as part of

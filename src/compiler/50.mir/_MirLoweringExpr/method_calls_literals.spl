@@ -3173,28 +3173,25 @@ impl MirLowering:
                     val poly_bool = b_poly.emit_binop(MirBinOp.Ne, mir_operand_copy(poly_raw), mir_operand_copy(poly_zero), MirType.bool())
                     self.builder = b_poly
                     return poly_bool
-                self.error("unresolved method call: {method}", nil)
-                # Task #145: self.error only COLLECTS -- both the bootstrap
-                # lane (driver_bootstrap.spl reads ctx.errors, never
-                # MirLowering.errors) and the native-build worker drop the
-                # list (see mir_lowering_stmts.spl lower_for_iterator's
-                # belt-and-braces note). The const-0 placeholder below then
-                # ships as SILENT data loss (exit 0, no stderr) -- exactly
-                # how the `.join()` no-op survived undetected. Surface it
-                # loudly at lowering time, naming the method.
+                self.error_fatal("unresolved method call: {method}", nil)
+                # Task #145 history: this arm formerly used non-fatal
+                # self.error, and bootstrap consumers could drop that collected
+                # diagnostic before codegen. The site now records a fatal
+                # MirError. The flat bootstrap consumer rejects it immediately
+                # after lowering the function, before the partial MIR enters
+                # the shared accumulator. Keep the diagnostic loud as local
+                # evidence and name the unresolved method.
                 print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145)"
                 var b = self.builder
                 val temp = b.new_temp(MirType.i64())
-                # FAIL CLOSED (Task #145). The collected self.error above is
-                # dropped by every pipeline that does not read
-                # MirLowering.errors -- concretely
-                # driver_bootstrap.bootstrap_lower_to_mir_context, which
-                # returns `next_ctx.errors.len() == 0` and never copies the
-                # lowering errors into ctx (unlike the default lane, which
-                # calls _driver_collect_mir_errors in
-                # driver_pipeline.lower_to_mir). In that lane the const-0
-                # placeholder below reached codegen and shipped as a wrong
-                # value under exit 0.
+                # FAIL CLOSED (Task #145). error_fatal still collects so a
+                # lowering pass can finish the current diagnostic boundary,
+                # but every consumer must reject the fatal list before codegen.
+                # The default driver does that through
+                # _driver_collect_mir_errors; the flat bootstrap path does it
+                # through bootstrap_reject_fatal_mir_errors after each lowered
+                # function. The const definition below is therefore structural
+                # recovery material, not an admissible runtime value.
                 #
                 # Emit rt_panic ahead of the placeholder so an unresolved
                 # method can never silently produce data, matching the two

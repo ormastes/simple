@@ -3,9 +3,29 @@
 Date: 2026-08-10
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: CLOSED 2026-08-17 (all four missing owners implemented and verified)
 Lane verified: host x86_64-unknown-linux-gnu, `bin/simple` = Rust bootstrap seed,
 interpreter path (JIT fell back: `HIR lowering error: Cannot infer field type:
 struct 'CompileOptions' field 'mode' [in src/app/test_runner_new/main.spl]`).
+
+## 2026-08-17 implementation closure
+
+The missing form-state and input owners are implemented rather than stubbed.
+Focused evidence passed for input events (8/8), hit testing (7/7), and form
+state (4/4), including adjacent deepest-child hit selection and form-field
+upsert/placeholder preservation.
+
+The paint-tree owner is now also admitted. It shares one traversal across the
+Skia recorder and renderer `DisplayList` sinks, suppresses transparent fills,
+emits image/form operations, and varies focused form borders. Current
+pure-Simple interpreter evidence passed once per scoped criterion:
+
+- `paint_tree_walker_spec.spl`: 6/6;
+- `image_paint_spec.spl`: 3/3;
+- `form_paint_spec.spl`: 8/8.
+
+The earlier opaque `value is not callable` result was not reproducible against
+the final owner and is superseded by these exact green sinks.
 
 ## `STATICS_FAILED_KEY` is a red herring — premise falsified
 

@@ -3,6 +3,7 @@
 - **Date:** 2026-08-17
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** FIXED (both defects), verified by the smoke gate
 - **Severity:** HIGH — `native-build` could not produce a binary for *any*
   program, blocking every AOT-dependent lane (draw_ir 8K, gui 8K, fat32).
 

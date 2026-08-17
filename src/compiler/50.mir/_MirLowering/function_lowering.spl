@@ -451,10 +451,18 @@ impl MirLowering:
         # current_has_vhdl_metadata above, so nested lowering cannot leak it.
         val previous_fn_returns_bool = self.current_fn_returns_bool
         self.current_fn_returns_bool = fn_returns_bool
-        val result = if fn_returns_bool:
+        # The LocalId? returned by lower_block[_expected] is not a safe native
+        # transport here: on the Stage3 lane a mixed explicit/implicit-return
+        # body preserves `.? == true` but loses the LocalId payload, and `??`
+        # consequently yields its fallback l0. format_fixed's l0 is f64, so
+        # the backend then sees an impossible double -> ptr return conversion.
+        # The producer publishes the same answer as a scalar id sidecar.
+        self.last_block_result_local_id = -1
+        if fn_returns_bool:
             self.lower_block_expected(fn_.body, fn_.return_type)
         else:
             self.lower_block(fn_.body)
+        val function_tail_local_id = self.last_block_result_local_id
         self.current_fn_returns_bool = previous_fn_returns_bool
         if trace_enabled:
             print "[mir-lower] lower_function:body-done {fn_.name}"
@@ -472,11 +480,8 @@ impl MirLowering:
                 self.emit_pending_resource_drops(nil)
                 bldr2 = self.builder
                 bldr2.terminate_return(nil)
-            elif result.?:
-                # Keep the coalesce out of the nested Some(call(...)) shape,
-                # but do not bind this struct optional with `if val`: compiled
-                # Stage4 can enter that arm without copying its LocalId payload.
-                val tail_local = result ?? LocalId(id: 0)
+            elif function_tail_local_id >= 0:
+                val tail_local = LocalId(id: function_tail_local_id)
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
@@ -856,6 +861,10 @@ impl MirLowering:
 
     me lower_block_expected(block: HirBlock, expected_type: HirType?) -> LocalId?:
         """Lower HIR block to MIR, return result local if any."""
+        # Always publish a scalar sentinel before returning. Function lowering
+        # reads this field because staged native LocalId? return payloads are
+        # not reliable for mixed explicit/implicit-return bodies.
+        self.last_block_result_local_id = -1
         # Use struct fields directly. A `val` declared without an initializer and
         # then assigned inside a match case is not bound in the outer scope by the
         # seed interpreter (-> 'variable block_stmts not found'). HirBlock carries
@@ -949,8 +958,10 @@ impl MirLowering:
                 print "[mir-lower] block:value-lowered"
             if bootstrap_trace:
                 print "[mir-lower] block:value-lowered"
+            self.last_block_result_local_id = local.id
             Some(local)
         else:
+            self.last_block_result_local_id = -1
             if bootstrap_trace:
                 print "[mir-lower] block:no-value"
             nil

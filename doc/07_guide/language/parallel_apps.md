@@ -99,6 +99,14 @@ budget; zero and negative values resolve to the finite default, never to
 unbounded storage. `reply_capacity()` and `outstanding_reply_count()` expose
 the admitted limit and current retained work.
 
+The domain guard applies to observations as well as admission. Off-domain
+`get_reply`/`consume_reply` return nil, cancellation returns false, count and
+capacity queries return zero, error text is empty, and `stats_string()` returns
+`Scheduler(unavailable: wrong thread)`. Those sentinels disclose no scheduler
+state and do not consume, cancel, or otherwise mutate retained work. Code must
+not treat the sentinels as an authoritative empty scheduler; it must execute
+through the creator domain or a future synchronized ingress.
+
 The legacy `PriorityMailbox` compatibility spelling `unbounded()` also now
 selects its finite default capacity. Queue owners normalize non-positive or
 forged capacities before admission, so zero cannot reopen an unbounded queue.
@@ -186,8 +194,10 @@ surfaces without promoting them to complete actor/process transport:
 
 - `test/03_system/feature/language/actor_channel_authority_spec.spl` covers
   same-thread scheduler authority, copied scalar-text arguments, finite mailbox
-  and reply credit, unknown/stopped rejection, and unique terminal removal. Its
-  authored mirror is
+  and reply credit, unknown/stopped rejection, unique terminal removal, and a
+  deterministic owner-identity mismatch over populated state. The latter
+  proves guard rejection and state preservation but does not claim live
+  cross-thread transport. Its authored mirror is
   `doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`.
 - `test/03_system/feature/language/parent_commit_piped_result_spec.spl` covers
   fragmented/replayed encoded child output, copied frame retention, parent
@@ -197,12 +207,12 @@ surfaces without promoting them to complete actor/process transport:
 
 Both primary scenarios convert observations into closed Modern SSpec evidence
 and compare them with independently declared `check_exact` oracles. Diagnostic
-text is not its own oracle. The actor schema is
-`actor-channel-authority/v1`; the process schema is
+text is not its own oracle. The actor schemas are
+`actor-channel-authority/v1` and `actor-owner-domain-rejection/v1`; the process schema is
 `parent-commit-piped-result/v1`. Missing/extra fields, unresolved selectors,
 and mismatches fail closed.
 
-Run the intended native gates only through an admitted pure-Simple Stage-4
+Run the intended native gates only through a qualified pure-Simple self-hosted
 test surface:
 
 ```sh
@@ -212,11 +222,11 @@ SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_co
 
 Then run `spipe-docgen` and `sspec-maintain scan` for each executable as listed
 in `doc/03_plan/sys_test/actor_channel_authority.md` and
-`doc/03_plan/sys_test/parent_authoritative_actor_process.md`. The deployed
-Stage-4 wrapper currently fails its bounded test ABI probe before either spec
-executes. Their Markdown files are therefore authored mirrors, not accepted
-generated manuals; no Rust seed or Stage-2 direct compile result may substitute
-for Stage-4 test/docgen/maintenance evidence.
+`doc/03_plan/sys_test/parent_authoritative_actor_process.md`. The admitted
+Stage-2 compiler has no qualified test/docgen/maintenance surface, so neither
+spec executes through it. Their Markdown files are therefore authored mirrors,
+not accepted generated manuals; no Rust seed or Stage-2 direct compile result
+may substitute for self-hosted test/docgen/maintenance evidence.
 
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but

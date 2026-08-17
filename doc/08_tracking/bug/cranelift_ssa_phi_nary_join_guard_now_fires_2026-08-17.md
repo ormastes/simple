@@ -3,6 +3,7 @@
 - **Filed:** 2026-08-17
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** OPEN
 - **Severity:** medium (one RED example; guard prevents a silent miscompile)
 - **Component:** `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`
 - **Related:** `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl:714`

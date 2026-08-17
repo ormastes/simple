@@ -351,6 +351,30 @@ release decision, which also requires `release_blockers=none`. If `sby`,
 `yosys`, or an SMT solver is missing, report the result as blocked readiness
 evidence, not as a proof pass.
 
+#### Focused RVFI readiness system coverage
+
+`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl` is the
+modern step-based system contract for the RVFI readiness seam. Its production
+checker must require all 21 canonical ports, including `rvfi_halt`,
+`rvfi_intr`, `rvfi_mode`, and `rvfi_ixl`. The positive fixture proves only
+manifest recognition. The edge and error flows remove an extended control
+port or supply a missing generated core and require a nonzero result with no
+`READY:` marker.
+The contract traces REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009.
+
+The final two scenarios invoke both production gates above. They may pass only
+in a source-matched qualified environment where the admitted pure-Simple CLI,
+generated sidecars, durable Lean/BYL proof layer, SymbiYosys toolchain, and
+strict proof artifacts all exist. Until then, record the spec and mirrored
+manual as `TEST_BLOCKED`; never replace execution with a source-string pass,
+Rust seed, Stage-2/3 binary, readiness-only marker, or hand-built receipt.
+
+After admission, run the SSpec, `sspec-maintain scan`, and `spipe-docgen` once
+on the unchanged tree using the commands in
+`doc/03_plan/sys_test/simple_formal_verification_2_0.md`. The generated manual
+must replace the blocked hand-maintained mirror with `0 stubs` and accepted
+scores before this lane can contribute PASS evidence.
+
 ---
 
 ## Legacy verification states
@@ -531,7 +555,10 @@ On a Simple-code change that touches a verified/mirrored path:
 
 `simple gen-lean generate|write|compare|verify` operate on a **fixed inventory** of `src/.../verification/regenerate/*.spl` modules — they do **not** scan arbitrary `@verify` user files and cannot emit algorithm Lean for an arbitrary `.spl` (only `gen-lean memory-safety --file <p>` consumes a user file, and only for memory-safety obligations). So for code outside that inventory — the NVMe firmware/emulator, for example — the mirror defs are **hand-transcribed** under the marked `gen lean` section, not machine-generated. `gen-lean write --force` overwrites whole files with **no** manual-edit preservation, so never hand-edit a file the regeneration tree owns; edit its source module instead.
 
-> The `bin/simple gen-lean` CLI is currently broken (the wrapper re-spawns itself and infinitely recurses; the Rust codegen is unreachable through the CLI) — see `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`. Until that is fixed, the regeneration tree is reachable only by internal callers, and the hand-transcribed in-file split above is the working path for example/firmware proofs.
+> The prior `bin/simple gen-lean` self-recursion has a source fix: the CLI now
+> dispatches a distinct worker. Canonical self-hosted runtime evidence is still
+> unavailable, so the fix is not release-admitted; see
+> `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`.
 
 ---
 

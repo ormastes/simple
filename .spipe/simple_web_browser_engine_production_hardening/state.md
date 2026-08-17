@@ -198,6 +198,12 @@ implementation in progress / target evidence blocked
   consumed. Source and documentation now distinguish rustls-enabled runtime
   TLS from the fail-closed stub. Live HTTPS remains unproven until a genuine
   pure-Simple binary is linked with runtime TLS.
+  [UPDATE 2026-08-16: the seed interpreter now delegates rt_tls_* to the
+  runtime rustls client (interpreter_extern/net_tls_client.rs, runtime-tls
+  feature); live https://example.com loads (559 bytes, chunked decoded) and a
+  self-signed host is rejected. This exercises the pure-Simple H1/TLS code
+  path live, but under the SEED — diagnostic tier only; self-hosted-binary
+  live HTTPS is still the promotion gate.]
 - evidence: Focused diff validation and both required
   `direct-env-runtime-guard` working/staged audits passed after the current
   browser/session/render changes.
@@ -2676,3 +2682,202 @@ implementation in progress / target evidence blocked
   animation lifecycle `47df593f600`, cookie authority `921fd1`, and D3 retain
   their existing rejected or stopped classifications. No runtime, docgen,
   performance, aggregate HTML/CSS, full-browser, or goal PASS is claimed.
+- layout box content contract system coverage (2026-08-16): the layout/paint
+  recovery landed at `81684d8af46` deleted `_paint_box` and ported
+  `layout_core.spl` onto the real `BeLayoutBox` shape, but that shape had no
+  system-tier statement — only unit coverage of the paint colour helper. Added
+  `test/03_system/browser_engine/layout_box_content_contract_spec.spl` (6
+  scenarios: positive geometry, zero-inset identity, derived-not-stored
+  mutation, over-constrained negative width, pinned `node_id`/tag identity,
+  text-box box-model zeroing), mirrored at
+  `doc/06_spec/03_system/browser_engine/layout_box_content_contract_spec.md`,
+  planned at
+  `doc/03_plan/sys_test/browser_engine_layout_box_content_contract.md`, with the
+  contract documented in `doc/07_guide/ui/browser_engine_implementation.md`.
+  CSS reaches the box through the product's own `BeDomNode.set_style` expander;
+  every assertion is an exact arithmetic oracle computed in the spec, with no
+  `skip()`, no `pending()`, and no placeholder pass, so the spec fails closed.
+  Scenario 3 is the discriminating one: it mutates padding after construction,
+  which is the only way to tell a derived content rectangle from a stored one —
+  the precise defect shape of `_paint_box`.
+  Coverage boundary recorded rather than padded: `_apply_opacity` is excluded
+  because unit tier already closes all four branches, `StyleProps` has no
+  `opacity` property, and the function has zero product callers, so no
+  CSS-to-paint producer exists to integrate against.
+  TEST_BLOCKED — the spec has NOT been executed and is not claimed as passing.
+  No admitted pure-Simple CLI exists in this tree: the deployed self-hosted
+  binary SIGSEGVs on `simple test --help`, re-bootstrap is gated on that same
+  binary's bounded test ABI probe, and stage3 `native-build` of a spec fails HIR
+  lowering (`unresolved name: __p-1`). See
+  `doc/08_tracking/bug/deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`.
+  No runtime, docgen, or sspec-maintain evidence is claimed; the mirrored manual
+  is hand-authored in generated shape pending a docgen run.
+
+## 2026-08-16 — REQ-WEB-BROWSER-014 sandbox gate wiring (Vulkan/sandbox lane)
+
+- **Audit finding.** The Vulkan half of this lane is code-complete and
+  binary-blocked: `scripts/check/browser_vulkan_evidence.spl` and
+  `check-simple-web-browser-docker-vulkan.shs` are implemented and fail-closed,
+  Docker is usable here and `simple-browser-vulkan:latest` is cached, so the
+  only missing input is an admitted pure-Simple CLI. Its current
+  `SKIPPED (cannot test)` is honest, not a defect. No new Vulkan work was done —
+  it would have duplicated already-landed code.
+- **Genuine gap closed (sandbox half).**
+  `src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`, added
+  2026-08-15 with the seccomp deny-list→allow-list fix, was invoked by
+  **nothing**: no runner, no spec, no wrapper. Added
+  `scripts/check/check-browser-renderer-sandbox-seccomp.shs` (fail-closed;
+  no-seccomp kernel and no-C-compiler host both yield `ERROR — nothing was
+  checked`, exit 2) plus the step-based SSpec system scenario
+  `test/03_system/browser_engine/browser_renderer_sandbox_spec.spl`
+  (REQ-WEB-BROWSER-014, cases SANDBOX-N/E/D) and its mirrored manual
+  `doc/06_spec/03_system/browser_engine/browser_renderer_sandbox_spec.md`.
+- **Evidence, split honestly.** The GATE executed here:
+  `PASS — 3 check(s) verified`, including a real `SIGSYS` kill on `socket()`
+  through `rt_browser_renderer_sandbox_enter`. That is native C-runtime
+  evidence. The SSPEC SCENARIO is **unexecuted** — no admitted pure-Simple
+  self-hosted runtime exists on this host and Rust-seed output is not accepted
+  for this lane. **REQ-WEB-BROWSER-014 is NOT promoted**; no runtime, docgen, or
+  goal PASS is claimed by this entry.
+- **Runtime blocker (verified, not inherited).** Only `bootstrap/stage3/simple`
+  is non-seed and it core-dumps on a two-line hello-world via both `compile
+  --format=smf` and `native-build`. The bootstrap that would replace it is
+  blocked by design: `bootstrap-from-scratch.sh` requires a planner-admission-v2
+  envelope, and per
+  `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md` the
+  non-circular producer for that envelope **does not yet exist**. Confirmed
+  empirically — a correctly-formed authorization leaf (reason
+  `self-host-convergence-check`, four real SHA-256 bindings) is rejected with
+  `bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2` by both
+  `--validate-bootstrap-receipt` and a real run. This contradicts
+  `.spipe/stage3-segfault-fix/state.md`, whose closure requires exactly that
+  transaction; that lane's research note calling
+  `scripts/bootstrap/bootstrap-from-scratch.sh` a "stale reference (does not
+  exist)" is also wrong — the script is present (112 KB). Critical path for this
+  lane and every pure-Simple criterion downstream is building the admission
+  producer. Not owned here; not started.
+- **Not covered, do not read as covered**: problems 2 and 3 of
+  `doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`
+  (no namespace/privilege drop; in-process browsers under `src/app/browser/**`
+  still evaluate page script unjailed). The gate proves the jail's syscall
+  contract, not that every browser surface enters the jail.
+
+## 2026-08-16 (second pass) — sandbox problem 2 implemented + container-verified
+
+- **Implemented** `browser_renderer_enter_namespaces()` in
+  `src/runtime/runtime_process.c`, closing problem 2 of
+  `doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`:
+  unshare `CLONE_NEWUSER` -> write `/proc/self/setgroups=deny`, `gid_map`,
+  `uid_map` -> unshare `CLONE_NEWNET | CLONE_NEWIPC`. Runs from
+  `browser_renderer_preinit`. Ordering namespaces -> landlock -> seccomp is
+  load-bearing: landlock declares `handled_access_fs` with no allow rules
+  (kills every write, including `/proc/self/uid_map`) and the seccomp
+  allow-list has neither `unshare` nor `openat`.
+- **runtime_need**: the jail is a C-runtime-owned property; `chosen_path`
+  = `runtime-owned-change` (this IS the runtime owner module).
+  `rejected_shortcuts`: (a) hard-failing `sandbox_enter` when namespaces are
+  unavailable — rejected because Ubuntu 24.04's
+  `kernel.apparmor_restrict_unprivileged_userns=1` would then leave NO jail at
+  all on default hosts, strictly worse than seccomp+landlock; (b) trusting the
+  posture boolean in the self-check instead of comparing `/proc/self/ns/net` —
+  rejected as exactly the false-green this repo keeps hitting.
+- **PID namespace deliberately not unshared**: `CLONE_NEWPID` only affects
+  children created after the unshare and `RLIMIT_NPROC=0` forbids forking.
+  Claiming it would be theatre. Recorded so a later agent does not "fix" it.
+- **New evidence**: `src/runtime/test/rt_browser_renderer_namespace_selfcheck.c`
+  (fails on a false claim in EITHER direction), driven by the extended
+  `scripts/check/check-browser-renderer-sandbox-seccomp.shs`, now
+  `PASS — 4 check(s) verified` and printing `sandbox_namespaces=`.
+- **Container verification (both postures proven, so the check is not
+  tautological):** bare host `unavailable`; `docker run` default `unavailable`;
+  `--security-opt apparmor=unconfined` `unavailable`; **`--privileged`
+  `active`** with the netns identity genuinely moving
+  `net:[4026533421] -> net:[4026533540]`.
+- **QEMU: NOT DONE.** No Linux x86_64 qcow2 exists in-tree and `curl`/`wget`
+  are blocked by the context-mode rules, so a VM image must be supplied out of
+  band. The privileged container exercises the same kernel property, so this is
+  a redundancy gap, not a hole. Do not record QEMU evidence for this row.
+- **Still NOT promoted.** All of the above is native C-runtime evidence. The
+  SSpec scenario remains **unexecuted** — no admitted pure-Simple runtime; see
+  the runtime blocker recorded in the previous entry, unchanged. Problem 3
+  (in-process browsers unjailed) remains open.
+- **Sabotage discipline satisfied (2026-08-16).** Both gate arms proven to bite
+  in a scratch tree copy: posture-lie arm -> FAIL `namespaces_active()=true but
+  net ns unchanged`; seccomp default flipped to `SECCOMP_RET_ALLOW` (replaying
+  the original deny-list defect) -> FAIL `child survived a non-allow-listed
+  syscall (fail-open)`. Pre and post runs both `PASS — 4 check(s) verified`.
+- **QEMU hard-blocked, not deferred**: no Linux image in-tree, curl/wget
+  blocked by context-mode rules, and `/boot/vmlinuz-*` is root-only with no
+  passwordless sudo. Needs an image supplied out of band.
+- **Problem 3 NOT attempted, deliberately.** Routing `src/app/browser` through
+  the broker is pure-Simple code (~3.5k-line `hosted_browser_renderer_process.spl`).
+  With no admitted runtime it could not be compiled, tested, or even
+  parse-checked, and it sits on a security-critical path guarded today by an
+  honest refusal gate. A large blind edit there would risk replacing a correct
+  refusal with a silent unjailed render. The single flip-line remains
+  `browser_sandbox_worker_routing_available()` in
+  `src/app/browser/sandbox_status.spl`.
+- **Self-audit 2026-08-16**: the namespace self-check originally verified only
+  the net namespace while the change claimed user+net+IPC plus a uid/gid drop —
+  3 of 4 claims unproven. Extended to compare all three ns identities (partial
+  unshare reported as full isolation now FAILs) and to prove the privilege drop
+  via the overflow-uid oracle (unmapped user ns yields 65534). Sabotage arm 3
+  (drop the `uid_map` write) bites: `uid/gid inside jail is 65534/0, expected
+  0/0`. Verified active under `docker run --privileged`; host remains
+  `unavailable`.
+- **Problem 3 partial (2026-08-16)**: added `src/app/browser/sandbox_routing.spl`
+  (operator-supplied `SIMPLE_BROWSER_RENDERER_WORKER`, fail-closed probe with
+  three declared reasons) and split the flip-line into
+  `browser_sandbox_render_route_wired()` AND the probe.
+  `browser_sandbox_worker_routing_available()` is now their conjunction, so
+  supplying the env var alone can never make the browser claim `jailed`.
+  Spec: `test/01_unit/app/browser/browser_sandbox_routing_spec.spl`.
+  **Render route still NOT wired** — two concrete blockers, both design
+  decisions rather than wiring: (a) the broker returns `DrawIrComposition`,
+  not `[u32]`, so the app needs an Engine2dCompositorBackend rasterization
+  step; (b) the worker arg is dispatched only at `hosted_entry.spl:285`, and
+  reaching it from the CLI would import `os.hosted.*` into every `simple`
+  invocation's closure. Corrected an agent claim: app->os is NOT forbidden
+  (47 files under src/app already import os.*), so layering is not the blocker.
+  Narrowing worth keeping: only the SESSION paths execute page script
+  (`browser_session_pixels_at_time`, `browser_engine_animated_frames`);
+  `browser_render_html_to_pixel_array` is pure parse/layout/paint, so jailing
+  targets two functions, not all rendering.
+  **NOTE: none of this .spl is executable here** — no admitted runtime, so the
+  new module and spec are unverified code, not a pass.
+
+## 2026-08-16 — REQ-WEB-BROWSER-014 render route wired, startup failure covered
+
+- `src/app/browser/sandbox_render.spl` routes page markup through the jailed
+  worker: broker -> worker -> Draw IR -> `render_draw_ir_composition` -> pixels.
+  `browser_sandbox_render_route_wired()` flipped to `true`.
+- The blocker that kept it `false` was a FALSE NEGATIVE from the repo's
+  `.gitignore`-honouring `grep` wrapper (0 hits vs 20 from `/usr/bin/grep`).
+  Rule recorded in `.claude/skills/spipe.md`: absence claims require
+  `/usr/bin/grep`, and subagent "not found" results must be re-verified.
+- New native check `rt_browser_renderer_startup_failure_selfcheck.c` closes the
+  startup-failure acceptance row. Two arms, neither can SKIP, both sabotage-
+  proven.
+- Gate check count was a hardcoded `4` and is now accumulated; verdict is
+  `PASS — 6 check(s) verified`.
+- Fail-closed on jail failure: empty buffer, never an in-process re-render.
+- **Blocked, not done**: the sandboxed render has never executed. Seed lacks the
+  `rt_browser_renderer_spawn_sandboxed` extern; no admitted pure-Simple runtime
+  on this host. REQ-WEB-BROWSER-014 stays NOT promoted.
+- Diagnostic (seed, not lane evidence): browser runs, GUI window captured under
+  Xvfb (64x36, 15 distinct colours, real antialiased glyphs), all three routing
+  states report distinct correct reasons.
+- Explicitly not claimed: real remote page rendering. The app stubs every URL
+  except `simple://home`; real TLS/HTTP is wired only into the hosted browser.
+
+## 2026-08-16 — real fetch merged into app browser; REQ-015 gate live
+
+- page_loader.spl: scheme gate + FetchEngine reuse (one engine, both fronts).
+- EXECUTED evidence (first in this lane): browser_page_loader_spec 3/3 passed
+  under seed interpreter (counted verdict). Live: http://example.com fetched
+  559 bytes, origin document rendered; https honest-fails (seed TLS stubs);
+  file:// refused with REQ-015 reason.
+- h1_client get_mock_registry seed-narrowing fix (.?/.unwrap -> match).
+- REQ-WEB-BROWSER-015 now has an enforcing implementation + executed unit
+  coverage; still not promoted to verified until a self-hosted runtime runs
+  the full suite.

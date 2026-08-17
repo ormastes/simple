@@ -171,3 +171,76 @@ dev-blocked
   Tier DB ended 39/1 on UTF-8 batch round-trip after the third attempt, so the
   iteration cap is exhausted. No immutable command receipt or admitted
   Stage-4 runtime exists; these observations promote no AC or ledger row.
+- continuation-truth-audit-2026-08-16: The audited baseline was detached HEAD
+  `00496db6f95a12dfc7d7c0ecd21648093be61322`, equal to the then-local
+  `origin/main`. Later commits in that baseline moved the synchronous parser's
+  limit/header policy and route matching into `std.common.net.http_core`, but
+  this lane's guide and verification inventory had not been reconciled. Their
+  recorded green counts used a runner with a seed-banner caveat and remain
+  diagnostic only, not Stage-4 evidence for this lane.
+- continuation-code-only-2026-08-16: Bounded sidecars prepared fixes for the
+  synchronous `Transfer-Encoding` fail-closed regression, bounded/write-all
+  HTTP responses, the DB protocol's UTF-8 byte-slice mismatch, and a real
+  loopback DB bind/OPEN/EOF/cleanup/rebind fixture. These are unexecuted
+  working-tree changes until the merge owner runs each focused criterion once
+  on an admitted Stage-4 self-hosted CLI; they promote no AC.
+- continuation-evidence-audit-2026-08-16: AC-9/10/12/13 remain open. Existing
+  hand-authored mirrors are not docgen receipts, no current `sspec-maintain`
+  scorecards exist, and the secure web scenario's manual-step/boolean-wrapper
+  quality findings were corrected only in the unexecuted working spec; a fresh
+  scan and generated-manual review are still required before AC-10 can pass.
+  The exact deferred command order is authoritative in
+  `doc/03_plan/sys_test/secure_pure_simple_servers.md`.
+- continuation-review-cycle1-2026-08-16: Fresh highest-capability review
+  rejected the first code-only handoff because retained listener-control copies
+  could close the same raw fd twice, the idle-stop oracle and canonical DB
+  steps were missing, two changed mirrors were stale, and architecture/design
+  named a nonexistent `stop_listening` API. Fix cycle 1 added one shared
+  mutex-backed close-once authority, a retained-copy idle accept/stop/join/
+  rebind scenario, canonical steps/matchers, synchronized the affected manuals,
+  and reconciled the lifecycle contract. Re-review and Stage-4 execution remain
+  required; no AC is promoted.
+- continuation-review-cycle2-2026-08-16: Re-review rejected close-once alone:
+  normal close did not publish stopped state to retained copies, and a fixed
+  sleep did not prove the worker reached accept. Fix cycle 2 replaces copied
+  raw-fd ownership with owner-local listener values plus one shared scalar
+  mutex lease/terminal receipt, serializes bounded accept and close, gives the
+  stopping domain only `DbStopControl`,
+  and requires its accept-attempt receipt before stop/join/rebind. Final
+  re-review and Stage-4 execution remain required.
+- continuation-review-cycle3-2026-08-16: Final review rejected the remaining
+  post-stop accept/dispatch race: stop could be published while bounded accept
+  was in flight and a completed connection could still reach authentication or
+  mutation dispatch. Fix cycle 3 rechecks stop immediately after accept, closes
+  the transport before dispatch, and adds a post-receipt stop/connect oracle
+  requiring an empty response and zero accepted/active/session state. The
+  three-cycle cap is reached; no PASS is claimed without Stage-4 execution and
+  a future independent acceptance review.
+- post-rebase-failure-triage-2026-08-16: Mutable `/tmp` diagnostics from an
+  explicitly inadmissible Rust-seed run were used only to locate failures, not
+  as acceptance evidence. They showed that class-valued mutex payloads became
+  nil in three DB listener scenarios, an older DB assertion inspected the
+  input instead of returned `ServeOutcome`, and the SimpleOS gate expected a
+  retired noalloc allocator path. The working fix uses an owner-local listener
+  plus scalar mutex lease/terminal receipt, asserts the returned outcome, and
+  verifies the bounded aligned RISC-V bump heap while removing the dead weak
+  allocator declaration. Admitted Stage-4 execution remains required; no AC
+  is promoted. Independent repair review cycle 1 accepted the scalar listener
+  lease, returned-outcome assertion, post-stop dispatch guard, and RISC-V
+  bump-heap oracles with no blocking source finding; this is code-review
+  evidence only and does not replace either interpreter test.
+- parallel-recovery-framing-audit-2026-08-16: An independent read-only AC-2
+  review found that the response serializer emitted its canonical framing and
+  then appended conflicting application `Content-Length`, `Transfer-Encoding`,
+  or `Connection` fields. The scoped code-only repair makes the writer the sole
+  framing owner, drops CR/LF-bearing header pairs, and adds an absolute mixed-
+  case conflict oracle. No runtime PASS is claimed without an admitted Stage-4
+  CLI, maintenance scan, and regenerated manual receipt.
+- response-framing-sspec-2026-08-16: REQ-002 now has modern visible-step SSpec
+  coverage for a valid application header, conflicting/control-bearing header
+  rejection, and a hostile-handler real-loopback response. All assertions use
+  built-in matchers with exact positive, edge/error, and integration oracles;
+  no placeholder pass is present. The synchronized `doc/06_spec` artifact is a
+  Markdown operator manual only. Status is `TEST_BLOCKED`: no adjacent receipt
+  admits a current-source pure-Simple Stage-4 full CLI, so runtime execution,
+  `sspec-maintain`, and docgen were intentionally not run and no AC is promoted.

@@ -10,7 +10,7 @@
 # shape fails identically). This module imports only `os.kernel.fs.fat32`, the
 # same import weight as `test/01_unit/os/kernel/fs/fat32_mount_and_dir_ops_spec.spl`
 # (which passes 8/8), so the logic with actual risk here — the fd table
-# itself, offset-delta re-application, task-scoping, the append-only guard —
+# itself, cursor/metadata commitment, task scoping, and alias retirement —
 # can be unit-tested for real instead of only reachable through a spec that
 # can never run.
 #
@@ -22,20 +22,28 @@ use os.kernel.fs.fat32.{FileHandle, fat32_mount_ready, fat32_mount_fs, fat32_mou
 
 val FAT32_FD_EBADF: i32 = -9
 val FAT32_FD_ENOSYS: i32 = -38
+val FAT32_FD_OBJECT_ID_MAX: u64 = 0xFFFFFFFFFFFFFFFF
 
 struct Fat32FdEntry:
-    """One task's open FAT32 fd. Keyed by (task_id, fd) — NOT fd alone: fd
+    """One task's FAT32 descriptor alias. Keyed by (task_id, fd) — NOT fd alone: fd
     numbers are per-task-context (see fd_context_* arrays in fd_table.spl /
     fd_activate_task), so two different tasks can both legitimately hold fd
-    3 for two entirely different files. `g_cwd_table` (syscall_file.spl) keys
-    on task_id for the identical reason; a fd-only key here would let one
-    task's read/write silently observe or corrupt another task's handle."""
+    3 for two entirely different files. The entry names a separately owned
+    file object so dup/fork aliases share one cursor and metadata record."""
     task_id: u64
     fd: i32
+    object_id: u64
+
+struct Fat32FileObject:
+    """Canonical open-file description shared by every descriptor alias."""
+    object_id: u64
     handle: FileHandle
 
 var g_fat32_fd_table: [Fat32FdEntry] = []
+var g_fat32_file_objects: [Fat32FileObject] = []
 var g_fat32_fd_table_ready: bool = false
+var g_fat32_next_object_id: u64 = 1u64
+var g_fat32_object_ids_exhausted: bool = false
 
 fn _fat32_fd_empty_table() -> [Fat32FdEntry]:
     """fn-returning constant: module-level array literals never execute in
@@ -43,9 +51,14 @@ fn _fat32_fd_empty_table() -> [Fat32FdEntry]:
     val empty: [Fat32FdEntry] = []
     empty
 
+fn _fat32_object_empty_table() -> [Fat32FileObject]:
+    val empty: [Fat32FileObject] = []
+    empty
+
 fn _fat32_fd_ensure_table():
     if not g_fat32_fd_table_ready:
         g_fat32_fd_table = _fat32_fd_empty_table()
+        g_fat32_file_objects = _fat32_object_empty_table()
         g_fat32_fd_table_ready = true
 
 fn _fat32_fd_index(task_id: u64, fd: i32) -> i64:
@@ -65,18 +78,108 @@ fn _fat32_fd_index(task_id: u64, fd: i32) -> i64:
         i = i + 1
     -1
 
-fn fat32_fd_register(task_id: u64, fd: i32, handle: FileHandle):
-    """Install (or replace) the stored handle for (task_id, fd). Called by
-    _handle_file_open after a successful open_at/create_at + fd_alloc."""
+fn _fat32_object_index(object_id: u64) -> i64:
     _fat32_fd_ensure_table()
-    val idx = _fat32_fd_index(task_id, fd)
-    if idx >= 0:
-        g_fat32_fd_table[idx as u64] = Fat32FdEntry(task_id: task_id, fd: fd, handle: handle)
+    if object_id == 0u64:
+        return -1
+    var i: u64 = 0
+    while i < g_fat32_file_objects.len():
+        if g_fat32_file_objects[i].object_id == object_id:
+            return i as i64
+        i = i + 1
+    -1
+
+fn _fat32_object_has_alias(entries: [Fat32FdEntry], object_id: u64) -> bool:
+    var i: u64 = 0
+    while i < entries.len():
+        if entries[i].object_id == object_id:
+            return true
+        i = i + 1
+    false
+
+fn _fat32_live_objects(entries: [Fat32FdEntry]) -> [Fat32FileObject]:
+    var kept = _fat32_object_empty_table()
+    var i: u64 = 0
+    while i < g_fat32_file_objects.len():
+        val object = g_fat32_file_objects[i]
+        if _fat32_object_has_alias(entries, object.object_id):
+            kept.push(object)
+        i = i + 1
+    kept
+
+fn _fat32_entries_without(task_id: u64, fd: i32) -> [Fat32FdEntry]:
+    var kept = _fat32_fd_empty_table()
+    var i: u64 = 0
+    while i < g_fat32_fd_table.len():
+        val entry = g_fat32_fd_table[i]
+        if not (entry.task_id == task_id and entry.fd == fd):
+            kept.push(entry)
+        i = i + 1
+    kept
+
+fn _fat32_allocate_object_id() -> u64:
+    """Return a fresh nonzero identity, or 0 after the u64 space is exhausted.
+
+    Exhaustion fails closed instead of wrapping and reviving a stale identity.
+    Test cleanup intentionally does not reset this allocator.
+    """
+    if g_fat32_object_ids_exhausted:
+        return 0u64
+    val object_id = g_fat32_next_object_id
+    if object_id == FAT32_FD_OBJECT_ID_MAX:
+        g_fat32_object_ids_exhausted = true
+    else:
+        g_fat32_next_object_id = object_id + 1u64
+    object_id
+
+fn fat32_fd_register(task_id: u64, fd: i32, handle: FileHandle):
+    """Create one canonical file object and attach (task_id, fd) to it.
+
+    Replacing an existing descriptor retires its old object only when no other
+    alias still names it. Object-id exhaustion leaves the descriptor
+    unregistered rather than reusing a stale identity.
+    """
+    _fat32_fd_ensure_table()
+    var entries = _fat32_entries_without(task_id, fd)
+    var objects = _fat32_live_objects(entries)
+    val object_id = _fat32_allocate_object_id()
+    if object_id == 0u64:
+        g_fat32_fd_table = entries
+        g_fat32_file_objects = objects
         return
-    g_fat32_fd_table.push(Fat32FdEntry(task_id: task_id, fd: fd, handle: handle))
+    entries.push(Fat32FdEntry(task_id: task_id, fd: fd, object_id: object_id))
+    objects.push(Fat32FileObject(object_id: object_id, handle: handle))
+    g_fat32_fd_table = entries
+    g_fat32_file_objects = objects
+
+fn fat32_fd_alias(source_task_id: u64, source_fd: i32, alias_task_id: u64, alias_fd: i32) -> Result<u64, i32>:
+    """Attach alias_task_id/alias_fd to the source's canonical file object.
+
+    This is the dup/fork integration hook. Replacing alias_fd retires its prior
+    object only when no other descriptor alias remains.
+    """
+    val source_idx = _fat32_fd_index(source_task_id, source_fd)
+    if source_idx < 0:
+        return Err(FAT32_FD_EBADF)
+    val object_id = g_fat32_fd_table[source_idx as u64].object_id
+    if source_task_id == alias_task_id and source_fd == alias_fd:
+        return Ok(object_id)
+    var entries = _fat32_entries_without(alias_task_id, alias_fd)
+    entries.push(Fat32FdEntry(task_id: alias_task_id, fd: alias_fd, object_id: object_id))
+    val objects = _fat32_live_objects(entries)
+    g_fat32_fd_table = entries
+    g_fat32_file_objects = objects
+    Ok(object_id)
 
 fn fat32_fd_is_registered(task_id: u64, fd: i32) -> bool:
     _fat32_fd_index(task_id, fd) >= 0
+
+fn fat32_fd_object_id(task_id: u64, fd: i32) -> u64:
+    """Return the live canonical object identity for an fd, or 0 for EBADF."""
+    val idx = _fat32_fd_index(task_id, fd)
+    if idx < 0:
+        return 0u64
+    g_fat32_fd_table[idx as u64].object_id
 
 fn fat32_fd_clear(task_id: u64, fd: i32):
     """Drop (task_id, fd)'s stored handle. Called by _handle_file_close
@@ -84,14 +187,10 @@ fn fat32_fd_clear(task_id: u64, fd: i32):
     is handed the same fd number cannot observe a stale FileHandle left over
     from a previous, unrelated file."""
     _fat32_fd_ensure_table()
-    var kept = _fat32_fd_empty_table()
-    var i: u64 = 0
-    while i < g_fat32_fd_table.len():
-        val e = g_fat32_fd_table[i]
-        if not (e.task_id == task_id and e.fd == fd):
-            kept.push(e)
-        i = i + 1
-    g_fat32_fd_table = kept
+    val entries = _fat32_entries_without(task_id, fd)
+    val objects = _fat32_live_objects(entries)
+    g_fat32_fd_table = entries
+    g_fat32_file_objects = objects
 
 fn fat32_fd_clear_task(task_id: u64):
     """Drop every fd entry belonging to task_id (call on process teardown,
@@ -103,12 +202,15 @@ fn fat32_fd_clear_task(task_id: u64):
         if g_fat32_fd_table[i].task_id != task_id:
             kept.push(g_fat32_fd_table[i])
         i = i + 1
+    val objects = _fat32_live_objects(kept)
     g_fat32_fd_table = kept
+    g_fat32_file_objects = objects
 
 fn fat32_fd_clear_for_test():
     """Test-only: wipe the whole table so specs don't leak state across
     examples (mirrors fat32_mount_clear's test-only role)."""
     g_fat32_fd_table = _fat32_fd_empty_table()
+    g_fat32_file_objects = _fat32_object_empty_table()
     g_fat32_fd_table_ready = true
 
 fn fat32_fd_read_into(task_id: u64, fd: i32, buf: [u8]) -> Result<u64, i32>:
@@ -128,9 +230,13 @@ fn fat32_fd_read_into(task_id: u64, fd: i32, buf: [u8]) -> Result<u64, i32>:
     val idx = _fat32_fd_index(task_id, fd)
     if idx < 0:
         return Err(FAT32_FD_EBADF)
+    val object_idx = _fat32_object_index(g_fat32_fd_table[idx as u64].object_id)
+    if object_idx < 0:
+        return Err(FAT32_FD_EBADF)
     if not fat32_mount_ready():
         return Err(FAT32_FD_ENOSYS)
-    var handle = g_fat32_fd_table[idx as u64].handle
+    var object = g_fat32_file_objects[object_idx as u64]
+    var handle = object.handle
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     val read_r = fs.read(dev, handle, buf)
@@ -138,55 +244,76 @@ fn fat32_fd_read_into(task_id: u64, fd: i32, buf: [u8]) -> Result<u64, i32>:
         return Err(read_r.unwrap_err())
     val n = read_r.unwrap()
     handle.offset = handle.offset + n
-    g_fat32_fd_table[idx as u64] = Fat32FdEntry(task_id: task_id, fd: fd, handle: handle)
+    object.handle = handle
+    g_fat32_file_objects[object_idx as u64] = object
     Ok(n)
 
 fn fat32_fd_write_from(task_id: u64, fd: i32, bytes: [u8]) -> Result<u64, i32>:
-    """Write bytes.len() bytes to (task_id, fd) via Fat32Filesystem.write,
-    then re-store the returned updated handle (write returns an explicit
-    updated handle rather than mutating in place, since FileHandle is a
-    value type — start_cluster/file_size change on a fresh or extended file).
+    """Write at the canonical object's sequential cursor and advance it.
 
-    HONESTY GUARD (see this module's own file-level note and
-    doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md's
-    HONESTY CONTRACT): `Fat32Filesystem.write` is APPEND-ONLY — it always
-    writes at `h.file_size`, never at an arbitrary tracked read offset. That
-    matches POSIX for a freshly created/empty file (offset == file_size ==
-    0), but for an EXISTING non-empty file reopened for write, POSIX expects
-    a plain `write()` to overwrite starting at offset 0 — silently calling
-    the append-only primitive there would write the right BYTES to the WRONG
-    place without any error, exactly the class of bug this file exists to
-    prevent. This function refuses that case with Err(ENOSYS) instead of
-    silently appending, rather than fabricating overwrite-in-place support
-    `Fat32Filesystem.write` does not have.
+    `Fat32Filesystem.write_at` returns an updated value-semantic handle whose
+    allocation and file-size metadata must be committed here. This owner alone
+    advances the shared cursor, so every dup/fork alias observes POSIX
+    sequential overwrite semantics while positioned writes remain independent.
 
-    Returns Err(EBADF=-9) when unregistered, Err(ENOSYS=-38) when unmounted
-    OR when offset != file_size (the refusal above), or whatever error
-    Fat32Filesystem.write itself returns (ENOSPC=-28, EIO=-5).
+    Returns Err(EBADF=-9) when unregistered, Err(ENOSYS=-38) when unmounted,
+    or the positioned FAT32 error (ENOSPC/EFBIG/EIO).
     """
     val idx = _fat32_fd_index(task_id, fd)
     if idx < 0:
         return Err(FAT32_FD_EBADF)
+    val object_idx = _fat32_object_index(g_fat32_fd_table[idx as u64].object_id)
+    if object_idx < 0:
+        return Err(FAT32_FD_EBADF)
     if not fat32_mount_ready():
         return Err(FAT32_FD_ENOSYS)
-    val handle = g_fat32_fd_table[idx as u64].handle
-    if handle.offset != handle.file_size:
-        # Would silently append at file_size instead of overwriting at the
-        # caller's actual offset — refuse rather than write wrong data.
-        return Err(FAT32_FD_ENOSYS)
+    val handle = g_fat32_file_objects[object_idx as u64].handle
+    val cursor = handle.offset
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
-    val write_r = fs.write(dev, handle, bytes)
+    val write_r = fs.write_at(dev, handle, cursor, bytes)
     if write_r.is_err():
         return Err(write_r.unwrap_err())
     var updated = write_r.unwrap()
-    # write() always appends at (old) file_size and never touches `offset`;
-    # advance offset to the new file_size so it again satisfies
-    # offset == file_size for a subsequent sequential write, and so a
-    # following read starts at the position just written (matching a POSIX
-    # fd cursor after a successful write()).
-    updated.offset = updated.file_size
-    g_fat32_fd_table[idx as u64] = Fat32FdEntry(task_id: task_id, fd: fd, handle: updated)
+    updated.offset = cursor + bytes.len().to_u64()
+    g_fat32_file_objects[object_idx as u64] = Fat32FileObject(
+        object_id: g_fat32_fd_table[idx as u64].object_id, handle: updated)
+    Ok(bytes.len() as u64)
+
+fn fat32_fd_read_object_at_into(object_id: u64, offset: u64, buf: [u8]) -> Result<u64, i32>:
+    """Read at an explicit offset without changing the shared fd cursor."""
+    val object_idx = _fat32_object_index(object_id)
+    if object_idx < 0:
+        return Err(FAT32_FD_EBADF)
+    if not fat32_mount_ready():
+        return Err(FAT32_FD_ENOSYS)
+    val handle = g_fat32_file_objects[object_idx as u64].handle
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    fs.read_at(dev, handle, offset, buf)
+
+fn fat32_fd_write_object_at_from(object_id: u64, offset: u64, bytes: [u8]) -> Result<u64, i32>:
+    """Write at an explicit offset while preserving the shared fd cursor.
+
+    The returned handle commits allocation and file-size metadata to the
+    canonical object, so every alias observes the extension.
+    """
+    val object_idx = _fat32_object_index(object_id)
+    if object_idx < 0:
+        return Err(FAT32_FD_EBADF)
+    if not fat32_mount_ready():
+        return Err(FAT32_FD_ENOSYS)
+    val object = g_fat32_file_objects[object_idx as u64]
+    val cursor = object.handle.offset
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val write_r = fs.write_at(dev, object.handle, offset, bytes)
+    if write_r.is_err():
+        return Err(write_r.unwrap_err())
+    var updated = write_r.unwrap()
+    updated.offset = cursor
+    g_fat32_file_objects[object_idx as u64] = Fat32FileObject(
+        object_id: object_id, handle: updated)
     Ok(bytes.len() as u64)
 
 fn fat32_fd_sync(task_id: u64, fd: i32) -> Result<bool, i32>:
@@ -194,11 +321,14 @@ fn fat32_fd_sync(task_id: u64, fd: i32) -> Result<bool, i32>:
     val idx = _fat32_fd_index(task_id, fd)
     if idx < 0:
         return Err(FAT32_FD_EBADF)
+    val object_idx = _fat32_object_index(g_fat32_fd_table[idx as u64].object_id)
+    if object_idx < 0:
+        return Err(FAT32_FD_EBADF)
     if not fat32_mount_ready():
         return Err(FAT32_FD_ENOSYS)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
-    val metadata = fs.flush(dev, g_fat32_fd_table[idx as u64].handle)
+    val metadata = fs.flush(dev, g_fat32_file_objects[object_idx as u64].handle)
     if metadata.is_err():
         return Err(metadata.unwrap_err())
     val durable = dev.flush()

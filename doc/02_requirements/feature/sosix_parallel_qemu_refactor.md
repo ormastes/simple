@@ -21,6 +21,21 @@
 - REQ-SQ-015: Use canonical asynchronous SOSIX operations for deferred host work, with notification-based synchronous adapters only at compatibility boundaries.
 - REQ-SQ-016: Keep research, requirements, architecture, design, QEMU operator guidance, Codex/Claude/Gemini SPipe instructions, and feature/layer expert knowledge synchronized with the canonical wrappers and current matrix status.
 - REQ-SQ-017: Distinguish diagnostic guest capability from release admission; no diagnostic transcript may change a matrix cell to PASS without clean source, compiler, firmware, nonce, and collector provenance.
+- REQ-SQ-018: Provide true FAT32 `read_at`/`write_at` primitives that preserve the sequential cursor, support overwrite and extension with zero-filled holes, reject overflowing or non-FAT32 file sizes before mutation, and persist returned metadata.
+- REQ-SQ-019: Give every live FAT32 open-file description a monotonic nonzero identity; dup and fork aliases share that identity and cursor, close retires only the last alias, task exit retires remaining aliases, and stale identities fail closed.
+- REQ-SQ-020: Retain the concrete FAT32 positioned backend in the production syscall 134/135 route while keeping registry installation explicit; accept evidence only after a receipt-bound pure-Simple runtime, strong linked shim symbols, and the focused owner suite pass once.
+- REQ-SQ-021: Provide binary-safe DBFS and NVFS positioned primitives with short EOF reads, overwrite and suffix preservation, sparse zero-filled extension, invalid-range rejection, device persistence, and no sequential-cursor mutation.
+- REQ-SQ-022: Route SOSIX NVFS and DBFS positioned backends only through live monotonic MountTable virtual file objects; reject raw, retired, ambiguous, and cross-filesystem identities.
+- REQ-SQ-023: Build and boot the current device-backed `nvfs-dbfs-backed-v1` SimpleOS root twice under QEMU, proving VFS installation, byte-exact positioned I/O, and reboot persistence through source-matched Stage-4 runtime, kernel, image, QEMU, and transcript identities.
+
+REQ-SQ-018 through REQ-SQ-020 were selected explicitly by the 2026-08-16
+scoped recovery continuation. They complete the host-independent positioned-I/O
+implementation but do not promote a QEMU matrix row without live guest proof.
+
+REQ-SQ-021 through REQ-SQ-023 were selected explicitly by the subsequent
+NVFS/DBFS continuation. The provider name is a claim boundary: it records the
+current DBFS-backed NVFS facade and does not claim the separate native NVFS
+engine is the on-disk namespace owner.
 
 Current requirement baseline (2026-08-12): the immutable collector is
 **0 PASS / 24**; every narrower success remains diagnostic until its complete

@@ -1,0 +1,143 @@
+use std.spec.*
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_POINTER_MOVE, TINY_EVENT_POINTER_DOWN, TINY_EVENT_POINTER_UP, TINY_EVENT_WHEEL}
+use std.tiny.common.status.{TINY_OK, TINY_ERR_STALE_HANDLE}
+use std.tiny.common.types.{TinyPoint, TinyRect}
+use std.tiny.wm_contract.ports.{TinyWmPortV1}
+use os.services.tiny_wm.model.{TinyWmKiosk}
+
+describe "Tiny WM kiosk policy":
+    it "forces one opaque root to the output and selects direct presentation":
+        var wm = TinyWmKiosk.create(320, 240, 4)
+        expect(wm.set_root(10).code).to_equal(0)
+        val receipt = wm.frame_receipt()
+        expect(receipt.visible_surfaces).to_equal(1)
+        expect(receipt.direct_present).to_be(true)
+        expect(receipt.damage_count).to_equal(1)
+        expect(receipt.damage[0].width).to_equal(320)
+        expect(receipt.damage.len()).to_equal(8)
+        expect(wm.surfaces.len()).to_equal(4)
+        expect(wm.surface_count).to_equal(1)
+
+    it "exposes linked kiosk behavior through the frozen WM port contract":
+        var wm = TinyWmKiosk.create(64, 48, 2)
+        expect(wm.set_root(7).code).to_equal(0)
+        expect(wm.frame().code).to_equal(0)
+        expect(wm.surface_count).to_equal(1)
+        expect(wm.surfaces[0].content_id).to_equal(7)
+
+    it "clips a popup and disables direct presentation until it closes":
+        var wm = TinyWmKiosk.create(100, 80, 3)
+        expect(wm.set_root(1).code).to_equal(0)
+        wm.frame_receipt()
+        expect(wm.open_popup(2, TinyRect(x: 70, y: 60, width: 50, height: 40)).code).to_equal(0)
+        val popup_frame = wm.frame_receipt()
+        expect(popup_frame.direct_present).to_be(false)
+        expect(wm.surfaces[1].resolved.width).to_equal(50)
+        expect(wm.surfaces[1].resolved.height).to_equal(40)
+        expect(wm.surfaces[1].clip.width).to_equal(30)
+        expect(wm.surfaces[1].clip.height).to_equal(20)
+        expect(wm.close_popup(2).code).to_equal(0)
+        expect(wm.frame_receipt().direct_present).to_be(true)
+
+    it "routes pointer focus and capture to the topmost popup":
+        var wm = TinyWmKiosk.create(100, 80, 3)
+        wm.set_root(1)
+        wm.open_popup(2, TinyRect(x: 10, y: 10, width: 30, height: 20))
+        val down = TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 20, y: 15), code: 1, value: 1)
+        expect(wm.dispatch(down).code).to_equal(0)
+        expect(wm.focused_content_id).to_equal(2)
+        expect(wm.captured_content_id).to_equal(2)
+        val move = TinyEvent(kind: TINY_EVENT_POINTER_MOVE, point: TinyPoint(x: 90, y: 70), code: 0, value: 0)
+        expect(wm.dispatch(move).code).to_equal(0)
+        expect(wm.routed_content_id).to_equal(2)
+        val up = TinyEvent(kind: TINY_EVENT_POINTER_UP, point: TinyPoint(x: 90, y: 70), code: 1, value: 0)
+        expect(wm.dispatch(up).code).to_equal(0)
+        expect(wm.routed_content_id).to_equal(2)
+        expect(wm.captured_content_id).to_equal(-1)
+        val wheel = TinyEvent(kind: TINY_EVENT_WHEEL, point: TinyPoint(x: 20, y: 15), code: 0, value: 8)
+        expect(wm.dispatch(wheel).code).to_equal(0)
+        expect(wm.routed_content_id).to_equal(2)
+
+    it "interprets popup bounds relative to its root surface and merges damage":
+        var wm = TinyWmKiosk.create(100, 80, 4)
+        wm.output = TinyRect(x: 20, y: 10, width: 100, height: 80)
+        wm.set_root(1)
+        wm.frame_receipt()
+        wm.open_popup(2, TinyRect(x: 5, y: 7, width: 20, height: 10))
+        expect(wm.surfaces[1].resolved.x).to_equal(25)
+        expect(wm.surfaces[1].resolved.y).to_equal(17)
+        wm.add_damage(TinyRect(x: 24, y: 16, width: 4, height: 4))
+        val receipt = wm.frame_receipt()
+        expect(receipt.damage_count).to_equal(1)
+        expect(receipt.damage[0].x).to_equal(24)
+        expect(receipt.damage[0].width).to_equal(21)
+
+    it "rejects popup capacity and missing popup close requests":
+        var wm = TinyWmKiosk.create(100, 80, 2)
+        wm.set_root(1)
+        expect(wm.open_popup(2, TinyRect(x: 1, y: 1, width: 10, height: 10)).code).to_equal(0)
+        expect(wm.open_popup(3, TinyRect(x: 2, y: 2, width: 10, height: 10)).code).to_equal(1)
+        expect(wm.close_popup(99).code).to_equal(2)
+
+    it "rejects root admission when the configured surface capacity is empty":
+        var wm = TinyWmKiosk.create(100, 80, 0)
+        expect(wm.set_root(1).code).to_equal(1)
+        expect(wm.surface_count).to_equal(0)
+
+    it "keeps live identities stable and increments a reused popup slot generation":
+        var wm = TinyWmKiosk.create(100, 80, 3)
+        expect(wm.set_root(1).code).to_equal(0)
+        expect(wm.open_popup(2, TinyRect(x: 2, y: 2, width: 10, height: 10)).code).to_equal(0)
+        expect(wm.open_popup(3, TinyRect(x: 20, y: 2, width: 10, height: 10)).code).to_equal(0)
+        val removed_id = wm.surfaces[1].id
+        val retained_id = wm.surfaces[2].id
+        expect(wm.close_popup(2).code).to_equal(0)
+        expect(wm.surfaces[1].id.index).to_equal(retained_id.index)
+        expect(wm.surfaces[1].id.generation).to_equal(retained_id.generation)
+        expect(wm.surface_slots.validate(removed_id).code).to_equal(TINY_ERR_STALE_HANDLE)
+        expect(wm.surface_slots.validate(retained_id).code).to_equal(TINY_OK)
+        expect(wm.open_popup(4, TinyRect(x: 2, y: 20, width: 10, height: 10)).code).to_equal(0)
+        val reopened_id = wm.surfaces[2].id
+        expect(reopened_id.index).to_equal(removed_id.index)
+        expect(reopened_id.generation).to_be_greater_than(removed_id.generation)
+        expect(wm.surface_slots.validate(removed_id).code).to_equal(TINY_ERR_STALE_HANDLE)
+        expect(wm.surface_slots.validate(reopened_id).code).to_equal(TINY_OK)
+
+    it "cleans removed popup routing and reassigns focus to the topmost survivor":
+        var wm = TinyWmKiosk.create(100, 80, 3)
+        wm.set_root(1)
+        wm.open_popup(2, TinyRect(x: 2, y: 2, width: 20, height: 20))
+        wm.open_popup(3, TinyRect(x: 30, y: 2, width: 20, height: 20))
+        val down = TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 35, y: 5), code: 1, value: 1)
+        expect(wm.dispatch(down).code).to_equal(0)
+        expect(wm.focused_content_id).to_equal(3)
+        expect(wm.pointer_content_id).to_equal(3)
+        expect(wm.captured_content_id).to_equal(3)
+        expect(wm.routed_content_id).to_equal(3)
+        expect(wm.close_popup(3).code).to_equal(0)
+        expect(wm.focused_content_id).to_equal(2)
+        expect(wm.pointer_content_id).to_equal(-1)
+        expect(wm.captured_content_id).to_equal(-1)
+        expect(wm.routed_content_id).to_equal(-1)
+
+    it "keeps root identity while replacement retires popups and routing state":
+        var wm = TinyWmKiosk.create(100, 80, 2)
+        wm.set_root(1)
+        wm.open_popup(2, TinyRect(x: 2, y: 2, width: 20, height: 20))
+        val root_id = wm.surfaces[0].id
+        val retired_popup_id = wm.surfaces[1].id
+        val down = TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 5, y: 5), code: 1, value: 1)
+        wm.dispatch(down)
+        expect(wm.set_root(7).code).to_equal(0)
+        expect(wm.surface_count).to_equal(1)
+        expect(wm.surface_slots.count()).to_equal(1)
+        expect(wm.surface_slots.validate(retired_popup_id).code).to_equal(TINY_ERR_STALE_HANDLE)
+        expect(wm.surfaces[0].id.index).to_equal(root_id.index)
+        expect(wm.surfaces[0].id.generation).to_equal(root_id.generation)
+        expect(wm.focused_content_id).to_equal(7)
+        expect(wm.pointer_content_id).to_equal(-1)
+        expect(wm.captured_content_id).to_equal(-1)
+        expect(wm.routed_content_id).to_equal(-1)
+        expect(wm.open_popup(8, TinyRect(x: 4, y: 4, width: 20, height: 20)).code).to_equal(0)
+        expect(wm.surfaces[1].id.index).to_equal(retired_popup_id.index)
+        expect(wm.surfaces[1].id.generation).to_be_greater_than(retired_popup_id.generation)

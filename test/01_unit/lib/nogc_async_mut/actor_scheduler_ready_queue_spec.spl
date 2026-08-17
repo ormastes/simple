@@ -1,5 +1,15 @@
 use std.spec.*
-use std.actor.scheduler.{actor_scheduler_ready_queue_should_compact, actor_scheduler_thread_domain_allows}
+use std.actor.actor.{Actor, HandlerTable}
+use std.actor.scheduler.{
+    ActorScheduler,
+    actor_scheduler_ready_queue_should_compact,
+    actor_scheduler_thread_domain_allows
+}
+
+fn actor_owner_guard_echo(args: [text]) -> text:
+    if args.is_empty():
+        return ""
+    args[0]
 
 describe "ActorScheduler owner-thread admission guard":
     it "admits only the exact positive scheduler thread identity":
@@ -7,6 +17,53 @@ describe "ActorScheduler owner-thread admission guard":
         expect(actor_scheduler_thread_domain_allows(41, 42)).to_equal(false)
         expect(actor_scheduler_thread_domain_allows(0, 0)).to_equal(false)
         expect(actor_scheduler_thread_domain_allows(-1, -1)).to_equal(false)
+
+    it "fails closed for reply lifecycle and scheduler queries outside the owner domain":
+        val scheduler = ActorScheduler.with_reply_capacity(2)
+        var handlers = HandlerTable.new()
+        handlers.register("echo", actor_owner_guard_echo)
+        val actor_id = scheduler.register_actor(Actor.new(handlers))
+        val reply_id = scheduler.ask_message(actor_id, "echo", ["completed"])
+        scheduler.run_until_idle()
+        expect(scheduler.send_message(actor_id, "missing", [])).to_equal(true)
+        scheduler.run_once()
+        expect(scheduler.send_message(actor_id, "echo", ["pending"])).to_equal(true)
+        val owner_thread_id = scheduler.owner_thread_id
+        expect(reply_id).to_be_greater_than(0)
+        expect(scheduler.outstanding_reply_count()).to_equal(1)
+        if val completed = scheduler.get_reply(reply_id):
+            expect(completed).to_equal("completed")
+        else:
+            fail("completed reply must be observable in the owner domain")
+        expect(scheduler.actor_count()).to_equal(1)
+        expect(scheduler.pending_message_count()).to_equal(1)
+        expect(scheduler.actor_error_count(actor_id)).to_equal(1)
+        expect(scheduler.actor_last_error(actor_id)).to_equal("method not found: missing")
+
+        scheduler.owner_thread_id = -1
+        expect(scheduler.get_reply(reply_id)).to_be_nil()
+        expect(scheduler.reply_capacity()).to_equal(0)
+        expect(scheduler.outstanding_reply_count()).to_equal(0)
+        expect(scheduler.consume_reply(reply_id)).to_be_nil()
+        expect(scheduler.cancel_reply(reply_id)).to_equal(false)
+        expect(scheduler.actor_count()).to_equal(0)
+        expect(scheduler.pending_message_count()).to_equal(0)
+        expect(scheduler.actor_error_count(actor_id)).to_equal(0)
+        expect(scheduler.actor_last_error(actor_id)).to_equal("")
+        expect(scheduler.stats_string()).to_equal("Scheduler(unavailable: wrong thread)")
+
+        scheduler.owner_thread_id = owner_thread_id
+        expect(scheduler.outstanding_reply_count()).to_equal(1)
+        if val completed = scheduler.get_reply(reply_id):
+            expect(completed).to_equal("completed")
+        else:
+            fail("rejected off-domain access must preserve the completed reply")
+        expect(scheduler.actor_count()).to_equal(1)
+        expect(scheduler.pending_message_count()).to_equal(1)
+        expect(scheduler.actor_error_count(actor_id)).to_equal(1)
+        expect(scheduler.actor_last_error(actor_id)).to_equal("method not found: missing")
+        expect(scheduler.cancel_reply(reply_id)).to_equal(true)
+        expect(scheduler.outstanding_reply_count()).to_equal(0)
 
 describe "ActorScheduler ready-queue cursor compaction":
     it "does not compact an empty or tiny active queue on every dispatch":

@@ -135,9 +135,41 @@ bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/css_ext_routing
 # All browser engine tests
 bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/
 
+# Layout box content contract (system tier)
+bin/simple test test/03_system/browser_engine/layout_box_content_contract_spec.spl
+
 # Enable layout debug output
 SIMPLE_DEBUG_LAYOUT=1 bin/simple run <script.spl>
 ```
+
+### Layout box content contract
+
+`BeLayoutBox` stores the **border box** (`x`/`y`/`width`/`height`) plus the box
+model, and derives the content rectangle on every call:
+
+    content_x      == x + padding_left + border_width
+    content_y      == y + padding_top  + border_width
+    content_width  == width  - padding_left - padding_right  - border_width * 2
+    content_height == height - padding_top  - padding_bottom - border_width * 2
+
+Two things follow, and both have already caused dead code:
+
+- `content_x` / `content_y` / `content_width` / `content_height` are **methods,
+  not fields**. Reading them as fields does not compile.
+- A box refers to its element by the integer `node_id` field (`-1` for
+  anonymous boxes). There is no `node` field holding a `BeDomNode`; resolving a
+  node from a box needs a `node_id` lookup that no current pipeline provides.
+
+The deleted `_paint_box` helper got both wrong and could never execute — see
+`doc/08_tracking/bug/layout_paint_paint_box_dead_code_wrong_belayoutbox_shape_2026-08-15.md`.
+The contract is now stated executably by
+`test/03_system/browser_engine/layout_box_content_contract_spec.spl` (plan:
+`doc/03_plan/sys_test/browser_engine_layout_box_content_contract.md`), whose
+third scenario mutates padding after construction specifically to prove the
+content rectangle is derived per call rather than stored.
+
+The engine does **not** clamp an over-constrained box: padding and border wider
+than the box yield a negative `content_width()`, which callers must handle.
 
 ## Production Web Boundary Checks
 

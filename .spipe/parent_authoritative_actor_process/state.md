@@ -63,3 +63,11 @@ verify-blocked
   compile now passes the mailbox and stops later at the tracked actor-spawn
   flat-AST/compiled `str.clear` gap. Static guards pass; the obsolete `STP1`
   sibling branch was inspected and deliberately not merged.
+- actor owner-domain continuation: completed fail-closed guards for reply
+  lookup/capacity/count/consume/cancel and actor/pending/error/stats queries.
+  Unit and modern system source seed distinct non-empty reply, actor, pending,
+  and error state, inject an owner-identity mismatch, and prove rejection does
+  not mutate retained state. The authored manual, plan, guide, feature expert,
+  and wiki now trace closed `actor-owner-domain-rejection/v1` evidence. This
+  completes the scoped source criterion but is not runtime PASS: the admitted
+  Stage-2 pure-Simple binary has no qualified `test`/docgen/maintenance surface.

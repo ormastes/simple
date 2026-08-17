@@ -559,9 +559,10 @@ class DbServerCapsule:
             Ok(listener_value):
                 self.serve_listener(listener_value, bounded)
 
-    # The caller may retain a copy of `control` and call request_stop() from
-    # another owner. DbStopControl is a shared mutex-backed token, while
-    # request_stop also closes the listener fd to interrupt an idle accept.
+    # The caller may retain `control.stop_handle()` and call request_stop()
+    # from another owner. The bounded accept timeout returns control to this
+    # sole listener owner, which observes stop and closes its owner-local fd
+    # under the shared scalar lease/terminal-close gate.
     me serve_listener(control: DbListenerControl, max_connections: i64) -> Result<i64, IoError>:
         var listener = control
         self.listener_running = true
@@ -573,15 +574,23 @@ class DbServerCapsule:
                         break
                     if accept_error.kind == IoErrorKind.TimedOut:
                         continue
-                    listener.close()
+                    listener.close_owned()
                     self.listener_running = false
                     return Err(accept_error)
                 Ok(transport):
+                    # Stop may be published while the bounded accept is in
+                    # flight. A connection completed after that publication
+                    # is owned only for cleanup; it must never reach auth,
+                    # session creation, or mutation dispatch.
+                    if listener.is_stopped():
+                        var rejected = transport
+                        rejected.close()
+                        break
                     self.active_connections = 1
                     self.serve_tcp(transport)
                     self.active_connections = 0
                     accepted = accepted + 1
-        listener.close()
+        listener.close_owned()
         self.listener_running = false
         Ok(accepted)
 

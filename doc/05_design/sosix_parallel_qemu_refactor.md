@@ -88,6 +88,25 @@ source, ABI, lengths, API ID, token, and generation, and publishes exactly one
 typed completion before signaling its wait set. POSIX shared-offset sequencing
 is above `read_at`/`write_at`; it is never encoded as `SEEK + READ`.
 
+### Concrete FAT32 positioned path
+
+`Fat32Filesystem.read_at` reads from an explicit offset and never updates the
+handle cursor. `write_at` enters the filesystem mutation owner once, rejects
+u64 overflow and values outside FAT32's u32 size field before mutation,
+allocates the required chain, zeroes an extending hole, overlays caller bytes,
+and returns the updated value-semantic handle with its original cursor.
+
+`fat32_fd_table` separates descriptor aliases from `Fat32FileObject`. Object
+IDs are monotonic, nonzero, and fail closed at exhaustion. Positioned writes
+commit the returned handle to the canonical object, while dup/fork aliases
+observe the same metadata and sequential cursor. Last-alias close and task
+exit retire the object, so a reused fd cannot revive an old capability.
+
+`SosixFat32PositionedVfsBackendV1` is a leaf adapter. It copies buffers at the
+boundary, validates lengths/ranges and transfer counts, and maps kernel errno
+to stable reasons. The syscall shim retains this concrete backend but accepts
+dispatch only after an authenticated registry owner is explicitly installed.
+
 ## 3. Host-service interfaces
 
 ```text
@@ -285,3 +304,61 @@ Linux x86_64, ARM64, and RV32 retain canonical producer bundles; other Linux
 and external-host diagnostics remain blocked/postponed until their complete
 collector admission. Documentation review is repeated when a wrapper,
 descriptor, marker, storage resolver, or blocked-row resume command changes.
+
+## 14. NVFS/DBFS positioned filesystem continuation
+
+### 14.1 Primitive and object boundaries
+
+NVFS and DBFS expose exact binary `pread`/`pwrite` primitives with short reads
+at EOF, overwrite/extension semantics, and zero-filled holes. The async VFS
+layer does not publish raw driver handles: `MountTable.open` returns the
+virtual handle used by `positioned_read_bytes` and
+`positioned_write_bytes`. Each call checks the virtual binding, driver family,
+offset, and count before dispatch. A retired or wrong-family handle fails
+closed and cannot be recycled into another SOSIX object.
+
+The SOSIX backends are fieldless adapters over the canonical global VFS
+facade. This retains one mount/object authority and one stable error mapping;
+it does not introduce a private registry or seek/restore emulation.
+
+### 14.2 Image and boot design
+
+`nvfs-dbfs-backed-v1` is the only supported provider name for this lane. Its
+raw image layout is NVFS superblocks at LBA 0/1, DBFS backing superblocks at
+LBA 2/3, and the backing arena from LBA 4. `mkfs-nvfs.shs` must reject a Rust
+seed or unqualified runtime and emit an adjacent manifest binding image path,
+image SHA-256, provider, runtime SHA-256, and source revision.
+
+The boot owner mounts `DriverInstance.Nvfs` as root, installs the typed NVFS
+route in the production shim, and opens `/boot-positioned.bin` as a
+`MountTable` virtual object. The oracle writes bytes `[11, 22]` at offset 2
+through registered-buffer SOSIX kernel dispatch and requires
+`[0, 0, 11, 22]` on readback. A separate
+persistence probe writes on the first boot and must read the same content from
+the same private image copy on the second boot.
+
+The qualified kernel uses the dedicated
+`examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl` entry.
+Its closed build receipt binds that entry, target, kernel path/hash,
+compiler/runtime path/hash, and source revision. DBFS rejects positioned
+full-image materialization beyond 64 MiB hosted or remaining device capacity
+before allocation and restores publication if namespace commit fails.
+
+### 14.3 Modern SSpec flow
+
+The executable system spec freezes these displayed steps:
+
+1. `Validate positioned filesystem source contracts`
+2. `Reject an unqualified live-guest environment`
+3. `Bind the admitted pure-Simple runtime`
+4. `Exercise NVFS and DBFS positioned owners`
+5. `Boot the NVFS-backed SimpleOS guest`
+6. `Verify cursor-independent guest I/O`
+7. `Retain filesystem matrix evidence`
+
+Its helpers are `run_positioned_filesystem_gate`, `run_nvfs_qemu_gate`,
+`qualified_positioned_environment`, `expect_positioned_backend_evidence`, and
+`expect_nvfs_live_guest_evidence`. Missing qualification invokes a real
+failure, never a skip or placeholder assertion. Until the qualified Stage-4
+environment exists, the `.md` manual is an explicitly unrun future-executable
+mirror, not generated or runtime PASS evidence.

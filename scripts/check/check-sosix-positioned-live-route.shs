@@ -1,12 +1,12 @@
 #!/bin/sh
 # Fail-closed admission for the live x86_64 SOSIX positioned-syscall route.
 #
-# Source admission proves only that syscall IDs 134/135 reach the canonical
-# value-threaded owner through the production C-ABI trap seam and that the
-# retained backend is explicitly unavailable.  Linked admission additionally
-# proves those exact C-ABI shims are strong symbols in a nonzero-entry x86_64
-# kernel ELF.  Neither mode claims an installed service owner, a true backend,
-# successful I/O, or runtime/QEMU evidence.
+# Source admission proves that syscall IDs 134/135 reach the canonical
+# value-threaded owner through the production C-ABI trap seam, retain the true
+# FAT32 positioned backend, and use generation-safe file objects. Linked
+# admission additionally proves those exact C-ABI shims are strong symbols in
+# a nonzero-entry x86_64 kernel ELF. Neither mode claims an authenticated
+# registry owner was installed at boot, successful I/O, or runtime/QEMU proof.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -18,6 +18,11 @@ require() { grep -Fq "$1" "$2" || fail "missing '$1' in $2"; }
 contract=$root/src/os/sosix/fs/positioned_syscall_v1.spl
 owner=$root/src/os/sosix/fs/kernel_positioned_dispatch_v1.spl
 backend=$root/src/os/sosix/fs/service_vfs_backend_v1.spl
+fat32_backend=$root/src/os/sosix/fs/fat32_positioned_vfs_backend.spl
+backend_composition=$root/src/os/sosix/fs/positioned_backend_composition_v1.spl
+fat32=$root/src/os/kernel/fs/fat32.spl
+fat32_objects=$root/src/os/kernel/fs/fat32_fd_table.spl
+process_lifecycle=$root/src/os/kernel/ipc/syscall_process.spl
 shim=$root/src/os/kernel/abi/syscall_shim_positioned.spl
 shim_root=$root/src/os/kernel/abi/syscall_shim.spl
 trap=$root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
@@ -36,10 +41,24 @@ source_admit() {
     require 'SOSIX_FS_PWRITE_REGISTERED_V1: u64 = 135' "$contract"
     require 'sosix_fs_kernel_dispatch_positioned_v1' "$owner"
     require 'sosix_fs_kernel_uninstalled_positioned_state_v1' "$owner"
-    require 'class SosixUnavailablePositionedVfsBackendV1' "$backend"
-    require 'fn positioned_io_available() -> bool: false' "$backend"
+    require 'trait SosixPositionedVfsBackendV1' "$backend"
+    require 'fn read_at(self, dev: BlockDevice, h: FileHandle, offset: u64, buf: [u8]) -> Result<u64, i32>' "$fat32"
+    require 'fn write_at(self, dev: BlockDevice, h: FileHandle, offset: u64, buf: [u8]) -> Result<FileHandle, i32>' "$fat32"
+    require 'fn fat32_fd_object_id(task_id: u64, fd: i32) -> u64' "$fat32_objects"
+    require 'fn fat32_fd_read_object_at_into(object_id: u64, offset: u64, buf: [u8]) -> Result<u64, i32>' "$fat32_objects"
+    require 'fn fat32_fd_write_object_at_from(object_id: u64, offset: u64, bytes: [u8]) -> Result<u64, i32>' "$fat32_objects"
+    require 'class SosixFat32PositionedVfsBackendV1' "$fat32_backend"
+    require 'fn positioned_io_available() -> bool:' "$fat32_backend"
+    require 'SosixPositionedBackendOwnerV1' "$shim"
+    require 'sosix_positioned_backend_default_v1()' "$shim"
+    require 'case Fat32:' "$backend_composition"
+    require 'SosixFat32PositionedVfsBackendV1()' "$backend_composition"
     require 'sosix_fs_kernel_dispatch_positioned_v1(' "$shim"
     require 'g_shim_positioned_state = dispatched.state' "$shim"
+    require '_publish_fat32_dup_alias' "$process_lifecycle"
+    require '_publish_fat32_fork_aliases' "$process_lifecycle"
+    require 'fat32_fd_clear_task(exiting_task.id)' "$process_lifecycle"
+    require 'fat32_fd_object_id(fd_current_task(), fd)' "$process_lifecycle"
     require '@export("C", name: "spl_handle_fs_pread_registered_v1")' "$shim"
     require '@export("C", name: "spl_handle_fs_pwrite_registered_v1")' "$shim"
     require 'use os.kernel.abi.syscall_shim_positioned' "$shim_root"
@@ -50,7 +69,7 @@ source_admit() {
     if grep -Eq 'posix_(lseek|read|write)' "$shim" "$backend"; then
         fail 'positioned live route contains cursor-based POSIX emulation'
     fi
-    printf '%s\n' 'PASS SOSIX positioned source route present (owner/backend runtime remains unproven)'
+    printf '%s\n' 'PASS SOSIX FAT32 positioned source route present (registry install and runtime remain unproven)'
 }
 
 artifact_admit() {
@@ -73,7 +92,7 @@ artifact_admit() {
         spl_handle_fs_pwrite_registered_v1; do
         require_global_text_symbol "$symbol" "$artifact"
     done
-    printf '%s\n' "PASS SOSIX positioned linked route admitted artifact=$artifact (backend/runtime success not claimed)"
+    printf '%s\n' "PASS SOSIX FAT32 positioned linked route admitted artifact=$artifact (registry/runtime success not claimed)"
 }
 
 case "$mode" in

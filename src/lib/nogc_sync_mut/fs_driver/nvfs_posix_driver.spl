@@ -8,6 +8,7 @@
 
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
 use std.fs_driver.error.{FsError}
+use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle, DirHandle, Inode, Path, OpenFlags, MountOptions, FileStat, DirEntry, StatInfo}
 use std.fs_driver.capability.{Capability, FsCapabilitySet}
 use std.fs_driver.extension.{Extension, PosixCompatExt}
@@ -28,6 +29,7 @@ var _nvfs_posix_open: [NvfsPosixOpenRecord] = []
 var _nvfs_posix_next_inst: i64 = 1
 var _nvfs_posix_next_nvme_block: i64 = 64
 val _NVFS_POSIX_BLOCKS_PER_FILE: i64 = 32
+val _NVFS_POSIX_MAX_OFFSET: i64 = 9223372036854775807
 
 struct NvfsPosixDriver:
     name: text
@@ -38,6 +40,13 @@ impl NvfsPosixDriver:
     static fn new(name: text) -> NvfsPosixDriver:
         val inst_id = _nvfs_posix_alloc_inst_id()
         NvfsPosixDriver(name: name, inst_id: inst_id, inner: DbFsDriver.new_hosted())
+
+    static fn new_on_device(
+        name: text, dev: BlockDevice, base_block: i64, block_count: i64
+    ) -> Result<NvfsPosixDriver, FsError>:
+        val inner = DbFsDriver.open_on_device(dev, base_block, block_count)?
+        val inst_id = _nvfs_posix_alloc_inst_id()
+        Ok(NvfsPosixDriver(name: name, inst_id: inst_id, inner: inner))
 
     fn mount(opts: MountOptions) -> Result<(), FsError>:
         val _ = opts
@@ -97,9 +106,10 @@ impl NvfsPosixDriver:
         self.inner.read_handle(handle, length)
 
     fn read(handle: FileHandle, offset: i64, mut buf: [u8]) -> Result<i64, FsError>:
-        if offset != 0:
-            return Err(FsError.Unsupported)
-        val data_r = self.inner.read_bytes_handle(handle, buf.len() as i64)
+        val length = buf.len() as i64
+        if not _nvfs_posix_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        val data_r = self.inner.pread_bytes_handle(handle, offset, length)
         val data = match data_r:
             Ok(bytes):
                 bytes
@@ -124,35 +134,26 @@ impl NvfsPosixDriver:
         self.inner.write_handle(handle, content)
 
     fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        if offset != 0:
-            return Err(FsError.Unsupported)
-        val r = self.inner.write_bytes_handle(handle, buf)
-        match r:
-            Ok(_):
-                pass
-            Err(err):
-                return Err(err)
-        val path = _nvfs_posix_path_for_handle(self.inst_id, handle.id as u64)
-        if path != "":
-            _nvfs_posix_store_file(path, _nvfs_posix_slice_bytes(buf, buf.len() as i64))
-            _nvfs_posix_mirror_to_nvme(buf)
-        Ok(buf.len() as i64)
+        self.pwrite(handle, offset, buf)
 
     fn pwrite_handle(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
         self.inner.pwrite_handle(handle, patch, offset)
 
     fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        var patch = ""
-        var i: i64 = 0
-        while i < buf.len() as i64:
-            patch = patch + buf[i as i32].chr()
-            i = i + 1
-        self.inner.pwrite_handle(handle, patch, offset)?
+        val length = buf.len() as i64
+        if not _nvfs_posix_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        val written = self.inner.pwrite_bytes_handle(handle, offset, buf)?
+        if written < 0 or written > length:
+            return Err(FsError.IoError(code: 0))
         val path = _nvfs_posix_path_for_handle(self.inst_id, handle.id as u64)
-        if path != "":
-            val merged = _nvfs_posix_merge_patch(_nvfs_posix_load_file(path), offset, buf)
+        if path != "" and written > 0:
+            val committed = _nvfs_posix_slice_bytes(buf, written)
+            val merged = _nvfs_posix_merge_patch(
+                _nvfs_posix_load_file(path), offset, committed)
             _nvfs_posix_store_file(path, merged)
-        Ok(buf.len() as i64)
+            _nvfs_posix_mirror_to_nvme(merged)
+        Ok(written)
 
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         self.inner.pread_handle(handle, offset, length)
@@ -332,6 +333,9 @@ fn _nvfs_posix_slice_bytes(buf: [u8], count: i64) -> [u8]:
         out.push(buf[i as i32])
         i = i + 1
     out
+
+fn _nvfs_posix_range_valid(offset: i64, length: i64) -> bool:
+    offset >= 0 and length >= 0 and offset <= _NVFS_POSIX_MAX_OFFSET - length
 
 fn _nvfs_posix_merge_patch(base: [u8], offset: i64, patch: [u8]) -> [u8]:
     var out: [u8] = []

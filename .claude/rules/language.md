@@ -21,6 +21,7 @@ alwaysApply: false
 - **Nested closure capture** - can READ outer vars, CANNOT MODIFY (module closures work fine)
 - **Chained methods on erased receivers** - chains fail only when a link's receiver type is erased (e.g. from ANY/dict); typed chains work. Workaround: intermediate typed `val`
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`
+- **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`, `pub`
 - **`examples` and `and_then`** — FIXED (2026-08-17): both are now accepted as named-argument labels (`Foo(examples: x)`, `Foo(and_then: y)`), alongside every other soft keyword. Census run 2026-08-10 had found these two to be the ONLY broken identifiers in that lexer block — `scenario`, `given`, `when`, `then`, `feature`, `outline` were always fine. The fix lands in `src/compiler_rust/parser/src/expressions/helpers.rs`; **it requires a rebuilt seed** — a binary older than 2026-08-17 still reports `function arguments: expected Comma, found Colon`. Regression spec: `test/01_unit/compiler/parser_contextual_keyword_named_arg_spec.spl`. See `doc/08_tracking/bug/examples_identifier_rejected_in_named_argument_position_2026-08-10.md`
 - **`move`** — FIXED (2026-08-17): `move` is now contextual. `var move = 3u32` followed by `while move + 1u32 < n` used to fail with `parse: Unexpected token: expected expression, found Plus`; `move` is treated as the keyword only when a lambda introducer or an operand follows it, and is an ordinary identifier otherwise. Move-closures (`move \x: ...`) are unaffected. **Requires a rebuilt seed** — an older binary still reports the Plus error. Regression spec: `test/01_unit/compiler/parser_move_contextual_keyword_spec.spl`. See `doc/08_tracking/bug/move_identifier_rejected_as_expression_2026-08-15.md`
 - **`generator`** — an ordinary name, but the interpreter has a lambda-based `generator(fn)` builtin. A user-defined `fn generator(...)` (e.g. `src/lib/nogc_async_mut/generator.spl`) shadows it as of 2026-08-17; on an older binary any call through that module fails with `semantic: generator expects a lambda`. See `doc/08_tracking/bug/generator_identifier_collides_with_builtin_construct_name_2026-08-11.md`
@@ -28,3 +29,19 @@ alwaysApply: false
 ## Syntax Quick Reference
 See `doc/07_guide/quick_reference/syntax_quick_reference.md` for complete reference.
 See `.claude/memory/ref_coding.md` for coding conventions and common mistakes.
+
+## `.?` is a payload, not a predicate — settled, do not re-file (2026-08-17)
+
+`.?` returns `T?` — the value if present, `nil` if absent (presence = not nil
+AND not empty; `syntax_quick_reference.md:548-552`). It is **not** a bool.
+`expect(x.?).to_be(true)` compares the unwrapped payload against `true` and the
+matcher is telling the truth when it reports the value. Correct predicate form:
+
+    expect(x.? != nil).to_be(true)     # or assert_true(x.? != nil)
+
+This has been triaged twice and closed both times — `3264274affec` ("SPEC
+MISUSE, not a compiler defect") and `4e73e47eb2ad` (re-triage closing
+`existence_check_conflates_absent_with_empty_text` as NOT A DEFECT). A third
+session re-diagnosed it as a compiler bug on 2026-08-17 and filed a duplicate;
+that doc was deleted. If a spec fails on `.?`, fix the **spec**, and do not
+change `.?` lowering.

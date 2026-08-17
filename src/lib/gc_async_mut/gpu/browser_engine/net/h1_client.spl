@@ -120,11 +120,20 @@ class MockResponseRegistry:
 var _global_mock_registry: MockResponseRegistry? = nil
 
 fn get_mock_registry() -> MockResponseRegistry:
-    if _global_mock_registry.?:
-        return _global_mock_registry.unwrap()
-    var reg = MockResponseRegistry.create()
-    _global_mock_registry = reg
-    return reg
+    # match instead of `.?` + `.unwrap()`: the seed interpreter's semantic
+    # pass narrows `_global_mock_registry` inside the `.?` branch and then
+    # cannot resolve `.unwrap()` on the narrowed class ("method `unwrap` not
+    # found on class `MockResponseRegistry`"), which killed every live fetch
+    # under `bin/simple run`. Match on the optional is the dominant idiom in
+    # this tree and works under both the seed and the self-hosted compiler.
+    match _global_mock_registry:
+        Some(reg):
+            return reg
+        nil:
+            ()
+    var created = MockResponseRegistry.create()
+    _global_mock_registry = created
+    return created
 
 fn set_mock_registry(registry: MockResponseRegistry):
     _global_mock_registry = registry
@@ -175,7 +184,8 @@ fn h1_mock_response_until(
         var headers: [Pair<text, text>] = []
         for header in mock.headers:
             headers.push(header)
-        if find_header(headers, "content-type").? == false:
+        # `== nil`, not `.? == false` — same seed divergence as the TLS guard.
+        if find_header(headers, "content-type") == nil:
             headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
         headers.push(Pair("Content-Length", "{mock.body.len()}"))
         headers.push(Pair("Connection", "close"))
@@ -267,7 +277,14 @@ class H1Client:
             host, port, is_tls, request_deadline_ms
         )?
 
-        if is_tls and conn.tls_conn.? == false:
+        # `== nil`, NOT `.? == false`: under the seed interpreter `.?` yields
+        # the unwrapped value or nil rather than a bool, so `nil == false` is
+        # false and this guard silently never fired — the handshake was
+        # skipped precisely when no TLS connection existed yet, and every
+        # https fetch died at the "missing TLS connection" fallthrough below
+        # even with a real TLS runtime linked. Probe + 43-site census:
+        # doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+        if is_tls and conn.tls_conn == nil:
             var service_identity = host
             var addresses: [text] = []
             if val identity = h1_tls_ipv6_literal_identity(host):
@@ -700,7 +717,7 @@ fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8]>:
     #   ...
     #   0\r\n
     #   \r\n
-    var result: [u8] = []
+    var body_acc: [u8] = []
     var pos = 0
 
     while pos < raw.len():
@@ -717,7 +734,7 @@ fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8]>:
         if chunk_size == 0:
             if line_end + 4 > raw.len() or raw[line_end + 2] != 13 or raw[line_end + 3] != 10:
                 return Err(parse_error("h1: incomplete terminal chunk"))
-            return Ok(result)
+            return Ok(body_acc)
 
         # Read chunk data
         val data_start = line_end + 2  # Skip \r\n after size
@@ -727,10 +744,10 @@ fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8]>:
             return Err(parse_error("h1: truncated chunk data"))
         if raw[data_end] != 13 or raw[data_end + 1] != 10:
             return Err(parse_error("h1: missing chunk terminator"))
-        if not h1_response_size_allowed(result.len(), chunk_size):
+        if not h1_response_size_allowed(body_acc.len(), chunk_size):
             return Err(parse_error("h1: decoded body exceeds 50 MiB limit"))
 
-        result = result + raw.slice(data_start, data_end)
+        body_acc = body_acc + raw.slice(data_start, data_end)
 
         # Skip \r\n after chunk data
         pos = data_end + 2
@@ -942,7 +959,7 @@ fn bytes_find_crlf(raw: [u8], start: i64) -> i64:
         if raw[i] == 13 and raw[i + 1] == 10:
             return i
         i = i + 1
-    -1
+    return -1
 
 fn split_lines(s: text) -> [text]:
     # Split a string by \r\n line endings.

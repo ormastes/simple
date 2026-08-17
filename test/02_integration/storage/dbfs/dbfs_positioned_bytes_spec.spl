@@ -1,0 +1,204 @@
+"""
+DBFS binary positioned-I/O integration specification.
+
+The canonical DBFS byte owner must preserve arbitrary bytes, return short EOF
+reads, keep overwrite suffixes, zero-fill holes, reject invalid signed ranges,
+and reject stale handles without routing through the legacy text primitives.
+"""
+
+use std.spipe.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.types.{FileHandle, OpenFlags, Path}
+
+var _dbfs_namespace_write_count: i64 = 0
+
+class NamespaceCommitFailBlockDevice:
+    inner: MemBlockDevice
+    namespace_lba: u64
+
+impl NamespaceCommitFailBlockDevice:
+    static fn new(sector_count: u64, namespace_lba: u64) -> NamespaceCommitFailBlockDevice:
+        _dbfs_namespace_write_count = 0
+        NamespaceCommitFailBlockDevice(
+            inner: MemBlockDevice.new(sector_count, 512u32),
+            namespace_lba: namespace_lba,
+        )
+
+impl BlockDevice for NamespaceCommitFailBlockDevice:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        self.inner.read_sector(lba)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if lba == self.namespace_lba:
+            _dbfs_namespace_write_count = _dbfs_namespace_write_count + 1
+            if _dbfs_namespace_write_count == 3:
+                return Err("injected namespace commit failure")
+        var inner = self.inner
+        inner.write_sector(lba, data)
+
+    fn sector_size() -> u32:
+        512u32
+
+fn open_positioned_fixture(path: text) -> (DbFsDriver, FileHandle):
+    val driver = DbFsDriver.new_hosted()
+    val handle = driver.open_path(
+        Path(raw: path), OpenFlags.read_write().with_create()).unwrap()
+    (driver, handle)
+
+describe "DBFS binary positioned I/O":
+    # @req: REQ-SQ-021
+    it "returns an owned short binary read from a nonzero offset":
+        val (driver, handle) = open_positioned_fixture("/dbfs-short-read.bin")
+        val seed: [u8] = [0x00u8, 0xffu8, 0x80u8, 0x41u8, 0x7fu8]
+        driver.write_bytes_handle(handle, seed).unwrap()
+
+        step("Read through EOF without padding")
+        val got = driver.pread_bytes_handle(handle, 2, 8).unwrap()
+        expect(got).to_equal([0x80u8, 0x41u8, 0x7fu8])
+        expect(driver.pread_bytes_handle(handle, 5, 1).unwrap()).to_equal([])
+
+        step("Keep each result independently owned")
+        got[0] = 0x11u8
+        expect(driver.pread_bytes_handle(handle, 2, 1).unwrap()).to_equal([0x80u8])
+
+    # @req: REQ-SQ-021
+    it "preserves binary prefix and suffix around an overwrite":
+        val (driver, handle) = open_positioned_fixture("/dbfs-overwrite.bin")
+        driver.write_bytes_handle(
+            handle, [0x00u8, 0xffu8, 0x80u8, 0x7fu8]).unwrap()
+
+        step("Overwrite only the selected byte range")
+        expect(driver.pwrite_bytes_handle(
+            handle, 1, [0xfeu8, 0x00u8]).unwrap()).to_equal(2)
+        expect(driver.pread_bytes_handle(handle, 0, 8).unwrap()).to_equal(
+            [0x00u8, 0xfeu8, 0x00u8, 0x7fu8])
+
+    # @req: REQ-SQ-021
+    it "zero-fills a hole and reports the exact new size":
+        val (driver, handle) = open_positioned_fixture("/dbfs-hole.bin")
+        driver.write_bytes_handle(handle, [0x31u8, 0x32u8]).unwrap()
+
+        step("Write beyond EOF")
+        expect(driver.pwrite_bytes_handle(
+            handle, 5, [0xffu8]).unwrap()).to_equal(1)
+        expect(driver.pread_bytes_handle(handle, 0, 9).unwrap()).to_equal(
+            [0x31u8, 0x32u8, 0u8, 0u8, 0u8, 0xffu8])
+        expect(driver.stat_path(Path(raw: "/dbfs-hole.bin")).unwrap().size).to_equal(6)
+
+    # @req: REQ-SQ-021
+    it "rejects invalid ranges before mutating file bytes":
+        val (driver, handle) = open_positioned_fixture("/dbfs-invalid.bin")
+        driver.write_bytes_handle(handle, [0x41u8, 0x42u8]).unwrap()
+
+        step("Reject negative, overflowing, and impractically large ranges")
+        expect(driver.pread_bytes_handle(
+            handle, -1, 1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pread_bytes_handle(
+            handle, 0, -1).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pwrite_bytes_handle(
+            handle, -1, [0x99u8]).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pwrite_bytes_handle(
+            handle, 9223372036854775807, [0x99u8]).unwrap_err()).to_equal(
+                FsError.InvalidArg)
+        expect(driver.pwrite_bytes_handle(
+            handle, 1099511627776, [0x99u8]).unwrap_err()).to_equal(
+                FsError.TooLarge)
+
+        step("Retain the original bytes")
+        expect(driver.pread_bytes_handle(handle, 0, 2).unwrap()).to_equal(
+            [0x41u8, 0x42u8])
+
+    # @req: REQ-SQ-021
+    it "rejects closed and unknown handles as stale":
+        val (driver, handle) = open_positioned_fixture("/dbfs-stale.bin")
+        driver.write_bytes_handle(handle, [0x41u8]).unwrap()
+        driver.close_handle(handle).unwrap()
+
+        step("Reject the retired handle")
+        expect(driver.pread_bytes_handle(
+            handle, 0, 1).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(driver.pwrite_bytes_handle(
+            handle, 0, [0x42u8]).unwrap_err()).to_equal(FsError.StaleHandle)
+
+        step("Reject a handle that was never allocated")
+        val unknown = FileHandle(id: 9223372036854775807u64)
+        expect(driver.pread_bytes_handle(
+            unknown, 0, 1).unwrap_err()).to_equal(FsError.StaleHandle)
+
+    # @req: REQ-SQ-021
+    it "commits positioned bytes through a device-backed driver":
+        val dev = MemBlockDevice.new(1024u64, 512u32)
+        val opened = DbFsDriver.open_on_device(dev, 64i64, 256i64)
+        expect(opened.is_ok()).to_equal(true)
+        val driver = opened.unwrap()
+        val path = Path(raw: "/dbfs-device-positioned.bin")
+        val handle = driver.open_path(
+            path, OpenFlags.read_write().with_create()).unwrap()
+        driver.write_bytes_handle(
+            handle, [0x00u8, 0xffu8, 0x80u8, 0x41u8]).unwrap()
+
+        step("Commit an overwrite through the DBFS arena")
+        expect(driver.pwrite_bytes_handle(
+            handle, 1, [0x22u8, 0x00u8]).unwrap()).to_equal(2)
+        expect(driver.pread_bytes_handle(handle, 0, 4).unwrap()).to_equal(
+            [0x00u8, 0x22u8, 0x00u8, 0x41u8])
+
+        step("Reopen the same device region and replay the committed bytes")
+        driver.close_handle(handle).unwrap()
+        val replayed = DbFsDriver.open_on_device(dev, 64i64, 256i64).unwrap()
+        val replayed_handle = replayed.open_path(path, OpenFlags.read_only()).unwrap()
+        expect(replayed.pread_bytes_handle(
+            replayed_handle, 0, 4).unwrap()).to_equal(
+                [0x00u8, 0x22u8, 0x00u8, 0x41u8])
+
+    # @req: REQ-SQ-021
+    it "does not publish a positioned image that exceeds remaining device capacity":
+        val dev = MemBlockDevice.new(32u64, 512u32)
+        val driver = DbFsDriver.open_on_device(dev, 8i64, 3i64).unwrap()
+        val path = Path(raw: "/dbfs-full-device.bin")
+        val handle = driver.open_path(
+            path, OpenFlags.read_write().with_create()).unwrap()
+        driver.write_bytes_handle(handle, [0x41u8, 0x42u8]).unwrap()
+
+        step("Reject the copy-on-write image before allocating or publishing it")
+        expect(driver.pwrite_bytes_handle(
+            handle, 510, [0x99u8]).unwrap_err()).to_equal(FsError.TooLarge)
+
+        step("Keep the prior inode and durable namespace authoritative")
+        expect(driver.stat_path(path).unwrap().size).to_equal(2)
+        expect(driver.pread_bytes_handle(handle, 0, 4).unwrap()).to_equal(
+            [0x41u8, 0x42u8])
+        driver.close_handle(handle).unwrap()
+        val replayed = DbFsDriver.open_on_device(dev, 8i64, 3i64).unwrap()
+        val replayed_handle = replayed.open_path(path, OpenFlags.read_only()).unwrap()
+        expect(replayed.stat_path(path).unwrap().size).to_equal(2)
+        expect(replayed.pread_bytes_handle(
+            replayed_handle, 0, 4).unwrap()).to_equal([0x41u8, 0x42u8])
+
+    # @req: REQ-SQ-021
+    it "rolls back inode publication when the namespace commit fails":
+        val dev = NamespaceCommitFailBlockDevice.new(64u64, 19u64)
+        val driver = DbFsDriver.open_on_device(dev, 16i64, 4i64).unwrap()
+        val path = Path(raw: "/dbfs-commit-failure.bin")
+        val handle = driver.open_path(
+            path, OpenFlags.read_write().with_create()).unwrap()
+        driver.write_bytes_handle(handle, [0x51u8, 0x52u8]).unwrap()
+
+        step("Inject a failure at the namespace publication boundary")
+        expect(driver.pwrite_bytes_handle(
+            handle, 1, [0x99u8]).unwrap_err()).to_equal(
+                FsError.IoError(code: 0))
+
+        step("Retain the prior in-memory and durable inode image")
+        expect(driver.stat_path(path).unwrap().size).to_equal(2)
+        expect(driver.pread_bytes_handle(handle, 0, 4).unwrap()).to_equal(
+            [0x51u8, 0x52u8])
+        driver.close_handle(handle).unwrap()
+        val replayed = DbFsDriver.open_on_device(dev, 16i64, 4i64).unwrap()
+        val replayed_handle = replayed.open_path(path, OpenFlags.read_only()).unwrap()
+        expect(replayed.stat_path(path).unwrap().size).to_equal(2)
+        expect(replayed.pread_bytes_handle(
+            replayed_handle, 0, 4).unwrap()).to_equal([0x51u8, 0x52u8])

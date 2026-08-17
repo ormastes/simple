@@ -1,0 +1,173 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH=$facade
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$facade"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage3-receipt-reuse.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT INT TERM HUP
+
+marker="$scratch/candidate-executed"
+candidate="$scratch/stage2"
+cat >"$candidate" <<EOF
+#!/bin/sh
+touch "$marker"
+exit 99
+EOF
+chmod 700 "$candidate"
+candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+
+sanity="$scratch/stage2-sanity.env"
+cat >"$sanity" <<EOF
+schema=simple-bootstrap-sanity-evidence-v1
+status=pass
+candidate_sha256_before=$candidate_sha
+version_status=0
+version_output=simple-bootstrap 1.0.0-beta
+unsupported_status=1
+unsupported_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
+frontend_smoke_status=0
+frontend_smoke_bootstrap_mode_status=0
+frontend_smoke_output_sha256=0000000000000000000000000000000000000000000000000000000000000000
+candidate_sha256_after=$candidate_sha
+EOF
+bootstrap_stage3_verify_sanity_evidence_receipt "$sanity" "$candidate"
+[ ! -e "$marker" ] || {
+    echo 'receipt verification executed the admitted Stage 2 candidate' >&2
+    exit 1
+}
+sed 's/^frontend_smoke_bootstrap_mode_status=0$/frontend_smoke_bootstrap_mode_status=1/' \
+    "$sanity" >"$sanity.bootstrap-mode-tampered"
+if bootstrap_stage3_verify_sanity_evidence_receipt \
+    "$sanity.bootstrap-mode-tampered" "$candidate"; then
+    echo 'sanity receipt accepted a failed bootstrap-mode frontend smoke' >&2
+    exit 1
+fi
+
+runtime_snapshot="$scratch/runtime-admitted.txt"
+receiver_log="$scratch/stage2-receiver.log"
+printf 'runtime\n' >"$runtime_snapshot"
+printf 'receiver PASS\n' >"$receiver_log"
+receiver="$scratch/stage2-receiver.env"
+cat >"$receiver" <<EOF
+schema=simple-bootstrap-stage2-receiver-evidence-v1
+status=pass
+probe_exit=0
+candidate_sha256_before=$candidate_sha
+candidate_sha256_after=$candidate_sha
+runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$runtime_snapshot")
+probe_log=$receiver_log
+probe_log_sha256=$(bootstrap_stage3_hash_file "$receiver_log")
+EOF
+bootstrap_stage3_verify_receiver_evidence_receipt \
+    "$receiver" "$candidate" "$runtime_snapshot" "$receiver_log"
+[ ! -e "$marker" ] || {
+    echo 'receiver receipt verification executed the admitted Stage 2 candidate' >&2
+    exit 1
+}
+
+source_snapshot="$scratch/source-inputs-before.txt"
+tool_snapshot="$scratch/tool-authority-before.txt"
+printf 'source authority\n' >"$source_snapshot"
+printf 'tool authority\n' >"$tool_snapshot"
+source_sha=$(bootstrap_stage3_hash_file "$source_snapshot")
+tool_sha=$(bootstrap_stage3_hash_file "$tool_snapshot")
+args_sha=3333333333333333333333333333333333333333333333333333333333333333
+sanity_sha=$(bootstrap_stage3_hash_file "$sanity")
+receiver_sha=$(bootstrap_stage3_hash_file "$receiver")
+runtime_sha=$(bootstrap_stage3_hash_file "$runtime_snapshot")
+identity_a=$(bootstrap_stage3_stage2_admission_identity \
+    "$candidate_sha" "$source_sha" "$runtime_sha" "$tool_sha" \
+    "$args_sha" "$sanity_sha" "$receiver_sha")
+identity_b=$(bootstrap_stage3_stage2_admission_identity \
+    "$candidate_sha" "$source_sha" "$runtime_sha" "$tool_sha" \
+    "$args_sha" "$sanity_sha" "$receiver_sha")
+[ "$identity_a" = "$identity_b" ]
+identity_changed=$(bootstrap_stage3_stage2_admission_identity \
+    "$candidate_sha" "$tool_sha" "$runtime_sha" "$tool_sha" \
+    "$args_sha" "$sanity_sha" "$receiver_sha")
+[ "$identity_a" != "$identity_changed" ]
+
+admission="$scratch/admission.env"
+bootstrap_stage3_write_stage2_admission_receipt \
+    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"
+bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"
+[ ! -e "$marker" ] || {
+    echo 'admission receipt verification executed the Stage 2 candidate' >&2
+    exit 1
+}
+
+cp -p "$candidate" "$candidate.saved"
+printf '# candidate tamper\n' >>"$candidate"
+if bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"; then
+    echo 'admission receipt accepted a tampered candidate' >&2
+    exit 1
+fi
+mv "$candidate.saved" "$candidate"
+
+cp -p "$admission" "$admission.tampered"
+chmod u+w "$admission.tampered"
+sed 's/^admission_identity=.*/admission_identity=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$admission.tampered" >"$admission.tampered.next"
+mv "$admission.tampered.next" "$admission.tampered"
+if bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission.tampered" "$candidate" "$source_snapshot" \
+    "$runtime_snapshot" "$tool_snapshot" "$args_sha" "$sanity" \
+    "$receiver"; then
+    echo 'admission receipt accepted a tampered receipt' >&2
+    exit 1
+fi
+
+cp -p "$sanity" "$sanity.saved"
+sed 's/^frontend_smoke_status=0$/frontend_smoke_status=1/' \
+    "$sanity.saved" >"$sanity"
+if bootstrap_stage3_verify_stage2_admission_receipt \
+    "$admission" "$candidate" "$source_snapshot" "$runtime_snapshot" \
+    "$tool_snapshot" "$args_sha" "$sanity" "$receiver"; then
+    echo 'admission receipt reblessed tampered sanity evidence' >&2
+    exit 1
+fi
+mv "$sanity.saved" "$sanity"
+
+printf 'receiver log tamper\n' >>"$receiver_log"
+if bootstrap_stage3_verify_receiver_evidence_receipt \
+    "$receiver" "$candidate" "$runtime_snapshot" "$receiver_log"; then
+    echo 'receiver receipt accepted a tampered probe log' >&2
+    exit 1
+fi
+printf 'receiver PASS\n' >"$receiver_log"
+
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+grep -Fq 'bootstrap_stage3_verify_sanity_evidence_receipt' "$resume"
+grep -Fq 'bootstrap_stage3_verify_receiver_evidence_receipt' "$resume"
+if grep -Fq 'bootstrap_stage3_verify_sanity_evidence "$stage2_sanity"' "$resume"; then
+    echo 'Stage 3 resume still replays Stage 2 sanity' >&2
+    exit 1
+fi
+
+writer="$root/scripts/check/lib/bootstrap-stage3/manifest-write.shs"
+verifier="$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+for source in "$writer" "$verifier"; do
+    grep -Fq 'simple-bootstrap-stage3-provenance-v4' "$source"
+    grep -Fq 'stage2_check_policy' "$source"
+    grep -Fq 'stage2_receiver_evidence_sha256' "$source"
+    grep -Fq 'stage2_admission_receipt_sha256' "$source"
+    grep -Fq 'stage2_checks_replayed_during_stage3' "$source"
+done
+
+v3_manifest="$scratch/provenance-v3.env"
+printf 'schema=simple-bootstrap-stage3-provenance-v3\n' >"$v3_manifest"
+if bootstrap_stage3_verify_manifest "$v3_manifest" "$root" "$candidate"; then
+    echo 'v3 Stage 3 provenance was not rejected fail-closed' >&2
+    exit 1
+fi
+
+echo 'bootstrap Stage 3 receipt reuse contract: PASS'

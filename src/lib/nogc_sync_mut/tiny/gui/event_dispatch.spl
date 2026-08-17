@@ -1,0 +1,110 @@
+# codex-impl
+
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_KEY, TINY_EVENT_POINTER_DOWN, TINY_EVENT_TEXT, TINY_EVENT_WHEEL}
+use std.tiny.common.status.{TinyStatus, TINY_ERR_INVALID, TINY_ERR_UNSUPPORTED}
+use std.tiny.common.types.{TinyPoint, TinyRect, tiny_contains}
+use std.tiny.gui.component.{TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_LIST, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_TEXT_INPUT}
+use std.tiny.gui.state.{TinyGuiState}
+use std.tiny.pane.hit_test.{tiny_hit_test}
+
+const TINY_KEY_TAB: i32 = 9
+const TINY_KEY_ENTER: i32 = 13
+const TINY_KEY_UP: i32 = 38
+const TINY_KEY_DOWN: i32 = 40
+
+class TinyGuiDispatchReceipt:
+    status: TinyStatus
+    state: TinyGuiState
+    target_index: i32
+    action_id: i32
+    changed: bool
+
+fn _tiny_gui_unbounded_viewport() -> TinyRect:
+    TinyRect(x: -1073741824, y: -1073741824, width: 2147483647, height: 2147483647)
+
+fn _tiny_gui_scroll_target(state: TinyGuiState, target: i32) -> i32:
+    var candidate = target
+    while candidate >= 0 and candidate < state.nodes.len():
+        if state.nodes[candidate].class_id == TINY_COMPONENT_SCROLL_PANE: return candidate
+        val parent = state.nodes[candidate].parent
+        if not parent.is_valid(): return -1
+        candidate = parent.index
+    -1
+
+fn _tiny_gui_list_item_at(state: TinyGuiState, list_index: i32, point: TinyPoint) -> i32:
+    val panes = state.resolved_panes(_tiny_gui_unbounded_viewport())
+    var ordinal = 0
+    var index = 0
+    while index < state.nodes.len():
+        val parent = state.nodes[index].parent
+        if parent.is_valid() and parent.index == list_index and parent.generation == state.nodes[list_index].id.generation:
+            if tiny_contains(panes[index].effective_clip, point): return ordinal
+            ordinal = ordinal + 1
+        index = index + 1
+    -1
+
+fn tiny_gui_dispatch(state: TinyGuiState, event: TinyEvent) -> TinyGuiDispatchReceipt:
+    var next = state
+    if event.kind == TINY_EVENT_KEY and event.code == TINY_KEY_TAB:
+        val status = next.focus_next()
+        return TinyGuiDispatchReceipt(status: status, state: next, target_index: next.focused_index, action_id: 0, changed: status.is_ok())
+    var target = next.focused_index
+    if event.kind == TINY_EVENT_POINTER_DOWN or event.kind == TINY_EVENT_WHEEL:
+        val hit = tiny_hit_test(next.resolved_panes(_tiny_gui_unbounded_viewport()), event.point)
+        target = hit.handle.index
+        if target >= 0 and event.kind == TINY_EVENT_POINTER_DOWN:
+            next.focused_index = target
+    if event.kind == TINY_EVENT_WHEEL:
+        val scroll_target = _tiny_gui_scroll_target(next, target)
+        if scroll_target < 0:
+            return TinyGuiDispatchReceipt(status: TinyStatus.error(TINY_ERR_INVALID, target), state: next, target_index: target, action_id: 0, changed: false)
+        var node = next.nodes[scroll_target]
+        var maximum = next.direct_child_extent_y(scroll_target) - node.bounds.height
+        if maximum < 0: maximum = 0
+        var offset = node.value + event.value
+        if offset < 0: offset = 0
+        if offset > maximum: offset = maximum
+        val changed = offset != node.value
+        node.value = offset
+        next.nodes[scroll_target] = node
+        return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: scroll_target, action_id: 0, changed: changed)
+    if target < 0 or target >= next.nodes.len():
+        return TinyGuiDispatchReceipt(status: TinyStatus.error(TINY_ERR_INVALID, target), state: next, target_index: target, action_id: 0, changed: false)
+    val class_id = next.nodes[target].class_id
+    if class_id == TINY_COMPONENT_LIST:
+        val item_count = next.direct_child_count(target)
+        if item_count <= 0:
+            return TinyGuiDispatchReceipt(status: TinyStatus.error(TINY_ERR_INVALID, target), state: next, target_index: target, action_id: 0, changed: false)
+        if event.kind == TINY_EVENT_POINTER_DOWN:
+            val selected = _tiny_gui_list_item_at(next, target, event.point)
+            if selected >= 0:
+                var node = next.nodes[target]
+                val changed = node.value != selected
+                node.value = selected
+                next.nodes[target] = node
+                return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: target, action_id: selected, changed: changed)
+        if event.kind == TINY_EVENT_KEY and (event.code == TINY_KEY_UP or event.code == TINY_KEY_DOWN):
+            var selected = next.nodes[target].value
+            if event.code == TINY_KEY_UP and selected > 0: selected = selected - 1
+            if event.code == TINY_KEY_DOWN and selected + 1 < item_count: selected = selected + 1
+            var node = next.nodes[target]
+            val changed = node.value != selected
+            node.value = selected
+            next.nodes[target] = node
+            return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: target, action_id: selected, changed: changed)
+        if event.kind == TINY_EVENT_KEY and event.code == TINY_KEY_ENTER:
+            return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: target, action_id: next.nodes[target].value, changed: false)
+    if (event.kind == TINY_EVENT_POINTER_DOWN or (event.kind == TINY_EVENT_KEY and event.code == TINY_KEY_ENTER)) and class_id == TINY_COMPONENT_BUTTON:
+        return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: target, action_id: next.nodes[target].value, changed: true)
+    if (event.kind == TINY_EVENT_POINTER_DOWN or (event.kind == TINY_EVENT_KEY and event.code == TINY_KEY_ENTER)) and class_id == TINY_COMPONENT_CHECKBOX:
+        var node = next.nodes[target]
+        node.value = if node.value == 0: 1 else: 0
+        next.nodes[target] = node
+        return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: target, action_id: node.value, changed: true)
+    if event.kind == TINY_EVENT_TEXT and class_id == TINY_COMPONENT_TEXT_INPUT:
+        if event.code >= 32 and event.code <= 126:
+            var node = next.nodes[target]
+            node.text_value = node.text_value + event.code.to_char()
+            next.nodes[target] = node
+            return TinyGuiDispatchReceipt(status: TinyStatus.ok(), state: next, target_index: target, action_id: 0, changed: true)
+    TinyGuiDispatchReceipt(status: TinyStatus.error(TINY_ERR_UNSUPPORTED, event.kind), state: next, target_index: target, action_id: 0, changed: false)

@@ -2300,11 +2300,33 @@ impl Lowerer {
                 // enum, which made `case Some(x)` irrefutable and bound x = 3.
                 // Kept in sync with the expression-form twin in
                 // hir/lower/expr/control.rs.
-                let subject_enum_owns_variant = matches!(
+                // EXCEPTION: the BUILTIN `Option<T>` annotation registers as a
+                // HirType::Enum named "Option" owning Some/None, but its RUNTIME
+                // representation is nil-boxing, not an enum object — the
+                // discriminant path left the `None` arm unmatched (nil 0x3
+                // fall-through). Kept in sync with the expression-form twin in
+                // hir/lower/expr/control.rs; see
+                // doc/08_tracking/bug/seed_jit_option_generic_match_none_arm_unmatched_2026-08-16.md.
+                // The name alone does NOT identify the builtin: a user-declared
+                // `enum Option: Some(i64) / None` is an ordinary enum object and MUST
+                // stay on the discriminant path. Only the builtin is generic
+                // (`generic_params: vec!["T"]`); user enums clone their own, empty.
+                // See doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_enum_2026-08-16.md
+                let subject_is_builtin_option = matches!(
                     self.module.types.get(subject_ty),
-                    Some(HirType::Enum { variants, .. })
-                        if variants.iter().any(|(name, _)| name == variant)
+                    Some(HirType::Enum { name, variants, generic_params, .. })
+                        if name == "Option"
+                            && !generic_params.is_empty()
+                            && variants.len() == 2
+                            && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
+                            && variants.iter().any(|(n, p)| n == "None" && p.is_none())
                 );
+                let subject_enum_owns_variant = !subject_is_builtin_option
+                    && matches!(
+                        self.module.types.get(subject_ty),
+                        Some(HirType::Enum { variants, .. })
+                            if variants.iter().any(|(name, _)| name == variant)
+                    );
 
                 // Special handling for None - check both nil and enum None
                 if variant == "None" && !subject_enum_owns_variant {

@@ -85,6 +85,8 @@ pub mod cli;
 pub mod cargo;
 pub mod sdn;
 pub mod sdl2;
+pub mod glfw;
+pub mod sdl3;
 pub mod audio;
 pub mod framebuffer;
 pub mod image;
@@ -92,6 +94,7 @@ pub mod simpleos_log;
 pub mod socket_nonblock;
 pub mod opengl;
 pub mod oneapi;
+pub mod capability_gap;
 pub mod coverage;
 pub mod cranelift;
 #[cfg(not(doctest))]
@@ -108,6 +111,7 @@ pub mod sffi_string;
 pub mod collections;
 pub mod lexer_sffi;
 pub mod tls13;
+pub mod net_tls_client;
 pub mod i18n;
 pub mod native_sffi;
 pub mod package;
@@ -196,48 +200,6 @@ fn call_loaded_function_by_name(
 /// `rt_stdin_read_line` — read a line from stdin (ignores all args)
 fn rt_stdin_read_line_stub(_args: &[Value]) -> Result<Value, CompileError> {
     io::input::input(&[])
-}
-
-/// `rt_tls_client_connect` / `rt_tls_client_connect_with_sni` — stub
-fn rt_tls_client_connect_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_write` — stub
-fn rt_tls_client_write_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_read` — stub
-fn rt_tls_client_read_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
-}
-
-/// `rt_tls_client_connect_address_with_sni_timeout` — stub
-fn rt_tls_client_connect_address_with_sni_timeout_stub(
-    _args: &[Value],
-) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_write_timeout` — stub
-fn rt_tls_client_write_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_read_timeout` — stub
-fn rt_tls_client_read_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
-}
-
-/// `rt_tls_client_close` — stub
-fn rt_tls_client_close_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(false))
-}
-
-/// `rt_tls_get_protocol_version` — stub
-fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
 }
 
 fn rt_browser_http_job_start_stub(_args: &[Value]) -> Result<Value, CompileError> {
@@ -2442,19 +2404,34 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_tls13_hkdf_expand_label_server_app",
         tls13::rt_tls13_hkdf_expand_label_server_app
     );
-    // TLS client stubs (interpreter mode — no real TLS)
-    insert_simple!("rt_tls_client_connect", rt_tls_client_connect_stub);
-    insert_simple!("rt_tls_client_connect_with_sni", rt_tls_client_connect_stub);
+    // TLS client — delegates to the runtime's rustls implementation
+    // (net_tls_client.rs). Falls back to the runtime's own refusing stubs
+    // only when the build lacks the `runtime-tls` feature; never fakes
+    // success. Replaced the old always-`-1` interpreter stubs 2026-08-16.
+    insert_simple!("rt_tls_client_connect", net_tls_client::rt_tls_client_connect);
+    insert_simple!(
+        "rt_tls_client_connect_with_sni",
+        net_tls_client::rt_tls_client_connect_with_sni
+    );
     insert_simple!(
         "rt_tls_client_connect_address_with_sni_timeout",
-        rt_tls_client_connect_address_with_sni_timeout_stub
+        net_tls_client::rt_tls_client_connect_address_with_sni_timeout
     );
-    insert_simple!("rt_tls_client_write", rt_tls_client_write_stub);
-    insert_simple!("rt_tls_client_write_timeout", rt_tls_client_write_timeout_stub);
-    insert_simple!("rt_tls_client_read", rt_tls_client_read_stub);
-    insert_simple!("rt_tls_client_read_timeout", rt_tls_client_read_timeout_stub);
-    insert_simple!("rt_tls_client_close", rt_tls_client_close_stub);
-    insert_simple!("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub);
+    insert_simple!("rt_tls_client_write", net_tls_client::rt_tls_client_write);
+    insert_simple!(
+        "rt_tls_client_write_timeout",
+        net_tls_client::rt_tls_client_write_timeout
+    );
+    insert_simple!("rt_tls_client_read", net_tls_client::rt_tls_client_read);
+    insert_simple!(
+        "rt_tls_client_read_timeout",
+        net_tls_client::rt_tls_client_read_timeout
+    );
+    insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
+    insert_simple!(
+        "rt_tls_get_protocol_version",
+        net_tls_client::rt_tls_get_protocol_version
+    );
     insert_simple!("rt_browser_http_job_start", rt_browser_http_job_start_stub);
     insert_simple!(
         "rt_browser_http_job_start_public_limited",
@@ -2738,6 +2715,29 @@ pub(crate) fn call_extern_function_with_values(
         return sdl2::dispatch(name, &evaluated);
     }
 
+    // The rt_glfw_* and rt_sdl3_* families are implemented in C
+    // (src/runtime/runtime_glfw.c, src/runtime/runtime_sdl3.c) and linked
+    // into every native build via the default runtime source list, but the
+    // interpreter runs inside a separate process image (the Rust seed) that
+    // does not compile either file in. Before this registration, any call
+    // died with "unknown extern function: rt_glfw_init" /
+    // "unknown extern function: rt_sdl3_init" — indistinguishable from "not
+    // installed". Route both families to the same C implementation the
+    // native build links, mirroring the rt_sdl2_ satellite-dlopen arm above.
+    // See doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
+    // lane R1. (Wiring was clobbered by unrelated commit 9c80ba664160 on
+    // 2026-08-05 and restored 2026-08-17; see
+    // doc/08_tracking/bug/interpreter_extern_registration_wiring_clobbered_2026-08-17.md.)
+    if name.starts_with("rt_glfw_") {
+        return glfw::dispatch(name, &evaluated);
+    }
+
+    if name.starts_with("rt_sdl3_") {
+        return sdl3::dispatch(name, &evaluated);
+    }
+
+
+
     // The rt_audio_* family (31 names) is implemented once, in C, at
     // src/runtime/runtime_audio.c (a real miniaudio-backed engine). It was
     // absent from every interpreter path -- not a registration gap alone,
@@ -2838,6 +2838,23 @@ pub(crate) fn call_extern_function_with_values(
             return result;
         }
         return Err(common::unknown_function(name));
+    }
+
+    // capability gap. None of these five families has a real native
+    // implementation anywhere in this tree (no C translation unit, no linked
+    // Rust runtime crate) for a dispatcher to resolve against. Registering
+    // them here cannot conjure an implementation, so this arm returns an
+    // honest, family-named capability-gap error instead of letting them fall
+    // into the generic "unknown extern function" text below, which is
+    // indistinguishable from a typo or a genuinely unregistered symbol. See
+    // capability_gap.rs and
+    // doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
+    // lane R3. Deliberately excludes rt_vulkan_ (real family). (Wiring was
+    // clobbered by unrelated commit cb71c629f611 on 2026-08-05 and restored
+    // 2026-08-17; see
+    // doc/08_tracking/bug/interpreter_extern_registration_wiring_clobbered_2026-08-17.md.)
+    if capability_gap::matches(name) {
+        return capability_gap::dispatch(name);
     }
 
     if let Some(result) = dynamic_sffi::try_call_dynamic(name, &evaluated) {
