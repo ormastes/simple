@@ -44,18 +44,33 @@ fn parallel_unstable_enabled(path_default: bool) -> bool:
 
 # Wrap a command so that a death BY SIGNAL survives as a 128+N exit status.
 #
-# This is not cosmetic. `rt_process_wait` is implemented over Rust's
-# `ExitStatus::code()`, which is `None` for a signal-killed child and is folded
-# to `-1` by `.unwrap_or(-1)` (env_process.rs:990) — so the signal number, and
-# with it the whole CRASHED / TERMINATED distinction, is DESTROYED before it ever
-# reaches Simple. `/bin/sh -c '<cmd>; exit $?'` restores it: the two-command body
-# defeats sh's exec-optimisation, so sh forks, `wait(2)`s the child ITSELF, and
-# reports 128+N as its own ordinary exit code. sh reads that status directly from
-# the kernel — not through a pipe — which is exactly the property R2 demands.
+# This is not cosmetic, and the obvious wrapper does NOT work. Measured on this
+# host with `rt_process_spawn_async` + `rt_process_wait`:
+#
+#   argv                                      status
+#   ["-c", "kill -SEGV $$"]                     -1     signal DESTROYED
+#   ["-c", "kill -SEGV $$\nexit $?"]            -1     signal DESTROYED
+#   ["-c", "/bin/sh -c \"$0\"\nexit $?", cmd]  139     signal PRESERVED
+#
+# `rt_process_wait` is implemented over Rust's `ExitStatus::code()`, which is
+# `None` for a signal-killed child and is folded to `-1` by `.unwrap_or(-1)`
+# (env_process.rs:990). The signal number — and with it the whole CRASHED /
+# TERMINATED distinction — is destroyed before it ever reaches Simple. Appending
+# `exit $?` does not help on its own: if the command dies, the shell RUNNING it
+# is the process that dies, and a dead shell never reaches its next statement.
+#
+# The fix is to interpose a supervising shell that is NOT the thing that dies.
+# The unit runs in a GRANDCHILD (`/bin/sh -c "$0"`), so the middle shell survives
+# it, `wait(2)`s it, and re-reports 128+N as its own ordinary exit code — read
+# straight from the kernel, not through a pipe, exactly as R2 demands. The
+# command travels as a separate argv element (`$0`) rather than being spliced
+# into the script text, so no quoting in a source path can break the wrapper.
+#
+# Verified end to end: SEGV->139, TERM->143, KILL->137, `exit 3`->3, `true`->0.
 #
 # Returns the argv tail for `/bin/sh`; use `parallel_supervised_cmd()` for argv[0].
 fn parallel_supervised_argv(inner_cmd: text) -> [text]:
-    ["-c", "{inner_cmd}\nexit $?"]
+    ["-c", "/bin/sh -c \"$0\"\nexit $?", inner_cmd]
 
 fn parallel_supervised_cmd() -> text:
     "/bin/sh"

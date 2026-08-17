@@ -70,7 +70,7 @@ describe "supervised build outcome class guard":
             \path: rt_process_spawn_async(
                 parallel_supervised_cmd(),
                 parallel_supervised_argv(
-                    if path == "b.spl": "/bin/sh -c 'kill -SEGV $$'" else: "true")),
+                    if path == "b.spl": "kill -SEGV $$" else: "true")),
             \path: "")
 
         # Four units in, four records out — even though one of them died.
@@ -106,7 +106,12 @@ describe "supervised build outcome class guard":
         # the LAST stage's status, which has produced false greens in this repo.
         expect(src).to_contain("var status = rt_process_wait(pid, 1)")
 
-        # The signal-preserving wrapper must survive: rt_process_wait folds a
-        # signal death to -1, so without `sh -c '<cmd>; exit $?'` the CRASHED /
-        # TERMINATED distinction is destroyed before Simple ever sees it.
-        expect(src).to_contain("exit $?")
+        # The signal-preserving wrapper must survive. rt_process_wait folds a
+        # signal death to -1, so the unit MUST run one level down from the shell
+        # whose status is read — otherwise the shell that would report 128+N is
+        # itself the process that died, and CRASHED / TERMINATED collapse into an
+        # indistinguishable -1 before Simple ever sees them.
+        expect(src).to_contain("/bin/sh -c ")
+        # ...and the command travels as a separate argv element, never spliced
+        # into the script text where a quote in a source path could break it.
+        expect(src).to_contain(", inner_cmd]")
