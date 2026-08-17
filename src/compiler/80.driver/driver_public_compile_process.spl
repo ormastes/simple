@@ -1,3 +1,22 @@
+# Lightweight external compile facade: every op is DELEGATED to a separate
+# `simple` CLI process. Never loads the compiler graph.
+#
+# Every public function here is named `external_*` and is re-exported under its
+# short public name by driver_public_compile.spl. The prefix is load-bearing,
+# not cosmetic: driver_api_compile_single.spl (Tier 2, the real in-process
+# driver) defines compile_file / compile_files / jit_file / check_file /
+# parse_sdn_file / compile_to_smf with byte-identical signatures. While both
+# modules defined those six names, each had TWO co-compiled definitions, and
+# the cross-module collision resolver sends an ambiguous call to the LAST
+# definition — so even an explicit
+# `use compiler.driver.driver_api_compile_single.{check_file}` could reach THIS
+# module instead. Callers then delegated to the resolved `simple` binary, which
+# under `bin/simple test` is the very CLI already running, so every call hit
+# the compile-delegation guard in driver_public_shared.spl. That is the
+# "compile delegation loop" that failed 10 of 12 examples in
+# test/02_integration/compiler/advanced_types_spec.spl (2026-08-16/17).
+# Keep these definition names unique — do NOT reintroduce a bare `check_file`.
+
 use compiler.common.driver_core_types.{CompileMode, CompileResult}
 use compiler.driver.driver_public_api.{interpret_file}
 use compiler.driver.driver_public_shared.{find_simple_binary, clean_child_output, check_compile_delegation_guard, mark_compile_delegated}
@@ -6,7 +25,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 
-pub fn compile_file(path: text) -> CompileResult:
+pub fn external_compile_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
     val guard_error = check_compile_delegation_guard("aot compile", simple_bin)
     if guard_error != "":
@@ -21,7 +40,7 @@ pub fn compile_file(path: text) -> CompileResult:
         return CompileResult.RuntimeError("compile reported success but did not create output: {default_output}")
     CompileResult.RuntimeError(combined)
 
-pub fn compile_to_smf(path: text, output: text) -> Result<text, text>:
+pub fn external_compile_to_smf(path: text, output: text) -> Result<text, text>:
     val simple_bin = find_simple_binary()
     val guard_error = check_compile_delegation_guard("aot compile to smf", simple_bin)
     if guard_error != "":
@@ -35,7 +54,7 @@ pub fn compile_to_smf(path: text, output: text) -> Result<text, text>:
         return Err("compile reported success but did not create output: {output}")
     Err(combined)
 
-pub fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
+pub fn external_compile_files(paths: [text], mode: CompileMode) -> CompileResult:
     if paths.len() == 0:
         return CompileResult.RuntimeError("compile_files requires at least one input path")
     if paths.len() > 1:
@@ -46,19 +65,19 @@ pub fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
         case CompileMode.Interpret:
             interpret_file(path)
         case CompileMode.Jit:
-            jit_file(path)
+            external_jit_file(path)
         case CompileMode.Aot:
-            compile_file(path)
+            external_compile_file(path)
         case CompileMode.Check:
-            check_file(path)
+            external_check_file(path)
         case CompileMode.Sdn:
-            parse_sdn_file(path)
+            external_parse_sdn_file(path)
         case CompileMode.SmfExec:
             CompileResult.RuntimeError("SmfExec mode is not supported by the lightweight external driver_api facade")
         case _:
             CompileResult.RuntimeError("unsupported compile mode for lightweight external facade")
 
-pub fn jit_file(path: text) -> CompileResult:
+pub fn external_jit_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
     val guard_error = check_compile_delegation_guard("jit execution", simple_bin)
     if guard_error != "":
@@ -70,7 +89,7 @@ pub fn jit_file(path: text) -> CompileResult:
         return CompileResult.Success(combined)
     CompileResult.RuntimeError(combined)
 
-pub fn check_file(path: text) -> CompileResult:
+pub fn external_check_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
     val guard_error = check_compile_delegation_guard("type check", simple_bin)
     if guard_error != "":
@@ -82,7 +101,7 @@ pub fn check_file(path: text) -> CompileResult:
         return CompileResult.Success(combined)
     CompileResult.RuntimeError(combined)
 
-pub fn parse_sdn_file(path: text) -> CompileResult:
+pub fn external_parse_sdn_file(path: text) -> CompileResult:
     val content = rt_file_read_text(path) ?? ""
     if content.trim() == "":
         return CompileResult.RuntimeError("failed to read SDN file: {path}")
