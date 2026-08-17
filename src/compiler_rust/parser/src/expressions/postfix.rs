@@ -378,6 +378,37 @@ impl<'a> Parser<'a> {
                             receiver: Box::new(expr),
                             index: index as usize,
                         };
+                    // NESTED tuple access: `r.0.1`.
+                    //
+                    // seed_nested_tuple_index_float_munch_2026-08-06: the lexer
+                    // is context-free and has already munched the `0.1` after
+                    // the first `.` into a single Float token, so the arm above
+                    // never sees an Integer and the parser died with
+                    // `expected identifier, found Float(0.1)`. The information
+                    // needed to undo this is in the token's LEXEME, not its
+                    // f64 value: `.0.10` and `.0.1` both parse to 0.1, and
+                    // 0.30000000000000004-style values make the f64 unusable as
+                    // an index source. So we re-split the raw text.
+                    //
+                    // Deliberately conservative -- only a lexeme of the exact
+                    // shape `digits.digits` (no sign, no exponent, no `_`
+                    // separators, no numeric suffix, and TokenKind::Float, so a
+                    // TypedFloat like `0.1f32` is excluded) is reinterpreted.
+                    // Anything else stays a genuine float and falls through to
+                    // the existing error, because a real float can never
+                    // legally follow `.` anyway.
+                    } else if let Some((a, b)) = match &self.current.kind {
+                        TokenKind::Float(_) => split_tuple_index_pair(&self.current.lexeme),
+                        _ => None,
+                    } {
+                        self.advance();
+                        expr = Expr::TupleIndex {
+                            receiver: Box::new(Expr::TupleIndex {
+                                receiver: Box::new(expr),
+                                index: a,
+                            }),
+                            index: b,
+                        };
                     // Support computed field access: children.(idx - 1)
                     } else if self.check(&TokenKind::LParen) {
                         self.advance(); // consume '('
@@ -1331,5 +1362,68 @@ impl<'a> Parser<'a> {
         }
         // Otherwise the generic args were consumed and discarded; caller's expr is unchanged.
         Ok(())
+    }
+}
+
+/// Re-split a lexer-munched `digits.digits` float lexeme back into the two
+/// tuple indices it actually was: `r.0.1` lexes `0.1` as one Float token.
+///
+/// seed_nested_tuple_index_float_munch_2026-08-06.
+///
+/// Returns `None` for anything that is not EXACTLY `digits '.' digits`, so a
+/// genuine float lexeme (`1e3`, `0.1f32`, `1_0.5`, `.5`, `1.`) is never
+/// silently reinterpreted as a tuple path. Works on the LEXEME rather than the
+/// parsed `f64` on purpose: `.0.10` and `.0.1` share the value `0.1`, and
+/// binary floating point cannot represent most decimal lexemes exactly, so the
+/// value is not a usable index source.
+fn split_tuple_index_pair(lexeme: &str) -> Option<(usize, usize)> {
+    let (lhs, rhs) = lexeme.split_once('.')?;
+    // A second '.' means this was never a simple pair.
+    if rhs.contains('.') {
+        return None;
+    }
+    // Reject empty halves (`.5`, `1.`) and any non-ASCII-digit character, which
+    // covers signs, exponents (`1e3`), `_` separators, and numeric suffixes
+    // (`0.1f32` arrives as TypedFloat, but be defensive).
+    if lhs.is_empty()
+        || rhs.is_empty()
+        || !lhs.bytes().all(|b| b.is_ascii_digit())
+        || !rhs.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((lhs.parse().ok()?, rhs.parse().ok()?))
+}
+
+#[cfg(test)]
+mod tuple_index_split_tests {
+    use super::split_tuple_index_pair;
+
+    #[test]
+    fn splits_a_plain_digit_dot_digit_lexeme() {
+        assert_eq!(split_tuple_index_pair("0.1"), Some((0, 1)));
+        assert_eq!(split_tuple_index_pair("1.0"), Some((1, 0)));
+        assert_eq!(split_tuple_index_pair("12.34"), Some((12, 34)));
+        // Leading zeros are still just digits: `.0.01` is index 0 then index 1.
+        assert_eq!(split_tuple_index_pair("0.01"), Some((0, 1)));
+    }
+
+    /// The whole reason this works on text: these two lexemes have the SAME
+    /// f64 value but different tuple paths, so an f64-based implementation
+    /// would be wrong.
+    #[test]
+    fn distinguishes_lexemes_that_share_an_f64_value() {
+        assert_eq!(split_tuple_index_pair("0.1"), Some((0, 1)));
+        assert_eq!(split_tuple_index_pair("0.10"), Some((0, 10)));
+    }
+
+    #[test]
+    fn refuses_anything_that_is_not_digits_dot_digits() {
+        for bad in [
+            "1e3", "1.5e3", "0.1f32", "1_0.5", "0.5_0", ".5", "1.", "1.2.3", "-1.2", "+1.2",
+            "0x1.8", "", ".", "a.b", "1.2i64",
+        ] {
+            assert_eq!(split_tuple_index_pair(bad), None, "must refuse {bad:?}");
+        }
     }
 }

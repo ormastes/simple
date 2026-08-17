@@ -1,0 +1,66 @@
+"""
+Feature: Nested Tuple Index Parsing
+Category: Compiler Frontend
+Status: Active
+"""
+
+# Regression spec for
+# doc/08_tracking/bug/seed_nested_tuple_index_float_munch_2026-08-06.md
+#
+# The seed lexer is context-free, so in `r.0.1` it munched the `0.1` following
+# the first `.` into a single Float token. The postfix parser's tuple-index arm
+# only accepted `TokenKind::Integer`, so nested tuple indexing died at parse
+# time -- before any type or codegen work -- with:
+#
+#     Unexpected token: expected identifier, found Float(0.1)
+#
+# Fix: `split_tuple_index_pair` in
+# src/compiler_rust/parser/src/expressions/postfix.rs re-splits a
+# `digits.digits` LEXEME (not the f64 value -- `.0.1` and `.0.10` share the
+# value 0.1) back into two tuple indices.
+#
+# The `does not break real floats` block below is the ablation half: it fences
+# the fix against over-reach, since the same token stream carries genuine float
+# literals.
+
+use spec.{describe, it, expect}
+
+describe("nested tuple indexing parses"):
+    it("reads a two-level index r.0.1"):
+        val r = ((1, 2), (3, 4))
+        expect(r.0.1).to_equal(2)
+
+    it("reads the other two-level paths"):
+        val r = ((1, 2), (3, 4))
+        expect(r.0.0).to_equal(1)
+        expect(r.1.0).to_equal(3)
+        expect(r.1.1).to_equal(4)
+
+    it("reads a three-level index r.0.1.0"):
+        val r = ((1, (7, 8)), (3, 4))
+        expect(r.0.1.0).to_equal(7)
+        expect(r.0.1.1).to_equal(8)
+
+    it("still reads a single-level index"):
+        val r = (10, 20)
+        expect(r.0).to_equal(10)
+        expect(r.1).to_equal(20)
+
+    it("allows a method call after a nested index"):
+        val r = ((1, 2), (3, 4))
+        expect(r.0.1.to_string()).to_equal("2")
+
+describe("nested tuple index fix does not break real floats"):
+    it("keeps a plain float literal a float"):
+        val x = 0.1
+        expect(x > 0.09 and x < 0.11).to_equal(true)
+
+    it("keeps a float literal in an expression"):
+        expect(1.5 + 1.5).to_equal(3.0)
+
+    it("keeps exponent-form floats"):
+        val e = 1e3
+        expect(e > 999.0 and e < 1001.0).to_equal(true)
+
+    it("keeps a float returned from a call"):
+        expect((2.0).to_string().starts_with("2")).to_equal(true)

@@ -1844,6 +1844,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_string_bytes", sffi_string::rt_string_bytes_fn);
     insert_simple!("rt_string_data", sffi_string::rt_string_data_fn);
     insert_simple!("rt_string_eq", sffi_string::rt_string_eq_fn);
+    // sdoctest_mode_unknown_extern_rt_string_ends_with_2026-08-07: registered in
+    // every codegen backend and defined in the C runtime, but absent here, so
+    // `--sdoctest` (which interprets sdoctest/discovery.spl's
+    // `file_path.ends_with(".md")`) failed on every input.
+    insert_simple!("rt_string_ends_with", sffi_string::rt_string_ends_with_fn);
+    // ...and rt_string_rfind is the identical gap on the next line of text.spl
+    // (backs `text.last_index_of`), so it is registered in the same change.
+    insert_simple!("rt_string_rfind", sffi_string::rt_string_rfind_fn);
     insert_simple!("rt_string_len", sffi_string::rt_string_len_fn);
     insert_simple!("rt_string_new", sffi_string::rt_string_new_fn);
     // host_wm_showcase_unknown_extern_rt_string_to_int_2026-07-28: the JIT/native
@@ -3104,6 +3112,134 @@ mod tests {
                 Value::Int(b'c' as i64)
             ]),
             "rt_string_bytes(\"abc\") must be a real Value::Array([97, 98, 99]), not an opaque handle"
+        );
+    }
+
+    /// sdoctest_mode_unknown_extern_rt_string_ends_with_2026-08-07.
+    ///
+    /// `extern fn rt_string_ends_with` (src/lib/text.spl:52) had no
+    /// `EXTERN_DISPATCH` entry, so every interpreted call — including the one
+    /// `--sdoctest` makes via `sdoctest/discovery.spl`'s
+    /// `file_path.ends_with(".md")` — died with
+    /// `semantic: unknown extern function: rt_string_ends_with`.
+    /// Asserts the entry exists AND computes the right answer (a registration
+    /// that always returned false would still make `--sdoctest` find no files).
+    #[test]
+    fn rt_string_ends_with_is_registered_and_correct_sdoctest_2026_08_07() {
+        assert!(
+            EXTERN_DISPATCH.contains_key("rt_string_ends_with"),
+            "missing rt_string_ends_with"
+        );
+        let handler = EXTERN_DISPATCH
+            .get("rt_string_ends_with")
+            .expect("registered handler");
+
+        let cases: &[(&str, &str, bool)] = &[
+            ("notes.md", ".md", true),
+            ("notes.mdx", ".md", false),
+            ("md", ".md", false),
+            (".md", ".md", true),
+            ("anything", "", true),
+            ("", ".md", false),
+            // multi-byte suffix: byte-wise tail compare must not split a
+            // codepoint or report a false hit
+            ("héllo…", "…", true),
+            ("héllo…", "o…", false),
+        ];
+
+        for &(subject, suffix, expected) in cases {
+            let mut env = Env::new();
+            let mut functions = HashMap::new();
+            let mut classes = HashMap::new();
+            let enums = HashMap::new();
+            let impl_methods = HashMap::new();
+            let result = handler(
+                &[Value::text(subject), Value::text(suffix)],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .expect("rt_string_ends_with should not error on two text arguments");
+            assert_eq!(
+                result,
+                Value::Bool(expected),
+                "rt_string_ends_with({subject:?}, {suffix:?})"
+            );
+        }
+    }
+
+    /// Same gap, next line of `src/lib/text.spl`. Pins the C runtime's exact
+    /// contract (`runtime_native.c:3733`): LAST byte index, -1 on miss, and
+    /// the empty needle returning the subject's LENGTH rather than 0.
+    #[test]
+    fn rt_string_rfind_is_registered_and_matches_c_runtime_semantics() {
+        assert!(
+            EXTERN_DISPATCH.contains_key("rt_string_rfind"),
+            "missing rt_string_rfind"
+        );
+        let handler = EXTERN_DISPATCH
+            .get("rt_string_rfind")
+            .expect("registered handler");
+
+        let cases: &[(&str, &str, i64)] = &[
+            ("a/b/c", "/", 3),
+            ("abcabc", "abc", 3),
+            ("abc", "abc", 0),
+            ("abc", "zz", -1),
+            ("ab", "abc", -1),
+            ("abc", "", 3),
+            ("", "", 0),
+            ("", "a", -1),
+        ];
+
+        for &(subject, needle, expected) in cases {
+            let mut env = Env::new();
+            let mut functions = HashMap::new();
+            let mut classes = HashMap::new();
+            let enums = HashMap::new();
+            let impl_methods = HashMap::new();
+            let result = handler(
+                &[Value::text(subject), Value::text(needle)],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .expect("rt_string_rfind should not error on two text arguments");
+            assert_eq!(
+                result,
+                Value::Int(expected),
+                "rt_string_rfind({subject:?}, {needle:?})"
+            );
+        }
+    }
+
+    /// Arity is enforced rather than silently defaulting: a 1-argument call
+    /// must be an error, not `false`.
+    #[test]
+    fn rt_string_ends_with_rejects_missing_second_argument() {
+        let handler = EXTERN_DISPATCH
+            .get("rt_string_ends_with")
+            .expect("registered handler");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let result = handler(
+            &[Value::text("notes.md")],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        );
+        assert!(
+            result.is_err(),
+            "rt_string_ends_with with 1 argument must error, got {result:?}"
         );
     }
 

@@ -436,20 +436,32 @@ impl<'a> Parser<'a> {
         // Soft keywords that also introduce a statement (`skip`, `bind …`, `on …`,
         // `with …`) are bindable as ordinary variables. `<kw> = …` / `<kw>.field`
         // at statement level is a use of that variable, never the statement form.
-        let soft_kw_stmt_as_ident = matches!(
+        //
+        // `use` is deliberately EXCLUDED from the `.`-peek half: `use .mod.X` and
+        // `use ..parent.X` are RELATIVE IMPORTS, so `Use` followed by `Dot` is the
+        // statement form, not a field access on a variable named `use`. Including
+        // it broke every relative import in the tree (200 `^use \.` lines under
+        // `src/`) with `Unexpected token: expected identifier, found LBrace`, which
+        // took `bin/simple test` down entirely — the runner's module graph reaches
+        // `src/compiler/70.backend/backend/vhdl_backend.spl`, which has 9 of them.
+        // `use = x` / `use.field` (assignment/field on a variable named `use`) still
+        // work via the Assign half below. `export`/`mod` have no `.`-leading form
+        // in the tree (0 occurrences each), but they are harmless here and are left
+        // as they were.
+        let soft_kw_stmt_as_ident = (matches!(
             &self.current.kind,
             TokenKind::Skip
                 | TokenKind::Bind
                 | TokenKind::On
                 | TokenKind::With
-                | TokenKind::Use
                 | TokenKind::Export
                 | TokenKind::Requires
                 | TokenKind::Auto
                 | TokenKind::Mod
                 | TokenKind::Examples
                 | TokenKind::AndThen
-        ) && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
+        ) && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot)))
+            || (matches!(&self.current.kind, TokenKind::Use) && self.peek_is(&TokenKind::Assign));
         // `common` keyword: only treat as `common use` when followed by `use`.
         // Otherwise it's used as a variable name (e.g., `common.push(x)`).
         let is_common_use = matches!(&self.current.kind, TokenKind::Common) && self.peek_is(&TokenKind::Use);

@@ -1,7 +1,20 @@
 # Rust seed: nested tuple index `r.0.1` lexes as a float and fails to parse
 
 - **Filed:** 2026-08-06
-- **Status:** OPEN (seed half). The pure-Simple half is FIXED — see
+- **Status:** FIXED both halves (seed half 2026-08-17). Seed fix:
+  `split_tuple_index_pair` +the `TokenKind::Float` arm in
+  `src/compiler_rust/parser/src/expressions/postfix.rs` (mirrors the
+  pure-Simple `tuple_index_pair_split`), with Rust unit tests
+  (`mod tuple_index_split_tests`, same file) and a seed-lane spec
+  `test/01_unit/compiler/frontend/nested_tuple_index_seed_parser_spec.spl`.
+  Re-verified RED before the fix on the deployed seed:
+  `error: compile failed: parse: ... Unexpected token: expected identifier,
+  found Float(0.1)`.
+  The re-split works on the token LEXEME, not the parsed `f64`: `.0.1` and
+  `.0.10` share the value `0.1`, so an f64-based split cannot distinguish
+  index 1 from index 10. Only an exact `digits.digits` lexeme is
+  reinterpreted, so `1e3` / `0.1f32` / `.5` / `1.` stay floats.
+  The pure-Simple half was already FIXED — see
   `src/compiler/10.frontend/core/parser_expr.spl`
   (`tuple_index_pair_split`) and
   `test/01_unit/compiler/frontend/nested_tuple_index_parse_spec.spl`.

@@ -1,9 +1,55 @@
 # `bin/simple test --sdoctest <file>.md` fails on every input: `unknown extern function: rt_string_ends_with`
 
-**Status:** Open
+**Status:** Fixed (2026-08-17) — root cause confirmed and closed; the originally
+reported SURFACE had already stopped reproducing for an unrelated reason, see
+"Re-verification 2026-08-17" below before reading the rest of this doc.
 **Found while:** implementing L1 (notebook document model + SDoctest exporter,
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md` Stream L)
 **Date:** 2026-08-07
+
+## Re-verification 2026-08-17
+
+**The reported command now PASSES, and that is NOT the fix.** On the deployed
+seed, unmodified:
+
+```
+$ SIMPLE_RUST_SEED_WARNING=0 bin/simple test --sdoctest \
+    doc/06_spec/system/compiler/modules/testing/sdoctest.md
+SDoctest Results: 16 total, 16 passed, 0 failed, 0 skipped, 0 errors
+```
+
+The extern gap the doc suspected was nevertheless still entirely real. It is
+**lane-specific**, which is what hid it: the default engine is JIT, and the
+sdoctest path stopped routing the call through the interpreter. Probing the
+extern directly (`extern fn rt_string_ends_with` called by name, NOT via
+`text.ends_with` — a method call can be answered by the builtin method table
+without ever reaching the extern, which is why the original repro decayed):
+
+```
+SIMPLE_EXECUTION_MODE=jit          ->  ends=true  rfind=3          rc=0
+SIMPLE_EXECUTION_MODE=interpreter  ->  error: semantic: unknown extern
+                                       function: rt_string_ends_with   rc=1
+```
+
+Root cause, exactly as the "Suspected area" section below guessed:
+`rt_string_ends_with` was registered in every codegen backend and defined in
+the C runtime (`src/runtime/runtime_native.c:3670`) but had **no entry in the
+seed interpreter's `EXTERN_DISPATCH` table**
+(`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`). Identical class
+to `host_wm_showcase_unknown_extern_rt_string_to_int_2026-07-28`.
+
+`rt_string_rfind` (`src/lib/text.spl:53`, the very next line; backs
+`text.last_index_of`; `runtime_native.c:3733`) had the **same** missing entry
+and is fixed in the same change.
+
+**Fix:** `rt_string_ends_with_fn` / `rt_string_rfind_fn` in
+`src/compiler_rust/compiler/src/interpreter_extern/sffi_string.rs`, registered
+in `interpreter_extern/mod.rs`. Byte-wise semantics mirror the C runtime
+(empty needle -> subject length for `rfind`, not 0).
+
+**Specs:** `test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl`
+(calls the externs directly so it cannot go vacuous via the builtin method
+table) and two Rust unit tests in `interpreter_extern/mod.rs`.
 
 ## Repro
 

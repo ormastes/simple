@@ -117,6 +117,93 @@ pub fn rt_string_to_int_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `extern fn rt_string_ends_with(s: text, suffix: text) -> bool`
+/// (`src/lib/text.spl:52`).
+///
+/// Same missing-interpreter-entry class as `rt_string_to_int_fn` above
+/// (`host_wm_showcase_unknown_extern_rt_string_to_int_2026-07-28`): the symbol
+/// is registered in every codegen backend (`codegen/common_backend.rs`,
+/// `method_registry/builtins.rs`, `codegen/llvm/emitter.rs`) and defined in the
+/// C runtime (`src/runtime/runtime_native.c:3670`), but `EXTERN_DISPATCH` had
+/// no entry, so any interpreted call died with
+/// `semantic: unknown extern function: rt_string_ends_with`. That is what made
+/// `bin/simple test --sdoctest <file>.md` fail on *every* input: the sdoctest
+/// mode interprets `src/lib/nogc_sync_mut/test_runner/sdoctest/discovery.spl`,
+/// which calls `file_path.ends_with(".md")`.
+/// See `doc/08_tracking/bug/sdoctest_mode_unknown_extern_rt_string_ends_with_2026-08-07.md`.
+///
+/// Compares by BYTES, matching the C runtime's `memcmp` tail test, so a
+/// multi-byte UTF-8 suffix behaves identically in both lanes.
+pub fn rt_string_ends_with_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let (s, suffix) = extern_string_pair(args, "rt_string_ends_with")?;
+    Ok(Value::Bool(s.as_bytes().ends_with(suffix.as_bytes())))
+}
+
+/// `extern fn rt_string_rfind(s: text, needle: text) -> i64`
+/// (`src/lib/text.spl:53`) — the last BYTE index of `needle` in `s`, or `-1`.
+///
+/// Registered together with `rt_string_ends_with_fn` above because it is the
+/// identical latent defect on the very next line of `text.spl`: also declared
+/// extern, also defined in the C runtime (`runtime_native.c:3733`), also
+/// missing from `EXTERN_DISPATCH`. `text.last_index_of` delegates here, so it
+/// is the next `unknown extern function` an interpreted lane would hit.
+///
+/// Semantics mirror the C definition exactly: an EMPTY needle returns the
+/// subject's byte length (not 0), and a needle longer than the subject
+/// returns -1.
+pub fn rt_string_rfind_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let (s, needle) = extern_string_pair(args, "rt_string_rfind")?;
+    if needle.is_empty() {
+        return Ok(Value::Int(s.len() as i64));
+    }
+    let found = s
+        .as_bytes()
+        .windows(needle.len())
+        .rposition(|w| w == needle.as_bytes());
+    Ok(Value::Int(found.map_or(-1, |i| i as i64)))
+}
+
+/// Resolve two `text`-typed extern arguments to owned Rust strings.
+///
+/// A `Value::Str` is used directly; anything else is treated as an already
+/// tagged runtime string handle and read back through the runtime, which is
+/// the same admission rule `resolve_runtime_string` applies. Unlike the
+/// single-pointer helpers above this does NOT retain a borrowed pointer, so
+/// holding two arguments live at once is safe (see the `BORROWED_STRING_DATA`
+/// note at the top of this file).
+fn extern_string_pair(args: &[Value], who: &str) -> Result<(String, String), CompileError> {
+    let arity = || {
+        CompileError::semantic_with_context(
+            format!("{who} expects 2 arguments"),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    };
+    let one = |value: &Value| -> Result<String, CompileError> {
+        match value {
+            Value::Str(s) => Ok(s.as_str().to_string()),
+            other => {
+                let handle = RuntimeValue::from_raw(other.as_int()? as u64);
+                let ptr = rt_string_data(handle);
+                let len = rt_string_len(handle);
+                if ptr.is_null() || len < 0 {
+                    return Err(CompileError::semantic_with_context(
+                        format!("{who} expects text arguments"),
+                        ErrorContext::new().with_code(codes::TYPE_MISMATCH),
+                    ));
+                }
+                // SAFETY: `ptr`/`len` come from the runtime string registry for
+                // a handle it just validated; the bytes outlive this copy.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+                Ok(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
+    };
+    let a = one(args.first().ok_or_else(arity)?)?;
+    let b = one(args.get(1).ok_or_else(arity)?)?;
+    Ok((a, b))
+}
+
 /// Render a raw `i64` as decimal `text`.
 ///
 /// Same missing-interpreter-entry story as `rt_string_to_int_fn` above:

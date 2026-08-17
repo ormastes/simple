@@ -2,10 +2,40 @@
 
 - **Filed:** 2026-07-30
 - **Severity:** medium — misleading parse error, no mention of the real cause
-- **Status:** open
+- **Status:** open — RE-VERIFIED STILL REPRODUCING 2026-08-17 (see below)
 - **Scope:** Rust bootstrap seed only (`src/compiler_rust/`). Not reproduced against the
   pure-Simple frontend (`src/compiler/10.frontend/`) — `grep -rn '"literal"'` there finds
   no keyword table entry, so this looks seed-specific.
+
+## Re-verification 2026-08-17 — still RED, and a static read says otherwise
+
+Reproduced verbatim on the deployed seed:
+
+```
+$ bin/simple run /tmp/.../p_literal.spl     # var literal = 1; literal = literal + 2
+error: compile failed: parse: in "p_literal.spl": Unexpected token: expected Fn, found Assign
+```
+
+**Warning for the next reader: a source-only inspection concludes, wrongly,
+that this is fixed.** `TokenKind::Literal` *is* folded back into identifier
+position in several places —
+`parser/src/expressions/primary/identifiers.rs:86`
+(`TokenKind::Literal => self.parse_keyword_identifier("literal")`),
+`primary/mod.rs:104`, `helpers.rs:422,569`. Those cover EXPRESSION position,
+which is exactly why the doc's own isolation found `val y = literal + "{"` and
+`literal == "..."` parse fine. None of them covers **statement-level
+assignment**, where the statement dispatcher must decide "is this an
+assignment LHS?" before expression parsing gets a turn. So the softening is
+real, partial, and does not touch the reported case.
+
+`identifiers.rs:254` still reads `"literal" => TokenKind::Literal`
+unconditionally, unlike `"lean"` and `"allow"` immediately below it, which
+carry explicit comments saying they are deliberately NOT keywords.
+
+Not fixed in this pass: the fix belongs in the statement dispatcher
+(`parser/src/stmt_parsing/`), not the lexer table, and was out of budget.
+Evidence quality note: run the repro; do not infer from the soft-keyword
+grep.
 
 ## Symptom
 
