@@ -1078,6 +1078,22 @@ impl<'a> Parser<'a> {
             self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) || self.check(&TokenKind::Colon)
         };
 
+        // A multi-line or-pattern (`case 1 | 2 |\n        3:`) made the lexer
+        // open a pseudo-INDENT for the continuation line. Its compensating
+        // DEDENT arrives BEFORE the arm body, not after it: the body line is
+        // dedented relative to the continuation line, so the stream reads
+        // `Newline Dedent Indent <body>`. The old post-body loop below assumed
+        // the "shallow" shape only, so the pre-body DEDENT was left in place,
+        // `parse_inline_or_block` found a DEDENT where it wanted an INDENT, and
+        // the arm loop then tried to read the body's INDENT as the next
+        // pattern — reported as `expected pattern, found Indent`.
+        //
+        // `deferred_dedent_count` is the existing, well-tested reconciliation
+        // channel for exactly this (`if`/`while` header continuations, see
+        // `parse_condition_block`), and it handles BOTH the deep and shallow
+        // shapes. Route the pattern continuation through it instead.
+        self.deferred_dedent_count += pattern_indents;
+
         let body = if valid_separator {
             self.advance();
             self.parse_inline_or_block()?
@@ -1089,18 +1105,6 @@ impl<'a> Parser<'a> {
                 self.current.span,
             ));
         };
-
-        // Consume DEDENTs that balance the INDENTs consumed during multi-line pattern parsing
-        // These DEDENTs appear AFTER the arm body in the token stream
-        for _ in 0..pattern_indents {
-            // Skip any newlines before the DEDENT
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                self.advance();
-            }
-        }
 
         Ok(MatchArm {
             span: Span::new(
