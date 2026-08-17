@@ -1,0 +1,99 @@
+"""
+# Field index on an ERASED receiver must never be guessed (reproducing)
+
+**Category:** HIR lowering / field-index resolution
+**Root cause:** `src/compiler_rust/compiler/src/hir/lower/expr/access.rs`
+— the `CannotInferFieldType` fallback ended field-index resolution in
+`.unwrap_or(0)`, so when the receiver's TypeId was erased to ANY every field
+read lowered to field **0**: a struct handed back BY VALUE reads its first
+field's value for `.a`, `.b` and `.c` alike.
+
+`0` is the worst possible guess: it is a VALID index for every non-empty
+struct, so the wrong read is silent — right shape, right type, wrong value.
+
+The fix adds a third attempt (the HIR type registry, whose declaration order
+IS the field index — the same table the field TYPE was just resolved from) and
+then FAILS CLOSED with a diagnostic naming the struct and the field.
+
+## Why the values are distinct primes
+
+Every field carries a distinct constant and none is `0`, so a field-0
+substitution cannot coincide with a correct read.
+
+## Engine
+
+The defect is in lowering, which a spec body never reaches for a native
+build — the example therefore shells out to a subprocess `native-build`.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+val ERASED_SOURCE: text = ("struct Triple:\n" +
+    "    a: i64\n" +
+    "    b: i64\n" +
+    "    c: i64\n" +
+    "\n" +
+    "fn make() -> Triple:\n" +
+    "    Triple(a: 11, b: 13, c: 17)\n" +
+    "\n" +
+    "fn forward() -> Triple:\n" +
+    "    make()\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val direct = make()\n" +
+    "    print(\"DIRECT\")\n" +
+    "    print(direct.a)\n" +
+    "    print(direct.b)\n" +
+    "    print(direct.c)\n" +
+    "    print(\"CALL\")\n" +
+    "    print(make().a)\n" +
+    "    print(make().b)\n" +
+    "    print(make().c)\n" +
+    "    val fwd = forward()\n" +
+    "    print(\"FWD\")\n" +
+    "    print(fwd.a)\n" +
+    "    print(fwd.b)\n" +
+    "    print(fwd.c)\n")
+
+# NOTE: no `{...}` in the embedded source — the SPEC's lexer would resolve it
+# and the file would die with zero-examples before any example ran.
+
+fn native_build_and_run(dir: text, src_text: text) -> text:
+    val src = dir + "/repro.spl"
+    val bin_out = dir + "/repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, src_text)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a by-value struct read through an erased receiver keeps its own field indices":
+
+    it "reads a, b and c as three different values in every receiver shape":
+        step("Build once and run the resulting binary")
+        val raw = native_build_and_run("build/test-artifacts/field_index_erased", ERASED_SOURCE)
+        # print() emits no newline on some engines — compare newline-stripped text
+        val out = raw.replace("\n", "")
+
+        step("Refuse to pass on a build that produced nothing")
+        expect(raw.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("DIRECT")
+
+        step("A local binding of a by-value return")
+        expect(out).to_contain("DIRECT111317")
+
+        step("A field read straight off the call expression — the erased receiver")
+        expect(out).to_contain("CALL111317")
+
+        step("A forwarded return, one hop further from the declaration")
+        expect(out).to_contain("FWD111317")
+
+        step("The field-0 substitution fingerprint appears nowhere")
+        expect(out.contains("111111")).to_equal(false)
