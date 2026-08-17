@@ -118,6 +118,27 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
 
+## Per-phase verification umbrella
+
+`sh scripts/check/check-bootstrap-all-phases.shs` runs every bootstrap phase
+gate in bootstrap order and reports one combined verdict, so no phase can
+silently pass unverified. Standard contract, verdict last on stdout: `PASS — <n>
+gate(s) checked, ...` (n > 0) / `FAIL — ...` exit 1 / `ERROR — nothing was
+checked` exit 2. Fail-closed and non-vacuous — 0 gates evaluated is ERROR, and a
+registry entry whose gate script is **missing is ERROR, never a skip**.
+`--selftest` (8 fixtures: must-PASS, must-FAIL, vacuous, missing-gate,
+static-present, static-broken, mixed, malformed) runs before every scan and is
+fatal. Gates needing a built stage artifact are marked `static` and are verified
+to exist and parse (`sh -n`), reported as `PRESENT` and counted separately from
+executed gates — never presented as if they had run.
+
+**The phase→gate map, what each gate asserts, and the honest list of UNGATED
+phases live in `doc/07_guide/tooling/bootstrap_phase_verification.md`.** Read
+its gap list before claiming a bootstrap phase is verified: stage 1, the
+stage2→stage3 fixpoint, the deploy step, and the Windows lane have **no gate at
+all**, and every gate except `check-cache-scope-ownership.shs` lacks both a
+`--selftest` and the verdict contract.
+
 ## Stage-3 self-verification gate
 
 `sh scripts/check/check-bootstrap-stage3-selfverify.shs` (exit 0 = safe) is the
