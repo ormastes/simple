@@ -249,3 +249,27 @@ SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1 \
 
 Logs: `logs/x86_64-unknown-linux-gnu/stage2-native-build.log` (8,160 bytes,
 58 link-error lines).
+
+---
+
+## Acceptance gate MET — status line above is stale (W4 bug-fixing wave, 2026-08-17)
+
+The Status header still reads OPEN with "a clean Stage-2 link remains the
+acceptance gate", but the "Measured result" table in this same document records
+that gate being met on `9bb19d8c913`: **Stage-2 linked OK, 0 undefined refs, 809
+compiled / 0 cached / 0 failed, 126,031 KB, 232.3s**, with both stated residuals
+(`spl_mutex_lock`/`spl_mutex_unlock` via `f295b66d955`, and
+`TaskState.is_terminal`) closed. Nothing in this row is outstanding.
+
+Fail-closed behaviour re-confirmed in current source: an unresolvable
+`GlobalLoad`/`GlobalStore` target at
+`src/compiler_rust/compiler/src/codegen/llvm/functions.rs:3207-3225` returns
+`CompileError::semantic("llvm global load referenced undeclared symbol ...")`
+rather than minting a global. `36673b6b6a3` is intact — do not revert it.
+
+**This row is the FIX for the family** whose other faces are
+`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11` (169 `call 0`
+sites measured per staged binary, 2026-08-17 — the pre-fix artifacts),
+`bytespan_starts_with_dropped_from_kernel_closure_weak_nil_stub_2026-07-28`,
+`freestanding_entry_module_constants_zero_stubs_2026-07-11`, and
+`native_build_llvm_explicit_return_lost_every_call_returns_zero`.

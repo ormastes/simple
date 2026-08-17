@@ -70,3 +70,38 @@ The native-project data-export/mangling pass must classify entry-module
 per-module compilation. Until fixed, early freestanding entry hardware values
 are local immediates at their owning operations. They must not be replaced by
 fake device readback or fixed evidence metadata.
+
+---
+
+## Source status 2026-08-17 (W4 bug-fixing wave)
+
+The "Required Fix" above asks for two things. Both are present in source:
+
+- **Preserve `global_init_values` through per-module compilation.**
+  `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs:263-292`
+  rewrites `mir.global_init_values` alongside `mir.globals` and `local_globals`
+  under a "Phase 2: Rename globals in mir.globals, global_init_values,
+  local_globals" header, re-inserting every entry under its mangled name and
+  keeping unmangled ones. The map is no longer dropped across mangling.
+- **Classify entry-module module-level declarations.**
+  `native_project/compiler.rs:350` treats
+  `Node::Let(_) | Node::Const(_) | Node::Static(_)` uniformly as
+  `is_module_level_decl`, and `native_project/module_global_init.rs` exists
+  specifically to carry module-global initialization. The sibling entry-file gap
+  is separately pinned by
+  `native_project/entry_closure_global_init_tests.rs`
+  (`freestanding_entry_keeps_call_initialized_global_at_module_scope`).
+
+**Not closed here.** The observable in this row is a *Cranelift freestanding*
+symbol table (weak text symbols with `xor eax,eax; ret` bodies for `FB_W`,
+`FB_H`, `DIRECT_QEMU_TOTAL_MEMORY`), which requires a stage-3 freestanding build
+plus a QEMU boot to confirm — neither was runnable in this wave, and the
+Cranelift adapter is outside this wave's file scope. Left **OPEN**, downgraded to
+"awaiting a freestanding-build observation", with the source-side prerequisites
+recorded above so the next lane does not re-derive them.
+
+**Family:** the weak zero-returning body is the same fail-open mechanism as
+`bytespan_starts_with_dropped_from_kernel_closure_weak_nil_stub_2026-07-28` and
+`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11` — a symbol with
+no real definition gets a fabricated zero body (or address 0) instead of failing
+the build. See the FAMILY RESOLUTION section of the latter.

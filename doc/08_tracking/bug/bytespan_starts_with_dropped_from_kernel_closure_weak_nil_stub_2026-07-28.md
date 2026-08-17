@@ -253,3 +253,41 @@ change regresses. `rt_*` symbols are excluded by construction
 (`simple_module_symbol_tail` returns `None` for them), so the `rt_*` channels are
 untouched. Unit test:
 `stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
+
+---
+
+## Source re-verification 2026-08-17 (W4 bug-fixing wave) — both defects are fixed in source; only a redeploy is outstanding
+
+Verified by grep against current source, not by trusting the "re-verified by
+source inspection" stamp at the top of this file:
+
+- **D1 (cache key).** `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:910`
+  now carries the comment "This is deliberately NOT gated on `incr_hardening`",
+  with `incr_hardening` surviving only at line 1120 for a narrower purpose. The
+  dependency-blind content-only key this row's root cause depended on is gone
+  from source.
+- **D2 (fail-open).** Three independent refusal channels exist:
+  `simpleos_undefined_simple_module_symbols` +
+  channel 3 at `src/compiler/70.backend/backend/llvm_native_link.spl:1814` /
+  `:2647` / `:2666` (message present verbatim); `stale_module_move_report` in
+  `native_project/stubs.rs`, invoked BEFORE the `FreestandingUnresolvedMode`
+  match so `DeferToLinker`/`EmitStubs` cannot swallow it; and
+  `freestanding_unresolved_mode()`, which now **never** returns `EmitStubs` when
+  `SIMPLE_NO_STUB_FALLBACK=1` regardless of `SIMPLE_ALLOW_FREESTANDING_STUBS`.
+  The single surviving `EmitStubs` path is gated by
+  `check_fabricated_stub_ratchet` against
+  `config/freestanding_fabricated_stub_baseline.sdn`, and the pure-Simple channel
+  against `config/simpleos_fabricated_lib_baseline.sdn`; both files exist.
+
+The "Caveat — the guard is not live yet" section is still the operative
+blocker and is unchanged: the fixes are inert until a bootstrap redeploy. That
+redeploy was explicitly out of scope for this wave (rebuilding
+`bin/simple` / `bin/release/**` clobbers ~16 concurrent lanes), so this row is
+left open ONLY on the redeploy, with no source work outstanding.
+
+**Family:** this row is the *stub-fabricator* face of the same cause tracked in
+`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11` (the *linker*
+face, measured at 169 `call 0` sites per staged binary on 2026-08-17) and
+`stage2_native_build_link_undefined_method_symbols_2026-08-09` (the fix,
+`36673b6b6a3`). See the FAMILY RESOLUTION section of the first of those for the
+full five-row list.
