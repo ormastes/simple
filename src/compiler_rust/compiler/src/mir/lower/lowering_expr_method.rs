@@ -1800,14 +1800,25 @@ impl<'a> MirLowerer<'a> {
         //
         // Native `u64` values above the 61-bit tagged-int limit cannot be boxed
         // losslessly, so route them through an unsigned-specific bridge instead.
+        // Signed `i64` has exactly the same problem in the same place: BoxInt
+        // packs `(value << 3) | TAG_INT`, so i64::MAX boxed to -1 and 2^62 to 0
+        // for `i64_val.to_string()` under the JIT while the tree-walking
+        // interpreter rendered them correctly. Route it through the signed
+        // bridge, mirroring u64. See
+        // doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md.
         if method == "to_string" || method == "to_text" || method == "str" {
-            if receiver.ty == TypeId::U64 {
+            if receiver.ty == TypeId::U64 || receiver.ty == TypeId::I64 {
+                let raw_fn = if receiver.ty == TypeId::U64 {
+                    "rt_raw_u64_to_string"
+                } else {
+                    "rt_raw_i64_to_string"
+                };
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::Call {
                         dest: Some(dest),
-                        target: crate::mir::effects::CallTarget::from_name("rt_raw_u64_to_string"),
+                        target: crate::mir::effects::CallTarget::from_name(raw_fn),
                         args: vec![receiver_reg],
                     });
                     dest

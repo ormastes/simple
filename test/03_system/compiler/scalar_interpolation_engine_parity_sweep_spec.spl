@@ -1,0 +1,124 @@
+"""
+# Scalar-interpolation engine-parity SWEEP (DETECTION spec)
+
+This is the *class* guard for the defect its sibling reproducer pins
+(`i64_interpolation_engine_parity_spec.spl`). It does not name any single
+magnitude or type. It asserts a structural invariant:
+
+  **Every `KEY=value` line the probe fixture emits must be byte-identical
+  between `SIMPLE_EXECUTION_MODE=interpreter` and `SIMPLE_EXECUTION_MODE=jit`.**
+
+The defect class is "a scalar-to-text renderer reached through string
+interpolation loses information on one engine but not the other". There are
+several sibling renderers behind the same lowering helper
+(`MirLowering::emit_to_string`, `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`):
+`rt_raw_u64_to_string`, `rt_raw_i64_to_string`, `rt_value_bool`, `BoxFloat`,
+`BoxInt` for the narrow int types, plus the flat-optional bypasses
+(`rt_opt_i64_to_string` / `rt_opt_bool_to_string` / `rt_opt_f64_to_string`).
+Each has independently been the site of a truncation or mis-tagging bug:
+
+  - `stress_f02_i64_boxing_truncation_2026-07-17.md` (I64/U64 61-bit payload)
+  - `interp_index_of_digit_leading_literal_2026-07-22.md` (flat-optional raw
+    payload misread as tag bits)
+  - `stage3_numeric_interpolation_slot_corruption_2026-08-13.md` (a numeric
+    render overwrote an adjacent array backing pointer)
+
+A per-value spec catches only the value it names. This one fails the moment
+ANY line diverges, so adding a shape to the probe fixture extends the guard
+with no spec edit -- which is the point: the pre-existing interpreter-only
+spec `i64_print_range_spec.spl` named four exact magnitudes, ran only under
+the tree-walking interpreter, and stayed green through the entire JIT
+regression including for the very 2^60 value it asserts.
+
+WHY SUBPROCESSES: `bin/simple test` is the tree-walking interpreter and never
+routes through the cranelift/JIT backend regardless of its own
+`SIMPLE_EXECUTION_MODE`. A spec body cannot exercise a JIT defect at all;
+only a child-process comparison can. `env` is invoked directly because the
+resource test-slot wrapper does not propagate environment variables to the
+child binary.
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.io_runtime.{process_run, env_get_or}
+
+val PROBE_PATH: text = "test/fixtures/repro/compiler/scalar_interpolation/scalar_interp_engine_parity_probe.spl"
+# The binary under test. Defaults to the deployed `bin/simple`; override with
+# SIMPLE_PARITY_BIN to point at an isolated build (never redeploy bin/simple --
+# ~15 lanes share this checkout).
+fn simple_bin() -> text:
+    return env_get_or("SIMPLE_PARITY_BIN", "bin/simple")
+
+fn run_probe(mode: text) -> text:
+    val result = process_run("env", ["SIMPLE_EXECUTION_MODE=" + mode, simple_bin(), "run", PROBE_PATH])
+    return result.0
+
+# Keep only the `KEY=value` payload lines, dropping the seed's warning banner
+# and any blank lines, so the comparison is over probe output alone.
+fn payload_lines(out: text) -> [text]:
+    var kept: [text] = []
+    for line in out.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if not trimmed.contains("="):
+            continue
+        if trimmed.starts_with("WARNING"):
+            continue
+        if trimmed.starts_with("Build and use"):
+            continue
+        kept.push(trimmed)
+    return kept
+
+describe "every interpolated scalar renders identically under both engines":
+    """
+    Structural parity sweep over the whole probe fixture. Any divergent line
+    in any scalar renderer fails this spec, including shapes added to the
+    fixture after this spec was written.
+    """
+
+    it "captured a non-trivial number of payload lines from both engines":
+        # Non-vacuity gate, and it is absolute: two empty captures agree
+        # trivially, so a comparison over 0 lines is a failure, never a pass.
+        # earlyoom kills `simple` first on this host, so an empty capture is
+        # a real and frequent outcome that must not read as green.
+        val interp_lines = payload_lines(run_probe("interpreter"))
+        val jit_lines = payload_lines(run_probe("jit"))
+        assert_true(interp_lines.len() >= 15)
+        assert_true(jit_lines.len() >= 15)
+
+    it "emits the same number of payload lines under both engines":
+        val interp_lines = payload_lines(run_probe("interpreter"))
+        val jit_lines = payload_lines(run_probe("jit"))
+        assert_equal(jit_lines.len(), interp_lines.len())
+
+    it "emits byte-identical payload lines under both engines":
+        val interp_lines = payload_lines(run_probe("interpreter"))
+        val jit_lines = payload_lines(run_probe("jit"))
+        assert_true(interp_lines.len() >= 15)
+        assert_equal(jit_lines.len(), interp_lines.len())
+        var divergent: [text] = []
+        var i = 0
+        while i < interp_lines.len():
+            if interp_lines[i] != jit_lines[i]:
+                divergent.push("interpreter=" + interp_lines[i] + " jit=" + jit_lines[i])
+            i = i + 1
+        # Name the offenders in the failure, so a regression identifies which
+        # renderer broke rather than only that something did.
+        assert_equal(divergent.len(), 0)
+
+    it "renders no scalar as a bare -1 or 0 under the JIT unless the interpreter does too":
+        # Shape-level canary independent of the line-by-line diff above:
+        # -1 and 0 are the two signature outputs of a lost `(v << 3)` payload
+        # (top bits shifted out, or the single set bit shifted past bit 63).
+        val interp_lines = payload_lines(run_probe("interpreter"))
+        val jit_lines = payload_lines(run_probe("jit"))
+        assert_true(interp_lines.len() >= 15)
+        var interp_suspicious = 0
+        for line in interp_lines:
+            if line.ends_with("=-1") or line.ends_with("=0"):
+                interp_suspicious = interp_suspicious + 1
+        var jit_suspicious = 0
+        for line in jit_lines:
+            if line.ends_with("=-1") or line.ends_with("=0"):
+                jit_suspicious = jit_suspicious + 1
+        assert_equal(jit_suspicious, interp_suspicious)

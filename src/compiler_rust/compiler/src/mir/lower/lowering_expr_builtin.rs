@@ -430,13 +430,23 @@ impl<'a> MirLowerer<'a> {
             let arg = &args[0];
             let arg_reg = self.lower_expr(arg)?;
 
-            if arg.ty == TypeId::U64 {
+            // U64 and I64 must both bypass BoxInt: it packs the payload as
+            // `(value << 3) | TAG_INT`, so only a signed 61-bit magnitude
+            // survives (i64::MAX -> -1, 2^62 -> 0). Same reasoning as the
+            // print-arg bypass below; see
+            // doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md.
+            if arg.ty == TypeId::U64 || arg.ty == TypeId::I64 {
+                let raw_fn = if arg.ty == TypeId::U64 {
+                    "rt_raw_u64_to_string"
+                } else {
+                    "rt_raw_i64_to_string"
+                };
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::Call {
                         dest: Some(dest),
-                        target: CallTarget::from_name("rt_raw_u64_to_string"),
+                        target: CallTarget::from_name(raw_fn),
                         args: vec![arg_reg],
                     });
                     dest

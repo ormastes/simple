@@ -36,8 +36,20 @@
 
 
 - **Filed:** 2026-08-08
-- **Status:** Open, not fixed. Root cause localized to the Rust seed (out of scope for a
-  pure-Simple fix); no bounded, sabotage-verifiable fix location exists in this tree today.
+- **Status:** **CLOSED 2026-08-17 — retired, did not reproduce.** THREE independent probe
+  runs now agree that value semantics hold under BOTH engines across every aliasing
+  shape: the header's HEAD-seed note, worker W5's deployed-seed run with a positive
+  control, and a third run recorded at the bottom of this file on a separate probe file.
+  (Previously: "Open, not fixed. Root cause localized to the Rust seed …")
+- **CAVEAT on W5's positive control, added 2026-08-17:** W5's guard
+  (`test/01_unit/engine_divergence/check-engine-divergence-probes.shs`, probe
+  `probes/boxed_int_61bit_probe.spl`) proves its mode switch is live by requiring
+  `1152921504606846976` to diverge to `-1152921504606846976` under `jit`. **That
+  divergence is itself a defect, and it has now been fixed** — see
+  `stage3_numeric_interpolation_slot_corruption_2026-08-13.md`. Once a seed carrying
+  that fix is deployed, W5's control will stop diverging and its guard will
+  (correctly, fail-closed) stop passing. W5's lane needs a different liveness control;
+  that file was deliberately not edited from here.
 - **Severity:** High — this is the *other half* of the F1 contract. Every packed-scene design
   that relies on `struct` snapshotting (span refs, row descriptors, revision stamps) is
   engine-dependent in the opposite direction from the class defect.
@@ -138,3 +150,74 @@ sibling one.
 `src/lib/nogc_sync_mut/ui/draw_ir_v3_native_writer.spl:14-19` documents the live workaround
 for the *class* half. This struct half adds a second precondition for removing it: see the
 "what would justify removal" note in that file and in the sibling bug doc.
+
+---
+
+## SECOND, INDEPENDENT CONFIRMATION 2026-08-17 — closing the row
+
+The header's "DID NOT REPRODUCE 2026-08-17" note was written against a seed
+built from HEAD by another lane. The `evidence` column and
+"re-verified by source inspection" stamps in this tracker have been shown wrong
+on 37% of the rows they touch, so that note alone was not treated as sufficient.
+It was re-run here on a **different** binary, from a separate probe file, with
+the same conclusion.
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, the Rust bootstrap seed
+(`bin/simple --version` prints the seed banner), size 59536728, mtime
+2026-08-16 22:59:37. Nothing was rebuilt or redeployed (~15 lanes share this
+checkout).
+
+Probe run as a subprocess under each engine — not as a spec body, because
+`bin/simple test` is the tree-walk interpreter and cannot reach the cranelift
+JIT at all, so a spec assertion here would be vacuous by construction:
+
+```
+struct SCell:
+    var n: i64
+class StructHolder:
+    var cell: SCell
+
+fn main():
+    var s = SCell(n: 150)
+    val sh = StructHolder(cell: s)
+    s.n = 151                      # mutate the SOURCE struct
+    print("FIELD={sh.cell.n}")     # contract: 150 (value copy)
+    var a = SCell(n: 1)
+    var b = a
+    b.n = 5
+    print("LOCAL={a.n}")           # contract: 1
+    var arr = [SCell(n: 2)]
+    var e = arr[0]
+    e.n = 7
+    print("ARRELEM={arr[0].n}")    # contract: 2
+```
+
+| shape | contract | `SIMPLE_EXECUTION_MODE=interpreter` | `SIMPLE_EXECUTION_MODE=jit` |
+|---|---|---|---|
+| struct read out of a class field | 150 | 150 VAL | 150 VAL |
+| plain local copy | 1 | 1 VAL | 1 VAL |
+| array element copy | 2 | 2 VAL | 2 VAL |
+
+The `sh.cell.n == 151` alias reported in "The divergence" table above is not
+reproducible on this binary in either engine. Value semantics for `struct` hold
+uniformly. Classified by EXECUTION, not by SHA ancestry (rebasing rewrites SHAs
+in this tree, so ancestry proves nothing here).
+
+### Corroborating representation note
+
+The interpreter's aggregate representation now makes the two contracts
+structurally distinct rather than uniform, which is consistent with the
+observed behaviour: `Value::ClassInstance(Arc<ClassInstance>)`
+(`src/compiler_rust/compiler/src/value.rs:1240`) is the **only** Arc-shared
+aggregate variant, documented in place as "Shared-identity class instance
+storage (source `class` values)" with `fields: RwLock<HashMap<String, Value>>`
+(same file, 1111-1115). A struct has no such shared handle, so cloning a struct
+`Value` cannot alias. This is corroboration for the interpreter half only — the
+JIT half rests on the execution result above, not on this symbol.
+
+### What this closure does NOT cover
+
+The **sibling** row `class_field_reference_semantics_diverge_2026-08-06.md` (the
+opposite direction: the interpreter value-copying *class* fields) is a separate
+root cause and is NOT addressed here. Nothing in this closure should be read as
+evidence about that row.

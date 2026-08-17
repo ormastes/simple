@@ -1,0 +1,109 @@
+"""
+# i64 string-interpolation engine-parity spec (REPRODUCER)
+
+Pins the exact defect: an `i64` rendered through string **interpolation**
+(`"{x}"`) truncated under the cranelift/JIT backend while the tree-walking
+interpreter rendered it correctly.
+
+Measured RED, stale seed `bin/release/x86_64-unknown-linux-gnu/simple`
+(mtime 2026-08-16 22:59), on
+`test/fixtures/repro/compiler/scalar_interpolation/scalar_interp_engine_parity_probe.spl`:
+
+    interpreter                 jit
+    I64_MAX_ANNOT=922337...807  I64_MAX_ANNOT=-1
+    I64_MIN=-9223372036854775808 I64_MIN=0
+    I64_POW62=4611686018427387904 I64_POW62=0
+    I64_POW60=1152921504606846976 I64_POW60=-1152921504606846976
+
+Root cause: `BoxInt` packs a RuntimeValue payload as `(value << 3) | TAG_INT`,
+so only a signed 61-bit magnitude round-trips. The STRESS-F02 fix
+(`stress_f02_i64_boxing_truncation_2026-07-17.md`) routed **direct `print(x)`
+arguments** of type I64 through the `rt_raw_i64_to_string` bypass, but string
+interpolation reaches the runtime through a *different* lowering helper
+(`MirLowering::emit_to_string` in
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`) which kept
+only the U64 bypass and left I64 on the lossy BoxInt path. Same omission at
+the explicit `rt_value_to_string(x)` builtin site in
+`lowering_expr_builtin.rs`. Both now bypass for I64 as well as U64.
+
+WHY THIS SPEC SPAWNS SUBPROCESSES: `bin/simple test` is the tree-walking
+interpreter and never routes through the cranelift/JIT backend, even with
+`SIMPLE_EXECUTION_MODE=jit` in its own environment. An in-body assertion can
+therefore only ever observe the engine that was already correct -- it would
+pass with the fix removed. The only way a spec can witness this defect is to
+run the probe fixture as a child process under each engine and compare.
+
+See doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md.
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.io_runtime.{process_run, env_get_or}
+
+val PROBE_PATH: text = "test/fixtures/repro/compiler/scalar_interpolation/scalar_interp_engine_parity_probe.spl"
+# The binary under test. Defaults to the deployed `bin/simple`; override with
+# SIMPLE_PARITY_BIN to point at an isolated build (never redeploy bin/simple --
+# ~15 lanes share this checkout).
+fn simple_bin() -> text:
+    return env_get_or("SIMPLE_PARITY_BIN", "bin/simple")
+
+# Run the probe under one engine and return its stdout.
+# `env` is invoked directly rather than through any wrapper: the
+# resource test-slot wrapper does NOT propagate environment variables to the
+# child binary and produced a false green control.
+fn run_probe(mode: text) -> text:
+    val result = process_run("env", ["SIMPLE_EXECUTION_MODE=" + mode, simple_bin(), "run", PROBE_PATH])
+    return result.0
+
+# Extract the value of a `KEY=value` line from probe stdout, or "" if absent.
+fn probe_field(out: text, key: text) -> text:
+    for line in out.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(key + "="):
+            return trimmed.substring(key.len() + 1, trimmed.len())
+    return ""
+
+describe "i64 string interpolation renders identically under both engines":
+    """
+    Reproducer for the JIT-only truncation of large `i64` values reached
+    through `"{x}"`. Every assertion here compares the JIT's rendering against
+    the interpreter's, which is the oracle.
+    """
+
+    it "produces probe output under both engines at all":
+        val interp_out = run_probe("interpreter")
+        val jit_out = run_probe("jit")
+        # Non-vacuity gate: an empty capture (earlyoom kill, missing binary)
+        # must not be mistaken for agreement between two empty strings.
+        assert_true(probe_field(interp_out, "I64_SMALL") == "42")
+        assert_true(probe_field(jit_out, "I64_SMALL") == "42")
+
+    it "renders i64::MAX exactly under the JIT, not -1":
+        val jit_out = run_probe("jit")
+        assert_equal(probe_field(jit_out, "I64_MAX_ANNOT"), "9223372036854775807")
+
+    it "renders i64::MIN exactly under the JIT, not 0":
+        val jit_out = run_probe("jit")
+        assert_equal(probe_field(jit_out, "I64_MIN"), "-9223372036854775808")
+
+    it "renders 2^62 exactly under the JIT, not 0":
+        val jit_out = run_probe("jit")
+        assert_equal(probe_field(jit_out, "I64_POW62"), "4611686018427387904")
+
+    it "renders 2^60 exactly under the JIT, not sign-flipped":
+        # The pre-existing interpreter-only spec
+        # test/03_system/compiler/i64_print_range_spec.spl asserts this value
+        # and passed throughout, because it never reached the JIT. Under the
+        # JIT this rendered as -1152921504606846976.
+        val jit_out = run_probe("jit")
+        assert_equal(probe_field(jit_out, "I64_POW60"), "1152921504606846976")
+
+    it "agrees with the interpreter on i64::MAX reached via .to_string()":
+        val interp_out = run_probe("interpreter")
+        val jit_out = run_probe("jit")
+        assert_equal(probe_field(jit_out, "I64_MAX_TOSTRING"), probe_field(interp_out, "I64_MAX_TOSTRING"))
+
+    it "agrees with the interpreter on a function-return i64 and an array element":
+        val interp_out = run_probe("interpreter")
+        val jit_out = run_probe("jit")
+        assert_equal(probe_field(jit_out, "I64_MAX_FNRET"), probe_field(interp_out, "I64_MAX_FNRET"))
+        assert_equal(probe_field(jit_out, "I64_MAX_ARRELEM"), probe_field(interp_out, "I64_MAX_ARRELEM"))

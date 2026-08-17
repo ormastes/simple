@@ -565,13 +565,32 @@ impl<'a> MirLowerer<'a> {
     /// builtin lowering in lowering_expr_builtin.rs).
     fn emit_to_string(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
         // U64 must not go through BoxInt (sign issues); use the raw helper.
-        if ty == TypeId::U64 {
+        //
+        // I64 must not either, for the SAME reason and via the signed
+        // counterpart: BoxInt packs the payload as `(value << 3) | TAG_INT`,
+        // so only a signed 61-bit magnitude round-trips. i64::MAX boxes to
+        // -1, 2^62 boxes to 0. The direct-`print` path already routes I64
+        // through rt_raw_i64_to_string (see the STRESS-F02 comment in
+        // lowering_expr_builtin.rs) but string INTERPOLATION reaches the
+        // runtime through this helper instead, so it kept the lossy BoxInt
+        // path and `"{i64_max}"` still rendered as "-1" under the JIT while
+        // the tree-walking interpreter (native Rust `Value` enum, no tagging)
+        // printed it correctly. Narrower int types (i8..i32, u8..u32) cannot
+        // exceed the 61-bit payload and stay on the BoxInt path.
+        // See doc/08_tracking/bug/stress_f02_i64_boxing_truncation_2026-07-17.md
+        // and doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md.
+        if ty == TypeId::U64 || ty == TypeId::I64 {
+            let raw_fn = if ty == TypeId::U64 {
+                "rt_raw_u64_to_string"
+            } else {
+                "rt_raw_i64_to_string"
+            };
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(dest),
-                    target: crate::mir::CallTarget::from_name("rt_raw_u64_to_string"),
+                    target: crate::mir::CallTarget::from_name(raw_fn),
                     args: vec![reg],
                 });
                 dest
