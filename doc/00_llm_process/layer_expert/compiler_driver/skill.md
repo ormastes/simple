@@ -80,3 +80,47 @@ green, but Stage 3/4 remain unadmitted, so do not advertise SPipe, deployment,
 or release admission. Current owner and resume condition:
 `doc/08_tracking/bug/stage3_post_file_copy_exit139_2026-08-14.md` and the
 canonical deployment plan.
+
+## Supervised / crash-safe build (80.driver, 2026-08-17)
+
+New layer contract in `src/compiler/80.driver/driver_build/`. A native build must
+reach the END of the source list even when a unit DIES, classifying each unit as
+`OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN`.
+
+**Landed public surface** — `src/compiler/80.driver/driver_build/build_outcome.spl`
+(`e89f0c6f94a`, 307 lines, unit-verified): `enum BuildOutcomeKind` (six disjoint
+variants), `BuildUnitOutcome`, `class BuildOutcomeSet` (`count_of` / `paths_in` /
+`all_ok` / `verdict` / `summary`), `build_outcome_classify_status(status,
+timed_out)` decoding the `128+N` signal convention, plus
+`build_outcome_is_unverified` / `build_outcome_is_failure` /
+`build_outcome_signal_of_status` / `build_outcome_kind_label` /
+`build_outcome_kind_order` / `build_outcome_sort_text` /
+`build_outcome_text_list`. Spec:
+`test/01_unit/compiler/driver/build_outcome_classification_spec.spl`.
+
+**`failure_count()` deliberately EXCLUDES `TERMINATED` and `TIMEOUT`.** Do not
+"fix" this. `earlyoom` on this host runs `--prefer ^(simple|...)` and actively
+SIGTERMs `simple`; the host is at ~103/125 GB with zero swap. rc 143 and a
+timeout are statements about the host, never verdicts about the unit — treat both
+as UNVERIFIED.
+
+**Extension points, in flight and separately owned** (re-grep before assuming any
+of it landed — as of this writing both files contain zero `BuildOutcome`
+references): outcome accumulation in `driver_aot_native_output.spl`, and
+separate-process "unstable mode" in `driver_build/parallel.spl`. `ParallelBuilder`
+already fans out uncached modules via `ParallelBuildConfig` (`num_threads` /
+`parallel_threshold` / `deterministic` / `verbose`); what the layer lacks is
+process isolation and outcome classification — today a worker's death is the
+parent's death.
+
+Layer rules this introduces:
+- Read a child's wait status **directly**; never through a pipe (`cmd | tail`
+  yields `tail`'s status — a documented false-green source here).
+- Fail closed at the build boundary, not at the first dead unit.
+- One supervisor, two front ends: bootstrap and ad-hoc share it. Unstable mode is
+  the DEFAULT on the bootstrap path only, and an explicit flag on both.
+- The session daemon is out of scope and stays for interactive use.
+
+Requirements: `doc/02_requirements/compiler/supervised_builder.md`.
+Feature expert: `../../feature_expert/supervised_build/skill.md`.
+Lane state: `.spipe/supervised-crash-safe-build/state.md`.
