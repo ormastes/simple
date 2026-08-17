@@ -159,19 +159,8 @@ Root-caused with file:line, not fixed. The blocked example in
 `sj_daemon_mutual_exclusion_spec.spl` therefore **remains RED**, correctly, and
 was not touched or softened.
 
-## Re-verification 2026-08-17 — DOES NOT REPRODUCE
 
-Ran the doc's probe-P6 shape (`class Counter`/`Inner`/`Outer`; `val mid =
-o.inner; mid.c.bump()`, then a chained `o.inner.c.bump()`, then read
-`o.inner.c.n`) on the deployed seed under `SIMPLE_EXECUTION_MODE=interpreter`.
-Bind-then-mutate is visible through the root: intermediate read after the bound
-mutation is `1`, final is `2`. `back_through_root` is now 1, not the 0 this doc
-records; the interpreter agrees with the JIT.
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
 
-Most likely already closed by `merge_shared_collection_fields`
-(`interpreter_call/core/function_exec.rs:975`), which carries Array/Dict/
-ByteArray fields back across a by-value receiver and recurses through nested
-structs — landed after this doc was filed.
-
-Caveat on this verdict: verified only for the bind-then-mutate shape this doc
-names. Not swept across every container/receiver combination.
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. REPRODUCER RUN GREEN. Fixed by the `ClassInstance(Arc<ClassInstance>)` shared-identity value variant added in `a155bff913f4` (2026-08-15), which gives source `class` values reference semantics distinct from the copy-on-write `Object` carrier used for `struct` values (`src/compiler_rust/compiler/src/value.rs:1234-1240`). That commit PREDATES the currently deployed seed, so it is testable with the deployed binary today. Fixture: bind a class-typed field to a local, mutate through the local, read back through the field --\n\n```\nclass Inner:\n    n: i64\nclass Outer:\n    inner: Inner\nfn main():\n    val o = Outer(inner: Inner(n: 0))\n    val bound = o.inner\n    bound.n = 42\n    print("field=" + o.inner.n.to_string())\n    print("local=" + bound.n.to_string())\n```\n\n`bin/simple run` -> rc 0, `field=42` / `local=42`. The local ALIASES the field as a class value must; the reported snapshot behaviour is gone.

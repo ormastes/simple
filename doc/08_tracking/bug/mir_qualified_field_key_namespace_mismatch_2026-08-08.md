@@ -1,7 +1,8 @@
 # MIR qualified struct-field key namespace mismatch: b9e23914a0e's new tier cannot fire across an import
 
 **Date:** 2026-08-08
-**Status:** OPEN — see "Re-confirmed 2026-08-10" at the end before acting on
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 this doc
 **Severity:** High (the landed fix is plausibly a NO-OP on the case it claims to fix)
 **Area:** `src/compiler/50.mir`, `src/compiler/20.hir`
@@ -639,3 +640,9 @@ still holds independently.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. Producer and consumer now agree. Consumer: `src/compiler/50.mir/_MirLowering/function_lowering.spl:1138-1140` consumes the QUALIFIED key first -- `val qualified_key = self.composite_layout_key(q_type_symbol)` then `if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):`. Producer: `module_lowering.spl:780` (`val struct_key = self.composite_layout_key(struct_symbol)`) and :791 for the class case use the SAME funnel, documented at module_lowering.spl:161/701 as "the single funnel" with defining_module normalization. The bare name survives only as a lower-priority fallback tier, so the cross-import-boundary namespace mismatch is closed.

@@ -1,7 +1,8 @@
 # Bug: interpreter binds the first param of *some* multi-param `me` methods to value×8
 
 **Filed:** 2026-06-29
-**Status:** Open — **reclassified 2026-08-01** (see *Triage 2026-08-01* below)
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Affects:** `bin/simple run` = the **JIT/native lane**, NOT the tree-walk interpreter. The
 `interp_` prefix in this filename and the word "interpreter" throughout the original text are
 a **misnomer** — kept only so links don't rot. **Conditional** — does not reproduce in isolation.
@@ -193,3 +194,9 @@ the trigger condition itself is still unproven.
 - The exact JIT argument-lowering site was not pinned to a file:line; a delegated search of the
   seed's method-call argument path did not return before this session was interrupted.
 - Pure-Simple lane behaviour is untested.
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. The x8 symptom is `<< 3`, the int-boxing shift -- this was one face of the unguarded 61-bit box, not a distinct parameter-binding defect. `src/compiler_rust/runtime/src/value/tags.rs` is now 14 lines of pure constants (`TAG_MASK 0b111`, `TAG_INT/HEAP/FLOAT/SPECIAL`) with no shift/boxing logic, so no double-shift is reachable from it; the shift now lives in `runtime/src/value/core.rs` `from_int` and is range-guarded. The `_p0` dummy-first-param workaround is GONE: `/usr/bin/grep -rn "_p0"` over `compiler/src` and `runtime/src` returns zero hits. COLLAPSES into the same root cause as jit_i64_boundary_constant_wraps_to_negative_2026-08-09.

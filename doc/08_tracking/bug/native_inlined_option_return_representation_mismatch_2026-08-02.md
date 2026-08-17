@@ -164,3 +164,9 @@ false-green risk in the same structural sense the audit describes, not a
 verified false-green of this exact defect. (Attempting to actually run it
 to observe pass/fail timed out in this session and was not completed —
 UNVERIFIED.)
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. Fix present and gated. `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1543` normalizes inlined returns under `case HirTypeKind.Optional(_)` via `result = self.ensure_option_handle(result, found_return)`, and the Eq path (:2286-2306) boxes the unwrapped side through the same `ensure_option_handle` before `rt_native_eq`. The gate this doc names exists and is real: `scripts/check/check-native-option-eq-representation.shs` native-builds two fixtures with `--entry-closure` and asserts stdout equals `hit=match miss=no-match none=match` for both.

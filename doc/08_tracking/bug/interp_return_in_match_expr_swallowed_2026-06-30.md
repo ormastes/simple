@@ -1,5 +1,8 @@
 # Bug: `return` inside a match/if EXPRESSION is swallowed (becomes the expr value)
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-06-30
 **Severity:** High — a whole CLASS of `Result`-handling failures. Any
 `val x = match r: case Ok(v): v; case Err(e): return Err(e)` leaves `x` bound to
@@ -61,3 +64,9 @@ Applied to `encoding/base58.spl` and `hpack/decoder.spl` (§6.1 + _decode_string
 The same pattern appears ~238 times across `compress/*` and elsewhere — most work
 (only the Err-arm-taken paths crash), so a blanket rewrite is unwarranted; the
 seed fix is the real solution.
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. The triage grep for `ControlFlow::Return` / `Flow::Return` returned zero hits because the enum is actually named `Control::Return(Value)` (`src/compiler_rust/compiler/src/interpreter/core_types.rs:117`). Propagation IS implemented, and not in the `expr/ops.rs` this doc names but in `src/compiler_rust/compiler/src/interpreter/expr/control.rs` -- If at :117, Match arms at :218/:242/:258 and :304, each doing `Control::Return(v) => return Err(CompileError::TryError(Box::new(v)))`, under a comment that names this bug doc by filename: "A `return` inside an if/match EXPRESSION arm must propagate out of the function".

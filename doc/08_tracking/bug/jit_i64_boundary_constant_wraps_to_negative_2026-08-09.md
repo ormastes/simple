@@ -1,5 +1,8 @@
 # Bug: JIT wraps large i64 boundary constants (p60/p62/i64::MAX) to negative/zero
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Found**: 2026-08-09, via `scripts/check/check-engine-differential.shs`
 (newly wired into pre-push this session, `DIFF_LANES=interpret,jit` fast
 config) as a NEW unbaselined divergence: `i64_boundary_values`.
@@ -66,3 +69,9 @@ Until fixed, `check-engine-differential.shs` is wired in RED on purpose in
 `scripts/check/pre-push-conflict-tree-guard.shs` (same convention as
 `lint_binary_staleness_guard`/`native_object_cache_granularity_guard`) so
 this stays visible rather than being silently baselined away.
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. Fix present in current source. `src/compiler_rust/compiler/src/codegen/cranelift_emitter.rs:730-739` `emit_box_int` no longer emits an inline `val << 3` (which overflows 64 bits for any value >= 2^61); it calls `rt_value_int`, under a comment naming "int61 truncation (DEFECT A, 2026-08-09)". The runtime half is implemented at `src/compiler_rust/runtime/src/value/core.rs:272`: `if Self::fits_inline_int(i) { Self((i as u64) << 3) } else { <heap box> }` -- bit-identical for what fits inline, heap-boxed for what does not. ROOT CAUSE COLLAPSE: this single unguarded 61-bit box is also the root of interp_me_method_first_param_times8_conditional_2026-06-29 (its "x8" IS this shift).

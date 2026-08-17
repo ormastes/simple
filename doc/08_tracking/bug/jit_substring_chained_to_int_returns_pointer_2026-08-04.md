@@ -1,6 +1,7 @@
 # JIT: `text.substring(n).to_int()` chained returns the raw text pointer, silently
 
-**Status:** OPEN
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 
 ## Symptom
@@ -166,3 +167,9 @@ covers the trim/substring chained-to-numeric shape via `bin/simple test`
 passes today (`Results: 3 total, 3 passed, 0 failed`) regardless of whether
 this defect is open, and is not a gate for it — the runnable probes above,
 via `bin/simple run`, are the real gate.
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. Fix present in current source. `src/compiler_rust/compiler/src/codegen/instr/methods.rs:150` now has the missing STRING branch: `if from_ty == TypeId::STRING && (to_is_int || F32/F64) { let helper = if to_is_int { "rt_string_to_int" } ... }`, with a comment naming this bug doc and the old behaviour ("simply handed back the string HEAP POINTER as a successful integer"). Root cause was NOT unknown receiver type -- the type was known; there are two duplicate method dispatchers and only the sibling in `closures_structs.rs::try_compile_builtin_method_call` had the STRING branch, so this one fell through to a bit-cast.

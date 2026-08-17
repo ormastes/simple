@@ -5,7 +5,8 @@
   lowering error (which includes the common `Option<Trait>.unwrap().method()`
   shape) crashed the compiler process itself (SIGSEGV) instead of printing a
   diagnostic, on the deployed self-hosted stage3 binary.
-- **Status:** the original crash (`CodegenError` construction calling
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   unresolved `Array.first()`) is source-fixed in three call sites
   (`driver_aot_pipeline.spl`, `driver_pipeline_execution.spl`,
   `driver_orchestration.spl`) and confirmed still working end-to-end via a
@@ -629,3 +630,9 @@ MIR lowering behaves exactly as designed (fails closed, returns a fatal
 error), and reproduces identically with no Option and no trait involved at
 all. The real defect was three lines later, in how the compiler driver
 itself reports that MIR lowering failed.
+
+
+## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+
+Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
+CORE-P1 sweep. Source-level fix present. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3007-3010` now routes `.first()`/`.last()` to real lowering (`if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false):`), and the helper at :3977 returns `LocalId?` wrapping success in `Some(...)` -- the missing `Some` wrap this doc describes is gone. Note the line numbers in this doc are stale: 3124-3133 is now the `rt_contains` polymorphic-accessor arm, not a CodegenError site, and NO `call 0` construct exists anywhere in the file. The remaining unresolved-method path at :3145 is `self.error("unresolved method call: {method}", nil)` -- a loud fail-closed rt_panic, deliberately not a silent const-0.
