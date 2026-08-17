@@ -8,28 +8,38 @@ describe "_CliMain main_and_help depth guard":
         expect(source).to_contain("env_set(\"SIMPLE_TEST_DEPTH\", \"1\")")
         expect(source.contains("env_set(\"SIMPLE_TEST_DEPTH\", (_depth + 1).to_text())")).to_equal(false)
         expect(source.contains("_depth_str.to_int()\n")).to_equal(false)
-        expect(source.contains("env_set(\"SIMPLE_TEST_DEPTH\", \"{_depth + 1}\")")).to_equal(false)
+        expect(source.contains("env_set(\"SIMPLE_TEST_DEPTH\", \"\{_depth + 1\}\")")).to_equal(false)
 
     it "routes tests through the pure-Simple runner":
         val source = rt_file_read_text("src/app/cli/_CliMain/main_and_help.spl") ?? ""
 
-        expect(source).to_contain("use app.test_runner_new.test_runner_main.{run_test_cli}")
+        # `use` or `use lazy` both satisfy the routing contract; the module path
+        # and the imported symbol are what matter.
+        expect(source).to_contain("app.test_runner_new.test_runner_main.\{run_test_cli\}")
         expect(source).to_contain("return run_test_cli()")
         expect(source.contains("main as pure_test_runner_main")).to_equal(false)
         expect(source.contains("cli_run_tests_process_args")).to_equal(false)
 
-    it "reads executable identity through the compatible scalar argv ABI":
+    it "reads executable identity in-process, never via the unregistered scalar argv externs":
         val source = rt_file_read_text("src/app/io/cli_ops.spl") ?? ""
 
-        expect(source).to_contain("if rt_cli_arg_count() > 0:")
-        expect(source).to_contain("val argv0 = rt_cli_arg_at(0)")
+        # Contract per cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md:
+        # prefer the kernel's record of the real executable, canonicalized
+        # IN-PROCESS via rt_path_absolute (never a `readlink -f` shell-out,
+        # which describes the helper and caused unbounded self-delegation),
+        # then fall back to sys_get_args(). rt_cli_arg_count/rt_cli_arg_at are
+        # unregistered on the deployed seed (#159) and must not be declared.
+        expect(source).to_contain("val self_path = _cli_resolve_symlink(\"/proc/self/exe\")")
+        expect(source).to_contain("rt_path_absolute(path) ?? \"\"")
+        expect(source).to_contain("val all_args = sys_get_args()")
         expect(source.contains("rt_cli_current_exe_path")).to_equal(false)
-        expect(source.contains("rt_path_absolute")).to_equal(false)
+        expect(source.contains("extern fn rt_cli_arg_count")).to_equal(false)
+        expect(source.contains("extern fn rt_cli_arg_at")).to_equal(false)
 
     it "stages code through the compatible file writer":
         val source = rt_file_read_text("src/app/io/_CliCommands/run_commands.spl") ?? ""
 
-        expect(source).to_contain("use app.io.file_ops.{file_write}")
+        expect(source).to_contain("use app.io.file_ops.\{file_write\}")
         expect(source).to_contain("val main_source = \"fn main():\\n    \"")
         expect(source).to_contain("if not file_write(tmp_path, main_source):")
         expect(source.contains("extern fn rt_file_write_text")).to_equal(false)
