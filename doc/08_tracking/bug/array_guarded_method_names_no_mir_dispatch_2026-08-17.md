@@ -4,8 +4,10 @@
 - **Status:** OPEN
 - **Severity:** P1 — but LOUD (aborts), not a silent wrong result
 - **Class:** name-keyed method dispatch with no receiver type
-- **Sibling (FIXED):** `Dict.clear()` — same class, repaired by routing to
-  `rt_dict_clear`
+- **Sibling (FIXED, LANDED on `origin/main`):** `Dict.clear()` — same class,
+  repaired by routing to `rt_dict_clear`. Content-verified on origin
+  (`rt_dict_clear` present, `receiver_is_dict and method == "clear"` arm
+  present), not asserted from SHA ancestry.
 
 ## Summary
 
