@@ -4,7 +4,69 @@
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong-answer bug. No diagnostic, correct length, wrong
 contents. Found because it made X25519 compute the wrong shared secret.
-**Status:** OPEN
+**Status:** ROOT-CAUSED and FIXED 2026-08-17 in `rt_array_copy`
+(`src/compiler_rust/runtime/src/value/collections.rs`), commit `a4cc6f61dfb`.
+
+## Root cause — it was never "zeroing", it was a divide by eight
+
+The title understates it. Elements were not zeroed; they were **divided by 8**.
+`5 >> 3 == 0`, which is why small fixtures looked like zeroing and the real
+mechanism stayed hidden. The discriminating measurement:
+
+```
+u64-small orig 5                    copy 0                   want 5
+u64-big   orig 1234567890123456789  copy 154320986265432098  want 1234567890123456789
+```
+
+`1234567890123456789 / 8 == 154320986265432098` exactly. That is an untagging
+`>> 3`, not an uninitialised buffer.
+
+Mechanism: `[u64]` arrays use a **packed** heap layout (`gc_flags::U64_PACKED`)
+whose `data` slots hold RAW 64-bit words rather than tagged `RuntimeValue`s.
+`rt_array_copy` walked the source with the generic `as_slice()` +
+`rt_array_push` loop, which is wrong twice over — it reinterprets each raw word
+as a tagged value, and it produces an **unpacked** result whose reader then
+untags whatever it finds. Length was copied correctly, which is exactly why a
+`.length()` check could never have caught it.
+
+`val b = a` on any array-typed binding lowers to `rt_array_copy`
+(`compiler/src/mir/lower/lowering_stmt.rs:209-230`), so this reached ordinary
+user code. That lowering already excluded `TypeId::U8` with a comment saying
+byte-packed arrays are "a separate heap layout that rt_array_copy's
+rt_array_push-based copy loop does not understand" — the identical hazard, one
+element type away, documented and worked around rather than fixed.
+
+## Scope — measured, not assumed
+
+| element type | pre-fix result |
+|---|---|
+| `[u64]` | **BROKEN** — every element divided by 8 |
+| `[i64]`, `[f64]`, `[u8]`, `[u32]`, `[u16]`, `[text]`, `[bool]` | correct |
+
+| engine | pre-fix result |
+|---|---|
+| cranelift JIT (`bin/simple run`) | **BROKEN** |
+| tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`, and `bin/simple test`) | correct |
+
+This is the same engine-divergence shape as the f32 struct-field defect fixed
+the same night (`ac438753ebb`): a width/representation disagreement between the
+store side and the load side, wrong only under the JIT.
+
+## Fix
+
+`rt_array_copy` now reproduces the source layout instead of flattening it: a
+packed-u64 source allocates a packed-u64 result and `memcpy`s the raw words; a
+byte-packed source does the same with bytes. The byte-packed arm also closes the
+`[u8]` gap the codegen guard documents, so that exclusion is now unnecessary —
+it is deliberately left in place to keep the change's blast radius bounded, and
+removing it is a separate, testable follow-up.
+
+## Unrelated defect noticed while sweeping the matrix
+
+`[i8]` reads back wrong **before** any copy: `[5i8, 6i8]` gives `orig 43` for
+element 0 under the JIT. The copy is faithful (43 -> 43), so this is NOT the
+same defect and is not addressed here. Filed separately as
+`doc/08_tracking/bug/i8_array_literal_reads_back_wrong_value_2026-08-17.md`.
 
 ## Summary
 
