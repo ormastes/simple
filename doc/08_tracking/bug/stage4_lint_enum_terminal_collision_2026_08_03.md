@@ -1,9 +1,9 @@
 # Stage 4 lint enum terminal collision
 
-Status: claimed
+Status: fix implemented — focused native and full Stage 4 replay pending
 Severity: P1 bootstrap blocker
-Owner: pure-Simple HIR materialized payload dependency resolution
-Fix owner: `/root` at source revision `4505aec902a`
+Owner: pure-Simple lint contract ownership
+Fix owner: `/root/priority_lint_enum` at source revision `1a2fd808fc`
 
 ## Exact failure
 
@@ -46,3 +46,23 @@ must decide before source edits.
 5. Keep the conflict diagnostic fail-closed; no import reshuffling, local type
    renaming, Rust-seed fallback, stub generation, or source exclusion may be
    accepted as the root fix.
+
+## Implemented repair (2026-08-17)
+
+The declarations are semantically identical: both enums have the same variant
+sets and the lint model already imports `LintLevel` from
+`std.tooling.easy_fix.types`. The same import also named `LintCategory`, but a
+stale local `LintCategory` declaration shadowed it. The smallest canonical fix
+deletes that one duplicate declaration, leaving the public lint facade to
+re-export both physical enum terminals from the shared easy-fix contract.
+
+`test/03_system/native/lint_enum_terminal_canonical_owner.spl` is the exact
+compiled entry-closure regression: it imports both enums through both public
+routes under their original spellings. The adjacent fail-closed guard is the
+same-spelled/different-terminal branch in
+`test/03_system/native/hir_materialized_enum_payload_dependencies.spl`.
+
+The one permitted focused replay was attempted before editing, but the deployed
+wrapper rejected its missing release target during the bounded identity probe,
+before compiler startup. Consequently this record remains verification-pending;
+neither focused native success nor a resumed canonical Stage 4 build is claimed.
