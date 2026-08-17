@@ -386,10 +386,42 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
         args.push("--gc=off")
     args
 
+# A deliberately-crashing fixture writes this file immediately BEFORE crashing
+# itself, so its presence is what separates CRASHED from TERMINATED. The runner
+# consumes (deletes) it so a stale sentinel cannot mis-label a later run.
+fn take_crash_sentinel(file_path: text) -> bool:
+    val sentinel = file_path + ".crashed"
+    if not file_exists(sentinel):
+        return false
+    file_delete(sentinel)
+    true
+
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
-    # Check for timeout
+    # Outcome classification -- contract frozen in .spipe/unstable_test_mode/state.md.
+    #
+    # The runtime collapses timeout AND death-by-signal onto ONE -1 sentinel:
+    # finish_child_output_bounded (runtime/src/value/sffi/env_process.rs:508)
+    # maps `status.code() == None` to -1, and its timeout branch (:535) returns
+    # a hard-coded -1 after appending a "\nTIMEOUT\n" marker to stderr. No
+    # signal number reaches this layer at all, so a directly-SIGTERMed child
+    # NEVER shows up as a plain rc 143 -- only as the -1 sentinel. A plain
+    # 143/144 can still arrive when an intermediate shell propagates it (the
+    # guard wrapper at env_process.rs:806 exits 143 on TERM), so both forms are
+    # classified as TERMINATED here.
+    #
+    # TIMEOUT and TERMINATED are UNVERIFIED, never failures: earlyoom is
+    # actively SIGTERMing `simple` on this host (fires at 10% memory, zero
+    # swap), so a signal death says nothing about the code under test. They
+    # carry failed: 0 so they cannot inflate the failed count -- but the
+    # non-empty error keeps is_ok() false, so they cannot be swallowed into a
+    # green run either. CRASHED and ERROR remain real failures.
     if exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT after {timeout_secs}s", timed_out: true, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT: no result after {timeout_secs}s (unverified)", timed_out: true, cached: false)
+
+    if exit_code == -1 or exit_code == 143 or exit_code == 144:
+        if take_crash_sentinel(file_path):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after writing its crash sentinel", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child died by signal with no crash sentinel (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
 
     # Stdout summaries are presentation, not authenticated execution evidence.
     # Every mode that still reaches this legacy mapper must fail closed under
@@ -400,6 +432,20 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: structured BDD evidence is unavailable for this execution mode", timed_out: false, cached: false)
 
     val combined = stdout + "\n" + stderr
+
+    # Bounded capture truncation makes every scraped count a LOWER BOUND.
+    # `rt_fork_parent_wait_bounded` (src/runtime/runtime_fork.c) keeps the head
+    # and the tail of an over-long child stream and splices
+    # `[output truncated: N bytes omitted]` where the MIDDLE was dropped, so any
+    # per-example line that lived in that middle is simply gone. Reporting the
+    # surviving numbers as the file's result silently under-reports the example
+    # count while still calling the file green -- the exact failure recorded in
+    # doc/08_tracking/bug/stage4_test_runner_pipe_capture_truncation_rt_fork_2026-07-20.md.
+    # Fail closed instead. Keyed on the literal marker prefix (which always ends
+    # in a colon) so prose merely mentioning truncation cannot red a file.
+    if combined.contains("[output truncated:"):
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "child output was truncated by the bounded capture; example counts are unverifiable (see runtime_fork.c FORK_CAPTURE_LIMIT)", timed_out: false, cached: false)
+
     val (passed, failed, skipped, pending) = parse_test_output(combined)
 
     if passed == 0 and failed == 0:
@@ -460,7 +506,9 @@ fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
 fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
     if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
-    if exit_code == -1:
+    # -1 (timeout or signal death) and a shell-propagated 143/144 all need the
+    # six-class classification above, not the generic non-zero-exit path below.
+    if exit_code == -1 or exit_code == 143 or exit_code == 144:
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
     val combined = stdout + "\n" + stderr
     val (_, _, skipped, pending) = parse_test_output(combined)
