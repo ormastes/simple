@@ -63,3 +63,58 @@ empty, because it greps `-i error` from the build log while the real line
 failure whose error text is truncated or buffered away is the same class of
 problem as the empty stage2 log, and any fix should cover both paths. See
 `doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
+
+## 2026-08-17 correction — the claimed mitigation was NEVER landed
+
+The "Fix (additive...)" section above describes a diagnostic block in
+`bootstrap-from-scratch.sh`. **It does not exist and never did.** None of the
+strings it describes are in the file, and
+`git log -S 'precondition refusal' --all -- scripts/bootstrap/bootstrap-from-scratch.sh`
+returns nothing — so this was not a shared-tree clobber, it was never committed.
+The doc's `Status: MITIGATED` was wrong for the whole time it stood.
+
+Landed now, as a standalone testable guard rather than inline script text:
+
+- `scripts/check/check-stage-log-diagnosable.shs` — classifies a stage failure
+  into log-never-created (wrapper precondition refusal, pre-exec) /
+  log-exists-0-bytes (compiler died unflushed) / content-with-no-diagnostic-line
+  (the `[bootstrap-error-count] count=21` shape) / exit-125 (wrapper post-run
+  verification, NOT a compile failure) / diagnosable-with-text. Verdict is the
+  last stdout line, `PASS`/`FAIL` exit 1/`ERROR` exit 2; a run that checked zero
+  things is ERROR, never a vacuous pass. Wired into stage2's failure path in
+  `bootstrap-from-scratch.sh`, which additionally prints an explicit
+  "stage2 failed with NO diagnostic text ... this is itself a defect" line.
+- `--selftest` is fatal, 10 fixtures, including the two that must PASS and the
+  below-the-truncation-banner case the AOT smoke gate misses:
+  `PASS — 10 selftest fixture(s), 0 failed`.
+
+The selftest earned its keep on first run: the counts-without-text fixture
+caught a real bug in the guard where `grep -c ... || echo 0` produced the
+two-line value `"0\n0"`, so the numeric test errored instead of comparing and
+an UNDIAGNOSABLE log was classified as diagnosable — a fail-open guard.
+
+## The deeper half: counts without text (fixed)
+
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl` emitted
+`[bootstrap-error-count]` unconditionally while the diagnostic TEXT was gated
+behind `SIMPLE_BOOTSTRAP_DEBUG=1` and additionally capped at `source_idx < 20`.
+The end-of-phase `[collect-all]` report does print the text — but only if the
+process survives to reach it, which a stage dying at exit 139 does not. That is
+why six stage-3 failures produced counts and no message.
+
+Fatal diagnostics now print at the moment they are recorded. Demonstrated on a
+real failing build (`rc=1`, read into a variable, not through a pipe):
+
+```
+[bootstrap-error-count] source_idx=0 point=post-lowering count=0
+[hir-fatal] source_idx=0 path=.../user.spl error_idx=0 text=HIR lowering error in .../user.spl: unresolved type: WireWriteV1
+[hir-fatal-count] source_idx=0 path=.../user.spl count=1 shown=1
+[bootstrap-error-count] source_idx=0 point=post-diagnostics count=1
+[hir-poisoned] source_idx=0 path=.../user.spl module=... errors=0->1
+```
+
+and the guard reads that log as `PASS — 1 check(s), stage demo failed (exit 1)
+and said why`, versus `FAIL — ... with NO diagnostic text` on a 0-byte log.
+
+Still open: `native-build` output buffering itself. The guard names the case and
+refuses to be silent about it, but does not make a mid-build death flush.
