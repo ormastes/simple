@@ -1,6 +1,7 @@
 # Command-stream boundary (`vulkan.submit.command_stream@1`, lane R4/B3): no Intel GPU on capture host, and no candidate encoder anywhere
 
 **Date:** 2026-08-11
+**Status:** SOURCE FIXED (2026-08-17); LIVE INTEL ANV EVIDENCE PENDING
 **Lane:** R4 / SoC lane B3 (Intel Gen12 / Xe-LP, counterpart Mesa `anv`)
 **Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
 **Plan:** doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md
@@ -127,3 +128,37 @@ that could be worked without any silicon: there is still no command-stream
 encoder under `src/os/drivers/gpu/board_vulkan/`, so even with Intel hardware the
 candidate side stays `ProviderStatus.unavailable`. Status: OPEN, correctly
 hardware-gated on the counterpart side, encoder-gated on the candidate side.
+
+---
+
+## 2026-08-17 — source half complete; live counterpart remains hardware-gated
+
+The hardware-independent statement above is now stale. Current source contains
+the canonical pure-Simple Gen12/Xe-LP encoder and boundary adapter:
+
+- `encoder_intel_gen12.spl` owns checked MI/GFXPIPE header construction,
+  Intel's `total_dwords - 2` length convention, and little-endian byte layout;
+- `cmdstream_adapter_gen12.spl` decodes only confirmed fields, carries unknown
+  GFXPIPE identities opaquely, and refuses unknown MI opcodes, truncated
+  packets, or unconfirmed named mappings;
+- `boundary_cmdstream_canonicalize.spl` remains the byte-exact canonical
+  packet/order comparator and never treats its synthetic fixture as capture.
+
+The source landed in `ab609ab9e5` and was hardened in `5942069084`. The five
+owned source/unit specifications were also migrated from the unsupported
+`describe("...")`/`it("...")` form to canonical SSpec syntax so the deployed
+pure-Simple runner executes the evidence rather than failing in parsing:
+
+```text
+intel_gen12_encoder_header_spec.spl:      10 passed
+intel_gen12_encoder_bytes_spec.spl:        4 passed
+intel_gen12_encoder_hardening_spec.spl:   12 passed
+cmdstream_encoder_roundtrip_spec.spl:      8 passed
+cmdstream_boundary_intel_gen12_spec.spl:   7 passed
+```
+
+This closes only the host-fixable candidate/source half. `submit_implemented`
+and hardware-verification flags remain false. A real Mesa `anv` batch captured
+from Intel Gen12/Xe hardware and compared against the candidate is still
+required; NVIDIA, a hand-authored stream, or the synthetic schema fixture is
+not acceptable substitute evidence.
