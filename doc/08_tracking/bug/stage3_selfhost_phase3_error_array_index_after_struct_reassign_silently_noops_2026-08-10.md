@@ -1,7 +1,40 @@
 # Stage-3 self-host — indexing `self.ctx.errors` right after `self.ctx = <returned struct>` silently produces no output
 
 - **ID:** stage3_selfhost_phase3_error_array_index_after_struct_reassign_silently_noops_2026-08-10
-- **Status:** ROOT-CAUSED (narrowly), NOT FIXED. Found as a side effect of chasing
+- **Status:** ROOT-CAUSED (narrowly), NOT FIXED — **still OPEN after a 2026-08-17
+  re-probe; see the note directly below before spending time on it.**
+
+### 2026-08-17 re-probe: the reassign-then-index SHAPE does not reproduce on either seed engine
+
+A probe replicating the exact shape — `struct Ctx: errors: [text]`, a `me` method
+returning `(Ctx, bool)`, `self.ctx = analyzed_ctx`, then `self.ctx.errors.len()`
+followed by a `while` loop indexing `self.ctx.errors[idx]` — prints all five
+elements correctly under **both** `SIMPLE_EXECUTION_MODE=jit` and
+`=interpreter`.
+
+Binary that produced this, stated because it is **not** current source:
+`bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes,
+mtime 2026-08-16 22:59:37 — the stale Rust seed.
+
+**This is NOT evidence that the row is fixed, and the row is deliberately left
+OPEN.** The reported defect is in the *pure-Simple native codegen* as executed by
+a Stage-2-compiled binary. Neither the seed's Cranelift JIT nor its tree-walk
+interpreter is that code path, so a green from either is a negative control on
+the wrong engine, not a retirement. Verifying it needs a Stage-2-built binary,
+which this shared checkout (~15 concurrent lanes) must not produce.
+
+**One confound was found and must be excluded before re-investigating.** Under
+the JIT — and, per `core_codegen.spl:1603`, under the LLVM backend in current
+source — `eprint` lowers to the **no-newline** `@rt_eprint`, so a diagnostic loop
+of exactly this row's shape emits one unbroken line and reads as "the loop body
+never ran". Filed separately as
+`doc/08_tracking/bug/eprint_loses_newline_on_jit_and_llvm_backend_2026-08-17.md`.
+It is **not sufficient** to explain this row (this row also reports a
+`file_write()` in the same position producing no file, which no newline defect
+can cause), but any future instrumentation of this row must not use `eprint` line
+counts on a native binary as its signal.
+
+Original filing follows. Found as a side effect of chasing
   Stage-3 self-host's phase-3 HIR failure (see
   `stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md` for
   the overall campaign chain). Distinct from, and downstream of, the bare-`Result`
@@ -154,3 +187,142 @@ the same symptom, which would rule `me`/`self` context in or out definitively.
 `fn f(x: text): eprint("{x}")` called from `main()`, native-built and run
 standalone (no bootstrap self-host involved), to determine if this is
 bootstrap-context-specific or a general native-codegen defect.
+
+---
+
+## RE-VERIFICATION 2026-08-17 (c_splmisc lane) — CONTROL LANE IS CLEAN; NATIVE LANE NOT REACHED
+
+Classified by CONTENT, not by SHA. No source change made.
+
+### The doc's own "suggested minimal repro" was built and run
+
+Fixture (`r4.spl`) exercises the exact narrowed shape this row describes —
+assign a returned struct into `self.ctx`, then immediately index/length the
+array field on it:
+
+```
+struct Ctx:
+    errors: [text]
+
+class Drv:
+    ctx: Ctx
+
+impl Drv:
+    me phase(c: Ctx) -> Ctx:
+        Ctx(errors: c.errors.push("boom"))
+
+    me drive():
+        self.ctx = self.phase(self.ctx)
+        eprint("count=")
+        eprint(self.ctx.errors.len())
+        if self.ctx.errors.len() > 0:
+            eprint(self.ctx.errors[0])
+```
+
+**Interpreter / JIT control — CORRECT, no silent no-op:**
+
+```
+$ nice -n 19 bin/simple run .../r4.spl --timeout 300
+rc=0
+count=1boom
+```
+
+(`rc` assigned on the line *after* the command, never through a pipe.)
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+59536728 B, mtime 2026-08-16 22:59 — the **Rust seed**. Both the `.len()` and
+the `[0]` read see the reassigned struct. So the defect is **not** in the
+seed's interpreter/JIT lane, consistent with the doc filing it as native-only.
+
+Incidental finding while writing the fixture, worth a line: `go` is a reserved
+word. `me go():` fails with `Unexpected token: expected identifier, found Go`,
+diagnosed at parse time — loud, not silent, so not this defect class.
+
+### COULD NOT PROVE — native lane
+
+`bin/simple native-build r4.spl -o r4.bin` was started (nice -n 19, 600s cap)
+and had not produced a binary when this lane stopped; it was still emitting
+frontend warnings. A sibling lane independently recorded, on this same worktree
+today, that the native lane is broken here in three different ways
+(`bootstrap/stage3/simple native-build` SIGSEGVs even on `fn main(): print("hi")`;
+seed `native-build` fails at LINK with `ld.lld: error: cannot ope[n]`) — see the
+2026-08-17 section of
+`doc/08_tracking/bug/stage4_aot_native_build_struct_field_access_sigill_2026-07-24.md`.
+So **no native evidence was obtained in either direction**, and a link-time
+failure could not have exposed a lowering defect anyway.
+
+### Probable collapse — flagged, deliberately not duplicated
+
+This row's shape — *a struct returned BY VALUE has its fields misread* — is very
+likely the same root cause as the known `hir/lower/expr/access.rs:288`
+`.unwrap_or(0)` defect, where a missing field index is guessed as `0` so every
+field of a by-value returned struct reads as field 0. That would explain the
+"silently no-ops" symptom exactly: `errors` resolves to field 0 of a struct
+whose field 0 is not `errors`. `access.rs` is another lane's exclusive path in
+this session and was **not** edited or measured here. Whoever fixes that row
+should re-run the fixture above natively before filing separate work for this
+one.
+
+Still not done (unchanged from the doc's own list): no IR/MIR correlated to the
+repro; not determined whether a plain top-level `fn` (rather than a `me` method)
+reproduces it, which would rule `me`/`self` context in or out.
+
+---
+
+## 2026-08-17 (W2 driver lane) — FAMILY COLLAPSED, DRIVER-SIDE MITIGATION LANDED; CODEGEN ROOT STILL OPEN
+
+**Not reproduced on any engine reachable from this checkout.** The exact shape
+(`h.ctx = <returned struct>` then `h.ctx.errors.len()` / `h.ctx.errors[i]` /
+typed-alias index) was probed three ways with the Rust seed at
+`bin/release/x86_64-unknown-linux-gnu/simple`:
+
+| engine | invocation | result |
+|---|---|---|
+| tree-walk interpreter | `SIMPLE_EXECUTION_MODE=interpreter bin/simple run probe.spl` | `count=3` + all 3 items + `direct0=alpha` — correct |
+| Cranelift JIT | `SIMPLE_EXECUTION_MODE=jit bin/simple run probe.spl` | identical, correct |
+| Cranelift AOT native | `bin/simple compile probe.spl -o probe.bin --native` then run the ELF | identical, correct |
+
+So the defect is specific to the **pure-Simple compiler's own native codegen**
+(the Stage-2-compiled binary running Stage 3), which is not buildable within a
+normal session. **The row stays OPEN** on the codegen axis, and the responsible
+file could not be named — hence no cross-owner block was filed against a guess.
+
+**Family found (the point fix in the original writeup would have missed it).** A
+census of `ctx.errors[` across `src/compiler/80.driver/` found **six** sites of
+the same reassign-then-index shape, and only ONE of them was the debug-gated
+trace loop this doc was written about. Two are on the **non-debug production
+path**, where the loss is not a missing trace line but a *silently blank
+diagnostic*:
+
+- `driver_orchestration.spl:158` — debug trace loop (the documented site)
+- `driver_orchestration.spl:164` — first-error extraction, production path
+- `driver_orchestration.spl:236,251` — `Method resolution` classification and the
+  MIR-lowering failure message, both after `self.ctx = analyzed_ctx`
+- `driver_pipeline_execution.spl:16`, `driver_aot_pipeline.spl:84` — MIR-lowering
+  failure message, same shape
+
+All six now go through a new method-shaped accessor
+`CompilerContext.error_message_at(index)` in
+`src/compiler/80.driver/driver_types.spl` (bounds-guarded, returns `""` out of
+range). A method call on the owner is the only shape this doc measured to work in
+the failing binary — the sibling `lowering_error_message_at()` loop in
+`driver_hir_pipeline_lowering.spl` printed correctly in the same run. This does
+not fix the codegen defect; it removes the driver's exposure to it.
+
+`driver_hir_pipeline_passes.spl:112` (`ictx.errors[e_idx]`) was left alone: its
+`ictx` is constructed by `HmInferContext.with_builtins()` and mutated in place,
+never reassigned from a returned struct, so it is a different shape — and
+`HmInferContext` is outside this lane's ownership.
+
+### Specs
+- `test/01_unit/compiler/driver/ctx_error_array_index_after_reassign_spec.spl`
+  (reproducer shape, pins count-vs-index agreement, typed alias, accessor):
+  `Results: 3 total, 3 passed, 0 failed`.
+- `test/01_unit/compiler/driver/driver_ctx_error_access_shape_spec.spl`
+  (similar-problem detection — fails when ANY driver phase file reintroduces the
+  direct-index shape, which the reproducer cannot see):
+  `Results: 3 total, 3 passed, 0 failed`.
+
+**Ablation.** Reverting a single site (`self.ctx.error_message_at(0)` back to
+`self.ctx.errors[0]`) drove the detection spec to
+`Results: 3 total, 1 passed, 2 failed`; restoring it returned it to green. The
+mitigation is therefore load-bearing for the guard.
