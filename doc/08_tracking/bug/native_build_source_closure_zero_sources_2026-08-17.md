@@ -133,6 +133,7 @@ note that earlyoom on this host prefers `simple` by name, so a signal death is
 UNVERIFIED rather than a failure of the code under test. A worker killed by a
 signal under heavy concurrent load is the expected signature of resource
 contention — which is exactly the condition these runs were conducted under.
+(`check-native-trailing-default-param` had not finished and is **unverified**.)
 
 What changed: all three logs contain **zero** compile errors. Counted per log —
 `TMPDIR`=0, `not found on type`=0, `source_closure 0/0`=0,
