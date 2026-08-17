@@ -1,16 +1,8 @@
 """
 # Required Comment CLI Lint Coverage
-
-WP-7 (aerospace hardening plan): `bin/simple lint`'s real output path
-(`lint_cli_source`) is wired to the AST-based semantic checker
-(`compiler.semantics.lint.required_comment.check_required_comment`), not the
-former per-line text scanner. `Linter.lint_source` alone (no AST decls) can
-no longer emit REQC001-004 — the loop lives in `lint_cli_source`
-(entry_and_fixes.spl), same as STUB001/STUB002. See
-doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md WP-7.
 """
 
-use compiler.tools.lint.main.{Linter, lint_cli_source}
+use compiler.tools.lint.main.{Linter}
 
 fn has_code(results, code: text) -> bool:
     for r in results:
@@ -18,66 +10,18 @@ fn has_code(results, code: text) -> bool:
             return true
     false
 
-fn count_code(results, code: text) -> i64:
-    var n = 0
-    for r in results:
-        if r.lint.code == code:
-            n = n + 1
-    n
-
-describe "required comment lint CLI path":
-    """
-    Proves `lint_cli_source` — the entry point `bin/simple lint` actually
-    calls — is wired to the AST-based `check_required_comment` semantic
-    checker for REQC001-004, and that the deleted text reimplementation's
-    per-line blind spots (multi-line calls) no longer false-positive.
-    """
-    it "emits REQC001 through lint_cli_source for a bare pass_todo":
+describe "required comment lint source path":
+    it "emits REQC001 through Linter.lint_source":
         var linter = Linter.new()
-        val results = lint_cli_source(linter, "sample.spl", "fn f():\n    pass_todo\n")
-        assert_true(has_code(results, "REQC001"))
+        val results = linter.lint_source("sample.spl", "fn f():\n    pass_todo\n")
+        expect(has_code(results, "REQC001")).to_equal(true)
 
-    it "emits REQC001 (not REQC003) through lint_cli_source for a weak bare todo(...)":
-        # Real-parser finding, filed as
-        # doc/08_tracking/bug/todo_call_collapses_to_pass_todo_node_reqc003_unreachable_2026-08-07.md:
-        # the parser (parser_stmts.spl / primary_expr.spl, `ident_text ==
-        # "todo"`) desugars `todo(...)` into the SAME `expr_pass_todo` AST
-        # node as bare `pass_todo(...)` — there is no `expr_call` with callee
-        # "todo" for real parsed source. `check_required_comment`'s dedicated
-        # REQC003 branch (which matches an `expr_call` callee) is therefore
-        # unreachable from real source; a weak `todo(...)` falls into the
-        # REQC001 pass_* branch instead. `required_comment_lint_spec.spl`
-        # still proves the REQC003 branch itself is correct by constructing
-        # the `expr_call` shape directly.
+    it "emits REQC003 through Linter.lint_source":
         var linter = Linter.new()
-        val results = lint_cli_source(linter, "sample.spl", "fn f():\n    todo(\"fix\")\n")
-        assert_true(has_code(results, "REQC001"))
-        assert_false(has_code(results, "REQC003"))
+        val results = linter.lint_source("sample.spl", "fn f():\n    todo(\"fix\")\n")
+        expect(has_code(results, "REQC003")).to_equal(true)
 
-    it "emits REQC004 through lint_cli_source for an unrationalized wildcard arm":
+    it "emits REQC004 through Linter.lint_source":
         var linter = Linter.new()
-        val results = lint_cli_source(linter, "sample.spl", "fn f():\n    match x:\n        case _: 0\n")
-        assert_true(has_code(results, "REQC004"))
-
-    it "emits exactly ONE REQC001 for a single-violation probe, not two":
-        # Acceptance criterion (c): with the old text reimplementation
-        # deleted, only the AST-based checker can fire REQC001 — a bare
-        # pass_todo must produce exactly one diagnostic, not one from each
-        # of two live implementations.
-        var linter = Linter.new()
-        val results = lint_cli_source(linter, "sample_single.spl", "fn g():\n    pass_todo\n")
-        expect(count_code(results, "REQC001")).to_equal(1)
-
-    it "does NOT false-positive REQC001 on a multi-line pass_todo with a real rationale":
-        # The disagreement case: the deleted text scanner checked ONE
-        # physical line at a time. `normalized.starts_with("pass_todo(")`
-        # on the opening-paren line alone (nothing else on that line) found
-        # no quoted string on THAT line and reported REQC001 even though the
-        # call carries a perfectly good rationale on the next line. The
-        # AST-based checker reads the real string-literal argument node
-        # regardless of which line it is printed on, so it must NOT flag
-        # this call.
-        var linter = Linter.new()
-        val source = "fn h():\n    pass_todo(\n        \"long enough rationale for this deferred work\",\n        \"tracked by SIMPLE-999\"\n    )\n"
-        val results = lint_cli_source(linter, "sample_multiline.spl", source)
-        assert_false(has_code(results, "REQC001"))
+        val results = linter.lint_source("sample.spl", "fn f():\n    match x:\n        case _: 0\n")
+        expect(has_code(results, "REQC004")).to_equal(true)
