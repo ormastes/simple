@@ -1020,3 +1020,37 @@ New acceptance criteria (extends AC-1..AC-12 above):
   w14a_output_escaping_audit_2026-08-17.md; posture doc W14-A section added.
   Evidence: Rust seed bin/release/x86_64-unknown-linux-gnu/simple (59536728
   bytes, 2026-08-16), interpreter mode, SIMPLE_TIMEOUT_SECONDS=900.
+
+## W14-B — DB / durable-store crash-consistency & tamper-detection (2026-08-17)
+
+Scope: `src/lib/nogc_sync_mut/enterprise_store/*.spl` only. Runner: Rust seed
+(`bin/simple --version` = Simple v1.0.0-beta, bootstrap seed), interpreter mode,
+ANSI-stripped `SPEC FILE VERDICT` line read (never `tail -1`).
+
+1. AUDIT-CHAIN-VERIFY-ON-LOAD — real gap found and fixed. `store_open_verified`
+   /`store_verify` previously checked only magic + store-format marker; a
+   tampered audit row (payload OR chain hash mutated out-of-band) was ACCEPTED on
+   open — the sha256 chain was only ever checked when a caller invoked
+   `records.audit_verify_chain`. Fix: new `store_audit_chain_error(store)` in
+   store.spl re-walks the chain for EVERY tenant (prev_hash linkage + recomputed
+   sha256 via the same `audit_sha256_hex`) and is wired into `store_verify` on
+   BOTH backends. Red-first (file backend, out-of-band file edit):
+   `enterprise_store_audit_chain_on_open_spec.spl` — before fix passed=1 failed=2
+   (both tampered stores accepted); after fix passed=3 failed=0.
+
+2. WRITE-FAILURE RECOVERY — invariant already correct; added a durable-path
+   regression fence. `enterprise_store_write_failure_recovery_spec.spl` (file
+   backend): injected disk-full via `store_faults_failing_commit()` -> commit
+   false, idempotency key NOT consumed and nothing durable (asserted after
+   close+reopen), operator retry with `store_faults_none()` applies exactly once,
+   third attempt detected as replay -> outbox still holds exactly one event.
+   passed=1 failed=0. Complements the :memory: zero-partial proof in
+   enterprise_store_harden_spec.spl.
+
+Backend honesty: all durability/tamper claims exercise the SPLSTORE1 file
+backend (the interpreter rt_sqlite emulation is non-persistent/non-ACID);
+:memory: paths are only used for the in-process zero-partial assertions.
+
+Regression (unchanged, all green): harden 6/6, enterprise_store 10/10,
+file_backend 6/6. Files: store.spl (+store_audit_chain_error, wired into
+store_verify, exported); 2 new specs. No fix needed for #2.
