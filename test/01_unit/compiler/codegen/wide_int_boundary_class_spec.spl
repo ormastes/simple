@@ -1,0 +1,98 @@
+# Wide i64 Boundary — Reproducer + Similar-Problem Detection Spec
+#
+# Bug: doc/08_tracking/bug/jit_i64_boundary_constant_wraps_to_negative_2026-08-09.md
+#
+#   The tagged value representation is `v << 3` with the low 3 bits reserved for
+#   the type tag, leaving a 61-bit signed payload. `RuntimeValue::from_int`
+#   (`src/compiler_rust/runtime/src/value/core.rs`) had NO range check, so any
+#   |v| >= 2^60 shifted its top bits out and sign-extended back as a DIFFERENT
+#   number: 2^60 flipped sign, 2^62 read as 0, i64::MAX read as -1. Exit 0, no
+#   diagnostic. i64 sentinels, nanosecond timestamps and hash seeds are all in
+#   that range.
+#
+# ROOT CAUSE, and the trap it set. The cranelift emitter comment at
+# `codegen/cranelift_emitter.rs` already asserted that `rt_value_int`
+# "heap-boxes only what does not [fit]" -- but that was only half-true: the
+# emitter had been rerouted through `rt_value_int`, and the runtime half was
+# never implemented. `from_int` was still a bare `(i as u64) << 3`. Anyone
+# reading the comment instead of the callee concludes this bug is already fixed.
+# Fixed by adding a range check plus a signed wide box
+# (`HeapObjectType::Int` / `HeapInt`) -- deliberately NOT the existing `UInt`
+# box, whose display path renders the payload as u64 and would print every wide
+# NEGATIVE i64 as a huge positive number.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT here (measured: `max=9223372036854775807` under
+# `SIMPLE_EXECUTION_MODE=interpret`, `max=-1` under the JIT). An in-process
+# example cannot go red on this defect and would be a vacuous green. The oracle
+# is the sibling run-path probe `probe_wide_int_boundary_jit.spl`, run as a
+# subprocess under BOTH engines against absolute literals.
+#
+# The class generalises past the three filed constants to: both signs, every
+# erased-slot boundary (array element, return value, nullable), arithmetic that
+# forces a real decode, and equality/ordering across the inline/wide split.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_wide_int_boundary_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "i64 values wider than the inline 61-bit tagged payload":
+    it "keeps every boundary constant exact on the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm -- it was already correct, so a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("PASS wide_i64_max")
+        expect(interp).to_contain("WIDE_INT_BOUNDARY PROBE: ALL PASS")
+
+    it "keeps the three filed constants exact on the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit -- the engine the bug lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("2^60 read back sign-flipped, 2^62 read back as 0, i64::MAX read back as -1")
+        expect(jit).to_contain("PASS wide_p60")
+        expect(jit).to_contain("PASS wide_p62")
+        expect(jit).to_contain("PASS wide_i64_max")
+
+        step("Values just BELOW the limit must stay bit-identical -- the fix must not disturb the inline fast path")
+        expect(jit).to_contain("PASS inline_p59")
+        expect(jit).to_contain("PASS inline_neg_p59")
+
+    it "keeps the whole wide-int class exact on the cranelift JIT":
+        val jit = run_probe_in_mode("jit")
+
+        step("Wide NEGATIVE values must not surface as huge positives -- the failure mode of boxing them as unsigned")
+        expect(jit).to_contain("PASS wide_neg_p60")
+        expect(jit).to_contain("PASS wide_neg_p62")
+        expect(jit).to_contain("PASS wide_i64_min")
+
+        step("Every erased-slot boundary: array element, return value, nullable")
+        expect(jit).to_contain("PASS array_wide_p60")
+        expect(jit).to_contain("PASS array_wide_max")
+        expect(jit).to_contain("PASS array_wide_neg")
+        expect(jit).to_contain("PASS return_wide_max")
+        expect(jit).to_contain("PASS optional_wide_p62")
+
+        step("Arithmetic forces a real decode -- a value corrupted identically in and out could still print correctly")
+        expect(jit).to_contain("PASS wide_arith_sub")
+        expect(jit).to_contain("PASS wide_arith_div")
+        expect(jit).to_contain("PASS wide_arith_shift")
+
+        step("Equality and ordering across the inline/wide split: two wide values are separate heap boxes, so a raw-bits compare would call equal values unequal")
+        expect(jit).to_contain("PASS wide_eq_same")
+        expect(jit).to_contain("PASS wide_ne_diff")
+        expect(jit).to_contain("PASS wide_gt_inline")
+        expect(jit).to_contain("PASS wide_neg_lt_zero")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("WIDE_INT_BOUNDARY PROBE: ALL PASS")

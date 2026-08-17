@@ -79,6 +79,17 @@ impl PartialEq for RuntimeValue {
         if self.is_float() || other.is_float() {
             return self.is_float() && other.is_float() && self.as_float() == other.as_float();
         }
+        // Wide signed ints are heap boxes, so two boxes holding the SAME i64
+        // are distinct pointers; a raw-bits compare would call them unequal.
+        // Compare by value, and against an inline int by value too.
+        if self.as_heap_i64().is_some() || other.as_heap_i64().is_some() {
+            let left = self.as_heap_i64().or_else(|| self.is_int().then(|| self.as_int()));
+            let right = other.as_heap_i64().or_else(|| other.is_int().then(|| other.as_int()));
+            return match (left, right) {
+                (Some(l), Some(r)) => l == r,
+                _ => false,
+            };
+        }
         if let Some(left) = self.as_heap_u64() {
             return other.as_heap_u64().map_or_else(
                 || other.is_int() && other.as_int() >= 0 && left == other.as_int() as u64,
@@ -107,6 +118,11 @@ impl std::hash::Hash for RuntimeValue {
                 d = 0.0;
             }
             d.to_bits().hash(state);
+        } else if let Some(value) = self.as_heap_i64() {
+            // Must agree with the value-based Eq above: hash the INTEGER, not
+            // the box pointer.
+            0x494e_5436_345f_5749u64.hash(state);
+            value.hash(state);
         } else if let Some(value) = self.as_heap_u64() {
             if value <= ((1u64 << 60) - 1) {
                 RuntimeValue::from_int(value as i64).to_raw().hash(state);
@@ -133,6 +149,13 @@ impl Ord for RuntimeValue {
         // tag-then-payload ordering below.
         if self.is_float() && other.is_float() {
             return self.as_float().total_cmp(&other.as_float());
+        }
+        if self.as_heap_i64().is_some() || other.as_heap_i64().is_some() {
+            let left = self.as_heap_i64().or_else(|| self.is_int().then(|| self.as_int()));
+            let right = other.as_heap_i64().or_else(|| other.is_int().then(|| other.as_int()));
+            if let (Some(l), Some(r)) = (left, right) {
+                return l.cmp(&r);
+            }
         }
         match (self.as_heap_u64(), other.as_heap_u64()) {
             (Some(left), Some(right)) => return left.cmp(&right),
@@ -198,10 +221,7 @@ impl RuntimeValue {
     /// immutable object handle, or ownership envelope instead.
     #[inline]
     pub const fn is_inline_transfer_value(self) -> bool {
-        matches!(
-            self.tag(),
-            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL
-        )
+        matches!(self.tag(), tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL)
     }
 
     /// Get the tag bits (lowest 3 bits)
@@ -238,9 +258,60 @@ impl RuntimeValue {
     /// Larger integers would need heap allocation.
     #[inline]
     pub fn from_int(i: i64) -> Self {
-        // Sign-extend to fit in 61 bits
-        // The tag is 0, so we just shift
-        Self((i as u64) << 3)
+        // The inline form is `i << 3` with a 0 tag, which leaves only a 61-bit
+        // SIGNED payload. Without a range check this silently truncated: `2^60`
+        // came back sign-flipped, `2^62` came back `0`, and `i64::MAX` came back
+        // `-1` (its top 3 one-bits shift out, then `>> 3` sign-extends). i64
+        // sentinels, nanosecond timestamps and FNV/xxHash seeds all live in that
+        // range. The cranelift emitter already routes BoxInt through
+        // `rt_value_int` specifically so this function could heap-box the
+        // out-of-range case, but that half was never implemented here.
+        //
+        // Values that fit keep the bit-identical `i << 3`, so the hot path and
+        // every in-range observable are unchanged.
+        if Self::fits_inline_int(i) {
+            Self((i as u64) << 3)
+        } else {
+            Self::from_wide_int(i)
+        }
+    }
+
+    /// `true` when `i` round-trips through the inline 61-bit `<< 3` / `>> 3`
+    /// payload unchanged. Written as an explicit range test rather than
+    /// `(i << 3) >> 3 == i` because the shift itself overflows for exactly the
+    /// inputs being screened, which is UB-adjacent and panics in debug builds.
+    #[inline]
+    pub const fn fits_inline_int(i: i64) -> bool {
+        const MIN: i64 = -(1i64 << 60);
+        const MAX: i64 = (1i64 << 60) - 1;
+        i >= MIN && i <= MAX
+    }
+
+    /// Heap-box a full-width signed i64 that does not fit the inline payload.
+    pub fn from_wide_int(i: i64) -> Self {
+        let size = std::mem::size_of::<super::heap::HeapInt>();
+        let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) else {
+            return Self::NIL;
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapInt;
+            if ptr.is_null() {
+                return Self::NIL;
+            }
+            (*ptr).header = HeapHeader::new(HeapObjectType::Int, size as u32);
+            (*ptr).value = i;
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+        }
+    }
+
+    /// The payload of a heap-boxed wide signed integer, if this is one.
+    #[inline]
+    pub fn as_heap_i64(self) -> Option<i64> {
+        if matches!(self.heap_type(), Some(HeapObjectType::Int)) {
+            Some(unsafe { (*(self.as_heap_ptr() as *const super::heap::HeapInt)).value })
+        } else {
+            None
+        }
     }
 
     /// Check if this is an integer
@@ -252,6 +323,11 @@ impl RuntimeValue {
     /// Get the integer value (undefined behavior if not an int)
     #[inline]
     pub fn as_int(self) -> i64 {
+        // A wide value lives in a HeapInt box (see `from_int`); shifting its
+        // TAG_HEAP pointer would return garbage, so decode it first.
+        if let Some(wide) = self.as_heap_i64() {
+            return wide;
+        }
         // Sign-extend from 61 bits
         (self.0 as i64) >> 3
     }
@@ -507,12 +583,10 @@ impl RuntimeValue {
     pub fn clone_for_isolated_thread(self) -> Option<Self> {
         match self.tag() {
             tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => Some(self),
-            tags::TAG_HEAP => {
-                match super::heap::registered_heap_type(self) {
-                    Some(HeapObjectType::Channel) => Some(self),
-                    _ => None,
-                }
-            }
+            tags::TAG_HEAP => match super::heap::registered_heap_type(self) {
+                Some(HeapObjectType::Channel) => Some(self),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -565,7 +639,7 @@ impl RuntimeValue {
                 // Unreachable in practice: the early `is_float()` guard above
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => "float",
-                Some(HeapObjectType::UInt) => "int",
+                Some(HeapObjectType::UInt) | Some(HeapObjectType::Int) => "int",
                 None => "null",
             },
             _ => "unknown",
@@ -622,7 +696,7 @@ impl RuntimeValue {
                 // Unreachable in practice: the early `is_float()` guard above
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => ValueKind::Float,
-                Some(HeapObjectType::UInt) => ValueKind::Int,
+                Some(HeapObjectType::UInt) | Some(HeapObjectType::Int) => ValueKind::Int,
                 None => ValueKind::Nil,
             },
             _ => ValueKind::Nil,

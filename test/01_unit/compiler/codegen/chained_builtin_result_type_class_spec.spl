@@ -1,0 +1,89 @@
+# Chained-Builtin Result Type — Reproducer + Similar-Problem Detection Spec
+#
+# Bug: doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md
+#
+#   `arg.substring(10).to_int()` returned the intermediate text's HEAP POINTER
+#   as a "successful" integer: a large, run-varying value, exit 0, no warning.
+#   `?? -1` did not rescue it -- to_int() never reported failure. Binding the
+#   intermediate to a typed `val` first was correct.
+#
+# ROOT CAUSE. The builtin call sites in
+# `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` recorded a
+# builtin's result VALUE (`ctx.vreg_values`) but never its TYPE
+# (`ctx.vreg_types`). A directly chained receiver therefore carried no recorded
+# type, and the numeric-cast block defaults a missing type to `TypeId::I64`
+# (`unwrap_or(TypeId::I64)`), so `to_int` skipped the `from_ty ==
+# TypeId::STRING` branch routing to `rt_string_to_int` and fell into the generic
+# raw-register conversion. Fixed by `builtin_method_result_type`.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT for this defect (measured: `chained=800` under
+# `SIMPLE_EXECUTION_MODE=interpret`, `chained=5239130365953` under the JIT). An
+# in-process example therefore cannot go red no matter what it asserts -- it
+# would be a vacuous green. The oracle is the sibling run-path probe
+# `probe_chained_builtin_result_type_jit.spl`, run as a subprocess under BOTH
+# engines, self-checking absolute literals and printing one verdict line.
+#
+# The class this generalises to is "a chained builtin's result type is unknown
+# to the next method", so the probe crosses every text-returning builtin with
+# every numeric/text/predicate consumer rather than only the filed pair.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_chained_builtin_result_type_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "chained builtin method results keep their static type":
+    it "resolves every chained builtin correctly on the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm -- it was already correct, so a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("PASS chained_substring_to_int")
+        expect(interp).to_contain("CHAINED_BUILTIN_RESULT_TYPE PROBE: ALL PASS")
+
+    it "resolves the filed reproducer correctly on the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit -- the engine the bug lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The exact filed expression: arg.substring(10).to_int() must be 800, not a heap pointer")
+        expect(jit).to_contain("PASS chained_substring_to_int")
+
+        step("The typed-intermediate control must stay correct")
+        expect(jit).to_contain("PASS via_typed_val_to_int")
+
+    it "resolves the whole chained-builtin class on the cranelift JIT":
+        val jit = run_probe_in_mode("jit")
+
+        step("Every text-returning builtin feeding an integer cast is the same defect shape")
+        expect(jit).to_contain("PASS chained_substring_to_i64")
+        expect(jit).to_contain("PASS chained_substring_to_i32")
+        expect(jit).to_contain("PASS chained_trim_to_int")
+        expect(jit).to_contain("PASS chained_slice_to_int")
+        expect(jit).to_contain("PASS chained_replace_to_int")
+
+        step("A float cast off a chained receiver used to fcvt the string's pointer")
+        expect(jit).to_contain("PASS chained_substring_to_float")
+
+        step("Text-in/text-out chains must stay text, not decay to a pointer")
+        expect(jit).to_contain("PASS chained_substring_to_upper")
+        expect(jit).to_contain("PASS chained_trim_substring")
+
+        step("Length and predicate builtins chained off a text-returning builtin")
+        expect(jit).to_contain("PASS chained_substring_len")
+        expect(jit).to_contain("PASS chained_substring_starts_with")
+        expect(jit).to_contain("PASS chained_trim_is_empty")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("CHAINED_BUILTIN_RESULT_TYPE PROBE: ALL PASS")

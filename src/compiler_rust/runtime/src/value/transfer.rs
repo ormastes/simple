@@ -239,6 +239,10 @@ enum EncodedLeafKind {
     Float64 = 1,
     UInt64 = 2,
     Utf8 = 3,
+    /// Full-width SIGNED i64 leaf (`HeapObjectType::Int`). Distinct from
+    /// `UInt64` so a wide negative value does not round-trip as a huge
+    /// positive one.
+    Int64 = 4,
 }
 
 impl TryFrom<u8> for EncodedLeafKind {
@@ -249,6 +253,7 @@ impl TryFrom<u8> for EncodedLeafKind {
             1 => Ok(Self::Float64),
             2 => Ok(Self::UInt64),
             3 => Ok(Self::Utf8),
+            4 => Ok(Self::Int64),
             _ => Err(()),
         }
     }
@@ -285,6 +290,12 @@ impl RuntimeEncodedCopy {
             HeapObjectType::UInt => (
                 EncodedLeafKind::UInt64,
                 with_typed_ptr::<HeapUInt, _>(value, HeapObjectType::UInt, |ptr| unsafe {
+                    (*ptr).value.to_le_bytes().to_vec()
+                })?,
+            ),
+            HeapObjectType::Int => (
+                EncodedLeafKind::Int64,
+                with_typed_ptr::<crate::value::heap::HeapInt, _>(value, HeapObjectType::Int, |ptr| unsafe {
                     (*ptr).value.to_le_bytes().to_vec()
                 })?,
             ),
@@ -349,8 +360,7 @@ impl RuntimeEncodedCopy {
             kind,
             payload: bytes[ENCODED_COPY_HEADER_LEN..].to_vec(),
         };
-        (value.payload_is_valid() && encoded_copy_checksum(kind, &value.payload) == expected_checksum)
-            .then_some(value)
+        (value.payload_is_valid() && encoded_copy_checksum(kind, &value.payload) == expected_checksum).then_some(value)
     }
 
     pub(crate) fn materialize(&self) -> Option<RuntimeValue> {
@@ -362,6 +372,9 @@ impl RuntimeEncodedCopy {
                 self.payload.as_slice().try_into().ok()?,
             )))),
             EncodedLeafKind::UInt64 => Some(RuntimeValue::from_u64(u64::from_le_bytes(
+                self.payload.as_slice().try_into().ok()?,
+            ))),
+            EncodedLeafKind::Int64 => Some(RuntimeValue::from_int(i64::from_le_bytes(
                 self.payload.as_slice().try_into().ok()?,
             ))),
             EncodedLeafKind::Utf8 => {
@@ -376,7 +389,7 @@ impl RuntimeEncodedCopy {
             return false;
         }
         match self.kind {
-            EncodedLeafKind::Float64 | EncodedLeafKind::UInt64 => self.payload.len() == 8,
+            EncodedLeafKind::Float64 | EncodedLeafKind::UInt64 | EncodedLeafKind::Int64 => self.payload.len() == 8,
             EncodedLeafKind::Utf8 => std::str::from_utf8(&self.payload).is_ok(),
         }
     }
@@ -561,11 +574,11 @@ mod tests {
         assert_eq!(
             copy.encode().unwrap(),
             [
-                0x53, 0x50, 0x54, 0x52, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x10, 0x9a, 0x9b, 0xda, 0x7b, 0x41, 0x33,
-                0x74, 0x79, 0x70, 0x65, 0x64,
+                0x53, 0x50, 0x54, 0x52, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x10, 0x9a, 0x9b, 0xda, 0x7b, 0x41, 0x33, 0x74, 0x79, 0x70, 0x65,
+                0x64,
             ]
         );
     }
@@ -588,12 +601,9 @@ mod tests {
             } else if let Some(value) = source.as_heap_u64() {
                 assert_eq!(destination.as_heap_u64(), Some(value));
             } else {
-                let destination_copy = RuntimeEncodedCopy::from_value(
-                    destination,
-                    TransferDomain::Thread,
-                    TransferDomain::Parent,
-                )
-                .unwrap();
+                let destination_copy =
+                    RuntimeEncodedCopy::from_value(destination, TransferDomain::Thread, TransferDomain::Parent)
+                        .unwrap();
                 assert_eq!(copy.payload, destination_copy.payload);
                 assert_eq!(rt_string_free(source), 1);
                 assert_eq!(rt_string_free(destination), 1);
@@ -635,11 +645,7 @@ mod tests {
         oversize[48..56].copy_from_slice(&((MAX_ENCODED_COPY_BYTES as u64) + 1).to_le_bytes());
         assert!(RuntimeEncodedCopy::decode_for_target(&oversize, TransferDomain::Actor).is_none());
         let invalid_utf8 = RuntimeEncodedCopy {
-            envelope: RuntimeTransferEnvelopeV1::encoded_copy(
-                TransferDomain::Parent,
-                TransferDomain::Actor,
-            )
-            .unwrap(),
+            envelope: RuntimeTransferEnvelopeV1::encoded_copy(TransferDomain::Parent, TransferDomain::Actor).unwrap(),
             kind: EncodedLeafKind::Utf8,
             payload: vec![0xff],
         };

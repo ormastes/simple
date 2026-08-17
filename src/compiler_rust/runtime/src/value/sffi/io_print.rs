@@ -479,6 +479,12 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
         HeapObjectType::UInt => v
             .as_heap_u64()
             .map_or_else(|| v.as_int().to_string(), |value| value.to_string()),
+        // Wide SIGNED int: render with i64 semantics, never u64 -- a negative
+        // wide value printed through the UInt arm would come out as a huge
+        // positive number.
+        HeapObjectType::Int => v
+            .as_heap_i64()
+            .map_or_else(|| v.as_int().to_string(), |value| value.to_string()),
         HeapObjectType::String => {
             let Some(s) = get_typed_ptr::<RuntimeString>(v, HeapObjectType::String) else {
                 return format!("<invalid-heap:0x{:x}>", v.to_raw());
@@ -562,6 +568,9 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
         },
         HeapObjectType::UInt => v
             .as_heap_u64()
+            .map_or_else(|| format!("<heap@{ptr:p}>"), |value| value.to_string()),
+        HeapObjectType::Int => v
+            .as_heap_i64()
             .map_or_else(|| format!("<heap@{ptr:p}>"), |value| value.to_string()),
         _ => format!("<heap@{ptr:p}>"),
     }

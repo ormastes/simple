@@ -593,9 +593,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
     let bare_builtin_collection =
         !lookup_name.contains('.') && is_bare_builtin_collection_method(lookup_name, args.len());
     if bare_builtin_collection {
+        let recv_ty = ctx.vreg_types.get(&receiver).copied();
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
             if let Some(d) = dest {
                 ctx.vreg_values.insert(*d, result);
+                if let Some(rt) = builtin_method_result_type(lookup_name, recv_ty) {
+                    ctx.vreg_types.insert(*d, rt);
+                }
             }
             return Ok(());
         }
@@ -635,6 +639,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
             if let Some(d) = dest {
                 ctx.vreg_values.insert(*d, result);
+                if let Some(rt) = builtin_method_result_type(lookup_name, receiver_ty) {
+                    ctx.vreg_types.insert(*d, rt);
+                }
             }
             // NOTE: Do NOT store the push result back to the receiver variable.
             // rt_array_push returns bool (success/failure), NOT a new array pointer.
@@ -1102,9 +1109,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 }
             }
         } else {
+            let recv_ty = ctx.vreg_types.get(&receiver).copied();
             if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
                 if let Some(d) = dest {
                     ctx.vreg_values.insert(*d, result);
+                    if let Some(rt) = builtin_method_result_type(lookup_name, recv_ty) {
+                        ctx.vreg_types.insert(*d, rt);
+                    }
                 }
                 return Ok(());
             }
@@ -1354,6 +1365,46 @@ fn is_int_chr_method(name: &str) -> bool {
             owner,
             "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "uint" | "Int" | "isize" | "usize"
         ),
+    }
+}
+
+/// Static result type of a builtin method, when it is knowable from the method
+/// name plus the (possibly unknown) receiver type.
+///
+/// This exists because the builtin call sites below only ever recorded the
+/// result VALUE (`ctx.vreg_values`) and never its TYPE (`ctx.vreg_types`). A
+/// *directly chained* builtin — `arg.substring(10).to_int()` — therefore handed
+/// the next method a receiver vreg with no recorded type, and the numeric-cast
+/// block further down defaults a missing type to `TypeId::I64`
+/// (`unwrap_or(TypeId::I64)`). `to_int` then skipped the `from_ty ==
+/// TypeId::STRING` branch that routes to `rt_string_to_int` and fell into the
+/// generic raw-register conversion, which returned the intermediate text's HEAP
+/// POINTER as a "successful" integer — no error, no warning, exit 0, and a
+/// value that changed between runs. Binding the intermediate to a typed `val`
+/// first made it correct, because that path does record the type.
+///
+/// Deliberately conservative: it answers `None` unless the result type is
+/// certain, so a wrong entry can never make a previously-correct call worse.
+/// Text-returning entries require a known-STRING receiver for the same reason —
+/// `slice` is shared with arrays, where the result is an array, not text.
+fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Option<TypeId> {
+    let method = method.rsplit('.').next().unwrap_or(method);
+    match method {
+        // Length/position queries are raw i64 on every receiver.
+        "len" | "length" | "char_code_at" | "index_of" | "find_index" => Some(TypeId::I64),
+        // Predicates are bool on every receiver.
+        "is_empty" | "contains" | "starts_with" | "ends_with" => Some(TypeId::BOOL),
+        // Text-in/text-out. `slice`/`substring` are shared with array receivers,
+        // so they are only classified when the receiver is known to be text.
+        "substring" | "slice" | "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower"
+        | "to_lowercase" | "char_at" | "replace" | "concat" => {
+            if receiver_ty == Some(TypeId::STRING) {
+                Some(TypeId::STRING)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 

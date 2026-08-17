@@ -1,0 +1,101 @@
+# Run-path probe: i64 values that do NOT fit the inline 61-bit tagged payload.
+#
+# Executed as a SUBPROCESS by wide_int_boundary_class_spec.spl under both
+# engines. Never run this as a spec: a spec body executes on the tree-walk
+# interpreter, which is correct here, so the defect cannot appear.
+#
+# THE DEFECT (doc/08_tracking/bug/jit_i64_boundary_constant_wraps_to_negative_2026-08-09.md)
+# The tagged representation is `v << 3` with the low 3 bits reserved for the
+# type tag, leaving a 61-bit signed payload. `RuntimeValue::from_int` had NO
+# range check, so any |v| >= 2^60 shifted its top bits out and was sign-extended
+# back as a DIFFERENT number on unbox:
+#     2^60      -> sign-flipped negative
+#     2^62      -> 0
+#     i64::MAX  -> -1
+# Silent, exit 0. i64 sentinels, nanosecond timestamps and FNV/xxHash seeds all
+# live in that range.
+#
+# Note the trap this bug set: the cranelift emitter's comment ALREADY claimed
+# "rt_value_int ... heap-boxes only what does not [fit]". The emitter half had
+# landed; the runtime half (from_int) never had. Reading the comment instead of
+# the code says the bug is fixed.
+#
+# Every oracle is an ABSOLUTE literal, and each is checked BOTH as a printed
+# decimal and through arithmetic, so a value that merely round-trips its own
+# corruption cannot pass.
+
+var failures: i64 = 0
+
+fn check(name: text, got: text, want: text):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=[" + got + "] want=[" + want + "]")
+        failures = failures + 1
+
+fn check_i(name: text, got: i64, want: i64):
+    check(name, got.to_text(), want.to_text())
+
+fn ret_max() -> i64:
+    9223372036854775807
+
+fn main() -> i64:
+    # --- the exact boundary constants from the filed bug ---------------------
+    val p59: i64 = 576460752303423488
+    val p60: i64 = 1152921504606846976
+    val p61: i64 = 2305843009213693952
+    val p62: i64 = 4611686018427387904
+    val mx: i64 = 9223372036854775807
+    val mn: i64 = -9223372036854775808
+
+    # Just BELOW the 61-bit payload limit: these always worked and must stay
+    # bit-identical, proving the fix did not disturb the inline fast path.
+    check_i("inline_p59", p59, 576460752303423488)
+    check_i("inline_neg_p59", -p59, -576460752303423488)
+
+    # At and above the limit: the filed failures.
+    check_i("wide_p60", p60, 1152921504606846976)
+    check_i("wide_p61", p61, 2305843009213693952)
+    check_i("wide_p62", p62, 4611686018427387904)
+    check_i("wide_i64_max", mx, 9223372036854775807)
+
+    # Wide NEGATIVE values are a separate risk: a wide box that stored the bits
+    # as UNSIGNED would print these as huge positive numbers.
+    check_i("wide_neg_p60", -p60, -1152921504606846976)
+    check_i("wide_neg_p62", -p62, -4611686018427387904)
+    check_i("wide_i64_min", mn, -9223372036854775808)
+
+    # --- the same values through every erased-slot boundary ------------------
+    val arr: [i64] = [p60, p62, mx, -p62]
+    check_i("array_wide_p60", arr[0u64], 1152921504606846976)
+    check_i("array_wide_p62", arr[1u64], 4611686018427387904)
+    check_i("array_wide_max", arr[2u64], 9223372036854775807)
+    check_i("array_wide_neg", arr[3u64], -4611686018427387904)
+
+    check_i("return_wide_max", ret_max(), 9223372036854775807)
+
+    val opt: i64? = 4611686018427387904
+    check_i("optional_wide_p62", opt ?? -1, 4611686018427387904)
+
+    # --- arithmetic, not just printing ---------------------------------------
+    # A value that is corrupted identically on the way in and out could still
+    # print correctly; these force a real decode.
+    check_i("wide_arith_sub", mx - 7, 9223372036854775800)
+    check_i("wide_arith_div", p62 / 2, 2305843009213693952)
+    check_i("wide_arith_shift", p60 >> 10, 1125899906842624)
+
+    # --- equality and ordering across the inline/wide split ------------------
+    # Two wide values are separate heap boxes, so a raw-bits compare would call
+    # equal values unequal.
+    val a: i64 = 4611686018427387904
+    val b: i64 = 4611686018427387904
+    check("wide_eq_same", (a == b).to_text(), "true")
+    check("wide_ne_diff", (a == p60).to_text(), "false")
+    check("wide_gt_inline", (mx > p59).to_text(), "true")
+    check("wide_neg_lt_zero", (-p62 < 0).to_text(), "true")
+
+    if failures == 0:
+        print("WIDE_INT_BOUNDARY PROBE: ALL PASS")
+    else:
+        print("WIDE_INT_BOUNDARY PROBE: " + failures.to_text() + " FAILURES")
+    failures
