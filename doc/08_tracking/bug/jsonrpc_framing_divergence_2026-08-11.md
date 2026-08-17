@@ -1,3 +1,12 @@
+## Triage 2026-08-17 — OPEN as designed (record, not a defect to close)
+
+This doc is an accurate enumeration, not a regression: 2 of 11 implementation
+sites are merged and sabotage-proven, the other 9 are DIVERGENT with per-site
+reasons already recorded. Merging families B/C/D/E is a refactor with real
+behavioural risk across LSP/DAP/MCP transports, not a fix this verification pass
+should land opportunistically. Left OPEN with its per-site table as the spec for
+whoever takes the merge.
+
 # JSON-RPC Content-Length framing: 4 behavioural families, not 20 duplicates
 
 **Date:** 2026-08-11

@@ -1,3 +1,12 @@
+## Triage 2026-08-17 — OPEN, design work not re-verifiable by inspection
+
+Not stale: the 2026-08-14 partial mitigation (`ParentCommitFrameInboxV1`,
+`ParentCommitPipedProcessSessionV1`) covers the bounded-session half only. The
+remaining acceptance rows — cryptographic wire-hash authentication (FNV-1a is
+not authentication), PID-reuse/namespace simulation, and exec-isolated child
+tests — are unimplemented. Left OPEN; out of scope for a bug-doc verification
+pass because it needs the admitted crypto wire-hash contract first.
+
 # Process transfer session and replay identity
 
 Status: open

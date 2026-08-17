@@ -1,3 +1,10 @@
+## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
+
+Blocker: unchanged and self-declared in this doc — the A7 aggregator is
+IMPLEMENTED (`scripts/check/check-render-perf-8k80-container.shs`); what is
+missing is live native A4 (CPU DrawIR) and A5 (strict Vulkan) receipts for the
+same 7680x4320 workload. Requires the NVIDIA CUDA/Vulkan container host. Nothing
+to fix in source.
 # Render performance 8K80 parent aggregator is missing
 
 Status: **IMPLEMENTED / LIVE EVIDENCE BLOCKED**

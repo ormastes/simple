@@ -1,3 +1,10 @@
+## Re-verified 2026-08-17 — STILL OPEN, unchanged
+
+`/usr/bin/grep -rn "allow_attr\|is_allowed\|allow_attribute" src/compiler/35.semantics/lint/*.spl`
+returns **zero** lines. No suppression machinery exists; the `@allow(primitive_api)` /
+`#[allow(raw_unit)]` headers already in `src/lib/nogc_sync_mut/engine/physics/*.spl`
+are still inert. Unchanged from the original filing.
+
 # `@allow(primitive_api)` / `#[allow(raw_unit)]` suppression is documented but never implemented
 
 **Status:** OPEN

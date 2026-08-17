@@ -1,3 +1,25 @@
+## RESOLVED (root cause removed) — re-verified 2026-08-17
+
+The fn-typed callback parameter this bug is about no longer exists.
+`src/lib/editor/render/md_renderer.spl:162` is now:
+
+```
+fn _mdr_render_for_tui(model: BlockModel, viewport_start: i64, viewport_height: i64, wiki_index: MdWikiIndex?) -> [text]
+```
+
+`grep -n 'render_block:' src/lib/editor/render/md_renderer.spl` returns nothing,
+and both entrypoints (:202, :205) now pass a plain `MdWikiIndex?` (`nil` /
+`Some(index)`) instead of a named function or a closure. With no lambda/closure
+in the module, the reported bailout
+("creates a lambda/closure; the JIT closure ABI does not tag-box lambda
+arguments or results") can no longer be emitted for these functions. The dedupe
+was kept; only the closure-shaped parameterization was replaced.
+
+Runtime re-measurement is INCONCLUSIVE in this lane: a direct `bin/simple run`
+probe could not construct a `BlockModel` (`unknown static method from_text`), so
+no fresh JIT-vs-interpreter timing was taken. Closing on the source-level root
+cause; reopen with a timing probe if the TUI render path is still slow.
+
 # md_renderer TUI dedupe forces a whole-callee-tree interpreter fallback (~15x slower)
 
 **Date:** 2026-08-11
