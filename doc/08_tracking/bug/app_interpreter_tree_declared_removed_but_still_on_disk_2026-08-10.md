@@ -133,3 +133,62 @@ prior doc explicitly reserves that decision for the repo owner. Deleting them
 here would also collide with the `check-tree-size-push.shs` load-bearing-path
 and file-count gates, which is exactly the review those gates exist to force.
 Status OPEN, owner-gated, no code change.
+
+## 2026-08-17 — RESOLVED: tree deleted, with the uniqueness check finally done
+
+User approval to delete was given explicitly (deleting an app tree is an owner
+decision). The evidence package's outstanding item — **file-by-file uniqueness
+across all 99 tracked files** — was run first, by declared-symbol name against
+all **36,120** other tracked `.spl` files, not by filename:
+
+- **864** symbols declared in the tree; **358** are also declared elsewhere.
+- Of the **506** declared ONLY here, only **94** appear as an identifier
+  anywhere outside; **25** of those are methods (`me`) declared outside,
+  leaving **69**.
+- Those 69 are namesakes or generic tokens (`bool`, `int`, `float`, `string`,
+  `dict`, `tuple`, `ref`, `address`, `cycle`) or type names with independent,
+  complete implementations elsewhere: `PersistentVec` →
+  `src/lib/nogc_async_immut/persistent_vec/`, `CopyStrategy` →
+  `src/lib/*/message_transfer.spl`, `PerfProfile` → `src/lib/*/perf.spl`,
+  `Interpreter` → `src/app/cli/`, `MatchCase`/`Statement`/`BinaryOp`/`Generator`
+  → the compiler and other trees. `LazySeq`'s only outside occurrence is a
+  `pending_reason` string inside a pending stub spec.
+- The watchdog/execution API names (`start_watchdog`, `stop_watchdog`,
+  `check_timeout`, `check_execution_limit`, `reset_execution_count`,
+  `run_script`, `evaluate_module`) were checked one by one: every outside hit is
+  a comment, a string literal, or an unrelated namesake.
+
+**Verdict: no file was the sole implementation of live functionality.**
+Corroborated independently — the tree does not parse:
+`bin/simple run src/app/interpreter/main.spl` exits 1 with
+`parse: in ".../ast_convert.spl": Unexpected token: expected pattern, found Indent`.
+Nothing in it could have been live.
+
+Deleted: 99 tracked files, 25,232 lines, 1.1 MB, plus one gitignored
+`.simple/logs/` residue directory (the 100th on-disk file).
+Recoverable from `ae55a7467197350bdf8b91c48444c167219ce8bb`, the last commit
+that touched the tree. Exact file list preserved at
+`doc/08_tracking/bug/app_interpreter_deleted_file_list_2026-08-17.txt`.
+
+### The 14 in-tree `_spec.spl` files
+12 have live counterparts under `test/01_unit/app/interpreter/` — which is a
+**namesake test tree**, importing only `std.*` and `app.io`, never
+`app.interpreter`, so it tests the stdlib equivalents and is unaffected. The 2
+without a counterpart (`mailbox_spec.spl`, `control_flow_spec.spl`) test only
+tree-internal code (`from mailbox import {...}`, and
+`eval_for`/`eval_while`/`eval_loop`/`eval_if`/`eval_match`): they have no
+subject left, and could not run anyway.
+
+### Prevention
+`scripts/check/check-removed-trees-absent.shs` — scans every
+`src/**/__init__.spl` for a removal declaration (`` `a.b.c` - REMOVED ``, also
+`DELETED`) and fails if `src/a/b/c` still holds files. Tree check, not a range
+check, since a commit that edits only the `__init__.spl` can introduce the
+contradiction without touching the tree it names. `--selftest` (6 fixtures) runs
+before every scan and is fatal; fixture 1 replays this exact incident and must
+FAIL. Verdict convention matches the pre-push guards: `PASS — <n> declaration(s)
+checked, 0 still on disk` / `FAIL` exit 1 / `ERROR — nothing was checked` exit 2,
+with a 0-declaration run always ERROR. Measured on this tree after the deletion:
+`PASS — 1 declaration(s) checked, 0 still on disk`.
+
+Status: RESOLVED.

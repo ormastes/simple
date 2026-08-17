@@ -303,3 +303,30 @@ prior doc explicitly reserves that decision for the repo owner. Deleting them
 here would also collide with the `check-tree-size-push.shs` load-bearing-path
 and file-count gates, which is exactly the review those gates exist to force.
 Status OPEN, owner-gated, no code change.
+
+## 2026-08-17 — executed
+
+The recommendation was carried out. The uniqueness check this package listed as
+NOT done was completed first and the tree was deleted; full evidence, counts and
+the prevention guard are recorded in the companion doc,
+`app_interpreter_tree_declared_removed_but_still_on_disk_2026-08-10.md`
+(§ "2026-08-17 — RESOLVED").
+
+Disposition of the two real inbound dependencies this package identified:
+- `test/01_unit/lib/nogc_async_mut_noalloc/execution/watchdog_manager_spec.spl`
+  — repointed, not deleted. The two blocks that read the app-layer
+  `watchdog.spl` now assert the property that outlives any single module: no
+  app-layer copy exists to re-declare the externs, and the `WatchdogManager`
+  facade still declares them. Strictly stronger than the old "this one file is
+  clean". (One drafted assertion — that the isolation gate names `rt_watchdog` —
+  was dropped after checking: `check-ui-backend-isolation.shs` bans app-layer
+  externs by path class, not by symbol, so that assertion would have been false.)
+- `test/03_system/feature/interpreter/runtime_error_stack_spec.spl` — repointed
+  off the dead tree onto `bin/simple run`, and its fixture path corrected: it
+  named `test/system/interpreter/sample/...`, which does not exist, so the spec
+  had **never** passed — it failed on a missing file, not on its assertion. It is
+  now left legitimately RED on the real assertion (the live path reports
+  `error[E1002]` at semantic analysis, with no `Runtime error` header and no
+  `Call stack:` section) and filed as
+  `doc/08_tracking/bug/runtime_error_stack_absent_on_live_interpreter_2026-08-17.md`.
+  Not weakened, not deleted, not marked pending.
