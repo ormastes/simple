@@ -1,0 +1,65 @@
+# Truncated child-output capture must NEVER be reported as a clean result.
+#
+# `rt_fork_parent_wait_bounded` (src/runtime/runtime_fork.c) caps a captured
+# child stream at FORK_CAPTURE_LIMIT = 4 MiB, keeping the first 2 MiB + the
+# last 2 MiB and splicing `[output truncated: N bytes omitted]` where the
+# MIDDLE was dropped. Any per-example lines that lived in that dropped middle
+# are gone, so the `Passed:`/`Failed:` counts scraped out of the surviving text
+# are a LOWER BOUND, not the truth.
+#
+# `src/app/test_runner_new/test_runner_single.spl` already recognises the
+# marker; the stdlib mapper `make_result_from_output`
+# (src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl) did not, so the
+# stdlib path silently under-reported example counts and still called the file
+# GREEN. That is the defect this spec fences.
+#
+# Bug: doc/08_tracking/bug/stage4_test_runner_pipe_capture_truncation_rt_fork_2026-07-20.md
+
+use std.spipe.*
+use std.test_runner.test_executor_parsing.{make_result_from_output}
+
+fn _truncated_stdout() -> text:
+    "Passed: 12\nFailed: 0\n[output truncated: 3145728 bytes omitted]\nPassed: 12\nFailed: 0\n"
+
+fn _clean_stdout() -> text:
+    "Passed: 12\nFailed: 0\n"
+
+describe "truncated capture is never a clean pass":
+
+    it "reports a failure when the truncation marker is present":
+        val r = make_result_from_output("x_spec.spl", _truncated_stdout(), "", 0, 10, 60)
+        assert_true(r.failed > 0)
+
+    it "names truncation in the error so the cause is not guessed":
+        val r = make_result_from_output("x_spec.spl", _truncated_stdout(), "", 0, 10, 60)
+        assert_true(r.error.contains("truncat"))
+
+    it "does not credit the scraped pass count from a truncated capture":
+        val r = make_result_from_output("x_spec.spl", _truncated_stdout(), "", 0, 10, 60)
+        assert_equal(r.passed, 0)
+
+describe "detection: the guard must key on truncation, not on anything else":
+
+    # Generalises past the reproducer above: the guard must not fire on clean
+    # output (that would red the whole suite), must fire regardless of which
+    # stream carried the marker, and must fire even when the surviving text
+    # looks perfectly green.
+    it "an untruncated green capture still passes":
+        val r = make_result_from_output("x_spec.spl", _clean_stdout(), "", 0, 10, 60)
+        assert_equal(r.passed, 12)
+        assert_equal(r.failed, 0)
+
+    it "a marker on stderr is caught too":
+        val r = make_result_from_output("x_spec.spl", _clean_stdout(), "[output truncated: 99 bytes omitted]", 0, 10, 60)
+        assert_true(r.failed > 0)
+
+    it "a marker with a different omitted-byte count is still caught":
+        val out = "Passed: 3\nFailed: 0\n[output truncated: 1 bytes omitted]\n"
+        val r = make_result_from_output("x_spec.spl", out, "", 0, 10, 60)
+        assert_true(r.failed > 0)
+
+    it "prose merely mentioning truncation is not enough to fail a file":
+        val out = "Passed: 3\nFailed: 0\nnote: we discuss output truncated behaviour here\n"
+        val r = make_result_from_output("x_spec.spl", out, "", 0, 10, 60)
+        assert_equal(r.failed, 0)
+        assert_equal(r.passed, 3)
