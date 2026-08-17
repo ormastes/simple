@@ -1085,3 +1085,51 @@ NamedVar branch, with the `:1080-1087` comment naming this bug id; no
 `self.symbols.lookup()` remains in `try_lower_bitfield_construct` at `:1059`.
 The SIGSEGV claim itself still requires a full stage-3 self-hosted run, which
 per the governing fact was not available in this lane.
+
+---
+
+## Re-measured 2026-08-17 (W4 bug-fixing wave) — reproduces, but on a PRE-FIX artifact; collapses into the call-to-zero family
+
+Reproduced this doc's exact `hello.spl` repro against the staged binary in
+`/mnt/data/worktrees/simple-main`:
+
+```
+$ printf 'fn main():\n    print("hello")\n' > hello.spl
+$ bootstrap/stage2/simple native-build -o hello_out hello.spl
+Segmentation fault (core dumped)   # rc=139
+```
+
+and the stage3 sibling fails identically (`rc=139` on the trivial
+`fn main() -> i64: 0` fixture).
+
+**Both staged binaries are 3,464,072 bytes and each contains 169 direct
+`call 0` sites**, measured with `sh scripts/check/check-no-call-zero.shs`:
+
+```
+call-to-zero: bootstrap/stage3/x86_64-unknown-linux-gnu/simple has 169 site(s)
+call-to-zero: bootstrap/stage2/simple has 169 site(s)
+FAIL — 338 call-to-zero site(s) across 2 binary/binaries
+```
+
+169 is the exact count that
+`stage2_native_build_link_undefined_method_symbols_2026-08-09` records for a tree
+built WITHOUT `36673b6b6a3`. A binary carrying 169 unconditional calls to address
+zero will SIGSEGV with `rip=0` on essentially any code path, which is precisely
+this doc's headline symptom ("SIGSEGVs on essentially EVERY `native-build`") — and
+it explains why the symbolized frame differed between stage2
+(`SymbolTable.lookup`) and stage3 (`0x517966`): gdb attributes an `rip=0` fault to
+the nearest preceding symbol in the *caller*, so the reported frame is an
+artifact of where the bad call happens to sit, not of a defect in that function.
+That symbolization trap is documented in
+`scripts/check/check-no-call-zero.shs`'s own header comment for exactly this
+reason.
+
+Consequence for this row's "Verification status" section: the still-pending
+end-to-end confirmation cannot be obtained from these artifacts at all. They
+predate the family fix, so they measure the old tree no matter how the scoped
+`.spl` fix behaves. **Re-scoped to the same mechanical gate as
+`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11`:** rebuild
+stage2/stage3 from current source, then require
+`sh scripts/check/check-no-call-zero.shs <new binaries>` to report `PASS` before
+re-running the `hello.spl` repro. A rebuild was out of scope for this wave
+(clobbers ~16 concurrent lanes).

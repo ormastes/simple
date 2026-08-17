@@ -62,3 +62,22 @@ This doc names no 50.mir function; all repairs it cites are OS-side scalar APIs
 ABI lowering yields only comment lines 81 and 282 — no aggregate-ABI fix exists
 there. The 2026-07-17 triage note's pending freestanding boot verification is
 unchanged.
+
+---
+
+## Not re-measured 2026-08-17 (W4 bug-fixing wave)
+
+The 2026-07-17 triage note's pending item is unchanged and was not dischargeable
+here: it requires a fresh stage-3 *freestanding* build that compiles and boots
+under QEMU with zero PMM/VMM faults. That needs a stage-binary rebuild (the
+staged binaries in this checkout are pre-fix artifacts — 169 `call 0` sites each,
+measured 2026-08-17) plus a QEMU boot lane, both out of scope for this wave.
+
+Left **OPEN, unverified**. Note for the next lane: the workarounds this doc
+describes (`pmm_alloc_page_raw`, `vmm_init_from_global_pmm`,
+`arch_x86_64_direct_boot_init`) are scalar-only APIs that deliberately AVOID the
+aggregate ABI, so a green boot through those paths does **not** verify the
+aggregate ABI fix. The acceptance test must pass a four-field `u64` struct by
+value across a module boundary directly, as this doc's own "Required Fix"
+paragraph asks — including the unused-parameter case, which is the variant that
+was proven to corrupt even when the callee never reads the aggregate.

@@ -214,3 +214,27 @@ sh /home/ormastes/dev/simple-s3bisect/build/cyc/gdb_stage3.sh FIX1 GDBRUN1 1800
 `FIX1/stage2-simple` is a stage2 built from a tree carrying blockers #2, #3 and
 #4's fixes. Evidence retained under
 `/home/ormastes/dev/simple-s3bisect/build/cyc/{FIX1RUN,GDBRUN1}`.
+
+---
+
+## Not re-measured 2026-08-17 (W4 bug-fixing wave) — left OPEN deliberately
+
+This row's `.spl`-side fix is recorded as landed with RED/GREEN and a sabotage
+check; the part left open is the underlying Rust-seed fail-open. That half was
+NOT verified here, and no claim is made about it.
+
+Why no measurement was taken: the observable is a SIGSEGV at ~394 s inside a
+stage-3 self-host run, which requires rebuilt stage binaries. The staged binaries
+present in this checkout are pre-fix artifacts carrying 169 `call 0` sites each
+(measured 2026-08-17, see
+`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11`), so any crash
+they produce cannot be attributed to a vtable field offset — a fault at `rip=0`
+symbolizes to whatever function precedes the bad call, which is exactly how the
+`emit_module_header` frame in this doc could arise without
+`emit_module_header` being at fault. Distinguishing the two requires binaries
+built from current source. Rebuilding was out of scope for this wave.
+
+Left **OPEN**, unverified either way, per the wave rule that a wrong close loses
+a real defect permanently. The next lane should re-take the backtrace only after
+`sh scripts/check/check-no-call-zero.shs` reports `PASS` on the binaries under
+test; otherwise the measurement is not interpretable.
