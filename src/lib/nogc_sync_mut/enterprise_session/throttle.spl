@@ -24,6 +24,21 @@ use std.nogc_sync_mut.enterprise_store.store.{
     EnterpriseStore, store_migrate, store_rows, store_insert_row, store_truncate
 }
 
+# throttle_max_rows is the hard ceiling on how many counter rows the throttle
+# table may retain at once, across every key and window. It is the memory bound
+# the identity-cycling DoS defence rests on: no flood of distinct identities can
+# push retained rows past it (see `throttle_admit`). Fixed, positive, tunable —
+# raise it to track more concurrent identities per window at a linear memory /
+# scan-cost price, never above what the deployment can afford to scan on every
+# attempt.
+# ponytail: O(1)-memory ceiling — throttle state is capped at THROTTLE_MAX_ROWS
+# (256) counter rows total; beyond that a genuinely new identity is denied
+# (fail-closed) rather than tracked. The cap trades unbounded exact per-identity
+# accounting for a bounded table; the security direction of the trade is always
+# "deny", never "admit".
+fn throttle_max_rows() -> i64:
+    256
+
 fn throttle_setup(store: EnterpriseStore) -> bool:
     store_migrate(store, "throttle_001_hits",
         "CREATE TABLE IF NOT EXISTS throttle_hits (id INTEGER PRIMARY KEY, key TEXT, window TEXT)")
@@ -106,10 +121,25 @@ fn throttle_admit(store: EnterpriseStore, key: text, now_epoch: i64, window_secs
     throttle_prune(store, window)
     if throttle_count(store, key, window) >= limit:
         return false
+    # Bounded state (W15-A, anti-DoS). Pruning only reclaims rows once the whole
+    # table has aged out of the live window, so within one window an attacker
+    # cycling distinct identities would otherwise grow the counter table — and
+    # every attempt's linear scan — without bound. Cap the table at
+    # `throttle_max_rows()`: once it is full, a request that would add a NEW row
+    # is denied instead of inserted. This is fail-closed (deny), so it can only
+    # make the throttle stricter, never weaker: an already-tracked key keeps its
+    # exact accumulating count (no eviction, no reset), so no existing lockout is
+    # relaxed; only fresh identities past the ceiling are refused until the
+    # window turns. Checked AFTER the per-key limit so a key already at its limit
+    # still short-circuits to the normal 429 path above.
+    # ponytail: hard ceiling THROTTLE_MAX_ROWS — O(ceiling) memory and scan cost,
+    # independent of how many distinct identities flood the window.
+    if throttle_rows_retained(store) >= throttle_max_rows():
+        return false
     store_insert_row(store,
         "INSERT INTO throttle_hits (key, window) VALUES (?, ?)",
         [key, "{window}"])
     true
 
 export throttle_setup, throttle_window, throttle_count, throttle_admit
-export throttle_prune, throttle_rows_retained
+export throttle_prune, throttle_rows_retained, throttle_max_rows
