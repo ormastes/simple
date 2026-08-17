@@ -1,0 +1,73 @@
+# Inline-asm output write-back must exist for EVERY output constraint kind.
+#
+# Row: doc/08_tracking/bug/asm_template_placeholders_never_bind_2026-08-07.md
+# root cause C — `out(reg)` bindings compiled, linked, ran, and NEVER wrote
+# their outputs back. `asm volatile("movq $$42, $0", dst = out(reg) dst)`
+# returned 0 forever, with no warning and no error: a constant load that
+# cannot fail silently produced zero. A `rdtsc` written in the bound form
+# reported a timestamp of 0 forever.
+#
+# Why this spec inspects SOURCE instead of running the asm:
+#   - `bin/simple test` is the tree-walk interpreter and `bin/simple run` is
+#     the Cranelift JIT. Neither executes inline assembly at all — a probe of
+#     both engines on `dst = out(reg) dst` leaves `dst` untouched in BOTH, so
+#     an execution-shaped assertion here cannot distinguish fixed from broken.
+#   - The one spec that does drive the real pipeline
+#     (test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl,
+#     `mir_metadata_score`) exceeds the runner's 120s per-file budget on a
+#     loaded box and reports `timeout=1`, so it is inert as a guard.
+# So this spec pins the MIR-lowering invariant structurally, and pins it for
+# the whole CLASS: a future output constraint kind added to `lower_inline_asm`
+# without a write-back copy fails here.
+
+use std.io_runtime.{read_file_text}
+
+val LOWERING_PATH: text = "src/compiler/50.mir/_MirLowering/function_lowering.spl"
+
+fn lowering_source() -> text:
+    read_file_text(LOWERING_PATH)
+
+describe "Inline asm MIR lowering writes outputs back":
+    it "reads a non-empty lowering source (non-vacuity control)":
+        # Without this, a moved/renamed file would make every assertion below
+        # pass against the empty string.
+        val src = lowering_source()
+        expect(src.len() > 2000).to_be(true)
+        expect(src.contains("me lower_inline_asm(asm_node: HirAsm)")).to_be(true)
+
+    it "allocates a FRESH temp per output instead of aliasing the source local":
+        # The defect was `operand: mir_operand_copy(value_local)` on the output
+        # side: the output and its own source were the same local, so LLVM's
+        # `=r` result had nowhere to land.
+        val src = lowering_source()
+        expect(src.contains("var output_destinations: [LocalId] = []")).to_be(true)
+        expect(src.contains("var output_results: [LocalId] = []")).to_be(true)
+        expect(src.contains("val output_temp = self.builder.new_temp(")).to_be(true)
+
+    it "emits an explicit Copy write-back for every recorded output":
+        val src = lowering_source()
+        expect(src.contains(
+            "kind: MirInstKind.Copy(output_destinations[writeback_index], output_results[writeback_index])"
+        )).to_be(true)
+        expect(src.contains("while writeback_index < output_destinations.len():")).to_be(true)
+
+    it "records a destination for EVERY output constraint kind (class guard)":
+        # Out / LateOut and InOut are the two output-bearing arms today. Each
+        # must push BOTH a destination and a result, or its write-back is
+        # silently skipped. Counting the pushes catches a third arm added later
+        # that forgets one half of the pair.
+        val src = lowering_source()
+        expect(src.count("output_destinations.push(")).to_equal(src.count("output_results.push("))
+        expect(src.count("output_destinations.push(") >= 2).to_be(true)
+        expect(src.contains("case Out | LateOut:")).to_be(true)
+        expect(src.contains("case InOut:")).to_be(true)
+
+    it "keeps the LLVM backend consuming the output operands it is handed":
+        # Single-output captures the call result; multi-output must extractvalue
+        # each field. Dropping either half reintroduces the silent zero.
+        val backend = read_file_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl"
+        )
+        expect(backend.len() > 2000).to_be(true)
+        expect(backend.contains("me translate_inline_asm(")).to_be(true)
+        expect(backend.contains("extractvalue")).to_be(true)

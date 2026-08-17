@@ -1,0 +1,117 @@
+# Class guard: a bare `asm """..."""` template must not contain a `{ident}`
+# placeholder.
+#
+# Row: doc/08_tracking/bug/asm_template_placeholders_never_bind_2026-08-07.md
+#
+# The DEFECT CLASS, stated generally: `{name}` is a placeholder only when the
+# `asm` call carries a matching operand in its constraint list. In a bare,
+# operand-less template it is literal text, emitted verbatim into LLVM inline
+# asm, where the integrated assembler rejects `{`. The failure surfaces three
+# phases later as `error: <inline asm>:2:25: unexpected token in argument list`
+# naming NO Simple file and NO line — which is why this cost a Stage-3 build
+# and why five separate files accumulated the same mistake before anyone
+# noticed. There is no compile-time diagnostic for it today (see the row's
+# "Diagnostic gap"), so this spec is the diagnostic.
+#
+# Scope note (honest limits): this scans an explicit file list rather than
+# walking the tree. `list_dir_recursive` was tried first and is UNUSABLE as a
+# spec primitive here — the seed interpreter has no `rt_list_dir_recursive`
+# ("unknown extern function"), so it returns an empty list and every scan built
+# on it is VACUOUSLY GREEN. An explicit list with a non-vacuity control is
+# weaker in reach but cannot lie about having checked something.
+
+use std.io_runtime.{read_file_text}
+
+# Files known to contain an `asm` block. Two are the outstanding offenders and
+# are allowlisted below; the rest are the negative controls that prove the
+# detector distinguishes correct bare asm from broken bare asm.
+val ASM_BEARING: [text] = [
+    "src/os/kernel/arch/x86_64/timer.spl",
+    "src/os/kernel/arch/x86_64/topology.spl",
+    "src/lib/nogc_async_mut_noalloc/baremetal/x86/serial_test_kernel.spl",
+    "src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl",
+    "src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl",
+]
+
+# Shrink-only allowlist. Landing a fix for one of these must REMOVE it here;
+# the "allowlist is not stale" example below fails if an entry no longer
+# offends, so a fix cannot silently leave dead permission behind.
+val ALLOWED_OFFENDERS: [text] = [
+    "src/os/kernel/arch/x86_64/timer.spl",
+    "src/os/kernel/arch/x86_64/topology.spl",
+]
+
+# True when `line` looks like assembly mnemonic text carrying a `{ident}`
+# placeholder. Deliberately narrow: it requires a brace pair on a line that is
+# NOT a Simple string-interpolation site and NOT part of an operand list.
+fn is_placeholder_asm_line(line: text) -> bool:
+    val t = line.trim()
+    if not t.contains("{"): return false
+    if not t.contains("}"): return false
+    # Operand-bearing spellings are correct, not defects.
+    if t.contains("out(") or t.contains("in(") or t.contains("inout(") or t.contains("lateout("): return false
+    if t.starts_with("#"): return false
+    # An asm mnemonic line has no Simple statement punctuation.
+    if t.contains("\"") or t.contains("=") or t.contains(";"): return false
+    true
+
+# Count placeholder-bearing lines inside `asm """ ... """` blocks only.
+fn bare_asm_placeholder_lines(source: text) -> i64:
+    var inside = false
+    var hits = 0
+    for line in source.split("\n"):
+        val t = line.trim()
+        if not inside:
+            # A bare block opens with `asm """` / `asm volatile """` and no
+            # operand list on the same line.
+            if t.starts_with("asm ") and t.contains("\"\"\"") and not t.contains("("):
+                inside = true
+        else:
+            if t.contains("\"\"\""):
+                inside = false
+            elif is_placeholder_asm_line(line):
+                hits = hits + 1
+    hits
+
+fn offends(path: text) -> bool:
+    bare_asm_placeholder_lines(read_file_text(path)) > 0
+
+describe "Bare asm templates carry no unbound placeholders":
+    it "reads every listed asm-bearing file (non-vacuity control)":
+        # A renamed or deleted path would otherwise silently shrink the scan to
+        # nothing and report green.
+        for path in ASM_BEARING:
+            val src = read_file_text(path)
+            expect(src.len() > 200).to_be(true)
+            expect(src.contains("asm")).to_be(true)
+
+    it "detects the two known offenders (detector is not inert)":
+        # If this goes green-by-emptiness the detector has stopped working, and
+        # the "no new offenders" example below would be worthless.
+        expect(offends("src/os/kernel/arch/x86_64/timer.spl")).to_be(true)
+        expect(offends("src/os/kernel/arch/x86_64/topology.spl")).to_be(true)
+
+    it "clears bare asm that legitimately has no placeholders":
+        # `cli` / `hlt` with no operands — correct, and must not be flagged.
+        expect(offends(
+            "src/lib/nogc_async_mut_noalloc/baremetal/x86/serial_test_kernel.spl"
+        )).to_be(false)
+
+    it "clears the files already rerouted to SFFI volatile ops":
+        expect(offends(
+            "src/lib/nogc_async_mut_noalloc/baremetal/semihost_transport.spl"
+        )).to_be(false)
+        expect(offends(
+            "src/lib/nogc_async_mut_noalloc/baremetal/system_api.spl"
+        )).to_be(false)
+
+    it "admits no offender outside the shrink-only allowlist":
+        for path in ASM_BEARING:
+            if offends(path):
+                expect(ALLOWED_OFFENDERS.contains(path)).to_be(true)
+
+    it "keeps the allowlist non-stale":
+        # Every allowlisted path must still actually offend. Fix a file and this
+        # fails until its entry is deleted.
+        for path in ALLOWED_OFFENDERS:
+            expect(offends(path)).to_be(true)

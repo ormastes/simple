@@ -6,6 +6,7 @@
   diagnostic gap remain.** See "Re-triage 2026-08-17" below.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   **That stamp was wrong on two of the three root causes** — see the re-triage.
+- **Severity:** blocker (Stage-3 self-host blocker #10) — as originally filed.
 
 ## Re-triage 2026-08-17 (content grep of CURRENT source, not SHA ancestry)
 
@@ -87,7 +88,73 @@ supported form.
 - The diagnostic gap (a bare `asm` template containing `{ident}` with an empty
   constraint list should error at the asm site) is unimplemented. Its stated
   precondition — fixing `timer.spl` / `topology.spl` first — still holds.
-- **Severity:** blocker (Stage-3 self-host blocker #10)
+
+### Specs added by this triage — with ablation proofs
+
+Both run on `bin/simple` (the stale Rust seed) reading `src/**` as SOURCE, in
+under 500ms each, with `--no-session-daemon`.
+
+**1. `test/01_unit/compiler/mir/inline_asm_output_writeback_spec.spl`** —
+reproducing guard for root cause C (fresh output temp + explicit `Copy`
+write-back, per output constraint KIND).
+
+```
+Results: 5 total, 5 passed, 0 failed      # after (current source)
+```
+
+Ablation (`MirInstKind.Copy(output_destinations[i], output_results[i])` ->
+`MirInstKind.Nop` in `function_lowering.spl`, then restored):
+
+```
+✗ emits an explicit Copy write-back for every recorded output
+Results: 5 total, 4 passed, 1 failed
+```
+
+A first ablation attempt silently did NOT apply (a shell `||` short-circuit left
+the file untouched) and reported a false 5/5 green. The count of the target
+string is now printed before and after every ablation; without that control the
+"proof" would have been vacuous — the same trap this row's original root cause C
+fell into.
+
+**2. `test/01_unit/compiler/mir/inline_asm_bare_template_placeholder_spec.spl`**
+— class-level detection: no scanned `.spl` may combine a bare (operand-less)
+`asm` template with a `{ident}` placeholder. Shrink-only allowlist holds exactly
+`timer.spl` and `topology.spl`; a fixed file must be removed from it.
+
+```
+Results: 6 total, 6 passed, 0 failed      # after (current source)
+```
+
+Ablation A — fix the offender (`mov {lo}, rax` -> `mov rcx, rax` in
+`timer.spl`): the allowlist correctly reads as stale.
+
+```
+✗ detects the two known offenders (detector is not inert)
+✗ keeps the allowlist non-stale
+Results: 6 total, 4 passed, 2 failed
+```
+
+Ablation B — inject a NEW offender into a currently-clean file
+(`{port}` placeholder into `serial_test_kernel.spl`): the class guard fires,
+which is the regression it exists to catch.
+
+```
+✗ clears bare asm that legitimately has no placeholders
+✗ admits no offender outside the shrink-only allowlist
+Results: 6 total, 4 passed, 2 failed
+```
+
+All three ablations were reverted and `git diff --stat` confirmed empty on the
+mutated files afterwards.
+
+### Incidental finding (not this row, not fixed here)
+
+`list_dir_recursive` (`src/lib/nogc_sync_mut/sffi/io.spl:179`) is unusable as a
+spec primitive under `bin/simple`: the seed interpreter has no
+`rt_list_dir_recursive` ("unknown extern function: rt_list_dir_recursive",
+E1002) and the call returns an EMPTY list rather than failing. Any tree-scanning
+spec built on it is vacuously green. That is why spec 2 uses an explicit file
+list plus a non-vacuity control instead of a directory walk.
 
 ## Symptom
 
