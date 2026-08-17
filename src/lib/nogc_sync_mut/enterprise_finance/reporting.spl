@@ -1,0 +1,125 @@
+"""
+# Enterprise Finance Reporting — session-gated trial balance / general ledger
+
+Lane `.spipe/simple_enterprise_suite`, W18-B (finance vertical reporting).
+
+A **trial balance** is the fundamental general-ledger report: for every
+account, the sum of its debit postings and the sum of its credit postings,
+plus the ledger-integrity invariant that **TOTAL DEBITS == TOTAL CREDITS**.
+A balanced ledger is the precondition for every downstream financial
+statement; an unbalanced one signals a corrupt or partially-posted journal
+and MUST be reported as such, never silently rendered as if correct.
+
+## Contract
+
+Reports are **pure reads**. The foundation design note records that reports
+need no action grant (they mutate nothing), so this module adds no guarded
+write and no new RBAC action. It still enforces the two invariants every
+read in the suite obeys:
+
+1. **Read through the session.** `trial_balance` refuses unless
+   `session_valid(session, tenant, who)` holds — an inactive session, a
+   token-less session, or an actor/tenant mismatch yields `ok:false` with
+   reason `invalid-session` and no data.
+2. **Tenant isolation.** The fold reads ONLY rows whose `tenant_id` equals
+   the authoritative `tenant.tenant_id` (which `session_valid` has already
+   proven equal to `session.tenant_id`). Tenant B's report can never include
+   tenant A's journal rows.
+
+Money is carried as integer minor units (cents) end to end — the folds are
+pure `i64` additions, never floats, so the debits==credits comparison is
+exact.
+
+## The two entry points
+
+- `trial_balance(store, session, tenant, who)` — the LIVE trial balance:
+  every posted journal row for the session's tenant, folded per account into
+  `TrialBalanceReport { debit_total, credit_total, balanced, lines }`.
+- `trial_balance_at_close(store, session, tenant, who, period_end_epoch)` —
+  the PERIOD-SCOPED variant: the debit/credit totals captured in
+  `period_locks` at the latest period close on or before `period_end_epoch`
+  (the period-boundary trial balance recorded by `fin_period_close`).
+
+## Known limitation (documented)
+
+The shared `journal` table carries no per-row posting date
+(`records.journal_post_pair` uses `posted_at_epoch` only to enforce the
+period lock; it is not stored on the row). The live `trial_balance` is
+therefore always as-of-now, and the period-scoped variant reconstructs a
+period-boundary trial balance from the snapshot totals `fin_period_close`
+records at close time — per-account lines are not part of that snapshot, so
+`trial_balance_at_close` returns totals + balanced flag with empty `lines`.
+Adding a per-row date to the journal is future work (a schema migration
+owned by the store lane), not done here.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, session_valid
+}
+use std.nogc_sync_mut.enterprise_finance.finance.{
+    FinAccountLine, FinTrialBalance, fin_trial_balance
+}
+
+# TrialBalanceReport is the session-gated result: ok/reason gate the read,
+# the rest is the folded ledger. reason is "accepted" on success,
+# "invalid-session" when the session is rejected, "no-close" when a
+# period-scoped read finds no close on or before the boundary.
+struct TrialBalanceReport:
+    ok: bool
+    reason: text
+    debit_total: i64
+    credit_total: i64
+    balanced: bool
+    lines: [FinAccountLine]
+
+fn rep_denied(reason: text) -> TrialBalanceReport:
+    TrialBalanceReport(ok: false, reason: reason, debit_total: 0, credit_total: 0, balanced: false, lines: [])
+
+# trial_balance produces the LIVE trial balance for the session's tenant.
+# Reads through the session (session_valid) and is tenant-isolated: the fold
+# in fin_trial_balance keeps only tenant.tenant_id's rows.
+fn trial_balance(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext) -> TrialBalanceReport:
+    if not session_valid(session, tenant, who):
+        return rep_denied("invalid-session")
+    val tb: FinTrialBalance = fin_trial_balance(store, tenant.tenant_id)
+    TrialBalanceReport(ok: true, reason: "accepted", debit_total: tb.debit_total, credit_total: tb.credit_total, balanced: tb.balanced, lines: tb.lines)
+
+# trial_balance_account returns one account's (debit_cents, credit_cents)
+# totals from a report ((0, 0) when the account has no postings).
+fn trial_balance_account(rep: TrialBalanceReport, account: text) -> (i64, i64):
+    for line in rep.lines:
+        if line.account == account:
+            return (line.debit_cents, line.credit_cents)
+    (0, 0)
+
+# trial_balance_at_close is the PERIOD-SCOPED variant: the debit/credit
+# totals captured at the latest period close whose period_end_epoch is on or
+# before `period_end_epoch`. This is the period-boundary trial balance
+# fin_period_close recorded; per-account lines are not part of the snapshot
+# (see module docstring), so `lines` is empty here. reason "no-close" when
+# no close covers the requested boundary.
+fn trial_balance_at_close(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, period_end_epoch: i64) -> TrialBalanceReport:
+    if not session_valid(session, tenant, who):
+        return rep_denied("invalid-session")
+    var found = false
+    var best_end: i64 = 0
+    var debit: i64 = 0
+    var credit: i64 = 0
+    val rows = store_rows(store, "period_locks", "id, tenant_id, period_end_epoch, closed_by, debit_total, credit_total, closed_at_epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant.tenant_id:
+            continue
+        val end = int(sqlite_row_get(row, "period_end_epoch"))
+        if end <= period_end_epoch and (not found or end >= best_end):
+            found = true
+            best_end = end
+            debit = int(sqlite_row_get(row, "debit_total"))
+            credit = int(sqlite_row_get(row, "credit_total"))
+    if not found:
+        return TrialBalanceReport(ok: true, reason: "no-close", debit_total: 0, credit_total: 0, balanced: true, lines: [])
+    TrialBalanceReport(ok: true, reason: "accepted", debit_total: debit, credit_total: credit, balanced: debit == credit, lines: [])
+
+export TrialBalanceReport
+export trial_balance, trial_balance_account, trial_balance_at_close
