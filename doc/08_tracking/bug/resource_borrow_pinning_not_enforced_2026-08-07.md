@@ -122,9 +122,39 @@ the accepted over-approximation already recorded in `mod.spl:265-272` (the walk
 is linear over `func.blocks`, not CFG-path-sensitive) means it would false-
 positive on mutually exclusive branches without region/liveness infra first.
 
-**Not proven by execution.** `bin/simple test
-test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl --timeout 900`
-was launched under `scripts/resource/test-slot.shs` and produced a **zero-byte
-log after >30 minutes** at high host load. Per the 2026-08-17 RESTART FINDINGS
-(item C), an absent `Results:` line is UNVERIFIED, not a failure — so no
-before/after `Results:` line is quoted and none should be inferred.
+### Execution: the named reproducer is GREEN, and that is the alarming part
+
+`bin/simple test test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl
+--timeout 900` under `scripts/resource/test-slot.shs` eventually completed
+(rc=0, ~50 min wall at load 48-124 — an earlier reading of this same run as a
+"zero-byte log" was my polling racing the output flush, and is retracted):
+
+    SPEC FILE VERDICT: .../resource_borrow_pinning_spec.spl declared>=1 executed=1 passed=1 failed=0 dropped=0
+    Results: 1 total, 1 passed, 0 failed
+
+The spec's own docstring says this `it` block "is expected to FAIL until the
+borrow-liveness-vs-move-or-drop check described above is implemented", and its
+assertion is an honest statement of the DESIRED behaviour:
+
+    assert_true(checker.errors.len() > 0)
+
+So a spec written to be RED against this gap is now GREEN **while the gap it
+describes is still present in the source** (`record_move` still never consults
+`borrows_of` — see above; that is a direct read of the file, not an inference).
+
+This does not close the bug. The likely explanation is that the assertion does
+not discriminate: it counts ANY entry in `checker.errors`, not the invariant-3
+diagnostic. The hand-built fixture declares `locals: []` while referencing
+`LocalId(id: 0)` and `LocalId(id: 1)`, so an unrelated out-of-range-local error
+would satisfy `errors.len() > 0` just as well as the borrow diagnostic would —
+a false green of exactly the silent-pass class this sweep exists to find.
+
+**Unproven either way:** I did not capture the error MESSAGES, so I cannot say
+which error made the count non-zero. Deciding it needs one more run printing
+`checker.errors`, at ~50 min on this host.
+
+**Recommended next step (not taken here):** tighten the assertion to match the
+diagnostic text rather than the count, then re-run. I deliberately did not edit
+the spec: turning it red-or-green again without being able to re-verify inside
+this session would ship an unverified test change, which is worse than leaving
+an honest note.

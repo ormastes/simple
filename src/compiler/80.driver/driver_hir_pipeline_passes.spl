@@ -10,6 +10,10 @@ use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
     safety_pass_severity
 }
+use compiler.driver.driver_typecheck_severity.{
+    TypecheckPassSeverity,
+    typecheck_pass_severity
+}
 use compiler.types.type_infer_types.{HmInferContext}
 use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.safety_checker.{
@@ -69,27 +73,66 @@ impl CompilerDriver:
         true
 
 pub fn run_typecheck_warn_pass(
+    ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
 ) -> [text]:
+    """Type-inference + visibility diagnostics, profile-gated for enforcement.
+
+    This pass is where declared return types actually get checked: the check
+    itself lives at 30.types/type_infer/inference_control.spl:564-574, where an
+    annotated function's body is inferred in Check mode and `subsume(body_ty,
+    fn_.return_type)` compares it against the declaration. Those errors land in
+    `ictx.errors` and arrive here.
+
+    Until 2026-08-17 this function returned them as strings and the caller only
+    `log_warn`ed them, so a `fn f() -> bool` returning a text literal produced a
+    genuine, correct diagnostic that was then thrown away — the build stayed
+    green and both engines returned different wrong values at rc=0. That is a
+    FAIL-OPEN, the same shape as `[use-warning]` reporting an unresolved import
+    at rc=0.
+
+    `severity` now decides whether the diagnostic also reaches `ctx`:
+    Advisory (default, unchanged) log-only; Warn -> ctx.add_warning; Deny ->
+    ctx.add_error, which fails the build. The default is deliberately Advisory
+    because the true violation count over the full module set has never been
+    measured — see the bug doc's step 2. Promote via SIMPLE_TYPECHECK_PROFILE
+    only after a census.
+    """
+    val severity = typecheck_pass_severity()
     var out: [text] = []
     for name in hir_modules.keys():
         val m = hir_modules[name]
-        # Type inference diagnostics (unification / occurs-check / mismatch).
+        # Type inference diagnostics (unification / occurs-check / mismatch),
+        # including declared-vs-actual return type mismatches.
         var ictx = HmInferContext.with_builtins()
         ictx.infer_module(m)
         var e_idx = 0
         while e_idx < ictx.errors.len():
-            out = out.push(
-                "[typecheck] {name}: " +
-                _format_type_infer_error(ictx.errors[e_idx]))
+            val msg = "[typecheck] {name}: " +
+                _format_type_infer_error(ictx.errors[e_idx])
+            out = out.push(msg)
+            match severity:
+                case TypecheckPassSeverity.Advisory:
+                    val _ = 0
+                case TypecheckPassSeverity.Warn:
+                    ctx.add_warning(msg)
+                case TypecheckPassSeverity.Deny:
+                    ctx.add_error(msg)
             e_idx = e_idx + 1
         # Visibility diagnostics (cross-module private/friend/package access).
         val vwarnings = check_module_visibility(m, name)
         var v_idx = 0
         while v_idx < vwarnings.len():
             val vw = vwarnings[v_idx]
-            out = out.push(
-                "[visibility {vw.code}] {name}: {vw.message}")
+            val vmsg = "[visibility {vw.code}] {name}: {vw.message}"
+            out = out.push(vmsg)
+            match severity:
+                case TypecheckPassSeverity.Advisory:
+                    val _ = 0
+                case TypecheckPassSeverity.Warn:
+                    ctx.add_warning(vmsg)
+                case TypecheckPassSeverity.Deny:
+                    ctx.add_error(vmsg)
             v_idx = v_idx + 1
     out
 

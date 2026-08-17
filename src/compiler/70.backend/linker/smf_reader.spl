@@ -18,126 +18,163 @@
 use compiler.backend.linker.obj_taker (SmfSymbol, SymbolType, SymbolBinding)
 use compiler.backend.linker.smf_enums (Platform, Arch, CompressionType)
 use compiler.mono.monomorphize.note_sdn (NoteSdnMetadata)
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_read_bytes}
+# The extern-free pure-Simple SMF decoders. Named imports, NOT a wildcard:
+# smf_reader_memory re-exports its own `SmfFlags`, `derive_section_index` and
+# `char_from_byte`, all of which this module also defines. A wildcard here would
+# make one name carry two terminal identities in a single scope -- exactly the
+# hazard called out in the ponytail note above.
+use compiler.backend.linker.smf_reader_memory.{
+    SmfMemoryHeader,
+    parse_header_from_bytes,
+    extract_string_table,
+    smf_payload_file_offset,
+    bytes_to_u32,
+    bytes_to_u64
+}
 
 # ============================================================================
 # Rust SFFI Declarations
 # ============================================================================
 #
-# These extern functions were INTENDED to be implemented in
-# src/rust/loader/src/smf/ffi.rs to handle low-level binary parsing. That path
-# does not exist in this repo and never has; see the block below.
+# HISTORICAL. Six `extern fn rt_smf_reader_*` symbols used to be declared here
+# and called on every read. They were INTENDED to live in
+# src/rust/loader/src/smf/ffi.rs -- a path that does not exist in this repo and
+# never has -- and no name-variant (sffi_smf_*, ffi_smf_*) existed either.
+#
+# They are deleted as of 2026-08-17. Reads are now done in pure Simple by the
+# same decoders SmfReaderMemory uses. See the RESOLVED block below and
+# doc/08_tracking/bug/smf_reader_bridge_silent_nil.md.
 
-# SmfReaderFfi - Rust SFFI handle for SMF file reading.
-# extern class not parseable by runtime (generics in signatures).
-# Stubs provided for runtime compatibility.
+# RESOLVED 2026-08-17 (doc/08_tracking/bug/smf_reader_bridge_silent_nil.md).
 #
-# !! NONE OF THE SIX rt_smf_reader_* EXTERNS BELOW ARE IMPLEMENTED. !!
+# The six `rt_smf_reader_*` externs are GONE. They were never implemented, and
+# an unregistered extern does not fail to link -- it yields 0/nil -- so this
+# type reported `Ok` for every input and then handed back a hardcoded all-zero
+# header, an empty symbol table, an empty string table and empty section data.
+# That is the silent-wrong-answer shape: no crash, no log, exit 0, and a caller
+# with no way to tell an empty module from one that was never read.
 #
-# Verified 2026-08-01 over the whole tree: the only matches for each symbol are
-# these declarations and their call sites in this file. There is no definition
-# in src/runtime/, src/compiler_rust/, or any .rs/.c/.h/.cpp file, and no
-# name-variant (sffi_smf_*, ffi_smf_*) exists either. The header comment above
-# points at src/rust/loader/src/smf/ffi.rs -- that directory does not exist.
+# The reads below are now real, and are the SAME decoders `SmfReaderMemory`
+# uses (`parse_header_from_bytes`, `extract_string_table`, and the 56-byte
+# symbol-entry layout from `_SmfReaderMemory/symbol_parser.spl`). Routing both
+# readers through one set of decoders is the point: it makes the two agree by
+# construction, which is what
+# `test/01_unit/compiler/linker/smf_reader_bridge_parity_class_spec.spl`
+# pins. `SmfReaderFfi` keeps its name and method signatures so no consumer
+# (link.spl, object_provider.spl, object_resolver.spl, lazy_instantiator.spl,
+# smf_getter.spl, module_loader.spl) changes shape.
 #
-# An unregistered extern does NOT fail to link. Depending on lane it yields a
-# silent 0/nil, and the native link emits a weak zero-size definition so the
-# symbol never even shows up in `nm -u`. The practical consequence here is worse
-# than a crash: rt_smf_reader_open returns 0, `handle < 0` is false, so open()
-# reports Ok(..) for ANY path -- including one that does not exist -- and every
-# read below then returns hardcoded empty data. This reader silently claims that
-# every SMF file it is given parses fine and contains zero symbols.
-#
-# THERE IS ALREADY A WORKING PURE-SIMPLE SMF READER. `SmfReaderMemory`
-# (smf_reader_memory.spl -> _SmfReaderMemory/{header_parser,symbol_parser}.spl,
-# ~919 lines, no externs) does real magic detection, header parsing, string
-# table location, symbol parsing, code reads and relocations from a [u8]. The
-# intended resolution is to re-route SmfReaderImpl onto it -- read the file to
-# bytes, then SmfReaderMemory.from_data -- and delete these six externs, which
-# is the same shape as the ffi_regex_*/sffi_regex_* de-duplication. That rework
-# spans the SmfReaderImpl/SmfReaderMemory type seam and its consumers
-# (smf_cache, smf_getter, object_resolver, object_provider, link, module_loader)
-# and is the link owner's call, so it is filed rather than done here:
-#   doc/08_tracking/bug/smf_reader_bridge_silent_nil.md
-extern fn rt_smf_reader_open(path: text) -> i64
-extern fn rt_smf_reader_read_header(handle: i64) -> i64
-extern fn rt_smf_reader_read_section(handle: i64, index: i32) -> i64
-extern fn rt_smf_reader_read_symbol_table(handle: i64) -> i64
-extern fn rt_smf_reader_read_string_table(handle: i64) -> i64
-extern fn rt_smf_reader_close(handle: i64) -> i64
-
+# `handle` is retained as a field only because `SmfHeaderRaw`/`SmfSymbolRaw` are
+# re-exported from linker/__init__.spl and callers may construct this type; it
+# is always 0 and nothing reads it.
 struct SmfReaderFfi:
     handle: i64
+    data: [u8]
+    mem_header: SmfMemoryHeader
 
 impl SmfReaderFfi:
     static fn open(path: text) -> Result<SmfReaderFfi, text>:
-        # FAIL CLOSED on a path that does not exist.
-        #
-        # `rt_smf_reader_open` is an unregistered extern (see the block above):
-        # it returns 0, the `handle < 0` guard below is therefore never true,
-        # and this reported `Ok` for EVERY path -- including one that does not
-        # exist -- after which every read yielded empty data. A missing input
-        # object was indistinguishable from an empty one.
-        #
-        # The existence check is deliberately the whole of the fix here. It
-        # converts the one silent-success case into a diagnostic while leaving
-        # the behaviour for a path that DOES exist byte-identical, so no
-        # existing caller (link.spl, object_provider.spl, lazy_instantiator.spl)
-        # changes outcome on any input it can succeed on today. The deeper
-        # rework -- re-routing onto SmfReaderMemory.from_data and deleting the
-        # six dead externs -- spans the SmfReaderImpl/SmfReaderMemory type seam
-        # and stays filed.
+        # FAIL CLOSED, on all three ways this can go wrong: a path that does not
+        # exist, a file that is empty, and a file whose magic is not SMF. Each
+        # used to be an `Ok` carrying nothing.
         if not file_exists(path):
             return Err("failed to open SMF reader: no such file: {path}")
-        pass_todo("the five remaining rt_smf_reader_* externs have no implementation, so reads still yield empty data on a file that DOES exist. Re-route onto SmfReaderMemory.from_data", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
-        val handle = rt_smf_reader_open(path)
-        if handle < 0:
-            Err("failed to open SMF reader: {path}")
-        else:
-            Ok(SmfReaderFfi(handle: handle))
+        val data = file_read_bytes(path)
+        if data.len() == 0:
+            return Err("failed to open SMF reader: empty file: {path}")
+        val mem_header = parse_header_from_bytes(data)?
+        Ok(SmfReaderFfi(handle: 0, data: data, mem_header: mem_header))
 
     fn read_header() -> SmfHeaderRaw:
-        pass_todo("returns a hardcoded zero header; the rt_smf_reader_read_header result is discarded. SmfReaderMemory.parse_header_from_bytes already does this for real", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
-        val _ = rt_smf_reader_read_header(self.handle)
+        # Decoded from the bytes at the header's real location. `header_offset`
+        # is 0 for a legacy leading-header file and EOF-128 for a v1.1 trailer;
+        # parse_header_from_bytes has already resolved which.
+        val data = self.data
+        val off = self.mem_header.header_offset
         SmfHeaderRaw(
-            magic: [83, 77, 70, 0],
-            version_major: 1,
-            version_minor: 1,
-            platform: 0,
-            arch: 0,
-            flags: 0,
-            compression: 0,
-            section_count: 0,
-            section_table_offset: 0,
-            symbol_table_offset: 0,
-            symbol_count: 0,
-            exported_count: 0,
-            entry_point: 0,
-            stub_size: 0,
-            smf_data_offset: 0,
-            module_hash: 0,
-            source_hash: 0,
-            app_type: 0
+            magic: [data[off], data[off + 1], data[off + 2], data[off + 3]],
+            version_major: data[off + 4],
+            version_minor: data[off + 5],
+            platform: data[off + 6],
+            arch: data[off + 7],
+            flags: bytes_to_u32(data, off + 8),
+            compression: data[off + 12],
+            section_count: bytes_to_u32(data, off + 16),
+            section_table_offset: bytes_to_u64(data, off + 20),
+            symbol_table_offset: bytes_to_u64(data, off + 28),
+            symbol_count: bytes_to_u32(data, off + 36),
+            exported_count: bytes_to_u32(data, off + 40),
+            entry_point: bytes_to_u64(data, off + 44),
+            stub_size: bytes_to_u32(data, off + 52),
+            smf_data_offset: bytes_to_u32(data, off + 56),
+            module_hash: bytes_to_u64(data, off + 60),
+            source_hash: bytes_to_u64(data, off + 68),
+            app_type: data[off + 76]
         )
 
     fn read_section(index: i32) -> [u8]:
-        pass_todo("always returns []; rt_smf_reader_read_section is unimplemented so section data never reaches read_code/read_template_section/read_note_sdn", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
-        val _ = rt_smf_reader_read_section(self.handle, index)
-        []
+        # Section table entry is 64 bytes: type(1) pad(3) flags(4) offset(8)
+        # size(8) virtual_size(8) alignment(8) name(16). Same layout
+        # SmfReaderMemory.read_code decodes.
+        val entry_size: i64 = 64
+        val entry_off = self.mem_header.section_table_offset + (index as i64) * entry_size
+        if index < 0 or entry_off < 0 or entry_off + entry_size > self.data.len():
+            return []
+        val raw_offset = bytes_to_u64(self.data, entry_off + 8) as i64
+        val sec_offset = smf_payload_file_offset(self.mem_header, raw_offset)
+        val sec_size = bytes_to_u64(self.data, entry_off + 16) as i64
+        val sec_end = sec_offset + sec_size
+        if sec_offset < 0 or sec_size < 0 or sec_end > self.data.len():
+            return []
+        var out: [u8] = []
+        var i = sec_offset
+        while i < sec_end:
+            out.push(self.data[i])
+            i = i + 1
+        out
 
     fn read_symbol_table() -> [SmfSymbolRaw]:
-        pass_todo("always returns []; this is the only path that populates SmfReaderImpl.symbols, so every lookup_symbol fails with 'Symbol not found'. SmfReaderMemory symbol_parser does this for real", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
-        val _ = rt_smf_reader_read_symbol_table(self.handle)
-        []
+        # 56-byte symbol entry, layout documented in
+        # _SmfReaderMemory/symbol_parser.spl (Rust #[repr(C)] SmfSymbol with
+        # natural alignment: 4-byte pad at 12, 4-byte pad at 44).
+        val entry_size: i64 = 56
+        val base = self.mem_header.symbol_table_offset
+        val count = self.mem_header.symbol_count as i64
+        var out: [SmfSymbolRaw] = []
+        var i: i64 = 0
+        while i < count:
+            val e = base + i * entry_size
+            # Truncated table: return what was actually readable rather than
+            # fabricating entries. Short is honest; zeros are not.
+            if e < 0 or e + entry_size > self.data.len():
+                return out
+            out.push(SmfSymbolRaw(
+                name_offset: bytes_to_u32(self.data, e),
+                name_hash: bytes_to_u32(self.data, e + 4),
+                sym_type: self.data[e + 8],
+                binding: self.data[e + 9],
+                visibility: self.data[e + 10],
+                flags: self.data[e + 11],
+                value: bytes_to_u64(self.data, e + 16),
+                size: bytes_to_u64(self.data, e + 24),
+                type_id: bytes_to_u32(self.data, e + 32),
+                version: bytes_to_u32(self.data, e + 36),
+                template_param_count: self.data[e + 40],
+                template_offset: bytes_to_u64(self.data, e + 48)
+            ))
+            i = i + 1
+        out
 
     fn read_string_table() -> [u8]:
-        pass_todo("always returns []; without it read_string_from_table yields empty names for every symbol", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
-        val _ = rt_smf_reader_read_string_table(self.handle)
-        []
+        match extract_string_table(self.data, self.mem_header):
+            Ok(table): table
+            Err(_): []
 
     fn close():
-        pass_todo("rt_smf_reader_close is unimplemented; nothing is released because nothing was ever opened", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
-        val _ = rt_smf_reader_close(self.handle)
+        # Nothing to release: the file was read once into `data` at open() and
+        # is owned by this value. There is no handle and never was.
+        pass_do_nothing
 
 # ============================================================================
 # Raw Structures (from SFFI)
@@ -428,16 +465,44 @@ impl SmfReaderImpl:
 
     fn exported_symbols() -> [SmfSymbol]:
         # Get all exported (global/weak) symbols.
+        #
+        # This used to call `s.is_exported()`, a method that does not exist on
+        # `SmfSymbol` (obj_taker.spl:39 — the struct has `binding`, no such
+        # method). It was never a compile error and never fired at runtime for
+        # one reason only: `self.symbols` was ALWAYS EMPTY, because every read
+        # went through an unimplemented extern, so the loop body was dead code.
+        # Fixing the reads (see the RESOLVED block above) made this reachable
+        # for the first time and it failed with
+        # `semantic: method is_exported not found on type SmfSymbol`.
+        #
+        # A dead branch hiding a hard error behind a silent empty answer is the
+        # same defect class as the extern bridge itself, so it is fixed here
+        # rather than filed. The predicate matches SmfReaderMemory's
+        # exported_symbols (header_parser.spl): Global or Weak is exported.
+        #
+        # Iteration is keys()-based, NOT `.values()`. Measured 2026-08-17 with a
+        # one-Global-symbol fixture: `lookup_symbol("hello")` returned the
+        # symbol while `for s in self.symbols.values()` yielded nothing, so this
+        # returned [] for a module that demonstrably had an exported symbol —
+        # another silent empty answer. `SmfReaderMemory.exported_symbols`
+        # (header_parser.spl:156) already iterates `self.symbols.keys()` for the
+        # same reason, with a BUG-001 note. Matching it keeps the two readers in
+        # parity, which is what the class spec asserts.
         var exported: [SmfSymbol] = []
-        for s in self.symbols.values():
-            if s.is_exported():
+        for name in self.symbols.keys():
+            val s = self.symbols[name]
+            if s.binding == SymbolBinding.Global or s.binding == SymbolBinding.Weak:
                 exported = exported.push(s)
         exported
 
     fn template_symbols() -> [SmfSymbol]:
         # Get all generic template symbols.
+        # keys()-based for the same reason as exported_symbols above: `.values()`
+        # yields nothing here, so this silently reported "no templates" for
+        # every module.
         var templates: [SmfSymbol] = []
-        for s in self.symbols.values():
+        for name in self.symbols.keys():
+            val s = self.symbols[name]
             if s.is_generic_template:
                 templates = templates.push(s)
         templates
@@ -504,11 +569,26 @@ fn parse_symbol_type(t: u8) -> SymbolType:
         case _: SymbolType.Unknown
 
 fn parse_symbol_binding(b: u8) -> SymbolBinding:
-    match b:
-        case 0: SymbolBinding.Local
-        case 1: SymbolBinding.Global
-        case 2: SymbolBinding.Weak
-        case _: SymbolBinding.Local
+    # Widened to i64 before comparison, deliberately.
+    #
+    # Measured 2026-08-17: with `match b:` on the raw `u8`, a symbol whose
+    # binding byte is literally 1 decoded as `Local`, not `Global` — every arm
+    # missed and `case _` won. That made `exported_symbols()` return [] for a
+    # module that plainly had a global symbol: another silent wrong answer, and
+    # one that was invisible until the reader started producing real symbols at
+    # all (see the RESOLVED block at the top of this file).
+    #
+    # Proof it is the u8 match and not the data: the same fixture byte read at
+    # the same offset yields `binding_is_local=true`, and widening to i64 with
+    # explicit comparisons yields Global. `if`/`else` rather than `match` so the
+    # comparison is unambiguously integer-to-integer.
+    val v = b as i64
+    if v == 1:
+        SymbolBinding.Global
+    else if v == 2:
+        SymbolBinding.Weak
+    else:
+        SymbolBinding.Local
 
 fn read_string_from_table(table: [u8], offset: u32) -> text:
     # Read null-terminated string from string table.

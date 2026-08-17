@@ -646,3 +646,52 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. Producer and consumer now agree. Consumer: `src/compiler/50.mir/_MirLowering/function_lowering.spl:1138-1140` consumes the QUALIFIED key first -- `val qualified_key = self.composite_layout_key(q_type_symbol)` then `if qualified_key != q_type_symbol.name and self.struct_field_order.has(qualified_key):`. Producer: `module_lowering.spl:780` (`val struct_key = self.composite_layout_key(struct_symbol)`) and :791 for the class case use the SAME funnel, documented at module_lowering.spl:161/701 as "the single funnel" with defining_module normalization. The bare name survives only as a lower-priority fallback tier, so the cross-import-boundary namespace mismatch is closed.
+
+## 2026-08-17 CRITICAL-lane re-check: the "DID NOT REPRODUCE" close above is WRONG — STILL OPEN
+
+The preceding section closes this row on the reasoning that producer and
+consumer "use the SAME funnel" (`composite_layout_key`). That observation is
+true and was never in dispute: **both sides always called it.** The mismatch was
+never about which function is called — it is about the *input* that function
+receives (`symbol.defining_module`, path-form on one side vs dotted logical name
+on the other) and the fact that the funnel performs **no normalization**.
+Same-function does not imply same-key.
+
+The funnel says so itself, in the current source, verbatim
+(`src/compiler/50.mir/_MirLowering/module_lowering.spl:273-284`):
+
+```
+    fn composite_layout_key(symbol: HirSymbol) -> text:
+        # DELIBERATELY NOT normalized yet -- see the BLOCKER section of
+        # doc/08_tracking/bug/mir_qualified_field_key_namespace_mismatch_2026-08-08.md.
+        # Wrapping this in mir_layout_canonical_module_name() is the one-line
+        # change that makes resolve_field_index's module-qualified tier
+        # actually fire across an import, but on its own it is HARMFUL: ...
+        val defining_module = symbol.defining_module ?? ""
+```
+
+A close that cites this function as evidence of agreement, while the function's
+own comment names this doc and states it is deliberately unfixed, is an
+unreviewed close. The normalizer `mir_layout_canonical_module_name` exists but
+is applied only in `canonical_mir_type_symbol` (`module_lowering.spl:134` def,
+`:306` sole use) — never on the layout-key path.
+
+Divergent inputs still confirmed:
+- producer, path form: `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:2493`
+  `val mod_name = if self.module_filename != "": Some(self.module_filename)`
+  (`types.spl:68` documents `module_filename` as a path);
+- consumer, dotted form: same file `:752` `...define(local_name, kind, ..., Some(imported_mod.module_name))`
+  (also `:791`, `:811`, `:881`).
+- construction still bare-keyed: `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:3391`
+  `val field_names = self.struct_field_order[struct_name]`.
+
+**Verdict: STILL OPEN**, unchanged in substance since the 2026-08-10 dynamic
+confirmation. The one-line normalization at `module_lowering.spl:284` remains
+HARMFUL on its own and must land with the `struct_value_syms` /
+`lower_struct_construct` re-namespacing (~340 refs across 10+ bare-keyed maps),
+for which there is still no oracle short of a Stage 3 bootstrap.
+
+**Evidence basis: SOURCE READING ONLY** — nothing was executed for this
+re-check. Also note the `Status re-verified 2026-08-17 by source inspection
+(triage shard 02)` stamp at the head of this doc cites no file, no line and no
+run; it should not be read as evidence in either direction.

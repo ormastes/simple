@@ -62,8 +62,10 @@ begin
       bsc_tdo => b_tdo,
       tck_o => tck, tms_o => tms, tdi_o => tdi, tdo_i => tdo);
 
+  -- NOTE: deliberately NO `generic map (IDCODE_VALUE => EXPECTED_IDCODE)` —
+  -- see tb_jtag_dtm_dmi.vhd. The DUT must carry its own default so the
+  -- IDCODE assertion below is independent of the DUT's configuration.
   u_chain : entity work.jtag_debug_chain
-    generic map (IDCODE_VALUE => EXPECTED_IDCODE)
     port map (
       clk => clk, rst_n => rst_n,
       tck => tck, tms => tms, tdi => tdi, trst_n => trst_n, tdo => tdo,

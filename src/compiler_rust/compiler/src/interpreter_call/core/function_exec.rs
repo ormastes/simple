@@ -1041,6 +1041,15 @@ fn write_back_mutable_arguments(
         .collect();
     let mut positional_idx = 0usize;
     let mut positional_mapping_valid = true;
+    // Caller bindings already written back on behalf of a `mut` parameter.
+    // When the SAME caller variable is passed to both a `mut` and a non-`mut`
+    // parameter (aliasing, e.g. `touch(arr, arr)` against
+    // `fn touch(mut a: [i64], b: [i64])`), the non-`mut` parameter still holds
+    // the pre-call snapshot. Writing that snapshot back afterwards silently
+    // reverts the mutation the `mut` parameter legitimately made, with no
+    // diagnostic and exit code 0. Track the mutated names and never let a
+    // non-`mut` parameter clobber one.
+    let mut mut_written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for arg in args {
         // A spread can bind multiple parameters, so later positional arguments
         // cannot be reconstructed safely without binder provenance. Named
@@ -1119,6 +1128,16 @@ fn write_back_mutable_arguments(
                 if caller_name == METHOD_SELF && self_mode == SelfMode::SkipSelf {
                     continue;
                 }
+                let param_is_mut = params_to_bind
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.mutability.is_mutable())
+                    .unwrap_or(false);
+                // Aliased argument: a non-`mut` parameter must never overwrite a
+                // caller binding that a `mut` parameter has already updated.
+                if !param_is_mut && mut_written.contains(&caller_name) {
+                    continue;
+                }
                 if let Some(callee_val) = local_env.get(&param_name) {
                     // Value-type structs (task #91) keep VALUE semantics: never
                     // write callee mutations back to the caller's binding.
@@ -1130,6 +1149,9 @@ fn write_back_mutable_arguments(
                         && outer_env.contains_key(&caller_name)
                     {
                         let new_val = callee_val.clone();
+                        if param_is_mut {
+                            mut_written.insert(caller_name.clone());
+                        }
                         outer_env.insert(caller_name, new_val);
                     } else if is_value_type_struct(callee_val, classes) {
                         // Value-type struct: fields stay value-copied, but its

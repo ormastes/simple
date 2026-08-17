@@ -87,3 +87,34 @@ Cost: codepoint-indexing users of `s[i]` on non-ASCII break — but such code is
 3. **Switch `[]` to byte-based** in seed interpreter + self-hosted interpreter in one change, gated by full spec run + bootstrap (`bin/simple build bootstrap`), converging on the native runtime's semantics.
 4. **Land Phase-5 `Text`/`TextView`** (`len_bytes`/`len_codepoints`/`len_graphemes`/`cp_at`) and migrate user code to explicit units; eventually deprecate bare `s[i]` on `text`.
 5. Document the chosen semantics in `doc/07_guide/quick_reference/syntax_quick_reference.md` and `doc/glossary.md`.
+
+## Re-verified 2026-08-17 (c_frontend triage lane) — STILL LIVE, still a decision
+
+Re-measured against the deployed seed (`bin/simple`, mtime 2026-08-16 22:59)
+because 29% of this corpus turned out to be already-fixed-but-stale. This row is
+**not** in that 29%: the divergence reproduces exactly as filed, unchanged.
+
+```
+SIMPLE_EXECUTION_MODE=interpreter bin/simple run <probe>   # rc=0
+bytelen=9
+cplen=7
+idx3=—
+idx6=f
+```
+
+i.e. `"abc—def"` still reports `len() == 9` (bytes) while `s[3]` still returns
+the em-dash — the **4th codepoint**, not the 4th byte. Both halves of the
+mismatch are intact.
+
+**Deliberately NOT fixed by this lane, and this is the correct outcome.** The
+doc's own conclusion holds: no current-semantics spec exists, so no layer is
+provably out of spec, and the recommended target (byte-based `[]`) would silently
+change behaviour for every codepoint-indexing caller while `len()` is depended on
+for byte semantics by ~415 files. That is a **language-semantics decision for the
+user**, not a defect a triage lane may resolve unilaterally, and picking a side
+here would be exactly the kind of silent behaviour change this batch exists to
+hunt. Migration step 1 (the lint) remains the correct first action and is
+independent of the decision.
+
+Status stays **Open — semantics decision required**. What changed is only that
+the "Verified 2026-07-02" evidence is no longer six weeks stale.

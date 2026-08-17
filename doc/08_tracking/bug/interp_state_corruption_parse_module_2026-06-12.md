@@ -38,3 +38,30 @@ crashing — this affects only the seed-interpreted lean parser.
 
 Pass a fake module name to parse_module and keep the real path only for
 reporting. See `tmp/site12/lean_parse_sweep.spl`.
+
+## 2026-08-17 (lane w04) — NOT VERIFIED this round
+
+Attempted a direct reproduction of the doc's decisive test (same source, fake
+module name vs. real existing path) as a standalone script. It could not be run:
+`parse_module` is not reachable as a free function from an ordinary script —
+
+```
+error[E1002]: function `parse_module` not found
+```
+
+— and the lean-frontend import path that exposes it was not identified within
+this lane's budget. **Status unchanged: neither reproduced nor cleared.**
+
+What was confirmed: the hex literal this doc blames is still present and
+unchanged at `src/lib/bitwise_utils.spl:11` (`(n >> (pos * 8)) & 0xff`, in
+`fn get_byte`). Note the doc cites `:8`; the line has moved but the construct is
+the same.
+
+`src/lib/bitwise_utils.spl` is INPUT DATA for this bug, not its cause — the
+defect is in the seed interpreter's handling of `parse_module` when the module
+name argument resolves to a real file. Nothing in that file was modified, and
+nothing in it should be.
+
+Next step for whoever picks this up: find the correct import for the lean
+frontend's `parse_module` (it is exercised by the sweep harnesses this doc
+mentions), then re-run the fake-name/real-name matrix.

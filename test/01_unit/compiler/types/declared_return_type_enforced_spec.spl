@@ -1,0 +1,87 @@
+# Declared return types must be enforced — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md
+#
+# `fn ret_text() -> bool` returning a text literal compiles clean and runs to
+# completion on both engines, at exit 0, producing two DIFFERENT wrong answers:
+#
+#   jit (default)                     -> "<special:177>"
+#   SIMPLE_EXECUTION_MODE=interpreter -> "not-a-bool"
+#
+# Measured 2026-08-17 on bin/simple (Rust seed, mtime 2026-08-16 22:59).
+#
+# ROOT CAUSE — and it is NOT a missing check.
+# The check exists and is correct, at
+# src/compiler/30.types/type_infer/inference_control.spl:564-574: an annotated
+# function's body is inferred in Check mode and `subsume(body_ty,
+# fn_.return_type)` compares it against the declaration, pushing self.error(e)
+# on mismatch. The bug doc's claim that enforcement must be written into
+# 30.types/type_system/checker.spl is wrong twice over — that file's own header
+# (lines 11-19) records that `class TypeChecker` has zero callers repo-wide and
+# has never executed.
+#
+# The defect is that the correct diagnostic is COMPUTED AND THEN DISCARDED, in
+# src/compiler/80.driver/driver_hir_pipeline_lowering.spl: the pass was gated
+# off by default (SIMPLE_TYPECHECK_WARN=1) and, even when on, only log_warn'd —
+# it never reached ctx, so the build could not fail. Fixed by profile-gating it
+# through driver_typecheck_severity.spl (Advisory/Warn/Deny), mirroring the
+# safety pass.
+#
+# WHY A SUBPROCESS. Spec bodies run on the tree-walk INTERPRETER, so no
+# in-process example can observe a JIT value or a driver-level diagnostic. Each
+# example shells out to `bin/simple` (NOT bin/release/simple — that path is a
+# production-guard wrapper that refuses and exits 1, and caused 88 false REDs).
+#
+# EXPECTED STATE: RED against the deployed Rust seed. The seed does not execute
+# the pure-Simple 80.driver pipeline at all, so SIMPLE_TYPECHECK_PROFILE cannot
+# reach it. This spec is deliberately left red per .claude/rules/testing.md —
+# it documents a real, reproduced defect and its unblock condition is a
+# self-hosted bin/simple.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val BAD: text = "test/01_unit/compiler/types/fixture_declared_return_type_violation.spl"
+val OK: text = "test/01_unit/compiler/types/fixture_declared_return_type_ok.spl"
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn run_fixture(path: text, mode: text, profile: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " SIMPLE_TYPECHECK_PROFILE=" + profile +
+        " " + simple_bin() + " run " + path + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "declared function return types are enforced":
+
+    it "rejects a text literal returned from a -> bool signature":
+        step("Compile and run the violating fixture under the strictest assurance profile")
+        val out = run_fixture(BAD, "interpreter", "critical")
+
+        step("A -> bool function returning text is a type error and must be reported as one")
+        expect(out).to_contain("[typecheck]")
+
+        step("The wrong value must NOT be handed to the caller as if it were a bool")
+        assert_false(out.contains("ret_text => not-a-bool"))
+
+    it "still accepts a matching return type under the same strict profile":
+        step("Run the control fixture, whose return value matches its declaration")
+        val out = run_fixture(OK, "interpreter", "critical")
+
+        step("The control proves enforcement is discriminating rather than rejecting everything")
+        expect(out).to_contain("ret_bool => true")
+        assert_false(out.contains("[typecheck]"))
+
+    it "does not let the two engines disagree about the same function":
+        step("Run the violating fixture on both engines with enforcement off, as a user would today")
+        val jit = run_fixture(BAD, "jit", "")
+        val interp = run_fixture(BAD, "interpreter", "")
+
+        step("An unenforced return type lets each backend invent its own answer: the JIT prints a raw slot (<special:NNN>, a tagged heap pointer), the interpreter passes the text straight through")
+        step("Whatever the engines do, they must not silently produce two different values for one function")
+        assert_false(jit.contains("<special:") and interp.contains("not-a-bool"))

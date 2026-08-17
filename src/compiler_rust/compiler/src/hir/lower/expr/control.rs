@@ -1997,6 +1997,67 @@ impl Lowerer {
         if is_logical_combinator {
             // `if a.? and b.?:` — the operands are conditions too.
             Self::coerce_exists_value_to_bool_in_place(&mut lowered);
+            return Ok(lowered);
+        }
+
+        // ROOT FIX (JIT branches on the raw slot word, 2026-08-17).
+        //
+        // A condition whose STATIC type is an optional / reference slot
+        // (`T?` resolves to `HirType::Pointer` — see
+        // `type_resolver.rs` `Type::Optional`) holds a TAGGED runtime word, not
+        // a native boolean. The Cranelift `Terminator::Branch` lowering
+        // (`codegen/instr/body.rs`) tests such a word with a bare
+        // `icmp_imm(NotEqual, cond, 0)` — no tag decode, no nil check — and the
+        // canonical nil sentinel is the NON-ZERO word `3`
+        // (`TAG_SPECIAL | SPECIAL_NIL`). So `val n: text? = nil; if n:` took the
+        // TRUE branch under the JIT while the interpreter (whose
+        // `is_condition_present` decodes the value) took the FALSE branch —
+        // a silent wrong-branch divergence with rc=0 on both engines.
+        //
+        // Fixed HERE rather than in `Terminator::Branch` deliberately: at the
+        // Cranelift terminator the condition is an untyped i64 vreg that may
+        // equally be a RAW native comparison result, so masking or routing
+        // every branch through `rt_value_truthy` there would miscompile every
+        // native conditional in the compiler. HIR still has the static type, so
+        // only genuinely tagged conditions are rewritten, and the rewrite lands
+        // on BOTH engines at once (no new interpreter/JIT skew).
+        //
+        // CANONICAL SEMANTICS (decided, not silently picked): `if x:` on an
+        // optional/reference-typed `x` means PRESENCE — "x is not nil" — the
+        // same meaning `x.?` already carries in condition position two dozen
+        // lines above, and the same predicate (`rt_is_some`) implements both.
+        // This deliberately does NOT adopt `RuntimeValue::truthy`'s
+        // emptiness-aware rule; see the residual note below.
+        //
+        // RESIDUAL, knowingly left open: `RuntimeValue::truthy`
+        // (runtime/src/value/core.rs) and the interpreter's
+        // `interpreter/value_impl.rs` disagree independently about `""` and
+        // about a boxed `false`, so `val b: bool? = false; if b:` is presence
+        // (true) under this rule while a truthiness reading would say false.
+        // Unifying those two truthiness tables is a separate change and is NOT
+        // attempted here.
+        // Narrow deliberately to the managed pointer kinds. `T?` resolves to
+        // `Pointer { kind: Shared }` (type_resolver.rs), and Unique/Weak/Handle
+        // are managed tagged slots too. RAW pointers (`RawConst`/`RawMut`) and
+        // borrows are NOT: they hold an untagged machine address where the old
+        // `!= 0` test is the correct null check, and `rt_is_some` would call a
+        // null raw pointer "present" (word 0 decodes as TAG_INT 0, not nil).
+        // Excluding them keeps this rewrite from regressing raw-pointer code.
+        let is_tagged_slot = matches!(
+            self.module.types.get(lowered.ty),
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
+                ..
+            })
+        ) || lowered.ty == TypeId::NIL;
+        if is_tagged_slot {
+            lowered = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![lowered],
+                },
+                ty: TypeId::BOOL,
+            };
         }
         Ok(lowered)
     }

@@ -1,0 +1,82 @@
+# No VHDL testbench may configure its DUT from a constant it asserts on
+# — SIMILAR-PROBLEM DETECTION spec (defect CLASS)
+#
+# Class source: doc/08_tracking/bug/riscv_jtag_stage1_idcode_check_is_self_referential_2026-07-28.md
+#
+# The defect found in tb_jtag_dtm_dmi.vhd was not a one-off. FOUR testbenches
+# under src/lib/hardware/debug/ carried the identical shape:
+#
+#     constant EXPECTED_IDCODE : ... := x"15350067";
+#     ...
+#     generic map (IDCODE_VALUE => EXPECTED_IDCODE)   -- DUT configured from it
+#     ...
+#     assert dout32 = EXPECTED_IDCODE                 -- ...and checked against it
+#
+# Whenever a testbench feeds constant K into the DUT as a generic AND asserts
+# against K, the assertion is a tautology. It proves the simulator can carry a
+# value along a wire; it proves nothing about the hardware holding the value
+# the specification requires. The gate then reports PASS for ANY DUT default —
+# measured: a DUT with IDCODE 0xDEADBEEF still printed "JTAG STAGE1 PASS".
+#
+# This spec is deliberately BROADER than its reproducer: it knows nothing about
+# IDCODE. It scans every tb_*.vhd in the hardware tree, extracts the uppercase
+# constants each testbench asserts on, and reports any that are also passed to
+# a DUT through a `generic map`. A NEW testbench reintroducing the pattern with
+# a different constant is caught without anyone editing this file.
+#
+# The scan runs in a subprocess (awk) rather than in the spec body, so it reads
+# the real files on disk and cannot be faded out by an interpreter-only path.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val SCAN: text = "
+set -e
+found_any=0
+offenders=''
+for f in $(find src/lib/hardware -name 'tb_*.vhd' 2>/dev/null | sort); do
+  found_any=1
+  # Constants asserted on: uppercase, underscore-bearing identifiers that
+  # appear on an `assert` line.
+  asserted=$(grep -h '^[[:space:]]*assert' \"$f\" 2>/dev/null \\
+    | grep -oE '[A-Z][A-Z0-9_]*_[A-Z0-9_]*' | sort -u)
+  # Constants handed to a DUT as the VALUE side of `generic map (X => VALUE)`,
+  # ignoring commented-out lines.
+  mapped=$(grep -h '=>' \"$f\" 2>/dev/null | grep -v '^[[:space:]]*--' \\
+    | sed 's/.*=>//' | grep -oE '[A-Z][A-Z0-9_]*_[A-Z0-9_]*' | sort -u)
+  for c in $asserted; do
+    for m in $mapped; do
+      if [ \"$c\" = \"$m\" ]; then
+        offenders=\"$offenders $(basename $f):$c\"
+      fi
+    done
+  done
+done
+if [ \"$found_any\" -eq 0 ]; then
+  echo 'SELFREF SCAN: ERROR no testbenches scanned'
+elif [ -z \"$offenders\" ]; then
+  echo \"SELFREF SCAN: SCANNED_OK CLEAN 0 offenders\"
+else
+  echo \"SELFREF SCAN: SCANNED_OK OFFENDERS$offenders\"
+fi
+"
+
+fn scan() -> text:
+    val out = process_run("sh", ["-c", SCAN])
+    out.0
+
+describe "VHDL testbench self-referential generic detection":
+
+    it "actually scanned some testbenches (a vacuous sweep is not a pass)":
+        step("Run the class scan over src/lib/hardware/**/tb_*.vhd")
+        val s = scan()
+
+        step("A scan that examined zero files prints ERROR and never SCANNED_OK, so this token alone proves the sweep was non-vacuous")
+        expect(s).to_contain("SELFREF SCAN: SCANNED_OK")
+
+    it "no testbench asserts on a constant it also feeds the DUT as a generic":
+        step("Any offender here is a hardware gate that CANNOT FAIL, whatever the DUT does")
+        val s = scan()
+
+        step("Fix the offending testbench — let the DUT carry its own default — rather than relaxing this spec")
+        expect(s).to_contain("CLEAN 0 offenders")

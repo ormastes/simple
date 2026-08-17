@@ -1,0 +1,80 @@
+## Isolation probe for a silent-wrong-result defect surfaced by
+## `test/unit/lib/crypto/paseto_v4_kat_spec.spl`.
+##
+## Observed, deterministically, on a quiet host (both with and without the
+## session daemon):
+##
+##   pre-edit spec  -> Results: 14 total,  8 passed, 6 failed
+##   post-edit spec -> Results: 16 total, 16 passed, 0 failed
+##
+## The ONLY difference between the two files is in the two tamper helpers. The
+## six failing examples call `_decrypt_4e1`, `_decrypt_4e3`, `_footer_correct_ok`
+## and `_verify_4s1_payload`, which are BYTE-IDENTICAL in both files and were
+## never edited. So editing one function changed the observable behaviour of
+## other, untouched functions -- a silent wrong result, not a crypto bug.
+##
+## The structural difference the edit removed:
+##
+##   OLD:  fn _tampered_local_ok() -> bool:
+##             val good = "<187-char literal>"        # local val binding
+##             val tampered = good.substring(0, 15) + "X" + good.substring(16, good.length())
+##
+##   NEW:  fn _local_token_4e1() -> text:
+##             "<same 187-char literal>"              # returned directly
+##
+## i.e. a long string literal bound to a LOCAL VAL, duplicated across two
+## functions in one module, versus the same literal returned directly. This
+## probe isolates that shape with no crypto involved. Every example below is a
+## pure text identity that must hold under any correct implementation.
+##
+## If these pass, the trigger is narrower than "duplicate long literal" and the
+## paseto reproducer remains the only known witness -- say so rather than
+## closing the investigation.
+
+use std.spec.{describe, it, expect}
+
+## The exact 4-E-1 token from the PASETO KAT spec (187 chars, base64url, so it
+## contains no `{` and cannot be mangled by spec-side interpolation).
+fn _literal_returned_directly() -> text:
+    "v4.local.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAr68PS4AXe7If_ZgesdkUMvSwscFlAl1pk5HC0e8kApeaqMfGo_7OpBnwJOAbY9V7WU6abu74MmcUE8YWAiaArVI8XJ5hOb_4v9RmDkneN0S92dx0OW4pgy7omxgf3S8c3LlQg"
+
+## The SAME literal, bound to a local val first -- the shape the old spec used.
+fn _literal_via_local_val() -> text:
+    val good = "v4.local.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAr68PS4AXe7If_ZgesdkUMvSwscFlAl1pk5HC0e8kApeaqMfGo_7OpBnwJOAbY9V7WU6abu74MmcUE8YWAiaArVI8XJ5hOb_4v9RmDkneN0S92dx0OW4pgy7omxgf3S8c3LlQg"
+    good
+
+## A third copy, sliced the way the old tamper helper sliced it.
+fn _literal_sliced_via_local_val() -> text:
+    val good = "v4.local.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAr68PS4AXe7If_ZgesdkUMvSwscFlAl1pk5HC0e8kApeaqMfGo_7OpBnwJOAbY9V7WU6abu74MmcUE8YWAiaArVI8XJ5hOb_4v9RmDkneN0S92dx0OW4pgy7omxgf3S8c3LlQg"
+    good.substring(0, 15) + good.substring(15, good.length())
+
+describe "long string literal duplicated across functions in one module":
+
+    context "identity across binding styles":
+        it "the directly-returned literal has the expected length":
+            expect(_literal_returned_directly().length()).to_equal(187)
+
+        it "the local-val-bound literal has the expected length":
+            expect(_literal_via_local_val().length()).to_equal(187)
+
+        it "both binding styles yield the same text":
+            expect(_literal_via_local_val()).to_equal(_literal_returned_directly())
+
+        it "a split-and-rejoin of the local-val copy reconstructs the original":
+            expect(_literal_sliced_via_local_val()).to_equal(_literal_returned_directly())
+
+    context "prefix and interior are not corrupted":
+        it "keeps its header":
+            expect(_literal_via_local_val().substring(0, 9)).to_equal("v4.local.")
+
+        it "agrees with the direct copy at the index the old fixture mutated":
+            expect(_literal_via_local_val().substring(15, 16)).to_equal(
+                _literal_returned_directly().substring(15, 16)
+            )
+
+        it "agrees with the direct copy on its final characters":
+            val a = _literal_via_local_val()
+            val b = _literal_returned_directly()
+            expect(a.substring(a.length() - 4, a.length())).to_equal(
+                b.substring(b.length() - 4, b.length())
+            )

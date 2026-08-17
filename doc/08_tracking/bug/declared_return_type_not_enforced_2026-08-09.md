@@ -157,3 +157,103 @@ Not fixed here, for the reason the original filing gives: enforcement belongs in
 unrepaired corpus (42 known `-> bool` violations alone). This entry records only
 that the bug is **live and re-confirmed**, and that the "already fixed?" question
 is settled in the negative.
+
+## 2026-08-17 (CRITICAL lane C3) — re-reproduced, root cause CORRECTED, staged fix landed
+
+### Reproduction (EXECUTION evidence)
+
+Fixture `fn ret_text() -> bool: return "not-a-bool"`, binary `bin/simple`
+(Rust seed, mtime 2026-08-16 22:59):
+
+| engine | rc | stdout |
+|---|---|---|
+| jit (default)                       | 0 | `<special:177>` |
+| `SIMPLE_EXECUTION_MODE=interpreter` | 0 | `not-a-bool` |
+
+Still live, still divergent, still exit 0 on both. (The JIT value has drifted
+again — `<special:129>` → `true` → `<special:177>` — which only reinforces that
+it is a raw slot being reinterpreted, not a value.)
+
+### This doc's stated root cause is WRONG in both halves
+
+1. **`30.types/type_system/checker.spl` is DEAD CODE.** Its own header,
+   lines 11-19, states: *"`class TypeChecker` below has ZERO callers repo-wide
+   and has never executed. It is NOT the compiler's type checker."* Writing
+   enforcement there would have produced a second checker that never runs.
+2. **The return-type check already exists and is already correct**, at
+   `src/compiler/30.types/type_infer/inference_control.spl:564-574`:
+
+   ```
+   val has_return_type = fn_.return_type.kind != HirTypeKind.Infer(0, 0)
+   if has_return_type:
+       match self.infer_block(fn_.body):
+           case Ok(body_ty):
+               match self.subsume(body_ty, fn_.return_type):
+                   case Err(e): self.error(e)
+   ```
+
+So this was never a missing-check bug. It is a **fail-open reporting** bug, in
+two independent layers, both in
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:797`:
+
+- the whole pass was gated behind `SIMPLE_TYPECHECK_WARN=1`, **off by default**;
+- even switched on, `run_typecheck_warn_pass` returned `[text]` and the caller
+  only `log_warn`ed it — **it never pushed `ctx.errors`**, so the build could
+  not fail regardless of what the diagnostics said.
+
+This is the **same class** as the sibling lane's finding that unresolved `use`
+imports surface only as `[use-warning]` at rc=0, and that an unknown extern
+function logs an ERROR and then returns a default: a correct diagnostic is
+computed and then discarded. Confirmed shared shape, not a coincidence.
+
+### Fix landed: staged/opt-in enforcement, default unchanged
+
+Blanket hard-error was rejected deliberately, per this doc's own step 2 ("do not
+promote to error before step 2 reports a number"). Instead the pass is now
+profile-gated exactly like the safety pass directly below it, which solved the
+identical problem in lane SE1 (2026-07-28):
+
+- new `src/compiler/80.driver/driver_typecheck_severity.spl` — `TypecheckPassSeverity`
+  {Advisory, Warn, Deny} + `typecheck_pass_severity()` reading
+  `SIMPLE_TYPECHECK_PROFILE`, reusing the shared `normalize_profile_name` table
+  so profile names cannot drift between the two projections.
+- `driver_hir_pipeline_passes.spl` — `run_typecheck_warn_pass` now takes `ctx`
+  and routes each diagnostic: Advisory → log only (today's behaviour); robust →
+  `ctx.add_warning`; critical/verified → `ctx.add_error` (fails the build).
+- `driver_hir_pipeline_lowering.spl` — the pass runs when either
+  `SIMPLE_TYPECHECK_WARN=1` (unchanged) **or** a non-Advisory profile is set.
+
+Default (unset) is Advisory, i.e. byte-for-byte the previous behaviour. No
+existing build changes.
+
+### Corpus census — PARTIAL, and honestly so
+
+- `-> bool` functions in `src/**` whose tail expression is a bare `.?`:
+  **10** (`grep -rn -A3 -- "-> bool:" src/ --include=*.spl`, matching a bare
+  `x.?` tail within 3 lines). The doc's "42 known violations" figure covered
+  the whole corpus including `test/`, so the `src/` half appears to have been
+  partly repaired since filing.
+- **The real census — the number step 2 asks for — was NOT obtained.** It
+  requires running `run_typecheck_warn_pass` over all ~993 modules, and the
+  pure-Simple 80.driver pipeline is not executable here: the deployed
+  `bin/simple` is the Rust seed, which does not run these `.spl` passes at all,
+  and the stage-3 self-host bootstrap is the live blocker. **Do not promote past
+  Advisory until that census is run on a self-hosted binary.**
+
+### Specs
+
+- `test/01_unit/compiler/types/declared_return_type_enforced_spec.spl`
+  (reproducing; + fixtures `fixture_declared_return_type_violation.spl`,
+  `fixture_declared_return_type_ok.spl` as the control arm)
+- `test/01_unit/compiler/types/fail_open_diagnostic_pass_detection_spec.spl`
+  (detection spec for the CLASS: a driver pass that computes a diagnostic it has
+  no route to report)
+
+The reproducing spec is **expected RED on the deployed seed** and is left red
+per `.claude/rules/testing.md`: the seed cannot execute the pure-Simple driver,
+so `SIMPLE_TYPECHECK_PROFILE` cannot reach it. Unblock condition: a self-hosted
+`bin/simple`.
+
+Status: remains **OPEN** — the mechanism is in place and default-safe, but
+enforcement is not on, and the census that would justify turning it on is
+unmeasured.

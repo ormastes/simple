@@ -1,0 +1,96 @@
+# Condition Tag Decode — REPRODUCING spec for the JIT raw-slot branch defect.
+#
+# Bug (P0, silent wrong result, 2026-08-17): the Cranelift `Terminator::Branch`
+# lowering in src/compiler_rust/compiler/src/codegen/instr/body.rs tested the
+# condition word with a bare `icmp_imm(NotEqual, cond, 0)` — no low-3-bit tag
+# mask, no nil check. Runtime tags live in the LOW 3 BITS (0 = boxed int
+# `v<<3`, 1 = heap, 2 = inline float, 3 = nil), so the canonical nil sentinel is
+# the NON-ZERO word `3` and `val n: text? = nil; if n:` took the TRUE branch
+# under the JIT while the interpreter took the FALSE branch. Both engines exit
+# rc=0 and print nothing unusual: the only symptom is a wrong answer.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which decodes the tag correctly and was never wrong here. An
+# in-process example therefore CANNOT go red on this defect. The oracle is the
+# sibling run-path probe `probe_condition_tag_decode_jit.spl`, run as a
+# subprocess under BOTH engines; it self-checks absolute expected branches and
+# prints one verdict line. Modelled on
+# `test/01_unit/compiler/codegen/scalar_slot_roundtrip_class_spec.spl`.
+#
+# FIX LOCATION. Corrected in HIR (`lower_condition`, hir/lower/expr/control.rs),
+# not at the Cranelift terminator: by then the condition is an untyped i64 vreg
+# that may equally be a RAW native comparison result, so masking every branch
+# there would miscompile every conditional in the compiler. HIR still knows the
+# static type, so only genuinely tagged (optional / reference) conditions are
+# rewritten, and the rewrite lands on both engines at once.
+#
+# CANONICAL SEMANTICS pinned by this spec: `if x:` on an optional /
+# reference-typed `x` means PRESENCE — "x is not nil" — identical to what `x.?`
+# already means in condition position, and implemented by the same `rt_is_some`
+# predicate.
+#
+# KNOWN RESIDUAL, deliberately not asserted here: `RuntimeValue::truthy`
+# (runtime/src/value/core.rs) and the interpreter's
+# `interpreter/value_impl.rs:346` disagree independently about `""` and about a
+# boxed `false`. Under the presence rule above, `val b: bool? = false; if b:` is
+# TRUE (it is present) while a truthiness reading would say false. Unifying the
+# two truthiness tables is a separate change; this spec pins only the nil case,
+# which both readings agree on.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_condition_tag_decode_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate binary
+    # without deploying it over the shared bin/simple; the default is whatever
+    # bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "branching on a tagged optional slot decodes the tag":
+    it "takes the correct branch under the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm — it decoded the tag correctly even before the fix, so a red here means the probe itself is broken")
+        expect(interp).to_contain("PASS nil_text_condition")
+        expect(interp).to_contain("PASS some_text_condition")
+        expect(interp).to_contain("CONDITION_TAG_DECODE PROBE: ALL PASS")
+
+    it "takes the correct branch under the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("A nil optional is ABSENT: the non-zero nil word 3 must not read as true")
+        expect(jit).to_contain("PASS nil_text_condition")
+        expect(jit).to_contain("PASS nil_i64_condition")
+
+        step("A present optional is truthy whatever its payload")
+        expect(jit).to_contain("PASS some_text_condition")
+        expect(jit).to_contain("PASS some_i64_condition")
+
+        step("`.?` in condition position was already correct — it is the reference semantics the bare form is aligned to")
+        expect(jit).to_contain("PASS nil_exists_check")
+        expect(jit).to_contain("PASS some_exists_check")
+
+        step("`not` over a tagged condition negates the DECODED value")
+        expect(jit).to_contain("PASS not_nil_condition")
+
+        step("A `while` on a nil optional must not enter the loop")
+        expect(jit).to_contain("PASS while_nil_zero_iterations")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("CONDITION_TAG_DECODE PROBE: ALL PASS")
+
+    it "agrees between the two engines on every branch it checks":
+        step("Engine agreement is a SECONDARY check — the absolute-literal assertions above are what prove correctness, since agreement alone would pass while both engines are wrong the same way")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_equal(interp)

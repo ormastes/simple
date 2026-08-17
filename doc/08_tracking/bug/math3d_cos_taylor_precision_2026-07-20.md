@@ -89,3 +89,59 @@ Taylor series) — math3d's version reimplements it in pure Taylor form instead
 of reusing the extern-backed helper, seemingly to avoid a second extern
 declaration; consolidating on the extern-backed version would fix this for
 free.
+
+---
+
+## RESOLUTION 2026-08-17 — FIXED (quadrant fold + 8-term series)
+
+**Reproduced first, and the error was far larger than this doc estimated.**
+The doc said "~1e-3 near pi"; measured via `bin/simple run` on a direct probe
+(`Quaternion.from_axis_angle` is the public path -- its `w` is `_cos(angle/2)`):
+
+BEFORE, 180-degree rotation about +z (correct answer w=0, z=1, rx=-1, ry=0):
+
+```
+w=-0.07502041466499769
+z=0.9971819981244607
+rx=-0.9887438747669841
+ry=-0.149618013991536
+full_rx=0.6895078467839116     # 2*pi rotation of (1,2,3) -- should be 1.0
+full_ry=2.1271057635255035     #                          -- should be 2.0
+```
+
+That is an ~8.6-degree rotation error, and `.normalize()` hid the magnitude
+error while leaving the component ratio wrong -- a silently wrong rotation,
+not a failure.
+
+AFTER (`src/lib/common/engine/math3d.spl:18` `_sin`):
+
+```
+w=0.0
+z=1.0
+rx=-1.0
+ry=0.0
+full_rx=1.0
+full_ry=2.0
+```
+
+**Fix applied** (the first of this doc's own suggestions; the extern route was
+not taken so the module keeps working in contexts without `rt_math_sin`):
+
+1. second range-reduction stage folding `[-pi, pi]` into `[-pi/2, pi/2]` via
+   `sin(a) == sin(pi - a)` / `sin(a) == sin(-pi - a)`;
+2. the series extended from 4 to 8 terms, evaluated by Horner in `x^2`
+   (truncation at `(pi/2)^17` is below 1e-12).
+
+`_cos` still delegates as `_sin(x + pi/2)`; that is now safe precisely because
+`_sin` reduces properly -- the shift is what used to push a near-zero argument
+into the worst part of the domain.
+
+**Still open, deliberately out of this row's scope:** `math2d.spl`'s analogous
+pair and `src/lib/skia/entity/matrix.spl`'s independent implementation both
+keep the `[-pi, pi]`-only reduction noted above.
+
+**Specs:** `test/01_unit/lib/engine/math3d_trig_precision_spec.spl`
+(reproducing: the 180-degree case above; class detection: a 25-sample sweep of
+the full rotation domain requiring `sin^2 + cos^2 == 1` everywhere, half+half
+composition equalling the full rotation, and a `2*pi` round trip -- so a fix
+that special-cases `pi` cannot pass).

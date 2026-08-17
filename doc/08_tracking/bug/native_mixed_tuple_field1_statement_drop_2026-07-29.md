@@ -104,3 +104,31 @@ RET1: 8
 C
 ```
 No statement drop, no 56=7<<3. Bare-`print` variant identical.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: ALREADY-FIXED IN 50.mir BY CONTENT.**
+
+Per-index tuple field typing is implemented in current source:
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1705-1731` (the Tuple
+arm sets `tuple_field_mir_types = field_types`) and `:1765-1772` (per-index
+fallback `result_type = tuple_field_mir_types[lit_field_idx]`). That is exactly
+this doc's own cause-1/cause-2 shape, so the 50.mir half of this row is closed
+by content. The runtime claim cannot be re-closed on this host per the
+governing fact above.

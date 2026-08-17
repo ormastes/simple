@@ -1,0 +1,82 @@
+# Class-detection spec for the "parser silently discards an operator tail"
+# defect class (js_engine_ternary_and_statement_split_2026-07-11).
+#
+# The concrete defect was that `_js_parser_expression` had no conditional
+# (`?:`) production, so `a ? b : c` degraded to just `a` and the tail was
+# dropped without any error. The CLASS is: a production that exists in the AST
+# and the evaluator but has no matching case in the recursive-descent
+# expression parser, so the sub-expression is silently truncated.
+#
+# These examples therefore exercise the conditional against every OTHER
+# expression production it has to interleave with — a fix that only special
+# cases the flat `x ? 1 : 2` shape will fail here. No braces appear in any
+# fixture string: the SPEC's lexer would resolve `{...}` as interpolation.
+use std.nogc_sync_mut.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+# JsValue.Number is an f64; render integral values without the ".0" tail so the
+# expectations below read as JS values, not Simple float formatting.
+fn _js_num_text(n: f64) -> text:
+    val s = n.to_text()
+    if s.ends_with(".0"):
+        return s.slice(0, s.len() - 2)
+    s
+
+fn eval_str(src: text) -> text:
+    var rt = js_runtime_with_default_logger("conditional-class-spec")
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Number(v: n): _js_num_text(n)
+                JsValue.Boolean(v: b): if b: "true" else: "false"
+                JsValue.Undefined: "<undefined>"
+                JsValue.Null: "<null>"
+                _: "<other>"
+        Err(e):
+            "<err>"
+
+describe "JS parser must not silently truncate conditional expressions":
+    it "does not degrade a ternary to its condition": # @req: js_engine_ternary_and_statement_split_2026-07-11
+        # The signature symptom of the class: the answer is the CONDITION's
+        # value ("false"/"true") rather than either branch.
+        expect(eval_str("5 < 2 ? 100 : 200")).to_equal("200")
+        expect(eval_str("5 > 2 ? 100 : 200")).to_equal("100")
+
+    it "keeps the ternary below || and && in precedence":
+        expect(eval_str("0 || 0 ? 11 : 22")).to_equal("22")
+        expect(eval_str("1 && 1 ? 11 : 22")).to_equal("11")
+
+    it "keeps the ternary above comparison and arithmetic":
+        expect(eval_str("1 + 2 > 2 ? 3 * 3 : 4 + 4")).to_equal("9")
+        expect(eval_str("1 + 2 > 9 ? 3 * 3 : 4 + 4")).to_equal("8")
+
+    it "keeps the ternary below assignment":
+        expect(eval_str("var a = 0; a = 1 ? 7 : 8; a")).to_equal("7")
+
+    it "parses a ternary nested in either branch":
+        expect(eval_str("0 ? 1 : 0 ? 2 : 3")).to_equal("3")
+        expect(eval_str("1 ? 0 ? 7 : 8 : 9")).to_equal("8")
+        expect(eval_str("1 ? 1 ? 7 : 8 : 9")).to_equal("7")
+
+    it "parses a ternary inside call arguments":
+        expect(eval_str("var id = x => x; id(1 < 2 ? 'yes' : 'no')")).to_equal("yes")
+
+    it "parses a ternary inside an array literal and indexes the result":
+        expect(eval_str("var a = [1 > 0 ? 5 : 6, 7]; a[0]")).to_equal("5")
+
+    it "parses a ternary whose branches are parenthesised":
+        expect(eval_str("(1 > 0) ? (2 + 3) : (4 + 5)")).to_equal("5")
+
+    it "does not treat ?? or ?. as a conditional":
+        expect(eval_str("null ?? 5")).to_equal("5")
+        expect(eval_str("var a = 0; a ?? 9")).to_equal("0")
+
+    it "does not treat a ? or : inside a string literal as an operator":
+        expect(eval_str("1 > 0 ? 'a?b:c' : 'z'")).to_equal("a?b:c")
+
+    it "does not treat an object literal colon as a ternary colon":
+        expect(eval_str("var o = 1 > 0 ? 4 : 5; o")).to_equal("4")
+
+    it "evaluates only the taken branch operand chain":
+        expect(eval_str("var n = 3; n > 2 ? n * 10 : n * 100")).to_equal("30")

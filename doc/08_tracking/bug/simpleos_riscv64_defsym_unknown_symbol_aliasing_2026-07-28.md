@@ -130,3 +130,39 @@ be evidence of a lost call, not a regression of this change.
 Spec: `test/01_unit/compiler/backend/unresolved_symbol_alias_fails_closed_spec.spl`
 (similar-problem detection: pins the RULE that no unknown_* may be aliased to a
 working function, not just the thirteen known sites).
+
+---
+
+## ALREADY FIXED — verified by CONTENT 2026-08-17 (not by commit ancestry)
+
+The triage row for this bug asserted "Verified live: lines 3095-3107 still push
+`--defsym=unknown_0..12` onto `rt_riscv_uart_put`/`_uart_put`/etc". **That is
+stale.** Current source, checked directly:
+
+```
+$ /usr/bin/grep -n 'defsym=unknown' src/compiler/70.backend/backend/llvm_native_link.spl
+3120:            args = args.push("--defsym=unknown_{unknown_idx}=__simple_unresolved_call_trap")
+```
+
+There is exactly ONE such line and all 13 `unknown_N` symbols alias to
+`__simple_unresolved_call_trap`, not to real kernel functions. The trap is
+defined in the same file (line 3032) and is loud by construction: it prints
+`FATAL: unresolved call (unknown_N) reached at runtime; MIR lowering failed to
+resolve a callee` over the UART and then spins in `wfi`.
+
+That inverts the defect. The bug was that an unresolved call silently landed on
+an unrelated real function — a silent wrong answer. It now halts loudly with a
+diagnostic naming the cause, which is the correct behaviour for an unresolvable
+callee. The comment at line 3118 states this intent explicitly ("Every
+unknown_N resolves to the trap, NOT to an unrelated function").
+
+`rt_riscv_uart_put` still appears in the file (lines 2973, 2990, 3032, 3146) but
+only as the UART **output primitive** used by the trap and by `serial_println` —
+never as a `--defsym` alias target.
+
+Not closed by SHA (ancestry is unsound in this repo — constant rebasing rewrites
+SHAs); closed by reading current source.
+
+**Residual, stated honestly:** this closure is a source-level verification. It
+was NOT confirmed by a riscv64 link + QEMU boot, because that needs a native
+build lane unavailable in this session.

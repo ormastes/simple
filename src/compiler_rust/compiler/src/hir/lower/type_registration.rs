@@ -48,6 +48,17 @@ impl Lowerer {
         // Classes need this as much as structs -- the reported bug's repro
         // (`class Font { id, size }`, `Font(bogus: 111, size: 8)`) is a CLASS.
         self.struct_decl_files.insert(c.name.clone(), self.current_file.clone());
+        // Record declared field DEFAULTS so `lower_struct_init_fields` can fill
+        // an omitted slot with the real default instead of the nil tag `3`.
+        // See `Lowerer::struct_field_defaults`.
+        let defaults: std::collections::HashMap<String, ast::Expr> = c
+            .fields
+            .iter()
+            .filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d)))
+            .collect();
+        if !defaults.is_empty() {
+            self.struct_field_defaults.insert(c.name.clone(), defaults);
+        }
 
         // F1/S3 — carry the declaration KIND the parser knew into HIR. `class`
         // decls arrive with `is_value_type == false`; a `struct … with Mixin`
@@ -155,6 +166,17 @@ impl Lowerer {
         // construction site is in this same file. See the SOUNDNESS GATE comment in
         // hir/lower/expr/collections.rs.
         self.struct_decl_files.insert(s.name.clone(), self.current_file.clone());
+        // Record declared field DEFAULTS so `lower_struct_init_fields` can fill
+        // an omitted slot with the real default instead of the nil tag `3`.
+        // See `Lowerer::struct_field_defaults`.
+        let defaults: std::collections::HashMap<String, ast::Expr> = s
+            .fields
+            .iter()
+            .filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d)))
+            .collect();
+        if !defaults.is_empty() {
+            self.struct_field_defaults.insert(s.name.clone(), defaults);
+        }
 
         let mut fields = Vec::new();
         for field in &s.fields {

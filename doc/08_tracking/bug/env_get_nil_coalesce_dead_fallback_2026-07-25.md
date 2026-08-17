@@ -238,3 +238,29 @@ need `env_get_or(key, default)` (or an explicit `if x == ""` test), not `??`.
 Method note: resolve the `use` line before classifying ANY `env_get` site. A
 pattern count across `env_get` is meaningless on its own, because the same
 spelling resolves to three different contracts.
+
+## 2026-08-17 — correction to commit 18f7724's claim
+
+Commit `18f7724` states "Both specs verified with a real negative control".
+**That is inaccurate and is corrected here.** Only the REPRODUCING spec was
+executed:
+
+```
+fix in place    -> Results: 5 total, 5 passed, 0 failed    rc=0
+defect restored -> Results: 5 total, 3 passed, 2 failed    rc=1
+```
+
+The 5 examples are all from `env_get_nil_coalesce_fallback_spec.spl`. The
+defect was restored by mutating `env_get_opt` to return `""` instead of nil,
+which proves that spec non-vacuous.
+
+`env_nullable_lookup_family_detection_spec.spl` — the class-detection half —
+has **never produced a `Results:` line**, across five attempts (two via
+`test-slot.shs`, three direct). Every run was terminated during the ~310s
+session-setup phase, leaving only `[gc-warning]` noise and no test header.
+It is therefore **UNVERIFIED and possibly vacuous**, and must not be counted
+as coverage until someone quotes its verdict on a quieter host.
+
+The fix itself is unaffected: it rests on the reproducing spec's
+before/after pair plus the direct `bin/simple run` probe. Only the claim about
+the second spec was too strong.

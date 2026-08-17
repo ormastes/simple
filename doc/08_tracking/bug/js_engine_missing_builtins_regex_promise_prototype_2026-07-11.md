@@ -13,6 +13,17 @@ related: src/lib/common/js/engine/runtime.spl
 
 **Status 2026-08-10:** Items 2 and 3 FIXED; item 1 (regex replace) still OPEN.
 
+**Re-verified LIVE 2026-08-17 by content.** `grep -rn "Regex\|RegExp\|regexp"
+src/lib/nogc_sync_mut/js/` returns exactly ONE hit — a lexer comment at
+`engine/parser.spl:1048` about skipping over a regex literal. There is no
+`RegExp` value, no `JsValue` variant for one, and no integration of
+`src/lib/common/js/builtins/regexp.spl`. `interpreter_string_methods.spl:271-300`
+implements `replace` as a literal substring scan over `js_to_string(search_val)`
+only, so a regex argument degrades to a text comparison and the call is a
+silent no-op. Not fixed here: this is not a small change — it needs a new
+`JsValue` regex variant, literal evaluation, and a regexp engine binding, which
+is a feature-sized piece of work, not a patch.
+
 The engine is pure Simple (`src/lib/nogc_sync_mut/js/engine/**`), not Rust seed.
 Root cause of 2+3: `eval_unary`'s `typeof <Identifier>` branch used a
 cache-only global lookup and never fell through to the normal identifier

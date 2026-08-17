@@ -1,0 +1,67 @@
+# Reproducing spec — a user-defined `me append(...)` / `me push(...)` must not
+# have its first integer argument tag-boxed.
+#
+# Bug: doc/08_tracking/bug/interp_me_method_first_param_times8_conditional_2026-06-29.md
+# Root cause: src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs
+#   `is_array_append_method = method == "push" || method == "append"` is a NAME
+#   test only. The block that boxes the first int argument (so `rt_array_push`
+#   sees a tagged element) ran on ANY receiver, including a plain struct whose
+#   own method was then called with `value << 3`. Fixed by gating that block on
+#   `self.receiver_is_array(receiver, receiver_local_ty)` — the same gate the
+#   sibling `index_of` boxing already used.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which was always CORRECT here (measured: 0 failures). Only
+# `bin/simple run` (Cranelift JIT) reproduced. An in-process example therefore
+# cannot go red on this defect and would be vacuous. The oracle is the sibling
+# probe `probe_user_method_builtin_name_append_jit.spl`, executed as a
+# subprocess under both engines; every check inside it is an ABSOLUTE literal.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_user_method_builtin_name_append_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a user method named after a builtin array mutator receives its arguments unchanged":
+    it "passes the first integer argument intact on the cranelift JIT":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The four-parameter `me append(lba, old, new, seq)` from the filed repro: the FIRST parameter was the victim, arriving as value*8 (100 -> 800)")
+        expect(jit).to_contain("PASS append4_returns_first_param")
+        expect(jit).to_contain("PASS append4_stores_first_param")
+
+        step("The remaining parameters were always correct and must stay correct")
+        expect(jit).to_contain("PASS append4_stores_second_param")
+        expect(jit).to_contain("PASS append4_stores_fourth_param")
+
+        step("Arity is irrelevant — the doc's claim that single-parameter `me` methods are unaffected was wrong")
+        expect(jit).to_contain("PASS push2_sums_params")
+        expect(jit).to_contain("PASS append1_identity")
+        expect(jit).to_contain("PASS push1_identity")
+
+        step("A method whose name does not collide is the control arm")
+        expect(jit).to_contain("PASS control_noncolliding_name")
+
+        step("The gate must not disable tag-boxing for genuine array push/append")
+        expect(jit).to_contain("PASS builtin_array_push_elem0")
+        expect(jit).to_contain("PASS builtin_array_append_elem1")
+
+        step("The aggregate verdict line is authoritative")
+        expect(jit).to_contain("USER_METHOD_BUILTIN_NAME PROBE: ALL PASS")
+        expect(jit.contains("FAIL ")).to_equal(false)
+
+    it "was already correct on the tree-walk interpreter and stays correct":
+        step("The interpreter is the control engine: it never reproduced this defect, so a red here means the probe itself is broken")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("USER_METHOD_BUILTIN_NAME PROBE: ALL PASS")
+        expect(interp.contains("FAIL ")).to_equal(false)

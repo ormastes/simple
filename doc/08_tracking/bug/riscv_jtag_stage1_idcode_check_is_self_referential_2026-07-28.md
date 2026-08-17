@@ -2,8 +2,47 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — one assertion inside an otherwise-gating testbench is vacuous
-- **Status:** open
+- **Status:** FIXED 2026-08-17 (reproduced, fixed, and re-proven under GHDL)
 - **Found via:** Lane R3 gate-honesty audit
+
+## Resolution (2026-08-17)
+
+Confirmed LIVE by content, then fixed. The defect was a **family of 3**, not one
+testbench: `tb_jtag_dtm_dmi.vhd`, `tb_soc_jtag_debug.vhd` and
+`tb_bscane2_bridge.vhd` all drove their DUT with
+`generic map (IDCODE_VALUE => EXPECTED_IDCODE)` and then asserted against the
+same constant. (`tb_openocd_bitbang.vhd` carries the same override but has no
+IDCODE assertion, so it is not vacuous; left unchanged and noted here.)
+
+**Fix:** delete the generic-map override so each DUT uses its own default
+(`jtag_tap.vhd:32` and `jtag_debug_chain.vhd:34`, both already `x"15350067"`).
+`EXPECTED_IDCODE` therefore becomes an independent, spec-mandated literal, and
+the change is semantics-preserving for a correct DUT.
+
+**Reproduction (GHDL, real simulation), DUT default mutated to `x"DEADBEEF"`:**
+
+| tree | mutant DUT | observed |
+|---|---|---|
+| before fix | `x"DEADBEEF"` | `CHECK2 PASS: IDCODE = 0x15350067` / `JTAG STAGE1 PASS`, rc=0 — **vacuous** |
+| after fix | `x"DEADBEEF"` | `CHECK2 FAIL: IDCODE mismatch, got DEADBEEF` / `ghdl:error: assertion failed`, rc=1 |
+| after fix | pristine `x"15350067"` | `CHECK2 PASS` / `JTAG STAGE1 PASS`, rc=0 — no false positive |
+
+Verified against the repo files in the gate's own analysis order
+(`scripts/check/check-riscv-hardware-gates.shs` `JTAG_UNITS`): the real
+`tb_jtag_dtm_dmi` still reports `JTAG STAGE1 PASS`, so the gate stays green.
+
+**Specs:**
+- reproducing: `test/01_unit/lib/hardware/debug/jtag_idcode_gate_not_self_referential_spec.spl`
+- class detection: `test/01_unit/lib/hardware/debug/testbench_self_referential_generic_class_spec.spl`
+  — scans every `tb_*.vhd` under `src/lib/hardware` for *any* constant that is
+  both asserted on and passed to a DUT as a generic. Proven non-vacuous:
+  10 files scanned, 0 offenders after the fix; reintroducing the line in
+  `tb_jtag_dtm_dmi.vhd` makes it report
+  `offenders: tb_jtag_dtm_dmi.vhd:EXPECTED_IDCODE`.
+
+Caveat: `tb_soc_jtag_debug` and `tb_bscane2_bridge` could **not** be elaborated
+on this host (their chains need `hart_core_glue` / `bscane2_stub`, absent from
+the directory), so their edits are content-verified but **not execution-verified**.
 
 ## Symptom
 

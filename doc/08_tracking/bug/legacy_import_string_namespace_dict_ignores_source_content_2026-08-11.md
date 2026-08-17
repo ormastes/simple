@@ -72,3 +72,38 @@ self-host fails", which is a separate, currently-open blocker).
 Re-run the repro above after either (a) this defect is root-caused and
 fixed in the module loader/resolver, or (b) `bin/release/<triple>/simple`
 is rebuilt+redeployed from current source via a working full bootstrap.
+
+## 2026-08-17 (lane w04) — STILL LIVE, reproduced verbatim
+
+Two-line reproducer on `bin/simple run`:
+
+```
+import string
+
+fn main():
+    print("char_at=" + string.char_at("hello", 1))
+```
+
+Error, matching this doc's symptom exactly (same 8 `bm_*` keys, same truncation):
+
+```
+error: semantic: method `char_at` not found on type `dict` (receiver value:
+{bm_hex_to_int: <fn:bm_hex_to_int>, bm_int_to_str: <fn:bm_int_to_str>,
+bm_str_ends_with: <fn:bm_str_ends_with>, bm_str_eq: <fn:bm_str_eq>,
+bm_str_find: <fn:bm_str_find>, bm_str_len: <fn:bm_str_len>, b)
+```
+
+Preceded by a codegen diagnostic that names the real shape of the defect:
+
+```
+[CODEGEN BODY] Function 'main' body compilation failed: GlobalLoad: unresolved
+identifier 'string' (not a global, function, const-data name, or import)
+[CODEGEN-STUB-FALLBACK] body compilation failed for 'main'
+```
+
+`src/lib/string.spl` is innocent and was not modified: it defines
+`fn char_at(s: text, idx: i64) -> text` and names `char_at` in its single
+`export` line, alongside `char_from_code`, `char_code`, `str_char_at`,
+`str_repeat`. The namespace dict served to `import string` callers still ignores
+all of it. Root cause is in the resolver's `import <bare-name>` namespace-object
+construction (Rust seed), not in `src/lib/**`; out of scope for stdlib lanes.

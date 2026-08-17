@@ -1,0 +1,53 @@
+# Run-path probe for env_nullable_lookup_family_detection_spec.spl.
+#
+# Executed as a SUBPROCESS by that spec. A spec body runs on the tree-walk
+# interpreter; environment lookups cross the runtime boundary (rt_env_get) and
+# are lowered differently on the run path, so an in-body example alone cannot
+# prove the run path behaves. Every check below compares against an ABSOLUTE
+# expected literal, never "both sides agree".
+#
+# Prints exactly one verdict line: PROBE_VERDICT=PASS or PROBE_VERDICT=FAIL:<why>
+
+use std.io_runtime.{env_get, env_get_opt, env_get_or, env_set, print}
+
+val UNSET_A: text = "SPL_ENV_FAMILY_PROBE_UNSET_A_4471"
+val UNSET_B: text = "SPL_ENV_FAMILY_PROBE_UNSET_B_4472"
+val SET_A: text = "SPL_ENV_FAMILY_PROBE_SET_A_4473"
+
+fn main():
+    var fails = ""
+
+    # CLASS INVARIANT 1: a nullable env accessor must let ?? reach the default
+    # for EVERY unset key, not just the one key someone happened to test.
+    if (env_get_opt(UNSET_A) ?? "D1") != "D1":
+        fails = fails + "opt_unset_a;"
+    if (env_get_opt(UNSET_B) ?? "D2") != "D2":
+        fails = fails + "opt_unset_b;"
+    if env_get_or(UNSET_A, "D3") != "D3":
+        fails = fails + "or_unset_a;"
+    if env_get_or(UNSET_B, "D4") != "D4":
+        fails = fails + "or_unset_b;"
+
+    # CLASS INVARIANT 2: the default must NOT be taken when a value exists.
+    # A fallback that always fires is the mirror-image defect and is just as
+    # silent as one that never fires.
+    val ok = env_set(SET_A, "present")
+    if not ok:
+        fails = fails + "env_set_failed;"
+    if (env_get_opt(SET_A) ?? "D5") != "present":
+        fails = fails + "opt_set_a;"
+    if env_get_or(SET_A, "D6") != "present":
+        fails = fails + "or_set_a;"
+
+    # CLASS INVARIANT 3: the known-dead non-nullable accessor still behaves as
+    # documented ("" on a miss). If this ever changes, the ~680 `env_get(k) ?? d`
+    # sites change meaning, and that must be a deliberate, visible break.
+    if env_get(UNSET_A) != "":
+        fails = fails + "env_get_unset_not_empty;"
+    if env_get(SET_A) != "present":
+        fails = fails + "env_get_set_wrong;"
+
+    if fails == "":
+        print("PROBE_VERDICT=PASS")
+    else:
+        print("PROBE_VERDICT=FAIL:" + fails)

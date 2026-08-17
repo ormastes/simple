@@ -1,0 +1,62 @@
+# Similar-problem DETECTION spec (defect CLASS), for
+# doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md
+#
+# The class: an accessor whose documented usage is `f(k) ?? default` but whose
+# return type is NON-nullable. `??` cannot fire, the default is dead code, and
+# the caller silently receives the accessor's sentinel ("" / 0) instead. This is
+# invisible at every call site because the idiom READS as correct — the original
+# incident burned hours on a "ppm-write-failed" that was really an empty path.
+#
+# This spec does not test one key or one function. It pins the invariant for the
+# whole io_runtime environment-lookup family, over multiple unset keys AND a set
+# key (so a fallback that ALWAYS fires — the mirror-image defect — is caught
+# too), and it does so on BOTH the in-process interpreter and the run path via a
+# subprocess, because environment access crosses the runtime boundary.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get, env_get_opt, env_get_or, env_set}
+
+val PROBE_PATH: text = "test/01_unit/lib/nogc_sync_mut/probe_env_nullable_lookup_family.spl"
+
+val UNSET_KEYS: [text] = [
+    "SPL_ENV_FAMILY_DETECT_UNSET_1",
+    "SPL_ENV_FAMILY_DETECT_UNSET_2",
+    "SPL_ENV_FAMILY_DETECT_UNSET_3"
+]
+
+fn run_probe() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val res = process_run("sh", ["-c", cmd])
+    res.0
+
+describe "nullable env-lookup family — dead-fallback detection":
+
+    it "every nullable accessor lets ?? reach the default for every unset key":
+        for key in UNSET_KEYS:
+            expect(env_get_opt(key) ?? "SENTINEL").to_equal("SENTINEL")
+            expect(env_get_or(key, "SENTINEL")).to_equal("SENTINEL")
+
+    it "no nullable accessor takes the default when a value is present":
+        # A `?? default` that fires unconditionally is the same silent class of
+        # wrong answer as one that never fires.
+        var i = 0
+        for key in UNSET_KEYS:
+            val ok = env_set(key + "_LIVE", "value" + i.to_text())
+            expect(ok).to_equal(true)
+            expect(env_get_opt(key + "_LIVE") ?? "SENTINEL").to_equal("value" + i.to_text())
+            expect(env_get_or(key + "_LIVE", "SENTINEL")).to_equal("value" + i.to_text())
+            i = i + 1
+
+    it "the known non-nullable accessor keeps its documented sentinel":
+        # Pinned deliberately: `env_get` returning "" is WHY `?? default` is dead
+        # there. If this flips, every `env_get(k) ?? d` site changes meaning and
+        # that must break loudly here rather than silently in production.
+        for key in UNSET_KEYS:
+            expect(env_get(key)).to_equal("")
+
+    it "the invariants hold on the run path, not only in the interpreter":
+        val out = run_probe()
+        expect(out.contains("PROBE_VERDICT=PASS")).to_equal(true)

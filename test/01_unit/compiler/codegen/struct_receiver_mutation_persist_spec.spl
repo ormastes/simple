@@ -1,0 +1,64 @@
+# Reproducing spec — a mutating method call does not write back to its receiver
+# on the default (JIT) engine.
+#
+# Bug: doc/08_tracking/bug/jit_method_receiver_mutation_never_written_back_2026-08-17.md
+#
+# Symptom class: compiles clean, exits 0, hands back a wrong answer. The method
+# body genuinely runs and observes its own write (`self.n` reads back as 1
+# INSIDE the method), but the mutated receiver is discarded at return, so the
+# caller sees the pre-call value forever.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT here. An in-process example therefore cannot go
+# red on this defect no matter how it is written. The oracle is the sibling
+# run-path probe `probe_struct_receiver_mutation_persist_jit.spl`, executed as a
+# subprocess under both engines.
+#
+# The interpreter arm is the CONTROL: it must be green. If it goes red, the
+# probe is broken rather than the engine.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_struct_receiver_mutation_persist_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate binary; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a mutating method call persists its write to the receiver":
+    it "persists the mutation on the tree-walk interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The probe must actually have executed, not exited early or been demoted")
+        expect(interp).to_contain("PASS depth0_bump_twice")
+
+        step("Every receiver depth must round-trip on the control engine")
+        expect(interp).to_contain("RECEIVER_MUTATION PROBE: ALL PASS")
+
+    it "persists the mutation on the default JIT engine":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine `bin/simple run` uses by default")
+        val jit = run_probe_in_mode("jit")
+
+        step("Depth 0: `l.bump()` on a plain local struct must leave n == 2 after two calls")
+        expect(jit).to_contain("PASS depth0_bump_twice")
+
+        step("Depth 0 with an argument: `l.set_to(7)` must leave n == 7, proving the write and not merely the call survived")
+        expect(jit).to_contain("PASS depth0_set_to")
+
+        step("Depth 1: one field hop to the receiver must behave identically")
+        expect(jit).to_contain("PASS depth1_bump_twice")
+
+        step("Depth 2: the shape originally filed as selfhost_two_hop_field_method_mutation_lost_2026-07-27")
+        expect(jit).to_contain("PASS depth2_bump_twice")
+
+        step("No failure line may appear at all")
+        expect(jit).to_contain("RECEIVER_MUTATION PROBE: ALL PASS")

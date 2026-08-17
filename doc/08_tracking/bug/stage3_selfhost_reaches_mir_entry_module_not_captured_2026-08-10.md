@@ -146,3 +146,29 @@ The next session should run one incremental debug bootstrap, retain the new
 `[bootstrap-flat-entry]` receipt, and require `functions > 0` before proceeding
 to Stage 4. Do not cite the older zero-function log as evidence against
 `5a4bf40c007`; it predates that fix.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: FIX PRESENT IN SOURCE; runtime claim UNVERIFIED (needs stage3).**
+
+`src/compiler/50.mir/_MirLowering/bootstrap_globals.spl:396`
+`val entry_index = bootstrap_hir_entry_index()` (the scalar registry, imported at
+`:23`) replaces the name scan, and `:398` `if entry_index < 0:` now guards the
+"was not captured" eprint fail-closed. The `functions > 0` receipt this doc asks
+for still requires one incremental debug bootstrap, which was not run here.

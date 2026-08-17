@@ -148,3 +148,27 @@ session.** Left honestly OPEN, fence stays RED on the roster as designed
 (it is the coverage fix, not the bug fix). No code changes made. Next step
 unchanged: a seed-authorized session must land the shared resolver-verdict
 fix in `src/compiler_rust`.
+
+## RE-VERIFIED 2026-08-17 — HALF FIXED, half unproven
+
+Read of current source (`src/compiler_rust/compiler/src/codegen/jit.rs:145-183`):
+the NULL-jump half IS implemented. `JitCompiler::compile_module` calls
+`first_unresolved_import()` BEFORE `finalize_definitions()` and fails the JIT
+compile so the driver's interpreter fallback runs, matching AOT behaviour. The
+de-JIT is deliberately LOUD — it prints a greppable
+`[jit-fallback] unresolved external symbol '<name>': whole module dropped to
+the interpreter` on stderr — and `SIMPLE_JIT_STRICT=1` turns it into a hard
+error for lanes that must never silently de-JIT. So "SIGSEGVs on an unresolved
+symbol" is fixed by content.
+
+Two sibling refusal guards sit immediately above it, for the JIT closure ABI
+(`first_lambda_function_impl`) and for named-fn-as-value loads
+(`first_named_fn_value_load`). Note these are demotions to the interpreter,
+not codegen fixes — correct answers, ~100-1000x slower.
+
+**NOT verified in this pass:** the second half of the title — "silently passes
+a bare undefined-variable read". That is a name-RESOLUTION diagnostic, not a
+JIT concern, and nothing in `jit.rs` addresses it. The fence script
+`scripts/check/check-jit-unresolved-symbol-guard.shs` exists but was not run
+here (host load 60-90; a run would not have been trustworthy). Keep this doc
+open for the undefined-variable half only.

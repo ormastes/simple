@@ -1,0 +1,79 @@
+# Run-path probe: does a mutating method call write back to its receiver?
+#
+# Oracle for `struct_receiver_mutation_persist_spec.spl` and
+# `receiver_mutation_writeback_class_spec.spl`.
+#
+# Run me under BOTH engines and compare:
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this file>
+#   SIMPLE_EXECUTION_MODE=jit         bin/simple run <this file>
+#
+# Every oracle below is an ABSOLUTE literal (2, 5, 7), never "the two engines
+# agree" — a same-direction wrong answer in both engines must still fail.
+#
+# Keep this file MINIMAL. One unsupported operation silently demotes the whole
+# program to the interpreter, which would make a JIT probe measure the wrong
+# engine (see .claude/rules/testing.md).
+
+struct Leaf:
+    var n: i64
+
+impl Leaf:
+    fn bump():
+        self.n = self.n + 1
+
+    fn set_to(v: i64):
+        self.n = v
+
+struct Mid:
+    var leaf: Leaf
+
+struct Top:
+    var mid: Mid
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name + " = " + got.to_text())
+    else:
+        failures = failures + 1
+        print("FAIL " + name + " expected " + want.to_text() + " got " + got.to_text())
+
+fn main():
+    # depth 0 — the receiver IS a plain local variable. This is the most basic
+    # shape in the language; if it loses the write, everything above it does too.
+    var l = Leaf(n: 0)
+    l.bump()
+    l.bump()
+    check("depth0_bump_twice", l.n, 2)
+
+    # depth 0, single call with an argument — distinguishes "the method never
+    # ran" from "the method ran and the write was discarded".
+    var l2 = Leaf(n: 0)
+    l2.set_to(7)
+    check("depth0_set_to", l2.n, 7)
+
+    # depth 1 — one field hop to the receiver.
+    var m = Mid(leaf: Leaf(n: 0))
+    m.leaf.bump()
+    m.leaf.bump()
+    check("depth1_bump_twice", m.leaf.n, 2)
+
+    # depth 2 — the shape originally filed as
+    # selfhost_two_hop_field_method_mutation_lost_2026-07-27.
+    var t = Top(mid: Mid(leaf: Leaf(n: 0)))
+    t.mid.leaf.bump()
+    t.mid.leaf.bump()
+    check("depth2_bump_twice", t.mid.leaf.n, 2)
+
+    # depth 2 by DIRECT ASSIGNMENT rather than a method call. The assignment
+    # spelling was once a loud hard error while the method spelling of the
+    # identical operation was silent; both must now simply work.
+    var t2 = Top(mid: Mid(leaf: Leaf(n: 0)))
+    t2.mid.leaf.n = 5
+    check("depth2_direct_assign", t2.mid.leaf.n, 5)
+
+    if failures == 0:
+        print("RECEIVER_MUTATION PROBE: ALL PASS")
+    else:
+        print("RECEIVER_MUTATION PROBE: " + failures.to_text() + " FAILURES")

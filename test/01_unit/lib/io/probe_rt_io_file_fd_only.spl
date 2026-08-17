@@ -1,0 +1,70 @@
+# Run-path probe isolating the fd-taking (i64-only) half of the rt_io_file_*
+# family from the text-taking half.
+#
+# The text-taking members (open/exists/delete) are absent from
+# `text_arg_indices()` (codegen/instr/calls.rs, codegen/llvm/functions/calls.rs),
+# so under JIT/native their `text` argument is passed as ONE unexpanded word
+# instead of the (ptr, len) pair the runtime C ABI declares. That makes
+# `rt_io_file_open` return -1, which in turn makes every fd-taking member fail
+# as COLLATERAL inside a `fd < 0` branch — hiding whether those members are
+# themselves correct.
+#
+# This probe obtains its fd from the independently-implemented `rt_file_open`
+# control family (which IS in the text-arg table and works under JIT), so each
+# fd-taking rt_io_file_* symbol is exercised on a real, valid descriptor.
+#
+# Run under both engines and diff:
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this file>
+#   SIMPLE_EXECUTION_MODE=jit         bin/simple run <this file>
+#
+# See doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
+
+extern fn rt_file_open(path: text, mode: i64) -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
+extern fn rt_io_file_meta_size(fd: i64) -> i64
+extern fn rt_io_file_meta_flags(fd: i64) -> i64
+extern fn rt_io_file_flush(fd: i64) -> bool
+extern fn rt_io_file_close(fd: i64) -> bool
+
+val FD_PROBE_PATH: text = "/tmp/probe_rt_io_file_fd_only.txt"
+
+fn report(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS " + name)
+        return 0
+    print("FAIL " + name)
+    return 1
+
+fn main() -> i64:
+    var fails = 0
+
+    rt_file_delete(FD_PROBE_PATH)
+    # 10 bytes on disk, written by the control family.
+    fails = fails + report("control_wrote_ten_bytes", rt_file_write_text(FD_PROBE_PATH, "0123456789"))
+    fails = fails + report("control_read_back", rt_file_read_text(FD_PROBE_PATH) == "0123456789")
+
+    # mode 0 = ReadOnly, matching rt_file_open's descriptor.rs encoding.
+    val fd = rt_file_open(FD_PROBE_PATH, 0)
+    fails = fails + report("control_rt_file_open_gave_fd", fd >= 0)
+
+    if fd >= 0:
+        # Absolute oracles about a 10-byte file on a fresh descriptor.
+        fails = fails + report("meta_size_is_ten", rt_io_file_meta_size(fd) == 10)
+        fails = fails + report("meta_flags_nonnegative", rt_io_file_meta_flags(fd) >= 0)
+        fails = fails + report("seek_set_to_3", rt_io_file_seek(fd, 3, 0) == 3)
+        fails = fails + report("seek_cur_plus_2", rt_io_file_seek(fd, 2, 1) == 5)
+        fails = fails + report("seek_end_minus_1", rt_io_file_seek(fd, -1, 2) == 9)
+        fails = fails + report("flush_ok", rt_io_file_flush(fd))
+        fails = fails + report("close_ok", rt_io_file_close(fd))
+
+    rt_file_delete(FD_PROBE_PATH)
+
+    if fails == 0:
+        print("RT_IO_FILE FD PROBE: ALL PASS")
+        return 0
+    print("RT_IO_FILE FD PROBE: FAILURES")
+    return 1

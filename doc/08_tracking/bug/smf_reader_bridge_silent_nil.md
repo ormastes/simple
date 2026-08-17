@@ -1,9 +1,15 @@
 # BUG: SMF reader bridge returns silent nil — six unimplemented `rt_smf_reader_*` externs
 
 - **Filed:** 2026-08-01
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 04).
-  decision for the SMF bridge itself needs the **link owner**
+- Status: **FIXED 2026-08-17** (was OPEN P1). The six externs are deleted and
+  every read is now real, pure-Simple decoding. See "Fix (2026-08-17)" below.
+- Status re-verified 2026-08-17 by source inspection (triage shard 04) — that
+  verification is superseded by the fix recorded at the bottom of this file.
+  **Everything below this header up to "Fix (2026-08-17)" describes the
+  PRE-FIX state and is retained as the original analysis.** In particular the
+  "Why this is not being done in this lane" and "Decision requested from the
+  link owner" sections are historical: option 1 (re-route onto the pure-Simple
+  decoders, delete the six externs) was the option taken.
 - **Severity:** High. Not a crash — a silent wrong answer. The reader reports
   success for files it never read.
 - **Related:** `doc/02_requirements/language/features/eliminate_dummy_impls.md`
@@ -179,3 +185,88 @@ empty header, no symbols and no sections. The prescribed rework — re-route ont
 SmfReaderImpl/SmfReaderMemory type seam and is unchanged by this commit.
 
 Spec: `test/01_unit/compiler/linker/smf_reader_open_fails_closed_spec.spl`
+
+---
+
+## Fix (2026-08-17)
+
+**Reproduced first.** New spec
+`test/01_unit/compiler/linker/smf_reader_ffi_bridge_silent_empty_spec.spl`
+builds a minimal-but-valid SMF image on disk (128-byte header at offset 0, one
+56-byte Global function symbol named `hello`, string table) and asserts the
+file-backed reader reports what is actually in the file.
+
+RED, deployed seed `bin/simple` (mtime 2026-08-16 22:59), before any change:
+
+```
+Results: 8 total, 1 passed, 7 failed
+```
+
+The single pass was "fails closed on a path that does not exist" — the earlier
+containment fix. Note that *"fails closed on a file whose magic is not SMF"*
+**also failed**: `open()` returned `Ok` for a junk file too.
+
+### Root cause and what it hid
+
+`src/compiler/70.backend/linker/smf_reader.spl` routed every read through six
+`rt_smf_reader_*` externs with no implementation anywhere in the tree. An
+unregistered extern does not fail to link, so `read_header` returned a
+hardcoded all-zero header and `read_section` / `read_symbol_table` /
+`read_string_table` returned `[]` unconditionally, while `open()` still
+reported success.
+
+Fixing the reads made three further defects reachable **for the first time**.
+All three were previously dead code masked by the always-empty symbol table,
+and each is the same silent-empty-answer class:
+
+1. `exported_symbols()` called `s.is_exported()` — **a method that does not
+   exist** on `SmfSymbol` (`obj_taker.spl:39`). Never a compile error; the loop
+   body simply never ran. First real symbol → `semantic: method is_exported not
+   found on type SmfSymbol`.
+2. `exported_symbols()` / `template_symbols()` iterated `self.symbols.values()`,
+   which yields nothing here. Measured: `lookup_symbol("hello")` returned the
+   symbol while the `.values()` loop saw zero. `SmfReaderMemory` already
+   iterates `.keys()` with a BUG-001 note for exactly this reason.
+3. `parse_symbol_binding(b: u8)` used `match b:` against bare integer literals.
+   A binding byte of literally `1` decoded as `Local`, not `Global` — every arm
+   missed and `case _` won — so `exported_symbols()` returned `[]` for a module
+   with a global symbol. Widened to `i64` with explicit comparisons.
+
+### Files changed
+
+- `src/compiler/70.backend/linker/smf_reader.spl` — the whole fix.
+
+`SmfReaderFfi` keeps its name and method signatures, so no consumer changes
+shape (`link.spl`, `object_provider.spl`, `object_resolver.spl`,
+`lazy_instantiator.spl`, `smf_getter.spl`, `module_loader.spl`). Reads now use
+the same decoders `SmfReaderMemory` uses (`parse_header_from_bytes`,
+`extract_string_table`, and the documented 56-byte symbol-entry layout), so the
+two readers agree by construction.
+
+### Evidence, all four defects, one fixture, executed under the interpreter
+
+```
+write_ok=true
+open=OK
+symbol_count=1              # was 0 (hardcoded zero header)
+exported=1                  # was 0, then a hard error, then 0 again
+lookup_hello=OK size=16     # was "Symbol not found"
+lookup_absent=correctly_missing
+missing_path=correctly_err
+bad_magic=correctly_err     # was Ok(..) for a non-SMF file
+PROBE DONE
+```
+rc=0. Probe:
+`scratchpad/probe_smf.spl` (session b0241b7c), run with `bin/simple run`.
+
+### Regression specs — both executed, both GREEN
+
+- reproducing: `test/01_unit/compiler/linker/smf_reader_ffi_bridge_silent_empty_spec.spl`
+  - RED before: `Results: 8 total, 1 passed, 7 failed`
+  - GREEN after: `Results: 8 total, 8 passed, 0 failed` (rc=0)
+- class detection: `test/01_unit/compiler/linker/smf_reader_bridge_parity_class_spec.spl`
+  - GREEN: `Results: 7 total, 7 passed, 0 failed` (rc=0)
+  — differential parity against `SmfReaderMemory`, an extern-free oracle, over
+  three fixtures (0/1/3 symbols) plus non-vacuity guards on the oracle itself.
+  This generalizes past the six named externs to the class: *a reader must never
+  report success while handing back an empty answer.*

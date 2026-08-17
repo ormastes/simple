@@ -1,0 +1,75 @@
+## Class-detection spec: a negative-test fixture must actually be negative.
+##
+## Defect class (found via
+## doc/08_tracking/bug/paseto_v4_tampered_token_signature_accepted_2026-07-20.md):
+## `paseto_v4_kat_spec.spl` built its "tampered" tokens as
+##
+##     good.substring(0, 15) + "X" + good.substring(16, good.length())
+##
+## For the v4.public RFC vector, index 15 is the "X" of "eyJkYXRh..." — so the
+## substitution replaced "X" with "X" and the "tampered" token was byte-identical
+## to the valid one. The example then asserted that a PERFECTLY VALID token must
+## be rejected, failed, and was reported as a P1 authentication bypass that did
+## not exist.
+##
+## This is the inverse of the usual vacuity mode. A vacuous positive test yields a
+## FALSE GREEN and hides a real bug; a vacuous NEGATIVE test yields a FALSE RED
+## and manufactures a phantom bug. Both waste the same amount of time, and the
+## false RED is more dangerous in security code because it invites someone to
+## "fix" a verifier that was already correct.
+##
+## The rule this spec pins: any fixture that claims to corrupt an input MUST
+## produce something different from that input, and a fixed-character
+## substitution never guarantees that. These examples exercise the mutation
+## helper's contract directly, independently of PASETO.
+
+use std.spec.{describe, it, expect}
+
+## Mirrors `_flip_char_at` in paseto_v4_kat_spec.spl: substitutes a character
+## guaranteed to differ from the one being replaced.
+fn _flip_char_at(value: text, index: i64) -> text:
+    val original = value.substring(index, index + 1)
+    val replacement = if original == "X": "Y" else: "X"
+    value.substring(0, index) + replacement + value.substring(index + 1, value.length())
+
+## The original, defective idiom — kept so the contrast is executable rather
+## than merely asserted in a comment.
+fn _naive_flip_at(value: text, index: i64) -> text:
+    value.substring(0, index) + "X" + value.substring(index + 1, value.length())
+
+val _PUBLIC_TOKEN_PREFIX = "v4.public.eyJkYXRhIjoidGhpcyBpcyBhIHNpZ25lZCBtZXNzYWdl"
+
+describe "negative-test fixtures must actually corrupt their input":
+
+    context "the naive fixed-character substitution is unsafe":
+        it "silently degrades to a no-op when the target is already the replacement":
+            # Index 15 of the real v4.public RFC vector is "X".
+            val token = _PUBLIC_TOKEN_PREFIX
+            expect(token.substring(15, 16)).to_equal("X")
+            expect(_naive_flip_at(token, 15)).to_equal(token)
+
+        it "does mutate when the target differs from the replacement":
+            val token = _PUBLIC_TOKEN_PREFIX
+            expect(_naive_flip_at(token, 14) == token).to_equal(false)
+
+    context "the guarded substitution always corrupts":
+        it "changes a character that is not already the replacement":
+            val token = _PUBLIC_TOKEN_PREFIX
+            expect(_flip_char_at(token, 14) == token).to_equal(false)
+
+        it "changes a character that IS already the replacement":
+            val token = _PUBLIC_TOKEN_PREFIX
+            expect(_flip_char_at(token, 15) == token).to_equal(false)
+
+        it "substitutes Y when the original is X":
+            expect(_flip_char_at("abXde", 2)).to_equal("abYde")
+
+        it "substitutes X otherwise":
+            expect(_flip_char_at("abcde", 2)).to_equal("abXde")
+
+        it "preserves length and every other position":
+            val token = _PUBLIC_TOKEN_PREFIX
+            val mutated = _flip_char_at(token, 15)
+            expect(mutated.length()).to_equal(token.length())
+            expect(mutated.substring(0, 15)).to_equal(token.substring(0, 15))
+            expect(mutated.substring(16, token.length())).to_equal(token.substring(16, token.length()))

@@ -264,6 +264,12 @@ impl<'a> Parser<'a> {
             TokenKind::Var => self.parse_primary_identifier(),
             // Mock as identifier in expression position
             TokenKind::Mock => self.parse_primary_identifier(),
+            // `spawn` prefixes an operand (`spawn worker`, `spawn \x: ...`) only
+            // when one actually follows; otherwise it is an ordinary identifier
+            // (`var spawn = 3` / `spawn + 1` / `spawn()`).
+            TokenKind::Spawn if !self.soft_keyword_prefixes_operand() => {
+                self.parse_primary_identifier()
+            }
             TokenKind::Spawn
             | TokenKind::Go
             | TokenKind::If

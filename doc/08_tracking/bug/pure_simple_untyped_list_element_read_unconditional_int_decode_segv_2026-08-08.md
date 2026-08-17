@@ -114,3 +114,37 @@ instead of a runtime SIGSEGV.
   machinery this pass doesn't build); reproduce by pasting into a scratch
   dir and running the `native-build` invocation in the Guide section of the
   originating task.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: ALREADY-FIXED BY CONTENT (the SIGSEGV half), in the runtime rather than in 50.mir.**
+
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:848-861` no longer emits a
+bare `>> 3` for the I64/U64 erased-element case; it routes through
+`rt_value_as_int_wide`. That function, at `src/runtime/runtime_native.c:2206-2226`,
+now returns a HEAP-tagged handle unchanged instead of shredding it
+(`if ((((uint64_t)value) & 0x7ULL) == RT_VALUE_TAG_HEAP) return value;`), and its
+comment names the sibling bug `native_empty_dict_text_value_sigsegv_2026-07-20`
+and the exact strcmp SIGSEGV signature. Separately,
+`scripts/check/check-untyped-list-element-shift.shs` was executed on 2026-08-17:
+rc=0, `PASS — interpreter reference lane correct: typed=[5,7], list-param=[5,7]`,
+plus a `KNOWN-OPEN` line reporting `list0=40 list1=56` (value*8). That KNOWN-OPEN
+belongs to the SEED lane and is tracked by
+`untyped_list_element_read_seed_rootcause_2026-07-30.md`, not by this pure-Simple
+doc.

@@ -656,3 +656,179 @@ primitives) that happen to share the same *shape* of bug ("primitives have no
 symbol, so anything keyed on symbol silently treats them as impl-less") but
 require separate fixes in separate languages; only the pure-Simple side was
 touched here, per scope.
+
+---
+
+## 2026-08-17 — CONTENT-BASED re-verification + first cross-engine RUN evidence
+
+Verified by reading current source, not by commit SHA (SHAs are rewritten
+constantly in this tree and prove nothing). Binary identity for every number
+below: `readlink -f bin/simple` ->
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`;
+`bin/simple --version` prints the seed banner, i.e. **everything measured here
+is the Rust bootstrap SEED**.
+
+### Which halves are live, by content
+
+| half | site | state today |
+|---|---|---|
+| export half (`use std.hash`) | `src/lib/nogc_sync_mut/src/hash.spl` | already fixed (not re-probed here) |
+| Defect B — resolver fall-through | `src/compiler/35.semantics/resolve_strategies.spl:158` | **fix PRESENT by content** (`primitive_type_key` consulted before bailing) |
+| Defect B — registration key | `src/compiler/35.semantics/resolve.spl:95` (`primitive_type_key`, distinct per kind/bits/signedness) + `resolve.spl:282` (registers primitives under it) | **fix PRESENT by content** |
+| Defect B — trait-DEFAULT-method registration | `src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl:249-251` — still `case _: default_fn.name` (bare unqualified name) | **UNFIXED** |
+| Defect A — seed JIT builtin-name shadow | `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1790` — still literally `"hash" => "rt_hash_text"`, matched on method NAME with **no receiver-type gate** | **LIVE, unchanged** |
+
+The Defect B fixes in `35.semantics` remain **unobservable through `bin/simple`**:
+that binary is the Rust seed, whose own interpreter emits the diagnostics seen
+below (`src/compiler_rust/compiler/src/interpreter/error_macros.rs:82`,
+`interpreter/expr/calls.rs:615`). Edited `src/compiler/**/*.spl` is not executed
+by it. Confirming that half still requires a bootstrap rebuild.
+
+### RUN evidence (new — first time both engines were exercised)
+
+Probe added: `test/01_unit/language/probe_primitive_receiver_trait_impl_dispatch.spl`
+(text / i64 / i32 / u64 / bool / f32 / f64 receivers + a struct control; every
+oracle an absolute literal). Exit status read on the line AFTER the command,
+never through a pipe.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 SIMPLE_EXECUTION_MODE=interpreter \
+  nice -n 19 bin/simple run test/01_unit/language/probe_primitive_receiver_trait_impl_dispatch.spl
+rc=1
+PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: begin
+PASS text_receiver
+PASS i64_receiver
+PASS bool_receiver
+PASS f64_receiver
+FAIL i32_receiver expected=1003 actual=1002
+PASS f32_receiver
+error: semantic: method `marker_probe` not found on type `u64` (receiver value: 7)
+```
+
+```
+SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 SIMPLE_EXECUTION_MODE=jit \
+  nice -n 19 bin/simple run test/01_unit/language/probe_primitive_receiver_trait_impl_dispatch.spl
+rc=70
+PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: begin
+Runtime error: Function 'str.marker_probe' not found
+Runtime error: unresolved symbol -- this is a code-generation dispatch gap, not a program error. Refusing to substitute a placeholder value (it would render as the text 'error' and silently corrupt output).
+```
+
+Three live findings:
+
+1. **i32 still collapses onto the i64 impl** under the seed interpreter
+   (1002 where 1003 is correct). Matches the long-standing RED row.
+2. **NEW: unsigned primitive Self types have no impl at all.** `impl MarkerProbe
+   for u64` is accepted at parse/lower time but the receiver resolves to
+   *nothing*: `method 'marker_probe' not found on type 'u64'`. This is a
+   strictly worse failure than the i32 collapse (which at least reaches *an*
+   impl) and was not previously recorded. Note the pure-Simple
+   `primitive_type_key` DOES key unsigned distinctly (`-2000 - bits`), so this
+   is a seed-side gap, not a Defect B gap.
+3. **Defect A confirmed LIVE and now shown to be broader than `hash`.** Under
+   the JIT every primitive receiver fails — `marker_probe` is not in the
+   builtin table, so it fails CLOSED (rc=70) rather than silently, exactly as
+   the original analysis predicted. The silent-open variant remains whatever
+   name collides with the table at `closures_structs.rs:1780-1800`.
+4. **Bonus, separate defect:** with the struct control arm ordered FIRST, the
+   JIT died with `runtime error: invalid field receiver` and **SIGILL, core
+   dumped (rc=132)** on `ControlPoint(x: 1).marker_probe()` — a `self.x` read
+   inside a trait impl body. Filed here only as an observation; it is a
+   distinct crash from the dispatch gap and is out of this row's scope.
+
+### Root cause, by file:line
+
+- Defect A (JIT, both the fail-closed and the silent-open variants):
+  `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1778-1800`
+  — the `match method { ... }` name->runtime-function table has no
+  receiver-type gate, and there is no fallback to a user `impl Trait for
+  <primitive>` when the name is absent from it.
+- Finding 2 (u64/unsigned): seed interpreter method dispatch,
+  `src/compiler_rust/compiler/src/interpreter/expr/calls.rs` / `interpreter_method/mod.rs`
+  — unsigned receiver values never consult the user impl table.
+
+Both root causes are in `src/compiler_rust/**` (the Rust seed). This lane's
+allowed edit scope was `src/compiler/{35.semantics,80.driver,99.loader,90.tools,60.mir_opt,25.traits}/**`;
+the pure-Simple half in `35.semantics` is **already correct by content**, so
+there was nothing left to fix there. **No source fix was made by this lane** —
+recording root cause instead, per scope.
+
+### Specs
+
+- Reproducing spec (pre-existing, unchanged):
+  `test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl`
+- **NEW class-detection spec:**
+  `test/01_unit/language/primitive_receiver_trait_impl_dispatch_class_spec.spl`
+  — generalises the class: every primitive Self type (text, i64, i32, u64,
+  bool, f32, f64) across BOTH engines, driven through a subprocess so the
+  JIT-only half can actually go red. A spec body always runs interpreted, so
+  the previous in-process-only spec was structurally incapable of catching
+  Defect A.
+- **NEW probe:** `test/01_unit/language/probe_primitive_receiver_trait_impl_dispatch.spl`
+
+### Residual / NOT proven
+
+- The Defect B fix in `35.semantics` is proven present **by content only**; it
+  has never been executed. A bootstrap rebuild is still the only way to observe
+  it, and this lane did not run one.
+- `trait_impl_lowering.spl:249-251` bare-name registration for trait DEFAULT
+  methods is still unfixed and untested.
+- Native (`native-build`) column not re-probed this session.
+- `bin/simple test` on the reproducing spec produced **1897 lines of warnings
+  with no `Results:` line** on the first attempt — the known silent-exit0
+  runner defect
+  (`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`).
+  The `bin/simple run` transcripts above are therefore the authoritative
+  evidence for this row, not the `test` runner.
+- **Neither spec has a `Results:` line from this session — UNVERIFIED, not
+  green and not red.** Three attempts on a box at load 80-130:
+  `nice -n 19 bin/simple test test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl --timeout 900`
+  -> 1942 lines, **exit code 0**, no `Results:`; retried once at
+  `--timeout 1800` -> 1943 lines, **rc=143** (SIGTERM — killed under host
+  load), no `Results:`. rc=143 with no `Results:` line is UNVERIFIED, not a
+  failure; and the exit-0-with-no-summary on the first attempt is the
+  silent-green signature — a caller checking only `rc` would have recorded this
+  row as PASSING while nothing ran.
+
+  **Both non-verdicts were host contention in SESSION SETUP, not the runner
+  defect.** Given a slot, the runner completes normally and the actual spec
+  execution takes ~4 seconds. The class spec proved this:
+
+```
+nice -n 19 bin/simple test \
+  test/01_unit/language/primitive_receiver_trait_impl_dispatch_class_spec.spl --timeout 1800
+rc=1
+
+impl Trait for <primitive Self> reaches the user impl on every engine
+  ✓ runs the probe at all under both engines
+  ✗ dispatches to the matching impl for every primitive Self type under the interpreter
+  ✗ dispatches to the matching impl for every primitive Self type under the cranelift JIT
+
+3 examples, 2 failures
+SPEC FILE VERDICT: ...class_spec.spl declared>=3 executed=3 passed=1 failed=2 dropped=0
+Results: 3 total, 1 passed, 2 failed
+Duration: 3848ms
+```
+
+  The class spec is therefore **genuinely RED (2 of 3)**, and red for exactly
+  the right reason: the passing example is the non-vacuity guard (the probe
+  really did start under both engines), while the two failures carry the
+  interpreter and JIT transcripts quoted above verbatim in their diff output.
+  Note `executed=3 dropped=0` — the run is not vacuous.
+
+  The `child binary:` line in that transcript confirms the subprocess resolved
+  to `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+  (the seed), never the production-guard wrapper.
+
+- **The pre-existing reproducing spec still has no `Results:` line from this
+  session.** A third attempt was launched and was still in session setup (1338
+  lines of warnings, no verdict) when this lane stopped; it was NOT killed and
+  NOT observed to fail. Its documented RED state (`Results: 7 total, 6 passed,
+  1 failed`, the i32 row) is carried over from the original report, and its
+  substance is independently confirmed by the `bin/simple run` interpreter
+  transcript above (`FAIL i32_receiver expected=1003 actual=1002`). Treat the
+  spec's `test`-runner verdict as re-confirmed only when someone quotes a fresh
+  `Results:` line for it. Do not read this as a pass or a fail: the class spec's
+  in-repo status is UNVERIFIED-BY-`test`, VERIFIED-RED-BY-`run` (its three
+  `it` blocks assert exactly the `PASS ...` lines the probe transcripts above
+  show absent).

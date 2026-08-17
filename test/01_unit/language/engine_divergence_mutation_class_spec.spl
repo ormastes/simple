@@ -1,0 +1,66 @@
+# Similar-problem DETECTION spec — engine-divergent container mutation.
+#
+# Generalises the defect CLASS behind
+# doc/08_tracking/bug/aliased_array_mut_param_mutation_lost_interpreter_2026-08-06.md
+# rather than its one reported shape.
+#
+# The class: a container mutation performed through a `mut` parameter is kept by
+# one execution engine and silently discarded by the other. Both engines exit 0
+# and print no diagnostic, so the only symptom is a wrong number much later. The
+# reported bug was the aliased-array shape; the same write-back path also covers
+# dicts, value-type struct fields, three-way aliasing and field-expression
+# arguments, and each of those was a separate silent hole.
+#
+# Two independent oracles, so a fix that makes both engines agree on the WRONG
+# answer still fails:
+#   1. every `SHAPE <name>=<n>` line must read 2 — an absolute literal the probe
+#      does not compute, since each shape pushes exactly one element onto a
+#      1-element container;
+#   2. the interpreter's and the JIT's full shape blocks must be byte-identical.
+#
+# WHY A SUBPROCESS: a spec body runs on the tree-walk interpreter under one
+# engine and structurally cannot observe an inter-engine divergence.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_engine_divergence_mutation_class.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn shape_lines(raw: text) -> [text]:
+    var kept: [text] = []
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with("SHAPE "):
+            kept.push(t)
+    kept
+
+fn discarded_shapes(raw: text) -> [text]:
+    var bad: [text] = []
+    for line in shape_lines(raw):
+        if not line.ends_with("=2"):
+            bad.push(line)
+    bad
+
+describe "engine-divergent container mutation (defect class)":
+    it "keeps every mut-parameter container mutation on the interpreter":
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(shape_lines(out).len()).to_equal(8)
+        expect(discarded_shapes(out).len()).to_equal(0)
+
+    it "keeps every mut-parameter container mutation on the jit, and agrees with the interpreter":
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(shape_lines(jit).len()).to_equal(8)
+        expect(discarded_shapes(jit).len()).to_equal(0)
+        val interp = run_probe_in_mode("interpreter")
+        expect(shape_lines(jit).join("|")).to_equal(shape_lines(interp).join("|"))

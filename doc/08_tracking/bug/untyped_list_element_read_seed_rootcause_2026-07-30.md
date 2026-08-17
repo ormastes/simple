@@ -364,3 +364,35 @@ Sabotage-verified: corrupting the fixture's seed data (`buf = [5, 7, 9]` →
 `[6, 7, 9]`) makes the script print `FAIL — interpreter reference lane
 regressed` and exit 1; restoring the fixture (verified byte-identical via
 `diff`) makes it pass again (`KNOWN-OPEN`, exit 0).
+
+## RE-VERIFIED 2026-08-17 — ALREADY FIXED IN-TREE (by content, not by SHA)
+
+Reproduced on the DEPLOYED seed (`bin/simple`, mtime 2026-08-16 22:59) and
+NOT reproducible on a seed freshly built from current `src/compiler_rust`
+(`cargo build --release --bin simple`, `BUILDRC=0`, binary 2026-08-17 08:15).
+
+Oracle: `test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl`,
+whose `get_via_list(xs: list, i)` / `get_via_typed(xs: [i64], i)` pair is the
+doc's own minimal pair.
+
+    deployed seed, default mode:  FAIL list_elem_mask got=80  want=10   (10 << 3)
+                                  FAIL list_elem_add  got=240 want=30
+    fresh seed, SIMPLE_EXECUTION_MODE=jit:          PASS list_elem_mask
+                                                    PASS list_elem_add
+    fresh seed, SIMPLE_EXECUTION_MODE=interpreter:  PASS (control arm)
+
+The `typed_array_elem_mask` control arm passes in every run, so the fixture is
+sound and the delta is the engine, not the probe.
+
+Also newly true and worth recording, because it dissolves this doc's stated
+reason a general fix was unsafe: `MirInst::UnboxInt` no longer lowers to a bare
+arithmetic `>>3`. Both `cranelift_emitter.rs:788` and `codegen/instr/mod.rs:1495`
+now route it through `rt_value_unbox_int`
+(`runtime/src/value/sffi/value_ops.rs:68`), which is TOTAL on any input: it
+decodes a heap-boxed wide int, shifts only `TAG_INT`, maps the boolean
+specials, and passes a heap pointer / float / special through VERBATIM. The
+"unboxing a heap pointer with an arithmetic shift is type confusion" objection
+above therefore no longer holds.
+
+**Status: CLOSE as already-fixed.** Kept open only if a lane can show a
+`list`-read miscompile on a seed built from current source.

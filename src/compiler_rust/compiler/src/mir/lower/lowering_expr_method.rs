@@ -1603,7 +1603,14 @@ impl<'a> MirLowerer<'a> {
         // Box integer arguments for array .push() — matches IndexGet unbox at line 1236.
         // Without this, wrap_value (no-op) passes raw integers to rt_array_push,
         // but IndexGet + MIR UnboxInt expects tagged (val << 3) values.
-        if is_array_append_method && !args.is_empty() {
+        // GATED ON AN ARRAY RECEIVER — same gate `index_of` uses just below.
+        // `is_array_append_method` is a NAME test only, so without this gate a
+        // user-defined `me append(...)`/`me push(...)` on a plain struct had its
+        // FIRST integer argument tag-boxed (`v << 3`) at the call site while the
+        // callee read it raw — every such call saw `value * 8`, silently, on the
+        // JIT lane only (the tree-walk interpreter was unaffected).
+        // See doc/08_tracking/bug/interp_me_method_first_param_times8_conditional_2026-06-29.md.
+        if is_array_append_method && !args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
             let push_arg_ty = args[0].ty;
             let receiver_element_is_function =
                 self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(|ty| {

@@ -61,3 +61,26 @@ store `Tensor` parameters and route their forward passes through the autograd
 ops in `std.pure.autograd` rather than the raw ops in `std.pure.tensor_ops`.
 Adding a `shape()` accessor to `PureTensor` alone would not fix the
 `forward()` failure.
+
+## 2026-08-17 (lane w04) — RESOLVED, verified by execution
+
+```
+Results: 5 total, 5 passed, 0 failed
+```
+(`src/lib/gc_async_mut/pure/test/nn_spec.spl`, `bin/simple test ... --no-session-daemon --timeout 900`, rc=0,
+`declared>=5 executed=5 passed=5 failed=0 dropped=0`.)
+
+Both type-surface mismatches this doc reports are gone in current source:
+
+1. `src/lib/gc_async_mut/pure/nn.spl` is uniformly raw-tensor now —
+   `Linear.weight: PureTensor<f64>`, `bias: PureTensor<f64>?`, and
+   `fn forward(x: PureTensor<f64>) -> PureTensor<f64>`. It no longer accepts an
+   autograd `Tensor` and no longer reads `.data` off one.
+2. The missing method-shaped accessor exists: `PureTensor.dims()` at
+   `src/lib/gc_async_mut/pure/tensor.spl:16`, matching autograd `Tensor.shape()`.
+3. The crossing is explicit and single: `src/lib/gc_async_mut/pure/autograd_bridge.spl`
+   provides `to_pure(t: Tensor) -> PureTensor<f64>` (`:25`) and
+   `to_autograd(p: PureTensor<f64>, requires_grad: bool = false) -> Tensor` (`:32`).
+
+The spec is no longer parked on `pending(...)`; it asserts the bridge round-trip
+directly. Suggest closing.

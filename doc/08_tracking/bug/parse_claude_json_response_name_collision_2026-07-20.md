@@ -91,3 +91,24 @@ literal input, not a bug. Deciding whether this test's premise (endpoint is
 still an unimplemented `501` stub) is stale requires knowing the current
 `/v1/chat/completions` handler contract — left unclassified, not attempted as
 a mechanical fix.
+
+## 2026-08-17 (lane w04) — DID NOT REPRODUCE: classify as ALREADY-FIXED
+
+```
+Results: 39 total, 39 passed, 0 failed
+```
+(`test/unit/app/llm_caret/claude_cli_spec.spl`, `bin/simple test ... --no-session-daemon --timeout 900`, rc=0,
+`declared>=39 executed=39 passed=39 failed=0 dropped=0`.)
+
+All 8 examples this doc lists as failing — `parses successful response`,
+`parses token counts`, `parses error response`, `handles missing model field`,
+`handles multiline result content`, `parses content_block_delta`,
+`parses message_stop`, `parses message_start with model` — now pass.
+
+Note the collision SHAPE is still present and was not removed: both definitions
+survive (`src/app/llm_caret/claude_cli.spl:246` `pub fn parse_claude_json_response`
+and `src/lib/nogc_async_mut/llm/claude_cli.spl:103` `fn parse_claude_json_response`).
+So the registry now dispatches correctly despite the duplicate name; the
+hypothesis in this doc was plausible but the mis-dispatch no longer occurs.
+Deduplicating the two modules remains reasonable hygiene, but it is not a bug fix
+and nothing is currently failing because of it.

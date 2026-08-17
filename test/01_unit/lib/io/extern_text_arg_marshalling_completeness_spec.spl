@@ -1,0 +1,72 @@
+# CLASS DETECTION: "extern symbol registered but dispatched with the wrong
+# marshalling".
+#
+# Generalises doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
+# past the one family that was filed.
+#
+# The class. Registration is not the contract. A `rt_*` symbol can be defined in
+# the runtime, exported, dlsym-resolvable, and declared to Simple — and STILL be
+# called wrongly, because the number of machine words a Simple `text` occupies
+# at a call site is decided by a hand-maintained allowlist, not by the symbol's
+# own signature:
+#
+#   text_arg_indices() in codegen/instr/calls.rs          (cranelift / JIT)
+#   text_arg_indices() in codegen/llvm/functions/calls.rs (LLVM / AOT)
+#
+# Miss an entry and there is no link error, no crash, no diagnostic: the
+# RuntimeString handle lands in `ptr` and an unrelated register lands in `len`.
+# The callee returns `false` / `-1` and the process exits 0. That is a silent
+# wrong result, and it is invisible from a spec body, which runs interpreted.
+#
+# This spec detects the WHOLE class statically, by deriving the required set
+# from the runtime's own C signatures instead of trusting either table:
+#   1. every `extern "C" fn rt_*` in the runtime file_io family taking `*const u8`
+#      (the repo's (ptr, len) convention),
+#   2. intersected with those src/lib declares to Simple with a `text` parameter,
+#   3. must appear in BOTH codegen tables.
+#
+# NOT VACUOUS: the scan prints how many symbols it actually classified, and a
+# scan of zero symbols is asserted to be a failure, not a pass — a broken
+# regex would otherwise report "no offenders" forever.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val SCAN: text = "test/01_unit/lib/io/extern_text_arg_marshalling_scan.shs"
+
+fn scan_output() -> text:
+    val out = process_run("sh", ["-c", "sh " + SCAN + " . 2>&1"])
+    out.0
+
+describe "every text-taking runtime symbol is in the codegen text-arg expansion tables":
+    it "actually classified symbols — a zero-symbol scan is a broken scan, not a pass":
+        step("Run the static cross-check of runtime C signatures against the codegen tables")
+        val out = scan_output()
+
+        step("the receipt must state a non-zero count of text-taking symbols")
+        expect(out).to_contain("text-taking symbol(s)")
+        expect(out).not_to_contain("SCANNED 0 text-taking symbol(s)")
+        expect(out).not_to_contain("ERROR missing codegen tables")
+
+    it "detects the class on the JIT path: no symbol may be missing from the cranelift table":
+        step("Run the scan")
+        val out = scan_output()
+
+        step("a MISSING_INSTR line is a symbol the JIT will call with an unexpanded text handle")
+        expect(out).not_to_contain("MISSING_INSTR")
+
+    it "detects the class on the AOT path: no symbol may be missing from the LLVM table":
+        step("Run the scan")
+        val out = scan_output()
+
+        step("a MISSING_LLVM line is the same defect in natively built binaries")
+        expect(out).not_to_contain("MISSING_LLVM")
+
+    it "names the symbols that started this: the rt_io_file_* text-taking members":
+        step("Run the scan")
+        val out = scan_output()
+
+        step("open/exists/delete are the three members whose C ABI takes (path_ptr, path_len)")
+        expect(out).not_to_contain("rt_io_file_open")
+        expect(out).not_to_contain("rt_io_file_exists")
+        expect(out).not_to_contain("rt_io_file_delete")

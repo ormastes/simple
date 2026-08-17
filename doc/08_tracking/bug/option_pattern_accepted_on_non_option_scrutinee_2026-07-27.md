@@ -867,3 +867,85 @@ jit:         uo=<value:0x6>
 interpreter: uo=6
 ```
 Neither is an error, and the two engines still disagree — exactly the reported defect. (Control in the same program: `Option<bool> == true` prints `p1=true` on both engines, so real Option equality is fine on the hosted engines; the defect is the missing type check on a NON-Option scrutinee.)
+
+## 2026-08-17 lane D — LIVE, three shapes measured, path drift resolved, class spec landed
+
+**Verdict: LIVE. No fix attempted — the locus is out of this lane's file scope
+and the blast radius is tree-wide (§8: 2,746 Option-shaped + 4,211 Result-shaped
+sites across 620 files).**
+
+### Path drift resolved
+
+The `## Where` section's cited file
+`src/compiler/10.frontend/core/interpreter/eval_methods.spl` **does not exist**
+(already noted NOW-WRONG above; confirmed again by directory listing).
+`src/compiler/10.frontend/core/interpreter/eval_calls.spl` — the row's other
+cited path — was grepped for `unwrap|is_some|option|result` and contains **no
+Option/Result handling of any kind**. The live pure-Simple dispatch is
+`_EvalOps/call_method_eval.spl:831` (`is_option_result_method`) and `:865`
+(`eval_option_result_method`). Note `:866-870`: when the receiver has no
+Option/Result tag it *does* `eval_set_error(...)` — so the pure-Simple
+interpreter is not the leaking half; the deployed Rust seed is, on both of its
+engines. There is still no static (type-check-time) rejection anywhere.
+
+### Measured 2026-08-17, deployed seed (`bin/simple`, the Rust seed), verbatim
+
+Four probe files, `bin/simple run <file>` under `SIMPLE_EXECUTION_MODE`:
+
+| probe | jit | interpreter | correct |
+|---|---|---|---|
+| `val n = 6; n.unwrap_or(-99)` | `uo=<value:0x6>` | `uo=6` | compile error |
+| `match n: case Some(i)` (n=6) | `some=<value:0x6>` | `some=6` | compile error |
+| `if val Some(k) = n` (n=6) | `bound=<value:0x6>` | `bound=6` | compile error |
+| CONTROL `val o: i64? = 42; o.unwrap_or(7)` | `ok=0.000…002` (denormal) | `ok=42` | `ok=42` |
+
+All four exit 0. The first three are the reported defect, now measured for
+**three distinct consumer shapes** rather than one. The CONTROL row is a
+*separate* live defect and is exactly §25's diagnosis confirmed at the surface:
+an implicit coercion of a bare scalar into a declared `i64?` leaves it unboxed,
+so `unwrap_or` re-reads it under `TAG_FLOAT` and prints a denormal. It matches
+`doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`.
+
+### Specs landed
+
+- Probes: `test/01_unit/compiler/interpreter/probe_option_on_non_option/`
+  (`unwrap_or_on_i64.spl`, `match_some_on_i64.spl`, `if_val_some_on_i64.spl`,
+  `control_real_option.spl`).
+- Class-detection spec:
+  `test/01_unit/compiler/interpreter/option_on_non_option_scrutinee_class_spec.spl`
+  — shells out per engine (a spec body runs interpreted and can never go red on
+  the JIT), asserts each bad probe is REJECTED, and pins the genuine-Option
+  control so a fix cannot outlaw Option operations wholesale. It is expected
+  RED until the static check exists; that is the point.
+
+### Not proved by this lane
+
+No fix. No measurement on the native/AOT column. No measurement on a
+self-hosted binary (none is runnable in this tree — see the sibling row's note).
+
+### Class spec verdict, verbatim (2026-08-17, `bin/simple run <spec>`)
+
+`bin/simple test` could not reach a verdict on this host today
+(`reason=daemon-no-response budget_ms=480000`, and SIGTERM at the 600s monitor —
+a live bootstrap is saturating the box). Running the spec file directly under
+`bin/simple run` bypasses the test daemon and does reach one:
+
+```
+  ✗ rejects unwrap_or on a bare i64 receiver on both engines
+    expected uo=6
+  ✗ rejects a Some(_) match arm against a bare i64 scrutinee on both engines
+    expected some=6
+  ✗ rejects an if-val Some() binding against a bare i64 on both engines
+    expected bound=6
+  ✗ still accepts a GENUINE Option and returns the payload on both engines
+    expected ok=0.000…002
+4 examples, 4 failures
+SPEC FILE VERDICT: .../option_on_non_option_scrutinee_class_spec.spl declared>=4 executed=4 passed=0 failed=4 dropped=0
+```
+
+Caveat recorded rather than hidden: inside the spec's subprocess the
+`SIMPLE_EXECUTION_MODE=jit` probe reported the INTERPRETER's value (`uo=6`, not
+`uo=<value:0x6>`), i.e. the env var did not force the JIT from that nested
+invocation. The JIT column in the table above was measured from a direct shell
+invocation and is sound; the spec's per-engine split is not, and needs a better
+engine selector before it can be trusted as a two-engine oracle.

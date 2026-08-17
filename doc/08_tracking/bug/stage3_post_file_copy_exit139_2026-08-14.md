@@ -71,6 +71,34 @@ observation and no code change is defensible.
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
 
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: FIX PRESENT IN SOURCE; runtime claim UNVERIFIED (needs stage3).**
+
+`src/compiler/50.mir/mir_lowering_types.spl:446` defines
+`copy_local_hir_type_metadata(source_local_id: i64, destination_local_id: i64)`
+taking scalars, and it is wired at `src/compiler/50.mir/mir_lowering_stmts.spl:566`
+inside `maybe_copy_array_value` (`:430`). Additionally
+`scripts/check/check-native-scalar-metadata-copy.shs` was executed on 2026-08-17
+and returned `STATUS: FAIL scalar-metadata-copy reason=compiler-missing-or-symlink`,
+rc=1 — it requires a real self-hosted compiler, so it yields no verdict on this
+host. Exit 139 stays unretained per this doc's own unblock note.
 ## Current-source audit 2026-08-17
 
 Status remains **FOCUSED PASS / STAGE 3 VERIFICATION PENDING**. The linked

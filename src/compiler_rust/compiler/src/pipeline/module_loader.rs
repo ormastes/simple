@@ -1409,6 +1409,39 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
 ///   keeps reaching `a.who` and `b.call_b()` keeps reaching `b.who`, in either import
 ///   order. It is only the bare-name *fallback* — a call from a third module that
 ///   defines neither — that collapses.
+///
+///   **RE-CONFIRMED 2026-08-17, and a correction to a retraction that briefly stood
+///   here.** A lane "retracted" this bullet as false after seeing `call_a()` and
+///   `call_b()` both print `from_A` under a plain `bin/simple run`. That retraction
+///   was itself wrong: plain `run` uses the **JIT**, not the interpreter. Re-run with
+///   the engine pinned explicitly, on `fixtures/probe_xmod_collision.spl`:
+///
+///   ```text
+///   SIMPLE_EXECUTION_MODE=interpreter -> XMOD_COLLISION PROBE: ALL PASS
+///   SIMPLE_EXECUTION_MODE=jit         -> FAIL b_private / b_public / b_arity
+///   ```
+///
+///   So this bullet is accurate **for the interpreter** and the owner-tag machinery
+///   does work there. The paragraph below ("Do not restate a registry policy here from
+///   reading one engine") is not boilerplate — it caught a real error, and the error
+///   was made by reading the DEFAULT engine without checking which engine that is.
+///
+/// - **NEW 2026-08-17 — the in-module call is NOT protected under the JIT.** The
+///   bullets here previously described codegen as first-import-wins only for the
+///   *third-module* caller. It is also first-import-wins for a call made from inside a
+///   defining module: `b.call_b()` reaches `a`'s body. Two further measurements:
+///   * Not specific to the `_` private-helper convention — a public `who()` collides
+///     identically under the JIT.
+///   * Not limited to identical signatures. With A's `shared_arity()` taking no
+///     parameters and B's taking one, B's own wrapper calls `shared_arity(7)` and
+///     reaches A's zero-parameter body: the argument is silently DISCARDED and **no
+///     arity error fires**. This is the strongest available proof that the JIT keeps
+///     only one definition rather than choosing badly between two.
+///
+///   Regression fixtures + specs (interpreter arm GREEN, JIT arm RED by design):
+///   `test/01_unit/compiler/pipeline/cross_module_symbol_collision_spec.spl`,
+///   `test/01_unit/compiler/pipeline/cross_module_collision_detection_spec.spl`,
+///   `test/01_unit/compiler/pipeline/fixtures/probe_xmod_collision.spl`.
 /// - **Codegen is first-import-wins, not last-write-wins.** Flip the two `use` lines
 ///   and the surviving definition flips with them, under both the Cranelift JIT and
 ///   `compile --native` (the two native artifacts differ byte-wise, so the winner is

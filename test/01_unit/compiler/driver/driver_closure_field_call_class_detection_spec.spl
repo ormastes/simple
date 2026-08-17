@@ -1,0 +1,53 @@
+# Regression guard (b): the CLASS-DETECTION spec for the closure-valued-field
+# call defect.
+#
+# Sibling of parallel_owner_collect_closure_field_call_spec.spl, which fences
+# the one known instance (ParallelBuilder.owner_collect_fn). This spec
+# generalizes to the whole DEFECT CLASS: calling ANY closure-valued field on
+# ANY class as `self.<field>(...)`.
+#
+# The compiler resolves a postfix call on a member access as a METHOD call on
+# the receiver's class, never as an indirect call through the field's value.
+# So every `self.<f>(...)` where `<f>` is a declared field (not a method) is a
+# latent "method `<f>` not found on class `<C>`" build break, regardless of
+# which class or which field. Verified 2026-08-17 on bin/simple (Rust seed) for
+# both a named-fn-valued field and a lambda-valued field.
+#
+# Detection method: for every .spl file under src/compiler/80.driver, collect
+# the names of fields declared with an `any` type (the way callables are held,
+# since there is no first-class fn-type annotation in use here), then flag any
+# `self.<that name>(` call site in the same file. A finding is a build break
+# waiting to happen; the fix is always to bind the field to a local first.
+#
+# The compiler-side fix (method resolution falling back to a field-held
+# callable) lives outside this lane's editable scope. See
+# doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
+#
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+
+use std.spec
+use std.io_runtime.{shell}
+
+fn _scan_cmd() -> text:
+    # For each .spl under 80.driver: gather `name: any` field declarations,
+    # then report any `self.name(` occurrence for one of those names.
+    # Prints one "file:name" line per finding; empty output means clean.
+    "for f in $(find src/compiler/80.driver -name '*.spl'); do for n in $(grep -oE '^[[:space:]]+[a-z_][a-z0-9_]*: any$' \"$f\" | tr -d ' ' | cut -d: -f1 | sort -u); do if grep -qE \"self[.]$n[(]\" \"$f\"; then echo \"$f:$n\"; fi; done; done"
+
+describe "closure-valued field called as a method (defect class sweep)":
+    it "finds no self.<any-typed field>(...) call sites anywhere under 80.driver":
+        # `shell` returns a ProcessResult; the captured text is `.stdout`.
+        val findings = shell(_scan_cmd()).stdout.trim()
+        # Any non-empty result names a class+field that will fail to build with
+        # "method `<field>` not found on class `<Class>`".
+        expect(findings).to_equal("")
+
+    it "detects the defect shape when it is present (self-test of the scanner)":
+        # Prove the scanner is not vacuous: run the same detection logic over a
+        # synthetic file that deliberately contains the defective form.
+        val fixture = "/tmp/driver_closure_field_call_detection_fixture.spl"
+        val setup = "printf '%s\\n' 'class Probe:' '    cb: any' 'impl Probe:' '    me go(a: i64) -> i64:' '        return self.cb(a)' > " + fixture
+        shell(setup)
+        val detect = "n=$(grep -oE '^[[:space:]]+[a-z_][a-z0-9_]*: any$' " + fixture + " | tr -d ' ' | cut -d: -f1); if grep -qE \"self[.]$n[(]\" " + fixture + "; then echo FOUND; fi"
+        val got = shell(detect).stdout.trim()
+        expect(got).to_equal("FOUND")

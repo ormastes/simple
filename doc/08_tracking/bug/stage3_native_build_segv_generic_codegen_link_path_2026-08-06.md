@@ -1058,3 +1058,30 @@ blind to `src/compiler` edits, so only a full stage-3 run can observe this
 change natively). Next stage-3 lane should retest hello-world and expect
 the `[mir-lower] WARNING` lines to enumerate the real cross-module
 collision family.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: FIX PRESENT IN SOURCE; runtime claim UNVERIFIED (needs stage3).**
+
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1088` has
+`return self.try_lower_bitfield_construct_for_symbol(symbol, args)` in the
+NamedVar branch, with the `:1080-1087` comment naming this bug id; no
+`self.symbols.lookup()` remains in `try_lower_bitfield_construct` at `:1059`.
+The SIGSEGV claim itself still requires a full stage-3 self-hosted run, which
+per the governing fact was not available in this lane.

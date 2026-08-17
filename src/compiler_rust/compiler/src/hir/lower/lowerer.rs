@@ -173,6 +173,21 @@ pub struct Lowerer {
     /// and not a same-bare-name struct from another module. See the SOUNDNESS
     /// GATE comment in hir/lower/expr/collections.rs.
     pub(super) struct_decl_files: HashMap<String, Option<PathBuf>>,
+    /// Declared field DEFAULT expressions, keyed by struct/class bare name then
+    /// field name (`class D: var m: i64 = 7` -> `{"D": {"m": <7>}}`).
+    ///
+    /// ROOT FIX (JIT omitted-field-default bug, 2026-08-17):
+    /// `lower_struct_init_fields` filled every declared slot nothing wrote with
+    /// a `HirExprKind::Nil` placeholder, which MIR lowers to the raw nil tag
+    /// `3`. Read back through an `i64`-typed field that surfaces as the literal
+    /// integer `3`, so `class D: var n: i64 = 0; var m: i64 = 7` constructed as
+    /// `D()` printed `n=3 m=3` under the JIT while the interpreter (which
+    /// evaluates declared defaults directly) printed `n=0 m=7`. Recording the
+    /// default expressions at registration time lets that loop lower the real
+    /// default instead. Only bare names with a recorded default are affected;
+    /// a field with NO declared default keeps the `Nil` placeholder exactly as
+    /// before.
+    pub(super) struct_field_defaults: HashMap<String, HashMap<String, Expr>>,
     /// Local bindings authored as untyped empty array literals (`var xs = []`).
     ///
     /// These start as `[Any]` placeholders in HIR so later builtin `append`
@@ -231,6 +246,7 @@ impl Lowerer {
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
+            struct_field_defaults: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -285,6 +301,7 @@ impl Lowerer {
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
+            struct_field_defaults: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -362,6 +379,7 @@ impl Lowerer {
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
+            struct_field_defaults: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),

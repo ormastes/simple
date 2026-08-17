@@ -1,4 +1,5 @@
 ## Resolution 2026-08-17 — HOST UAPI FIXED / HARDWARE VALIDATION PENDING
+## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
 
 Status: OPEN (P3)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -8,6 +9,8 @@ header text (not vendored in this tree) to confirm field offsets, plus PowerVR
 hardware to validate against. No fetch route in this lane. Unblock = vendor the
 UAPI header (or cite a pinned upstream revision) and re-derive
 `img_bxe_job_field_offset`/`img_bxe_sync_op_offset` against it. Unchanged.
+## Resolution 2026-08-17 — HOST UAPI FIXED / HARDWARE VALIDATION PENDING
+
 The host-verifiable blocker is closed against Linux commit
 `8d3ae59288f1e7d58d76558a6ee96d533bc5019f`, file
 `include/uapi/drm/pvr_drm.h`. The generated MIT-licensed authority is

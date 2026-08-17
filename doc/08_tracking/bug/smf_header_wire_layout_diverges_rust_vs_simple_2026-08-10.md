@@ -134,3 +134,55 @@ the `.simple_meta` TLV section precisely so the header never has to move again.
 - `src/compiler/70.backend/linker/test/smf_layout_parity_spec.spl` — 7 tests pinning the
   Simple layout and the known Rust divergence, so an accidental "fix" to either side is
   caught rather than silently shipped.
+
+---
+
+## Independently re-derived 2026-08-17 — CONFIRMED LIVE, offsets exact
+
+Recomputed from first principles by applying C `#[repr(C)]` natural-alignment
+rules to `src/compiler_rust/common/src/smf/header.rs:9` and comparing against
+the Simple decoder at `src/compiler/70.backend/linker/smf_header.spl:476-509`.
+Arrived at the same numbers the existing spec records, without consulting it —
+so the two derivations are independent.
+
+The divergence begins at the first `u64` after a `u32`. `section_count: u32`
+ends at 20; `section_table_offset: u64` must be 8-aligned, so Rust inserts 4
+bytes of padding and places it at **24**. The Simple layout is PACKED and reads
+it at **20**. Every subsequent field is displaced, and the totals differ:
+
+| field | Rust `repr(C)` | Simple packed | delta |
+|---|---|---|---|
+| `section_table_offset` | 24 | 20 | +4 |
+| `symbol_table_offset` | 32 | 28 | +4 |
+| `symbol_count` | 40 | 36 | +4 |
+| `exported_count` | 44 | 40 | +4 |
+| `entry_point` | 48 | 44 | +4 |
+| `stub_size` | 56 | 52 | +4 |
+| `smf_data_offset` | 60 | 56 | +4 |
+| `module_hash` | 64 | 60 | +4 |
+| `source_hash` | 72 | 68 | +4 |
+| `app_type` | 80 | 76 | +4 |
+| `window_width` | 82 | 77 | +5 |
+| `window_height` | 84 | 79 | +5 |
+| `prefetch_hint` | 86 | 81 | +5 |
+| `prefetch_file_count` | 87 | 82 | +5 |
+| **struct size** | **96** | **128** | **+32** |
+
+Fields 0..20 (magic, version, platform, arch, flags, compression,
+compression_level, reserved_compression, section_count) agree exactly — which is
+why a shallow "does it parse" check passes and the misdecode stays silent.
+
+The trailer location differs too: Rust reads at EOF-96, Simple at EOF-128.
+
+**Not fixed here, and deliberately so.** Converging the two requires editing
+`src/compiler_rust/common/src/smf/header.rs` (either `#[repr(C, packed)]` plus a
+128-byte definition, or moving Simple onto the padded 96-byte layout). That is
+outside this session's exclusive scope (`src/compiler/70.backend/**`) and is a
+wire-format decision affecting every SMF producer and consumer in both
+languages. Recording the exact numbers so whoever takes it does not have to
+re-derive them.
+
+Already guarded: `src/compiler/70.backend/linker/test/smf_layout_parity_spec.spl`
+pins the Simple side byte-for-byte and records `RUST_SEED_HEADER_SIZE = 96`,
+`RUST_SECTION_TABLE_OFFSET = 24`, `RUST_ENTRY_POINT_OFFSET = 48`,
+`RUST_APP_TYPE_OFFSET = 80` — all matching the table above.

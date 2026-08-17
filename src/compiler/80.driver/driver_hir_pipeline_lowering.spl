@@ -40,6 +40,7 @@ use compiler.semantics.effect_validation.{validate_effect_contracts}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
@@ -790,12 +791,32 @@ impl CompilerDriver:
         # check_module_visibility had zero callers. They have never run over the
         # full ~993-module set, so their true diagnostic count is unknown and
         # enabling them fatal would very likely break the build. This pass is
-        # gated behind SIMPLE_TYPECHECK_WARN=1 and only LOGS warnings (it never
-        # pushes ctx.errors), so the default build is unaffected. Flip the flag
-        # once the stage4 wall permits a verified non-crashing build to measure
-        # the real blast — see doc/03_plan/compiler/type_system/typecheck_burndown.md
-        if (rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1":
-            val tc_warnings = run_typecheck_warn_pass(phase_hir_modules)
+        # gated behind SIMPLE_TYPECHECK_WARN=1 and only LOGGED warnings (it
+        # never pushed ctx.errors), so the default build is unaffected. That
+        # log-only behaviour is still the DEFAULT, but is no longer the only
+        # option — see the profile gate immediately below. Measure the real
+        # blast before promoting past Advisory —
+        # see doc/03_plan/compiler/type_system/typecheck_burndown.md
+        # Since 2026-08-17 this pass is PROFILE-GATED, not only log-opt-in,
+        # mirroring the safety pass below: SIMPLE_TYPECHECK_PROFILE=robust
+        # routes each diagnostic to ctx.add_warning (visible, never fails the
+        # build -- the migration window); =critical/verified routes to
+        # ctx.add_error and fails the build. Default (unset) stays Advisory:
+        # log-only under SIMPLE_TYPECHECK_WARN=1, exactly the pre-change
+        # behavior, so no existing build changes.
+        #
+        # This is what makes declared return types enforceable at all: the
+        # check already exists and is correct
+        # (30.types/type_infer/inference_control.spl:564-574 subsumes the body
+        # type against the declared return type), but its diagnostics were
+        # computed and then discarded here, so `fn f() -> bool` returning a
+        # text literal stayed green at rc=0 on both engines. See
+        # doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md.
+        val typecheck_enforcing = match typecheck_pass_severity():
+            case TypecheckPassSeverity.Advisory: false
+            case _: true
+        if ((rt_env_get("SIMPLE_TYPECHECK_WARN") ?? "") == "1") or typecheck_enforcing:
+            val tc_warnings = run_typecheck_warn_pass(phase_ctx, phase_hir_modules)
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():

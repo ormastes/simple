@@ -168,3 +168,22 @@ this defect, not on the MQTT logic, which is correct in isolation.
 - Any module returning optional tuples that newly gains native compilation
   (e.g. by adding type annotations) is exposed; the interpreter fallback was
   masking this.
+
+## RE-VERIFIED 2026-08-17 — fix is present in source; seed rebuild no longer blocked
+
+The doc's blocker was "root-caused and fixed in seed HIR lowering but pending a
+seed rebuild". Both halves re-checked:
+
+1. The fix is present by content. `hir/lower/stmt_lowering.rs:1384` carries a
+   comment naming THIS doc, immediately above the multi-field tuple-payload
+   indexing at :1434.
+2. The seed rebuild is no longer blocked. `cargo check --release --bin simple`
+   and a full `cargo build --release --bin simple` both completed with rc=0
+   from current `src/compiler_rust` on 2026-08-17 (binary 08:15, 59,436,360
+   bytes) in an isolated `CARGO_TARGET_DIR`. rc was read on the line after the
+   command, never through a pipe.
+
+**NOT proven:** no optional-tuple payload program was executed against that
+fresh seed in this pass, so "the fix works" is still unverified — only "the fix
+is in the tree and the tree builds". A lane closing this row must run the doc's
+own consumption forms against a freshly built seed first.

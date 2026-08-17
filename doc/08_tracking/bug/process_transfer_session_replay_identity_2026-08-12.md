@@ -1,3 +1,4 @@
+## Triage 2026-08-17 — OPEN, design work not re-verifiable by inspection
 ## Production integration 2026-08-17 — source complete; executable evidence pending
 
 Status: source-complete / focused pure-Simple execution pending

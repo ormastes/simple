@@ -1,3 +1,4 @@
+## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
 ## 2026-08-17 Darwin ARM host closure
 
 The parent aggregator remains implemented; the host-fixable gap was Darwin

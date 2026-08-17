@@ -1,7 +1,57 @@
 # JS subset parser: ternary dropped, statements after `}` never evaluated
 
-- Status: OPEN (P2)
+- Status: DEFECT 1 FIXED 2026-08-17; DEFECT 2 was already fixed.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
+## 2026-08-17 verification and fix
+
+**Defect 2 (statement after `}`) was ALREADY FIXED in-tree** —
+`js_parse_program_subset` (`parser.spl:16-34`) peels each leading
+brace-terminated construct off a `;`-split part via
+`_js_parser_leading_construct_end`. Measured: `function f(x) ...` followed by
+`f(3)` returns 4.
+
+**Defect 1 (ternary dropped) was LIVE.** `grep -c Ternary` on
+`git show HEAD:src/lib/nogc_sync_mut/js/engine/parser.spl` returned **0**,
+while `JsExpression.Ternary` exists in `types/ast_types.spl:45` and is
+evaluated at `engine/interpreter_eval.spl:116` — an AST node the parser could
+never produce.
+
+Measured with the HEAD parser vs the patched parser (same probe, `bin/simple run`):
+
+| source | before | after |
+|---|---|---|
+| `var x = 5 < 2 ? 1 : 2; x` | `false` | `2` |
+| `var x = 2 < 5 ? 1 : 2; x` | `true` | `1` |
+| `0 ? 1 : 0 ? 2 : 3` | `0` | `3` |
+| `1 ? 0 ? 7 : 8 : 9` | `1` | `8` |
+| `null ?? 5` | `5` | `5` |
+| `1 > 0 ? 'a?b:c' : 'z'` | `true` | `a?b:c` |
+
+Fix: a conditional production in `_js_parser_expression`, placed between the
+assignment and unary/binary productions (correct JS precedence), plus
+`_js_parser_find_ternary_question` / `_js_parser_find_ternary_colon`, which are
+quote- and depth-aware and skip `??` and `?.`; nested ternaries in the
+consequent consume their own colon via a pending counter.
+
+Post-fix spec runs (verbatim):
+
+```
+test/01_unit/lib/js/ternary_expression_spec.spl
+Results: 7 total, 7 passed, 0 failed
+test/01_unit/lib/js/conditional_expression_class_spec.spl
+Results: 12 total, 12 passed, 0 failed
+```
+
+The pre-fix RED is the `bin/simple run` A/B table above (HEAD parser swapped in
+and restored), not a spec run: holding the shared working tree at the HEAD
+parser for the ~50 minutes a spec run currently takes under this host's load
+would have corrupted other lanes' concurrent runs.
+
+Specs: `test/01_unit/lib/js/ternary_expression_spec.spl` (reproducing) and
+`test/01_unit/lib/js/conditional_expression_class_spec.spl` (class detection:
+precedence against every neighbouring production, nesting, call args, array
+literals, parens, `??`/`?.`, `?`/`:` inside string literals).
 - **Date:** 2026-07-11
 - **Area:** lib / js engine (`src/lib/nogc_sync_mut/js/engine/parser.spl`)
 - **Severity:** P2 (silently wrong values on extremely common JS forms)

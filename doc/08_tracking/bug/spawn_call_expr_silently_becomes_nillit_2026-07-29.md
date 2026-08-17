@@ -1,7 +1,9 @@
 # Bug: `spawn(...)` call expressions silently lower to `HirExprKind.NilLit` on the bootstrap seed frontend — the callee and every argument are discarded with zero diagnostic
 
 **Date:** 2026-07-29
-**Status:** open — root-caused, not fixed (out of scope for the lane that found it)
+**Status:** FIXED 2026-08-17 — `EXPR_SPAWN` (and its two silent siblings
+`EXPR_AWAIT`, `EXPR_YIELD`) now have real dispatch arms in
+`convert_flat_expr`. See "Resolution (2026-08-17)" at the bottom.
 **Found:** side-finding while lane G8 (`transfer-share`, mission-critical
 robustness campaign) wrote a spec exercising a real `spawn(...)` call site
 **Area:** compiler / frontend (`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`) — bootstrap-seed-only parsing bridge
@@ -134,3 +136,105 @@ analogous parser-layer gap) specifically because real `spawn(...)` source
 text cannot reach that code path on this seed until this bug is fixed. The
 rule is not blocked on this bug to be correct, but it IS blocked on this bug
 to ever fire against real compiled source on the seed.
+
+---
+
+## Resolution (2026-08-17)
+
+**Classified by CONTENT, not by commit ancestry.** At the start of this lane the
+defect was still LIVE in `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`:
+`convert_flat_expr`'s dispatch chain had arms for 40+ tags and **none** for
+`EXPR_SPAWN`. An earlier lane (NIL1) had only made the *fallback* loud
+(`flat_bridge_report_unhandled_node`, `convert_nodes.spl:195`) — the expression
+was still discarded, just noisily. Its own comment said so:
+"EXPR_SPAWN has no dispatch arm above".
+
+### Direct reproduction (9s, `bin/simple run`, no test-runner session)
+
+```
+PROBE_SPAWN_KIND=NilLit
+[parser_error] line 3:1: flat AST bridge: unhandled expr node kind (tag=39) silently converted to nil/no-op ...
+```
+
+### Root cause
+
+`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:1240` — the
+`if tag == EXPR_DICT_COMP:` arm was the last one before the generic
+`else:` catch-all at (pre-fix) `:1261-1267`. `EXPR_SPAWN` (tag 39) fell
+straight into it. The node is produced unconditionally from ordinary source by
+`src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:477-479`
+(`spawn` lexes as reserved `KwSpawn`, token kind 197, never `TOK_IDENT`).
+
+### Sibling constructs with the identical defect shape (class axis)
+
+Same file, same catch-all, all produced from real source text by
+`primary_expr.spl`:
+
+| tag | construct | builder | status after this lane |
+|---|---|---|---|
+| 39 `EXPR_SPAWN` | `spawn(w)` | `primary_expr.spl:479` | **FIXED** |
+| 37 `EXPR_AWAIT` | `await f()` | `primary_expr.spl:439` | **FIXED** |
+| 38 `EXPR_YIELD` | `yield 1` | `primary_expr.spl:444` | **FIXED** |
+| 44 `EXPR_DO_BLOCK` | `do:` / `ce N:` | `primary_expr.spl:485,496` | still unhandled (loud fallback only) |
+| 45 `EXPR_ATOM` | `` `sym `` | `primary_expr.spl:501` | still unhandled; `ExprKind` has no Atom variant |
+| 50 `EXPR_NEW` | `new expr` | `primary_expr.spl:474` | still unhandled; `ExprKind` has no New variant |
+
+`do:`/atom/`new` are left unfixed deliberately: the target `ExprKind` variant
+either does not exist or the mapping is a semantic decision, not a mechanical
+one. They remain covered by the loud fallback, and
+`convert_nodes_loud_fallback_spec.spl` was repointed at `do:` so that spec still
+probes a genuinely unhandled kind.
+
+### Fix shape — why `Call`, not `ExprKind.Spawn`
+
+`ExprKind.Spawn` exists in `parser_types_expr.spl`, but emitting it would have
+traded a silent drop for a hard error: `20.hir/hir_lowering/expressions.spl`'s
+`lower_hir_expr` has **no** `case ExprKind.Spawn` arm and falls to
+`case _: self.error("unsupported expression kind", ...)`. Every live consumer of
+a spawn site matches the callee NAME on a plain `Call`
+(`30.types/type_system/checker.spl`, `builtin_registry.spl`,
+`50.mir/mir_effects.spl`, and rule E1049 at
+`35.semantics/safety_checker.spl:907`). So the bridge rebuilds
+`ExprKind.Call(Ident("spawn"), [operand])`. `Await`/`Yield` ARE handled by HIR
+lowering (`expressions.spl:954-966`) and are emitted as their real nodes.
+
+This unblocks lane G8's E1049 rule against real compiled source for the first
+time — previously there was no `Call` node for it to inspect.
+
+### Evidence
+
+Reproducing spec: `test/01_unit/compiler/frontend/flat_bridge_spawn_call_expr_spec.spl`
+- BEFORE: `1 example, 1 failure` — `assert_equal failed: expected Call(spawn,1), got NilLit`
+  `SPEC FILE VERDICT: ... declared>=1 executed=1 passed=0 failed=1 dropped=0`
+- AFTER: `1 example, 0 failures`
+  `SPEC FILE VERDICT: ... declared>=1 executed=1 passed=1 failed=0 dropped=0`
+
+Class-detection spec: `test/01_unit/compiler/frontend/flat_bridge_keyword_expr_nillit_class_spec.spl`
+- BEFORE: `4 examples, 3 failures`
+  `SPEC FILE VERDICT: ... declared>=4 executed=4 passed=1 failed=3 dropped=0`
+  (spawn, await, yield all collapsed; the ordinary-call control passed — so the
+  spec is not vacuous)
+- AFTER: `4 examples, 0 failures`
+  `SPEC FILE VERDICT: ... declared>=4 executed=4 passed=4 failed=0 dropped=0`
+
+Regressions re-run after the fix:
+- `convert_nodes_loud_fallback_spec.spl` 4/4 (after repointing its spawn example at `do:`)
+- `flat_ast_child_ownership_spec.spl` 7/7
+- `flat_ast_speculative_diagnostics_spec.spl` 1/1
+- `transfer_share_semantic_spec.spl` 8/8
+- `flat_ast_address_of_spec.spl` 1 failure — **pre-existing**, proven by re-running
+  it against `git show HEAD:convert_nodes.spl` restored in place: identical
+  `passed=1 failed=1`. Unrelated (reference-syntax -> MIR Ref).
+
+### Not proven
+
+- `bin/simple test` could not produce a `Results:` line for these specs: three
+  attempts were SIGTERMed (rc=143, one with a 0-byte log) under host load
+  averaging 60-90 with a 6-slot queue. All verdicts above come from
+  `bin/simple run <spec>`, which executes the `it` bodies and prints an explicit
+  `SPEC FILE VERDICT` / `N examples, M failures` line.
+- Not exercised end-to-end through a *native/JIT compile* of a spawning program;
+  only the frontend bridge conversion is pinned.
+- `bin/simple` here is the Rust seed, but that is irrelevant for this fix: the
+  bridge is pure Simple, read as source at every run, and the probe above shows
+  the seed executing the changed code path.

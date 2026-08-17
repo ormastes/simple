@@ -89,6 +89,30 @@ thing. **These are immediately actionable.**
 
 | Class | Count | Bugs |
 |---|---:|---|
+| **PENDING (host-verifiable)** | 9 | dns_aaaa_qtype, simple_timeout_seconds_ignored, blink_specs_import, lint_timeout_hwir_zca_rows, bootstrap_stage2_silent_exit1, board_vulkan_fabricated_counterpart, host_qemu_virtio_gpu_gl_missing_egl, render_perf_8k80_aggregator, vulkan_8k_jit_retained_host_buf_sample_crash |
+| **bootstrap-gated** | 6 | stage3_selfhost_exit_139, stage3_post_file_copy_exit139, stage4_resume_from_admitted_gap, stage4_bootstrap_rust_inputs_changed, riscv_gen2_sequential_hwir, a2_target_ir_untracked_target_graph |
+| **truly hardware-gated** | 3 | cmdstream_boundary_no_intel_gpu, img_bxe_submit_encoder (validation half only), starfive_check_deployed_simple_segv |
+| **owner-decision** | 3 | app_interpreter_deletion_evidence_package, app_interpreter_tree_declared_removed, silent_deletion_audit |
+| **feature-work** | 1 | process_transfer_session_replay_identity |
+
+### Machines and environments actually required — ranked by payoff
+
+**Rank 0 — free, on this box, clears 2 bugs:** rebuild QEMU with
+`--enable-opengl --enable-virglrenderer`. Probe-proven to be a link-time
+packaging defect, not silicon. Clears `host_qemu_virtio_gpu_gl_missing_egl` and
+unblocks the whole B0/venus programme behind it. **This is the single highest
+payoff action and costs nothing but build time.**
+
+**Rank 1 — free, on this box, clears 3 bugs:** use the NVIDIA hardware already
+installed. `render_perf_8k80_aggregator`, `vulkan_8k_jit_retained_host_buf_sample_crash`,
+and the L2/L4 halves of `board_vulkan_fabricated_counterpart` need no acquisition
+at all — the docs were stale.
+
+**Rank 2 — cheap software, no machine, part of 1 bug:** vendor the upstream
+`drivers/gpu/drm/imagination` UAPI header (`struct drm_pvr_job`). Probe: `find /
+-name 'drm_pvr*'` returns nothing, so it is genuinely absent — but it is a text
+file, obtainable from a pinned upstream revision. Closes the byte-layout half of
+`img_bxe_submit_encoder`.
 | **fully closed** | 7 | dns_aaaa_qtype, simple_timeout_seconds_ignored, blink_specs_import, stage4_bootstrap_rust_inputs_changed, riscv_gen2_sequential_hwir, a2_target_ir_untracked_target_graph, silent_deletion_audit |
 | **source fixed / admitted or external evidence pending** | 11 | lint_timeout_hwir_zca_rows, bootstrap_stage2_silent_exit1, board_vulkan_fabricated_counterpart, host_qemu_virtio_gpu_gl_missing_egl, render_perf_8k80_aggregator, vulkan_8k_jit_retained_host_buf_sample_crash, stage4_resume_from_admitted_gap, cmdstream_boundary_no_intel_gpu, img_bxe_submit_encoder, starfive_check_deployed_simple_segv, process_transfer_session_replay_identity |
 | **bootstrap-admission gated** | 2 | stage3_selfhost_exit_139, stage3_post_file_copy_exit139 |
@@ -140,6 +164,13 @@ submission is firmware-mediated; there is nothing to emulate.
 QEMU wrapper covers it), Windows host, a physical display for 8K evidence (the
 physical-presentation receipt is **optional** in the A7 contract).
 
+### Fixable on this box today
+
+`dns_aaaa_qtype` · `simple_timeout_seconds_ignored` · `blink_specs_import` ·
+`lint_timeout_hwir_zca_rows` · `bootstrap_stage2_silent_exit1` ·
+`board_vulkan_fabricated_counterpart` · `host_qemu_virtio_gpu_gl_missing_egl` ·
+`render_perf_8k80_aggregator` · `vulkan_8k_jit_retained_host_buf_sample_crash` ·
+plus the three owner-decision rows, which need a yes/no and no engineering.
 ### Current host result
 
 All evidence-backed source corrections identified by this sweep are now
@@ -223,6 +254,7 @@ were not changed destructively.
 - **Reproduce here:** `vulkaninfo --summary` works against both NVIDIA devices *and* lavapipe (`lvp_icd.json` present) — probe-confirmed today. **No GPU acquisition involved; lavapipe is CPU-side.**
 - **Hardware:** none. **Unblock:** nothing.
 
+### 7. `host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md` — PENDING (host-verifiable)
 ### 7. `host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md` — PORTABLE PROBE FIXED / LINUX VIRGL EVIDENCE PENDING
 - **Current resolution:** a bounded portable capability checker now classifies
   the exact symbol mismatch and adjacent disabled/absent/failure states.
@@ -233,6 +265,7 @@ were not changed destructively.
 - **Fix guide:** build QEMU from source with `--enable-opengl --enable-virglrenderer` (EGL/GBM/virglrenderer dev packages), or take a build where the symbol exists. Verify with `nm -D` on the new binary and a succeeding `-device virtio-gpu-gl,help`. Then attempt B0/venus **via the OVMF-pflash path** (`/usr/share/OVMF/OVMF_CODE_4M.fd` is present) — never `-kernel`, per `.claude/rules/board-runnable.md`.
 - **Hardware:** none — free on this box. **Unblock:** an OpenGL-enabled QEMU build.
 
+### 8. `render_perf_8k80_completion_aggregator_missing_2026-08-14.md` — PENDING (host-verifiable)
 ### 8. `render_perf_8k80_completion_aggregator_missing_2026-08-14.md` — AGGREGATOR FIXED / NVIDIA 8K EVIDENCE PENDING
 - **Current resolution:** the aggregator and Darwin-portable positive/sabotage
   self-test are green. This Apple Silicon host has no NVIDIA device; the old
@@ -287,6 +320,7 @@ were not changed destructively.
 - **Fix guide:** **Rust seed engine only.** Land or revert the 17 dirty paths so the tree is quiescent, re-take the fingerprint, and start the full bootstrap from a clean checkout so the guard cannot fire mid-run. **Do not weaken the guard** — refusing to publish a stale seed is correct. Verify: the run reaches Stage 2 source discovery with a nonzero Simple file count.
 - **Hardware:** none. **Unblock:** a quiescent `src/compiler_rust/` tree — contested by parallel sessions, which is the real blocker.
 
+### 14. `riscv_gen2_sequential_hwir_selfhost_runtime_blocker_2026-08-14.md` — bootstrap-gated (**not** hardware-gated)
 ### 14. `riscv_gen2_sequential_hwir_selfhost_runtime_blocker_2026-08-14.md` — CLOSED (current pure-Simple runtime green)
 - **Current resolution:** the sequential datapath implementation and exact
   mixed/standalone regressions are green; the stale-runtime blocker below is
@@ -296,6 +330,7 @@ were not changed destructively.
 - **Fix guide:** nothing to change in source in this lane. Deploy a provenance-admitted self-hosted **Stage 4** CLI whose bounded test-ABI probe passes, then run each exact resume command once from `.spipe/riscv_gen2_hwir_foundation/state.md`, retaining outputs and coverage. Sources when actionable: `src/compiler/50.mir/hwir/sequential.spl`, `src/compiler/70.backend/backend/hwir_to_vhdl.spl`, `test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`. **Neither the Rust seed nor a Stage-2 compiler is admissible as qualification evidence** — `bin/simple` here still prints the seed banner.
 - **Hardware:** **none, despite the RISC-V name.** The evidence is generated-VHDL + GHDL **simulation**, pure software; no RISC-V silicon is involved. **Unblock:** Stage-4 deploy.
 
+### 15. `a2_target_ir_blocked_on_untracked_target_graph_2026-08-10.md` — bootstrap-gated (coordination)
 ### 15. `a2_target_ir_blocked_on_untracked_target_graph_2026-08-10.md` — RECOVERED / FIXED (`df2e577a89`)
 - **Current resolution:** the compute-only owner landed independently at
   `src/compiler/80.driver/cache/target_ir.spl`; 9/9 exact/adjacent tests pass.
@@ -306,6 +341,7 @@ were not changed destructively.
 - **Verify:** `test/01_unit/compiler/build_graph/target_graph_spec.spl` 9/9, with the two recorded sabotage probes (rdeps returning the forward closure; malformed `//path` accepted) going RED.
 - **Hardware:** none. **Unblock:** the concurrent session landing or abandoning its file — or choosing (b) and unblocking immediately.
 
+### 16. `cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md` — truly hardware-gated (verification half)
 ### 16. `cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md` — SOURCE FIXED / LIVE INTEL ANV EVIDENCE PENDING
 - **Current resolution:** the Gen12/Xe encoder and canonical adapter are
   implemented with five green source suites. Only live ANV capture/submit/
@@ -319,6 +355,7 @@ were not changed destructively.
 - **Fix vs verification:** the **fix** — writing the Gen12 encoder from the public PRM — is host-work available today; only the **counterpart capture** needs silicon. Flip the profile flags honestly as each stage lands; **never set `submit_implemented` before `spirv_implemented`**, the guard exists for that.
 - **Unblock:** encoder implementation (host, now) + Intel silicon (acquisition, for evidence) — independently.
 
+### 17. `img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md` — env-gated now, hardware-gated for validation
 ### 17. `img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md` — UAPI SOURCE FIXED / POWERVR VALIDATION PENDING
 - **Current resolution:** the exact Linux UAPI layout is pinned and encoded
   fail-closed, including indirect sync arrays, alignment, and HWRT rules. The
@@ -330,6 +367,7 @@ were not changed destructively.
 - **Machine class (validation only):** a board with PowerVR Rogue / BXE-4-32 silicon and a matching firmware release. **QEMU sufficient? No** — firmware-mediated submission has nothing to emulate.
 - **Unblock:** vendor the header (near-term) → PowerVR hardware (full validation).
 
+### 18. `starfive_check_deployed_simple_segv_2026-08-15.md` — truly hardware-gated (verification), plus bootstrap
 ### 18. `starfive_check_deployed_simple_segv_2026-08-15.md` — HOST RECURSION FIXED / REDEPLOY + JH7110 EVIDENCE PENDING
 - **Current resolution:** the recorded crash belonged to an x86_64 deployed
   runtime, not a JH7110 execution. Recursive release delegation now fails
@@ -354,6 +392,7 @@ were not changed destructively.
 - **Fix guide:** merge into bug 19's decision. If the owner picks migration, the work is rewriting 62 files off `from X import {…}` onto `use module.{…}` plus renaming the `actor` parameter — 25k lines, which is why deletion is on the table.
 - **Hardware:** none. **Unblock:** same owner decision as bug 19.
 
+### 21. `silent_deletion_audit_2026-08-11.md` — owner-decision / bookkeeping
 ### 21. `silent_deletion_audit_2026-08-11.md` — CLOSED (all 12 rows reverified)
 - **Current resolution:** every row was reverified and the runtime API guard now
   protects the restored surface. The rerun/closure guide below is complete.
@@ -362,6 +401,11 @@ were not changed destructively.
 - **Fix guide:** re-run the audit's own method (`git log --numstat` over the window; per-path pre/post/current-tip line counts plus symbol-set diffs), close every RESTORED-SINCE row, escalate only rows still short at HEAD, then mark the doc closed. `check-runtime-api-regression-push.shs` now guards this class going forward.
 - **Hardware:** none. **Unblock:** one verification pass and a closure marker.
 
+### 22. `process_transfer_session_replay_identity_2026-08-12.md` — feature-work
+- **Symptom:** the native transfer allocator's RegionId (low 31 PID bits + 32-bit local sequence in a positive `i64`) gives no global uniqueness across PID namespaces, PID reuse, stale frame replay, or process restarts.
+- **Root cause:** known by design. The bounded frame decoder verifies route, destination, length, and an FNV-1a corruption checksum — **FNV-1a is a corruption check, not authentication.**
+- **Fix guide:** the 2026-08-14 partial mitigation covers the **bounded-session half only** — `ParentCommitFrameInboxV1` binds a finite inbox to an expected generation and rejects other generations / repeated region IDs; `ParentCommitPipedProcessSessionV1` refuses a generation mismatch, owns one piped handle, records an idempotent close. The generation stays caller-selected. Remaining acceptance rows, all unimplemented: cryptographic wire-hash authentication (needs the admitted crypto wire-hash contract first — the real prerequisite), PID-reuse/namespace simulation, cancellation revoking outstanding ownership/session tokens, and exec-isolated child tests with bounded timeout/cleanup.
+- **Hardware:** none. **Unblock:** the admitted cryptographic wire-hash contract landing first.
 ### 22. `process_transfer_session_replay_identity_2026-08-12.md` — PRODUCTION SOURCE FIXED / ADMITTED EXEC EVIDENCE PENDING
 - **Symptom:** the native transfer allocator's RegionId (low 31 PID bits + 32-bit local sequence in a positive `i64`) gives no global uniqueness across PID namespaces, PID reuse, stale frame replay, or process restarts.
 - **Root cause:** known by design. The bounded frame decoder verifies route, destination, length, and an FNV-1a corruption checksum — **FNV-1a is a corruption check, not authentication.**

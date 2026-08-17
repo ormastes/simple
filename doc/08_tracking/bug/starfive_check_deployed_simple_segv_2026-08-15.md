@@ -12,6 +12,12 @@ This reproduces the already-known deployed self-host environment-write/miscompil
 
 ---
 
+## Triage classification 2026-08-17 — DEFERRED: requires physical StarFive board + a fresh bootstrap
+
+Reviewed in the second-pass backlog sweep. Not actionable from this session:
+the SEGV is in a deployed binary on RISC-V hardware not present on this host, and reproducing it needs a rebuilt/redeployed compiler. No code change is possible without that, so no
+speculative fix was attempted. Classification recorded here so future sweeps
+skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.
 ## Host audit 2026-08-17
 
 The recorded executable path is an **x86_64 Linux host runtime**, not a binary

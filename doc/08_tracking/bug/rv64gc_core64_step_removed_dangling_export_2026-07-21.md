@@ -1,6 +1,43 @@
 # rv64gc reland removed `core64_step` but left its export and 4 spec call sites dangling
 
 - **Date:** 2026-07-21
+
+> ## 2026-08-17 — REPRODUCED, still LIVE (not fixed by this lane)
+>
+> Confirmed live by content **and** by execution. `grep -rn "fn core64_step"
+> src/lib/` returns **zero** hits; `Core64StepResult` is likewise undefined.
+> `git log -S"fn core64_step"` on `core.spl` is empty, so this symbol was never
+> defined — it is a spec written against an API that does not exist, not a
+> regression that removed one.
+>
+> Surviving call sites: `test/01_unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl`
+> imports both symbols at line 42 and calls `core64_step` at lines 323 and 330.
+> (The `.spipe_wrapped_entry_*` path named in the original triage row no longer
+> exists; the live file is the unwrapped one above.)
+>
+> **RED evidence** — `bin/simple test test/01_unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl`:
+>
+> ```
+> semantic: function `core64_step` not found
+> [use-warning] 'Core64StepResult' is named in `use std.hardware.rv64gc_rtl.core.{...}` but module '.../src/std/hardware/rv64gc_rtl/core.spl' does not provide it
+> [use-warning] 'core64_step' is named in `use std.hardware.rv64gc_rtl.core.{...}` but module '.../src/std/hardware/rv64gc_rtl/core.spl' does not provide it
+> Results: 35 total, 32 passed, 3 failed
+> ```
+>
+> Note the failure mode: the unresolved import is only a **warning**, and the
+> module still ran 32 green examples. Exactly the silent-degradation shape this
+> sweep targets. (`src/std` is a symlink to `lib`, so the resolved path is the
+> same file — not a second copy.)
+>
+> **Deliberately NOT fixed here.** The obvious repair is a thin one-cycle
+> wrapper composing the existing verified primitives —
+> `core64_combinational(state, imem, dmem_rdata, state.rf)` then
+> `core64_update(state, imem, comb, rf.reg_10, rf.reg_11)` — returning a
+> `Core64StepResult`. But `SocBus64` (`pkg.spl:167`) is a stub carrying a single
+> `data: i64` with no fetch path, so the instruction-fetch semantics the spec
+> intends cannot be inferred from source. Guessing them would put unverifiable
+> CPU-step semantics into a shared RTL library. Needs an owner who can validate
+> against the RV64GC reference. The 3 failing examples are all `core64_step`.
 - **Status:** partially fixed (Lane FF, 2026-07-22) — see "Update" below;
   dangling `__init__.spl` export removed, 2 of 4 spec call sites already
   self-resolved, 2 remain open.

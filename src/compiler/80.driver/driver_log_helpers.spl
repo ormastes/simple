@@ -8,6 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{file_append}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_flush}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_stdout_flush()
 extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_mem_snapshot_open(path: text) -> i64
 extern fn rt_mem_snapshot_record(
@@ -131,6 +132,17 @@ pub fn log_build_progress(
     cached: i64,
     terminal: text
 ):
+    val path = _build_progress_path()
+    # Stdout twin, same reasoning as _append_phase_profile above: the events
+    # file is opt-in via SIMPLE_BUILD_PROGRESS_EVENTS, so without this every
+    # one of these call sites is silent and a native-build writes a 0-byte
+    # stage log for its whole run -- a stage that dies leaves no trail at all.
+    # Emitted BEFORE the path check so progress does not depend on the env var,
+    # and flushed because stage logs are files (block-buffered), not terminals.
+    print "[build] {phase} {_build_progress_number(done)}/{_build_progress_number(total)} step {_build_progress_number(tasks_done)}/{_build_progress_number(tasks_total)} {current}"
+    rt_stdout_flush()
+    if path == "":
+        return
     val remaining = if done >= 0 and total >= 0:
         val delta = total - done
         if delta > 0: delta else: 0

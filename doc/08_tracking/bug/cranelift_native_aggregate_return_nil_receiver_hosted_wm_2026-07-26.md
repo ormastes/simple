@@ -288,3 +288,54 @@ around a codegen defect.
 - `doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md` — different defect, same session, also nil-from-infrastructure
 - `.claude/memory` `reference_jit_option_i64_value3_none_collision` — earlier Option-decode defect in the JIT lane
 - Xvfb note: with `xvfb-run` the host-WM lane is NOT environment-blocked — hooks ready, WM launches, 5 windows created; the blocker is this defect.
+
+## 2026-08-17 CRITICAL-lane re-measure attempt: evidence spec is VACUOUS, not wrapper-broken
+
+This row was flagged MUST-RE-MEASURE on the theory that its cited evidence spec,
+`test/03_system/feature/language/parent_commit_piped_result_spec.spl`, was one of
+the 88 specs broken by shelling out to the refusing production-guard wrapper
+`bin/release/simple`. **That theory is wrong, and the truth is worse.**
+
+`bin/release/simple` occurs in that spec exactly once, at line 24, and it is
+**inside the module docstring** — prose telling an operator how to run the file:
+
+```
+    SIMPLE_LIB=src bin/release/simple test .../parent_commit_piped_result_spec.spl --mode=native
+```
+
+Grep for every executable spawn form (`bin/release/simple`, `bin/simple`,
+`process_run`, `shell(`) returns that single docstring line and nothing else.
+**The spec contains no subprocess at all.** It therefore never spawned the
+wrapper and was never a wrapper-induced false RED.
+
+The consequence is that its evidence is worthless for a different and more
+serious reason: a spec body runs on the tree-walk **interpreter**, so a spec with
+no subprocess **cannot go red on a cranelift/native codegen defect under any
+circumstances**. It could not have reproduced this bug when it passed, and it
+could not have refuted it when it failed. Do not treat this row as measured in
+either direction on the strength of that file.
+
+Note also that the `bin/release/simple` reference here is *deliberate* (the
+docstring explicitly states "The Rust bootstrap seed is not acceptance
+evidence") — it should **not** be repointed to `bin/simple` as part of the
+88-spec sweep. Left unmodified.
+
+Pinpointed sub-defects remain present in current source (SOURCE READING ONLY):
+- `src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:641-647`
+  — `Dict.get` still returns the raw field value or `val_make_nil()`, never a
+  Some/None encoding.
+- `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:300-306` —
+  `declare_module_statics` still drops any static failing
+  `cranelift_static_init_supported`, printing `[cranelift] unsupported module
+  static '...'`.
+- Aggregate returns still route through the `type_is_aggregate` slot-map
+  exclusions (`cranelift_codegen_adapter.spl:459, 495, 504, 1008`).
+
+**Verdict: STILL OPEN but UNVERIFIED — needs execution.** Settling the
+aggregate-return half requires a real native run
+(`--backend cranelift --entry-closure --mode dynload`) with a probe that shells
+out to `bin/simple` and asserts ABSOLUTE expected values. Not run here: a
+stage-3 bootstrap was occupying the host. The head-of-doc
+`Status re-verified 2026-08-17 by source inspection (triage shard 00)` stamp
+cites no file, no line and no run, and demonstrably did not re-measure anything;
+treat it as absent.

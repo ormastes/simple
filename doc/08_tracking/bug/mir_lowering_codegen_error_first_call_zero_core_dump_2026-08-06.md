@@ -636,3 +636,19 @@ itself reports that MIR lowering failed.
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. Source-level fix present. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3007-3010` now routes `.first()`/`.last()` to real lowering (`if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false):`), and the helper at :3977 returns `LocalId?` wrapping success in `Some(...)` -- the missing `Some` wrap this doc describes is gone. Note the line numbers in this doc are stale: 3124-3133 is now the `rt_contains` polymorphic-accessor arm, not a CodegenError site, and NO `call 0` construct exists anywhere in the file. The remaining unresolved-method path at :3145 is `self.error("unresolved method call: {method}", nil)` -- a loud fail-closed rt_panic, deliberately not a silent const-0.
+
+## 2026-08-17 CRIT-C4 close (SOURCE READING, no execution)
+
+The "silent const-0 placeholder" mechanism this row is filed against no longer
+exists. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` now
+fails CLOSED at the end of the Unresolved arm:
+`:3176 self.error("unresolved method call: {method}", nil)`,
+`:3185 print "[mir-lower] WARNING: unresolved method call '{method}' lowered to
+const-0 placeholder (silent-null risk, Task #145)"`, then
+`:3208 emit_const_str("unresolved method call: {method}")` + an `rt_panic` call
+emitted BEFORE the const-0 def (the def is retained only so the temp is not
+use-before-def in llvm-lib). An unresolved method can therefore no longer ship a
+wrong value under exit 0. The doc's own title already says "source-fixed".
+Recommend CLOSE. The C4 TSV evidence column ("const-0/unresolved placeholder path
+still present at line 3133") is stale — the path is present but is now preceded
+by rt_panic.

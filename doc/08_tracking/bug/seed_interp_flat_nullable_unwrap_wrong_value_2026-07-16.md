@@ -182,3 +182,20 @@ Status: **closeable as fixed.** No new patch written. NOT independently
 re-verified by a fresh binary run in this shard — host contention made a seed
 rebuild unreliable — so the close rests on source content, which is the
 classification standard set for this sweep.
+
+## RE-VERIFIED 2026-08-17 — DID NOT REPRODUCE
+
+Fixture: `fn flat_opt(v: i64) -> i64?: return v`, then `flat_opt(41).unwrap()`.
+
+    R3 unwrap  = 41
+
+Correct. A bare `.unwrap()` on a flat-nullable `T?` returns the payload, not a
+`rt_enum_payload` misread. Note that `emit_unbox_int`
+(`codegen/cranelift_emitter.rs:770-790`) now routes through
+`rt_value_unbox_int`, which passes a heap pointer through verbatim instead of
+`>>3`-mangling it — the comment there names this exact `.unwrap()` case
+(DEFECT A) as the thing it fixed.
+
+**Status: candidate CLOSE (already fixed by content).** The doc's claim that
+the patch was "staged in a scratch worktree, never deployed" is stale; an
+equivalent fix is present in current source.

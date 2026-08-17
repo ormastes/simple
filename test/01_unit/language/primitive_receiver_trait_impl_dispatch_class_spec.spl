@@ -1,0 +1,111 @@
+# `impl Trait for <primitive Self>` — Similar-Problem Detection Spec (defect CLASS)
+#
+# Background: doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+#
+# The sibling spec `primitive_receiver_trait_impl_dispatch_spec.spl` pins ONE
+# engine (the interpreter) for a handful of primitive Self types, and it found
+# the defect one type at a time. This spec generalises the CLASS instead:
+# EVERY primitive Self type (text, i64, i32, u64, bool, f32, f64) checked
+# across BOTH execution engines, so the next omitted type or the next engine
+# that fails to reach a user impl goes red here rather than shipping.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER (`TestExecutionMode` has no JIT variant — see
+# .claude/rules/testing.md). An in-process example therefore CANNOT go red on
+# the JIT-only half of this defect, no matter how many types it covers. The
+# oracle is the sibling run-path probe
+# `probe_primitive_receiver_trait_impl_dispatch.spl`, executed as a subprocess
+# under BOTH SIMPLE_EXECUTION_MODE=interpreter and =jit.
+#
+# Every oracle is an ABSOLUTE literal (1001..1008, 5001) that the probe did not
+# itself compute — never "the two engines agree", which would pass while both
+# engines were wrong in the same way.
+#
+# Do NOT point this at `bin/release/<triple>/simple` directly: that path is a
+# production-guard WRAPPER that exits 1 with "refusing non-production Simple
+# runtime". `bin/simple` (currently the Rust bootstrap seed) is the binary that
+# actually ships behaviour today.
+#
+# EXPECTED STATE 2026-08-17 (measured, see bug doc):
+#   interpreter arm — RED: i32 collapses to the i64 impl (1002, not 1003), and
+#                     u64 has NO impl registered at all ("method `marker_probe`
+#                     not found on type `u64`").
+#   jit arm         — RED: fails CLOSED on the very first primitive receiver
+#                     ("Function 'str.marker_probe' not found", rc=70).
+# Per .claude/rules/testing.md a correct spec that fails is a legitimate
+# artifact: do NOT weaken these assertions to match the bug.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_primitive_receiver_trait_impl_dispatch.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "impl Trait for <primitive Self> reaches the user impl on every engine":
+    """
+    As a Simple developer writing `impl SomeTrait for i64` (or text, i32, u64,
+    bool, f32, f64), I want the trait method called on a receiver of that exact
+    type to invoke THAT impl's body — the same body, on every execution engine
+    the toolchain offers. A method that returns one answer under the
+    interpreter, a different answer under the JIT, or no answer at all is a
+    silently-wrong-results defect, not an engine detail.
+    """
+
+    it "runs the probe at all under both engines":
+        step("The probe must actually start under the interpreter — a scan that finds nothing may have scanned nothing")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: begin")
+
+        step("And under the JIT")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: begin")
+
+    it "dispatches to the matching impl for every primitive Self type under the interpreter":
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Signed and text receivers")
+        expect(interp).to_contain("PASS text_receiver")
+        expect(interp).to_contain("PASS i64_receiver")
+
+        step("Narrower signed widths must NOT collapse onto the i64 impl")
+        expect(interp).to_contain("PASS i32_receiver")
+
+        step("Unsigned widths must register an impl at all")
+        expect(interp).to_contain("PASS u64_receiver")
+
+        step("bool and both float widths")
+        expect(interp).to_contain("PASS bool_receiver")
+        expect(interp).to_contain("PASS f32_receiver")
+        expect(interp).to_contain("PASS f64_receiver")
+
+        step("The struct control proves the probe's trait machinery itself is sound")
+        expect(interp).to_contain("PASS struct_control")
+
+        step("And no arm may be missing: the probe's own verdict must be ALL PASS")
+        expect(interp).to_contain("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: ALL PASS")
+
+    it "dispatches to the matching impl for every primitive Self type under the cranelift JIT":
+        val jit = run_probe_in_mode("jit")
+
+        step("The JIT must reach the user impl, not a same-named runtime builtin and not a dispatch error")
+        expect(jit).to_contain("PASS text_receiver")
+        expect(jit).to_contain("PASS i64_receiver")
+        expect(jit).to_contain("PASS i32_receiver")
+        expect(jit).to_contain("PASS u64_receiver")
+        expect(jit).to_contain("PASS bool_receiver")
+        expect(jit).to_contain("PASS f32_receiver")
+        expect(jit).to_contain("PASS f64_receiver")
+        expect(jit).to_contain("PASS struct_control")
+
+        step("A primitive receiver must never produce an unresolved-dispatch error")
+        expect(jit).to_contain("PRIMITIVE_TRAIT_IMPL_DISPATCH PROBE: ALL PASS")

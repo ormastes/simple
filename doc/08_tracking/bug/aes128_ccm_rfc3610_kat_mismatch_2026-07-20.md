@@ -5,9 +5,39 @@
   `test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatches across multiple
   independent RFC 3610 vectors).
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
-  values are canonical.
+- Status: **DID NOT REPRODUCE 2026-08-17 — candidate for close.**
+- The 2026-08-17 "re-verified by source inspection" line below was **wrong**:
+  it inspected source and assumed OPEN without running the spec. Running it
+  is what settles this class, and the spec is GREEN.
+
+  ```
+  nice -n 19 env KILL_SIMPLE_MIN_AGE_SECS=3600 \
+    bin/simple test test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl --timeout 900
+  Results: 12 total, 12 passed, 0 failed          (rc=0)
+  ```
+
+  Not vacuous: 12 example markers printed, 12 `✓`, zero `✗`. The doc's
+  recorded symptom was 9 examples / 6 failures, including every RFC 3610 §8
+  vector (#1, #4, #7) named below. All now pass, tag lengths M=8 and M=10
+  included.
+
+  Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes,
+  mtime 2026-08-16 22:59:37.
+
+  Not localized to a fix commit: `src/os/crypto/aes128_ccm.spl` has not been
+  substantively touched since 2026-08-08 (the 2026-08-11 commits on it are
+  tree-restores). The CCM code was most likely always correct and the original
+  failure lived in the interpreter/runtime byte-array path, fixed elsewhere.
+  Classified by RUNNING it, not by SHA ancestry, per the standing correction.
+
+- Ownership note: this row is listed in `p1_unassigned.tsv` against
+  `src/lib/common/aes/modes.spl`, which contains **no CCM at all**. The real
+  implementation is `src/os/crypto/aes128_ccm.spl` — a claimed path. See
+  `p1_unassigned_worklist_file_column_misattributes_owner_2026-08-17.md`.
+  This entry records evidence only; no source was edited.
+
+- Original status line, kept for the record: OPEN (P1), re-verified
+  2026-08-17 by source inspection (triage shard 00). Values are canonical.
 
 ## Symptom
 
