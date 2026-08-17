@@ -26,7 +26,16 @@ CPU_THRESHOLD="${KILL_SIMPLE_CPU_PCT:-95}"
 #     already-running monitor. `SIMPLE_TIMEOUT_SECONDS=0` disables the CPU
 #     guard for that process; the RSS guard below still applies, so a runaway
 #     can never balloon the host.
-MIN_AGE_SECS="${KILL_SIMPLE_MIN_AGE_SECS:-60}"
+# Raised from 60 to 900 on 2026-08-17. 60s sat BELOW the runtime of an ordinary
+# unit spec (~115s measured), so the DEFAULT configuration killed valid runs —
+# the guard's floor has to be above realistic spec runtime or it is a
+# result-corrupting timer, not a runaway guard. A true runaway spins forever and
+# is still caught, just later.
+MIN_AGE_SECS="${KILL_SIMPLE_MIN_AGE_SECS:-900}"
+# Number of CONSECUTIVE polls a process must be measured above CPU_THRESHOLD
+# before the CPU guard will fire. One hot sample is noise; a runaway is hot on
+# every sample forever.
+SPIN_SAMPLES="${KILL_SIMPLE_SPIN_SAMPLES:-3}"
 # RSS guard: kill a bin/simple run/test proc this big regardless of CPU/age.
 # A no-GC simple balloon doesn't peg CPU, so the CPU guard alone misses the
 # host-OOM crash class (simple_runaway_oom_host_crash_2026-06-14). earlyoom is
@@ -44,13 +53,54 @@ GENERIC_MEM_THRESHOLD_MB="${KILL_ANY_MEM_MB:-64000}"
 WARN_MEM_MB="${KILL_SIMPLE_WARN_MB:-32000}"
 MY_UID=$(id -u)
 
+# Single-instance lock. Before 2026-08-17 the monitor unconditionally clobbered
+# $PIDFILE, so two worktrees each started a monitor and both policed the whole
+# uid: a process spared by one was killed by the other, and the pidfile pointed
+# at whichever started last, so neither could be stopped reliably. mkdir is the
+# portable atomic test-and-set.
+LOCKDIR="${KILL_SIMPLE_LOCKDIR:-/tmp/.kill_simple_monitor.lock}"
+OWNS_LOCK=0
+
+acquire_lock() {
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        OWNS_LOCK=1
+        echo $$ > "$LOCKDIR/pid" 2>/dev/null || true
+        return 0
+    fi
+    _holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+    if [ -n "$_holder" ] && kill -0 "$_holder" 2>/dev/null; then
+        echo "[kill_monitor] another monitor already running (pid=$_holder); exiting" >&2
+        return 1
+    fi
+    # Stale lock from a monitor that died without cleaning up.
+    rm -rf "$LOCKDIR" 2>/dev/null || true
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        OWNS_LOCK=1
+        echo $$ > "$LOCKDIR/pid" 2>/dev/null || true
+        return 0
+    fi
+    echo "[kill_monitor] could not acquire lock $LOCKDIR; exiting" >&2
+    return 1
+}
+
 cleanup() {
-    rm -f "$PIDFILE"
+    if [ "$OWNS_LOCK" -eq 1 ]; then
+        rm -f "$PIDFILE"
+        rm -rf "$LOCKDIR" 2>/dev/null || true
+    fi
     exit 0
 }
 trap cleanup INT TERM HUP EXIT
 
+acquire_lock || exit 0
+
 echo $$ > "$PIDFILE"
+
+# Instantaneous-CPU sampling state, one file per observed pid.
+CPU_STATE_DIR="${KILL_SIMPLE_CPU_STATE_DIR:-/tmp/.kill_monitor_cpu_$MY_UID}"
+mkdir -p "$CPU_STATE_DIR" 2>/dev/null || true
+CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
+[ -n "$CLK_TCK" ] || CLK_TCK=100
 
 is_protected() {
     _cmd="$1"
@@ -117,6 +167,69 @@ cpu_budget_secs() {
     fi
 }
 
+# Instantaneous CPU percent for a pid, as the delta of utime+stime over the
+# interval since the PREVIOUS poll. This replaces `ps -o pcpu`, which reports a
+# LIFETIME AVERAGE: a spec that compiles near 100% and then falls to ~70% for
+# I/O drifts across a fixed threshold purely as a function of WHEN it happens to
+# be sampled, so byte-identical commands got opposite verdicts (measured
+# 2026-08-17: 75.1% survived, 97.2% killed, 69.2% survived).
+#
+# Echoes nothing when there is no usable prior sample (first sighting of the
+# pid, or the pid was reused). Callers MUST treat empty as "no evidence" and
+# skip the kill — never as 0 and never as "hot".
+instant_cpu_pct() {
+    _pid="$1"
+    _stat=$(cat "/proc/$_pid/stat" 2>/dev/null) || return 0
+    [ -n "$_stat" ] || return 0
+    # Field 2 (comm) is parenthesised and may contain spaces; strip through the
+    # LAST ") " so a comm like "sh (x) y" cannot shift every later field.
+    _rest=${_stat##*') '}
+    _had_noglob=0
+    case $- in *f*) _had_noglob=1 ;; esac
+    set -f
+    # After comm is stripped, positional $1 is field 3 (state), so field N is
+    # ${N-2}: utime(14)=${12}, stime(15)=${13}, starttime(22)=${20}.
+    set -- $_rest
+    [ "$_had_noglob" -eq 1 ] || set +f
+    [ "$#" -ge 20 ] || return 0
+    _ticks=$(( ${12} + ${13} ))
+    _start=${20}
+    _now=$(date +%s)
+
+    _f="$CPU_STATE_DIR/$_pid"
+    _prev=$(cat "$_f" 2>/dev/null)
+    printf '%s %s %s\n' "$_start" "$_ticks" "$_now" > "$_f" 2>/dev/null || true
+    [ -n "$_prev" ] || return 0
+
+    set -f
+    set -- $_prev
+    [ "$_had_noglob" -eq 1 ] || set +f
+    [ "$#" -eq 3 ] || return 0
+    # starttime mismatch means this pid was recycled; the old sample is not ours.
+    [ "$1" = "$_start" ] || return 0
+    _dticks=$(( _ticks - $2 ))
+    _dt=$(( _now - $3 ))
+    [ "$_dt" -ge 1 ] 2>/dev/null || return 0
+    [ "$_dticks" -ge 0 ] 2>/dev/null || return 0
+    echo $(( _dticks * 100 / (CLK_TCK * _dt) ))
+}
+
+# Consecutive-hot-sample counter, so one hot poll can never fire the guard.
+spin_streak() {
+    _pid="$1"; _hot="$2"
+    _f="$CPU_STATE_DIR/streak_$_pid"
+    if [ "$_hot" -eq 0 ]; then
+        rm -f "$_f" 2>/dev/null || true
+        echo 0
+        return 0
+    fi
+    _n=$(cat "$_f" 2>/dev/null)
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    _n=$(( _n + 1 ))
+    echo "$_n" > "$_f" 2>/dev/null || true
+    echo "$_n"
+}
+
 # Tell the victim why it is dying, in its own output stream. Without this the
 # kill is invisible to whoever is reading the run: the process just stops
 # mid-line and the truncated output reads like a real (partial) result.
@@ -160,6 +273,16 @@ while true; do
         kill -0 "$_mp" 2>/dev/null || rm -f "$_m" 2>/dev/null || true
     done
 
+    # Drop CPU-sample and spin-streak state for dead pids, so a recycled pid
+    # starts from no evidence rather than inheriting a stranger's hot streak.
+    for _s in "$CPU_STATE_DIR"/* ; do
+        [ -e "$_s" ] || continue
+        _sp="${_s##*/}"
+        _sp="${_sp#streak_}"
+        case "$_sp" in ''|*[!0-9]*) continue ;; esac
+        kill -0 "$_sp" 2>/dev/null || rm -f "$_s" 2>/dev/null || true
+    done
+
     # uid filters to our own procs (can't/shouldn't kill root system procs);
     # rss is in KB; etimes in seconds. args is last so it captures full cmdline.
     ps -eo uid,pid,pcpu,rss,etimes,args --no-headers 2>/dev/null | while read uid pid cpu rss etime cmdline; do
@@ -191,9 +314,20 @@ while true; do
                         ;;
                 esac
 
-                # CPU guard — runaway spin.
-                cpu_int=$(printf '%.0f' "$cpu" 2>/dev/null || echo 0)
+                # CPU guard — runaway spin. Measured INSTANTANEOUSLY (see
+                # instant_cpu_pct); `ps` pcpu is deliberately not used here.
+                cpu_int=$(instant_cpu_pct "$pid")
+                # Empty => first sighting or recycled pid. No evidence is not
+                # evidence of a runaway: wait for the next poll.
+                if [ -z "$cpu_int" ]; then
+                    continue
+                fi
                 if [ "$cpu_int" -lt "$CPU_THRESHOLD" ] 2>/dev/null; then
+                    spin_streak "$pid" 0 >/dev/null
+                    continue
+                fi
+                streak=$(spin_streak "$pid" 1)
+                if [ "$streak" -lt "$SPIN_SAMPLES" ] 2>/dev/null; then
                     continue
                 fi
                 budget=$(cpu_budget_secs "$pid")
@@ -202,7 +336,7 @@ while true; do
                 if [ "$etime" -lt "$budget" ] 2>/dev/null; then
                     continue
                 fi
-                kill_hard "$pid" "cpu=${cpu}% age=${etime}s>=${budget}s: $cmdline"
+                kill_hard "$pid" "cpu=${cpu_int}% (instantaneous, ${streak} consecutive samples) age=${etime}s>=${budget}s: $cmdline"
         else
                 # Generic RSS cap for any other owned proc (rogue python/etc).
                 if [ "$rss_mb" -ge "$GENERIC_MEM_THRESHOLD_MB" ] 2>/dev/null; then
