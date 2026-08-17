@@ -1,0 +1,175 @@
+# Unwrapped Foreign Resource Lint Specification
+#
+# Verifies W-MC-RES-001 (unwrapped_foreign_resource, REQ-MC-023): in the
+# critical profile, a bare handle returned by an SFFI acquire call
+# (`rt_..._open`/`_create`/`_new`/`_alloc`) must not escape its acquire call
+# site unwrapped — via return, tail expression, or a direct `self.field`
+# assignment — without first passing through a wrapping constructor call.
+#
+# Text-level, intraprocedural, single-assignment heuristic — see
+# unwrapped_foreign_resource.spl's file docstring for the documented ceiling
+# (only same-function return/field escape is tracked; cross-call argument
+# threading and multi-hop variable renaming are explicitly out of scope for
+# v1). Deployed `bin/simple lint` predates this source file (WP-3.5 redeploy
+# pending) — this spec drives the check function directly (interpreter path)
+# rather than relying on the CLI binary as the oracle.
+
+use std.spec.*
+use compiler.semantics.lint.unwrapped_foreign_resource.{
+    UnwrappedResourceFinding,
+    check_unwrapped_foreign_resource
+}
+use compiler.tools.lint._LintMain.config_and_model.{
+    profile_default_levels, map_lint_code_to_config_name, LintProfile
+}
+
+
+describe "W-MC-RES-001: unwrapped foreign resource":
+    """
+    ## No unwrapped foreign resource escape (REQ-MC-023)
+
+    Firmware-style rule: a raw opaque handle acquired from an SFFI
+    acquire-verb extern (`rt_..._open`/`_create`/`_new`/`_alloc`) must not
+    escape its acquire call site unwrapped. Warn-level under the critical
+    profile; allow elsewhere.
+    """
+
+    context "when a bare handle escapes via return":
+
+        it "warns on a direct acquire call returned bare":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn read_config(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("W-MC-RES-001")
+            expect(findings[0].line_num).to_equal(4)
+
+        it "warns on a tracked handle var returned bare":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn read_config(path: text) -> i64:\n    val handle = rt_file_open(path)\n    return handle\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].line_num).to_equal(5)
+
+        it "warns on raw handles returned in a tuple":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn open_two(a: text, b: text) -> (i64, i64):\n    return (rt_file_open(a), rt_file_open(b))\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].line_num).to_equal(4)
+
+    context "when a bare handle escapes as the tail expression":
+
+        it "warns on a direct acquire call as the fn's tail expression":
+            val source = "extern fn rt_db_open(path: text) -> i64\n\nfn open_db(path: text) -> i64:\n    rt_db_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].line_num).to_equal(4)
+
+        it "warns on a tracked handle var as the tail expression":
+            val source = "extern fn rt_db_open(path: text) -> i64\n\nfn open_db(path: text) -> i64:\n    val h = rt_db_open(path)\n    h\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].line_num).to_equal(5)
+
+    context "when a bare handle is assigned directly to a struct/class field":
+
+        it "warns on self.field = <acquire call>":
+            val source = "extern fn rt_db_open(path: text) -> i64\n\nclass Database:\n    handle: i64\n\n    me reopen(path: text):\n        self.handle = rt_db_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].line_num).to_equal(7)
+
+        it "warns on self.field = <tracked handle var>":
+            val source = "extern fn rt_db_open(path: text) -> i64\n\nclass Database:\n    handle: i64\n\n    me reopen(path: text):\n        val h = rt_db_open(path)\n        self.handle = h\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].line_num).to_equal(8)
+
+    context "when the handle is wrapped in a constructor call":
+
+        it "does not warn when the acquire call is a constructor argument, tail-returned":
+            val source = "extern fn rt_db_open(path: text) -> i64\nextern fn rt_db_close(handle: i64) -> bool\n\nclass Database:\n    handle: i64\n\n    static fn open(path: text) -> Database:\n        Database(handle: rt_db_open(path))\n\n    me close():\n        rt_db_close(self.handle)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn when the acquire call is a constructor argument, returned via `return`":
+            val source = "extern fn rt_db_open(path: text) -> i64\n\nclass Database:\n    handle: i64\n\n    static fn open(path: text) -> Database:\n        return Database(handle: rt_db_open(path))\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "exclusions":
+
+        it "does not warn on the extern fn declaration itself":
+            val source = "extern fn rt_file_open(path: text) -> i64\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn on an @unsafe-boundary fn":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\n@unsafe(reason: \"ffi boundary\", capabilities: [ffi])\nfn raw_open(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "skips generated sffi_gen adapter modules":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn raw_open(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/compiler/90.tools/sffi_gen/generated/file_adapter.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "skips vendored sources":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn raw_open(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/runtime/vendor/lib/thing.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn on a non-acquire extern call":
+            val source = "extern fn rt_file_close(handle: i64) -> bool\n\nfn shutdown(handle: i64) -> bool:\n    return rt_file_close(handle)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "return-type gate: an acquire verb is not enough, it must be a handle":
+
+        it "does not flag an acquire-verb extern that returns bool":
+            # rt_dir_create makes a directory and returns success; there is no
+            # handle to wrap. 19 real findings in src/ were this shape.
+            val source = "extern fn rt_dir_create(path: text, parents: bool) -> bool\n\nfn ensure(path: text) -> bool:\n    return rt_dir_create(path, true)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not flag an acquire-verb extern that returns an array":
+            val source = "extern fn rt_bytes_alloc(n: i64) -> [u8]\n\nfn buf(n: i64) -> [u8]:\n    return rt_bytes_alloc(n)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "still flags an acquire-verb extern that returns an i64 handle":
+            val source = "extern fn rt_file_open(path: text) -> i64\n\nfn open_raw(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "still flags when the return type is Any — Any IS used as a handle":
+            # Regression guard: rt_mutex_new/rt_rwlock_new both return Any, so
+            # treating Any as a non-handle would fail OPEN on real resources.
+            val source = "extern fn rt_mutex_new() -> Any\n\nfn make() -> Any:\n    return rt_mutex_new()\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "fails closed when the extern is declared in another file":
+            # No declaration here means no type information, which is not a
+            # licence to go quiet.
+            val source = "fn open_raw(path: text) -> i64:\n    return rt_file_open(path)\n"
+            val findings = check_unwrapped_foreign_resource(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+    context "profile plumbing (critical tier)":
+
+        it "maps W-MC-RES-001 to the unwrapped_foreign_resource config name":
+            expect(map_lint_code_to_config_name("W-MC-RES-001")).to_equal("unwrapped_foreign_resource")
+
+        it "allows the rule in moderate/strict/robust tiers":
+            val moderate = profile_default_levels(LintProfile.Moderate)
+            expect(moderate["unwrapped_foreign_resource"]).to_equal("allow")
+            val strict = profile_default_levels(LintProfile.Strict)
+            expect(strict["unwrapped_foreign_resource"]).to_equal("allow")
+            val robust = profile_default_levels(LintProfile.Robust)
+            expect(robust["unwrapped_foreign_resource"]).to_equal("allow")
+
+        it "warns under the critical tier, keeping robust strictness":
+            val critical = profile_default_levels(LintProfile.Critical)
+            expect(critical["unwrapped_foreign_resource"]).to_equal("warn")
+            expect(critical["unsafe_pattern"]).to_equal("deny")
+            expect(critical["bare_primitive_internal"]).to_equal("warn")

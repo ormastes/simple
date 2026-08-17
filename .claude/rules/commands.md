@@ -104,9 +104,42 @@ bin/simple --version 2>&1 | head -2
 /usr/bin/grep -rn "pattern" src/       # exhaustive scans / censuses
 ```
 
-- `bin/simple lint` costs ~11.7s startup + ~3.3-4.0s **per function decl**,
-  superlinear. A 120-line file takes ~119s. **Do not batch files** — 2 files
-  exceeded 600s vs 119s for 1.
+- `bin/simple lint` costs ~12s fixed startup, then a per-declaration cost that
+  **depends on what is IN the declaration**. The old "~3.3-4.0s per function
+  decl" figure here was measured on simple declarations and is roughly right for
+  those, but it is NOT what makes a big file unlintable, and reading it as a
+  general rule under-predicts real compiler files by more than an order of
+  magnitude. Re-measured 2026-08-17 (shared box, load 33-55, 21-30 concurrent
+  `simple` processes — an idle box is faster, so treat these as an envelope):
+
+  | fixture | decls | lines | wall | per decl |
+  |---|---|---|---|---|
+  | 1 trivial fn | 1 | 2 | 12s | — (this is startup) |
+  | 15 tiny fns | 15 | 61 | 111s | ~6.6s |
+  | 90 tiny fns | 90 | 361 | 436s | ~4.7s |
+  | 4 fns x 45 stmts | 4 | 192 | 107s | ~24s |
+  | 45 fns x 4 stmts | 45 | 315 | 239s | ~5s |
+  | `zca_rows.spl` first 2 fns | 2 | 182 | 210s | ~99s |
+  | `zca_rows.spl` first 8 fns | 8 | 443 | **>2400s** (killed) | >300s |
+
+  Two conclusions the old line got wrong:
+  - **Declaration count alone scales LINEARLY** (15 -> 90 decls leaves per-decl
+    cost flat or falling). Splitting a file into more functions does not help.
+  - **Content complexity is the real driver, and it is superlinear in the file.**
+    Two real hwir row-builder functions cost 20x two trivial ones, and going
+    from 182 to 443 lines of the same file multiplied cost by more than 11x for
+    2.4x the lines. That is why `src/compiler/50.mir/hwir/zca_rows.spl` (30 such
+    functions, 1901 lines) exceeds any practical budget — it is a cost problem,
+    **not a hang**: the linter does terminate and does print a verdict.
+  - Startup is ~12s and is **not** the ~310s fixed `Session setup` cost seen in
+    `bin/simple test`; lint does not share that path. Don't conflate the two.
+
+  **Do not batch files** — 2 files exceeded 600s vs 119s for 1.
+  Cost is pinned by `sh scripts/check/check-lint-cost-budget.shs` (fail-closed,
+  `--selftest`, treats a silent exit 0 with no verdict line as FAIL).
+  Open: the superlinear term has not been located — attach-based profiling is
+  blocked on this host (`ptrace_scope=1`, `perf_event_paranoid=4`). See
+  `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
 - No pure-Simple binary can lint: `bootstrap/stage3/simple lint` is
   `unknown command` (exit 1). `simple test` GREEN does not prove self-hosted.
 - Detail: `doc/07_guide/tooling/build_fast_path.md`

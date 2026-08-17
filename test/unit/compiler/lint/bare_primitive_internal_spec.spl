@@ -1,0 +1,152 @@
+# Bare-Primitive Internal Binding Lint Specification
+#
+# Verifies W-MC-VAL-001 (bare_primitive_internal, REQ-MC-011): in
+# mission-critical code, internal `val`/`var` bindings must carry domain
+# types. Bare numeric/bool literal initializers without annotation or unit
+# suffix warn, as do explicit primitive-table annotations. Text-level
+# heuristic (see bare_primitive_internal.spl for the ponytail note; upgrade
+# path = typed-HIR walk).
+#
+# Lexer parity note: `_` before a digit is a numeric separator (`1_000` is
+# ONE bare number, lex_scan_number); a suffix is `_` + alpha (`250_ms`).
+
+use std.spec.*
+use compiler.semantics.lint.bare_primitive_internal.{
+    BarePrimitiveFinding,
+    check_bare_primitive_internal
+}
+use compiler.tools.lint._LintMain.config_and_model.{
+    profile_default_levels, parse_lint_profile,
+    map_lint_code_to_config_name, LintProfile
+}
+
+
+describe "W-MC-VAL-001: bare primitive internal bindings":
+    """
+    ## No bare primitives in internal code (REQ-MC-011)
+
+    Firmware-style rule: even internal locals carry domain types in
+    mission-critical packages. Bare literals and primitive annotations
+    are flagged at warn level under the mission-critical profile.
+    """
+
+    context "when a binding is a bare literal with no type information":
+
+        it "warns on a bare integer literal val":
+            val source = "fn f():\n    val x = 1\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("W-MC-VAL-001")
+            expect(findings[0].name).to_equal("x")
+            expect(findings[0].line_num).to_equal(2)
+
+        it "warns on a bare bool literal var":
+            val source = "fn f():\n    var y = true\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("y")
+
+        it "warns on a bare float literal":
+            val source = "fn f():\n    val r = 1.5\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("r")
+
+        it "warns on a digit-separator literal (1_000 is still bare)":
+            val source = "fn f():\n    val big = 1_000\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("big")
+
+    context "when a binding has an explicit primitive annotation":
+
+        it "warns on a primitive-table annotation even with an initializer":
+            val source = "fn f():\n    val t: i64 = 1\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("t")
+
+        it "warns on a bool annotation (bool IS in the primitive table)":
+            val source = "fn f():\n    var flag: bool = compute()\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("flag")
+
+    context "when the binding carries a domain type":
+
+        it "does not warn on a domain-type annotation":
+            val source = "fn f():\n    val t: DurationMs = 1\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn on a unit-suffix literal":
+            val source = "fn f():\n    val d = 250_ms\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn on a short unit suffix":
+            val source = "fn f():\n    val d = 1_s\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "when the initializer is not a bare literal":
+
+        it "does not warn on a call initializer (expression type governs)":
+            val source = "fn f():\n    val n = count_items()\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn on an arithmetic expression initializer":
+            val source = "fn f(k: i64):\n    val n = k + 1\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does not warn on a string literal initializer":
+            val source = "fn f():\n    val s = \"hello\"\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "exclusions":
+
+        it "does not warn on for-loop induction variables":
+            val source = "fn f(n: i64):\n    for i in 0..n:\n        print(i)\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "skips vendored sources":
+            val source = "fn f():\n    val x = 1\n"
+            val findings = check_bare_primitive_internal(source, "src/runtime/vendor/lib/thing.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "skips discard bindings":
+            val source = "fn f():\n    val _ = 0\n"
+            val findings = check_bare_primitive_internal(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "profile plumbing (mission-critical tier)":
+
+        it "parses both mission-critical spellings and keeps old tiers":
+            expect(parse_lint_profile("mission-critical").is_some()).to_be(true)
+            expect(parse_lint_profile("mission_critical").is_some()).to_be(true)
+            expect(parse_lint_profile("reliable").is_some()).to_be(true)
+            expect(parse_lint_profile("bogus").is_some()).to_be(false)
+
+        it "maps W-MC-VAL-001 to the bare_primitive_internal config name":
+            expect(map_lint_code_to_config_name("W-MC-VAL-001")).to_equal("bare_primitive_internal")
+
+        it "suppresses the rule in strict/moderate/robust tiers (allow)":
+            val lib = profile_default_levels(LintProfile.Strict)
+            expect(lib["bare_primitive_internal"]).to_equal("allow")
+            val mod = profile_default_levels(LintProfile.Moderate)
+            expect(mod["bare_primitive_internal"]).to_equal("allow")
+            val rel = profile_default_levels(LintProfile.Robust)
+            expect(rel["bare_primitive_internal"]).to_equal("allow")
+
+        it "warns under the critical tier, keeping robust strictness":
+            val mc = profile_default_levels(LintProfile.Critical)
+            expect(mc["bare_primitive_internal"]).to_equal("warn")
+            # Reliable elevations carry over...
+            expect(mc["unsafe_pattern"]).to_equal("deny")
+            expect(mc["memory_safety"]).to_equal("deny")
+            # ...and const_ref_default keeps its existing default level.
+            expect(mc["const_ref_default"]).to_equal("warn")

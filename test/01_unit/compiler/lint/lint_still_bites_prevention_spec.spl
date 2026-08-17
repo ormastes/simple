@@ -1,0 +1,79 @@
+# @req REQ-LINT-COST-002
+"""
+# Lint Still Bites
+
+**Category:** Tooling
+**Status:** Implemented
+
+## Purpose and Audience
+
+The tempting way to make a slow linter stop timing out is to make it do less
+work. Every such change -- an early return on large files, a skipped check, a
+widened cache -- shows up as a faster, greener run, which looks exactly like a
+successful optimisation. This spec exists so that a linter which has quietly
+stopped reporting fails here instead of being congratulated.
+
+It is aimed at anyone optimising lint cost, which is the open follow-up on the
+`zca_rows.spl` budget overrun.
+
+## Scope and Preconditions
+
+Two committed fixtures are linted through the real `bin/simple lint`:
+
+- a clean file, which must be reported clean;
+- a file that deliberately declares a raw `rt_process_run` extern outside the
+  privileged runtime tiers, which must be reported as a `RAW-RT-001` finding.
+
+The second fixture is the load-bearing one. It is not a test of the file -- it
+is a test that the linter is still looking.
+
+## Primary Workflow
+
+Lint each fixture and compare the reported findings against what each fixture
+is known to contain. The clean file and the violating file must produce
+different answers; a linter that answers "clean" to both has stopped working
+regardless of how fast it did so.
+
+## Recovery and Troubleshooting
+
+If the violation scenario fails, do not adjust the fixture to match the new
+output. Establish why `RAW-RT-001` stopped firing. A caching change that serves
+a stale clean verdict for an edited file is the most likely cause, and is a
+defect in the cache, not in this spec.
+
+## Compatibility and Limitations
+
+Covers one lint rule as a liveness canary, not lint coverage generally. It
+cannot detect a linter that reports this rule while having silently dropped
+others.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val CLEAN_FIXTURE = "test/fixtures/lint_cost/nested_expression_row.spl"
+val VIOLATING_FIXTURE = "test/fixtures/lint_cost/raw_rt_violation.spl"
+
+describe "Lint still reports findings after any cost work":
+    it "flags a raw runtime extern declared outside the privileged tiers":
+        step("Lint a fixture that declares rt_process_run directly")
+        val (out, err, code) = process_run("bin/simple", ["lint", VIOLATING_FIXTURE])
+
+        step("Require the specific rule, so a generic warning elsewhere cannot stand in for it")
+        expect(out).to_contain("RAW-RT-001")
+        expect(out).to_contain("rt_process_run")
+
+        step("Require the finding to name the offending file and line, not just the rule")
+        expect(out).to_contain("raw_rt_violation.spl:")
+
+    it "does not report that finding against a file that does not contain it":
+        step("Lint the clean fixture")
+        val (out, err, code) = process_run("bin/simple", ["lint", CLEAN_FIXTURE])
+
+        step("The two fixtures must produce different answers, or the linter is not reading them")
+        expect(out).to_not_contain("RAW-RT-001")
+
+        step("The clean fixture must produce no finding of its own")
+        expect(out).to_not_contain("nested_expression_row.spl:")
+        expect(out).to_contain("Lint passed")
+        expect(code).to_equal(0)

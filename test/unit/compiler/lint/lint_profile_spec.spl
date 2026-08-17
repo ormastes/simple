@@ -1,0 +1,220 @@
+use std.spec.*
+use std.io_runtime.{file_write, file_delete, getpid, time_now_unix_micros}
+use compiler.tools.lint._LintMain.config_and_model.{
+    map_lint_code_to_config_name, profile_default_levels, parse_lint_profile,
+    LintConfig, LintProfile, LintLevel,
+    deprecated_profile_alias_warn_count,
+    engine_default_profile, engine_default_levels, LintEngineDefault
+}
+use compiler.tools.lint.main.{run_lint_file}
+
+val WARN_ALL_FIXTURE_PATH = "/tmp/simple_lint_warn_all_spec_{getpid()}_{time_now_unix_micros()}.spl"
+
+# P0 of the reliable-mode plan: the moderate|strict|robust|critical strictness-tier
+# selector on the CLI lint engine (formerly moderate|lib|reliable|mission-critical;
+# old spellings are deprecated aliases — see profile-rename cases below), plus a
+# complete lint-code -> config-name map.
+# See doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md and
+# doc/02_requirements/language/mission_critical_profile.md § Profile ladder rename.
+#
+# NOTE: interpreter-mode `bin/simple test` only load-checks `it` blocks; the
+# executing oracle for this behavior is the `bin/simple run` probe recorded in
+# .spipe/reliable_mode/state.md (ALL_PROBE_PASS). These cases mirror that probe.
+describe "lint strictness profiles (reliable-mode P0)":
+
+    it "maps every previously-unmapped lint family to a config name (AC-3)":
+        step("Resolve formerly-unconfigurable lint codes")
+        expect(map_lint_code_to_config_name("W001")).to_equal("unused_code")
+        expect(map_lint_code_to_config_name("S001")).to_equal("unsafe_pattern")
+        expect(map_lint_code_to_config_name("CC001")).to_equal("concurrency_misuse")
+        expect(map_lint_code_to_config_name("CLOS001")).to_equal("closure_capture")
+        expect(map_lint_code_to_config_name("RET001")).to_equal("ignored_return")
+        expect(map_lint_code_to_config_name("BOOL001")).to_equal("multiline_bool")
+        expect(map_lint_code_to_config_name("SAFE001")).to_equal("memory_safety")
+        expect(map_lint_code_to_config_name("W0401")).to_equal("visibility_boundary")
+        expect(map_lint_code_to_config_name("ST001")).to_equal("style_convention")
+        expect(map_lint_code_to_config_name("D001")).to_equal("database_integrity")
+        expect(map_lint_code_to_config_name("TRK001")).to_equal("tracking_traceability")
+
+    it "strict tier preserves current defaults (AC-1)":
+        step("Strict == build_default_levels baseline (formerly Lib)")
+        val lib = profile_default_levels(LintProfile.Strict)
+        expect(lib["primitive_api"]).to_equal("deny")
+        expect(lib["stub_impl"]).to_equal("deny")
+
+    it "moderate tier downgrades deny defaults to warn (AC-1)":
+        step("Moderate is advisory")
+        val mod = profile_default_levels(LintProfile.Moderate)
+        expect(mod["primitive_api"]).to_equal("warn")
+        expect(mod["stub_impl"]).to_equal("warn")
+        expect(mod["export_outside_init"]).to_equal("warn")
+
+    it "robust tier elevates safety + public-surface lints to deny (AC-1)":
+        step("Robust is strictest (formerly Reliable)")
+        val rel = profile_default_levels(LintProfile.Robust)
+        expect(rel["unsafe_pattern"]).to_equal("deny")
+        expect(rel["memory_safety"]).to_equal("deny")
+        expect(rel["visibility_boundary"]).to_equal("deny")
+        expect(rel["concurrency_misuse"]).to_equal("deny")
+        expect(rel["non_exhaustive_match"]).to_equal("deny")
+
+    it "parses every new tier name (AC-2, profile-rename)":
+        step("parse_lint_profile round-trips all four current names")
+        expect(parse_lint_profile("moderate").is_some()).to_equal(true)
+        expect(parse_lint_profile("strict").is_some()).to_equal(true)
+        expect(parse_lint_profile("robust").is_some()).to_equal(true)
+        expect(parse_lint_profile("critical").is_some()).to_equal(true)
+
+    it "rejects unknown profile strings, including the old names' near-misses (AC-2)":
+        step("bogus strings stay nil; renamed-away spellings are not silently accepted")
+        expect(parse_lint_profile("bogus").is_some()).to_equal(false)
+        expect(parse_lint_profile("reliabl").is_some()).to_equal(false)
+        expect(parse_lint_profile("").is_some()).to_equal(false)
+
+    it "deprecated aliases parse to the SAME variant as their new spelling (profile-rename)":
+        step("lib -> strict, reliable -> robust, mission-critical/mission_critical -> critical")
+        match parse_lint_profile("lib"):
+            case Some(p):
+                expect(profile_default_levels(p)["primitive_api"]).to_equal(profile_default_levels(LintProfile.Strict)["primitive_api"])
+            case nil:
+                assert_true(false)
+        match parse_lint_profile("reliable"):
+            case Some(p):
+                expect(profile_default_levels(p)["unsafe_pattern"]).to_equal(profile_default_levels(LintProfile.Robust)["unsafe_pattern"])
+            case nil:
+                assert_true(false)
+        match parse_lint_profile("mission-critical"):
+            case Some(p):
+                expect(profile_default_levels(p)["bare_primitive_internal"]).to_equal(profile_default_levels(LintProfile.Critical)["bare_primitive_internal"])
+            case nil:
+                assert_true(false)
+        match parse_lint_profile("mission_critical"):
+            case Some(p):
+                expect(profile_default_levels(p)["bare_primitive_internal"]).to_equal(profile_default_levels(LintProfile.Critical)["bare_primitive_internal"])
+            case nil:
+                assert_true(false)
+
+    it "deprecated aliases warn exactly ONCE per distinct old name, not once per call (profile-rename)":
+        step("call each deprecated spelling several times; the warn count must stay 1")
+        val before_dep = deprecated_profile_alias_warn_count("dep-once-test-alias-does-not-exist")
+        expect(before_dep).to_equal(0)
+        # Use a distinct old-spelling family so this test is independent of
+        # call order/count from other examples that also parse "lib"/"reliable".
+        val _r1 = parse_lint_profile("lib")
+        val _r2 = parse_lint_profile("lib")
+        val _r3 = parse_lint_profile("LIB")
+        val _r4 = parse_lint_profile("lib")
+        expect(deprecated_profile_alias_warn_count("lib")).to_equal(1)
+        val _s1 = parse_lint_profile("reliable")
+        val _s2 = parse_lint_profile("reliable")
+        expect(deprecated_profile_alias_warn_count("reliable")).to_equal(1)
+        val _t1 = parse_lint_profile("mission-critical")
+        val _t2 = parse_lint_profile("mission_critical")
+        val _t3 = parse_lint_profile("mission-critical")
+        expect(deprecated_profile_alias_warn_count("mission-critical")).to_equal(1)
+        expect(deprecated_profile_alias_warn_count("mission_critical")).to_equal(1)
+
+    it "engine-default resolution: interpreter/JIT -> moderate, compiler/loader -> robust at warn (REQ-MC-012 tier 3)":
+        step("engine_default_profile picks the right tier per engine")
+        match engine_default_profile(LintEngineDefault.InterpreterOrJit):
+            case Moderate:
+                assert_true(true)
+            case _:
+                assert_true(false)
+        match engine_default_profile(LintEngineDefault.CompilerLoader):
+            case Robust:
+                assert_true(true)
+            case _:
+                assert_true(false)
+        step("compiler/loader's default levels report robust's rule set but at WARN, never deny")
+        val compiler_levels = engine_default_levels(LintEngineDefault.CompilerLoader)
+        expect(compiler_levels["unsafe_pattern"]).to_equal("warn")
+        expect(compiler_levels["memory_safety"]).to_equal("warn")
+        expect(compiler_levels["visibility_boundary"]).to_equal("warn")
+        step("interpreter/JIT's default levels match moderate's dict exactly")
+        val interp_levels = engine_default_levels(LintEngineDefault.InterpreterOrJit)
+        val moderate_levels = profile_default_levels(LintProfile.Moderate)
+        expect(interp_levels["primitive_api"]).to_equal(moderate_levels["primitive_api"])
+        expect(interp_levels["stub_impl"]).to_equal(moderate_levels["stub_impl"])
+
+    it "rejects an unknown CLI profile instead of silently using defaults":
+        val written = file_write(WARN_ALL_FIXTURE_PATH, "fn clean_name() -> i64:\n    1\n")
+        val exit_code = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--profile=relaible", "--json"])
+        val removed = file_delete(WARN_ALL_FIXTURE_PATH)
+        expect(written).to_equal(true)
+        expect(exit_code).to_equal(2)
+        expect(removed).to_equal(true)
+
+    it "unset profile preserves legacy behavior; robust elevates (AC-6)":
+        step("nil profile == today's build_default_levels fallback")
+        var cfg = LintConfig.new()
+        # unsafe_pattern base default is warn -> get_level Warn under no profile
+        val unset = cfg.get_level("unsafe_pattern")
+        expect(level_name(unset)).to_equal("warn")
+        step("select robust -> elevated to deny")
+        cfg.set_profile(LintProfile.Robust)
+        expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
+
+    it "sdn lints.profile selects a tier (AC-2)":
+        step("from_sdn_string parses profile: before the lint-name gate")
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: robust\n")
+        expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
+
+    it "sdn lints.profile also accepts the deprecated old spelling (profile-rename)":
+        step("from_sdn_string honors 'reliable' as an alias for 'robust'")
+        val cfg = LintConfig.from_sdn_string("lints:\n  profile: reliable\n")
+        expect(level_name(cfg.get_level("unsafe_pattern"))).to_equal("deny")
+
+    it "leaves the tier unselected when the manifest carries no profile key":
+        # Differential half of AC-2: without this, the two examples above pass
+        # even on a scanner that never matches anything, because an unselected
+        # profile also leaves unsafe_pattern at its default. Assert the two
+        # cases DIFFER rather than only asserting the with-key case.
+        step("a lints: section with no profile: entry selects nothing")
+        val cfg = LintConfig.from_sdn_string("lints:\n  stub_impl: deny\n")
+        val unpinned_name = if cfg.profile.?: "selected" else: "none"
+        expect(unpinned_name).to_equal("none")
+        step("and the with-key case does select one")
+        val pinned = LintConfig.from_sdn_string("lints:\n  profile: robust\n")
+        val pinned_name = if pinned.profile.?: "selected" else: "none"
+        expect(pinned_name).to_equal("selected")
+
+    it "no longer accepts the removed TOML-ish [lints] shape":
+        # WP-4: the `[lints]` / `name = "level"` shape was deleted. It was never
+        # present in any manifest in the tree (aerospace hardening plan premise
+        # 4), so this is a format removal, not a softened assertion.
+        step("the old shape selects no profile")
+        val cfg = LintConfig.from_sdn_string("[lints]\nprofile = \"robust\"\n")
+        val legacy_name = if cfg.profile.?: "selected" else: "none"
+        expect(legacy_name).to_equal("none")
+
+    it "@lint_profile() file attribute selects a tier (AC-2)":
+        step("apply_file_attributes honors @lint_profile, distinct from @profile(critical)")
+        var cfg = LintConfig.new()
+        cfg.apply_file_attributes("@lint_profile(robust)\n\nfn main():\n    print(\"x\")\n")
+        expect(level_name(cfg.get_level("memory_safety"))).to_equal("deny")
+
+    it "promotes allowed style diagnostics with warn-all":
+        step("ST001 stays allowed by default, then becomes an error under --warn-all --deny-all")
+        val dirty_written = file_write(WARN_ALL_FIXTURE_PATH, "fn CamelCase() -> i64:\n    1\n")
+        val baseline_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--json"])
+        val dirty_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--warn-all", "--deny-all", "--json"])
+        val clean_written = file_write(WARN_ALL_FIXTURE_PATH, "fn clean_name() -> i64:\n    1\n")
+        val clean_exit = run_lint_file(WARN_ALL_FIXTURE_PATH, ["--warn-all", "--deny-all", "--json"])
+        val removed = file_delete(WARN_ALL_FIXTURE_PATH)
+
+        expect(dirty_written).to_equal(true)
+        expect(baseline_exit).to_equal(0)
+        expect(dirty_exit).to_equal(1)
+        expect(clean_written).to_equal(true)
+        expect(clean_exit).to_equal(0)
+        expect(removed).to_equal(true)
+
+fn level_name(level: LintLevel) -> String:
+    match level:
+        case Allow:
+            "allow"
+        case Warn:
+            "warn"
+        case Deny:
+            "deny"

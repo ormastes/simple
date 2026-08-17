@@ -1,0 +1,91 @@
+# Machine-applicable fixes for the collection-efficiency lints.
+use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+use std.tooling.easy_fix.*
+
+val CONCAT_SRC = "fn build(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        out = out + [x]\n    out\n"
+val MULTI_SRC = "fn build2(xs: [i64]) -> [i64]:\n    var out: [i64] = []\n    for x in xs:\n        out = out + [x, x]\n    out\n"
+val POP_SRC = "fn drain(ys: [i64]) -> [i64]:\n    var arr = ys\n    while arr.len() > 0:\n        arr = arr[0:arr.len()-1]\n    arr\n"
+
+describe "collection lint auto-fix":
+
+    it "reports COLL001 on the offending line, not the enclosing function":
+        """A quadratic concat inside a loop should point at the concat itself,
+        so the reader lands on the defect rather than the function header."""
+        step("Lint a function whose loop body grows an array by concatenation")
+        var line = 0
+        var count = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/coll_push.spl", CONCAT_SRC):
+            if result.lint.code == "COLL001":
+                count = count + 1
+                line = result.line
+        assert_equal(count, 1)
+        # `out = out + [x]` is line 4; `fn build` is line 1.
+        assert_equal(line, 4)
+
+    it "offers a push rewrite that applies cleanly to the source":
+        """The fix must be machine-applicable: splicing its replacement into the
+        original text has to yield working code with the concat gone."""
+        step("Collect the COLL001 replacement and splice it into the source")
+        var replacements = 0
+        var new_text = ""
+        var applied = ""
+        for result in lint_cli_source(Linter.new(), "/tmp/coll_push2.spl", CONCAT_SRC):
+            if result.lint.code == "COLL001":
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            replacements = replacements + 1
+                            new_text = rep.new_text
+                            applied = CONCAT_SRC.slice(0, rep.start) + rep.new_text + CONCAT_SRC.slice(rep.end)
+                    case nil:
+                        val _ = 0
+        assert_equal(replacements, 1)
+        expect(new_text).to_equal("out.push(x)")
+        step("The spliced source keeps the indentation and drops the concat")
+        expect(applied).to_contain("        out.push(x)\n")
+        assert_false(applied.contains("out + [x]"))
+
+    it "warns without a fix when the concat appends more than one element":
+        """`arr + [a, b]` needs one push per element, which is not a
+        statement-local rewrite, so the warning stands alone."""
+        step("Lint a loop body appending a two-element literal")
+        var warned = false
+        var replacements = 0
+        for result in lint_cli_source(Linter.new(), "/tmp/coll_multi.spl", MULTI_SRC):
+            if result.lint.code == "COLL001":
+                warned = true
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        replacements = replacements + easyfix_replacements(fix).len()
+                    case nil:
+                        val _ = 0
+        assert_true(warned)
+        assert_equal(replacements, 0)
+
+    it "offers a .pop() rewrite for the array-rebuild-to-pop shape":
+        """The bug report and this rule's own header comment wrote the
+        fixture with `..` (arr[0..arr.len()-1]); that is not valid slice
+        syntax (`..` builds a Range, not a slice — indexing by one errors
+        at runtime), so neither the warning nor the fix could ever see it.
+        The rule fires on the real colon slice form, and the fix must
+        offer the matching rewrite."""
+        step("Lint a loop that rebuilds arr via arr[0:arr.len()-1]")
+        var replacements = 0
+        var new_text = ""
+        var applied = ""
+        for result in lint_cli_source(Linter.new(), "/tmp/coll_pop.spl", POP_SRC):
+            if result.lint.code == "COLL007":
+                match result.lint.easy_fix:
+                    case Some(fix):
+                        for rep in easyfix_replacements(fix):
+                            replacements = replacements + 1
+                            new_text = rep.new_text
+                            applied = POP_SRC.slice(0, rep.start) + rep.new_text + POP_SRC.slice(rep.end)
+                    case nil:
+                        val _ = 0
+        assert_equal(replacements, 1)
+        expect(new_text).to_equal("arr.pop()")
+        step("The spliced source keeps the indentation and drops the rebuild")
+        expect(applied).to_contain("        arr.pop()\n")
+        assert_false(applied.contains("arr[0:arr.len()-1]"))

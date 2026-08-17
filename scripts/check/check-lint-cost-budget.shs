@@ -1,0 +1,237 @@
+#!/bin/sh
+# check-lint-cost-budget.shs — pin `simple lint` wall-cost on a fixed fixture.
+#
+# WHY THIS EXISTS
+# ---------------
+# `sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl` was
+# killed by a 600s budget with no verdict line and filed as a lint hang. It is
+# not a hang: the linter runs to completion and prints a verdict. The real
+# problem is that lint cost grows superlinearly with file CONTENT, so a large
+# hwir row-builder file exceeds any fixed budget it is given, and nothing in the
+# tree noticed the cost drifting there.
+#
+# Measured 2026-08-17 (all under load average 33-48 on a shared box, 21-30
+# concurrent `simple` processes — cost roughly doubles vs an idle box, so treat
+# these as an upper envelope, not a clean-room number):
+#
+#   fixture                       decls  lines  wall
+#   syn_tiny (1 trivial fn)           1      2    12s   <- fixed startup
+#   cnt_15   (15 tiny fns)           15     61   111s   ~6.6s per decl
+#   cnt_90   (90 tiny fns)           90    361   436s   ~4.7s per decl
+#   syn_big  (4 fns x 45 stmts)       4    192   107s
+#   syn_small(45 fns x 4 stmts)      45    315   239s
+#   zca cut_183 (2 real hwir fns)     2    182   210s   ~99s per decl
+#   zca cut_444 (8 real hwir fns)     8    443  >2400s  (killed; >11x cut_183
+#                                                       for 2.4x the lines)
+#
+# Reading of that table:
+#   * Declaration count alone is LINEAR (15 -> 90 decls, per-decl cost flat or
+#     falling). The published "3.3-4.0s per function decl" is the right shape
+#     for simple declarations but is NOT what makes zca_rows unlintable.
+#   * Content complexity dominates. Two real hwir functions cost 20x what two
+#     trivial ones do, and the cost per line keeps RISING as the file grows —
+#     that is the superlinear term and the thing worth fixing.
+#   * Startup is ~12s, NOT the ~310s fixed `Session setup` cost measured in
+#     `bin/simple test`. Lint does not share that path; do not conflate them.
+#
+# This gate is deliberately NOT a benchmark of zca_rows itself — that file costs
+# more than any sane CI budget. It pins a small representative fixture so a
+# regression that makes ordinary files dramatically slower fails fast and loudly.
+#
+# CONVENTION (matches the other scripts/check guards)
+#   verdict is the LAST line of stdout:
+#     PASS  — <n> fixture(s) checked, ...        exit 0   (n is always > 0)
+#     FAIL  — ...                                 exit 1
+#     ERROR — nothing was checked                 exit 2
+#   A run that timed 0 fixtures is ERROR, never a pass. `--selftest` runs before
+#   every scan and is fatal.
+#
+# The linter's exit status is read into a variable on the line AFTER the
+# invocation, never through a pipe — a pipeline's $? is the last stage's status,
+# and that exact trap already produced a false green in this repo (a cargo build
+# that failed while `| tail` reported exit 0).
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+FIXTURE_DEFAULT="test/fixtures/lint_cost/nested_expression_row.spl"
+
+# Generous by design: the box this runs on is shared and heavily loaded, and a
+# flaky perf gate gets disabled, which is worse than a loose one. The fixture
+# costs ~15-25s loaded; 240s only trips on a real order-of-magnitude regression.
+BUDGET_DEFAULT=240
+
+SIMPLE_BIN_DEFAULT="bin/simple"
+
+usage() {
+    echo "usage: $0 [--fixture PATH] [--budget SECONDS] [--simple-bin PATH] [--selftest-only]"
+}
+
+# ---------------------------------------------------------------------------
+# time_lint <simple_bin> <fixture> <budget>
+#   Echoes: "<elapsed> <rc> <verdict_seen>"
+#   verdict_seen is 1 when the linter printed an explicit result sentence.
+# ---------------------------------------------------------------------------
+time_lint() {
+    tl_bin=$1
+    tl_fixture=$2
+    tl_budget=$3
+    tl_out=$(mktemp)
+
+    tl_start=$(date +%s)
+    # NOTE: status into a variable on the next line. Never `| tail`.
+    timeout "$tl_budget" nice -n 19 "$tl_bin" lint "$tl_fixture" >"$tl_out" 2>&1
+    tl_rc=$?
+    tl_end=$(date +%s)
+    tl_elapsed=$((tl_end - tl_start))
+
+    if grep -aq 'Lint passed\|Found [0-9]* error' "$tl_out"; then
+        tl_verdict=1
+    else
+        tl_verdict=0
+    fi
+
+    rm -f "$tl_out"
+    echo "$tl_elapsed $tl_rc $tl_verdict"
+}
+
+# ---------------------------------------------------------------------------
+# Self-test. Fatal — a gate that cannot prove it bites is not evidence.
+# Uses a stub `simple` so the self-test costs milliseconds and does not depend
+# on the real linter being fast, available, or even correct.
+# ---------------------------------------------------------------------------
+selftest() {
+    st_dir=$(mktemp -d)
+    st_fail=0
+
+    # Stub 1: fast + prints a verdict  -> must PASS a generous budget
+    cat >"$st_dir/fast" <<'STUB'
+#!/bin/sh
+echo "Lint passed: all files clean"
+exit 0
+STUB
+    # Stub 2: prints NO verdict, exits 0 -> must FAIL (silent green is the
+    # single most important thing this gate must not accept)
+    cat >"$st_dir/silent" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+    # Stub 3: sleeps past the budget -> must FAIL on time
+    cat >"$st_dir/slow" <<'STUB'
+#!/bin/sh
+sleep 5
+echo "Lint passed: all files clean"
+exit 0
+STUB
+    chmod +x "$st_dir/fast" "$st_dir/silent" "$st_dir/slow"
+    echo 'fn f(a: i64) -> i64:' >"$st_dir/fixture.spl"
+    echo '    return a' >>"$st_dir/fixture.spl"
+
+    # fixture 1: fast stub must PASS
+    st_r=$(time_lint "$st_dir/fast" "$st_dir/fixture.spl" 30)
+    st_verdict=$(echo "$st_r" | cut -d' ' -f3)
+    if [ "$st_verdict" != "1" ]; then
+        echo "selftest: FAILED — fast stub did not register a verdict line"
+        st_fail=1
+    fi
+
+    # fixture 2: silent stub must be detected as verdict-less
+    st_r=$(time_lint "$st_dir/silent" "$st_dir/fixture.spl" 30)
+    st_verdict=$(echo "$st_r" | cut -d' ' -f3)
+    if [ "$st_verdict" != "0" ]; then
+        echo "selftest: FAILED — silent exit-0 stub was accepted as a verdict"
+        st_fail=1
+    fi
+
+    # fixture 3: slow stub must exceed a 2s budget (timeout rc 124)
+    st_r=$(time_lint "$st_dir/slow" "$st_dir/fixture.spl" 2)
+    st_rc=$(echo "$st_r" | cut -d' ' -f2)
+    if [ "$st_rc" -ne 124 ]; then
+        echo "selftest: FAILED — slow stub was not killed by its budget (rc=$st_rc)"
+        st_fail=1
+    fi
+
+    # fixture 4: a missing fixture must not look like a pass
+    st_r=$(time_lint "$st_dir/fast" "$st_dir/does_not_exist.spl" 30)
+    if [ -z "$st_r" ]; then
+        echo "selftest: FAILED — missing fixture produced no measurement at all"
+        st_fail=1
+    fi
+
+    rm -rf "$st_dir"
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 4 fixture(s) passed"
+}
+
+# ---------------------------------------------------------------------------
+
+FIXTURE=$FIXTURE_DEFAULT
+BUDGET=$BUDGET_DEFAULT
+SIMPLE_BIN=$SIMPLE_BIN_DEFAULT
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fixture)     FIXTURE=$2; shift 2 ;;
+        --budget)      BUDGET=$2; shift 2 ;;
+        --simple-bin)  SIMPLE_BIN=$2; shift 2 ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        -h|--help)     usage; exit 0 ;;
+        *) echo "unknown argument: $1"; usage; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 4 fixture(s) checked, selftest only, no lint cost measured"
+    exit 0
+fi
+
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked"; exit 2; }
+
+if [ ! -f "$FIXTURE" ]; then
+    echo "missing fixture: $FIXTURE"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "no runnable simple binary at: $SIMPLE_BIN"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+LOAD=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo "unknown")
+PROCS=$(pgrep -c -x simple 2>/dev/null || echo 0)
+
+RESULT=$(time_lint "$SIMPLE_BIN" "$FIXTURE" "$BUDGET")
+ELAPSED=$(echo "$RESULT" | cut -d' ' -f1)
+RC=$(echo "$RESULT" | cut -d' ' -f2)
+VERDICT_SEEN=$(echo "$RESULT" | cut -d' ' -f3)
+
+CHECKED=1
+
+if [ "$RC" -eq 124 ]; then
+    echo "FAIL — $CHECKED fixture(s) checked, lint exceeded its ${BUDGET}s budget on $FIXTURE (load=$LOAD, concurrent simple=$PROCS)"
+    exit 1
+fi
+
+# Silent green is a FAIL, not a pass: an exit 0 with no result sentence is
+# indistinguishable from a run that never linted anything.
+if [ "$VERDICT_SEEN" -ne 1 ]; then
+    echo "FAIL — $CHECKED fixture(s) checked, lint printed no verdict line on $FIXTURE (rc=$RC, ${ELAPSED}s, load=$LOAD)"
+    exit 1
+fi
+
+if [ "$RC" -ne 0 ]; then
+    echo "FAIL — $CHECKED fixture(s) checked, lint exited $RC on $FIXTURE (${ELAPSED}s, load=$LOAD)"
+    exit 1
+fi
+
+echo "PASS — $CHECKED fixture(s) checked, lint completed in ${ELAPSED}s of a ${BUDGET}s budget (load=$LOAD, concurrent simple=$PROCS)"
+exit 0

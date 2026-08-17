@@ -1,0 +1,64 @@
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+
+extern fn rt_exit(code: i32)
+
+val source = "fn pair(left: i64, right: i64):\n    0\n\nfn caller():\n    pair(1, 2)\n"
+val linter = Linter.new()
+var generic_has_dtyp = false
+var count = 0
+var call_line = 0
+var default_warn = false
+
+for result in linter.lint_source("/tmp/lint_dtyp_generic.spl", source):
+    if result.lint.code == "DTYP001":
+        generic_has_dtyp = true
+
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_cli.spl", source):
+    if result.lint.code == "DTYP001":
+        count = count + 1
+        call_line = result.line
+        if result.lint.level == LintLevel.Warn:
+            default_warn = true
+
+var deny_is_deny = false
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_deny.spl", "@deny(unnamed_duplicate_typed_args)\n" + source):
+    if result.lint.code == "DTYP001" and result.lint.level == LintLevel.Deny:
+        deny_is_deny = true
+
+var allow_has_dtyp = false
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_allow.spl", "@allow(unnamed_duplicate_typed_args)\n" + source):
+    if result.lint.code == "DTYP001":
+        allow_has_dtyp = true
+
+var named_count = 0
+val named_source = "fn pair(left: i64, right: i64):\n    0\n\nfn caller():\n    pair(left: 1, right: 2)\n"
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_named.spl", named_source):
+    if result.lint.code == "DTYP001":
+        named_count = named_count + 1
+
+var mixed_count = 0
+var mixed_message = ""
+val mixed_source = "fn pair(left: i64, right: i64):\n    0\n\nfn caller():\n    pair(right: 2, 1)\n"
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_mixed.spl", mixed_source):
+    if result.lint.code == "DTYP001":
+        mixed_count = mixed_count + 1
+        mixed_message = result.lint.message
+
+var method_count = 0
+val method_source = "fn pair(left: i64, right: i64):\n    0\n\nfn caller(receiver: any):\n    receiver.pair(1, 2)\n"
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_method.spl", method_source):
+    if result.lint.code == "DTYP001":
+        method_count = method_count + 1
+
+var nested_count = 0
+val nested_source = "fn pair(left: i64, right: i64):\n    0\n\nfn caller(receiver: any):\n    receiver.consume(pair(1, 2))\n"
+for result in lint_cli_source(linter, "/tmp/lint_dtyp_nested.spl", nested_source):
+    if result.lint.code == "DTYP001":
+        nested_count = nested_count + 1
+
+if generic_has_dtyp or count != 2 or call_line != 5 or not default_warn or not deny_is_deny or allow_has_dtyp or named_count != 0 or mixed_count != 1 or not mixed_message.contains("`left`") or method_count != 0 or nested_count != 2:
+    print "FAIL: DTYP001 CLI ownership, call line, or config parity changed"
+    rt_exit(1)
+
+print "PASS: CLI owner adds DTYP001 once with call line and config parity"
+rt_exit(0)

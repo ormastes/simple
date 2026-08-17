@@ -1,0 +1,43 @@
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+
+extern fn rt_exit(code: i32)
+
+val source = "use std.common.text.*\nexport std.common.math.*\nfn keep_module_non_facade() -> i64:\n    1\n"
+val linter = Linter.new()
+var generic_import_count = 0
+var generic_export_count = 0
+for result in linter.lint_source("/tmp/lint_star_generic.spl", source):
+    if result.lint.code == "W0406": generic_import_count = generic_import_count + 1
+    if result.lint.code == "W0407": generic_export_count = generic_export_count + 1
+
+var cli_import_count = 0
+var cli_export_count = 0
+var import_line = 0
+var export_line = 0
+var export_warn = false
+for result in lint_cli_source(linter, "/tmp/lint_star_cli.spl", source):
+    if result.lint.code == "W0406":
+        cli_import_count = cli_import_count + 1
+        import_line = result.line
+    if result.lint.code == "W0407":
+        cli_export_count = cli_export_count + 1
+        export_line = result.line
+        export_warn = result.lint.level == LintLevel.Warn
+
+var facade_has_star = false
+for result in lint_cli_source(linter, "C:\\tmp\\__init__.spl", source):
+    if result.lint.code == "W0406" or result.lint.code == "W0407":
+        facade_has_star = true
+
+parser_set_had_error(true)
+val _ = lint_cli_source(linter, "/tmp/lint_star_parser_state.spl", source)
+val parser_state_preserved = parser_has_errors()
+parser_set_had_error(false)
+
+if generic_import_count != 1 or generic_export_count != 0 or cli_import_count != 1 or cli_export_count != 1 or import_line != 1 or export_line != 2 or not export_warn or facade_has_star or not parser_state_preserved:
+    print "FAIL: wildcard import/export CLI ownership, line, facade, or parser state regressed"
+    rt_exit(1)
+
+print "PASS: CLI keeps one W0406 EasyFix owner and adds one parsed W0407 export warning"
+rt_exit(0)

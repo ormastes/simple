@@ -1,0 +1,53 @@
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
+use compiler.core.ast.{module_get_decls}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+
+extern fn rt_exit(code: i32)
+
+val source = "# decoy: fn collect_values():\nval decoy = \"fn join_pair(left: i64, right: i64)\"\n\nasync fn collect_values<T>():\n    var values = []\n    var i = 0\n    while i < 2:\n        values = values + [i]\n        i = i + 1\n\nfn join_pair(left: i64, right: i64) -> i64:\n    left + right\n\nfn call_pair() -> i64:\n    join_pair(1, 2)\n\nfn call_pair_named() -> i64:\n    join_pair(left: 1, right: 2)\n"
+val allowed_source = "@allow(unnamed_duplicate_typed_args)\n" + source
+val linter = Linter.new()
+var generic_has_coll = false
+var generic_dtyp_family_count = 0
+for result in linter.lint_source("/tmp/lint_collection_dtyp_generic.spl", source):
+    if result.lint.code == "COLL001":
+        generic_has_coll = true
+    if result.lint.code == "unnamed_duplicate_typed_args":
+        generic_dtyp_family_count = generic_dtyp_family_count + 1
+
+var coll_count = 0
+var coll_line = 0
+var coll_deny = false
+var cli_dtyp_family_count = 0
+var cli_has_dtyp001 = false
+for result in lint_cli_source(linter, "/tmp/lint_collection_dtyp_cli.spl", source):
+    if result.lint.code == "COLL001":
+        coll_count = coll_count + 1
+        coll_line = result.line
+        coll_deny = result.lint.level == LintLevel.Deny
+    if result.lint.code == "unnamed_duplicate_typed_args":
+        cli_dtyp_family_count = cli_dtyp_family_count + 1
+    if result.lint.code == "DTYP001":
+        cli_has_dtyp001 = true
+
+# The shared semantic query leaf must warn only for the two positional args;
+# the named call it recommends must not produce another pair of warnings.
+val semantic_dtyp_count = check_duplicate_typed_args(module_get_decls()).len()
+
+var allowed_has_dtyp_family = false
+for result in lint_cli_source(linter, "/tmp/lint_collection_dtyp_allowed.spl", allowed_source):
+    if result.lint.code == "unnamed_duplicate_typed_args":
+        allowed_has_dtyp_family = true
+
+parser_set_had_error(true)
+val _ = lint_cli_source(linter, "/tmp/lint_collection_dtyp_parser_state.spl", source)
+val parser_state_preserved = parser_has_errors()
+parser_set_had_error(false)
+
+if generic_has_coll or generic_dtyp_family_count != 1 or coll_count != 1 or coll_line != 4 or not coll_deny or cli_dtyp_family_count != 1 or cli_has_dtyp001 or semantic_dtyp_count != 2 or allowed_has_dtyp_family or not parser_state_preserved:
+    print "FAIL: COLL CLI ownership or duplicate-typed positional/named ownership regressed"
+    rt_exit(1)
+
+print "PASS: CLI adds COLL001 once; duplicate-typed calls keep one fix owner and ignore named args"
+rt_exit(0)

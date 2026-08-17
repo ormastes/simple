@@ -1,0 +1,62 @@
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+use compiler.semantics.lint.argument_count.{ArgCountWarning, check_argument_count}
+use compiler.core.ast.{ast_reset, module_get_decls, decl_fn, decl_get_span, span_line}
+use compiler.core.parser.{parse_module_silent, parser_has_errors, parser_set_had_error}
+
+extern fn rt_exit(code: i32)
+
+val warn_source = "# decoy: fn arg_warn(a, b)\nval decoy = \"fn arg_warn(a, b)\"\n\nfn arg_warn<T>(a: T, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> T:\n    a\n"
+val deny_source = "fn arg_deny(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64, k: i64, l: i64, m: i64) -> i64:\n    a\n"
+val allowed_source = "@allow(too_many_arguments)\nfn arg_allowed(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64:\n    a\n"
+val extern_source = "\n\nextern fn c_arg(a: i64, b: i64) -> i64\n"
+var generic_has_arg = false
+var cli_warn = false
+var cli_deny = false
+var cli_allowed_has_arg = false
+var cli_warn_line = 0
+var linter = Linter.new()
+val old_shape_warning = ArgCountWarning(
+    code: "ARG001", severity: "warning", message: "old shape", hint: "",
+    fn_name: "old_shape", param_count: 8
+)
+
+for result in linter.lint_source("/tmp/lint_arg_generic.spl", warn_source):
+    if result.lint.code == "ARG001" or result.lint.code == "ARG002":
+        generic_has_arg = true
+for result in lint_cli_source(linter, "/tmp/lint_arg_warn.spl", warn_source):
+    if result.lint.code == "ARG001" and result.lint.level == LintLevel.Warn:
+        cli_warn = true
+        cli_warn_line = result.line
+for result in lint_cli_source(linter, "/tmp/lint_arg_deny.spl", deny_source):
+    if result.lint.code == "ARG002" and result.lint.level == LintLevel.Deny:
+        cli_deny = true
+for result in lint_cli_source(linter, "/tmp/lint_arg_allowed.spl", allowed_source):
+    if result.lint.code == "ARG001" or result.lint.code == "ARG002":
+        cli_allowed_has_arg = true
+
+parser_set_had_error(true)
+val _ = lint_cli_source(linter, "/tmp/lint_arg_parser_state.spl", warn_source)
+val parser_state_preserved = parser_has_errors()
+parser_set_had_error(false)
+
+ast_reset()
+parse_module_silent(extern_source, "/tmp/lint_arg_extern.spl")
+val extern_decls = module_get_decls()
+var extern_line = 0
+if extern_decls.len() == 1:
+    extern_line = span_line(decl_get_span(extern_decls[0]))
+
+ast_reset()
+val invalid_span_decl = decl_fn(
+    "invalid_span", ["a", "b", "c", "d", "e", "f", "g", "h"], [],
+    0, [], 0, [], 999999
+)
+val invalid_span_warnings = check_argument_count([invalid_span_decl])
+val invalid_span_safe = invalid_span_warnings.len() == 1 and invalid_span_warnings[0].line == 0
+
+if generic_has_arg or not cli_warn or cli_warn_line != 4 or not cli_deny or cli_allowed_has_arg or not parser_state_preserved or extern_line != 3 or old_shape_warning.line != 0 or not invalid_span_safe:
+    print "FAIL: argument-count lint escaped its CLI owner or missed a threshold"
+    rt_exit(1)
+
+print "PASS: CLI owner adds ARG001/ARG002 while generic lint stays parser-free"
+rt_exit(0)

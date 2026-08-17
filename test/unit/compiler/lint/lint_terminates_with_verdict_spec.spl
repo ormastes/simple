@@ -1,0 +1,74 @@
+# @req REQ-LINT-COST-001
+"""
+# Lint Terminates And Says So
+
+**Category:** Tooling
+**Status:** Implemented
+
+## Purpose and Audience
+
+`sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl` was
+killed by a 600-second budget with no verdict line, and was filed as a lint
+hang. It is not a hang. Measurement showed the linter runs to completion and
+prints an explicit verdict; that file is simply far past the budget it was given.
+
+The distinction matters because the two diagnoses have opposite fixes. A hang is
+a deadlock to break. A cost problem is either optimised or given an honest,
+written bound -- and pretending to "fix a hang" that was never a hang would
+leave the real bound undocumented and the next agent equally stuck.
+
+This spec pins the half that is cheap to check and easy to regress: for a file
+it can process, lint finishes and reports a verdict rather than exiting silently.
+
+## Scope and Preconditions
+
+Drives the real `bin/simple lint` as a subprocess over a small committed
+fixture. The fixture's single function is a deeply nested call expression --
+the shape that dominates cost in the hwir row builders -- kept small enough to
+lint quickly.
+
+Measured cost model is recorded in the bug document, not asserted here: wall
+time depends on machine load, and a timing assertion would be flaky rather than
+informative.
+
+## Primary Workflow
+
+Lint the fixture, then read the verdict off stdout. The oracle is the presence
+of an explicit result line, never the exit status on its own.
+
+## Recovery and Troubleshooting
+
+A failure with empty output and a non-zero status is the timeout signature, not
+a lint finding. Re-run with a longer budget and record the machine load before
+concluding anything about the linter.
+
+## Compatibility and Limitations
+
+Only asserts termination and reporting. It deliberately does not assert a time
+bound; see the bug document for measured numbers and the load they were taken
+under.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val LINT_FIXTURE = "test/fixtures/lint_cost/nested_expression_row.spl"
+
+describe "Lint reports a verdict instead of ending silently":
+    it "finishes a deeply nested expression file and states the outcome":
+        step("Run bin/simple lint over the nested-expression fixture")
+        val (out, err, code) = process_run("bin/simple", ["lint", LINT_FIXTURE])
+
+        step("Read the explicit verdict sentence the linter prints when it completes")
+        expect(out).to_contain("Lint passed")
+
+        step("Confirm the run ended cleanly, with the exit status as corroboration rather than the oracle")
+        expect(code).to_equal(0)
+
+    it "reports a clean file as clean, and says so in words":
+        step("Lint the same fixture and look for the verdict sentence")
+        val (out, err, code) = process_run("bin/simple", ["lint", LINT_FIXTURE])
+
+        step("A silent exit 0 is indistinguishable from a skipped run, so require the sentence")
+        expect(out).to_contain("Lint passed")
+        expect(code).to_equal(0)

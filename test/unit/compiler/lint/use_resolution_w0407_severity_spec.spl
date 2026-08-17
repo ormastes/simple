@@ -1,0 +1,57 @@
+"""
+# W0407 Severity Promotion Under `critical` (WP-10)
+
+Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+WP-10.
+
+`check_use_resolution` (use_resolution.spl) emits W0407 for a `use` import
+that does not resolve to an existing `.spl` file. Every profile used to get
+the same WARNING severity, including `critical` -- an unresolved import
+could reach import-admission (module_loader_core.spl) with no ERROR
+anywhere in the diagnostic chain. Severity is now routed through the WP-3
+canonical policy resolver (`strictness_for_profile_name`) and promoted to
+ERROR only at the `critical` rung.
+"""
+
+use compiler.core.ast.{ast_reset, decl_use_import}
+use compiler.semantics.lint.use_resolution.{check_use_resolution, UseResolutionWarning}
+
+fn probe_file_path() -> text:
+    "src/compiler/35.semantics/lint/use_resolution.spl"
+
+fn make_unresolvable_use() -> i64:
+    ast_reset()
+    decl_use_import("compiler.wp10.definitely_does_not_exist_zzz", ["zzz"], 0)
+
+describe "W0407 severity routes through the WP-3 policy resolver (WP-10)":
+    it "defaults to WARNING for the permissive profile (\"\")":
+        val d = make_unresolvable_use()
+        val ws = check_use_resolution([d], probe_file_path(), "")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].code).to_equal("W0407")
+        expect(ws[0].severity).to_equal("WARNING")
+
+    it "stays WARNING for strict and robust (not critical)":
+        val d1 = make_unresolvable_use()
+        val ws1 = check_use_resolution([d1], probe_file_path(), "strict")
+        expect(ws1[0].severity).to_equal("WARNING")
+        val d2 = make_unresolvable_use()
+        val ws2 = check_use_resolution([d2], probe_file_path(), "robust")
+        expect(ws2[0].severity).to_equal("WARNING")
+
+    it "promotes to ERROR under critical":
+        val d = make_unresolvable_use()
+        val ws = check_use_resolution([d], probe_file_path(), "critical")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].severity).to_equal("ERROR")
+
+    it "promotes to ERROR under the deprecated mission-critical alias too (WP-3 table)":
+        val d = make_unresolvable_use()
+        val ws = check_use_resolution([d], probe_file_path(), "mission-critical")
+        expect(ws[0].severity).to_equal("ERROR")
+
+    it "does not warn at all when the import DOES resolve":
+        ast_reset()
+        val d = decl_use_import("compiler.semantics.lint.star_import", [], 0)
+        val ws = check_use_resolution([d], probe_file_path(), "critical")
+        expect(ws.len()).to_equal(0)
