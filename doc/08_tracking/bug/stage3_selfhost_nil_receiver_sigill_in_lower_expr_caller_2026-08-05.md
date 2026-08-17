@@ -1107,3 +1107,30 @@ bare-leaf resolution fix in `functions.rs` (make the well-known-method table at
 `:2497` reachable for dotless leaves, and/or make the suffix scan reject a
 single *incompatible* candidate instead of accepting it), then re-run this exact
 recipe.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: UNKNOWN — unverifiable by grep in principle, and still UNVERIFIED at runtime.**
+
+This doc claims no fix, and records that the fault site has never executed
+(`[mir-stmt-caller]` probe count 0, zero SIGILL/exit-132 observations). Its
+blockers are upstream of MIR (a bare `bytes` suffix hijack in the driver's source
+loader), so there is no fix pattern to grep for in
+`_MirLoweringExpr/expr_dispatch.spl`. Reaching MIR at all needs stage3, which
+per the governing fact was not available. Status left STILL UNVERIFIED.

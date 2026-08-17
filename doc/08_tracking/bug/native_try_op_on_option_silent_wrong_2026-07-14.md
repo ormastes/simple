@@ -180,3 +180,31 @@ None ordinal 1 plus the raw-nil migration fallback. Execution remains pending.
 ## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
 
 LIVE by content. `lower_try_expr` at src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2816 still contains NO `option`/`optional`/`is_none` branch anywhere in its body (grep over the function returns zero hits) — the `?` base is still handled as a Result unconditionally. The tagged-Option ABI the doc says the fix requires is likewise absent. Not executed (native-build lanes are claimed by other sessions).
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: ALREADY-FIXED IN 50.mir BY CONTENT.**
+
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2816`
+`lower_try_expr` has a full Optional lane at `:2853`
+(`case HirTypeKind.Optional(inner):`) with the dual-ABI `try_opt_boxed/flat/none`
+blocks and `ensure_option_handle` at `:2991`; `:1668` cites this bug id as the
+root fix. The claim that `?`'s base is unconditionally treated as a Result is
+false against current source — this supersedes the earlier note above, which
+grepped the function before that lane existed.

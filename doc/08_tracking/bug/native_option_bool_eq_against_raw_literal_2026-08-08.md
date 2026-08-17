@@ -145,3 +145,33 @@ the script to FAIL (exit 1); restoring returns it to PASS (exit 0).
 ## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
 
 UNPROVEN by this lane (native-only). The hosted half of the matrix re-checks clean on the deployed seed: `make(true) == true` where `make` returns `bool?` by implicit coercion prints `p1=true` under BOTH jit and SIMPLE_EXECUTION_MODE=interpreter, matching rows p1's interp/jit columns. The wrong-answer columns are native-build only, and native-build/`pipeline/native_project/**` is claimed by another lane, so the native leg was not re-run here. Ownership stays with the native-option-return-representation effort as the doc states.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: ALREADY-FIXED IN 50.mir BY CONTENT.**
+
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2256-2306` boxes the raw
+side via `ensure_option_handle(...)` and sets `bin_is_enum_eq = true`, routing to
+`rt_native_eq` at `:2312`; the `== nil` arm using `rt_is_none` is at `:2241`.
+This doc's OPEN status rests on a `bin/simple` (seed) reproduction, which per the
+governing fact is not evidence about 50.mir. NOTE: this doc's own "marker
+confirmed live" verification methodology left an unguarded
+`eprint("MARKER_RT_IS_NONE_ARM_REACHED")` behind at `expr_dispatch.spl:2239`;
+that stray probe was removed in this lane and is now guarded by
+`test/01_unit/compiler/mir/mir_lowering_no_stray_debug_marker_spec.spl`.

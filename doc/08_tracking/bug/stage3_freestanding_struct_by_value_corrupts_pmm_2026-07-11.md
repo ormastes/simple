@@ -34,3 +34,31 @@ multiboot wrapper supplied Limine aggregates.
 ## Triage note (2026-07-17)
 
 Commits `ca1e18c1744a` and `7c30ce49d04f` likely address the aggregate ABI and enum-payload defects described above. The workarounds (scalar-only APIs, direct-boot path) are confirmed in production use. Pending runtime verification: fresh stage3 freestanding build must compile and boot with zero PMM/VMM faults.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: MIS-ATTRIBUTED — no 50.mir claim to verify; runtime claim UNVERIFIED.**
+
+This doc names no 50.mir function; all repairs it cites are OS-side scalar APIs
+(`pmm_alloc_page_raw`, `vmm_init_from_global_pmm`,
+`arch_x86_64_direct_boot_init`). Grepping
+`src/compiler/50.mir/_MirLowering/function_lowering.spl` for aggregate/byval/sret
+ABI lowering yields only comment lines 81 and 282 — no aggregate-ABI fix exists
+there. The 2026-07-17 triage note's pending freestanding boot verification is
+unchanged.

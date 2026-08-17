@@ -205,3 +205,30 @@ consumer of `bin/simple`) stays seed-attributed until this is fully fixed
    visibility is the intended semantic, or whether call sites relying on it
    should get explicit imports instead — verify against pre-`Dict`-fix
    behavior to rule out the masking-accident explanation.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: MIS-ATTRIBUTED — NOT A 50.mir DEFECT.**
+
+Both root causes are glob-import symbol registration in 20.hir —
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:739`
+(`register_imported_symbol`) and `:1095` (`find_reexport_source`).
+`src/compiler/50.mir/mir_data.spl` is only the victim facade (its `export` lines
+`:733-735`). `register_glob_imported_symbols` has zero matches anywhere in
+`src/compiler`. Re-attribute this row to 20.hir module lowering.

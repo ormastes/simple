@@ -174,3 +174,36 @@ value for another and additionally made it a *type* violation. Either way `?` in
 a non-`Result` function should be a compile-time error; today it silently
 miscompiles. Filed here rather than separately because the fix belongs in the
 same `lower_try` type-dispatch work as the Option case above.
+
+---
+
+## Triage re-verification 2026-08-17 (c_mir lane, classified by CONTENT not SHA)
+
+**Governing fact for every 50.mir-attributed row:** nothing runnable on this
+host executes `src/compiler/50.mir/**.spl`. `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, mtime
+2026-08-16 22:59), whose own `--version` banner states it is a Rust
+**bootstrap seed**; it has its own Rust MIR/JIT/native pipeline and never reads
+`src/compiler/**.spl` for compilation logic. `bin/release/simple` is the
+2181-byte refusing production-guard wrapper, and no stage2/stage3 self-hosted
+binary exists under `build/bootstrap/`. Therefore any evidence in this doc
+phrased as "reproduced on `bin/simple`" is evidence about the **seed**, not
+about 50.mir, and the runtime claim here can only be closed by a full
+self-hosted bootstrap (not run: the user's bootstrap is live and
+`build/bootstrap/**` is off-limits). Rows were therefore classified by
+grepping current source.
+
+**Verdict: STILL PRESENT, but MIS-ATTRIBUTED — the defect is in the Rust SEED, not 50.mir.**
+
+Confirmed live in current seed source at
+`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:2302-2319` —
+`result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY)` followed by an
+unconditional hash of the literal `"Err"` into `rt_enum_check_discriminant`, with
+no Optional branch anywhere before it. An Option never carries that
+discriminant, so `?` never early-returns. The 50.mir counterpart IS fixed (see
+`native_try_op_on_option_silent_wrong_2026-07-14.md`). Note also that
+`scripts/check/check-try-operator-error-propagation.shs` reported
+`PASS — 3 engine(s) checked: default,interpret,jit` on 2026-08-17, but that gate
+does NOT cover this row: its own header at line 37 reads "SCOPE — Result ONLY.
+`?` on an Option is a SEPARATE, STILL-OPEN defect". Recommend re-attributing this
+row to `hir/lower/expr/control.rs`.
