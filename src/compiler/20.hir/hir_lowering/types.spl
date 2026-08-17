@@ -86,6 +86,20 @@ class HirLowering:
     # This is intentionally separate from the traversal set above: two
     # different terminal items must never silently compete for one spelling.
     materialized_payload_bindings: HirMaterializedPayloadBindings
+    # Re-entrancy breaker for the imported-type METHOD registration cycle
+    # `register_imported_type_methods` ->
+    # `materialize_imported_callable_type_dependencies` ->
+    # `register_imported_symbol` -> `register_imported_type_methods`.
+    # Two types in one module whose method signatures mention each other
+    # re-enter that cycle forever and SIGSEGV Stage 3 on stack exhaustion --
+    # doc/08_tracking/bug/stage3_register_imported_type_methods_infinite_recursion_2026-08-17.md
+    # Deliberately a plain `[text]` used as a stack, NOT a Dict: every existing
+    # breaker in this cycle memoizes on a Dict/symbol-table membership test, and
+    # `rt_dict_contains` under-reporting is what silently disabled them once
+    # before (see the essay in 20.hir/hir_types.spl). A linear scan over an
+    # append-only array has no such fail-open mode, and the depth guarded is
+    # type-reference nesting depth, which is small.
+    imported_type_methods_in_progress: [text]
     # Nested-field-access support (native-build --entry path has no type
     # inference pass, so a `s.arr` Field expr otherwise gets `type_: nil` and
     # MIR defaults its result to i64 -- silently wrong for an array/struct
@@ -208,6 +222,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_fn_tuple_returns: {text: [HirType]} = {}
     val empty_glob_expand_memo: {text: i64} = {}
     val empty_reexport_root_surface_indices: [i64] = []
+    val empty_imported_type_methods_in_progress: [text] = []
     val empty_reexport_root_wanted: [text] = []
     val empty_reexport_root_found: [bool] = []
     val empty_reexport_root_terminal_indices: [i64] = []
@@ -237,6 +252,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         imported_enum_owners: empty_imported_enum_owners,
         materialized_payload_origins: empty_materialized_payload_origins,
         materialized_payload_bindings: empty_materialized_payload_bindings,
+        imported_type_methods_in_progress: empty_imported_type_methods_in_progress,
         struct_field_types_by_name: empty_struct_field_types,
         local_struct_types: empty_local_struct_types,
         struct_field_order_by_name: empty_struct_field_order,
@@ -302,6 +318,11 @@ impl HirLowering:
         self.imported_enum_owners.clear()
         self.materialized_payload_origins.clear()
         self.materialized_payload_bindings.clear()
+        # Must already be empty here (the guard pops what it pushes, and the
+        # cycle cannot span a module boundary), so this is belt-and-braces: a
+        # stale entry would silently SKIP a needed method registration rather
+        # than recurse, which is the quieter and more dangerous failure.
+        self.imported_type_methods_in_progress = []
         self.struct_field_types_by_name.clear()
         self.local_struct_types.clear()
         self.struct_field_order_by_name.clear()

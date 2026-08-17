@@ -1473,6 +1473,50 @@ impl HirLowering:
                         self.register_imported_symbol(imported_mod, imported_mod_name, dependency, dependency, import_span, materialize_enum)
 
     me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
+        # RE-ENTRANCY BREAKER. This method sits in a three-node cycle:
+        #   register_imported_type_methods
+        #     -> materialize_imported_callable_type_dependencies
+        #     -> register_imported_symbol
+        #     -> register_imported_type_methods   (composite and enum branches)
+        # Every guard on that path is "check, then recurse" against the symbol
+        # table (`lookup_qualified_type_raw(...) < 0`,
+        # `lookup_or_invalid(...).is_valid()`), which only terminates when the
+        # callee is fully registered BEFORE the recursive descent. That holds
+        # on the composite path -- it defines and binds the type, then returns
+        # early when it was `already_bound`. It does NOT hold on the ENUM path,
+        # which calls this method unconditionally with no `already_bound` early
+        # return (deliberately -- gating it broke imported `DbValue.to_text()`).
+        # So two types in one module whose method SIGNATURES mention each other
+        # descend forever and exhaust the stack.
+        #
+        # Observed 2026-08-17: Stage 3 SIGSEGV (exit 139) with `rsp` on the
+        # guard page 0x7fffff7ff000 and these three frames repeating for the
+        # entire backtrace. Fixing it by gating the enum call site would
+        # reintroduce the to_text() bug, so the cycle is broken here instead --
+        # registering a type's methods is idempotent, so declining a re-entrant
+        # call loses nothing: the in-flight outer call completes the same work.
+        # doc/08_tracking/bug/stage3_register_imported_type_methods_infinite_recursion_2026-08-17.md
+        #
+        # Deliberately a plain `[text]` used as a stack, NOT a Dict: every other
+        # breaker in this cycle memoizes on a Dict/symbol-table membership test,
+        # and `rt_dict_contains` under-reporting is exactly what silently
+        # disabled them once before (see the essay at 20.hir/hir_types.spl and
+        # stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md).
+        val reentry_key = "{imported_mod.module_name}::{imported_name}"
+        for in_progress in self.imported_type_methods_in_progress:
+            if in_progress == reentry_key:
+                return
+        self.imported_type_methods_in_progress =
+            self.imported_type_methods_in_progress.push(reentry_key)
+        self.register_imported_type_methods_inner(
+            imported_mod, imported_mod_name, imported_name, local_owner, import_span, materialize_enum)
+        var unwound: [text] = []
+        for in_progress in self.imported_type_methods_in_progress:
+            if in_progress != reentry_key:
+                unwound = unwound.push(in_progress)
+        self.imported_type_methods_in_progress = unwound
+
+    me register_imported_type_methods_inner(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span, materialize_enum: bool):
         var local_owner_module: text = imported_mod_name
         var local_owner_defining_module: text? = nil
         if val owner_symbol = self.symbols.get_symbol(local_owner):
