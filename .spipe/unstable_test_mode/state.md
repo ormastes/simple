@@ -378,3 +378,24 @@ at all.
 died on the concurrent `test_runner_types.spl` parse breakage with no `Results:`
 line, and it DISCARDED the attempt rather than concluding from it. The clean
 retry is what is reported above.
+
+## 2026-08-17 — `SPEC FILE VERDICT` contradiction is BLOCKED, not merely open
+
+Emitter located: **`src/compiler_rust/driver/src/cli/basic.rs:169`** (doc
+comment at `:126`). It is in the **Rust seed**, compiled into `bin/simple`.
+
+Consequence: the `failed=1` it prints for a timed-out spec — contradicting the
+summary's `failed: 0` from the same run — **cannot be fixed by any `.spl` edit**.
+It needs a seed rebuild, which is forbidden here (clobbers ~15 concurrent lanes).
+This is the SAME structural problem as the CLI help text
+(`driver/src/cli/help.rs`): user-visible test-runner output lives in the seed,
+so pure-Simple work cannot reach it.
+
+Both are blocked on the same event — the next seed rebuild/redeploy. To close
+them together, after that redeploy:
+  - `bin/simple help test | grep unstable`   (help text)
+  - re-run the five fixtures and check the `SPEC FILE VERDICT` line for the
+    timeout spec reports the timeout as unverified, not `failed=1`
+
+Until then a consumer parsing `SPEC FILE VERDICT` still sees a timeout as a
+failure, and this lane's contract holds only for the `Results:` summary line.
