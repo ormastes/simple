@@ -2206,6 +2206,22 @@ int64_t rt_value_int_wide(int64_t value) {
 int64_t rt_value_as_int_wide(int64_t value) {
     RtCoreWideInt* n = rt_core_as_heap_int(value);
     if (n) return n->value;
+    /* bug native_empty_dict_text_value_sigsegv_2026-07-20: codegen emits this
+     * unbox on EVERY container read whose static element type is the erased i64
+     * default -- including a `var d = {}` dict that actually holds text. A
+     * tagged HEAP handle (string/float/array/class) is not an int box, and the
+     * blind `>> 3` below shredded it into a non-pointer word; the very next
+     * rt_text_eq_any -> rt_interp_cstr then treated that word as a raw char*
+     * and strcmp SIGSEGV'd (observed strcmp rdi=0xaaaaaaac182, i.e. a real
+     * handle 0x5555_5556_0C10 arithmetically shifted right by 3).
+     *
+     * A heap handle carries no integer to extract, so pass it through
+     * unchanged and let the downstream string/float path decode it properly.
+     * Values that ARE tagged int immediates (and the nil/special sentinels,
+     * whose `>> 3` behaviour other lowering deliberately relies on -- see
+     * dict_get_preserve_flat_nil) keep the exact previous arithmetic, so no
+     * correct existing consumer changes behaviour. */
+    if ((((uint64_t)value) & 0x7ULL) == RT_VALUE_TAG_HEAP) return value;
     return value >> 3;
 }
 
@@ -3774,9 +3790,19 @@ int64_t rt_string_contains(int64_t value, int64_t needle) {
     return rt_string_find(value, needle) >= 0 ? 1 : 0;
 }
 
+/* Defined next to rt_string_trim; forward-declared here because
+ * rt_string_ascii_case appears earlier in the file. */
+static int rt_string_promote_raw_receiver(int64_t value, int64_t* out);
+
 static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return rt_core_nil();
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_ascii_case(promoted, to_lower);
+        }
+        return rt_core_nil();
+    }
     RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)s->len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
@@ -4082,7 +4108,13 @@ int8_t rt_is_some(int64_t value) {
  * native `.repeat()` unresolved. */
 int64_t rt_string_repeat(int64_t value, int64_t count) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_repeat(promoted, count);
+        }
+        return value;
+    }
     if (count <= 0 || s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     if (count == 1) return value;
 
@@ -4194,7 +4226,13 @@ int64_t rt_string_char_count(int64_t value) {
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */
 int64_t rt_string_capitalize(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_capitalize(promoted);
+        }
+        return value;
+    }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)malloc((size_t)s->len);
     if (!out) return value;
@@ -4212,7 +4250,13 @@ int64_t rt_string_capitalize(int64_t value) {
 /* swapcase: uppercase <-> lowercase for every character (ASCII only). */
 int64_t rt_string_swapcase(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_swapcase(promoted);
+        }
+        return value;
+    }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)malloc((size_t)s->len);
     if (!out) return value;
@@ -4232,7 +4276,13 @@ int64_t rt_string_swapcase(int64_t value) {
  * arm defines it. */
 int64_t rt_string_title(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_title(promoted);
+        }
+        return value;
+    }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)malloc((size_t)s->len);
     if (!out) return value;
@@ -4257,7 +4307,13 @@ int64_t rt_string_title(int64_t value) {
 /* chomp: strip ONE trailing line terminator -- "\r\n", "\n", or "\r". */
 int64_t rt_string_chomp(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_chomp(promoted);
+        }
+        return value;
+    }
     uint64_t len = s->len;
     if (len >= 2 && s->data[len - 2] == '\r' && s->data[len - 1] == '\n') len -= 2;
     else if (len >= 1 && (s->data[len - 1] == '\n' || s->data[len - 1] == '\r')) len -= 1;
@@ -4322,7 +4378,13 @@ int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
  * squeeze everything" case. An explicit empty string squeezes nothing. */
 int64_t rt_string_squeeze(int64_t value, int64_t set) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_squeeze(promoted, set);
+        }
+        return value;
+    }
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     RtCoreString* set_s = rt_core_as_string(set);
     char* out = (char*)malloc((size_t)s->len);
@@ -4397,7 +4459,13 @@ static inline uint64_t rt_checked_mul_u64(uint64_t a, uint64_t b, const char* ct
  * returns the receiver rather than attempting a huge allocation. */
 int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_pad_left(promoted, width, pad);
+        }
+        return value;
+    }
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -4416,7 +4484,13 @@ int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
 /* pad_right / pad_end: right-pad to `width` CHARACTERS. */
 int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_pad_right(promoted, width, pad);
+        }
+        return value;
+    }
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -4435,7 +4509,13 @@ int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
 /* center: pad both sides to `width` CHARACTERS, extra character on the RIGHT. */
 int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_center(promoted, width, pad);
+        }
+        return value;
+    }
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -4460,7 +4540,13 @@ int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
  * front of the zeros ("-7".zfill(4) is "-007", not "00-7"). */
 int64_t rt_string_zfill(int64_t value, int64_t width) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_zfill(promoted, width);
+        }
+        return value;
+    }
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t sign = (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) ? 1 : 0;
@@ -4500,7 +4586,13 @@ int64_t rt_string_find_all(int64_t value, int64_t needle) {
  * to 0, matching the saturating eval_arg_usize in the interpreter. */
 int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_substr(promoted, start, length);
+        }
+        return value;
+    }
     if (start < 0) start = 0;
     if (length < 0) length = 0;
     uint64_t b = 0;
@@ -4517,7 +4609,13 @@ int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
  * padding value (tagged nil) IS the integer 3 for an int parameter. */
 int64_t rt_string_substr_from(int64_t value, int64_t start) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_string_substr_from(promoted, start);
+        }
+        return value;
+    }
     if (start < 0) start = 0;
     uint64_t b = 0;
     int64_t skipped = 0;
@@ -4931,9 +5029,25 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
+/* A raw, unregistered `char*` receiver does not decode via rt_core_as_string.
+ * Promote a plausible raw pointer to a real heap string so the callers below
+ * can recurse once into their already-correct heap-string path. Same
+ * conservative floor as rt_interp_cstr: < 0x10000 is nil/bool/small-int and is
+ * never dereferenced. */
+static int rt_string_promote_raw_receiver(int64_t value, int64_t* out) {
+    if (value < 0x10000) return 0;
+    const char* p = (const char*)(uintptr_t)value;
+    *out = rt_string_new((const uint8_t*)p, (uint64_t)strlen(p));
+    return 1;
+}
+
 int64_t rt_string_trim(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim(promoted);
+        return value;
+    }
     uint64_t begin = 0;
     uint64_t end = s->len;
     while (begin < end && (s->data[begin] == ' ' || s->data[begin] == '\t' || s->data[begin] == '\n' || s->data[begin] == '\r')) {
@@ -4947,7 +5061,11 @@ int64_t rt_string_trim(int64_t value) {
 
 int64_t rt_string_trim_start(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_start(promoted);
+        return value;
+    }
     uint64_t begin = 0;
     while (begin < s->len && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
                               s->data[begin] == '\n' || s->data[begin] == '\v' ||
@@ -4959,7 +5077,11 @@ int64_t rt_string_trim_start(int64_t value) {
 
 int64_t rt_string_trim_end(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return value;
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_end(promoted);
+        return value;
+    }
     uint64_t end = s->len;
     while (end > 0 && (s->data[end - 1] == ' ' || s->data[end - 1] == '\t' ||
                        s->data[end - 1] == '\n' || s->data[end - 1] == '\r')) {

@@ -1,0 +1,98 @@
+# Runtime string primitives — raw-receiver degradation, CLASS-prevention spec
+#
+# The class: `rt_core_as_string(value)` in src/runtime/runtime_native.c decodes
+# only a TAGGED, REGISTERED heap string. A raw, untagged `char*` receiver — which
+# MIR can and does deliver, because the `ensure_tagged_str` normalisation in
+# src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2194 is gated on
+# `resolution_is_unresolved` and is skipped for statically-resolved calls —
+# decodes as NULL. A function that then treats NULL as "give up" and writes
+#
+#     if (!s) return value;
+#
+# hands the caller back its own receiver UNCHANGED while reporting success. The
+# transform silently did not happen: `"  padded  ".trim()` keeps its padding,
+# `"abc".pad_left(8)` is not padded. Nothing crashes and nothing is logged.
+#
+# WHY A SOURCE INVARIANT AND NOT A BEHAVIOURAL SPEC. This defect lives in the C
+# runtime, which a spec body (tree-walk interpreter) does not link against, so no
+# in-process example can observe it. The behavioural red-then-green evidence for
+# the originally-filed instances is
+# src/runtime/test/rt_string_trim_case_raw_receiver_selfcheck.c, driven by
+# scripts/check/check-hosted-string-trim-case-raw-receiver.shs. That guard names
+# exactly four functions. This spec exists because naming four was the bug: the
+# same one-line signature was present in TWELVE more siblings (repeat,
+# capitalize, swapcase, title, chomp, squeeze, pad_left, pad_right, center,
+# zfill, substr, substr_from) that the original fix and its guard both missed.
+# So this asserts the INVARIANT over the whole family instead of a fixed list,
+# and a newly-added `rt_string_*` that degrades the same way fails HERE.
+#
+# The invariant: on the `!s` path a string primitive must either
+#   (a) promote the raw receiver via `rt_string_promote_raw_receiver` and recurse
+#       into the already-correct heap-string path, or
+#   (b) refuse LOUDLY via `rt_refuse_non_text_receiver` (the contract chosen by
+#       rt_string_sorted / rt_string_partition_at).
+# Silently returning the receiver unchanged is neither, and is the defect.
+#
+# Bug: doc/08_tracking/bug/hosted_string_trim_case_raw_receiver_degrades_2026-08-11.md
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val RUNTIME_C: text = "src/runtime/runtime_native.c"
+
+# Emits one `SILENT <fn>` line per rt_string_* function that gives up on a raw
+# receiver by handing the receiver straight back.
+val CENSUS_AWK: text =
+    "awk '/^(static )?int64_t rt_string_[a-z_0-9]+\\(/" +
+    # Anchor the strip to the LEADING return type. A greedy `^.*int64_t ` also
+    # eats the first parameter's own `int64_t`, leaving "value) {" as the
+    # "function name" — which still counts offenders correctly but cannot name
+    # them, so the positive control below would never match.
+    "{fn=$0; sub(/^(static )?int64_t /,\"\",fn); sub(/\\(.*/,\"\",fn)} " +
+    "/^    if \\(!s\\) return value;$/{print \"SILENT \" fn}' "
+
+fn sh(cmd: text) -> text:
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "no runtime string primitive silently degrades on a raw receiver":
+    it "proves the census actually detects the defect signature":
+        # Anti-vacuity positive control. "A scan that finds nothing may have
+        # scanned nothing" — so before trusting a clean result, the same scanner
+        # must produce a hit against a fixture that deliberately carries the
+        # defect. If this control is silent, the scan is broken, not the runtime.
+        step("Write a fixture carrying the exact pre-fix shape of rt_string_trim")
+        val fixture = "/tmp/rt_string_raw_receiver_class_control.c"
+        val write = "printf '%s\\n' 'int64_t rt_string_fixture_victim(int64_t value) {' " +
+            "'    RtCoreString* s = rt_core_as_string(value);' " +
+            "'    if (!s) return value;' '    return value;' '}' > " + fixture
+        sh(write)
+
+        step("The census must flag the fixture by name")
+        val found = sh(CENSUS_AWK + fixture)
+        expect(found).to_contain("SILENT rt_string_fixture_victim")
+
+        step("Clean up the control fixture")
+        sh("rm -f " + fixture)
+
+    it "reports no silently-degrading string primitive in the shipped runtime":
+        step("Confirm the runtime source was actually read — a census over a missing or empty path would report zero offenders and look identical to a pass")
+        val headers = sh("grep -c '^\\(static \\)\\?int64_t rt_string_[a-z_0-9]*(' " + RUNTIME_C)
+        expect(headers.contains("0\n")).to_equal(false)
+
+        step("Run the census over the real runtime — the offender list must be empty")
+        val offenders = sh(CENSUS_AWK + RUNTIME_C)
+        expect(offenders.contains("SILENT ")).to_equal(false)
+
+    it "keeps the shared promotion helper defined and actually used":
+        step("The helper must exist — every promoting call site is dead weight without it")
+        val defined = sh("grep -c 'static int rt_string_promote_raw_receiver(int64_t value, int64_t\\* out) {' " + RUNTIME_C)
+        expect(defined).to_contain("1")
+
+        step("The originally-filed four must each promote, not just the siblings found later")
+        val trim = sh("grep -c 'rt_string_promote_raw_receiver' " + RUNTIME_C)
+        expect(trim.contains("0\n")).to_equal(false)
+
+        step("A raw receiver below the 0x10000 floor is nil/bool/small-int and must never be dereferenced as a pointer")
+        val floor = sh("grep -c 'if (value < 0x10000) return 0;' " + RUNTIME_C)
+        expect(floor).to_contain("1")

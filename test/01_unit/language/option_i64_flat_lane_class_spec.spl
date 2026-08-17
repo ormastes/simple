@@ -1,0 +1,109 @@
+# Flat primitive-optional lane — similar-problem DETECTION spec (defect CLASS)
+#
+# The class: a primitive optional `T?` lowers as `HirType::Pointer{inner:T}` —
+# a nullable-pointer optimisation where the "pointer" IS the raw, UNTAGGED
+# primitive and nil is the fake pointer 3. `lower_nil_expr`
+# (src/compiler_rust/compiler/src/mir/lower/lowering_expr_literal.rs:50) emits
+# a bare `MirInst::ConstInt { value: 3 }` — not a `(payload<<3)|tag` encode and
+# not a call through `rt_core_nil()`. So every `T?` check against nil compares
+# the raw machine word against the literal 3, on a full-range i64 domain that
+# was never tagged. A true payload of exactly 3 is bit-for-bit
+# indistinguishable from nil BY CONSTRUCTION, and is silently LOST.
+#
+# This generalises past the surface symptom it was filed under
+# (`text.index_of` "returns nil for a match at position 3" — the found index 3
+# IS the collision). It sweeps the payload NEIGHBOURHOOD (0,1,2,3,4,11,-1) so a
+# sentinel that merely MOVES to a different in-band value still fails here, and
+# it sweeps all three independent consumer forms — `== nil`, `??` and
+# `if val` — which are separate lowering paths that were each observed to lose
+# the payload on their own.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT on this lane. In-process examples therefore can
+# never go red on this defect no matter what they assert. The oracle is the
+# sibling run-path probe `probe_option_i64_flat_lane_jit.spl`, executed as a
+# subprocess under BOTH engines; it self-checks 16 absolute literals and prints
+# one aggregate verdict line.
+#
+# Every oracle is an ABSOLUTE literal the probe did not itself compute — never
+# "the two engines agree", which would pass while both engines are wrong the
+# same way.
+#
+# EXPECTED STATE: the "cranelift JIT" example is RED and is a legitimate
+# artifact under .claude/rules/testing.md — it documents a live defect that is
+# deliberately NOT fixed here. The fix is the deferred retag of the flat
+# Pointer representation (7 site-groups across 6+ files: Return type-context
+# threading, if-val, `??`, call-arg, Let/Assign, struct-field coercion); two
+# narrow boundary-boxing spot-patches were designed and PROVEN WRONG.
+# Do not weaken these assertions to make the file green.
+#
+# Bug: doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_option_i64_flat_lane_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "flat primitive-optional lane carries every payload, including the nil sentinel's bit pattern":
+    it "keeps every i64? payload distinct from nil on the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the CONTROL arm — it uses a real Rust Value enum with no in-band sentinel, so a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("OPTION_I64_FLAT_LANE PROBE: ALL PASS")
+
+        step("The probe must actually have executed its checks, not exited early")
+        expect(interp).to_contain("PASS eq_nil_payload_3")
+        expect(interp).to_contain("PASS coalesce_payload_3")
+        expect(interp).to_contain("PASS if_val_payload_3")
+
+    it "keeps every i64? payload distinct from nil on the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lives in")
+        val jit = run_probe_in_mode("jit")
+
+        step("Negative controls: neighbouring payloads must survive, proving the probe reached the JIT and was not silently demoted to the interpreter")
+        expect(jit).to_contain("PASS eq_nil_payload_2")
+        expect(jit).to_contain("PASS eq_nil_payload_4")
+        expect(jit).to_contain("PASS eq_nil_payload_11")
+        expect(jit).to_contain("PASS eq_nil_payload_neg1")
+
+        step("A genuine nil must still read as nil — a fix must not trade this away")
+        expect(jit).to_contain("PASS eq_nil_actual_nil")
+        expect(jit).to_contain("PASS coalesce_actual_nil")
+        expect(jit).to_contain("PASS if_val_actual_nil")
+
+        step("`== nil` must be false for the payload that collides with the sentinel")
+        expect(jit).to_contain("PASS eq_nil_payload_3")
+
+        step("`??` is an independent lowering path and must return the payload, not the default")
+        expect(jit).to_contain("PASS coalesce_payload_3")
+
+        step("`if val` is a third independent path and must bind rather than skip the unwrap")
+        expect(jit).to_contain("PASS if_val_payload_3")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("OPTION_I64_FLAT_LANE PROBE: ALL PASS")
+
+    it "shows no tag-misread signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("A raw payload re-read through the runtime's 3-bit tag namespace leaks as `<value:0x..>`")
+        expect(jit.contains("<value:0x")).to_equal(false)
+        expect(interp.contains("<value:0x")).to_equal(false)
+
+        step("No check may have failed under either engine")
+        expect(interp.contains("FAIL ")).to_equal(false)
+        expect(jit.contains("FAIL ")).to_equal(false)
