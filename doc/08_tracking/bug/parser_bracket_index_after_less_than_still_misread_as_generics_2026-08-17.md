@@ -5,6 +5,7 @@
 - **Discovered:** 2026-08-17, while re-baselining an unrelated MIR finding against a fresh seed.
 - **Status:** FIXED 2026-08-17 — see "Verdict" at the bottom. Severity corrected from
   P1 to P3: the parse was never wrong, only a diagnostic leaked.
+- **Status:** OPEN
 - **Reopens:** `parser_array_index_misread_as_generics_2026-06-14.md`, which was marked
   `CLOSED 2026-08-17 — the parser false positive no longer fires`. It still fires.
 
@@ -176,3 +177,11 @@ of this work. No competing fix.
 backtrack that also restores only token state, but it never calls `parse_type`
 and pushes no hints, so it is not a member of this defect class today. It would
 become one if it ever grew a type-parsing path.
+## Not yet done
+
+- No parser fix attempted. Filing only.
+- The class spec above is unwritten (the lane assigned to it was killed by a session limit).
+- Root cause in the Rust seed parser not localised; note that another lane has
+  uncommitted edits under `src/compiler_rust/parser/` (`parser_impl/core.rs`,
+  `stmt_parsing/control_flow.rs`, `expressions/postfix.rs`), so whoever picks this up
+  should check whether it is already being addressed there before editing.
