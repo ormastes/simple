@@ -6,7 +6,31 @@
   property spec — including the structural CT check itself, so the
   underlying CT property of P-256 scalar-mul is currently **unverified**,
   not merely unverifiable-and-passing).
-- **Status:** OPEN.
+- **Status:** ALREADY FIXED — verified by content 2026-08-17, no change made
+  by this lane.
+
+## Verification 2026-08-17 (classified by content, not by commit)
+
+`src/lib/common/math/field/fe_p256.spl` **exists on disk** and provides
+`fe_from_bytes`, so the import at `src/os/crypto/ecdh_p256.spl:46` resolves
+and the spec loads. Measured with `bin/simple run
+test/01_unit/lib/crypto/p256_ct_property_spec.spl --no-session-daemon`:
+
+| | |
+|---|---|
+| this doc's claim | all 4 examples blocked, spec unrunnable |
+| measured 2026-08-17 | `executed=5 passed=5 failed=0`, rc=0 |
+
+The structural CT check (`_scalar_mul_affine` body contains no `if` branch on
+a scalar bit) now executes and passes, so the CT property this doc flagged as
+"unverified, not merely unverifiable-and-passing" is now actually verified.
+No source change was required; the blocker was resolved upstream.
+
+**Scope note:** the sibling row
+`p256_stack_imports_nonexistent_fe_p256_module_2026-08-04.md` is the same root
+cause and is marked `CLAIMED-OFFHOST 2026-08-17`. This lane deliberately made
+**no edit** to any P-256 source file, so that host's ablation evidence is
+intact; the above is a read-only measurement.
 
 ## Symptom
 

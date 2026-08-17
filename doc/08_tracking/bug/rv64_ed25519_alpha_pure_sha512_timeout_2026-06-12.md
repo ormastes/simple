@@ -1,7 +1,8 @@
 # RV64 SSH alpha Ed25519 runtime/pure mismatch
 
 Date: 2026-06-12
-Status: open
+Status: open — still open after 2026-08-17 triage; the spec named in the
+tracking row does NOT test this claim (see "Triage 2026-08-17" below)
 Area: SimpleOS RV64 SSH, crypto dual-backend alpha
 
 ## Summary
@@ -627,3 +628,28 @@ correctly refusing to serve SSH with a runtime/pure signing mismatch.
 Added `test/01_unit/os/crypto/sha512_direct_kat_spec.spl` coverage for the
 RFC8032 seed hash so the OS-local SHA-512 implementation has the exact live
 seed vector in addition to empty and `abc`.
+
+## Triage 2026-08-17 — the named spec is vacuous with respect to this bug
+
+The tracking row cites `test/01_unit/os/crypto/dual_backend_alpha_spec.spl` as
+the reproducer. It is green — `executed=4 passed=4 failed=0`, rc=0, measured
+with `bin/simple run <spec> --no-session-daemon`. **That green is not
+evidence this bug is fixed, and the row must not be closed on it.**
+
+`grep -c 'ed25519|sha512|Ed25519'` returns **0** for both
+`src/os/crypto/dual_backend.spl` and that spec. `dual_backend.spl` is a
+generic agree/mismatch *policy* module (alpha halts, beta logs and returns the
+preferred side); the spec drives it with synthetic literals — the mismatch
+examples feed it `runtime=aa / pure=bb` and `runtime=7 / pure=8`. It exercises
+the reporting plumbing, never Ed25519 signing and never SHA-512.
+
+So the claim in this doc — a runtime-vs-pure **Ed25519 signature** mismatch on
+the RV64 SSH alpha path — is neither reproduced nor refuted by any spec
+currently on disk. Verdict: **UNVERIFIED**, left OPEN deliberately.
+
+Unblock condition: a reproducer that actually signs with both backends and
+compares the 64-byte signature — i.e. drives the runtime and pure-Simple
+Ed25519 implementations over a shared KAT and asserts byte equality — plus the
+RV64 lane evidence (board/QEMU transcript) the original report was based on.
+Until such a spec exists, do not treat `dual_backend_alpha_spec.spl` passing
+as coverage of this defect.

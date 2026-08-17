@@ -3,8 +3,51 @@
 - **Date:** 2026-07-20
 - **Area:** `src/os/crypto/pem.spl` (and/or a base64 helper it calls)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).
-- **Status:** OPEN — root cause not fully localized, needs a source-owner
-  follow-up (see caveat below).
+- **Status:** FIXED 2026-08-17.
+
+## Root cause (2026-08-17) — localized
+
+`src/os/crypto/pem.spl` was written against a **list-of-i64 base64 API that no
+longer exists**. Two independent breakages, both at the import line
+(`pem.spl:21-22` before the fix):
+
+1. `base_encoding.base64.base64_encode` has signature `(data: text) -> text`
+   (`src/lib/common/base_encoding/base64.spl:45`) and its first statement is
+   `val bytes = data.bytes()` (`base64.spl:47`). `pem_encode` passed a `list`
+   of i64, so `.bytes()` was invoked on an `array` — the reported error. The
+   receiver in the message (`[0, 1, ... 31]`) is the spec's own DER fixture,
+   which is why it looked like a spec problem.
+2. `base_encoding.utilities` **never exported `line_wrap`/`line_unwrap` at
+   all** — it provides only `bytes_to_text`, `text_to_bytes`,
+   `validated_utf8_bytes_to_text_linear`, `text_to_bytes_linear`. Those two
+   imports were dangling (`[use-warning]` on every load).
+
+## Resolution
+
+Base64 and line wrapping are now implemented locally over `[u8]` inside
+`src/os/crypto/pem.spl` (`_b64_encode_bytes`, `_b64_value`,
+`_b64_decode_to_bytes`, `_line_wrap`, `_line_unwrap`); the dead
+`_u8_to_list`/`_list_to_u8` bridges are deleted. The fix stays inside
+`src/os/crypto/**` and touches no shared encoder.
+
+Routing the body through `text` would have been wrong even once it compiled:
+PEM bodies are arbitrary binary, and any DER byte >= 0x80 becomes a multi-byte
+UTF-8 sequence, so the bytes coming back out are not the ones that went in.
+The codec therefore stays in byte space end to end.
+
+| | `pem_rfc7468_kat_spec.spl` |
+|---|---|
+| before | `error: semantic: method 'bytes' not found on type 'array'` — file did not load, **0 examples ran** |
+| after | `executed=13 passed=13 failed=0` |
+
+Class-detection spec:
+`test/01_unit/os/crypto/pem_binary_roundtrip_class_spec.spl` (7/7). The KAT
+fixture is 32 bytes valued 0..31 — all below 0x80 — so it would pass against a
+text-routing implementation too. The class spec round-trips all 256 byte
+values and the 0x80..0xFF half exactly, checks the body is really RFC 4648
+base64 (`0xFB 0xFF 0xFE` → `+//+`, 1-byte body → `AA==`) rather than merely
+self-consistent, and checks 64-column wrapping. It carries a guard example
+asserting the high-byte fixture really contains bytes >= 0x80.
 
 ## Symptom
 
