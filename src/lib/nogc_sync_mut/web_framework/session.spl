@@ -162,11 +162,13 @@ impl SessionStore:
         val table_opt = self.simple_session_table_opt(db)
         if not table_opt.?:
             return Ok({})
-        val Some(table) = table_opt
+        val Some(table) = table_opt else:
+            return Ok({})
         val row = table.get_row(session_id)
         if not row.?:
             return Ok({})
-        val Some(session) = row
+        val Some(session) = row else:
+            return Ok({})
         if session.get("valid") == Some("false"):
             return Ok({})
         val expires = (session.get("expires_at") ?? "0").to_int() ?? 0
@@ -207,7 +209,8 @@ impl SessionStore:
                 val current = table.get_row(session_id)
                 if not current.?:
                     return Err("Session not found")
-                var Some(row) = current
+                var Some(row) = current else:
+                    return Err("Session not found")
                 row.set("data", serialized)
                 table.update_row(session_id, row)
                 db.set_table("sessions", table)
@@ -295,7 +298,8 @@ impl SessionStore:
         val current = table.get_row(session_id)
         if not current.?:
             return Err("Session not found")
-        var Some(row) = current
+        var Some(row) = current else:
+            return Err("Session not found")
         row.set("expires_at", "{expires}")
         table.update_row(session_id, row)
         db.set_table("sessions", table)
@@ -363,7 +367,8 @@ impl SessionStore:
                 val raw = dict.get(key)
                 if not raw.?:
                     return nil
-                val Some(s) = raw
+                val Some(s) = raw else:
+                    return nil
                 if s.len() < 3:
                     return nil
                 if s[0:2] != "i:":
@@ -393,7 +398,8 @@ impl SessionStore:
                 val raw = dict.get(key)
                 if not raw.?:
                     return nil
-                val Some(s) = raw
+                val Some(s) = raw else:
+                    return nil
                 if s.len() < 3:
                     return nil
                 if s[0:2] != "b:":
@@ -470,11 +476,13 @@ impl SessionStore:
         val table_opt = self.simple_session_table_opt(db)
         if not table_opt.?:
             return Err("Session not found")
-        val Some(table) = table_opt
+        val Some(table) = table_opt else:
+            return Err("Session not found")
         val row = table.get_row(session_id)
         if not row.?:
             return Err("Session not found")
-        val Some(session) = row
+        val Some(session) = row else:
+            return Err("Session not found")
         val ver = (session.get("version") ?? "0").to_int() ?? 0
         Ok(ver == expected)
 
@@ -511,7 +519,8 @@ impl SessionStore:
         val current = table.get_row(session_id)
         if not current.?:
             return Err("Session not found")
-        var Some(row) = current
+        var Some(row) = current else:
+            return Err("Session not found")
         val old_ver = (row.get("version") ?? "0").to_int() ?? 0
         val new_ver = old_ver + 1
         row.set("version", "{new_ver}")
@@ -534,8 +543,9 @@ impl SessionStore:
             val loaded = SdnDatabase.load(path)
             if loaded.?:
                 self.simple_db = loaded
-                val Some(db) = loaded
-                return Ok(db)
+                val Some(fresh) = loaded else:
+                    return Ok(db)
+                return Ok(fresh)
         Ok(db)
 
     fn simple_session_table(db: SdnDatabase) -> SdnTable:
@@ -653,28 +663,29 @@ fn simple_decode(s: text) -> text:
 # ============================================================================
 
 fn generate_session_id() -> text:
-    """Generate a random-looking session ID.
+    """Generate a session ID from the OS CSPRNG.
 
-    Uses timestamp + counter for uniqueness. In production,
-    this would use a CSPRNG.
+    A session ID is a bearer credential: anyone who can predict one can
+    assume that session. This MUST NOT be derived from the clock or from
+    any seeded PRNG.
+
+    A previous revision expanded `current_timestamp()` through the fixed
+    multiplier 2654435761, which made the whole ID a pure function of the
+    creation time. An attacker who knew roughly when a session was created
+    could enumerate the few candidate timestamps and recover the ID
+    outright -- and two sessions created in the same clock tick collided.
+
+    Now every nibble comes from `rt_random_i64` (OsRng / /dev/urandom),
+    giving 64 bits of entropy across the 16 hex characters.
     """
-    val ts = current_timestamp()
+    val digits = "0123456789abcdef"
     var parts: [text] = []
-    var n = ts
     var i = 0
     while i < 16:
-        val digit = (n * 2654435761) % 16
-        n = n + digit + i + 7
-        if digit < 10:
-            parts.push("{digit}")
-        else:
-            match digit:
-                10: parts.push("a")
-                11: parts.push("b")
-                12: parts.push("c")
-                13: parts.push("d")
-                14: parts.push("e")
-                _: parts.push("f")
+        var nibble = rt_random_i64() % 16
+        if nibble < 0:
+            nibble = nibble + 16
+        parts.push(digits.char_at(nibble))
         i = i + 1
     parts.join("")
 
@@ -706,6 +717,11 @@ fn hex_digit(n: i64) -> text:
         _: "f"
 
 extern fn rt_time_now_unix_micros() -> i64
+
+# OS CSPRNG. Rust interpreter path: rand::rngs::OsRng; native path:
+# src/runtime/runtime.c reads /dev/urandom. Backs generate_session_id above --
+# do NOT reroute this through any seeded/LCG helper of the same name.
+extern fn rt_random_i64() -> i64
 
 fn current_timestamp() -> i64:
     rt_time_now_unix_micros() / 1000000
