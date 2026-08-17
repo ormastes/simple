@@ -4,6 +4,40 @@
   current source.** Do not re-open this row for the live stage-3/stage-4 parse
   stall; that is a different defect (see
   `stage3_parse_stalls_at_tail_43_files_2026-08-17.md`).
+- **Retirement independently corroborated 2026-08-17 (W1)** by grepping current
+  source: the `GLB2` memo (`glob_expand_memo`) exists at
+  `module_lowering.spl:1547-1572` with the field declared at
+  `hir_lowering/types.spl:158`, initialised `:209/:247` and cleared per module
+  `:312`; and `module_lowering.spl:1928` is `lowered_module.functions.values()`
+  with no accumulator rebuild loop. Both matching the RETIRED verdict below.
+- **The "one defect, two symptoms" link between this row, the stage-3 parse
+  stall, and `lint_timeout_hwir_zca_rows_2026-08-17.md` is REFUTED.** The
+  linter does not run the compiler frontend at all:
+  `/usr/bin/grep -rln "parse_full_frontend\|compiler.frontend"
+  src/compiler/tools/lint/ src/compiler/tools/fix/` returns **nothing**, and
+  `src/compiler/tools/lint/_LintMain/lint_checks.spl` iterates over `lines`
+  (3 `while ... < lines.len()` loops). So lint's superlinear cost shares no code
+  path with `phase=parse` in stage 3 or with HIR lowering, and neither cost curve
+  is evidence about the other. Anyone treating the lint fixture as a cheap
+  reproducer for the stage-3 stall is measuring a different program.
+- **The linter's superlinear term is real and reproducible in ~2 min**, which is
+  useful for `lint_timeout_hwir_zca_rows_2026-08-17.md` (not for this row).
+  Synthetic fixture: one function whose body is a single `[(text, i64, i64)]`
+  array literal of N elements, one per line
+  (generator + fixtures were scratch-only). Binary: the stale Rust seed
+  `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, mtime
+  2026-08-16 22:59, 59,536,728 bytes. Shared box under heavy load, so treat as an
+  envelope:
+
+  | N array elements | wall | minus ~12 s startup |
+  |---|---|---|
+  | 25 | 64 s | ~52 s |
+  | 50 | 149 s | ~137 s |
+
+  2x the elements costs 2.6x the work — superlinear (exponent ~1.4), and driven
+  by ONE declaration's content, which is the shape that file's row reports. The
+  offender is therefore inside the pure-Simple lint checks (or the seed
+  interpreter executing them), not the parser.
 - The earlier line here ("Root causes 2 and 3 remain unproven and unfixed; no fix
   landed", stamped "re-verified 2026-08-17 by source inspection") was WRONG on
   both counts. Re-verified by grepping current source, not by SHA ancestry:
