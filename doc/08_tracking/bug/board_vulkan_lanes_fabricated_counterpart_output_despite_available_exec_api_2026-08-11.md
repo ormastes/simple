@@ -79,3 +79,22 @@ arch-substitution guard, the provider inventory and the independence predicates
 are sound and independently sabotage-proven, and they are what a real execution
 will plug into. What is not yet true is any claim that Simple's Vulkan IO has been
 compared against Mesa's.
+
+## 2026-08-17 triage — remains OPEN; process/lane-rework finding, not a code defect
+
+Re-read and left in place. This doc records that no board-Vulkan boundary lane
+executed a real counterpart — the expected side was authored by the lane itself
+(hand-typed lavapipe literals, caller-supplied image bytes, out-of-band shell
+measurements). That is the expected-from-actual trap, and the SPipe contract is
+unambiguous about it: a provider that cannot run reports
+`ProviderStatus.unavailable` and the run is REJECTED, never fabricated.
+
+Fixing it means rewriting those lanes to invoke `vulkaninfo` / `libvulkan_lvp.so`
+through the process-exec API from inside the spec, plus a sabotage arm per lane
+that turns green to red. That is lane feature work owned by the board-Vulkan
+campaign, not a small verified diff, and this triage lane must not close it by
+re-labelling. Note also that the sibling blockers re-verified today
+(`cmdstream_boundary_no_intel_gpu_on_capture_host`,
+`host_qemu_virtio_gpu_gl_missing_egl_symbol`) mean some of these lanes cannot
+produce genuine counterpart evidence on this host at all — the honest end state
+for those is `unavailable`, recorded and visible, never a synthesized pass.

@@ -36,3 +36,21 @@ This resolves the runtime-adapter source gap only. The deployed self-hosted
 test wrapper currently fails its bounded test-ABI probe, so compiled closure
 and the required QEMU/physical reboot durability evidence remain pending. Keep
 this record open until the original closure evidence above passes.
+
+## 2026-08-17 triage — BLOCKED, not re-measured in this lane
+
+Read and left OPEN with its blocker intact. Deliberately **not** re-measured
+here rather than reported on weakly: closing it requires either a working
+self-hosted `native-build` or a QEMU/board evidence run, and both are outside
+this lane's budget and permissions (one test process at a time, no main-compiler
+build).
+
+One relevant fact measured today that bears directly on the native-artifact half
+of these blockers: `bin/simple native-build` currently fails outright on a
+twelve-line struct probe with `error: semantic: undefined field 'kind': cannot
+access field on value of type 'nil'` (gate:
+`scripts/check/check-aot-smoke.shs` → `FAIL — AOT lane broken`). So the AOT lane
+is broken ahead of any performance question — a native-renderer or DrawIR
+artifact build cannot succeed while that holds, and re-attempting these
+benchmarks before it is fixed would only re-derive the same blocker. Detail:
+`doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.

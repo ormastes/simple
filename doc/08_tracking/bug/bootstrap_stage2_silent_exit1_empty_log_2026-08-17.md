@@ -45,3 +45,21 @@ verification. The three cases were previously indistinguishable and all silent.
 `native-build` should flush progress/diagnostics to a non-tty (line-buffered
 stderr at minimum) so a mid-build death leaves evidence. Tracked separately from
 this script mitigation.
+
+## 2026-08-17 triage — mitigation stands; root defect not re-verifiable in this lane
+
+Left OPEN as filed. The diagnostic mitigation is in place; the root
+output-buffering defect (stage2 exiting 1 with a 0-byte
+`stage2-native-build.log`) can only be re-observed by running a full bootstrap,
+which this lane is explicitly forbidden to do (never build the main compiler,
+never touch `/mnt/data/worktrees/simple-boot-snap`).
+
+Corroborating same-family evidence gathered today without a bootstrap, worth
+recording because it shows the symptom is not confined to stage2: the AOT smoke
+gate `scripts/check/check-aot-smoke.shs` FAILed with its own diagnostic excerpt
+empty, because it greps `-i error` from the build log while the real line
+(`error: semantic: undefined field 'kind': ...`) sits below the
+`!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!` banner. A `native-build`
+failure whose error text is truncated or buffered away is the same class of
+problem as the empty stage2 log, and any fix should cover both paths. See
+`doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
