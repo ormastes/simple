@@ -98,3 +98,82 @@ re-labelling. Note also that the sibling blockers re-verified today
 `host_qemu_virtio_gpu_gl_missing_egl_symbol`) mean some of these lanes cannot
 produce genuine counterpart evidence on this host at all — the honest end state
 for those is `unavailable`, recorded and visible, never a synthesized pass.
+
+---
+
+## 2026-08-17 — measured re-audit on a real-GPU host: two of four unblock items are ALREADY DONE, and a NEW fail-open was found
+
+This doc's problem statement is now partly stale, and its 2026-08-17 triage
+("some of these lanes cannot produce genuine counterpart evidence on this host at
+all") is wrong about the host. This machine has two real NVIDIA GPUs (RTX A6000
+49140 MiB, TITAN RTX 24576 MiB, driver 580.126.16), a working Mesa lavapipe ICD,
+and the Khronos SPIR-V tools installed. Each unblock item re-checked against
+source and host:
+
+| # | Unblock item | Measured status 2026-08-17 |
+|---|--------------|----------------------------|
+| 1 | SPIR-V via `glslangValidator`/`spirv-val` | **DONE.** `boundary_spirv_khronos_provider.spl:27,52,55` calls `process_run_bounded` against pinned `/usr/bin/spirv-as` and `/usr/bin/spirv-val` (present on host, `SPIRV-Tools v2025.1`), returns `ProviderStatus.unavailable` at line 165 when the tools are absent. Not fabricated. |
+| 2 | Enumeration via `vulkaninfo` | **DONE.** `boundary_enumeration_provider.spl` now shells out (`shell("VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json vulkaninfo …")`) and parses the real transcript in `parse_vulkaninfo_lavapipe`, failing closed to nil. The "hand-typed literal for lavapipe at lines 104-137" described above **no longer exists**. Verified the command produces real output here: `deviceName = llvmpipe (LLVM 20.1.2, 256 bits)`, `apiVersion = 1.4.318`. |
+| 3 | Readback via a real lavapipe render | **STILL OPEN.** `boundary_readback_lavapipe_provider.spl` is 93 lines of manifests only — zero `shell(` / `process_run` calls. It remains descriptor-only, exactly as this doc described. |
+| 4 | Independence groups | **OPEN, and worse than filed — see below.** |
+
+### New finding: the independence gate is fail-open on its grouping key
+
+`independence_gate_executed_group_count`
+(`src/os/drivers/gpu/board_vulkan/provider_nvidia.spl`) is documented to group
+executed sources by `SourceResult.independence_group` — that field is the entire
+reason the Mesa family (anv/lavapipe/radv/nouveau/asahi/venus-guest) collapses to
+one reference. The body instead groups by `source.provider_id`:
+
+```
+if source.provider_id != "":
+    ... groups.push(source.provider_id)
+```
+
+Since `mesa_reference_source(id, …)` builds `provider_id = "host-mesa-" + id`,
+six Mesa ICDs carry six distinct `provider_id`s and the gate counts them as
+**six independent references**. Relabelling NVIDIA's `independence_group` into
+`"mesa"` — the exact sabotage `nvidia_independent_reference_gate_spec.spl`
+sabotage (a) exists to catch — leaves `provider_id` untouched and so still passes.
+The candidate's deliberately-empty `independence_group` is likewise ignored, and
+its `provider_id` counts as a group of its own.
+
+This is the same defect class as the fabrication this doc reports: a gate that is
+internally consistent and green while measuring something other than what it
+claims. It makes every "two independent references" verdict this lane has issued
+unsound.
+
+Reproducing spec: `test/01_unit/os/vulkan/independence_group_key_regression_spec.spl`
+Similar-problem detection spec: `test/01_unit/os/vulkan/independence_gate_key_confusion_detection_spec.spl`
+(the detection spec pins the key rather than the counts, via a collapse property —
+one family with many identities must count 1 — paired with a separation property —
+one identity across two families must count 2; no identity-keyed implementation
+can satisfy both.)
+
+Both specs were committed RED-first in `a046b58ebc7`. **Verdict capture is
+still pending** and the fix is deliberately NOT applied until the RED is quoted;
+applying it first would destroy the reproduce-first evidence.
+
+Recorded here because it cost this session an hour and will cost the next one the
+same: `scripts/check/check-test-verdict-not-silent.shs` printed
+
+```
+  OK  test/01_unit/os/vulkan/independence_group_key_regression_spec.spl
+```
+
+for the reproducer, and **that `OK` is not a pass.** That guard classifies only
+*silence* — whether a run emitted any verdict/counts line at all. Its own
+selftest (lines 97-103) feeds it fixture 4, `Results: 4 total, 3 passed, 1
+failed` with exit 1, and requires the classification `OK` (`red:OK`). So `OK`
+covers GREEN and honest RED identically and can never distinguish them. Only an
+explicit `Results: N total, N passed` line settles a spec's outcome; a bare `OK`
+from that wrapper must never be quoted as evidence that a spec passed.
+
+Host conditions for the record: a stage-3 self-host build was live with ~174
+concurrent `simple` processes, `bin/simple` currently resolves to the Rust
+bootstrap seed (it says so on startup), and a single spec run took roughly an
+hour to reach its first output.
+
+Status: OPEN. Items 1 and 2 are closed by measurement; item 3 is unchanged; item
+4 is now a concrete, specified, spec-covered code defect rather than a lane-rework
+task.
