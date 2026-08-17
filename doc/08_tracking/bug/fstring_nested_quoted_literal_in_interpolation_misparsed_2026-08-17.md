@@ -3,6 +3,7 @@
 (Filename says "nested quoted literal" — that was the initial, and wrong,
 characterisation. The trigger is specifically the `??` right-hand side; see the
 isolation table below. Filename kept stable so existing references still resolve.)
+# f-string: a nested double-quoted literal inside an interpolation is mis-parsed
 
 - **Filed:** 2026-08-17
 - **Status:** OPEN (grammar defect unfixed); the one load-bearing call site is worked around
@@ -15,6 +16,10 @@ isolation table below. Filename kept stable so existing references still resolve
 A string literal on the right-hand side of `??` inside an f-string interpolation is
 mis-parsed. The scanner terminates that literal early, so its *contents* are then
 read as an expression — a bare identifier, in call or variable position:
+A double-quoted string literal nested inside an f-string interpolation is
+mis-parsed. The interpolation scanner terminates the inner literal early, so the
+literal's *contents* are then read as an expression — a bare identifier in call
+position:
 
 ```
 error[E1002]: function `TMPDIR` not found
@@ -98,6 +103,9 @@ sites repo-wide:
 So after the fix there are **zero** affected sites in tree, and the grammar defect
 has **no** surviving in-tree reproducer. The 6-line fixture in this row is the
 reproducer; a regression spec should be added when the grammar is fixed.
+  `"{_pad("target", target_w)}  {_pad("attach", attach_w)}  ..."`. **NOT yet
+  verified** to fail; it is left untouched deliberately so a real repro of the
+  grammar defect survives in-tree. Whoever fixes the grammar should check it.
 
 ## Real fix (not done here)
 
@@ -118,6 +126,10 @@ position, rather than rewriting the whole interpolation scanner.
 Regression coverage to add with the fix: all three variants above, since a fix
 that only repairs A+B while leaving bare B broken would look green on the original
 symptom.
+recorded here rather than treated as closed. The fix belongs in the f-string
+interpolation scanner: when scanning an interpolation, string literals inside the
+braces must be consumed as literals, with brace/quote nesting tracked, instead of
+the interpolation being delimited by a naive scan to the next `"` or `}`.
 
 ## Not related to the receiver-erasure hypothesis
 
