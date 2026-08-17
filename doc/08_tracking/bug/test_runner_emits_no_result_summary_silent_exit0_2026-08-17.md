@@ -158,6 +158,106 @@ rc=2
 Neither repro spec can be read as green any more: one produces a real verdict,
 the other is loudly ERROR at exit 2.
 
+## Third cause: the PURE-SIMPLE classifier also passed a verdict-less run (2026-08-17)
+
+The two causes above covered the SIGTERM kill and the Rust seed's
+`TestRunResult::success()`. Neither touched the pure-Simple classifier, which
+`bin/simple test` actually reaches — `test` dispatches to
+`src/app/test_runner_new/main.spl` (`driver/src/main.rs`, the `name: "test"`
+`CommandEntry`), and the stdlib is read as SOURCE every run, so this path was
+live with no rebuild.
+
+`classify_test_run_result` (`src/lib/nogc_sync_mut/test_runner/test_runner_types.spl`)
+only inspected a file result when its `error` was non-empty:
+
+```
+for file_result in result.files:
+    if file_result.error != "" and file_result.failed == 0:
+        return TestRunOutcome.InternalError
+if result.total_failed > 0:
+    return TestRunOutcome.AssertionOrChildFailure
+TestRunOutcome.Pass          # <-- verdict-less run lands HERE
+```
+
+A file result with `passed=failed=skipped=pending=0` **and** `error == ""` fell
+through to `Pass`, exit 0. That shape is reachable, not hypothetical: on
+`TRESP_COMPLETED` the daemon lane builds the result with `error: ""` by
+construction (`test_runner_main.spl:844-861` — `error` is populated only for
+`TRESP_FAILED`, or `TRESP_CACHED` with failures), so a daemon child that
+completed without producing a result line was classified as a pass.
+
+Second, smaller defect in the same function: `TERMINATED:` / `TIMEOUT:` /
+`NOT EXECUTED:` all matched the `error != ""` arm and were reported as
+`internal_error`. Non-zero, so not a silent green, but it labels **host
+interference as a code defect** — exactly the conflation that manufactures
+phantom compiler bugs on a box where earlyoom is live.
+
+### Fix
+
+- `TestRunOutcome.Unverified` added, exit code **5** (distinct from 1 failure,
+  3 internal error, 4 empty selection, 124 timeout).
+- `test_file_result_is_unverified()` added: true for the `TERMINATED:` /
+  `TIMEOUT:` / `NOT EXECUTED:` prefixes (frozen names, unchanged) and for the
+  zero-examples-with-no-error shape. `CRASHED:` deliberately stays
+  `internal_error` — a crash IS a statement about the code.
+- The unverified check runs BEFORE the `error != ""` arm, so host kills can
+  never be reported as failures.
+- `test_runner_main.spl` names every unverified spec (`UNVERIFIED  <path>: ...`)
+  and prints `ERROR — nothing was verified: ...`. An unnamed non-zero exit is
+  nearly as hard to act on as a silent green.
+
+### Ablation (both arms measured, verbatim)
+
+Spec: `test/01_unit/app/test_runner/no_verdict_is_unverified_spec.spl`.
+rc read from a variable on the line after the command, never through a pipe.
+
+Fix applied:
+
+```
+RC=0
+9 examples, 0 failures
+SPEC FILE VERDICT: .../no_verdict_is_unverified_spec.spl declared>=9 executed=9 passed=9 failed=0 dropped=0
+Results: 9 total, 9 passed, 0 failed
+```
+
+Fix reverted (the unverified early-return removed) — the control DOES fail, and
+reproduces the defect in the classifier's own words:
+
+```
+RC=1
+    assert_equal failed: expected unverified, got pass
+    assert_equal failed: expected 5, got 0
+    assert_equal failed: expected unverified, got internal_error   (x3)
+9 examples, 5 failures
+Results: 9 total, 4 passed, 5 failed
+```
+
+`expected unverified, got pass` / `expected 5, got 0` is the silent green:
+a verdict-less run classified `pass` with exit code 0.
+
+Green-preservation control — a fix that turns real passes into `unverified`
+would be worse than the defect, so this was measured too:
+
+```
+$ bin/simple test test/01_unit/app/test_runner/args_spec.spl
+CONTROL_RC=0
+SPEC FILE VERDICT: .../args_spec.spl declared>=92 executed=92 passed=92 failed=0 dropped=0
+Results: 92 total, 92 passed, 0 failed
+```
+
+92/92 still pass, exit still 0, no `UNVERIFIED` line.
+
+### Still open — NOT fixed here, and a different code path
+
+`exit_code == -1` remains ONE sentinel for both timeout and death-by-signal.
+It originates in `app.io.process_ops.process_run_bounded` (consumed at
+`test_runner_single.spl:193`; see the comment at `:148`), i.e. the
+process-execution layer, not the classifier changed above. Separating those two
+outcomes means giving `process_run_bounded` a signal-vs-timeout distinction —
+an independent change in a different layer, deliberately not bundled into this
+fix. Until then `TIMEOUT:` and a host SIGKILL are both classified `unverified`,
+which is at least the correct *class* for both.
+
 ## Spec coverage, and what could not be covered
 
 - `test/01_unit/app/test_runner/silent_green_verdict_spec.spl` — reproducing

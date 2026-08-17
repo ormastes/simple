@@ -45,6 +45,12 @@ enum TestRunOutcome:
     InternalError
     EmptySelection
     TimeoutResourceFailure
+    # A spec whose child produced NO result line at all, or whose child was
+    # killed by the host (SIGTERM/SIGKILL, earlyoom) / timed out. This is
+    # UNVERIFIED: it says nothing about whether the code is correct, so it is
+    # never a failure verdict -- but it is never a pass either. Requirement R3,
+    # doc/02_requirements/infra/supervised_test_runner.md.
+    Unverified
 
 # =========================================================================
 # Test Options
@@ -203,11 +209,31 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
             return TestRunOutcome.EmptySelection
         return TestRunOutcome.Pass
     for file_result in result.files:
+        # Host interference (SIGTERM/SIGKILL/timeout) and never-executed specs
+        # are UNVERIFIED, not failures. Checked BEFORE the InternalError rule
+        # below so a contended host cannot manufacture a phantom code defect.
+        if test_file_result_is_unverified(file_result):
+            return TestRunOutcome.Unverified
         if file_result.error != "" and file_result.failed == 0:
             return TestRunOutcome.InternalError
     if result.total_failed > 0:
         return TestRunOutcome.AssertionOrChildFailure
     TestRunOutcome.Pass
+
+# A file result carries no verdict when its child was killed / timed out / never
+# ran, or when it reported no examples of any kind with no error to explain it.
+# The latter is the silent-green shape: exit 0 with no `Results:` line.
+fn test_file_result_is_unverified(file_result: TestFileResult) -> bool:
+    val err = file_result.error
+    if (err.starts_with("TERMINATED:") or err.starts_with("TIMEOUT:") or
+        err.starts_with("NOT EXECUTED:")):
+        return true
+    if err != "":
+        # CRASHED: and other real errors are handled by the caller.
+        return false
+    val example_count = (file_result.passed + file_result.failed +
+                         file_result.skipped + file_result.pending)
+    example_count == 0
 
 fn test_run_outcome_exit_code(outcome: TestRunOutcome) -> i64:
     match outcome:
@@ -217,6 +243,7 @@ fn test_run_outcome_exit_code(outcome: TestRunOutcome) -> i64:
         case InternalError: 3
         case EmptySelection: 4
         case TimeoutResourceFailure: 124
+        case Unverified: 5
 
 fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
     match outcome:
@@ -226,6 +253,7 @@ fn test_run_outcome_name(outcome: TestRunOutcome) -> text:
         case InternalError: "internal_error"
         case EmptySelection: "empty_selection"
         case TimeoutResourceFailure: "timeout_resource_failure"
+        case Unverified: "unverified"
 
 # =========================================================================
 # Skip Feature Info
