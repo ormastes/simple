@@ -2,7 +2,40 @@
 
 **Date:** 2026-06-26  
 **Severity:** P2 — affects usability of generic helper free functions  
-**Status:** Workaround applied; interpreter fix pending
+**Status:** RESOLVED — ALREADY-FIXED, re-verified 2026-08-17.
+
+## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+
+The doc's own reproducer, run verbatim on the deployed seed
+(`bin/simple`, Rust seed dated 2026-08-16):
+
+```
+struct Box<T>:
+    item: T
+fn box_get<T>(b: Box<T>) -> T?:
+    b.item
+...
+expect(box_get(Box(item: 42))).to_equal(42)
+
+Results: 1 total, 1 passed, 0 failed
+```
+
+The free function returns the raw `42`, not `Option::Some(42)`. The interpreter
+defect this file describes no longer reproduces.
+
+STILL WORTH DOING (not done here, and NOT a defect): the `any`-typed
+workarounds recorded under "Affected Files" -- `stack_get`/`queue_get` in
+`src/lib/tooling/ds_utils.spl` -- can now be given their real `T?` return
+types. That is a cleanup, not a bug; it is listed here so the workaround is not
+forgotten now that its cause is gone.
+
+NOT PROVED: the `Option::None`-vs-`nil` half of the filing (the "not found"
+branches in `algorithm_utils.spl`) was not re-probed in this pass, nor was the
+pure-Simple self-hosted lane.
+
+--- original filing below, kept for history ---
+
+**Status (original):** Workaround applied; interpreter fix pending
 
 ## Summary
 

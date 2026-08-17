@@ -1,6 +1,30 @@
 # Static methods on a generic class are unresolvable: "unknown static method create on class GContainer"
 
-**Status:** open
+**Status:** RESOLVED — ALREADY-FIXED, re-verified 2026-08-17.
+
+## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+
+The doc's own reproducer, run verbatim on the deployed seed
+(`bin/simple`, Rust seed dated 2026-08-16):
+
+```
+bin/simple test <probe> --no-session-daemon --sequential --no-cache \
+    --no-cover-check --timeout 120
+Results: 1 total, 1 passed, 0 failed
+```
+
+`GContainer.create(42)` resolves and `c.value` is `42`. The
+"semantic: unknown static method create on class GContainer" error does not
+occur. The status line above was stale, not the code. Nothing was changed to
+achieve this; the resolver fix landed in some earlier commit that did not
+update this file.
+
+NOT PROVED: which commit fixed it (not bisected), and the pure-Simple
+self-hosted lane (only the seed was exercised).
+
+--- original filing below, kept for history ---
+
+**Status (original):** open
 **Found:** 2026-08-01, by de-vacuum-ing `test/unit/compiler/codegen/static_method_spec.spl`
 **Lane:** vacuous-spec audit
 **Engine:** tree-walking interpreter (`bin/simple_seed test`) — PROVED there; other lanes untested

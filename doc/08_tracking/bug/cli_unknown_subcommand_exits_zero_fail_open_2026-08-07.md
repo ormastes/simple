@@ -2,7 +2,26 @@
 
 **Filed:** 2026-08-07
 **Severity:** medium — a fail-open in the CLI, and it silently defeats scripts
-**Status:** PARTIAL — the filed rc=0 claim did NOT reproduce (measured rc=1
+**Status:** NOT A BUG / RESOLVED — re-verified 2026-08-17.
+
+## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+
+```
+$ bin/simple definitely-not-a-command >/dev/null 2>&1
+$ echo $?
+1
+```
+
+An unknown subcommand exits **1**, not 0. The CLI does not fail open. This
+matches the earlier "did NOT reproduce" measurement rather than the original
+filing, on a second independent probe ~10 days later. Closing.
+
+NOT PROVED: only the deployed Rust seed was probed, and only with a single
+unknown-subcommand shape.
+
+--- original filing below, kept for history ---
+
+**Status (original):** PARTIAL — the filed rc=0 claim did NOT reproduce (measured rc=1
 from the deployed seed across 7 token shapes, see "Corrected measurement").
 The pure-Simple dispatch fall-through (`app.cli.main`) now returns exit 2 for
 this case, verified at the function level; **unverifiable at the
