@@ -135,3 +135,18 @@ reachable in the git object database even with the ref deleted — try
 `git fsck --lost-found` / `git reflog` on whatever clone the agent used. This
 lane did not attempt object recovery because it does not know which clone that
 was. Status stays OPEN, reclassified from "withheld" to "presumed lost".
+
+## 2026-08-17 recovery
+
+The vanished append was reimplemented semantically in the new owned file
+`src/compiler/80.driver/cache/target_ir.spl`; the unrelated historical
+manifest graph was not recreated or overwritten. The recovered compute-only
+surface contains nine target kinds, nine typed dependency edges, the complete
+Target record, canonical and alias labels with fail-closed parsing, legacy CLI
+target synthesis, deterministic target-block `build.sdn` reading, and distinct
+forward/reverse transitive graph queries. The focused nine-example spec retains
+the two original adjacent sabotage properties: malformed `//path` labels are
+rejected, and reverse dependencies cannot be implemented as the forward
+closure. After correcting the tests' misuse of optional `.?` in value position,
+the admitted macOS runtime reported `9 total, 9 passed, 0 failed`. Status:
+RECOVERED / FIXED.
