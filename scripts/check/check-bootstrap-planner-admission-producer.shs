@@ -112,6 +112,16 @@ run_producer() {
         --out="$rp_root/receipt.env"
 }
 
+run_custom_output_producer() {
+    rp_root=$1
+    sh "$producer" --root="$rp_root" \
+        --bootstrap-output="$rp_root/build/bootstrap-custom" \
+        --parent-compiler="$rp_root/build/bootstrap-custom/stage2/fixture-triple/simple" \
+        --runtime-dir="$rp_root/src/runtime" \
+        --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+        --out="$rp_root/custom-output-receipt.env"
+}
+
 # --- fixture 1: the gate is satisfiable -------------------------------------
 ok_root="$scratch/ok"
 make_fixture "$ok_root" 'stage2-provenance: pure-simple' strict
@@ -122,6 +132,17 @@ grep -q '^bootstrap-admission: produced ' "$scratch/ok.log" ||
     fail "producer emitted no verdict line"
 bootstrap_planner_v2_verify "$ok_root/receipt.env" "$ok_root" >/dev/null 2>&1 ||
     fail "verifier rejected the canonical producer's own receipt (gate unsatisfiable)"
+checked=$((checked + 1))
+
+# --- configured output: admission follows the bootstrap output owner --------
+custom_root="$scratch/custom-output"
+make_fixture "$custom_root" 'stage2-provenance: pure-simple' strict
+mv "$custom_root/build/bootstrap" "$custom_root/build/bootstrap-custom"
+custom_root=$(CDPATH= cd -- "$custom_root" && pwd -P)
+run_custom_output_producer "$custom_root" >"$scratch/custom-output.log" 2>&1 ||
+    fail "producer refused configured bootstrap output"
+bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" "$custom_root" >/dev/null 2>&1 ||
+    fail "configured-output receipt failed canonical verification"
 checked=$((checked + 1))
 
 # --- fixture 2: a forged argv digest is refused ------------------------------

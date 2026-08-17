@@ -34,7 +34,7 @@ adm_fail() {
 }
 
 usage() {
-    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
     echo "       $0 --selftest" >&2
 }
 
@@ -44,6 +44,7 @@ adm_reason=''
 adm_parent=''
 adm_runtime=''
 adm_out=''
+adm_bootstrap_output=''
 adm_root=$root
 
 while [ "$#" -gt 0 ]; do
@@ -52,6 +53,7 @@ while [ "$#" -gt 0 ]; do
         --target=*) adm_target=${1#*=} ;;
         --reason=*) adm_reason=${1#*=} ;;
         --parent-compiler=*) adm_parent=${1#*=} ;;
+        --bootstrap-output=*) adm_bootstrap_output=${1#*=} ;;
         --runtime-dir=*) adm_runtime=${1#*=} ;;
         --out=*) adm_out=${1#*=} ;;
         --root=*) adm_root=${1#*=} ;;
@@ -71,6 +73,14 @@ fi
 adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
 bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
 
+if [ -z "$adm_bootstrap_output" ]; then adm_bootstrap_output="$adm_root/build/bootstrap"; fi
+case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$PWD/$adm_bootstrap_output" ;; esac
+adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-not-canonical
+case "$adm_bootstrap_output" in
+    "$adm_root/build"/*) ;;
+    *) adm_fail bootstrap-output-not-under-repository-build ;;
+esac
+
 case "$adm_parent" in /*) ;; *) adm_parent="$PWD/$adm_parent" ;; esac
 if [ -z "$adm_runtime" ]; then adm_runtime="$adm_root/src/runtime"; fi
 case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
@@ -80,10 +90,10 @@ case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
 # A Rust seed, a hand-placed binary, or a stage2 dir with no evidence is
 # refused: the whole point of v2 is that admission descends from an admitted
 # parent, so an unverifiable parent must not produce an authoritative receipt.
-stage2_root="$adm_root/build/bootstrap/stage2"
+stage2_root="$adm_bootstrap_output/stage2"
 case "$adm_parent" in
     "$stage2_root"/*) ;;
-    *) adm_fail parent-compiler-not-under-build-bootstrap-stage2 ;;
+    *) adm_fail parent-compiler-not-under-configured-bootstrap-stage2 ;;
 esac
 parent_file=$(bootstrap_planner_v2_canonical_file "$adm_parent") || adm_fail parent-compiler-missing-or-not-canonical
 parent_dir=$(dirname -- "$parent_file")
