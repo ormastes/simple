@@ -94,9 +94,43 @@ fn count_positional_args(args: [text]) -> i64:
         i = i + 1
     n
 
+fn parse_env_timeout_secs(raw: text) -> i64:
+    """Parse SIMPLE_TIMEOUT_SECONDS. Returns 0 for anything that is not a
+    positive run of decimal digits, so junk falls back to the hardcoded default
+    rather than silently becoming a 0-second (instantly-expiring) budget."""
+    if raw == "":
+        return 0
+    var value: i64 = 0
+    var digits = 0
+    var i = 0
+    while i < raw.len():
+        val c = raw.char_code_at(i)
+        if c < 48 or c > 57:
+            return 0
+        value = value * 10 + (c - 48)
+        digits = digits + 1
+        i = i + 1
+    if digits == 0:
+        return 0
+    value
+
+fn client_default_timeout_secs() -> i64:
+    val env_secs = parse_env_timeout_secs(env_get("SIMPLE_TIMEOUT_SECONDS") ?? "")
+    if env_secs > 0:
+        return env_secs
+    120
+
 fn parse_client_run(args: [text]) -> ClientRun:
     var paths: [text] = []
-    var timeout_secs = 120
+    # SIMPLE_TIMEOUT_SECONDS supplies the DEFAULT budget; an explicit --timeout
+    # still wins. Until 2026-08-17 the env var was read by nothing at all on
+    # this path, so every session exporting it got the hardcoded 120s and saw
+    # healthy specs recorded as `failed=1 reason=daemon-no-response
+    # budget_ms=120000`. run.timeout_secs feeds BOTH the light-daemon request
+    # budget (light_request_timeout_ms_from_seconds) and the direct-child
+    # `--timeout` argument, so defaulting it here fixes every downstream path.
+    # Bug: simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md
+    var timeout_secs = client_default_timeout_secs()
     var i = 0
     while i < args.len():
         val arg = args[i]

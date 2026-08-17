@@ -1,0 +1,100 @@
+"""DNS QTYPE wire-encoding detection spec — every record type, not just AAAA.
+
+Audience: anyone changing `src/lib/nogc_sync_mut/dns/wire.spl`, or reading a
+DNS query byte dump and deciding which two bytes are the QTYPE.
+
+Why this spec exists: `dns_spec.spl`'s "AAAA query has QTYPE=28" example read
+the QTYPE out of the LAST two bytes of the query. In RFC 1035 §4.1.2 a question
+is QNAME, then QTYPE, then QCLASS — so the last two bytes are the QCLASS, and
+that example was asserting `qclass_low == 28` against a correct encoder. It read
+back `1` (IN) and was filed as a defect in the query builder
+(`doc/08_tracking/bug/dns_aaaa_query_qtype_not_28_2026-08-17.md`).
+
+The generalisation: an off-by-two QTYPE read is invisible for record type A,
+because A=1 and CLASS_IN=1 are the same byte. It only shows up for a type whose
+value differs from 1. So this spec pins the QTYPE offset AND the IANA value for
+every record type the library declares — A=1, NS=2, CNAME=5, MX=15, TXT=16,
+AAAA=28, SRV=33 — which is what makes it a class detector rather than a
+one-record regression test.
+
+# @req REQ-DNS-WIRE-QTYPE
+"""
+
+use std.spec.*
+
+use std.nogc_sync_mut.dns.wire.{dns_wire_encode_query}
+
+use std.nogc_sync_mut.dns.types.{
+    DNS_TYPE_A, DNS_TYPE_NS, DNS_TYPE_CNAME, DNS_TYPE_MX,
+    DNS_TYPE_TXT, DNS_TYPE_AAAA, DNS_TYPE_SRV
+}
+
+# The four question-tail bytes of every query, in RFC 1035 order:
+#   [len-4] QTYPE hi   [len-3] QTYPE lo   [len-2] QCLASS hi   [len-1] QCLASS lo
+# Returns "" when the encoding is correct, otherwise a human-readable reason
+# naming the record type — so a loop failure says WHICH type broke.
+fn qtype_tail_reason(label: text, qtype: i64) -> text:
+    val q = dns_wire_encode_query(0x1234, "example.com", qtype)
+    val n = q.length()
+    if n != 29:
+        return "{label}: expected a 29-byte query for example.com, got {n}"
+    val qtype_hi = q[n - 4]
+    val qtype_lo = q[n - 3]
+    val qclass_hi = q[n - 2]
+    val qclass_lo = q[n - 1]
+    val want_hi = qtype / 256
+    val want_lo = qtype - (want_hi * 256)
+    if qtype_hi != want_hi or qtype_lo != want_lo:
+        return "{label}: QTYPE bytes are {qtype_hi},{qtype_lo}, expected {want_hi},{want_lo}"
+    # The absolute oracle that makes the offset claim non-vacuous: the two
+    # bytes AFTER the QTYPE must be QCLASS=IN (0,1). Without this, a reader
+    # that slid two bytes right would still "find" 0,1 and call it a QTYPE.
+    if qclass_hi != 0 or qclass_lo != 1:
+        return "{label}: QCLASS bytes are {qclass_hi},{qclass_lo}, expected 0,1 (IN)"
+    ""
+
+describe "DNS query QTYPE encoding, across every declared record type":
+
+    it "places QTYPE immediately before QCLASS for all seven record types":
+        """A DNS client asks for each record type in turn and checks the bytes
+        it is about to put on the wire: the QTYPE it requested, followed by the
+        IN class. Any record type encoded at the wrong offset names itself."""
+
+        step("Encode one query per record type and inspect the question tail")
+        expect(qtype_tail_reason("A", DNS_TYPE_A)).to_equal("")
+        expect(qtype_tail_reason("NS", DNS_TYPE_NS)).to_equal("")
+        expect(qtype_tail_reason("CNAME", DNS_TYPE_CNAME)).to_equal("")
+        expect(qtype_tail_reason("MX", DNS_TYPE_MX)).to_equal("")
+        expect(qtype_tail_reason("TXT", DNS_TYPE_TXT)).to_equal("")
+        expect(qtype_tail_reason("AAAA", DNS_TYPE_AAAA)).to_equal("")
+        expect(qtype_tail_reason("SRV", DNS_TYPE_SRV)).to_equal("")
+
+    it "pins the IANA record-type numbers the encoder writes":
+        """The offsets above only matter if the constants themselves are the
+        registered values. These are IANA DNS RR TYPE assignments, not
+        implementation choices, so they are asserted directly."""
+
+        step("Compare each declared constant against its IANA assignment")
+        expect(DNS_TYPE_A).to_equal(1)
+        expect(DNS_TYPE_NS).to_equal(2)
+        expect(DNS_TYPE_CNAME).to_equal(5)
+        expect(DNS_TYPE_MX).to_equal(15)
+        expect(DNS_TYPE_TXT).to_equal(16)
+        expect(DNS_TYPE_AAAA).to_equal(28)
+        expect(DNS_TYPE_SRV).to_equal(33)
+
+    it "reads back QCLASS, not QTYPE, from the final two bytes":
+        """This is the exact confusion that produced the AAAA bug report. The
+        last two bytes of a query are always 0,1 — the IN class — no matter
+        which record type was requested. A reader that expects 0,28 there for
+        an AAAA query is reading the wrong field, and this example says so."""
+
+        step("Encode an AAAA query and read its final two bytes")
+        val q = dns_wire_encode_query(1, "example.com", DNS_TYPE_AAAA)
+        val last = q.length() - 1
+        expect(q[last]).to_equal(1)
+        expect(q[last - 1]).to_equal(0)
+
+        step("Read the QTYPE from the two bytes before that")
+        expect(q[last - 2]).to_equal(28)
+        expect(q[last - 3]).to_equal(0)
