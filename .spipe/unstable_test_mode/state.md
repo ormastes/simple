@@ -435,9 +435,34 @@ broken source -> selftest fails -> guard errors -> hook blocks -> no lane can pu
 
 **NOT FIXED HERE, deliberately.** The 88 lines are another lane's feature work.
 Reverting them at origin to unblock a push would destroy it — exactly the
-clobber pattern this repo keeps suffering. The owning lane must repair the
-assignment-at-impl-level inside that addition. The main tree's parsing copy is
-the reference for what a working version looks like.
+clobber pattern this repo keeps suffering. The main tree's parsing copy is NOT a
+fix: it simply predates the addition.
+
+### CORRECTION 2026-08-17 (later) — the 88 lines are VALID; the BINARY is stale
+
+The observations above are reproducible, but the attribution is wrong. The
+addition does not contain an "assignment at impl level". It declares a local
+`var literal` and reassigns it in three `match` arms, and `literal` lexes to
+`TokenKind::Literal`, which the statement dispatcher routed unconditionally to
+`parse_literal_function` (which `expect`s `Fn`). Four-line repro:
+`fn main():` / `var literal = 1` / `literal = 2` — same
+`expected Fn, found Assign`.
+
+That parser defect was **already fixed** at `d7213eb61742` (2026-08-17 07:36Z),
+and the separate `Use angle brackets: X<...>` false positive — which is a
+**warning**, not an error; `bin/simple run` on the file exits 0 — at
+`17d3496f3f3` (2026-08-17 12:14Z). The deployed `bin/simple` was built
+**2026-08-16 22:59Z**, so it predates both. The repo-wide parse block is a
+STALE-SEED artifact; the correct action is to rebuild and redeploy the seed, not
+to edit any `.spl`.
+
+Also corrected: `check-native-trailing-default-param.shs` does NOT fail its
+selftest. From the main tree it reaches its real scan and reports
+`FAIL — native-build failed to compile the fixture (exit 1, ...)`, exit 1, caused
+by `llc-20: invalid redefinition of function '__simple_main'` — an unrelated LLVM
+lane defect.
+
+Full record: `doc/08_tracking/bug/deployed_seed_predates_landed_parser_fixes_blocks_repo_2026-08-17.md`.
 
 ## 2026-08-17 — sync status, and a guard-integrity finding
 
