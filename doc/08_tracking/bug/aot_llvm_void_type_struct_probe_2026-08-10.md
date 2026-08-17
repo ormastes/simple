@@ -66,3 +66,43 @@ exercised far less than Cranelift.
      mutates `lst[0]`) where interp and post-F1 JIT copy.
   2. AOT interpolation of an `f64` struct field prints raw i64 bits
      (`f.a=4607182418800017408` for 1.0).
+
+## 2026-08-17 re-verification — original defect NOT reproducible; lane RED for a different reason
+
+Re-ran the exact probe this doc specifies (`struct Flat{f64,i64}`, copy,
+`b.n = 99`, four prints) through `bin/simple native-build` against the deployed
+`bin/release/x86_64-unknown-linux-gnu/simple`.
+
+**The `void type only allowed for function results` llc error did not occur.**
+Nothing in the 1,802-line build log mentions `llc`, `void type`, or a `.ll`
+line/column. That failure mode stays closed — the `translate_alloc` guard in
+`_MirToLlvm/core_codegen.spl` covers it and no evidence of recurrence exists.
+
+**But the AOT lane is currently RED on an unrelated, previously unrecorded
+error**, so this doc must not be closed as simply fixed:
+
+```
+$ sh scripts/check/check-aot-smoke.shs
+FAIL — AOT lane broken: native-build exit 1, binary absent
+
+$ bin/simple native-build tmp_aot_probe.spl -o tmp_aot_probe_bin   # exit 1
+error: semantic: undefined field 'kind': cannot access field on value of type 'nil'
+!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!
+error: native-build worker exited with code 1.
+```
+
+Note the gate's own diagnostic path is weak here: it greps `-i error` from the
+build log and printed nothing usable, because the real line is below the
+truncation banner. The verdict line is still correct and fail-closed; the
+diagnostic excerpt is not, and is worth widening.
+
+Attribution, measured rather than assumed: this is **not** caused by the
+concurrent `module_lowering.spl` fix landed in `153e331d605`. A/B in one tree
+with one binary — reverting that file to its parent blob and re-running the same
+`native-build` reproduces the identical exit 1 — so the break predates it. The
+working copy at the time of this run carried ~13k lines of uncommitted
+`src/compiler_rust/**` changes from parallel sessions, and `native-build`
+interprets the working-copy compiler live, so the most likely origin is that
+drift rather than any landed commit. Whoever owns those changes should re-run
+the gate; `scripts/check/check-aot-smoke.shs` is the durable detector and is
+doing its job.
