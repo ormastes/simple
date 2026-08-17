@@ -13,6 +13,46 @@ use crate::hir::types::{
     VerificationMode,
 };
 
+/// Turn a genuinely unresolvable `use` into a hard compile error.
+///
+/// `load_imported_types` fails for two very different reasons and only one of
+/// them is a defect:
+///
+///   * The module does not exist anywhere on the resolution path. The resolver
+///     reports this as `cannot resolve import: module `X` not found` (E1034,
+///     `module_resolver/resolution.rs`). Nothing later in the pipeline can
+///     supply it, so every use of an imported name is guaranteed to blow up at
+///     RUNTIME with `semantic: function <name> not found` -- long after the
+///     compile that should have caught it. This is fatal.
+///   * A policy/plumbing condition on an import that is otherwise fine, e.g.
+///     `stdlib import `std.text` resolves from the project stdlib roots only`
+///     when compiling a file outside the repo. The import is valid; only this
+///     eager type-preload could not service it. This stays a warning.
+///
+/// The discriminator is the resolver's own `cannot resolve import` prefix,
+/// which is emitted at exactly three sites, all of them true E1034s.
+///
+/// `SIMPLE_ALLOW_UNRESOLVED_IMPORTS=1` restores the old warn-and-continue
+/// behaviour. It exists as a break-glass for bisecting an unrelated failure,
+/// not as a way to land code with a broken import.
+fn unresolved_import_fatal(segments: &[String], err: &impl std::fmt::Display) -> LowerResult<()> {
+    let rendered = err.to_string();
+    if !rendered.contains("cannot resolve import") {
+        return Ok(());
+    }
+    if std::env::var_os("SIMPLE_ALLOW_UNRESOLVED_IMPORTS").is_some() {
+        eprintln!(
+            "[WARN] unresolved import {:?} tolerated via SIMPLE_ALLOW_UNRESOLVED_IMPORTS: {}",
+            segments, rendered
+        );
+        return Ok(());
+    }
+    Err(LowerError::UnresolvedImport {
+        path: segments.join("."),
+        reason: rendered,
+    })
+}
+
 fn stable_module_name_hash(value: &str) -> i64 {
     let mut hash = 5381u64;
     for byte in value.as_bytes() {
@@ -1243,6 +1283,7 @@ impl Lowerer {
                 // Log import loading failures -- silent failures cause cross-module
                 // FieldGet bugs (wrong byte_offset when type falls back to ANY).
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
+                    unresolved_import_fatal(&use_stmt.path.segments, &e)?;
                     if std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_some() {
                         continue;
                     }
@@ -1824,6 +1865,7 @@ impl Lowerer {
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
+                    unresolved_import_fatal(&use_stmt.path.segments, &e)?;
                     if std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_some() {
                         continue;
                     }
@@ -2098,12 +2140,8 @@ impl Lowerer {
             });
         }
 
-        let mut output = super::super::LoweringOutput::with_lifetime(
-            module,
-            warnings,
-            lifetime_lean4,
-            lifetime_violations,
-        );
+        let mut output =
+            super::super::LoweringOutput::with_lifetime(module, warnings, lifetime_lean4, lifetime_violations);
         // Carry out the attribution index for names that `lenient_types`
         // lowered to globals, so a link-time undefined symbol is traceable.
         output.lenient_globals = self.lenient_globals.clone();

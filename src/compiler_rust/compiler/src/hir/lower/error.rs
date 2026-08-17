@@ -79,6 +79,19 @@ pub enum LowerError {
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
 
+    /// E1034: a `use` names a module that does not exist anywhere on the
+    /// resolution path.
+    ///
+    /// This was a `[WARN]` until 2026-08-17. Demoting it let six stdlib files
+    /// ship `use string.{char_from_code}` -- a module path that has never
+    /// existed in this tree. They compiled clean; every call died at runtime
+    /// with `semantic: function char_from_code not found`, silently breaking
+    /// DNS label/TXT rdata decoding and SMTP base64/quoted-printable. A
+    /// nonexistent import can never be satisfied later, so there is no
+    /// recovery worth attempting: fail the compile at the `use`.
+    #[error("cannot resolve import `{path}`: {reason}")]
+    UnresolvedImport { path: String, reason: String },
+
     /// E1050: Use Python-style constructor instead of .new()
     #[error("Use Python-style constructor `{class_name}(...)` instead of `{class_name}.new(...)`")]
     UseConstructorNotNew { class_name: String },
