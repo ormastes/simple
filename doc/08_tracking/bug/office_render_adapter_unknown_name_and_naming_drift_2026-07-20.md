@@ -4,7 +4,6 @@
 "Finding 2 disposition" section at the bottom for Finding 2's evidence.
 
 Finding 1 RESOLVED 2026-08-17 — commit `7c7079bf63c9`. Evidence:
-**Status:** Finding 1 RESOLVED 2026-08-17 — commit `7c7079bf63c9`. Evidence:
 grepped `src/app/office/render_adapter.spl`; it now computes a `known` surface
 predicate (line ~429) and, when the name is unknown, pushes
 `"Unknown adapter name '{surface}'; rendered the suite index instead."` into
@@ -14,8 +13,6 @@ adapter still uses `"LibreOffice Writer"`; that is a naming-convention decision.
 (Superseded — see "Finding 2 disposition 2026-08-17" below: that convention is
 decided and the adapter already follows it, so Finding 2 was closed as
 NOT-A-DEFECT and the doc is now RESOLVED.)
-adapter still uses `"LibreOffice Writer"`; that is a naming-convention decision,
-untouched by this commit. Doc stays open until Finding 2 is dispositioned.
 
 **Date:** 2026-07-20
 **Component:** `src/app/office/render_adapter.spl` (`office_render`)
