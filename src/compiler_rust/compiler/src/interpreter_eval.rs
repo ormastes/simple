@@ -1745,7 +1745,18 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 &use_stmt.target,
                                 ImportTarget::Glob | ImportTarget::Group(_)
                             );
-                        if !is_path_derived_main {
+                        // A Group import that explicitly names an item equal to the
+                        // module's own name (`use pkg.Mod.{Mod}`) must bind the member,
+                        // not the enclosing module dict -- don't clobber it.
+                        let group_binds_name = match &use_stmt.target {
+                            ImportTarget::Group(items) => items.iter().any(|item| match item {
+                                ImportTarget::Single(name) => name == &binding_name,
+                                ImportTarget::Aliased { alias, .. } => alias == &binding_name,
+                                _ => false,
+                            }),
+                            _ => false,
+                        };
+                        if !is_path_derived_main && !group_binds_name {
                             env.insert(binding_name.clone(), value.clone());
                             // Sync module binding to MODULE_GLOBALS so functions can access it
                             MODULE_GLOBALS.with(|cell| {
