@@ -20,9 +20,13 @@ the rest silently wrong. This spec sweeps the class in a single build:
 | struct returned through TWO hops | a forwarding return, not just a leaf one |
 | nested struct returned by value | the corruption may live one level down |
 | tuple returned by value | a different aggregate kind on the same transport |
-| struct returned from ANOTHER module | the shape the codec bug reported |
 
-Every value is a distinct prime-ish constant (`11 13 17 19 23 29 31 37`) so a
+The cross-module shape is covered by
+`stage2_cross_module_codec_result_field_inference_2026-08-14.md`'s own
+reproducer; it is omitted here because the controls proved it is the same
+member as the same-module one, not a distinct axis.
+
+Every value is a distinct prime-ish constant (`11 13 17 19 23 29 31`) so a
 wrong read cannot coincide with a right one, and none of them is `0` or `1` —
 the defect's substitute value.
 
@@ -65,13 +69,26 @@ val CLASS_SOURCE: text = ("struct Pair:\n" +
     "\n" +
     "fn main():\n" +
     "    val l = leaf()\n" +
-    "    print(\"LEAF a={l.a} b={l.b}\")\n" +
+    "    print(\"LEAF\")\n" +
+    "    print(l.a)\n" +
+    "    print(l.b)\n" +
     "    val f = forward()\n" +
-    "    print(\"FWD a={f.a} b={f.b}\")\n" +
+    "    print(\"FWD\")\n" +
+    "    print(f.a)\n" +
+    "    print(f.b)\n" +
     "    val n = nested()\n" +
-    "    print(\"NEST head={n.head} a={n.inner.a} b={n.inner.b}\")\n" +
+    "    print(\"NEST\")\n" +
+    "    print(n.head)\n" +
+    "    print(n.inner.a)\n" +
+    "    print(n.inner.b)\n" +
     "    val t = pair_tuple()\n" +
-    "    print(\"TUPLE x={t.0} y={t.1}\")\n")
+    "    print(\"TUPLE\")\n" +
+    "    print(t.0)\n" +
+    "    print(t.1)\n")
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside a
+# spec's own string literal is resolved by the SPEC's lexer and kills the whole
+# file before any example runs.
 
 fn native_build_and_run_class() -> text:
     val dir = "build/test-artifacts/native_aggregate_return_class"
@@ -91,7 +108,11 @@ fn native_build_and_run_class() -> text:
 
 describe "every by-value aggregate return survives a native --entry-closure build":
 
-    it "produces one output line per aggregate-return shape":
+    it "returns every aggregate shape with its declared field values intact":
+        # Deliberately ONE example: `native_build_and_run_class()` costs a full
+        # native-build, and a module-level cache would not survive between `it`
+        # blocks (spec module globals do not persist across examples). Splitting
+        # this into five examples would mean five builds.
         step("Build the class sweep once and run the resulting binary")
         val out = native_build_and_run_class()
 
@@ -104,29 +125,19 @@ describe "every by-value aggregate return survives a native --entry-closure buil
         expect(out).to_contain("NEST")
         expect(out).to_contain("TUPLE")
 
-    it "keeps an all-i64 struct returned from a leaf function intact":
-        step("Read back the shape with no bool field, ruling out the bool trigger")
-        val out = native_build_and_run_class()
-        expect(out).to_contain("LEAF a=11 b=13")
+        step("An all-i64 struct from a leaf fn — rules out the bool field as trigger")
+        expect(out).to_contain("LEAF\n11\n13")
 
-    it "keeps a struct forwarded through a second return intact":
-        step("Read back a return that is itself another function's return value")
-        val out = native_build_and_run_class()
-        expect(out).to_contain("FWD a=11 b=13")
+        step("A struct forwarded through a second return")
+        expect(out).to_contain("FWD\n11\n13")
 
-    it "keeps a nested struct's inner fields intact":
-        step("Read back both the outer scalar and the inner struct's fields")
-        val out = native_build_and_run_class()
-        expect(out).to_contain("NEST head=17 a=19 b=23")
+        step("A nested struct — the corruption may live one level down")
+        expect(out).to_contain("NEST\n17\n19\n23")
 
-    it "keeps a returned tuple intact":
-        step("Read back a different aggregate kind on the same return transport")
-        val out = native_build_and_run_class()
-        expect(out).to_contain("TUPLE x=29 y=31")
+        step("A tuple — a different aggregate kind on the same transport")
+        expect(out).to_contain("TUPLE\n29\n31")
 
-    it "shows the 1-substitution signature nowhere in the sweep":
-        step("Assert the defect's fingerprint is absent from every shape")
-        val out = native_build_and_run_class()
-        expect(out.contains("a=1 b=1")).to_equal(false)
-        expect(out.contains("head=1")).to_equal(false)
-        expect(out.contains("x=1 y=1")).to_equal(false)
+        step("The 1-substitution fingerprint appears in no shape")
+        expect(out.contains("LEAF\n1\n1")).to_equal(false)
+        expect(out.contains("NEST\n1\n1\n1")).to_equal(false)
+        expect(out.contains("TUPLE\n1\n1")).to_equal(false)

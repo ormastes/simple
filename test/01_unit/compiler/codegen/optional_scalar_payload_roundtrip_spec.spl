@@ -1,0 +1,114 @@
+# Optional Scalar Payload Round-Trip — Reproducing Spec
+#
+# Reproduces doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md.
+#
+# `val x: i64? = 42` stored the RAW machine word 42 into a slot the runtime
+# reads as a TAGGED RuntimeValue. The runtime tag lives in the low 3 bits
+# (rt_to_string, src/runtime/runtime_native.c): 0 = boxed int (v << 3),
+# 1 = heap, 2 = inline float, 3 = special/nil.
+#
+#   42 & 7 == 2 -> read as an inline f64 whose bits are 40 -> ~2.08e-322
+#    7 & 7 == 7 -> no valid tag at all              -> "<value:0x7>"
+#
+# `!` then unwrapped a plainly non-nil optional to nil, and — worst of the set —
+# `x ?? 99` returned the CORRUPT payload rather than the default, so no
+# caller-side branch could detect or defend against it.
+#
+# ROOT CAUSE: every boxing guard in MIR lowering tested `ty == TypeId::ANY`. A
+# nullable scalar `T?` lowers to `HirType::Pointer { inner: T }` and is equally
+# a tagged-value slot — it must be able to hold tagged nil — so the raw scalar
+# was stored unboxed. Fixed by `MirLowerer::slot_holds_tagged_value` +
+# `box_scalar_for_tagged_slot` in src/compiler_rust/compiler/src/mir/lower/.
+#
+# ENGINES DIVERGE. The interpreter was always CORRECT; only the cranelift JIT
+# was wrong, and a spec file falls back to the interpreter — so the in-process
+# examples below could never have been red. They guard the interpreter and any
+# future native port. The SUBPROCESS example is the one that reproduced the
+# defect; it pins BOTH engines against the same absolute literals.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+fn give_int() -> i64?:
+    return 7
+
+val REPRO_SOURCE: text = "fn give() -> i64?:\n" +
+    "    return 7\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val x: i64? = 42\n" +
+    "    print(\"x=\" + x.to_string())\n" +
+    "    print(\"bang_x=\" + x!.to_string())\n" +
+    "    val g = give()\n" +
+    "    print(\"g=\" + g.to_string())\n" +
+    "    print(\"bang_g=\" + g!.to_string())\n" +
+    "    print(\"coalesce=\" + (x ?? 99).to_string())\n" +
+    "main()\n"
+
+fn run_repro_in_mode(mode: text) -> text:
+    val path = "build/test-artifacts/optional_scalar_payload_repro.spl"
+    file_write(path, REPRO_SOURCE)
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "optional scalar payload round-trip":
+    it "renders an i64 optional bound from a literal as its payload":
+        step("Bind a raw integer literal into an `i64?` slot")
+        val x: i64? = 42
+
+        step("Rendering must show the payload, not its bit pattern read as a float")
+        expect(x.to_string()).to_equal("42")
+
+    it "unwraps a non-nil optional to its payload instead of nil":
+        step("`!` on a plainly non-nil optional must yield the payload")
+        val x: i64? = 42
+        expect((x!).to_string()).to_equal("42")
+
+    it "returns the payload from `??` and reaches the default only on nil":
+        step("A non-nil optional coalesces to its own payload")
+        val x: i64? = 42
+        expect((x ?? 99).to_string()).to_equal("42")
+
+        step("A nil optional is the only case that reaches the default")
+        val n: i64? = nil
+        expect((n ?? 99).to_string()).to_equal("99")
+
+    it "carries the payload across a function return typed `i64?`":
+        step("Return a raw literal from a function declared `-> i64?`")
+        val g = give_int()
+
+        step("The returned value must render as 7, never as a tagged handle")
+        expect(g.to_string()).to_equal("7")
+        expect((g!).to_string()).to_equal("7")
+
+    it "agrees between the interpreter and the cranelift JIT on every optional read":
+        step("Write the bug report's minimal repro to a temporary source file")
+        step("Run it under SIMPLE_EXECUTION_MODE=interpreter — the engine that was always correct")
+        val interp = run_repro_in_mode("interpreter")
+
+        step("Run the same file under SIMPLE_EXECUTION_MODE=jit — the engine that was wrong")
+        val jit = run_repro_in_mode("jit")
+
+        step("Both engines must produce the same absolute values")
+        expect(interp).to_contain("x=42")
+        expect(interp).to_contain("bang_x=42")
+        expect(interp).to_contain("g=7")
+        expect(interp).to_contain("bang_g=7")
+        expect(interp).to_contain("coalesce=42")
+        expect(jit).to_contain("x=42")
+        expect(jit).to_contain("bang_x=42")
+        expect(jit).to_contain("g=7")
+        expect(jit).to_contain("bang_g=7")
+        expect(jit).to_contain("coalesce=42")
+
+        step("Neither corruption signature may appear: the denormal, the raw tagged handle, or a nil unwrap")
+        expect(jit.contains("0.0000000000000000000")).to_equal(false)
+        expect(jit.contains("<value:0x")).to_equal(false)
+        expect(jit.contains("bang_x=nil")).to_equal(false)
+        expect(jit.contains("bang_g=nil")).to_equal(false)
