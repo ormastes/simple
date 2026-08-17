@@ -87,8 +87,19 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
         + "-storage-" + sha256_text(storage_identity)
     val host_avx2 = target == "" and rt_simd_has_avx2()
     val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
-    val scope = native_build_cache_scope_key(
+    val scope_raw = native_build_cache_scope_key(
         Some(backend), raw_target, [capability_key], opt_level as i32, compiler_id)
+    # `scope` is a SINGLE directory component, so it is bounded by POSIX
+    # NAME_MAX (255 on ext4/xfs). The `-storage-<sha256>` suffix added to
+    # `compiler_id` above pushed it to 295 chars, and every object write then
+    # failed with ENAMETOOLONG surfacing as "Failed to write ELF bytes to
+    # build/native_cache/..." -- i.e. the AOT lane could not emit any binary.
+    # Keep the readable head for debuggability and fold the whole key into a
+    # digest so the scope stays injective.
+    val scope = if scope_raw.len() <= 200:
+        scope_raw
+    else:
+        scope_raw.substring(0, 160) + ";digest=" + sha256_text(scope_raw)
     val cache_scope_root = rt_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
