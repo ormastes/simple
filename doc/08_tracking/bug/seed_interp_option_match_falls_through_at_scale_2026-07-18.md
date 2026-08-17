@@ -1,5 +1,74 @@
 # Seed interpreter: `.?` boolean-context consumers re-decide presence from payload truthiness ("0 is falsy" landmine)
 
+## 2026-08-17 (independent corroboration, interpreter lane)
+
+Independently re-classified by CONTENT, not by SHA: `is_condition_present` is
+present in `interpreter_control.rs` and is now applied at every consumer the
+original "Known follow-up" section listed as untouched — `interpreter/expr/
+ops.rs` (and/or/not, line 256+), `interpreter/expr/control.rs`,
+`interpreter/node_exec.rs`, `interpreter_call/block_execution.rs`,
+`interpreter_method/collections.rs`, `interpreter_helpers/collections.rs`,
+`interpreter_helpers/method_dispatch.rs`, `interpreter_call/bdd.rs`,
+`macro/invocation.rs`. New reproducing spec
+`test/03_system/interpreter/option_exists_check_falsy_payload_spec.spl`
+(if / elif / while / match-guard / expression-form `if`, on `Some(0)` and `nil`)
+runs GREEN on the deployed seed:
+
+```
+Results: 10 total, 10 passed, 0 failed
+```
+
+Class-detection spec:
+`test/03_system/interpreter/exists_check_consumer_class_spec.spl`.
+
+## 2026-08-17 (batch_02 core-silent-wrong lane): interpreter half CONFIRMED fixed;
+## a SECOND, unfiled half existed on the JIT lane and is now fixed too
+
+The interpreter fix this doc describes (`is_condition_present`,
+`interpreter_control.rs`) is present and works — verified by execution, not by
+reading it. But the doc concluded the defect was a purely interpreter-side
+consumption-boundary problem, and that was incomplete: **the JIT lane had an
+independent instance of the same landmine, in the runtime rather than the
+interpreter.** Measured on a seed freshly built from `88227f48202`, for a
+present `i64?` holding `0`:
+
+| form | interpreter | JIT (before) |
+|---|---|---|
+| `if o.?:` | present ✓ | **absent ✗** |
+| `match o:` | `case Some` ✓ | **`case None` ✗** |
+| `o.? ?? 99` | `0` ✓ | **`99` ✗** |
+
+So the original M4 report — "`match` on `Some(0)` executes neither arm, only at
+full-driver scale" — was *not* a phantom and was *not* only about `.?`. It could
+not be reproduced in isolation at filing time because the reproduction was run
+on the interpreter, while the driver at scale runs JIT-compiled.
+
+Root cause (one line, `src/compiler_rust/runtime/src/value/objects.rs`):
+
+```rust
+pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
+    if value.0 == 0 || value.0 == TAG_SPECIAL { return true; }   // <-- both wrong
+```
+
+Integers box as `(v << 3) | TAG_INT` and `TAG_INT` is `0b000`, so the integer
+`0` boxes to the bit pattern `0x0` — bit-identical to the "raw nil" test.
+Presence and a zero payload were literally the same 64-bit value. `is_nil()`
+already tests the canonical sentinel (`TAG_SPECIAL|SPECIAL_NIL` == `3`), which
+is exactly what the second clause duplicated, so both raw comparisons were
+removable without losing any real nil encoding.
+
+The same line is the "absence → 0" half of
+`doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md`; the
+two docs are opposite directions of one collision.
+
+Pinned by `test/01_unit/compiler/codegen/probe_option_presence_falsy_payload.spl`
+(run-path probe, absolute-literal oracles, both engines) plus
+`option_presence_zero_payload_spec.spl` (reproducing) and
+`option_presence_falsy_payload_class_spec.spl` (payload × consumption-form
+matrix). The probe was RED 9/9 on the JIT arm and green on the interpreter arm
+before the fix — which is precisely why no spec in the suite had ever caught it:
+spec bodies execute interpreted.
+
 **Date:** 2026-07-18
 **Lane:** N2 (root-caused from lane M4's report)
 **Status:** Root-caused and fixed at the source (`src/compiler_rust`). **Fix

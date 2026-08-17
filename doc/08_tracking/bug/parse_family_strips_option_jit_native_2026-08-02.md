@@ -1,5 +1,45 @@
 # BUG: the `parse_*` text-method family silently strips the Option on JIT and native
 
+## 2026-08-17 (batch_02 core-silent-wrong lane): reproduced, and the "absence → 0"
+## half shares ONE root cause with `seed_interp_option_match_falls_through_at_scale`
+
+Reproduced on a seed freshly built from `88227f48202` (so this is not the
+stale-deployed-binary artefact that closed three sibling docs today):
+
+```
+val bad = "zz".parse_int()
+print(bad ?? -1)      # JIT: 0     interpreter: -1
+```
+
+**Mode 1 ("absence → 0") is not a `parse_*` alias-table problem at all.** It is
+the general presence test. `rt_is_none`
+(`src/compiler_rust/runtime/src/value/objects.rs`) opened with
+
+```rust
+if value.0 == 0 || value.0 == TAG_SPECIAL { return true; }
+```
+
+and integers box as `(v << 3) | TAG_INT` with `TAG_INT = 0b000`, so the integer
+**0 boxes to the bit pattern `0x0`** — bit-identical to that "raw nil" test. Any
+raw 0 reaching a `T?` slot therefore reads as absent, whatever produced it. The
+same line makes a genuinely present `Some(0)` read as absent, which is the
+separately-filed
+`doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md`
+— the two docs are opposite directions of one collision.
+
+Fixed by dropping both raw comparisons (`is_nil()` already tests the canonical
+sentinel `3`). Pinned by
+`test/01_unit/compiler/codegen/probe_option_presence_falsy_payload.spl` and its
+two specs, whose `parse_fail_default` / `parse_ok_zero` rows are exactly this
+doc's mode 1.
+
+**Mode 2 ("present 3 → absent") did NOT reproduce** — `"3".parse_int() ?? -1`
+returned `3` correctly on both engines, before and after. Either it was fixed
+separately or it was always specific to a shape not captured by the doc's own
+example. The per-method return-shape table (`parse_i64` unmapped, etc.) was NOT
+re-measured here and remains open on its own merits; only the value-level
+"failed parse is indistinguishable from 0" claim is closed.
+
 - **Status:** OPEN — measured, staged migration designed, stage 0 (measurement) landed
 - **Filed:** 2026-08-02
 - **Base sha measured:** `a788a2a3e5c68ef1736401428397b5bf950d3a67`

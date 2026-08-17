@@ -1,5 +1,29 @@
 # Bug: JIT boxes i64 as `(value << 3) | TAG_INT` — drops the top 3 bits (bit-63 loss); miscompiles RV64 SoC
 
+## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane)
+
+Fixed by `2a240d9b0b2` ("fix(jit): i64 values >= 2^60 silently became a
+different number"), which routes wide values to a signed heap box
+(`HeapObjectType::Int`) and keeps the bit-identical `i << 3` fast path for
+values that fit.
+
+**This doc is a worked example of the stale-binary trap, and the evidence is
+kept here deliberately.** The doc's own reproducer — an `[i64]` array that is a
+struct field — was run against two binaries on the same tree:
+
+| binary | `o.arr[2] = 0x8010000000000000` under JIT | interpreter |
+|---|---|---|
+| deployed `bin/simple`, mtime 2026-08-16 22:59 | `4503599627370496` (**bit 63 dropped**) | `-9218868437227405312` |
+| freshly built from `88227f48202`, this session | `-9218868437227405312` (correct) | `-9218868437227405312` |
+
+A second control in the same probe, `w[0] = 1<<62`, read back `0` on the
+deployed seed and `4611686018427387904` on the fresh one — matching this doc's
+"`1<<63` and `1<<62` box to 0" prediction exactly.
+
+The deployed seed was built at 22:59 on 2026-08-16; `2a240d9b0b2` landed at
+06:23 on 2026-08-17. Anyone reproducing against the deployed `bin/simple` will
+therefore still see the original, fully convincing failure. Closeable.
+
 - **ID:** seed_jit_boxed_int_61bit_drops_high_bits
 - **Date:** 2026-07-22
 - **Status:** OPEN — ROOT CAUSE FULLY BISECTED; fix is a core value-representation change (awaiting go-ahead)
@@ -178,3 +202,30 @@ them under a "boxed-int fixed" message would be a false-green. The `copy`/
 `concat` packing-preserve edits are correct in isolation and are preserved in
 worktree `/tmp/wt_heapint` should Option-B-complete or Option-A ever be
 authorized.
+
+## 2026-08-17 — Option A DID land, then was silently REVERTED by a stale snapshot
+
+Classification by CONTENT (not SHA), triage shard A6:
+
+- `2a240d9b0b2` "fix(jit): i64 values >= 2^60 silently became a different number"
+  implemented exactly the Option-A HeapInt fix recommended above, across 10
+  Rust files, plus 4 spec files.
+- The very next commit touching those files, `e14a2ffb4df`
+  ("fix(backend,mir): three fail-open sites made fail-closed"), reverted **all
+  ten** source files to their pre-fix content — the stat lines are the exact
+  inverse (`core.rs 104 +++/---`, `closures_structs.rs 51`, `methods.rs 37`,
+  `heap.rs 24`, `transfer.rs 44`, ...). It is a whole-working-copy stale-snapshot
+  clobber of the kind `.claude/rules/vcs.md` § "Sync must never clobber"
+  forbids; the same commit also deleted `src/compiler/35.semantics/lint/
+  silent_default.spl` (341 lines), `scripts/check/check-silent-default-baseline.shs`,
+  and gutted `scripts/check/check-engine-differential.shs` (411 lines).
+- Evidence at HEAD (`b32ec0de65a`):
+  `git show HEAD:src/compiler_rust/runtime/src/value/core.rs | grep -c fits_inline_int` -> `0`
+  and `from_int` at core.rs:240-243 is again the bare `Self((i as u64) << 3)`.
+- The four spec files added by `2a240d9b0b2` SURVIVED (the revert hit source
+  only), so `test/01_unit/compiler/codegen/probe_wide_int_boundary_jit.spl` and
+  `wide_int_boundary_class_spec.spl` are live reproducers against HEAD.
+
+Status: **LIVE at HEAD, cause = revert, not a missing fix.** The 10 Rust files
+have been restored from `2a240d9b0b2` into the working tree (uncommitted) and
+`cargo check --release --bin simple` passes clean on the restored tree.

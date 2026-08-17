@@ -1,0 +1,113 @@
+# Falsy-but-present payload — Similar-Problem Detection Spec (defect CLASS).
+#
+# The reproducing spec next door (`option_presence_zero_payload_spec.spl`)
+# pins ONE payload (integer zero) reached through the forms that were observed
+# wrong. That is how both filed bugs were found — one value, one syntax at a
+# time, by a human noticing a wrong answer:
+#
+#   doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+#     found via `match` on `Some(0)`.
+#   doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#     found via `"zz".parse_int() ?? default`.
+#
+# Neither reporter noticed the other, and neither reached the shared cause:
+# one line in `rt_is_none` (`runtime/src/value/objects.rs`) that treated the
+# bit pattern `0x0` as nil, when `0x0` is also exactly how the integer 0 boxes
+# (`(v << 3) | TAG_INT`, TAG_INT = `0b000`).
+#
+# THE CLASS: "a value that is PRESENT but FALSY must never be confused with
+# ABSENT, in either direction." It has two axes, and a defect at the shared
+# helper hits every cell:
+#
+#   axis 1 — the payload:  0, 0.0, false, ""      (and their non-falsy controls)
+#   axis 2 — how presence is consumed:
+#       `.?` in condition position   (lowered to a bare `rt_is_some`)
+#       `.?` in value position       (`lower_exists_check`)
+#       `match` Some/None
+#       `??`
+#       `is_some()` / `is_none()`
+#
+# Zero is merely the payload that happens to collide with today's encoding.
+# The next encoding change can just as easily make `false` or `""` collide, and
+# a new consumption form can be added without going through `rt_is_none` at
+# all. Crossing both axes is what makes the NEXT instance fail here instead of
+# shipping as a plausible-looking answer.
+#
+# WHY A SUBPROCESS. Spec bodies execute on the tree-walk INTERPRETER, which was
+# correct in both bugs; an in-process example can never go red on this. The
+# oracle is `probe_option_presence_falsy_payload.spl`, run under both engines,
+# and every assertion inside it is an ABSOLUTE literal — never "the engines
+# agree", which would pass while both are wrong the same way.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_option_presence_falsy_payload.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "presence is independent of payload truthiness, on every engine":
+    it "covers every falsy payload under the cranelift JIT":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("Axis 1: integer zero — the payload that collides with the nil bit pattern today")
+        expect(jit).to_contain("PASS cond_zero_i64 = present")
+
+        step("Axis 1: float zero — a different tag, same conceptual trap")
+        expect(jit).to_contain("PASS cond_zero_f64 = present")
+
+        step("Axis 1: boolean false — falsy but unambiguously present")
+        expect(jit).to_contain("PASS cond_false_bool = present")
+
+        step("Axis 1: the empty string, consumed through `??` so an absent-read would substitute the fallback")
+        expect(jit).to_contain("PASS coalesce_empty_text = ")
+
+    it "covers every consumption form for the same present-zero subject":
+        val jit = run_probe_in_mode("jit")
+
+        step("Axis 2: `.?` in condition position — lowered to a bare rt_is_some call")
+        expect(jit).to_contain("PASS cond_zero_i64 = present")
+
+        step("Axis 2: `.?` in value position — must yield the payload, not the nil sentinel")
+        expect(jit).to_contain("PASS value_dotq_zero_i64 = 0")
+
+        step("Axis 2: `match` Some/None")
+        expect(jit).to_contain("PASS match_zero_i64 = some")
+
+        step("Axis 2: `??` — the most dangerous form, it silently swaps in the default")
+        expect(jit).to_contain("PASS coalesce_zero_i64 = 0")
+        expect(jit).to_contain("PASS coalesce_zero_f64 = 0.0")
+
+        # Axis 2's fifth form, `.is_some()` / `.is_none()`, is intentionally
+        # absent: those two names are broken on the JIT lane by a separate
+        # method-DISPATCH defect (wrong for present and absent receivers
+        # alike), filed as
+        # doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md.
+        # See the note in the probe. Re-add when that is fixed.
+
+    it "keeps absence detectable, so the fix is not \"everything is present\"":
+        step("Every cell above would also pass if presence were hardwired true; these rows are what forbid that")
+        val jit = run_probe_in_mode("jit")
+
+        expect(jit).to_contain("PASS cond_absent_i64 = absent")
+        expect(jit).to_contain("PASS match_absent_i64 = none")
+        expect(jit).to_contain("PASS coalesce_absent_i64 = 99")
+
+        step("And a failed parse stays distinguishable from a successful parse of \"0\" — the two-directions check")
+        expect(jit).to_contain("PASS parse_fail_default = -1")
+        expect(jit).to_contain("PASS parse_ok_zero = 0")
+
+    it "holds on the interpreter too, so the engines cannot drift apart":
+        step("The interpreter reaches presence through is_condition_present, a completely separate path from rt_is_none")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Both engines must satisfy the SAME absolute oracles — this is what catches a fix applied to only one lane")
+        expect(interp).to_contain("OPTION_PRESENCE_FALSY_PAYLOAD PROBE: ALL PASS")

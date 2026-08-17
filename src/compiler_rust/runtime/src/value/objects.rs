@@ -484,14 +484,28 @@ pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
 
 /// Check if a value is None/nil.
 /// Returns true if:
-/// - value is nil (raw 0 / TAG_SPECIAL with SPECIAL_NIL)
+/// - value is the canonical nil sentinel (TAG_SPECIAL with SPECIAL_NIL, i.e. `3`)
 /// - value is an Option enum (reserved ID 1) with discriminant hash("None")
+///
+/// It must NOT test `value.0 == 0`. Integers box as `(v << 3) | TAG_INT`, and
+/// TAG_INT is `0b000`, so the integer **0 boxes to the bit pattern `0x0`** —
+/// bit-identical to the "raw nil" this used to accept. That made a present
+/// payload of zero indistinguishable from absence, in both directions:
+///   - `Some(0)` / a flat `i64?` holding 0 reported absent, so `if o.?:` took
+///     the else branch and `match o:` chose `case None`
+///     (doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md)
+///   - a failed `"zz".parse_int()` returning raw 0 was indistinguishable from a
+///     successful parse of `"0"`, so `?? default` never fired
+///     (doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md)
+/// Both are silent wrong answers under the JIT/native lane; the tree-walk
+/// interpreter never routed through here and stayed correct, which is why this
+/// only ever showed up as a cross-engine disagreement.
+///
+/// `is_nil()` is `self.0 == NIL.0` and NIL is `from_special(SPECIAL_NIL)` == `3`,
+/// which is precisely the old `value.0 == TAG_SPECIAL` clause, so dropping both
+/// raw comparisons loses no real nil encoding.
 #[no_mangle]
 pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
-    // Check for raw nil (value == 0 or TAG_SPECIAL with NIL)
-    if value.0 == 0 || value.0 == super::tags::TAG_SPECIAL {
-        return true;
-    }
     if value.is_nil() {
         return true;
     }

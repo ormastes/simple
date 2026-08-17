@@ -1,5 +1,31 @@
 # Seed JIT: `text.to_i64()` / `.to_int()` return a FLOAT-tagged value — silent wrong results
 
+## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane) — does not reproduce
+
+The reproduction block below was re-run **verbatim** and every value is now
+correct, on BOTH engines, on BOTH the deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`, mtime 2026-08-16 22:59) and a
+seed freshly built this session from `88227f48202`:
+
+```
+print("42".to_i64())   -> 42     (doc: 0.00000000000000000)
+print("42".to_int())   -> 42     (doc: 0.00000000000000000)
+print(v + 1)           -> 43     (doc: <special:5>)
+print(v == 42)         -> true   (doc: false)
+print("-5".to_i64())   -> -5     (doc: <special:2305843009213693951>)
+```
+
+Attributed fix: `2a240d9b0b2` ("fix(jit): i64 values >= 2^60 silently became a
+different number"), whose message records adding "the missing STRING receiver
+branch to the methods.rs numeric-cast dispatch, which handed back a string's
+heap pointer as a 'successful' integer". That is this defect's tag/value
+confusion. Note the fix predates neither binary tested, so this is not a
+stale-binary artefact in either direction.
+
+Closeable. The 2026-08-17 triage line "no retag landed" was a source-inspection
+inference (it read a stale comment at `closures_structs.rs:1379`) and was not
+confirmed by execution.
+
 - **Status:** OPEN (pre-existing; found while landing an unrelated interpreter-lane fix)
 - **Severity:** high — silent wrong values, not a crash. `"42".to_i64() == 42`
   evaluates to **false**.

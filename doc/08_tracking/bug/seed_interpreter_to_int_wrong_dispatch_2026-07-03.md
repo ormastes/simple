@@ -1,5 +1,29 @@
 # Seed interpreter: `.to_int()` misdispatches on split()-produced strings
 
+## VERIFIED FIXED 2026-08-17 (batch_02 core-silent-wrong lane) — does not reproduce
+
+The "Minimal repro" below was re-run verbatim and prints `10`, correctly, under
+BOTH `SIMPLE_EXECUTION_MODE=interpret` and the default JIT lane, on BOTH the
+deployed seed (mtime 2026-08-16 22:59) and a seed freshly built this session
+from `88227f48202`:
+
+```
+val parts = "10,4".split(",")
+val p = parts[0]
+print(p.to_int())        -> 10   (doc: pointer-like garbage, e.g. 6277833388737)
+```
+
+Same-family evidence: the sibling doc
+`seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md` is also fixed,
+by `2a240d9b0b2`, which added the missing STRING receiver branch to the
+numeric-cast dispatch — i.e. exactly the "dispatch resolving to a different
+method for these receivers" this doc predicted.
+
+Closeable. The Simple-side workaround `core_digits_to_i64`
+(`src/compiler/10.frontend/core/lexer.spl`) is now removable, but that removal
+is deliberately NOT done here: the lexer is in another lane's claimed path this
+session.
+
 - **Status:** open (seed/Rust interpreter; worked around in Simple code)
 - **Date:** 2026-07-03
 - **Component:** `src/compiler_rust` interpreter method dispatch

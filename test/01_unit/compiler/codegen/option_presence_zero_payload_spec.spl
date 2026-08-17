@@ -1,0 +1,76 @@
+# Option presence with a ZERO payload — REPRODUCING spec.
+#
+# Pins the exact defect fixed in `rt_is_none`
+# (`src/compiler_rust/runtime/src/value/objects.rs`), which opened with
+#
+#     if value.0 == 0 || value.0 == TAG_SPECIAL { return true }
+#
+# Integers box as `(v << 3) | TAG_INT` and TAG_INT is `0b000`, so the integer
+# 0 boxes to the bit pattern `0x0` — bit-identical to that "raw nil" test.
+# A present optional holding 0 was therefore reported ABSENT.
+#
+# Bugs closed by this:
+#   doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md
+#   doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which routes presence through `is_condition_present`
+# (`interpreter_control.rs`) and was correct all along. An in-process example
+# CANNOT go red on this defect. The oracle is the sibling run-path probe
+# `probe_option_presence_falsy_payload.spl`, run as a subprocess under both
+# engines; the JIT arm is the one that was red.
+#
+# The generalising companion is
+# `option_presence_falsy_payload_class_spec.spl`.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_option_presence_falsy_payload.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a present optional holding zero is not absent":
+    it "reports a zero payload as present under the interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was correct throughout, so a red here means the probe is broken rather than the engine")
+        expect(interp).to_contain("OPTION_PRESENCE_FALSY_PAYLOAD PROBE: ALL PASS")
+
+    it "reports a zero payload as present under the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("`if o.?:` on a present i64? holding 0 took the else branch before the fix")
+        expect(jit).to_contain("PASS cond_zero_i64 = present")
+
+        step("`match o:` on the same value selected `case None` before the fix")
+        expect(jit).to_contain("PASS match_zero_i64 = some")
+
+        step("`.?` in value position yielded the nil sentinel, so `?? 99` substituted 99 for a value that was there")
+        expect(jit).to_contain("PASS value_dotq_zero_i64 = 0")
+
+        step("A FAILED parse must stay distinguishable from a successful parse of \"0\"")
+        expect(jit).to_contain("PASS parse_fail_default = -1")
+        expect(jit).to_contain("PASS parse_ok_zero = 0")
+
+        step("And the whole probe passes, so no other row regressed")
+        expect(jit).to_contain("OPTION_PRESENCE_FALSY_PAYLOAD PROBE: ALL PASS")
+
+    it "still reports a genuinely absent optional as absent":
+        step("The fix must not degenerate into \"everything is present\" — absence still has to work")
+        val jit = run_probe_in_mode("jit")
+
+        expect(jit).to_contain("PASS cond_absent_i64 = absent")
+        expect(jit).to_contain("PASS match_absent_i64 = none")
+        expect(jit).to_contain("PASS coalesce_absent_i64 = 99")
