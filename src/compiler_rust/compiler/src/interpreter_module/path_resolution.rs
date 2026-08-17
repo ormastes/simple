@@ -312,19 +312,29 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
     // table at src/compiler/80.driver/driver_source_loading.spl:801. This makes the
     // seed agree with that driver for ALL dotted dirs rather than a hardcoded list.
     //
-    // At least one segment must remain after the dotted directory, so the greedy
-    // window is bounded by parts.len() - 1.
-    let max_window = parts.len() - 1 - depth;
-    if max_window >= 2 {
-        for window in (2..=max_window).rev() {
+    // The window may consume ALL remaining segments, in which case the dotted
+    // directory IS the module being imported and resolves through its
+    // __init__.spl -- `use app.ui.chromium.acid2.{...}` names the package
+    // `src/app/ui.chromium.acid2/`, with no segment left over to be a file.
+    // Bounding the window at parts.len() - 1 instead would silently miss that
+    // whole shape.
+    let remaining = parts.len() - depth;
+    if remaining >= 2 {
+        for window in (2..=remaining).rev() {
             let dotted = parts[depth..depth + window].join(".");
             let dotted_dir = current.join(&dotted);
-            if dotted_dir.exists() && dotted_dir.is_dir() {
-                if let Some(found) =
-                    resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + window)
-                {
-                    return Some(found);
+            if !dotted_dir.is_dir() {
+                continue;
+            }
+            if depth + window == parts.len() {
+                let init_path = dotted_dir.join("__init__.spl");
+                if init_path.is_file() {
+                    return Some(init_path);
                 }
+            } else if let Some(found) =
+                resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + window)
+            {
+                return Some(found);
             }
         }
     }
