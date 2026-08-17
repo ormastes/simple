@@ -91,3 +91,49 @@ dressed as completion.
   (`build/native_probe/simple`, present here, dated 2026-07-23).
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
 - SPipe state: `.spipe/simple_riscv_hardening/state.md`
+
+## 2026-08-17 — FIXED (provenance now stated in the verdict)
+
+RED reproduced first, on the live tree:
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ bin/simple --version
+WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+```
+
+`scripts/check/check-riscv-hardware-gates.shs` printed only `simple binary:
+<path>` and then `RISCV-HW-GATES: n/m PASS` — no engine identity anywhere, so a
+green line read as a self-hosted result when it was the Rust seed.
+
+Fix (same file):
+- `classify_engine()` probes `--version` **before any gate runs**, assigning rc
+  on the line AFTER the command (never through a pipe), and classifies
+  `rust-seed` / `self-hosted`.
+- An indeterminate binary (nonzero `--version`, or empty output) is
+  `ERROR — nothing was checked` exit 2. Absence of evidence is never a pass.
+- The engine is carried into the terminal verdict:
+  `PASS — <n> gate(s) checked, 0 failed (engine=rust-seed)` /
+  `FAIL — <n> gate(s) checked, <k> failed (engine=...)`.
+- `TOTAL == 0` is now `ERROR ... exit 2`, not exit 1.
+- `--selftest` (fatal, 4 shim fixtures): seed banner must classify as
+  `rust-seed`; a non-seed banner as `self-hosted`; an unrunnable binary and a
+  silent `--version` must both be indeterminate, never `self-hosted`.
+
+After:
+
+```
+$ sh scripts/check/check-riscv-hardware-gates.shs --selftest | tail -1
+PASS — 4 selftest fixture(s) checked
+$ sh scripts/check/check-riscv-hardware-gates.shs --bogus; echo rc=$?
+ERROR — nothing was checked: unknown argument '--bogus'
+rc=2
+$ sh scripts/check/check-riscv-hardware-gates.shs | grep '^engine:'
+engine: rust-seed (59536728 bytes, mtime 2026-08-16 22:59:37 +0000)
+```
+
+The underlying condition (this machine has no self-hosted binary deployed) is
+unchanged and still tracked by
+`no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09.md`; what is
+fixed here is the misattribution.
