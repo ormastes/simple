@@ -144,6 +144,17 @@ else
 fi
 mkdir -p "$stage3_cache" "$home" "$tmp" "$(dirname "$stage3_log")"
 
+# Per-lane private caches: stage2 and stage3 run different compiler binaries over
+# the same source tree, so each cache dir is fenced to its own lane and reuse of a
+# foreign lane's dir is refused. Additive: old checkouts without the guard skip it.
+# doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+cache_scope_guard="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)/scripts/check/check-cache-scope-ownership.shs"
+if [ -f "$cache_scope_guard" ]; then
+  mkdir -p "$stage2_cache"
+  sh "$cache_scope_guard" "$stage2_cache" stage2 || exit 1
+  sh "$cache_scope_guard" "$stage3_cache" stage3 || exit 1
+fi
+
 # Recovery starts a fresh evidence interval after the immutable Stage-2 checks.
 bootstrap_stage3_source_snapshot "$source_before" "$root"
 bootstrap_stage3_git_state "$root" "$git_before"

@@ -868,8 +868,36 @@ bootstrap_native_cache_prune() {
   echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
 }
 
+# Per-lane private cache. Each stage gets build/bootstrap/native_cache/<lane>/
+# instead of every stage sharing one native_cache, so a phase-2 entry can never be
+# picked up by a phase-3 lane running a different compiler over the same source.
+# Guarded fail-closed by scripts/check/check-cache-scope-ownership.shs.
+# Design: doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+native_cache_base_dir="${native_cache_dir}"
+bootstrap_cache_scope_guard="${repo_root:-.}/scripts/check/check-cache-scope-ownership.shs"
+
+bootstrap_select_cache_lane() {
+  bscl_label=$1
+  bscl_lane=$(printf '%s' "${bscl_label}" | tr -c 'A-Za-z0-9._-' '_')
+  [ -n "${bscl_lane}" ] || bscl_lane=default
+  native_cache_dir="${native_cache_base_dir}/${bscl_lane}"
+  native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
+  # Propagate to the compilers themselves (both engines read SIMPLE_CACHE_SCOPE).
+  SIMPLE_CACHE_SCOPE="${bscl_lane}"
+  export SIMPLE_CACHE_SCOPE
+  mkdir -p "${native_cache_dir}"
+  # Old checkouts may not have the guard yet; stay additive rather than fatal.
+  if [ -f "${bootstrap_cache_scope_guard}" ]; then
+    if ! sh "${bootstrap_cache_scope_guard}" "${native_cache_dir}" "${bscl_lane}"; then
+      echo "  ${bscl_label}: refusing to build against a foreign cache scope" >&2
+      exit 1
+    fi
+  fi
+}
+
 prepare_native_cache() {
   label=$1
+  bootstrap_select_cache_lane "${label}"
   if [ "${execution_profile}" = "clean-release" ]; then
     echo "  ${label}: clearing native cache (clean-release profile)"
     rm -rf "${native_cache_dir}/"
@@ -902,6 +930,17 @@ prepare_native_cache() {
     echo "  ${label}: reusing native cache (${bootstrap_mode} mode)"
   fi
   bootstrap_native_cache_prune "${native_cache_dir}"
+  bootstrap_stamp_cache_lane
+}
+
+# Re-stamp the ownership marker: every clear path above `rm -rf`s the dir, which
+# removes it. An unmarked dir is claimable, so this is belt-and-braces, but it
+# keeps the marker present for out-of-band inspection.
+bootstrap_stamp_cache_lane() {
+  [ -n "${native_cache_dir:-}" ] || return 0
+  mkdir -p "${native_cache_dir}" 2>/dev/null || return 0
+  printf 'lane=%s\n' "${SIMPLE_CACHE_SCOPE:-default}" \
+    > "${native_cache_dir}/.cache_scope" 2>/dev/null || true
 }
 
 run_logged() {
