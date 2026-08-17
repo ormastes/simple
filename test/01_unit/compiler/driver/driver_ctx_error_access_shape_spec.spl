@@ -1,0 +1,40 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+# Similar-problem DETECTION spec for the family behind
+# doc/08_tracking/bug/stage3_selfhost_phase3_error_array_index_after_struct_reassign_silently_noops_2026-08-10.md
+#
+# The reproducer above only covers one call site. The defect class is "any driver
+# site that direct-indexes `ctx.errors` after `self.ctx = <returned struct>`", and
+# a census found SEVEN such sites, including two on the NON-debug production path
+# (`driver_orchestration.spl` first-error extraction and the MIR-lowering failure
+# message) where the loss is a silently blank diagnostic rather than a missing
+# trace line. This spec fails when any driver file reintroduces the direct-index
+# shape, so a new site cannot land unnoticed.
+
+val DRIVER_FILES = [
+    "src/compiler/80.driver/driver_orchestration.spl",
+    "src/compiler/80.driver/driver_pipeline_execution.spl",
+    "src/compiler/80.driver/driver_aot_pipeline.spl",
+]
+
+describe "driver compiler-context error access shape":
+    it "exposes a method-shaped accessor on the context owner":
+        val types = file_read("src/compiler/80.driver/driver_types.spl")
+        expect(types).to_contain("fn error_message_at(index: i64) -> text:")
+
+    it "never direct-indexes ctx.errors in any driver phase file":
+        var offenders: [text] = []
+        var f = 0
+        while f < DRIVER_FILES.len():
+            val path = DRIVER_FILES[f]
+            val source = file_read(path)
+            if source.contains("ctx.errors["):
+                offenders.push(path)
+            f = f + 1
+        expect(offenders.len()).to_equal(0)
+
+    it "uses the accessor at the phase-3 failure sites":
+        val orch = file_read(DRIVER_FILES[0])
+        expect(orch).to_contain("self.ctx.error_message_at(0)")
+        expect(orch).to_contain("self.ctx.error_message_at(phase3_error_index)")

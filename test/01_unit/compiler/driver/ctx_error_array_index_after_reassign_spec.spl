@@ -1,0 +1,60 @@
+use std.spec.{describe, it, expect}
+
+# Reproducing spec for
+# doc/08_tracking/bug/stage3_selfhost_phase3_error_array_index_after_struct_reassign_silently_noops_2026-08-10.md
+#
+# Shape under test: index an array field reached through a struct local that was
+# just reassigned from a function's return value. In the Stage-3 self-host
+# (pure-Simple native codegen) `.len()` on that field returned the correct count
+# while every direct index silently produced nothing. This spec pins the correct
+# behaviour so any engine reachable from `bin/simple test` regresses loudly.
+
+struct SpecCtx:
+    var errors: [text]
+
+struct SpecHolder:
+    var ctx: SpecCtx
+
+fn _make_spec_ctx() -> SpecCtx:
+    var e: [text] = []
+    e.push("alpha")
+    e.push("beta")
+    e.push("gamma")
+    return SpecCtx(errors: e)
+
+describe "array index after struct reassign from a returned value":
+    it "reports the same count that indexing can actually reach":
+        var h = SpecHolder(ctx: SpecCtx(errors: []))
+        val produced = _make_spec_ctx()
+        h.ctx = produced
+        val n = h.ctx.errors.len()
+        expect(n).to_equal(3)
+        var reached: [text] = []
+        var i = 0
+        while i < n:
+            reached.push(h.ctx.errors[i])
+            i = i + 1
+        expect(reached.len()).to_equal(3)
+        expect(reached[0]).to_equal("alpha")
+        expect(reached[2]).to_equal("gamma")
+
+    it "reads the field through a typed local alias too":
+        var h = SpecHolder(ctx: SpecCtx(errors: []))
+        h.ctx = _make_spec_ctx()
+        val direct: [text] = h.ctx.errors
+        expect(direct.len()).to_equal(3)
+        expect(direct[0]).to_equal("alpha")
+
+    it "reads the field through a method-shaped accessor":
+        # The accessor shape is what driver_types.CompilerContext.error_message_at
+        # uses, because a method call on the owner was the only shape measured to
+        # work in the failing Stage-3 binary.
+        var h = SpecHolder(ctx: SpecCtx(errors: []))
+        h.ctx = _make_spec_ctx()
+        expect(_at(h.ctx, 1)).to_equal("beta")
+        expect(_at(h.ctx, 99)).to_equal("")
+
+fn _at(c: SpecCtx, index: i64) -> text:
+    if index < 0 or index >= c.errors.len():
+        return ""
+    c.errors[index]
