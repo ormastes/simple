@@ -546,3 +546,51 @@ prevent.
 the landing worktree would let the guard run and the push succeed, but the
 verdict would describe a tree nobody is pushing. That is `--no-verify` wearing a
 disguise, and the standing instruction forbids it. Blocked and reported instead.
+
+## 2026-08-17 — BUILD-SIDE PROCESS ISOLATION IS GENUINELY BLOCKED (082200ce8af)
+
+Answered by reading code, with file:line evidence. **A child process CANNOT
+compile one module from its source path alone.** Field offsets in a module's MIR
+are a function of the WHOLE PROGRAM:
+
+- One `MirLowering` instance is shared across all modules
+  (`driver_pipeline_lowering.spl:202,255`), and a whole-program PREPASS registers
+  every module's HIR struct layout before any module lowers (`:209-215,262-263`).
+  The comment at `:203-208` records why: without it an imported struct's field
+  order is unknown and `resolve_field_index` defaulted to 0 — a cross-module
+  SEGV. Consumed at `module_lowering.spl:896,905-926`.
+  **A source-only child would emit objects with WRONG FIELD OFFSETS, silently.**
+- Two whole-program passes mutate `mir_modules` AFTER lowering: async state
+  machines (`driver_pipeline_passes.spl:27`), AOP rewrites
+  (`driver_pipeline_aop.spl:94-126`).
+- `_compile_frozen_module_capsule` fails `capsule-registry-mismatch` unless the
+  storage registry identity matches — a hash over ALL modules' rows plus
+  `mir_modules.keys()` (`driver_types.spl:806-839,786-789`), unreproducible from
+  one closure; re-registration is refused once frozen (`:618,641`).
+- Existing single-file entries (`driver_api_compile_single.spl:12-55`,
+  `driver_api_native_single.spl:11,24`) take one path but load the ENTIRE import
+  closure and lower it together — recompiling the closure N times, the opposite
+  of the goal.
+
+**MIR serialization does not exist.** `grep -rn deserialize | grep -i mir` = 0
+hits (control `serialize_mir_module` = 3, so the scan works).
+`mir_serialization.spl:13` is explicitly a lossy functions-only compatibility
+shape that drops statics/constants/types; `mir_json.spl` is emit-only.
+`FrozenStorageModuleSnapshotV1` has no serializer at all.
+
+**Shortcut explicitly REJECTED (record this so nobody retries it):** the parent
+could pass `capsule_identity` on argv so a child writes a conforming
+`.capsule-receipt` (`driver_aot_native_output.spl:186-196`). That would let
+`driver_native_collect_capsule_result_v1` (`:198`) promote a WRONG-OFFSET object
+into the cache as AUTHENTICATED — a green build producing a miscompiled program.
+Strictly worse than today's loud SIGSEGV.
+
+**Precondition to unblock — one of:**
+1. a round-trippable MIR + storage-snapshot format WITH a reader, gated by a
+   `serialize -> deserialize -> native_capsule_mir_identity_v1` identity test;
+   then the one-module CLI really is small; or
+2. source-derivable stable field ordering for imported structs — i.e. the
+   still-zero-caller `interface_digest_of` (`cache/action_key.spl:199`).
+
+**Scope of what is actually missing:** run-to-end and outcome classification
+ALREADY work in-process on the build side. Only crash CONTAINMENT is blocked.
