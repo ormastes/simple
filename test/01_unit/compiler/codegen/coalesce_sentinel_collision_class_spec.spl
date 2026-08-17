@@ -1,0 +1,86 @@
+# Coalesce / nil-sentinel collision — similar-problem detection spec (defect CLASS)
+#
+# CLASS: a raw, unboxed machine word handed to a runtime nil test. The runtime
+# encodes nil as the bare word 0 or 3 (TAG_SPECIAL = 0b011,
+# src/compiler_rust/runtime/src/value/tags.rs:7; rt_is_none in
+# src/compiler_rust/runtime/src/value/objects.rs). Any scalar whose VALUE is one
+# of those sentinels is therefore indistinguishable from "absent" once it
+# reaches that comparison unboxed — the answer is silently replaced by the
+# `??` default and nothing is logged.
+#
+# History: doc/08_tracking/bug/tag_boxing_value_corruption_family_triage_2026-08-01.md #2
+# (`s.index_of("(") ?? d` returned d when the true index was 3). That was fixed
+# statically in lower_coalesce (hir/lower/expr/control.rs) for non-nullable
+# scalars, but the fix DELIBERATELY exempts the optional accessors
+# (first/last/get/min/max/pop/remove/at), which still take the runtime check —
+# so the class is not closed. This spec sweeps the whole class rather than the
+# one shape that was reported.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT for this defect. An in-process example can never
+# go red here. The oracle is the sibling run-path probe
+# `probe_coalesce_sentinel_collision_jit.spl`, executed as a subprocess under
+# BOTH engines; every check inside it compares against an absolute literal, never
+# "the engines agree".
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_coalesce_sentinel_collision_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "`??` never mistakes a real scalar for the nil sentinel":
+    it "keeps every low-3-bit value intact under the interpreter":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm — it holds a typed Value and never reaches the raw-word comparison, so a red here means the probe itself is broken")
+        expect(interp).to_contain("COALESCE_SENTINEL PROBE: ALL PASS")
+
+        step("The probe must actually have executed, not exited early")
+        expect(interp).to_contain("PASS scalar_3")
+        expect(interp).to_contain("PASS index_of_coalesce")
+
+    it "keeps every low-3-bit value intact under the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("Sweep every tag bit pattern 0..8 as a plain local; 0 (SPECIAL_NIL) and 3 (TAG_SPECIAL) are the historically fatal two")
+        expect(jit).to_contain("PASS scalar_0")
+        expect(jit).to_contain("PASS scalar_3")
+        expect(jit).to_contain("PASS scalar_7")
+
+        step("The original reporter's shape: a search result that happens to be 3")
+        expect(jit).to_contain("PASS index_of_coalesce")
+
+        step("Derived and negative values take the same path")
+        expect(jit).to_contain("PASS scalar_derived3")
+        expect(jit).to_contain("PASS scalar_neg3")
+
+        step("The opposite failure mode: a genuinely-absent accessor must still yield the default, never leak the raw sentinel 3 as an integer")
+        expect(jit).to_contain("PASS empty_first_default")
+        expect(jit).to_contain("PASS oob_get_default")
+
+        step("And a PRESENT accessor result whose value IS a sentinel must survive — this is the half the static lower_coalesce fix deliberately does not cover (see doc/08_tracking/bug/coalesce_optional_accessor_sentinel_value_eaten_jit_2026-08-17.md)")
+        expect(jit).to_contain("PASS present_first_is_3")
+        expect(jit).to_contain("PASS present_get_is_0")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("COALESCE_SENTINEL PROBE: ALL PASS")
+
+    it "shows no sentinel-substitution signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("No check may have failed under either engine")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

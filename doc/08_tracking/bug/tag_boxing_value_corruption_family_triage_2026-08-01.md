@@ -1,7 +1,11 @@
 # Tag-boxing value-corruption family — three-lane triage
 
 - **Filed:** 2026-08-01
-- **Status:** 1 of 4 FIXED and landed; 1 does not reproduce; 2 OPEN
+- **Status:** re-verified 2026-08-17 — **all four original repros are now GREEN
+  on both interpreter and JIT.** #2 is fixed for the shape reported here, but a
+  *residual* of the same class is live and split out to
+  `coalesce_optional_accessor_sentinel_value_eaten_jit_2026-08-17.md`.
+  (Historical status line: 1 of 4 FIXED and landed; 1 does not reproduce; 2 OPEN.)
 - **Verdict on the family:** **NOT one root cause. Four separate sites.** PROVED.
 
 Four defects were filed separately and looked like one shared cause — a tagged
@@ -27,7 +31,7 @@ a reading.
 | # | symptom | interp | JIT | native | verdict |
 |---|---------|--------|-----|--------|---------|
 | 1 | `list.get(i)` returns `value << 3` | correct | correct | correct | DOES NOT REPRODUCE — fixed upstream since 2026-07-28 |
-| 2 | `??` on a raw i64 whose value is 3 | correct | **WRONG** | unsupported | OPEN — JIT only |
+| 2 | `??` on a raw i64 whose value is 3 | correct | correct (2026-08-17) | unsupported | **FIXED as reported**; residual on optional accessors split out |
 | 3 | `.find()` result breaks `text[:idx]` | error | **WRONG** | error | **FIXED** — was never tag-boxing |
 | 4 | `to_text` on an erased `Any` bool | correct | correct | not re-run | **FIXED (interpreter+JIT) — verified 2026-08-07**, see update below |
 
@@ -65,7 +69,35 @@ original report's BIP-39 note turned on W1006 demoting that module to the
 interpreter; that demotion is still what makes the module's arithmetic run on
 the correct lane for the OTHER open defects here.
 
-## 2 — `??` on a raw i64 whose value is 3 — OPEN, JIT ONLY
+## 2 — `??` on a raw i64 whose value is 3 — FIXED as reported; residual split out
+
+**Update 2026-08-17 — re-measured on the deployed `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, Rust seed, mtime 2026-08-16),
+both lanes via `SIMPLE_EXECUTION_MODE`:**
+
+| case | interpreter | JIT |
+|------|-------------|-----|
+| `val n = 3` -> `n ?? 777` | 3 | **3** (was 777) |
+| `s.index_of("(") ?? 999999` | 3 | **3** (was 999999) |
+| every value 0..8, plus `0-3` and `1+2` | correct | correct |
+
+Classified by CONTENT, not ancestry: `lower_coalesce`
+(`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:1774`) now lowers
+`??` to the identity when the left operand's `TypeId` is a statically
+non-nullable scalar, with a long comment naming this exact defect. That is the
+fix, and it is present in current source.
+
+**Residual, still LIVE — new doc.** The same fix deliberately EXEMPTS the
+optional accessors (`first/last/get/min/max/pop/remove/at`, control.rs:1815-1822),
+which keep the runtime nil check. So `[3, 9].first() ?? -1` returns **-1** under
+the JIT and **3** under the interpreter. Filed as
+`doc/08_tracking/bug/coalesce_optional_accessor_sentinel_value_eaten_jit_2026-08-17.md`,
+gated (RED by design) by
+`test/01_unit/compiler/codegen/coalesce_sentinel_collision_class_spec.spl`
+and its run-path probe. The reported shape alone stays green — only the
+class-sweep detection spec caught it.
+
+### Original report (OPEN, JIT ONLY) — superseded by the update above
 
 ```simple
 fn main():

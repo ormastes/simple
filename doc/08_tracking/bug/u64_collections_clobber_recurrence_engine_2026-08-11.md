@@ -1,9 +1,14 @@
 # The `collections.rs` clobber is ONE commit replayed 6 times — and it is still armed
 
 - **Date:** 2026-08-11
-- **Status:** ROOT CAUSE FOUND. Origin is currently repaired, but the mechanism that
-  re-breaks it is **still live**. A 7th recurrence will happen on the next push
-  from the shared working copy.
+- **Status (updated 2026-08-17):** ROOT CAUSE FOUND; tree is healthy
+  (`collections.rs` 6200 lines, `HeapObjectType::UInt` consistent); the
+  "7th recurrence is armed" claim was already retracted below; and the
+  recurrence is now **proven covered fail-closed** by two existing pre-push
+  guards, verified against the real incident ranges — see the measured table in
+  §Fix item 4. **No new guard is warranted.** Remaining OPEN work is only the
+  source-clone hygiene in items 1-3 (abandoning the replay change in the
+  originating worktrees), which cannot be done from this repo.
 - **Severity:** BLOCKER-class recurrence — each occurrence makes `origin/main`
   uncompilable for every session.
 
@@ -129,19 +134,51 @@ source has to be removed:
    `collections.rs` to the 6012-line blob in the working copy and in any commit
    in that stack that carries the stale one.
 3. Same check in `simple-gpu-mmu-interface-wt`.
-4. **Guard:** none of the seven pre-push guards catches this.
-   `check-runtime-api-regression-push.shs` greps for `rt_NAME(...) {`
-   *definitions* at range endpoints — but this clobber is a rebase replay, so
-   for most pushes the symbols are absent at *both* endpoints and no removal is
-   detected. The cheap durable check is a floor on
-   `runtime/src/value/collections.rs` line count (healthy 6012, clobbered 4211),
-   or wiring `check-c-runtime-compiles-push.shs`'s sibling — an actual
-   `cargo check` — into the mandatory set. Note that
-   `check-seed-builds-push.shs` *would* have caught every one of these, since
-   the range touches `src/compiler_rust/`; it is worth verifying it is actually
-   executing, given
-   `doc/08_tracking/bug/fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md`
-   found the hook wiring silently downgraded to advisory.
+4. **Guard: MEASURED 2026-08-17 — this is now covered fail-closed by two
+   EXISTING guards. No new guard is needed, and a line-count floor on
+   `collections.rs` would be a redundant, brittle duplicate. Do not add one.**
+
+   The doc's earlier claim ("none of the seven guards catches this") was half
+   right. Both halves were measured directly against the real incident commits
+   in this worktree:
+
+   | range | guard | verdict |
+   |---|---|---|
+   | `6e2f613d302~1..6e2f613d302` (first replay onto a healthy base) | `check-runtime-api-regression-push.shs` | `FAIL — 2669 symbol(s) checked, 45 symbol(s) removed: rt_array_each rt_array_map …` (exit 1) |
+   | `6e2f613d302..2b833f5f09e` (replay onto an already-clobbered base) | `check-runtime-api-regression-push.shs` | `PASS — 2673 symbol(s) checked, 0 removed` (exit 0) — **the gap this doc named is real** |
+   | `6e2f613d302..2b833f5f09e` (same range) | `check-seed-builds-push.shs` | `FAIL — cargo check failed in 2b833f5f09e: error[E0432]: unresolved imports value::rt_array_each, value::rt_array_map, value::rt_array_reduce, value::rt_map, value::rt_value_unbox_int` (exit 1) |
+
+   The two are complementary by construction: the symbol guard is a **delta**
+   check and is therefore blind when both endpoints are stale, while the seed
+   guard `cargo check`s the **NEW TIP absolutely** (isolated
+   `git worktree add --detach`, `cargo check --release --bin simple`), so a
+   broken-at-both-endpoints tip still FAILs. Every replay range touches
+   `src/compiler_rust/`, so the seed guard never takes its no-op fast path here.
+
+   Enforcement verified the same day, which is the half
+   `fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md` warns about:
+   `core.hooksPath` is unset (default), `.git/hooks/pre-push` is a symlink to
+   `scripts/check/pre-push-conflict-tree-guard.shs` and resolves to mode
+   `-rwxrwxr-x`, and that script wires both guards at lines 131-132.
+   `check-seed-builds-push.shs` is itself `-rwxrwxr-x`.
+
+   Residual hole, stated rather than papered over: if a future replay range
+   touched **no** file under `src/compiler_rust/` or `src/runtime/`, the seed
+   guard takes its fast path and the symbol guard sees no delta, so an
+   already-broken tip would pass. That is a "broken origin stays broken" case,
+   not a newly introduced regression, and it is what
+   `watch-origin-tree-health.shs` (pull-based, independent of the pusher's
+   hooks) exists to notice. Not closing it here.
+
+   Current tree state at re-measure: `collections.rs` = **6200 lines** (healthy
+   band; clobbered blob is 4211), `heap.rs:46` defines `UInt = 0x1D` and
+   `collections.rs` uses `HeapObjectType::UInt` with **zero** `WideInt`
+   references — the naming split described above is resolved, consistently, in
+   the `UInt` direction. Note also that the stale blob `95b6ac77e5` does **not**
+   contain the `WideInt` mismatch: at both `6e2f613d302` and `05520066d13` the
+   4211-line file has 0 `WideInt` uses against a `UInt = 0x1D` `heap.rs`. The
+   break those commits caused was the 45 removed `rt_*` symbols still
+   `pub use`-re-exported from `lib.rs` (E0432), not the rename.
 
 ## Evidence commands
 
