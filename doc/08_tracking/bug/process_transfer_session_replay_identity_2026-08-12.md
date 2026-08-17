@@ -1,6 +1,6 @@
-## Closure 2026-08-17 — source-fixed
+## Production integration 2026-08-17 — source complete; executable evidence pending
 
-Status: source-fixed
+Status: source-complete / focused pure-Simple execution pending
 
 The missing host-side authority is now implemented in pure Simple. The V2
 boundary authenticates the complete canonical V1 wire plus session ID and
@@ -13,14 +13,27 @@ inbox and destroys accepted-but-uncommitted frames.
 Focused regression evidence is
 `test/01_unit/lib/nogc_async_mut/parent_commit_authenticated_session_spec.spl`:
 wire mutation, wrong-key authentication, exact replay, PID/namespace reuse,
-parent restart, and cancellation all fail closed. The existing
-`parent_commit_piped_result_spec.spl` remains the bounded exec-isolated child
-and cleanup evidence; the cryptographic admission owner is transport-neutral.
+parent restart, and cancellation all fail closed.
+
+`parent_commit_piped_process.spl` now integrates that authority into the real
+process reader. `SPRF2` carries a fixed-width HMAC beside the canonical `SPRF1`
+frame; authentication runs before generation/replay admission; spawn derives
+the parent-issued identity; and cancellation revokes the reader's owned inbox.
+The V1 constructor remains only as the explicit compatibility surface.
+
+The exec-isolated scenario in `parent_commit_piped_result_spec.spl` emits a
+wrong-session frame, one valid frame, and an exact replay before remaining
+alive for cancellation. It asserts identity issuance, authentication-required
+decode, wrong-session/replay rejection, and revocation. This worktree has no
+deployed pure-Simple executable, so the scenario has not been executed here;
+source completion is not a green runtime verdict.
 
 Owned source:
 
 - `src/lib/common/structural/transfer/process_frame_auth.spl`
 - `src/lib/nogc_async_mut/parent_commit_authenticated_session.spl`
+- `src/lib/nogc_async_mut/parent_commit_piped_process.spl`
+- `test/03_system/feature/language/parent_commit_piped_result_spec.spl`
 
 ## Triage 2026-08-17 — superseded by source closure above
 
