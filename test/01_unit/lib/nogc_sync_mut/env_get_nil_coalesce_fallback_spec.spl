@@ -1,0 +1,41 @@
+# Reproducing spec — env_get_nil_coalesce_dead_fallback_2026-07-25
+#
+# `std.io_runtime.env_get` returns a NON-nullable `text`, so the ~680-site idiom
+# `env_get(k) ?? default` is a DEAD fallback: `??` never fires on `""`, the
+# caller silently receives the empty string, and nothing is logged. Measured
+# before the fix on bin/simple:
+#
+#   result=[]              <- expected result=[FALLBACK]
+#
+# The fix adds `env_get_opt` (nullable) and `env_get_or` (explicit default) in
+# src/lib/nogc_sync_mut/io_runtime.spl. These examples fail before that change
+# (the symbols do not exist) and pass after.
+
+use std.spec.*
+use std.io_runtime.{env_get, env_get_opt, env_get_or, env_set}
+
+val UNSET_KEY: text = "SPL_ENV_GET_FALLBACK_SPEC_UNSET_9713"
+val SET_KEY: text = "SPL_ENV_GET_FALLBACK_SPEC_SET_9713"
+
+describe "env_get nil-coalesce fallback":
+
+    it "env_get on an unset key yields the empty string, not nil":
+        # This is the defect itself, pinned so a future change to env_get's
+        # return type shows up here as an intentional break rather than silently.
+        expect(env_get(UNSET_KEY)).to_equal("")
+
+    it "env_get_opt on an unset key lets ?? take the default":
+        expect(env_get_opt(UNSET_KEY) ?? "FALLBACK").to_equal("FALLBACK")
+
+    it "env_get_or on an unset key returns the default":
+        expect(env_get_or(UNSET_KEY, "FALLBACK")).to_equal("FALLBACK")
+
+    it "env_get_opt on a set key returns the live value, not the default":
+        val ok = env_set(SET_KEY, "live-value")
+        expect(ok).to_equal(true)
+        expect(env_get_opt(SET_KEY) ?? "FALLBACK").to_equal("live-value")
+
+    it "env_get_or on a set key returns the live value, not the default":
+        val ok = env_set(SET_KEY, "live-value")
+        expect(ok).to_equal(true)
+        expect(env_get_or(SET_KEY, "FALLBACK")).to_equal("live-value")
