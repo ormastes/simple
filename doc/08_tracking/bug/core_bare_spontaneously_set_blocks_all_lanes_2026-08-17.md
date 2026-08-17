@@ -19,6 +19,52 @@ While it is set:
 So a single stray line blocks **every** push and rebase on the host, for every
 lane, with an error that does not name the cause.
 
+## Investigation 2026-08-17 — ruled out BY TEST, not by reading
+
+Each of these was executed against a throwaway fixture repo, not assumed:
+
+| hypothesis | test | result |
+|---|---|---|
+| `jj git init --git-repo=<repo>` marks the backing repo bare | ran it against a fresh non-bare repo | `core.bare` stayed `false` — **ruled out** |
+| routine jj ops flip it | `jj status`, `jj git export`, `jj git import`, `jj log -r @` | all left `false` — **ruled out** |
+| `git sparse-checkout init` (which enables `extensions.worktreeConfig`) writes it | fresh repo + worktree + `sparse-checkout init --cone` | `bare` stayed `false`, extension enabled — **ruled out** |
+| jj colocation in this tree | `ls .jj` | absent — **ruled out** |
+| repo tooling sets it | `grep -rn 'core\.bare' scripts/ src/ tools/ .claude/` | zero hits (only vendored VS Code completion data elsewhere) — **ruled out** |
+| a stray global setting | `~/.gitconfig` | no `bare` entry — **ruled out** |
+| shell history | `.bash_history`, `.zsh_history` | no hits — **ruled out** |
+
+### Relevant discovery
+
+`extensions.worktreeConfig = true` IS enabled on this repo (389 of 401
+worktrees carry a `config.worktree`, all from sparse-checkout). This matters:
+with that extension, git treats `core.bare` as a **per-worktree** setting and
+its `init_worktree_config()` path will MOVE an existing `core.bare = true` out
+of `.git/config` into a `config.worktree`. That explains how the value can
+appear to migrate between files, but it does not create a `true` — git only
+relocates one that already exists.
+
+### Leading hypothesis (not yet proven)
+
+An **interrupted operation** that sets `core.bare true`, does work, and restores
+`false` — killed before the restore. Two facts support it: earlyoom is actively
+SIGTERM-killing processes on this host (`-r 3600 --prefer ^(simple|rustc|...)`),
+and this exact failure mode was reproduced *accidentally* during this
+investigation — a `pkill -f` pattern matched its own shell and killed it midway
+between `git config core.bare true` and the restoring `git config core.bare
+false`, leaving the flag stranded exactly as observed in the wild.
+
+### Detector armed
+
+A polling detector is running (50 ms, rolling `ps` buffer of git/jj/sj
+processes, dumped on any change to the `bare = true` count). **Self-tested in
+both directions and confirmed to fire.** Known limit, stated rather than
+assumed: at 50 ms it will NOT attribute a ~5 ms `git config` invocation — it
+missed the self-test's own writer — so it reliably DETECTS a flip and only
+attributes a longer-running writer. Anyone continuing this should reach for
+root-level `fanotify`/`auditd` on `.git/config`, which is the only thing that
+attributes a write that fast; `ptrace`-based attach is blocked on this host
+(`ptrace_scope=1`).
+
 ## What is NOT the cause
 
 - Nothing in the repo writes it: `grep -rn 'core\.bare\|core_bare' scripts/ src/ tools/ .claude/` returns zero hits.
