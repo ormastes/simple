@@ -114,6 +114,37 @@ busy"). Post-deploy `bin/simple run` on the repro prints `ok`, rc=0.
 Because the source was never touched, this is an ablation on the binary axis
 alone: it proves the deployed artifact, not the tree, was the defect.
 
+## Guard re-run after the redeploy (the residual FAIL is a DIFFERENT defect)
+
+`sh scripts/check/check-native-trailing-default-param.shs`, run from the main tree
+on the rebuilt seed, `rc` read into a variable:
+
+```
+GUARD_RC=1
+FAIL — native-build failed to compile the fixture (exit 1, log saved to /tmp/check-native-trailing-default-param.2785153.log)
+```
+
+That is a **real verdict line**, exit 1 — not `ERROR — nothing was checked` / exit 2,
+and the fatal `--selftest` ran to completion first. So the guard is functioning; it
+is reporting a genuine downstream failure.
+
+**The failure mode changed with the seed**, which is itself evidence the old symptom
+was binary-bound:
+
+| seed | guard failure |
+|---|---|
+| stale | `llc-20: invalid redefinition of function '__simple_main'` (LLVM lane) |
+| rebuilt | `error[E1002]: function `TMPDIR` not found`, during the `parse` step |
+
+The LLVM redefinition is gone. The residual `TMPDIR` error is unrelated to the
+fixture (neither `main.spl`, `dep.spl` nor the guard script mentions `TMPDIR`); the
+only occurrence in the tree is
+`src/compiler/70.backend/backend/runtime_compiler.spl:55`,
+`val tmpdir = rt_env_get("TMPDIR")` — i.e. a **string-literal argument being
+resolved as a function name** somewhere on the native-build path. That belongs to
+the `native_trailing_default_param_guard_*` / `native_build_static_method_*` open
+family, not to this record, and is left OPEN rather than papered over.
+
 ## Second-order defect worth its own attention
 
 The `expected Fn, found Assign` diagnostic carries **no file line/column** when
