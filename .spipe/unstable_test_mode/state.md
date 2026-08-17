@@ -73,7 +73,7 @@ The gaps are elsewhere — see below.
 
 | lane | owns | status |
 |---|---|---|
-| A | `test_runner_args.spl`, `test_runner_types.spl` | pending |
+| A | `test_runner_args.spl`, `test_runner_types.spl` | DONE `a3738dd8d0c` |
 | B | `test_executor_parsing.spl`, `test_runner_output.spl` | uncommitted WIP present |
 | C | `test/fixtures/unstable_mode/**` (new files only) | pending |
 | D | `test_runner_main.spl` | pending |
@@ -84,3 +84,12 @@ The gaps are elsewhere — see below.
 - 2026-08-17 — D1 established by code reading; `run_all` misattribution
   corrected. Lane A/B WIP in `test_executor_parsing.spl` +
   `test_runner_output.spl` is uncommitted and at risk.
+- 2026-08-17 — Lane A landed `a3738dd8d0c`: `unstable_mode` +
+  `unstable_mode_set` on `TestOptions`, `--unstable` / `--no-unstable` parsed.
+  Two useful side findings:
+  - **Partial struct literals are legal here** — `execution_strategy.spl:245`
+    builds `TestOptions` with ~30 of 81 fields. Adding a field does NOT break
+    other construction sites, so field additions are safe across lanes.
+  - `test_runner_args.spl` contains **no help/usage text at all**. The
+    user-visible flag help lives in some other file and is still UNDOCUMENTED
+    for `--unstable`. Open follow-up.
