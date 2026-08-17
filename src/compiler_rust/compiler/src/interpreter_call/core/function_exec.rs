@@ -980,19 +980,27 @@ fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) {
     };
     let mut updates: Vec<(String, Value)> = Vec::new();
     for (name, new_field) in callee_fields.iter() {
-        if !matches!(
-            new_field,
-            Value::Array(_) | Value::Dict(_) | Value::ByteArray(_)
-        ) {
+        let Some(old_field) = caller_fields.get(name) else {
+            continue;
+        };
+        if std::mem::discriminant(old_field) != std::mem::discriminant(new_field) {
             continue;
         }
-        match caller_fields.get(name) {
-            // Same kind on both sides and actually changed — carry it back.
-            Some(old_field)
-                if std::mem::discriminant(old_field) == std::mem::discriminant(new_field)
-                    && old_field != new_field =>
-            {
+        match new_field {
+            Value::Array(_) | Value::Dict(_) | Value::ByteArray(_) if old_field != new_field => {
                 updates.push((name.clone(), new_field.clone()));
+            }
+            // A struct-typed field is itself value-copied, but the containers
+            // NESTED inside it are still shared handles, so recurse rather than
+            // stopping at depth one. `self.inner.values[k] = v` through a
+            // by-value receiver must reach the caller for the same reason
+            // `self.values[k] = v` does.
+            Value::Object { .. } => {
+                let mut merged = old_field.clone();
+                merge_shared_collection_fields(&mut merged, new_field);
+                if merged != *old_field {
+                    updates.push((name.clone(), merged));
+                }
             }
             _ => {}
         }

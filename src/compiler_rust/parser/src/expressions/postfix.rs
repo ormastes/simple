@@ -1271,6 +1271,26 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            // A separator between arguments. Reached when the previous argument
+            // ended at a closing `>` of a nested list (the `Gt` branch above
+            // `continue`s without consuming what follows), which `parse_type`
+            // cannot start on.
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+                continue;
+            }
+
+            // `Ident <` opens a NESTED generic argument list. Step over the name
+            // only and let this loop's own `Lt`/`Gt`/`Comma` branches walk the
+            // nesting, instead of handing the whole thing to `parse_type`.
+            // `parse_type` would swallow the inner list and then fail on an inner
+            // const-generic argument (`Box2<Box2<i64, 4>, i32>`), losing both the
+            // depth bookkeeping and the const-argument span.
+            if matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Lt) {
+                self.advance();
+                continue;
+            }
+
             // Try to parse a type arg; if that fails this is not a valid generic list
             match self.parse_type() {
                 Ok(_) => {}
