@@ -136,3 +136,31 @@ future triage that defers this as "needs a GPU/GL host" is wrong.
 The only unblock remains a `qemu-system-x86_64` actually built with working
 `--enable-opengl` (verify with the `nm -D` probe above before trusting a host).
 Status stays OPEN and correctly hardware-independent.
+
+---
+
+## 2026-08-17 macOS ARM host audit and portable classifier
+
+The current Apple Silicon host has Homebrew QEMU 10.2.2, but its AArch64
+system emulator does not provide the GL virtio-gpu device:
+
+```
+$ qemu-system-aarch64 --version
+QEMU emulator version 10.2.2
+$ qemu-system-aarch64 -M none -device virtio-gpu-gl,help
+qemu-system-aarch64: -device virtio-gpu-gl,help: Device 'virtio-gpu-gl-pci' not found
+```
+
+This is **not** evidence for or against the Linux module-symbol defect and is
+not Linux virgl/Venus runtime evidence. It is a separate, fail-closed
+`device-absent` result on macOS ARM.
+
+`scripts/check/check-qemu-virtio-gpu-gl-capability.shs` now runs the real QEMU
+device-help probe with a portable shell watchdog (no GNU `timeout`
+dependency). It distinguishes `module-symbol-mismatch`, `opengl-disabled`,
+`device-absent`, `qemu-missing`, and an unclassified `probe-failed`; only a
+successful options response is `ready`. Every result explicitly leaves Linux
+virgl evidence unclaimed. A future Linux build remains admissible only when
+this probe succeeds; symbol inspection is diagnostic rather than a portable
+admission rule because monolithic/static QEMU builds need not export the same
+dynamic-symbol surface.

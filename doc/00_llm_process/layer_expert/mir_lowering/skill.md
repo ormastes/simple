@@ -64,6 +64,15 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
 
 ## Gotchas
 
+0. **Bare match identifiers need value-before-capture resolution:** flat HIR
+   represents `case NAME:` as `HirPatternKind.Binding` whether `NAME` is a
+   fresh capture or a current-module scalar `val`. `lower_match_case` must
+   first consult `builder.module.constants`, normalize exact int/bool/text
+   constants to literal patterns, and dispatch `norm_arms`. Only an unresolved
+   name remains an irrefutable capture. Text patterns compare by content with
+   `rt_text_eq_any`, never by pointer identity. Regression:
+   `test/01_unit/compiler/codegen/match_bare_val_constant_spec.spl`.
+
 1. **Arrays are value types:** passed by copy, so `.push()` / `.pop()` /
    `.reverse()` return a new array (not mutating in-place). Statement-position
    calls are discarded on native (no side effect). Always assign or use in

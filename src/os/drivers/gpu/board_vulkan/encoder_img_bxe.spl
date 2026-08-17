@@ -25,18 +25,13 @@
 # vendor-internal firmware-interface format (`pvr_rogue_fwif*` in the
 # kernel driver) that is versioned per firmware release and not a stable,
 # freely-encodable ISA the way Adreno CP packets or Intel batch-buffer
-# opcodes are. This repo has no verified, byte-exact copy of that kernel
-# UAPI struct's field OFFSETS in front of it right now (no local kernel
-# header, no reachable network fetch route wired into this task), so this
-# encoder does NOT claim byte-exact conformance to the real
-# `struct drm_pvr_job` layout. What IS honestly encodable, and is encoded
-# below: the FIELD SET every PowerVR submission structurally requires
-# (job type, context handle, HWRT dataset handle, sync-in/out fence ops,
-# stream length) with a self-consistent, testable layout — deterministic
-# field offsets, a size field that provably equals the encoded payload
-# length, and alignment/range validation that rejects malformed input.
+# opcodes are. The host envelope is pinned byte-for-byte to Linux
+# `include/uapi/drm/pvr_drm.h` at the immutable revision recorded in
+# `pvr_drm_uapi_layout.spl`: 48-byte drm_pvr_job, indirect 16-byte
+# drm_pvr_sync_op elements, natural member alignment, and 64-bit total
+# alignment. Alignment/range validation fails closed before encoding.
 # The firmware-side CCB payload itself is treated as an OPAQUE blob: this
-# encoder carries its length and a single "opaque_firmware_blob" field and
+# encoder carries its pointer/length and a labelled opaque contract field and
 # never pretends to decompose or fabricate its internal encoding.
 #
 # This is why `submit_implemented` on `img_bxe_board_profile()` in
@@ -52,6 +47,7 @@
 # capture can be compared with the same comparator every other lane uses.
 
 use os.drivers.gpu.board_vulkan.boundary_cmdstream_canonicalize.{CmdField, CmdPacket, cmd_field, cmd_packet}
+use os.drivers.gpu.board_vulkan.pvr_drm_uapi_layout.*
 
 # One fence operation attached to a job: wait-on or signal, by sync-object
 # handle plus the point value (PowerVR sync objects are timeline-style,
@@ -72,15 +68,38 @@ pub fn img_bxe_sync_op(handle: i64, flags: i64, value: i64) -> ImgBxeSyncOp:
 pub struct ImgBxeJobDesc:
     job_type: text
     context_handle: i64
+    flags: i64
     hwrt_data_set_handle: i64
+    hwrt_data_index: i64
     stream_len: i64
+    cmd_stream_addr: i64
+    sync_ops_addr: i64
     sync_ops: [ImgBxeSyncOp]
 
 pub fn img_bxe_job_desc(job_type: text, context_handle: i64, hwrt_data_set_handle: i64, stream_len: i64, sync_ops: [ImgBxeSyncOp]) -> ImgBxeJobDesc:
-    ImgBxeJobDesc(job_type: job_type, context_handle: context_handle, hwrt_data_set_handle: hwrt_data_set_handle, stream_len: stream_len, sync_ops: sync_ops)
+    ImgBxeJobDesc(job_type: job_type, context_handle: context_handle, flags: 0,
+        hwrt_data_set_handle: hwrt_data_set_handle, hwrt_data_index: 0,
+        stream_len: stream_len, cmd_stream_addr: 0, sync_ops_addr: 0,
+        sync_ops: sync_ops)
+
+pub fn img_bxe_uapi_job_desc(job_type: text, context_handle: i64, flags: i64,
+                             stream_len: i64, cmd_stream_addr: i64,
+                             sync_ops_addr: i64, sync_ops: [ImgBxeSyncOp],
+                             hwrt_data_set_handle: i64, hwrt_data_index: i64) -> ImgBxeJobDesc:
+    ImgBxeJobDesc(job_type: job_type, context_handle: context_handle, flags: flags,
+        hwrt_data_set_handle: hwrt_data_set_handle, hwrt_data_index: hwrt_data_index,
+        stream_len: stream_len, cmd_stream_addr: cmd_stream_addr,
+        sync_ops_addr: sync_ops_addr, sync_ops: sync_ops)
 
 pub fn img_bxe_known_job_types() -> [text]:
     ["geometry", "fragment", "compute", "transfer"]
+
+pub fn img_bxe_job_type_u32(job_type: text) -> i64:
+    if job_type == "geometry": return 0
+    if job_type == "fragment": return 1
+    if job_type == "compute": return 2
+    if job_type == "transfer": return 3
+    -1
 
 fn _img_bxe_list_contains(items: [text], value: text) -> bool:
     var found = false
@@ -91,20 +110,14 @@ fn _img_bxe_list_contains(items: [text], value: text) -> bool:
 
 # === Layout constants ===
 #
-# Fixed-header field count for the envelope, before any sync ops: job_type,
-# flags(reserved-zero), context_handle, hwrt_data_set_handle, stream_len.
-# Each header field is one dword (4 bytes); every sync op is 3 dwords
-# (handle, flags, value) per PowerVR's timeline-sync-object shape. This is
-# this encoder's OWN internal layout — see the note above on why it is not
-# asserted to match the real kernel struct byte-for-byte.
-pub val IMG_BXE_HEADER_DWORDS: i64 = 5
-pub val IMG_BXE_SYNC_OP_DWORDS: i64 = 3
+# Exact fixed sizes from the pinned Linux UAPI. Sync operations are not inline
+# in drm_pvr_job; its drm_pvr_obj_array points to 16-byte elements.
+pub val IMG_BXE_HEADER_DWORDS: i64 = PVR_UAPI_JOB_SIZE / 4
+pub val IMG_BXE_SYNC_OP_DWORDS: i64 = PVR_UAPI_SYNC_OP_SIZE / 4
 pub val IMG_BXE_DWORD_BYTES: i64 = 4
 
 # `stream_len` is a byte length carried in a single dword field of this
-# encoder's own envelope layout — bound it to what a 32-bit unsigned length
-# field can hold so a caller cannot ask for a length that would overflow
-# that field when the real kernel struct's actual width is wired in later.
+# real `drm_pvr_job.cmd_stream_len` u32 field.
 pub val IMG_BXE_MAX_STREAM_LEN: i64 = 0xFFFFFFFF
 
 pub struct EncodeError:
@@ -114,11 +127,21 @@ pub struct EncodeError:
 fn encode_error(field_name: text, message: text) -> EncodeError:
     EncodeError(field_name: field_name, message: message)
 
-pub fn img_bxe_job_field_offset(field_index: i64) -> i64:
-    field_index * IMG_BXE_DWORD_BYTES
+pub fn img_bxe_job_field_offset(field_name: text) -> i64:
+    if field_name == "type": return PVR_UAPI_JOB_TYPE_OFFSET
+    if field_name == "context_handle": return PVR_UAPI_JOB_CONTEXT_HANDLE_OFFSET
+    if field_name == "flags": return PVR_UAPI_JOB_FLAGS_OFFSET
+    if field_name == "cmd_stream_len": return PVR_UAPI_JOB_CMD_STREAM_LEN_OFFSET
+    if field_name == "cmd_stream": return PVR_UAPI_JOB_CMD_STREAM_OFFSET
+    if field_name == "sync_ops": return PVR_UAPI_JOB_SYNC_OPS_OFFSET
+    if field_name == "hwrt": return PVR_UAPI_JOB_HWRT_OFFSET
+    -1
 
-pub fn img_bxe_sync_op_offset(header_dwords: i64, sync_index: i64) -> i64:
-    (header_dwords + sync_index * IMG_BXE_SYNC_OP_DWORDS) * IMG_BXE_DWORD_BYTES
+pub fn img_bxe_sync_op_offset(field_name: text) -> i64:
+    if field_name == "handle": return PVR_UAPI_SYNC_OP_HANDLE_OFFSET
+    if field_name == "flags": return PVR_UAPI_SYNC_OP_FLAGS_OFFSET
+    if field_name == "value": return PVR_UAPI_SYNC_OP_VALUE_OFFSET
+    -1
 
 # Every offset this encoder produces must be dword-aligned by construction
 # (every field is exactly one dword) — reject any offset that isn't, naming
@@ -129,10 +152,9 @@ pub fn img_bxe_check_alignment(offset: i64) -> Result<i64, EncodeError>:
         return Err(encode_error("offset", "offset is not dword-aligned (must be a multiple of " + IMG_BXE_DWORD_BYTES.to_text() + "): " + offset.to_text()))
     Ok(offset)
 
-# Total encoded payload size in bytes: header dwords + (sync ops * 3 dwords),
-# all dword-aligned by construction (every field is exactly one dword).
+# Total UAPI job-object size; sync objects live in a separate indirect array.
 pub fn img_bxe_job_payload_size(job: ImgBxeJobDesc) -> i64:
-    (IMG_BXE_HEADER_DWORDS + job.sync_ops.len() * IMG_BXE_SYNC_OP_DWORDS) * IMG_BXE_DWORD_BYTES
+    PVR_UAPI_JOB_SIZE
 
 # Validation: reject anything a real submission could never carry.
 # - job_type must be one of the known PowerVR job classes
@@ -143,37 +165,48 @@ pub fn img_bxe_job_payload_size(job: ImgBxeJobDesc) -> i64:
 pub fn img_bxe_job_is_valid(job: ImgBxeJobDesc) -> bool:
     if not _img_bxe_list_contains(img_bxe_known_job_types(), job.job_type):
         false
-    elif job.stream_len < 0:
+    elif job.stream_len < 0 or job.stream_len > IMG_BXE_MAX_STREAM_LEN:
         false
-    elif job.context_handle < 0 or job.hwrt_data_set_handle < 0:
+    elif job.context_handle < 0 or job.context_handle > 0xFFFFFFFF or job.hwrt_data_set_handle < 0 or job.hwrt_data_set_handle > 0xFFFFFFFF:
+        false
+    elif job.flags < 0 or job.flags > 0xFFFFFFFF:
+        false
+    elif job.hwrt_data_index < 0 or job.hwrt_data_index > 0xFFFFFFFF:
+        false
+    elif job.stream_len > 0 and (job.cmd_stream_addr <= 0 or job.cmd_stream_addr % 8 != 0):
+        false
+    elif job.stream_len == 0 and job.cmd_stream_addr != 0:
+        false
+    elif job.sync_ops.len() > 0 and (job.sync_ops_addr <= 0 or job.sync_ops_addr % 8 != 0):
+        false
+    elif job.sync_ops.len() == 0 and job.sync_ops_addr != 0:
+        false
+    elif (job.job_type == "compute" or job.job_type == "transfer") and (job.hwrt_data_set_handle != 0 or job.hwrt_data_index != 0):
         false
     elif img_bxe_job_payload_size(job) % IMG_BXE_DWORD_BYTES != 0:
         false
     else:
         var ok = true
         for op in job.sync_ops:
-            if op.handle < 0:
+            if op.handle < 0 or op.handle > 0xFFFFFFFF or op.flags < 0 or op.flags > 0xFFFFFFFF or op.value < 0:
                 ok = false
         ok
 
-# Encode one job into the shared CmdPacket schema. `length` is the dword
-# count INCLUDING the implicit header dword, matching the convention
-# `boundary_cmdstream_canonicalize.spl` already documents for the Intel
-# lane — this is the size field the spec proves equals the real payload.
+# Encode one pinned 48-byte drm_pvr_job layout into the shared canonical field
+# schema. `length` is its exact size in dwords; u64 fields occupy two dwords.
 pub fn img_bxe_encode_job(job: ImgBxeJobDesc) -> CmdPacket:
     var fields: [CmdField] = []
-    fields.push(cmd_field("job_type", job.job_type))
-    fields.push(cmd_field("context_handle", job.context_handle.to_text()))
-    fields.push(cmd_field("hwrt_data_set_handle", job.hwrt_data_set_handle.to_text()))
-    fields.push(cmd_field("stream_len", job.stream_len.to_text()))
-    fields.push(cmd_field("opaque_firmware_blob", "<" + job.stream_len.to_text() + "-byte-firmware-ccb-not-decoded>"))
-    var i: i64 = 0
-    while i < job.sync_ops.len():
-        val op = job.sync_ops[i]
-        fields.push(cmd_field("sync_handle", op.handle.to_text()))
-        fields.push(cmd_field("sync_flags", op.flags.to_text()))
-        fields.push(cmd_field("sync_value", op.value.to_text()))
-        i = i + 1
+    fields.push(cmd_field("type@0:u32", img_bxe_job_type_u32(job.job_type).to_text()))
+    fields.push(cmd_field("context_handle@4:u32", job.context_handle.to_text()))
+    fields.push(cmd_field("flags@8:u32", job.flags.to_text()))
+    fields.push(cmd_field("cmd_stream_len@12:u32", job.stream_len.to_text()))
+    fields.push(cmd_field("cmd_stream@16:u64", job.cmd_stream_addr.to_text()))
+    fields.push(cmd_field("sync_ops.stride@24:u32", PVR_UAPI_SYNC_OP_SIZE.to_text()))
+    fields.push(cmd_field("sync_ops.count@28:u32", job.sync_ops.len().to_text()))
+    fields.push(cmd_field("sync_ops.array@32:u64", job.sync_ops_addr.to_text()))
+    fields.push(cmd_field("hwrt.set_handle@40:u32", job.hwrt_data_set_handle.to_text()))
+    fields.push(cmd_field("hwrt.data_index@44:u32", job.hwrt_data_index.to_text()))
+    fields.push(cmd_field("cmd_stream_contract", "<" + job.stream_len.to_text() + "-byte-firmware-ccb-opaque>"))
     val dwords = img_bxe_job_payload_size(job) / IMG_BXE_DWORD_BYTES
     cmd_packet("PVR_SUBMIT_JOB:" + job.job_type, dwords, fields)
 
@@ -201,14 +234,40 @@ pub fn img_bxe_job_validate(job: ImgBxeJobDesc) -> Result<(), EncodeError>:
         return Err(encode_error("stream_len", "stream_len exceeds the 32-bit length field maximum (" + IMG_BXE_MAX_STREAM_LEN.to_text() + "): " + job.stream_len.to_text()))
     if job.context_handle < 0:
         return Err(encode_error("context_handle", "context_handle must be non-negative (kernel handles are unsigned): " + job.context_handle.to_text()))
+    if job.context_handle > 0xFFFFFFFF:
+        return Err(encode_error("context_handle", "context_handle must fit the UAPI u32 field"))
     if job.hwrt_data_set_handle < 0:
         return Err(encode_error("hwrt_data_set_handle", "hwrt_data_set_handle must be non-negative (kernel handles are unsigned): " + job.hwrt_data_set_handle.to_text()))
+    if job.hwrt_data_set_handle > 0xFFFFFFFF:
+        return Err(encode_error("hwrt_data_set_handle", "HWRT set handle must fit the UAPI u32 field"))
+    if job.flags < 0 or job.flags > 0xFFFFFFFF:
+        return Err(encode_error("flags", "flags must fit the UAPI u32 field"))
+    if job.hwrt_data_index < 0 or job.hwrt_data_index > 0xFFFFFFFF:
+        return Err(encode_error("hwrt.data_index", "HWRT data index must fit u32"))
+    if job.stream_len > 0 and (job.cmd_stream_addr <= 0 or job.cmd_stream_addr % 8 != 0):
+        return Err(encode_error("cmd_stream", "non-empty command stream requires a nonzero u64-aligned userspace pointer"))
+    if job.stream_len == 0 and job.cmd_stream_addr != 0:
+        return Err(encode_error("cmd_stream", "zero-length command stream must use a null pointer"))
+    if job.sync_ops.len() > 0 and (job.sync_ops_addr <= 0 or job.sync_ops_addr % 8 != 0):
+        return Err(encode_error("sync_ops.array", "non-empty sync-op array requires a nonzero u64-aligned userspace pointer"))
+    if job.sync_ops.len() == 0 and job.sync_ops_addr != 0:
+        return Err(encode_error("sync_ops.array", "empty sync-op array must use a null pointer"))
+    if (job.job_type == "compute" or job.job_type == "transfer") and (job.hwrt_data_set_handle != 0 or job.hwrt_data_index != 0):
+        return Err(encode_error("hwrt", "HWRT reference must be zero for non-render jobs"))
+    if not pvr_drm_uapi_layout_is_valid():
+        return Err(encode_error("uapi_layout", "pinned PowerVR UAPI layout authority is internally inconsistent"))
     img_bxe_check_alignment(img_bxe_job_payload_size(job))?
     var i: i64 = 0
     while i < job.sync_ops.len():
         val op = job.sync_ops[i]
         if op.handle < 0:
             return Err(encode_error("sync_ops[" + i.to_text() + "].handle", "sync handle must be non-negative: " + op.handle.to_text()))
+        if op.handle > 0xFFFFFFFF:
+            return Err(encode_error("sync_ops[" + i.to_text() + "].handle", "sync handle must fit the UAPI u32 field"))
+        if op.flags < 0 or op.flags > 0xFFFFFFFF:
+            return Err(encode_error("sync_ops[" + i.to_text() + "].flags", "sync flags must fit the UAPI u32 field"))
+        if op.value < 0:
+            return Err(encode_error("sync_ops[" + i.to_text() + "].value", "sync timeline value must be non-negative"))
         i = i + 1
     Ok(())
 

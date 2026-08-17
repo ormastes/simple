@@ -58,6 +58,8 @@ may run the bounded exact/adjacent diagnostic with:
 ```sh
 SIMPLE_ADMITTED_COMPILER_SHA256=<admitted-sha256> \
   SIMPLE_ADMITTED_RUNTIME_PATH=/absolute/path/to/admitted/runtime \
+  SIMPLE_ADMITTED_RUNTIME_RECEIPT=/absolute/path/to/runtime-admission.env \
+  SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256=<runtime-receipt-sha256> \
   sh scripts/check/check-stage3-aggregate-receiver-native.shs \
   /absolute/path/to/admitted/pure-simple/compiler
 ```
@@ -85,3 +87,37 @@ fix.
 
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
+
+## Current-source and authority audit 2026-08-17
+
+Audited local `71aedd12c3` and latest `origin/main` `df2e577a89`; the intervening
+commits recover Target IR and Intel cmdstream coverage and do not alter this
+bootstrap failure lane. No retained row-11 Stage-2 binary, admitted compiler,
+runtime authority directory, or hash-bound runtime receipt exists in this
+worktree. The historical `/mnt/data/worktrees/restart12-infra/...` path is not
+available here. Consequently neither the exact native aggregate-receiver gate
+nor a bounded admitted Stage-3 resume can honestly start.
+
+The current compiler contains the separately symbolized sibling repair:
+`maybe_copy_array_value` passes scalar local IDs to
+`copy_local_hir_type_metadata`, which copies `HirType`, isolation, and resource
+state only inside the owning aligned arrays and rejects missing/nil/raw-zero
+sources before mutation. Its exact/adjacent fixture covers append, update,
+missing source, and both state arrays. That evidence is consistent with this
+failure family but is not promoted into a root-cause claim for row 11, whose
+original exit 139 remains unretained.
+
+The focused gate was syntax-checked and invoked once against an explicitly
+missing candidate. It exited 2 with
+`error=candidate_not_executable:.../build/missing-admitted-stage2`, proving it
+fails before any Rust seed or unadmitted compiler can become evidence. The
+unblock example above was corrected to include the two runtime-receipt
+variables the gate actually requires.
+
+**Exact remaining admission blocker:** supply one executable pure-Simple
+compiler plus its expected SHA-256, an immutable runtime authority directory,
+and a hash-bound runtime admission receipt plus receipt SHA-256. Run the
+five-probe gate once; only if all five rows pass may the materially changed,
+cache-preserving Stage-3 resume run once with retained driver console and
+symbolized crash output. Until then status remains OPEN / ADMISSION BLOCKED;
+there is no further evidence-backed source correction in this row.

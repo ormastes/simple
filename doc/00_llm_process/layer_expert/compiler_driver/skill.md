@@ -24,6 +24,14 @@ interpretation: downstream HIR/MIR branches attach native/bootstrap semantics
 to it. Keep the interpret exclusion explicit in
 `driver_source_pipeline_loading.spl`.
 
+Native-project import ownership is fail-closed for duplicate bare providers.
+Pure-Simple filesystem families name `std.nogc_sync_mut.platform` or
+`std.nogc_async_mut.platform` directly; `src.std.platform` remains an
+interpreter compatibility shim and must not force native-project to guess an
+owner through a transitive alias chain. Exact and duplicate-provider controls
+live in `pipeline/native_project/tests.rs` and are tracked by
+`native_project_src_std_platform_alias_owner_loss_2026_08_03.md`.
+
 ## Performance evidence
 
 The compiler-loader negative-cache and packed-byte performance handoff lives at

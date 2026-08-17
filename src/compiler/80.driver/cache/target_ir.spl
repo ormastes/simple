@@ -1,0 +1,166 @@
+pub enum TargetKind:
+    module
+    smf_library
+    dynamic_library
+    static_library
+    binary
+    test
+    generated
+    bootstrap_stage
+    aggregate
+
+pub enum DependencyEdgeKind:
+    compile_interface
+    abi
+    link
+    runtime
+    compile_semantic
+    tool
+    generated
+    resolution
+    aop_selection
+
+pub struct TargetLabel:
+    path: text
+    name: text
+    alias: bool
+
+pub fn parse_target_label(raw: text) -> TargetLabel?:
+    val value = raw.trim()
+    if value == "" or value.contains(" "):
+        return nil
+    if not value.starts_with("//"):
+        if value.contains("/") or value.contains(":"):
+            return nil
+        return TargetLabel(path: "", name: value, alias: true)
+    val parts = value.slice(2, value.len()).split(":")
+    if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+        return nil
+    TargetLabel(path: parts[0], name: parts[1], alias: false)
+
+pub fn target_label_to_text(label: TargetLabel) -> text:
+    if label.alias: label.name else: "//" + label.path + ":" + label.name
+
+pub struct Target:
+    stable_id: TargetLabel
+    kind: TargetKind
+    entry_points: [text]
+    source_roots: [text]
+    declared_inputs: [text]
+    inferred_module_closure: [text]
+    output_artifacts: [text]
+    target_platform: text
+    runtime_family: text
+    enabled_features: [text]
+    build_profile: text
+
+pub struct TargetEdge:
+    source: TargetLabel
+    destination: TargetLabel
+    kind: DependencyEdgeKind
+
+pub struct TargetGraph:
+    targets: [Target]
+    edges: [TargetEdge]
+
+pub fn target_graph(targets: [Target], edges: [TargetEdge]) -> TargetGraph:
+    TargetGraph(targets: targets, edges: edges)
+
+fn label_equal(a: TargetLabel, b: TargetLabel) -> bool:
+    target_label_to_text(a) == target_label_to_text(b)
+
+fn label_seen(labels: [TargetLabel], label: TargetLabel) -> bool:
+    for existing in labels:
+        if label_equal(existing, label):
+            return true
+    false
+
+pub fn target_graph_deps(graph: TargetGraph, root: TargetLabel) -> [TargetLabel]:
+    var result: [TargetLabel] = []
+    var queue: [TargetLabel] = [root]
+    var cursor = 0
+    while cursor < queue.len():
+        val current = queue[cursor]
+        cursor = cursor + 1
+        for edge in graph.edges:
+            if label_equal(edge.source, current) and not label_seen(result, edge.destination):
+                result.push(edge.destination)
+                queue.push(edge.destination)
+    result
+
+pub fn target_graph_rdeps(graph: TargetGraph, root: TargetLabel) -> [TargetLabel]:
+    var result: [TargetLabel] = []
+    var queue: [TargetLabel] = [root]
+    var cursor = 0
+    while cursor < queue.len():
+        val current = queue[cursor]
+        cursor = cursor + 1
+        for edge in graph.edges:
+            if label_equal(edge.destination, current) and not label_seen(result, edge.source):
+                result.push(edge.source)
+                queue.push(edge.source)
+    result
+
+pub fn synthesize_legacy_target(entry_file: text, source_roots: [text], output: text) -> Target:
+    Target(stable_id: TargetLabel(path: "legacy", name: "cli", alias: false), kind: TargetKind.binary, entry_points: [entry_file], source_roots: source_roots, declared_inputs: [], inferred_module_closure: [], output_artifacts: [output], target_platform: "", runtime_family: "", enabled_features: [], build_profile: "legacy")
+
+fn kind_from_text(raw: text) -> TargetKind?:
+    match raw.trim():
+        "module" => TargetKind.module
+        "smf_library" => TargetKind.smf_library
+        "dynamic_library" => TargetKind.dynamic_library
+        "static_library" => TargetKind.static_library
+        "binary" => TargetKind.binary
+        "test" => TargetKind.test
+        "generated" => TargetKind.generated
+        "bootstrap_stage" => TargetKind.bootstrap_stage
+        "aggregate" => TargetKind.aggregate
+        _ => nil
+
+fn list_value(raw: text) -> [text]:
+    var result: [text] = []
+    for item in raw.split(","):
+        val value = item.trim()
+        if value != "":
+            result.push(value)
+    result
+
+pub fn parse_build_sdn_targets(raw: text) -> [Target]?:
+    var result: [Target] = []
+    var active_name = ""
+    var kind_text = ""
+    var entries: [text] = []
+    var roots: [text] = []
+    var outputs: [text] = []
+    var depends: [text] = []
+    for original in (raw + "\ntarget __end__:").split("\n"):
+        val line = original.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if line.starts_with("target ") and line.ends_with(":"):
+            if active_name != "":
+                val parsed_kind = kind_from_text(kind_text)
+                if not parsed_kind.?:
+                    return nil
+                result.push(Target(stable_id: TargetLabel(path: "", name: active_name, alias: true), kind: parsed_kind ?? TargetKind.aggregate, entry_points: entries, source_roots: roots, declared_inputs: depends, inferred_module_closure: [], output_artifacts: outputs, target_platform: "", runtime_family: "", enabled_features: [], build_profile: "default"))
+            active_name = line.slice(7, line.len() - 1).trim()
+            if active_name == "__end__": active_name = ""
+            kind_text = ""
+            entries = []
+            roots = []
+            outputs = []
+            depends = []
+        elif active_name == "":
+            return nil
+        else:
+            val parts = line.split(":")
+            if parts.len() != 2:
+                return nil
+            val key = parts[0].trim()
+            val value = parts[1].trim()
+            if key == "kind": kind_text = value
+            elif key == "entry": entries = list_value(value)
+            elif key == "source_roots" or key == "roots": roots = list_value(value)
+            elif key == "output": outputs = list_value(value)
+            elif key == "depends": depends = list_value(value)
+    result

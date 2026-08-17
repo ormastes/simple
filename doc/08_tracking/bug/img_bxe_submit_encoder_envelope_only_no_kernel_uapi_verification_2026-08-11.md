@@ -1,4 +1,4 @@
-## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
+## Resolution 2026-08-17 — HOST UAPI FIXED / HARDWARE VALIDATION PENDING
 
 Status: OPEN (P3)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -8,6 +8,29 @@ header text (not vendored in this tree) to confirm field offsets, plus PowerVR
 hardware to validate against. No fetch route in this lane. Unblock = vendor the
 UAPI header (or cite a pinned upstream revision) and re-derive
 `img_bxe_job_field_offset`/`img_bxe_sync_op_offset` against it. Unchanged.
+The host-verifiable blocker is closed against Linux commit
+`8d3ae59288f1e7d58d76558a6ee96d533bc5019f`, file
+`include/uapi/drm/pvr_drm.h`. The generated MIT-licensed authority is
+`src/os/drivers/gpu/board_vulkan/pvr_drm_uapi_layout.spl`.
+
+The encoder now models the real 48-byte `drm_pvr_job`: u32 fields at offsets
+0/4/8/12, aligned u64 command-stream pointer at 16, 16-byte indirect
+`drm_pvr_obj_array` at 24, and 8-byte HWRT reference at 40. Sync operations
+are correctly indirect 16-byte objects (`handle@0`, `flags@4`, `value@8`), not
+inline three-dword payloads. Unknown field names, misaligned/non-null-incoherent
+pointers, overflowing u32 fields, malformed sync entries, and non-render HWRT
+references fail closed. The exact and adjacent specs pin the upstream revision,
+every offset/size, indirect-array behavior, pointer alignment, and HWRT rule.
+
+No firmware control-stream bytes were invented. Real kernel acceptance, Mesa
+capture comparison, firmware execution, and readback remain hardware-gated;
+`submit_implemented` and `readback_implemented` stay false.
+
+Focused test execution was attempted once with the repository-default
+`bin/simple`; this isolated worktree has no such deployed executable and the
+command exited 127 before loading either spec. No Rust-seed fallback was used.
+Scoped source `diff --check` passes; executable verification remains pending a
+deployed pure-Simple test CLI.
 # IMG BXE-4-32 submit encoder: envelope-only, no verified kernel UAPI byte layout
 
 **Date:** 2026-08-11
@@ -42,7 +65,7 @@ stable, freely-encodable ISA the way the other two lanes' targets are.
   `opaque_firmware_blob` field; it does not attempt to decompose or invent
   firmware-internal packet content.
 
-## Why this is not byte-exact against the real kernel UAPI
+## Historical finding: why the original encoder was not byte-exact
 
 This repo/session had no verified local copy of the actual
 `struct drm_pvr_job` header text (no vendored kernel header under this
@@ -56,7 +79,7 @@ naming the exact mismatch (`expected 5, got 4`), then restored — but this
 only proves internal self-consistency, not conformance to the real kernel
 ABI.
 
-## Unblock condition
+## Historical unblock condition (host half now satisfied)
 
 Obtain the actual `include/uapi/drm/pvr_drm.h` (or equivalent) text from
 the upstream Linux kernel source that ships the `imagination`/`powervr`

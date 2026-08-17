@@ -9,8 +9,19 @@ use std.common.structural.transfer.process_frame_codec.{
     decode_process_transfer_text_line,
     process_transfer_text_max_line_bytes
 }
+use std.common.structural.transfer.process_frame_auth.{
+    decode_process_transfer_authenticated_text_line,
+    process_transfer_frame_authenticated
+}
 use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
-use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
+use std.nogc_async_mut.parent_commit_inbox.{
+    ParentCommitFrameInboxV1,
+    parent_commit_frame_inbox_v1_for_generation
+}
+use std.nogc_async_mut.parent_commit_authenticated_session.{
+    ParentProcessSessionIdentityV2,
+    parent_process_session_identity_v2
+}
 use std.nogc_async_mut.io.process_ops.{
     process_close_piped,
     process_is_piped_alive,
@@ -38,6 +49,8 @@ struct ParentCommitPipedProcessStatusV1:
     accepted: i64
     rejected: i64
     terminal_reason: text
+    authenticated: bool
+    session_id: text
 
 fn parent_commit_piped_read_result_v1(ok: bool, accepted: i64, rejected: i64,
                                       pending_bytes: i64, reason: text) -> ParentCommitPipedReadResultV1:
@@ -61,6 +74,10 @@ class ParentCommitPipedResultReaderV1:
     pending_high_water_bytes: i64
     dropping_oversize_line: bool
     closed: bool
+    auth_required: bool
+    auth_key: text
+    auth_session_id: text
+    auth_generation: i64
 
 impl ParentCommitPipedResultReaderV1:
     static fn create(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
@@ -84,8 +101,25 @@ impl ParentCommitPipedResultReaderV1:
             pending: "",
             pending_high_water_bytes: 0,
             dropping_oversize_line: false,
-            closed: false
+            closed: false,
+            auth_required: false,
+            auth_key: "",
+            auth_session_id: "",
+            auth_generation: 0
         )
+
+    static fn create_authenticated(inbox: ParentCommitFrameInboxV1,
+                                   auth_key: text,
+                                   identity: ParentProcessSessionIdentityV2) -> ParentCommitPipedResultReaderV1:
+        val reader = ParentCommitPipedResultReaderV1.create(inbox)
+        reader.auth_required = true
+        reader.auth_key = auth_key
+        reader.auth_session_id = identity.session_id
+        reader.auth_generation = identity.generation
+        # SPRF2 adds a 64-byte tag and two delimiters around the canonical
+        # SPRF1 carrier. The underlying frame bound remains unchanged.
+        reader.max_line_bytes = process_transfer_text_max_line_bytes() + 71
+        reader
 
     me observe_pending_high_water():
         if self.pending.len() > self.pending_high_water_bytes:
@@ -149,10 +183,25 @@ impl ParentCommitPipedResultReaderV1:
                     self.observe_pending_high_water()
                 continue
             processed = processed + 1
-            val decoded = decode_process_transfer_text_line(
-                self.pending, ParallelExecutionDomain.Parent)
+            var decoded_ok = false
+            var decoded_wire: [u8] = []
+            var authenticated = not self.auth_required
+            if self.auth_required:
+                val decoded_auth = decode_process_transfer_authenticated_text_line(
+                    self.pending, ParallelExecutionDomain.Parent)
+                decoded_ok = decoded_auth.ok
+                decoded_wire = decoded_auth.wire
+                authenticated = decoded_auth.ok and process_transfer_frame_authenticated(
+                    self.auth_key, self.auth_session_id, self.auth_generation,
+                    decoded_auth.wire, decoded_auth.tag)
+            else:
+                val decoded = decode_process_transfer_text_line(
+                    self.pending, ParallelExecutionDomain.Parent)
+                decoded_ok = decoded.ok
+                decoded_wire = decoded.wire
             self.pending = ""
-            if not decoded.ok or not self.inbox.offer_process_result_frame(decoded.wire):
+            if not decoded_ok or not authenticated
+                    or not self.inbox.offer_process_result_frame(decoded_wire):
                 rejected = rejected + 1
             else:
                 accepted = accepted + 1
@@ -218,6 +267,8 @@ class ParentCommitPipedProcessSessionV1:
     accepted: i64
     rejected: i64
     terminal_reason: text
+    authenticated: bool
+    session_id: text
 
 impl ParentCommitPipedProcessSessionV1:
     static fn spawn(command: text, args: [text], session_generation: i64,
@@ -238,6 +289,8 @@ impl ParentCommitPipedProcessSessionV1:
             naturally_exited: false,
             accepted: 0,
             rejected: 0,
+            authenticated: false,
+            session_id: "",
             terminal_reason: if not binding_ok:
                 "generation-binding-mismatch"
             elif pid > 0:
@@ -245,6 +298,43 @@ impl ParentCommitPipedProcessSessionV1:
             else:
                 "spawn-failed"
         )
+
+    static fn spawn_authenticated(command: text, args: [text],
+                                  capacity: i64, auth_key: text,
+                                  authority_secret: text, authority_epoch: text,
+                                  process_namespace: text, child_identity: i64,
+                                  session_generation: i64) -> ParentCommitPipedProcessSessionV1:
+        val identity = parent_process_session_identity_v2(
+            authority_secret, authority_epoch, process_namespace,
+            child_identity, session_generation)
+        val binding_ok = capacity > 0 and session_generation > 0
+            and auth_key != "" and identity.session_id != "" and command != ""
+        val inbox = parent_commit_frame_inbox_v1_for_generation(
+            capacity, session_generation)
+        val pid = if binding_ok:
+            process_spawn_piped(command, args)
+        else:
+            -1
+        ParentCommitPipedProcessSessionV1(
+            session_generation: session_generation,
+            process_handle: pid,
+            reader: ParentCommitPipedResultReaderV1.create_authenticated(
+                inbox, auth_key, identity),
+            closed: false,
+            close_succeeded: false,
+            close_attempts: 0,
+            cancelled: false,
+            naturally_exited: false,
+            accepted: 0,
+            rejected: 0,
+            authenticated: true,
+            session_id: identity.session_id,
+            terminal_reason: if not binding_ok:
+                "invalid-authenticated-session"
+            elif pid > 0:
+                ""
+            else:
+                "spawn-failed")
 
     me poll(max_lines: i64) -> ParentCommitPipedReadResultV1:
         if self.closed:
@@ -324,7 +414,9 @@ impl ParentCommitPipedProcessSessionV1:
             naturally_exited: self.naturally_exited,
             accepted: self.accepted,
             rejected: self.rejected,
-            terminal_reason: self.terminal_reason)
+            terminal_reason: self.terminal_reason,
+            authenticated: self.authenticated,
+            session_id: self.session_id)
 
 fn parent_commit_piped_process_session_v1(
     command: text,
@@ -334,3 +426,18 @@ fn parent_commit_piped_process_session_v1(
 ) -> ParentCommitPipedProcessSessionV1:
     ParentCommitPipedProcessSessionV1.spawn(
         command, args, session_generation, inbox)
+
+fn parent_commit_authenticated_piped_process_session_v2(
+    command: text,
+    args: [text],
+    capacity: i64,
+    auth_key: text,
+    authority_secret: text,
+    authority_epoch: text,
+    process_namespace: text,
+    child_identity: i64,
+    session_generation: i64
+) -> ParentCommitPipedProcessSessionV1:
+    ParentCommitPipedProcessSessionV1.spawn_authenticated(
+        command, args, capacity, auth_key, authority_secret, authority_epoch,
+        process_namespace, child_identity, session_generation)

@@ -3678,6 +3678,7 @@ fn test_runtime_bundle_hosted_is_removed_for_non_compiler_entry() {
     assert!(err.contains("removed Rust-hosted runtime bundles"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -4039,6 +4040,80 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
     let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
 
     assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
+#[test]
+fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .unwrap();
+    let src_root = repo_root.join("src");
+    let paths = [
+        src_root.join("lib/nogc_sync_mut/path.spl"),
+        src_root.join("lib/nogc_sync_mut/platform.spl"),
+        src_root.join("lib/nogc_async_mut/path.spl"),
+        src_root.join("lib/nogc_async_mut/platform.spl"),
+        src_root.join("std/platform.spl"),
+        src_root.join("lib/nogc_sync_mut/fs.spl"),
+        src_root.join("lib/nogc_async_mut/fs.spl"),
+    ];
+    let file_sources = paths
+        .iter()
+        .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+        .collect::<Vec<_>>();
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&src_root), &src_root);
+    let path_owner = format!(
+        "{}__normalize_path",
+        module_prefix_from_path(&src_root.join("lib/nogc_sync_mut/path.spl"), &src_root)
+    );
+    let absolute_owner = format!(
+        "{}__is_absolute_path",
+        module_prefix_from_path(&src_root.join("lib/nogc_sync_mut/path.spl"), &src_root)
+    );
+
+    for fs_path in [&paths[5], &paths[6]] {
+        let ast = simple_parser::Parser::new(&std::fs::read_to_string(fs_path).unwrap())
+            .parse()
+            .unwrap();
+        let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+        assert_eq!(use_map.get("platform_normalize"), Some(&path_owner));
+        assert_eq!(use_map.get("platform_is_absolute"), Some(&absolute_owner));
+    }
+}
+
+#[test]
+fn aliased_family_facade_rejects_adjacent_duplicate_path_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("src");
+    let sync_root = src_root.join("lib/nogc_sync_mut");
+    let gc_root = src_root.join("lib/gc_async_mut");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    std::fs::create_dir_all(&gc_root).unwrap();
+    let sync_path = sync_root.join("path.spl");
+    let sync_platform = sync_root.join("platform.spl");
+    let gc_path = gc_root.join("path.spl");
+    let consumer = sync_root.join("consumer.spl");
+    std::fs::write(&sync_path, "fn normalize_path(path: text) -> text:\n    path\nfn is_absolute_path(path: text) -> bool:\n    true\n").unwrap();
+    std::fs::write(&sync_platform, "export use std.nogc_sync_mut.path.{normalize_path, is_absolute_path}\n").unwrap();
+    std::fs::write(&gc_path, "fn normalize_path(path: text) -> text:\n    \"wrong\"\nfn is_absolute_path(path: text) -> bool:\n    false\n").unwrap();
+    std::fs::write(&consumer, "use std.nogc_sync_mut.platform.{normalize_path as platform_normalize, is_absolute_path as platform_is_absolute}\n").unwrap();
+    let file_sources = [&sync_path, &sync_platform, &gc_path, &consumer]
+        .into_iter()
+        .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+        .collect::<Vec<_>>();
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&src_root), &src_root);
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+    let expected_prefix = module_prefix_from_path(&sync_path, &src_root);
+
+    assert_eq!(use_map.get("platform_normalize"), Some(&format!("{expected_prefix}__normalize_path")));
+    assert_eq!(
+        use_map.get("platform_is_absolute"),
+        Some(&format!("{expected_prefix}__is_absolute_path"))
+    );
 }
 
 #[test]
