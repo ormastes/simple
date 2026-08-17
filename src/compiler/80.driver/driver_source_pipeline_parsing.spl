@@ -323,8 +323,25 @@ impl CompilerDriver:
             # parse completion. Module-surface alias ownership is already
             # preserved separately; materialize only the modules whose source
             # rows survive in the returned context.
+            # Receipts for the post-parse surface window. Until 2026-08-17 this
+            # whole stretch -- 619 add_parsed calls, the alias pass,
+            # resolve_export_origins and finish() -- emitted NOTHING, so a stall
+            # here was indistinguishable from a stall in HIR lowering: the last
+            # line on the log stayed `parse 619/619 step 1/6` and `phase=hir`
+            # never appeared. Stage 3 sat in exactly that state for 30+ minutes
+            # at 88% of one core with the main-thread stack at 132 kB (so NOT
+            # recursion) and the heap growing 13.5 kB/s (so NOT allocation
+            # churn), and no profiler could say which of the four sub-steps it
+            # was, because attach-based profiling is blocked on this host
+            # (ptrace_scope=1, perf_event_paranoid=4).
+            # ponytail: same trade the per-file parse receipts already took --
+            # one append per unit against a multi-minute phase, in exchange for
+            # the slow sub-step naming itself.
+            # doc/08_tracking/bug/stage3_post_parse_surface_window_has_no_receipts_2026-08-17.md
             var entry_surface_builder = ModuleSurfaceBuilder.new()
             var entry_surface_source_index: i64 = 0
+            log_build_progress("surface_build", "files", 0,
+                unique_entry_sources.len(), "start", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 var parsed_idx: i64 = -1
@@ -373,6 +390,12 @@ impl CompilerDriver:
                         "entry-closure module surface error: {surface_result.unwrap_err()}")
                     return (self.ctx, false)
                 entry_surface_source_index = entry_surface_source_index + 1
+                log_build_progress("surface_build", "files",
+                    entry_surface_source_index, unique_entry_sources.len(),
+                    source.path, 1, 6, 0, 0, "running")
+            log_build_progress("surface_alias", "aliases", 0,
+                entry_sources.len(), "start", 1, 6, 0, 0, "running")
+            var entry_alias_done: i64 = 0
             # Keep every resolver spelling as a scalar name -> surface index.
             # ParserModule values remain physical-source unique; copying those
             # large values once per alias caused the Stage3 RSS runaway.
@@ -394,16 +417,27 @@ impl CompilerDriver:
                     self.ctx.add_error(
                         "entry-closure module alias error: {alias_result.unwrap_err()}")
                     return (self.ctx, false)
+                entry_alias_done = entry_alias_done + 1
+                log_build_progress("surface_alias", "aliases", entry_alias_done,
+                    entry_sources.len(), alias_source.path, 1, 6, 0, 0, "running")
+            log_build_progress("export_origins", "surfaces", 0, -1,
+                "start", 1, 6, 0, 0, "running")
             val entry_origins_result = entry_surface_builder.resolve_export_origins()
             if entry_origins_result.is_err():
                 self.ctx.add_error(
                     "entry-closure export origin error: {entry_origins_result.unwrap_err()}")
                 return (self.ctx, false)
+            log_build_progress("export_origins", "surfaces", -1, -1,
+                "complete", 1, 6, 0, 0, "running")
+            log_build_progress("surface_freeze", "surfaces", 0, -1,
+                "start", 1, 6, 0, 0, "running")
             val entry_surfaces_result = entry_surface_builder.finish()
             if entry_surfaces_result.is_err():
                 self.ctx.add_error(
                     "entry-closure module surface freeze error: {entry_surfaces_result.unwrap_err()}")
                 return (self.ctx, false)
+            log_build_progress("surface_freeze", "surfaces", -1, -1,
+                "complete", 1, 6, 0, 0, "running")
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             entry_ctx.sources = unique_entry_sources
