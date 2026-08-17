@@ -1863,3 +1863,111 @@ watchdog kill, so **143 without a monotonic RSS trace is not a reproduction.**
 `Results: 5 total, 5 passed, 0 failed`. It fails if a deep-free call is
 reintroduced into the driver context, if the measured hazard rationale is
 deleted, or if the HIR loop goes back to constructing a lowerer per source.
+
+## UPDATE 2026-08-17 (triage lane): the mechanism is measured and REFRAMED —
+## it is NOT AST retention. It is that the JIT/native lane reclaims **nothing**,
+## for **every** heap family. Still OPEN; no fix attempted this session.
+
+**Scope honesty first.** This session did not fix the bug and does not claim to.
+It could not even run the stage-4 lane: this checkout has no self-hosted binary
+(`bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` is the **Rust
+bootstrap seed**, and the lane rules forbid rebuilding or touching the
+concurrent bootstrap worktree). What it did instead is measure the *mechanism*
+in the small, on current source, and the result contradicts the framing every
+previous update has worked from.
+
+### The AST arena is NOT the leak
+
+`ast_reset()` (`src/compiler/10.frontend/core/_Ast/module_state.spl:453`) already
+allocates each arena pool once and then **clears in place**, explicitly "so
+every parsed file reuses arena storage". The flat-array AST arenas are therefore
+bounded by the *largest* file, not by the corpus. Every session that went
+looking for cross-file AST retention, per-file eviction, `evict_mir_module()`,
+`rt_dict_free`/`rt_object_free`, and "class instances must become
+runtime-identifiable" was chasing a reclamation path for storage that is
+already reused.
+
+### What IS unbounded: every transient heap value, in every family
+
+New fixture: `test/fixture/mem_infra/transient_alloc_churn_workload.spl`. It
+allocates `CHURN_N` short-lived values, keeps **no** reference past the
+iteration that made them, then reports its own `VmRSS`.
+
+Deployed `bin/simple` (Rust seed, mtime 2026-08-16 22:59), `run` lane
+(Cranelift JIT), text family:
+
+| CHURN_N | VmRSS |
+|---------|-------|
+| 20,000  | 32,768 kB |
+| 40,000  | 35,840 kB |
+| 80,000  | 44,968 kB |
+| 160,000 | 61,576 kB |
+| 320,000 | 94,324 kB |
+
+**205 B/iteration between 80k->160k and 205 B/iteration between 160k->320k** —
+dead linear, no knee, no plateau. Same binary, `SIMPLE_EXECUTION_MODE=jit`
+pinned, N = 50,000 vs 200,000, across three families:
+
+| family | @50k | @200k | B/iteration |
+|--------|------|-------|-------------|
+| text   | 37,836 kB | 63,584 kB | ~176 |
+| array  | 33,356 kB | 44,284 kB | ~75  |
+| dict   | 38,272 kB | 63,296 kB | ~171 |
+
+All three leak. Nothing is family-specific, which is why the 2026-07-24
+`rt_string_new_literal` interning fix helped and yet did not close the bug: it
+removed *some* string allocations rather than making any allocation reclaimable.
+
+### This also reproduces the doc's headline seed-vs-self-host contrast
+
+Same workload, same binary, only the engine changed:
+`SIMPLE_EXECUTION_MODE=interpreter` measures **31 B/iter** for the text family
+against **222 B/iter** under `=jit`. The tree-walk interpreter's values are
+Rust-owned and dropped; the JIT's are not. That is the same shape as this
+file's opening contrast (seed-compiled stage-4 flat at ~90 MB, self-host
+stage-4 at ~160 MB/file) — it was never a property of the *source set*, and
+arguably never a property of the *parser* either. It is the execution engine.
+
+So the real unblock condition is **reclamation for `rt_core_*` heap objects on
+the native lane** (refcounting, a GC, or a per-phase arena those objects are
+allocated from) — not eviction wiring, not `evict_mir_module()`, and not class
+instance identifiability, which are all downstream of having anything to free
+into.
+
+### Cost, separately: parse is superlinear and SLOW, but it is not a hang
+
+`src/app/test/parse_probe_all.spl` on the JIT lane over 1.8 kB synthetic files
+managed **3 files in ~3 minutes** at a flat ~232 MB RSS, and 6 files of
+`src/lib/common/*.spl` in 10 minutes. That is a **cost** problem (every run
+terminates), and it is a *separate* axis from the memory one — at these tiny
+file sizes RSS did not climb measurably, so the ~160 MB/file step is driven by
+how much a *real* compiler file allocates, not by file count.
+
+### Shipped this session (both GREEN, both proven RED-capable)
+
+- Reproducer: `test/01_unit/runtime/transient_text_alloc_reclaim_spec.spl` —
+  `Results: 1 total, 1 passed, 0 failed`, printing
+  `[reclaim] text: 37032 kB @ 40000 -> 63080 kB @ 160000 = 222 B/iter (ceiling 400, target 0)`.
+- Class detector: `test/01_unit/runtime/transient_alloc_reclaim_family_class_spec.spl`
+  — `Results: 3 total, 3 passed, 0 failed`, printing
+  `[reclaim-class] text: 190 B/iter` / `array: 37 B/iter` / `dict: 178 B/iter`.
+  It fences the whole defect CLASS (any allocation family that stops being
+  reclaimable, or a new one added that leaks worse) rather than just strings, so
+  a family-local fix cannot be mistaken for a class-level one.
+
+Both pin `SIMPLE_EXECUTION_MODE` in the child, both fail rather than pass when
+the child crashes or its `VmRSS` is unreadable, and both budget the *slope*
+with the header stating that the true target is 0 B/iteration. Detector
+liveness proven by sabotage: lowering the reproducer's ceiling from 400 to 10
+yields `Results: 1 total, 0 passed, 1 failed` at a measured 230 B/iter; ceiling
+restored to 400.
+
+### Status
+
+**OPEN.** Unchanged peak. What changed is the target: previous updates' blocker
+("make class instances runtime-identifiable so the deep-free planner can see
+them") is necessary for a *deep-free* design, but the measurements above say
+the loss is dominated by ordinary transient values that no eviction call would
+ever be handed. Whoever picks this up next should cost a reclamation strategy
+for `rt_core_*` allocations on the native lane first, and treat arena/eviction
+work as downstream of it.
