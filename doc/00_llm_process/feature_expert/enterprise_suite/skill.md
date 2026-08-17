@@ -93,8 +93,20 @@ bin/simple test test/01_unit/lib/http_server/path_safety_spec.spl
 # The suite IS the glob: any new */http_server/*_spec.spl file is in the suite
 # the moment it lands. `test/unit/**` is the legacy mirror and is excluded.
 # Enforced by scripts/check/check-http-server-suite-enumeration.shs.
-# This SUPERSEDES the 49/49-green count above for the http_server tier: the
-# current enumerated sweep is 21/26 green (275 examples, 255 passed, 20 failed).
+#
+# DO NOT re-add hand-listed http_server lines here. Six of them (async_parser_limits,
+# async_path_safety, async_dynamic_dispatch, chunked_rejection, parser_limits,
+# path_safety) were reintroduced above this loop on 2026-08-17 and removed again:
+# every one is already matched by the glob, so listing them ran those specs TWICE
+# and re-opened the drift hole the loop exists to close. The glob is the list.
+#
+# This SUPERSEDES the 49/49-green count above for the http_server tier. Current
+# sweep, measured one-per-process in a CLEAN WORKTREE at origin/main (not the
+# shared checkout — it is chronically stale and produces false reds), Jul-25
+# aarch64 binary: 25/27 files green, 290 examples, 275 passed, 15 failed.
+# The 2 reds are chunked_body_boundary (7/14) and chunked_size_overflow (4/12),
+# both the pre-existing `common_index_of` aliased-import defect noted at
+# src/lib/nogc_async_mut/http_server/parser.spl:29 — not enterprise-lane code.
 # Evidence: doc/09_report/verify/http_server_suite_enumeration_2026-08-17.md
 for s in $(find test -path '*http_server*' -name '*_spec.spl' -not -path 'test/unit/*' | sort); do bin/simple test "$s"; done
 bin/simple test test/01_unit/lib/nogc_async_mut/http/http_hardening_spec.spl
@@ -159,29 +171,36 @@ SimpleOS lanes.
 ## Out-of-suite reds in the `http_server` tier specs (found 2026-08-17, W10-A)
 
 Enumerating the enterprise+http spec family from disk rather than from this
-list turned up **21 `*/http_server/*_spec.spl` files that the recorded suite
-never ran**. Swept them the same way (one per process): **12/21 green,
-9 RED — 168 examples, 131 passed, 37 failed.** These are NOT enterprise-suite
-regressions — they were never in the sweep list, and the dominant cause is a
-missing library API, not a merge:
+list turned up `*/http_server/*_spec.spl` files that the recorded suite never
+ran. **RESOLVED 2026-08-17 (lane W14) — the table that used to sit here is
+superseded and has been removed rather than left to mislead.** Read
+`doc/09_report/verify/http_server_suite_enumeration_2026-08-17.md`; the
+enumeration is now a glob (above) fenced by
+`scripts/check/check-http-server-suite-enumeration.shs`.
 
-| Spec | executed/passed | Cause |
-|---|---|---|
-| `lib/http_server/security_headers_spec` | 7/0 | `semantic: function default_security_headers_config not found` |
-| `lib/http_server/rate_limit_spec` | 6/0 | `semantic: function default_rate_limit_config not found` |
-| `lib/http_server/request_validation_spec` | 11/0 | same class — missing config constructor |
-| `lib/http_server/range_numeric_guard_spec` | 1/0 | assertion: `expected subject to be truthy, got false` |
-| `lib/http_server/security_context_dispatch_spec` | 6/5 | 1 assertion |
-| `lib/nogc_async_mut/http_server/compression_spec` | 19/11 | 8 assertions (`expected gzip to equal lz4`) |
-| `lib/nogc_async_mut/http_server/protocol_handler_spec` | 8/7 | 1 assertion |
-| `lib/nogc_async_mut/http_server/range_numeric_guard_spec` | 1/0 | assertion |
-| `lib/nogc_async_mut/http_server/static_compression_cache_spec` | 8/7 | 1 assertion |
+What the old table got wrong, and it is worth knowing because the failure mode
+recurs: it reported "9 RED, three orphaned against an API that does not exist"
+and concluded a missing library API. The `git log -S` check confirms those
+functions (`default_security_headers_config`, `default_rate_limit_config`, …)
+never existed — but the specs had **already been repointed** at the real
+class-based API (`SecurityHeadersConfig.default()`, `RateLimitConfig.default()`,
+`CsrfConfig.default()`) by lane W11-A. The reds were measured against a shared
+working copy holding an uncommitted revert to the phantom-API text. **The
+library was fine; the checkout was stale.** Only `csrf_spec`'s mirror copy was
+genuinely red at HEAD, and W14-A rewrote it (13/13).
 
-`/usr/bin/grep -rn 'default_security_headers_config\|default_rate_limit_config' src/`
-returns **zero hits** — those functions exist nowhere in the tree, so the three
-worst specs are orphaned against an API that was never implemented (or was
-removed). Deliberately NOT fixed by W10-A: out of the enterprise lane's scope
-and not caused by this round's merges. Needs an owner.
+Current measurement — 26 canonical specs plus the one divergent mirror, swept
+one-per-process in a CLEAN WORKTREE at `origin/main` (never the shared
+checkout, for exactly the reason above), Jul-25 aarch64 binary:
+
+**25/27 files green — 290 examples, 275 passed, 15 failed, 0 missing verdicts.**
+
+The only 2 reds are `chunked_body_boundary_spec` (7/14) and
+`chunked_size_overflow_spec` (4/12), both the pre-existing `common_index_of`
+aliased-import defect recorded in-tree at
+`src/lib/nogc_async_mut/http_server/parser.spl:29`. Everything the old table
+listed is now green, including `protocol_handler_spec` (8/8) and
+`compression_spec` (20/20), fixed by lane W11-B.
 
 ## Landmines (each of these has already cost a lane real time)
 
