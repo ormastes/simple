@@ -2277,6 +2277,65 @@ pub(crate) fn exec_augmented_assignment(
                 ctx,
             ))
         }
+    }
+    // Handle indexed targets: arr[i] += 1, dict[k] += 1, obj.field[i] += 1
+    //
+    // Bug: doc/08_tracking/bug/spec_runner_indexed_augmented_assignment_unsupported_2026-08-15.md
+    // Previously this fell through to the catch-all below and reported
+    // "unsupported augmented assignment target" for every indexed lvalue.
+    //
+    // Strategy: desugar `recv[idx] op= rhs` into a PLAIN assignment
+    // `recv[__idx_temp__] = recv[__idx_temp__] op __rhs_temp__` and delegate to
+    // `exec_assignment`, which already owns the full indexed-store path
+    // (arrays, dicts, nested field receivers, writeback). The index expression
+    // is evaluated exactly ONCE into a temp binding so that side-effecting
+    // subscripts (`arr[next()] += 1`) do not run twice.
+    else if let Expr::Index { receiver, index } = &assign.target {
+        let idx_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+        let idx_temp = "__aug_idx_temp__".to_string();
+        let rhs_temp = "__aug_rhs_temp__".to_string();
+
+        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        if is_suspend {
+            rhs_value = await_value(rhs_value)?;
+        }
+
+        // Save/restore any shadowed bindings so the temps never leak.
+        let saved_idx = env.get(&idx_temp).cloned();
+        let saved_rhs = env.get(&rhs_temp).cloned();
+        env.insert(idx_temp.clone(), idx_value);
+        env.insert(rhs_temp.clone(), rhs_value);
+
+        let stable_target = Expr::Index {
+            receiver: receiver.clone(),
+            index: Box::new(Expr::Identifier(idx_temp.clone())),
+        };
+        let value_expr = match bin_op {
+            Some(op) => Expr::Binary {
+                op,
+                left: Box::new(stable_target.clone()),
+                right: Box::new(Expr::Identifier(rhs_temp.clone())),
+            },
+            // `~=` is a plain (awaited) assignment.
+            None => Expr::Identifier(rhs_temp.clone()),
+        };
+        let plain = simple_parser::ast::AssignmentStmt {
+            span: assign.span,
+            target: stable_target,
+            op: AssignOp::Assign,
+            value: value_expr,
+        };
+        let result = exec_assignment(&plain, env, functions, classes, enums, impl_methods);
+
+        match saved_idx {
+            Some(v) => env.insert(idx_temp, v),
+            None => env.remove(&idx_temp),
+        };
+        match saved_rhs {
+            Some(v) => env.insert(rhs_temp, v),
+            None => env.remove(&rhs_temp),
+        };
+        result
     } else {
         let ctx = ErrorContext::new()
             .with_code(codes::INVALID_ASSIGNMENT)
