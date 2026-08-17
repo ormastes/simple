@@ -72,6 +72,35 @@ GREP=grep
 # to catch. Git chdirs to the working-tree root before invoking a hook, so
 # equality is the correct and strictest test here.
 is_bare=$(git rev-parse --is-bare-repository 2>/dev/null) || is_bare=""
+
+# SELF-HEAL (2026-08-17): `core.bare = true` has been observed appearing
+# spontaneously on this repo's shared .git/config, flipping back within minutes
+# of being corrected. While it is set, `git rebase` dies with "this operation
+# must be run in a work tree" and EVERY guard below refuses to run, so a single
+# stray line blocks every lane on the host. The writer has not been identified
+# (nothing under scripts/ src/ tools/ .claude/ sets it).
+#
+# Repair ONLY on a provable contradiction, never on a guess: a genuinely bare
+# repository's config does not live in a directory literally named `.git` that
+# sits inside a populated working tree. If the common git dir basename is
+# `.git` AND its parent holds a checked-out tree, then `bare = true` is false on
+# its face and is corrected in place. A real bare repo (config at `foo.git/` or
+# at the repo root) fails this test and is left untouched, so this cannot
+# "repair" a repo into corruption.
+if [ "$is_bare" = "true" ]; then
+    common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
+    case "$common_dir" in
+        */.git)
+            parent_dir=${common_dir%/.git}
+            if [ -d "$parent_dir" ] && [ -e "$parent_dir/.git/HEAD" ]; then
+                echo "pre-push: core.bare=true on a NON-bare layout ($common_dir) — self-healing to false" >&2
+                git config core.bare false 2>/dev/null || true
+                is_bare=$(git rev-parse --is-bare-repository 2>/dev/null) || is_bare=""
+            fi
+            ;;
+    esac
+fi
+
 if [ "$is_bare" != "false" ]; then
     echo "pre-push: git reports is-bare-repository='$is_bare' (expected 'false')" >&2
     echo "pre-push: a stray core.bare in .git/config misdirects every guard — refusing to push blind" >&2
