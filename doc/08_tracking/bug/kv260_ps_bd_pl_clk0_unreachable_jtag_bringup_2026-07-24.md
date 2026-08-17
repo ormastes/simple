@@ -3,7 +3,8 @@
 - **Date:** 2026-07-24
 - **Severity:** high (blocks all PS-clocked fabric designs on KV260 for
   JTAG-only bring-up; rv64 bring-up was built on this assumption)
-- **Status:** root-caused; resolution is architectural (switch clocking
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   source), not a register-poke fix
 
 ## Symptom

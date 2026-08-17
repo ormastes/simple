@@ -1,5 +1,8 @@
 # app.ui.render.widgets does not re-export render_html_widget/render_html_tree (pre-existing, unrelated to Lane A/C)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-11 · **Status:** fixed (re-export + LayoutKind rename + stale assertions retargeted)
 **Found:** Lane E ("rendering-inside-rendering") baseline run of the existing
 widget/chrome specs before writing

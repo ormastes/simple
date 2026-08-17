@@ -1,5 +1,8 @@
 # LLVM Imported Array Length/Index Runtime Handle Bug
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 partial: HIR/MIR accessor routing fixed; native verification blocked
@@ -57,3 +60,27 @@ literal syntax.
 
 The next verification must preserve runtime-array length and the exact packed
 color before accepting native quality or SIMD-hit evidence.
+
+## 2026-08-17 re-verification (lane s2_rust_codegen) — original defect fixed; residual is verification debt
+
+Classified by CONTENT, not by commit ancestry.
+
+The silently-wrong-result defect this doc is named for — `value.len()` lowering
+to constant `0` and `value[index]` lowering to a raw pointer GEP/load on an
+imported array — is resolved per this doc's own Evidence section: the retained
+LLVM IR reaches `call i64 @rt_array_len` and `call i64 @rt_array_get`. There is
+no remaining "returns a runtime handle instead of the element/length" behaviour
+to reproduce.
+
+What actually remains open under this row is NOT the titled miscompile:
+1. **Native verification debt.** The strict architecture matrix was never run,
+   because the bounded build stopped in the semantic checker on an unrelated
+   error (`method 'replace' not found on value of type str in nested call
+   context`). That is a separate defect blocking the gate, not this one.
+2. **A different gap:** the `[value; count]` array-repeat HIR/semantic hole.
+
+Recommend re-titling this row to the verification debt, or splitting (1) and (2)
+into their own rows, rather than leaving a P2 "silently wrong result" label on a
+defect whose lowering is fixed.
+
+Not proven here: native execution was not run this session (same blocker).

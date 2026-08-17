@@ -1,6 +1,7 @@
 # Bug: hosted_browser_renderer_process.spl native build fails — cannot infer field type on `struct 'ANY' field 'message'`
 
-**Status: FIXED (2026-08-09).** Verified directly: `sh scripts/check/check-wm-production-fullscreen-evidence.shs`
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 now produces `wm_production_fullscreen_native_artifact=present` and zero
 occurrences of "cannot infer field type" / "struct 'ANY'" in its output —
 the native build genuinely succeeds now. See Resolution below. The guard

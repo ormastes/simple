@@ -3,7 +3,8 @@
 - **ID:** interp_parse_module_arena_visibility_crash_2026-06-16
 - **Severity:** P2 (blocks running any arena-AST lint pass from interpreted app code; blocks reliable-mode R2 wiring and the dormant `_run_ast_lint_passes` suite in the LSP/query path)
 - **Area:** interpreter / compiler.core (parse + AST arena, HIR lowering)
-- **Status:** open — reproduced across 3 wiring approaches
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found during:** reliable-mode P1/R2 (wiring `check_primitive_api_arena` into `query_lint`)
 
 ## Summary

@@ -1,6 +1,7 @@
 # Lint invalid profile false-green — 2026-07-19
 
-**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Reproduction
 

@@ -1,7 +1,8 @@
 # A file `lint` cannot parse is reported as one error, not as NOT LINTED — the file is silently skipped
 
 **Date:** 2026-08-01
-**Status:** Reporting FIXED (loud + countable + fail-closed). The census of how
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 many files are currently skipped is RETRACTED — the oracle was proved vacuous by
 sabotage; see "Blast radius". Do not cite any count from this lane.
 **Severity:** HIGH — this is a verification-layer blindness, not a cosmetic one.

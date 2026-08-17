@@ -1,6 +1,7 @@
 # Interpreter: struct-in-Dict field with a closure-typed sibling field reads back nil
 
-**Status:** OPEN — found 2026-08-10 during a stdlib bug hunt in `src/lib/nogc_async_mut/actors/actor.spl`.
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 

@@ -1,6 +1,7 @@
 # JS subset parser: ternary dropped, statements after `}` never evaluated
 
-- **Status:** Open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Date:** 2026-07-11
 - **Area:** lib / js engine (`src/lib/nogc_sync_mut/js/engine/parser.spl`)
 - **Severity:** P2 (silently wrong values on extremely common JS forms)

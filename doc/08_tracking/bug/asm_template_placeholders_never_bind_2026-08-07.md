@@ -1,7 +1,8 @@
 # `asm """..."""` template placeholders never bind — and `@cfg("target_arch", ...)` is inert
 
 - **Date:** 2026-08-07
-- **Status:** partially fixed (3 files closed, 2 remain); two root-cause defects open
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** blocker (Stage-3 self-host blocker #10)
 
 ## Symptom

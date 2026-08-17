@@ -3,7 +3,8 @@
 - **ID:** httpserver_static_serve_zeroed_cache_segfault_2026-06-17
 - **Severity:** P1 (the `nogc_async_mut` HTTP server could not serve a single request)
 - **Area:** compiler interpreter extern (`rt_event_loop_*`) + lib/nogc_async_mut io/driver
-- **Status:** INTERPRETER crash **FIXED + verified**. NATIVE crash **FIXED +
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   verified 2026-06-17** (runtime root-cause fix, option A — see "Real fix landed"
   below).
 

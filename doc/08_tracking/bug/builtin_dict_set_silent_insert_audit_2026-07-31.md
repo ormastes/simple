@@ -1,5 +1,8 @@
 # Audit: `.set()` on builtin Dict -- silent-insert-failure blast radius (2026-07-31)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Background
 
 Confirmed defect (not re-litigated here): calling `.set(k, v)` on a **builtin

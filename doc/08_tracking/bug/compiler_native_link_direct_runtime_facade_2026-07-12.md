@@ -1,5 +1,8 @@
 # Compiler native linker still uses direct runtime imports
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 The LLVM native-link owner still imports `rt_env_get`, `rt_process_run`, and
 file operations directly. The ARM64 freestanding dispatch added on 2026-07-12
 keeps those calls inside that existing owner and adds no app/backend leakage.

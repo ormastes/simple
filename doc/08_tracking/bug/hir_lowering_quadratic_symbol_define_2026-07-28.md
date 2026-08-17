@@ -1,6 +1,7 @@
 # HIR lowering is quadratic in symbols-per-module (stage-4 blocker)
 
-- **Status:** open. Root cause 1 **REFUTED** on the stage-4 (native) lane by a
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   second pass on 2026-07-28 — see "CORRECTION" below before doing anything.
   Root causes 2 and 3 remain unproven and unfixed; no fix landed.
 - **Filed:** 2026-07-28

@@ -1,5 +1,8 @@
 # Module loader negative-cache filesystem stat storm
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 This is a condensed restoration of the tracking record originally introduced
 by commits `08424ed7075` and `eaae2e73dc5`, restated against current source.
 

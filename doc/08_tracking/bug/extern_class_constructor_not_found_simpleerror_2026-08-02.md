@@ -1,6 +1,7 @@
 # `extern class` constructor is not callable — `SimpleError` fails with E1002
 
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Date:** 2026-08-02
 - **Found at:** `f3354f1924ab032503ae64f8761c8c067e76656b`
 - **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple`, which announces

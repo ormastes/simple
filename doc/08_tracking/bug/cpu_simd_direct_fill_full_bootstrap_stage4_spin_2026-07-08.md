@@ -1,5 +1,8 @@
 # CPU SIMD Direct Fill Full Bootstrap Stage 4 Spin
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Date: 2026-07-08
 
 ## Status
@@ -60,3 +63,43 @@ Focused evidence:
 Rebuild/deploy a pure-Simple `bin/simple` and rerun the retained 4K/8K SIMD
 performance evidence. Keep `build/bootstrap/native_cache` and use isolated mini
 caches for any further bootstrap probes.
+
+## 2026-08-17 re-verification — BLOCKED (bootstrap forbidden) + one STALE attribution
+
+A full bootstrap (`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+--deploy`) is the only stated reproduction, and running one was **forbidden this
+session** — a live bootstrap owned the host at ~98% CPU and was the user's top
+priority. The Stage 4 spin was therefore NOT re-attempted, and no claim is made
+about whether it still occurs.
+
+**Stale attribution, corrected.** The "Mitigation" section credits:
+
+> Simple `native_build_main.spl` uses dictionaries for discovered files and
+> import-resolution cache entries instead of linear scans.
+
+That code is **not in `src/app/cli/native_build_main.spl`** at tip, and cannot
+be: the file is a 390-line argv wrapper that spawns
+`src/app/cli/native_build_worker.spl` as a subprocess and contains no closure
+walker, no dictionary of discovered files, and no import-resolution cache. A
+tree scan for entry-closure logic
+(`/usr/bin/grep -rln "entry_closure\|entry-closure" src/app src/compiler/80.driver`)
+does not list `native_build_main.spl` at all; the pure-Simple closure walkers now
+live in `src/app/io/_CliCompile/compile_targets.spl`,
+`src/app/cli/bootstrap_focused_native_build.spl`, and
+`src/compiler/80.driver/driver_source_*loading.spl`. Anyone re-checking this
+mitigation must look there, not here. The Rust half of the mitigation
+(`native-project` discovery tracking queued vs processed files) is under
+`pipeline/native_project/**`, owned by another lane.
+
+The remaining substance of this bug — "rebuild/deploy a pure-Simple `bin/simple`
+and rerun the retained 4K/8K SIMD performance evidence" — is by construction a
+bootstrap+deploy task and stays open.
+
+### What could NOT be proven this session
+- Whether Stage 4 still spins CPU-bound without emitting objects.
+- Whether `build/bootstrap/native_cache` still ends up holding only
+  `bootstrap-wide-inputs.sha256`. `build/bootstrap/**` was off-limits.
+- Any 4K/8K SIMD performance number, and whether `rt_engine2d_simd_fill_u32` is
+  reached on a pure-Simple binary — no pure-Simple binary was built or deployed.
+- The `cargo test ... test_entry_closure_handles_shared_import_fan_in` evidence
+  line was not re-run.

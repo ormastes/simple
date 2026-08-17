@@ -1,5 +1,8 @@
 # CudaLaneSession.create() unresolved across module boundary (blocks B2 live verification)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Date: 2026-08-07
 Filed by: Task B2 (cuda_jit lane executor), `doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md`
 

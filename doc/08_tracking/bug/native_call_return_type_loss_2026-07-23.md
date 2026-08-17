@@ -1,5 +1,8 @@
 # native (bootstrap): declared function return types ignored — call results all typed i64
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Date:** 2026-07-23  **Status:** PARTIALLY FIXED (Str returns; other types
   remain on the builtin-table fallback by design, see ceiling)
 - **Severity:** critical — every text-returning call rendered as raw integers

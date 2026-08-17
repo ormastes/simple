@@ -1,5 +1,8 @@
 # Jupyter kernel `complete_request`/`inspect_request` crash the kernel — deployed `bin/simple` rejects `rt_process_spawn_piped`
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Date:** 2026-08-07
 - **Area:** `src/app/jupyter_kernel/main.spl` (Task P1) LSP bridge / deployed `bin/simple` extern registry
 - **Symptom:** `error: semantic: unknown extern function: rt_process_spawn_piped` — kills the whole

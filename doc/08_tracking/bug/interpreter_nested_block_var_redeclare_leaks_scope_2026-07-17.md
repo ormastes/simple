@@ -1,7 +1,8 @@
 # Bug: nested-block `var` redeclaration leaks into outer scope (Rust seed interpreter)
 
 - **Date:** 2026-07-17
-- **Status:** fixed — `exec_block`/`exec_block_fn` now capture each block's directly-declared
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   names (`var`/`val`/`const`/`static`) before running its statements and restore
   (or remove) them on every exit path (fallthrough, return, break, continue).
   See `src/compiler_rust/compiler/src/interpreter/block_exec.rs`

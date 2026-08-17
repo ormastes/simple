@@ -1,5 +1,8 @@
 # `rt_host_gpu_queue_emit_payload_text` unregistered in self-hosted runner — payload-carrying host↔GPU queue round-trip aborts
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 Open.
 

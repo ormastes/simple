@@ -1,5 +1,8 @@
 # Cranelift emits garbage data pointer for [u8] array literals under freestanding native-build
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 Open.
 

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-06-13
 - **Severity:** P1 (silent wrong result in compiled/JIT code; correct in interpreter)
-- **Status:** FIXED AND REDEPLOYED — re-verified 2026-08-09 against the
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   currently-deployed seed binary (`bin/release/x86_64-unknown-linux-gnu/simple`,
   built 2026-08-09). Root cause was a Rust-seed **parser** heuristic (not MIR
   lowering/type inference as originally suspected); removed by commit

@@ -1,7 +1,8 @@
 # Browser jail: seccomp is a deny-list and in-process browsers are unjailed
 
 - **Date**: 2026-08-15
-- **Status**: PARTIALLY FIXED 2026-08-15 (problem 1 fixed: seccomp is now an
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   ALLOW-list; problem 3 partially addressed: honest sandbox posture surface +
   refusal gate landed, worker routing still open; problem 2 still open)
 - **Area**: runtime (C), app/browser, os/hosted

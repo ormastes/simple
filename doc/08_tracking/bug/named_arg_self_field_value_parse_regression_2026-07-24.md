@@ -1,5 +1,8 @@
 # RETRACTED — see jit_option_i64_value3_reads_as_none_2026-07-24.md
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-24
 
 This report's original conclusion — that `Type(field: self.field)` in a named

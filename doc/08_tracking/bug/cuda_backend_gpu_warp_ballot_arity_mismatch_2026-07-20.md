@@ -1,6 +1,7 @@
 # CUDA backend requires 2 args for gpu_warp_ballot but codegen (and the intrinsic's real signature) only uses 1
 
-**Status:** Open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Category:** GENUINE-BUG (backend arity-validation bug, precisely root-caused)
 **Discovered:** 2026-07-20 (whole-suite triage campaign, shard meas_01u_03)
 
@@ -89,3 +90,17 @@ campaign's src/** edit restriction — filed here instead.
 ## Affected specs
 
 - `test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl` (1 of 24 examples: "emits vote.sync.ballot.b32 for gpu_warp_ballot")
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (cited line:col accurate)
+
+`src/compiler/70.backend/backend/cuda_backend.spl:1628` still lists
+`gpu_warp_ballot` in the `required_args = 2` case group:
+
+```spl
+case "min" | "max" | ... | "gpu_warp_shuffle_xor" | "gpu_warp_ballot" | "gpu_warp_broadcast" | ...: required_args = 2
+```
+
+Second site: `cuda_backend.spl:1167  case "gpu_warp_ballot":`.
+Owner path: src/compiler/70.backend/**.

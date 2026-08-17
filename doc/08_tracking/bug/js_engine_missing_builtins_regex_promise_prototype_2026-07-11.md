@@ -1,6 +1,7 @@
 ---
 id: js_engine_missing_builtins_regex_promise_prototype_2026-07-11
-status: PARTIALLY-FIXED (2/3 fixed 2026-08-10; regex replace still open)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: medium
 discovered: 2026-07-11
 discovered_by: famous-page JS conformance probe (tools/pixel_compare/probe_js_char.spl)

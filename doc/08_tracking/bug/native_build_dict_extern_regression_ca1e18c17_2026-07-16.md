@@ -1,5 +1,8 @@
 # Bug: native-build broken under deployed seed since ca1e18c1744 (dict-extern migration)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Status (2026-07-16):** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 
 - **Severity:** P1 (the default tooling path `bin/simple native-build --entry`

@@ -5,7 +5,8 @@
   symptom is "sspec `describe`-level fixtures are not visible inside `it`", which pushes every
   spec author to module-level state.
 - **Component:** compiler — closure free-variable analysis. **NOT** the spec library.
-- **Status:** **FIXED 2026-07-27 (lane CAPFIX)** in the Rust compiler tree. Both walkers now
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   descend into every statement form and into match arms, with sequential shadowing. Regression
   spec: `test/01_unit/compiler/closure_capture_statements_spec.spl` (30 examples; 22 of them fail
   on the pre-fix binary, 0 after). See "Fix" below. Not yet ported to the pure-Simple
@@ -197,3 +198,21 @@ declare a fixture at describe level. Each is affected *only* if that fixture is 
 and only when no earlier plain-expression statement in the same `it` already referenced it.
 The failure is loud (`variable X not found`) inside sspec, so it surfaces as a red example
 rather than a false green — but the same defect in non-spec code is silent.
+
+## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
+
+Content check of `src/compiler_rust/compiler/src/hir/lower/expr/control.rs`:
+lines 2424-2429 carry the landed capture-walker fix and name this very file:
+
+> "...and had no `Expr::DoBlock` arm at all, so a `fn(): ...` block body captured
+>  ... doc/08_tracking/bug/closure_selective_capture_skips_non_expression_statements_2026-07-27.md"
+
+So the **walker half is confirmed fixed in current source**. The half this doc
+leaves open — the JIT substituting `0` for the closure's lost direct read — is
+NOT in `control.rs`; it is a cranelift codegen concern and was not located or
+verified here.
+
+**Verdict: STILL-OPEN (JIT half only). Walker half ALREADY-FIXED by content.**
+**Not proven:** the JIT half. A JIT defect cannot go red from a spec body
+(spec bodies run interpreted) and the subprocess comparison could not be run —
+see "Execution blocked" below.

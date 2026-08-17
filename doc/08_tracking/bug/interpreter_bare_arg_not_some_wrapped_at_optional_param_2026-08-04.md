@@ -264,10 +264,3 @@ the JIT/native side (`show(42)` on an `i64?` prints a denormal float;
 reading actually saw. It is untouched here — this change is confined to pattern
 matching — and it is why any future measurement of this area must compare
 VALUES (`x == 42`), never `to_text` output.
-
-## Re-verification 2026-08-17 — DOES NOT REPRODUCE (confirms the doc's own FIXED verdict)
-
-`fn f(x: i64?)` called as `f(5)`, matched with `case Some(v)`, returns
-`"some:5"` under `SIMPLE_EXECUTION_MODE=interpreter` on the deployed seed. No
-fall-through. Consistent with this doc's own 2026-08-05 FIXED note; recorded
-here because the entry was still being routed as open P1 work.

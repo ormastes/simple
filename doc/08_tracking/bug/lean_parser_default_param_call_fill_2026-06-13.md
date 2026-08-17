@@ -9,7 +9,8 @@
 - **Date:** 2026-06-13
 - **Component:** `src/compiler/20.hir` / `src/compiler/30.types` — call lowering /
   call-signature resolution (self-hosted pipeline).
-- **Status:** RESOLVED on the active (Rust) frontend 2026-06-14 (commit 4e151c2649b).
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   The deployed compiler's `run`/`jit`/`aot` path uses the Rust HIR frontend, and
   that path now fills omitted trailing default args (verified: `greet("hi")`→103,
   `multi(1)`→31, no-default `add(2,3)`→5; regression spec

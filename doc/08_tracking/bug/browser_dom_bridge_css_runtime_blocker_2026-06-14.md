@@ -1,5 +1,8 @@
 # Browser DOM Bridge CSS Runtime Blocker - 2026-06-14
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Summary
 
 `src/app/ui.browser/dom_bridge.spl` checks successfully, but executable runtime

@@ -1,7 +1,8 @@
 # Bug: `regenerate_memory_capabilities()` never emits a `conversion_is_safe`-named theorem — generated Lean output only proves narrow special cases (reflexivity, two hand-picked pairs), not general conversion safety
 
 - **Date:** 2026-07-20
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl` (`regenerate_memory_capabilities`), exercised via `test/00_formal_verification/compiler/regeneration_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple` (prints the Rust-seed bootstrap warning); this is a content-generation gap in pure-`.spl` code, not an interpreter defect, so it is expected to reproduce identically on a self-hosted binary.
 
@@ -36,3 +37,13 @@ Either (a) add a genuinely general theorem to `regenerate_memory_capabilities()`
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/regeneration_spec.spl --no-session-daemon
 ```
 Failing example: "Lean Regeneration > module generators > regenerates memory capability output".
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE
+
+`grep conversion_is_safe` over
+`src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`
+returns zero hits. The ten `add_theorem(build_theorem(` calls (lines 105, 112,
+119, 126, 133, 140, 147, 154, 161, 168) still emit only the narrow set the doc
+describes — `"can_convert_refl"` (:106) and `"exclusive_to_shared"` (:113) lead
+them — and `def canConvert` is emitted at :67 with no general safety theorem
+quantified over it.

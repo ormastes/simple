@@ -1,5 +1,8 @@
 # `_cli_driver_binary()` seed-sibling lookup fails under symlinked argv0
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-11 · **Status:** worker-side workaround landed in check_entry.spl; durable
 fix landed in working copy (src/app/io/cli_ops.spl), pending next stage-4 rebuild + redeploy
 
@@ -50,3 +53,18 @@ the lookup fails, and delegation is skipped without any diagnostic.
   sibling path doesn't exist, per the visibility ask above. Net +15 lines in
   `src/app/io/cli_ops.spl`. Takes effect after the next stage-4 rebuild + redeploy since
   this is compiled-binary code; left uncommitted per task scope.
+
+## 2026-08-17 reproduction attempt (CLI lane)
+
+Classified by CONTENT. `src/app/io/cli_ops.spl` no longer resolves the driver
+from argv0 first: `_cli_current_exe_path()` (line 158-188) canonicalizes
+`/proc/self/exe` IN-PROCESS via `rt_path_absolute` (`_cli_resolve_symlink`,
+line 146-156) and only falls back to `sys_get_args()[0]` + `_cli_resolve_argv0`
++ `_cli_find_on_path` when that yields nothing or on Windows. The symlink case
+this bug is about (`bin/simple` -> `bin/release/<triple>/simple`) is therefore
+answered by the kernel, not by argv0. `_cli_is_current_exe` (205) additionally
+resolves the CANDIDATE's symlinks, the specific regression called out in the
+in-source comment at line 213-217.
+
+Repro spec run: `test/01_unit/app/io/cli_argv0_resolution_spec.spl` — see the
+`Results:` line recorded alongside this entry.

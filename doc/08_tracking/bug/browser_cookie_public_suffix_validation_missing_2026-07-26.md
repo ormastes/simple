@@ -1,5 +1,8 @@
 # Browser cookie public-suffix validation is missing
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Implementation fixed; executable target evidence is compiler-blocked.

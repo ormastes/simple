@@ -1,6 +1,7 @@
 # Killed spec emits no verdict line — a broken spec reads as "not yet run"
 
-- **Status:** FIXED 2026-08-09
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** high (fail-open; hides broken specs from every sweep)
 - **Area:** `src/app/test_daemon/`, `src/app/test_runner_new/`
 

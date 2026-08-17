@@ -3,7 +3,8 @@
 - **Filed:** 2026-07-27
 - **Lane:** NILQ
 - **Severity:** High (silent wrong-branch; no diagnostic)
-- **Status:** Open — root cause is in a compiler tree, NOT patched by this lane
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Engines affected:** JIT / native default engine only. The interpreter is correct.
 
 ## Specification

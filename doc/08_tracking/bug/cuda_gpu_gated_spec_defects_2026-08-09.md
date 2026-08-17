@@ -1,5 +1,8 @@
 # CUDA/GPU defects uncovered by opening the P15 env gates (2026-08-09)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Stream F1. Three gated specs were run with `SIMPLE_CUDA_TEST=1` (runner prints
 the `test-env-gate: ... bypassing test daemon` line). Findings below; the fixed
 items are noted for completeness, the rest are FILED, not fixed.

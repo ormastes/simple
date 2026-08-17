@@ -1,5 +1,8 @@
 # mir_lowering_new_spec.spl: 19/34 failures are pre-existing, not caused by a399483d/796d8484
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Date: 2026-08-08
 
 ## Summary

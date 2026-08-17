@@ -188,3 +188,40 @@ mis-dispatch case. `mod_a/b/c.spl` + `main.spl`/`main2.spl` and
 and plain (`use m`) imports do not flatten**, emit no warning, and dispatch
 correctly on both engines. Only wildcard `use m.*` (and the spec harness's
 equivalent) triggers the flattening that exposes the bug.
+
+---
+
+## Re-verification 2026-08-17 (compiler-lint lane) — OPEN, but the file attribution is WRONG
+
+The tracking row files this against `src/compiler/35.semantics/resolve.spl`.
+That is incorrect and would send the next lane to the wrong file:
+
+- `grep -n candidates src/compiler/35.semantics/resolve.spl` returns **one**
+  line (869) and it is a comment about method-vs-global fallthrough. There is
+  no `candidates.last()` fallback and no overload dedup key in that file.
+- Both remaining remedies live in the **Rust seed**, not in `35.semantics`:
+  - **C1** (include the return type in the dedup key) —
+    `src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:1642-1734`,
+    where `private_dup_overloads: HashMap<String, Vec<(Vec<TypeId>, String)>>`
+    (declared at `lowering_core.rs:295`) is built keyed on **parameter** types
+    only.
+  - **C2** (make the `candidates.last()` fallback a hard error) —
+    `src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs:640-645`.
+
+Both files are under `hir/lower` / MIR-lowering trees that are explicitly
+claimed by other concurrent lanes, so **no change was made here.**
+
+Independent live confirmation that the mechanism is still active: an unrelated
+single-file `bin/simple lint` run on 2026-08-17 emitted
+`compiler_cross_module_private_symbol_collision` warnings for `dir_remove_all`
+((text)->bool vs (text)->i32), `file_read_bytes` ((text)->[i64] vs (text)->[u8]),
+`join_path`, `last_index_of`, `read_file`, `shell`, and `write_file` — every one
+of them a pair that **differs only in RETURN type or in a String/text pairing**,
+i.e. exactly the class C1's parameter-only dedup key cannot separate. This is
+stronger evidence than the original sshd four names, which the doc itself
+classifies as benign.
+
+**Verdict: OPEN (C1/C2), OUT-OF-SCOPE for this lane.** Refile against
+`src/compiler_rust/compiler/src/mir/lower/{lowering_core.rs,lowering_expr_call.rs}`.
+Not proven here: that any of the seven names above is actually mis-dispatched at
+runtime — the warning proves the ambiguity exists, not that a fallback was hit.

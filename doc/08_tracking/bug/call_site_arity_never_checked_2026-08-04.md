@@ -1,6 +1,7 @@
 # Call-site argument count is never checked before codegen (2026-08-04)
 
-**Status:** OPEN (detection not armed; real call sites remain). §3's same-file
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 census found 7 real sites, all repaired (`af0fdf192d8`, `7788bdf1d56`, §7). §8
 then measured the **cross-module** population §3 had declared unmeasured and
 found **154 real sites**; §9 repairs 26 more of them across three modules, and
@@ -627,3 +628,56 @@ All six clusters are therefore accounted for: **one landed** (§10.3,
 `compile_options_hash_compute/7`, arity-provably-fixed though the spec stays
 red for an unrelated `text.to_bytes()` gap), **five left open** with the
 specific reason recorded above.
+
+## REPRODUCED 2026-08-17 (fleet lane C) — live, exit 0, no diagnostic
+
+Probe re-run on the deployed binary, matching §1's probe exactly
+(`f3(a,b,c) -> c*1000 + a*10 + b`):
+
+```
+RC=0
+too_few=  3078      <- f3(7, 8)         one argument too FEW
+too_many= 9078      <- f3(7, 8, 9, 11)  one argument too MANY
+correct=  9078      <- f3(7, 8, 9)
+```
+
+Both malformed calls compile clean and exit 0. The too-many call silently DROPS the extra
+argument. The too-few call silently fabricates `c`, yielding **3078 instead of 9078** — a
+wrong number handed back with no error anywhere. Silent-corruption class confirmed live.
+
+### The stated blocker is now STALE — re-arming is partly unblocked
+
+`src/compiler/35.semantics/resolve.spl:815-822` suppresses the arity error with this reason:
+
+> the lean bridge currently hardcodes `has_default: false`
+> (`_FlatAstBridge/convert_nodes.spl:571/682`) ... Re-enable the arity error only after the
+> bridge captures has_default faithfully.
+
+That is no longer true. `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` now
+computes it for real at line 1730:
+
+```
+val p_has_default = p_default_idx >= 0
+```
+
+and line 1713 explicitly records that it *used to* hardcode `false` for every parameter. So
+the bridge half of the precondition is MET.
+
+### Why this lane did not arm it anyway
+
+Two reasons, both evidence-based:
+
+1. `has_default` is still hardcoded `false` at several HirParam construction sites OUTSIDE the
+   bridge — `20.hir/hir_lowering/_Items/module_lowering.spl:236`,
+   `_Items/declaration_lowering.spl:151` and `:381`. (`declaration_lowering.spl:586` does
+   propagate `p.has_default` correctly, so the coverage is partial, not uniform.) Arming the
+   error now would false-fire on whichever paths flow through the remaining hardcodes. Those
+   files are under `20.hir/hir_lowering/**`, owned by another lane this session.
+2. The defect above reproduces on the **Rust seed**, which does not execute the pure-Simple
+   `35.semantics/resolve.spl` pass at all. A fix in `resolve.spl` therefore cannot be proven
+   by the probe that demonstrates the bug — and an unprovable patch to a compiler pass that
+   can false-fire is precisely the failure mode this queue exists to avoid.
+
+Detection remains open per §5. Concrete next step for whoever picks this up: make
+`has_default` faithful at the three `20.hir/hir_lowering` sites listed above, THEN re-arm the
+error at `resolve.spl:815`, and prove it through the pure-Simple pipeline (not the seed).

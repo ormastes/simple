@@ -1,5 +1,8 @@
 # Build11 Stage 3 CompileContext corruption after clean parse
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Lane-B IfChain continuation (2026-08-14)
 
 Fresh r6 evidence supersedes the earlier pre-HIR owner hypothesis. Stage 2

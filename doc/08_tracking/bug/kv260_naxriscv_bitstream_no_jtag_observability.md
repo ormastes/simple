@@ -2,7 +2,8 @@
 
 **ID:** kv260_naxriscv_bitstream_no_jtag_observability
 **Severity:** P2 (blocks physical-FPGA SimpleOS/RISC-V observation, not emulation)
-**Status:** Open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-06-13 (telnet-over-serial system-test bring-up)
 
 ## Finding (verified from the loaded netlist, not docs)

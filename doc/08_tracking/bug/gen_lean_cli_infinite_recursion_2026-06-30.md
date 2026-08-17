@@ -1,5 +1,8 @@
 # gen-lean CLI Infinite Recursion — Rust codegen unreachable - 2026-06-30
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 
 Open. `bin/simple gen-lean <sub>` does not run; the Simple→Lean generation CLI is

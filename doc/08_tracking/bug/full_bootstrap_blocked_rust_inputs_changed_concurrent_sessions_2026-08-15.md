@@ -1,5 +1,8 @@
 # Full bootstrap blocked: Rust inputs changed mid-build (concurrent sessions)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Date: 2026-08-15. Session: sole temporary build owner attempting to replace the
 seed-masquerading `bin/simple` with a self-hosted binary.
 

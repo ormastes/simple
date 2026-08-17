@@ -22,7 +22,8 @@ origin/main — then re-cherry-pick e210ff2af19 (or d0e976ffef4) and push; or
 - Pre-existing origin red found during verification: backend_software_damage_spec
   "vertically merges every separated run from the prior row" fails on pristine
   origin lib (expected [0,0,64,128,128,0,64,128], got [0,0,256,128]).
-Status: OPEN — do not push until unblocked.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## 2026-08-17 re-verification — UNBLOCKED: unblock condition (a) is now satisfied
 

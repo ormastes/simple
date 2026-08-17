@@ -1,6 +1,7 @@
 # A single system spec without `# @cover` abandons the WHOLE run — 488 specs never execute in three directories (2026-08-04)
 
-**Status:** OPEN
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 **Related — SAME gate, other tiers, found by parallel lanes the same day. Fix
 once, close all three:**
@@ -130,3 +131,61 @@ per the standing mandate: the fix is well-specified (see "Why not fixed now"
 above) but requires touching a shared, heavily-depended-on file across three
 independent code paths, which is unsafe to do quickly in a shared working
 copy. No code changed this pass.
+
+## Re-verified 2026-08-17 (app-rest lane) — still OPEN, and the stated blocker is WEAKER than believed
+
+Content re-check (no SHA/ancestry reasoning used) confirms the defect is live:
+
+- `src/app/test_runner_new/test_runner_main.spl:241-257` still holds the
+  unmodified gate. Line 257 is byte-for-byte the early return quoted in "Root
+  cause": `return TestRunResult(files: [], total_passed: 0, total_failed:
+  missing_covers.len(), ...)`. Discovery has already completed at :236, so the
+  discarded `all_files` is the full list.
+- The reproducer named in triage, `test/03_system/stdlib/database/sdn_checksum_spec.spl`,
+  still has **0** occurrences of `@cover` (`grep -c '@cover'` → `0`), so the gate
+  still fires for that directory.
+- `validate_system_test_covers` is imported at `test_runner_main.spl:21` from
+  `std.test_runner.test_runner_files` — it is **not** defined under `src/app/`,
+  so the flagging predicate itself is out of this file's reach.
+
+**Correction to "Why not fixed now" option 1.** That analysis says the extra
+count "has to be threaded through all three" accumulation paths or it will be
+dropped, and both the 2026-08-04 and 2026-08-10 passes declined the fix on that
+basis. The premise is narrower than stated: those three paths are all *internal*
+returns of a single function, and that function has exactly **one call site in
+the whole tree** —
+
+```
+$ grep -rn "run_tests(" src/app/ src/lib/nogc_sync_mut/test_runner/ \
+    | grep -v "fn run_tests\|run_tests_parallel_mode\|run_tests_via_daemon\|run_tests_sequential"
+src/app/test_runner_new/test_runner_main.spl:1082:        spec_result = run_tests(options)
+```
+
+(The other `run_tests` hits — `src/app/test/ci_runner.spl:310`,
+`src/app/release/prepare.spl:55`, `cli_run_tests` in `src/app/io/**` — are
+unrelated functions with different signatures. `src/lib/nogc_sync_mut/test_runner/test_runner_modes.spl:139`
+is commented out.)
+
+So the failure total can be folded **once** at `:1082` rather than three times
+inside `run_tests`, which removes the "wrong thread-through corrupts every
+session's verdict" hazard that blocked the previous two passes. What genuinely
+remains unsolved is *communicating the count outward*: `TestRunResult` has no
+field for a non-executed gate failure, so option 1 still needs one of
+(a) an added field on the shared `TestRunResult` struct, (b) splitting
+`run_tests` into an inner worker plus a thin folding wrapper, or (c) injecting
+synthetic failed `TestFileResult` entries at the gate. That is a real design
+choice, not a two-line edit — but it is a *smaller* one than this doc has been
+recording.
+
+**Not fixed in this pass either, and the reason is host state, not design.**
+The lane could not obtain a single `Results:` line to satisfy the mandatory
+reproduce-first rule: four spec invocations
+(`sdn_checksum_spec`, `mcp_debug_log_tree_stdio_spec`, `mcpgdb_log_modes_spec`,
+`model3d_nested_nodes_spec`) were launched under `nice -n 19` via
+`scripts/resource/test-slot.shs` and each produced **0 bytes of output after
+25+ minutes** while alive in state `SNl`, with the box at load average 346 on
+32 cores and 87 concurrent `simple` processes (a live bootstrap plus ~15
+parallel lanes). Landing an unverified restructure of the shared test runner
+under those conditions is exactly the clobber class the session brief forbids.
+**Unblock condition:** re-attempt when load is below ~32 and a
+`Results: N total, ...` line can actually be captured before and after.

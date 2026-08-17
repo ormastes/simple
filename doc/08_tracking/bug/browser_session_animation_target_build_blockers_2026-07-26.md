@@ -1,7 +1,8 @@
 # BrowserSession animation target build blockers
 
 - **Date:** 2026-07-26
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Scope:** production execution of the HTML/CSS/Simple Script/JavaScript
   animation fixture
 

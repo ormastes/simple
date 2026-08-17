@@ -1,6 +1,7 @@
 ---
 id: cranelift_seed_missing_sffi_externs_2026-07-16
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: medium
 discovered: 2026-07-16
 discovered_by: scripts/check/check-native-seed-parity.shs strict-cranelift family (all 9 cases red at tip de7cb5a238a)
@@ -140,3 +141,11 @@ every cranelift build still XFAILs either way under this seed — so it is
 pure churn against an already-correct call site for zero verification-gate
 benefit. Fix remains: redeploy the seed/self-hosted binary from current
 source.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN as SEED STALENESS, not a source defect — confirmed by CONTENT.**
+`src/lib/nogc_sync_mut/sffi/codegen.spl` contains 154 `rt_cranelift_*` occurrences,
+i.e. the Simple-side externs are all declared. The gap is that the DEPLOYED seed
+binary registers only a subset. Nothing to fix under `src/lib/**`; this closes only
+when a fresh self-hosted binary is deployed.

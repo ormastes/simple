@@ -1,5 +1,8 @@
 # The spec suite is structurally blind to JIT-only defects (2026-07-30)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Motivation: `SIMPLE_EXECUTION_MODE=jit` is the default engine for plain
 `simple run`, but `bin/simple test` unconditionally forces interpreter mode
 for every child spec (proved with a direct code citation in
@@ -253,3 +256,23 @@ programs under test rather than reporting green unconditionally.
   llvm::` as a cheap sanity check) at the moment of testing, not just "the
   deployed binary," so a later reconciliation can confirm or rule out a
   binary swap as the explanation (§3a).
+
+## Triage 2026-08-17 — PARTIALLY ADDRESSED (content evidence)
+
+Classified against current source, not SHA ancestry.
+
+The differential harness this report asked for now exists:
+`scripts/check/check_jit_interpreter_differential.spl`, 271 lines, with a fixture
+table under `test/fixtures/jit_differential/` (`chained_to_i64_twice.spl`,
+`module_level_val_from_call.spl`, `struct_field_compound_assign.spl`, ...) and a
+documented entry point `bin/simple run scripts/check/check_jit_interpreter_differential.spl`.
+It cites this bug doc at line 22.
+
+The ROOT condition is still live and still stated in that file at line 4: the
+spec runner "unconditionally overwrites SIMPLE_EXECUTION_MODE to interpret", so
+`bin/simple test` remains single-engine and JIT-only divergences stay invisible
+to the suite itself. The harness is an out-of-band mitigation, not a fix to the
+suite. Keep open, but rescope the title: the blind spot is now covered by an
+opt-in harness that nothing gates on.
+
+NOT proven here: whether the harness currently passes. Not executed.

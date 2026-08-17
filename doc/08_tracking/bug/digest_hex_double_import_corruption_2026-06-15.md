@@ -1,5 +1,8 @@
 # Bug: Digest.hex() returns garbage when seam.spl and ctypes are both imported
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **ID:** digest_hex_double_import_corruption_2026-06-15
 **Filed:** 2026-06-15
 **Severity:** P1 — silent data corruption; hex() returns structurally plausible but wrong hex strings

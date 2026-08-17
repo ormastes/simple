@@ -1,6 +1,7 @@
 # Duplicate-check unknown option scanned its value
 
-- **Status:** FIXED in source; current Stage 4 qualification remains pending.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Observed:** `duplicate-check --bogus <empty-dir> --mode token --format json` treated `<empty-dir>` as the required target, scanned it, emitted zero groups, and exited `0`.
 - **Cause:** target selection skipped every dash-prefixed argument, while the later option parser silently ignored unknown flags.
 - **Fix:** the shared target-argument owner now accepts exact known switches or nonempty known value options, validates split option values, requires exactly one positional target, scans the full argv before returning it, and rejects malformed or unknown options before any filesystem scan.

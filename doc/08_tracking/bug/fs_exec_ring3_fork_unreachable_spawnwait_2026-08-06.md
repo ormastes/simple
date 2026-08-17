@@ -2,7 +2,8 @@
 
 Date: 2026-08-06
 Lane: B3 of `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`
-Status: **implementation landed, in-guest proof blocked on a build-system defect (D5 below)**
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## 1. Mechanism — fork is unreachable, not broken
 

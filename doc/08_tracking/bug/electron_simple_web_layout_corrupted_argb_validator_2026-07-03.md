@@ -1,6 +1,7 @@
 # Electron Simple Web Layout Corrupted ARGB Validator
 
-- status: fixed
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - date: 2026-07-03
 - gate: `test/03_system/check/electron_simple_web_layout_proof_validator_spec.spl`
 

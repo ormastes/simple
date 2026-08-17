@@ -6,7 +6,8 @@
 > one-line fix are in "Resolution" at the bottom; read that first — everything
 > above it is the original filing and is now historical.
 
-- **Status:** FIXED 2026-08-10 (was: OPEN — native/AOT backend defect)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Filed:** 2026-08-10
 - **Severity:** blocks AOT for any `class` that carries mutable scalar state —
   i.e. for the entire "use a class when you need shared mutable state" pattern

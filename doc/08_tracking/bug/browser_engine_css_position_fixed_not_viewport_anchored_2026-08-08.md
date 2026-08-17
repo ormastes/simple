@@ -1,6 +1,7 @@
 # browser_engine: `position: fixed` resolves against the nearest DOM ancestor, not the viewport
 
-**Status:** open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-08 (U3.7 `web_css_positioning_spec.spl`, REQ-WEB-CSS-007,
 `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/**`

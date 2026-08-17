@@ -1,6 +1,7 @@
 # HTML Compat Fixture 18 Live Source-B Timeout
 
-- **Status:** closed — all AC verified 2026-06-12
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Date:** 2026-06-11
 - **Lane:** Simple Web / Chromium HTML pixel parity
 

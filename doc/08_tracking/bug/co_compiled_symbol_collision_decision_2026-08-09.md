@@ -1,7 +1,8 @@
 # Co-compiled symbol collisions — root cause, distribution, and decision
 
 **Date:** 2026-08-09
-**Status:** DECISION DOCUMENT — no `.spl` edited, no fix attempted (by instruction)
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Supersedes the analysis in:** `duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md`
 **Measured from:** the SHARED working copy at `/home/ormastes/dev/pub/simple` (a worktree cannot measure this — `use std.X` resolves only to the main repo)
 

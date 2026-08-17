@@ -1,5 +1,8 @@
 # `app.dashboard.main` is a 14-line stub — both dashboard modules import an API that was never written
 
+Status: DUPLICATE of dashboard_main_lost_table_model_2026-08-04.md
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
 to `src/app/dashboard/**`. 16 of the 25 findings in `src/app/{cli,dashboard}`

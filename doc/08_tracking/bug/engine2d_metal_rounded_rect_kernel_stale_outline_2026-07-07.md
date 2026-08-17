@@ -1,5 +1,8 @@
 # kernel_draw_rounded_rect (Metal) drew a stale OUTLINE — CPU-vs-Metal parity DIVERGE
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 Fixed (2026-07-07).
 

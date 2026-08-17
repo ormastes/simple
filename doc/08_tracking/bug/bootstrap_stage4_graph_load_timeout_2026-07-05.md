@@ -1,6 +1,7 @@
 ---
 id: bootstrap_stage4_graph_load_timeout_2026-07-05
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: high
 discovered: 2026-07-05
 discovered_by: Stage-4 bootstrap execution on Apple M4
@@ -399,3 +400,11 @@ Do not repeat Stage4 in this session. The next fresh cycle may refresh the
 cached Stage2/Stage3 pair with this source, run the same lexer regression under
 the admitted CLI, then perform one bounded Stage4 A/B against the v45
 40-file/6.9-GiB baseline.
+
+## Re-verification 2026-08-17 (fleet lane C)
+
+STILL-OPEN, unproven either way. `src/compiler/99.loader/module_loader.spl` exists (603 lines)
+but contains no `timeout`/`7200` handling, and the `module_graph.spl` the doc cites is absent
+from disk (path drift confirmed). Reproduction requires a full stage-4 native build under
+`scripts/bootstrap/bootstrap-from-scratch.sh` — explicitly out of bounds for this lane while
+the users stage-3 bootstrap owns the host. No patch attempted.

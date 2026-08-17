@@ -1,7 +1,8 @@
 # aarch64 real-firmware EFI lane was unreproducible; unified arm64 lane still uses QEMU `-kernel`
 
 - **Date:** 2026-08-11
-- **Status:** PARTIALLY FIXED — EFI lane is now reproducible and gated (GREEN).
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   The `-kernel` dependency of the main arm64 desktop lane REMAINS OPEN.
 - **Rule:** `.claude/rules/board-runnable.md`
 
@@ -420,3 +421,11 @@ mistaken for a passing one.
 
 **Status: kernel-side boot-protocol gap CLOSED. Lane migration STILL OPEN,
 now blocked only on the self-hosted compiler (item 2).**
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN, correctly described.** The doc's own split is accurate: the
+EFI-application half is fixed and gated; the `-kernel` half of
+`scripts/check/check-simpleos-arm64-unified-live.shs` is explicitly blocked on a
+self-hosted `bin/simple` that can build the unified kernel. Not actionable by this
+lane — a bootstrap is live at ~98% CPU and this lane is forbidden from running one.

@@ -43,19 +43,3 @@ Run with the seed interpreter path (`bin/simple run`).
 ## Fix direction
 Struct assignment into a `var` local must deep-copy (as array assignment
 does); audit the interpreter's value-clone path for struct rvalues.
-
-## Re-verification 2026-08-17 — DOES NOT REPRODUCE
-
-The doc's verbatim reproducer (`struct S`, `var b = a; b.x = 2; print(a.x)`)
-prints `1` — the correct value-semantics answer — on the deployed seed in BOTH
-`SIMPLE_EXECUTION_MODE=interpreter` and the default JIT lane. This doc records
-the interpreter printing `2`; that no longer happens.
-
-Note this defect is the exact MIRROR of
-`interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10.md`
-(which complains that a class field does not alias ENOUGH). Both now behave
-correctly, which is consistent with the two having been opposite faces of the
-same copy-on-write write-back gate rather than two independent defects.
-
-Not proven: the `src/lib/hardware/soc_rtl/uart16550.spl` observation site
-(`uart_mmio_write`) was not re-exercised — only the reduced reproducer.

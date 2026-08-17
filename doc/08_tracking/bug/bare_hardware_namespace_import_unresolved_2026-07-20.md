@@ -1,6 +1,7 @@
 # Bare `hardware.*` namespace imports fail to resolve (needs `std.` prefix; ~64 specs affected)
 
-**Status:** open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** compiler module resolution / `src/lib/hardware/**`
 
@@ -82,3 +83,25 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 (Broader sibling pattern: 64 files under `test/01_unit/hardware/` use the
 same bare `use hardware.X` import style; likely all share this root cause,
 not independently verified here — out of shard scope.)
+
+## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+Recorded reproducer `test/01_unit/hardware/riscv_common/.spipe_matchers_riscv_formal_contract_spec.spl`
+NO LONGER EXISTS. Source verification instead:
+`src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:156-300` tries
+local dir, `$SIMPLE_LIB`, `src/<path>`, then a `lib/`-family search gated on
+`if relative_path.starts_with("lib/")` (line 219). A bare `hardware.*` never gets
+a `lib/` prefix, and `src/hardware/riscv_common/core/riscv_formal.spl` does not
+exist (the module lives at `src/lib/hardware/...`). No namespace fallback list
+exists. 32 files under `test/01_unit/hardware/` still use the bare form, e.g.
+`test/01_unit/hardware/riscv_common/riscv_formal_contract_spec.spl:3`.
+NOT FIXED by this lane (interpreter path owned by a concurrent P1 lane).
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STALE-REF
+
+The cited `src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl`
+(403 lines) contains no occurrence of `hardware`, and no `"hardware"` literal
+appears in any `src/compiler/10.frontend/core/interpreter/*.spl`. The namespace
+alias table is elsewhere; re-locate it before actioning.

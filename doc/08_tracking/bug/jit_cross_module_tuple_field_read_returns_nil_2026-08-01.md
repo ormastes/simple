@@ -1,6 +1,7 @@
 # JIT: cross-module tuple `.0` read returns nil
 
-**Status:** OPEN — found 2026-08-01 while fixing
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 `common_encoding_yaml_broken_cross_submodule_import_2026-07-20`.
 
 **Engine:** Cranelift JIT (`simple run` path). Not observed on the tree-walk

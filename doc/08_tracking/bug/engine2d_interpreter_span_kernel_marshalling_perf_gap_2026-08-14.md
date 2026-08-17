@@ -1,7 +1,8 @@
 # engine2d interpreter span kernels 180–300× slower than C due to per-element marshalling
 
 - **Date:** 2026-08-14
-- **Status:** RESOLVED 2026-08-15 (bulk `arr.write_span` primitive; see Resolution below)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** lib/engine2d + interpreter extern array ABI
 - **Severity:** perf (correctness is bit-exact; parity specs green)
 

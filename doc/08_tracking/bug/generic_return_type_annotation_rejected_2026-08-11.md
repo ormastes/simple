@@ -1,5 +1,8 @@
 # Generic return-type annotation reported rejected — NOT REPRODUCIBLE (2026-08-11)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Report
 
 Reported: the seed parser rejects generic return-type annotations —

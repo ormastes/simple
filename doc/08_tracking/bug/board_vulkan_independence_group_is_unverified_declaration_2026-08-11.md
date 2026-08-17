@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-11
 **Category:** OS / GPU driver / counterpart evidence
-**Status:** Open
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Owner:** Board Vulkan lane L4 (host provider inventory)
 **Files:** `src/os/drivers/gpu/board_vulkan/provider_inventory.spl`,
 `test/01_unit/os/vulkan/provider_inventory_spec.spl`

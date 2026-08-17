@@ -1,5 +1,8 @@
 # PERF BUG: HTML/CSS RenderDoc goal status spec exceeds runner threshold
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 
 - Date observed: 2026-06-25

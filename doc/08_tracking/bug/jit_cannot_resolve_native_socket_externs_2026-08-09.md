@@ -1,8 +1,68 @@
 # JIT cannot resolve the native socket externs — every "JIT mode" networking run is silently an interpreter run
 
 - **Filed:** 2026-08-09
-- **Status:** OPEN — root-caused 2026-08-09, scoped OUT of `.spl` work
+- Status: **FIXED 2026-08-17** (was OPEN P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   (Rust-seed-only fix, see "Root cause" below)
+
+## Resolution (2026-08-17)
+
+**Root cause, confirmed by content:** `register_runtime_symbols_from_provider`
+(`src/compiler_rust/compiler/src/codegen/jit.rs:387-395`) iterates **only**
+`RUNTIME_SYMBOL_NAMES`, and that manifest
+(`src/compiler_rust/common/src/runtime_symbols.rs:385`) contained **zero**
+`native_*` entries — `grep '"native_'` on the file returned three hits, all of
+them `starts_with` prefix arms inside `symbol_tier_of`, none inside the array.
+So the classifier already called the family `Sys`
+(`runtime_symbols.rs:307-309`) and the native linker already stubbed all 39 of
+them (`compiler/src/linker/native_binary/stubs.rs:87-125`), while the one list
+the JIT actually reads had never heard of them. A name absent there is never
+passed to `JITBuilder::symbol`, so Cranelift saw an unresolved import and the
+whole module was demoted to the tree-walk interpreter.
+
+**Fix:** added all 39 `native_tcp_* / native_udp_* / native_http_*` names to
+`RUNTIME_SYMBOL_NAMES`. All are `#[no_mangle] pub extern "C"` in
+`simple_runtime` (e.g. `runtime/src/value/net_tcp.rs:118`), so both provider
+lookup and the `elf_utils::resolve_runtime_symbol` fallback can resolve them.
+
+**Evidence (RED then GREEN, same tree, same isolated `CARGO_TARGET_DIR`):**
+
+RED — with the 39 manifest entries stripped and the tests kept:
+```
+test runtime_symbols::tests::every_classified_native_extern_family_has_manifest_coverage ... FAILED
+test runtime_symbols::tests::native_socket_externs_are_registered_for_the_jit ... FAILED
+test result: FAILED. 7 passed; 4 failed; 0 ignored; 0 measured; 1 filtered out
+```
+GREEN — with the fix:
+```
+test runtime_symbols::tests::every_classified_native_extern_family_has_manifest_coverage ... ok
+test runtime_symbols::tests::native_socket_externs_are_registered_for_the_jit ... ok
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 1 filtered out
+```
+The 2 residual failures (`realloc_is_exactly_once_and_adjacent_to_alloc_in_full_manifest`,
+`struct_allocator_pair_is_present_in_core_and_full_manifests`) are **pre-existing
+and unrelated** — they fail identically in both states, and this change only
+*appends* names, which cannot cause a "symbol missing from the manifest"
+assertion to start failing. They are not claimed as fixed here.
+
+**Specs added** (both in `src/compiler_rust/common/src/runtime_symbols.rs`,
+`mod tests`):
+1. *reproducing* — `native_socket_externs_are_registered_for_the_jit`: asserts
+   the four names the bug report measured are in the manifest.
+2. *similar-problem detection* — `every_classified_native_extern_family_has_manifest_coverage`:
+   generalises to the defect **class**, an extern family the tier table claims
+   to know about while the JIT's registration manifest has never heard of it.
+   For every prefix family `symbol_tier_of` special-cases it requires at least
+   one manifest entry, and conversely requires every `native_*` manifest entry
+   to classify as `Sys`, so the two tables cannot drift apart silently again.
+
+**Not proven here:** end-to-end JIT execution of a socket program. The deployed
+`bin/simple` is a Rust seed (mtime 2026-08-16 22:59) that predates this change,
+and on it the doc's original reproduction no longer prints the `[jit-fallback]`
+line at all — a control run with a deliberately bogus extern showed the run
+going through `interpreter_sffi::rt_interp_call`, i.e. the JIT was never
+entered for that program shape on that binary. Confirming the runtime effect
+needs a rebuilt seed.
 - **Severity:** Medium (correctness of engine claims; performance cliff)
 - **Component:** `RUNTIME_SYMBOL_NAMES` manifest (`src/compiler_rust/common/src/runtime_symbols.rs`)
   → Cranelift JIT external-symbol registration

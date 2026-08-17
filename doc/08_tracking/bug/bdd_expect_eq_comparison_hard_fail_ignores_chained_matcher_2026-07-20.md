@@ -1,7 +1,8 @@
 # SSpec `expect(a == b)`/`expect(a != b)` hard-fails before a chained matcher runs
 
 - **ID:** bdd_expect_eq_comparison_hard_fail_ignores_chained_matcher_2026-07-20
-- **Status:** FIXED (worktree `/tmp/wt_sspeceval`, not yet landed — a review/land
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   lane owns pushing to origin)
 - **Severity:** high-blast-radius false-RED in the SSpec interpreter evaluator
   (`simple test`) — NOT a value-marshaling / empty-value bug

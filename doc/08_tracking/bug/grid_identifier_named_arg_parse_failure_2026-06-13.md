@@ -2,7 +2,8 @@
 
 - **Date:** 2026-06-13
 - **Severity:** P2 (grammar regression — common identifier unusable in named-arg position)
-- **Status:** resolved (2026-06-14)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** parser (likely GPU launch grammar `kernel<<<grid, block>>>(args)` token handling)
 
 ## Resolution (2026-06-14)

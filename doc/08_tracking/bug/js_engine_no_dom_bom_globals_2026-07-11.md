@@ -1,6 +1,7 @@
 ---
 id: js_engine_no_dom_bom_globals_2026-07-11
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: high
 discovered: 2026-07-11
 discovered_by: famous-page JS conformance probe (tools/pixel_compare/probe_js_char.spl)
@@ -74,3 +75,9 @@ the `ScriptHost` already holds.
 Google's inline scripts in `google_live.html` (11 script bodies) all `eval`
 without error precisely because they never depend on a populated DOM — they
 return `undefined` and move on. No parser hang was observed on that corpus.
+
+## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED on this host
+
+Confirmed only that script_runner.spl mentions document/window in just 2 places, consistent with the doc's claim that no DOM/BOM globals are bound — but binding them is a feature build-out, not a defect patch, and no execution evidence was gathered. Not reproduced and not closed: this lane could neither exercise the path nor
+find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
+not mistaken for either a live confirmation or a close.

@@ -11,7 +11,8 @@
   never produced it before.)
 - **Date:** 2026-06-13
 - **Component:** `src/compiler/10.frontend/core/` lean parser
-- **Status:** FIXED 2026-06-13 (commit 1cfdeae4f789) — see "Fix landed" below.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 Struct-literal brace syntax `Name { x: 1, y: 2 }` is not parsed into a struct

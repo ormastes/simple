@@ -2,7 +2,8 @@
 
 - **ID:** compiler_cross_module_private_symbol_collision_2026-06-16
 - **Severity:** P1 (silent wrong-result + SIGSEGV; broad latent surface)
-- **Status:** MITIGATED — detection diagnostic implemented (option 3). Auto-fix
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   (per-file mangle) deferred as a deliberately-scoped effort given measured surface.
 - **Area:** compiler — import loader / module flattening / symbol resolution
 

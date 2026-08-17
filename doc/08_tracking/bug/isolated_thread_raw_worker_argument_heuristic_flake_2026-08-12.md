@@ -1,6 +1,7 @@
 # Isolated-thread raw worker argument heuristic is test-order dependent
 
-Status: open. Discovered while closing the isolated-thread heap-input gate on
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 2026-08-12.
 
 `native_callable()` infers `raw_worker_args` from closure-record shape/address.

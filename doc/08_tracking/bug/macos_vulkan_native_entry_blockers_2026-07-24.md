@@ -1,5 +1,8 @@
 # macOS Vulkan native entry blockers — 2026-07-24
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 OPEN — Vulkan installation, pure-Simple AOT entry, MoltenVK instance creation,
@@ -252,3 +255,11 @@ the next session must isolate the first remaining fallback transition with
 per-operation provenance before another full live launch. Window capture and
 keyboard/pointer/click evidence remain blocked behind that strict device
 readback gate; web, GUI widgets, WM, Metal, and QEMU were not started.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE
+
+Two named blockers are still present in source. `src/runtime/runtime_native.c:237`
+still defines `rt_vulkan_is_available(void)` as a `SPL_HOSTED_UNAVAILABLE_WEAK`
+stub. No Darwin loader probe exists: grep for `dylib` / `libvulkan.1.dylib`
+across `src/compiler_rust/runtime/src/vulkan/` returns zero hits, so only `.so`
+names are probed. Unverifiable at runtime on this Linux host.

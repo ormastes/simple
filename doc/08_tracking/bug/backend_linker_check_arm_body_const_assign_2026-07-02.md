@@ -1,6 +1,7 @@
 ---
 id: backend_linker_check_arm_body_const_assign_2026-07-02
-status: OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: low
 discovered: 2026-07-02
 discovered_by: `bin/simple check src/compiler/70.backend/linker/symbol_analysis.spl` while re-applying explicit dict-value type annotations
@@ -39,3 +40,20 @@ Blocks the literal "clean check" acceptance bar for
 unrelated compiler self-check quirk (likely in how `check <file>` resolves
 transitive dependencies for backend/linker-layer files vs. `__init__.spl`
 aggregation), not part of the 2026-07-02 "5 lost fixes" restoration.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STALE-REF (likely fixed; cited line is unrelated code)
+
+Cited `src/compiler/10.frontend/core/parser_stmts.spl:861` is an unrelated
+expression-statement branch. The real `arm_body` sites are:
+
+```spl
+src/compiler/10.frontend/core/parser_stmts.spl:1173:    var arm_body: [[i64]] = []
+src/compiler/10.frontend/core/parser_stmts.spl:1586:            val arm_body = parse_block()
+```
+
+The mutated one is declared `var` (1173) and the `val` one (1586) is never
+reassigned, so the "cannot assign to const arm_body" shape is not present in
+current source. NOT PROVEN: that `bin/simple check` no longer emits the error —
+no compiler was run.

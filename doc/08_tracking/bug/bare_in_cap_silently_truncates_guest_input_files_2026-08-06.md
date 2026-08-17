@@ -2,7 +2,8 @@
 
 Date: 2026-08-06
 Lane: B1 (in-guest clang compile of `llvm/lib/Support/DivisionByConstantInfo.cpp`), toolchain self-host bootstrap plan
-Status: **FIXED** (source fix landed; full in-guest OVMF B1 run NOT completed this session — see §5)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## 1. Symptom
 

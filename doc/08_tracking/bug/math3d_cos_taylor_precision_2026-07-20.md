@@ -1,5 +1,8 @@
 # math3d.spl `_cos`/`_sin` Taylor series loses precision away from zero
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (numeric precision defect in pure-Simple lib code)
 **Spec:** `test/unit/lib/engine/math3d_spec.spl` (24/25 passing — only this example fails)

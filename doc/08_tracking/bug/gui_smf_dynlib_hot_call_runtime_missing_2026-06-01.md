@@ -1,7 +1,8 @@
 # GUI macOS SMF dynlib hot-call evidence missing
 
 Date: 2026-06-01
-Status: open (triaged 2026-06-11, macOS arm64 evidence still missing per body)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Summary
 

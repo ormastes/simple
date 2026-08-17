@@ -1,5 +1,8 @@
 # Core-C bootstrap bundle misses `rt_is_interpreter_runtime`
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Fix prepared in the Vulkan integration lane. The core-C archive and focused

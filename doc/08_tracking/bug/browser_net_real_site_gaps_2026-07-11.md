@@ -1,6 +1,7 @@
 ---
 id: browser_net_real_site_gaps_2026-07-11
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: medium
 discovered: 2026-07-11
 discovered_by: Manual hardening pass against real sites (example.com, en.wikipedia.org,

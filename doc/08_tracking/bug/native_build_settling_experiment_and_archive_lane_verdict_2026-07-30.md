@@ -1,5 +1,8 @@
 # Settling experiment + archive-lane final verdict (2026-07-30)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Assignment: (1) settle whether the 07-29 6-CPU-hour rebuild arc was
 "blind but legitimate" or a real defect, by re-running with
 `SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1` and watching the discovery curve;

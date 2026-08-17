@@ -1,5 +1,8 @@
 # `src/lib/gc_sync_mut/` exists (869 files) despite being documented as "not a public variant directory"
 
+Status: DUPLICATE of gc_module_loader_spec_asserts_gc_sync_mut_absent_2026-08-17.md
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Scope:** `src/lib/gc_sync_mut/**` (existence itself)
 **Severity:** low-medium — breaks one assertion in `test/feature/lib/gc_parity/gc_module_loader_spec.spl`; architectural drift, not a crash

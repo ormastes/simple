@@ -1,5 +1,8 @@
 # lsp_json "suite hang" — no hanging spec; directory-run throughput on seed binary (2026-08-16)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Symptom
 A run of the lsp_json test suite appeared to hang and was killed after 15 min.
 

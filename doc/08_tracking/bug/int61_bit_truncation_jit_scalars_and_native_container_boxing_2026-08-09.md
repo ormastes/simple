@@ -1,6 +1,7 @@
 # Integers needing 61+ bits are corrupted: JIT everywhere, native inside containers
 
-Status: **RESOLVED 2026-08-09 — both defects.** Defect B (container boxing)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 fixed in the C runtime + pure-Simple MIR lowering (`fa518a9148c`), awaiting a
 bootstrap redeploy for the native-lane re-measurement. Defect A (JIT scalars)
 FIXED in the Rust seed (Cranelift codegen + Rust runtime `RuntimeValue`) —

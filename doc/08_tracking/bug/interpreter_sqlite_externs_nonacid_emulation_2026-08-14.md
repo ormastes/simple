@@ -1,5 +1,8 @@
 # Interpreter rt_sqlite_* externs are a non-ACID SQL emulation (transactions no-op, constraints unenforced)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - Date: 2026-08-14
 - Area: runtime / interpreter externs / database
 - Severity: high (blocks honest durability evidence for any interpreter-mode

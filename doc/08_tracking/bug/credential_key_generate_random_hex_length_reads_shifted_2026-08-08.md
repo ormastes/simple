@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (key generation impossible; encryption always failed closed)
-- **Status:** FIXED in `src/lib/nogc_sync_mut/terminal/credential/store.spl`
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   (local workaround); the underlying compiler defects stay OPEN
 - **Area:** compiler (seed JIT) / `src/lib/nogc_sync_mut/terminal/credential/store.spl`
 

@@ -1,6 +1,7 @@
 # SPIPE005 does not recognize `assert_true`/`assert_false` as assertions — contradicts the testing rule
 
-**Status:** open
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane F)
 **Area:** `src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl:376`
 **Severity:** medium — the linter rejects the assertion form the project's own rules

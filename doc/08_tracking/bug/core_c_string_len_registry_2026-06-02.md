@@ -116,3 +116,22 @@ nothing about this line. A native/core-c build was not run: the native build
 pipeline (`pipeline/native_project/**`) is claimed by another lane and a
 bootstrap was occupying the host. **Close only after a core-c native binary
 runs the repro above and prints `OK`.**
+
+## 2026-08-17 independent re-verification (second runtime lane)
+
+The 2026-08-17 note above was re-checked line-by-line against current source and
+is **accurate**: `rt_string_len` is at `src/runtime/runtime_native.c:2525-2529`
+with exactly the quoted body, and literal interning + `RT_CORE_STRING_FLAG_SHARED`
+are at `:2507-2521`. Its refusal to close is also correct and is upheld — no
+core-c native binary was run, and no `Results:` line exists for this row.
+
+**New finding, not in the note above — the fallback is only half-safe.**
+`rt_core_as_string` (`:1706-1714`) still gates on `rt_core_is_registered_string`.
+It returns NULL for two different populations: (a) an *untagged raw* `char*`,
+where `strlen` is the right answer, and (b) a value carrying
+`RT_VALUE_TAG_HEAP` whose object is simply not in the registry, where `strlen`
+runs on a **tagged, misaligned** address and yields garbage or a segfault rather
+than the old honest `-1`. The fallback only rescues case (a). Before closing,
+the repro should cover an unregistered *tagged* handle, not just a literal.
+
+Status stays OPEN (P2).

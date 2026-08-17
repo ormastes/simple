@@ -1,5 +1,8 @@
 # T2: `ComputedStyleHot` split verified — real production consumer confirmed
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Unit: T2, `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`
 §3 "T2 — Verify/complete the `ComputedStyleHot` hot/cold split".
 

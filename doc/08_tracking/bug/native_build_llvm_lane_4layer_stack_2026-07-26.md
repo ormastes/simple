@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-26
 - **Lane:** macOS host native-build (default = LLVM backend)
-- **Status:** layers 2-3 have env workarounds (proven `nb-ok`); layers 1+4 open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Working recipe (proven: probe compiles, links, runs)
 ```

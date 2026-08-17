@@ -1,5 +1,8 @@
 # engine2d JIT timing probe blocked by `rt_file_is_char_device` unresolved symbol (2026-08-08)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Summary
 
 A genuine Cranelift-JIT-vs-interpreter timing baseline for the engine2d SIMD

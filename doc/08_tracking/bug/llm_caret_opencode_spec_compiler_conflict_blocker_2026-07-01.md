@@ -1,5 +1,8 @@
 # LLM Caret OpenCode Spec Compiler Conflict Blocker - 2026-07-01
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 Resolved in source and verified locally with `bin/simple test` after restoring

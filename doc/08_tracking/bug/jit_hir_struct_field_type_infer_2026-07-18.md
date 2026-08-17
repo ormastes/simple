@@ -1,7 +1,8 @@
 # JIT HIR lowering: cannot infer struct-typed field type (falls back to interpreter)
 
 - **Date:** 2026-07-18
-- **Status:** open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** low (correctness unaffected — interpreter fallback runs; JIT coverage lost)
 - **Area:** compiler JIT / HIR lowering
 

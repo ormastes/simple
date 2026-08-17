@@ -1,6 +1,7 @@
 # Interpreter match-arm binding leaks into same-named param/outer variable
 
-- **Status:** FIXED (2026-08-04)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Component:** Rust seed tree-walk interpreter
 - **Severity:** High — silent runtime data corruption
 

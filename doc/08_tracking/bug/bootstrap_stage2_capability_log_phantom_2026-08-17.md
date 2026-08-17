@@ -1,7 +1,8 @@
 # Bootstrap: warning references stage2-capability.log that was never written
 
 - **Date:** 2026-08-17
-- **Status:** FIXED
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh` (stage2 capability probe)
 
 ## Symptom

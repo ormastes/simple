@@ -1,6 +1,7 @@
 # `import string` namespace dict ignores src/lib/string.spl source content
 
-Status: OPEN. Discovered 2026-08-11 while fixing the missing `string.char_at`
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 export used by `src/lib/nogc_sync_mut/oauth/utilities.spl` and its
 `gc_async_mut`/`nogc_async_mut` sibling copies.
 

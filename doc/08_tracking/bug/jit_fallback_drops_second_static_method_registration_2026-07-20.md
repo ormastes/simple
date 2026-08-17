@@ -1,5 +1,8 @@
 # JIT-compile failure anywhere in the whole-program closure → interpreter fallback loses a struct's 2nd+ static method registration
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-20
 **Scope:** `bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary) JIT-to-interpreter fallback path (compiler internals — needs a rebuild to verify current source, not a `.spl` source edit)
 **Severity:** medium — silently drops real static methods; no compile error, just a runtime "unknown static method" that looks like a source bug

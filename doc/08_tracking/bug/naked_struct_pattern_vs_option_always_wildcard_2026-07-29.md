@@ -1,6 +1,7 @@
 # A naked `case StructName(field):` pattern matched against an `Option<StructName>` value always falls to the wildcard arm
 
-**Status:** open (general defect class, not swept beyond the one confirmed site)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-07-29 (lane SYM0 `get-symbol-id-zero-nil`), while diagnosing
 `doc/08_tracking/bug/hir_get_symbol_id_zero_returns_nil_2026-07-29.md`
 **Area:** interpreter/runtime pattern matching (exact engine boundary not

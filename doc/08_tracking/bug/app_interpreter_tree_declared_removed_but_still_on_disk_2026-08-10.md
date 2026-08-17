@@ -6,7 +6,8 @@
 
 # `src/app/interpreter/` is declared REMOVED but is still on disk and still compiled
 
-**Status:** OPEN — filed rather than half-migrated
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Date:** 2026-08-10
 **Supersedes the diagnosis in:** `88b3874cd51`, and the header comment in
 `test/01_unit/lib/nogc_async_mut/generator_intensive_spec.spl` (+ its `test/unit/` twin)

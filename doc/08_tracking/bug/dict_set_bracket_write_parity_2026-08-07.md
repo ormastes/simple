@@ -1,5 +1,8 @@
 # Dict `.set()` vs `d[k]=v` write parity -- 2026-08-07 re-verification
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status: FIXED (source-level, 2026-08-09) -- see "Fix applied" below. Full native-lane re-execution still not obtained (see caveat).
 
 ## Fix applied (2026-08-09)

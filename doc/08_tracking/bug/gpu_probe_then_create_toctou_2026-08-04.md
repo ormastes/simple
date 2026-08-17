@@ -1,7 +1,8 @@
 # GPU backend probe-then-create TOCTOU makes offload gates flaky and vacuous
 
 - **Date:** 2026-08-04
-- **Status:** parity spec FIXED. **All 7 originally-listed siblings are now FIXED**
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   and landed, together with both legacy mirrors (see Campaign below). The family is
   **larger than the seven** — a second sweep found 5 more instances, still OPEN, the
   biggest of which (`cuda_strict_spec.spl`) has ~19 prediction-gated examples.

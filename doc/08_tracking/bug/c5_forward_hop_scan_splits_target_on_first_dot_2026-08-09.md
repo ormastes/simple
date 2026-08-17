@@ -1,6 +1,7 @@
 # C5 `forward_hop_scan` splits a forwarding target on the FIRST dot — wrong receiver projection and a target method that does not exist
 
-- **Status:** FIXED 2026-08-09 (see the FIXED section at the end). Originally
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   filed OPEN while landing C2 typed forwarding, which could not fix it here:
   `src/compiler/90.tools/verify/forward_hop_scan.spl` is C5 territory and was
   explicitly off-limits to this session.

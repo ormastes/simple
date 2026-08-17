@@ -1,5 +1,8 @@
 # LLM Caret Native Closure Admission Failure — 2026-08-11
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Symptom
 
 `bin/caret --help` and `bin/caret --tui` correctly fail closed with exit 127:

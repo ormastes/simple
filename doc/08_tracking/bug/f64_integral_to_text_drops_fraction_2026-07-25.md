@@ -7,7 +7,8 @@
 - **Severity:** medium — lossy/ambiguous rendering; a serialized `1.0` reads
   back as an integer, and float values become indistinguishable from ints in
   logs, `to_string()` output, and any text-format round trip.
-- **Status:** OPEN.
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 
@@ -52,3 +53,27 @@ than weakened to `contains("1")`, which would bake the defect into the suite.
 `src/lib/common/convert.spl:124` `f64_to_text` delegates straight to `"{n}"`,
 so fixing the interpolation path fixes the stdlib helper too. There is
 currently no correct float formatter anywhere in `src/lib/common/`.
+
+## ALREADY_FIXED 2026-08-17
+
+Re-run of the doc's own probe body on `bin/simple run` (seed binary):
+
+```
+val a = 1.5 ; val b = 2.25 ; val c = -3.0 ; val d = 1.0
+print "A={a} B={b} C={c} D={d}"
+-> A=1.5 B=2.25 C=-3.0 D=1.0
+
+use std.common.convert.{f64_to_text}
+f64_to_text(1.0)  -> "1.0"
+f64_to_text(-3.0) -> "-3.0"
+```
+
+The documented symptom was `C=-3` and `1.0 -> "1"`. Integral f64 now keeps its
+fractional part in both the interpolation path and `src/lib/common/convert.spl`
+`f64_to_text` (which is still just `"{n}"`, so it inherits the fixed
+formatter). The root cause was in the f64 formatter, not `src/lib` — no
+`src/lib` change was required or made.
+
+Follow-up for whoever owns it: the two examples in
+`src/lib/gc_async_mut/pure/test/tensor_spec.spl` "String Representation" that
+were parked as `pending` on this bug can now be un-parked.

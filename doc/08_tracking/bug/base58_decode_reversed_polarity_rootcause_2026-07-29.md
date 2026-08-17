@@ -1,5 +1,8 @@
 # base58_decode reversed-polarity engine bug — root cause (2026-07-29)
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Assignment: root-cause the pass-5 finding that `base58_decode`'s
 carry-propagation loop corrupted values under the DEFAULT engine while the
 interpreter was correct (the reverse of every other engine divergence found
@@ -195,3 +198,25 @@ an open item at the end of the bracket-slice byte/char index campaign
 (pass 3, stays with the engine investigation lanes) and the newly-found
 `sha256_bytes`/base58check-encode engine divergence noted above (new,
 unowned).
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**NOT-REPRODUCED on either engine.** Probe over
+`std.common.encoding.base58.{base58_encode, base58_decode}`, run twice — once with
+`SIMPLE_EXECUTION_MODE=interpreter` and once on the default JIT (`bin/simple run`),
+both rc=0 — produced IDENTICAL output:
+
+```
+enc=1LiA
+valid_is_err=false
+roundtrip=0,1,2,255,
+invalid_is_err=true
+```
+
+Polarity is correct in both directions (a valid string decodes, the
+alphabet-invalid `"0OIl"` errors), the byte round-trip including the leading zero
+is exact, and there is no interpreter/JIT divergence — which is what the two
+claimed miscompiles would have shown. Note the path in this doc had drifted; the
+live module is `src/lib/common/encoding/base58.spl` (`base58_decode` at :212).
+Recommend CLOSED, or re-file with a fresh minimal repro if the miscompile is
+believed to persist elsewhere.

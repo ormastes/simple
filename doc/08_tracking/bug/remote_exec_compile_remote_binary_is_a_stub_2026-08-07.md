@@ -56,3 +56,22 @@ requires no changes: it already passes the real cell `code` text through
 verbatim (`remote_exec.spl`'s `compile_remote_binary(code, self.arch,
 self.memory_map.code_start)`), so the K4 plan's literal val → fn → call
 cross-cell assertion becomes provable without touching this file again.
+
+## Verification 2026-08-17 (content classification) — LIVE, and this one IS silent
+
+Confirmed live by reading `src/lib/nogc_sync_mut/debug/remote/exec/compiler_bridge.spl`
+(36 lines total). `compile_remote_binary_in_dir` matches on `arch` and returns
+`Ok(arm32_return_zero_bytes())` / `Ok(rv32_return_zero_bytes())`, which are
+literal constants — `[0x00, 0x20]` (`movs r0, #0`) and
+`[0x13, 0x05, 0x00, 0x00]` (`addi a0, x0, 0`). The `source` parameter is threaded
+through every function in the file and **never read**.
+
+Unlike the CUDA row above, this returns `Ok` — a caller compiling any program
+gets a successful-looking result whose payload always returns 0. That is the
+silent-wrong-result class exactly. Severity as filed (P2) is understated for the
+`Ok` wrapper specifically; the honest shape would be `Err` until a real backend
+lands.
+
+Not proven: no `Results:` line —
+`test/02_integration/app/tools/notebook/remote_exec_qemu_rv32_spec.spl` needs a
+QEMU lane and was not run while the bootstrap holds the host.

@@ -1,7 +1,8 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
 
 **Date:** 2026-08-01
-**Status:** interpreter lane FIXED; **JIT lane FIXED**; **native LLVM (Rust seed
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 `compile --native`) FIXED to JIT parity** — see
 `array_at_native_llvm_lane_2026-08-01.md`. The pure-Simple `native-build` lane
 is still OPEN (no `at` arm in its MIR lowering; fails loudly).
@@ -430,3 +431,37 @@ evidence about the native or JIT lanes — which is exactly why
 close this bug. Native must be verified by `simple compile --native` plus
 running the produced binary, and JIT by a default `simple foo.spl` run, as done
 in the transcripts above.
+
+
+## Adjacent finding 2026-08-17 (P0-core silent-wrong lane): `.at()` RETURN SHAPE diverges between engines
+
+Not the defect this doc tracks — the filed defect (`at` returning nil for every
+index, and the missing `at` arm in pure-Simple MIR lowering) was NOT reproduced
+and NOT re-tested on the native lane. But the probe written to check it exposed
+a different divergence in the same method, on the two engines this tree actually
+ships:
+
+```
+val a: [i64] = [10, 20, 30]
+print a.at(1)
+```
+
+| engine | output |
+|---|---|
+| `SIMPLE_EXECUTION_MODE=interpreter` | `20` |
+| `SIMPLE_EXECUTION_MODE=jit`         | `<enum@0x46988592660>` |
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+2026-08-16 22:59:37 UTC (Rust seed). Exit 0 both times, no diagnostic.
+
+The JIT result is the *defensible* one if `at` is specified to return `T?` — it
+is handing back the Option enum unopened. The interpreter is silently unwrapping
+it. Whichever is intended, they cannot both be, and today the same source text
+yields a number on one engine and an enum handle on the other. Anything that
+pattern-matches the result works on one engine and falls through on the other;
+anything that prints it produces either a value or a pointer.
+
+Filed here rather than as a new doc because it is the same method and a reader
+of this doc needs to know it; if the owner disagrees it should be split out.
+Not investigated: which behaviour is specified, where the unwrap happens, and
+whether `.get()`/`.first()`/`.last()` share it.

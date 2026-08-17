@@ -1,7 +1,8 @@
 # Stage-4 self-host full-CLI build: parse-phase memory blowup (~160MB/file, killed at 64GB)
 
 - **ID:** bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20
-- **Status:** OPEN
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high (blocks the stage3-compiled stage-4 lane entirely; seed-compiled fallback lane unaffected)
 - **Lane:** bootstrap `--full-bootstrap --mode=one-binary --backend=cranelift`, x86_64-linux
 

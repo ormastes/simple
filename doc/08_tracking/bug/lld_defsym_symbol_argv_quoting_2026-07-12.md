@@ -1,5 +1,8 @@
 # LLD defsym symbol argv quoting
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ARM64 and RV64 discover the exact generated `spl_start` symbol with `nm`. When
 the workspace path contains hyphens, the symbol also contains hyphens and LLD
 parses an unquoted `--defsym=spl_start=<symbol>` RHS as subtraction.

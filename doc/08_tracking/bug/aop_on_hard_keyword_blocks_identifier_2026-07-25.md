@@ -4,7 +4,8 @@
 - **Area:** parser / AOP pointcut grammar
 - **Severity:** medium — silent-looking, badly-localized parse failure on a very
   common identifier.
-- **Status:** FIXED in the pure-Simple frontend (`.spl`), unverified end-to-end
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   in this environment — see Verification note below.
 
 ## Repro

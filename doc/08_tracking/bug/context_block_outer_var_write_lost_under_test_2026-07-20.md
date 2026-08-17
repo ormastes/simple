@@ -1,5 +1,8 @@
 # `context <obj>:` block body writes to an outer `var` are lost under `test`
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-20
 **Component:** `bin/simple test` (SSpec evaluator) scoping for `context
 <obj>: <body>` blocks (block-scoped method-context dispatch).

@@ -1,7 +1,8 @@
 # Async-tier mutex/rwlock have no async-suspend locking (block the carrier OS thread)
 
 - **Date:** 2026-07-28
-- **Status:** open (follow-up; deliberate interim state)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Area:** src/lib/nogc_async_mut/concurrent/{mutex,rwlock}.spl
 
 ## Summary
@@ -20,3 +21,13 @@ on unlock (scheduler integration in
 `src/lib/nogc_async_mut/concurrent/green_thread.spl` / runtime hooks). Until
 then the sync-backed facade is intentional and loudly documented in both facade
 files — do not remove the warning without implementing suspend semantics.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT and deliberate.**
+`src/lib/nogc_async_mut/concurrent/mutex.spl:18` is a single
+`export use std.nogc_sync_mut.concurrent.mutex.{...}` re-export, and the module
+docstring (lines 4-9) states plainly: "This tier has NO async-aware mutex:
+`lock()`/`with_lock()` spin/block". The described behaviour is the current, stated
+design; this is a feature gap, not a silent-wrong-result defect. No stdlib-local
+fix is possible without an async-aware backend.

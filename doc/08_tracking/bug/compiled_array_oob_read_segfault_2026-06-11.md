@@ -1,7 +1,8 @@
 # Bug: out-of-bounds array read SIGSEGVs in cranelift binaries (interpreter returns 0)
 
 - **Date:** 2026-06-11
-- **Status:** fixed — committed in adc8dcad379 (fix(parser): M9, bundled with parser work)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high — semantics diverge between interpreter and compiled code
 
 ## Symptom

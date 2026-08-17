@@ -3,7 +3,8 @@
 - **ID:** `llm_caret_compiled_carrier_build_latency`
 - **Severity:** P1 (blocks production compiled database/plugin carriers)
 - **Found:** 2026-08-02
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Owner:** Codex LLM Caret messaging integration lane (2026-08-09)
 
 ## Symptom

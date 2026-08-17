@@ -1,6 +1,8 @@
 # Bug: Baremetal --entry-closure imported-class instantiation FAULT
 
-- **Status:** INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation)
+- Status: OPEN (P1) — root cause OUT OF SCOPE of the two CLI entrypoints; see
+  "2026-08-17 scope + staleness audit" at the bottom.
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Date:** 2026-07-06
 - **Where seen:** `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl:14-17` — instantiating a class imported from a shared module (e.g. `os.gui.shortcut.ShortcutHandler`) inside an x86_64 `--entry-closure` baremetal kernel faults at runtime. Workaround so far: procedural duplication (the 3603-line WM), factory free-functions in the defining module (`create_fb_engine`), and integer action codes instead of shared enums (arm64 `wm_entry_io`).
 - **Impact:** blocks sharing `src/os/compositor` classes (`HostCompositor`, `CompositorBackend` trait impls) into the QEMU guest WM.
@@ -143,3 +145,46 @@ backend-codegen implementation pass is required before finding 1's symptom
 disappears. Freestanding/board verification of the link-stage change itself
 remains pending per the board-runnable rule (no QEMU/board boot attempted
 this pass).
+
+## 2026-08-17 scope + staleness audit (CLI-entrypoint lane)
+
+Classified by CONTENT against current `src/app/cli/native_build_main.spl`, not by
+commit ancestry (SHAs are unsound in this repo). A full bootstrap / QEMU boot was
+**forbidden this session** (a live bootstrap owns the host), so the end-to-end
+fault was deliberately NOT re-attempted.
+
+**One documented sub-claim is STALE and is now closed.** The "Repro" note above
+says:
+
+> trailing `--mode=dynload` is required — `run_native_build_worker`
+> (src/app/cli/native_build_main.spl:198) injects `--mode=interpreter` into the
+> worker argv
+
+That injection **no longer exists**. `run_native_build_worker`
+(`src/app/cli/native_build_main.spl:246-294`) builds `worker_args` as
+`["run", "src/app/cli/native_build_worker.spl"]` plus the caller's args verbatim,
+and carries the execution mode via the *environment* instead:
+`env_set("SIMPLE_EXECUTION_MODE", "interpret")` at line 250, only when unset.
+`/usr/bin/grep -n 'mode=interpreter' src/app/cli/native_build_main.spl` returns
+**no match**; the only `--mode` occurrence in the file is line 350, in the
+`native_build_is_value_consuming_flag` list. So the trailing `--mode=dynload`
+workaround in the repro block is no longer required, and no worker-arg
+regression remains on this path. Pinned by a new source contract:
+`test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl`
+("never injects an execution mode into the worker argv").
+
+**The actual defect is unchanged and lives outside these two files.** Findings
+1-4 above are all attributed to `src/compiler/50.mir/_MirLowering/**`,
+`src/compiler/70.backend/**`, `src/compiler/80.driver/driver_pipeline.spl`, and
+the checked-in weak-NIL `auto_stubs.c` — none of which this lane may touch.
+Neither `native_build_main.spl` nor `bootstrap_main.spl` contains any
+class-instantiation, field-map, symbol-mangling, or module-init logic; they are
+argv wrappers.
+
+### What could NOT be proven this session
+- Whether the S1..S5/CLASSOK probe still faults, and at which marker. That needs
+  the cranelift freestanding build plus a QEMU boot — not run.
+- Whether findings 2-4 are still live in current MIR/backend source (other lanes
+  own those paths).
+- That dropping `--mode=dynload` from the repro command now works end to end.
+  Only the *cause* of that workaround was proven gone, by source.

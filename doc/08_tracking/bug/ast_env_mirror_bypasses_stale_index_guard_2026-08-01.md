@@ -2,7 +2,8 @@
 
 **ID:** ast_env_mirror_bypasses_stale_index_guard_2026-08-01
 **Severity:** P1 — latent correctness (silent wrong AST tag) + proven O(N^2) + **exec ceiling already exceeded by current source files** (measured 2026-08-01)
-**Status:** **FIXED 2026-08-01 — the stmt/expr env mirror is RETIRED (deleted).** All three defects
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 (E2BIG, stale cross-unit reads, O(N^2)) close together. The premise that kept the mirror alive —
 "under a tree-walk interpreter, module-level arrays may not persist between calls" — was tested
 directly and **DISPROVED**; see "Decisive experiment" below. The decl-side env store is a separate

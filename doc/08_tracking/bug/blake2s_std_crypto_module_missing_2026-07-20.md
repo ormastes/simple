@@ -3,7 +3,8 @@
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/crypto/` (missing file)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).
-- **Status:** OPEN.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 

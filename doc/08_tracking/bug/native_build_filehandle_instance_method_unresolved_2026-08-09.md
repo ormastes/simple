@@ -1,5 +1,8 @@
 # `native-build` MIR lowering fails to resolve `FileHandle` instance methods for `rt_io_file_roundtrip` — new blocker after the `File` symbol ordering/collision fix
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Summary
 
 Follow-up to

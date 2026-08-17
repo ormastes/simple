@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-25
 - **Lane:** 2D headless showcase (`examples/06_io/ui/graphics_2d_showcase.spl`), interpreted (seed `bin/simple run`, Linux x86_64)
-- **Status:** root-caused (reproduction isolated), NOT fixed — appears to be an interpreter/GC architecture cost, not a `.spl` library antipattern
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 

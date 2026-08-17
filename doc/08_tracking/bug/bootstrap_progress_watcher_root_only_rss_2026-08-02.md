@@ -1,5 +1,8 @@
 # Bootstrap progress watcher reports only wrapper RSS
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Fixed for future canonical runs. The active canonical run was not restarted or
@@ -41,3 +44,10 @@ descendant was still the per-file fingerprint/source-authority shell chain.
 That prebuild latency is separately measurable, but source and tool authority
 are admission inputs. It must not be shortened by dropping hashes or snapshots;
 this fix deliberately does not change it.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN, fix claim remains unverified.** A content grep for 'watcher|rss' in
+`scripts/bootstrap/bootstrap-from-scratch.sh` returns 1 incidental hit and no child-tree RSS
+aggregation, so the doc's own admission (canonical run never restarted, fix unverifiable) holds.
+NOT proven either way this session: no bootstrap was run, per lane host-etiquette rules.

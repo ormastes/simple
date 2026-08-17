@@ -3,7 +3,8 @@
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (the credential-store KDF is not a function of its
   inputs under the JIT; a key derived at generate time cannot be reproduced)
-- **Status:** FIXED 2026-08-08 (see RESOLUTION below). Root cause was a
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   bare-name symbol collision on `text_to_bytes` reached from *inside*
   `eksblowfish_setup`, resolved differently depending on which modules the
   CALLER pulled in. Fixed in `.spl` with a RED→GREEN→RED control against an

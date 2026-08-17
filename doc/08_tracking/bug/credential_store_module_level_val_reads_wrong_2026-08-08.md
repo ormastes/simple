@@ -1,5 +1,8 @@
 # credential_kdf_cost returns the wrong value on a path that cannot — three implementations refuted
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-08-08
 - **Severity:** MED (silently wrong constants; here it mis-set a KDF cost factor)
 - **Area:** compiler / `src/lib/nogc_sync_mut/terminal/credential/store.spl`

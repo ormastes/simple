@@ -1,5 +1,8 @@
 # Bug: seed `native-build` of `src/app` segfaults — blocks bootstrap Stage 1
 
+Status: DUPLICATE of bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-06-29
 **Area:** native-build / bootstrap (seed compiler AOT path)
 **Severity:** high (blocks `bin/simple build bootstrap`, i.e. self-hosted redeploy)

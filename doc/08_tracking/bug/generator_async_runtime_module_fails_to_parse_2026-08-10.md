@@ -1,5 +1,8 @@
 # src/app/interpreter/async_runtime/generators.spl fails to parse
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **File**: `src/app/interpreter/async_runtime/generators.spl`
 - **Found during**: fixing `generator_intensive_spec.spl` to stop shadowing
   the real `GeneratorState` enum (see

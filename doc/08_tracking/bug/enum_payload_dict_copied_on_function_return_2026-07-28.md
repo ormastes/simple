@@ -1,7 +1,8 @@
 # Enum collection payload is copied at the function-return boundary
 
 - **Date:** 2026-07-28
-- **Status:** OPEN
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** high — silently wrong results, no diagnostic
 - **Engines:** interpreter (silently wrong) and JIT (rejects with W1006)
 - **Found via:** `SdnValue.insert()` never persisting (`test/01_unit/lib/common/sdn_coverage_spec.spl`, example "get by key from dict")

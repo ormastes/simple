@@ -4,7 +4,8 @@
 - **Area:** `src/os/crypto/ed25519_ops.spl` / `src/os/crypto/ed25519.spl`
 - **Severity:** high (pubkey derivation / signature correctness for at least
   one canonical RFC vector).
-- **Status:** OPEN.
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 

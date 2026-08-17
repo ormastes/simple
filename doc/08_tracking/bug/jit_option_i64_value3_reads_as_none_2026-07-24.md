@@ -1,7 +1,8 @@
 # Test runner false-fails specs with 10–99 examples (downstream of the `i64?` payload-3 collision)
 
 **Date:** 2026-07-24
-**Status:** Test-runner symptom FIXED (pure-Simple, `find_raw`); root cause is a
+Status: DUPLICATE of jit_optional_i64_payload_reinterpreted_2026-08-17.md
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 separate DEFERRED architectural limitation — see below.
 
 ## Root cause (already documented — NOT re-filing)

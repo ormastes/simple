@@ -1,6 +1,7 @@
 # Bug: Native Any Parameter Forwarding Corrupts Pointer
 
-Status: One-word Any ABI supersedes the reported two-slot premise; strict
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 default-LLVM + explicit-Cranelift forwarding proof added, execution pending.
 
 **Date:** 2026-06-05

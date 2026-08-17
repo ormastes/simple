@@ -1,6 +1,7 @@
 # Duplicate `backend_types` terminal declarations
 
-Status: `BackendKind` FIXED 2026-08-04 (`0ae169b85918` + `c764ffdbd854`) -- one
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 terminal declaration, in `compiler.backend.backend.backend_types`. The wider
 family of multiply-declared enums with divergent variant orders is STILL OPEN,
 and nothing in the repo detects it (see the sabotage section).

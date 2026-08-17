@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-27
 **Lane:** FSDICT
-**Status:** UNABLE-still-open (re-verified 2026-08-10, reproduces identically; root cause is in the interpreter's implicit-self injection for `it`-block closures calling module-namespace dict members — requires a real interpreter/HIR fix, not attempted this session given scope)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Severity:** high — silently reds whole spec files and is easy to misread as "the module didn't resolve"
 
 ## Re-verification (2026-08-10)

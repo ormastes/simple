@@ -128,3 +128,51 @@ rewrite. Re-run the classifier from scratch (fresh injection test first) to
 re-derive before trusting the list again; a stale list risks fixing a file
 another lane has since deleted or moved, per
 `expression_evaluator.spl` above.
+
+---
+
+## Re-verification 2026-08-17 — named file is a FALSE POSITIVE (closed for `src/lib`)
+
+Re-checked by CONTENT (not SHA ancestry), scoped to the file this record's
+metadata names, `src/lib/common/validation.spl`.
+
+**`validation.spl` has zero real `Ok(`/`Err(` in executable code.** The only
+two hits are at lines 425 and 445, and both sit strictly INSIDE `"""..."""`
+docstrings:
+
+- `require()` — docstring spans lines **419-428**; the `return Err(message)`
+  is line **425**, inside the `Usage:` example showing a CALLER how to wrap
+  `require`'s `text?` return in an `Err`. `require`'s own body is lines
+  429-432 (`if condition: nil else: Some(message)`) — no `Ok`/`Err` at all.
+- `require_all()` — docstring spans lines **435-446**; `return Err(errors.join("; "))`
+  is line **445**, again inside a `Usage:` block. Its body (447+) only pushes
+  to an array and returns it.
+
+This is exactly **exclusion category 3 ("Docstring usage examples") of this
+record's own audit above, which already names `validation.spl:require()` by
+name as a false positive.** The record's `file:` metadata therefore
+contradicts its own body — the metadata was the triage error, not the source.
+No fix is possible or warranted in this file; nothing to change.
+
+**The "partial fix" is confirmed present in current source**, so that half of
+the record is stale too:
+
+```
+src/lib/nogc_sync_mut/src/dl/config_loader.spl:22:fn load_config_from_file(path: text) -> Result<DLConfig, text>:
+src/lib/nogc_sync_mut/src/dl/config_loader.spl:313:fn extract_dl_config_from_sdn(sdn_value: SdnValue) -> Result<DLConfig, text>:
+```
+
+Both signatures now declare `Result<DLConfig, text>` as the audit prescribed.
+
+### Status
+
+**CLOSED for the named file and for `src/lib`.** The genuine remainder is the
+~29 `src/compiler/**` sites (`predicate_parser.spl`, `arch_rules.spl`,
+`dim_constraints.spl`, `blocks/*.spl`, `type_system/effects.spl`,
+`linker_context.spl`, `vulkan_backend.spl`, `95.interp/execution/mod.spl`,
+`99.loader/module_resolver/*.spl`) already attributed above to the
+`b0c98541d2a` / `9d4d16b106e2c` refactor-damage lane. Those were **not**
+touched in this pass: `src/compiler/{10.frontend,20.hir,50.mir,70.backend}/**`
+is out of scope for this worker, so that subfamily is **blocked-out-of-scope**,
+not unproven-absent. Retitle/rescope this record to the `src/compiler/` family
+rather than leaving `validation.spl` as its `file:`.

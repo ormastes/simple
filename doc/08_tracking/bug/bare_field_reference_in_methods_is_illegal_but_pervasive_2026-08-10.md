@@ -1,7 +1,8 @@
 # Bare field reference inside methods is illegal in every lane, yet ~740 product-code sites use it
 
 - **Filed:** 2026-08-10
-- **Status:** Root-caused. Determination settled: the form is ILLEGAL. Kernel `riscv_shared`
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   modules fixed; the wider 62-file family is filed here as systemic follow-up.
 - **Severity:** High — this is a *coverage suppression* defect, not a lane defect. Every
   method containing a bare field reference is dead on arrival in all four lanes, and the

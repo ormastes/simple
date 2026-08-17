@@ -1,6 +1,7 @@
 # Bug: GUI/web/2D Vulkan RenderDoc blockers remain
 
-Status: open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Date: 2026-06-23
 Area: GUI/web/2D Vulkan, RenderDoc capture gates
 

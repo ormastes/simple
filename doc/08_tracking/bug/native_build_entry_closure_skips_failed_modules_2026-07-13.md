@@ -1,5 +1,8 @@
 # Bug: native-build entry closure skips failed semantic dependencies
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 Reported dotted-import resolution, parse, and HIR-skip path source-fixed; fresh
@@ -62,3 +65,47 @@ no Rust-seed result is substituted.
 The next source fix must distinguish valid single-segment module imports from
 scanner false positives and fail unresolved required modules closed. Do not
 remove the skip while another agent owns the active driver/bootstrap rebuild.
+
+## Verification 2026-08-17 (w02 driver lane) — CONFIRMED LIVE (residual only); file reference was STALE
+
+Classified by CONTENT, not by commit ancestry.
+
+**Stale reference corrected.** This doc names
+`src/compiler/80.driver/driver.spl` as the owning file. That file is 151 lines
+and contains none of the closure logic (`grep -n 'non-critical|ParseError|
+TypeError|skip'` on it returns zero hits). The entry-closure walker now lives in
+`src/compiler/80.driver/driver_source_pipeline_loading.spl`, with parsing and
+lowering gates in `driver_source_pipeline_parsing.spl` and
+`driver_pipeline_lowering.spl`.
+
+**What is fixed, verified in current source**
+`driver_source_pipeline_loading.spl:213-223`: an unresolved import that
+CONTAINS a dot calls `self.ctx.add_error("unresolved import '...' ... no source
+file found ...")` — a loud, closure-failing error, not a skip. Line 226 likewise
+errors when a resolved file is empty/excluded. So the reported dotted-import
+half is genuinely closed at source level.
+
+**What is still live, verified in current source**
+The same block at `:212-223` still `continue`s — silently, with no error and no
+warning — for any unresolved import with **no dot in it**, on the comment's
+stated rationale that single-segment names "are more likely prose/scoped
+pseudo-imports than real module files". A real single-segment module that fails
+to resolve is therefore still dropped from the entry closure and the build
+proceeds to link. That is exactly the residual this doc's Status paragraph
+already claims, and it is accurate.
+
+**No fix attempted, deliberately.** Removing the skip requires distinguishing a
+genuine single-segment module import from a scanner false positive
+(`_driver_entry_import_module_paths` is a text scan over file content, not a
+parsed import list). Tightening it without that discrimination converts every
+prose false positive into a hard build failure across the tree. This is the
+"next source fix" the doc already scopes, and it is a design change, not a
+one-line correction — it is not fixable within a silent-wrong-result sweep.
+
+**Not proven:** no executable evidence was produced in this sweep. No
+`Results:` line is quoted because no spec was run; the finding is source-content
+inspection only. The claim above is about what the code says, not about a
+reproduced build transcript.
+
+Classification for this sweep: **ARCHITECTURAL-OPEN (residual single-segment
+skip), dotted-import half already fixed.**

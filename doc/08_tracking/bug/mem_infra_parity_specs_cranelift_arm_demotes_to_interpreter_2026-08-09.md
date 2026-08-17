@@ -2,7 +2,8 @@
 # mem_infra parity specs: the "cranelift" arm never measured cranelift
 
 - **Filed:** 2026-08-09
-- **Status:** PARTIALLY FIXED — the registration defect is fixed and both specs
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   are GREEN for real reasons; the natively-linked-backend coverage gap is
   SCOPED OUT and recorded below. The interpreter-mode `_native` residual
   reported on 2026-08-09 was re-measured the same day and is **NOT A DEFECT** —
@@ -318,3 +319,63 @@ the parity specs were written to eliminate.
 - `doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md`
 - `doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md`
 - `doc/07_guide/infra/testing/spec_engine_reach.md`
+
+## Triage 2026-08-17 — NO LONGER SILENT; coverage gap still LIVE
+
+Classified against current source, not SHA ancestry.
+
+The "silently" in this title is now stale. `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`
+documents the limitation explicitly in its own header, lines 43-72: an earlier
+version ran the probe under `SIMPLE_EXECUTION_MODE=jit` and asserted the UAF
+survives; that was removed because `bin/simple run` under
+`SIMPLE_EXECUTION_MODE=jit` does NOT link the same allocator the tree-walk
+interpreter uses (`interpreter_extern/mod.rs`), so `rt_alloc`/`rt_free` resolve
+to the interpreter allocator and the run "is NOT evidence about the matrix
+cranelift row" (line 59). Line 63: "The interpreter and in-process jit lanes are
+exercised here directly." Line 65: "Scoped out (no automated coverage): the true
+cranelift/llvm native-linked" path. Line 72: the cranelift matrix row "is still
+asserted here as a static check".
+
+So the defect is now declared in-source rather than hidden — a demotion that
+announces itself is not the silent-green class. What remains genuinely open is
+the underlying COVERAGE gap: the cranelift backend is still never measured, and
+its matrix row is a static assertion. Recommend retitling to "cranelift arm is a
+static assertion, backend never measured" and keeping it open on that basis.
+
+NOT proven here: the spec was not executed (see host note below).
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE, but NOT a test-side vacuity — the spec is already honest.**
+
+Checked `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl` for the
+"interpreted spec body" vacuity mode. It does **not** have it: the spec really
+does shell out to a subprocess —
+
+```
+122:    val cmd = "{gate}SIMPLE_EXECUTION_MODE={engine} \"${{SIMPLE_TEST_BINARY:-bin/simple}}\" run {FIXTURE} 2>&1"
+123:    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+```
+
+...via `use std.io_runtime.process_run` (line 85), and it targets
+`${SIMPLE_TEST_BINARY:-bin/simple}`, **not** the refusing
+`bin/release/simple` production wrapper, so it is not part of the
+`shellout_specs_target_refusing_production_wrapper_2026-08-17.md` false-RED
+family either.
+
+Better: the spec already documents the exact demotion this bug doc reports, in
+its own header, and refuses to claim coverage it does not have —
+
+- line 49: "`bin/simple run` under `SIMPLE_EXECUTION_MODE=jit` does **not** link the [guard allocator]"
+- lines 55-59: the run measures "the interpreters allocator; it does not and cannot measure the cranelift *backend*" and "is NOT evidence about the matrixs `cranelift` row"
+- line 65: "**Scoped out (no automated coverage):** the true cranelift/llvm *native-linked* [rows]"
+- lines 69-72: cross-references `mem_infra_guard_row_false_on_native_backends_2026-07-31.md`
+
+So the demotion half is a genuine **source/toolchain** gap — `SIMPLE_EXECUTION_MODE=jit`
+on `bin/simple run` does not link the guard allocator, so no spec written in
+`test/**` can measure the cranelift row — and not a spec defect this lane can
+close. Making the spec "measure cranelift" is impossible until that linkage
+exists; the correct next step is a native-linked (not `run`-based) harness.
+
+**DIAGNOSIS ONLY.** No edit made to either parity spec: changing an honest,
+explicitly-scoped-out spec would make it worse, not better.

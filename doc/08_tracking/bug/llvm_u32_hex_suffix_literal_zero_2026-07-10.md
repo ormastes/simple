@@ -1,5 +1,8 @@
 # LLVM U32 Hex-Suffix Literal Lowers to Zero
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 RESOLVED — verified fixed at origin tip 8932fcb3a148

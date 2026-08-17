@@ -1,5 +1,8 @@
 # Four database specs shadow StringInterner with incompatible field sets
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Files**:
   - `test/integration/compiler/core_intensive_spec.spl:17` (fields `strings`, `reverse`, `next_id: i64`)
   - `test/integration/lib/database_core_spec.spl:30` (same wrong field set)

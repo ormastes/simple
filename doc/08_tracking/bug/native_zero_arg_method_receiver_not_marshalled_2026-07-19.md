@@ -102,3 +102,14 @@ For the kernel-only symptom, record that this exact call has one MIR argument,
 then capture Cranelift IR and disassembly. Fix the first layer where the
 receiver disappears; do not add another receiver in MIR while it is already
 present.
+
+## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED
+
+The symbol named in this doc, `_draw_font_b`, does not exist in
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl`; the family present is
+`_draw_font_batch` (:1453), `_draw_font_batch_plan` (:1544),
+`_draw_font_batch_staged` (:1520), `_draw_font_batch_cpu_suffix` (:1456).
+The defect is a NATIVE-codegen receiver-marshalling fault, so it cannot be
+exercised from a spec body (which runs interpreted) and needs a native
+subprocess plus GPU backends absent on this host. Recorded UNVERIFIED — neither
+reproduced nor closed.

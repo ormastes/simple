@@ -1,7 +1,8 @@
 # Deleting the pure-facade glob gate swaps 356 import winners (33 of them types)
 
 - **Date:** 2026-08-01
-- **Status:** FIXED — the ungate is reverted; the memo is retained. See
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   "Resolution (2026-08-01)" at the bottom. Kept OPEN-as-history above so the
   measurement that drove the decision is not lost.
 - **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`

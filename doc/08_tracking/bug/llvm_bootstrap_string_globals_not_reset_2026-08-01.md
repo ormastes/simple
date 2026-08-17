@@ -1,7 +1,8 @@
 # Bootstrap LLVM string-constant accumulator is never reset on the bootstrap object-emitter path: unit two redefines unit one's `@.str.0`
 
 - **Date:** 2026-08-01
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/compiler/70.backend/backend/_MirToLlvm/class_def.spl`
   (accumulator declared in
   `src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl`)

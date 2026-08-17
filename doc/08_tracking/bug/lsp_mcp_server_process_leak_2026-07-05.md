@@ -1,6 +1,7 @@
 ---
 id: lsp_mcp_server_process_leak_2026-07-05
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: high
 discovered: 2026-07-05
 discovered_by: Manual process audit (pkill)

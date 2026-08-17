@@ -1,5 +1,8 @@
 # SoftwareBackend.draw_rounded_rect draws an OUTLINE where it must FILL
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 Fixed (2026-07-06).
 

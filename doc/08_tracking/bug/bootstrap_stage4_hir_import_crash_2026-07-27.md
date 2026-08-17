@@ -1,5 +1,8 @@
 # Stage 4 HIR Import Crash
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 PARTIALLY FIXED. The native `Dict.get()` crash is fixed by using
@@ -170,3 +173,12 @@ core-C-bootstrap ABI (`Dict.has`, `rt_is_debug_mode_enabled`,
 `rt_array_extend_i64`, and `rt_option_map` are absent). That is not execution
 proof; TODO592 remains open for the fresh admitted self-hosted runner. No full
 Stage 4 was rerun.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STALE-REF
+
+The cited `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` no longer
+contains the diagnostic text: `grep -rn "unresolved import" src/compiler/20.hir/`
+returns zero hits across the whole 20.hir layer. Location must be re-established
+before this row can be actioned. Owner path: src/compiler/20.hir/hir_lowering/**.

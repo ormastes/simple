@@ -1,5 +1,8 @@
 # `/api/test/click` on `lab_add_cell` reports success but doesn't add a cell
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Found:** 2026-08-07, during notebook-lanes L4 verification
 (`test/03_system/tools/simple_lab/lab_shared_ui_contract_spec.spl`).
 

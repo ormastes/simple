@@ -1,7 +1,8 @@
 # Browser Static Shell Cache Spec Timeout
 
 Date: 2026-06-14
-Status: open
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 

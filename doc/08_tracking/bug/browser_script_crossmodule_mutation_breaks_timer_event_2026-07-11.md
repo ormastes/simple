@@ -1,6 +1,7 @@
 ---
 id: browser_script_crossmodule_mutation_breaks_timer_event_2026-07-11
-status: PARTIALLY-RESOLVED
+Status: DUPLICATE of browser_engine_free_fn_arg_mutation_lost_2026-06-30.md
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: medium
 discovered: 2026-07-11
 discovered_by: browser script API conformance probes (tools/pixel_compare/probe_xmod.spl, probe_bind.spl)

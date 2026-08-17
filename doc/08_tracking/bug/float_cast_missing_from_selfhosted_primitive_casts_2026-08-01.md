@@ -1,7 +1,8 @@
 # `float(x)` missing from the self-hosted primitive-cast set
 
 - **Date:** 2026-08-01
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** medium (loud, module-fatal)
 - **Parent:** `selfhost_names_with_no_import_path_masked_by_seed_flat_resolution_2026-08-01.md`
   (carve-out finding 6, `float` in the value namespace)

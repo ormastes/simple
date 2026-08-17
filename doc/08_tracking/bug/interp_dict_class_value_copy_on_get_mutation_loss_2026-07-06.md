@@ -1,5 +1,8 @@
 # Interpreter: `Dict<K, ClassInstance>.get()`/`.set()` copies the value — mutations through the fetched instance are silently lost
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - Date: 2026-07-06
 - Severity: high (silent state loss — any cache/accumulator held in a Dict misbehaves)
 - Found during: task #15 S1 cache wiring (WebRenderPixelArtifactCache in HostCompositor)
@@ -29,3 +32,36 @@ spec: mutate-through-get persists without manual write-back.
 1. `var d: Dict<i64, C> = {}` with `class C: n: i64`
 2. `d.set(1, C(n: 0))`; `val c = d.get(1)`; `c.n = 5`
 3. `d.get(1).n` → expected 5, observed 0.
+
+
+## Re-measurement 2026-08-17 (P0-core silent-wrong triage lane) — NOT REPRODUCED
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+2026-08-16 22:59:37 UTC (Rust seed). Probes run under both
+`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`.
+
+The filed "Repro sketch" was executed verbatim:
+
+```
+class C:
+    var n: i64
+var d: Dict<i64, C> = {}
+d.set(1, C(n: 0))
+val c = d.get(1)
+c.n = 5
+print d.get(1).n
+```
+
+Prints `5` on BOTH engines (the doc's expected value); the reported observation
+was `0`. Mutation through a `Dict`-fetched class instance now persists without
+the manual `caches.set(id, cache)` write-back the doc describes as the in-tree
+workaround.
+
+**Scope of this close.** This disproves the defect on the two Rust-seed engines
+only, which is where it was originally observed (interpreter). It says nothing
+about the pure-Simple self-hosted interpreter — no self-hosted binary is
+deployed in this tree (`bin/simple` is the seed), so that lane could not be
+measured. It also does not re-verify the two original `host_compositor_entry.spl`
+call sites; the workaround write-backs there are now believed redundant but
+were NOT removed or re-tested, so do not treat this as authority to delete them
+without re-measuring that path.

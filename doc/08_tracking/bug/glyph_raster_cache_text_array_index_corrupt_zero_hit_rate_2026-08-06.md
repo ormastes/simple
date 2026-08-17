@@ -2,7 +2,8 @@
 
 - **Date:** 2026-08-06
 - **Lane:** hosted `bin/simple run` (Cranelift JIT), font rendering
-- **Status:** root-caused via minimal repro; NOT landed — this is the investigation
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   that held back the uncommitted W4 glyph-raster-cache addition to
   `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`
 - **Related but distinct from:**

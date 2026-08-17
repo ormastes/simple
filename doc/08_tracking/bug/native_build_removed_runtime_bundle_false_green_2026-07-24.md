@@ -1,5 +1,8 @@
 # Native-build removed runtime bundle false-green
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Symptom
 
 A fresh pure-Simple Stage 2 compiler accepted

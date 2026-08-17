@@ -1,6 +1,7 @@
 # Bracket-slice (`s[i:j]`) byte-index survey — file classification, 2026-07-29
 
-**Status:** survey only, no fixes. **Component:** repo-wide, `src/`.
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Follows on from:** `doc/08_tracking/bug/web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md`
 § "bracket-slice (`s[i:j]`) survey gap" (enumerated **1,193 sites / 393 files**,
 top-concentration table + a domain-guess classification of ~20 files, not

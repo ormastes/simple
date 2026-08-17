@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** P0 — silent wrong values, no error, on the DEFAULT engine
-- **Status:** FIXED on the JIT (cranelift) + tree-walk interpreter lanes,
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   re-verified 2026-08-07 and again 2026-08-09 — see *Re-verification* entries
   below. Root cause confirmed 2026-08-09: a missing tag-box **decode/unbox**
   step on `.get()`'s call site (the "value-vs-address" hypothesis was checked

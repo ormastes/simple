@@ -1,7 +1,8 @@
 # browser_renderer_spec — 22 residual failures (sequence-dependent + :has(> ) direct-child)
 
 Date: 2026-06-11
-Status: open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 Owner: gui-render-watch lane (gpu-backend-dx-harden session)
 
 ## Summary

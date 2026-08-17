@@ -3,7 +3,8 @@
 - **Filed:** 2026-08-09
 - **Lane:** G4 (NILQ follow-on)
 - **Severity:** High — 16 sites return a wrong value; the rest are accidentally correct
-- **Status:** FIXED 2026-08-10 (stream J1) — all 16 genuinely-wrong sites rewritten as explicit predicates; the 26 accidentally-correct sites are untouched (conformance sweep still open). **Operator semantics RULED CORRECT — do not "fix" `.?`.**
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Companions:** `dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27.md`,
   `dotq_zero_test_hazard_call_sites_2026-07-27.md`,
   `dot_question_truthy_op_returns_payload_as_call_arg_2026-07-20.md`

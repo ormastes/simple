@@ -1,5 +1,8 @@
 # All four `gc_async_mut` GPU engine2d FFI facades are dangling re-exports
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Filed:** 2026-08-09 (stream F4)
 **Severity:** high — the modules are unusable, and the breakage is silent
 **Found while:** replacing the tautology-shell specs recorded in

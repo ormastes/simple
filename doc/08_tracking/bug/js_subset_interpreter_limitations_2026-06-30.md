@@ -2,7 +2,8 @@
 
 - **Date:** 2026-06-30
 - **Component:** `src/lib/nogc_sync_mut/js/engine/` (interpreter_exec / interpreter_eval / parser)
-- **Status:** Open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** Medium — forces workarounds in the ES-module transform
   (`src/lib/gc_async_mut/web/browser_session_modules.spl`).
 
@@ -87,3 +88,9 @@ The module transform now emits only forms the subset supports:
 re-export would be wrongly overwritten by the dependency's value. The five system
 tests only exercise truthy export values, so they pass; a correct fix needs
 Defect 1 resolved so an `undefined`-guard can be used.
+
+## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED on this host
+
+Doc's own position is that the workarounds live in the ES-module transform and the engine is unchanged; closing it means implementing engine features, which is out of a bug-fix lane's remit. Not reproduced and not closed: this lane could neither exercise the path nor
+find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
+not mistaken for either a live confirmation or a close.

@@ -1,6 +1,7 @@
 # browser_engine: missing UA defaults (h4/h5/h6, blockquote, pre, form/fieldset/dl/etc.)
 
-- Status: open
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (senior code review)
 

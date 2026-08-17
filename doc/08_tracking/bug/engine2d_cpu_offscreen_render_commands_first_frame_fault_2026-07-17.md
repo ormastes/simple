@@ -1,6 +1,7 @@
 # Engine2D CPU-rasterizer offscreen/embedded-batch first-frame fault storm
 
-Status: Open.
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 Date: 2026-07-17
 

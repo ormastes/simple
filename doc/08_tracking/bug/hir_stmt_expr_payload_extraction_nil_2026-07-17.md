@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-17
 **Scope:** `src/compiler/20.hir/hir_lowering/statements.spl` (`lower_hir_stmt`)
-**Status:** Primary bug (stage2-gate misroute) FIXED and verified. One landmine
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 found+documented+avoided (not blocking). One separate, unrelated downstream
 issue observed and flagged (not investigated — out of this bug's scope).
 

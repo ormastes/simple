@@ -1,7 +1,8 @@
 # Bug: `ContractExprKind.Forall` (enum variant) and `ContractExpr.ge`/`.call` (static methods) report "not found" from outside the module even though they are defined in source, while sibling members (`.gt`, `.Ge`, etc.) resolve fine
 
 - **Date:** 2026-07-20
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Area:** `src/compiler_rust/lib/std/src/verification/models/contracts.spl` (`enum ContractExprKind`, `class ContractExpr`), exercised via `test/00_formal_verification/compiler/unified_attrs_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple`, which currently prints the Rust-seed bootstrap warning — likely a seed-interpreter symbol-table/dispatch defect; not independently re-verified on a genuinely self-hosted binary.
 
@@ -62,3 +63,26 @@ Needs actual interpreter/semantic-checker instrumentation to compare symbol-tabl
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl --no-session-daemon
 ```
 4/5 examples fail as above.
+
+## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
+
+Content check of `src/compiler_rust/lib/std/src/verification/models/contracts.spl`:
+all three reportedly-missing members **do exist** in current source, adjacent to
+the sibling `.gt` that the doc says resolves fine:
+
+- `static fn gt(...)` — line 436  (reported working)
+- `static fn ge(...)` — line 439  (reported not-found)
+- `static fn call(...)` — line 442 (reported not-found)
+- `ContractExprKind.Forall` — declared line 38, constructed line 416,
+  matched at 139/247/282/606
+
+`ge` and `call` are declared on the **same lines, in the same block, with the
+same `static fn` shape** as `gt`. That rules out "member absent" and localises
+the defect to cross-module *resolution/export*, not to this file's contents.
+This reframes the bug: no edit to `contracts.spl` can fix it.
+
+**Verdict: STILL-OPEN, root cause relocated** (cross-module member resolution,
+not the model file).
+**Not proven:** the resolution path itself was not identified, and
+`test/00_formal_verification/compiler/unified_attrs_spec.spl` produced no
+`Results:` line — see "Execution blocked" below.

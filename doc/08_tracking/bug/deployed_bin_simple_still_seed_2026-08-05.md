@@ -2,7 +2,8 @@
 
 - **ID:** BUG-2026-08-05-deployed-seed-not-selfhosted
 - **Date:** 2026-08-05
-- **Status:** open, deployment-state only (no source defect)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** medium — contradicts stated policy, hides pure-Simple interpreter
   fixes from `bin/simple run`/`bin/simple test` until redeployed
 
@@ -113,3 +114,41 @@ sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
   feature whose severity-wiring follow-up this gap affects
 - `doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`
   — 2026-08-06 full-bootstrap attempt and the Stage 3 blocker it hit
+
+---
+
+## 2026-08-17 re-verification (wave_01 lane H3) — STILL LIVE, confirmed by probe
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ stat -c '%s %y' "$(readlink -f bin/simple)"
+59536728 2026-08-16 22:59:37.799277177 +0000
+$ nice -n 19 timeout 60 bin/simple --version ; echo rc=$?
+rc=0
+WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+Build and use the pure-Simple bin/simple instead.
+Simple Language v1.0.0-beta
+```
+
+Unchanged in substance since 2026-08-05: the artifact is fresh (rebuilt
+2026-08-16 22:59 by another lane) and still self-identifies as a seed. Freshness
+is not self-hostedness.
+
+**Two corrections to the surrounding record, both established today:**
+
+1. This is now the ONLY live member of the deployed-binary family. Its sibling
+   `deployed_bin_simple_bootstrap_only_2026-07-31.md` was closed today as
+   not-reproducing: the current seed accepts `test`/`lint` and compiles a bodiless
+   `@extern fn` at rc=0. The "bootstrap-only, `compile`-only" condition is gone;
+   only the seed-vs-self-hosted condition remains.
+2. `bin/release/.../simple` (this bug, a Rust seed) and
+   `release/.../simple` (SHA-256 `04a38e21…`, a stale pure-Simple artifact that
+   SIGSEGVs — `deployed_selfhost_env_set_miscompile_segv_2026-07-14.md`) are
+   different files on different paths. Both were re-probed today and both still
+   hold. Do not conflate them.
+
+**No fix attempted.** The remedy is a redeploy
+(`--full-bootstrap --deploy`), which this lane is explicitly forbidden to
+perform (a bootstrap is live and owns the box). Status stays OPEN (P2) as a
+deployment-state item, not a source defect.

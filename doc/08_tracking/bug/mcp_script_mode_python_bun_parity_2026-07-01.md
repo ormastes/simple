@@ -1,5 +1,8 @@
 # MCP script-mode Python/Bun parity gap
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Date: 2026-07-01
 
 ## Status

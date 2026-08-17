@@ -1,5 +1,8 @@
 # font_renderer advance-cache hit crashes interpreter: `unwrap` not found on `CachedGlyph`
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-08-15
 **Severity:** medium (interpreter lane, glyph-cache hit path)
 **Component:** `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` (advance-width cache-hit path, ~line 1549; sibling sites at ~1321 and ~1349)

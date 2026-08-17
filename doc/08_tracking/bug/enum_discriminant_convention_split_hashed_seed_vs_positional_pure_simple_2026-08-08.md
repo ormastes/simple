@@ -1,7 +1,8 @@
 # Enum discriminant convention split: hashed (seed) vs positional (pure-Simple)
 
 - **Filed:** 2026-08-08
-- **Status:** OPEN — **LATENT hazard; no live cross-over found.** Disjointness
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   is established at *source* level and confirmed on the one stage artifact
   available; artifact-level coverage of the seed-emitted leg is INCOMPLETE (see
   Reachability § limits).

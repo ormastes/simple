@@ -1,5 +1,8 @@
 # BUG: `FontRenderBatch` missing `atlas_owner_generation` field + missing native-safe identity free functions — dropped during codex-font-branch reland
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 FIXED (2026-07-20). Root cause confirmed by git evidence; field and free
 functions implemented; verified via the spec's real `expect(...).to_equal()`/

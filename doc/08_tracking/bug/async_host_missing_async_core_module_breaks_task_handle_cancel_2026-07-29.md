@@ -1,7 +1,8 @@
 # Bug: `std.async_core` module does not exist — the whole async_host task-handle/cancel family is unbuildable
 
 - **Date:** 2026-07-29
-- **Status:** open (one contributing bug fixed this session; the module gap itself is
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   a design decision, not fixed)
 - **Severity:** CRITICAL — an entire documented API surface (task handles with
   join/abort/cancel, `JoinSet`) cannot be constructed at all

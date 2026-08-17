@@ -111,3 +111,27 @@ means, and `primitive_api` is at `deny` level
 widened rule would immediately fail builds across the tree. Neither example was
 weakened; the contradiction is recorded so an owner can pick which reading
 wins.
+
+---
+
+## Re-verification 2026-08-17 (compiler-lint lane) — ARCHITECTURAL-OPEN, still stands
+
+Classified by CONTENT of current source, not SHA ancestry.
+
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl` is **unchanged**
+in the respect this record is about: `_all_same_primitive` still derives its
+verdict from the declaration line alone, and the scan loop still keys on
+`trimmed.starts_with("pub fn ")` with params/return extracted from that same
+`line`. No body/AST signal was added.
+
+Therefore the contradiction recorded on 2026-08-04 is intact: AC-D1 (do not
+flag a single-arg single-return same-primitive `pub fn`) and AC-D2 (flag an
+extern-shaped `pub fn`) remain unsatisfiable simultaneously by any predicate
+over the declaration line, because the two declaration lines are identical
+modulo the function name.
+
+**Verdict: ARCHITECTURAL-OPEN, not a code defect to patch.** Resolving it is a
+lint-design decision (which reading of `primitive_api` wins) and, because the
+rule sits at `deny` level, a widened rule fails builds tree-wide. No patch
+applied; no spec written, because there is no defect to make go red — a spec
+here would only encode one arbitrary side of the contradiction.

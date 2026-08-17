@@ -3,7 +3,8 @@
 - **ID:** llvm_backend_missing_module_init_heap_globals_2026-06-15
 - **Severity:** P1 (silent: any `var/val X: [T] = [...]`, `= "..."`, or struct-literal module-global is null at runtime under the LLVM backend; `.len()`/index/field/method on it derefs null)
 - **Backend:** LLVM (target-independent — reproduced on `x86_64-unknown-linux-gnu` host and `riscv64-unknown-none` kernel)
-- **Status:** RESOLVED 2026-06-15 — LLVM backend now emits `__module_init_<prefix>`
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   for heap-typed module globals (mirrors cranelift `generate_module_init`); rv64
   boot calls `__simple_call_module_inits` after heap init; init-caller compiled
   with `-mcmodel=medany`. Oracle `scripts/qemu/qemu_rv64_http_test.shs

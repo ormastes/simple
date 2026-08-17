@@ -2,7 +2,8 @@
 
 **ID:** ast_env_var_quadratic_parse_2026-06-13  
 **Severity:** P1 — `check` on 400+ top-level functions times out (>300 s)  
-**Status:** Localized, fix proposed, not yet implemented  
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Reported:** 2026-06-13
 
 ---

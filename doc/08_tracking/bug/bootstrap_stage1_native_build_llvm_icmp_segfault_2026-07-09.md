@@ -6,7 +6,8 @@
   the bootstrap native-build path crashes.
 - **Backend:** native-build LLVM IR generation, run **interpreted** by the deployed self-hosted
   `bin/simple` (`aarch64-apple-darwin-macho`, built 2026-07-05). Reproduced 2026-07-09.
-- **Status:** OPEN — root-caused via crash report `~/Library/Logs/DiagnosticReports/simple-2026-07-09-084618.ips`.
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 

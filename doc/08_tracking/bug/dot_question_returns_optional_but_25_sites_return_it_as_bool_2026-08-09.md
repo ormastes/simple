@@ -1,5 +1,8 @@
 # `.?` yields `T?`, but 25 `-> bool` functions return it directly
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Filed:** 2026-08-09 (stream F3)
 **Found via:** `feature/usage/wasm_compile` — row 27 of
 `gated_specs_are_tautology_shells_2026-08-09.md` (P15, `1bc53420716`)
@@ -129,3 +132,27 @@ bulk edit that should not ride along with a one-row fix.
 3. Only the interpreter path was measured. The native/JIT lowering of
    `EXPR_EXISTS_CHECK` (`convert_nodes.spl:1002`,
    `compile_c_entry.spl:221`) was **not** checked and may diverge again.
+
+## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+Re-measured at HEAD 2026-08-17: the site count has GROWN, not shrunk. A census
+over all `src/**/*.spl` for a tail-position `.?` inside a function whose
+signature contains `-> bool` finds **29 sites** (doc recorded 24 remaining);
+about 22 are a bare `X.?` tail, the rest are `a.? and b.?` style compounds.
+Representative live sites:
+
+- `src/lib/nogc_sync_mut/ffi/llvm_loader.spl:41` — `return _llvm_lib.?`
+- `src/compiler/70.backend/backend/llvm_backend.spl:344` — `self.object_code.?`
+- `src/compiler/25.traits/trait_def.spl:58` — `self.default.?`
+- `src/app/pkg/lock.spl:47` — `self.find_entry(name).?`
+- `src/compiler_rust/lib/std/src/core/regex_api.spl:458` — `return search(...).?`
+
+`wasm_backend.spl` no longer appears, i.e. exactly one site was fixed. This is a
+shared root cause with
+`dot_question_truthy_op_returns_payload_as_call_arg_2026-07-20.md` -- both are
+the same `EXPR_EXISTS_CHECK` payload leak at
+`src/compiler/10.frontend/core/interpreter/eval.spl:443-450`, seen in return
+position and in argument position respectively. Fixing that one site retires
+both docs; patching the 29 call sites individually does not.
+
+NOT FIXED by this lane (interpreter path owned by a concurrent P1 lane).

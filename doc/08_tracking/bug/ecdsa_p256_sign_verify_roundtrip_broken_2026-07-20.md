@@ -5,7 +5,8 @@
   `test/unit/lib/crypto/ecdsa_p256_spec.spl`
 - **Severity:** high (verify rejects a signature this repo's own sign just
   produced — a basic round-trip break, not an edge case).
-- **Status:** OPEN. **Do not touch the NIST CAVP vector.**
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 

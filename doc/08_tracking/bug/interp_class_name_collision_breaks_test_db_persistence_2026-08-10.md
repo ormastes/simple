@@ -1,5 +1,8 @@
 # Interpreter class-name collision breaks test-DB persistence (2026-08-10)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status: WORKED AROUND (renames); DIAGNOSTIC NOW LANDED; by-name resolution still OPEN
 
 Update 2026-08-10: the duplicate-symbol warning is extended from functions to

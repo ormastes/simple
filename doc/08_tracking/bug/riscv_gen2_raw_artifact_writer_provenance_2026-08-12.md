@@ -54,3 +54,51 @@ receipt. Do not make a mission-critical release claim that depends on
 language-level non-forgeability until remediation item 4 is complete.
 
 Owner: RISC-V Gen2 compiler-product provenance lane
+
+## Re-verification 2026-08-17 (content-based, lane w03/C)
+
+The triage row for this doc read: *"Doc claims 'exported bypass removed' but
+lines 922-924 still `export` both helpers."* **That triage note is a misreading
+of the doc, and the doc is correct as written.** Recorded here so the next sweep
+does not re-open this on the same false signal.
+
+The "exported bypass" this doc claims to have removed is the distinct symbol
+`vhdl_write_compiler_gen2_production_artifacts` — a Gen2-specific writer that
+took serializable Gen2 input plus raw VHDL. Verified against current source:
+
+- `grep -rn vhdl_write_compiler_gen2_production_artifacts src/compiler/ test/`
+  returns **three hits, all of them negative assertions** in
+  `test/01_unit/compiler/backend/vhdl_artifact_manifest_spec.spl:557-563`, which
+  assert the symbol is absent from both the artifact module and the driver.
+  Zero hits anywhere in `src/`. The bypass is genuinely gone, and its removal is
+  regression-pinned.
+
+The two helpers still exported at `driver_vhdl_artifacts.spl:922` and `:924`
+(`vhdl_render_production_artifacts`, `vhdl_write_production_artifacts`) are the
+GENERIC source-owned path, which the doc never claimed to unexport. They are
+guarded rather than withdrawn:
+
+- `vhdl_write_production_artifacts` (`:904`) rejects all three compiler-owned
+  Gen2 routes at `:913-915`, via `vhdl_rendered_claims_compiler_owned_gen2`
+  (`:857`, manifest route marker) OR `vhdl_text_claims_compiler_owned_gen2`
+  (`:870`, raw VHDL route marker) — the second closing the forged-payload hole
+  where a legacy manifest carries a Gen2 marker in the VHDL. The rejection
+  returns before `vhdl_write_artifacts_after_authorization` (`:884`), so
+  stale-artifact cleanup never runs on a rejected bypass and existing files are
+  preserved, exactly as the doc states.
+- `vhdl_render_production_artifacts` (`:806`) is a pure renderer with no I/O, and
+  it hard-codes `"qualification":{"status":"FAIL","reason":
+  "unqualified_generated_artifact"}` at `:841`. It therefore cannot mint a
+  qualified receipt for arbitrary VHDL; every manifest it produces is
+  self-declared unqualified.
+
+**Status unchanged and correct: the exported bypass is removed; the residual is
+the language-level authority gap already recorded above (remediation item 4 —
+cross-module private access, constructors and field writes are warn-only, so the
+receipt is private by module convention, not by enforcement).** No code change
+made in this sweep; there is no silent-wrong-result defect here to fix, and the
+remaining item is a visibility-enforcement feature in the type system, not a
+defect in this file.
+
+Classification for this sweep: **already-fixed as filed; triage verdict was a
+false positive.**

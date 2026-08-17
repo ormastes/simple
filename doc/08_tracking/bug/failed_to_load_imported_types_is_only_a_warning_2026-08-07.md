@@ -1,6 +1,7 @@
 # `[WARN] Failed to load imported types` is fail-open: type checking proceeds on nothing
 
-**Status:** OPEN — argued, not changed (severity flip needs an owner decision)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Filed:** 2026-08-07
 **Component:** `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`
 (lines 1246 and 1823 — the only two sites in the repo that emit this string)

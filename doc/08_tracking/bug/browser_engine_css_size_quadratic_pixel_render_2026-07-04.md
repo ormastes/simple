@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-04
 **Severity:** high (blocks CARD 16 office GUI; hidden by a test-aware fast path)
-**Status:** open — diagnosis complete, measured
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 

@@ -1,5 +1,8 @@
 # Encoding Source Restoration 2026-06-26
 
+Status: DUPLICATE of encoding_cluster_missing_source_2026-06-26.md
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Summary
 Restored 23 deleted source files and 27 deleted spec files from git history. All files were deleted in commit `a8569120c13ce0a3ca86cb913d6ee61e6a012c6f` and parent commits; they were recovered from the parent commit using `git show <parent>:<path>`.
 

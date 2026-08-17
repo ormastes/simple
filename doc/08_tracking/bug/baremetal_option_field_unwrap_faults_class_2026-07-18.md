@@ -1,7 +1,8 @@
 # CLASS: Option-unwrap / if-val field access faults on baremetal native codegen
 
 **Date:** 2026-07-18
-**Status:** Per-site workarounds LANDED across the font lane (SHAs below). **Root
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 compiler codegen bug is OPEN** — it has only been worked around at each call
 site, never fixed in the codegen owner. This file exists to track the *class*,
 not to claim it is fixed.

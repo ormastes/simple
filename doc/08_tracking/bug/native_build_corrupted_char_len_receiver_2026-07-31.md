@@ -1,6 +1,7 @@
 # `native-build` phase2:parse: `.len()` on identifier `c` receives a corrupted `str` (renders as U+FFFD) — localized, not fixed
 
-**Status:** file-6 (`io_runtime.spl`) blocker CLEARED by `6d9c78d9902` (see
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 "Update 2026-07-31: file-6 blocker cleared" below) — measured on a fresh
 worktree with a `bootstrap`+`llvm` seed rebuild. Root byte-provenance of the
 original `StrBytes` corruption was still never independently re-derived past

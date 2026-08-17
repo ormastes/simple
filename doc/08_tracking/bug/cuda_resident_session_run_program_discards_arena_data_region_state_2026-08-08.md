@@ -1,5 +1,8 @@
 # CudaVmExecutor.run_source / ResidentSession.run_program discard arena DATA-region state every call
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Date: 2026-08-08
 Found by: Task K5 (`CudaExec` notebook lane)
 

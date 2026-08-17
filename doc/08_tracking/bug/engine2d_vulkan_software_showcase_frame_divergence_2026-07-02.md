@@ -1,7 +1,8 @@
 # Engine2D Vulkan and Software backends diverge on the text-heavy showcase frame (1136/30000 px)
 
 Date: 2026-07-02
-Status: open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Severity: P3 (rendering-parity gap; primitive parity gates still pass)
 Found by: fable review of W1c lane (G1.1)
 

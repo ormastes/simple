@@ -109,3 +109,21 @@ remaining retention is unknown. The prose claim ("skips strings") is refuted by
 source; the perf number is simply stale and unverified. The sibling doc
 `compiled_checker_transient_string_retention_2026-08-03` should be re-measured
 before either is closed.
+
+## 2026-08-17 independent re-verification (second runtime lane)
+
+The 2026-08-17 note above was re-checked against current source and is
+**accurate**: `rt_core_reclaim_transient_immortal` is at
+`src/runtime/runtime_native.c:1527`, the `case RT_VALUE_HEAP_STRING` arm and its
+`RT_CORE_STRING_FLAG_TRANSIENT && !RT_CORE_STRING_FLAG_SHARED` predicate are
+present as quoted, and the guard
+`if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;`
+does let a transient non-shared string reach the erase/free path. So the doc's
+"Residual retention (not fixed here)" prose — *"deliberately skips strings"* — is
+indeed refuted by source.
+
+Its refusal to close is likewise upheld: the doc's claim is a **perf** claim
+(33,503 KiB/file residual slope) and no RSS re-measurement was taken by either
+lane. A code-shape refutation cannot close a measured-magnitude row. The sibling
+`compiled_checker_transient_string_retention_2026-08-03` must be re-measured
+first. Status stays OPEN (P3).

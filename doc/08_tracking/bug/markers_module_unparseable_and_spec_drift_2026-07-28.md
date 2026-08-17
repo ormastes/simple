@@ -1,7 +1,8 @@
 # `os.kernel.log.markers` was unimportable; its spec had never run
 
 - **Date:** 2026-07-28
-- **Status:** PARTIALLY FIXED (3 source defects fixed, 2 discrepancies left open)
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Module:** `src/os/kernel/log/markers.spl`
 - **Spec:** `test/01_unit/os/kernel/logging/marker_wire_format_spec.spl` (mirror: `test/unit/...`)
 

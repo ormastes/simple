@@ -1,6 +1,7 @@
 # BUG: a write inside `after_each` that reads the captured variable is lost; a constant write is not
 
-**Status:** OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-04
 **Severity:** medium — spec hooks silently fail to accumulate state, so any
 `after_each`/`before_each` counter is stuck at its initial value. No error.

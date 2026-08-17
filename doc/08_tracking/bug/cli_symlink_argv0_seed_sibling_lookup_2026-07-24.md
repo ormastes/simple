@@ -1,5 +1,8 @@
 # `bin/simple test` never delegates to `simple_seed` when invoked via the symlink
 
+Status: DUPLICATE of cli_driver_binary_symlink_argv0_2026-07-11.md
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-24 (corrected 2026-07-25) · **Severity:** high (tooling) · **Status:** source fix landed (`6cf217f0febb`); deployed binary awaits redeploy
 
 ## Symptom

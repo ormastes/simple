@@ -1,6 +1,7 @@
 ---
 id: cranelift_direct_string_constant_null_pointer_2026-07-12
-status: FIX-IMPLEMENTED-UNVERIFIED-E2E (re-confirmed 2026-08-10, see note below)
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: blocking
 discovered: 2026-07-12
 discovered_by: native-build --entry-closure self-host closure build (agent session)

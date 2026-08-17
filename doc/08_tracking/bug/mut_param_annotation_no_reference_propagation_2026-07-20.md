@@ -1,7 +1,8 @@
 # Bug (or undocumented semantics): `fn f(x: mut i64)` mutating `x` does not propagate back to the caller's variable
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/parser_type_annotations_spec.spl`)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** `mut T` parameter annotation semantics (interpreter — pass-by-value
   vs pass-by-reference for primitives), deployed seed at
   `bin/release/x86_64-unknown-linux-gnu/simple`

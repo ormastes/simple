@@ -1,6 +1,7 @@
 # AC-4 SIMD byte-identity probe crashes on reproduction — reported PASS does not hold
 
-**Status:** OPEN, PARTIALLY ADDRESSED (2026-08-06: root cause found and fixed
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 at the `simple-runtime` source level, verified at the Rust-crate/unit level
 only — NOT yet verified end-to-end against the named `.spl` probe, which does
 not exist in this repo, and NOT yet in the deployed `bin/simple` binary; see
@@ -308,3 +309,16 @@ rebuild+redeploy is out of budget for a single item, so this stays
 end-to-end claim cannot be independently closed without (a) a Stage
 rebuild/redeploy of `bin/simple` and (b) recreating the missing `.spl`
 fixture. No code touched.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — SPLIT
+
+- **Alignment crash: ALREADY-FIXED.**
+  `src/compiler_rust/runtime/src/value/simd_int_ops.rs` `rt_simd_mul_i32x8`
+  now uses `read_unaligned()` (with a comment citing this bug doc), and
+  `mul_i32x8` (:379-390) uses `_mm256_loadu_si256`/`storeu`. No aligned
+  `_mm*_load_si*` intrinsic remains in the file.
+- **Reported PASS still unsupported: LIVE.** The named probe
+  `test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl`
+  still does not exist; that directory holds only
+  `mlkem_avx2_reduce_selfcheck.c` and `mlkem_ntt_simd_c_test.c`. Keep open for
+  the missing probe only.

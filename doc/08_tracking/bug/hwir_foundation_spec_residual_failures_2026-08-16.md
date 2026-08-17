@@ -1,5 +1,8 @@
 # hwir_foundation_spec residual failures after missing std.spec import fix (2026-08-16)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Context
 The mass failure of `test/01_unit/compiler/50.mir/hwir_*` specs (batch timeout at
 550s, per-spec 100% fail) had an infra root cause: commit `6fe33f889dee`

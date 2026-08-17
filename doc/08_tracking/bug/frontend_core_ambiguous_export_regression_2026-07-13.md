@@ -1,5 +1,8 @@
 # Regression: ambiguous package exports in `10.frontend/core/__init__.spl` break all fresh native-builds
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Introduced by** the parallel commit `050209d9b36` ("fix: speed up pure Simple
 bootstrap") on origin/main. Breaks any `native-build` that loads the compiler
 frontend (the seed's own bootstrap, `simpleos-native-build`, the multiarch

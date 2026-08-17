@@ -1,6 +1,7 @@
 # Blink inline `style=` cascade path: `parse_declarations` cross-module name collision
 
-**Status:** OPEN — pre-existing, discovered while closing browser-render-lane
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 exit criterion 5 (stylesheet sources), not caused by that work.
 
 ## Symptom
@@ -91,3 +92,16 @@ Rename one of the two `parse_declarations` definitions (and the colliding
 cross-module by-name resolution in the interpreter so import scope is
 honoured. Either closes both RED examples above without touching this
 session's `blink.style.user_agent_stylesheet` work.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN (partially claimed), confirmed by CONTENT.** Both definitions survive:
+`src/lib/gc_async_mut/gpu/browser_engine/style_block_parse.spl:455`
+(`pub fn parse_declarations(text_val: text) -> [CssDecl]`) and
+`src/lib/blink/css_parser/parser.spl:615`
+(`fn parse_declarations(source: String) -> [CssDeclaration]`). Note the blink one
+is NOT `pub`, which narrows but does not eliminate the wrong-dispatch window,
+since the collision is resolved by the compilers name table, not by visibility.
+Not fixed in this pass: the disambiguating rename would have to touch
+`src/lib/gc_async_mut/gpu/browser_engine/**`, which is owned by another lane in
+this fleet run.

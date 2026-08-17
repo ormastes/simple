@@ -1,6 +1,7 @@
 # Legacy MCP feature tests target a REMOVED API and assert nothing
 
-**Status:** OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 **Severity:** medium · **Area:** legacy feature suite / MCP server
 **Found during:** legacy-feature-test triage (`test/03_system/feature/lib/mcp`)
@@ -104,3 +105,33 @@ ARCHITECTURAL-OPEN**: this needs an MCP-owner decision on the restructured
 server's intended contract before the 22 stale smoke tests can be rewritten as
 real assertions; no mechanical fix is safely in scope here. Left OPEN with
 this fresh confirmation; no code change made.
+
+## Triage 2026-08-17 — REPRODUCED LIVE (content evidence), now FIXED
+
+Classified against current source, not SHA ancestry.
+
+Two claims, one stale and one live:
+
+1. STALE: the doc says the file imports a removed `api_tools` API.
+   `grep api_tools test/03_system/feature/lib/mcp/bootstrap_e2e_test.spl` returns
+   nothing, and `src/app/mcp/api_tools.spl` still exists. The removed import was
+   actually `use app.mcp.session.{McpState}` — `src/app/mcp/session.spl` is
+   absent and `McpState` is defined nowhere under `src/app/mcp/` (only
+   `assistant/session_*.spl` files exist, none defining it).
+
+2. LIVE: "asserts nothing" was exactly right. The file was a plain `fn main()`
+   whose every check was `if ok: print("✓") else: print("✗")`. The failure branch
+   printed and the process still exited 0 with no `Results:` line, so a
+   regression was indistinguishable from a pass. This is the silent-green class.
+
+Fix: converted to `describe`/`it` with real `expect`/`assert_true` oracles,
+mirroring the conversion already landed in
+`test/feature/lib/mcp/bootstrap_protocol_test.spl`. The unresolvable
+`app.mcp.session.McpState` import and its "McpState creation works" check were
+dropped rather than faked; recorded here so the loss of that coverage is not
+silent. Restoring it needs whoever removed `McpState` to say where it went.
+
+Similar-bug-class detection spec added:
+`test/03_system/feature/lib/mcp/vacuous_print_only_test_detection_spec.spl` —
+fails if ANY `*_test.spl`/`*_spec.spl` in the two MCP feature trees contains no
+oracle token, with a positive control so a scan that scanned nothing cannot pass.

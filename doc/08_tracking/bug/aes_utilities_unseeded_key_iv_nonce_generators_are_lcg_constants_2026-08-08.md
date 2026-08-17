@@ -1,7 +1,8 @@
 # AES utilities: `generate_aes_key` / `generate_iv` / `generate_nonce` are constant-seeded LCGs
 
 - **Date:** 2026-08-08
-- **Status:** OPEN — filed, not fixed (file is contested; see "Why filed, not fixed")
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Medium *as currently wired* (zero callers), High as a latent trap
 - **Component:** `src/lib/common/aes/utilities.spl`
 - **Related:** `doc/08_tracking/bug/credential_store_aes_cbc_label_is_actually_ctr_with_deterministic_iv_2026-08-06.md`
@@ -86,3 +87,38 @@ Test shape: salt/key/IV generation has no published vectors. Assert (a) two
 successive calls differ, (b) length and byte range are correct, and (c) the output
 is not the old LCG's exact stream. Pattern:
 `test/07_security/csprng_salt_iv_spec.spl`.
+
+## ALREADY_FIXED 2026-08-17 (verified against current source)
+
+Re-triaged against CURRENT SOURCE, not prose. This defect no longer exists.
+
+**Fixing commit:** `7fa1b5ed34f7` — "fix(security): predictable AES key/IV and
+web session IDs; unbreak session module" (`git log -- src/lib/common/aes/utilities.spl`).
+
+**Evidence — all three cited generators now draw from the OS CSPRNG:**
+
+- `src/lib/common/aes/utilities.spl` `generate_aes_key(size)` -> `csprng_bytes(size)`
+- `generate_iv()` -> `csprng_bytes(16)`
+- `generate_nonce()` -> `csprng_bytes(16)`
+
+`csprng_bytes` (same file, line 17) is backed by the `rt_random_i64` extern, one
+draw per byte, with the sign normalised so the result is exactly `value mod 256`
+and carries no modulo bias.
+
+The constant-seeded LCG the report described survives **only** in
+`generate_iv_from_seed`, which is now explicitly marked `DEPRECATED — NOT
+CRYPTOGRAPHICALLY SUITABLE` with an in-file comment spelling out the CTR/GCM
+keystream-reuse and CBC first-block-equality consequences, and its single former
+caller (the credential store) is recorded in
+`credential_store_aes_cbc_label_is_actually_ctr_with_deterministic_iv_2026-08-07.md`.
+
+No further action. Closing.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**ALREADY-FIXED (verdict by CONTENT, not SHA).** `src/lib/common/aes/utilities.spl`
+now defines `generate_aes_key` (:286) as `csprng_bytes(size)`, `generate_iv` (:302)
+as `csprng_bytes(16)` and `generate_nonce` (:306) as `csprng_bytes(16)`.
+`csprng_bytes` (:17) is the /dev/urandom-backed helper documented at :11. The LCG
+survives only as `generate_iv_from_seed` (:326), which now carries an explicit
+DEPRECATED / NOT-CRYPTOGRAPHICALLY-SUITABLE banner and has zero callers. Closing.

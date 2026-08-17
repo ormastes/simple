@@ -3,7 +3,8 @@
 - **Date:** 2026-08-01
 - **Severity:** High (retroactively invalidates worktree-based reasoning)
 - **Area:** repo configuration / agent isolation harness
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Measured at:** `a6b56173fda9ebd06ec28d6063352754c00deb4e`
 
 ## Summary

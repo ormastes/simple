@@ -1,7 +1,8 @@
 # Bug: AST collection-desugar rewrites `x = x + n` to `x.merge(n)` on scalar (non-collection) targets
 
 - **Date:** 2026-07-29
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** MEDIUM — silently changes program shape (Assign -> MethodCall) for a
   extremely common idiom (`total = total + item`, `x = x + 1`); found as a side
   discovery while implementing E1047 (param-mutability-semantic, lane G2), not yet
@@ -77,3 +78,20 @@ fn bump(x: i64) -> i64:
 Parse with `parse_full_frontend`, lower with `HirLowering`, inspect the resulting
 `HirStmtKind` for `bump`'s body: it is `Expr(MethodCall(NamedVar(x), "merge", [IntLit(1)]))`,
 not `Assign(NamedVar(x), Add, IntLit(1))`.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (narrowed, by the source own admission)
+
+A guard now exists — `fn is_definite_scalar_addend(e: i64) -> bool` at
+`src/compiler/10.frontend/desugar/collection_desugar.spl:138` — but the comment
+immediately above it states the residual case is deliberately not covered:
+
+```
+# depends on the rewrite firing there. That ambiguity is a pre-existing,
+# separate, out-of-scope concern -- this gate only removes the *provably*
+# wrong cases.
+```
+
+Pattern B (`x = x + other` -> `x.merge(other)`) is still documented as live at
+`collection_desugar.spl:10`. Cited line 220 is stale; use :10 and :138.

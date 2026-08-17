@@ -1,6 +1,7 @@
 ---
 id: native_build_cross_module_trait_only_and_unimported_method_gaps_2026-07-17
-status: PARTIAL
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: medium
 discovered: 2026-07-17
 discovered_by: lane S49, while building the cross-module probe matrix for #190

@@ -1,7 +1,8 @@
 # `char_from_code(0)` returns a NUL byte, spec expected empty text
 
 - **ID:** char_from_code_zero_returns_nul_not_empty_2026-08-10
-- **Status:** RESOLVED 2026-08-10 — **the SPEC was wrong**, the implementation
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   was right. Assertion corrected in all four spec copies; implementation
   unchanged except for a comment recording the ruling.
 - **Binary:** `src/compiler_rust/target/bootstrap/simple`, 33,759,648 bytes,

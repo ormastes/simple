@@ -2,7 +2,8 @@
 
 - **ID:** BUG-2026-08-07-enum-match-native-lowering-status
 - **Date:** 2026-08-07
-- **Status:** payload-free enum match FIXED on `--native`; payload-bearing enum
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   match still REFUSED (fail-closed) on `--native`. JIT (cranelift, default
   `bin/simple run`) and interpreter (`SIMPLE_EXECUTION_MODE=interpret`) both
   execute BOTH forms correctly.
@@ -103,3 +104,15 @@ code path entirely (confirmed unchanged since `cfe0506e336b`, 2026-08-05, by
 `git log` on that file). The "Root cause" section below remains accurate
 verbatim. Treat this doc as still current; the payload-bearing `--native`
 gap remains open and out of `.spl`-only scope.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE, exactly as documented
+
+`src/compiler_rust/compiler/src/compilability.rs:379-383` (statement
+`Node::Match`) and `:620-624` (`Expr::Match`) both add
+`FallbackReason::PatternMatch` unless `mode == AotNative &&
+is_native_payload_free_enum_match(arms)`. So payload-free enum match is
+exempted (fixed) and payload-bearing still carries the fallback reason, which
+`pipeline/execution.rs:286`/`:1067` turns into "function(s) contain constructs
+that require the interpreter". The doc status is accurate; no change made.
+Note: `compiler/src/codegen/**` and `compiler/src/mir/**` are owned by other
+workers in this pass, so no fix was attempted here.

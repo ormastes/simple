@@ -1,5 +1,8 @@
 # Bug: Lean Parser Bitwise/Pipe Precedence Divergence
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-06-11
 **Component:** src/compiler/10.frontend/core/parser_expr.spl
 

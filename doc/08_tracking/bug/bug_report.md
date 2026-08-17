@@ -1,6 +1,7 @@
 # Bug Report
 
-Status: open (untriaged-symptom, 2026-06-11) — auto-generated report, 0 bugs at generation time
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Generated:** 2026-06-04 07:10:35
 **Total Bugs:** 0

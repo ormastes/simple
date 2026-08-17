@@ -1,6 +1,7 @@
 # Bug: static constructors with a trait-typed parameter always fail overload scoring (test-path interpreter)
 
-Status: **RESOLVED**
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 **Date:** 2026-07-20
 **Severity:** high (blocked 17 real FAT32 LFN tests; general interpreter bug, not FAT32-specific)

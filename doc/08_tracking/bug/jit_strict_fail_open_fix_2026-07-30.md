@@ -1,5 +1,8 @@
 # SIMPLE_JIT_STRICT fail-open fix (2026-07-30)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Assignment (part 1 of 2): fix the SIMPLE_JIT_STRICT fail-open hole flagged
 as a side finding in the pass-12 `os.*` JIT root-cause doc — strict mode
 printed a "refusing to fall back" message and then fell back anyway,

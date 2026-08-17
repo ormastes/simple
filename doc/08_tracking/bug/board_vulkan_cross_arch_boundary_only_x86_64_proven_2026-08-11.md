@@ -1,6 +1,7 @@
 # Board-Vulkan cross-arch boundary capture: only x86_64 proven (lane L6)
 
-**Status:** Open — QEMU-only / single-arch, filed per `.claude/rules/board-runnable.md`
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Date:** 2026-08-11
 **Owner:** lane L6, board-Vulkan parallel SoC lanes campaign
 **Related:** `doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md` § "Per-architecture status (lane L6)"

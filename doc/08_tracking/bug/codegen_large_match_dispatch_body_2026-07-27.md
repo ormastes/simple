@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-27
 - **Lane:** stage4 native-build (cranelift), full-CLI closure
-- **Status:** open — blocks stage4 full-CLI build (last remaining compile blocker)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 `native-build` of `src/app/office/sheets/formula.spl` fails:
@@ -31,3 +32,22 @@ Calc TUI UI access`.
    separate `fn` with a manageable arm count, called in sequence. Preserves exact
    behavior; gets each body under the codegen limit. Being applied to unblock the
    stage4 deploy while the compiler fix is pending.
+
+## App-side symptom re-verification 2026-08-17 (app-lane worker) — STILL OPEN, NOT OWNED HERE
+
+App-side shape unchanged in current source:
+
+- `src/app/office/sheets/formula.spl` is **9846 lines**.
+- `_dispatch_function` is still the single dispatch chokepoint, called from
+  `formula.spl:134` (`val probe = _dispatch_function(upper, [[1.0, 2.0]], sheet)`)
+  and `formula.spl:3407` (`val result_val = _dispatch_function(name, args, sheet)`),
+  and documented as such at `formula.spl:2721`.
+
+The defect itself is a **codegen** defect (cranelift function-body compilation),
+whose fix belongs in `src/compiler/50.mir/**` or `src/compiler/70.backend/**` —
+owned by a different lane. This worker deliberately made **no** compiler edit and
+**no** app-side split of `_dispatch_function`: splitting the match to dodge a
+codegen limit would hide the compiler defect behind a workaround, which the
+project rules forbid. Not re-executed: a `native-build` of formula.spl was not
+attempted, because an unrelated `native-build` on this host exceeded 300s wall
+under the concurrent bootstrap load (rc=124) and would not have been evidence.

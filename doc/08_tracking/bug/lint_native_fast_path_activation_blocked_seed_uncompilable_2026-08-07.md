@@ -1,7 +1,8 @@
 # lint native fast path landed but unactivated — seed rebuild blocked by pre-existing E0425s
 
 **Date:** 2026-08-07
-**Status:** OPEN (activation pending)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## What landed
 

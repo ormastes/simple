@@ -4,7 +4,8 @@
 - **Area:** module loader / import closure resolution
 - **Severity:** medium — 8x startup penalty on every interpreted run that touches
   Engine2D without also importing winit.
-- **Status:** OPEN. Reproducible, stable across repeats, not a cache effect.
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Repro
 
@@ -60,3 +61,24 @@ Root-causing the 2D x headless showcase cell — see
 `engine2d_load_font_interpreter_3kb_per_sec_2026-07-25.md`. (This is *not* that
 cell's root cause; the showcase already imports `window_winit` and so pays only
 the 3 s.)
+
+## Re-measured 2026-08-17 (lane m7c_lib_async) — the 8x gap does NOT reproduce
+
+Two minimal programs, `bin/simple run`, `nice -n 19`, shared/loaded host,
+`/usr/bin/time -f %e`:
+
+| program | imports | wall |
+|---|---|---|
+| `e1.spl` | `std.gc_async_mut.gpu.engine2d.engine.{Engine2D}` only | **20.49 s** |
+| `e2.spl` | same **plus** `std.nogc_sync_mut.io.window_winit` | **17.02 s** |
+
+The documented behaviour (24 s without winit, dropping to **3 s** with it) is
+not reproduced: adding the winit import improves load by ~17%, not ~8x. What
+remains true and still worth tracking is the absolute cost — importing
+`engine2d.engine` alone costs ~20 s of module load, with or without the
+workaround import.
+
+Revised characterisation: the *slow engine2d module load* is LIVE; the
+*winit-import-as-workaround* claim is STALE. Single run per configuration on a
+contended host, so treat the 17% delta as noise-adjacent, not as a measured
+effect.

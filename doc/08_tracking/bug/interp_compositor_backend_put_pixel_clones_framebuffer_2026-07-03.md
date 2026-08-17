@@ -1,7 +1,8 @@
 # Interpreter: CompositorBackend.put_pixel clones the whole framebuffer per pixel
 
 - id: interp_compositor_backend_put_pixel_clones_framebuffer_2026-07-03
-- status: worked around in the compositor (interpreter root cause still open)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - workaround (2026-07-04): `HeadlessHostCompositorBackend.fill_rect` and
   `.blit_pixels` now write `self.pixels` inline in their own loops with
   once-up-front clamping (no per-pixel `me`->`me` delegation). Measured:

@@ -1,6 +1,7 @@
 # actor_scheduler expects the priority-mailbox API; no imported name provides it
 
-- **Status:** OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** High
 - **Found by:** adversarial review of `a019ba19aa66` ("rename mailbox_actor.Mailbox to PriorityMailbox, resolve nogc_async_mut export ambiguity")
 - **File:** `src/lib/nogc_async_mut/actor_scheduler.spl`

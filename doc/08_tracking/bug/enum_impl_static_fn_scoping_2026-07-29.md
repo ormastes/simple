@@ -1,7 +1,8 @@
 # Bug: enum associated functions (`impl Enum:` and enum-body `static fn`) — scoping study, not fixed
 
 - **Date:** 2026-07-29
-- **Status:** open — **scoped, not fixed** (see "Why this is not a small fix" below)
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** critical (silent wrong values on the default JIT engine; a second,
   narrower, independent false-rejection defect on the interpreter)
 - **Binary under test:** Rust seed `src/compiler_rust/target/debug/simple`,

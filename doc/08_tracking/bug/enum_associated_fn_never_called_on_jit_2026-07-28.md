@@ -1,7 +1,8 @@
 # Bug: `EnumName.assoc_fn()` is never called on the JIT — returns a bogus value, no error
 
 - **Date:** 2026-07-28
-- **Status:** open
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** critical (silent wrong values codebase-wide on the default engine; engines disagree)
 - **Found by:** lane S3 while diagnosing "SdnValue insert does not persist"; reproduced independently by the coordinator
 

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-06-13
 - **Severity:** P2 (silent data loss in iteration — masks multi-entry processing)
-- **Status:** Fix landed in worktree `wt_s22` for a reproduced type-corruption
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   crash + a reproduced flaky duplicate-key non-collapse (interpreter/`val`
   path), PENDING-REDEPLOY (Rust seed change; not cargo-built/verified in this
   sandbox per lane hard rules). The exact "1 entry -> 4 iterations" / "3 -> 4"

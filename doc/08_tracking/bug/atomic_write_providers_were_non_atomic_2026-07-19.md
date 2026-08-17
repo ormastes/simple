@@ -1,6 +1,7 @@
 # atomic-write providers were non-atomic
 
-**Status:** PROVIDER REGRESSIONS PASS / STAGE 4 INTEGRATION PENDING
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Severity:** P1 — interrupted lint, formatter, runner, or doc writes could lose data
 
 ## Root cause

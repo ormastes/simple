@@ -1,7 +1,8 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
 
 - Date: 2026-06-22
-- Status: pass for pairwise pixels; browser/RenderDoc completion still blocked
+- Status: DUPLICATE of gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - Gate: `scripts/setup/setup-gui-web-2d-vulkan-env.shs --run`
 - Evidence: `build/gui-web-2d-vulkan-env/evidence.env`
 

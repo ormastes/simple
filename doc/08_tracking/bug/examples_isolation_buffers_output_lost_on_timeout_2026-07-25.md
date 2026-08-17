@@ -1,7 +1,8 @@
 # `examples/**` isolation wrapper buffers child output and discards it when the run is killed — any slow example looks like a silent exit-0
 
 - **ID:** examples_isolation_buffers_output_lost_on_timeout_2026-07-25
-- **Status:** OPEN (root-caused, not fixed)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** high (masks evidence; makes failures indistinguishable from success)
 - **Found via:** `widget × host-WM` showcase-matrix cell producing 2 lines of
   output and exit 0.

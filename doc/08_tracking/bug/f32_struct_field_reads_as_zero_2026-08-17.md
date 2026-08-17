@@ -1,7 +1,8 @@
 # f32 struct fields always read back as 0.0
 
 - **Date:** 2026-08-17
-- **Status:** OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** HIGH — silently wrong numerics, no error, no warning
 - **Found by:** `test/03_system/` sweep (test/03_system/game_net, test/03_system/game3d)
 

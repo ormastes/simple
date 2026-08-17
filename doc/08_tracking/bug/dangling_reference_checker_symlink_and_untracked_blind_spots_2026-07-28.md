@@ -1,5 +1,8 @@
 # check-dangling-references: two false-positive classes — symlinked source trees and untracked providers
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-28 · **Status:** open · **Class:** checker defect (false positives)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
 to `src/app/{cli,dashboard}`. 2 of the 25 findings in that scope are not real
@@ -85,3 +88,77 @@ treats a SYMBOL finding as proof of a missing implementation will chase these.
 In the `src/app/{cli,dashboard}` slice they are 2 of 25 (8%); the symlink class
 is likely much larger repo-wide, since the numbered compiler tier directories
 are all reached through symlinks.
+
+---
+
+## SEPARATE DEFECT, FOUND AND FIXED 2026-08-17 — the checker could exit 0 having scanned nothing
+
+The two blind spots above are false-POSITIVE (noise) classes and remain OPEN.
+While working this row a third, opposite, and strictly worse defect was found in
+the same script: a **vacuous pass**. It is fixed.
+
+### Defect
+
+Both scan passes were pipelines whose exit status was never read:
+
+```sh
+xargs -a "$tmp/all.txt"     -d '\n' awk -f "$tmp/index.awk" | sort -u > "$tmp/index.txt"
+xargs -a "$tmp/targets.txt" -d '\n' awk -v idx=... -f "$tmp/check.awk" > "$tmp/viol.txt"
+```
+
+`awk`'s `fatal:` aborts the entire batch, so every file after the offending one
+in that `xargs` batch was **never scanned**. `viol.txt` then came back empty and
+the script printed `OK -- no dangling references` and exited **0**. The verdict
+carried no count, so a run that scanned zero files was indistinguishable from a
+clean one. `sort`'s status is what `$?` held for pass 1 — the exact
+"never read rc through a pipe" trap.
+
+Trigger is not hypothetical: one unreadable/vanishing tracked `.spl` is what a
+concurrent `jj` checkout produces, and this repo runs ~15 concurrent lanes.
+
+### Reproduction (throwaway git repo, 4 tracked `.spl` files, one real violation)
+
+```
+# beta.spl readable
+check-dangling-references: FAIL -- 1 dangling reference(s)      rc=1
+# chmod 000 beta.spl, same tree, same violation still present
+awk: ... fatal: cannot open file `src/lib/beta.spl' for reading: Permission denied
+check-dangling-references: OK -- no dangling references         rc=0
+```
+
+A genuine dangling reference was masked and the gate went green.
+
+### Fix
+
+`scripts/check/check-dangling-references.shs`:
+
+- pass 1 writes to a file and reads `index_rc=$?` on the **next** line, then
+  sorts; nonzero -> ERROR exit 2 (an incomplete definition index makes every
+  finding, positive or negative, unsound);
+- pass 2 likewise reads `scan_rc=$?` on the next line;
+- `check.awk` counts the files it actually opened (`FNR == 1 { scanned++ }`,
+  `END { print "#SCANNED\tn" }`, summed across `xargs` batches) and the shell
+  requires `scanned == targets_n` and `scanned > 0`;
+- verdicts now follow the repo convention and are always the last stdout line:
+  `PASS -- <n> file(s) checked, 0 dangling references` (0) /
+  `FAIL -- <n> dangling reference(s) in <m> file(s)` (1) /
+  `ERROR -- nothing was checked: <why>` (2). `OK` is gone.
+
+### `--selftest` (runs before every scan, fatal)
+
+Three throwaway git repos scanned through the script's own entry point
+(`DANGLING_REF_SELFTEST_CHILD=1` stops the recursion):
+
+1. clean tree -> must PASS, exit 0, count > 0;
+2. one dangling `self.method()` -> must FAIL, exit 1;
+3. fixture 2 **plus one unreadable tracked `.spl`** (incident replay) ->
+   must ERROR, exit 2 — this is the fixture that was green before the fix.
+
+Fixture 3 cannot be built as root; that case is reported as ERROR exit 2, never
+as a pass.
+
+Mutation-tested: neutering all four non-vacuity guards turns the selftest RED
+with `FIXTURE 3 ... got rc=0 out='... PASS -- 0 file(s) checked ...'`.
+The four guards are deliberately redundant — disabling any three still catches
+the incident (awk dies before `END`, so no `#SCANNED` sentinel is emitted at
+all).

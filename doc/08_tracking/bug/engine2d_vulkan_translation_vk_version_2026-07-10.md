@@ -1,5 +1,8 @@
 # Engine2D Vulkan Translation Requires Missing `vk_version` Argument
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 
 Open; blocks Linux DirectX-on-Vulkan and Metal-on-Vulkan RenderDoc capture.

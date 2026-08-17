@@ -1,7 +1,8 @@
 # Two `list`-parameter stdlib/helper functions return wrong values while byte-identical inline code is correct — one of them silently corrupted a bug investigation
 
 **Date:** 2026-08-08
-**Status:** ROOT-CAUSED and RESOLVED 2026-08-08 — see
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 `doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md`
 
 > **Mechanism (was "NOT determined"):** under the JIT, an element read `data[i]`

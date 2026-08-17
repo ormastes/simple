@@ -26,7 +26,8 @@
 # `native-build --entry` BUILDFAILs on any local struct construction — `method has not found on nil`
 
 - **id:** native_build_entry_struct_construction_buildfail_2026-07-20
-- **status:** resolved 2026-07-20 (root-fixed — driver_pipeline.spl duplicated-constructor drift; see top banner)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **severity:** high (a first-class construct — defining and constructing a
   struct — cannot be single-file native-built at all)
 - **component:** compiler — `native-build --entry` single-file mode; the

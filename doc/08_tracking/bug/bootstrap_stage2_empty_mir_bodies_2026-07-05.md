@@ -1,6 +1,7 @@
 ---
 id: bootstrap_stage2_empty_mir_bodies_2026-07-05
-status: IN_PROGRESS
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: critical
 discovered: 2026-07-05
 discovered_by: Bootstrap stage-2 binary verification

@@ -4,7 +4,8 @@
 - **Severity:** critical (system-wide resource exhaustion; ~35k leaked
   processes; killed an unrelated Vivado implementation run at checkpoint
   write; also the cause of the earlier "generate-script hang at 0% CPU")
-- **Status:** root fix implemented in `.spl` (requires redeploy to reach
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   `bin/release/*` binaries); wrapper guard retained as defense-in-depth
 
 ## Anatomy

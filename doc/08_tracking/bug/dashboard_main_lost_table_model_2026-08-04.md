@@ -1,6 +1,7 @@
 # BUG: `app.dashboard.main` no longer defines the table model its own siblings import
 
-**Status:** ARCHITECTURAL-OPEN — re-verified 2026-08-10. `src/app/dashboard/main.spl`
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 is now 3,094 bytes (grown from the originally-reported 382-byte stub, so the
 CLI entry-point work continued), but still defines none of the ten table-model
 symbols: `grep -c 'DASHBOARD_CACHE_PATH\s*=\|TABLE_NAMES\s*=\|fn load_table\|fn ensure_dirs' src/app/dashboard/main.spl` is 0, and the tree-wide grep from the
@@ -125,3 +126,42 @@ development with a live session. The truncation may be deliberate localization
 rather than an accident. This entry deliberately stops at recording the
 recovery path; the decision to restore belongs to the owner of that lane.
 
+
+## Verification 2026-08-17 (wave_00 w0001/app_1) — REPRODUCED, STILL OPEN
+
+Classified by CONTENT of current source, not by SHA ancestry.
+
+- `src/app/dashboard/collectors.spl` no longer exists; it was renamed to
+  `src/app/dashboard/dashboard_collectors.spl`. The dangling import moved with
+  it, so the doc's original file:line reference was stale but the DEFECT is not.
+- `src/app/dashboard/dashboard_collectors.spl:8`:
+  `use app.dashboard.main.{Table, load_table, load_table_named, header_index, get_field, count_eq, sum_int, count_nonempty, write_table, today_date, itos, DASHBOARD_TABLE_DIR}`
+- `src/app/dashboard/main.spl` is 87 lines and defines none of them. Its own
+  header comment, lines 7-8, states the gap and points at this doc:
+  "The dashboard data model (tables, cache, collectors) is still missing from
+  this module — see doc/08_tracking/bug/dashboard_main_lost_table_model_2026-08-04.md."
+- The symbols are defined NOWHERE under `src/app/dashboard/`.
+  `src/app/dashboard/dashboard_export_runtime.spl:8` imports the same missing
+  set plus `DASHBOARD_CACHE_PATH`, `DASHBOARD_HISTORY_DIR`, so BOTH modules are
+  dead, not just one.
+
+Live reproduction (`nice -n 19 bin/simple run src/app/dashboard/dashboard_collectors.spl`):
+
+```
+[use-warning] 'Table' is named in `use app.dashboard.main.{...}` but module '.../src/app/dashboard/main.spl' does not provide it (imported from src/app/dashboard/dashboard_collectors.spl)
+... (12 such warnings: Table, load_table, load_table_named, header_index,
+     get_field, count_eq, sum_int, count_nonempty, write_table, today_date,
+     itos, DASHBOARD_TABLE_DIR)
+rc=0
+```
+
+**The exit code is 0.** Twelve unresolved `use` symbols degrade to warnings and
+the process exits successfully — this is the silent-wrong-result class, not a
+loud failure. That resolver-level fail-open is a SEPARATE and broader defect
+than this row and is out of this slice's file scope; filed here as an
+observation for whoever owns the `use`-resolution lane.
+
+Not fixed here: restoring the model (Table + SDN load/write + header_index /
+get_field / count_eq / sum_int / count_nonempty / today_date / itos and the
+three path constants) is a feature restoration, not a patch, and was out of
+budget for this lane. Status stays OPEN with the evidence above.

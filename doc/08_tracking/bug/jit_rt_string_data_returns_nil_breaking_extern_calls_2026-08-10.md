@@ -5,7 +5,8 @@ symptom, not the defect — `rt_string_data` is fine in isolation in both lanes.
 Kept as the canonical path for inbound links.)*
 
 - **Date:** 2026-08-10
-- **Status:** **NOT REPRODUCIBLE on current `main`.** It reproduces only on the
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   **stale deployed seed** `bin/release/x86_64-unknown-linux-gnu/simple`
   (built 2026-08-09 04:50). A seed built from current `main` does not exhibit
   it in either lane. Fenced going forward by

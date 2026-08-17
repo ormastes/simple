@@ -1,6 +1,7 @@
 # Metal GPU lane: device verification pending — no Metal host in this repo
 
-- **Status:** OPEN (blocked on hardware, not on code)
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-08-09
 - **Area:** `src/lib/gc_async_mut/gpu_lane/` (Metal lane), SVM-G / GMB-1
 - **Design:** `doc/05_design/app/tools/metal_gpu_lane_and_vulkan_jit_notebook_architecture_2026-08-09.md`

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-26 (run 9 trace evidence, first observable harness build)
 - **Lane:** deployed stage4 `bin/release/aarch64-apple-darwin-macho/simple` `native-build` (cranelift, `--target x86_64-unknown-none`, `--entry-closure`, harness env `SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT/src SIMPLE_ALLOW_FREESTANDING_STUBS=1`)
-- **Status:** open — measured, root cause not yet isolated
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Measured (SIMPLE_COMPILER_TRACE=1, harness run 9, 10800s wall — expired in parse)
 `[BOOTSTRAP-PHASE] phase2:parse:file` timings from `native-build.out` (19MB):

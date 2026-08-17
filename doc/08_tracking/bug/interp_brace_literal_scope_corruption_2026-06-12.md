@@ -1,7 +1,8 @@
 # Brace-containing string literal corrupts lowering scope across functions
 
 Date: 2026-06-12
-Status: source fixed; exact regression execution pending
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Severity: P2
 Related: `short_grammar_placeholder_interpolation_2026-05-27.md`,
 memory note "Brace Interpolation in Literals"

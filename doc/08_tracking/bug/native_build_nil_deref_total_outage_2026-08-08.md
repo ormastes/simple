@@ -1,6 +1,7 @@
 # `native-build` is dead for EVERY input — nil-deref in the interpreted compiler
 
-- **Status:** **FIXED** — the outage was real at the measured commit and was
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   already fixed by `100a9aadcc4` *three minutes before this doc was filed*. This
   report was **stale on arrival**; see "Resolution" below. No action needed.
 - **Date:** 2026-08-08

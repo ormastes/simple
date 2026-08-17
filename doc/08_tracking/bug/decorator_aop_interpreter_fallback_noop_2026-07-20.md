@@ -1,7 +1,8 @@
 # Bug (interpreter-path, unverified against compiled): `@decorator` wrapping and AOP `pc{}` weaving are no-ops under the tree-walking interpreter fallback
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/{decorators,aop,aop_pointcut}_spec.spl`, `collections_spec.spl` "Decorators" section)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Area:** interpreter fallback path (`bin/simple test` / `bin/simple run` on the
   deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`, which falls back to
   tree-walking whenever JIT lowering fails — the default/only path available on
@@ -95,3 +96,17 @@ weaving genuinely only run under compiled mode, this bug's practical severity
 is "expected interpreter limitation, needs an explicit diagnostic" rather than
 "feature broken everywhere" — flagging for whoever verifies against a real
 compiled build.
+
+## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+Reproduce-first re-run of the recorded reproducer at HEAD:
+
+```
+$ bin/simple test test/feature/usage/decorators_spec.spl
+Results: 10 total, 5 passed, 5 failed          # rc=1
+```
+
+Confirmed still red. NOT FIXED by this lane: the root cause sits in
+`src/compiler/10.frontend/core/interpreter/`, which was owned by a concurrent P1
+lane at the time of triage, so this lane deliberately made no source change
+there. Handing off with the RED reproduced and the reproducer confirmed live.

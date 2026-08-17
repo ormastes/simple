@@ -1,7 +1,8 @@
 # `native-build --backend llvm`: every user function using `return` silently returned 0
 
 - **Date:** 2026-08-01
-- **Status:** FIXED (verified by built-and-run ELF, RED/GREEN A/B on the same tree)
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Critical — silent wrong answer, exit 0, real ELF, no diagnostic
 - **Area:** `src/compiler/20.hir/hir_lowering/`, `src/compiler/70.backend/backend/_MirToLlvm/`
 - **Lane:** `bin/simple_seed native-build <file>.spl --backend llvm` (the pure-Simple

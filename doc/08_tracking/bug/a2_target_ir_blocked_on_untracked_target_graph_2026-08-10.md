@@ -1,7 +1,8 @@
 # A2 target IR is complete but NOT landed — blocked on an untracked file
 
 **Date:** 2026-08-10
-**Status:** OPEN — work is done and passing, deliberately withheld from `main`.
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Work location:** worktree `.claude/worktrees/agent-a5cdacdf7286b11a3`, branch
 `worktree-agent-a5cdacdf7286b11a3` (do not delete this worktree).
 **Plan:** `doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md` §5/§6, Wave 1.
@@ -135,3 +136,13 @@ reachable in the git object database even with the ref deleted — try
 `git fsck --lost-found` / `git reflog` on whatever clone the agent used. This
 lane did not attempt object recovery because it does not know which clone that
 was. Status stays OPEN, reclassified from "withheld" to "presumed lost".
+
+## Re-verification 2026-08-17 (fleet lane C, by CONTENT not SHA)
+
+STILL-OPEN, confirmed by source inspection. `src/compiler/80.driver/cache/target_graph.spl`
+and `src/compiler/80.driver/build_graph/` are both ABSENT from the working tree
+(`ls src/compiler/80.driver/` shows no `build_graph` entry; `find src -name "target_graph*"`
+returns nothing). The named spec `test/01_unit/compiler/build_graph/target_graph_spec.spl`
+is likewise absent, so there is nothing to run — the work has still not landed from the
+agent worktree. No reproduction is possible and no patch is appropriate: this is a
+landing/VCS task, not a code defect.

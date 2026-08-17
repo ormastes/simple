@@ -2,7 +2,8 @@
 
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-**Status:** Source fixed in Rust-seed and pure-Simple interpreters;
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 direct-constructor execution pending
 
 ## Symptom

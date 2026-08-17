@@ -1,5 +1,8 @@
 # Sweep: how many specs pass vacuously because of the JIT enum-associated-fn hijack?
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **Date:** 2026-07-28
 - **Kind:** measurement (no specs were rewritten)
 - **Parent bug:** `doc/08_tracking/bug/enum_associated_fn_never_called_on_jit_2026-07-28.md`

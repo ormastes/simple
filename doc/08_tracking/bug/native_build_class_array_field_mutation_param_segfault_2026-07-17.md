@@ -1,6 +1,7 @@
 # native-build SIGSEGV: class-in-array field mutation through a function param
 
-- **Status:** FIXED — the later named-array type bridge fix preserves class
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   element identity across parameters; LLVM and Cranelift verification passed
   on 2026-07-18.
 - **Discovered:** 2026-07-17, lane s19

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-03
 - **Severity:** P2 (silent wrong result; turns scan loops into infinite loops)
-- **Status:** source fixed in the active pure-Simple evaluator; execution pending
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Repro:**
 
 ```spl

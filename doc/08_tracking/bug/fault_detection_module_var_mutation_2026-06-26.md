@@ -1,5 +1,8 @@
 # Bug: Module-level var mutations via function calls do not propagate in interpreter
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-06-26
 **Spec:** `test/01_unit/lib/common/fault_detection_enhanced_spec.spl`
 

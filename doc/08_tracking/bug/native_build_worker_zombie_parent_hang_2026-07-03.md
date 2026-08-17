@@ -1,7 +1,8 @@
 # native-build parent hangs forever when its worker dies early (zombie, empty log)
 
 Date: 2026-07-03
-Status: SOURCE IMPLEMENTED — fresh-runtime parent-death execution blocked
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Severity: P1 (blocks bootstrap stage 4 / --deploy on this host; silent 2h timeout burns)
 Found by: fable orchestrator during bootstrap redeploy
 

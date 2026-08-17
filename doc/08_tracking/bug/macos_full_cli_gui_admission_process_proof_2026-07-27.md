@@ -1,6 +1,7 @@
 # macOS Full-CLI GUI Admission Process Proof
 
-**Status:** cycle-3 source candidate / builder self-test blocked after fixture chmod repair / Swift link+self-test blocked after `-lbsm` repair / live Endpoint Security evidence unavailable (exit 125)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Evidence row:** `MAC-WM-GLASS-LOCAL-001`
 
 The cycle-3 source candidate repairs the previously rejected boundary:

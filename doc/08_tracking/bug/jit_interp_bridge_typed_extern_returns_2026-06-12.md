@@ -3,7 +3,8 @@
 - **ID**: jit_interp_bridge_typed_extern_returns
 - **Date**: 2026-06-12
 - **Severity**: P3
-- **Status**: open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component**: seed compiler — cranelift JIT hybrid execution
 
 ## Context

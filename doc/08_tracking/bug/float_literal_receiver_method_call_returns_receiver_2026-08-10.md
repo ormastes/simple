@@ -1,7 +1,8 @@
 # A method call on a parenthesised float literal returns the receiver, not the result
 
 - **Date:** 2026-08-10
-- **Status:** FIXED 2026-08-11 — root cause: `parse_postfix`'s `LParen` arm in
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   `src/compiler_rust/parser/src/expressions/postfix.rs:168` (pre-fix line
   168-170) grabbed ANY following `(...)` as this expression's own call
   parens, with no whitespace-adjacency check (unlike the `LBracket` arm two

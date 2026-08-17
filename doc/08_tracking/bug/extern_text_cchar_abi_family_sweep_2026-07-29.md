@@ -1,5 +1,8 @@
 # Mechanical Sweep: extern text-arg `c_char` → `(ptr, len)` ABI family
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Scope:** extern "C" functions in `src/compiler_rust/runtime/src` taking `*const c_char` text parameters must use `(*const u8, u64)` when callable from native codegen (JIT/Cranelift), per doc/08_tracking/bug/mem_attr_set_owner_jit_text_arg_dropped_2026-07-29.md.
 
 **Completed:** 2026-07-29

@@ -1,5 +1,8 @@
 # Bug: native-build BuildCache loses all entries on cross-process reload
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Status (2026-07-16):** RESOLVED — two-build gate PASS. On origin tip
 (eaee86e1e4d, deployed binary, live-interpreted pipeline), a rebuild of an
 unchanged single-module probe reported `[NATIVE] cache hit` cross-process and

@@ -10,7 +10,8 @@ the same pass.
 
 # Gate Oracle Soundness Census — 2026-08-11
 
-Status: FIRST-PASS TRIAGE (static analysis only, not re-verified line-by-line
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 for every gate). See "Confidence / follow-up" section — do not treat the
 per-gate bucket assignments below as final without a full manual read.
 

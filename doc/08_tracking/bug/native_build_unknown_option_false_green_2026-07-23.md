@@ -1,5 +1,8 @@
 # BUG: native-build ignored unknown options
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Reproduction
 
 Append `--entry-clousre` to an otherwise valid pure-Simple `native-build`

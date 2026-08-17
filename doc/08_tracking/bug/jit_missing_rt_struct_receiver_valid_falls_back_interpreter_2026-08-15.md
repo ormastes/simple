@@ -1,7 +1,8 @@
 # JIT lane reports missing runtime fn `rt_struct_receiver_valid` and silently falls back to interpreter
 
 - **Date:** 2026-08-15
-- **Status:** RESOLVED at source (verification pending) — fixed by parallel
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   session in `f11bd8f0d6b` "fix(jit): register struct-field runtime funcs"
   (runtime_sffi.rs RuntimeFuncSpec for rt_struct_alloc +
   rt_struct_receiver_valid). Post-lock verification: the repro below must run

@@ -1,7 +1,8 @@
 # Native codegen: text.char_code_at returns value >>3 (tag-shift corruption) on freestanding lane
 
 - **ID:** native_char_code_at_tag_shift_2026-07-19
-- **Status:** SOURCE FIXED in pure Simple (503c075464fc, 2026-07-19) and seed
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   parity (c97697506aa, 2026-07-19). The pure MIR path calls a reserved raw-i64
   runtime alias after custom-method lookup; the seed fallback types builtin
   string scalar methods as I64. Seed freestanding verification returned U=88

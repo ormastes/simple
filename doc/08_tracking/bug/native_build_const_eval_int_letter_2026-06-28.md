@@ -1,5 +1,8 @@
 # native-build const-eval: hex-letter parse (FIXED) + residual typed/module-val gaps (OPEN)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Date: 2026-06-28
 
 Lane: `.spipe/simpleos-alpine-harden-musl-busybox` (AC-6b — cross-compile simplebox)

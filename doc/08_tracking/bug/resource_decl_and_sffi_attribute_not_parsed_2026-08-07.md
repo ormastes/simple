@@ -172,3 +172,29 @@ edited `.spl` under the interpreter. `resource_decl_spec.spl` uses it.
 WP-B (`*R`/`@R`/`-R` sigils — note `*T` in type-annotation position **already
 parses** today, verified by probe), WP-C (HIR carrier), WP-E (MIR drop
 edges), WP-G (borrow enforcement), WP-H (generated adapters).
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: THE SPECS OWN PROSE IS STALE — WP-A has landed.**
+
+`test/01_unit/compiler/resource/resource_sffi_pilot_spec.spl` lines 15-24 assert
+that "as of 2026-08-07, `resource` is not a parsed declaration kind anywhere in
+`src/compiler/10.frontend/**`" and that "a repo-wide grep for
+`parse_resource_decl` ... returns zero hits outside the design docs".
+
+That is no longer true. `grep -rn "parse_resource_decl" src/compiler`:
+
+- `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:230` — `fn parse_resource_decl(loop_index: i64) -> i64:` (the definition)
+- `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:516` — wired via `finalize_decl_visibility(parse_resource_decl(loop_index), visibility)`
+- `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:795` — `val res_d = parse_resource_decl(i)`
+- `src/compiler/10.frontend/resource_registry.spl:40` — cross-reference
+
+The same file carries an explicit `# ===== WP-A: resource declarations +
+@sffi(...) attribute =====` banner at line 152 documenting `resource` as a
+contextual (soft) keyword, exactly as the design specified.
+
+The spec header must be rewritten before any conclusion is drawn from a RED
+run: a reader currently attributes the failure to an unimplemented parser that
+is in fact implemented. The remaining structural cause (if the pilot is still
+RED) is downstream of parsing and has not been isolated here — see the
+Unproven section.

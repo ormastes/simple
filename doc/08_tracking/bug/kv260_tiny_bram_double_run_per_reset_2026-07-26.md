@@ -1,5 +1,8 @@
 # KV260 tiny-BRAM SoC: firmware runs TWICE per reset on silicon (GHDL runs once)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Date:** 2026-07-26
 - **Severity:** low (cosmetic for current gates — both runs complete and agree; masks nothing today, but breaks any future fw that is not idempotent or that counts on running once)
 - **Where:** `examples/09_embedded/fpga_riscv/rtl/soc_top_rv32_tiny_bram.vhd` + `rv32_bram_soc.vhd` reset/obs path on real xck26 silicon (BSCANE2 USER4 obs tunnel readout)

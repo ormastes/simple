@@ -3,7 +3,8 @@
 - **ID:** lsp_code_action_edit_emit_parse_mismatch_2026-06-16
 - **Severity:** P2 (LSP quickfix/refactor actions surface but apply no edit)
 - **Area:** lsp / app
-- **Status:** open — root-caused, fix attempted and reverted (see Notes)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Found during:** reliable-mode plan P1 / R3 (doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md)
 
 ## Summary

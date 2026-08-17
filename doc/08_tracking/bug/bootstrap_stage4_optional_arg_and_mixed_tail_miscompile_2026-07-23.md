@@ -3,7 +3,8 @@
 - **Date:** 2026-07-23
 - **Component:** Rust seed `SIMPLE_BOOTSTRAP=1` native lane (stage4 full-CLI build)
 - **Severity:** critical (silently wrong code in the self-hosted AOT driver)
-- **Status:** open (seed defect; .spl call sites worked around, fix pinned by probes)
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Defect 1 — optional in argument position never invokes the callee
 

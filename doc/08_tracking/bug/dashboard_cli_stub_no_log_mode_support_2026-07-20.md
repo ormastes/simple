@@ -1,5 +1,8 @@
 # dashboard app CLI is a no-op stub; `dashboard_log_modes_spec.spl` tests removed functionality
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-20
 **Component:** `src/app/dashboard/main.spl`
 **Severity:** Medium — not an interpreter/compiler defect; a product-level
@@ -59,3 +62,23 @@ entrypoint is intentionally dead, retarget or delete
 expectations. Left the spec file unmodified per the "never rewrite an
 assertion to force green" rule — deciding which of these two paths is
 correct requires product/ownership context beyond this triage pass.
+
+## Verification 2026-08-17 (wave_00 w0001/app_1) — log-mode half LANDED; stub half is a duplicate
+
+The doc's stated evidence ("main.spl grew to 87 lines but still has no
+--log-mode handling") is now FALSE. `src/app/dashboard/main.spl` handles the
+shared log-mode/progress surface:
+
+- `:11` `use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}`
+- `:16-19` `val log_opts = parse_log_options(raw_args)` with `if not log_opts.valid:` -> `error(...)` + `return 1` (fail-closed)
+- `:22` `val as_json = log_opts.log_mode == "json"`, honoured at `:25-27`, `:32-34`, `:41-43`
+- `:35` `render_progress(log_opts.progress, 0, 1, "usage")`
+- `:59-65` `dashboard_is_log_option` covers `--log-mode`, `--log-mode=`, `--surface`, `--progress` and the shorthand modes
+- `:73-87` `dashboard_clean_log_args` strips them, consuming the value for the separated forms
+
+What remains is that the dashboard has no COMMANDS to run — every non-help
+argument falls to `:44` `error("dashboard", "unknown command '{args[0]}'")`.
+That residue is the same defect as
+`doc/08_tracking/bug/dashboard_main_lost_table_model_2026-08-04.md` (the data
+model was lost from this module), not a log-mode gap. Recommend narrowing this
+row to a duplicate of that one.

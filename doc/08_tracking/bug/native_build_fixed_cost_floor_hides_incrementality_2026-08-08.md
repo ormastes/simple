@@ -2,7 +2,8 @@
 
 - **ID:** native_build_fixed_cost_floor_hides_incrementality_2026-08-08
 - **Date:** 2026-08-08
-- **Status:** OPEN — measured, not fixed.
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** high for developer loop cost; not a correctness defect.
 
 ## Why this doc exists

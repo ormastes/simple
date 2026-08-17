@@ -1,6 +1,7 @@
 # FAT32 driver: no cycle guard for cluster-chain walks (infinite-loop hazard)
 
-- **Status:** closed — cycle guard implemented 2026-06-11
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found:** 2026-06-11 by the Lean `fat32` formal model (FINDING-T3 in
   `src/verification/fat32/Fat32/Theorems.lean`)
 - **Severity:** was high (infinite loop on cyclic FAT); now guarded

@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-08-08
 - **Severity:** High — `simple test` is the verification oracle most lanes depend on.
-- **Status:** Root-caused, source fix landed (Rust seed). **Not live until the
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   deployed binary is rebuilt** — see *Mitigation now*.
 - **Pre-existing:** reproduces against the pre-`2139afa0c90` `origin/main` blob.
   Not introduced by the child-binary resolution fix.

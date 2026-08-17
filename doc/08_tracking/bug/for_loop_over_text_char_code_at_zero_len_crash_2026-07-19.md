@@ -1,5 +1,8 @@
 # BUG: `for ch in <text>:` loop-bound element is corrupted — `char_code_at(0)` always 0, `.len()` segfaults the interpreter
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 SOURCE FIXED (2026-07-22), rebuilt current-source execution pending. The Rust
 seed's corrupt narrow loop binding was fixed earlier. The self-hosted Pure MIR

@@ -1,5 +1,8 @@
 # mock_spec twins shadow CallRecorder/CallVerifier with a full alternate mock framework
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Files**:
   - `test/unit/lib/common/mock_spec.spl:123,155` (625 lines)
   - `test/unit/std/mock_spec.spl:123,155` (593 lines, near-duplicate of the above)
@@ -88,3 +91,14 @@ pre-existing `test/unit/std/mock_simple_spec.spl` — fails at runtime with
   binary `bin/release/x86_64-unknown-linux-gnu/simple` (mtime
   2026-08-10 11:06:25 UTC; prints the Rust-seed WARNING banner per the
   known Stage-3 self-host blocker, `bin/simple --version`).
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — ALREADY-FIXED by content
+
+Classified against current source, not SHA ancestry. The shadowing
+reimplementation is gone: `test/unit/std/mock_spec.spl:20` now reads
+`use std.spec.mock.{Mock, Spy, Stub, CallRecorder, CallVerifier}` and the file
+is 1912 bytes (was 593 lines); `test/unit/lib/common/mock_spec.spl:14` likewise
+imports from `std.spec.mock`. `grep` for a `class CallRecorder` / `class
+CallVerifier` declaration in either twin returns nothing, so the real
+`src/compiler_rust/lib/std/src/spec/mock.spl` is now the code under test.
+Recommend CLOSE.

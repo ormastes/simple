@@ -1,6 +1,7 @@
 # `simple fix` failed-write false-green
 
-**Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** P1 — a failed persistence was reported as an applied fix
 
 ## Root cause

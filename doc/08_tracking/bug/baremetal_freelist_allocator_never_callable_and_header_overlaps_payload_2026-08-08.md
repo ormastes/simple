@@ -1,7 +1,8 @@
 # Baremetal FreeListAllocator was never callable; BlockHeader overlapped the payload it hands out
 
 - **Date:** 2026-08-08
-- **Status:** FIXED (three defects), one related finding left OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **File:** `src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl`
 - **Public surface:** re-exported as `std.baremetal.{FreeListAllocator, FixedBlockAllocator, MultiPoolAllocator, BumpAllocator, heap_init, ...}`
   (`src/lib/nogc_async_mut_noalloc/baremetal/__init__.spl:1`,

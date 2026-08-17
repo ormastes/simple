@@ -1,5 +1,8 @@
 # doc_coverage csv_exporter: undefined `NL` import + DocItem missing create_class/create_enum
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Symptom
 
 `test/01_unit/app/doc_coverage/csv_export_spec.spl` fails all 28 examples with:

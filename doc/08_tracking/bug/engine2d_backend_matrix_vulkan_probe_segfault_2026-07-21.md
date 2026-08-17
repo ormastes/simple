@@ -1,7 +1,8 @@
 # Engine2D vulkan probe segfaults the whole process (kills list_backends + any backend-matrix spec)
 
 - **Date:** 2026-07-21
-- **Status:** FIXED + VERIFIED (same day). After the struct fix + seed rebuild,
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   `probe_backend("vulkan")` returns coherently, and on this host Vulkan now
   goes all the way to **Initialized with a passing 16x16 fill+readback vs the
   SoftwareBackend oracle** (Mesa ICD). The regression gate

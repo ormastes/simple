@@ -1,6 +1,7 @@
 ---
 id: metal_readback_spec_stale_alpha_expectation_2026-07-05
-status: FIXED
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: medium
 discovered: 2026-07-05
 discovered_by: Gate run of scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs during draw_image GPU-dispatch work

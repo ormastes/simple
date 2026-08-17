@@ -1,5 +1,8 @@
 # Systematic pipeline diff: `run_file_jit` vs the whole-program native-build pipeline (2026-07-30)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Eight JIT-only defects were found this session one at a time, by hand, each
 costing a full investigation. a894's shape analysis found two patterns: (1)
 miscellaneous codegen bugs, and (2) **pipeline-completeness gaps**, where a

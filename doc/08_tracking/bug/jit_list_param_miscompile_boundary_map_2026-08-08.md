@@ -1,5 +1,8 @@
 # JIT tagged-element miscompile — independent boundary map (adversarial re-take)
 
+Status: DUPLICATE of jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-08-08 · **Verifier:** adversarial review lane · **Engine:** JIT
 (Cranelift) via `bin/simple run` on the Rust seed
 `bin/release/x86_64-unknown-linux-gnu/simple`.

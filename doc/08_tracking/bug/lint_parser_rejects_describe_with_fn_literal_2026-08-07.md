@@ -1,7 +1,8 @@
 # Lint's parser rejects `describe "...", fn():` that the test runner accepts
 
 - **Filed:** 2026-08-07
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** low — a valid spec form is unlintable; every AST lint is silently skipped for the file
 - **Found via:** WP-4 of `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`
 

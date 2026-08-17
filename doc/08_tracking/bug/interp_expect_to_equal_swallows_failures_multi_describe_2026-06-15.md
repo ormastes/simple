@@ -2,7 +2,8 @@
 
 **ID:** interp_expect_to_equal_swallows_failures_multi_describe_2026-06-15
 **Severity:** P1
-**Status:** Open
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Discovered:** 2026-06-15
 
 ## Symptom

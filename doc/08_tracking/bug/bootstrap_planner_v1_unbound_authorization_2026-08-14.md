@@ -1,6 +1,7 @@
 # Bootstrap planner v1 unbound authorization
 
-Status: OPEN — v3 design is frozen; non-circular producer cycle exhausted and reverted
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 The version-1 planner receipt authorized any target with a bootstrap or release
 prefix and bound only a typed reason. It did not identify the admitted parent
@@ -96,3 +97,11 @@ the reason guard was not reached. The entire draft was reverted at the cap; v2
 therefore remains fail-closed. TODO666 retains the producer, atomic envelope,
 consumer/bootstrap switch, reason guard, and deliberate-red closure as one
 indivisible future lane.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN (same root cause as bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17).**
+`scripts/check/lib/bootstrap-planner-admission-bound.shs` still only validates STRUCTURE
+(`bootstrap_planner_v2_verify_structure`) and never executes the planner, so authorization
+remains unbound to argv/env/exit status. These two rows collapse into one missing artefact:
+a non-circular planner-execution producer. Fixing either requires building it.

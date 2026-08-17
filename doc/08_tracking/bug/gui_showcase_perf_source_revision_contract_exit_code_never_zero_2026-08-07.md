@@ -1,5 +1,8 @@
 # `gui_showcase_perf_source_revision_contract_spec.spl` stays RED on `expect(code).to_equal(0)` — aggregate-gate/exit-code mismatch
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status: T18 (2026-08-07) landed the family-wide exit-code fix; see "T18 update" below
 
 ## T18 update (2026-08-07)

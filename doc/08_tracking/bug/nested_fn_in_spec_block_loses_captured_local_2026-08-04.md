@@ -125,7 +125,55 @@ callee computes the offset (`base + HPET_TBL_OFF_GAS + …`) — returns 0. So A
 may be a second, distinct arm rather than the same capture failure; whoever
 picks this up should bisect that boundary before assuming one fix covers both.
 
-## Root cause
+## Root cause (ISOLATED 2026-08-17 — exact call-resolution ordering)
+
+**Re-reproduced 2026-08-17** on the deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`) with a new self-contained spec,
+`test/03_system/interpreter/nested_fn_captures_block_local_spec.spl`:
+
+```
+  ✗ nested fn reads a block-local array
+    semantic: variable `buf` not found
+  ✗ nested fn reads a block-local scalar
+    semantic: variable `base` not found
+  ✗ nested fn composes two block locals
+    semantic: variable `lo` not found
+Results: 4 total, 1 passed, 3 failed
+```
+
+The one PASSING example is the discriminator: *"nested fn passed as a callback
+reads a block-local array"* passes, because a callback is called through the
+`Value::Function` value (which carries `captured_env`), while a **call by
+name** is not. Three-line mechanism, all in `src/compiler_rust/compiler/src`:
+
+1. `interpreter_call/block_execution.rs:716-732` — a `Node::Function` inside a
+   block closure (`it` block) is registered **twice**: into the global
+   `functions` map (line 722, "so recursive calls can find it") *and* into
+   `local_env` as a `Value::Function` carrying `captured_env` (line 725-732).
+2. `interpreter_call/mod.rs:525` — "Priority 5: check regular functions" looks
+   in the `functions` map and wins, **before** "Priority 6: check env" at line
+   536 which is the only branch that would honour `captured_env`.
+3. `interpreter_call/core/function_exec.rs:826` (and 1215/1303/1392) —
+   `exec_function*` builds its frame with
+   `captured_env_with_live_globals(func, &Env::new())`, i.e. an **empty**
+   captured environment. The block's locals are gone; the read either errors
+   (`variable X not found`, arm B) or resolves to a same-named global/zero
+   (arm A, the silent one).
+
+Contrast: the plain statement path `interpreter/node_exec.rs:388-399` inserts
+the nested `fn` into `env` **only** (never into `functions`), so outside a spec
+block Priority 5 misses and Priority 6 correctly supplies `captured_env` —
+which is exactly why this defect is spec-block-specific.
+
+Fix shape: at `interpreter_call/mod.rs:525`, prefer an env-resident
+`Value::Function` with a non-empty `captured_env` over the same-named entry in
+the `functions` map (or stop double-registering at
+`block_execution.rs:722` and give the `functions`-map fallback the captured
+env). Not applied in this pass: the fix lands in `interpreter_call/**`, outside
+the editing lane assigned to this session, and verifying it requires a Rust
+seed rebuild + redeploy while a bootstrap is live.
+
+## Root cause (original wording, superseded above)
 
 Not isolated to a specific line. The construct is a nested `fn` declaration
 inside a lambda (`it` block) referencing a binding from the lambda's scope.

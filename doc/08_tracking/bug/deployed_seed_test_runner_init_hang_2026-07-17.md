@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-17
 **Severity:** high (blocks single-file spec runs repo-wide on the deployed binary)
-**Status:** OPEN — hypothesis pending fresh-seed confirmation
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## 2026-07-18 native-owner update
 

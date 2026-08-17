@@ -1,7 +1,8 @@
 # LLVM lane: argv array not boxed for rt_interp_call
 
 - **Date:** 2026-08-10
-- **Status:** **FIXED (CODE-LEVEL)** — Tier 2 implementation complete, compiles without error. Behavioral verification deferred (requires 2+ hour dual Rust compiler builds to compare pre/post behavior).
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Lane:** LLVM only
 - **Class:** silent extern-call failure / NaN-box representation mismatch (now resolved)
 

@@ -1,5 +1,8 @@
 # `census-spec-vacuity` comment detection has three fail-open/fail-loud defects (2026-08-10)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Filed, not fixed: `scripts/check/census-spec-vacuity.spl` was in flight in another
 session at filing time (foreign staged deletion in the shared index plus an
 untracked rewrite, mtime 04:06). Editing it would have collided. Whoever lands

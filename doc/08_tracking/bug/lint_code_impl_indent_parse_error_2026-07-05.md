@@ -1,6 +1,7 @@
 ---
 id: lint_code_impl_indent_parse_error_2026-07-05
-status: OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: low
 discovered: 2026-07-05
 discovered_by: Stage-4 bootstrap module graph loading diagnostics
@@ -46,3 +47,26 @@ Parser error on a specific syntactic construct (likely indentation-sensitive cod
 3. If valid, add parser support for the indentation pattern in impl blocks.
 4. If invalid, refactor the code to use a supported syntax pattern.
 5. Add a regression test to prevent this parse error from reoccurring.
+
+## Verification 2026-08-17 (w02/s4 lane) — occurrence GONE, class NOT proven fixed
+
+Classified by CONTENT of current source (session brief CORRECTION 1).
+
+`src/compiler/tools/fix/rules/impl_/lint_code.spl` (547 lines) now contains
+**zero `impl` blocks** (`grep -c '^impl '` = 0) and **22 top-level free
+functions** (`grep -c '^fn \|^pub fn '` = 22). The reported failure was
+"fails to parse due to Indent token handling in impl blocks"; the file has been
+restructured so that it has no impl blocks to mis-indent.
+
+The module is live and reachable, not orphaned: it is imported by
+`src/compiler/tools/fix/rules/registry.spl:12` and
+`src/compiler/tools/fix/rules/impl_/impl.spl:33`, and re-exported via
+`impl_/__init__.spl:25`. A module that failed to parse could not be imported by
+a working registry.
+
+**Verdict: this file's occurrence is FIXED (by restructuring). Closing the row.**
+**Explicitly NOT proven:** the underlying parser defect — Indent token handling
+inside `impl` blocks — is *not* shown to be fixed. This close is a
+workaround-close for one file, not a fix of the parser behaviour. If the parser
+issue matters independently it needs its own row against the frontend (a lane
+claimed by another session; not touched here).

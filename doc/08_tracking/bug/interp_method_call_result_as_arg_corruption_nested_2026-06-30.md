@@ -1,5 +1,8 @@
 # Interpreter: method-call result passed directly as a method argument is corrupted (nested subprocess) - 2026-06-30
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 
 Open. Worked around in the NVMe firmware by binding the inner call result to a local `val`

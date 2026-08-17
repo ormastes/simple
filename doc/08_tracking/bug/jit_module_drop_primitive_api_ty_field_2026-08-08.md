@@ -1,6 +1,7 @@
 # `check-no-jit-module-drop.shs` DROP: `primitive_api.spl` struct 'String' field 'ty'
 
-Status: root-caused, NOT fixed. Fix requires a broader redesign than a call-site
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 workaround; guard correctly stays red. Live re-compile verification blocked by
 an unrelated environment breakage (see "Environment blocker" below).
 
@@ -187,3 +188,31 @@ STOP"). Concretely, either:
    decision, not something to do silently as a "guard fix").
 
 No source files were changed for this task.
+
+## Verification 2026-08-17 (w02/s4 lane) — ALREADY FIXED, closing on content
+
+Classified by CONTENT of current source, not SHA ancestry (per session brief
+CORRECTION 1 — the cited commits are not reachable from `origin/main`).
+
+`grep -n '\.ty\b' src/compiler/35.semantics/lint/primitive_api.spl` returns
+**exactly one line, and it is a comment** (line 21). There is no remaining
+field access of `.ty` on a flat-text entry anywhere in the file.
+
+The in-source NOTE at `src/compiler/35.semantics/lint/primitive_api.spl:18-27`
+records the fix and its mechanism: `FunctionDef.params` and
+`StructDef/ClassDef.fields` are `[text]` ("name: Type" entries, per the
+`# DESUGARED` markers in `ast.spl`), not `[Param]`/`[ParserField]` objects. The
+file previously field-accessed `.ty`/`.name` on them, which parses but cannot be
+lowered ("cannot infer field type ... struct 'String' field 'ty'") — the exact
+error in this bug's title. It now parses the flat-text shape with local
+`_pf_name_of` / `_pf_type_of` helpers instead of enum-typed field access,
+matching sibling `semantic_api/checker.spl`.
+
+The tracking-row evidence "root-caused NOT fixed, needs redesign" is **stale**;
+the redesign it asked for is the one that landed. `scripts/check/check-no-jit-module-drop.shs`
+remains in tree as the standing gate.
+
+**Verdict: ALREADY FIXED (stale doc). No patch applied.**
+Not proven: this lane did not execute `check-no-jit-module-drop.shs` end-to-end
+(host at 164 concurrent `simple` processes under a live bootstrap); the close
+rests on source content, which is decisive for the named defect.

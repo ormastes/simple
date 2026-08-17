@@ -1,6 +1,7 @@
 ---
 id: interp_dict_get_option_match_never_matches_2026-07-05
-status: RESOLVED (2026-08-09, not reproducible — see Re-verification below)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 severity: medium
 discovered: 2026-07-05
 discovered_by: std.diag (easy-debug-infra P0) implementation + spec work

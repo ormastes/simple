@@ -1,6 +1,7 @@
 # Three app modules/symbols their specs import exist nowhere in the tree
 
-**Status:** OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-04
 **Severity:** high — 19 spec examples cannot run, and two of the three are real
 CLI surfaces (`simple os …`, `simple build --target-feature …`) that a user can
@@ -67,3 +68,17 @@ dependencies (`os_parse_log_arg`, `os_log_arg_error`, `os_parse_scenario_arg`,
 `get_scenario`, `build_scenario`, `arch_from_name`, `get_qemu_target`,
 `build_os`, `_export_os_log_mode_inline`, `_restore_os_log_mode_inline`) are
 themselves absent and touch the SimpleOS/QEMU build path.
+
+## Verification 2026-08-17 (wave_00 w0001/app_1) — CONFIRMED STILL OPEN
+
+`/usr/bin/grep -rn 'handle_os_inline|handle_os_build_inline' src/` returns
+ZERO definitions. The spec still names them:
+
+- `test/01_unit/app/cli/cli_os_spec.spl:2` — `use app.cli.main.{handle_os_inline}`
+- `test/01_unit/app/cli/cli_os_spec.spl:7,10,11,14,19,23,26,29` — 8 call sites
+
+Shared root cause with
+`doc/08_tracking/bug/dashboard_main_lost_table_model_2026-08-04.md`: a module
+extraction/refactor left importers naming symbols the target module no longer
+defines, and the compiler reports that only as `[use-warning]` while exiting 0.
+Both rows are instances of the same fail-open `use`-resolution behaviour.

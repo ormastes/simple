@@ -1,6 +1,7 @@
 # Architecture / style rule audit of the 2026-08-09→10 landing window
 
-**Status:** OPEN (3 findings, all filed — none fixed unilaterally)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Audit surface:** 910 files changed across 388 commits in the trailing 20h on
 `origin/main` (tip `45e486f0be6`), of which 330 were newly added. 586 `.spl`,
 158 `.md`, 56 `.rs`, 51 `.shs`, 13 `.c`.
@@ -131,3 +132,15 @@ infrastructure that concurrent sessions are exercising right now; a blind swap
 of atomic primitives under live locks, unproven by concurrency testing, would
 risk corrupting other sessions' builds. A correct Perl script beats a subtly
 racy `.shs` one.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN (reproduced by content).** Both Perl files are still on disk:
+`scripts/check/lib/portable-hardlink-lock.pl` (3729 bytes) and
+`scripts/check/lib/portable-session-exec.pl` (2209 bytes), violating the
+`.claude/rules` 'ALL code in .spl/.shs' rule. They are live dependencies, not dead
+files — referenced by `scripts/check/lib/portable-process-lock.shs`,
+`scripts/check/check-bootstrap-portability.shs` and
+`scripts/bootstrap/bootstrap-from-scratch.sh`, so deleting them is not the fix;
+a POSIX-sh reimplementation of hardlink locking / session exec is required.
+Not attempted this session (out of the silent-wrong-result scope of this lane).

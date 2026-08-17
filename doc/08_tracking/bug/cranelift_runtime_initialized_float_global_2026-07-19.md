@@ -1,6 +1,7 @@
 # Cranelift rejected runtime-initialized float globals
 
-- **Status:** FIXED (source/unit/cross-target contracts; fresh execution pending)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high
 - **Backend:** Cranelift
 

@@ -1,5 +1,8 @@
 # CI gate enforcement surface (task #34)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Filed:** 2026-07-07
 **Severity:** low (infra/tracking; hardens enforcement, no product regression)
 **Scope:** `.github/workflows/repo-hygiene.yml` + `scripts/check/*.shs` ratchet gates.
@@ -109,3 +112,10 @@ Each installs ripgrep if missing and fails the job on exit ≠ 0.
 
 This substantially closes the CI-enforcement piece of #34: the standalone
 structural/idiom ratchet gates are now genuinely, non-bypassably enforced.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN.** `scripts/check/check-repo-hygiene.shs` is RED on content debt per the
+doc's own 'NOT green (see below)'; the two wiring bugs are fixed but the content debt is
+untouched. The gate was NOT executed this session (mass hygiene sweep is forbidden while the
+live bootstrap holds the host).

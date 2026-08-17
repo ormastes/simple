@@ -1,7 +1,8 @@
 # if-expression with a constant-false condition binds the DEAD branch's `[]`
 
 - **Date:** 2026-08-06
-- **Status:** OPEN (compiler defect). Call site worked around by deleting the
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   dead branch — see `src/compiler/70.backend/backend/llvm_native_link.spl`.
 - **Severity:** Blocker (this was Stage 3 self-host blocker #8)
 - **Engine:** self-hosted stage2 binary (native, LLVM backend), not the seed

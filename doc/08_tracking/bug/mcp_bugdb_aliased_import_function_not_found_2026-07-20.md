@@ -1,5 +1,8 @@
 # `mcp_bugdb_spec.spl`: aliased free-function import unresolved (`file_exists as file_exists_backend`)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-20
 **Component:** `src/lib/nogc_async_mut/mcp/bugdb_resource.spl` (and sibling
 `resources.spl`, `testdb_resource.spl`, `featuredb_resource.spl` — same

@@ -2,7 +2,8 @@
 
 **Filed:** 2026-08-10
 **Parent:** `blink_selector_engine_totally_red_and_dom_node_builder_missing_2026-08-10.md` (Defect 2)
-**Status:** OPEN — one consumer fixed (`src/lib/blink/css_parser/selector.spl`), family untriaged.
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Defect
 

@@ -1,6 +1,7 @@
 # Cross-language source/SMF actual execution mode receipt missing
 
-Status: implemented in the sealed performance candidate; fresh Stage 3/4 runtime
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 execution remains required before the rows are release-admitted.
 
 The performance harness can request `--interpret` or execute an `.smf`, but the
@@ -52,3 +53,24 @@ compiler provenance evidence. The focused contract covers interpreter and SMF
 positive receipts, forced-fallback rejection, missing-receipt rejection, and
 SMF error-arm ownership. A fresh admitted compiler is still necessary for the
 runtime positives; source contracts alone do not close that verification step.
+
+## 2026-08-17 verification (CLI lane) — implemented in source, NOT provable on this host
+
+The receipt owner exists in current source:
+`src/app/io/_CliCommands/run_commands.spl:69-75` —
+`execution_mode_receipt_enabled()` gates on `SIMPLE_EXECUTION_MODE_RECEIPT == "1"`
+and `emit_execution_mode_receipt()` emits exactly
+`simple_execution_mode_v1 requested={requested} actual={actual} fallback={fallback_text}`
+on stderr.
+
+Empirical run: `SIMPLE_EXECUTION_MODE_RECEIPT=1 bin/simple run hello.spl` -> rc=0,
+stdout `hi`, and **no receipt line**. This is NOT evidence of a defect: the
+deployed `bin/simple` is the Rust bootstrap seed (it prints the
+"this Rust-built Simple binary is a bootstrap seed only" banner), so the
+pure-Simple `run_commands.spl` receipt path never executes. Proving the receipt
+requires a self-hosted `bin/simple`, which this lane could not produce (a
+bootstrap was already occupying the host).
+
+Verdict: **STILL-OPEN (unproven)** — source implementation present, runtime
+receipt not demonstrated. Do not close until re-run on an admitted Stage 3/4
+self-hosted binary.

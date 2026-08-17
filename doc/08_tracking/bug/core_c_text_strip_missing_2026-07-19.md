@@ -1,6 +1,7 @@
 # Core-C native paths could not resolve `text.strip`
 
-- **Status:** pure-Simple dispatch fixed; fresh runtime regression pending
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Observed:** the strict pure-Simple lint binary accepted a clean file, then crashed with `function not found: str.strip` on a deny fixture.
 - **Cause:** `strip()` is a documented public alias implemented by the Rust interpreter and stdlib, but pure-Simple interpreter, C generation, and MIR native lowering only dispatched `trim()`.
 - **Fix:** route both public spellings through the same existing trim implementation in all pure-Simple interpreter/codegen owners.

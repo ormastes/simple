@@ -3,7 +3,8 @@
 **Date:** 2026-07-15
 **Severity:** high
 **Component:** core interpreter module loader
-**Status:** open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Reproduction
 
@@ -39,3 +40,12 @@ loads. It must evaluate newly appended module declarations once, preserve
 dependency order, propagate initialization errors, and publish globals only
 after successful initialization. `module_loader_core` cannot directly import
 `eval_decl` today because `eval_decls` already depends on the loader.
+
+## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+`src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl` contains zero
+references to `DECL_VAL`/`DECL_VAR`; those constants appear only at
+`module_loader_core.spl:50-51`, and `register_module_functions`
+(`module_loader_core.spl:280-305`) registers only `DECL_FN`/`DECL_EXTERN_FN`. No
+post-load module-global initialization owner exists, so a module global is still
+not materialized on first use. NOT FIXED by this lane (P1-owned path).

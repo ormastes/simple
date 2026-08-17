@@ -1,7 +1,35 @@
 # Interpreter: 10 drifted duplicate function definitions — the STALE copies WIN
 
-**Status:** OPEN — DIVERGENCE CONFIRMED. **DO NOT DEDUPE. DO NOT DELETE.**
-All five implied user-facing defects were probed and DISPROVED.
+Status: **OPEN (P2) — divergence confirmed still present; NOT a silent-wrong-result row**
+Re-verified 2026-08-17 (wave_01 lane B). All five implied user-facing defects were
+already probed and DISPROVED (see below); this pass found no new user-facing symptom
+and made no code change. Routing note added — see "Lane routing" below.
+
+## 2026-08-17 re-verification (wave_01 lane B)
+
+Content check, current source:
+
+- Both duplicate modules still exist: `src/compiler/10.frontend/core/interpreter/eval_access.spl`
+  and `.../eval_calls.spl`. The divergence is NOT stale — the delete is still forbidden
+  and the load-order question is still open.
+- The path exclusion is still live at TWO sites, not one:
+  `src/compiler/80.driver/driver_source_loading.spl:868` and `:903`
+  (`p.contains("/core/interpreter/")` in both).
+
+**Lane routing.** This row was sliced to lane B on the strength of its `file` column
+(`80.driver/driver_source_loading.spl`), but the defect and its fix both sit in
+`10.frontend` — the doc's own `**Layer:**` field says so, and the divergent definitions
+are all under `10.frontend/core/interpreter/`. `10.frontend` is claimed by another lane,
+so lane B did not edit it. Whoever owns `10.frontend` should take this: the exclusion
+lines above are the 80.driver-side lever, and they are the only part of the fix that
+lands outside `10.frontend`.
+
+**Severity framing.** This does not belong in the "silently wrong results" batch. The
+premise "the STALE copies WIN and therefore users get wrong answers" was falsified by
+the second pass (five defects probed, all disproved) and the third pass retracted the
+unreachability claim in the other direction. What is left is a real but *latent*
+maintenance hazard: two divergent definitions where the winner is decided by load order
+rather than by intent.
 **Filed:** 2026-08-11
 **Updated:** 2026-08-11 (resolution winner measured; original premise falsified)
 **Updated:** 2026-08-11 (second pass: all five implied defects disproved by

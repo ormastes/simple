@@ -1,6 +1,7 @@
 # `simple_web_html_layout_renderer_layout.spl` exceeds the 128 KiB parser limit on main (2026-07-31)
 
-**Status:** OPEN — pre-existing on `origin/main`, NOT introduced by the change
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 that found it.
 **Guard:** `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_module_split_spec.spl`,
 example *"keeps every parser input below 128 KiB"*.

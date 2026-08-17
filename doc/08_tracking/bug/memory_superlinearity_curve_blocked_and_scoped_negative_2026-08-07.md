@@ -1,6 +1,7 @@
 # src/app entry-closure memory curve: flat through 550 files, blocked before 722; 70GB figure traced to a different scale entirely
 
-- **Status:** SCOPED NEGATIVE (2026-08-07) — no superlinear memory growth found
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   in the measured range; the closure that would extend the curve to 722 files
   is currently unbuildable for an unrelated reason (see "Blocker" below).
 - **Found:** 2026-08-07

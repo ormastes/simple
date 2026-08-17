@@ -1,5 +1,8 @@
 # Tracked self-hosted release artifact links a stale `rt_env_set` ABI
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 > **STATUS 2026-08-06: still OPEN — re-confirmed by disassembly and probe.**
 > The `04a38e21…` artifact is still present at
 > `release/x86_64-unknown-linux-gnu/simple` and still SIGSEGVs on `check` and
@@ -570,3 +573,54 @@ Follow-up: factor the hardened `is_bootstrap_seed` + `compiler_can_build_target`
 pair (identity skip, banner check, and the env-write probe that is the only
 check which actually rejects the stale ABI) into one shared helper these scripts
 source, rather than re-implementing the fail-open glob in each.
+
+---
+
+## 2026-08-17 re-verification (wave_01 lane H3) — REPRODUCED, still OPEN
+
+Artifact identity confirmed unchanged — same SHA-256 the report names:
+
+```
+$ ls -la release/x86_64-unknown-linux-gnu/simple
+-rwxrwxr-x 1 ormastes ormastes 42477824 Aug 11 22:10 simple
+$ sha256sum release/x86_64-unknown-linux-gnu/simple
+04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0  release/x86_64-unknown-linux-gnu/simple
+```
+
+Crash reproduced directly (rc read on the line AFTER the command, never through
+a pipe):
+
+```
+$ nice -n 19 timeout 120 release/x86_64-unknown-linux-gnu/simple test --help ; echo rc=$?
+Segmentation fault (core dumped)
+rc=139
+```
+
+The 2026-08-06 hazard note is also re-confirmed: a `--help`-shaped capability
+probe can still exit 0 on this artifact, so exit status alone does not detect it.
+
+```
+$ nice -n 19 timeout 120 release/x86_64-unknown-linux-gnu/simple --version ; echo rc=$?
+rc=0
+Simple v1.0.0-beta
+```
+
+That asymmetry is the trap worth restating: `--version` succeeds, `test --help`
+dumps core. Anything that probes this binary with `--version` and concludes
+"healthy" is wrong.
+
+**Root cause locus: none in current source.** This is a stale *binary artifact*
+carrying an obsolete two-argument `rt_env_set` ABI, not a defect reachable by
+editing a `.spl` or `.rs` file today. Current source is not implicated by the
+crash, and no source edit can clear it.
+
+**Why no fix landed here:** the only remedy is rebuilding and redeploying the
+tracked `release/` artifact against the current four-register `rt_env_set` ABI.
+This lane is explicitly forbidden to rebuild or redeploy any binary, and a
+bootstrap owning the box was live throughout. Recorded as reproduced-and-blocked
+rather than fixed. Status remains OPEN (P1).
+
+**Not proven by this lane:** that a fresh build of current source produces a
+correct four-argument `rt_env_set` call sequence. That claim needs the redeploy
+this lane could not perform, and must not be assumed from the source-side
+`rt_env_set` signature alone.

@@ -1,7 +1,8 @@
 # Interpreted Engine2D full-resolution render is ~9s/frame, pushing 640x480 capture specs near the 120s test cap
 
 Date: 2026-07-02
-Status: open
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Severity: P3 (test-throughput / DX; correctness unaffected)
 Found by: fable, W1d GUI-enhancement lane (G1.2/G1.5/G1.6)
 

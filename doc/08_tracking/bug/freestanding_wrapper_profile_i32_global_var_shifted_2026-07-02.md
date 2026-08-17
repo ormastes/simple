@@ -11,7 +11,8 @@
   `_needs_freestanding_stub_env`; reproduced on the `wm-simple-web` x86_64
   QEMU target, `--target x86_64-unknown-none`, host macOS aarch64 building
   x86_64)
-- **Status:** OPEN — root cause isolated 2026-07-07 (see "Root cause
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   (isolated)" below: two stackable seed-codegen defects B1+B2; the old
   "store-side `>>3`" theory is WRONG — the store is correct, the corruption is
   on the read/fstring-display side). Fix is Rust-seed, gated on
@@ -195,3 +196,74 @@ relinked by any `native-build` without touching the seed/bootstrap.
   module `var` as a regression guard once fixed. Then mark this bug CLOSED and
   correct `project_simpleos_gui_boot_2026-05-28`'s "UNFIXED root cause B"
   (superseded by B0 above).
+
+---
+
+## 2026-08-17 re-verification (wave_01 lane H3) — B2 mechanism STILL PRESENT in source; not reproduced (build blocked)
+
+Classified by CONTENT of current source per the wave_01 contract, since SHA
+ancestry is unsound in this repo.
+
+**B2's boxing gate is unchanged.**
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs:428-480`
+still keys the decision purely on the *static* `arg.ty`:
+
+```rust
+if name == "rt_value_to_string" && args.len() == 1 {
+    ...
+    let needs_boxing = matches!(
+        arg.ty,
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
+            | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+    );
+```
+
+with `BoxInt` emitted only under `needs_boxing`. Anything whose `arg.ty` is not
+one of those eight — `TypeId::ANY` in particular — still reaches
+`rt_value_to_string` **unboxed**. The gate has gained `U64`, `BOOL` and float
+special-cases since this report was written, but none of them changes the
+conclusion: an `ANY`-typed argument still passes through raw.
+
+**The consuming heuristic is also unchanged.**
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:269` still
+defines
+
+```c
+#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
+```
+
+so a raw untagged multiple of 8 remains bit-identical to a `BoxInt`-tagged small
+int and is still `DECODE_INT`'d to `v>>3`. Both halves of the B2 chain are
+therefore intact, and the "only multiples of 8 corrupt" signature still follows.
+
+**The workaround is still load-bearing.** `gui_entry_engine2d.spl` declares only
+two module-level globals (lines 27-28), both `i64` and both initialised to `0` —
+i.e. it still avoids exactly the `var X: i32 = <nonzero>` shape that corrupts.
+The report's own account of the workaround matches the tree.
+
+**Not reproduced — and deliberately so.** The repro is a freestanding
+`native-build --target x86_64-unknown-none --entry-closure` followed by a real
+headless QEMU boot. This lane is forbidden to run builds or touch
+`build/**`, and a bootstrap owning ~98% of the box was live throughout, so no
+RED evidence line could be produced. Per the wave_01 contract, no RED ⇒ no fix,
+so **nothing was patched here**.
+
+**Fix loci are all outside this lane's scope.** B1 (`.text` placement) lands in
+`pipeline/native_project/{compiler.rs,linker.rs}` and B2's root fix in the
+HIR/MIR lowering path — both explicitly claimed by other lanes. The one locus
+inside this lane's slice, `baremetal_stubs.c`, only admits the report's
+"defense-in-depth C" option, and that option is *unsound on its own*: at that
+boundary a raw multiple-of-8 and a tagged small int are genuinely
+indistinguishable, so removing the raw fallback before the root fix guarantees
+boxing would simply break the other direction. Correctly ordered, C is a
+follow-up to B2, not a substitute — so no local edit was made.
+
+**Status: OPEN (P2), unchanged.** Still a real silent-wrong-result defect by
+source content; still gated on a seed rebuild + deploy that is separately
+blocked (see `.claude/rules/bootstrap.md` § KNOWN BLOCKER, Stage 3).
+
+**Not proven by this lane:** the live `128`-instead-of-`1024` boot symptom was
+not re-observed, and the report's open question — *why* an explicitly-typed
+`var g_probe: i32` resolves to `ANY` at this call site under `native-build` —
+remains unanswered. Presence of the mechanism in source is strong evidence, not
+a reproduction; do not record this as confirmed-live-by-execution.

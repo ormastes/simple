@@ -1,6 +1,7 @@
 # Bug: Interpreter conflates fn-typed field access with method calls
 
-Status: **RESOLVED** — Rust-side `evaluate_method_call_with_self_update` falls back to
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 **Date:** 2026-05-27
 **Severity:** Medium

@@ -1,6 +1,7 @@
 # Bug: ModuleLoader load/unload bookkeeping diverges from documented behavior (13 failures)
 
-- **Status:** SOURCE-FIXED in the compatibility loader; fresh Stage 4 replay pending
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-07-20
 - **Affected spec:** `test/unit/compiler/loader/module_loader_spec.spl`
 - **Command:**

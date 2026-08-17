@@ -1,5 +1,8 @@
 # Freestanding Module Values Are Zero Before Early Hardware I/O
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Symptom
 
 Pure-Simple freestanding code in `bga_init.spl` loaded module-level `val`

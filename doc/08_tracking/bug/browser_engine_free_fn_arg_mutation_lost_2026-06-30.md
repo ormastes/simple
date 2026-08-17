@@ -1,6 +1,7 @@
 # Class-instance args passed to free functions lose mutations in compiled library modules
 
-- **Status:** PARTIALLY-RESOLVED (2026-07-17)
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Discovered:** 2026-06-30
 - **Area:** compiler backend (codegen / JIT) — value vs reference semantics for class-instance arguments
 - **Severity:** High (silent data loss; corrupts any builder/visitor pattern that mutates an argument or accumulator)
@@ -134,3 +135,31 @@ follow-up, not blocking.
 - `src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl` — free-fn mutators.
 - Memory note: "Cross-module mutation loss — free fn(self: Class) across modules
   loses field mutation".
+
+
+## Re-measurement 2026-08-17 (P0-core silent-wrong lane) — hosted shape NOT reproduced
+
+```
+class Box:
+    var n: i64
+fn mutate(b: Box):
+    b.n = 42
+fn main():
+    val b = Box(n: 0)
+    mutate(b)
+    print b.n        # -> 42 on interpreter AND jit
+```
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+2026-08-16 22:59:37 UTC (Rust seed). A class instance passed to a free function
+keeps reference semantics and the mutation is visible to the caller on both
+engines.
+
+**This is a WEAK close and must not be read as resolving the doc.** The doc's
+title condition is "in compiled library modules" — the failure was specific to a
+mutation crossing a compiled-module boundary, and the measurement above is a
+single hosted file with no module boundary at all. It disproves only the
+simplest shape. The cross-module and compiled-library shapes were NOT
+constructed, and the sibling `cross_module_imported_fn_mutation_not_propagating_2026-07-12.md`
+covers exactly the case this probe did not reach. Treat the doc as still open on
+its stated scope.

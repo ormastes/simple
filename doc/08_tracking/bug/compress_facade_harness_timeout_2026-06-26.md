@@ -1,5 +1,8 @@
 # Bug: compress_facade_harness_spec times out (>120s)
 
+Status: DUPLICATE of compress_lz4_empty_payload_roundtrip_corruptstream_2026-07-20.md
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-06-26
 **Spec:** `test/01_unit/lib/common/compress_facade_harness_spec.spl`
 

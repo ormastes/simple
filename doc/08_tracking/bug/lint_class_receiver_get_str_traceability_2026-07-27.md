@@ -1,7 +1,8 @@
 # Bug: `simple lint` fails on any file containing a `class` — "method `get` not found on type `str`"
 
 - **Date:** 2026-07-27
-- **Status:** fixed (2026-07-27, lane LINTCLS2)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** high (lint unusable as a lane gate for class-bearing OS sources)
 - **Found by:** two independent SimpleOS harden lanes (P1 IPC, P3 VFS) on untouched control files
 

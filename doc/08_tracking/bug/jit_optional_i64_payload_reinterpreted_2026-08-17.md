@@ -1,7 +1,8 @@
 # JIT: `i64?` optional payloads are reinterpreted as f64 and `!` unwrap always yields nil
 
 - **Date:** 2026-08-17
-- **Status:** OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** HIGH — silent wrong values, no error, on the engine ordinary
   programs actually run on. No spec in the suite can observe it.
 - **Area:** Cranelift JIT (`bin/simple run` default path)

@@ -1,7 +1,8 @@
 # desktop_e2e_entry kernel crashes in paging _alloc_table_page during 4GB identity-map (no Limine HHDM)
 
 - **ID:** desktop_e2e_entry_paging_alloc_crash_no_hhdm_2026-07-20
-- **Status:** FIXED (2026-07-20 — see "Root cause + fix" below)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** medium (blocks the P1 framebuffer golden generator + SYS-GUI-006 spec path; main desktop entry unaffected)
 - **Lane:** native-build (FIXED seed, cranelift, x86_64), QEMU q35
 

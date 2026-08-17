@@ -1,7 +1,8 @@
 # guard_wiring_optout.txt carries a family of FALSE exemptions, several hiding RED gates
 
 - **Date:** 2026-08-06
-- **Status:** OPEN (exemption reasons corrected; the RED gates behind them need owners)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Scope:** `scripts/check/guard_wiring_optout.txt`
 - **Predecessor:** `doc/08_tracking/bug/core_c_capsule_gate_wrongly_opted_out_of_guard_wiring_2026-08-06.md` (`ed9e6f401f6`)
 

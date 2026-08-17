@@ -1,5 +1,8 @@
 # GPU Performance Measurement Harness Runtime Blocked - 2026-07-10
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Severity
 
 P1. The local host has NVIDIA CUDA and Vulkan devices, but neither canonical

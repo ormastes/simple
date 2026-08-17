@@ -1,5 +1,8 @@
 # Bug: `for x in <custom struct>` silently iterates zero times (no iterator protocol)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **ID:** for_in_custom_struct_no_iterator_protocol_2026-06-15
 - **Filed:** 2026-06-15
 - **Severity:** P2 (language capability gap; silent wrong result)
@@ -64,3 +67,16 @@ type-checking and only surface via a value assertion.
   and `native_array_iteration_indexing_async_driver_smoke_2026-05-13` (array
   iteration under native driver); this is about user structs having no iterator
   hook at all.
+
+## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+The SILENT half is fixed: `src/compiler/10.frontend/core/interpreter/eval_stmts.spl:538`
+now raises `eval_set_error("cannot iterate over " + val_kind_name(...))` as the
+fall-through for a non-array/non-string receiver, so `for x in <custom struct>`
+is a diagnostic rather than zero silent iterations.
+
+The PROTOCOL half is not: `src/compiler/10.frontend/core/interpreter/value.spl:268-275`
+`val_iterable_array` accepts only arrays and a struct literally NAMED `"List"`
+(unwrapping its `items` field). No `next`/`iter` method lookup exists anywhere in
+the interpreter directory, so a user-defined iterable is still not iterable.
+Retitle scope to the protocol gap. NOT FIXED by this lane (P1-owned path).

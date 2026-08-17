@@ -1,7 +1,8 @@
 # A module whose basename equals its class shadows the class inside `it` blocks
 
 - **ID:** `module_named_like_its_class_shadows_it_inside_it_blocks_2026-08-04`
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Found:** 2026-08-04
 - **Severity:** high (64 failing examples —
   `test/01_unit/compiler/mdsoc/transform_adapters_spec.spl` and its
@@ -102,3 +103,15 @@ The alternative that *is* pure-`.spl` — renaming the six MDSOC `entity_view`
 module files so no basename equals its exported class — is a cross-tree rename
 of a public module path and needs an owner for the MDSOC layer, not a test-fix
 session.
+
+## Content re-verification 2026-08-17 (m4_compiler_spl lane) — STILL OPEN
+
+`grep -n "shadow" src/compiler/99.loader/module_loader.spl` returns **zero
+hits**: no shadowing-precedence handling of any kind has been added to the
+module loader since this doc was filed. The reported binding order (module wins
+over the same-named class inside an sspec `it` block) is therefore unchanged in
+current source. Classified by CONTENT, not by commit ancestry — see the
+2026-08-17 CORRECTIONS: SHA reachability proves nothing in this repo.
+
+Not reproduced by execution in this pass (no `Results:` line obtained), so this
+is an OPEN-by-content verdict, not a re-measured RED.

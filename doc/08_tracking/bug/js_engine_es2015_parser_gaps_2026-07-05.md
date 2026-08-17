@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-05
 **Spec:** `test/03_system/feature/js/es2015_conformance_spec.spl`
-**Status:** open — 13 genuine failures now visible (25 pass)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## What happened
 

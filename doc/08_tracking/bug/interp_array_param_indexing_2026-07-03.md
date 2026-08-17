@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-03
 **Severity:** downgraded to low — see Re-triage 2026-08-01
-**Status:** mostly NOT REPRODUCIBLE at HEAD; 2 of 3 symptoms have no mechanism
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 and are contradicted by shipped code. 1 narrow symptom survives (2D index
 assignment) and is a seed-interpreter lvalue gap, not an array-parameter bug.
 The title of this doc is wrong: "array parameters" is not the variable.

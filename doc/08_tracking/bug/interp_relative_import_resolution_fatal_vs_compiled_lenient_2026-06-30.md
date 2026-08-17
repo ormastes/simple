@@ -1,5 +1,8 @@
 # Bug: unresolvable relative `import ..` is FATAL in interpret mode, lenient when compiled
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-06-30
 **Severity:** Low — edge case (deprecated `import` syntax + relative path on a
 standalone file). Real impact: the two `module_import_spec` examples

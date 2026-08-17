@@ -1,7 +1,8 @@
 # core-C capsule gate is opted out of guard wiring on a false rationale
 
 - **Date:** 2026-08-06
-- **Status:** open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Component:** `scripts/check/guard_wiring_optout.txt`, `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`
 
 ## Symptom
@@ -42,3 +43,12 @@ wiring must land together.
 
 Not done here: rewiring belongs to the owner of the guard-wiring lane, and is
 outside the minimal diff of the gate fix.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN (reproduced by content).** `scripts/check/guard_wiring_optout.txt:22`
+still reads `build-core-c-bootstrap-runtime-capsule.shs  hardware/emulator lane; needs QEMU,
+an FPGA or a physical dev board`. Deliberately NOT edited: removing the entry makes
+`check-guard-wiring.shs` FAIL (the guard is genuinely unwired), so the correct fix is to wire
+the capsule gate into a caller first and then drop the line — an ordering this lane could not
+complete without touching guard-wiring files owned by the wiring backlog.

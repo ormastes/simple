@@ -1,5 +1,8 @@
 # Dict class-field contains_key/bracket-read after insert — 2026-08-08
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Origin
 
 A lane fixing a tuple-index bug in `src/compiler/20.hir/hir_lowering/expressions.spl`

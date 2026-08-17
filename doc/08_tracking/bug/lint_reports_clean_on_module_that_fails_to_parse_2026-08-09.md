@@ -1,7 +1,8 @@
 # `bin/simple lint` reports "all files clean" on a module that does not parse
 
 Date: 2026-08-09
-Status: ARCHITECTURAL-OPEN (re-investigated 2026-08-09, root cause narrowed —
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 see "Fresh investigation" below; not the fail-open bug it looks like)
 Severity: high — lint is fail-open, so a green lint is not evidence the file compiles.
 Found by: Counterpart Conformance Wave-0 lane while landing the frozen contracts.
@@ -143,3 +144,12 @@ run the module or a spec that imports it.
 - Frozen contracts: `src/lib/common/spec/evidence/counterpart/model.spl`
 - Spec that caught it: `test/01_unit/infra/counterpart/contract_model_spec.spl`
 - Lint rule involved: `src/compiler/35.semantics/lint/primitive_api.spl`
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE as a grammar divergence
+
+`src/compiler_rust/parser/src/parser_impl/items.rs:681` still hard-rejects
+non-`fn/struct/...` items after `pub` + attributes ("fn, struct, class, mixin,
+mod, enum, or union after pub with attributes"), while the self-hosted frontend
+that lint drives accepts `pub val` there. The divergence — and therefore the
+clean-verdict-on-a-file-the-seed-cannot-parse symptom — is present in current
+source; the PARSE001/NOT-LINTED fail-open path is intact.

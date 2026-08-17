@@ -1,7 +1,8 @@
 # Arity census re-audit: the declaration is not ground truth
 
 **Date:** 2026-08-04
-**Status:** 1 fix landed (`3c45274ba4b`); remainder filed below.
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Why this re-audit happened
 

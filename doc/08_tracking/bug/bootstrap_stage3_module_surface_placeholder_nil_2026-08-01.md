@@ -1,5 +1,8 @@
 # Bootstrap Stage 3 module-surface placeholder nil trap (2026-08-01)
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Open. Stage 4 is blocked because a fresh admitted Stage 3 compiler cannot yet

@@ -1,7 +1,8 @@
 # Bug: `iso`/`mut` capability-prefixed types are not parsed by the real frontend (`parse_full_frontend`) at all
 
 - **Date:** 2026-07-29
-- **Status:** RESOLVED (parser gap) — re-verified 2026-08-07, see "Re-verification" below.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   `mut T` capability-prefix parsing is also handled now; HIR-side consumption of the
   `mut`/exclusive side-table was not re-audited in this pass (out of scope: this bug is
   titled around the *parser* gap, which is closed).

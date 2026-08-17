@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-20
 **Severity:** high (production source code, not a test-only issue)
-**Status:** open — root-caused and patched 2026-08-01, fix NOT YET COMPILED
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/skia` cluster
 
 ## Update 2026-08-01 — root cause, scope, and a worse sibling defect

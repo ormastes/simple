@@ -1,6 +1,7 @@
 # `bin/simple compile` false-fails any main-less module with a module-level global
 
-**Status:** open. **Severity:** verification-lane defect — `run`/`native-build`
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 handle the same modules correctly, but single-file compile (the recommended
 syntax/semantic gate) false-fails a large class of library modules.
 

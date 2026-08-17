@@ -1,5 +1,8 @@
 # MIR lowering has no case for 9 of 26 `HirTypeKind` variants — hits a fatal wildcard arm on the canonical redeploy-gate smoke fixture
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Found while verifying the `me`-receiver fix (`ea198ba3e60`,
 `MirToLlvm.llvm_type_text`/`llvm_function_symbol_name`/`native_int`) with a
 fresh stage-2 self-hosted binary from an ad-hoc incremental bootstrap

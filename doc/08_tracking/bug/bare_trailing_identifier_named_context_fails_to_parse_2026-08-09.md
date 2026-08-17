@@ -1,6 +1,7 @@
 # A bare trailing expression named `context` fails to parse
 
-**Status:** OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-09, Counterpart Conformance Wave 1 lane F4
 **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed; prints the
 bootstrap-seed warning banner)

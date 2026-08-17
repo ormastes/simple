@@ -1,6 +1,7 @@
 # `cargo test -p simple-compiler --lib` — 135-failure triage (2026-08-10)
 
-**Status:** TRIAGED (6 fixed, 129 remain)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Predecessor:** `cargo_test_lib_e0063_missing_struct_owner_fields_2026-08-09.md`
 
 The E0063 fix (`0a99948d436`, confirmed ancestor of `origin/main`) made this
@@ -332,3 +333,20 @@ attributed to any fix in this document. Excluding them the result is
   `UnknownType { type_name: "CompilerContext" }`) — untouched; `native_project`
   files are off-limits this session.
 - Category E heavyweight archive/runtime contract tests — unchanged.
+
+## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
+
+This doc's own concrete action item — replace the poisoning
+`static LOCK: OnceLock<Mutex<()>>` guards with
+`lock().unwrap_or_else(|e| e.into_inner())` so one panic stops laundering 25
+unrelated results — was confirmed **still unapplied**: the raw
+`OnceLock<Mutex<()>>` declarations are present at
+`src/compiler_rust/compiler/src/pipeline/native_project/tests.rs:228`, `:233`,
+and `:637`.
+
+**Verdict: SKIPPED — claimed by another lane.** `pipeline/native_project/**` is
+on this fleet's do-not-touch list, so this worker made no edit despite the fix
+being small and well-specified. Whoever owns that path should apply it; it is
+the single highest-leverage item in this triage (it unmasks 25 of 135 failures).
+**Not proven:** the remaining 129 failures were not re-run (`cargo test` needs
+an isolated `CARGO_TARGET_DIR` and competes with the live bootstrap).

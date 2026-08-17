@@ -1,6 +1,7 @@
 # HIR package-sibling imported-enum surface leak
 
-Status: implemented — focused native gate passed; full Stage 4 validation pending (2026-08-03)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Severity: P1 bootstrap blocker
 Owner: pure-Simple HIR module lowering
 Fix owner: `/root` — CLAIMED at `9299ca99288`

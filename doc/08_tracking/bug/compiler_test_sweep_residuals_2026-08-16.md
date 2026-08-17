@@ -1,5 +1,8 @@
 # Compiler test sweep residuals — 2026-08-16
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Triage of unfixed failures from the 2026-08-16 compiler test sweep. Engine:
 `bin/simple test` (tree-walk interpreter path). One item was a stale spec and is
 FIXED in this change; everything else is filed here with root-cause notes.

@@ -1,7 +1,8 @@
 # Bug: `m{}` math-DSL implicit multiplication mis-chains 3+ groups / unary-minus, and 1D-vector matmul rejected
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/implicit_mul_spec.spl`,
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   `test/feature/usage/math_render_spec.spl` — both "Status: Implemented")
 - **Area:** math-block (`m{...}`) DSL implicit-multiplication parsing/lowering
   and tensor `@` matmul operator, not isolated further in this pass, deployed

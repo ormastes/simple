@@ -1,5 +1,8 @@
 # Bracket-slice byte-index survey — pass 5 (2026-07-29): base58_encode fixed; bencode decode path deferred
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Per the coordinator's explicit fallback ("if bencode decode explodes in
 scope, land base58 alone and doc the boundary"): base58_encode is fixed
 and landed; the bencode decode path is investigated far enough to

@@ -22,7 +22,8 @@ field), and `content_x()/content_y()/content_width()/content_height()` as METHOD
 # layout_paint.spl `_paint_box` is latent dead code built against the wrong BeLayoutBox shape
 
 - **Date:** 2026-08-15
-- **Status:** OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl`
 - **Severity:** low (dead code), but a semantic landmine
 

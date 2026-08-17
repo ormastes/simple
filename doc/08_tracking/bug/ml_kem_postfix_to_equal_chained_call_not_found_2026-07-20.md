@@ -7,7 +7,8 @@
   spec (ByteEncode/ByteDecode round-trip, NTT round-trip, NTT pointwise
   multiply, SHAKE-128 KAT); the underlying ML-KEM-768 arithmetic is
   UNVERIFIED as a result (assertions never execute).
-- **Status:** OPEN.
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 
@@ -99,3 +100,15 @@ diagnostic. Also plausibly related to the documented language limitation
 - `test/unit/lib/crypto/ml_kem_768_kat_spec.spl` (ITEM-3, ITEM-4, ITEM-5,
   ITEM-7 — 4 of 8 failures directly; the 2 W12-A probe failures are
   intentional self-diagnostic, not bugs)
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — CANNOT-DETERMINE; the "Source" pointer is wrong
+
+`src/compiler_rust/lib/std/src/spec/matchers.spl` (72 lines, read in full)
+contains no `to_equal` at all — only `MatchResult` and `trait Matcher<T>` (:70).
+Postfix-matcher dispatch does not live there, so no defective line can be quoted
+at the file this doc names, and the Source field should be corrected.
+Separately, the symptom is no longer exercised: `test/unit/lib/crypto/ml_kem_768_kat_spec.spl`
+lines 57, 59, 69, 85, 107 and 108 are now `expect(enc.len()).to_equal(384)`-style
+wrapped calls, i.e. precisely the rewrite this doc's "What NOT to do" forbade.
+The W12-A probe blocks survive at :125-131. To settle this, someone must locate
+the real postfix-sugar rewrite site and run a chained-receiver case.

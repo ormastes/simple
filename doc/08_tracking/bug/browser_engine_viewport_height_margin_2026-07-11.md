@@ -1,6 +1,7 @@
 # browser_engine: `vh` viewport-height units unresolved in margins/lengths
 
-- Status: implementation fixed; executable regression is compiler-blocked
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (example.com render comparison vs Chrome headless)
 

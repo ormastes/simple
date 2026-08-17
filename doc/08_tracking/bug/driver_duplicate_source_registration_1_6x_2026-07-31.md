@@ -1,7 +1,8 @@
 # Driver registers ~6,359 duplicate/alias SourceFiles (1.6x the source list)
 
 **Date:** 2026-07-31
-**Status:** RECLASSIFIED 2026-08-01 — the duplicate registrations are DELIBERATE
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 and load-bearing; "1.6x cost" is NOT supported by the source. One real O(N²) was
 found nearby and is the actual actionable item. See "Static re-analysis" below.
 **FIXED 2026-08-01** — the O(N²) linear scan is replaced by a `Dict<text, i64>`,

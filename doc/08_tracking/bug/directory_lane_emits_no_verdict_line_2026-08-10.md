@@ -1,7 +1,8 @@
 # Directory test lane emitted no `SPEC FILE VERDICT:` line for any file
 
 - **Filed:** 2026-08-10
-- **Status:** FIXED (see "Fix" below)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Related:** `0ff267a366a` (single-file half), `unrun_spec_emits_no_verdict_line_2026-08-10`,
   `killed_spec_emits_no_verdict_line_2026-08-09`
 

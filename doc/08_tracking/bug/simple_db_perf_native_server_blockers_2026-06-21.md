@@ -91,3 +91,43 @@ Crash-safety note:
 
 - Do not loop native/release rebuilds while investigating this; run one bounded
   native check at a time and stop on segfault/core-dump/fallback.
+
+---
+
+## 2026-08-17 — no *silent* fail-open found; the exit-0 is labelled and deliberate. Row re-scoped, one residual gap named.
+
+Audited `scripts/check/check-simple-db-perf-compare.shs` for the fail-open class
+(a vacuous run reported as a pass). It does not have one in the silent sense:
+
+- `strict_blockers()` (lines 82-101) explicitly enumerates
+  `invalid_or_missing_rows`, `target_misses`, `interpreter_fallback` and
+  `server_unavailable`, and returns the literal `none` only when all four are
+  clear.
+- The non-strict default (`SIMPLE_DB_PERF_STRICT=0`) prints
+  `STATUS: WARN simple db perf compare blockers: <list>` as the **last line of
+  stdout** and exits 0. That is an exit 0, but it is not a claimed pass: the
+  verdict line says WARN and names every blocker. `STATUS: PASS` is printed only
+  on `none`.
+- `--strict` / `SIMPLE_DB_PERF_STRICT=1` turns the same blocker set into
+  `STATUS: FAIL` exit 1.
+- A completely failed embedded run still surfaces: `run_mode` records
+  `embedded_status=failed`, every `baseline_row` value degrades to `-`,
+  `status_vs_baseline` returns `missing`, and `invalid_or_missing_rows` fires.
+  A driver that exits 0 while printing no timings degrades along the same path.
+
+So the row's substance ("server lane and value validation remain open") is a
+**coverage gap, not a false green**, and I did not reproduce a run that reported
+success while checking nothing. **No code change made.**
+
+Residual gap worth stating rather than papering over: the script has **no
+`--selftest`**, so the blocker-classification logic above is unverified — nothing
+would catch a future edit that made `strict_blockers()` return `none`
+unconditionally, and that *would* be a silent green in the strict lane. Adding
+`--selftest` fixtures over `strict_blockers()` (one per blocker category, plus an
+all-clear control and an empty-input non-vacuity case) is the natural next step;
+it was not done here because this row is P3 and the two P2/P3 rows in the same
+slice had reproducible defects that took priority.
+
+Also unproven: I did not execute the lane (it runs a native benchmark and a
+bootstrap was live on this host), so the *measured* server/value-validation
+status is unchanged from whatever the doc last recorded.

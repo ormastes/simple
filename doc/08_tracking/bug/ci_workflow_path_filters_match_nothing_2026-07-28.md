@@ -1,6 +1,7 @@
 # CI workflow `paths:` filters matched nothing (fail-open dormant workflows)
 
-- **Status:** fixed for 9 workflows; 1 residual (`index-validate.yml`) OPEN
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Found:** 2026-07-28
 - **Scope:** `.github/workflows/**`
 
@@ -65,3 +66,13 @@ Add a lint/pre-push check that resolves every workflow `paths:` glob against
 `git ls-files` and fails on a zero-match entry, so this cannot regress. Note
 `bin/simple lint` cannot serve here (fail-open on syntax errors per
 `lint_does_not_detect_syntax_errors_2026-07-28.md`, and does not read YAML).
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN (reproduced by content).** `.github/workflows/index-validate.yml` still
+declares `on: pull_request: paths: - 'index/**'`, and its own header says it is a
+'Template: Registry Index Validation ... For the simple-lang/registry repo'. In THIS repo that
+filter matches nothing, so the workflow never runs — a fail-open CI gate. The correct fix is
+editorial/ownership (move the template out of the live `.github/workflows/` directory, or
+repoint the filter at the real in-repo path), not a code change; deliberately not made
+unilaterally by this lane because it changes CI trigger surface owned elsewhere.

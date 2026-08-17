@@ -6,7 +6,8 @@
   mechanism, and `test/01_unit/language/jit_lambda_and_fn_ref_value_spec.spl`
   for an interpreter-lane regression lock (`Results: 3 total, 3 passed, 0
   failed`).
-- **Status:** Defect 1 guarded (pre-existing); Defect 2 now GUARDED
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   (2026-08-07, unit T7 — see "T7 landed" below). The ABI itself (this doc's
   "Fix direction" item 1) remains unfixed; the loud fallback (item 2) is
   landed.

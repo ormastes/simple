@@ -1,6 +1,7 @@
 # GLFW event draining could starve rendering
 
-- **Status:** fixed and live-verified
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Affected owner:** `runtime_glfw.c` / `SimpleGlfw.poll_events()`
 - **Impact:** sustained native input could keep one WM poll call running and
   prevent the next render or routing step.

@@ -1,5 +1,8 @@
 # Duplicate `impl` method definitions across files — silent, no dedup, no error
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Filed 2026-08-08. Follow-up to an Opus review of the `lower_tuple_lit` fix
 (`ec9ff78876c`, see
 `native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02.md`), which
@@ -840,3 +843,14 @@ this is revisited, the safe order is (a) drop the now-unnecessary
 `use compiler.types.associated_types_solvers.*` from
 `associated_types_defs.spl` first, verify the two `file_read` assertions in
 the spec above still pass, and only then remove the other four files.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (no dedup present)
+
+The cited `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+(4311 lines) contains no first-wins dedup or duplicate-impl diagnostic —
+`grep -n "first_wins|dedup|duplicate"` matches only unrelated comments
+(:2529 arity check, :3272 receiver re-lowering, :3582 literals duplication).
+Nothing implements or reports duplicate impl-method detection, consistent with
+the reported silent first-win. Owner path: src/compiler/50.mir/**.

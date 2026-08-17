@@ -1,6 +1,7 @@
 # Native array map loses text ownership and provenance
 
-Status: SOURCE FIXED; native execution pending
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Reproduction
 

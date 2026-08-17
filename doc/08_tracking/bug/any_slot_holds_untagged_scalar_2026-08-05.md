@@ -1,6 +1,7 @@
 # ANY-typed slots hold RAW untagged scalars (JIT) — 2026-08-05
 
-**Status:** Rust seed FIXED. Pure-Simple STORAGE-SIDE boxing FIXED
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 (commit `688e40ff147243f2de8118ef071ccf96ce8e17ca`, confirmed on
 `origin/main`) — see "Pure-Simple parity gap — storage side FIXED" below.
 **Consumer-side gap (`.to_text()` / `==`) still OPEN** — see "Pure-Simple

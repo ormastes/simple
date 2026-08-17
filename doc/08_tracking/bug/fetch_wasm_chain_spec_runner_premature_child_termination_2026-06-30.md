@@ -1,7 +1,8 @@
 # Bug: `browser_session_fetch_wasm_chain_spec.spl` file-level FAIL despite 250/250 passing
 
 - **Date:** 2026-06-30
-- **Status:** Open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Component:** test runner (`src/app/test_runner_new/`) — NOT the js/web library under test
 - **Severity:** Medium (false-negative test result; the code under test is correct)
 - **Spec:** `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` (250 it-blocks, ~6370 lines)

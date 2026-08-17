@@ -1,7 +1,8 @@
 # Borrow check: "spurious errors on trivial code" REFUTED; two fail-opens found instead
 
 **Date:** 2026-08-08
-**Status:** primary claim refuted; two secondary fail-opens filed (open)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Area:** `src/compiler/55.borrow/borrow_check/`, `src/compiler/80.driver/`
 
 ## Summary
@@ -199,3 +200,15 @@ Practical consequence for the Stage-3 investigation: a falsey `borrow_check()`
 is **not** evidence of a borrow violation. Before attributing anything to
 `55.borrow`, read `ctx.errors` and check whether the entries are borrow errors at
 all — under the current code they usually are not.
+
+## Re-verification 2026-08-17 (fleet lane C, by CONTENT)
+
+The doc's own framing holds. `src/compiler/55.borrow/borrow_check/nll.spl:363` still reads
+`return self.errors.is_empty()` — intact, so the refuted primary spurious-error claim stays
+refuted. A grep for `fail_open`/`fail.open` across `src/compiler/55.borrow/` returns NOTHING,
+so the two secondary driver fail-opens are not marked in source and could not be located by
+name; they remain open and unlocated.
+
+UNPROVEN: the two secondary fail-opens. They are described only in prose here, have no
+in-source marker, and `test/01_unit/compiler/borrow/borrow_check_spec.spl` does not target
+them. Someone must first pin them to a `file:line` before they can be fixed or closed.

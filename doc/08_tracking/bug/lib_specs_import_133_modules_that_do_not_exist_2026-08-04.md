@@ -1,6 +1,7 @@
 # 199 lib specs fail on 133 `std.*` modules that exist nowhere in the tree
 
-**Status:** OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 **Severity:** medium — these are not broken tests, they are tests for code that
 was never written; they cost a red suite and hide the specs that fail for a
@@ -158,3 +159,33 @@ not a defect with a code fix).
   and `doc/08_tracking/bug/c_parser_library_specced_but_never_implemented_2026-08-04.md`
   — the same failure mode under `test/01_unit/app/`, found independently the
   same day. The pattern is tree-wide, not a `lib/` quirk.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE BUT MASSIVELY OVERSTATED — magnitude re-measured.**
+
+Re-resolved every `use std.X` in every `.spl` under `test/**/lib/**` against
+`src/lib/` **and its five family subdirectories** (`common/`,
+`nogc_sync_mut/`, `nogc_async_mut/`, `gc_async_mut/`,
+`nogc_async_mut_noalloc/`). The original count was produced by a resolver that
+did not search the family subdirectories, so it counted resolvable modules as
+missing (`std.spec` and `std.spipe` alone accounted for 2,623 phantom misses).
+
+| metric | doc claim | measured 2026-08-17 |
+|---|---|---|
+| std imports scanned | — | 9,228 |
+| distinct unresolved `std.*` modules | 133 | **24** |
+| lib test files affected | 199 | **39** |
+
+Top remaining genuinely-unresolved modules: `versioned` (6),
+`persistent_trie`/`persistent_map`/`persistent_list`/`persistent_vec`/
+`persistent_set`/`persistent_sorted_map`/`atom`/`combinators` (4 each),
+`signature.key_ops`, `file`, `game_engine.effects`, `collection_helpers` (2 each).
+
+**The docs anchor spec is ALREADY FIXED.**
+`test/01_unit/lib/math/bignum/bignat_spec.spl` imports
+`std.math.bignum.limb` and `std.math.bignum.bignat`; both resolve today to
+`src/lib/common/math/bignum/limb.spl` and
+`src/lib/common/math/bignum/bignat.spl`. `src/lib/math/bignum/` never existed —
+the module lives under the `common/` family. The anchor should be re-pointed at
+one of the 39 files that genuinely still fail, e.g. a `persistent_*` spec.

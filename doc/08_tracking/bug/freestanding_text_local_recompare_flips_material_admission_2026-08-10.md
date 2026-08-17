@@ -1,6 +1,7 @@
 # Freestanding x86_64: WM material provenance loss chain — three stacked codegen corruptions
 
-**Status:** layers 1–2 worked around (comparison hoisting, dimension threading);
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 layer 3 (page faults in the CPU glass composite) OPEN and now the rung-(d) blocker
 **SUPERSEDED 2026-08-10 (see addendum at end of file):** the layer-3 page fault
 was never the rung-(d) blocker — it self-recovers (`*** END FRAME (recovering)

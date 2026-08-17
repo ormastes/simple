@@ -1,7 +1,8 @@
 # `.?` truthy-check returns the unwrapped payload (not `true`) when passed directly as a `bool`-typed call argument
 
 - **Date:** 2026-07-20
-- **Status:** open (worked around at the spec level, not root-fixed)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** interpreter evaluation of the `.?` operator (`.? over is_* predicates`
   is the documented idiom per `.claude/rules/language.md`), under
   `bin/simple test` (SSpec evaluator).
@@ -80,3 +81,18 @@ affected spec to `check(<opt> != nil)` / `check(<opt> == nil)`, and one
 `check(<text> != "")`. All 21 examples pass after the rewrite; no assertion
 was weakened (`!= nil` / `== nil` / `!= ""` check the identical condition the
 original `.?` intended). Spec: same file as above.
+
+## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+Re-verified at HEAD by source inspection. Note the recorded reproducer
+`test/02_integration/lib/.spipe_matchers_persistence_intensive_spec.spl` NO
+LONGER EXISTS (only `test/02_integration/lib/persistence_intensive/summary.txt`
+remains), so nothing currently covers this idiom.
+
+Root cause unchanged at
+`src/compiler/10.frontend/core/interpreter/eval.spl:443-450`: `EXPR_EXISTS_CHECK`
+returns the payload, never a bool --
+`if val_exists(normalized_vid): return normalized_vid` / `else: return val_make_nil()`.
+
+NOT FIXED by this lane (interpreter path owned by a concurrent P1 lane). A
+replacement reproducer is still needed.

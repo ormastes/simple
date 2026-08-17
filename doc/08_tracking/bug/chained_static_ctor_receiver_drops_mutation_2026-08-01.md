@@ -1,7 +1,8 @@
 # A mutating method chained directly off a static constructor call silently does nothing
 
 **Date:** 2026-08-01
-**Status:** OPEN — reproduced and measured, mechanism NOT yet proven
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Severity:** Silent no-op. No diagnostic, no error, no warning. Generates
 false-green tests.
 **Found while:** verifying the WASM float-arithmetic fix,
@@ -98,3 +99,32 @@ Bisect in `src/compiler/` whether a static-method call in receiver position is
 lowered to a distinct temporary that argument mutations are applied to and then
 discarded. Until then, **never chain a mutating method off `Class.create(...)`**
 — bind the receiver to a `val` first.
+
+
+## Re-measurement 2026-08-17 (P0-core silent-wrong lane) — BOUND form is correct; the CHAINED form was not tested
+
+```
+class P:
+    var n: i64
+    static fn make() -> P:
+        P(n: 0)
+    fn bump(mut self):
+        self.n = self.n + 1
+fn main():
+    var q = P.make()
+    q.bump()
+    print q.n        # -> 1 on interpreter AND jit
+```
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+2026-08-16 22:59:37 UTC (Rust seed).
+
+**Explicitly NOT a close.** This doc's subject is a mutating method chained
+DIRECTLY off the static constructor call — `P.make().bump()` — where the
+receiver is a temporary with no binding to write back into. The probe above
+binds the constructor result to a variable first, which is a different
+expression shape and is the shape that works. The chained form was not
+constructed and remains untested; so does the doc's note that the affected
+module drops to the interpreter on an unresolved external symbol. Recorded here
+only so the next lane does not repeat the bound-form measurement and mistake it
+for evidence.

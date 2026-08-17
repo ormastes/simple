@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — tooling-visible, not runtime-visible
-- **Status:** **not reproducible on HEAD (2026-07-29)** — guard spec added; likely a native `Dict.get()` flake, see below
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found via:** HS1 `hir-span-populate` lane, while writing a guard spec
 
 ## 2026-07-29 update — not reproducible; guard landed

@@ -1,5 +1,8 @@
 # `use lib.gc_async_mut.gpu.browser_engine...` import alias fails to resolve `_web_budget_clock` module var — `std.` alias works fine
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Filed:** 2026-08-08
 **Severity:** medium — blocks any spec/script that reaches
 `simple_web_html_layout_renderer` through the `lib.` import alias; the `std.`
@@ -74,3 +77,12 @@ binary, the module-loader dedup logic needs the actual fix.
 Use `std.gc_async_mut.gpu.browser_engine....` (not `lib....`) for any new spec
 or script that reaches into `simple_web_html_layout_renderer` and its
 foundation module.
+
+## Triage 2026-08-17 (lane m7c_lib_async) — LIVE resolver defect, workaround in place
+
+`simple_web_html_layout_renderer_foundation.spl` declares the module var at
+:32 (`var _web_budget_clock: FrameClock = default_frame_clock()`) and reads it
+at :266, :299, :332. Every `use` in that file (lines 3-13) is the `std.` form;
+no `use lib.` alias remains. So the *workaround* is what is in the tree — the
+`lib.`-alias resolution defect itself is unfixed and lives in the compiler's
+module resolver, not in this stdlib file. Not actionable from `src/lib/**`.

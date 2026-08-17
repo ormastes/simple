@@ -1,7 +1,8 @@
 # `name =` with the RHS on the next line does not parse — took a whole example file down silently
 
 - **ID:** assign_rhs_newline_continuation_parse_2026-07-25
-- **Status:** SOURCE FIXED / DEPLOYED ARTIFACT BLOCKED — current lexer source
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   classifies assignment tokens as RHS-requiring; deployed Stage2/old Stage3
   artifacts still reject the form
 - **Severity:** high — the failure is whole-file (nothing in the module loads) and the
@@ -88,3 +89,20 @@ surface symptom as a separate, unrelated defect in a separate parser
 implementation, still present as of `92dc586924a` (2026-07-31) and fixed in
 `doc/08_tracking/bug/seed_assignment_trailing_equals_continuation_2026-07-31.md`.
 Don't assume "SOURCE FIXED" here covers the seed.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: ALREADY-FIXED (pure-Simple source side)
+
+Corrected location: `src/compiler/10.frontend/core/tokens.spl:543` (NOT `core/lexer.spl`, which only mentions `token_requires_rhs` in a comment at :608).
+
+```spl
+fn token_requires_rhs(kind: i64) -> bool:          # tokens.spl:532
+    ...
+    if kind >= TOK_ASSIGN and kind <= TOK_WALRUS:  # tokens.spl:543
+        return true
+```
+
+Assignment tokens ARE classified RHS-requiring, so `name =` followed by a
+newline continues instead of erroring. NOT PROVEN: behaviour of already-deployed
+Stage2/Stage3 artifacts (no build/run was performed in this triage).

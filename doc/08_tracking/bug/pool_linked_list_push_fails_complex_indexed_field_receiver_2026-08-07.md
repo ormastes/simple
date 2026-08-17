@@ -173,3 +173,15 @@ the same before/after discipline used in the sibling `FixedArray`/
 
 Tracked as WP-12 input in
 `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
+
+## ALREADY_FIXED — verified 2026-08-17 (P2 triage, compiler lane)
+
+Reproduce-first re-run of the recorded reproducer at HEAD:
+
+```
+$ bin/simple test test/01_unit/lib/nogc_async_mut_noalloc/collections/linked_list_spec.spl
+Results: 2 total, 2 passed, 0 failed          # rc=0
+```
+
+Assignment through a complex indexed-field receiver (`pool[i].next = x`) no
+longer fails. Closing as already fixed; no source change was made by this lane.

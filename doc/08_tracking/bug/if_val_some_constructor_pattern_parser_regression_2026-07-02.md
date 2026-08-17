@@ -1,5 +1,6 @@
 id: if_val_some_constructor_pattern_parser_regression_2026-07-02
-status: FIXED (source; deployed binary pending bootstrap — stage2 blocked by unrelated rt_cranelift_new_aot_module extern error)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 fixed: 2026-07-02
 fix: src/compiler/10.frontend/core/parser_stmts.spl parse_if_stmt — binding
   position now parsed with parse_or (below assignment precedence); a

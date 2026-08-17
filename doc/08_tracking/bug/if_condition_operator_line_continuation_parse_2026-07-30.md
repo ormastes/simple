@@ -1,6 +1,7 @@
 # Trailing-operator line continuation rejected for comparison/equality operators (seed parser only)
 
-**Status:** FULLY FIXED. Comparison and equality landed 2026-07-30; the
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 `elif` sub-case landed 2026-07-31 (`a7e5fbccf85` plus the shared
 `parse_condition_block` drain in `parser_impl/core.rs`) and is re-verified
 closed at origin `b9341804e5` on 2026-08-01 — see "Remaining gap" below,

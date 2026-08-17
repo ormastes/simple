@@ -1,6 +1,7 @@
 # LaTeX renderer: range upper bound fixed at two call sites, root cause unfixed
 
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** Medium
 - **Found by:** adversarial review of `464cb52500c9` ("LaTeX sum/int renderer dropped range upper bound")
 - **File:** `src/lib/common/math_repr.spl`

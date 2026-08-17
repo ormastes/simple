@@ -1,5 +1,8 @@
 # `env` app CLI: `delete --log-mode=json` output missing `"name"` field
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Component:** `src/app/env/main.spl` (`delete` subcommand, JSON log mode)
 **Severity:** Low-Medium — single isolated example, sibling `create`/

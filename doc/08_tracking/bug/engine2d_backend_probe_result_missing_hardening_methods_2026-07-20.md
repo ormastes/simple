@@ -1,5 +1,8 @@
 # Engine2D BackendProbeResult missing is_hardware/strict_failure_without_fallback (present on 3D counterpart)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Symptom
 
 `test/01_unit/lib/gpu/engine2d/backend_probe_strict_spec.spl` fails all 8

@@ -1,5 +1,8 @@
 # DAP spec examples reported GREEN while asserting nothing (2026-08-08)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Summary
 
 Four DAP unit spec files under `test/01_unit/app/dap/` contained 58 `it`

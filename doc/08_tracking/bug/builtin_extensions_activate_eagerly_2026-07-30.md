@@ -2,7 +2,8 @@
 
 - **Found:** 2026-07-30, while replacing source-text assertions in
   `test/01_unit/lib/editor/extension_discovery_contract_spec.spl`
-- **Status:** FIXED 2026-07-31 (verified against `origin/main` @ `85550715f42`,
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   local WC confirmed byte-identical on every file cited below). All three
   "Fix direction" steps landed: (1) `sheets_ext`/`slides_ext` manifests now
   declare `onCommand:<their own command id>` alongside their original

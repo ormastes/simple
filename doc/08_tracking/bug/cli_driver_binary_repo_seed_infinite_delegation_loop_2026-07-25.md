@@ -1,7 +1,8 @@
 # Bug: `bin/simple run` infinite delegation loop — blocks ALL execution
 
 **Date:** 2026-07-25
-**Status:** BLOCKER — discovered while verifying the host-WM headless capture
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 lane (`doc/08_tracking/bug/wm_showcase_no_headless_lane_2026-07-25.md`); files
 as its own defect because it blocks every `bin/simple run`/`bin/simple lint`
 invocation on this host, not just the headless-lane work.
@@ -102,3 +103,26 @@ incident pattern precisely.
 Add the same `_cli_is_current_exe(repo_seed)` guard already used on the other
 two branches of `_cli_driver_binary()`, then re-verify with the linear-scaling
 repro above (bytes vs. timeout should stop growing once the guard fires).
+
+## 2026-08-17 reproduction attempt (CLI lane) — NOT REPRODUCED
+
+Classified by CONTENT, not by SHA.
+
+Empirical: `SIMPLE_EXECUTION_MODE_RECEIPT=1 bin/simple run <tmp>/hello.spl`
+completed normally, `rc=0`, printing `hi`. No delegation loop, no fork bomb,
+no unbounded recursion.
+
+Current source already carries the two guards this bug needed
+(`src/app/io/cli_ops.spl`):
+
+- `_cli_is_current_exe()` (line 205-219) canonicalizes BOTH sides via
+  `_cli_resolve_symlink()` before comparing, and fails CLOSED (returns `true`,
+  i.e. "this is me, do not delegate") when identity cannot be established
+  (line 209-212).
+- `_cli_driver_binary()` (line 243-289) applies that guard at all three exits:
+  the `SIMPLE_BOOTSTRAP_DRIVER` override (259), the seed sibling (271), and the
+  `bin/simple` candidate (287). The repo-seed fallback (`bin/simple_seed`,
+  `_cli_repo_seed_path()` line 199) is only reached when the sibling does not
+  exist, and its result still flows through callers that are self-exec guarded.
+
+Verdict: **ALREADY-FIXED / NOT-REPRODUCED**. No patch applied.

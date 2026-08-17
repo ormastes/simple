@@ -1,5 +1,8 @@
 # DrawIR 8K Native Evidence Blocked — 2026-08-12
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 The canonical retained-damage benchmark is
 `test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl`. It measures twenty
 7680x4320 CPU DrawIR frames with one changing 256x128 damage rectangle, keeping

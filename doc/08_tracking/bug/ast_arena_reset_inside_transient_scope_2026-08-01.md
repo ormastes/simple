@@ -1,7 +1,8 @@
 # ast_reset() runs INSIDE the transient array scope, so the flat-AST arena is freed under its readers
 
 - **Id:** ast_arena_reset_inside_transient_scope_2026-08-01
-- **Status:** root-caused and fixed. The hazard is PROVED at the runtime level;
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   the 6,474-event Stage 4 signature did **not** reproduce at
   `ca8ff9e003d2` (see "Reproduction status" below), so the fix is a proven-real
   hazard closure, not a demonstrated before/after on that signature.

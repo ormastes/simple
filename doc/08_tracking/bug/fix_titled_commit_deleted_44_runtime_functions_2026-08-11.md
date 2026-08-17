@@ -1,6 +1,7 @@
 # A "fix"-titled commit deleted 44 runtime functions and broke the build (2026-08-11)
 
-- **Status:** FIXED (restore commit lands the union; see below)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Offending commit:** `6e2f613d302` "fix(runtime): preserve u64 across erased values"
   (cherry-pick of `5f3066c9ca3`), parent `28eaee006ab`.
 - **Inherited by:** `ad2b5d5307f` (a *legitimate* revert of an unrelated 427-file

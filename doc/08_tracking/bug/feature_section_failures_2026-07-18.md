@@ -57,7 +57,8 @@
 
 **Verification:** `bin/simple lint` on all 9 specs shows zero "Replace 'function'" errors after fix.
 
-**Status:** COMPLETE — all 9 specs now parse cleanly.
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ---
 

@@ -23,7 +23,8 @@ cause; reopen with a timing probe if the TUI render path is still slow.
 # md_renderer TUI dedupe forces a whole-callee-tree interpreter fallback (~15x slower)
 
 **Date:** 2026-08-11
-**Status:** OPEN — output is correct, but both TUI render entrypoints lost JIT compilation.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Commit:** `582ef0d69a39022302333894fa650e47b6845e85`
 ("refactor: dedupe TUI viewport-slicing loop in md_renderer")
 **File:** `src/lib/editor/render/md_renderer.spl`

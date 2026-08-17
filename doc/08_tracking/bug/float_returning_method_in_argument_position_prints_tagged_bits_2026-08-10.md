@@ -1,7 +1,8 @@
 # A float-returning method used directly as a call argument prints raw tagged bits
 
 - **Date:** 2026-08-10
-- **Status:** FIXED 2026-08-10. Root cause was NEITHER of the two hypotheses
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   below as stated — see "Resolution" at the bottom. It is not the desugar
   rebuild and not the print/`to_text` coercion; it is a missing HIR **result
   type** for the float math methods, one layer earlier than both. Fenced by

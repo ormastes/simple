@@ -1,7 +1,8 @@
 # Most math methods do not exist on numeric receivers (`f64.sin`, `i64.abs`, ...)
 
 - **Date:** 2026-08-10
-- **Status:** FIXED 2026-08-11
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Lanes:** interpreter and JIT (`SIMPLE_JIT_STRICT=1`) — both, identically.
 - **Class:** missing dispatch. Loud, not silent — the runtime refuses rather
   than substituting a placeholder, which is the correct behaviour.

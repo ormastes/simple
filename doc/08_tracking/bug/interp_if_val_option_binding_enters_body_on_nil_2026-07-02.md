@@ -1,7 +1,8 @@
 # Interpreter: `if val x = <Option-returning fn>:` enters the body when the result is nil
 
 Date: 2026-07-02
-Status: source fixed 2026-07-15; executable interpreter proof pending a
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 runnable pure-Simple compiler artifact
 Severity: P2 (silently wrong control flow; workaround exists)
 Found by: W4b lane agent (browser link-click navigation work)

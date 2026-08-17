@@ -1,7 +1,8 @@
 # Bug: CancellationToken depth-2 cancel propagation reads stale registry after a 3rd allocation
 
 - **Date:** 2026-07-29 (root-caused further, same date, lane G9b)
-- **Status:** open — root cause identified (receiver-less function calls not
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   observing intervening instance-method mutations; worse across `it`/closure
   boundaries), workaround attempted and rejected (traded wrong-answer for a
   hang), see the 2026-07-29 update section below

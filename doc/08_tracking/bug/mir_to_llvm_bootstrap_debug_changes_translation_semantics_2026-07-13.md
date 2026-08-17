@@ -1,5 +1,8 @@
 # MIR-to-LLVM bootstrap debug changes translation semantics
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Symptom
 
 Setting `SIMPLE_BOOTSTRAP_DEBUG=1` does more than enable diagnostics. In

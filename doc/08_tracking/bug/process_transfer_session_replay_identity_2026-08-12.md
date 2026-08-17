@@ -77,3 +77,21 @@ authentication)" needs the admitted crypto wire-hash contract to exist before a
 spec can assert against it. Writing a spec now would pin FNV-1a, the very thing
 this record says must be replaced. Status stays open; do not re-derive this
 blocker on the next sweep.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE — the FNV-1a identity is still the shipped mechanism.**
+
+`src/lib/common/structural/transfer/process_frame_codec.spl` still derives
+session identity from a non-cryptographic FNV-1a hash:
+
+- line 23: `val PROCESS_TRANSFER_FNV1A_OFFSET: i64 = -3750763034362895579`
+- line 24: `val PROCESS_TRANSFER_FNV1A_PRIME: i64 = 1099511628211`
+- lines 74-78: `var hash = PROCESS_TRANSFER_FNV1A_OFFSET` ... `hash = hash * PROCESS_TRANSFER_FNV1A_PRIME`
+
+No keyed MAC, no cryptographic wire-hash. This confirms the docs own
+2026-08-14 note that the mitigation covered the bounded-session half only: the
+crypto wire-hash, PID-reuse and exec-isolated rows remain unimplemented.
+
+**DIAGNOSIS ONLY — not fixed here.** The fix is in `src/lib/**`, outside the
+test lanes file scope.

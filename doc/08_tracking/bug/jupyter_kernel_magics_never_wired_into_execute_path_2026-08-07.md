@@ -1,6 +1,7 @@
 # Jupyter kernel: `%mode`/`%%mode`/`%lanes`/`%reset`/... magics are never invoked — every cell always runs on the hardcoded local lane
 
-- **Status:** FIXED (2026-08-07) — `main.spl` now imports `std.notebook.magics`
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   and calls `dispatch_magics(SESSION_MANAGER, DEFAULT_SESSION_ID, MAGICS_STATE,
   code)` at the top of `session_execute` before any compile/execute happens,
   passing `magics.code` (stripped) and `magics.cell_mode_override` through to

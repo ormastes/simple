@@ -1,6 +1,7 @@
 # Census: `rt_*` extern names reachable from neither the static dispatch table nor the runtime `.so` exports
 
-Status: tracking (R4 of `doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md`).
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Scope: enumeration only — **no product code changed by this doc.** Feeds R1/R2/R3 and any
 future lane with a concrete work-list instead of a bare headcount.
 ## 1. What was measured, and against what

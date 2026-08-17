@@ -1,7 +1,8 @@
 # Mission-Critical Infrastructure Hardening V2 — Wave 1 RED
 
 Date: 2026-08-11
-Status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Owner: mission-critical-infra-hardening-v2 merge owner
 
 ## Exact evidence

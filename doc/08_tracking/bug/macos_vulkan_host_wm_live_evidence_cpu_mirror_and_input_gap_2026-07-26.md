@@ -1,5 +1,8 @@
 # macOS Vulkan Host-WM Evidence Uses a CPU Presentation Mirror and Synthetic Commands
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 **OPEN — fail closed.** This is a source-path audit only. No host-WM live

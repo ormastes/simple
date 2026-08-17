@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-06
 - **Severity:** HIGH — blocks ALL live GUI interaction on macOS (clicks, typing, drag, programmatic control)
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** GUI / winit runtime / macOS launch path
 - **Fix owner:** GuiRenderer / spl_winit work (task #25)
 - **Related:** `doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md` (predecessor: window not displayed at all; this bug is the residue after the .app-bundle workaround makes it display)

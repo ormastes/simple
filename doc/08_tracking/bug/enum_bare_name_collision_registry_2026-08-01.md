@@ -1,7 +1,8 @@
 # Enum bare-name collisions: enumeration, mechanism correction, and resolution options
 
 **Date:** 2026-08-01
-**Status:** ENUMERATION LANDED — no fix applied. Needs an owner decision on the
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 resolution strategy before any code change or rename sweep.
 **Severity:** CRITICAL — silent wrong arm selection across a module boundary,
 no diagnostic, exit code 0. Blocks promoting the match-fallthrough diagnostic

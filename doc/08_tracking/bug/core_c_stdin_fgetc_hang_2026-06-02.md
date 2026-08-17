@@ -62,3 +62,31 @@ no edit was made.
 **What was NOT proven.** No reproduction was attempted — the row carries
 `reproducible_by: NONE` and no runnable reproducer exists in the doc. This entry
 records scope, not evidence of behaviour.
+
+## 2026-08-17 verification — runtime slice (classified by CONTENT)
+
+**Verdict: STILL OPEN.** The C `fgetc`-based primitive is unchanged in current
+source, `src/runtime/runtime_native.c:2119-2125`:
+
+```c
+int64_t stdin_read_char(void) {
+    int ch = fgetc(stdin);
+    if (ch == EOF) return rt_string_new(NULL, 0);
+    uint8_t byte = (uint8_t)ch;
+    return rt_string_new(&byte, 1);
+}
+```
+
+The doc's "Proper long-term fix" is therefore still unimplemented. Seven owned
+`.spl` consumers still call the extern: `src/lib/nogc_sync_mut/lsp/lsp_protocol.spl`,
+`src/lib/nogc_sync_mut/mcp_sdk/transport/{stdio,transport}.spl`,
+`src/lib/nogc_async_mut/mcp/{protocol,lazy_protocol_io,fileio_main}.spl`,
+`src/lib/nogc_async_mut/host_io/stdio.spl` (plus `src/compiler/90.tools/fix/main.spl`).
+
+**Doc metadata correction:** the row/doc names `json_helpers.spl` as the holdout
+caller. No `json_helpers.spl` exists anywhere under `src/` in current source — that
+filename is stale; the live callers are the list above.
+
+**What was NOT proven.** No hang was reproduced or excluded by execution: this is
+C-runtime code reachable only from a NATIVE-compiled binary, and `bin/simple` is
+the Rust seed using the Rust runtime, so an interpreted probe would be vacuous.

@@ -1,7 +1,8 @@
 # engine2d native blend row/span diverges from scalar reference on varied pixel patterns
 
 - **Date:** 2026-08-15
-- **Status:** RESOLVED (2026-08-15)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** src/runtime/runtime_simd_dispatch.c blend kernels vs src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl `_scalar_blend_row`
 - **Severity:** correctness — violates the module's stated bit-identical contract
 

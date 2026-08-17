@@ -1,5 +1,8 @@
 # Bug: asym_typed_keypair — tuple-element corruption risk on cross-module return
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **ID:** asym_typed_keypair_tuple_corruption_2026-06-15
 **Date:** 2026-06-15
 **Severity:** Workaround applied — no current crash
@@ -23,3 +26,18 @@ same module as the core call — so the corruption window is closed.
 Fix the interpreter tuple-element accessor to correctly handle cross-module
 tuple return; then `Ed25519KeyPair` can be removed and the function signature
 simplified to return `(SecretKey, PublicKey)` directly.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (workaround still load-bearing)
+
+The struct workaround the doc describes is still in place, i.e. the underlying
+interpreter cross-module tuple-element defect has not been fixed:
+
+```spl
+src/lib/common/crypto/typed/asym.spl:30:  struct Ed25519KeyPair:
+src/lib/common/crypto/typed/asym.spl:44:  fn ed25519_typed_keypair(seed: ByteSpan) -> Ed25519KeyPair:
+src/lib/common/crypto/typed/asym.spl:56:      Ed25519KeyPair(secret: sk, public: pk)
+```
+
+The doc `Fix` section (return `(SecretKey, PublicKey)` directly) is unapplied.

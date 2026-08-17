@@ -1,5 +1,8 @@
 # Local git index has duplicate stage-0 entries (2026-08-08)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status: diagnosed, NOT repaired (report for approval — repair is deferred while
 other agents are actively editing this working copy)
 

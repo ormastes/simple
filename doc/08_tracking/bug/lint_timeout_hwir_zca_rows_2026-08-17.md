@@ -1,7 +1,8 @@
 # Lint timeout (>600s) on src/compiler/50.mir/hwir/zca_rows.spl
 
 - Date: 2026-08-17
-- Status: **DIAGNOSED — not a hang. Cost model corrected. Superlinear term NOT
+- Status: DUPLICATE of lint_single_file_superlinear_timeout_on_line_count_2026-08-06.md
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   yet located (profiling blocked on this host); optimisation still OPEN.**
 - Command: `sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl`
   (via seed `bin/simple lint`), killed by `timeout 600` (rc=124), no verdict line.

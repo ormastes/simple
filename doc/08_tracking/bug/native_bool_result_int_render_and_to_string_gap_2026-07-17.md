@@ -4,7 +4,8 @@
 **Severity:** Medium-High (silent wrong output for the first half; loud build
 error for the second — bundled here because they share one root cause: lost
 type information for bool/float results)
-**Status:** source-fixed with focused MIR regressions; native execution pending
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Part A — `starts_with`/`ends_with`/`contains` interpolate as integers, not booleans

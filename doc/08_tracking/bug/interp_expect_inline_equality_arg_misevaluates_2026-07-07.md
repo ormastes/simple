@@ -1,5 +1,8 @@
 # Bug: `expect(a == b).to_equal(false)` mis-evaluates the inline `==` argument
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-07
 **Severity:** Medium — false-RED on specs that assert inequality of two
 distinct values via `expect(<comparison>).to_equal(<bool>)` (the values under

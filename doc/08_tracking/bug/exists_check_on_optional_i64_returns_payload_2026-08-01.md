@@ -1,6 +1,7 @@
 # `.?` exists-check on an `i64?` yields the payload / nil instead of a bool
 
-**Status:** INVALID — closed 2026-08-08 by re-triage. The observed behaviour IS
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 the ratified contract: `.?` returns `T?` (payload if present, nil if absent),
 never `bool`. The expectation in this report (`expect r.? to_equal true`) is
 what is wrong, not the compiler. See "Re-triage 2026-08-08" at the bottom.

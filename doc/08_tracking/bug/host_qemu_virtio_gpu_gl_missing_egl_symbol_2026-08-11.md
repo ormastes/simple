@@ -1,5 +1,8 @@
 # Host QEMU `virtio-gpu-gl` cannot load — missing `qemu_egl_display` symbol (blocks B0/venus)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Date: 2026-08-11. Lane: V1 (board Vulkan B0/venus verification).
 
 ## Summary

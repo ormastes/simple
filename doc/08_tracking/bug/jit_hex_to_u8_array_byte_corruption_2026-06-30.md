@@ -3,7 +3,8 @@
 - **Filed:** 2026-06-30
 - **Severity:** High (silently corrupts byte arrays under JIT/native; interpreter is correct)
 - **Area:** compiler — JIT/native codegen for `i64 -> u8` (`to_u8()`) and/or u8 array push in a tight loop
-- **Status:** Open
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Summary
 

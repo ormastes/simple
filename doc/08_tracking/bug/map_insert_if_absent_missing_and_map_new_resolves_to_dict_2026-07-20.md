@@ -3,7 +3,8 @@
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign,
 `test/unit/lib/nogc_async_mut/src/map_insert_if_absent_spec.spl`
-**Status:** open — genuine defect/missing-feature, not a stale test
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 

@@ -1,5 +1,8 @@
 # Triage of check-guard-wiring.shs unwired guards (2026-08-08)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 REPORT-ONLY. No guard was wired, deleted, or edited. `scripts/check/check-guard-wiring.shs`
 was run unmodified from the repo root and its verbatim output was used as the source of
 truth.
@@ -159,3 +162,11 @@ to something still present. This is a lower-confidence negative (a full "does th
 ```
 doc/08_tracking/bug/check_guard_wiring_48_unwired_triage_2026-08-08.md
 ```
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN (census, no fix claimed).** Confirmed as a triage document; the unwired
+set was re-measured, not reduced. Same family as `check_script_wiring_orphans_2026-08-01.md`
+— these two rows collapse into one backlog item (wire or retire the orphan guards), not two bugs.
+Note: this lane ADDED one new guard, `scripts/check/check-phantom-log-reference.shs`, which is
+currently itself unwired and should be added to a caller when the wiring backlog is worked.

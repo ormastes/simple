@@ -1,5 +1,8 @@
 # JIT: layout_run_full_with_ports dies with nil-receiver field access (core dump)
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT / gpu_web layout ports
 
 ## Symptom
@@ -38,3 +41,9 @@ with `SIMPLE_EXECUTION_MODE=interpreter` completes.
 
 Open. Engine-divergence family
 (`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`).
+
+## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED on this host
+
+The defect is a JIT-only nil-receiver fault. A spec body runs INTERPRETED, so it can never go red from a spec alone, and the CUDA execution port needs GPU hardware absent from this host. Not reproduced and not closed: this lane could neither exercise the path nor
+find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
+not mistaken for either a live confirmation or a close.

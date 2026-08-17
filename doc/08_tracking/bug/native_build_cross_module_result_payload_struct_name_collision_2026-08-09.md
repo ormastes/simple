@@ -1,5 +1,8 @@
 # `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th/5th/7th layer RESOLVED (6th layer's leads were dead ends; see 7th layer for the real root cause and fix)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Summary
 
 Follow-up to

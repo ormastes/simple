@@ -1,5 +1,8 @@
 # Linux Vulkan RenderDoc Reason Forwarding SSpec Daemon Timeout
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Date: 2026-06-28
 
 ## Summary

@@ -37,7 +37,8 @@ verified without a seed rebuild + redeploy.
 # `move` identifier rejected in expression position ("expected expression, found Plus")
 
 - **Date:** 2026-08-15
-- **Status:** OPEN (workaround applied)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** parser (Rust seed lexer/parser reserved-word handling)
 
 ## Symptom

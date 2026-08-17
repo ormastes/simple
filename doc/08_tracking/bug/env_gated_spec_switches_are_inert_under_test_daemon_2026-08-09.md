@@ -1,7 +1,8 @@
 # Env-gated spec switches are silently INERT under `bin/simple test` (fail-open)
 
 **Filed:** 2026-08-09 (stream P13, while adding `SIMPLE_REQUIRE_GPU` to the GPU lane specs)
-**Status:** OPEN — one instance fixed (`SIMPLE_REQUIRE_GPU`), the general defect remains
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** high — it makes every env-gated strictness switch in a spec fail OPEN
 
 ## Symptom

@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-25  
 **Lane:** L5 (examples safety isolation check)  
-**Status:** ROOT CAUSE IDENTIFIED
+Status: DUPLICATE of examples_isolation_buffers_output_lost_on_timeout_2026-07-25.md
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Root Cause
 

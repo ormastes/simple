@@ -1,7 +1,8 @@
 # `crypto_sffi.random_hex` degrades to an empty string on CSPRNG failure, and `random_salt()` inherits it
 
 - **Date:** 2026-08-08
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Medium (fail-open on a rare path, but the failure is silent and lands in a salt)
 - **Component:** `src/lib/nogc_sync_mut/io/crypto_sffi.spl`
 
@@ -87,3 +88,12 @@ Testing the failure path needs the provider stubbed to return nil;
 `random_hex_provider_failure_returns_nil_parity` in
 `src/compiler_rust/compiler/src/interpreter_extern/random.rs` is the existing
 Rust-side test of that behaviour and shows how the nil is produced.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**ALREADY-FIXED (verdict by CONTENT).** `src/lib/nogc_sync_mut/io/crypto_sffi.spl`
+no longer contains `rt_random_hex(length) ?? ""`. Line 366 now reads
+`checked_entropy_hex(rt_random_hex(length), length)`, and the docstring at :357
+states "FAILS CLOSED. This used to be `rt_random_hex(length) ?? ""`, which turned a
+..." — i.e. the fail-open degradation is gone and the doc block records it.
+Closing.

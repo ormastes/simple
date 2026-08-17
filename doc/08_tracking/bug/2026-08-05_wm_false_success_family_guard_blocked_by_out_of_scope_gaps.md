@@ -10,7 +10,8 @@
   - `test/03_system/gui/wm_host_platform/wm_false_success_family_spec.spl`
     (owned by A0)
   - `doc/08_tracking/wm_false_success_baseline.txt`
-- **Status:** OPEN — filed, not fixed (both files are out of scope for the
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   lane that discovered this; see below).
 - **Base for evidence:** `origin/main` = `71475ea79564d1ee4a07a339711cc0b113708483`
 

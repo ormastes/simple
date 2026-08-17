@@ -1,5 +1,8 @@
 # Interpreter: enum-variant match returns nil when a class shares the variant name (closure-dependent)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **Date:** 2026-07-06
 - **Area:** interpreter (self-hosted deployed binary, interpret mode)
 - **Severity:** high (silent nil poisoning, closure-dependent — passes in unit repros, fails in apps)

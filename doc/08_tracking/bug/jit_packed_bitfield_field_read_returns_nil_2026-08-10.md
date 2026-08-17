@@ -10,7 +10,8 @@ here (resource rules forbid building the main compiler in this lane).
 
 # JIT: `@packed` bitfield field reads return `nil` (positional raw constructor)
 
-**Status:** OPEN
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-10 by stream M3, while restoring `NullBlockStatusRegister`'s
 `@packed` bitfields (`null_block_status_register_lost_packed_bitfields_2026-08-10.md`).
 **Binary:** `src/compiler_rust/target/bootstrap/simple` (33,653,056 bytes, 2026-08-09 23:10)

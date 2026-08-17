@@ -1,6 +1,7 @@
 # Hosted-WM entry closure was unparseable: two grammar gaps + three landed syntax errors
 
-**Status:** source repaired (the original change); **Gap A and Gap C are now
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 CLOSED in the grammar** — see "Update 2026-08-01" at the end. Gap B
 (multi-line `match` as a struct-literal field value) is tracked separately.
 **Found:** while trying to calibrate `GLYPH_RGB_SHA256` for

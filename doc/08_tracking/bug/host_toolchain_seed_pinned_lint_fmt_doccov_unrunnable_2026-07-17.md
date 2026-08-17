@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-17
 **Severity:** high (four tooling lanes dead on the host; masked by the seed-stopgap deploy)
-**Status:** open
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 

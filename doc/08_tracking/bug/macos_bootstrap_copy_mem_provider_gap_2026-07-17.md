@@ -1,5 +1,8 @@
 # macOS bootstrap Rust-hosted archive lacks `copy_mem`
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 Resolved in source and focused runtime verification on 2026-07-17. The broader

@@ -1,7 +1,8 @@
 # Browser Layout Large SIMD Fill Facade Unsafe
 
 - **Date:** 2026-07-09
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high
 - **Area:** Simple Web layout, CPU-SIMD, runtime facade
 
@@ -157,3 +158,62 @@ uninitialized storage and fills it by doubling initialized spans with
 `memcpy`. No packed-u32 framebuffer or new unsafe mutable ABI should be added
 until that source is present in a fresh self-hosted binary and measured. The
 owner facade remains the correct containment boundary.
+
+---
+
+## 2026-08-17 — REPRODUCED (still open at inspection) and FIXED (GPU slice worker E)
+
+Classified by CONTENT against current source, not by commit ancestry.
+
+### Root cause (confirmed live before the fix)
+
+`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`, in
+`native_simd_pixel_evidence()`: the bit-exactness selfcheck opened with a
+single hard-coded
+
+    val count: i64 = 64
+
+and validated exactly that one row length, then published the result as the
+class-level claim `bit_exact: fill_exact and copy_exact` on
+`NativeSimdPixelEvidence` — a type whose own docstring promises the kernels
+"stayed bit-identical", unqualified.
+
+Why 64 specifically cannot support that claim: on every SIMD level this
+function accepts (`Neon`, `Avx2`, `Sse42`, `Rvv`) a 64-element `u32` row is an
+exact whole number of vectors. So the selfcheck exercised **only the aligned
+chunk path**. The one thing a vectorised fill/copy facade actually gets wrong
+— the TAIL, where a remainder is left unfilled or written past the end — was
+structurally unreachable by the evidence, at any count, forever.
+
+That makes this the silent class rather than a coverage nit: the function does
+not report "unverified beyond 64", it reports `bit_exact: true`, and callers
+consume that as proof.
+
+### Fix
+
+The selfcheck now sweeps `[3, 17, 64, 65, 67]`:
+
+- `3` — below one vector width (pure-tail, no aligned chunk at all)
+- `17`, `65`, `67` — non-multiples straddling one or more whole vectors
+- `64` — the original aligned case, retained rather than replaced, so prior
+  coverage is not traded away
+
+`fill_exact` and `copy_exact` now only stay true if EVERY count round-trips,
+and the fill comparison checks against `color` directly instead of building a
+parallel 64-element reference array that was itself fixed-size.
+
+### Not addressed
+
+This widens the *selfcheck*; it does not add a large-buffer or multi-row
+(stride/pitch) case, so a 2-D blit defect that only appears across rows is
+still out of reach of this evidence. Stated here rather than implied fixed.
+
+### Verification status — HONEST GAP
+
+The spec run for this change was queued behind a saturated `test-slot` queue
+(a stage-3 bootstrap plus ~10 concurrent lanes) and had NOT produced a
+`Results:` line by end of session. The change is a pure widening of an
+existing in-source selfcheck and needs no build (`src/lib/**` is read as
+source), but **it has not been executed**. Do not treat this row as verified
+until `test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl` and
+`simd_kernels_branch_coverage_spec.spl` are run green.

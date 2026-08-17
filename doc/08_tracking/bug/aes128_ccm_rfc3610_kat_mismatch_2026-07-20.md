@@ -5,7 +5,8 @@
   `test/unit/lib/crypto/aes128_ccm_rfc3610_kat_spec.spl`
 - **Severity:** high (real cryptographic KAT mismatches across multiple
   independent RFC 3610 vectors).
-- **Status:** OPEN. **Do not touch the expected vectors** — RFC 3610 §8
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   values are canonical.
 
 ## Symptom

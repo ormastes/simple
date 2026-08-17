@@ -1,6 +1,7 @@
 # `green_task_error` is an exported API that can only ever return `""`
 
-- **Status:** RESOLVED 2026-08-08
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found:** 2026-08-08, adversarial review of `7168c6d1c2b2`
 - **File:** `src/lib/nogc_async_mut/concurrent/green_thread.spl`
 

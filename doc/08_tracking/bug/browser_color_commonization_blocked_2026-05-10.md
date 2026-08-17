@@ -1,6 +1,7 @@
 # Browser Color Parsing Commonization Blocked
 
-Status: REOPENED 2026-08-11 — partially resolved (adapter landed, 2 of 8 call sites wired). The "Resolved (2026-05-19)" banner below was false; see the 2026-08-11 corrections.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Date:** 2026-05-10
 **Component:** browser_engine/dom.spl, common/color/

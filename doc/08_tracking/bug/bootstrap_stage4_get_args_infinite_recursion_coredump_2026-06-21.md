@@ -1,7 +1,8 @@
 # Bootstrap Stage 4 binary SIGSEGVs at startup — `io.cli_ops.get_args` infinite recursion
 
 - **Id:** bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21
-- **Status:** Open root cause; guarded 2026-06-22
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** P1 — a fresh `bootstrap-from-scratch.sh --pure-simple` produces a
   Stage 4 `build/bootstrap/full/<triple>/simple` that **segfaults on every
   invocation** (even `print(1)`), in both interpret and JIT mode. There is no

@@ -1,6 +1,7 @@
 # editor entrypoint never dispatches `--gui` or the TUI shell (2026-08-10)
 
-Status: **RESOLVED 2026-08-10 (fix landed as 231d3b1f6e5; status corrected by stream N3)**
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Found by: stream K4, anchoring hollow "comment-cheat" spec needles
 (`doc/08_tracking/test/comment_cheat_spec_census_2026-08-09.md`)
 

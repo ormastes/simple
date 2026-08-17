@@ -50,3 +50,37 @@ gap, per `.claude/rules/testing.md`.
 ## Unblock condition
 The interpreter emits a `Call stack:` section with per-frame entries for runtime
 errors. Then this spec goes green with no change to its assertions.
+
+## Content re-verification 2026-08-17 (m4_compiler_spl lane) — STILL OPEN, refined
+
+The triage row's evidence line ("grep for `Call stack:` across `src/` returns
+nothing") is now **stale**, but the bug is **not** fixed. Current source:
+
+- `src/compiler/95.interp/mir_interpreter.spl:141-153` defines
+  `MirInterpreter.call_stack_trace()`, which renders exactly the
+  `Call stack:` / `  #<i> <fn>` section this doc asks for.
+- `:155-165` defines `format_error(err)`, joining the message head with that
+  trace.
+- `CallFrame.function_name` (`:64-66`) exists specifically to make the frames
+  nameable, and its comment cites this doc by name.
+
+So the machinery is written. The defect is that it is **wired to nothing**:
+
+    grep -rn "format_error\|call_stack_trace" src/compiler/95.interp src/app
+    -> only the three definition lines in mir_interpreter.spl; ZERO call sites.
+
+`format_error` has no callers anywhere in `src/`, so no error-reporting path
+ever reaches it and the rendered section is never printed. This is the same
+"designed, implemented, exported, called by no one" shape recorded for
+`interface_digest_of` in `.claude/rules/commands.md`.
+
+Second, independent blocker on proving a fix: the deployed `bin/simple` is the
+**Rust seed**, so the interpreter that actually prints a runtime error for
+`bin/simple run` is the Rust one, not this pure-Simple `MirInterpreter`. Wiring
+`format_error` into `95.interp` therefore cannot be shown green by running the
+named reproducer under the current binary.
+
+**Verdict: OPEN / UNVERIFIED.** No `Results:` line was obtained; no `.spl` was
+changed by this lane. Unblock condition unchanged, plus an explicit first step:
+give `format_error` a caller on the interpreter's error-reporting path, and
+re-verify on a self-hosted binary rather than the seed.

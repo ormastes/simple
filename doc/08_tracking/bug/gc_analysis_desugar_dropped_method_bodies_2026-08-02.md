@@ -1,7 +1,8 @@
 # gc_analysis: desugaring dropped method bodies, whole subsystem is non-executable
 
 - **Date:** 2026-08-02
-- **Status:** OPEN — `escape.spl`, `roots.spl`, `barriers.spl` (incl.
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   `BarrierAnalysis.analyze()`, fixed 2026-08-08) are now executable and
   covered; `mod.spl` (`RootAnalysis.create`/`BarrierAnalysis.create` TAB-named
   args, `_1` closure placeholder, empty `GcSafetyReport` methods) is still

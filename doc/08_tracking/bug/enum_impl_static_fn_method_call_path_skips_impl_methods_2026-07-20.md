@@ -1,7 +1,8 @@
 # Bug: `EnumName.static_method()` call-expression path ignores `impl EnumName:` static methods (only checks inline enum-body methods)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/shared/control_flow/static_fn_spec.spl`)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** `src/compiler_rust/compiler/src/interpreter_method/mod.rs` (`Value::EnumType` method-call dispatch), deployed seed at `bin/release/x86_64-unknown-linux-gnu/simple`
 
 ## Symptom

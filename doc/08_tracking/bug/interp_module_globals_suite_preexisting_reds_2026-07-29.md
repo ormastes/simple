@@ -1,5 +1,8 @@
 # Pre-existing reds in interpreter_flattened_module_globals suite (2026-07-29)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## RESOLVED (same day) — TWO independent root causes, both required
 
 - **Lane L2 (harness):** process-global `RECURSION_DEPTH` reset mid-flight by a

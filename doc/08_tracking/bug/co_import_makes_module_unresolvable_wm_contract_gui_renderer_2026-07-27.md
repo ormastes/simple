@@ -6,7 +6,8 @@
   (post-`module_registry.spl` deletion, `src/compiler/20.hir` refactor — see *Leads*)
 - **Severity:** high — blocks **three of the five remaining showcase-matrix cells**.
   Compilation dies in the SEMANTIC phase; no codegen, no process, no window.
-- **Status:** **RESOLVED — no longer reproduces (verified 2026-07-30).** The
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   defect described below did not survive the interim work (LLVM restore,
   parser fix `023a60a05aa`, canonical rebuild). Re-verification is recorded
   in the section "2026-07-30 re-test" at the end of this file; the original

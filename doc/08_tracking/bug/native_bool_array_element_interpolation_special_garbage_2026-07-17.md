@@ -1,7 +1,8 @@
 # BUG: native backend bool array element via string interpolation prints `<special:N>` garbage
 
 - **Date:** 2026-07-17
-- **Status:** FIXED at 2026-07-17 (fix lane s16, worktree wt_s9; landed as commit a0c03cb07ba, cherry-picked onto tip 9b6f34f9b75 after two independent, overlapping fixes — 71a4d0f21e4 "preserve bool array element types" and dd848072025 "preserve class array field metadata" — landed in between; see "2026-07-17 root cause + fix" below for what stayed vs. what those commits already covered). Verified under `bin/simple native-build`. Re-tested this doc's EXACT minimal repro verbatim (`var flags: [bool] = [true, false, true]; var x = flags[0]; print x; print "{x}"`, no type annotation on `x`, matching the doc precisely): BEFORE any of these three fixes it printed `11` (BOTH the bare `print x` and the interpolated `print "{x}"` were wrong — not only interpolation as originally described; `x`'s Bool-ness was lost the moment it was rebound to an untyped `val`/`var`, so every later read of `x` decoded the raw i64 tag bit instead of `true`/`false`). AFTER, it correctly prints `truetrue`. The defect additionally (and more visibly) affects bool/text elements read from a CLASS or STRUCT array FIELD (`f.bits[i]`, `c.names[i]`) — verified fixed for both a `class` and a plain value-type `struct`.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** compiler native codegen (array element read + bool/text string interpolation): both a plain untyped `val`/`var` rebinding of an array-read bool, and any class/struct array FIELD read
 - **Severity:** medium (silent wrong output; no crash)
 

@@ -3,7 +3,8 @@
 - **Date:** 2026-07-25
 - **Severity:** medium (blocks on-silicon observation of the rv32 soak; risks
   false-green if a sim value is reported as board-captured evidence)
-- **Status:** open (fixed hardware/observability gap — NOT a regression, NOT a
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   core-not-running defect)
 - **Component:** `build/fpga/evidence/rv32_2026-07-24/rv32_fpga.bit`,
   `scripts/fpga/k26_rv64.xdc`, `scripts/fpga/soak_rv32_board.shs`

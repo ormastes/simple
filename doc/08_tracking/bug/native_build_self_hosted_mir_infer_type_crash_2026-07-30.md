@@ -1,5 +1,8 @@
 # `native-build` crashes on module-level globals with a binary-expression initializer (self-hosted compiler, not the Rust seed)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Filed while following up on
 `doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md`'s own
 side-finding that `native-build --entry`/`--entry-closure` was failing in

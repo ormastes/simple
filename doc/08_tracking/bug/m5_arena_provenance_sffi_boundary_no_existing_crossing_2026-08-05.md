@@ -1,7 +1,8 @@
 # M5 arena-provenance defect class: no existing SFFI crossing to instrument
 
 **Date:** 2026-08-05
-**Status:** OPEN — filed rather than implemented (see "Why this is filed, not
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 fixed" below).
 **Severity:** Low-to-informational for now. This is a scoping gap, not an
 observed memory-safety hole: no live code path was found where the hazard

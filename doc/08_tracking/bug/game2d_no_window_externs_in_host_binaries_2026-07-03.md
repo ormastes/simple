@@ -1,5 +1,8 @@
 # Gap: deployed bin/simple lacks window externs — game2d wrapper uses gui-feature driver when available
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-03
 **Component:** interpreter extern surface (`src/compiler_rust/compiler/src/interpreter_extern/`),
 `src/lib/nogc_sync_mut/game2d/backend/sdl_backend.spl`, G3.3 real-window evidence.

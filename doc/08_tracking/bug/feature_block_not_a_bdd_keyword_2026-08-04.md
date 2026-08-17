@@ -1,6 +1,7 @@
 # `feature "..."` is not a BDD block keyword — 10 spec files are dead entry points, 300 `it` blocks never run
 
-**Status:** OPEN
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Found:** 2026-08-04
 
 ## Symptom

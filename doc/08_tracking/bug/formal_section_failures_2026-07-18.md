@@ -1,5 +1,8 @@
 # Formal Verification Section Test Failures (106/274)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **UPDATE 2026-07-20:** This doc's core premise ("the specification modules
 themselves do not exist in the codebase") is now false — re-triaged on
 2026-07-20 against the same section and the `verification.*` modules are

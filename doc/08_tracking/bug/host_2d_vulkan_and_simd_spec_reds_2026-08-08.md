@@ -1,5 +1,8 @@
 # Host 2D Vulkan/SIMD spec reds found during primitive-rendering verification
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Filed:** 2026-08-08 · **Severity:** mixed (see per-item) · **Scope:** HOST
 (Linux x86_64) only, found while verifying
 `doc/09_report/host_2d_vulkan_simd_primitive_verification_2026-08-08.md`.

@@ -3,7 +3,8 @@
 - **Filed:** 2026-07-07
 - **Severity:** P1 (silent data loss in any Option<i64>-returning stdlib call)
 - **Component:** self-hosted interpreter — string/Option value boxing
-- **Status:** open; worked around in `src/app/llm_caret/json_helpers.spl`
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 

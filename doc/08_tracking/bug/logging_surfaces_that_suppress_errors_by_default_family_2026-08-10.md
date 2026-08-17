@@ -1,7 +1,8 @@
 # Logging surfaces that suppress error-level output by default (family sweep)
 
 - **Date:** 2026-08-10
-- **Status:** ALL FIXED — `src/lib/nogc_sync_mut/log.spl` fixed here; OPEN 1-4
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   fixed 2026-08-10 (see the per-item sections below). OPEN 1 was a
   misdiagnosis and is corrected rather than "fixed". Two adjacent defects were
   found on the way and filed separately, NOT fixed:

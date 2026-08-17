@@ -1,6 +1,7 @@
 # `GLYPH_RGB_SHA256=pending` is not the first blocker for showcase cells 4/5/6
 
-**Status:** OPEN — ARCHITECTURAL. no legitimate calibration value exists yet,
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 and none was invented.
 
 **Re-checked 2026-08-09:** `GLYPH_RGB_SHA256=pending` is still line 18 of the

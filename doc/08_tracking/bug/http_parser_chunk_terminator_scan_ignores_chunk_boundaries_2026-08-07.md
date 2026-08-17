@@ -1,6 +1,7 @@
 # HTTP request parser scans for the chunked terminator without respecting chunk boundaries
 
-- **Status:** OPEN
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found:** 2026-08-07
 - **Area:** `src/lib/nogc_async_mut/http_server/parser.spl` (`ParseState.Body`, chunked branch)
 - **Severity:** medium — a legal request is rejected with 400; before 2026-08-07 the

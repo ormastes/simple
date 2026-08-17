@@ -1,6 +1,7 @@
 # `if val Some(x) = opt: EXPR else: EXPR2` loses field access on `x` when used as a value-producing expression (2026-07-31)
 
-**Status:** OPEN — worked around at the one call site this lane needed
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 (`src/lib/gc_async_mut/game2d/tilemap.spl::_pixels_for_tile`), not fixed at
 the interpreter level.
 

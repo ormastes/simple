@@ -1,5 +1,8 @@
 # JS VM DOM bridge retention is frame-linear and property-scan quadratic
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 Open. No implementation, executable spec, or production receipt is merged.

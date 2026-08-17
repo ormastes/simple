@@ -1,7 +1,8 @@
 # `exec_cap_check`'s scalar-caller ABI cannot carry a real `CapabilitySet` — every non-kernel caller is unconditionally denied, not "checked"
 
 **Date:** 2026-08-07
-**Status:** ARCHITECTURAL-OPEN (real capability-matching logic now exists and is
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 proven — re-verified 2026-08-10: `bin/simple test
 test/01_unit/os/kernel/loader/cap_exec_gate_spec.spl --no-cover-check` →
 `Results: 8 total, 8 passed, 0 failed`; threading a real caller identity into

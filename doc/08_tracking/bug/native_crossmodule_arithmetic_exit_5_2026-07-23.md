@@ -71,3 +71,33 @@ rebuild Stage2/3 incrementally and run the unchanged cross-module fixture once.
 If it still fails, disassemble the keys before considering the separate
 `translate_load` provenance audit. Do not weaken or delete the fixture, and do
 not advance to Stage4/QEMU until it passes.
+
+## Triage 2026-08-17 — exit code mapped to its exact predicate
+
+Classified against current source, not SHA ancestry.
+
+Exit 5 is now pinned to a specific check. In
+`test/fixtures/native_crossmodule_result_u8/main.spl`, `fn main()` returns 5 from
+exactly one site: `if not cross_target_arithmetic_ok(): return 5`. So the probe
+is not failing generically — `cross_target_arithmetic_ok()` is the failing
+predicate, and it is the ONLY thing exit 5 can mean.
+
+That function tests, in order: mixed i64/f64 relational comparison
+(`signed_int < 41.5`); u64-vs-i64 comparison across the sign bit
+(`high = 0x8000000000000000u64` against `small = 1` for `< <= > >=`); u64-vs-f64
+comparison (`high > 0.0`, `high <= 9223372036854775808.0`); u64 division and
+modulo (`high / 2u64`, `high % 3u64`); u64 logical shift (`high >> 63u64 == 1u64`);
+arithmetic (sign-propagating) right shift by an unsigned count
+(`negative >> unsigned_count == -1` where `negative = -2i64`); and
+truncation-toward-zero signed division (`-9 / 2 == -4`, `-9 % 2 == -1`).
+
+Every one of those is a mixed-signedness / mixed-width numeric lowering
+behaviour, which puts the root cause in the native codegen path, i.e. under
+`src/compiler/50.mir/**` or `src/compiler/70.backend/**`. Those trees are CLAIMED
+by other lanes in this sweep, so no fix is attempted here. Handing off: bisect
+`cross_target_arithmetic_ok()` one predicate at a time — the u64-across-sign-bit
+comparisons and the arithmetic-vs-logical shift distinction are the highest-prior
+suspects, since both are classic silent-wrong-result lowering bugs.
+
+NOT proven here: the probe was not executed, so it is not confirmed that exit 5
+still reproduces today — only that IF it does, this is the predicate at fault.

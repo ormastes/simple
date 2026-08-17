@@ -1,6 +1,7 @@
 ---
 id: cuda_backend_mirop_signature_field_semantic_false_positive_2026-07-29
-status: FIXED
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: medium
 discovered: 2026-07-29
 fixed: 2026-07-30

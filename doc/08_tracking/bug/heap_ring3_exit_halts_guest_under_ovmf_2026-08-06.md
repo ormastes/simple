@@ -2,7 +2,8 @@
 
 Date: 2026-08-06
 Lane: C4 / L5 of `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`
-Status: **FIXED** (see §4)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## 1. Symptom (and why it read as a transport bug)
 

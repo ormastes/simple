@@ -1,6 +1,7 @@
 # iso/borrow-check unreachable from the interpret pipeline (`bin/simple test`)
 
-- Status: open, scoped (investigated, deliberately NOT wired in)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Related: `reference_borrow_check_runs_only_in_aot_pipeline` (memory),
   `src/compiler/50.mir/_MirLowering/function_lowering.spl` iso MIR-lowering
   prerequisite fix (commit `7a8115c60913ab30e3e07adba0b4bc53845aea50`, landed
@@ -83,3 +84,66 @@ prerequisite fix for `iso` (commit `7a8115c60913ab30e3e07adba0b4bc53845aea50`)
 stands on its own and is unaffected by this gap; it fixes AOT/native-build's
 iso MIR lowering, which is the path where `borrow_check()` is actually wired
 today.
+
+## Verification 2026-08-17 (w02/s4 lane) — CONFIRMED LIVE, with exact root cause
+
+Classified by CONTENT of current source (session brief CORRECTION 1). The doc's
+"deliberately NOT wired in" status is accurate, and this note pins down *why*
+wiring it in is not a one-line change.
+
+### The pass exists and IS wired — but only into MIR-bearing pipelines
+
+`me borrow_check()` is defined at
+`src/compiler/80.driver/driver_pipeline_passes.spl:11` (guarded by
+`--no-borrow-check` at `:12`). It has exactly three call sites, all found by
+`grep -rn 'borrow_check()' src/compiler/80.driver/`:
+
+| call site | pipeline |
+|---|---|
+| `driver_pipeline_execution.spl:21` | JIT (`jit_compile_and_run`) |
+| `driver_aot_pipeline.spl:98`       | AOT (`aot_compile`) |
+| `driver_orchestration.spl:255`     | orchestration |
+
+### The interpret pipeline is the one path with no such call
+
+`src/compiler/80.driver/driver.spl:96-136` — `interpret_pipeline()` — is the
+whole of the interpret mode (`interpret()` at `:93` just delegates to it). Read
+end to end it does exactly this: check `ctx.sources` is non-empty (`:101`),
+construct `InterpreterBackendImpl.new()` (`:115`), then loop the sources pulling
+`self.ctx.hir_modules[name]` (`:121`) and calling
+`interp.interpret_hir_module(hir_module)` (`:126`).
+
+**Root cause: `src/compiler/80.driver/driver.spl:96`** — the interpret pipeline
+goes HIR -> interpreter directly. It never calls `self.lower_to_mir()` and never
+calls `self.borrow_check()`. Since `bin/simple test` runs on this path, the
+borrow checker never executes for any spec.
+
+### Why this is not a one-line fix (and why no patch was applied here)
+
+`borrow_check()` is a **MIR** pass — note the ordering at
+`driver_pipeline_execution.spl:10-21`, where `lower_to_mir()` runs *first* and
+`borrow_check()` is only reached if it succeeded. The interpret pipeline has no
+MIR at all. Wiring the borrow checker into interpret therefore requires adding a
+MIR-lowering step to the interpret path (paying its cost on every `bin/simple
+test` invocation), or re-expressing the check over HIR. Both are design changes
+under `src/compiler/50.mir/**`, a tree **claimed by another lane this session**,
+so nothing was edited. This row needs a design decision, not a bug patch.
+
+### Shared root cause with a sibling row
+
+This is very likely the same root cause as
+`iso_use_after_move_invisible_as_call_argument_2026-08-07.md`: any iso/borrow
+defect is structurally invisible to a spec that reaches the checker only through
+the interpret driver. Note that
+`test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl` sidesteps this by
+driving `hir_lowering` and `mir_lowering` itself in-spec (see its `:70`/`:73`
+assertions) and invoking the checker directly — so that spec *can* still go red,
+and the two rows should be triaged together but are not duplicates.
+
+**Verdict: LIVE, CONFIRMED. No patch applied (blocked on a claimed tree + a
+design decision).**
+Not proven: this lane did not execute anything — the confirmation is a complete
+read of the interpret path plus an exhaustive call-site census of
+`borrow_check()`. The queued run of the sibling e2e spec never got a
+`test-slot.shs` slot (host under a live stage-3 bootstrap, 164 concurrent
+`simple` processes).

@@ -1,7 +1,8 @@
 # Host Vulkan reaches lavapipe, but every graphics entry point is a 0-returning stub without the `vulkan` cargo feature
 
 **Date:** 2026-08-11
-**Status:** OPEN
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** High — blocks all pixel-level host-GPU evidence (SCCT image comparison, offscreen readback), while presenting as a silent, error-free zero
 **Area:** host GPU / Vulkan runtime FFI, seed build configuration
 

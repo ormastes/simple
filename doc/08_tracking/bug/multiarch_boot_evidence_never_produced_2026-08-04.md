@@ -1,6 +1,7 @@
 # Multi-arch AC-4/AC-6 specs assert on QEMU boot evidence that no lane ever produces
 
-**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10; requires `--arch` dispatch + real QEMU/board boots, out of scope for a hosted lane)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 
 ## Symptom
@@ -101,3 +102,41 @@ Re-checked again: `--arch` still absent from `bootstrap-from-scratch.sh`
 `riscv64/bootstrap_result.json`. Facts and scope unchanged from the
 2026-08-09 pass; header `Status:` field aligned to `ARCHITECTURAL-OPEN` to
 match the body (it previously said plain `OPEN`). No code change.
+
+## Triage 2026-08-17 — LIVE in source (flag half proven)
+
+Classified against current source, not SHA ancestry.
+
+The `--arch` half of this report is confirmed live by content:
+`test/03_system/os/multiarch/six_arch_boot_spec.spl:5` still documents the spec
+as driven by `bin/simple test --arch=<triple>`, and an exhaustive
+`/usr/bin/grep -rn -- --arch` over `scripts/os/` and `scripts/check/` finds the
+flag ONLY in image-build scripts (`build_simpleos_install_image{,_main}.spl/.shs`,
+`rebuild-sosix-qemu-media.shs`, `check-sosix-qemu-matrix.ps1`,
+`check-simpleos-virtio-snd-qemu.shs`) — never in the test dispatch path the spec
+calls. So the flag the spec depends on does not exist in that dispatcher.
+
+NOT proven here: whether any lane produces the QEMU boot evidence the AC-4/AC-6
+specs assert on. That needs a QEMU lane run, which was not attempted.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE — both halves re-confirmed against current source.**
+
+1. **The evidence is never produced.** `test/03_system/os/multiarch/six_arch_boot_spec.spl`
+   asserts `file_exists("build/multiarch/<triple>/smoke_result.json")` (helper
+   `_smoke_path`, line 18; first assertion line 51). `ls build/multiarch/`
+   returns *No such file or directory* — the directory does not exist at all,
+   so every per-arch row is asserting on a file no lane writes.
+
+2. **The dispatch flag still does not exist.** The spec header (lines 3-5)
+   states the evidence comes from running `bin/simple test --arch=<triple>`.
+   `grep -rn "--arch src/app/test/ src/app/cli/` returns **zero hits** —
+   the `test` command parses no `--arch` flag. The only `--arch` parsers in the
+   tree belong to unrelated apps: `src/app/qemu/commands.spl:24,71`,
+   `src/app/sim/profile.spl:15`, and `src/app/diagram/main.spl:230`
+   (`--arch-diagram`, a different flag entirely).
+
+So the specs are honestly RED rather than vacuously green (a missing file makes
+`expect(file_exists(...)).to_equal(true)` fail), but they gate on a production
+path that was never built.

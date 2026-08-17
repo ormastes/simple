@@ -125,3 +125,45 @@ That blocker is tracked in
 `pure_simple_test_runner_core_c_runtime_abi_gap_2026-07-17.md`. Runner
 execution and broad Cranelift function-static support remain open; the
 function-pointer compiler fix itself is retained with focused regressions.
+
+## Triage 2026-08-17 — could-not-prove (native entry-closure build unavailable), but the underlying gap is still LIVE in-tree
+
+**Classification: could-not-prove.** The only reproduction recipe in this doc is
+`native-build --entry-closure --backend cranelift --target x86_64-unknown-none`
+against a freshly bootstrapped Stage-2 compiler. Missing capability: a fresh
+self-hosted binary plus a full bootstrap (a bootstrap is live on this host and
+must not be disturbed). No interpreter/`simple test` path exercises fn-pointer
+module-global export classification, so the defect cannot be settled here.
+
+**But content evidence contradicts the doc's closing "confirming this defect is
+fixed on the exercised path".** The library does not call the fn-pointer global
+directly any more — it routes every call site through a hand-written
+load-then-call wrapper carrying an explicit workaround comment
+(`src/lib/nogc_sync_mut/io/signal_handlers.spl:56-59`):
+
+```
+fn run_global_cleanup_handler():
+    # ponytail: local indirect call until native codegen supports calling fn globals.
+    val cleanup = _global_cleanup_handler
+    cleanup()
+```
+
+"until native codegen supports calling fn globals" is a live statement that the
+compiler-side capability is still absent. The four signal entry points
+(lines 141/156/171/194) now call that wrapper, so the *symptom* is masked at the
+library level while the *defect* is untested. Anyone reading only the doc's last
+paragraph would wrongly close this. Do not close it until the wrapper can be
+inlined back to a direct `_global_cleanup_handler()` call and the entry-closure
+build still links.
+
+**Path/line drift corrected** (the doc's numbers are all stale by the current
+tree; `src/app/io/signal_handlers.spl` still exists as a second copy):
+
+| doc says | actual (`src/lib/nogc_sync_mut/io/signal_handlers.spl`) |
+|---|---|
+| `:35` declaration | `:36` `var _global_cleanup_handler: fn() = default_cleanup_handler` |
+| `:66` setter | `:86` `_global_cleanup_handler = cleanup_handler` |
+| `:93/108/123/136` call sites | `:141/156/171/194`, and they call `run_global_cleanup_handler()`, **not** the global directly |
+
+No files were modified for this row — the residual fix is in
+`src/compiler**`/`src/compiler_rust**`, outside this worker's edit scope.

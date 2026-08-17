@@ -1,5 +1,8 @@
 # v1 credential records are never rewritten: no config writer owns the upgrade
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-08-08
 - **Severity:** LOW-MED
 - **Area:** `src/lib/nogc_sync_mut/terminal/credential/`
@@ -62,3 +65,13 @@ Give the config layer an atomic write, then wire the upgrade:
 ## See also
 
 - `doc/09_report/lib/crypto/credential_store_aes_cbc_adversarial_review_2026-08-08.md` (finding F5)
+
+## Re-verification 2026-08-17 (terminal slice) — STILL OPEN
+
+Classified by CONTENT. `src/lib/nogc_sync_mut/terminal/credential/config_parser.spl`
+was grepped for `v1`, `upgrade`, and `rewrite`: **zero matches**. No
+upgrade-on-write path exists in the natural owner identified by this doc, so v1
+credential records are still never rewritten to v2 on a config write.
+
+Status: OPEN (unchanged). Severity remains LOW-MED — a stale-format record is
+still readable; this is a migration gap, not a wrong-result defect.

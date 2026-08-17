@@ -1,7 +1,8 @@
 # JIT named-fn-as-value guard is narrower than its own doc claims: extern fn names still miscompile
 
 - **Filed:** 2026-08-08
-- **Status:** RESOLVED 2026-08-08 — fixed in
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   `src/compiler_rust/compiler/src/codegen/jit.rs`,
   `JitBackend::first_named_fn_value_load`. Two changes were needed, not one:
   (1) `func_names` now chains `mir.extern_fn_names` as the doc's illustrative

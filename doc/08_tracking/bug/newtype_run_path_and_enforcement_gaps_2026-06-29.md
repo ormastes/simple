@@ -53,3 +53,16 @@ A first-class newtype would enforce #1, preserve the wrapper through arithmetic
 ## Runtime verification (2026-07-17)
 
 **Item #1 (no type-safety enforcement) STILL-REPRODUCES:** `mix(Lba, Ppn)` accepted and ran, printed `5` with no type error. **Item #3 (JIT cannot lower) STILL-REPRODUCES:** `HIR lowering error: Unknown type: Lba` seen during same run (JIT fallback). **Item #2 (arithmetic erases wrapper) FIXED-AT-TIP:** `(l + Lba(value:1)).value` printed `6` cleanly with no `undefined field` error — arithmetic now preserves the wrapper (matches fix credit to `612a1372a28`). **Item #4 (fn-field call under interp+import):** not independently tested (requires genuine cross-module import, out of budget).
+
+## Content re-verification 2026-08-17 (m4_compiler_spl lane) — STILL OPEN
+
+`grep -n "newtype" src/compiler/30.types/type_system/builtin_registry.spl`
+returns **zero hits**: the registry named as the fix site carries no newtype
+handling at all, so no nominal-distinctness enforcement can be coming from
+there. Consistent with the doc's own recheck (items #1 and #3 still reproduce).
+Classified by CONTENT per the 2026-08-17 CORRECTIONS.
+
+Not re-run in this pass — no `Results:` line, so OPEN-by-content, not a
+re-measured RED. Real enforcement needs type-system + lowering work in layers
+claimed by other lanes (20.hir/hir_lowering, 50.mir), so it was not attempted
+here.

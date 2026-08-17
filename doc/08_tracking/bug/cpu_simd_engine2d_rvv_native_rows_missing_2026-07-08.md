@@ -102,3 +102,17 @@ the kind of mass run that was forbidden for this session.
 
 **What was NOT proven.** Nothing was executed. No claim is made here about
 whether the dispatch C is correct; only that the filed gap is elsewhere.
+
+## 2026-08-17 verification — runtime slice (classified by CONTENT)
+
+**Verdict: STILL OPEN, unchanged from the doc's own 2026-08-15 update.** No
+source change was found that would close the `.spl` detection-branch legs, and
+the C dispatch file (`src/runtime/runtime_simd_dispatch.c`) compiles clean under
+the tree gate (`PASS — 104 file(s) compiled, 0 errors`).
+
+**What was NOT proven — this row was NOT executed.** The reproducer is
+`scripts/check/check-cpu-simd-engine2d-arch-matrix.shs`, a QEMU arch-matrix gate.
+It was deliberately not run: a stage-3 bootstrap owns this host and is the
+user's stated top priority, and a QEMU arch matrix is exactly the kind of mass
+run the lane etiquette forbids. No `Results:` line was obtained, so treat this
+row as carried forward on the doc's prior evidence, not re-verified.

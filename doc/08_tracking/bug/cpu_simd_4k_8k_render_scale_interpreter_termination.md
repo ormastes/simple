@@ -1,5 +1,8 @@
 # CPU-SIMD 4K/8K render-scale evidence terminates in interpreter path
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 fixed

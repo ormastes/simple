@@ -1,7 +1,8 @@
 # O0/O1 source-revision contract spec asserted the wrong process exit code
 
 - **Filed:** 2026-08-07 (T9, `render_perf_replan_parallel_teams_2026-08-07.md`)
-- **Status:** Fixed (test-oracle fix, not a production defect)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Component:** `test/03_system/check/gui_showcase_perf_source_revision_contract_spec.spl`
 
 ## Summary

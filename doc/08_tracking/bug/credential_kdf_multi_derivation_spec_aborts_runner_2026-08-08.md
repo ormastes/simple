@@ -1,5 +1,8 @@
 # A spec doing several bcrypt KDF derivations aborts the test child with rc=255 and NO verdict
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-08-08
 - **Severity:** MED (blocks verification, and a landed instance would take down a whole directory run)
 - **Area:** test runner child / `std.bcrypt.key_derivation`

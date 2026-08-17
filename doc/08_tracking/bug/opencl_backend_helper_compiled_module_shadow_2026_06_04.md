@@ -41,3 +41,22 @@ Make backend artifact output use a uniquely named type or a runtime-stable quali
 - `compile_module_with_backend("opencl", ...)` returns OpenCL C text in `assembly`.
 - `compile_module_with_backend("cl", ...)` follows the same path.
 - The spec subprocess exits cleanly without `code -1`.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE — root cause confirmed present in current source.**
+
+The duplicate type name that the doc blames for the shadowing still exists.
+`grep -rn "struct CompiledModule" src/compiler --include=*.spl`:
+
+- `src/compiler/70.backend/codegen.spl:739`
+- `src/compiler/70.backend/backend/backend_types.spl:333`
+
+Two `struct CompiledModule` definitions inside the same `70.backend` layer, so
+`compile_module_with_backend("opencl").to_compiled_module` can resolve against
+whichever declaration wins, producing the reported `CompiledModule has no
+field`.
+
+**DIAGNOSIS ONLY — not fixed here.** `src/compiler/70.backend/**` is owned by
+another lane in the current parallel session; the fix (renaming one of the two
+structs and updating its importers) must land there, not from the test lane.

@@ -1,5 +1,8 @@
 # GUI Showcase 4K `bin/simple` Native Assignment Target Failure - 2026-06-27
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Summary
 
 The retained widget-showcase 4K native perf wrapper fails when it auto-selects

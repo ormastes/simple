@@ -1,7 +1,8 @@
 # BUG: `LlvmIRBuilder.emit_module_header()` ignores the triple passed to `create()`
 
 - **Date:** 2026-08-09
-- **Status:** OPEN (diagnosed, not fixed — fix judged too risky, see below)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/compiler/70.backend/backend/llvm_ir_builder.spl`
 - **RED spec:** `test/feature/usage/llvm_backend_i686_spec.spl` — "emits datalayout in module header"
 

@@ -1,5 +1,8 @@
 # Bug: `std.sdn.*` resolves to a STALE bundled stdlib copy (divergent SdnValue API)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-06-30
 **Severity:** Medium — latent. Any code importing `std.sdn.value` / `std.sdn.parser`
 silently gets the seed-bundled SDN module, whose `SdnValue` has a DIFFERENT,

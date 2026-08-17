@@ -1,7 +1,8 @@
 # Bootstrap Stage 3 self-host fails — stage2 `bootstrap_main` binary can only emit a seed-wrapper, not real native code
 
 - **Id:** bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17
-- **Status:** Open
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** P2 — **NEEDS REVISIT (2026-06-21):** the parenthetical below
   claims "the seed-built artifacts are valid," but that assumption is now
   contradicted. A fresh `--pure-simple` Stage 4 binary **SIGSEGVs on every
@@ -226,3 +227,78 @@ land correctness fixes on `src/**` (waves through 2026-08-01: `4beaa207810`,
 not self-host unblockers — the self-host gate remains the umbrella blocker. See
 `doc/08_tracking/bug/divergence_byte_char_find_option_sweep_2026-08-01.md` and
 `doc/08_tracking/bug/module_lowering_byte_vs_char_sanitizer_2026-08-01.md`.
+
+## 2026-08-17 content re-classification — TITLE IS NOW WRONG; umbrella blocker stays OPEN
+
+Reviewed by the lane owning `src/app/cli/bootstrap_main.spl` and
+`src/app/cli/native_build_main.spl`. Classified by CONTENT of current source
+(SHA ancestry is unsound in this repo). A bootstrap run was **forbidden this
+session** (a live bootstrap owned the host), so nothing about Stage 3 convergence
+was re-measured.
+
+### The "seed-wrapper fallback" framing is stale — and the emitted string moved
+
+`bootstrap_main.spl` contains **no** seed-wrapper generation and **no** guard
+string. `/usr/bin/grep -rn "seed-wrapper" --include=*.spl --include=*.sh
+--include=*.rs .` finds exactly two live sites, neither in `bootstrap_main.spl`:
+
+- `src/compiler/80.driver/driver_bootstrap.spl:103` —
+  `CompileResult.CodegenError("bootstrap seed-wrapper fallback was removed")`
+- `test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl:27,34`
+
+`bootstrap_main.spl` also carries none of the forbidden seed markers
+(`compiler_rust`, `execv`, `SIMPLE_BOOTSTRAP_SEED`, `ret i64 0`). Its
+`run_native_build_bootstrap` (line 260) routes the Stage4 explicit-entry shape
+and the single-`.spl`-positional shape through the **pure-Simple in-process
+CompilerDriver**, and asserts a real artifact on the way out:
+`file_exists(output)` plus a `<= 300` byte stub rejection (342-348), with the
+same contract on the SMF lane (443-450). This matches the 2026-07-29 note above
+("The current LLVM path no longer fails at the historical seed-wrapper guard")
+and supersedes the title and the ROOT CAUSE section.
+
+The remaining seed delegation is explicit and documented, not a silent fallback:
+an `--entry` invocation outside `SIMPLE_BOOTSTRAP_STAGE4=1` calls
+`run_rt_native_build` (line 276), i.e. the Rust `rt_native_build` FFI, after
+printing a note when `--source` is absent.
+
+Proposed fix option 3 above (restate the Stage 3 warning instead of blaming
+LIM-010) is already **moot**: `/usr/bin/grep -rn "LIM-010" scripts/` returns no
+matches, so the misattributing warning text no longer exists in the bootstrap
+script.
+
+### Live finding: the existing regression spec asserts a string that is gone
+
+`test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl:27` still
+asserts
+
+```
+expect(src).to_contain("bootstrap_main cannot emit a seed-wrapper fallback")
+```
+
+against `src/app/cli/bootstrap_main.spl`, which no longer contains that text.
+That example is therefore RED for a stale reason, not a real regression — the
+guard string it is pinning migrated into `driver_bootstrap.spl` (already covered
+by the *next* example in the same spec, line 34). The assertion should be
+retargeted or dropped; it is left untouched here because rewriting an assertion
+to make it pass is exactly what the testing rules forbid without the finding
+being recorded first. Recorded now.
+
+Replacement coverage that does hold at tip:
+`test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl`, examples
+"keeps bootstrap_main free of seed-wrapper artifact generation", "never reports
+in-process native-build success without a real artifact", and "keeps the
+cli_mode_text override on both in-process compile lanes".
+
+### Status
+
+**STILL OPEN as an umbrella blocker** — pure-Simple Stage 3 self-host is not
+green, and the 2026-08-01 note stands. What is closed is the specific mechanism
+in the title: the stage2 binary no longer *has* a seed-wrapper path to fall into.
+
+### What could NOT be proven this session
+- Whether Stage 3 converges, times out, or emits a diagnostic. No bootstrap run.
+- Whether the stage2 SHA256 == stage3 SHA256 reproducibility check can pass.
+- Whether the 574 stubbed cross-module symbols (2026-06-26 note) are still
+  emitted — that is seed cranelift native-build, another lane's path.
+- Whether the Stage 4 `get_args` infinite-recursion SIGSEGV (2026-06-21) is
+  still live; no Stage 4 binary was built or executed.

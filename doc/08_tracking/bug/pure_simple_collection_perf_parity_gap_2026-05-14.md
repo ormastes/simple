@@ -1,4 +1,5 @@
 # Pure Simple collection benchmark parity gap
+Status: OPEN (untriaged — not in the 2026-08-17 triage worklist)
 
 Date: 2026-05-14
 

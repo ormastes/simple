@@ -6,7 +6,8 @@
   `src/compiler/90.tools/duplicate_check/detector_files.spl`
   (`matches_detector_exclude`).
 - **Severity:** low (usability gap, not a detection-correctness bug).
-- **Status:** fixed in source; production CLI verification awaits an admitted
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   Stage 4 artifact.
 
 ## Symptom

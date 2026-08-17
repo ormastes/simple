@@ -1,7 +1,8 @@
 # `wm_content_frame_web_provenance_valid` is unreachable for `widget-panel`-wrapped WM content
 
 - **Date:** 2026-08-05
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Medium — the canonical themed WM content-frame path silently
   rejects every frame that goes through it, regardless of caller
 - **Area:** `src/lib/common/ui/window_scene.spl` (gate),

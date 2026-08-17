@@ -1,6 +1,7 @@
 # CompilerContext multi-def name collision (W13-H class 3b reclassification)
 
-Status: - **W15-K (this filing):** documented; not fixed in W15-K scope.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Filed:** 2026-05-02 by W15-K agent
 **Discovered during:** W15-K HIR class 3b source-side typo fixes

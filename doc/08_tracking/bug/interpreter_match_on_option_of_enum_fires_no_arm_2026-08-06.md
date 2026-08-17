@@ -1,7 +1,8 @@
 # Interpreter: `match` on an `Option<Enum>` value directly fires no arm
 
 - **Filed:** 2026-08-06
-- **Status:** Fixed (2026-08-06) — see "Fix landed" below.
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** Medium-High — silent, no error, no crash
 - **Component:** interpreter — Option/enum discriminant
 - **Engine:** `SIMPLE_EXECUTION_MODE=interpret` ONLY. The JIT handles this case correctly.
@@ -133,3 +134,15 @@ Measured with the Rust bootstrap seed
   JIT-only sibling. Read both together.
 - Interpreter Option encoding uses `__tag`, not a struct name.
 - Neither engine is trustworthy in isolation (2026-07-27).
+
+## ALREADY_FIXED — verified 2026-08-17 (P2 triage, compiler lane)
+
+Reproduce-first re-run of the recorded reproducer at HEAD:
+
+```
+$ bin/simple test test/01_unit/compiler_core/interpreter/option_wrapped_enum_match_variant_spec.spl
+Results: 7 total, 7 passed, 0 failed          # rc=0
+```
+
+`match` on an `Option<Enum>` value now fires the correct arm. Closing as
+already fixed; no source change was made by this lane.

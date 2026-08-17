@@ -3,7 +3,8 @@
 **ID:** lint_single_file_superlinear_timeout_on_line_count_2026-08-06
 **Severity:** P1 — makes `bin/simple lint` unusable on any file over a few hundred
 lines
-**Status:** RE-CHARACTERIZED 2026-08-06 (second lane) and QUANTIFIED 2026-08-06
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 (third lane, same day). NOT superlinear — **linear at ~0.19-0.20 s/line**,
 replicated by two lanes on two independent synthetic families. **99.0% of the
 size-dependent cost is `parse_module_silent_checked`; all of lint's own ~44
@@ -577,3 +578,38 @@ session — empty in every case:
 `src/compiler/90.tools/fix/rules/impl_/lint_code.spl`,
 `src/app/io/cli_lint_commands.spl`. No code change shipped from this
 investigation; this doc is the only artifact.
+
+---
+
+## Re-verification 2026-08-17 (compiler-lint lane) — OPEN, evidence-only, NO perf fix attempted
+
+Per explicit task scope this row is a **known cost property**; no performance
+change was attempted and none should be attempted opportunistically.
+
+State of the evidence in current source:
+
+- `src/compiler/90.tools/lint/main.spl` is unchanged with respect to this record
+  — the investigation on 2026-08-06 shipped no code (see the Housekeeping
+  section above, which verifies `git diff --stat` empty for all six files it
+  touched). Nothing has superseded it since.
+- The cost model has since been **re-measured independently** and is now pinned
+  in `.claude/rules/commands.md` (2026-08-17 table). That measurement corrects
+  the older "~3.3-4.0s per function decl" figure in two ways that matter here:
+  declaration count alone scales **linearly** (15 -> 90 decls leaves per-decl
+  cost flat or falling), while **content complexity** is the superlinear driver
+  — `zca_rows.spl` first 2 fns cost ~99s/decl and first 8 fns exceeded 2400s.
+  So "superlinear on line count" is close but not exact; it is superlinear on
+  per-declaration content, which correlates with line count within one file.
+- It is a **cost** problem, not a hang: the linter does terminate and does print
+  a verdict. Confirmed again this session — an unrelated single-file lint of
+  `src/lib/nogc_sync_mut/spec/decorators.spl` (331 lines, 10 decls) produced
+  real diagnostics rather than hanging.
+- The cost is now gated: `sh scripts/check/check-lint-cost-budget.shs`
+  (fail-closed, `--selftest`, treats a silent exit 0 with no verdict line as
+  FAIL).
+
+**Verdict: OPEN (accepted cost property, gated).** The superlinear term has
+still not been localised; attach-based profiling remains blocked on this host
+(`ptrace_scope=1`, `perf_event_paranoid=4`). Cross-reference:
+`doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
+Not proven here: any specific hot function or algorithmic cause.

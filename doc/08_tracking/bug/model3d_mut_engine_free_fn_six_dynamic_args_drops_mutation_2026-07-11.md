@@ -1,6 +1,7 @@
 # `mut Engine3D` free-function call silently drops mutation once 6+ sibling args are dynamic
 
-- **Status:** OPEN
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Discovered:** 2026-07-11 (Lane D: `model3d` 3D node-in-node nesting, `test/02_integration/app/model3d/model3d_nested_nodes_spec.spl`)
 - **Area:** compiler codegen — argument marshalling/register allocation for a free
   function whose first parameter is `mut <ClassType>` (a "handle" class holding

@@ -2,7 +2,8 @@
 
 **Found by:** link_manager Lane SMFMAP scout while verifying the byte-parity
 harness for Phase 1.
-**Status:** Open.
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 

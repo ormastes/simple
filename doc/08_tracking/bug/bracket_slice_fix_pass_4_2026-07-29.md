@@ -1,5 +1,8 @@
 # Bracket-slice byte-index survey — fix pass 4 (2026-07-29), campaign closeout
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Batch 4: the four files deferred from pass 3 (`protobuf_wire.spl`,
 `base58.spl`, `bencode.spl`, `parser_types_expr.spl`), all sharing the
 `X[i].ord()` idiom. Per instruction: check whether each does byte-wire

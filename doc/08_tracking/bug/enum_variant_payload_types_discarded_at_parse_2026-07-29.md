@@ -8,7 +8,8 @@
   (`10.frontend/core/parser_decls_types.spl`,
   `10.frontend/core/_ParserDecls/enum_module_body.spl`) and the flat-AST bridge
   (`10.frontend/_FlatAstBridge/module_assembly.spl`).
-- **Status:** OPEN — not fixed by this lane (out of ownership scope; would
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   require parser + decl-arena + bridge changes, none of which A4E is
   authorized to touch).
 

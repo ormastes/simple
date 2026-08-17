@@ -1,7 +1,8 @@
 # Bug: JIT silently loads 0 for the read side of `obj.field += v` (struct-field compound assignment)
 
 - **Date:** 2026-07-27
-- **Status:** FIXED 2026-08-01 — see "Root cause + fix" at the bottom.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   The title is wrong and is kept only for searchability: nothing loads zero, and
   nothing is struct-field-specific. The operator was being discarded.
 - **Severity:** CRITICAL — silent wrong results, default execution engine, long-standing

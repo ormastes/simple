@@ -1,5 +1,8 @@
 # Command-stream boundary (`vulkan.submit.command_stream@1`, lane R4/B3): no Intel GPU on capture host, and no candidate encoder anywhere
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-08-11
 **Lane:** R4 / SoC lane B3 (Intel Gen12 / Xe-LP, counterpart Mesa `anv`)
 **Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
@@ -127,3 +130,34 @@ that could be worked without any silicon: there is still no command-stream
 encoder under `src/os/drivers/gpu/board_vulkan/`, so even with Intel hardware the
 candidate side stays `ProviderStatus.unavailable`. Status: OPEN, correctly
 hardware-gated on the counterpart side, encoder-gated on the candidate side.
+
+---
+
+## 2026-08-17 — CLAIM REFUTED, row needs re-scoping (GPU slice worker E)
+
+Classified by CONTENT against current source, not by commit ancestry.
+
+The triage evidence asserts "the missing encoder is a real code gap". **That
+is wrong.** `src/os/drivers/gpu/board_vulkan/encoder_intel_gen12.spl` exists
+(11,437 bytes) and is a real Gen12 command-stream encoder. Its own header
+(`:5-8`) states the distinction explicitly — that everything else in the
+directory declares capability while this file actually emits Gen12 dwords. It
+encodes MI/GFXPIPE command types, honours the `dword_length_field`
+count-minus-2 convention, emits little-endian dwords, and carries per-field
+confidence annotations. `cmdstream_adapter_gen12.spl` (7,804 bytes)
+accompanies it.
+
+The 1,159-byte `backend_intel_gen12.spl` cited in the `file` column is small
+**by design**: it holds only the `BoardGpuProfile` declaration (`:18-30`). It
+was never the encoder, so its size is not evidence of a missing encoder.
+
+### What IS genuinely open
+
+Stage-4 **submit + readback** on real Intel silicon — `TODO(hw-gated)` at
+`backend_intel_gen12.spl:11-14`. That is a hardware-availability blocker (this
+host has NVIDIA only), exactly as the doc's title says, and it is not
+closeable by writing code.
+
+Recommended re-scope: "vulkan.submit.command_stream@1 Intel Gen12 submit and
+readback unproven — hardware absent". The encoder-gap half of this row should
+be dropped.

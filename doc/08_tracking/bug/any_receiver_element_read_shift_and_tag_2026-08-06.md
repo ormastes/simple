@@ -1,5 +1,8 @@
 # Reading an element off an `any` receiver: three forms, three different results
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Filed:** 2026-08-06 · **Severity:** high (silent wrong data, no diagnostic)
 **Found by:** WS-D 2D perf work (`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`)
 **Engine:** JIT (Cranelift) via `bin/release/x86_64-unknown-linux-gnu/simple`
@@ -66,3 +69,52 @@ Repro probe (parity, dense over `da`, `sa` at 0/1/2/127/128/253/254/255):
 3. Until fixed, `as u32` (or a typed-array temporary) is the only safe read.
    Audit other `: any` framebuffer/byte-buffer parameters that do bit
    arithmetic on element reads.
+
+---
+
+## 2026-08-17 — triaged by GPU slice worker E: SITE MITIGATED, GENERIC DEFECT STILL OPEN, root cause OUT OF SLICE
+
+Classified by CONTENT against current source, not by commit ancestry.
+
+### Why this row was routed to the GPU slice, and why the fix is not here
+
+The `file` column points at
+`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`, but that is where the
+defect was *found*, not where it lives. The three-forms-three-results
+behaviour is an element read off an `any` receiver mis-lowering the runtime
+tag — a codegen defect in the MIR/backend lanes
+(`src/compiler/50.mir/**`, `src/compiler/70.backend/**`,
+`src/compiler/20.hir/hir_lowering/**`). Those paths are explicitly claimed by
+other lanes in this fleet, so this worker did not touch them. **Reported as
+SKIPPED-claimed for the root cause.**
+
+### State of the reporting site (in scope, and already mitigated)
+
+`simd_kernels.spl` passes `any` receivers in 15 functions (`:422`, `:447`,
+`:465`, `:506`, `:517`, `:544`, `:551`, `:559`, `:566`, `:574`, `:588`,
+`:593`, `:613`, `:647`, `:651`), so the blast radius named in the original
+report is real and unchanged.
+
+However, the site-level workaround the report identifies as the ONLY correct
+form — `dst[idx] as u32` — is already applied here, and carries a comment
+naming this exact defect (`_scalar_blend_row`, `:465` ff.):
+
+    # `dst` is `any`; the explicit u32 cast pins the element to a typed
+    # integer before the bit ops. Without it, the seed's MIR lane loses …
+
+So the `PARITY_DIFFS=210` field impact is mitigated at this call site. No
+further change was made to this file for this row: switching these signatures
+away from `any` would be an API change well beyond the bug, and re-lowering
+the read correctly is the codegen lane's job.
+
+### What this worker could NOT prove
+
+- That the generic defect is still live. Confirming it needs a subprocess
+  JIT-vs-interpreter comparison (a spec body runs interpreted and can never
+  show a JIT tag defect), and the `test-slot` queue was saturated by a
+  stage-3 bootstrap plus ~10 concurrent lanes for this session's duration.
+- That no OTHER `any`-receiver site in the tree is missing the `as u32`
+  mitigation. Only `simd_kernels.spl` was audited; a tree-wide census was out
+  of scope under the no-mass-sweeps constraint.
+
+Status left OPEN (P1) deliberately.

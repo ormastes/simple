@@ -6,7 +6,8 @@ that mutate an array parameter in place, but ONLY under the BDD test runner.
 **Component:** Rust seed interpreter — function-call / closure execution
 (`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`,
 `interpreter_call/core/function_exec.rs` Bug #19 write-back).
-**Status:** Source fixed; execution verification pending.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 

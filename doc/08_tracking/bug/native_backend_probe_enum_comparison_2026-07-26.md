@@ -1,5 +1,8 @@
 # Native Backend Probe Enum Comparison
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 Resolved by routing comparisons through `backend_probe_initialized`, in the

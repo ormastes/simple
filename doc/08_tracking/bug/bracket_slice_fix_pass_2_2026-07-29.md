@@ -1,5 +1,8 @@
 # Bracket-slice byte-index survey — fix pass 2 (2026-07-29)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Batch 2, follow-up to `bracket_slice_fix_pass_1_2026-07-29.md` (`1bd388912f5`)
 and the harness root-cause (`9186d5daa73`). Per the harness finding,
 `bin/simple test` is NOT used as the gate here — every claim below is

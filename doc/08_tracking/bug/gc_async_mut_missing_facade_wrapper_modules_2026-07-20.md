@@ -3,7 +3,8 @@
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/gc_async_mut/**`
-**Status:** open — same defect class as the already-FIXED
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 `dbfs_checkpoint_facade_spec_self_not_found_2026-06-11.md` "Defect 2", but a
 different/newer set of subsystems; needs the same treatment (or the earlier
 fix regressed — not distinguished here, see Regression note).

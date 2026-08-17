@@ -1,6 +1,7 @@
 # dbfs_checkpoint_attr_facade specs still red: `self` not found + missing gc tier module
 
-- **Status:** FIXED 2026-06-11
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Found:** 2026-06-11, exposed by the `gen` → `slot_gen` rename (see
   `dbfs_checkpoint_gen_reserved_keyword_2026-06-11.md`); previously MASKED
   because the spec failed earlier at the reserved-keyword parse error.

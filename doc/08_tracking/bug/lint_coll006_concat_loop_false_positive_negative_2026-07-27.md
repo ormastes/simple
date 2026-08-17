@@ -1,7 +1,8 @@
 # Bug: lint COLL006 "string concat in loop" fires on concat-free fns and misses a real concat loop
 
 - **Date:** 2026-07-27
-- **Status:** fixed 2026-07-28 (working copy) — see .spipe/lint_coll006/state.md
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** medium (noise + missed real finding)
 - **Found by:** SimpleOS harden lane P7 (config_core)
 

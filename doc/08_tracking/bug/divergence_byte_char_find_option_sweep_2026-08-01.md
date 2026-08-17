@@ -1,7 +1,8 @@
 # Divergence sweep: byte-vs-char + find/rfind-as-Option — IN PROGRESS
 
 - **Id:** divergence_byte_char_find_option_sweep_2026-08-01
-- **Status:** In Progress — NOT YET DONE (ongoing; yield decreasing, not zero)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** P2 — silent product-correctness divergences across `src/**`
 - **Component:** cross-cutting (`src/compiler`, `src/lib`, `src/app`)
 

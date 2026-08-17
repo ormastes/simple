@@ -14,7 +14,8 @@
   `engine2d_host_gpu_runtime_emit_payload_text`
   (`src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl:139,150,177-178,309-320`).
   Reproduced in interpreter mode on macOS aarch64.
-- **Status:** OPEN — found 2026-07-08 while wiring the #39 SOSIX GPU lane
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   (Gap #2). Worked around in Simple (see below). Fix is Rust-seed
   (bootstrap-only), so not attempted here per the seed-is-bootstrap-only rule.
 

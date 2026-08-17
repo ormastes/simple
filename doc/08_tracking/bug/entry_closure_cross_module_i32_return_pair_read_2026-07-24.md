@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-24
 - **Severity:** P0 wrong-code on 32-bit targets (silent); type-degradation on all targets
-- **Status:** FIXED — prescan registration in `prescan_module_struct_names` + global name-keyed registry in `mir_data.spl`
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 

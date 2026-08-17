@@ -2,7 +2,8 @@
 
 Date: 2026-06-06
 
-Status: Open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Summary
 

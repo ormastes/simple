@@ -58,3 +58,34 @@ families must be renamed apart). When fixed, the 2 RED examples in
   have no std.process equivalent) and `verification/lean/proof_ref.spl` imports
   `io.fs.list_dir` which the resolved io.fs dict does not provide. Only
   exercised when a Lean toolchain is present.
+
+## Resolution (2026-08-17, later same day)
+
+**REPRODUCED before fixing**, on the deployed binary:
+
+    Results: 5 total, 3 passed, 2 failed
+
+with the two documented errors, plus the compiler's own diagnostic naming both
+files and prescribing the remedy verbatim:
+
+> warning: class `ContractExpr` has 2 co-compiled definitions across 2 modules;
+> the interpreter resolves class members by NAME across modules ... Defined in:
+> `.../verification/lean/contracts.spl`, `.../verification/models/contracts.spl`.
+> **Rename one of the classes to a unique name.**
+> `[compiler_cross_module_private_symbol_collision]`
+
+**Fix taken: the rename, not an interpreter change.** A census of the two
+families showed the `lean/contracts.spl` pair is a self-contained duplicate with
+**no external consumers**: every other module — including `lean/expressions_eval.spl`,
+which sits in the same package — already imports `ContractExpr`/`ContractExprKind`
+from `verification.models.contracts`. The only outside reference was
+`lean/__init__.spl:82`, which re-exported the *wrong* family. So the lean pair
+was renamed to `LeanContractExpr` / `LeanContractExprKind`
+(`src/compiler_rust/lib/std/src/verification/lean/contracts.spl`, 55 sites; the
+`__init__.spl` export updated to match).
+
+**Not fixed here (deliberately):** the underlying interpreter behaviour — class
+and enum member lookup keyed by a global type-name table rather than by the
+aliased module — is unchanged. It is out of this lane's file scope, and it
+remains a live latent hazard for any future same-named pair. The "Unblock
+condition" section above still describes the real compiler-side fix.

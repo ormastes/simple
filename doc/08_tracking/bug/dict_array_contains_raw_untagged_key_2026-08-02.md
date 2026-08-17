@@ -1,6 +1,7 @@
 # `.has()` / `.contains()` / `in` answer membership questions with an untagged key
 
-- **Status:** OPEN — root cause PROVED, **emitter LOCATED 2026-08-02** (Rust seed
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   LLVM backend `bare_rt_redirect`, see "The emitter, LOCATED"), codegen fix
   specified but NOT landed (no host pipeline can verify it; see "Reproduction
   gap")
@@ -262,3 +263,28 @@ inside an `it` block is silently INERT in this spec DSL — `assert 1 == 2` stil
 reported `7 passed, 0 failed`. Only `expect(...).to_equal(...)` actually
 asserts. Any spec in this tree written with bare `assert` should be treated as
 unverified until converted.
+
+
+## Re-measurement 2026-08-17 (P0-core silent-wrong triage lane) — NOT REPRODUCED
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+2026-08-16 22:59:37 UTC (Rust seed). Probes run under both
+`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`.
+
+`d.has(k)` for a key that IS present now returns `true` on both engines:
+
+```
+var d: Dict<text, i64> = {}
+d.set("k", 1)
+print d.has("k")     # -> true, interpreter and JIT
+```
+
+No `[mir-lower] WARNING: unresolved method call 'has' lowered to const-0` was
+emitted on either run — the doc names that warning as the emitter's signature,
+and its absence is the second, independent signal that this path no longer
+takes the unresolved arm.
+
+**Scope of this close.** Only the `text`-keyed `.has()` shape on the Rust-seed
+interpreter and JIT was measured. The doc also covers `.keys`, `.contains`,
+`in`, and array receivers; those were NOT re-measured, so this is not a
+whole-doc close. Reduce the doc's scope rather than resolving it outright.

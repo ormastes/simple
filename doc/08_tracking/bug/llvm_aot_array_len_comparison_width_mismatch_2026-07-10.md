@@ -1,7 +1,8 @@
 # LLVM AOT Width Lookup and Array-Index Pointer Blocker
 
 - **Date:** 2026-07-10
-- **Status:** RESOLVED. width mismatch fixed (d984ee9); array-index pointer
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   half SUBSUMED by 7dc19b547ab (#138) + 67650325 — see Resolution below.
 - **Area:** LLVM AOT lowering
 

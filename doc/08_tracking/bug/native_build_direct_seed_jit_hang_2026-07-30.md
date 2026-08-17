@@ -1,6 +1,7 @@
 # `native-build` invoked directly against the seed hangs under JIT; `SIMPLE_EXECUTION_MODE=interpret` terminates. Mechanism UNKNOWN — an earlier version of this doc asserted a wrong explanation; see the correction below.
 
-**Status:** open, mechanism honestly unresolved after eight tested
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 explanations. **Confirmed:** default-mode `native-build`, invoked directly
 against the Rust seed binary, never terminates; `SIMPLE_EXECUTION_MODE=interpret`
 terminates on two independent trees. **NOT confirmed:** why. An earlier

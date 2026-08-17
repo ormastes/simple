@@ -1,5 +1,8 @@
 # `exp` app CLI: experiment script execution falls back to usage/help text instead of delegating
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Component:** `src/app/exp/main.spl` CLI script-delegation path
 **Severity:** Low-Medium — single isolated example; 4 of 5 examples in the

@@ -2,7 +2,8 @@
 
 Date: 2026-07-15
 
-Status: trust anchor implemented for semantics v1; semantics-v2 regeneration is
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 blocked by the deployed self-hosted runner, and retained CUDA device readback
 remains pending (2026-07-25)
 
@@ -131,3 +132,9 @@ CUDA device-origin readback pass.
 The current semantics-v2 regeneration blocker and bounded retry evidence are
 tracked in
 `doc/08_tracking/bug/portable_compute_cuda_emitter_pure_simple_segfault_2026-07-17.md`.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT.** `src/lib/nogc_sync_mut/package/build.spl:159`
+still returns the literal `"checksum_placeholder"`. Unchanged from the filed
+evidence.

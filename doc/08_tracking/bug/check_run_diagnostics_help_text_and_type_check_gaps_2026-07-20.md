@@ -1,5 +1,8 @@
 # `simple check`/`simple run` diagnostics: missing `help:` annotations + `check` not detecting type mismatches
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-20
 **Component:** `simple check` / `simple run` CLI diagnostics output
 (`bin/release/x86_64-unknown-linux-gnu/simple`)
@@ -84,3 +87,41 @@ Rust-seed source fix in this triage pass.
 Both spec files are correct as written and left unmodified — the "never
 weaken an assertion" rule applies; these are real coverage/contract gaps,
 not stale test syntax.
+
+## Re-confirmed OPEN 2026-08-17 (content classification, no fix attempted)
+
+Classified against current source, not commit ancestry.
+
+**Type-mismatch gap: CONFIRMED STILL OPEN.** `check_one_profiled`
+(`src/app/check/main.spl:209-266`) is the whole of what `simple check` does per
+file, and its entire analysis is:
+
+- `check_sspec_guidance(source, path)` — sspec authoring guidance;
+- `parse_module(source, path)` then `parser_get_errors()` / `parser_has_errors()`
+  — **parsing only**;
+- `run_concurrency_api_lint(source, path)` — a line-oriented textual lint over
+  `use` lines and call spellings (see `concurrency_api_lint_errors`, same file).
+
+There is no call into any type-checking or semantic-analysis pass anywhere on
+this path — no HIR lowering, no inference, no pool of resolved types beyond
+`reset_all_pools()`, which only recycles parser arenas. A file that parses
+cleanly but assigns `text` to an `i64` is therefore reported as
+`All checks passed`. The doc's claim that `check` "does not detect type
+mismatches at all" is accurate as written.
+
+**Not fixed here, deliberately, with the reason stated rather than deferred
+silently:** closing this gap means wiring a real semantic/type pass into the
+check entrypoint. That work lands in the frontend/HIR layers, which are owned by
+other lanes this session, and it is a feature implementation rather than a
+defect repair — writing a stub that pattern-matches a few mismatch shapes would
+manufacture a false sense of coverage, which is the same false-green class this
+bug already describes.
+
+**Help-annotation gap: NOT re-verified.** `print_help`
+(`src/app/check/main.spl:43-58`) documents only the log-mode/surface/progress
+option surface and carries a comment binding it to `check_option_error`. Whether
+that satisfies the doc's `help:` annotation requirement was not established, so
+this half is left OPEN and unproven rather than claimed either way.
+
+Status: OPEN. Type-mismatch half proven still live by source inspection;
+help-annotation half not proven in either direction.

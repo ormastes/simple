@@ -173,3 +173,25 @@ control confirms the gate still fires.
 - No stage3 error-count table is reported: the run at this tip exited 143
   (SIGTERM), and per `glob_ungate_swaps_import_winners_2026-08-01.md` a count
   census is structurally blind to winner swaps anyway.
+
+## Re-verification 2026-08-17
+
+The two `TypeAlias` symbol-creation sites this doc cites
+(`module_lowering.spl:632`, `module_lowering.spl:1855`) and the
+alias-target consumers (`alias_registry.spl:211-217`,
+`module_surface.spl` copy-only read) live under `src/compiler/20.hir/` and
+`src/compiler/35.semantics/lint/semantic_api/alias_registry.spl`. The actual
+defect — `SymbolTable.define` last-write-wins for `SymbolKind.TypeAlias`, and
+`lower_named_kind` never expanding an alias — is owned entirely by
+`src/compiler/20.hir/` (symbol table + `hir_lowering/types.spl`), which is
+outside this worker's scope lock (`30.types, 35.semantics, 90.tools,
+95.interp`). `alias_registry.spl` itself only reads the already-collapsed
+`module.type_aliases` dict passed in; it does not participate in the
+last-write-wins symbol definition and has no fix to make on its own.
+
+Status unchanged: latent, no live miscompile today (confirmed by this doc's
+own probe matrix), becomes live only once alias transparency is implemented
+in `20.hir`.
+
+**Verdict: BLOCKED (real fix belongs in `src/compiler/20.hir/`, out of scope
+for this worker). No code change made.**

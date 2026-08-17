@@ -1,5 +1,8 @@
 # Bootstrap Parser Rejects Nested Else Comparison
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 FIXED AND CLEARED IN FULL BOOTSTRAP. The focused parser executable passes, and

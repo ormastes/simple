@@ -1,5 +1,8 @@
 # BUG: JIT struct assignment ALIASES instead of copying (interpreter copies)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 > **MOSTLY RESOLVED 2026-08-10 — stale-binary measurement.** The binary
 > measured below (deployed 2026-08-09 04:50) predates the F1 campaign that
 > landed later the same day: `735bbd4b606` (S3: carry struct-vs-class
@@ -173,3 +176,52 @@ assignment is unknown and must be measured separately.
 If the language intends value semantics for structs (consistent with the
 text/array rulings and interpreter behaviour), the JIT must copy structs on
 assignment, argument passing, return, and container extraction.
+
+## 2026-08-17 re-verification (lane s2_rust_codegen) — headline claim ALREADY FIXED; narrow this row
+
+Reproduced first, on both engines, then classified by CONTENT of current source
+(not by commit ancestry, which is unsound in this repo).
+
+### Cross-engine reproduction (a spec body runs interpreted, so a subprocess comparison is the only valid probe)
+
+Fixture: `struct Flat`; `var f2 = f; f2.a = 7.0`; print original and copy.
+
+| engine | output | rc |
+|---|---|---|
+| Cranelift JIT (`bin/simple run`) | `ORIG f.a=1.0` / `COPY f2.a=7.0` | 0 |
+| interpreter (`SIMPLE_EXECUTION_MODE=interpreter`) | `ORIG f.a=1.0` / `COPY f2.a=7.0` | 0 |
+
+Identical — the aliasing does not reproduce. The JIT lane genuinely executed:
+no `JIT compilation failed, falling back to interpreter` line appeared in the
+captured output (that line *does* appear when the JIT path is unavailable, so its
+absence is a positive control, not an assumption).
+
+The doc's residual container-extraction cell (`var e = lst[0]; e.a = 77.0`) also
+agrees across engines (`LIST lst0.a=1.0` / `CTRL 1.0` on both) — the previously
+reported JIT `77.0` write-through is gone.
+
+### Content evidence
+
+`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:922-956`
+`copy_if_value_type` emits a real copy rather than a pointer move:
+- `:947` pushes `MirInst::AggregateCopy { dest, src, byte_size, type_name, deep_fields }`
+  into a **fresh** `dest` vreg (`:945`), with `byte_size = fields.len() * 8` (`:935`).
+- `:943` `struct_deep_fields(...)` builds the recursive nested-struct descriptor,
+  i.e. residual item 1's fix is present in source.
+- `:929` the gate `type_value_kinds.get(&name) != Some(&true)` is fail-closed to
+  declared `struct`.
+
+The assignment sites route through it:
+`lowering_stmt.rs:273` (the `val b = a` copy site) and `lowering_stmt.rs:444`
+(field-assign value copy).
+
+### Verdict
+
+ALREADY FIXED for the claim in the title. Recommend narrowing this row to the one
+residual that was NOT settled — item 2, the `m[1][0] = 9` interpreter rejection at
+`interpreter/node_exec.rs:1481`, which is an interpreter-side gap in the opposite
+direction from this bug — rather than closing outright.
+
+### Could NOT prove
+- The AOT/native lane was not exercised separately (item 3 remains unmeasured).
+- Item 2 was not reproduced; it is outside this lane's subsystem.

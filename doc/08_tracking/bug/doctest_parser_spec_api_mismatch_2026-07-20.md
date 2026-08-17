@@ -1,6 +1,7 @@
 # Bug: doctest parser_spec tests a removed/older API shape
 
-- **Status:** open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Filed:** 2026-07-20
 - **Affected spec:** `test/unit/doctest/parser_spec.spl`
 - **Command:**

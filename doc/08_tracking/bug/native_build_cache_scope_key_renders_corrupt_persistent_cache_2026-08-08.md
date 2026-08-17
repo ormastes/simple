@@ -1,7 +1,8 @@
 # Persistent native-build cache has no GC and a key that has rendered corrupt
 
 - **ID**: native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08
-- **Status**: OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity**: HIGH (guaranteed unbounded disk leak on a 95%-full disk; plausible silent wrong-binary path in the stage-3 lane)
 - **Found by**: adversarial review of `5b569e96986d` ("stop wiping stage2/stage3 native-build cache every run")
 - **Files**:
@@ -308,3 +309,29 @@ scopes to `remove_entry` each other, non-atomic `BuildCache.save()`) are all
 real and all remain open. They are correctness/efficiency issues in the key
 and cache-index design, independent of both the GC gap and the persistence
 change, and none of them is a disk-growth vector.
+
+## Verification 2026-08-17 (w02/s4 lane) — GC half CONFIRMED LIVE
+
+Classified by CONTENT (session brief CORRECTION 1).
+
+Split verdict, matching the triage row:
+
+- **Key half: FIXED.** `native_build_cache_scope_key` is present in
+  `src/compiler/80.driver/driver_build/incremental.spl` at line 198, and
+  `.claude/rules/commands.md` documents the lane axis (`SIMPLE_CACHE_SCOPE` /
+  `--cache-scope`) landing 2026-08-17, partitioning entries by a scope-derived
+  directory.
+- **GC half: LIVE.** `grep -c 'cache_gc\|prune\|evict\|gc_'` over that same file
+  returns **0**. There is no eviction, no pruning, and no size cap anywhere in
+  the file that owns the cache scope key. The persistent native-build cache
+  therefore still grows without bound on an already 95%-full volume.
+
+Scoping entries by lane (the 2026-08-17 change) makes this *worse*, not better:
+each additional scope gets its own directory of entries, and nothing reclaims any
+of them.
+
+**Verdict: LIVE (GC half only). No patch applied** — adding cache eviction is a
+design change (retention policy, LRU vs size cap, concurrency against the live
+bootstrap writing into `build/bootstrap/native_cache/<lane>/`), not a bug fix,
+and this lane was instructed not to touch `build/bootstrap/**`.
+Not proven: actual disk consumption was not measured this session.

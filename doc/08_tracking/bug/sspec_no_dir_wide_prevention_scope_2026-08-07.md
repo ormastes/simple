@@ -81,3 +81,26 @@ the current opt-in gap.
 - Guide: `doc/07_guide/infra/testing/prevention_mocks.md`.
 - LLM wiki: `doc/00_llm_process/feature_expert/prevention_mocks/skill.md`.
 - Layer expert: `doc/00_llm_process/layer_expert/test_runner/skill.md`.
+
+## Evidence note — 2026-08-17 (CONFIRMED BY CONTENT, still OPEN, doc-only)
+
+Verified by content, not by SHA ancestry. The gap is real and unchanged:
+
+- `grep` for any directory-scoped spec-config hook across
+  `src/lib/nogc_sync_mut/spec.spl` and `src/lib/common/spec/**` finds
+  **zero** hits for `spec_dir` / `prevent_dir` / `spec_config` / any
+  per-directory config file convention. The only `sspec`-namespaced
+  constants that exist are evidence-manifest schema names
+  (`simple.sspec.evidence.v1`, `simple.sspec.counterpart.v1`,
+  `simple.sspec.evidence.ext.v1`) — unrelated to prevention scope.
+- `spec.spl`'s own `prevent_file` docstring still states that even
+  **file** scope is unachievable under this runner ("module-level spec state
+  does not persist from one `it` example to the next"), and
+  `prevent_file()` is a plain forwarder to `prevent()`. Directory scope is
+  therefore two levels away from anything the runner can express today.
+
+No feature was built (this row was explicitly scoped to verify-and-record).
+Nothing to reproduce: there is no code path to run, so no `Results:` line
+applies. Remains a design gap; the blocker is upstream of prevention-mock
+scope — the runner needs per-example persistence of module-level spec state
+before any file- or directory-wide scope can be honest rather than fail-open.

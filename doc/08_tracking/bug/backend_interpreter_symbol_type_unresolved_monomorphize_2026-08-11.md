@@ -1,5 +1,8 @@
 # backend/interpreter.spl `unresolved type: Symbol` at stage4 native-build (2026-08-11)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Symptom
 
 Full bootstrap attempt (`/mnt/data/simple-option-config-f64-candidate/build/st4-final-fa1a`)
@@ -141,3 +144,20 @@ case D)").
   `focused native-build` against `src/compiler/backend/backend/interpreter.spl`
   and confirm `unresolved type: Symbol` no longer appears. This was
   explicitly out of scope for this investigation (hours of machine time).
+
+## Re-verification 2026-08-17 (fleet lane C, by CONTENT)
+
+NOT REPRODUCED here, and the docs premise is partly stale.
+
+- `grep "^type Symbol|^struct Symbol|^enum Symbol" src/compiler/20.hir/` is EMPTY —
+  the alias the doc says should resolve `Symbol` is genuinely absent. That half stands.
+- However `src/compiler/backend/backend/interpreter.spl` (528 lines) does NOT reference a
+  bare `Symbol` type. Its import is `use compiler.hir.hir_types.{HirSymbol, Effect}` (line 9)
+  and every other occurrence is `SymbolId` or `HirSymbol`. So the specific unresolved
+  reference the title names is no longer present in this file.
+- The failure was observed only at a **stage4 native-build**, which cannot be re-run in this
+  session (a stage-3 bootstrap is holding the host at ~98% CPU and the lane is forbidden to
+  touch `build/bootstrap/**`).
+
+UNPROVEN: whether stage4 still fails. The in-file evidence suggests the cited symbol is gone,
+but that is not the same as proving the build is green. Re-verify at the next full bootstrap.

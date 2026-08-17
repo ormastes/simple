@@ -76,3 +76,22 @@ re-evidenced rather than merely restated.
 
 Reopen condition (mechanical, so this does not rot): the grep above returning a
 non-zero count. Until then this is not a gap, it is a scope boundary.
+
+### Sub-claim checked and REJECTED 2026-08-17: the docstring is not lying
+
+A triage pass flagged `return_type_mismatch.spl:21` as an "actively lying
+docstring" claiming lambdas are handled, on the strength of a bare
+`grep -i lambda` hit. Read in context that is the opposite of what it says:
+
+```
+20  # The real fix belongs in the type checker and must reconcile tail
+21  # expressions, `return` in every branch, lambdas, trait impls and generics.
+22  # Landing that as a hard error against an uncensused corpus turns the build
+23  # red. The agreed sequence is warn -> census -> error. This module is the
+24  # WARN half.
+```
+
+The sentence enumerates what the *future type checker* must reconcile and
+explicitly scopes this module to the WARN half. It is the only `lambda`/
+`closure` occurrence in the file. No docstring edit is warranted; do not
+"fix" it on the next pass.

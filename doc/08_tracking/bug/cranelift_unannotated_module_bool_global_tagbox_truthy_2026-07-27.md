@@ -1,7 +1,8 @@
 # Un-annotated module-level `val x = false` is stored tag-boxed (19) and reads TRUTHY
 
 - **ID:** cranelift_unannotated_module_bool_global_tagbox_truthy_2026-07-27
-- **Status:** OPEN — root-caused, reproduced at object level, not fixed
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high (silent wrong-branch; no diagnostic, no crash)
 - **Backend:** Cranelift. LLVM backend not tested (see Unverified).
 - **Trigger config:** `--entry-closure --mode dynload --emit-archive --target x86_64-unknown-none --opt-level=none`

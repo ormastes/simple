@@ -1,5 +1,8 @@
 # HIR lowering: "cannot infer field type" is the only signal for an undeclared struct field (no file:line to the real defect)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **Date:** 2026-08-08
 - **Severity:** P2 (blocks native build of any closure that reaches the affected struct; misleading diagnostic hides the real defect)
 - **Repro (before fix):** `SIMPLE_BIN=build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` (native-build step)

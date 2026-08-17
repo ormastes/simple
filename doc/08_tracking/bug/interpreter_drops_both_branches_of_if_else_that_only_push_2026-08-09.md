@@ -1,7 +1,8 @@
 # Tree-walk interpreter silently drops BOTH branches of an if/else whose bodies only `push`
 
 **Date:** 2026-08-09
-**Status:** NOT REPRODUCIBLE (2026-08-09 follow-up; regression spec landed)
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## 2026-08-09 follow-up: cannot reproduce on any engine
 

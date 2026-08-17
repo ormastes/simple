@@ -2,7 +2,8 @@
 
 - **Date:** 2026-06-13
 - **Severity:** P1 crash — **FIXED** (JIT now falls back to interpreter instead of crashing). Native-codegen *feature* gaps remain (see Follow-ups).
-- **Status:** Crash guarded/fixed; feature follow-ups Open.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** codegen / cranelift JIT symbol binding; module import flattening.
 
 > **NOTE — original diagnosis was WRONG.** This file first blamed a runtime

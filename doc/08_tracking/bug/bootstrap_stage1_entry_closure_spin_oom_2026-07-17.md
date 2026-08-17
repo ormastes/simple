@@ -1,5 +1,8 @@
 # Bootstrap Stage 1: seed native-build CPU-spins with runaway allocation on src/app entry closure (2026-07-17)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Severity: release blocker.** Blocks the entire Linux redeploy chain: stage1
 never completes → self-hosted binary cannot be rebuilt → deployed stale seed
 (Jul 11) lacks `rt_cli_arg_count` → dozens of gate specs fail at semantic phase

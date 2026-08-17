@@ -1,7 +1,8 @@
 # JIT HIR lowering: module-alias references and `panic` intrinsic unsupported
 
 Date: 2026-07-02
-Status: open (workarounds in place)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Severity: P2 (every affected program silently falls back to the interpreter)
 Related: doc/08_tracking/bug/jit_lowering_clamp_f_engine_color_2026-07-02.md
 
@@ -29,3 +30,17 @@ HIR lowering should resolve `alias.member` exactly as the interpreter does,
 and `panic` should lower to the runtime abort path. Until then, any library
 using module aliases quietly loses JIT for the whole program — the perf
 cliff is ~100x (one breakout frame: <1 s JIT-target vs >280 s interpreted).
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — SPLIT: panic FIXED, module alias LIVE
+
+- `panic` intrinsic: **fixed**. `compiler/src/hir/lower/expr/calls.rs:545` —
+  `"panic" => Ok(Some(self.lower_builtin_call("rt_panic", args, TypeId::NIL, ctx)?))`,
+  with the bare-`panic()` default-message path at `calls.rs:415-425`.
+- Module alias (`use m as g`): **still LIVE**. The only alias resolution in
+  lowering is for *selective*-import aliases (`hir/lower/lowerer.rs:800-803`,
+  consumed at `hir/lower/expr/mod.rs:295`); `grep module_alias` over
+  `hir/lower/` returns zero hits. `g.Canvas` still reaches
+  `LowerError::UnknownType` (`hir/lower/error.rs:22`) and `g.run(...)`
+  `UnknownVariable` (`expr/mod.rs:282`/`:380`), and under `lenient_types` that
+  becomes a silent unresolved global — so the interpreter fallback persists.
+This doc should be re-scoped to the module-alias half only.

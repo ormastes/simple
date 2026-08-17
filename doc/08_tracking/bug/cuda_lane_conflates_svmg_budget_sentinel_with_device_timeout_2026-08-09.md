@@ -1,7 +1,8 @@
 # CUDA lane reads the SVM-G budget sentinel as a device timeout, making budget expiry unobservable to a debugger
 
 - **Date:** 2026-08-09
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Component:** `src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl`
 - **Found by:** P6 (DBG-1/PROF-1 CUDA wrapper), running the D3 debug
   conformance vector `budget_expiry_while_debugging` on a live device.

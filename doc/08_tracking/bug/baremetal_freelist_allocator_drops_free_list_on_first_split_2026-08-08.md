@@ -1,6 +1,7 @@
 # FreeListAllocator drops its free list on the first splitting alloc; memory paths remain unexecutable
 
-- **Status:** FIXED (§1 and §2 below; §3's host-address blocker is unchanged and still open)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Found:** 2026-08-08, adversarial review of `c2b75d56dd46`
 - **Fixed:** 2026-08-08, this session
 - **File:** `src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl`

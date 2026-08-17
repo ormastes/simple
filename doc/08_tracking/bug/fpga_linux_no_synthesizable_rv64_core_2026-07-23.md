@@ -1,5 +1,8 @@
 # BLOCKER: no synthesizable rv64 core → Linux cannot run on the real FPGA
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-23
 **Severity:** blocker (board-runnable rule: "when board-run is genuinely blocked, say so explicitly and file it")
 **Goal it blocks:** "run Linux on the real FPGA to harden Simple RISC-V 32/64"

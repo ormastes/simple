@@ -1,5 +1,8 @@
 # BUG: --emit-smf produces 219-byte stub regardless of module content
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **ID:** emit_smf_stub_drops_module_content_2026-06-12
 **Severity:** P1 (blocks binary distribution of UI artifacts)
 **Discovered:** 2026-06-12

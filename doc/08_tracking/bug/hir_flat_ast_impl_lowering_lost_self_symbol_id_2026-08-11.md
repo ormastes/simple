@@ -1,6 +1,7 @@
 # HIR flat-AST impl lowering lost `current_method_self_symbol_id` save/set/restore
 
-- **Status:** OPEN (regression present at `origin/main`)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found:** 2026-08-11, during skeptical review of landed refactor commits
 - **Introduced by:** `83d21f1808` ("refactor(compiler): consolidate 4-way duplicated
   module-name-from-path derivation") — collateral, unrelated to that commit's stated scope

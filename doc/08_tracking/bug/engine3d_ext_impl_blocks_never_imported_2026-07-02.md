@@ -1,7 +1,8 @@
 # engine3d: `*_ext.spl` plain impl blocks are never imported — trait impls incomplete
 
 Date: 2026-07-02
-Status: open (CPU backend fixed; same latent bug in all other 3D backends)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Severity: P2
 Found by: W6 lane agent
 

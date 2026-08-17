@@ -1,5 +1,8 @@
 # native-build: missing --output directory → silent worker exit 1
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Date:** 2026-07-23
 - **Severity:** minor (UX) — cost two full ~25-min rebuild cycles to diagnose
 - **Repro:** `simple native-build ... --output build/bootstrap/repro/w66` where

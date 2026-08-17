@@ -13,7 +13,8 @@
 # User-fn f64 return is untyped in JIT binop coercion → garbage compare
 
 - **id:** native_call_return_f64_untyped_binop_2026-07-19
-- **status:** resolved 2026-07-20 (fixed on origin by `c8f5af510b8` — see top banner)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **severity:** medium (silent wrong result for `f(...) <cmp> <f64>` when `f` is a user fn returning f64)
 - **backend:** seed cranelift-JIT / `run` path (build_vreg_types). Orthogonal to the f64 heap-box precision fix.
 

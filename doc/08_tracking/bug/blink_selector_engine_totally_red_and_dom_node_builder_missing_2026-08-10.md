@@ -2,7 +2,8 @@
 
 **Filed:** 2026-08-10
 **Found by:** implementing `blink.style.cascade` (the style→paint resolver).
-**Status:** OPEN — both are pre-existing; neither is caused by the cascade.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 `blink.style.cascade` landed and `test/01_unit/lib/blink/style_cascade_spec.spl`
 went from `reason=unresolved-module` (0 executed) to `16 executed, 9 passed`.

@@ -1,6 +1,7 @@
 # gpu_memset_f32 discards its `value` argument and returns Ok(()) — blocked on a missing f32→u32 bitcast
 
-- **Status:** OPEN (wiring only) — CORRECTED 2026-08-07: the "missing f32 bitcast" blocker below was DISPROVEN, see the correction section
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Date:** 2026-08-06
 - **Severity:** high — silently-wrong success
 - **Sites:** `src/lib/gc_async_mut/gpu_ops.spl`, `src/lib/gc_async_mut/gpu_api.spl`

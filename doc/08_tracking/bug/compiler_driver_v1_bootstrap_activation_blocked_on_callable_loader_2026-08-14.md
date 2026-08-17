@@ -1,5 +1,8 @@
 # CompilerDriverV1 bootstrap activation is blocked on a callable provider loader
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Impact
 
 `src/compiler/80.driver/driver_provider_contract_v1.spl` and

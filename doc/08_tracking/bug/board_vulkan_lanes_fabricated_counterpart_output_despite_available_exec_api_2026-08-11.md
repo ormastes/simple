@@ -1,5 +1,8 @@
 # Board-Vulkan lanes compared against fabricated counterpart output while a process-exec API existed
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Filed:** 2026-08-11
 **Found by:** parent review of eight parallel boundary lanes + red-team audit
 (`doc/09_report/board_vulkan_lane_redteam_audit_2026-08-11.md`)
@@ -215,3 +218,39 @@ hour to reach its first output.
 Status: OPEN. Items 1 and 2 are closed by measurement; item 3 is unchanged; item
 4 is now a concrete, specified, spec-covered code defect rather than a lane-rework
 task.
+
+---
+
+## 2026-08-17 — ALREADY-FIXED (GPU slice worker E)
+
+Classified by CONTENT against current source, not by commit ancestry.
+
+The triage evidence line ("providers still return hardcoded strings") is
+**stale**. `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl`
+has since been rewritten and now drives the real exec API:
+
+- imports `use std.nogc_sync_mut.io.process_ops.{shell, ProcessResult}`;
+- `lavapipe_reference_enumeration()` calls `shell(_lavapipe_vulkaninfo_command())`,
+  checks `result.exit_code != 0`, and parses real stdout through
+  `parse_vulkaninfo_lavapipe()` — a genuine ~150-line parser that fails CLOSED
+  (returns `nil`) rather than substituting a literal;
+- `lavapipe_source_status()` returns `ProviderStatus.unavailable` when the
+  subprocess cannot run, instead of pretending success.
+
+At the line this doc singles out (old `:104`) there are now
+`_vendor_probe_reports_any_device()` and
+`_venus_transport_reports_device_payload()`, which **call**
+`GpuVendorRegistry.probe_all()` and the real `venus_icd_*` transport and derive
+availability from actual return values. No fabricated record remains in the
+file.
+
+### Residual gap (small, NOT the filed defect)
+
+`spec/evidence/format/exec_capture.spl` is still not imported — only
+`process_ops`. So the lane runs the real tool but does not persist a
+captured-evidence record. That is a separate, minor follow-up; the
+fabricated-output defect this doc filed is closed.
+
+Status: closed as ALREADY-FIXED. Not re-verified by execution — the
+`test-slot` queue was saturated this session — but the fabrication claim is
+refuted by source inspection alone, which is sufficient for this row.

@@ -3,7 +3,8 @@
 - **Date:** 2026-07-18
 - **Area:** compiler / 50.mir method lowering (cranelift native lane)
 - **Severity:** high (silent wrong result, no diagnostic)
-- **Status:** source fixed — rebuilt Cranelift verification pending after bounded three-cycle diagnosis
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 `val cp: i64 = 65; val s: text = cp.chr()` compiles without error on the

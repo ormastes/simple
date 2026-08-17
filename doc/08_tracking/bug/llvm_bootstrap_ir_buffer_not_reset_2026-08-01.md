@@ -1,7 +1,8 @@
 # Bootstrap LLVM IR buffer is never reset: every module after the first is emitted as (all previous modules ++ itself)
 
 - **Date:** 2026-08-01
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/compiler/70.backend/backend/llvm_ir_builder.spl`
 - **Severity:** High — pure-Simple LLVM backend emits IR that `llc` rejects for
   every module except the first one compiled in a process.

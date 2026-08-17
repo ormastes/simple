@@ -1,5 +1,8 @@
 # kafka crc32_table() 64-of-256 entries fix (2026-07-30)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Flagged (not fixed) in the pass-10 seed root-cause doc as a separate,
 pre-existing bug found while verifying the `serialization.spl` list-typed
 retype fix. Fixed this pass per the coordinator's priority ("small and

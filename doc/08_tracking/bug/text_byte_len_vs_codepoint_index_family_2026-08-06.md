@@ -172,3 +172,57 @@ engines** — so these are self-consistent (byte bound + byte slice) and are
 that `src/lib/common/json/parser.spl:82-84` describes. That note did not
 reproduce and should be corrected or deleted; a lane relying on it will draw
 the wrong conclusion.
+
+## Follow-up 2026-08-17 — primitive table RE-CONFIRMED; class-1a site at theme_package_wire hardened
+
+### The class is still real
+
+Re-measured on `bin/simple run` (seed binary) with the same probe string
+`"aé€😀z"` (5 codepoints, 11 bytes):
+
+| expression | measured 2026-08-17 |
+|---|---|
+| `"aé€😀z".len()` | 11 — **BYTES** |
+| `"aé€😀z".length()` | 11 — **BYTES** |
+| `"aé€😀z".char_at(4)` | `"z"` — **CODEPOINTS** (last cp at index 4) |
+| `for ch in "aé€😀z"` iterations | 5 — **CODEPOINTS** |
+| `char_at(overrun) == ""` | `true` (interpreter path) |
+
+So the mismatch that defines this family is unchanged: `len()`/`length()` are
+byte counts, `char_at`/`char_code_at` are codepoint-indexed, and `for ch in s`
+is the codepoint-correct iteration form.
+
+Two entries of the original table did NOT reproduce and should be re-measured
+before being relied on: `(97).chr()` now works (`-> "a"`), and
+`_theme_wire_parse_*` on multibyte input returned `Err` rather than aborting
+with `cannot cast str to i64`.
+
+### `theme_package_wire.spl:121,149` — hardened, but it never had an observable RED
+
+Honest finding: the two sites are byte-bounded exactly as documented, but they
+cannot be driven to a **wrong answer**. Both are digit *validators*: `char_at`
+is codepoint-indexed, so any non-ASCII codepoint is reached and rejected
+(`code < 48 or code > 57`) BEFORE the byte bound can over-run, and an overrun
+value coerces to `0`, which also fails the digit test. Probed directly:
+`_theme_wire_parse_u32("1é")` and `_theme_wire_parse_i32("-1é")` both return
+`Err`. Correct by accident, not by construction.
+
+Changed anyway, because "correct by accident" is one refactor away from wrong:
+both loops now iterate codepoints (`for ch in value:` + `ch.char_code_at(0)`)
+instead of `while i < value.len(): value.char_at(i) as i64`. No behaviour
+change is expected or observed. `_theme_wire_parse_i32`'s `start` offset is
+kept as a codepoint index — it is 0 or 1 and only ever skips an ASCII `-`.
+
+Specs added:
+- `test/01_unit/lib/common/ui/theme_wire_number_codepoint_bound_spec.spl`
+  (site: ASCII accept/reject contract + non-ASCII rejection, both parsers)
+- `test/01_unit/lib/common/text_byte_len_vs_codepoint_index_spec.spl`
+  (class detection: pins the byte-vs-codepoint primitive contract and the
+  shared codepoint-correct measurement leaf `common/layout/text_metrics.spl`
+  that both this family and the live-lane inline-text bug route through)
+
+### Re-checked and found clean
+
+`src/lib/common/image/ppm_decode.spl:137` is listed as class 1a but is not
+defective: its `header` is a locally built `"P6\n{width} {height}\n255\n"`,
+always ASCII, so byte length and codepoint count coincide by construction.

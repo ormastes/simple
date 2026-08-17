@@ -1,5 +1,8 @@
 # DirectX-family test triage: a real Windows Vulkan-probe bug (FIXED), a real `/bin/sh` runtime bug (FIXED, now verified end-to-end), and a chain of Windows Rust-seed rebuild blockers (ALL RESOLVED — full bootstrap now succeeds)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Update 2026-08-09 (later same day):** every blocker in the "OPEN: chain of
 pre-existing Windows Rust-seed rebuild blockers" section below is now fixed.
 `cargo build --profile bootstrap -p simple-driver --bin simple --features

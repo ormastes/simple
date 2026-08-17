@@ -1,6 +1,7 @@
 # BUG: an imported module-level const has no cross-module HIR linkage
 
-**Status:** OPEN — re-verified 2026-08-10, still blocked (see hazard below)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Re-verification (2026-08-10):** Reproduced fresh on
 `bin/release/x86_64-unknown-linux-gnu/simple` (seed) via `native-build

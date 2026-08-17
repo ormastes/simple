@@ -1,7 +1,8 @@
 # SDN-roundtripped Draw IR composition fails render: "cannot assign field on non-object value"
 
 - **Date:** 2026-08-15
-- **Status:** OPEN (root-caused to the SDN round-trip input, exact assignment site not yet pinned)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Component:** common.ui.draw_ir_sdn / gc_async_mut.gpu.engine2d.draw_ir_adv (interpreter path)
 
 ## Symptom

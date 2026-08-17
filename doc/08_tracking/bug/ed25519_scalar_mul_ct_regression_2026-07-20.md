@@ -4,7 +4,8 @@
 - **Area:** `src/os/crypto/ed25519_ops.spl` (pure-Simple Ed25519 point arithmetic)
 - **Severity:** high (timing side-channel on the secret-scalar code path — the
   exact class of bug previously fixed and guarded against).
-- **Status:** OPEN — do NOT fix from a test-cluster triage pass; flagging with
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   full evidence for a follow-up implementation session.
 
 ## Symptom
@@ -109,3 +110,21 @@ resolves the T_SHA_ABC value mismatch, or whether they are independent.
 ## Affected specs
 
 - `test/unit/lib/crypto/ed25519_ct_property_spec.spl`
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (corrected line refs)
+
+Both functions still exist in `src/os/crypto/ed25519_ops.spl`:
+
+```
+966: fn ed_scalar_mul_basepoint_simple(scalar: [u8]) -> EdPoint:
+976: fn ed_scalar_mul_basepoint(scalar: [u8]) -> EdPoint:
+```
+
+No constant-time selection primitive is present (`grep -n "ct_select\|conditional_select"`
+returns nothing in this file). The cited line 938 sits inside the `_simple`
+body, which also still carries per-byte `serial_println("[ed25519-scalar] byte8")`
+debug tracing. Use :966 / :976 as the reference points.
+NOT PROVEN: that the constant-time property actually regresses at runtime — that
+needs execution/timing, which this triage did not perform.

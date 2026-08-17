@@ -1,7 +1,8 @@
 # Conflict markers reported "committed at origin" were WORKING-COPY ONLY (stalled cherry-pick)
 
 - Date: 2026-08-11
-- Status: **NOT A BUG AT ORIGIN — origin is and was clean.** Shared working copy is broken.
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Reported as: "commit `57ed3ef0365` committed literal git conflict markers into
   `src/runtime/runtime.h` (lines 1, 1271, 2406) at origin; every seed cargo build now fails."
 - Actual: the markers exist only in the **uncommitted, unmerged working tree** of

@@ -1,7 +1,8 @@
 # Cache v2 / interface-compat first milestone — known gaps NOT fixed
 
 **Date:** 2026-08-10
-**Status:** OPEN — recorded, not fixed. Each entry states its unblock condition.
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Landed work:** commits for C1 (tier router), C3 (GC/leases), A3 (CompileInterfaceDigest), C7 (fixtures).
 **Plans:** `doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md`,
 `doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md`
@@ -124,3 +125,18 @@ self-hosted binary was not separately verified for any of this work.
 
 **Unblock:** re-run the cache_v2 and interface_compat specs under
 `bin/release/<triple>/simple` once a bootstrap deploys.
+
+## Re-verification 2026-08-17 (fleet lane C, by CONTENT)
+
+STILL-OPEN and correctly labelled; the only correction is PATH DRIFT in the triage row.
+Both named files exist:
+- `src/compiler/80.driver/cache/gc/admission.spl` (112 lines) — present
+- `src/compiler/80.driver/cache/lease/lease.spl` — present (triage looked for it at
+  `cache/gc/lease.spl`, which does not exist)
+
+Neither file carries a `TODO`/`stub`/`not implemented` marker, so the unfinished GC-admission
+and lease work is not flagged in source — the gap list lives only in this doc. That is itself
+worth fixing: an unmarked gap is invisible to every scan. Recommend adding TODO markers at the
+specific unimplemented call sites so the backlog is greppable.
+
+No patch attempted: this is scoped, deliberately-deferred milestone work, not a defect.

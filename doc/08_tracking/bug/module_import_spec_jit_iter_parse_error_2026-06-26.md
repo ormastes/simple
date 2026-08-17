@@ -2,7 +2,8 @@
 
 **Date:** 2026-06-26
 **Spec:** test/01_unit/lib/common/module_import_spec.spl
-**Status:** Source fixed; execution verification pending
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 
@@ -34,3 +35,16 @@ The five iterator implementations in `core/iter.spl` now use the
 canonical `impl Trait for Type` grammar. The seed parser retains its strict
 grammar. The existing module-import spec covers the original JIT/import path;
 its execution remains pending an authorized runtime test run.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — source cause ALREADY-FIXED
+
+`src/compiler_rust/lib/std/src/core/iter.spl` lines 91, 103, 115, 130 and 150
+all use the canonical `impl Iterator<T> for SkipIterator<T>:` form; no
+single-line `impl Type: Trait` header remains, so the parse failure this doc
+describes cannot occur. The two examples named in the doc are at
+`test/01_unit/lib/common/module_import_spec.spl:107` and `:111`, and both now
+assert `to_contain("export-from-ok")` / `("export-group-from-ok")` rather than
+the warning string the doc says they wrongly expected.
+NOT proven: execution. No spec run was performed, so this remains
+"source fixed, execution verification pending" — exactly the status the doc
+already carries. Recommend keeping open only for that runtime confirmation.

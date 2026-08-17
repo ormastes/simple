@@ -1,5 +1,8 @@
 # Browser CSS animation clock is not connected
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Frame sampling and the hosted compositor invalidation path are wired;

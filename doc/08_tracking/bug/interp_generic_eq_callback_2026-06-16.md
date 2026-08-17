@@ -1,7 +1,8 @@
 # Bug: generic `!=` / 2-arg `==` on `[T]` elements mis-evaluates in interpreter
 
 **Found:** 2026-06-16 · **Severity:** P2 (correctness) · **Area:** interpreter / generics
-**Status:** source fixed; focused seed-interpreter execution pending
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Summary
 Inside a generic function `fn f<T>(data: [T], ...)`, comparing two array elements of the

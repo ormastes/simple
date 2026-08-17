@@ -1,5 +1,8 @@
 # native-build worker: JIT vs interpret measurement (2026-07-30)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Assignment: measure the `native_build_worker.spl` compile pipeline under
 `SIMPLE_EXECUTION_MODE=jit` versus the forced-`interpret` default, since
 three independent lanes have now converged on "6+ minutes CPU-bound in

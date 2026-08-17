@@ -1,5 +1,8 @@
 # Bug: ds_utils T? return inconsistently wraps in Option::Some
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-06-26
 **Spec:** `test/01_unit/lib/common/ds_utils_stack_queue_spec.spl`
 **Source:** `src/lib/tooling/ds_utils.spl`

@@ -1,7 +1,8 @@
 # `match` on an imported enum silently matches NO arm when the entry point lives in the same package
 
 - **Filed:** 2026-08-06
-- **Status:** Fixed (2026-08-06) — see "Fix landed" below. The MIR gap
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   identified in finding (b) is closed; the Rust-seed-JIT measurement in
   finding (a) remains out of scope (`src/compiler_rust/**`).
 - **Severity:** High — silent wrong behavior, no error, no crash, no warning

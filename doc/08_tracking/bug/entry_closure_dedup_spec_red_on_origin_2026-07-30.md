@@ -1,6 +1,7 @@
 # `entry_closure_physical_source_dedup_spec.spl` is red on origin — diagnosis
 
-- **Status:** diagnosed only, nothing fixed (per task scope)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Spec:** `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`
 - **Repro:** `timeout 900 bin/simple test test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`
   (plain invocation, no `SIMPLE_TEST_RUNNER_RUST=1`) → `Results: 15 total, 7 passed, 8 failed`.

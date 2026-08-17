@@ -1,5 +1,8 @@
 # Browser Fetch redirect deadline reset
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Source fix and deterministic SSpec implemented. Runtime PASS remains blocked by

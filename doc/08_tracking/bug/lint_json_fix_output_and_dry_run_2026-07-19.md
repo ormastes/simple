@@ -1,6 +1,7 @@
 # lint JSON fix output was mixed and dry-run was inert
 
-**Status:** SOURCE FIXED / PURE-SIMPLE DEPLOY VERIFICATION PENDING
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Severity:** P1 — structured output and advertised dry-run were incorrect
 
 ## Reproduction

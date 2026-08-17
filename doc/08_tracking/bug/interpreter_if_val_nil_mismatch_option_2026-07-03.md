@@ -1,6 +1,7 @@
 # Interpreter `if val x = <nil Option>:` Wrongly Takes the Match Branch - 2026-07-03
 
-Status: SOURCE FIXED (2026-07-15); executable interpreter proof pending a
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 runnable pure-Simple compiler artifact.
 
 ## Symptom

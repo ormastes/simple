@@ -1,5 +1,8 @@
 # Deployed macOS binaries reject `rt_raw_i64_to_string` — entire host-compositor spec chain unrunnable
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Date:** 2026-08-04
 - **Area:** tooling/deploy (extern registry of BOTH `bin/release/aarch64-apple-darwin-macho/simple` and its `simple_seed` sibling)
 - **Symptom:** `semantic: unknown extern function: rt_raw_i64_to_string` fails whole-module load.

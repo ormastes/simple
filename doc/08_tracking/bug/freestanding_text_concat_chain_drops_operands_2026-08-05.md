@@ -4,7 +4,8 @@
 - **Lane:** SimpleOS guest, `--target x86_64-unknown-none` (freestanding native
   codegen), built through the stage3 pure-Simple compiler by
   `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`.
-- **Status:** fixed 2026-08-05 (root cause found and fixed in the freestanding
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   `rt_any_add` runtime stub; see "Root cause and fix" below)
 - **Severity:** high — silent data loss in a boring, ubiquitous construct.
 

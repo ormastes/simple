@@ -1,6 +1,7 @@
 # Browser renders boxes pixel-exact, but any text node blanks the whole frame
 
-**Status:** Defect 1 and Defect 2 both FIXED 2026-08-06 (see Resolution below)
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-05
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/`
 **Attribution:** Rust bootstrap seed (`bin/simple` prints the seed banner). The

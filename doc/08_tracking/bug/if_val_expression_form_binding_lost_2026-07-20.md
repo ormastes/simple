@@ -1,6 +1,7 @@
 # `if val` expression form loses the bound pattern variable
 
-**Status:** Open  **Found:** 2026-07-20 (whole-suite triage cluster, test/03_system/)
+Status: DUPLICATE of if_val_expression_binding_lost_hir_2026-08-01.md
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Affected spec:** `test/03_system/interpreter/interpreter_regression_spec.spl`
   — `describe "Bug 1d - plain if-val unwraps Option"`,
   `it "expression form selects by presence and binds the payload"` (line 182)

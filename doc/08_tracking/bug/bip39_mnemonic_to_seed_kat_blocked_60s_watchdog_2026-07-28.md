@@ -1,7 +1,8 @@
 # BIP-39 mnemonic_to_seed KAT block cannot complete — 60 s run watchdog vs interpreted PBKDF2
 
 - **Date:** 2026-07-28
-- **Status:** RESOLVED 2026-07-28 (same day) — see "Resolution" below; full KAT now green
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Resolution (2026-07-28, later the same day)
 

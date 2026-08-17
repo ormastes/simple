@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-17
 - **Severity:** P2 (silent wrong result in compiled/JIT code; correct in interpreter)
-- **Status:** FIXED (lane S29, 2026-07-17); re-verified 2026-08-09 against the
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   currently-deployed seed binary (built 2026-08-09) via `bin/simple run` on the
   exact var-reassigned-in-a-while-loop repro from this doc — output `1, 1, 1`
   on every iteration, matching the interpreter. Regression coverage:

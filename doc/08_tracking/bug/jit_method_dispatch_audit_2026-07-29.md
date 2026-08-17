@@ -1,5 +1,8 @@
 # Bug: Cranelift JIT builtin-method dispatch audit — what's left after the index_of/first/last/pop/... fixes
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-29
 **Component:** `src/compiler_rust/compiler/src/codegen/instr/{calls,closures_structs,methods}.rs`,
 `src/compiler_rust/compiler/src/codegen/llvm/{emitter,functions}.rs`,
@@ -216,3 +219,28 @@ not committed to the repo (scratch, not requested for git).
 
 **Lambda ABI** still blocked — see jit_lambda_abi_scoping_2026-07-29.md
 (rt_closure_new never declared in the runtime-import table).
+
+## 2026-08-17 note (lane s2_rust_codegen) — LIVE, but one supporting evidence line is unsound
+
+This audit stays OPEN. No claim here is being closed.
+
+One correction to the triage evidence attached to this row, which read: *"grep
+`rt_string_reverse` returns ZERO hits, so at least one listed gap is still real."*
+That inference does not hold. The implemented design deliberately never
+introduces a symbol named `rt_string_reverse`; `reverse` is wired to the
+**receiver-polymorphic** `rt_reverse_mut`, which handles a text receiver directly
+(`src/compiler_rust/runtime/src/value/collections.rs:3071`,
+`s.chars().rev().collect()`), with the codegen arms at
+`codegen/instr/calls.rs:3656`, `codegen/instr/closures_structs.rs:2028` and
+`codegen/llvm/emitter.rs:292`. See the companion note added the same day to
+`jit_dispatch_worklist_2026-07-29.md`.
+
+So the `reverse` cell is stale. The audit's substantive finding — that enum
+guards fire only for statically-resolved types, leaving `Some(x)`/`Ok(x)` as
+`ANY` — was **not** re-checked here and is untouched by the above. Keep this row
+open on that finding, not on the `reverse` cell.
+
+### Could NOT prove
+The enum-guard / `ANY` finding in the title was not re-verified, and none of the
+audit's 63 enumerated methods were executed. Source inspection of the `reverse`
+cell only.

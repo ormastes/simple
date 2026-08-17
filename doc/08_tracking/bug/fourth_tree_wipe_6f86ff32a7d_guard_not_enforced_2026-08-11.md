@@ -2,7 +2,8 @@
 
 - **Date:** 2026-08-11
 - **Severity:** BLOCKER (repo integrity; whole-tree loss)
-- **Status:** repaired + mitigated
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Wipe number:** 4 (prior: 2026-08-01 ENOSPC, 2026-08-01 API `base_tree`, `2313821fd77` stale-WC revert)
 
 ## What happened

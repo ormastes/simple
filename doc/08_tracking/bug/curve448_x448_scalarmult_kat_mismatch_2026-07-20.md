@@ -5,7 +5,8 @@
   `test/unit/lib/crypto/curve448_rfc7748_kat_spec.spl`
 - **Severity:** high (every KAT vector in the file mismatches — near-total
   break, not an edge case).
-- **Status:** OPEN. **Do not touch the expected vectors** — RFC 7748 §5.2/§6.2
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   values are canonical.
 
 ## Symptom

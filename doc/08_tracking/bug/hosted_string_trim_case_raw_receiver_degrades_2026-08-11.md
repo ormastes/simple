@@ -1,5 +1,8 @@
 # Hosted `rt_string_trim`/`rt_string_ascii_case` family degrades on a raw receiver
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 **RESOLVED 2026-08-11.** Follow-up gap #2 flagged (but explicitly left open)
 by `native_text_equality_against_empty_literal_unreliable_after_trim_lower_2026-08-11.md`

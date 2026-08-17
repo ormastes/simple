@@ -2,7 +2,8 @@
 
 - **ID:** audit_analyzer_empty_if_branch_2026-08-02
 - **Date:** 2026-08-02
-- **Status:** FIXED
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Component:** `src/app/audit/{ffi_analyzer,sffi_analyzer}.spl`
 - **Severity:** bootstrap diagnostic-sweep failure
 

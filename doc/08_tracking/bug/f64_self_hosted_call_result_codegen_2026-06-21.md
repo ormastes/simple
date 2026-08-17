@@ -1,6 +1,7 @@
 # f64 call-result corrupted in self-hosted (production) codegen
 
-- **Status:** OPEN (seed fixed & landed; self-hosted port blocked by bootstrap breakage)
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** High — any f64 returned from a non-inlined function is wrong in `bin/simple` compiled/JIT mode
 - **Date:** 2026-06-21
 - **Component:** `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` (self-hosted cranelift codegen)

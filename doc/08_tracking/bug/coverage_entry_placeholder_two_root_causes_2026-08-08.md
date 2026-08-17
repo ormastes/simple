@@ -1,6 +1,7 @@
 # Coverage `<entry>` placeholder attribution — two root causes, not one; B collapses into A
 
-Status: root-caused, all three fixes landed (Node::Impl owner-tagging gap in
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 the import-module path; entry-script `<entry>`-sentinel coverage fallback;
 Node::Impl owner-tagging gap in the sibling script-eval path).
 

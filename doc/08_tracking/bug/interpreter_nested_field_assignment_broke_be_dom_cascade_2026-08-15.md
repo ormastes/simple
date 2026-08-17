@@ -1,5 +1,8 @@
 # Interpreter nested-field-assignment rejection broke the BeDomNode CSS cascade
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Date: 2026-08-15. Status: WORKED AROUND in dom.spl; underlying interpreter
 limitation still open.
 

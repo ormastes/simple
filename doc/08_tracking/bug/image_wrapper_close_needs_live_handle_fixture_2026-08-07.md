@@ -1,6 +1,7 @@
 # Resource wrapper double-close on a genuinely-acquired handle is untested (Image + FileLock)
 
-**Status:** OPEN — ARCHITECTURAL, root cause now narrowed. **Filed:** 2026-08-07,
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 during WP-J (pilot resource migration,
 `doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
 

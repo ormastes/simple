@@ -1,5 +1,8 @@
 # `compile --native` binary omits program body — silent exit 3 (NIL sentinel)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED; native execution pending · **Area:** native AOT / linker
 **Blocks:** running showcases as native binaries (the fast lane that escapes
 the interpreter wall now that the LINK step is fixed).
@@ -82,3 +85,15 @@ SIMPLE_RUNTIME_PATH="$PWD/build/simple-core" SIMPLE_LINKER=ld \
   bin/simple compile --native examples/06_io/ui/graphics_2d_showcase.spl -o /tmp/g2d
 SHOWCASE_RESOLUTION=320x240 /tmp/g2d ; echo $?   # -> silent, 3
 ```
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — ALREADY-FIXED (now fails loudly)
+
+`src/compiler_rust/compiler/src/pipeline/execution.rs:1029-1062` gates the
+interp-call escape that produced the silent NIL body: `:1033` allows it only
+under `bootstrap_mode || SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1`, otherwise `:1058`
+raises `codes::UNSUPPORTED_FEATURE` with help text naming that env var. A
+silently-nil `--native` binary is therefore no longer emitted; the build is
+refused instead.
+NOT proven: end-to-end native execution was not re-run (no usable self-hosted
+binary on this host), and the underlying `rt_interp_call`-returns-NIL mechanism
+is refused rather than removed.

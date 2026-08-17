@@ -1,5 +1,8 @@
 # Metal `newFunctionWithName` cannot find a genuinely-new kernel appended to `_engine2d_msl()`
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 > **STATUS: RESOLVED — NON-REPRODUCING (transient) — 2026-07-07.**
 >
 > Re-verified on the *identical* binary

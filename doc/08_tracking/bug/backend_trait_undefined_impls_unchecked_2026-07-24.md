@@ -1,5 +1,8 @@
 # Compiler `Backend` trait is declared nowhere; impls silently unchecked
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-24
 **Area:** compiler / 70.backend
 **Severity:** medium (masked type-safety hole; broke stage4 native link until seed workaround)
@@ -46,3 +49,19 @@ eval_expr, exec_stmt, is_allowed, is_allowed_stmt) in
 
 Also worth a lint: `impl T for X` where `T` resolves to no trait definition
 should at least warn.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN
+
+`grep -rn "trait Backend" src/compiler --include=*.spl` returns ZERO declarations,
+while the type is still used as a field/param type and the only impl is commented out:
+
+```
+src/compiler/70.backend/backend/interpreter.spl:97:# impl Backend for InterpreterBackendImpl:
+src/compiler/70.backend/backend/env.spl:22:    backend: Backend
+src/compiler/70.backend/backend/env.spl:203:    backend: Backend
+src/compiler/70.backend/backend/env.spl:207:    static fn new(backend: Backend, module: HirModule) -> HirVisitor:
+```
+
+Owner path: src/compiler/70.backend/**.

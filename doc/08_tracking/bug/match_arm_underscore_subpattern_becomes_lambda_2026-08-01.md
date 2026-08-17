@@ -1,7 +1,8 @@
 # `_` in a match-arm sub-pattern is eaten by the placeholder-lambda desugar
 
 - **Date:** 2026-08-01
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** high (silent miscompile + loud false "unresolved name")
 - **Parent:** `selfhost_names_with_no_import_path_masked_by_seed_flat_resolution_2026-08-01.md`
   (carve-out findings 2 `_`/`_1` and 7 "declared in the same file")

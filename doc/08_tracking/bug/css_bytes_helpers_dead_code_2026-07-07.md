@@ -3,7 +3,8 @@
 - **Date:** 2026-07-07
 - **Area:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   (`css_bytes_find` ~`:3707`, `css_bytes_match_close` ~`:3715`, `css_bytes_trimmed_eq` ~`:3730`).
-- **Status:** open — pre-existing on `main` (confirmed present on base, before the parse_html
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   linear-scan rewrite; not introduced by that change). Found during opus review of the
   parse_html event-scanner rewrite.
 - **Severity:** low (dead code, no runtime impact) but violates the project's

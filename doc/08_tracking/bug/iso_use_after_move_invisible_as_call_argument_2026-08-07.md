@@ -1,7 +1,8 @@
 # Bug: `iso` use-after-move is invisible to the borrow checker when the second use is a call argument
 
 - **Date:** 2026-08-07
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** medium (the headline "use-after-move of an `iso` value is
   caught" guarantee does NOT hold for the single most natural way a
   programmer would trigger it — passing the moved value to a function)

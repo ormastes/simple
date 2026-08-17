@@ -1,7 +1,8 @@
 # Audit: semantic compiler changes hidden inside "chore" commit `941605d43d9`
 
 **Date:** 2026-08-01
-**Status:** Audit complete; the two changes that gated a bootstrap were then
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 measured and BOTH CLEARED — see "Follow-up verdicts" at the end
 **Commit:** `941605d43d930af46fa3a18084f5cce9be1972e6`
 **Subject:** `chore: sync evidence showcase and parser framework lane updates`

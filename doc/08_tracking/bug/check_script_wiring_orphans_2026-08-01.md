@@ -1,6 +1,7 @@
 # 364 of 413 check scripts are invoked by nothing
 
-- **Status:** open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high (verification is decorative at scale)
 - **Measured at:** `a8da64469b41c084e78d1b2e509e72d925652159` (tree 109,569)
 - **Date:** 2026-08-01
@@ -485,3 +486,9 @@ rename to chase or a missing implementation to write, and several sit in
 subsystems (`os/compositor`, `os/services/netstack`, `ui.*`, `app.dashboard`)
 that other lanes are live in. Filed here with exact counts so the next pass
 starts from a number rather than a re-scan.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN (census).** Duplicate-family with
+`check_guard_wiring_48_unwired_triage_2026-08-08.md`. The optout list landed but the orphan
+count itself was never reduced. Not reduced by this lane either.

@@ -1,5 +1,8 @@
 # ByteSpan.starts_with dropped from the SimpleOS kernel closure and silently replaced by a nil-returning WEAK stub
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-07-28
 - **Severity:** high (silent wrong answer, no diagnostic, in the WM render path)
 - **Component:** native-build entry-closure / per-function emission + seed freestanding stub fail-open

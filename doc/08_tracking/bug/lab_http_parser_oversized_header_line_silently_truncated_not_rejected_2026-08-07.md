@@ -3,7 +3,8 @@
 **Found:** 2026-08-07, during notebook-lanes H3 verification
 (`test/03_system/tools/simple_lab/lab_robustness_spec.spl`, fuzz-lite corpus).
 
-**Status: RESOLVED 2026-08-08** — fixed in pure Simple at the parser layer, no
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 runtime change needed. The truncation IS detectable from the caller side:
 `TcpStream.read_line()` returns the line *including* its terminating newline,
 so a runtime-truncated line has a unique signature — raw length >= the

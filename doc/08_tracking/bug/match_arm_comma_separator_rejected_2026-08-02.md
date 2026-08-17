@@ -1,7 +1,8 @@
 # Comma between `match` arms is rejected — two shipped std modules were unloadable
 
 - **Date:** 2026-08-02
-- **Status:** FIXED (Rust seed parser + pure-Simple parser)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** high (whole modules silently invisible to every spec and census
   that imports them)
 - **Parent:** `vacuous_spec_census_2026-07-30.md`, "Defects recorded, not

@@ -1,6 +1,7 @@
 # Compiled checker asm-volatile indented-block gap
 
-- Status: **open, rerouted**
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Severity: P1 (Stage 4 inventory blocker)
 - Found by: `stage4_expr_batch`
 - Owner: inline-assembly primary parser (unclaimed)

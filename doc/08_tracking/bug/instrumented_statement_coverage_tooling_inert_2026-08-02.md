@@ -1,5 +1,8 @@
 # Instrumented statement-coverage tooling is inert (three independent breaks)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** test tooling / coverage
 **Found during:** web-rendering GPU offload coverage campaign (goal: verify
 ≥90% on `src/lib/gc_async_mut/gpu/browser_engine/*` target modules).

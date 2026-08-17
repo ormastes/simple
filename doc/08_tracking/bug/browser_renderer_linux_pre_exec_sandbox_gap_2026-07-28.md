@@ -72,3 +72,19 @@ lane, and none is claimed.
 session (host reserved for a stage-3 bootstrap), so there is no `Results:` line
 either way. Closing this row requires the installed-production transcript the
 doc asks for; a source read cannot supply it.
+
+## 2026-08-17 verification — runtime slice (classified by CONTENT)
+
+**Verdict: STILL OPEN, but the open item is EVIDENCE, not code.** The pre-exec
+sandbox stage is present in current source: `src/runtime/runtime_process.c`
+declares `rt_browser_renderer_spawn_sandboxed` (:889, :1408) and
+`rt_browser_renderer_sandbox_enter` (:896), includes `<linux/seccomp.h>` (:966),
+and `proc_spawn(..., bool sandboxed_renderer)` (:1239) admission-guards the slot
+(`proc_alloc`, :1003-1016), forces an absolute `cmd` (:1244), and redirects
+stdout/stderr to `/dev/null` in the child (:1328-1330). Whole-tree syntax gate is
+green: `PASS — 104 file(s) compiled, 0 errors` (`check-c-runtime-compiles-push.shs`).
+
+**What was NOT proven.** The doc's actual gap — installed-production evidence from
+a deployed renderer — was not collected. Nothing in `src/runtime/*.c` is reachable
+from `bin/simple` (Rust seed, Rust runtime), so no interpreted probe here can be
+anything but vacuous. Needs a native build + an installed-production run transcript.

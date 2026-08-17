@@ -1,7 +1,8 @@
 # compile_c_entry flat-AST bridge lowers EVERY binary op to Add and EVERY unary to Neg
 
 - **ID:** compile_c_entry_flat_ast_all_binaries_lower_to_add_2026-08-11
-- **Status:** FIXED IN SOURCE 2026-08-11 — regression test BLOCKED (see "Verification status" below)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** HIGH (silent miscompile — wrong answers, no diagnostic)
 - **Found:** 2026-08-11, while root-causing the SimpleOS WM rung-(d) text-render blocker
 - **Lane:** `src/app/cli/compile_c_entry.spl` (C-entry / flat-AST bridge). **NOT** the

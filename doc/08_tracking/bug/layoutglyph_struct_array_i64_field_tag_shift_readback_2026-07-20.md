@@ -1,7 +1,8 @@
 # LayoutGlyph struct-in-array i64 fields read back tag-shifted on the freestanding native lane — zero glyph quads, no text on SimpleOS desktop
 
 - **ID:** layoutglyph_struct_array_i64_field_tag_shift_readback_2026-07-20
-- **Status:** ROOT-FIXED on the hosted native-build path (x86_64-unknown-linux-gnu, self-hosted `src/compiler/50.mir` MIR lowering + `src/compiler_rust` seed driver); the per-site scalar-mirror workaround in `_prepare_text_active` is now redundant but was left in place (out of scope for this change — see Root-fix note below); freestanding/OVMF x86_64-unknown-none NOT independently re-verified in this change (same target-independent MIR lowering code path, so expected to carry over, but the SimpleOS desktop boot/OVMF gate was not re-run — flag for a follow-up board-runnable check per `.claude/rules/board-runnable.md`)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** P1 — silently killed ALL glyph text on the SimpleOS x86_64 desktop (taskbar clock, window titles, taskbar labels); no crash, no diagnostic
 - **Lane:** native-build (Rust seed frontend, cranelift, `--entry-closure`, x86_64-unknown-none), OVMF/GRUB multiboot boot
 - **Class:** the documented "BoxInt <<3 / tag-shifted views of one boxed integer" codegen family (see GLYPH-FIX-3 retraction note in `src/lib/nogc_sync_mut/text_layout/font_renderer.spl` and `baremetal_option_field_unwrap_faults_class_2026-07-18.md` for siblings)
@@ -206,3 +207,20 @@ above (separate struct-in-container hop, not this bug). Deleting the
 `_prepare_text_active` scalar-mirror workaround now that the root cause is
 fixed is left to whoever next touches `font_renderer.spl` with board access
 to re-verify the OVMF gate, per this repo's board-runnable rule.
+
+## Verification 2026-08-17 (content classification) — workaround still load-bearing
+
+The call-site workarounds are still present and still annotated as such in
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl`: line 347 ("this is a
+call-site workaround, not a compiler fix. Do NOT re-nest a ..."), the probe
+narrative at 1908-1932 (cp=83/w=5/h=12, and the note that char_code_at's 0
+`(88 & 7)`, bytes()'s 11 `(88 >> 3)` and 88 itself are three tag-shifted views of
+one value), and the struct-in-array round-trip note at 1978.
+
+So the doc's status is accurate: root-fixed on the hosted x86_64 lane, with the
+freestanding lane still carried by per-site workarounds. This is the same
+low-3-bit boxing family named in the session brief. Root cause is in codegen
+(`src/compiler/**`, claimed by another lane) — nothing to fix inside
+`src/lib/nogc_sync_mut/**`.
+
+Not proven: no `Results:` line — the freestanding lane was not booted.

@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — silently caps every downstream source-location feature
-- **Status:** open
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Found via:** DS5 `mir-span-thread` lane, while proving MIR spans survive lowering
 
 ## Symptom

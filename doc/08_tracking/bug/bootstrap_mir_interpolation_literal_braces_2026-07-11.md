@@ -1,5 +1,8 @@
 # Bootstrap MIR: string interpolation `{expr}` printed literally, not evaluated
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-11 · **Status:** RESOLVED (root-cause gate fixed) 2026-07-17 — see
 "Fix landed" below. One unrelated pre-existing blocker remains for full E2E
 verification (documented, not fixed here — out of scope).

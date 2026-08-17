@@ -1,7 +1,59 @@
 # nogc Engine2D `backend_lane` lacks shared `helpers_availability` — font-offload backend priority diverges from gc mirror
 
 ## Status
-Open.
+**FIXED 2026-08-17.** Root cause was worse than this doc described — see
+"Reproduction and fix (2026-08-17)" below.
+
+## Reproduction and fix (2026-08-17)
+
+The doc predicted `engine2d_backend_lane_preferred_font_offload_candidate(["qualcomm"])`
+would return `""`. It does not — it does not return at all. A partial port had
+already applied fix option 2 (the picker walks the qualcomm/intel-aware
+`engine2d_font_offload_backend_order()`), but it copied the gc mirror's body
+verbatim, including its call to `backend_canonical_name` — a function defined
+**only** in `src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl`, a module
+that has no nogc counterpart and is not imported by the nogc file. There are no
+`use` statements in `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` at all.
+
+RED, `bin/simple run` calling the exported function:
+
+```
+error[E1002]: function `backend_canonical_name` not found
+  = help: check the function name or import the module that defines it
+```
+
+So the entire nogc font-offload picker was unreachable, not merely mis-tiered.
+
+**Root cause:** `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl:128`.
+
+**Fix:** call the file's own `_engine2d_backend_canonical_name` (line 86) instead
+of the gc-only `backend_canonical_name`. One line; no new module, per fix option 2.
+
+GREEN, same probe:
+
+```
+qualcomm -> [qualcomm]
+intel -> [intel]
+nvidia -> []
+```
+
+`nvidia -> []` is correct and matches the gc mirror: gc's `backend_canonical_name`
+does not map `nvidia` to `cuda` either, so it is absent from the font-offload
+order and is dropped on both sides.
+
+**Residual, deliberately not fixed (out of scope for this row):** the nogc
+`_engine2d_backend_canonical_name` is a much smaller alias table than gc's — it
+lacks `native`/`platform_native` -> `baremetal`, `virtio` -> `virtio_gpu`, the
+`d3d11`/`dx11`/`dx12` spellings, `dxvk`/`vkd3d` -> `directx-on-vulkan`,
+`simd_cpu` -> `cpu_simd`, and gc's `.trim().lower()` normalization. That is a
+separate mirror divergence in *alias* handling, not in font-offload selection.
+
+**Specs:**
+- reproducing: `test/01_unit/lib/nogc_async_mut/gpu/engine2d/backend_lane_font_offload_candidate_spec.spl`
+- similar-bug detection: `test/01_unit/lib/nogc_async_mut/gpu/engine2d/backend_lane_mirror_symbol_reachability_spec.spl`
+  — calls *every* exported function of the nogc module, because a gc-only symbol
+  smuggled in by a partial port is invisible until that one entry point is
+  invoked; the module loads fine and every other export works.
 
 ## Severity
 Low — routing correctness only for font-offload backend *selection*. Operation-lane
@@ -52,3 +104,13 @@ Operation-lane tier routing (`vector_font`/`vector_glyph`/`glyph_raster`/
 this backend-priority coupling was left as an explicit divergence rather than
 half-ported. Marked at the call site in
 `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
+
+## Triage 2026-08-17 (lane m7c_lib_async) — divergence still LIVE
+
+`grep -c helpers_availability`:
+`src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` -> **0**;
+`src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` -> **1**.
+The mirror divergence this doc records is unchanged. Left unfixed deliberately:
+it is an enhancement (adding a backend-selection helper to the nogc lane), not a
+silently-wrong-result defect, and closing it needs GPU backends this host does
+not have to validate against.

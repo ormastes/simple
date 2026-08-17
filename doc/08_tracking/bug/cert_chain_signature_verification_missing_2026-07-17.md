@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-17
 **Scope:** `src/lib/nogc_sync_mut/tls/validation.spl` (deleted `validate_chain`)
-**Status:** Deliberately deferred, not fixed. Dead code removed rather than
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 faked; this doc tracks the real gap for whoever picks up TLS chain-of-trust
 validation.
 
@@ -63,3 +64,13 @@ To implement real chain-of-trust validation:
    to `validation.spl` using those primitives instead of a phantom import.
 3. Add real test coverage (currently none existed even for the deleted
    phantom-backed version).
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT.** `src/lib/nogc_sync_mut/tls/validation.spl`
+lines 8-17 record that `verify_signature` (and `validate_chain`) never existed in
+this tree and that `validate_chain` was DELETED rather than stubbed, explicitly
+pointing at this doc as "the tracked follow-up gap". So there is no false-success
+path today — the API is absent rather than fake — but chain-of-trust verification
+is genuinely unimplemented. Requires a real X.509 signature primitive; out of scope
+for a stdlib-slice bug-fix pass.

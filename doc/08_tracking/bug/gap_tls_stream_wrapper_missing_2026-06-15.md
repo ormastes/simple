@@ -1,6 +1,7 @@
 # GAP-TLS-3: Accepted TcpStream has no encrypted Pure-Simple overlay
 
-Status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Owner: Pure-Simple TLS transport lane
 
 `src/lib/nogc_sync_mut/http_server/tls_server.spl` receives a `TcpStream`, but

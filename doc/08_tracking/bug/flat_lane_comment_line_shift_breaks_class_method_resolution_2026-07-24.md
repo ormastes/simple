@@ -3,7 +3,8 @@
 **Date:** 2026-07-24 (root-caused + fixed 2026-07-25)
 **Severity:** High (silent miscompile of the *target* program on ~1/3 of builds)
 **Lane:** seed `native-build --entry-closure` (SIMPLE_BOOTSTRAP=1, compiler .spl run by the seed)
-**Status:** ROOT-CAUSED and FIXED — see "Root cause" / "Fix" below.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom (as originally observed)
 

@@ -3,7 +3,8 @@
 
 **Severity:** medium (crash, not silent-wrong -- found while regression-testing task #170)
 **Found:** 2026-07-17, task #170 (BoxInt<<3 tag-shift verification) lane
-**Status:** filed, not yet root-caused or fixed -- out of scope for #170
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 

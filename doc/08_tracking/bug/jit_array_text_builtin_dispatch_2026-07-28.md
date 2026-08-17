@@ -1,5 +1,8 @@
 # JIT array/text builtin dispatch defects (2026-07-28)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Engine under test: **Cranelift JIT** (`bin/simple run`, `SIMPLE_EXECUTION_MODE=jit`).
 Reference semantics: the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`),
 correct in every case below.

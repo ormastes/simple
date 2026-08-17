@@ -1,5 +1,8 @@
 # jj push bypasses rules.sdl gates (2026-08-11)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Mechanism
 
 `.git/hooks/pre-push` (`scripts/check/pre-push-conflict-tree-guard.shs`) fans out to

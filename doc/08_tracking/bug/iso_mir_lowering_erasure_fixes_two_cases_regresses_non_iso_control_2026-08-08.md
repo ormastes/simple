@@ -11,7 +11,8 @@
 > baseline 1/4, patched **4/4**. Read the "Retraction" section at the end before
 > anything else here.
 
-- **Status:** RETRACTED — see the banner above. Originally filed OPEN — patch identified and measured, deliberately NOT landed (it
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   trades one passing test for two; see the table)
 - **Severity:** medium — blocks
   `borrow_check_bypassed_on_interpret_path_2026-08-08`, which names this as its

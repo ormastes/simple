@@ -1,7 +1,8 @@
 # Four blink specs RED: they import blink modules that do not exist
 
 Date: 2026-08-10
-Status: OPEN (feature gap, not a compiler defect)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 Lane verified: host x86_64-unknown-linux-gnu, `bin/simple` = Rust bootstrap seed,
 interpreter path (JIT fell back: `HIR lowering error: Cannot infer field type:
 struct 'CompileOptions' field 'mode' [in src/app/test_runner_new/main.spl]`).
@@ -275,3 +276,10 @@ implementable feature work (three new Blink modules with real paint/hit-test/
 form semantics), not a compiler defect and not bug-triage scope. Per
 `.claude/rules/testing.md`, the four specs are correct and stay RED as the
 record of the gap; they must not be weakened or marked pending. Status OPEN.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT.** `src/lib/blink/dom/` holds only
+`interaction_state.spl` and `node.spl` (no `form_state.spl`), and
+`src/lib/blink/input/` does not exist at all. The four specs still import modules
+with no implementation. Unchanged from the filed evidence.

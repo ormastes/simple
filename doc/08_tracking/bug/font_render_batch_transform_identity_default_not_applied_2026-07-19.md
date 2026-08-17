@@ -1,5 +1,8 @@
 # BUG: `FontRenderBatch.transform_identity` default field value not applied — reads as empty string, blocking all glyph compositing
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 Open (2026-07-19, GLYPH-FIX-8 campaign). Root-cause LOCALIZED, not fixed
 (out of this session's edit-surface scope — see below).

@@ -1,5 +1,8 @@
 # Deep-Recheck Bug Inventory — 2026-07-05
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Source: 9-subsystem deep-recheck workflow (sonnet audit + opus adversarial verify).
 `real=` is the opus verifier's verdict. All are **current-source** bugs unless marked
 `already-fixed-stale-binary`. **Verification caveat:** confirming a pure-Simple source
@@ -158,3 +161,17 @@ high-impact (opus); **P2** = wide/risky (fix+verify after wall); **DOC** = featu
 2. **Now (P1, opus):** type-checker-is-a-noop + generic trait-bound.
 3. **After wall (P1/P2 batch):** interpreter f64/SIGSEGV, AOP compiled-path (4), lint/fmt non-functional, regalloc multi-arch, HIR diagnostics/generic-args, loader relocation/facade.
 4. **DOC/features:** Array.map/reduce, DictComprehension lowering, GPU HIR, dead-code removals.
+
+## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+Umbrella doc, re-checked at HEAD 2026-08-17. Of 31 `**P**`-tagged items: 1
+REFUTED-then-FIXED (the P0 Result/Option payload index, now `[__tag,__payload]`
+at `src/compiler/10.frontend/core/interpreter/eval_access.spl:482-504`), 1 marked
+"PARTLY NOW-WRONG", 5 still `real=?` (never verified), 1 `real=False`, and the
+remaining ~23 carry no fix annotation. The Type system, HIR, backends/regalloc,
+AOP, loader, tooling and test-runner sections carry no fixed markers at all.
+
+This doc is not actionable as a single P2 row and should not be closed as one:
+it is an inventory whose items belong in separate records. Recommend splitting
+the 5 `real=?` items into individually reproducible records and retiring the
+umbrella. NOT FIXED by this lane.

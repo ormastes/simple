@@ -1,6 +1,7 @@
 # CUDA resident-session design §5.3 needs 3 missing SFFI bindings: `cuMemHostAlloc`, `cuMemHostGetDevicePointer`, `cuDeviceGetAttribute`
 
-**Status:** ARCHITECTURAL-OPEN — re-verified 2026-08-10. Confirmed all three
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 SFFI bindings (`cuMemHostAlloc`/`cuMemHostGetDevicePointer`/
 `cuDeviceGetAttribute` and their `rt_cuda_*` extern counterparts) are still
 absent from `src/lib/nogc_sync_mut/cuda/sffi.spl`

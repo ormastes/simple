@@ -1,5 +1,8 @@
 # Linux secure-server performance runtime blockers
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 The self-hosted CLI fails its bounded `test --help` ABI probe. A user-authorized
 temporary Stage-2 build produced native HTTP and PureDatabase executables, but
 the HTTP process did not install its advertised listener and the database

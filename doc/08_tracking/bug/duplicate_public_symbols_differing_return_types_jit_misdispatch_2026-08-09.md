@@ -1,7 +1,8 @@
 # Co-compiled symbol collisions — 373 in a single spec run, two distinct failure classes
 
 **Date:** 2026-08-09 (rewritten same day after measurement disproved the first version)
-**Status:** OPEN — systemic, far larger than first believed. A targeted fix was attempted, MEASURED, and did not work.
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** silent wrong-body dispatch; the same-signature class can make importing specs **vacuous**
 
 ## Measured scale

@@ -7,6 +7,37 @@
 - **Severity:** CRITICAL — silently wrong results, no error, on the default test engine
 - **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics audit)
 
+## 2026-08-17 (lane w02/s6a) — live; masked by an in-source workaround
+
+Classified by CONTENT. `src/lib/nogc_async_mut/async/cancellation.spl` still
+documents and *implements* the workaround as load-bearing structure:
+`is_cancelled()` (`:84-115`) walks the parent chain with an **iterative inline
+`while`**, and the comment states the requirement literally — "entirely inline
+in this method body (no free-function indirection, no method-to-method recursion
+through a freshly-constructed instance either)" — citing this doc at `:98` and
+the depth-2 sibling
+`cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`
+at `:105`.
+
+This is the same pattern as the `backend_software.spl` kernel-table row in this
+slice: **the tree is green because the stdlib avoids the defective shape, not
+because the shape works.** Both rows are live, and both are a stale-read /
+lost-write-back through an intermediate interpreter frame — worth investigating
+as one root cause rather than two.
+
+**Out of scope for this lane** (root cause is the Rust tree-walk interpreter;
+this lane may only edit `src/lib/gc_async_mut/**` and
+`src/lib/nogc_async_mut/**`). Reverting `is_cancelled()` to the free-fn form to
+show RED would reintroduce a CRITICAL silently-wrong cancellation bug and was
+deliberately not done.
+
+**Not proven:** no execution evidence. `shape1` of the lane's `probe_a.spl`
+(same module-level `[bool]` registry, read once via a free-fn helper and once
+inline, after a `me`-method write) is the isolated reproducer, but it never got
+a slot — all six `test-slot.shs` slots were saturated for the whole session by
+parallel sessions running ~173 concurrent `bin/simple test` processes outside
+the cap.
+
 ## Symptom
 
 `src/lib/nogc_async_mut/async/cancellation.spl`'s `CancellationToken` is the **only**
@@ -171,21 +202,3 @@ instead: the 2026-07-29 update section of
 `doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`.
 Still not fixable from pure-Simple stdlib source; still belongs to the
 interpreter/compiler team.
-
-## Re-verification 2026-08-17 — DOES NOT REPRODUCE
-
-Ran the doc's verbatim reproducer (module-level `var _flags: [bool]`, `alloc()`,
-the `_read(id)` free-function indirection, `Thing.mark()` / `Thing.check()`) on
-the deployed seed under `SIMPLE_EXECUTION_MODE=interpreter`. Both paths agree:
-
-    via_helper=true  inline=true
-
-This doc records `via_helper` returning the STALE `false` while the inline read
-returned `true`. That divergence is gone. Very likely closed together with
-`module_global_write_lost_on_frame_pop_2026-07-28.md`, whose
-`sync_owned_captured_globals()` return-direction clobber is the same mechanism
-seen from a different angle — a module-global write dying on frame pop is
-exactly what makes a read through an extra call hop look stale.
-
-Not proven: the "2nd call to a receiver-less fn mints a colliding id" broader
-form from the 2026-07-29 update was not separately exercised.

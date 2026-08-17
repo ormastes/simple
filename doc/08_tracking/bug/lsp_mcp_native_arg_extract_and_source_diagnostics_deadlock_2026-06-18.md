@@ -1,5 +1,8 @@
 # Bug: simple-lsp-mcp native tools/call broken + source-mode diagnostics deadlock
 
+Status: DUPLICATE of lsp_mcp_integer_position_args_corrupted_2026-06-14.md
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Filed:** 2026-06-18
 - **Severity:** P1 (LSP MCP tools unusable on native; diagnostics unusable in source mode)
 - **Components:** `src/app/simple_lsp_mcp/`, native AOT codegen, interpreter `process_run`

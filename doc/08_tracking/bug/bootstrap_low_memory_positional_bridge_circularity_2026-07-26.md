@@ -1,7 +1,8 @@
 # Bug: bootstrap low-memory positional bridge is blocked by split pure-binary capabilities
 
 Date: 2026-07-26  
-Status: **BLOCKED — final preflight found no admissible distinct route; one cycle remains unspent**
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 Scope: current-main compiler promotion only; normal compilation must remain unchanged
 
 ## Intended behavior
@@ -277,3 +278,11 @@ failure. Only after the positive and negative micro controls pass may the
 source bridge be committed and a separately authorized, bounded
 current-compiler promotion be considered. Do not run full Stage4 to diagnose
 this circularity.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN.** Nothing in `scripts/bootstrap/bootstrap-from-scratch.sh` resolves
+the stated circularity; status BLOCKED with no admissible distinct route is still accurate.
+Not reproduced live — the named probe
+(`test/02_integration/compiler/bootstrap_low_memory_phase2_reclaim_probe.spl`) was not run
+because a bootstrap is live at ~98% CPU and this lane must not contend with it.

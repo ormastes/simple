@@ -43,3 +43,32 @@ Until those prerequisites exist, `--threads` accurately controls only the AOT
 build stage. No bounded safe concurrency patch exists in driver orchestration
 alone.
 
+
+## Re-verification 2026-08-17 (content-based, lane w03/C)
+
+Triage listed this row as live. Re-checked against CURRENT source, not against
+the prose above. The doc's own audit is **confirmed accurate and unchanged**:
+
+- `driver_native_build_threads` has exactly TWO occurrences in the whole driver:
+  its definition at `src/compiler/80.driver/driver_aot_native_output.spl:60` and
+  its single call at `driver_aot_native_output.spl:587`, where it fills
+  `num_threads:` of a `ParallelBuildConfig`. There is no third site.
+- `ParallelBuildConfig` appears only in `driver_build/__init__.spl`,
+  `driver_build/parallel.spl` and `driver_aot_native_output.spl` — i.e. entirely
+  inside the AOT stage, never in the frontend.
+- `driver_source_pipeline_parsing.spl` calls `parse_full_frontend` serially at
+  five sites (`:89`, `:230`, `:385`, `:468`, `:539`) and contains **zero**
+  occurrences of `thread`/`Thread`/`parallel`/`Parallel` other than two unrelated
+  comments (`:455`, `:509`). It never reads the worker setting.
+
+So `SIMPLE_NATIVE_BUILD_THREADS` still controls only the AOT build stage, exactly
+as recorded. **Status stays BLOCKED, not fixed.** This is deliberately NOT patched
+in a bug-fix lane: the four "Required enabling work" items above are a
+reentrancy-and-arena redesign of the pure lexer/parser (process-global lexer,
+parser, diagnostics and AST state), not a bounded driver-orchestration change. A
+partial patch here would produce racy or order-dependent diagnostics — a silent
+wrong result strictly worse than the current honest serial behaviour.
+
+Classification for this sweep: **live, but architectural — no fix attempted.**
+Note also that this is a throughput gap, not a wrong-answer gap; it does not
+belong to the silent-wrong-result class this sweep was scoped to.

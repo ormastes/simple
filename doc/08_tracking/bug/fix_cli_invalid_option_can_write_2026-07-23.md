@@ -1,6 +1,7 @@
 # Fix CLI invalid option can write
 
-- **Status:** source fixed; focused bootstrap-interpreter contracts pass; fresh pure-Simple qualification blocked.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Observed:** `simple fix file.spl --dry-run=true` silently ignored the malformed option, then applied safe fixes because write mode is the default.
 - **Fix:** both active pure-Simple fix CLI owners now reject unknown options and empty `--fix-id=` with exit 2 before reading or writing files.
 - **Regression:** the lightweight and production-owner contracts (`fix_cli_option_validation_contract_check.spl` and `fix_production_cli_option_validation_contract_check.spl`) each prove malformed/unknown options leave a fixable fixture unchanged, while exact `--dry-run --fix-all --fix-id=ID` remains accepted and non-mutating.

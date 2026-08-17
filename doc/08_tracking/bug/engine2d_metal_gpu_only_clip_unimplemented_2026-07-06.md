@@ -1,6 +1,7 @@
 # Bug: Engine2D Metal GPU-only-mode scissor clip evidence
 
-- **Status:** implemented; current-source native Metal evidence pending
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** P2 (implementation complete; deployment evidence remains)
 - **Component:** `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl`
   (`set_clip`, `clear_clip`, `_bind_metal_clip`)

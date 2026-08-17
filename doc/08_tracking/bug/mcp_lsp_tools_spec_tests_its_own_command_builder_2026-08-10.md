@@ -55,7 +55,8 @@ vacuously green: it cannot fail if the handlers in
 
 # `mcp_lsp_tools_spec` tests its own command builder; product has no testable seam
 
-- **Status:** OPEN (spec is vacuously GREEN — 78/78 — and proves nothing)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-08-10 (stream P2)
 - **Files:** `test/01_unit/app/mcp_unit/mcp_lsp_tools_spec.spl`,
   `test/unit/app/mcp_unit/mcp_lsp_tools_spec.spl` (identical mirrors)

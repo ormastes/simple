@@ -1,6 +1,7 @@
 # Bug: Interpreter rejects `self.field = value` in methods
 
-Status: **RESOLVED** — root cause identified as incorrect method keyword (`fn` instead
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 **Date:** 2026-05-27
 **Severity:** Medium

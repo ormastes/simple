@@ -1,5 +1,8 @@
 # draw_image (kernel_blit_image) had a real Metal dispatch path but ZERO CPU-vs-Metal parity coverage
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 Closed (2026-07-07) — coverage gap, not a live divergence. No fix was needed;
 reproduction proved CPU vs Metal already bit-exact for this op.

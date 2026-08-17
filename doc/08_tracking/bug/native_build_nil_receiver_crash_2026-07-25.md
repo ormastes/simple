@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-25 (evening)
 - **Lane:** deployed stage4 `bin/simple native-build`, macOS
-- **Status:** open — bisect/fix in progress; broke SimpleOS harness runs 3-4 and MCP artifact rebuilds
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 `bin/simple native-build --entry <any .spl> --output <bin>` exits 132 (SIGILL) printing

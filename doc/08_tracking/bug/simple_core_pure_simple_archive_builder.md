@@ -146,3 +146,103 @@ reviewed archive change. Focused contracts pass 13/13 for native-build and 2/2
 for the SimpleOS launcher; the test-runner result predicates also pass 34/34.
 The full archive smoke remains gated on a source-matched rebuilt pure-Simple
 CLI.
+
+---
+
+## 2026-08-17 — headline claim STALE by content; a DIFFERENT live fail-open found in the same script, reproduced and fixed
+
+### The row's headline claim does not reproduce
+
+The triage row reads: *"check-simple-core-runtime-smoke still materializes
+`libsimple_runtime.a` from C, not pure Simple."* Classified against current
+content, that is false. `build_archive_part()`
+(`scripts/check/check-simple-core-runtime-smoke.shs`) builds every archive part
+with
+
+```
+"$SIMPLE_BINARY" native-build --backend "$BACKEND" --source "$CORE_SOURCE_DIR" \
+    --entry-closure --entry "$entry" --no-mangle --emit-archive --output "$output" --clean
+```
+
+over `src/runtime/simple_core/*.spl`, then assembles them with `ar`. There is no
+`cmake`, no `gcc`/`clang`/`cc`, and no `.c` input anywhere in the script — a
+grep for compiler invocations returns matches only inside the selftest fixtures
+added below. The archive is produced from pure-Simple sources by the Simple
+compiler. **The "materializes from C" half of this row is closed as stale.**
+
+The doc's other half — *"rebuilt self-hosted execution pending"* — is untouched
+by this entry and remains open: the smoke lane still needs a self-hosted
+`$SIMPLE_BINARY` that can run `native-build --emit-archive`, and I did not
+execute the full lane (it requires a native build; a bootstrap is live on this
+host). **I could not prove or disprove that half.**
+
+### A real fail-open in the same script, REPRODUCED
+
+The closure-cleanliness gate — the check that proves the produced executables
+contain no Rust-hosted runtime and no unwinder — was four inline lines:
+
+```sh
+HOSTED_MARKERS="$(strings "$HELLO_BIN" ... | rg -c 'libsimple_native_all|rust-hosted' || true)"
+UNWIND_MARKERS="$(nm -a "$HELLO_BIN" ... 2>/dev/null | rg -c '_Unwind|unwind' || true)"
+HOSTED_MARKERS="${HOSTED_MARKERS:-0}"
+UNWIND_MARKERS="${UNWIND_MARKERS:-0}"
+if [ "$HOSTED_MARKERS" != "0" ] || [ "$UNWIND_MARKERS" != "0" ]; then ... exit 1; fi
+```
+
+Every failure mode of the *tools* is laundered into a clean verdict: `|| true`
+swallows the status, `2>/dev/null` hides the diagnostic, and `${VAR:-0}` turns
+the resulting empty string into the value that means "no forbidden markers".
+The counts are also read through a pipe, so `$?` was `rg`'s status, not
+`strings`'/`nm`'s.
+
+Reproduced by extracting those exact lines and running them twice over one
+input file that visibly contains **both** forbidden markers, changing nothing
+but the availability of `strings` and `nm` (stubbed to `exit 127` on `PATH`):
+
+```
+== tools present  ==  simple_core_closure_clean=false hosted=4 unwind=0   rc=1
+== tools ABSENT   ==  simple_core_closure_clean=true                      rc=0
+```
+
+A host without binutils reports the runtime closure clean and the whole script
+exits 0. `nm` failing for any other reason (input that is not a valid object
+file) laundered identically.
+
+### Fix
+
+The scan is now the function `closure_marker_scan()`, which:
+
+- **verifies `strings`, `nm`, `rg` are present up front** and returns
+  `ERROR — nothing was checked` / exit 2 if any is missing — absence of evidence
+  is not evidence of absence, and a machine with no binutils can never be a pass;
+- captures each tool's output into a variable, wrapped in `set +e`/`set -e`, and
+  **reads the status on the line AFTER the command, never through a pipe** (the
+  `set -e` wrap is required: a failing command substitution in an assignment
+  aborts the shell before the status can be inspected);
+- treats a failing `strings`/`nm`, and an unreadable or absent input binary, as
+  ERROR exit 2 rather than a clean pass;
+- **counts the binaries it actually scanned** and returns ERROR exit 2 if that
+  count is 0, so a vacuous run cannot present as a pass;
+- reports `simple_core_closure_scanned=<n>` on success.
+
+### `--selftest` (fatal)
+
+`sh scripts/check/check-simple-core-runtime-smoke.shs --selftest`. Verdict
+convention: `PASS — <n> selftest fixture(s) checked, 0 failed` exit 0 / `FAIL`
+exit 1 / `ERROR — nothing was checked` exit 2. Six fixtures:
+
+| fixture | expect | role |
+|---|---|---|
+| clean real ELF object | rc 0 | must-PASS control, so the guard is not merely always-red |
+| `strings`/`nm` stubbed to `exit 127`, marker-bearing input | rc 2 | **reproducing** — the exact measured fail-open |
+| forbidden marker in a real object | rc 1 | must-FAIL: the gate still does its job |
+| non-object input (marker-FREE, so tool failure is the only possible cause) | rc 2 | generalizing: tool *failure*, not just absence |
+| absent/unreadable input | rc 2 | generalizing: missing input is never a pass |
+| zero binaries passed | rc 2 | generalizing: the non-vacuity rule itself |
+
+Note the selftest is itself fail-closed: if no C compiler exists to build the
+must-PASS fixture, it exits 2 rather than skipping the fixture and passing.
+
+Observed: `PASS — 6 selftest fixture(s) checked, 0 failed`, rc 0. All six were
+first written and run *before* the fix; the reproducing and non-object fixtures
+were red against the original inline code (rc 0 / clean where 2 was required).

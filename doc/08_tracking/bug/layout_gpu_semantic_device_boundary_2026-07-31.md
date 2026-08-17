@@ -1,6 +1,18 @@
 # Complete the GPU layout semantic/device boundary
 
-Status: OPEN — concrete boundary and bounded device slices implemented
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
+**2026-08-17 (lane w02/s6a) — stale file pointer, and NOT a silent-wrong-result
+bug.** The worklist row for this doc cites
+`src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl` as the subject file.
+That pointer is stale: `layout_paint.spl` is now a **24-line ARGB opacity
+helper** (`_apply_opacity` only, zero occurrences of "gpu"/"GPU") after its
+dead `_paint_box` was removed on 2026-08-17. The real GPU-layout boundary work
+lives under `gpu/browser_engine/gpu_web/layout/`. This row is enhancement-shaped
+— remaining item 1 is explicitly blocked on a complete Stage4 binary — so it is
+correctly classified DB, but it does not belong in a silently-wrong-results
+sweep and no reproduction was attempted for it here.
 
 The layout framework must not publish `hybrid_vector_gpu` from policy or
 oracle copying.
@@ -41,3 +53,9 @@ breaking pending a semantic shaping contract) are scoped feature growth, not
 defects with a bounded root-cause fix. **Confirmed ARCHITECTURAL-OPEN** —
 status and remaining-work list left unchanged as an accurate characterization;
 no code change made.
+
+## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED on this host
+
+Enhancement-shaped (bounded device slices) and needs GPU hardware to validate. Not reproduced and not closed: this lane could neither exercise the path nor
+find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
+not mistaken for either a live confirmation or a close.

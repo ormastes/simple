@@ -1,5 +1,8 @@
 # The 27 env-gated specs: 12 are tautology shells, 7 hide real defects
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Filed:** 2026-08-09 (stream P15)
 **Follows:** `env_gated_spec_switches_are_inert_under_test_daemon_2026-08-09.md` (P14, `c3307d1404d`)
 

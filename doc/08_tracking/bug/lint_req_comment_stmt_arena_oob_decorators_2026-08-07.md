@@ -1,6 +1,7 @@
 # `bin/simple lint` crashes with stmt-arena OOB on `decorators.spl` (pre-existing)
 
-- Status: open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Found: 2026-08-07, while landing WP-9 (skip governance,
   `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`)
 - File: `src/lib/nogc_sync_mut/spec/decorators.spl`

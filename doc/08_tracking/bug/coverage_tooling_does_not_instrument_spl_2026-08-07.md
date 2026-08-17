@@ -7,7 +7,8 @@
   built branch-coverage and line-coverage closure units on top of tooling that
   does not currently work end-to-end. No product functionality is broken by
   this; it blocks trustworthy coverage MEASUREMENT, both branch and line.
-- **Status:** open, RESOLVED AGAINST THE DEPLOYED BINARY WITH A CAVEAT. As of
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   the "Gate rebuilt with real mechanical probes for all 5 prerequisites
   (fourth pass)" section near the end of this doc,
   `check-render2d-coverage.shs` mechanically probes all five prerequisites
@@ -610,3 +611,19 @@ Remaining one-sided decisions per module are catalogued in each spec/agent
 report as provable headless ceilings (device/FFI lanes, never-nil retained
 engines, compile-time-false probes). Struct-method attribution gap filed as
 coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md.
+
+## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
+
+Content check confirms the doc's own caveat is still accurate:
+
+- `spl-coverage` exists **only** as a driver CLI arm —
+  `src/compiler_rust/driver/src/main.rs:310` (dispatch), `:963-966`
+  (`app_path: "src/app/spl_coverage/main.spl"`), `:1368`, `:1497`.
+- `lowering_coverage` is referenced only by `mir/lower/mod.rs:9` and its own
+  tests (`mir/lower/tests/branch_coverage/{misc.rs:375,expr.rs:407}`) — no
+  production wiring to the `.spl` runner artifact path.
+
+**Verdict: STILL-OPEN, confirmed by content.** Same family as
+`coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md`; both are the
+same missing-instrumentation cause and should be tracked together.
+**Not proven:** no execution evidence — see "Execution blocked" below.

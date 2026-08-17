@@ -1,5 +1,8 @@
 # Mirror BOTH-RED population: every failure traces to an already-documented landmine
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Lane MIRR2**, run inline by the orchestrator after two subagent attempts failed
 (the first deadlocked on a background monitor, the second was halted on an API
 quota).

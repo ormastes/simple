@@ -1,7 +1,8 @@
 # `eprint` in a module importing `std.io_runtime` is re-routed to STDOUT with a literal `[STDERR] ` prefix
 
 - **Date:** 2026-08-10
-- **Status:** **FIXED** 2026-08-10. Root-caused, fixed at the `.spl` layer, fenced
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   by `scripts/check/check-eprint-reaches-stderr-fd.shs` (revert-proved FAIL).
 - **Lanes:** both `interpreter` and `jit` (both were broken, both are now green).
 - **Class:** silent diagnostic loss / wrong sink.

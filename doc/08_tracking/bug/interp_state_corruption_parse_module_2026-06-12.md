@@ -4,7 +4,8 @@
 - **Severity:** P2
 - **Date:** 2026-06-12
 - **Component:** Rust seed interpreter (`src/compiler_rust`), interpreted execution of the lean frontend
-- **Status:** OPEN (workarounds in harnesses; root cause in seed not investigated per fix-.spl-first rule)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 

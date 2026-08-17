@@ -4,7 +4,8 @@
 - **Severity:** Critical — the repo's only automated protection against a `main`
   tree wipe is currently **off for every lane**, and fails in a way that looks
   like a tooling hiccup rather than a disabled gate.
-- **Status:** Open. Detected and worked around, **not repaired** (see *Why not
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   repaired here*).
 
 ## Symptom

@@ -1,5 +1,8 @@
 # `jupyter_notebook_server_system_spec.spl` — 2 of 4 local E2E `it` blocks reference Python helpers that don't exist, so they always SKIP
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **Date:** 2026-08-08
 - **Area:** `test/03_system/tools/jupyter/jupyter_notebook_server_system_spec.spl` (P0/P3 Jupyter
   system-spec suite)

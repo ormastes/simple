@@ -1,6 +1,7 @@
 # Engine2D Vulkan GLSL/SPIR-V Parity Closure
 
-Status: fully closed (2026-06-12 — VKSPIRV-001 resolved; rt_vulkan_init crash
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 confirmed not reproducible; all 10 kernels now real compiled SPIR-V 1.3)
 
 Date: 2026-05-29

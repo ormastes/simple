@@ -1,9 +1,12 @@
 # Bug: module-array push+reassign is stale after the SAME function also defines a nested closure over it (interpreter)
 
 - **Date:** 2026-07-29
-- **Status:** open (worked around in `test/01_unit/lib/std/concurrency/promise_spec.spl`;
-  root cause is in the interpreter, not fixable from pure Simple source beyond the
-  workaround)
+- **Status:** open — STILL LIVE, re-verified by content 2026-08-17 (see
+  "Re-verification" below). Worked around in
+  `test/01_unit/lib/std/concurrency/promise_spec.spl`. **BLOCKED — OUT OF SCOPE
+  for stdlib lanes:** root cause is in the Rust-seed interpreter's global/closure
+  environment sync, not in `src/lib/nogc_async_mut/async/promise.spl` (that file
+  is innocent; the failing class `Promise` is defined locally inside the spec).
 - **Severity:** HIGH — silently wrong results (stale read after mutation), no error,
   on the default test engine
 - **Found by:** lane PRM1 (mission-critical robustness campaign — `Promise.new`
@@ -130,6 +133,53 @@ nested closure share one frame or are split across two. Not root-caused further 
 this lane; filed for the interpreter/compiler team per the same reasoning as the
 referenced doc (not expressible/fixable from pure-Simple stdlib source beyond
 case-by-case workarounds).
+
+## Re-verification 2026-08-17 (still live) + root-cause location
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust bootstrap seed).
+Engine is the tree-walk interpreter — the JIT explicitly declines the module
+(`function 'main' creates a lambda/closure; the JIT closure ABI does not
+tag-box lambda arguments or results ... deferring to interpreter`), so this is
+an interpreter-only defect and cannot be attributed to codegen.
+
+The doc's minimal repro was re-run verbatim under `nice -n 19 timeout 400
+bin/simple run` (exit 0) and still shows the stale read:
+
+```
+0        # print(_reg[idx]) in make()  -- STALE, expected 42
+[0]      # print(_reg)                 -- STALE, expected [42]
+```
+
+Unchanged from the 2026-07-29 report — no regression, no fix in the interim.
+
+**Root cause location (do not edit from a stdlib lane).** The interpreter
+publishes/refreshes module globals across call frames at explicit sync points
+rather than sharing one live cell:
+
+- `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:47`
+  `captured_env_with_live_globals(func, captured_env)` — builds a closure's
+  environment by SNAPSHOTTING the current global values at call time.
+- `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:123`
+  `publish_live_bound_globals(env)` — writes a frame's globals back out; it is
+  invoked at the call boundaries (lines 172, 825-826, 890-891, 1214-1215).
+- `src/compiler_rust/compiler/src/interpreter/block_exec.rs:65-108` and
+  `node_exec.rs:659-690` — the `globals.contains_key(...) / globals.insert(...)`
+  write-back and `env.refresh_globals(...)` paths.
+
+That snapshot/publish design is exactly consistent with the observed polarity:
+a `var` rebind (`_reg = _reg.push(0)`) in the enclosing frame replaces the
+frame's LOCAL copy of the global, while the nested `fn` was given (or later
+publishes into) a different copy, so the two frames diverge. Hoisting the
+rebind into its own free function makes the publish/refresh boundary fall
+between the rebind and the closure creation, which is why the documented
+workaround works.
+
+This also explains the "opposite polarity" puzzle with
+`interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md`: both
+are the same snapshot-vs-live-cell bug, and which side goes stale is decided
+only by where the publish/refresh boundary happens to land relative to the
+rebind. They should be fixed together, by making module `var` bindings a shared
+mutable cell rather than a per-frame copy that is synced at boundaries.
 
 ## Suggested next step
 

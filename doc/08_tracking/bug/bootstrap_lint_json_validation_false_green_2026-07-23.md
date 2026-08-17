@@ -1,6 +1,7 @@
 # Bootstrap lint JSON validation accepted malformed output — 2026-07-23
 
-**Status:** SOURCE FIXED / FRESH STAGE 4 QUALIFICATION PENDING
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Reproduction
 

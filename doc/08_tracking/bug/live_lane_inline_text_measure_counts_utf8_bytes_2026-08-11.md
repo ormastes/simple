@@ -1,7 +1,8 @@
 # Live browser lane measures inline text by UTF-8 BYTES, not characters
 
 - **Date:** 2026-08-11
-- **Status:** OPEN (measured, not fixed — fixing it changes live-lane pixel output)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`
 - **Found while:** closing blocker 1 (inline text measurement) of
   `doc/03_plan/ui/rendering/blink_wiring_plan.md`
@@ -136,3 +137,59 @@ confirms the assertions are a real oracle rather than a tautology.
 
 Filed here rather than half-fixed, because a measurement-only change to this
 module is a regression.
+
+## Row triage 2026-08-17 — assigned file `src/lib/blink/layout/inline_text.spl` is ALREADY_FIXED
+
+`src/lib/blink/layout/inline_text.spl` contains no byte-bounded measurement.
+It imports the codepoint-correct shared leaf and measures through it:
+
+```simple
+use std.common.layout.text_metrics.{
+    TextMetrics, monospace_metrics, measure_text, baseline_offset_px,
+    wrap_text_lines, wrap_line_end, measure_range, text_cell_width
+}
+```
+
+Its own loops are bounded by codepoint arrays (`cps.len()`), not by
+`text.len()`. Nothing to fix in that file.
+
+The remaining OPEN sites are `src/lib/gc_async_mut/gpu/browser_engine/**`
+(out of scope for this lane) and `src/lib/gc_async_mut/gpu/engine2d/
+helpers_text.spl`, which this doc already documents as NOT safely fixable in
+isolation: its measurement and its draw loops (`text_render_metrics_to_buf`,
+`..._scale1`) both walk `text_val.len()` bytes and must move together, and
+edits to that module were measured NOT reaching the running process (a
+`/mnt/data/build-clean/src/lib/**` shadow root). Left as filed — a
+measurement-only change there is a regression, and the shadow-root trap makes
+any local measurement unverifiable.
+
+Class-level regression coverage added for the byte-vs-codepoint contract this
+bug and `text_byte_len_vs_codepoint_index_family_2026-08-06.md` share:
+`test/01_unit/lib/common/text_byte_len_vs_codepoint_index_spec.spl`.
+
+## RESOLVED — verified by content + execution 2026-08-17 (lane m7c_lib_async)
+
+Both defective call sites named above now measure CELLS, not bytes, in
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`:
+
+- `intrinsic_text_width` (:463-479) computes
+  `width + (text_cell_width(txt) as i32) * ink_w` — the byte-count
+  `txt.len() * ink_w` is gone, with an in-source comment stating the CJK
+  double-width / combining-mark-zero policy.
+- `inline_text_advance_width` (:504-534) now builds `val cps = text_codepoints(raw)`
+  and loops `while i < cps.len()` over codepoints, accumulating
+  `codepoint_cells(ch) as i32 * advance`. The advance-array arity check at :513
+  compares against `cps.len()`, not `raw.len()`.
+
+Both consume the shared leaf via line 15,
+`use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}`.
+`src/lib/blink/layout/inline_text.spl:80` likewise delegates to `text_cell_width`.
+
+Executed proof (`bin/simple run`, seed):
+
+    val s = "aé漢"
+    s.len()            -> 6      # bytes
+    text_cell_width(s) -> 4      # cells — exactly the "correct 4 drawn columns"
+                                 # this doc asked for
+
+Status: RESOLVED. No source change was needed by this lane.

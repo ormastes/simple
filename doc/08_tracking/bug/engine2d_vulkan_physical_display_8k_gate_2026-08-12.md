@@ -1,6 +1,7 @@
 # Engine2D Vulkan physical-display 8K gate
 
-Status: open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 Source readiness update (2026-08-14): the container campaign now builds and
 retains a native `strict_semantic_vulkan_window_producer`. It lowers the same

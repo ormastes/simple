@@ -1,6 +1,7 @@
 # GAP-TLS-1: Server-side ALPN is not connected to a live TLS handshake
 
-Status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Owner: Pure-Simple TLS/HTTP server lane
 
 `src/lib/nogc_sync_mut/http_server/tls_server.spl` can choose an ALPN value

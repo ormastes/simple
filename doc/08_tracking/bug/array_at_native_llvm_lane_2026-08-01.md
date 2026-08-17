@@ -1,7 +1,8 @@
 # Array `.at(i)` on the native LLVM lane — dispatch + missing C runtime accessor
 
 **Date:** 2026-08-01
-**Status:** native LLVM lane FIXED to parity with the JIT lane
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Parent bug:** `array_at_returns_nil_for_every_index_2026-08-01.md`
 **Prior lanes:** interpreter `f18c5963132`, JIT `ceee960ca8e`
 **Severity:** CRITICAL — silent wrong answer, no error, no crash

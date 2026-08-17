@@ -1,7 +1,8 @@
 # char_from_code / text_dot_from_char_code drop all non-ASCII codepoints
 
 - **Filed:** 2026-07-20
-- **Status:** fixed in source (2026-07-20) — green under `bin/simple run` and
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   matches the already-shipping `browser_engine` production workaround for
   the same bug (see below); the canonical `bin/simple test` verdict is
   still red (14 / 2 failures) due to a separate, pre-existing SSpec

@@ -1,5 +1,8 @@
 # generator_intensive_spec.spl shadows GeneratorState with different variants
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **File**: `test/unit/lib/nogc_async_mut/generator_intensive_spec.spl:17` (531 lines)
 - **Real product code**: `src/app/interpreter/async_runtime/generators.spl:10`
   — `enum GeneratorState` with variants `Created`, `Running`,

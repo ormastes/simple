@@ -1,6 +1,7 @@
 ---
 id: interp_module_global_stale_read_in_spec_blocks_2026-07-05
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 severity: medium
 discovered: 2026-07-05
 discovered_by: std.diag (easy-debug-infra P0) implementation + spec work

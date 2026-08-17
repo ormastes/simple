@@ -1,6 +1,7 @@
 # Generic BTree Spike Parse Failure — FULLY RESOLVED
 
-Status: **Rust seed parser:** Fixed. `try_skip_ident_generic_args` in
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Status
 

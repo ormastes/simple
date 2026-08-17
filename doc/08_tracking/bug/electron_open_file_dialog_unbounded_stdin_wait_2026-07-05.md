@@ -1,5 +1,8 @@
 # Electron open_file_dialog blocks on stdin with no timeout and silently drops unrelated IPC
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 Open.
 

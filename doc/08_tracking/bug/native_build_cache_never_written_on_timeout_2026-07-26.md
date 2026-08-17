@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-26
 - **Lane:** `native-build --cache-dir` (both backends; observed on SimpleOS WM harness kernel builds)
-- **Status:** root-caused (read-only analysis); fix set described below
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
 SimpleOS WM harness runs 5-7 each burned 2h+ compiling the kernel closure and timed

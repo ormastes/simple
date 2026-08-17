@@ -1,5 +1,8 @@
 # Bootstrap diagnostic sweep missing-child preflight
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Reproduction
 
 A canonical diagnostic sweep in a fresh worktree dispatched all selected files

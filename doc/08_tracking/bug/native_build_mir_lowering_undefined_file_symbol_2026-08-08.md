@@ -1,5 +1,8 @@
 # `native-build` MIR lowering fails to resolve `File`/`FileHandle` symbols for the `rt_io_file_roundtrip` fixture — reached, decisive, reproducible
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Summary
 
 The AOT (`native-build`, true LLVM codegen) leg of

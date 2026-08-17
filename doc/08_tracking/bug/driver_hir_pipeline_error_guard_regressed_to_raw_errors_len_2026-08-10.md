@@ -1,6 +1,7 @@
 # `driver_hir_pipeline_passes` error guard regressed to raw `errors.len()` — RED
 
-**Status:** OPEN — spec is RED against the product and stays RED. Do not weaken it.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Filed:** 2026-08-10
 **Found by:** repairing the half-landed fix on
 `compiler/mono/monomorphize_integration_spec.spl`

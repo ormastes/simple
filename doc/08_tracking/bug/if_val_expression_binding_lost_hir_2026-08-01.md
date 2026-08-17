@@ -1,6 +1,7 @@
 # `if val PAT = e:` in expression position loses its binding in HIR lowering
 
-- **Status:** FIXED (2026-08-01)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** High — silent wrong answers under JIT/native, hard build abort under LLVM
 - **Found by:** stage4 bootstrap, first blocker after the statement-arena fix `ec75d8c6090`
 - **Related:** `if_val_expression_form_binding_lost_2026-07-20.md` (the *interpreter*

@@ -1,7 +1,8 @@
 # Browser network policy check blocker
 
 - **Date:** 2026-07-26
-- **Status:** open
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Scope:** pure-Simple check of browser CORS/HTTP/HTTPS hardening
 
 ## Reproduction

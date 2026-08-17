@@ -1,5 +1,8 @@
 # engine2d SIMD row/span kernels are slower than scalar, and `fill_span` corrupts the fill colour
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Filed:** 2026-08-06 · **Severity:** high (perf regression by construction + wrong pixels)
 **Workstream:** WS-D (2D perf), findings D-F2 / D-F3 / D-F9
 **Binary under test:** `bin/release/x86_64-unknown-linux-gnu/simple`,

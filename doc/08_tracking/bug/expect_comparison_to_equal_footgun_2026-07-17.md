@@ -1,7 +1,8 @@
 # expect(a == b).to_equal(false) comparison-matcher footgun
 
 **Date:** 2026-07-17
-**Status:** PHASE-1 SWEPT — parse-aware transformer rewrote 1,386 simple cases in 321 files (2026-07-17); ~1,360 complex lines remain flagged by the checker
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 
@@ -67,3 +68,61 @@ deployed binary's rt_cli_arg_count gap; seed runner cannot compile the
 pure-Simple test-runner) — A/B confirmed the failure is byte-identical for
 origin and swept content, i.e. pre-existing and unrelated. Remaining
 ~1,360 complex lines: run the checker for the current list.
+
+## 2026-08-17 — the GATE itself was fail-open (fixed)
+
+Classified by CONTENT, not SHA ancestry. Row verdict: **LIVE**, but the live
+defect was not the remaining ~1,360 spec lines — it was the checker.
+
+### Reproduced RED (before any change)
+
+`scripts/check/check-expect-footgun.shs` computed only a HIT count. It never
+counted the FILES it fed to `grep`, so a scan of ZERO files was byte-identical
+to a clean tree, and exited 0 — in BOTH lanes, because `--strict` shared the
+same early `exit 0` at line 80-82:
+
+```
+# empty fixture tree (0 spec files present)
+$ sh check-expect-footgun.shs           -> rc=0  "EXPECT-FOOTGUN: No footgun patterns found"
+$ sh check-expect-footgun.shs --strict  -> rc=0  "EXPECT-FOOTGUN: No footgun patterns found"
+```
+
+Identical text and exit status to a genuinely clean tree. Absence of evidence
+reported as evidence of absence — the exact fail-open shape catalogued in
+`gate_oracle_soundness_census_2026-08-11.md`. The gate also had no `--selftest`
+and no `PASS/FAIL/ERROR` verdict line, so nothing pinned the behaviour.
+
+Root cause: `scripts/check/check-expect-footgun.shs:54-82` (pre-fix) — `COUNT`
+was the only oracle; the input cardinality was never computed.
+
+### After
+
+Repo guard convention, verdict always the last line of stdout, non-vacuity
+absolute (0 files scanned is ERROR, never a pass), fatal `--selftest`
+(3 fixtures: dirty must detect, clean-non-empty must pass with n>0, empty tree
+must yield 0 scanned so the caller is forced to ERROR).
+
+```
+$ sh check-expect-footgun.shs --selftest   rc=0  PASS -- 3 selftest fixture(s) checked, 0 failures
+$ sh check-expect-footgun.shs (empty tree) rc=2  ERROR -- nothing was checked (0 spec files found ...)
+$ sh check-expect-footgun.shs              rc=0  WARN -- 20580 file(s) scanned, 2531 footgun pattern(s) found (report-only; use --strict to fail)
+$ sh check-expect-footgun.shs --strict     rc=1  FAIL -- 20586 file(s) scanned, 2531 footgun pattern(s) found
+```
+
+The empty-tree case moved from `rc=0` to `rc=2` — that is the fix.
+
+### Similar-problem detection gate (new)
+
+`scripts/check/check-scan-guard-vacuity.shs` generalises to the CLASS rather
+than this one script: every `check-*.shs` under `scripts/check/` that walks a
+corpus (`find` / `git ls-files` / `grep -r`) must have BOTH a non-vacuity oracle
+(a zero-input path reaching `exit 2`) and a COUNTED success verdict. Ratcheted
+against `scripts/check/scan_guard_vacuity_baseline.txt`; FAILs on any newly
+fail-open guard AND on any baselined entry that now passes (stale baseline).
+Fatal `--selftest`, 6 fixtures, including a byte-level replay of this incident's
+shape and an empty-tree fixture that must classify zero scripts.
+
+### Not fixed here
+
+The remaining 2,531 flagged spec lines are unchanged — this change makes the
+count honest and makes `--strict` capable of failing, it does not sweep phase 2.

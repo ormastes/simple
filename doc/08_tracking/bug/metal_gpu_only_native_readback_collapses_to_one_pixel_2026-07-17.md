@@ -1,5 +1,8 @@
 # Metal GPU-only native readback collapses to one pixel
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Scope
 
 - Host: Apple Silicon arm64, macOS
@@ -89,3 +92,13 @@ cycle proves the 1,024-pixel device result and clip oracle.
    `SIMPLE_NO_STUB_FALLBACK=1`.
 4. The focused 8x8 SPipe readback spec asserts full length and clipped pixels
    from the device source on current native macOS.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — 1x1 collapse ALREADY-FIXED
+
+`src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl:784-795`: `read_pixels()`
+returns the device buffer only when `gpu_pixels.len() == (self.w * self.h)`,
+and under `gpu_only` returns an **empty** array rather than the 1x1 mirror. The
+single-pixel collapse path this doc reports is gone (fail-closed rather than a
+stale mirror). Residual, and the reason this is not closed outright: device
+readback still yields empty under gpu_only, and this is a Linux host so no
+Metal run can confirm anything at runtime.

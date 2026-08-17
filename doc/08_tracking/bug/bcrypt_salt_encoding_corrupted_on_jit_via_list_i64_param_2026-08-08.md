@@ -1,5 +1,8 @@
 # bcrypt salt encoding is corrupted on the JIT lane (`list<i64>` param miscompile)
 
+Status: DUPLICATE of jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Filed:** 2026-08-08 · **Severity:** high (silent wrong output in shipped security
 code; no diagnostic) · **Engine:** JIT via `bin/simple run` on the Rust **seed** binary
 `bin/release/x86_64-unknown-linux-gnu/simple`. **Interpreter: CORRECT.**

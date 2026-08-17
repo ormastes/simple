@@ -1,7 +1,8 @@
 # Bug: `--features llvm` build — RESOLVED (was a compile-time visibility error, not a link failure)
 
 - **Date:** 2026-07-30
-- **Status:** **not reproducible** — the `--features llvm` build of the seed
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   succeeds on current origin.
 
 > **Correction (parent session, 2026-07-30).** Two independent lanes checked

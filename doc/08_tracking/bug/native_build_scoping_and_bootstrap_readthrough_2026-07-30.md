@@ -1,5 +1,8 @@
 # `native-build` scoping + fail-open readthrough (2026-07-30)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Assignment: read `native_build_worker.spl` and the CLI arg plumbing that
 invokes it to answer definitively why the pass-13/14 archive-lane attempts
 on `slh_dsa_wots.spl` stalled, and whether this also explains the
@@ -325,3 +328,23 @@ small** — with two caveats now on record:
    now the recommended next attempt: it directly follows from this
    pass's own citations (matches the one invocation shape proven to work
    for all 6 real callers) rather than introducing a new mechanism.
+
+## Content re-verification 2026-08-17 (app-rest lane) — the fail-open CLAIM is REFUTED
+
+Triage recorded this row as "scope resolution returns empty string instead of
+falling through to src, silently fail-open" citing doc line ~258. Read against
+CURRENT source, that specific claim does not hold:
+
+- `src/app/io/_CliCompile/compile_targets.spl` has three `return ""` sites —
+  `:457`, `:477`, `:527`. Each is a **benign guard**, not a scope fall-through:
+  dirname of a single-segment path, an all-dots relative import, and an empty
+  segment list respectively. None of them is on the scope-resolution path.
+- The widening `src` fallback is present and gated, not missing:
+  `compile_targets.spl:570-571`, guarded by `_nb_source_dirs_cover_workspace`
+  (defined at `:505`).
+
+So there is no fail-open `return ""` to patch here. **The fail-open half of this
+record should be CLOSED as not-reproducible-by-content.** Any remaining
+bootstrap-readthrough concern in this doc is separate and was not evaluated.
+Not proven: no execution evidence — the host was at load 346 with a live
+bootstrap, so no native-build run was performed.

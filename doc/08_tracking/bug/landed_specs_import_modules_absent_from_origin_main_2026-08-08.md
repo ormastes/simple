@@ -1,6 +1,7 @@
 # Landed specs import modules absent from origin/main (2026-08-08)
 
-**Status:** open — family enumerated, not yet triaged.
+Status: DUPLICATE of lib_specs_import_133_modules_that_do_not_exist_2026-08-04.md
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Summary
 

@@ -183,3 +183,36 @@ literally empty, but this was not re-measured against the seed's parse
 capability or the lint checker's actual consumption of that registry in this
 pass, so it is noted as a fact, not treated as closing the blocker. The
 164-finding residual and the `deny`-promotion block remain open.
+
+## Re-verification 2026-08-17
+
+Re-read `src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl`
+(within scope). Confirmed still present and unchanged from the doc's
+description: `_ufr_is_nonhandle_return_type` (line 161) and
+`_ufr_nonhandle_externs` (line 168) implement the same-file, text-level
+`extern fn ... -> TYPE` return-type gate exactly as documented (`bool` and
+`[`-prefixed array types only; `Any` deliberately excluded).
+
+`grep -rn "^resource " src/lib src/app src/compiler` returns 7 matches (same
+count the doc's 2026-08-10 note recorded). The blocker is unchanged: the
+sound fix needs a populated `@sffi(handle: ...)` / `resource R` registry
+(`compiler.frontend.resource_registry`) consulted by the checker, and that
+registry — its population and its consumption path — is not owned by
+`unwrapped_foreign_resource.spl`; wiring it is a cross-cutting change that
+the doc itself frames as belonging to WP-A/WP-C plus the checker's dispatch
+into the lint rule registry (out of scope per this task's instructions: "if
+the real fix requires editing the shared lint rule REGISTRY ... do NOT touch
+it").
+
+No further narrowing was attempted within `unwrapped_foreign_resource.spl`
+alone: any additional cut (e.g. adding more non-handle return types, or
+special-casing `rt_string_new`/`rt_array_new` by name) would be exactly the
+kind of unsound, ad hoc narrowing the doc explicitly warns against ("do not
+ship it") without real type information from the (currently unconsumed)
+resource registry.
+
+**Verdict: SKIPPED-CLAIMED / BLOCKED — the return-type gate already landed
+inside this file (in-scope, already done); the remaining 160-finding residual
+needs the resource-registry consumption wiring, which crosses into the
+shared lint-rule-dispatch machinery this worker was told not to touch. No
+code change made in this pass.**

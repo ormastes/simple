@@ -1,6 +1,7 @@
 # Lint profile optional assertion runner failure — 2026-07-19
 
-**Status:** REPRODUCED / OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 The focused lint-profile spec consistently reports 9 passing scenarios and one
 failure in its existing `parse_lint_profile` optional assertions, while the new

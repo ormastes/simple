@@ -1,5 +1,8 @@
 # `mcpgdb` app MCP server: `ping` now returns JSON-RPC "Method not found" instead of empty result
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-20
 **Component:** `src/app/mcpgdb/main.spl` MCP JSON-RPC dispatch
 **Severity:** Low — single isolated example; 5 of 6 examples in the same

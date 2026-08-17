@@ -1,5 +1,8 @@
 # Bug: `bin/simple run` corrupts single-field enum payload values
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **ID:** interp_run_enum_single_field_payload_corrupt_2026-06-15
 **Severity:** P1 (data corruption, silent)
 **Affected path:** `bin/simple run` (default JIT/interpreter driver, not seed-driven test runner)

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-07-27
 - **Lane:** SimpleOS-WM QEMU (cranelift native), font metric resolution
-- **Status:** root-caused (read-only analysis); fix direction described; NOT blocking the now-green SimpleOS-WM cell
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Family:** cranelift native aggregate-return nil-receiver (`cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md`)
 
 ## Symptom

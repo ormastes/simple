@@ -1,7 +1,8 @@
 # Essential-tools smoke silently ignores artifact argument
 
 - **ID:** `essential_tools_smoke_ignored_artifact_argument_2026-08-02`
-- **Status:** FIXED — claimed and repaired by `pure_parser_close` on 2026-08-02
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** Critical (wrong-binary verification)
 
 ## Reproduction

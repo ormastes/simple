@@ -5,7 +5,8 @@
 - **First observed red:** 2026-05-19 (`c_backend_export_spec`, 100% failure rate)
 - **Severity:** P2 — whole C++ backend silently dead under the interpreter
 - **Category:** Compiler / Backend / C / interpreter module loading
-- **Status:** ROOT CAUSE FIXED 2026-06-25 (residual harness item below)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Real root cause (the original "block-less" guess was wrong)
 

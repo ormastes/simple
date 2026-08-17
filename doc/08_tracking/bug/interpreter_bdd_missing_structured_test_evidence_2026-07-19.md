@@ -1,6 +1,7 @@
 # interpreter BDD omitted structured test evidence
 
-**Status:** PRODUCER FIXED / PURE-SIMPLE CONSUMER DEPLOYMENT PENDING
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Severity:** P1 — `--assert-ran` could not authenticate interpreter results
 
 ## Root cause

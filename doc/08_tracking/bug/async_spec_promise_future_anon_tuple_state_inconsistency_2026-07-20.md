@@ -1,6 +1,7 @@
 # async_spec: destructured Future from anon-tuple Promise.new() gives inconsistent poll() results
 
-**Status:** open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** interpreter / anonymous-tuple destructuring (likely same landmine class as
 `resource_handle_anon_tuple_field_access_2026-07-20.md`)

@@ -9,7 +9,8 @@
 > committed and is intentionally RED on the one assertion that tracks the
 > remaining work.
 
-**Status:** OPEN (reduced — `[i64]?` arm closed, `[u8]`/`[i64]` arm remains)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Found:** 2026-08-09 — flagged by stream P6b as a co-compiled-definition warning
 during the Vulkan DBG-1 work; widened by the coordinator on inspection
 **Severity:** latent misdispatch — silently returns a differently-shaped value

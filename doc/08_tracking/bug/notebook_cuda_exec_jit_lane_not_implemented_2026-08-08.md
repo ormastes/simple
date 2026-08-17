@@ -41,3 +41,19 @@ runtime.
 
 - `src/lib/gc_async_mut/gpu_lane/cuda_jit_lane_executor.spl` (fixed-kernel JIT executor)
 - `src/lib/nogc_sync_mut/notebook/cuda_exec.spl` (`probe`/`execute_cell` jit-base-runtime branch)
+
+## Verification 2026-08-17 (content classification) — LIVE, but fails LOUDLY
+
+Confirmed live in `src/lib/nogc_sync_mut/notebook/cuda_exec.spl`. The jit lane is
+not silently wrong — it is explicitly gated and names this doc in its own error
+strings: `LaneStatus.Blocked(...)` at line 134, `blocked_reason` at 140, and
+`cell_result_error(...)` at 175, each triggered by `if self.base_runtime ==
+"jit"`. The header comment (39-46) states the gap directly.
+
+Classification note for the silent-wrong-result sweep: this row does **not**
+belong to that class. It returns an honest error rather than a wrong answer, so
+it is a feature gap (per-cell Simple->PTX compile path missing), not a
+correctness defect. Only `KERNEL_PTX_PATH` (line 60), a checked-in fixed kernel
+artifact, ever executes.
+
+Not proven: no `Results:` line — CUDA hardware lanes were not exercised.

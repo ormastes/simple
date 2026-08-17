@@ -1,5 +1,8 @@
 # Bootstrap Stage 4 AST/HIR overlap exhausts the no-GC heap registry
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Open. The full `src/app/cli/main.spl` Stage 4 closure still does not produce a

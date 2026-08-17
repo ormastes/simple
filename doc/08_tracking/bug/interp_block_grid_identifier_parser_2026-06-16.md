@@ -1,7 +1,8 @@
 # Bug: `block` / `grid` as identifier names trip the parser near named-field construction
 
 **Found:** 2026-06-16 · **Severity:** P3 (parser ergonomics) · **Area:** parser / frontend
-**Status:** source fixed for `grid` in Rust parser 2026-07-15; focused execution
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 pending (`block` was not reserved)
 
 ## Summary

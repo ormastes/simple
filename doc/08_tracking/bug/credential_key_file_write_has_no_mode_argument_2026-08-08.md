@@ -101,3 +101,34 @@ first part is in this lane's scope (`src/runtime/**`): the runtime primitive
 dead code by the project's own code-style rule — and, as the doc notes, it needs
 a bootstrap rebuild, which was excluded while a stage-3 bootstrap held the host.
 **This wants a single owner across all three paths, not a runtime-only patch.**
+
+## 2026-08-17 verification — runtime slice (classified by CONTENT)
+
+**Verdict: STILL OPEN — confirmed live, with corrected line numbers.** The doc
+header cites `src/runtime/runtime_native.c:8425`; that is stale. Current source
+has TWO hard-coded-0644 creation sites:
+
+```c
+src/runtime/runtime_native.c:9654:  int fd = open(path, O_WRONLY | O_CREAT, 0644);
+src/runtime/runtime_native.c:10121: int fd = open(path, O_WRONLY | O_CREAT, 0644);
+```
+
+so a secret is created world/group-readable and only narrowed afterwards — the
+race window the doc describes is real and observable via `stat` during the write.
+
+There is still **no write-with-permission-mode primitive** anywhere in the
+runtime. The only near-miss is `file_write_with_mode`
+(`src/runtime/simple_core/core_fs.spl:215`, called at :238/:274/:311), whose
+`mode_str` is an **fopen mode string** (`"w"`/`"a"`), not a permission bitmask —
+it does not address this bug and must not be mistaken for the fix.
+
+Note the one place that already gets this right, as the model for the fix:
+`:9550` uses `open(temp_path, O_WRONLY|O_CREAT|O_EXCL, 0600)` (Windows sibling at
+:9545). The minimal fix is to thread a mode argument to the two 0644 sites and
+default secret writes to 0600.
+
+**Not fixed here, deliberately.** The fix is only meaningful together with its
+callers, which live in `src/lib/**` — outside this worker's file slice, where an
+edit would be a cross-worker clobber. Adding an uncalled runtime primitive alone
+would also violate the "never add unused code" rule. Handing off with the exact
+sites above.

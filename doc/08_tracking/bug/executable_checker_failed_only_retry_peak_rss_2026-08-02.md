@@ -1,5 +1,8 @@
 # Executable checker failed-only retry peak RSS — 2026-08-02
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Observation
 
 A bounded four-worker retry of exactly 414 previously failing files reported a

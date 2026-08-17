@@ -1,6 +1,7 @@
 # Guard fixtures missing locally silently disable pre-push checks (2026-08-08)
 
-**Status:** swept; 4 files restored; 0 remaining MISSING-LOCALLY.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Trigger:** `scripts/check/check-jit-closure-blockers.shs` fail-closed with
 `ERROR — nothing was checked (selftest failed: 8)` because all 8 fixtures under
 `test/fixtures/repro/compiler/jit_closure/` were absent from the shared working

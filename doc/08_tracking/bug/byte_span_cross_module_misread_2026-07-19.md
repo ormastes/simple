@@ -1,5 +1,8 @@
 # Cross-module ByteSpan misreads small heap-built [u8] arrays (deployed interpreter)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Filed:** 2026-07-19 · **Status:** OPEN · **Area:** interpreter / cross-module struct fields
 **Found via:** every PNG chunk CRC from `png_encode.spl` was wrong while its
 zlib stream was byte-perfect.

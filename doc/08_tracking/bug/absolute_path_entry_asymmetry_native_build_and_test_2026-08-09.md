@@ -1,5 +1,8 @@
 # Absolute paths are mishandled in opposite directions by `native-build --entry` and `simple test` -- 2026-08-09
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status: OPEN (usability / fail-open). READ-DERIVED filing -- neither half was re-executed for this doc.
 
 Two CLI entry points disagree about absolute paths, and they fail in *opposite*

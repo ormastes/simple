@@ -484,3 +484,40 @@ of which resolve to real definitions and are dropped by the def-filter.)
 Consequently **all 12 remaining Class A sites belong to other lanes**
 (`10.frontend`, `15.blocks`, `70.backend`, `90.tools`, `src/lib`, `compiler_rust`)
 and were deliberately not edited in this pass.
+
+## Specs (2026-08-17)
+
+- **Census / prevention:** `test/01_unit/compiler/common/impl_to_free_fn_zero_definition_census_spec.spl`
+  Re-derives the whole survivor set from `src/compiler/**` on every run using the
+  CORRECTED oracle, and fails on any NEW zero-definition call site. Bidirectional
+  against `known_survivors()`: an unlisted survivor fails, and a listed entry that
+  is no longer present also fails — so the allowlist cannot rot into a permanent
+  blanket exemption. Six synthetic-input examples prove the detector can fire
+  (positive control, folded-receiver control, two negative controls including the
+  `zzq`/`zzqx` off-by-one, definition extraction across `fn`/`me fn`/`extern fn`,
+  and an anti-regression on the published oracle's `me fn` blind spot), plus
+  `files.len() > 500` / `defs.len() > 1000` non-vacuity guards so a failed walk
+  fails loudly instead of passing empty.
+- **Reproducer:** `test/01_unit/compiler/common/impl_to_free_fn_class_a_call_sites_spec.spl`
+  Pins the 12 Class A callees: each must have >=1 `fn`/`me fn` definition in `src/`.
+  Expected RED until the owning lanes restore them. Also pins `00.common`'s
+  repaired `predicate_parser.spl` site against regression.
+
+### Evidence status: UNVERIFIED — no `Results:` line obtainable
+
+Neither spec has produced a verdict line, and this is NOT being reported as a pass.
+
+- Run 1: ~1900 lines, all warnings, **no `Results:` line, exit 0** — the silent-green
+  defect (`test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`).
+  Exit 0 without a results line is INCONCLUSIVE, per `.claude/rules/testing.md`.
+- Run 2: **EXIT=143 (SIGTERM)** at 1943 lines. Attributed, not guessed: a
+  `kill_simple_monitor.shs` (pid 1765979) is live from a DIFFERENT worktree
+  (`/home/ormastes/dev/pub/simple/`) and `/tmp/kill_simple_monitor.log` shows it
+  still firing the pre-fix `MIN_AGE_SECS=60` rule (`06:21:00 ... age=62s>=60s`).
+  That threshold sits far below this spec's runtime, so **any** run of it is killed
+  before it can print. Host loadavg 76-112 at the time.
+
+A SIGTERMed spec dies before printing its header, which through a pipe launders as
+exit 0 with no `Results:` line — indistinguishable from the silent-green class. Both
+specs therefore need a re-run on a quiet host, or with that foreign monitor stopped,
+before any verdict is claimed for them.

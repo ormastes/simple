@@ -1,6 +1,7 @@
 # browser_engine: table rows lay cells vertically (no horizontal table layout)
 
-- Status: open
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   (`tag_defaults` treats `table`/`tr`/`td`/`th` as plain `display:block`;
   `layout_table.spl` exists but is not wired into this renderer's flow)

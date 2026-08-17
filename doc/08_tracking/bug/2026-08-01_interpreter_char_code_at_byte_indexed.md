@@ -1,7 +1,8 @@
 # Pure-Simple interpreter `text.char_code_at` was BYTE-indexed (cross-lane divergence)
 
 - **Date:** 2026-08-01
-- **Status:** FIXED (behaviourally verified on the pure-Simple interpreter)
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** High — the canonical default lane was the wrong one
 - **Area:** `src/compiler/10.frontend/core/interpreter/`
 

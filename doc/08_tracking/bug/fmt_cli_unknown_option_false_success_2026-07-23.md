@@ -1,5 +1,8 @@
 # fmt CLI unknown options could succeed
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Symptom
 
 Both pure-Simple `fmt` owners ignored unrecognised dash-prefixed arguments, so

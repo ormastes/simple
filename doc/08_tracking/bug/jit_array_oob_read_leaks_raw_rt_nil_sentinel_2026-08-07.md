@@ -4,7 +4,8 @@
 - **Severity:** P2 — wrong text output / missing panic on bare OOB index, no
   crash, no memory-safety issue (`rt_array_get` internally bounds-checks and
   returns cleanly; confirmed 2026-08-07, see Update below)
-- **Status:** OPEN — root-caused 2026-08-07, not fixed (Rust-seed defect, see
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   Update below)
 - **Affects:** JIT/native lane only, confirmed against the currently-deployed
   seed binary (`bin/simple` = Rust seed; self-host Stage-3 blocker still
@@ -319,3 +320,78 @@ Sabotage-verified: corrupting the fixture's in-bounds control value
 (`ys=[1,2,3]` → `[1,2,4]`) makes the script print `FAIL — interpreter lane
 control regressed` and exit 1; restoring the fixture (verified byte-identical
 via `diff`) makes it pass again (`KNOWN-OPEN`, exit 0).
+
+## Update 2026-08-17: re-reproduced on a HEAD seed, and UNIFIED with the `??` sentinel bug
+
+Re-reproduced against a seed built from HEAD at
+`/mnt/data/cargo-target-rustp1/release/simple` (NOT the deployed `bin/simple`,
+which is a stale 2026-08-16 seed — both binaries were measured and agree, so
+this is not a stale-binary artifact).
+
+New run-path probe + spec, JIT arm, 9 red rows:
+
+```
+FAIL array_get_miss_bare got=3 want=nil
+FAIL array_get_miss_far got=3 want=nil
+FAIL empty_get_miss_bare got=3 want=nil
+FAIL dict_get_miss_bare got=3 want=nil
+FAIL present_3_get_coalesce got=-1 want=3
+FAIL present_3_first got=-1 want=3
+FAIL present_3_last got=-1 want=3
+FAIL present_3_dict_coalesce got=-1 want=3
+FAIL sweep_present_3 got=987654 want=3
+Results: 6 total, 2 passed, 4 failed
+```
+
+The interpreter arm is fully green (46/46), confirming the engine split.
+Bare `xs[9]` still exits 0 printing `3` with no panic.
+
+### This bug and `coalesce_raw_i64_sentinel_collision_2026-08-02.md` are ONE defect
+
+They are the two *directions* of a single representational hazard:
+
+```
+RT_NIL == RuntimeValue::from_special(SPECIAL_NIL)
+       == from_tag_payload(TAG_SPECIAL = 0b011, payload = 0) == raw word 3
+a properly BOXED inline integer 3                            == 3 << 3 == 24
+```
+
+The word 3 means nil only while the value is BOXED. The shared root cause is a
+single line of the type table:
+
+  `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:1478`
+  `"first" | "last" | "get" | "max" | "min" => Some(*element)`
+  (and `:1601` `"get" | "remove" | "get_or"` for dicts)
+
+These accessors are *genuinely optional* but were typed as the bare element
+type. A bare scalar TypeId makes `needs_int_unbox`
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs:600-617`)
+UNBOX the accessor result to a raw i64 before anything inspects it — which
+collapses the two cases the caller must distinguish into the same machine word:
+
+- a MISS (boxed nil, word 3) unboxes to word 3   -> formats as `3`, not `nil`
+  (this bug's symptom)
+- a PRESENT 3 also unboxes to word 3             -> the `!= nil` check in
+  `hir/lower/expr/control.rs::lower_coalesce` fires and `?? d` returns `d`
+  (the residual the coalesce doc filed as a "known remaining gap")
+
+So the earlier framing here — "the producer never wraps the value as a proper
+flat-Option" — was right about the layer but not the mechanism: the producer
+`rt_array_get` DOES return a properly boxed `RuntimeValue::NIL`, distinguishable
+from a boxed 3 (word 24). The information is destroyed one step later, by the
+unconditional unbox that the bare element TypeId authorises.
+
+### Fix
+
+Type `[T].first/last/get` and `{K:V}.get/remove` as `TypeId::ANY` so the value
+stays BOXED: nil remains word 3 while a present 3 becomes word 24. Both the
+existing `!= nil` check and the boxed formatter then become correct without
+either of them changing. `ANY` is used rather than `Pointer`/`T?` (the lane
+`at` uses) because `at` is still broken in value position on the JIT.
+
+Still NOT fixed by this change, and explicitly not claimed:
+- bare `xs[9]` OOB emits no bounds check and does not panic under the JIT. The
+  seed's array-index MIR arm and `.get()` share one code path, so a bounds
+  check cannot be added there without also making `.get()` panic. Separate fix.
+- `max`/`min` keep the bare element type; they are optional too but were not on
+  the measured collision path.

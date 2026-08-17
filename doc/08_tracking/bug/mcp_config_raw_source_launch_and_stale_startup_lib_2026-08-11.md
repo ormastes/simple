@@ -1,7 +1,8 @@
 # MCP/LSP server family: raw-source client configs, stale startup-lib extraction, missing POSIX wrappers
 
 **Date:** 2026-08-11
-**Status:** raw-source configs FIXED + guarded; remaining items RECORDED (not fixed)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## 1. FIXED — shipped MCP configs launched raw `.spl` source
 
@@ -146,3 +147,15 @@ The other four guards all returned real, non-vacuous PASSes on
 `094f7667f7ad..3345567480df`: conflict-tree 1 commit / 0 conflict trees;
 conflict-markers 7 files / 0 markers; tree-size 1 commit / 112,817 files /
 0 structural faults; no-revert 8 files / 0 reverts.
+
+## Content re-verification 2026-08-17 (app-rest lane) — config half CONFIRMED FIXED
+
+Classified by CONTENT only. `.mcp.json:30` now launches the compiled binary
+(`exec "$PWD/bin/simple_lsp_mcp_server"`); no `mcp_stdio_bridge.js` and no raw
+`.spl` launch remains for the simple lanes. (The JS bridge still on line 42 is
+the unrelated `codex_stitch` server, not an MCP-family regression.) This matches
+the doc's own "raw-source configs FIXED + guarded" status.
+The remaining items — stale startup-lib extraction and the missing POSIX
+wrappers — are explicitly RECORDED-not-fixed by this doc and stay OPEN; nothing
+in `src/app/simple_lsp_mcp/main.spl` implements them. **No patch available in
+`src/app/`; this is a backlog record, not a live app-code defect.**

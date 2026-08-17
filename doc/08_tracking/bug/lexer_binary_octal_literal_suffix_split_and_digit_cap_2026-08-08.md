@@ -1,6 +1,7 @@
 # CoreLexer: binary/octal literals lost their type suffix; radix digit runs capped at 64
 
-- **Status:** FIXED (2026-08-08)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** compiler front end — `src/compiler/10.frontend/core/lexer_struct.spl`, `CoreLexer.scan_number`
 - **Engines:** pure-Simple front end (CoreLexer is the only live tokenizer; the
   free-function scanner cluster was deleted 2026-07-29, see

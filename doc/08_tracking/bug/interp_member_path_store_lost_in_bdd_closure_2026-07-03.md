@@ -8,7 +8,8 @@ directly inside an `it` block.
 `bin/release/x86_64-unknown-linux-gnu/simple`; same family as
 `interp_crossmodule_array_writeback_lost_in_bdd_closure_2026-06-29.md` and
 `interp_enum_arg_corruption_in_bdd_closure_2026-06-30.md`).
-**Status:** Source fixed; execution verification pending.
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Found by:** rollball production spec lane (W6d event-handling gap check).
 
 ## Symptom

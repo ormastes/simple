@@ -1,6 +1,7 @@
 # HTML Compat Inline Span Structural Geometry Mismatch
 
-- Status: resolved
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - Severity: P2
 - Area: Simple Web Renderer / Chromium geometry parity
 - Repro:

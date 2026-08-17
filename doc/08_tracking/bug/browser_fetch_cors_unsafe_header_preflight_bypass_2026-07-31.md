@@ -1,6 +1,7 @@
 # Browser Fetch bypasses CORS preflight for unsafe request headers
 
-- **Status:** source-fixed candidate; static gate only; runtime/SPipe pending
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high — cross-origin network side effects can occur before denial
 - **Verified revision:** `30af808b2eebbfb38cf9f3132869a0e9e2cd26f3`
 - **Scope:** shared browser `FetchEngine` and CORS policy

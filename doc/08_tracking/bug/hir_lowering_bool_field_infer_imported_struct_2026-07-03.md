@@ -1,5 +1,8 @@
 # HIR lowering: cannot infer bool field type on imported struct (falls back to interpreter)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **Date:** 2026-07-03
 - **Severity:** P2 (perf — JIT lost, program still runs via interpreter fallback)
 - **Repro:** `bin/simple examples/12_business/simple_erp/src/business_suite.spl`

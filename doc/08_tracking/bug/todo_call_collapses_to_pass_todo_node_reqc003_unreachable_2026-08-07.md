@@ -77,3 +77,24 @@ regression probe pinning this exact behavior.
 A WP that deliberately touches `parser_stmts.spl` /
 `_ParserPrimary/primary_expr.spl` `todo(...)` parsing (option 1) or
 `required_comment.spl`'s REQC003 branch + its unit spec (option 2).
+
+## Re-verification 2026-08-17
+
+Re-read current source. Unchanged:
+
+- `src/compiler/10.frontend/core/parser_stmts.spl:656`: `return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)` —
+  `todo(...)` still collapses to `expr_pass_todo`, not a real `expr_call`.
+- `src/compiler/35.semantics/lint/required_comment.spl:233-256` (current line numbers
+  match doc verbatim): the `tag == 9` / callee-name `"todo"` REQC003 branch is still
+  present, correctly implemented, and still unreachable from real parser output for
+  exactly the reason filed.
+
+Fix option 1 (parser emits a real `expr_call` for `todo(...)`) requires editing
+`src/compiler/10.frontend/**`, which is out of this worker's scope lock
+(`30.types, 35.semantics, 90.tools, 95.interp` only). Fix option 2 (drop the
+REQC003 branch, accept REQC001-only) is in-scope but was explicitly rejected by
+the filer as a regression in diagnostic quality ("loses the wording"), so not
+applied unilaterally here.
+
+**Verdict: BLOCKED (real fix is in `10.frontend`, out of scope for this worker).**
+No code change made in this pass.

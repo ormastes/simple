@@ -1,5 +1,8 @@
 # Cross-module public symbol collisions (bootstrap warnings, wrong-dispatch risk)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Date: 2026-08-16. Source: bootstrap log `compiler_cross_module_private_symbol_collision` warnings.
 
 JIT resolves duplicate public functions by exact arg-type match with a last-definition
@@ -53,3 +56,11 @@ Risk: ambiguous call sites fall back to the LAST definition — wrong-dispatch a
 `ProcessResult`/`ShellResult`/tuple `shell` variants is the highest-risk (5 defs, 3 signatures).
 Suggested direction: keep the std-lib names, rename tool-local helpers (e.g. `seed_shell`,
 `fix_read_file`), or migrate callers to the std versions.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN (partial), confirmed by CONTENT.** The `FixToolApplicator` rename is
+present, but `src/lib/nogc_sync_mut/tooling/easy_fix/types.spl:135` still declares
+`pub class FixApplicator`. Remaining collision rows are unchanged. Not fixed here:
+`tooling/easy_fix` is on the compilers lint/fix path and renames there ripple into
+`src/compiler/90.tools/**`, outside this slice.

@@ -1,7 +1,8 @@
 # Interpreter: single-line `if A or B: return X` matches everything and swallows the function tail
 
 - id: interp_single_line_if_or_return_2026-07-04
-- status: RESOLVED (2026-08-09, not reproducible — see Re-verification below)
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - severity: high (silent wrong result — no error, wrong value returned)
 - component: interpreter (single-line if-suite parsing with `or` + `return`)
 - found: 2026-07-04, building the WM/GUI theme-sharing hex parser

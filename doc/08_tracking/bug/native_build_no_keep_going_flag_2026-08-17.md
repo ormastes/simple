@@ -1,7 +1,8 @@
 # Feature bug: `native-build` has no --keep-going / --error-limit flag
 
 - **Date:** 2026-08-17
-- **Status:** OPEN (feature request)
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/app/cli/native_build_main.spl`, pure-Simple driver
   (`src/compiler/80.driver/`), Rust seed `native_project` pipeline
 

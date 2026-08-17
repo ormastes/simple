@@ -1,5 +1,8 @@
 # engine2d SIMD/GPU-backend layer audit — filed findings (2026-08-08)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Follow-on to the rendering audit (`rendering_adhoc_impl_gap_audit_2026-08-07.md`,
 landed `546bc78c6934`) and the compositor audit (landed `e6b57e07db9c`), scoped
 to `src/lib/nogc_sync_mut/gpu/engine2d/**` and

@@ -1,6 +1,7 @@
 # JIT returns a tag-corrupted `[i64]` from `sha1_bytes` — floats, `nil` and heap tags inside an i64 list
 
-**Status:** OPEN
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 
 ## Symptom
@@ -174,3 +175,60 @@ mitigation (widening `sha1_bytes`'s return type from untyped `list` to
 `[i64]`) was proposed in the original doc but not yet attempted this pass;
 left for a follow-up since it changes a public stdlib signature and needs
 validation on both engines before landing.
+
+---
+
+## RE-MEASURED 2026-08-17 — still OPEN, but the symptom has CHANGED
+
+`bin/simple` = Rust seed, `readlink -f bin/simple` =
+`bin/release/x86_64-unknown-linux-gnu/simple`.
+
+```
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run sha1chk.spl
+[238, 108, 70, 110, 94, 234, 152, 37, 44, 128, 103, 215, 170, 90, 6, 148, 47, 250, 31, 170]
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run sha1chk.spl
+[169, 153, 62, 54, 71, 6, 129, 106, 186, 62, 37, 113, 120, 80, 194, 108, 156, 208, 216, 157]   # RFC 3174, correct
+```
+
+**The tag corruption in the RETURNED digest is gone** — no `<special:N>`, no
+`nil`, no `<invalid-heap:…>`, no denormal floats in the final list. What remains
+is a plain **wrong digest**: 20 clean integers, all wrong. So the "JIT reads raw
+tagged words as untagged i64s *when returning a `list`*" hypothesis in the
+original Root cause section is **no longer supported by the evidence** and
+should not be used to drive a fix.
+
+### Bisected — where the divergence actually starts
+
+| stage | JIT vs interpreter |
+|---|---|
+| `sha1_pad_message([97,98,99])` | **identical** (64 bytes, `…, 0, 24`) |
+| message schedule `w[0..15]` | **identical** (`[1633837952, 0 x14, 24]`) |
+| `rotl32`, `add_mod32`, `sha1_f(t,…)` for t=0/20/40/60, `sha1_k(t)` | **identical** in isolation |
+| `w[16]` (first extended word) | **DIVERGES** — JIT `371603456`, interpreter `3267675904` (= `rotl32(0x61626380,1)` = `0xC2C4C700`, correct) |
+| `sha1_process_block(initial_h, block)` | JIT `[4000073326, 1592432677, 746612695, 2858026644, 804921258]` vs interpreter `[2845392438, …]` (= `a9993e36…`, correct) |
+
+Reproduces in a standalone copy of `sha1_process_block` in a scratch file, so it
+is not a `use`/module-resolution artifact and the library is again confirmed
+innocent.
+
+**Tag corruption IS still present, just later:** printing the working variable
+`a` after each of the first three rounds yields a denormal float and a
+`<value:0x57cfa1df>` on the JIT.
+
+### What could NOT be narrowed further (be honest about this)
+
+Every attempt to reduce `w[16]` to a standalone reproducer **agreed on both
+engines**, including: the raw xor chain over `.get()`s; `rotl32` of that chain
+inline inside a `push`; the same with the real `0x61626380` value; growing an
+array literal past its initial capacity of 16 while reading it. The divergence
+so far only appears in the full ~80-iteration loop, and the mechanism is
+**UNPROVEN**. Do not close this on the old hypothesis.
+
+### A related, newly proven defect in the same family
+
+`doc/08_tracking/bug/jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17.md`
+— `tuple.get(i)` delivers a raw `TAG_INT` word (`v << 3`) to any `i64`-typed
+sink under the JIT, so `(5,6).get(0)` binds as `40`. That IS "a raw tagged word
+read as if already untagged", it is minimal, and `sha1`'s context type is
+`(list, list, i64, i64)` read via `ctx.get(2)` / `ctx.get(3)`. It is a strong
+candidate contributor here and is filed separately with a 5-line reproducer.

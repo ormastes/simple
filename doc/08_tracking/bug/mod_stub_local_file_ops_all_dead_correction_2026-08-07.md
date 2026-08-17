@@ -1,7 +1,8 @@
 # Correction: mod_stub local file-op defs were ALL dead, not seed-registry-rescued
 
 Date: 2026-08-07
-Status: CORRECTION to commit `09900bfaa62`
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Area: lib / module resolution
 
 ## What the commit message got wrong

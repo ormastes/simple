@@ -1,5 +1,8 @@
 # Perf: Engine2D per-op interpreted mirror makes every backend equally slow
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 - **Date:** 2026-07-03
 - **Severity:** high (blocks WM-chrome-via-CSS at desktop resolution; goal item)
 - **Area:** src/lib/gc_async_mut/gpu/engine2d (Engine2D dispatch/mirror), draw_ir_adv executor

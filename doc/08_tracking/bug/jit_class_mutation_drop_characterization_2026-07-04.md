@@ -1,6 +1,7 @@
 # Class-in-array mutation drop in interpret mode — characterization (task #112)
 
-- **Status:** SOURCE FIX LANDED (2026-07-04) for the 70.backend `InterpreterBackendImpl` (class reference model, see bottom section) — pending REGATE on a healthy stage4 binary. `compiler.core.interpreter` (flat-AST) was found already-correct for this repro; the observed `42` on the deployed binary is source/binary divergence.
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Discovered:** 2026-07-04 (task #112, following up on #108's discriminator work and #35's
   `struct_param_mutation_semantics_2026-07-03.md`)
 - **Area:** interpreter runtime — class/array reference semantics

@@ -1,5 +1,8 @@
 # BUG: parameter/variable named `unit` collides with the `Unit` keyword token (seed parser)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 - **ID:** `interp_unit_param_keyword_collision`
 - **Severity:** P1 (any user code with a `unit` parameter/variable mis-parses or fails lookup)
 - **Found:** 2026-06-13, perf-umbrella (diagnosing the bench `make_bench_result` failure)

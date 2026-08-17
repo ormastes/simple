@@ -1,5 +1,8 @@
 # narrowing_spec.spl shadows NarrowingContext/Fact/Scope — real narrowing algorithm untested
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **STATUS: RESOLVED 2026-08-10.** The spec was rewritten against the real
 `compiler.semantics.narrowing` API with real `HirExpr`/`HirType`/`HirBlock`
 fixtures. All local mirror types and the text-based re-implementation are gone;

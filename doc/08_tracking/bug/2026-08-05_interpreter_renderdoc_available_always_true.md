@@ -1,7 +1,8 @@
 # `rt_renderdoc_available()` lies `true` under the interpreter (out of N2 scope)
 
 - **Date:** 2026-08-05
-- **Status:** CLOSED (fixed and verified, see Resolution below)
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Medium — one honesty-contract symbol out of ten, interpreter engine only
 - **Area:** `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` (`renderdoc_dlopen` module)
 

@@ -1,6 +1,7 @@
 # Deployed stage4 compiler cannot resolve `.replace(...)` on an erased receiver in nested call context
 
-- **Status:** Open (blocks host macOS WM Vulkan gate; site-patching confirmed insufficient)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-07-26
 - **Area:** compiler / stage4 self-hosted / method-resolution
 - **Severity:** high (blocks the production host-WM Vulkan live-evidence gate)
@@ -139,3 +140,20 @@ directly as a nested call argument rather than through a typed intermediate
 site in the WM/Vulkan build graph would need the typed-intermediate
 workaround simultaneously — which the codex-agent evidence shows is not a
 tractable per-site patching strategy.
+
+## Verification 2026-08-17 (content classification) — LIVE, site-patching duplicated
+
+`src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/row_value_helpers.spl`
+still dispatches `.replace(...)` on an erased receiver at **two** duplicated
+sites: the `if fname == "replace"` branch at line 914 (call at 925) and the same
+branch again at line 1193 (call at 1204), both
+`DbValue.Text(value: rpt.replace(from_t, to_t))`.
+
+That the identical branch appears twice is consistent with the doc's finding
+that per-site patching is insufficient — the sites multiply while the resolution
+defect stays put. Root cause is stage4 method resolution in the native lowering
+path, i.e. `src/compiler/**`, which is claimed by another lane. Recorded, not
+patched.
+
+Not proven: no `Results:` line — the repro needs a stage4 native build, which
+was not run while the bootstrap holds the host.

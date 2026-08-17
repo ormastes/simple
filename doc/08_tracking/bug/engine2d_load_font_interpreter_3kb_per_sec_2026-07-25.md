@@ -4,7 +4,8 @@
 - **Area:** `src/lib/gc_async_mut/gpu/engine2d/` font loading + `src/lib/common/encoding/font_registry.spl`
 - **Severity:** high — makes the showcase-matrix cell **2D × headless** unrunnable
   on the interpreter lane at *any* resolution, including 320x240.
-- **Status:** **FIXED 2026-07-26** in `src/lib/common/encoding/font_registry.spl`.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   See "Fix" below for the change and the verifying measurement.
 - **Platform measured:** linux-x86_64, `bin/simple` =
   `bin/release/x86_64-unknown-linux-gnu/simple` (currently a **Rust bootstrap

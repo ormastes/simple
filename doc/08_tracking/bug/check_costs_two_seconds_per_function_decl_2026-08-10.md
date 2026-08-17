@@ -1,6 +1,7 @@
 # `simple check` costs ~2s per function declaration (parse), plus ~20s fixed per worker
 
-- **Status:** OPEN (partial mitigation landed)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Found:** 2026-08-10, stream K3, following stream G3 (`a39229b1eb0`)
 - **Severity:** blocks directory-wide parse gating; `simple check src/app` is tens of hours
 

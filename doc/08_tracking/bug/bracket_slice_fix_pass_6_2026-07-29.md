@@ -1,5 +1,8 @@
 # Bracket-slice byte/char index campaign — Pass 6 (2026-07-29)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Scope (coordinator assignment): the last named deferral — bencode's **decode**
 path (`src/lib/common/encoding/bencode.spl`). Encode side was already fixed in
 pass 4 (03267955f6ed).

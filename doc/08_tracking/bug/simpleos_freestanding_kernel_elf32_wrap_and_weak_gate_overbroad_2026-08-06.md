@@ -296,3 +296,33 @@ not a kernel, ABI, syscall, or FS-exec defect.
   argument to `rt_refuse_non_text_receiver` and its 9 call sites, so a
   dispatch-gap refusal now prints the actual receiver word — a permanent
   diagnostic improvement, not a workaround; the underlying defect is unfixed)
+
+## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+The two TITLED defects are fixed at HEAD:
+
+1. The unconditional ELF32/EM_386 objcopy downgrade is now conditional —
+   `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:2325-2333`
+   (`let want_elf32_multiboot_wrap = ...`).
+2. The overbroad weak-symbol gate is now escapable —
+   `scripts/check/check-simpleos-x86-kernel-elf.shs:78-96`, with self-tests at
+   `:139-143` asserting reject under `SIMPLE_ALLOW_FREESTANDING_STUBS=0` and
+   accept under `=1`.
+
+Two record corrections. First, the `file:` field pointing at
+`src/compiler/10.frontend/core/lexer.spl` is WRONG: lines 743-746 there are
+`lex_snapshot_save`, merely the `.clear()` idiom quoted as an example in this
+doc prose, not a defect site. Second, the doc's third symptom (in-guest
+`/usr/bin/simple hello.spl` exiting rc=70 on `str.clear` with receiver 0x0) is a
+DIFFERENT, still-open defect whose real location is
+`src/runtime/runtime_native.c:4535`
+`static void rt_refuse_non_text_receiver(const char* method, int64_t receiver)`
+— a name-keyed `.clear()`/`rev`/`take`/... dispatch gap that `exit(70)`s on any
+unresolved receiver (call sites at `:4585`, `:4623`). The `receiver` diagnostic
+argument the doc asked for IS present, so the narrowing landed, but the dispatch
+gap itself did not. That third defect should be split into its own record
+against `src/runtime/runtime_native.c`, not tracked here.
+
+Also correcting a stale note: `config/simpleos_arm64_servers_weak_undefined_allowlist.sdn`
+is PRESENT in the working tree (a deletion of it is staged in another session's
+shared index, which is not this lane's change).

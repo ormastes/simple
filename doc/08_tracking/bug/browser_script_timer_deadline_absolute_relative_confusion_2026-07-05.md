@@ -1,5 +1,8 @@
 # Browser script setTimeout/setInterval deadline logic fires timers on first tick regardless of delay
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 Implementation fixed; executable BrowserSession regression is compiler-blocked.
 

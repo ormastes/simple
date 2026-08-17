@@ -1,7 +1,8 @@
 # Bug: module-level `use <module> as <alias>` binding not resolvable when referenced inside a function/method body — "variable `<alias>` not found"
 
 - **Date:** 2026-07-20
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** interpreter/semantic name resolution for aliased module imports. Reproduced in two independent files:
   - `src/compiler/90.tools/verify/checker.spl:8` (`use verification.regenerate as regen`), used inside top-level `fn known_verification_files()` at line 130
   - `src/compiler_rust/lib/std/src/verification/toolchain.spl:8` (`use host.process as process`), used inside `class ToolchainInfo`'s `static fn detect()` at line 30

@@ -1,7 +1,8 @@
 # cranelift `__simple_ssa_phi` N-ary-join guard now fires in a real spec
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** medium (one RED example; guard prevents a silent miscompile)
 - **Component:** `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`
 - **Related:** `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl:714`
@@ -125,3 +126,19 @@ the corrected example in `sugar_plugin_spec.spl` **is** the regression guard,
 and there is no defect to reproduce. The `__simple_ssa_phi` N-ary-join
 restriction at `cranelift_codegen_adapter.spl:728-730` and its llvm-lib twin
 remain in place as designed and unexercised by this spec.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (source comment is stale relative to the report)
+
+The guard is present at `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:~728`,
+but its comment still asserts the case is unreachable:
+
+```
+# first pair. No caller currently emits N-ary joins through
+# this backend, so this is latent; guard it loudly rather
+# than miscompiling silently if that ever changes.
+```
+
+The bug report says the guard DOES fire in sugar_plugin_spec, so either the
+comment or the report is wrong. Owner path: src/compiler/70.backend/**.

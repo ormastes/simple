@@ -1,6 +1,7 @@
 # Bootstrap `bootstrap_main` native build makes no object progress
 
-- **Status:** resolved for entry closure; downstream bootstrap remains open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Observed
 
@@ -149,3 +150,49 @@ and no bridge artifact exists. The failure is now classified as old-generation
 bootstrap aggregate HIR transport, not CLI dispatch. Do not run another bridge
 generation until a focused aggregate-construction regression and source repair
 exist.
+
+## 2026-08-17 scope audit — BLOCKED, and no longer a CLI-entrypoint bug
+
+Reviewed by the lane that owns `src/app/cli/native_build_main.spl` and
+`src/app/cli/bootstrap_main.spl`. A full bootstrap / native-build shard was
+**forbidden this session** (a live bootstrap owned the host), so the "no object
+progress" symptom was deliberately not re-attempted. Classified by CONTENT.
+
+**This doc has already walked itself out of these two files.** Its own later
+sections record the migration:
+
+1. Parent-entry graph loading — RESOLVED, and still resolved at tip.
+   `src/app/cli/native_build_main.spl` imports only `app.io.env_ops` and
+   `app.io.process_ops` (lines 3-4). It does **not** import
+   `app.io._CliCompile.compile_targets` or anything under `compiler.driver`; its
+   only heavyweight action is spawning `src/app/cli/native_build_worker.spl` as a
+   subprocess (line 247). The `--help` fast path (382-384) returns before any
+   spawn, matching the recorded 0.05s measurement.
+2. Entry-closure discovery cost — recorded RESOLVED (2026-07-25).
+3. The blocker then moved to the Stage 2 interpreter, then to `pub mod` parsing,
+   then to MIR transport, and the doc's **own final section** (2026-07-26
+   aggregate bridge isolation) concludes: *"The failure is now classified as
+   old-generation bootstrap aggregate HIR transport, not CLI dispatch."*
+
+That final classification puts the live defect in HIR/MIR aggregate construction
+(`CompileOptions` mutate-after-default and literal lowering), i.e. under
+`src/compiler/20.hir/**` and `src/compiler/50.mir/**` — paths this lane must not
+touch and which other lanes own.
+
+**The one thing this lane can still assert** is that `bootstrap_main.spl` never
+reports success without a real artifact, which is the failure mode that would
+make a non-progressing shard look green. Both in-process lanes check
+`file_exists(output)` and reject an artifact of <= 300 bytes
+(`bootstrap_main.spl:342-348` for native, `443-450` for SMF). Pinned by
+`test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl`
+("never reports in-process native-build success without a real artifact").
+
+### What could NOT be proven this session
+- Whether the entry-closure shard now produces objects. No bootstrap or
+  native-build shard was run.
+- Whether the aggregate-HIR segfault at `run_compile_bootstrap` /
+  `run_native_build_bootstrap` still reproduces on a current compiler.
+- Any timing claim (42.39s closure, 396/546 files) — none re-measured.
+- The recommended next action is unchanged and remains a bootstrap-lane task:
+  isolate the aggregate construction that trips HIR lowering, with a focused
+  regression, before another bridge generation.

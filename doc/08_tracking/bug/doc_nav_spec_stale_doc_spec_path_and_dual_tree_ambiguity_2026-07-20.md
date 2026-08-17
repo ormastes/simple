@@ -1,5 +1,8 @@
 # `doc_nav_spec.spl`: hardcoded dead `doc/spec/...` path + ambiguous dual doc/test tree
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Component:** `test/02_integration/app/doc_nav/doc_nav_spec.spl`
 **Severity:** Medium — the doc-navigation consistency spec cannot currently

@@ -1,5 +1,8 @@
 # Engine lib API surface drift vs. spec expectations
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (missing/mismatched implementation, not a test-naming issue)
 **Command:** `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test <spec> --no-session-daemon`

@@ -1,6 +1,7 @@
 # A spec that passes 28/28 alone reports 3 failures inside a directory run
 
-**Status:** RETRACTED (see below) — original "directory-run" diagnosis was
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 wrong; the real cause was the `T?`-to-`bool` coercion defect plus an unpinned,
 concurrently-mutated working copy. Kept for the durable measurement-methodology
 finding at the bottom (pin a worktree before measuring).

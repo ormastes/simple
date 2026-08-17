@@ -1,6 +1,7 @@
 # ByteSpan.equals faults 93x on a boxed integer in a pointer slot (SimpleOS WM guest)
 
-- Status: OPEN — producer located and characterized, fix NOT landed
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Filed: 2026-07-28
 - Gate: `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
 - Baseline symptom: `reason=guest-render-fault`, `serial_log_bytes=31702`,

@@ -1,7 +1,8 @@
 # Engine2D Draw-IR CSS background-image path has no resolver
 
 - **ID:** engine2d-draw-ir-image-path-no-resolver-2026-07-06
-- **Status:** Resolved for bounded `<img>` and static/dynamic CSS URL backgrounds (2026-07-29)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** ui / gpu / engine2d / browser_engine
 - **Date:** 2026-07-06
 

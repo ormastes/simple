@@ -6,7 +6,8 @@
   (the hosted-WM production lane); compiler aggregate-return/Option lowering
 - **Severity:** high — blocks the host-WM showcase cells and any first frame of
   the hosted compositor. The SimpleOS guest compositor shares this pipeline.
-- **Status:** OPEN (systemic). Five consumer sites converted to the
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   owning-module accessor idiom (each verifiably moved the crash); the next
   site is inside the web render artifact pipeline, where aggregates are
   passed pervasively — chasing further sites is the wrong fix.

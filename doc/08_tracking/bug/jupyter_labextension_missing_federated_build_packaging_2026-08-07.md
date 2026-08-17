@@ -1,5 +1,8 @@
 # JupyterLab labextension has no installable federated-extension build pipeline
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Found:** 2026-08-07, during notebook-lanes X2 implementation (extension core + LSP
 wiring), blocking galata/browser verification.
 
@@ -68,3 +71,15 @@ jupyterlab itself was installed):
 
 Remaining gap narrowed to: actually running the galata/browser smoke for X2/X3/X4 —
 the packaging blocker itself is closed.
+
+## Content re-verification 2026-08-17 (app-rest lane) — CLOSE candidate
+
+Classified by CONTENT only (no SHA/ancestry reasoning). The packaging pipeline
+this record says is missing now exists in-tree:
+`tools/jupyter/labextension/pyproject.toml`, `tools/jupyter/labextension/install.json`,
+and `tools/jupyter/labextension/simple_labextension` are all present, which
+matches this doc's own "Fixed 2026-08-08" line. The source file this row was
+filed against, `src/app/jupyter_kernel/main.spl`, is unrelated to federated
+extension packaging and needs no change. **Recommend CLOSED.**
+Not proven: that the extension actually builds/installs — no `jupyter
+labextension build` was run (host at load 346, bootstrap live).

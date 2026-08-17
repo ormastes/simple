@@ -6,7 +6,8 @@ Rust **seed** binary `bin/release/x86_64-unknown-linux-gnu/simple`
 **Interpreter (`SIMPLE_EXECUTION_MODE=interpret`, `bin/simple test`): CORRECT on
 every variant below.**
 
-- **Status:** RESOLVED 2026-08-08 — root cause: `100 - data[3]` lowers
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   `data[3]` through `lower_index_expr`
   (`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs`). When
   the *expression's* static type is `ANY` (true for an untyped `list`

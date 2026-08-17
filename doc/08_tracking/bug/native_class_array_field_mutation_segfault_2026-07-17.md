@@ -132,3 +132,67 @@ native-build failing to match a reference — the reference itself is broken.
 
 If this needs fixing, it should be re-filed against `src/compiler_rust` (seed JIT) rather than
 "native codegen."
+
+## 2026-08-17 re-verification (lane s2_rust_codegen) — the residual seed-JIT half is now ALSO dead; CLOSE
+
+This doc's status line already recorded NOT REPRODUCIBLE under `native-build`,
+while asserting the segfault still reproduces under `bin/simple run` (the seed's
+own Cranelift JIT). That remaining half was re-tested today and is also gone.
+
+Classified by CONTENT plus direct reproduction — not by commit ancestry, which is
+unsound in this repo.
+
+### Reproduction (both attempts RC=0, no SIGSEGV, no panic, no error text)
+
+Binary provenance checked first: `bin/simple --version` self-identifies as the
+Rust bootstrap seed, so the seed-JIT path this doc blames is the path actually
+exercised.
+
+1. **Shift-sensitive fixture** — a 3-field class with the array in the MIDDLE and
+   a scalar `tail: i64 = 7` as the LAST field, i.e. exactly the slot this doc says
+   is left as uninitialized garbage:
+   ```
+   name=box
+   len=1
+   tail=7
+   ```
+   `RC=0`. Neither end shifted: the first field printed correctly AND the last
+   field printed its true value. `len=1` shows the `.push()` landed on real
+   storage rather than a phantom offset-0 header slot.
+
+2. **This doc's own exact reproducer** (`class Container: var items: [i64]`, free
+   fn `mutate(c)` calling `c.items.push(42)`), run with `env -u SIMPLE_BOOTSTRAP`
+   exactly as the 2026-07-17 re-verification section prescribes:
+   ```
+   len=1
+   ```
+   `RC=0`.
+
+Exit codes were captured on the line after each command, never through a pipe.
+
+### Content evidence for why the stated root cause can no longer arise
+
+The recorded root cause was a `StructInit` emitted with `field_offsets`/
+`field_types` carrying an extra per-CLASS header slot at offset 0 that
+`field_values` never supplies (the 2026-07-17 gdb + `SIMPLE_DUMP_MIR` trail
+recorded `field_offsets: [0,8]` against `field_values: [VReg(4)]`).
+
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs:159` is the
+  **only** `MirInst::StructInit` emission site in the entire tree.
+- Its layout construction at `:115-143` starts `offset` at `0u32` and pushes one
+  entry per declared field — there is no header slot on any branch.
+- Both non-`HirType::Struct` fallbacks (`:132-135`, `:139-142`) derive the table
+  from `n = field_regs.len()`, making `field_offsets` and `field_values`
+  equal-length **by construction**. A class takes one of these paths, so the
+  arity mismatch that caused the shift is now structurally impossible.
+
+### Verdict
+
+CLOSE. Do not re-file this against `src/compiler_rust` — the seed-side defect it
+would have been re-filed for no longer exists.
+
+### Could NOT prove
+Only the two fixtures above were run; no exhaustive sweep of class shapes
+(inheritance-free by project rule, but nested classes and mixin/trait-bearing
+classes were not probed). The `native-build` lane was not re-run, as this doc
+already records it as non-reproducing there.

@@ -1,6 +1,7 @@
 # macOS Vulkan 2D vector-font empty-batch native fault
 
-Status: open, live evidence blocked
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Scope
 

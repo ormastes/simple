@@ -5,7 +5,8 @@
   `test/unit/lib/crypto/ecc_p384_p521_kat_spec.spl`
 - **Severity:** high (sign is non-functional for P-384; verify fails NIST
   CAVP vectors for both curves).
-- **Status:** OPEN. **Do not touch the NIST CAVP vectors.**
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Symptom
 

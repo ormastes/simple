@@ -2,7 +2,8 @@
 
 - **ID:** bootstrap_diagnostic_reserved_target_routing_2026-08-02
 - **Date:** 2026-08-02
-- **Status:** FIXED
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Component:** `src/app/cli/check_entry.spl`
 - **Severity:** diagnostic-sweep false failure
 

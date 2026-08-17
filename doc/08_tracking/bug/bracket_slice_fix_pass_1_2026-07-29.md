@@ -1,5 +1,8 @@
 # Bracket-slice byte-index survey — fix pass 1 (2026-07-29)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Follow-up to `doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md`.
 Fixes the 4 files that survey flagged as "missed-HIGH" (matched the HIGH-risk
 domain but the keyword classifier didn't catch them):

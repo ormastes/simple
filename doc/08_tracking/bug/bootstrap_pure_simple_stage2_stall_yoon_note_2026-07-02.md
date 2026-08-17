@@ -1,7 +1,8 @@
 # Bootstrap --pure-simple stage2 stalls on yoon-note (7200s timeout, no binary)
 
 Date: 2026-07-02
-Status: open (blocks redeploying bin/simple on this host)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 Severity: P2
 Related: doc/08_tracking/bug/jit_lowering_module_alias_and_panic_2026-07-02.md (needs redeploy to verify JIT)
 
@@ -37,3 +38,9 @@ hir-lower rather than slowly progressing.
 
 - Try the suggested alternatives: shrink `--source`, or the in-process
   backend; or rebuild + deploy from a host with a working LLVM dev setup.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: STILL-OPEN.** No stage2 stall remediation exists in
+`scripts/bootstrap/bootstrap-from-scratch.sh`. Not reproduced live (a 7200s stall probe is
+incompatible with the live high-priority bootstrap on this host).

@@ -1,7 +1,8 @@
 # A docs-titled commit (`2313821fd77`) re-clobbered origin main, reverting five landed fixes
 
 **Filed:** 2026-08-10 (independent review lane)
-**Status:** OPEN — live at origin tip `2acc36fce8e0a6981042e1ea6745fb037d281a46`
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** HIGH — five verified fixes and 26 files are absent from origin main while
 their commits are still ancestors of the tip, so ancestry checks report them as landed.
 

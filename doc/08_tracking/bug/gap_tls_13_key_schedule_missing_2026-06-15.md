@@ -1,6 +1,7 @@
 # GAP-TLS-2: TLS 1.3 server key schedule is incomplete
 
-Status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Owner: Pure-Simple TLS protocol lane
 
 `src/lib/nogc_sync_mut/http_server/tls_server.spl` advertises TLS policy, but

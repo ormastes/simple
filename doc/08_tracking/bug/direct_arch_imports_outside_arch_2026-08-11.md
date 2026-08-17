@@ -1,7 +1,8 @@
 # 7 direct arch imports outside `arch/` (AC-3 violation)
 
 **Date:** 2026-08-11
-**Status:** OPEN — spec is legitimately RED
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** Medium (portability contract)
 
 ## Summary

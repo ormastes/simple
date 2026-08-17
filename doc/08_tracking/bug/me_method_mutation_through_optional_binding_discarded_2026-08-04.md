@@ -1,7 +1,8 @@
 # `me`-method mutation through an OPTION-typed binding is silently discarded
 
 **Date:** 2026-08-04
-**Status:** OPEN (language/runtime defect). Callers must work around it by
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 destructuring; the workaround is applied in `engine2d/engine.spl`.
 **Severity:** High — silent, exit 0, no warning from the compiler or runtime.
 Every state change a mutating method makes is thrown away. Since 2026-08-04 a

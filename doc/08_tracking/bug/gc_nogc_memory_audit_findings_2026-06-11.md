@@ -1,6 +1,7 @@
 # BUG (tracking): gc/nogc memory audit — consolidated open findings (2026-06-11)
 
-Status: OPEN (tracking list; items close individually)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 **Date:** 2026-06-11
 **Status:** OPEN (tracking list; items close individually)

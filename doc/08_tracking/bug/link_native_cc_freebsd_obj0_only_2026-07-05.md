@@ -1,6 +1,7 @@
 ---
 id: link_native_cc_freebsd_obj0_only_2026-07-05
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: medium
 discovered: 2026-07-05
 discovered_by: Code review of src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl

@@ -3,7 +3,8 @@
 **Date:** 2026-07-28
 **Severity:** high — silent wrong-code generation; victims are currently
 discovered by guest page faults, one at a time
-**Status:** OPEN (mitigated per-name only)
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Component:** `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
 (cranelift seed codegen), `compile_method_call_static`
 

@@ -6,7 +6,8 @@
 - **Area:** `src/lib/common/js/engine/runtime.spl` (`JsRuntime` + `NATIVE_*` id constants +
   `dispatch_native`), the `interpreter*` clusters across tiers, the module-system's cross-module
   `val` resolution.
-- **Status:** OPEN — found 2026-07-08 attempting #35 Step 4 (move `JsRuntime` out of the pure CORE
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   tier). Steps 1-3 (lzma2 + js/mod + js/module_loader) landed cleanly (`952208f1`, gate
   `core_purity_new` 4→1). Step 4 reverted after the regression below.
 
@@ -51,3 +52,20 @@ mechanical relocation; it perturbs this fragile resolution.
 Recommend (1) or (3) — both are their own tracked work, not a rider on the purity fix. Until then,
 `common/js/engine/runtime.spl` stays the last baselined-adjacent core-purity item (gate
 `core_purity_new=1`).
+
+## Re-verification 2026-08-17 (UI/JS slice) — STILL OPEN
+
+Classified by CONTENT. Both halves of the intended split still exist as
+separate files:
+
+- `src/lib/common/js/engine/runtime.spl` — still carries the `NATIVE_*`
+  constant block (lines 59-68+: `NATIVE_CONSOLE_LOG = -1` ...
+  `NATIVE_MATH_ROUND = -22`) alongside the Symbol counter (line 47) and
+  `_define_global_fn("Symbol", NATIVE_SYMBOL)` (line 450).
+- `src/lib/nogc_sync_mut/js/engine/runtime.spl` — still present.
+
+No core/runtime purity split landed; the cross-module `NATIVE_*` constant
+resolution blocker described here is unaddressed. This is a structural/design
+gap, not a silently-wrong-result defect.
+
+Status: OPEN (unchanged).

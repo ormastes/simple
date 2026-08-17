@@ -1,5 +1,8 @@
 # Game2D Breakout Rendered 60s Interpreter Session Is Too Slow
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 
 Open. G3.2 has a passing 3600-step logic session in

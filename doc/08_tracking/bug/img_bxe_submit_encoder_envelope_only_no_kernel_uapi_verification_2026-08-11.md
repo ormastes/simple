@@ -1,5 +1,8 @@
 ## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Blocker: needs the upstream `drivers/gpu/drm/imagination` `struct drm_pvr_job`
 header text (not vendored in this tree) to confirm field offsets, plus PowerVR
 hardware to validate against. No fetch route in this lane. Unblock = vendor the

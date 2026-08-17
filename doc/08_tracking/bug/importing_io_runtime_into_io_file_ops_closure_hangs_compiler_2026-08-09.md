@@ -1,6 +1,7 @@
 # `file_read_bytes` convergence blocked by non-reproducible "test daemon timed out" with no verdict
 
-**Status:** OPEN — ARCHITECTURAL/ENVIRONMENTAL; cause NOT established; do not
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 treat the cycle theory below as confirmed
 
 **Re-checked 2026-08-09/10:** Reproduced the identical symptom twice more on

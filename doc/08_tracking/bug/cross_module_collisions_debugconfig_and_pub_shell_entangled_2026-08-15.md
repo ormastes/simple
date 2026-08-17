@@ -1,6 +1,7 @@
 # Cross-module private-symbol collisions too entangled to rename: `DebugConfig` and public `shell` (2026-08-15)
 
-Status: OPEN (deliberately deferred; rename exceeds the 30-reference-site bar)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 `compiler_cross_module_private_symbol_collision` warnings fixed in the same pass:
 `FixApplicator` (compiler side renamed to `FixToolApplicator`), `Lint`/`LintResult`
@@ -42,3 +43,11 @@ renamed without an aliasing re-export or a wrapper that would itself recreate a
 colliding `shell`). Fix direction: converge on ONE public `shell` signature
 (likely `ProcessResult`), migrate `io_runtime.ShellResult` callers, and drop the
 `src/app/io` mirror in favour of the std module.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, deliberately deferred — unchanged.** No change made in this pass; the
+47 `DebugConfig` reference sites and 3 competing `shell` signatures with ~230
+importers are exactly the entanglement this doc describes, and a partial rename is
+more dangerous than the status quo. Recorded as a knowing non-fix, not a silent
+skip.

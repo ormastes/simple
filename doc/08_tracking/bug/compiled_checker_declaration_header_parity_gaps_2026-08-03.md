@@ -1,6 +1,7 @@
 # Compiled checker declaration/header parser parity gaps
 
-- Status: fixed for declaration/domain owner; expression rows rerouted
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Claimed by: Codex Stage 4 declaration batch
 - Date: 2026-08-03
 - Base revision: `5e7c57e9c89a8f59df22830991327438ba37fc93`

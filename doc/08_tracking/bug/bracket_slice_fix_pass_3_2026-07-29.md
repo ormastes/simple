@@ -1,5 +1,8 @@
 # Bracket-slice byte-index survey — fix pass 3 (2026-07-29)
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 Batch 3, widened hunt per the coordinator's pattern: files mixing bare
 single-index `s[i]` (character-indexed) with a `.len()`/`.length()`-bounded
 loop or index arithmetic from `index_of` over the SAME counter. Searched

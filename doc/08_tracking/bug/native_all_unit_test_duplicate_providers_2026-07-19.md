@@ -1,6 +1,7 @@
 # Native-all unit tests linked duplicate runtime providers
 
-- **Status:** provider ownership fixed; focused regressions passed
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Observed:** the focused atomic-write unit test failed to link because native-all and its simple-runtime dependency both exported `rt_process_exists` and `print_raw`.
 - **Cause:** native-all duplicated canonical simple-runtime providers. Its `rt_process_exists` also checked Linux `/proc`, while simple-runtime only checked its spawned-child registry; neither matched the public arbitrary-PID contract portably.
 - **Fix:** remove both native-all duplicates. Simple-runtime remains the sole `print_raw` owner and now implements OS-wide positive-PID existence checks on Unix and Windows.

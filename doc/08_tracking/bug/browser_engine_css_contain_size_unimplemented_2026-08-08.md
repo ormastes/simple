@@ -1,6 +1,7 @@
 # browser_engine: CSS `contain: size` parses but is never consulted by the sizing pass
 
-**Status:** open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-08 (U3.6 `web_css_visibility_containment_spec.spl`,
 `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/containment.spl`,

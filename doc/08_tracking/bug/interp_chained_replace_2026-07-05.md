@@ -1,6 +1,7 @@
 ---
 id: interp_chained_replace_2026-07-05
-status: RESOLVED (source and unit regression; deployed stage4 compatibility workarounds remain)
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 severity: medium
 discovered: 2026-07-05
 discovered_by: Manual testing in tools/pixel_compare/render_simple_html.spl development

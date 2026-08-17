@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (at-rest key material corrupted and entropy-reduced)
-- **Status:** FIXED in `src/lib/common/aes/utilities.spl` (this doc); the
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   underlying compiler defect stays OPEN — see
   `jit_param_passed_list_element_read_returns_tagged_2026-08-08.md`
 - **Area:** `src/lib/common/aes/utilities.spl`,

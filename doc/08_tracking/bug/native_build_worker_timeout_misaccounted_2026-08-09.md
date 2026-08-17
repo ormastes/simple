@@ -1,7 +1,8 @@
 # native-build worker timeout fires far earlier than the configured budget
 
 - **ID:** native_build_worker_timeout_misaccounted_2026-08-09
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Found by:** gui/web/2D vulkan showcase sweep, 2026-08-09
 - **Area:** `src/app/cli/native_build*` worker supervision
 - **Severity:** medium — large-closure native builds are killed mid-compile

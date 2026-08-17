@@ -1,7 +1,8 @@
 # Duplicate top-level type name audit (COLLISION lane, 2026-07-17)
 
 **Severity:** systemic (P1-class root cause, most individual instances P3-and-below)
-**Status:** 3 confirmed offenders fixed; standalone DUP001 checker added; 85 class-A collisions remain (tracked, not all fixed — see Disposition)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Why this audit exists
 
@@ -257,3 +258,31 @@ declares no `SdnValue`-typed code at all); left as-is, harmless.
 - `src/lib/common/crypto/x509.spl` — `X509ParseResult` → `X509DerParseResult`
 - `scripts/check/check-type-name-collisions.shs` — new DUP001 checker
 - `doc/08_tracking/bug/duplicate_type_name_collision_audit_2026-07-17.md` — this doc
+
+## PARTIAL — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+Registries remain BARE-NAME keyed at HEAD, not module-qualified:
+`src/compiler/10.frontend/core/interpreter/eval_tables.spl:624`
+`struct_table_register(name, decl_id)` hashes `name` and OVERWRITES `st_vals[idx]`
+(last-wins); `:723` `enum_table_register` is FIRST-wins and drops the second decl
+— the two tables silently disagree with each other, and the enum comment claims
+MIR is last-wins. What was added is a warning, not a fix: a parallel
+`st_module_paths` array plus `_st_warn_collision` (`:609-619`) and
+`_enum_warn_bare_name_collision` (`:706`). No dual-key scheme exists. NOT FIXED
+by this lane (P1-owned path).
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STILL-OPEN (mitigation is diagnostic-only, by the source own words)
+
+`src/compiler/10.frontend/core/interpreter/eval_tables.spl:~159-168`:
+
+```
+# helper with differing signatures silently mis-dispatch: the
+# second registration clobbers the first (last-write-wins), and a call to the
+# clobbered version dispatches to the wrong body — silent wrong-result or crash.
+# This is a non-breaking diagnostic only; the fix is to rename one helper.
+```
+
+The source itself states the clobber still happens and only a warning was added.
+ROOT-CAUSE FAMILY: flat bare-name registries.

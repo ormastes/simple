@@ -1,7 +1,8 @@
 # Bug: `.to_int()` on `.split()`-derived text + `??` fallback both return garbage (Rust seed interpreter)
 
 - **Date:** 2026-07-17
-- **Status:** open (found incidentally while hardening `simple doc-coverage --missing`; worked around in pure Simple, not fixed here)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** `src/compiler_rust` interpreter fallback (tree-walking, `bin/simple run` / `src/compiler_rust/target/release/simple run`)
 
 ## Symptom

@@ -1,7 +1,8 @@
 # Field-style `.length` (and any unlowered field access on a builtin container) drops the whole module out of JIT
 
 - Date: 2026-08-08
-- Status: OPEN (partial fix landed for `src/compiler`)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Severity: performance (~100-1000x on affected modules), silent for `.length` only
 
 ## Mechanism (reproduced independently)

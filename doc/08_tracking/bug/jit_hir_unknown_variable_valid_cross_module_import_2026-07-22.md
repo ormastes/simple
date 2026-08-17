@@ -2,7 +2,8 @@
 
 - **ID:** jit_hir_unknown_variable_valid_cross_module_import
 - **Date:** 2026-07-22
-- **Status:** OPEN
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** medium (silent perf degradation — JIT falls back to interpreter)
 - **Component:** seed JIT HIR lowering
 

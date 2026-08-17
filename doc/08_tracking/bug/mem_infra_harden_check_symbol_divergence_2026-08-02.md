@@ -1,7 +1,8 @@
 # `rt_mem_harden_check` silently returns 0 under cranelift — the check symbol diverges per backend
 
 - **Filed:** 2026-08-02
-- **Status:** MOSTLY RESOLVED 2026-08-09 — `rt_mem_harden_check_native` is now
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   registered as an alias of `rt_mem_harden_check` in
   `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`, so both spellings
   resolve on the JIT lane and neither silently returns 0. The premise that the

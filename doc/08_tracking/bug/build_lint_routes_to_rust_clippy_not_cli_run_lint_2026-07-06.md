@@ -1,5 +1,8 @@
 # `bin/simple build lint` routes to Rust-driver clippy — pure-Simple `cli_run_lint` never executes
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - Date: 2026-07-06
 - Severity: medium (policy violation + inert lint-time gates)
 - Found during: backend-isolation gate wiring verification (task #22, integration round 3)
@@ -36,3 +39,30 @@ task #21) — the same delegation lane is involved.
 
 ## Workaround (current)
 Pre-commit hook enforcement + `sh scripts/check/check-ui-backend-isolation.shs` directly.
+
+## 2026-08-17 verification (CLI lane) — STILL OPEN, confirmed by source content
+
+Root cause confirmed unchanged in current source:
+
+- `src/compiler_rust/driver/src/cli/commands/misc_commands.rs:130`
+  `"lint" => handle_build_lint_with_args(&sub_args[1..])`.
+- `handle_build_lint_with_args` (same file, ~line 185-200) ignores every
+  positional argument except `--fix` and unconditionally runs
+  `cargo clippy --manifest-path src/compiler_rust/Cargo.toml --workspace -- -W clippy::all`.
+  A `.spl` path passed to `bin/simple build lint <file>` is silently discarded.
+- The build help text at line 141 documents this as
+  `"lint           Run clippy linter on Rust workspace"`, so the routing is
+  deliberate, not a dispatch slip; the defect is that it shadows the
+  pure-Simple linter under a name users reach for.
+- The pure-Simple linter is alive and reachable by the OTHER spelling:
+  `src/app/cli/_CliMain/main_and_help.spl:349` (`elif str_eq(first, "lint")`)
+  routes to `cli_run_lint` in
+  `src/app/io/_CliCommands/run_commands.spl:225`, which loops over file
+  arguments and calls `run_lint_file` (line 323). So
+  `bin/simple lint <file>` works; `bin/simple build lint <file>` does not.
+
+Not patched by this lane: the fix belongs in `misc_commands.rs`, which this
+lane was explicitly scoped OUT of editing (Rust seed, other lane's file).
+Recommended fix, for whoever owns it: in `handle_build_lint_with_args`, when
+any non-flag argument is present (or any argument ends in `.spl`), delegate to
+the pure-Simple `lint` command instead of invoking cargo clippy.

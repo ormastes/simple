@@ -1,6 +1,7 @@
 # Multicore Green Stress Scale Blockers - 2026-06-07
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Summary
 

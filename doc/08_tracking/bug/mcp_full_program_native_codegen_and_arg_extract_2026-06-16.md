@@ -1,6 +1,7 @@
 # simple-mcp broken in Claude Code + bootstrap stage4 produces broken full CLI (2026-06-16)
 
-Status: OPEN (bootstrap defect C and portability defect D remain)
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Severity: P1 (self-hosted bootstrap deploy); native simple-mcp path resolved 2026-07-15
 Owned-code scope: src/app/mcp, src/lib/nogc_sync_mut/mcp_sdk, seed/cranelift codegen, scripts/bootstrap
 

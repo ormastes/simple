@@ -1,5 +1,8 @@
 # `native-build` MIR lowering: instance methods unresolved on a `match`-bound class local — new blocker after the payload-binding fix
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Summary
 
 Follow-up to

@@ -1,5 +1,8 @@
 # MCP `debug_log_tree` tool call produces no matching response for either JSON or LLM-text mode
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-20
 **Component:** MCP stdio server `debug_log_tree`/`debug_log_enable` tool
 handlers (source not isolated in this pass — reachable via

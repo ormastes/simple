@@ -1,5 +1,8 @@
 # Freestanding Entry Constants Become Zero Stubs
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Stage3 Cranelift freestanding builds emit module-level scalar `val`s declared
 in the entry file as weak functions returning zero instead of initialized data.
 Imported module constants are emitted as initialized data.

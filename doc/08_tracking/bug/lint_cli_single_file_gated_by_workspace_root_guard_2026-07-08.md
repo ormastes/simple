@@ -7,7 +7,8 @@
   "clean file lints OK, exit 0".
 - **Area:** `src/app/io/cli_lint_commands.spl` (`cli_run_lint` `:33` root-guard call),
   `src/app/cli/lint_entry.spl` (help-on-bare-command), the `bin/simple` top-level dispatcher.
-- **Status:** OPEN — found 2026-07-08 while updating stale #38 assertions in
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   `code_quality_tools_spec.spl`.
 
 ## Finding 1 — single-file lint gated by workspace-root guard

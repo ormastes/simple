@@ -1,7 +1,8 @@
 # CPU-SIMD/GPU Scheduling Parity Gate Missing
 
 - **Date:** 2026-07-09
-- **Status:** resolved
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high
 - **Area:** Engine2D, CPU-SIMD, GPU scheduling
 

@@ -1,7 +1,8 @@
 # Bare `assert` vacuity — remaining inert sites after the interpreter fix
 
 **Date:** 2026-08-02
-**Status:** interpreter bare-`assert` FIXED (`7d73d4dd3a6e`); OPEN 2 FIXED
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 (`62c075bbe3cf`); OPEN 3 FIXED (`f93a9abb5d0d`); **OPEN 1 still OPEN** — it
 needs more than the parser change first assumed, see the revised section below
 **Related:** `doc/08_tracking/bug/` spec-DSL false-green family; shim-vacuity findings
@@ -316,3 +317,28 @@ freshly built binary invoked as `simple test` therefore measures the OLD
 debug binary in the shared working copy and shows no change at all — this
 lane hit exactly that and briefly concluded the fix had no effect. Use
 `<your-binary> run <spec>` to measure the binary you actually built.
+
+
+## Re-measurement 2026-08-17 (P0-core silent-wrong lane): seed engines both FIRE
+
+```
+fn main():
+    assert 1 == 2
+    print "assert-did-not-fire"
+```
+
+| engine | result |
+|---|---|
+| `SIMPLE_EXECUTION_MODE=interpreter` | `error: semantic: assertion failed: condition evaluated to false` |
+| `SIMPLE_EXECUTION_MODE=jit` | `Assertion violation in function 'main': contract condition failed` |
+
+Neither engine reached the `print`, so bare `assert` is not vacuous on either
+Rust-seed engine. This is consistent with the doc's own record that the
+interpreter case was fixed in `7d73d4dd3a6e`, and extends it to the JIT, which
+the doc did not state.
+
+**This does NOT close "OPEN 1".** That item is about the PURE-SIMPLE compiler
+discarding bare `assert`, and the pure-Simple compiler could not be exercised
+here at all: no self-hosted binary is deployed in this tree (`bin/simple` is
+the 2026-08-16 Rust seed, and `bootstrap/stage3/simple` has no `run`/`test`
+subcommand). The remaining open item is untouched and unverified.

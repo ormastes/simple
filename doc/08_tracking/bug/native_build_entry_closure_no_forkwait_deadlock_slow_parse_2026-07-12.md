@@ -1,7 +1,8 @@
 # native-build full-closure: task's own success bar is MET on a clean run — no fork/wait deadlock observed; earlier "deadlock" report was very likely a monitoring artifact over a slow (but live) parse phase
 
 Date: 2026-07-12
-Status: investigated; task's Step-3 success criterion reproduced with NO fix applied; redirect residual perf question to parser-perf tracking
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Severity: informational (no orchestration fix landed; do not implement one against this premise)
 
 ## Bottom line

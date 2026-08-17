@@ -1,6 +1,7 @@
 # Status/Bug: Editor TUI render code complete; full runtime behavior still degraded
 
-Status: - RESOLVED. The narrowed interpreter proof draws a real buffer-backed frame. The full `rust-hosted` 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 - **ID:** editor_render_runtime_blockers
 - **Date:** 2026-05-29

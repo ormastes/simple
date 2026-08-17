@@ -1,7 +1,8 @@
 # Bug: `GenericClass<T>.static_method()` unresolved under `simple test` (non-generic classes work fine)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/futures_promises_spec.spl`)
+- Status: DUPLICATE of generic_class_static_method_unresolved_2026-08-01.md
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Area:** interpreter method-call dispatch for generic classes (likely
   `src/compiler_rust/compiler/src/interpreter_method/mod.rs`, same family as
   `doc/08_tracking/bug/enum_impl_static_fn_method_call_path_skips_impl_methods_2026-07-20.md`),

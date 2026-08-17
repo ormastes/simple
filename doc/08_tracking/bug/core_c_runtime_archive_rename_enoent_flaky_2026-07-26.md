@@ -1,7 +1,8 @@
 # core-C runtime archive build flakes with rename ENOENT, silently degrading to a 28x runtime
 
 - **Filed:** 2026-07-26
-- **Status:** ROOT-CAUSED AND FIXED (2026-07-26) — see *Root cause* below.
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   The elimination table further down is kept because it records why several
   confident readings of the evidence were wrong.
 
@@ -145,3 +146,16 @@ prebuilt archive.
 3. **Staging dirs leak.** 13 `native-objects-*` dirs accumulated in `.simple/`
    over 4 days because the success path calls `TempDir::keep()`. Unbounded growth;
    `disk-retention.shs` does not cover `.simple/`.
+
+## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
+
+Content check of `src/compiler_rust/driver/src/cli/init.rs`: the
+silent-degradation half is confirmed fixed in current source —
+`pub fn cleanup_stale_db_files(...)` is defined at line 200 and called at line
+285, and lines 189-191 carry a comment naming this bug doc by path. Line 308
+documents the rename-ENOENT scenario.
+
+**Verdict: partial — silent-degradation half ALREADY-FIXED by content; the
+underlying rename race remains STILL-OPEN**, exactly as the doc states.
+**Not proven:** the race itself is timing-dependent and was not reproduced; no
+attempt was made to force it.

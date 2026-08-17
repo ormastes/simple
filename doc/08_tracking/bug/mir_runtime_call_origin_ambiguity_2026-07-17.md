@@ -1,6 +1,7 @@
 ---
 id: mir_runtime_call_origin_ambiguity_2026-07-17
-status: PARTIALLY-RESOLVED
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: blocking
 discovered: 2026-07-17
 discovered_by: high-level review of runtime/local collision fix

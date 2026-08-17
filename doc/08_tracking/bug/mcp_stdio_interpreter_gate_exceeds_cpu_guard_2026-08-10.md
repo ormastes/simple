@@ -1,6 +1,7 @@
 # MCP stdio interpreter gate exceeds the CPU guard
 
-Status: claimed by Codex `/root` (2026-08-10)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Exact failure
 
@@ -132,3 +133,43 @@ requires a fresh session to use the tracked direct-run bootstrap workaround
 compiler, and then prove Stage-3 self-host equivalence. Only that compiler may
 run the exact MCP interpreter gate for the after-fix wall/RSS comparison and
 final scenario verdict.
+
+## Verification 2026-08-17 (w02/s4 lane) — `rt_file_is_char_device` half is FIXED
+
+Classified by CONTENT of current source (session brief CORRECTION 1).
+
+This doc bundles two claims. The **unresolved `rt_file_is_char_device`** half
+(named at line 44) is fixed; the symbol is now complete across all three layers
+it needs to exist in:
+
+- **Declared** (Simple extern): `src/lib/nogc_sync_mut/io_runtime.spl:52`
+  `extern fn rt_file_is_char_device(path: text) -> bool`, with a caller at `:250`
+  and a rationale comment at `:245`.
+- **Defined** (C runtime): `src/runtime/runtime.c:1172`
+  `int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len)`,
+  documented at `:1164` as a "no-shell stat(2) probe".
+- **Registered in the MIR extern ABI allowlist** — the actual resolution
+  mechanism, and the one whose absence produces an "unresolved" symbol:
+  `src/compiler/50.mir/text_extern_abi.spl:74` lists `"rt_file_is_char_device"`
+  in the text-ABI extern match arm alongside `rt_file_exists`,
+  `rt_file_canonicalize`, etc.
+
+`src/runtime/runtime_native.c:8258` additionally refers to this in the past
+tense as "the rt_file_is_char_device defect (fixed ...)". (That comment cites a
+SHA; per CORRECTION 1 the SHA proves nothing — the three content facts above
+are what settle it.)
+
+**Verdict on the `rt_file_is_char_device` half: ALREADY FIXED. No patch applied.**
+
+**Explicitly NOT proven, and the row should stay open for it:** the *other* half
+of this doc — that the **MCP stdio interpreter gate exceeds the CPU guard** — was
+not measured by this lane. That is a performance/timeout claim requiring a real
+run of `test/02_integration/app/mcp_stdio_integration_spec.spl`, which this lane
+could not schedule: the host is under a live stage-3 bootstrap with 164
+concurrent `simple` processes, and the one spec this lane did queue
+(`iso_use_after_move_e2e_spec.spl`) was still waiting on `test-slot.shs` after
+25+ minutes. Do not read this note as closing the CPU-guard claim.
+
+Note also `src/compiler/50.mir/**` is claimed by another lane this session; the
+`text_extern_abi.spl` reference above is a READ for evidence only — nothing under
+`50.mir` was edited here.

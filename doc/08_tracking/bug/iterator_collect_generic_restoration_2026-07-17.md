@@ -1,6 +1,7 @@
 # Iterator.collect generic restoration
 
-Status: open
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Problem
 
@@ -49,3 +50,13 @@ Restore the original generic signature only when all of the following hold:
 
 Until then, callers needing a non-array collection must collect to an array and
 construct the target collection explicitly.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE
+
+`src/compiler_rust/lib/std/src/core/iter.spl:52` — `fn collect() -> List<T>:`
+is still non-generic (no `<C: FromIterator<Self.Item>>`, no `C.from_iter`), so
+the generic parameter is still lost. The three deferred `FromIterator` impls
+remain in tree and remain unreachable through `collect`: `core/list.spl:603`,
+`core_nogc/fixed_vec.spl:449`, `core_nogc_immut/static_vec.spl:406`.
+Doc/source drift worth correcting: the doc says the ceiling is
+`-> [Self.Item]`, the source returns `List<T>`.

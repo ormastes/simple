@@ -819,3 +819,22 @@ real design task, not a local edit, and no measurement was taken to size the win
 **What was NOT proven.** No timing was re-measured this session (the host was
 running a bootstrap at ~98% CPU, so any timing taken now would be noise). This
 verification is a source-shape confirmation only.
+
+## 2026-08-17 verification — runtime slice (classified by CONTENT)
+
+**Verdict: STILL OPEN — refuted by source, and the source says so itself.**
+`src/runtime/simple_core/core_string.spl:283-295`, the comment block immediately
+above `rt_string_char_code_at` (:296), states the remaining defect verbatim:
+
+> NOTE: unlike the hosted C/Rust runtimes, this freestanding lane does NOT cache
+> the all-ASCII result in the string header, so it stays O(index) per call rather
+> than becoming O(1). The header bit the hosted runtimes use is bit 31 of the
+> `reserved` field, which lands on the sign bit of the i64 word at offset 0 and
+> is awkward to set safely from Simple.
+
+So the ASCII fast path is a plain byte compare instead of a full UTF-8 decode (a
+constant-factor win, matching the doc's FIXED sub-item (h)), but the per-call
+O(index) scan — the quadratic term when a caller walks a string — is unfixed.
+
+**What was NOT proven.** No timing re-measurement. The quadratic *magnitude* in
+the doc's baseline table is unre-run; only the code shape was verified.

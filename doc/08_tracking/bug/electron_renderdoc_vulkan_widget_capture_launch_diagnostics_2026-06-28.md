@@ -1,5 +1,8 @@
 # Electron RenderDoc Vulkan Widget Capture Launch Diagnostics - 2026-06-28
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 
 Open blocker for the GUI/web/2D RenderDoc hardening goal.

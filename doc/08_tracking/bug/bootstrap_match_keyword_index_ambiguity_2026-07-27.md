@@ -3,7 +3,8 @@
 - **Date:** 2026-07-27
 - **Area:** pure-Simple parser / keyword identifiers
 - **Severity:** high — blocks the strict Stage 4 full-CLI bootstrap.
-- **Status:** OPEN.
+- Status: DUPLICATE of bootstrap_parser_match_keyword_identifier_2026-07-27.md
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Reproduction
 

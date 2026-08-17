@@ -1,5 +1,8 @@
 # Flat --entry-closure lane: text module-global values lose textness through function returns (prints pointer as number)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-24
 **Severity:** Medium (silent wrong output; no crash after the rt_env_get ABI fix)
 **Lane:** seed `native-build --entry-closure` (SIMPLE_BOOTSTRAP=1)

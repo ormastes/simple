@@ -1,7 +1,8 @@
 # module_lowering byte-vs-char path sanitizer miscounts on non-ASCII module paths
 
 - **Id:** module_lowering_byte_vs_char_sanitizer_2026-08-01
-- **Status:** Open — NOT YET DONE (deferred: native-codegen-sensitive)
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** P3 — impact is non-ASCII module/file paths only (≈never in practice)
 - **Found:** 2026-08-01 (divergence parallel scan, Wave 11)
 - **Component:** `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`

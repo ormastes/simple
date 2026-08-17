@@ -1,5 +1,8 @@
 # `src/lib/gc_sync_mut/` exists with real content, violating the "not a public variant directory" invariant the spec + structure.md both encode
 
+Status: DUPLICATE of gc_module_loader_spec_asserts_gc_sync_mut_absent_2026-08-17.md
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Component:** repo layout — `src/lib/gc_sync_mut/` vs.
 `test/feature/lib/gc_parity/gc_module_loader_spec.spl` and

@@ -1,5 +1,8 @@
 # Bootstrap parser quadratic source refetch
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 Parser scaling fixed; full bootstrap acceptance remains open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,

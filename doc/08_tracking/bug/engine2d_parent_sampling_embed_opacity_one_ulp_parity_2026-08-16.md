@@ -4,7 +4,8 @@
 - date: 2026-08-16
 - area: rendering / engine2d / draw-ir / glass materials
 - severity: low (single-channel ±1 rounding on inactive-window glass)
-- status: RESOLVED (2026-08-16)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Resolution
 

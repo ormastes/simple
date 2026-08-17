@@ -1,7 +1,8 @@
 # `cli_help_alignment_spec` is RED — help text and dispatch have drifted by 18 commands
 
 Date: 2026-08-09
-Status: OPEN — pre-existing, not caused by the change that found it. Item 1 of
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 the unblock condition (the `val`/`push` spec defect) is FIXED as of 2026-08-10;
 items 2-4 (the real 25-command help/dispatch gap, `check-capsule`, and the
 `verify`/`gen-lean` experimental tags) remain open and are CLI-surface work,

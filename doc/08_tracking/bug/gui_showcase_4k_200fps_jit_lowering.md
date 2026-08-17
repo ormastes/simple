@@ -1,7 +1,8 @@
 # GUI Showcase 4K 200 FPS JIT Lowering Blocker
 
 - Date: 2026-06-22
-- Status: fixed
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - Gate: `scripts/check/check-widget-showcase-4k-200fps.shs`
 - Evidence: `build/widget-showcase-4k-200fps/status.env`
 

@@ -1,5 +1,8 @@
 # `GcConfig.with_heap_size` unresolvable — one specific static method missing from an otherwise-working class, identical struct/impl defined in 3 sibling family modules
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Component:** interpreter class/impl registry — `struct GcConfig` +
 `impl GcConfig` defined identically in `src/lib/nogc_sync_mut/gc.spl`,

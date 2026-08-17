@@ -1,5 +1,8 @@
 # Bug: `expect(a == b).to_equal(false)` false-fails when a != b
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-06-30
 **Severity:** Medium — false-RED on specs that assert inequality via the
 `expect(<comparison>).to_equal(<bool>)` idiom (library/code is correct).

@@ -1,7 +1,8 @@
 # `env_get(...) ?? default` is a DEAD fallback against `std.io_runtime`'s `env_get` — silently yields `""` instead of the default
 
 - **ID:** env_get_nil_coalesce_dead_fallback_2026-07-25
-- **Status:** OPEN — root-caused, one instance fixed, general sweep NOT done
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** high — silent wrong value, no error, no warning; the idiom reads
   as correct and is used ~680 times in-tree.
 

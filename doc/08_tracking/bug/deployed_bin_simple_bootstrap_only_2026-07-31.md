@@ -3,7 +3,9 @@
 - **Date:** 2026-07-31
 - **Severity:** blocker (no test runner on this machine)
 - **Component:** deploy / bootstrap binary
-- **Status:** open
+- Status: CLOSED — did not reproduce (2026-08-17, wave_01 lane H3; see the
+  re-verification section at the end of this file for the probe transcripts)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Summary
 
@@ -81,3 +83,55 @@ carry the second defect.
 
 Deploys should rotate the previous binary aside instead of overwriting in
 place, so a broken deploy has a rollback target.
+
+---
+
+## 2026-08-17 re-verification (wave_01 lane H3) — DID NOT REPRODUCE, both claims dead
+
+Classified by direct probe of the CURRENTLY deployed artifact, not by SHA
+ancestry. Binary identity recorded first, per `.claude/rules/commands.md`:
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ stat -c '%s %y' "$(readlink -f bin/simple)"
+59536728 2026-08-16 22:59:37.799277177 +0000
+```
+
+**Claim 1 — "full CLI is missing" — FALSE against this artifact.** The report's
+signature failure was `error: unknown command 'test'`. That string does not
+occur:
+
+```
+$ nice -n 19 timeout 60 bin/simple test --help ; echo rc=$?
+rc=124
+WARNING: this Rust-built Simple binary is a bootstrap seed only; ...
+warning: Avoid 'export use *' - exposes unnecessary interfaces
+  --> src/lib/nogc_async_mut/test_runner/test_runner_types.spl:1:1
+```
+
+`test` is RECOGNISED — the binary proceeds into module loading (the ~310s
+session-setup path) and my 60s cap expired; rc=124 is my `timeout`, not a
+rejected subcommand. `lint --help` behaves identically. The binary is a full
+CLI seed, not the bootstrap-only build described here.
+
+**Claim 2 — "`compile` cannot parse a bodiless `@extern fn`" — FALSE.**
+
+```
+$ cat /tmp/h3/extern_probe.spl
+@extern fn rt_probe_noop() -> i64
+
+fn main():
+    println("ok")
+$ nice -n 19 timeout 300 bin/simple compile --format=smf /tmp/h3/extern_probe.spl ; echo rc=$?
+rc=0
+Compiled /tmp/h3/extern_probe.spl -> /tmp/h3/extern_probe.smf
+```
+
+**Verdict: CLOSED — not reproducible.** The bootstrap-only artifact this report
+describes was replaced; the deployed binary is now a full-CLI Rust seed. The
+*separate* fact that it is still a SEED rather than the self-hosted binary is a
+different defect and stays open under
+`deployed_bin_simple_still_seed_2026-08-05.md` — do not merge the two. No source
+fix was made and none is warranted: this report tracked a deployment state, not
+a source defect.

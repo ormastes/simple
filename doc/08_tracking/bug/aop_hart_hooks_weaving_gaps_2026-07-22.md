@@ -1,5 +1,8 @@
 # AOP hart hooks: no in-tree path executes woven advice for lib-module hardware code
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-07-22
 **Severity:** High (blocks Phase-3 "AOP hart hooks" from being AOP-carried end-to-end)
 **Found by:** Lane H (AOP hart debug hooks, `src/lib/hardware/debug_hooks/`)
@@ -120,3 +123,14 @@ bin/simple run test/01_unit/lib/hardware/debug_hooks/hart_debug_probe.spl
 All 16 gates pass today: seam behavior (trace/halt-freeze/single-step/resume,
 rv64+rv32) green, weave accounting >0 via bare-name rule, tokenized
 execution-form rule pinned at 0/fail-closed, interp gap printed explicitly.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT.** `src/lib/hardware/debug_hooks/hart_debug.spl`
+lines 13-17 still carry the KNOWN GAP banner naming this very doc: "no in-tree path
+executes woven advice for functions defined in imported lib modules today
+(interpreter weaving is entry-module-only, and the MIR weave matcher does not match
+parser-tokenized execution(...) predicates), so `hart_dbg_step_hook_fires` stays 0
+on the run path until that lands." Gap 1 is unfixed; the source is honest about it.
+Not fixed in this pass (root cause is in the weaving pipeline, outside the stdlib
+slice).

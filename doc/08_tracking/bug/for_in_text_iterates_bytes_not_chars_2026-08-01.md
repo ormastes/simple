@@ -1,6 +1,7 @@
 # `for ch in <text>` iterates BYTES, not characters (2026-08-01)
 
-Status: **FIXED on the Rust seed JIT/MIR lane (measured)**; pure-Simple lanes
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 corrected earlier by inspection. Native AOT is UNVERIFIED — see "Native AOT lane
 is unmeasurable" below; it shares the fixed MIR lowering site.
 

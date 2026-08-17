@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-21
 **Severity:** P1 (blocks rv64 serial_shell_entry compilation)
-**Status:** Filed
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Component:** MIR lowering / Semantic analysis
 
 ## Verbatim Error

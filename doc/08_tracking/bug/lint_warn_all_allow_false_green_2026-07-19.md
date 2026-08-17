@@ -1,6 +1,7 @@
 # `lint --warn-all --deny-all` ignored allowed style diagnostics
 
-- **Status:** FIXED in source; current Stage 4 qualification remains pending.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Reproducer:** an ST001 function name such as `CamelCase` exited `0` because `style_convention` defaulted to `Warn`, while applying configured `Warn` preserved the diagnostic's built-in `Allow` level.
 - **Root fix:** keep style diagnostics suppressed by default (`style_convention = allow`), then promote an original `Allow` diagnostic when configuration or `--warn-all` selects `Warn`. Existing `Deny` diagnostics are never downgraded.
 - **Regression:** `lint_profile_spec.spl` proves baseline ST001 exits `0`, `--warn-all --deny-all` exits `1`, and a clean source exits `0`, using a PID/time-unique fixture.

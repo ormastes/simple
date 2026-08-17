@@ -1,5 +1,8 @@
 # Freestanding text ORDERING (`<`/`>`/sort) unreliable against a raw literal
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Status
 **RESOLVED 2026-08-11.** Follow-up gap #1 flagged (but explicitly left open)
 by `native_text_equality_against_empty_literal_unreliable_after_trim_lower_2026-08-11.md`

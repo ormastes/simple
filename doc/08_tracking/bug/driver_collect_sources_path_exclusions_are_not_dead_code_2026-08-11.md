@@ -1,6 +1,7 @@
 # DECISION: do NOT retire `core/interpreter/` — the "excluded from every build" premise is FALSE
 
-**Status:** DECIDED — **NEITHER RETIRE NOR BLIND-RECONNECT.** No source deleted.
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Filed:** 2026-08-11
 **Supersedes the disposal premise in:**
 `doc/08_tracking/bug/interpreter_eval_access_calls_drifted_duplicate_definitions_2026-08-11.md`

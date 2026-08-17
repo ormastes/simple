@@ -1,5 +1,8 @@
 # Bootstrap Parser Rejects Address-Of Cast Arguments
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 PARTIALLY RESOLVED. Prefix `&` and `&mut` now pass the flat parser, AST bridge,
@@ -54,3 +57,14 @@ and commas cascade into recovery diagnostics.
 Fix cast grouping so `&value as u64` is
 `Cast(Unary(Ref, value), u64)`, then complete native stable-place/write-back
 evidence. Do not rewrite valid userlib syscall arguments as a workaround.
+
+## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
+
+Verdict: STALE-REF / UNDETERMINED
+
+`grep -rln address_of src/compiler/10.frontend/` returns NOTHING, and the cited
+file `src/compiler/10.frontend/parser_types_expr.spl` (783 lines) has no
+address-of handling at all. The cited location is wrong; the correct site was
+not located by name in this triage. Shares a probable root cause with
+bootstrap_prefix_address_of_parser_gap_2026-07-27 (same cited file, same
+feature). Owner path: src/compiler/10.frontend/**.

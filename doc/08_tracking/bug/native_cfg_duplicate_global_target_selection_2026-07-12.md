@@ -1,5 +1,8 @@
 # Native cfg duplicate global target selection
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Status (2026-07-15):** source implemented; focused AArch64/RISC-V object
 regression execution remains pending.
 

@@ -1,7 +1,8 @@
 # Bug: json_logic_spec blocked by stub-only json sub-modules
 
 **Date:** 2026-06-26
-**Status:** Open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Classification:** missing-source (both-fail)
 
 ## Summary

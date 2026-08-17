@@ -1,6 +1,7 @@
 ---
 id: di_test_tag_env_not_inherited_by_subprocess_2026-07-02
-status: OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 severity: medium
 discovered: 2026-07-02
 discovered_by: test/03_system/feature/features/di_extensions_system_spec.spl (5/10 failures while restoring DiContainer.has())

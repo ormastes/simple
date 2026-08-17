@@ -1,6 +1,7 @@
 # Duplicate-check cosine fragmented one clone into multiple groups — 2026-07-23
 
-**Status:** SOURCE FIXED / PURE-SIMPLE QUALIFICATION PENDING
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Reproduction
 

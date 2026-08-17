@@ -230,3 +230,26 @@ only 20 000 pieces (quadratic) — at equal N the builder is ~520x faster.
 
 - `doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md` — perf wave plan
 - `test/05_perf/mcp_json_perf_spec.spl` — existing perf benchmark
+
+## Verification 2026-08-17 (content classification) — row evidence was a FALSE INFERENCE
+
+The triage row closed on "`json.spl` has 0 `rt_string_builder` references, so it
+is still quadratic". Re-read the file: absence of the builder is not evidence of
+quadratic behaviour here, because there is **no accumulation loop to be
+quadratic**.
+
+`src/lib/nogc_sync_mut/mcp_sdk/core/json.spl` builds JSON entirely with
+**fixed-arity** concatenations — `jp` (29), `js` (32), `jo1`..`jo5` (36-53) each
+concatenate a bounded, compile-time-known number of operands. The only unbounded
+case, `ja(items)` (56-57), is `"[" + items.join(",") + "]"` — `join` is the
+linear primitive, not repeated `+`. `unescape_json_string` (294-302) is six
+whole-string `.replace` passes, i.e. O(6n).
+
+There is therefore nothing for `rt_string_builder` to fix in this file, and
+adopting it would add an abstraction with no measured win (CLAUDE.md: never
+over-engineer). Verdict for the `json.spl` half of this row: **NOT A DEFECT**.
+The runtime half (`string_builder.rs` landed) is unaffected.
+
+Not proven: no `Results:` line was collected — this is a static classification of
+the source, not a perf measurement. `test/05_perf/mcp_json_perf_spec.spl` was not
+re-run under the live bootstrap load.

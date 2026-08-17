@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-06
 **Area:** lib/nogc_async_mut/compute, lib/nogc_sync_mut/text_layout, lib/gpu/engine2d
-**Status:** Open (honest gap — device execution unproven off Metal)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Summary
 

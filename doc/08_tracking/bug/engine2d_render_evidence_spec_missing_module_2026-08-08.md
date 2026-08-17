@@ -1,5 +1,8 @@
 # engine2d_render_evidence_spec.spl fails to load: missing `os.kernel.arch.x86.render_capture_ack` module (2026-08-08)
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Summary
 
 `test/01_unit/os/compositor/engine2d_render_evidence_spec.spl` fails at

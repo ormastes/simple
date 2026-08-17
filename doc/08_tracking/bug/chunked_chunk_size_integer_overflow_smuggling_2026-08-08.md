@@ -1,6 +1,7 @@
 # Chunked chunk-size integer overflow accepted as last-chunk (request smuggling)
 
-- **Status:** FIXED (2026-08-08)
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** High (protocol parsing on untrusted input; smuggling primitive)
 - **Found by:** adversarial review of `df13e306e9f` (boundary-aware chunked body-end detection)
 - **Sites:** 4 (all tiers)

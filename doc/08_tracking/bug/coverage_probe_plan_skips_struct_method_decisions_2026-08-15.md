@@ -1,5 +1,8 @@
 ## Re-verified 2026-08-17 — reproducer GONE; defect NOT fixed; localized; BLOCKED on a seed rebuild
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ### 1. The named reproducer no longer exists
 
 `src/lib/nogc_sync_mut/gpu/engine2d/vulkan_presenter.spl` is **not in the tree**
@@ -120,3 +123,17 @@ Two concrete blockers, stated rather than worked around:
 Unblock: once the seed changes in flight have landed, re-run the
 `vulkan_present_damage_gate_branch_coverage_spec.spl` coverage measurement and
 attribute struct-method bodies in the probe plan. Severity stays P3.
+
+## Evidence 2026-08-17 (fleet worker A, rust-seed slice)
+
+Content check of `src/compiler_rust/compiler/src/mir/lower/lowering_coverage.rs`
+(3,777 bytes, registered as `mod lowering_coverage;` at `mir/lower/mod.rs:9`):
+
+`grep -n "struct_method\|StructMethod\|impl_method\|methods"` returns **zero
+matches**. The probe planner has no struct-method awareness of any kind, so the
+gap this doc describes is confirmed present in current source rather than
+merely stale prose.
+
+**Verdict: STILL-OPEN, confirmed by content.** Not fixed; this is a measurement
+gap (missing instrumentation), not a wrong-answer defect.
+**Not proven:** no execution evidence — see "Execution blocked" below.

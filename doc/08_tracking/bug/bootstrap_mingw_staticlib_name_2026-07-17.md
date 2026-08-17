@@ -1,5 +1,8 @@
 # Bootstrap used MSVC staticlib names for MinGW
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Symptom
 
 Windows bootstrap always looked for `simple_native_all.lib` and

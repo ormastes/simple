@@ -1,6 +1,7 @@
 # native-build resolves `libsimple_runtime.a` via a CWD-relative path with no staleness check
 
-- Status: FIXED (mechanism + fix below); full `cargo check` verification blocked by a
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   pre-existing host btrfs metadata-exhaustion condition (see Verification section).
 - Filed: 2026-08-11
 

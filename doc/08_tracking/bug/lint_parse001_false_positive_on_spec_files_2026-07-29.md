@@ -1,5 +1,8 @@
 # lint PARSE001 false positive on `use std.spec.*` describe-specs (2026-07-29)
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status Update (2026-07-30)
 
 **Item 1 (PARSE001 false positive): FIXED** by commit f4adc39bf39 (2026-07-28).

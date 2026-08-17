@@ -1,6 +1,7 @@
 # Bare `T?` in condition position silently takes the WRONG branch
 
-**Status:** FIX WRITTEN, STRUCTURALLY SOUND, EXECUTION-UNVERIFIED — needs a
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 T3 full bootstrap to confirm. See "Fix landed" below for the precise reason
 this cannot be closed as FIXED yet. Originally found
 2026-08-01 while triaging

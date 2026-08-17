@@ -1,6 +1,7 @@
 # LSP MCP: integer position args (line/character) corrupted in deployed server
 
-- **Status:** Open — root cause is a **`native-build` codegen/runtime bug**, not a `tools.spl` logic bug
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** P1 (server currently fully unusable — see 2026-06-14 PM update)
 - **Date:** 2026-06-14
 - **Component:** `bin/simple native-build` codegen+runtime (`text.to_int()`, text `>=`, `str(negative i64)`); surfaces in `src/app/simple_lsp_mcp/`

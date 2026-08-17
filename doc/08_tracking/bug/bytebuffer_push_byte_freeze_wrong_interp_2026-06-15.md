@@ -1,5 +1,8 @@
 # Bug: ByteBuffer.push_byte(v) + freeze() yields wrong byte values in interpreter
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **ID:** bytebuffer_push_byte_freeze_wrong_interp_2026-06-15
 **Filed:** 2026-06-15
 **Severity:** P1 — silent data corruption; produces wrong bytes with no error
@@ -81,3 +84,21 @@ val span = ByteSpan.new(arr)
 
 This is the pattern used in `ctypes.spl`'s `_hex_to_bytes` helper (see comment in
 that file). Confirmed working.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**NOT-REPRODUCED — the described corruption is gone.** Direct interpreter probe
+(`SIMPLE_EXECUTION_MODE=interpreter bin/simple run`, rc=0) over
+`ByteBuffer.new()` + `push_byte(0,1,127,128,255,256)` + `freeze()`:
+
+```
+len=6
+bytes=0,1,127,128,255,0,
+```
+
+All six values are exactly correct (`256` -> `0` is the specified low-8-bits
+truncation, not corruption). Current source explains why:
+`src/lib/common/bytes/span.spl:152-154` now stores `(v & 0xFF).to_u8()` into
+`self.buf`, and `freeze()` (:171) builds `ByteSpan(data: self.buf, off: 0,
+span_len: self.buf.len())` with no re-encoding. The raw-byte store fix referenced
+by the sibling byte_span doc covers this path too. Recommend CLOSED.

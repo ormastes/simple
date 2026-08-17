@@ -118,3 +118,14 @@ and said why`, versus `FAIL — ... with NO diagnostic text` on a 0-byte log.
 
 Still open: `native-build` output buffering itself. The guard names the case and
 refuses to be silent about it, but does not make a mid-build death flush.
+
+## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
+
+**Verdict: PARTIALLY-FIXED, root defect STILL-OPEN.** Content confirms the diagnosis path is
+present: `scripts/bootstrap/bootstrap-from-scratch.sh:1963` captures `stage2_status=$?` on
+the line AFTER the build (not through a pipe), and :1973 unconditionally announces
+`stage2-native-build log: ${log_dir}/stage2-native-build.log`, with the sanity gate at
+1974-1985 able to force `stage2_status=2`. The underlying 0-byte-log output-buffering defect
+is not addressed by that code and remains open.
+Related fix landed this session in the SAME file — see
+`bootstrap_stage2_capability_log_phantom_2026-08-17.md`.

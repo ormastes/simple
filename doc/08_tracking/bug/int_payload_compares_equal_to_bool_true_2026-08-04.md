@@ -1,6 +1,7 @@
 # `1` compares equal to `true`, turning a real type error into a passing assertion
 
-**Status:** **NOT REPRODUCIBLE 2026-08-04 — the stated repro is refuted.**
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Retained because the *observation* that prompted it is real and still
 unexplained; the *mechanism* asserted below is not.
 **Found:** 2026-08-04, while measuring the `T?`-to-`bool` coercion fix.

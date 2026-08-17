@@ -1,6 +1,7 @@
 # cpu_simd public text lane: stale assertion rewound by a sync clobber, plus an unrecorded oracle drift
 
-Status: assertion fixed; OPEN 1 (oracle drift) **RESOLVED 2026-08-04** — see
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 "Resolution of OPEN 1" at the foot of this file. OPEN 2 confirmed and re-scoped
 (the two declarations do **not** behave identically). Two further defects spun
 off, both open:

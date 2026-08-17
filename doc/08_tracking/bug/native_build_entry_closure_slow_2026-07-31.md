@@ -1,6 +1,7 @@
 # `--entry-closure` BFS averages ~1-2s/file (not "cheap") — localized, not fixed
 
-- **Status:** one of the two contained follow-ups below landed (content-keyed cache
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   removed); the other was measured and found to be a no-op on this path, left alone.
   See "Follow-up: contained candidates resolved (2026-07-31)" at the bottom.
 - **Symptom:** `_native_build_entry_closure` in `src/app/io/_CliCompile/compile_targets.spl`

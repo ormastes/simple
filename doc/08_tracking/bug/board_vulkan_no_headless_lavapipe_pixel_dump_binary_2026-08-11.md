@@ -1,5 +1,8 @@
 # No installed CLI/demo binary can drive lavapipe to a raw pixel dump without new host code
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 **Date:** 2026-08-11
 **Lane:** L3, board Vulkan readback boundary (`vulkan.present.readback_image@1`)
 **Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md

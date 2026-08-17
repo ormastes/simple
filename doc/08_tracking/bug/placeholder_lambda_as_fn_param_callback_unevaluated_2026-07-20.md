@@ -3,8 +3,10 @@
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/{gc_async_immut,gc_sync_immut}`
-**Status:** open — genuine interpreter/compiler defect, reproduces under both
-`bin/simple run` and `bin/simple test`
+**Status:** open — STILL LIVE, re-verified by content 2026-08-17. Genuine
+compiler (parser/desugar) defect. **BLOCKED — OUT OF SCOPE for stdlib lanes:**
+root cause is in the placeholder-lambda desugaring in the frontend, not in
+`src/lib/**`.
 
 ## Summary
 
@@ -78,7 +80,61 @@ This doc's minimal repro is closer to those older reports' shape than to the
 "unknown static method" test-vs-run landmine family — it is NOT that landmine
 (reproduces identically under `run`, not just `test`).
 
-## Root-cause hypothesis
+## Re-verification 2026-08-17 (still live) + root cause NARROWED
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (the Rust seed —
+`bin/simple --version` prints the bootstrap-seed warning). Engine is the
+tree-walk interpreter: the JIT declines the module with
+`function 'main' creates a lambda/closure; the JIT closure ABI does not
+tag-box lambda arguments or results ... deferring to interpreter`.
+
+Probe A (`bin/simple run`, exit 0) — the doc's own two repros verbatim:
+
+```
+<lambda>          # call_once(_1 + 1)      BUG (expected 11)
+11                # call_once(fn(x): x+1)  correct
+[2, 3, 4]         # my_pmap(..., add1)     correct
+[2, 3, 4]         # my_pmap(..., fn(x):..) correct
+<lambda>          # my_pmap(..., _1 + 1)   BUG
+```
+
+Probe B is the new information and **falsifies the doc's original hypothesis**
+("threading a placeholder lambda through a user-defined function parameter is
+broken"). Binding the placeholder to a `val` FIRST and passing that same value
+into the same user function works:
+
+```
+6                 # val g = _1 + 1 ; g(5)          correct
+11                # call_once(g)                    CORRECT — threading is fine
+[2, 3, 4]         # [1,2,3].map(_1 + 1)             correct
+11                # call_once(\x: x + 1)            correct
+```
+
+So the parameter-threading path is NOT broken. The defect is purely
+**syntactic/parse-time**: a placeholder written INLINE in a call-argument
+position is captured by the WRONG enclosing expression. `call_once(_1 + 1)`
+does not build a lambda and pass it — it desugars the whole enclosing call into
+a lambda, roughly `\a: call_once(a + 1)`. That is exactly why `print` shows
+`<lambda>` and why `[1,2,3].map(_1 + 1)` still works (method-call arguments get
+their own per-argument transform; a plain free-function call argument does
+not). Confirming detail: `val r = call_once(_1 + 1)` followed by `r(7)` does
+not even resolve — `error[E1002]: function \`r\` not found` — the produced
+value is not an ordinary callable binding.
+
+**Root cause location (do not edit from a stdlib lane):**
+`src/compiler/10.frontend/desugar/placeholder_lambda.spl` — the
+`parse_call_arg` / `transform_placeholder_call_args_after_interpolation`
+per-argument transform (see that file's own header comment at lines 45-70
+describing the parser's distinction between "real call arguments" and nested
+sub-parsed regions, and the argument-scoping walk at lines 275-350). The
+free-function call-argument case is the one that hoists to the enclosing call
+instead of wrapping the argument.
+
+**Correct workaround until fixed** (better than the doc's original advice of
+rewriting to `fn(x): ...`, because it preserves the short grammar): bind the
+placeholder to a `val` on the previous line and pass the binding.
+
+## Root-cause hypothesis (superseded by the section above)
 
 Placeholder lambdas (`_1 + 1`) likely lower to a distinct "curried/callable"
 representation from `fn(x): ...` closures. When threaded through a plain

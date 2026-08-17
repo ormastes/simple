@@ -1,7 +1,8 @@
 # Pure-Simple LLVM shard emits invalid `bitcast i1` to `ptr`
 
 - **Date:** 2026-08-03
-- **Status:** FIXED
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** P1
 - **Area:** pure-Simple LLVM MIR lowering
 - **Verified owner:**

@@ -1,7 +1,8 @@
 # Bug: Stage 2 interpreted parser indexes an empty array
 
 - **Date:** 2026-07-24
-- **Status:** resolved 2026-07-25
+- Status: CLOSED (not reproducible)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** high
 - **Area:** Rust-seed interpreter / pure-Simple frontend
 

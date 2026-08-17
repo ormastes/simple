@@ -9,7 +9,65 @@
 - **Date:** 2026-06-12 (compiled re-profile + parse fix 2026-06-13)
 - **Component:** lean frontend (`src/compiler/10.frontend/core/`). Parse-side
   fetch: FIXED. Interpreter parse_module aging: still open (interp-only).
-- **Status:** parse-side fetch FIXED; interp aging OPEN; compiled-`check`
+- Status: **OPEN (P2) — the superlinear term is now LOCATED (not yet measured or fixed)**
+- Re-verified 2026-08-17 (wave_01 lane B) by content inspection of the
+  re-attributed pass. No timing run was performed — see "Not measured" below.
+
+## 2026-08-17 — the type-inference superlinear term, at file:line
+
+This doc has said since 2026-06-13 that the remaining superlinearity is "type
+inference (tracked separately)" without ever naming a line. It is named now.
+
+`src/compiler/30.types/type_infer/generalization.spl:91-118`
+
+```
+me env_free_var_ids() -> [i64]:
+    var vars: [i64] = []
+    for name in self.env.keys():                    # EVERY binding in the env
+        val scheme: TypeScheme = self.env[name]
+        val ty_vars = self.free_vars_with_levels(scheme.ty)   # full structural walk
+        for (id, _) in ty_vars:
+            if not scheme.vars.contains(id):        # linear array scan
+                vars = vars.push(id)
+    vars
+
+me generalize(ty: HirType) -> TypeScheme:
+    ...
+    val env_vars = self.env_free_var_ids()          # called on EVERY generalize
+    for (id, var_level) in free_vars:
+        if not env_vars.contains(id) and var_level > self.level:   # linear scan again
+```
+
+Three compounding costs, all on the hot path:
+
+1. `generalize()` calls `env_free_var_ids()` **unconditionally**, so every single
+   let-binding re-walks the *entire* type environment structurally. With the env
+   growing as the file is processed, that alone is O(bindings^2 x type size) —
+   which is exactly the shape reported above (a file gets slower the further in
+   you go, and repeated identical work gets slower per call).
+2. `env_vars` and `scheme.vars` are **arrays**, and membership is tested with
+   `.contains(...)`, a linear scan, inside the inner loop.
+3. `vars = vars.push(id)` rebuilds rather than appends in place, and never
+   de-duplicates, so `env_vars` grows with repeats and makes (2) worse still.
+
+Two obvious repairs, in increasing order of risk:
+
+- **Safe, semantics-preserving:** key `env_vars` and `scheme.vars` by a set/Dict
+  instead of an array, and compute `env_free_var_ids()` lazily — it is only ever
+  consulted for ids that already satisfy `var_level > self.level`.
+- **Correct but needs an audit:** under standard level-based (Remy) HM,
+  `var_level > self.level` is *by construction* equivalent to "not free in the
+  environment", which makes the whole `env_free_var_ids()` scan redundant. This is
+  only sound if levels are adjusted on every unification; that invariant was NOT
+  audited here and must be before the scan is deleted.
+
+**Not measured, so not fixed.** Producing the RED timing evidence this lane's
+contract requires means driving interpreted `parse_module`/`check` over a
+multi-hundred-line file (25-45 min per data point per the table above), while a
+stage-3 bootstrap held the box at ~98% CPU for the whole session. Under
+reproduce-first, locating the term without timing it does not authorise a patch,
+so no code was changed. The next lane to pick this up should start at the two
+`.contains()` calls above.
   superlinearity is type-inference (tracked separately, see below)
 
 ## Symptom

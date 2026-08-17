@@ -1,5 +1,8 @@
 # `match` arm naming a `val` constant lowers as an irrefutable capture
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Status (2026-07-20):** OPEN. Worked around at every known call site; no root
 fix yet. Distinct from `native_const_pattern_lowers_irrefutably_2026-07-13.md`
 (that one is enum-variant-vs-struct *name precedence* in native lowering, and is

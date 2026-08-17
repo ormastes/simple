@@ -1,6 +1,7 @@
 # The `# @cover` gate marks 227 system tests FAILED without running a single one
 
-**Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10) — policy/rollout
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 decision needed, not a code bug
 **Found:** 2026-08-04
 
@@ -97,3 +98,17 @@ that names the 2,122 legacy files explicitly, or a measured annotation pass done
 with coverage collection on. Until then, treat the 227 in
 `test/03_system/app` as **unmeasured**, not as 227 defects: the only honest
 current number for that directory comes from a `--no-cover-check` run.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT.**
+`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:203-214`
+(`validate_system_test_covers`) still gates purely on the `/system/` and
+`/03_system/` path substrings and flags any file whose `extract_cover_annotations`
+returns empty — no test is executed to reach that verdict. Note checked and
+DISMISSED during this pass: `missing.push(f)` at :213 discards its result, which
+would be a silent no-op if `push` were pure — but every other call site in this
+file (:115, :229, :342, :482, :523, :551, :593, :638, :720) uses the same bare
+mutating form, so that is the file-wide convention, not a defect. The gate is live.
+Policy decision (should a missing `# @cover` be a FAILURE or a warning?) is not a
+unilateral stdlib change; left open.

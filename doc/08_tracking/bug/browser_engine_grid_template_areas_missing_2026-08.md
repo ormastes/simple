@@ -1,5 +1,8 @@
 # `grid-template-areas` and `grid-auto-flow` are entirely unimplemented in the browser engine
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-08-07
 - **Severity:** P2 — no crash; named-area placement and column-first
   auto-placement simply do not happen. Cells fall back to the default

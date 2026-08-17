@@ -1,6 +1,7 @@
 # Hosted Windows ARM64 and FreeBSD toolchain contracts
 
-**Status:** Source fixed fail-closed/corrected; executable proof pending  
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Component:** compiler/backend hosted native linking  
 **Found:** 2026-07-16
 

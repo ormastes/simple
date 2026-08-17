@@ -2,7 +2,8 @@
 
 - **ID:** entry_closure_runs_global_stdlib_pass_regardless_of_imports_2026-08-08
 - **Date:** 2026-08-08
-- **Status:** OPEN, but the "stall" framing is FALSIFIED (see Update 2026-08-08b) —
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   it is a slow-but-finite pipeline, `--entry-closure` scoping is CORRECT for both
   the source-load BFS and codegen, and the fixed ~1469-1515-line prefix is the
   native-build WORKER's own interpreter self-bootstrap, unrelated to the target
@@ -10,6 +11,49 @@
 - **Severity:** high — it is the blocker for the last unfenced AOT audit row, and
   it makes AOT compile time roughly independent of program size for any program
   that touches the stdlib at all.
+- 2026-08-17 (wave_01 lane B): the fixed prefix is **independently reproduced on a
+  different lane, with a program that imports NOTHING** — see below. The remaining
+  "for any program that touches the stdlib at all" qualifier in the line above is
+  too weak: it happens for programs that touch the stdlib not at all.
+
+## 2026-08-17 corroboration — zero-import program, same fixed prefix
+
+The evidence in this doc so far all comes from `native-build --entry-closure`. A
+different driver lane was exercised this pass:
+
+```
+bin/simple run src/compiler/80.driver/main.spl -c tiny.spl --target wasm32 -o out.wat
+```
+
+where `tiny.spl` is five lines with **no `use` statements at all**:
+
+```
+fn add(a: i64, b: i64) -> i64:
+    a + b
+
+fn main():
+    print(add(2, 3).to_text())
+```
+
+The run still emitted a fixed prefix that plateaued at **1518 lines** — squarely inside
+the ~1469-1515 band recorded above — and the modules named in it are precisely the ones
+this doc already flagged as unexplained by the fixture's imports:
+`std.nogc_sync_mut.sffi.llvm_loader`, `std.nogc_sync_mut.sffi.dynamic`,
+`compiler.backend.target_presets`, `15.blocks/blocks/modes.spl`, plus cross-module
+collision warnings for `read_file` / `shell` / `text_to_bytes` / `write_file`.
+
+This is a *control* the doc did not previously have. It removes the last version of the
+"it is the fixture's import surface" hypothesis: a program with an empty import surface
+produces the same prefix, at the same size, on a lane that is not `--entry-closure`.
+It is consistent with — and strengthens — the re-verified framing at the top of this
+file: the prefix is the driver/worker's own interpreter self-bootstrap and is
+**program-independent**, so no amount of shrinking the target program's imports will
+move it.
+
+What this does NOT establish: that the pipeline terminates for a given input, or any
+wall-clock figure for `--entry-closure` specifically. Those were not measured this pass
+(a stage-3 bootstrap held the box at ~98% CPU throughout), and the observation above is
+an *upper structure*, not a timing claim. No code was changed.
 
 ## Symptom
 

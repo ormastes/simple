@@ -1,7 +1,8 @@
 # Residual exposure of the enum-associated-function defect in NON-spec code
 
 - **Date:** 2026-07-28
-- **Status:** triage / measurement (no call sites fixed — see "Nothing needed an
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   immediate fix")
 - **Parent bugs:**
   `doc/08_tracking/bug/enum_associated_fn_never_called_on_jit_2026-07-28.md`,

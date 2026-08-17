@@ -1,6 +1,7 @@
 # Bare `duplicate-check` exited successfully without checking anything
 
-- **Status:** FIXED in source; current Stage 4 qualification remains pending.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Reproducer:** `simple duplicate-check` printed usage and exited `0` before reaching argument validation, so automation could report a vacuous clean result.
 - **Cause:** `run_duplicate_check` returns usage/0 for truly bare argv, while `target_path_from_args` silently defaults to `src/`. Checking argv length alone is insufficient: flags-only input such as `--format json` also has no positional path and would reach the implicit full-repository scan.
 - **Root fix:** make positional target extraction return empty/optional when absent, process explicit help first, then require the target with usage/2 for both bare and flags-only invocations. Update every active help surface from `[path]` to `<path>`. Explicit `--help` and `-h` must remain `0`.

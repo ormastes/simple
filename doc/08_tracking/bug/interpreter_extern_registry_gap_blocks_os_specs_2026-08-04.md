@@ -1,6 +1,7 @@
 # BUG: baremetal externs have no interpreter binding — `unsafe_addr_of` and `rt_x86_syscall` fail closed in hosted unit specs
 
-**Status:** OPEN
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 **Severity:** medium — 3 confirmed failing examples in
 `test/01_unit/os/posix/`. The failure is a hard error, so the affected

@@ -2,7 +2,8 @@
 
 - **Date:** 2026-08-09
 - **Lane:** F9 (foundation red-team), Counterpart Conformance Wave 1
-- **Status:** FIXED 2026-08-09 by lane F5/F6 — see "Resolution" at the end
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** High. This is the gate that separates a differential test from a tautology.
 
 ## What the design requires

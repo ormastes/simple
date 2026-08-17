@@ -1,7 +1,8 @@
 # Stage-4 seed-compiled full CLI: run/test SIGSEGV at startup (Windows branch on Linux, tagged-value deref)
 
 - **ID:** bootstrap_stage4_seed_compiled_full_cli_run_test_crash_2026-07-20
-- **Status:** PARTIALLY FIXED — SIGSEGV closed, /proc/meminfo closed; 2 symptoms still OPEN (see "2026-07-20 follow-up" below)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** critical (single defect now gating the entire self-hosted redeploy)
 - **Lane:** seed-compiled stage-4 full CLI (cranelift, core-c-bootstrap runtime lane)
 

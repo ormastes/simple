@@ -1,5 +1,8 @@
 # `ide --feature-check --tui`: a call result that should be truthy returns 0
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 **Date:** 2026-07-20
 **Component:** `src/app/ide/main.spl` (or its feature-check TUI rendering
 path) — not isolated to an exact line in this pass

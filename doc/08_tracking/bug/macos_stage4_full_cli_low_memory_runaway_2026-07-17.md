@@ -1,5 +1,8 @@
 # macOS Stage 4 full-CLI compile exceeds bounded resource envelope
 
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 ## Status
 
 Open. Apple Silicon Stage 2/3 self-host succeeds. The whole-tree Stage 4

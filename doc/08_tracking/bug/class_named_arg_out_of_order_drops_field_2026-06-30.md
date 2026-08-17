@@ -3,7 +3,8 @@
 **Date:** 2026-06-30
 **Severity:** medium
 **Component:** compiler/interpreter (class literal construction with named args)
-**Status:** source fix implemented; executable verification pending
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Summary
 

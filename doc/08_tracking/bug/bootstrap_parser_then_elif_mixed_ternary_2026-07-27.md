@@ -1,5 +1,8 @@
 # Bootstrap Parser Rejects Mixed Then/Elif Ternary
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 ## Status
 
 FIXED AND CLEARED IN FULL BOOTSTRAP. The focused nested-AST regression passes,

@@ -1,6 +1,7 @@
 # decode_chunked treats a malformed chunk size as end-of-body (silent truncation)
 
-- **Status:** FIXED 2026-08-07
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Found:** 2026-08-06
 - **Area:** `src/lib/nogc_sync_mut/http/headers.spl` (+ gc_async_mut / nogc_async_mut copies)
 - **Severity:** high — reachable on an HTTP server request path with attacker-controlled input

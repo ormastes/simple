@@ -1,7 +1,8 @@
 # JIT `Unknown type: DrawIrRenderTarget` — resolved by trait pre-registration
 
 **Date:** 2026-07-30
-**Status:** `DrawIrRenderTarget` RESOLVED (confirmed independently this pass,
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 fresh pristine worktree + rebuilt seed including `7935e971737`) — HIR Pass 0
 now pre-registers trait names before declaration lowering. The next blocker,
 `CastElse` (the second gap from the original assignment), is now also

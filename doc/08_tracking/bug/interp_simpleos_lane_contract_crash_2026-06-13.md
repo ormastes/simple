@@ -3,7 +3,8 @@
 - **ID:** interp_simpleos_lane_contract_crash
 - **Date:** 2026-06-13
 - **Severity:** P1 (blocks interpreter-mode testing of all catalog-lane QEMU scenarios)
-- **Status:** workarounds landed 2026-06-13 (interpreter root cause open)
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Two distinct Option-poison sites (both worked around, root cause shared & open)
 1. **Platform catalog** (`simpleos_platform_qemu_smoke_lane` etc.) — `Option<SimpleOsPlatformBuildTarget>` unwrap mis-binds. Fixed by index-based accessors (`_simpleos_platform_target_index`, `*_or_smoke`, `*_direct`) so no Option crosses a boundary.

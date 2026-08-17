@@ -1,7 +1,8 @@
 # Bootstrap is blocked repo-wide: stage 1 dies on unknown extern rt_transient_array_scope_begin
 
 - **Filed:** 2026-07-27
-- **Status:** open, blocks every session
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** blocks ALL compiler-side work — no fix to `src/compiler/**` can be
   verified until this is cleared, because the only way to exercise such a fix is
   to rebuild the compiler.

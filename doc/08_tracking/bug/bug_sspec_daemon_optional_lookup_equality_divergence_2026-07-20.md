@@ -1,6 +1,7 @@
 # Bug: `simple test` daemon evaluator diverges from `simple run` on `text?`-returning lookup + equality pattern
 
-**Status:** OPEN — workaround applied in new code, latent defect left in place in existing code per scope constraint (see below)
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Date:** 2026-07-20
 **Reporter:** DRAWIR-PATCH lane (draw_ir_patch.spl / draw_ir_diff.spl id-map slice)
@@ -253,3 +254,35 @@ item 1's fix.
 3. Grep for the same `for ... return value / nil` + `== nil` comparison shape
    elsewhere in `src/lib/**` — this is a common idiom and other call sites
    may have the same masked defect at scale.
+
+## Re-verification 2026-08-17 (UI slice) — DOC PARTLY STALE; ROOT CAUSE STILL OPEN
+
+Classified by CONTENT.
+
+**Stale half.** This doc states the workaround was applied only to new code and
+that `draw_ir_diff.spl`'s `_draw_ir_style_changed` "carries the identical latent
+defect ... not touched here". That is no longer true.
+`src/lib/common/ui/draw_ir_diff.spl:67-81` now implements
+`_draw_ir_style_changed` with an explicit guard comment at line 68:
+
+    # NOTE: deliberately NOT a `T?`-returning-lookup + `== nil` comparison —
+    # that shape diverges between `simple test`'s daemon evaluator and
+    # `simple run` at moderate array scale (~20-30 elements).
+
+and a nested key/value scan that never returns a nilable from a per-property
+lookup. The sibling `draw_ir_patch.spl:142` guard is likewise still in place.
+So **both** known UI call sites are now defended; there is no remaining latent
+occurrence of the pattern in `src/lib/common/ui/`.
+
+**Live half.** The workarounds are avoidance, not repair. The underlying
+defect — `simple test`'s daemon evaluator disagreeing with `simple run` on a
+`text?` lookup compared via `== nil` — is a compiler/test-runner divergence and
+was NOT fixed. It remains a silent-wrong-result hazard for any code that uses
+the optional-lookup shape, and the two NOTE comments are the only thing keeping
+the UI layer off it.
+
+Not proven: the divergence itself was not re-reproduced (it needs a
+daemon-vs-run differential at ~20-30 element scale; not run under the
+bootstrap-priority constraint). The root cause is outside this slice's files.
+
+Status: OPEN for the evaluator divergence; the UI-layer occurrences are closed.

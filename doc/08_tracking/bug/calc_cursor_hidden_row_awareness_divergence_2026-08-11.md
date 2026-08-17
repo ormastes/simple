@@ -1,7 +1,8 @@
 # Calc cursor movement: only the GUI session honours hidden rows
 
 **Date:** 2026-08-11
-**Status:** OPEN — filed, deliberately not merged
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Area:** app/office (Calc)
 **Severity:** Medium — a user-visible correctness gap on two of three surfaces
 
@@ -84,3 +85,20 @@ Decide the intended semantics once, then converge deliberately:
   difference was a parameterisable scroll origin.
 - `doc/05_design/office_cli_tui_ui_access.md`
 - `doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md`
+
+## Content re-verification 2026-08-17 (app-lane worker) — STILL OPEN
+
+Classified by CONTENT of current source, not by commit ancestry:
+
+```
+$ /usr/bin/grep -nc "hidden" src/app/office/interactive.spl src/app/office/gui.spl
+src/app/office/interactive.spl:0
+src/app/office/gui.spl:32
+```
+
+`src/app/office/interactive.spl` contains the token `hidden` **zero** times, so
+`_tui_move` cannot be hidden-row aware; `src/app/office/gui.spl` carries the
+`is_row_hidden` logic at 32 sites (`gui.spl:214` `if not
+sheet.is_row_hidden(r.to_i64()):`, plus the visible-row window contract at
+`gui.spl:1268-1282`). The asymmetry the record describes is intact. No fix
+applied by this worker; no spec written (would need a TUI-session harness).

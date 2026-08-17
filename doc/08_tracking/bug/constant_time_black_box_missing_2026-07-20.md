@@ -3,7 +3,8 @@
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/crypto/constant_time.spl`
 - **Severity:** medium (blocks 4 of 5 examples in the file).
-- **Status:** OPEN.
+- Status: FIXED
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
 

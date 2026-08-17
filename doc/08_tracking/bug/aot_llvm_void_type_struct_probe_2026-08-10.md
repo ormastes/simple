@@ -1,5 +1,8 @@
 # BUG: AOT/LLVM backend emits invalid IR (`void type only allowed for function results`) for struct-bearing programs
 
+Status: CLOSED (not reproducible)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - Date: 2026-08-10
 - Severity: MEDIUM (blocks AOT measurement/execution of struct value-semantics
   probes; scope beyond probes unquantified)

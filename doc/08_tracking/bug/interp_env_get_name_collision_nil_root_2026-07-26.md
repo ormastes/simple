@@ -7,7 +7,8 @@
 - **Severity:** high — an explicitly imported function silently binds to a
   different definition with a different contract; any same-named stdlib pair is
   affected.
-- **Status:** OPEN (root defect). The one crashing consumer found so far is
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
   guarded (see below), the resolver itself is not fixed.
 
 ## What happens
@@ -86,3 +87,15 @@ reject duplicate registrations with differing signatures at load time.
 
 - `doc/08_tracking/bug/web_draw_ir_path_trim_on_nil_any_element_2026-07-26.md` — the consumer crash, now fixed
 - `.claude/memory` `feedback_interp_struct_name_collision_global_registry` — same registry defect for structs
+
+## STILL_PRESENT — re-verified 2026-08-17 (P2 triage, compiler lane)
+
+`module_loader_core.spl:291-298` still registers by BARE NAME into a flat table
+(`func_table_register(name, did)`); `irt_track_func_owned` exists only to stop one
+module unload deleting another module entry, not to bind an import site.
+`load_module_selective` (`:465-470`) likewise checks availability by bare name.
+13 distinct `fn env_get` definitions still exist under `src/lib/`, so an explicit
+import can still resolve to a same-named fn in another module. Shares a root
+cause with `interp_class_name_collision_breaks_test_db_persistence_2026-08-10.md`
+and `duplicate_type_name_collision_audit_2026-07-17.md`: flat, bare-name,
+module-blind interpreter registries. NOT FIXED by this lane (P1-owned path).

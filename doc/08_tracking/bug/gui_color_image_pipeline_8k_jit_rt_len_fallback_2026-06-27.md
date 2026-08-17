@@ -1,5 +1,8 @@
 # GUI Color/Image 8K JIT rt_len Fallback
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 Date: 2026-06-27
 
 ## Summary

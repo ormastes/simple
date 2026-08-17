@@ -1,6 +1,7 @@
 # Compatibility aliases retained unreachable targets
 
-- **Status:** ELF fixed and regression passed; Mach-O Stage 4 projection and COFF/native Windows remain pending
+- Status: OPEN (P3)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Observed:** referencing one generated compatibility alias retained the whole `_stubs.o` text section, pulling unrelated aliases and their optional unresolved targets into strict links.
 - **Cause:** generated assembly placed every trampoline in the same executable section, defeating linker section garbage collection.
 - **Fix:** emit one executable section per generated symbol on ELF/COFF targets and enable Mach-O symbol subsections; native Windows keeps its existing C `-ffunction-sections` path. Only the ELF path is currently qualified: Mach-O request projection does not yet dead-strip these atoms, and COFF has directive-only evidence.

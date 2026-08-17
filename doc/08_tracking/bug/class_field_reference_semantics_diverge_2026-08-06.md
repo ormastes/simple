@@ -1,7 +1,8 @@
 # Class reference semantics diverge: interpreter value-copies class fields; JIT crashes on optional class field
 
 - **Filed:** 2026-08-06
-- **Status:** Investigated, not fixed (blocked — see "Investigation update" below). Root cause fully
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to the out-of-scope Rust seed; every reachable pure-Simple candidate interpreter was
   checked and does not share this defect, but none is buildable/runnable in this tree today, so no
   bounded, verifiable fix location exists yet.

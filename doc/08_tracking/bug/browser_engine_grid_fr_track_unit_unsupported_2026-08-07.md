@@ -1,5 +1,8 @@
 # CSS Grid `fr` track units are unsupported — silently falls back to plain block flow
 
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
 - **Filed:** 2026-08-07
 - **Severity:** P2 — no crash, no wrong-looking output within a naive
   eyeball check, but the CSS Grid `fr`-unit code path never activates.

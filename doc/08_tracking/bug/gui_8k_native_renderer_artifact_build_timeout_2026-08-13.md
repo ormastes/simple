@@ -1,7 +1,8 @@
 # GUI 8K dynamic-render evidence is blocked by native renderer artifact build time
 
 - **Id:** gui_8k_native_renderer_artifact_build_timeout_2026-08-13
-- **Status:** OPEN
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Severity:** P1 — blocks a valid pure-Simple 8K/80 dynamic-render claim on an
   available GPU host
 - **Found:** 2026-08-13

@@ -1,6 +1,7 @@
 # Architecture / structure rule audit of the 2026-08-10→11 landing window
 
-**Status:** OPEN — 6 findings (2 doc corrections applied here; 4 need a decision)
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Window:** `45e486f0be6..276c61ed464` on `origin/main` — **272 commits, 761
 files changed**. `45e486f0be6` is the exact tip audited by the predecessor doc
 `architecture_rule_audit_2026-08-10.md`, so this audit is the strict continuation
@@ -223,3 +224,11 @@ none exists.
   only 15 files across all of `src/app/**` + `src/os/services/**`, and still
   **zero** across `src/lib/blink/**`. Unchanged this window; pre-existing, per
   that doc's Finding 3.
+
+## Re-verification 2026-08-17 (fleet lane C)
+
+STILL-OPEN as a decision item, not a code defect. `src/compiler/35.semantics/gc_boundary_check.spl`
+exists (378 lines). `reproducible_by` is NONE and the finding is a counted-violations
+delta (389 vs 387), i.e. a policy backlog needing a human decision on whether to gate.
+No spec can settle it; not actionable by an automated bug-fixing lane. Recommend
+re-routing to an architecture decision (ADR) rather than the bug queue.

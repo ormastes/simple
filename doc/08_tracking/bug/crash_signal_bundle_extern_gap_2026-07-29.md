@@ -1,6 +1,7 @@
 ---
 id: crash_signal_bundle_extern_gap_2026-07-29
-status: OPEN
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 severity: medium
 discovered: 2026-07-29
 discovered_by: lane DS7 (mission-critical robustness plan, Batch D, crash-native)
@@ -115,3 +116,10 @@ Filed, not stubbed. Do not add a fake register/context field to
 `CrashBundleV1` to make it "look" like real signal capture — the honest
 minimal bundle (data model + panic/log-ring capture + SDN serialization) is
 what's reachable without the runtime work above.
+
+## Re-verification 2026-08-17 (stdlib slice G, content-classified)
+
+**STILL-OPEN, confirmed by CONTENT.** `grep -rn rt_install_crash_handler src/lib/`
+returns exactly one line, `crash_bundle.spl:6`, and it is inside a COMMENT. No
+`extern fn rt_install_crash_handler` is declared anywhere under `src/lib/`, so no
+Simple-reachable hook exists. Unchanged.

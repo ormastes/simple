@@ -1,6 +1,7 @@
 # LZ4 auto-frame round-trip rejects its own empty-payload output as corrupt
 
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/lib/common/compress/lz4.spl` — LZ4 frame encoder/decoder facade
 - **Severity:** Medium — breaks the empty-input round-trip for the public

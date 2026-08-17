@@ -1,7 +1,8 @@
 # std.io_runtime.env_get returns corrupted text under `bin/simple run`
 
 Date: 2026-06-19
-Status: open (workaround in place)
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 Severity: P2
 Related: memory note "f64 Unreliable All Backends", "Text-only API byte cliffs"
 

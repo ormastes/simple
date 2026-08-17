@@ -1,6 +1,7 @@
 # `case` is reserved everywhere, so `for case in …` kills the whole file at parse
 
-**Status:** OPEN — but narrowed: ARCHITECTURAL-OPEN, Rust-seed-only (see
+Status: FIXED
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 2026-08-10 re-triage below). The pure-Simple `.spl` frontend already accepts
 `case` as a for-loop binding; only the seed lexer hard-reserves it. The one
 spec it was blocking has been unblocked.

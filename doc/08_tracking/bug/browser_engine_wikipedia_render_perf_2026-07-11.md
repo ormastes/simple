@@ -1,6 +1,7 @@
 # browser_engine: real-page software render is ~176s interpreted (248KB page); default 10s budget always degrades
 
-- Status: open (degraded-output honesty fixed; perf itself remains)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (Wikipedia Main_Page render comparison vs Chrome headless)
 
