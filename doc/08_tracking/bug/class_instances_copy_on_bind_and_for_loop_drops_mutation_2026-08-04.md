@@ -1,6 +1,28 @@
 # BUG: `class` instances copy on binding, and `for` loop mutation is discarded entirely
 
-**Status:** OPEN
+**Status:** RESOLVED — ALREADY-FIXED, re-verified 2026-08-17.
+
+## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+
+Both halves of the filing re-probed verbatim on the deployed seed
+(`bin/simple`, Rust seed dated 2026-08-16):
+
+```
+for c in xs: c.bump()   ->  xs[0].n == 1   (was: mutation dropped)
+val a = c1; a.bump()    ->  c1.n  == 1     (was: copy-on-bind)
+
+Results: 2 total, 2 passed, 0 failed
+```
+
+Class instances behave as reference types on this lane; neither the
+copy-on-bind nor the for-loop-drops-mutation symptom occurs.
+
+NOT PROVED: which commit fixed it (not bisected); the pure-Simple self-hosted
+lane and the native/JIT lane were not probed.
+
+--- original filing below, kept for history ---
+
+**Status (original):** OPEN
 **Found:** 2026-08-04
 **Severity:** high — `doc/07_guide/language/syntax.md:460` documents `class` as a
 **reference type**; it behaves as a value type. Mutation through a `for` loop

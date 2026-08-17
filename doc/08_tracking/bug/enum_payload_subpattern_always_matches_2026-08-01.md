@@ -1,7 +1,31 @@
 # Non-binding sub-patterns inside an enum payload always match and never bind
 
 **Date:** 2026-08-01
-**Status:** PARTIALLY FIXED 2026-08-01 — the pure-Simple MIR lowering now
+**Status:** RESOLVED — re-verified 2026-08-17; the "Remaining RED" is gone.
+
+## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+
+All three of this file's reproducer functions re-run verbatim on the deployed
+seed (`bin/simple`, Rust seed dated 2026-08-16):
+
+```
+nested payload bind   -> 41   (doc recorded -1)
+arm selection         ->  1   (doc recorded  0)
+nested literal match  ->  7   (doc recorded -1)
+
+Results: 3 total, 3 passed, 0 failed
+```
+
+The sub-pattern no longer "always matches"; payload sub-patterns discriminate
+and bind correctly.
+
+NOT PROVED: which commit closed it (not bisected). The doc's "NOT PROVED —
+blocked by PRE-EXISTING pure-Simple-lane defects" section was not re-tested;
+this pass exercised the seed lane only.
+
+--- original filing below, kept for history ---
+
+**Status (original):** PARTIALLY FIXED 2026-08-01 — the pure-Simple MIR lowering now
 implements nested payload tests + binds (was: silently skipped / loud-fail),
 and a silent no-op in the compiled stage2's in-process native lane is fixed.
 See "Fix" and the CRITICAL "Engine attribution correction" sections at the

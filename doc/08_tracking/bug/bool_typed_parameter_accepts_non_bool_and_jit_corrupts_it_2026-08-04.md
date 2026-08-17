@@ -1,6 +1,35 @@
 # BUG: a `bool`-declared parameter accepts a non-bool silently — and the JIT corrupts it
 
-**Status:** OPEN
+**Status:** PARTIAL — corruption half GONE, rejection half STILL OPEN
+(re-verified 2026-08-17). Do not close this file.
+
+## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
+
+On the deployed seed (`bin/simple`, Rust seed dated 2026-08-16):
+
+```
+take_bool(42)  ->  got = true
+
+Results: 1 total, 1 passed, 0 failed
+```
+
+The VALUE-CORRUPTION symptom is gone: `42` no longer arrives as `42` in a
+`bool` parameter, and is not re-tagged to `<special:44>`. It is now coerced to
+`true`.
+
+WHAT IS STILL OPEN, and why coercion is not the fix this file asked for: the
+filing's expected outcome was a COMPILE ERROR rejecting a non-bool argument to
+a `bool`-typed parameter. Silent coercion removes the visible corruption while
+leaving the type hole open -- an int still passes where only a bool is legal,
+it just does so quietly now. That is a strictly harder defect to notice than
+the one originally filed, so the file stays OPEN on the rejection half.
+
+NOT PROVED: the `.?` and JIT-lane halves of the filing were not probed
+separately; only the interpreter lane was exercised.
+
+--- original filing below, kept for history ---
+
+**Status (original):** OPEN
 **Found:** 2026-08-04
 **Related — SAME root cause, found independently by parallel lanes the same day.
 Fix once, close all of these. This file is the UNIT-tier record; its unique

@@ -1,6 +1,28 @@
 # Duplicate same-named struct/class decls shadow field types; test-runner main dropped to interpreter
 
-**Status:** PARTIALLY FIXED (three collisions deduped and verified; one remains, blocked)
+**Status:** LIKELY RESOLVED — re-probed 2026-08-17 on WEAK evidence; read the
+caveat before closing it.
+
+## Re-probe 2026-08-17 (partial-fix sweep, lane 1)
+
+This file's own oracle for the last (`Span.end`) collision is a `jit-fallback`
+line on `bin/simple test` startup. Across six independent `bin/simple test`
+invocations in this session, `grep -c jit-fallback` was **0** in every log, so
+the collision is no longer dropping the test-runner main to the interpreter.
+
+EXPLICITLY WEAKER THAN THE FILING: the doc's evidence was a full-suite run;
+this is a startup-path observation over six single-spec runs. It is the same
+startup path that emitted the original line, but it is not the same experiment.
+Treat this as "symptom absent", not "collision proven deduped" — whoever closes
+this should confirm the duplicate declaration itself is gone from the tree.
+
+NOT PROVED: that the duplicate `Span` declaration was actually removed; the
+"blocked" reason recorded under "STILL OPEN — the last collision" was not
+re-examined.
+
+--- original filing below, kept for history ---
+
+**Status (original):** PARTIALLY FIXED (three collisions deduped and verified; one remains, blocked)
 **Date:** 2026-08-10
 **Impact:** suite-wide. `bin/simple test` startup emits
 `[jit-fallback] HIR lowering error: Cannot infer field type: struct '<X>' field '<f>' [in src/app/test_runner_new/main.spl]: whole module dropped to the interpreter (expect ~100-1000x slowdown)`
