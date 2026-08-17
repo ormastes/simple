@@ -503,3 +503,6 @@ prevent.
 the landing worktree would let the guard run and the push succeed, but the
 verdict would describe a tree nobody is pushing. That is `--no-verify` wearing a
 disguise, and the standing instruction forbids it. Blocked and reported instead.
+clobber pattern this repo keeps suffering. The owning lane must repair the
+assignment-at-impl-level inside that addition. The main tree's parsing copy is
+the reference for what a working version looks like.
