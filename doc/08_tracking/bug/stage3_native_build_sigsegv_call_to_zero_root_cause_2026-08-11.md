@@ -120,3 +120,97 @@ Rebuild stage2/stage3 with debug symbols retained (or add
 re-run this exact repro under gdb with symbols, to identify which relocation
 record was never patched. Prime suspects: the self-hosted backend's own
 symbol-resolution/link-fixup pass under `src/compiler/70.backend/`.
+
+---
+
+## FAMILY RESOLUTION 2026-08-17 (W4 bug-fixing wave) — the emitting code path IS known, and the source fix already landed
+
+The "what's NOT yet established" question above (which routine emits the
+`call 0`) is answered by a sibling row filed two days earlier:
+`doc/08_tracking/bug/stage2_native_build_link_undefined_method_symbols_2026-08-09.md`.
+
+That doc's "Corrected root cause" section states the mechanism exactly: the Rust
+seed's LLVM backend **mints an unmangled external for a call target it could not
+resolve** (bare method leaves such as `starts_with`, `split`, `replace`,
+`substring`, `rfind`, `char_code_at`, plus `TaskState.is_terminal`). It then
+records the two possible outcomes:
+
+| tree | what happens to the unresolvable call |
+|---|---|
+| with `36673b6b6a3` | undefined symbol → link fails loudly, fail-closed |
+| without `36673b6b6a3` | binds to absolute `0` → binary builds, then SIGSEGVs with `rip=0` |
+
+and it names the count in the pre-fix binary: **169 direct `call 0` sites**.
+
+### Measurement on this host, 2026-08-17
+
+Reproduced this doc's repro verbatim against the in-repo staged binary
+(`/mnt/data/worktrees/simple-main`, both staged binaries 3,464,072 bytes):
+
+```
+$ printf 'fn main() -> i64:\n    0\n' > p.spl
+$ bootstrap/stage3/x86_64-unknown-linux-gnu/simple native-build --entry p.spl --source . -o probe_bin
+Segmentation fault (core dumped)   # rc=139
+```
+
+Then the fail-closed detection channel that exists for exactly this class:
+
+```
+$ sh scripts/check/check-no-call-zero.shs \
+    bootstrap/stage3/x86_64-unknown-linux-gnu/simple bootstrap/stage2/simple
+call-to-zero: bootstrap/stage3/... has 169 site(s)
+call-to-zero: bootstrap/stage2/simple has 169 site(s)
+FAIL — 338 call-to-zero site(s) across 2 binary/binaries
+```
+
+**169 per binary — the exact figure the 08-09 doc reports for the pre-fix
+tree.** The first site is at `404659` with bytes `e8 a2 b9 bf ff`, byte-for-byte
+identical to the crash-site disassembly quoted earlier in this document. These
+two staged binaries are therefore artifacts of a tree that predates
+`36673b6b6a3`; they are not evidence about current source.
+
+### Current source is fail-closed (verified by inspection)
+
+- `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:3207-3225` — an
+  unresolvable `GlobalLoad`/`GlobalStore` target now returns
+  `CompileError::semantic("llvm global load referenced undeclared symbol ...")`
+  rather than minting a global. No fabrication path remains there.
+- `src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs` —
+  `freestanding_unresolved_mode()` defaults to `DeferToLinker`/`StrictPrecheck`
+  and **never** enters `EmitStubs` under `SIMPLE_NO_STUB_FALLBACK=1`; the one
+  remaining `EmitStubs` path is gated by `check_fabricated_stub_ratchet` against
+  a per-entry baseline, and `stale_module_move_report` hard-errors *before* the
+  mode match on any undefined `lib__*`/`os__*` symbol whose bare name is defined
+  under a different module prefix.
+- `src/compiler/70.backend/backend/llvm_native_link.spl:1814,2647,2666` —
+  `simpleos_undefined_simple_module_symbols` + channel 3 refuse the freestanding
+  link on any newly-fabricated pure-Simple symbol.
+
+### Status change
+
+**RETIRED as a source defect; re-scoped to an artifact-staleness item.** No
+source fix is outstanding for this row. What remains is a *rebuild*: the staged
+`bootstrap/stage2/simple` and `bootstrap/stage3/.../simple` in this checkout must
+be rebuilt from current source, after which
+`sh scripts/check/check-no-call-zero.shs <new binaries>` must report `PASS`. That
+rebuild was explicitly out of scope for this wave (redeploying `bin/simple` /
+`bin/release/**` clobbers ~16 concurrent lanes), so the row is left open ONLY on
+that gate, with the acceptance criterion now mechanical.
+
+### Family
+
+Rows collapsed into one cause — "an unresolvable callee is materialised as a
+weak/undefined symbol that links to address 0, so the call returns zero or
+faults instead of failing the build":
+
+- `stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11` (this row)
+- `stage2_native_build_link_undefined_method_symbols_2026-08-09` (the fix,
+  `36673b6b6a3`; measured 34 → 0 undefined refs, Stage 2 links)
+- `bytespan_starts_with_dropped_from_kernel_closure_weak_nil_stub_2026-07-28`
+  (same shape via the *stub fabricator* rather than the linker; D1 cache key
+  ungated at `native_project/mod.rs:910`, D2 guards as listed above)
+- `freestanding_entry_module_constants_zero_stubs_2026-07-11` (entry-module
+  `val`s becoming weak `xor eax,eax; ret` bodies — the same fabricator)
+- `native_build_llvm_explicit_return_lost_every_call_returns_zero` — the
+  "every call returns zero" symptom is the *observable* of this family whenever
+  the fabricated body is reached rather than the null address.
