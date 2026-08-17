@@ -1,7 +1,56 @@
 # Bug: `Dict.get()` on a MISS returns a zero VALUE, not `nil` (native codegen) — silent wrong branch
 
 - **Date:** 2026-07-28
-- **Status:** FIXED for `i64` and `bool` value types (2026-08-01); **still open for `text`**
+- **Status:** **FIXED for `i64`, `text`, `bool` and struct value types (2026-08-17).**
+  `f64` remains out of scope (no room for a sentinel in a float word), as does
+  `d[k]`-on-a-miss (an index read is not an Option and has nowhere to put a
+  miss signal).
+
+## 2026-08-17 — the "residual text gap" was not a text gap: the fix was UN-WIRED
+
+The 2026-08-01 entry below is accurate about what it built and wrong about what
+shipped. Re-measured today on a native `--entry-closure` build, **every** value
+type reproduced the ORIGINAL pre-fix behaviour, including the two this doc
+recorded as FIXED:
+
+| probe | measured 2026-08-17 (before) | after |
+|---|---|---|
+| `Dict<text,i64>` miss `== nil` | `NOTNIL` | **`NIL`** |
+| `Dict<text,i64>` miss `?? -77` | `0` | **`-77`** |
+| `Dict<text,text>` miss `== nil` | `NOTNIL` | **`NIL`** |
+
+Root cause, from the emitted LLVM IR: **no guard blocks were emitted at all** —
+no `dict_get_miss_nil` / `dict_get_hit_value` / `dict_get_merge` appeared
+anywhere, and `rt_interp_cstr(i64 3)` was applied to the sentinel
+unconditionally. `dict_get_preserve_flat_nil` was never reached because
+`lower_dict_runtime_read`'s `as_option` parameter was **never true at any call
+site in the tree**: `.get(k)`'s arm
+(`_MirLoweringExpr/method_calls_literals.spl`) called `lower_dict_runtime_get`,
+a one-line wrapper that hardcodes `as_option: false`. The entire guard — and
+the `Option<bool>` raw-word arm with it — was dead code.
+
+So this was never a str-specific decode problem. The earlier note that "the str
+guard is emitted but does not change the observed result" was a mis-diagnosis:
+the guard was not emitted. The 2026-08-01 work was correct and simply
+disconnected, most likely when the `.get` arm was re-routed through the shared
+helper to fix the struct-value corruption
+(`native_dict_get_struct_value_corrupt_option_2026-07-27`) — that change made
+both readers identical, which is right for resolve/decode/register and wrong
+for the one axis on which they must differ.
+
+**Fix:** call `lower_dict_runtime_read(..., true)` directly from the `.get(k)`
+arm. `d[k]` still goes through `lower_dict_runtime_get` unchanged.
+
+**Why nothing caught the regression:** `dict_get_miss_returns_nil_spec.spl`
+drives only the `interpret` and `jit` engines out of process, and its own header
+states its in-process examples are green before and after the MIR fix. The
+defect lives in lowering that only the native lane compiles, so no spec
+exercised the lane that could fail. Closed by
+`test/01_unit/compiler/codegen/native_dict_get_miss_sentinel_class_spec.spl`,
+which builds natively and asserts both halves of the contract — a miss reads
+nil AND a stored `0` / empty string / `false` does not.
+
+- **Status (historical, superseded):** FIXED for `i64` and `bool` value types (2026-08-01); **still open for `text`**
 - **Area:** native codegen — MIR dict read lowering (`lower_dict_runtime_get` applies
   `decode_runtime_value` to `rt_dict_get`'s nil sentinel with no nil guard)
 - **Severity:** **critical** — silent-wrong-answer. Nothing crashes; a missing key is
