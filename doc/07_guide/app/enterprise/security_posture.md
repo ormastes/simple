@@ -142,19 +142,8 @@ and 9 of the matrix above. What remains:
    applies to rather than fixing it: gating the booking and restaurant reads
    made the app CONSISTENT, not finer-grained. Concretely, no role can be
    granted "read the open bill" without also being granted "open a table".
-3. **CSRF — CLOSED for the cookie flow by W14-C.** The app is bearer-token
-   only, which genuinely sidesteps CSRF, but the dispatcher no longer *assumes*
-   that: `main.store_app_handle` now runs a double-submit CSRF check
-   (`enterprise_store_app/csrf.spl`) BEFORE any route/command. A state-changing
-   request (`POST`/`PUT`/`PATCH`/`DELETE`) that carries an ambient `Cookie`
-   credential — the only shape a browser can be tricked into forging
-   cross-site — MUST echo the session's per-session token
-   (`csrf_token(session)`, bound to the session secret, never equal to the
-   bearer) in `X-CSRF-Token`, or it is rejected 403. Bearer-only calls (no
-   `Cookie` header) stay exempt, so no API client regresses. Remaining: if a
-   real cookie-session issuance path is added, the token must be minted and
-   set at login rather than derived on demand. Fence:
-   `test/03_system/app/enterprise/store_web_request_gating_spec.spl`.
+3. **No CSRF token and no cookie flow.** The app is bearer-token only, which
+   sidesteps CSRF; introducing cookies would require this to be revisited.
 4. **The throttle is bounded but still a linear scan of the live window.**
    `throttle_count` walks the whole retained set rather than an index. The
    set is now bounded by the live window instead of by all traffic ever, so
@@ -173,62 +162,12 @@ and 9 of the matrix above. What remains:
    and fenced it, so the remainder is purely the mojibake/normalisation gap:
    no route compares business identifiers after Unicode normalisation today,
    but a future field that does would need recombination added deliberately.
-7. **Route-level write gating — ADDED as defense in depth by W14-C.** Writes
-   are still gated inside the guarded commands (rung order in
-   `guarded_command_contract.md`), which remains where the authority lives —
-   that check is UNCHANGED and still fires. On top of it, the dispatcher now
-   pre-checks the mutating routes it knows (`write_gate_action` in `main.spl`:
-   `POST /store/order` -> `sale.order.place`, `POST /store/pay` ->
-   `sale.order.pay`, `POST /fin/period/close` -> `finance.period.close`)
-   against the SAME `role_allows` policy the command re-enforces, and rejects
-   an unauthorized role 403 BEFORE the handler runs (denial detail
-   `write-gate:<action>` makes the dispatch-level rejection observable). The
-   two gates use one identical policy value, so the dispatcher gate can only
-   reject what the command would also reject — it cannot widen access or drift.
-   It does NOT close the deeper gap (a NEW route with no guarded command behind
-   it and not listed in `write_gate_action` still inherits no authorization);
-   the durable fix is the registry-driven RBAC noted in residual 2. Fence:
-   `test/03_system/app/enterprise/store_web_request_gating_spec.spl`.
-
-## W14-A — output-escaping + security-header completeness audit (2026-08-17)
-
-A reproduce-first sweep of EVERY interpolation of a request- or store-derived
-value into HTML across `booking_routes`, `restaurant_routes`, `dashboard`,
-`auth_routes`, `hcm_routes`, `procurement_routes`, `finance_routes`, and
-`web_common`. Conclusion: **already hardened — no unescaped attacker-influenceable
-interpolation, and no response path omits the security headers.** Full
-path:function -> escaped? audit list:
-`doc/01_research/app/enterprise/w14a_output_escaping_audit_2026-08-17.md`.
-
-Findings, all confirming safety (like W13-C):
-
-- **Every dynamic value passes through `esc()`.** All page renders interpolate
-  only store-/library-derived values (`sqlite_row_get`, `booking_status`, ledger
-  lines, employee/PO fields) or URL params, each wrapped in `esc()`. The
-  literal `esc("{wage}")`-style tokens are static placeholder strings, not data.
-- **`esc()` is attribute-context safe, not merely element-safe.** It escapes
-  `"`->`&quot;` and `'`->`&#39;` in addition to `&`/`<`/`>`. Every attribute in
-  the app is double-quoted (`data-resource`, `data-line`, `data-po`,
-  `data-account`, `data-employee`, `data-ref`), so a `">`-prefixed breakout
-  cannot escape the attribute. This was untested before W14-A (the prior fence
-  only exercised element context on `/store/catalog`) and is now fenced.
-- **Every response path is wrapped by `secured()`/`with_default_security_headers`
-  — including denials.** `deny()`, `command_page`, the trailing `404`, and the
-  auth `too_many()`/`unauthorized()`/`413`/`501`/`400` returns all wrap; a grep
-  for any unwrapped `HttpResponse.{html,error,...}` across the seven route files
-  returns nothing.
-- **`auth_routes` `"token=" + r.detail` (line 104) is NOT escaped but is safe by
-  source:** `r.detail` is the freshly issued session token derived from the
-  server-supplied `entropy` (see attack #3b), never an attacker-influenceable
-  field.
-
-Fence: `test/03_system/app/enterprise/enterprise_output_escaping_audit_spec.spl`
-(declared>=5 executed=5 passed=5). Red-first proof: temporarily disabling the
-`"`->`&quot;` replacement in `esc()` flips 3 of the 5 to red (the attribute-
-context assertions + the booking-resource breakout), restored to green — so the
-fence bites the exact attribute-context gap it claims to cover. Evidence:
-interpreter mode, Rust seed `bin/release/x86_64-unknown-linux-gnu/simple`
-(59536728 bytes, 2026-08-16), `SIMPLE_TIMEOUT_SECONDS=900`, one spec per run.
+7. **Nothing role-gates a WRITE at the route.** Writes are gated inside the
+   guarded commands (rung order in `guarded_command_contract.md`), which is
+   where the authority actually lives; the route-level checks added by W12-B
+   cover reads only. This is by design — two gates for one decision is how
+   they drift — but it means a route added without a guarded command behind
+   it inherits no authorization at all.
 
 ## Related
 

@@ -1,0 +1,36 @@
+# Cross-module global symbol references through the llvm-lib backend.
+#
+# Bug (2026-08-17, stage-2 bootstrap blocker): native-build of
+# src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl failed
+# with `llvm codegen: semantic: llvm global load referenced undeclared symbol
+# 'LintDiag'`. Root cause was SOURCE-side: the file referenced two class names
+# that exist nowhere in the tree — `LintDiag` and `LintRunResult` — instead of
+# the real classes `Lint` and `LintResult` defined in
+# src/compiler/90.tools/lint/_LintMain/config_and_model.spl. The interpreter's
+# late binding let this pass; the llvm-lib backend's global-load declaration
+# check caught it at codegen.
+
+describe "llvm cross-module global symbol references":
+    it "lint traceability module references only defined lint model classes (repro)":
+        extern fn rt_file_read_text(path: text) -> text
+        val source = rt_file_read_text("src/compiler/90.tools/lint/_LintMain/traceability_and_assertions.spl") ?? ""
+        expect(source.len()).to_be_greater_than(0)
+        # The undefined names must never come back.
+        expect(source).to_not_contain("LintDiag")
+        expect(source).to_not_contain("LintRunResult")
+        # The corrected references are the real model classes.
+        expect(source).to_contain("Lint.new(")
+        expect(source).to_contain("LintResult.new(")
+
+    it "referenced lint model classes are actually defined (generalization)":
+        extern fn rt_file_read_text(path: text) -> text
+        val model = rt_file_read_text("src/compiler/90.tools/lint/_LintMain/config_and_model.spl") ?? ""
+        expect(model).to_contain("class Lint:")
+        expect(model).to_contain("class LintResult:")
+
+    it "llvm-lib backend keeps the undeclared-global-load diagnostic (generalization)":
+        # The backend check that surfaced this bug must stay: a global load of a
+        # symbol with no emitted declaration is a semantic error, not silent UB.
+        extern fn rt_file_read_text(path: text) -> text
+        val src = rt_file_read_text("src/compiler_rust/compiler/src/codegen/llvm/functions.rs") ?? ""
+        expect(src).to_contain("llvm global load referenced undeclared symbol")

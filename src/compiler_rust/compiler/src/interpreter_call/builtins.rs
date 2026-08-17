@@ -536,6 +536,14 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(FutureValue::rejected(error_str))))
         }
         "generator" => {
+            // A user-defined `fn generator(...)` (e.g. std.generator's
+            // state-machine constructor) must shadow this lambda-based builtin;
+            // otherwise any binding named `generator` is unreachable and calls
+            // fail with "generator expects a lambda". Fall through to normal
+            // function dispatch when a user definition exists.
+            if functions.contains_key("generator") {
+                return Ok(None);
+            }
             let inner_expr = args.first().ok_or_else(|| {
                 let ctx = ErrorContext::new()
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)

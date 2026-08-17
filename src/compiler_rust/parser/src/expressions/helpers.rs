@@ -456,6 +456,9 @@ impl<'a> Parser<'a> {
                 // named constructor/function argument (e.g., P(grid: 0), LaunchShape(grid: ..., block: ...)).
                 // expect_identifier already handles TokenKind::Grid for field access (p.grid).
                 TokenKind::Grid => Some("grid".to_string()),
+                // `examples` is a Gherkin data-table soft keyword; it must still
+                // work as a named-arg/field label (e.g. K(examples: "ok")).
+                TokenKind::Examples => Some("examples".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {
