@@ -143,3 +143,36 @@ where a guessed implementation is worse than a recorded gap.
 4. **Compositor** — decide whether `FbCompositorBackend` and the `draw_*`
    families are still wanted, or whether the importing `mod.spl` re-export lines
    should be deleted as dead.
+
+## CONFIRMED OPEN 2026-08-17 — but it is a DEAD-MODULE defect, not a live boot breakage
+
+The chain is closed end to end:
+
+- `src/os/kernel/boot/boot_fs.spl:11` imports
+  `os.kernel.arch.arch_context.{Architecture, current_architecture}`
+- it **calls** it at `:392` and `:427` (`val arch = current_architecture()`) —
+  live call sites, not a dead import
+- `src/os/kernel/arch/arch_context.spl` defines the `Architecture` enum (`:6`)
+  and a METHOD `ArchContext.arch()` (`:24`), but **no free function
+  `current_architecture` anywhere**; a tree-wide count across `src/os` and
+  `src/lib` returns zero
+
+**Why this has never broken a build, which the original report does not say:**
+`boot_fs.spl` has **no importer at all**. Every other reference in `src/os` is
+either a prose comment or points at the *different* module `boot_fs_mount.spl`.
+The file is dead code — which is exactly why an unresolvable import with two live
+call sites has sat here undetected. `syscall_file.spl:259-261` already records
+the sibling observation that `boot_fs_mount_fat32_from_device` has no caller in
+the live boot sequence either, so this is a cluster rather than a one-off.
+
+**Deliberately not fixed.** Both available moves are wrong: implementing
+`current_architecture()` means inventing a global/per-CPU arch accessor that
+cannot be verified without booting the kernel — a blind guess — and deleting a
+dead module is out of proportion and needs an owner's decision.
+
+**Recommendation: retitle.** The row is real, but as filed it reads as a live
+missing-symbol defect. It is a dead-module cluster, and the correct question is
+whether `boot_fs.spl` should be revived or removed.
+
+Corrections to the original symbol list: `FeP256` (1 definition) and `md5` (2)
+DO exist. Only `display_protocol` and `current_architecture` have zero.
