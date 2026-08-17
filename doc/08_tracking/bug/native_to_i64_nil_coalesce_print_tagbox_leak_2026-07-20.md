@@ -1,7 +1,7 @@
 # Native `text.to_i64() ?? default` leaks tag-box representation, wrong value in string interpolation
 
 **Date:** 2026-07-20
-**Status:** ROOT-CAUSED + SOURCE-FIXED 2026-07-21 (Rust seed,
+**Status:** REOPENED 2026-08-17 -- the `.trim()` shape still yields a wrong integer under SIMPLE_EXECUTION_MODE=jit (see REOPENED section at end). Previously: ROOT-CAUSED + SOURCE-FIXED 2026-07-21 (Rust seed,
 `src/compiler_rust`); dynamic end-to-end (compile-and-run) verification of
 the *patched* binary is BLOCKED by an unrelated, pre-existing toolchain gap
 (see "Fix + verification status" below) — treat as source-fix-landed,
@@ -238,3 +238,31 @@ session with a working from-source build should file and fix it, at which
 point this bug's regression coverage
 (`test/03_system/native/option_nullcoalesce_i64_print_interp.spl`, expected
 rc 42) can finally be run.
+
+## REOPENED 2026-08-17 — closed on an UNPINNED engine
+
+The prior closure rested on an invocation that did not pin
+`SIMPLE_EXECUTION_MODE`, so it is evidence about one arbitrary engine, not
+about the defect. Re-probed in a minimal single-file probe, both arms pinned,
+`rc` read on the line AFTER the command. Binary: bin/simple (stale Rust seed, bin/release/x86_64-unknown-linux-gnu/simple, 59536728 B, mtime 2026-08-16 22:59).
+
+| probe | interpreter | jit | expected |
+|---|---|---|---|
+| `val n = "12345".to_i64() ?? -999; print("n={n}")` | `n=12345` rc=0 | `n=12345` rc=0 | `12345` |
+| `val n2 = "12345".trim().to_i64() ?? -999; print("n2={n2}")` | `n2=12345` rc=0 | **`n2=3775049836129`** rc=0 | `12345` |
+
+The `.trim()`-routed half still produces a wrong integer under the JIT, matching
+this doc's own observation that the wrong value is non-constant across sessions
+(`341095809`, `675995905`, now `3775049836129`) — consistent with a still-tagged
+slot being read as the payload. The direct-literal half (`n`) IS fixed. Status
+"SOURCE-FIXED, runtime-unverified" is now runtime-VERIFIED as still broken on
+the seed's JIT for the `.trim()` shape.
+
+Engine-identity control (`val p60 = 1152921504606846976` INSIDE `fn main()`):
+interpreter `1152921504606846976`, jit `-1152921504606846976` — so the jit arm
+demonstrably JIT-compiled and was not demoted. Note the same control at TOP
+LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
+
+Any "re-verified by source inspection" stamp above is void per repo policy.
+Full method, population counts and probe paths:
+`<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.

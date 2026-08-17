@@ -476,3 +476,29 @@ a real code address (`codegen/jit.rs:194-202`). Verified version-independent —
 0 lines interpreted / 13 lines jitted on BOTH the stale seed and the HEAD build.
 This is what disambiguated "already fixed" from "silently demoted to
 interpreter", which the value comparison alone could not do.
+
+## REOPENED 2026-08-17 — closed on an UNPINNED engine
+
+The prior closure rested on an invocation that did not pin
+`SIMPLE_EXECUTION_MODE`, so it is evidence about one arbitrary engine, not
+about the defect. Re-probed in a minimal single-file probe, both arms pinned,
+`rc` read on the line AFTER the command. Binary: bin/simple (stale Rust seed, bin/release/x86_64-unknown-linux-gnu/simple, 59536728 B, mtime 2026-08-16 22:59).
+
+| probe | interpreter | jit | expected |
+|---|---|---|---|
+| `fn sum3(a: list) -> i64: return a.get(0)+a.get(1)+a.get(2)`, called with `[10,20,30]` | `sum=60` rc=0 | **`sum=480`** rc=0 | `60` |
+
+`480 == 60 << 3`: each element read out of the `list` PARAMETER comes back as a
+tagged word that is never shifted back down. This is the shift-and-tag family,
+same as `any_receiver_element_read_shift_and_tag_2026-08-06`. The closure and its
+"re-verified 2026-08-17 by source inspection" stamp were both made on the
+interpreter arm, which is exactly the arm where this reads correctly.
+
+Engine-identity control (`val p60 = 1152921504606846976` INSIDE `fn main()`):
+interpreter `1152921504606846976`, jit `-1152921504606846976` — so the jit arm
+demonstrably JIT-compiled and was not demoted. Note the same control at TOP
+LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
+
+Any "re-verified by source inspection" stamp above is void per repo policy.
+Full method, population counts and probe paths:
+`<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.

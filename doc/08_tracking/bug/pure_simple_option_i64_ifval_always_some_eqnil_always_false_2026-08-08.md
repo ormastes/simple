@@ -1,6 +1,6 @@
 # Pure-Simple AOT lane: `i64?` value-3 collision does NOT reproduce, but `if val`/`== nil` are broken worse
 
-**Status:** LIKELY FIXED, unconfirmed on the AOT lane — 2026-08-10 re-check. A fix
+**Status:** REOPENED 2026-08-17 -- reproduces under SIMPLE_EXECUTION_MODE=jit (see REOPENED section at end). Previously: LIKELY FIXED, unconfirmed on the AOT lane — 2026-08-10 re-check. A fix
 matching this doc's own "candidate (a)" is already present in
 `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (the `nil_check_operand`
 / `rt_is_none`/`rt_is_some` block, ~line 2680-2718), landed by a separate session
@@ -246,3 +246,34 @@ output. Follow-up should first isolate whether the SIGSEGV is generic to any
 `native-build --entry-closure` single-file probe (try the simplest possible
 `fn main(): print("hi")` through the same path) before re-attempting this bug's
 specific sweep.
+
+## REOPENED 2026-08-17 — closed on an UNPINNED engine
+
+The prior closure rested on an invocation that did not pin
+`SIMPLE_EXECUTION_MODE`, so it is evidence about one arbitrary engine, not
+about the defect. Re-probed in a minimal single-file probe, both arms pinned,
+`rc` read on the line AFTER the command. Binary: bin/simple (stale Rust seed, bin/release/x86_64-unknown-linux-gnu/simple, 59536728 B, mtime 2026-08-16 22:59).
+
+| probe | interpreter | jit | expected |
+|---|---|---|---|
+| `mk(3) == nil` where `fn mk(v: i64) -> i64?` | `false` rc=0 | **`true`** rc=0 | `false` |
+| `mk(3) ?? -777` | `3` rc=0 | **`<value:0xfffffffffffffcf7>`** rc=0 | `3` |
+| `none_val ?? -777`, `none_val: i64? = nil` | `-777` rc=0 | **`<value:0xfffffffffffffcf7>`** rc=0 | `-777` |
+| `none_val == nil` | `true` rc=0 | `true` rc=0 | `true` |
+
+So the payload-3 sentinel collision DOES still reproduce under the JIT, and `??`
+additionally leaks a raw tag box into `to_string()` — the same
+`<value:0x...>` shape as `native_to_i64_nil_coalesce_print_tagbox_leak_2026-07-20`.
+`0xfffffffffffffcf7` is `-777` as a payload, so the correct value is inside the
+box and only the unboxing is missing. The "LIKELY FIXED" status is not supported
+on the JIT arm. The pure-Simple AOT `native-build` bar this doc sets for itself
+remains separately unmet.
+
+Engine-identity control (`val p60 = 1152921504606846976` INSIDE `fn main()`):
+interpreter `1152921504606846976`, jit `-1152921504606846976` — so the jit arm
+demonstrably JIT-compiled and was not demoted. Note the same control at TOP
+LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
+
+Any "re-verified by source inspection" stamp above is void per repo policy.
+Full method, population counts and probe paths:
+`<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.

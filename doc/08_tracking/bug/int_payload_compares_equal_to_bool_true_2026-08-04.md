@@ -1,6 +1,6 @@
 # `1` compares equal to `true`, turning a real type error into a passing assertion
 
-Status: CLOSED (not reproducible)
+Status: REOPENED 2026-08-17 (was CLOSED not-reproducible; reproduces under SIMPLE_EXECUTION_MODE=jit -- see REOPENED section at end)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 Retained because the *observation* that prompted it is real and still
 unexplained; the *mechanism* asserted below is not.
@@ -102,3 +102,30 @@ changing only the matcher; if it does, the matcher fix alone would leave `1 ==
 true` true in ordinary code.
 
 Related: `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`.
+
+## REOPENED 2026-08-17 — closed on an UNPINNED engine
+
+The prior closure rested on an invocation that did not pin
+`SIMPLE_EXECUTION_MODE`, so it is evidence about one arbitrary engine, not
+about the defect. Re-probed in a minimal single-file probe, both arms pinned,
+`rc` read on the line AFTER the command. Binary: bin/simple (stale Rust seed, bin/release/x86_64-unknown-linux-gnu/simple, 59536728 B, mtime 2026-08-16 22:59).
+
+| probe | interpreter | jit | expected |
+|---|---|---|---|
+| `1 == true` | `false` rc=0 | **`true`** rc=0 | `false` |
+
+The REFUTATION section above claims equality is strict "in every engine
+reachable here". That is false: it is strict in the interpreter and LOOSE under
+the JIT. This is very likely the unidentified mechanism the refutation says is
+"still unexplained" — an untagged `1` compared against `true`. Same
+untagged-scalar family as `interp_array_param_indexing_2026-07-03` (`60` reads
+back as `480 == 60 << 3`) and the `|v| >= 2^60` boxed-int divergence.
+
+Engine-identity control (`val p60 = 1152921504606846976` INSIDE `fn main()`):
+interpreter `1152921504606846976`, jit `-1152921504606846976` — so the jit arm
+demonstrably JIT-compiled and was not demoted. Note the same control at TOP
+LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
+
+Any "re-verified by source inspection" stamp above is void per repo policy.
+Full method, population counts and probe paths:
+`<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.
