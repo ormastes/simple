@@ -54,3 +54,37 @@ is broken ahead of any performance question — a native-renderer or DrawIR
 artifact build cannot succeed while that holds, and re-attempting these
 benchmarks before it is fixed would only re-derive the same blocker. Detail:
 `doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
+
+## 2026-08-17 — `rt_file_atomic_write` is NOT the missing primitive
+
+Checked because a hosted `rt_file_atomic_write` (temp + fsync + rename, parent-dir
+creation, mode preservation) landed in the Rust runtime staticlib the same night
+and looked like a candidate. It is not, on two independent grounds:
+
+1. **Wrong target.** The Rust implementation is hosted
+   (`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:680`) and the C
+   one is POSIX (`src/runtime/runtime_native.c:9374`, `stat`/`rename`). This
+   record's "Non-fixes" list already names "hosted fallback" explicitly.
+2. **SimpleOS already has this shape, and it is exactly what is insufficient.**
+   `src/os/userlib/rt_file_facade.spl:136` implements `rt_file_atomic_write` for
+   the target: open `path + ".atomic~"`, write, `_SYS_FILE_SYNC`, close, then
+   `rt_simpleos_file_rename_bytes`. Its docstring asserts *"Atomicity is the
+   rename syscall's"* — which is true on a journalled filesystem and **false on
+   FAT32**, where `Fat32Filesystem.rename_at` links new then deletes old and
+   explicitly disclaims pairwise atomicity, and `mount`/`fat32_mount_publish`
+   perform no recovery. So the primitive is present, and the observed defect is
+   precisely that this primitive's atomicity claim does not hold on this
+   filesystem. Adding another temp+fsync+rename wrapper cannot close it.
+
+The required fix is unchanged: the provisioned dual-bank, checksummed,
+flush-ordered protocol of `doc/04_architecture/os/fat32_atomic_replace_recovery.md`,
+recovery before mount publication, typed capability exposed to
+`src/os/apps/servers_user/database_persistence_adapter.spl`.
+
+**Blocker (why no fix landed here):** closure evidence is FAR-001..009 plus a
+fresh-process QEMU power-cut/reboot matrix, then physical UNO Q reboot evidence.
+Both are boot-gated, and the deployed CLI cannot run the lane — see the blocker
+quoted in `process_transfer_session_replay_identity_2026-08-12.md`. Follow-up
+worth filing separately: the `rt_file_facade.spl:137` docstring states an
+atomicity guarantee the FAT32 backend does not provide, which is how a caller
+would wrongly conclude this bug was already closed.
