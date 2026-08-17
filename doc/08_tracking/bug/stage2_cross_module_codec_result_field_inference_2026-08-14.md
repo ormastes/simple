@@ -32,3 +32,31 @@ through cross-module calls), which cannot be validated without that binary.
 
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
+
+## Update 2026-08-17 — reframed: cross-module is not the discriminator
+
+Reduced to an 8-line same-module reproducer. A struct RETURNED BY VALUE from a
+function reads every field back as `1` after
+`SIMPLE_BOOTSTRAP=1 bin/simple native-build --entry-closure`, while the same
+struct constructed inline in the same function is correct:
+
+```
+inline len=3 tag=77returned len=1 tag=1
+```
+
+Cross-module imports are not required; return-by-value is the trigger. The
+`.ok` failure recorded above is that defect wearing a diagnostic. The
+provider-side annotation workaround silences the message but does not correct
+the VALUE.
+
+Root cause, controls, and gating specs:
+`doc/08_tracking/bug/native_entry_closure_struct_return_by_value_fields_read_as_one_2026-08-17.md`
+· `test/01_unit/compiler/codegen/native_struct_return_by_value_field_read_spec.spl`
+· `test/01_unit/compiler/codegen/native_aggregate_return_transport_class_spec.spl`
+
+Note also: without `SIMPLE_BOOTSTRAP=1` the same two-module reproducer dies
+with `unresolved type: WireWriteV1` EVEN WHEN the struct is explicitly imported,
+because `try_register_bootstrap_global_symbol`
+(`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:930`) returns
+false outright unless that variable is set. That is a separate, still-open
+defect in the same file.
