@@ -2,9 +2,10 @@
 
 **Date:** 2026-08-17
 **Status:** OPEN
-**Severity:** MEDIUM — `src/lib/hardware/rv64gc_rtl/imac_protected_core.spl`
-(and every module importing it) fails to parse
-**Found by:** `src/lib/**` parse sweep (7780 files)
+**Severity:** MEDIUM — `src/lib/hardware/rv64gc_rtl/imac_protected_core.spl` and
+`src/lib/common/crypto/x25519_mlkem768/matrix_receipt.spl` (and every module
+importing them) fail to parse
+**Found by:** `src/lib/**` parse sweep (7780 files, complete)
 **Binary:** `/mnt/data/cgtw2/release/simple` (freshly built Rust seed) — also
 fails on the stale deployed binary, so this is not a fresh-build regression
 
@@ -47,6 +48,38 @@ indented branch body — is rejected.
                 state.fetch_low else if state.pipeline_phase == CORE64_FETCH_LOW:
                 0 else: state.instruction
 ```
+
+## Second route: via `elif` (found in the sweep tail, 2026-08-17)
+
+The completed sweep found a second root with the same root cause, reached
+through `elif` rather than a plain `if` branch. FAILS:
+
+```simple
+fn e1(a: bool, r: text) -> text:
+    val v = if a: "" elif r != "":
+        r else: "z"
+    v
+```
+
+PASSES with `else:` moved to its own line:
+
+```simple
+fn e2(a: bool, r: text) -> text:
+    val v = if a: "" elif r != "":
+        r
+    else: "z"
+    v
+```
+
+Real site — `src/lib/common/crypto/x25519_mlkem768/matrix_receipt.spl:697-698`:
+
+```simple
+        val admission_reason = if admitted_row: "" elif reason != "":
+            reason else: "source-row-public-output-mismatch"
+```
+
+So the defect is not specific to `if`/`else if`: any branch body that is opened
+as an indented block and then carries a trailing inline `else:` is rejected.
 
 ## Expected
 
