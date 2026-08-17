@@ -55,3 +55,34 @@ divergence delta-escape offender list at that time; the one saved at
 `/mnt/data/tmp/test_tree_divergence_preexisting.txt` is from 2026-08-15 and is
 stale for a fresh range. The separately-noted pre-existing origin red in
 `backend_software_damage_spec` is unrelated to this blocker and stays open.
+
+## 2026-08-17 RESOLVED — by supersession, not by landing e210ff2af19
+
+Per-file blob comparison of all 40 files in `e210ff2af19` against
+`origin/main` (`git rev-parse <rev>:<path>`, three-way: parent / e210 / origin):
+
+- **31 of 40 files are byte-identical at origin to e210's version.** The work
+  landed through another route; re-applying e210 would be a no-op for these.
+- **9 files diverge, and origin is strictly FORWARD of e210 in every one**
+  (measured as `git diff --numstat`): origin vs e210's *parent* is a large
+  add (e.g. `engine2d_web_gpu_offload_spec.spl` +293/-0,
+  `node_exec.rs` +489/-18), while origin vs *e210* is a small delta
+  (+3/-3 and +169/-17 respectively). Origin contains e210's content plus more.
+
+Spot-verified that the actual fixes are present at origin, not lost:
+- `node_exec.rs`: the nested/augmented field-assign diagnostic
+  ("cannot assign field on non-object value") is present (3 hits).
+- `engine2d_vulkan_cpu_render_diff_spec.spl`: e210 carried a *tolerance*
+  (`expect(mism <= 6)`) for the thick-line row-coverage divergence; origin has
+  `expect(mism).to_equal(0)` at all three sites — the underlying divergence was
+  fixed and the tolerance correctly deleted. Re-applying e210 here would have
+  been a **regression**, re-introducing a weakened assertion.
+- `backend_software.spl`: e210's offset-loop thick-line implementation was
+  replaced at origin by a different (single-guard `sw_bresenham`) path.
+
+Conclusion: **no landing is warranted.** `e210ff2af19` is fully superseded;
+applying it verbatim would revert at least one assertion and one implementation.
+Nothing was re-applied and no code was changed by this pass.
+
+Status: RESOLVED (superseded at origin). The `/mnt/data/tmp/land-wt` worktree
+and commit `e210ff2af19` can be discarded.
