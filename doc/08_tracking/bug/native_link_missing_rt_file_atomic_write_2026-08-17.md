@@ -1,7 +1,41 @@
 # `--native` link fails on `rt_file_atomic_write`, so `std.enterprise_store` cannot be AOT-compiled
 
-**Status:** OPEN. Filed 2026-08-17, lane W12-A of `.spipe/simple_enterprise_suite`.
-**Severity:** blocks end-to-end native measurement of the enterprise store.
+**Status:** RESOLVED 2026-08-17, lane W13-A of `.spipe/simple_enterprise_suite`.
+**Severity:** blocked end-to-end native measurement of the enterprise store.
+
+## Root cause (lane W13-A, with link-line evidence)
+
+The archive W12-A inspected was never on the link line. With
+`SIMPLE_LINKER_DEBUG=1` the failing single-file `--native` link is:
+
+```
+ld.lld ... main.o _main_shim.o build/simple-sqlite/runtime_sqlite.o crtn.o \
+  -L <seed target>/release/deps ... -Bstatic -lsimple_runtime -Bdynamic -lc ... -lsqlite3
+```
+
+`-lsimple_runtime` resolves from the seed's cargo `deps/` directory — the
+**Rust** `libsimple_runtime.a` staticlib built from
+`src/compiler_rust/runtime`, chosen because
+`NativeBinaryOptions::find_runtime_library_path_for_target` prefers
+`exe_dir/deps` (the seed's own cargo dir) over `build/simple-core`. That
+crate never defined `rt_file_atomic_write` — measured:
+`nm -g --defined-only <target>/release/deps/libsimple_runtime.a` shows
+`T rt_file_write_text_at` (3 defs) and **zero** `rt_file_atomic_write`. The C
+`build/simple-core/libsimple_runtime.a` (from `runtime_native.c`) does define
+it, but that archive is only used when the cargo dirs are absent — so W12-A's
+"present in the archive" check looked at the wrong archive. Not gc-sections,
+not name mangling, not link order.
+
+**Fix (Rust seed edit, no pure-Simple path exists — the missing symbol lives
+in the Rust runtime crate the seed links):** implement
+`rt_file_atomic_write(path: i64, content: i64) -> i64` in
+`src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs`, mirroring the
+C semantics (parent-dir creation, unix mode preservation, temp+fsync+rename,
+1/0 return). Gate extended: `scripts/check/check-store-open-acid.shs` now has
+a second stage that AOT-compiles
+`test/fixture/enterprise_store/store_native_acid_probe.spl` (which imports
+`std.enterprise_store` itself) and requires `store_acid=true` from the native
+binary.
 
 ## Symptom
 

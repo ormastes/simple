@@ -854,6 +854,38 @@ New acceptance criteria (extends AC-1..AC-12 above):
   did not help and was REVERTED rather than left in unverified. Filed:
   doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md.
   Under the interpreter the flag stays false, correctly.
+- NATIVE-LINK GAP CLOSED: store_backend_acid READS true FROM AN AOT-NATIVE
+  BINARY (2026-08-17, lane W13-A). W12-A's `undefined symbol:
+  rt_file_atomic_write` was NOT the archive they inspected: with
+  SIMPLE_LINKER_DEBUG=1 the single-file --native link line is
+  `-L <seed cargo>/release/deps -Bstatic -lsimple_runtime` — the RUST
+  runtime staticlib (find_runtime_library_path_for_target prefers exe_dir/deps
+  over build/simple-core), and `nm -g --defined-only` on that archive showed
+  `T rt_file_write_text_at` x3 but ZERO rt_file_atomic_write. The C archive
+  W12-A nm'd (build/simple-core, from runtime_native.c) has the symbol but is
+  never on the link line when the seed runs from a cargo tree. Not
+  gc-sections, not ordering, not mangling — wrong archive, missing symbol.
+  FIX (Rust seed edit, flagged: the symbol must live in the Rust runtime crate
+  the link actually resolves against; no pure-Simple layer can add a symbol to
+  that archive): rt_file_atomic_write implemented in
+  src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs mirroring the C
+  semantics (parent-dir create, unix mode preserve, temp+fsync+rename, 1/0).
+  RESULT: AOT-native probe importing std.enterprise_store links, runs, and
+  prints store_open_ok=true store_acid=true against real sqlite (W12-A's
+  NUL-termination fix holding natively).
+  GATE EXTENDED: check-store-open-acid.shs stage 2 AOT-compiles
+  test/fixture/enterprise_store/store_native_acid_probe.spl and requires
+  store_acid=true; now `PASS — 9 stage(s) checked ... native
+  store_backend_acid=true`. DISCRIMINATION PROVEN: objcopy-stripping
+  rt_file_atomic_write from the linked archive makes the gate report `FAIL —
+  native store link stage: error: codegen: undefined symbol:
+  rt_file_atomic_write` (the exact original error); restored -> PASS.
+  Native codegen limitation observed and worked around in the fixture:
+  "{}".format fails at runtime (`Function 'str.format' not found`) in AOT
+  binaries — probe prints fixed strings instead.
+  Interpreter regression: enterprise_store 10/10, harden 6/6;
+  c-runtime-compiles PASS (102 files). Driven by locally built seed
+  (/mnt/data/tmp .../release/simple, 59450240 bytes; bin/release/** untouched).
 - RESIDUAL SECURITY RISKS CLOSED (2026-08-17, lane W12-B).
   RISK 1 throttle amplification: throttle_admit now sweeps before deciding and
   on the reject path; throttle_prune drops the counter table once EVERY
