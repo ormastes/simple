@@ -8,6 +8,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
 
 extern fn rt_hash_text(content: text) -> i64
+extern fn rt_env_get(key: text) -> text
 extern fn rt_path_absolute(path: text) -> text
 extern fn rt_transient_heap_promote(value: Any) -> bool
 
@@ -429,6 +430,17 @@ impl ModuleSurfaceBuilder:
         # Build one package/name owner index up front. Stage4 carries thousands
         # of exports, so scanning every surface for every plain export turns
         # this boundary into O(exports * surfaces).
+        # Module-name -> surface-index lookup, built ONCE. The import-route
+        # helpers below need it once per import declaration per export item per
+        # fixpoint pass; resolving that by scanning the aligned name arrays was
+        # O(modules) per call and dominated the whole export_origins phase.
+        val origin_trace = module_surface_origin_trace_enabled()
+        module_surface_origin_trace(origin_trace,
+            "enter surfaces={self.surfaces.len()} names={self.ordered_names.len()}")
+        val name_index = module_surface_name_index_build(
+            self.ordered_names, self.ordered_indices)
+        module_surface_origin_trace(origin_trace,
+            "name_index built entries={name_index.len()}; step=owner_index")
         var owner_by_package_name: Dict<text, i64> = {}
         # Routing and collision identity are deliberately separate. A public
         # facade remains the route used by sibling consumers, while duplicate
@@ -541,9 +553,14 @@ impl ModuleSurfaceBuilder:
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
             owner_surface_index = owner_surface_index + 1
 
+        module_surface_origin_trace(origin_trace,
+            "owner_index built keys={owner_by_package_name.len()}; step=first_pass")
         var surface_index = 0
         while surface_index < self.surfaces.len():
             var surface = self.surfaces[surface_index]
+            # In-flight receipt: names the surface about to be processed.
+            module_surface_origin_trace(origin_trace,
+                "first_pass {surface_index}/{self.surfaces.len()} in-flight {surface.module_name}")
             for export_decl in surface.exports:
                 for export_item in export_decl.items:
                     if export_item.ends_with(".*"):
@@ -566,7 +583,7 @@ impl ModuleSurfaceBuilder:
                         continue
 
                     val imported_result = module_surface_explicit_import_origin(
-                        self.surfaces, self.ordered_names, self.ordered_indices, surface,
+                        self.surfaces, name_index, surface,
                         source_name, local_name)
                     if imported_result.is_error:
                         return Err(imported_result.error)
@@ -594,7 +611,7 @@ impl ModuleSurfaceBuilder:
                     # name; empty ParserImport.items is the parser's glob
                     # representation.
                     if module_surface_has_explicit_import_route(
-                        self.surfaces, self.ordered_names, self.ordered_indices, surface,
+                        self.surfaces, name_index, surface,
                         source_name, local_name):
                         continue
 
@@ -634,8 +651,12 @@ impl ModuleSurfaceBuilder:
                     if not bounded_item.ends_with(".*"):
                         max_origin_passes = max_origin_passes + 1
         var origin_changed = true
+        module_surface_origin_trace(origin_trace,
+            "first_pass done; step=fixpoint max_passes={max_origin_passes}")
         while origin_changed and origin_pass < max_origin_passes:
             origin_changed = false
+            module_surface_origin_trace(origin_trace,
+                "fixpoint pass {origin_pass}/{max_origin_passes} in-flight step=promote")
 
             var exported_owner_index = 0
             while exported_owner_index < self.surfaces.len():
@@ -684,9 +705,13 @@ impl ModuleSurfaceBuilder:
                     exported_origin_index = exported_origin_index + 1
                 exported_owner_index = exported_owner_index + 1
 
+            module_surface_origin_trace(origin_trace,
+                "fixpoint pass {origin_pass} step=revisit")
             var revisit_index = 0
             while revisit_index < self.surfaces.len():
                 var revisit_surface = self.surfaces[revisit_index]
+                module_surface_origin_trace(origin_trace,
+                    "revisit pass {origin_pass} {revisit_index}/{self.surfaces.len()} in-flight {revisit_surface.module_name}")
                 for export_decl in revisit_surface.exports:
                     for export_item in export_decl.items:
                         if export_item.ends_with(".*"):
@@ -705,7 +730,7 @@ impl ModuleSurfaceBuilder:
                         if module_surface_declares_item(revisit_surface, source_name):
                             continue
                         val imported_result = module_surface_explicit_import_origin(
-                            self.surfaces, self.ordered_names, self.ordered_indices, revisit_surface,
+                            self.surfaces, name_index, revisit_surface,
                             source_name, local_name)
                         if imported_result.is_error:
                             return Err(imported_result.error)
@@ -728,7 +753,7 @@ impl ModuleSurfaceBuilder:
                                 origin_changed = true
                             continue
                         if module_surface_has_explicit_import_route(
-                            self.surfaces, self.ordered_names, self.ordered_indices, revisit_surface,
+                            self.surfaces, name_index, revisit_surface,
                             source_name, local_name):
                             continue
                         val revisit_origin_index_retained: ModuleSurfaceExportOriginIndex = revisit_surface.export_origin_index
@@ -763,7 +788,11 @@ impl ModuleSurfaceBuilder:
                 self.surfaces[revisit_index] = revisit_surface
                 revisit_index = revisit_index + 1
             origin_pass = origin_pass + 1
+            module_surface_origin_trace(origin_trace,
+                "fixpoint pass {origin_pass} complete changed={origin_changed}")
 
+        module_surface_origin_trace(origin_trace,
+            "exit passes_run={origin_pass} changed={origin_changed}")
         if origin_changed:
             return Err("facade export origin resolution did not converge after {max_origin_passes} passes")
         Ok(())
@@ -860,8 +889,7 @@ fn module_surface_origin_error(message: text) -> ModuleSurfaceOriginResolution:
 
 fn module_surface_explicit_import_origin(
     surfaces: [ModuleSurface],
-    ordered_names: [text],
-    ordered_indices: [i64],
+    name_index: Dict<text, i64>,
     facade: ModuleSurface,
     source_name: text,
     local_name: text
@@ -871,7 +899,7 @@ fn module_surface_explicit_import_origin(
     var has_named_route = false
     for import_decl in facade.imports:
         if module_surface_import_owner_is_physical_self(
-            surfaces, ordered_names, ordered_indices, facade, import_decl.module):
+            surfaces, name_index, facade, import_decl.module):
             continue
         for item in import_decl.items:
             val imported_local = if item.has_alias: item.alias else: item.name
@@ -884,7 +912,7 @@ fn module_surface_explicit_import_origin(
     if has_named_route:
         for import_decl in facade.imports:
             val owner_index = module_surface_index_by_name(
-                ordered_names, ordered_indices, import_decl.module)
+                name_index, import_decl.module)
             if owner_index < 0 or owner_index >= surfaces.len():
                 continue
             val owner = surfaces[owner_index]
@@ -935,7 +963,7 @@ fn module_surface_explicit_import_origin(
         if import_decl.items.len() != 0:
             continue
         val owner_index = module_surface_index_by_name(
-            ordered_names, ordered_indices, import_decl.module)
+            name_index, import_decl.module)
         if owner_index < 0 or owner_index >= surfaces.len():
             continue
         val owner = surfaces[owner_index]
@@ -978,8 +1006,7 @@ fn module_surface_explicit_import_origin(
 
 fn module_surface_has_explicit_import_route(
     surfaces: [ModuleSurface],
-    ordered_names: [text],
-    ordered_indices: [i64],
+    name_index: Dict<text, i64>,
     facade: ModuleSurface,
     source_name: text,
     local_name: text
@@ -988,7 +1015,7 @@ fn module_surface_has_explicit_import_route(
     # pending. It must retain precedence over every wildcard route.
     for import_decl in facade.imports:
         if module_surface_import_owner_is_physical_self(
-            surfaces, ordered_names, ordered_indices, facade, import_decl.module):
+            surfaces, name_index, facade, import_decl.module):
             continue
         for item in import_decl.items:
             val imported_local = if item.has_alias: item.alias else: item.name
@@ -1001,7 +1028,7 @@ fn module_surface_has_explicit_import_route(
         if import_decl.items.len() != 0:
             continue
         val owner_index = module_surface_index_by_name(
-            ordered_names, ordered_indices, import_decl.module)
+            name_index, import_decl.module)
         if owner_index < 0 or owner_index >= surfaces.len():
             continue
         val owner = surfaces[owner_index]
@@ -1015,8 +1042,7 @@ fn module_surface_has_explicit_import_route(
 
 fn module_surface_import_owner_is_physical_self(
     surfaces: [ModuleSurface],
-    ordered_names: [text],
-    ordered_indices: [i64],
+    name_index: Dict<text, i64>,
     facade: ModuleSurface,
     imported_module: text
 ) -> bool:
@@ -1025,21 +1051,51 @@ fn module_surface_import_owner_is_physical_self(
     # not an explicit owner route. Let sibling/fixpoint resolution find the
     # concrete child instead of allowing the self facade to mask it forever.
     val owner_index = module_surface_index_by_name(
-        ordered_names, ordered_indices, imported_module)
+        name_index, imported_module)
     if owner_index < 0 or owner_index >= surfaces.len():
         return false
     surfaces[owner_index].canonical_path == facade.canonical_path
 
-fn module_surface_index_by_name(
-    names: [text], indices: [i64], name: text) -> i64:
-    # The arrays are built once by ModuleSurfaceBuilder and passed through the
-    # resolution pass.  Never materialize Dict keys/values in this hot lookup.
+# Export-origin resolution is one monolithic call over every module surface.
+# Until 2026-08-17 it emitted nothing at all between entry and return, so a
+# multi-minute Stage-3 window showed only `current=start` with no way to tell
+# progress from a hang. These receipts name the surface currently IN FLIGHT
+# (never the one just completed -- a prior fix in this area reported the
+# completed unit and so a stall named its predecessor).
+fn module_surface_origin_trace_enabled() -> bool:
+    val trace = rt_env_get("SIMPLE_HIR_EXPORT_ORIGIN_TRACE") ?? ""
+    if trace == "1":
+        return true
+    (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1"
+
+fn module_surface_origin_trace(enabled: bool, msg: text):
+    if enabled:
+        eprint("[EXPORT-ORIGINS] " + msg)
+
+fn module_surface_name_index_build(
+    names: [text], indices: [i64]) -> Dict<text, i64>:
+    # Built once per resolve_export_origins call. Semantics are identical to the
+    # former linear scan over the aligned arrays: FIRST occurrence of a name
+    # wins, and a name present in `names` but past the end of `indices` is not
+    # resolvable. ModuleSurfaceBuilder.add_indexed_name already guarantees the
+    # arrays hold each name exactly once, so first-wins is only a safety net.
+    var name_index: Dict<text, i64> = {}
     var index = 0
     while index < names.len() and index < indices.len():
-        if names[index] == name:
-            return indices[index]
+        if not name_index.contains_key(names[index]):
+            name_index[names[index]] = indices[index]
         index = index + 1
-    -1
+    name_index
+
+fn module_surface_index_by_name(
+    name_index: Dict<text, i64>, name: text) -> i64:
+    # Hot lookup: called once per import declaration per export item per
+    # fixpoint pass. The scan this replaced was O(module count) per call, which
+    # on a ~619-module Stage-3 closure made export-origin resolution the
+    # dominant phase cost. Never materialize keys()/values() here.
+    if not name_index.contains_key(name):
+        return -1
+    name_index[name]
 
 fn module_surface_syntactically_exports(surface: ModuleSurface, name: text) -> bool:
     for export_decl in surface.exports:
