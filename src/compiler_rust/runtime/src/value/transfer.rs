@@ -239,6 +239,10 @@ enum EncodedLeafKind {
     Float64 = 1,
     UInt64 = 2,
     Utf8 = 3,
+    /// Full-width SIGNED i64 leaf (`HeapObjectType::Int`). Distinct from
+    /// `UInt64` so a wide negative value does not round-trip as a huge
+    /// positive one.
+    Int64 = 4,
 }
 
 impl TryFrom<u8> for EncodedLeafKind {
@@ -249,6 +253,7 @@ impl TryFrom<u8> for EncodedLeafKind {
             1 => Ok(Self::Float64),
             2 => Ok(Self::UInt64),
             3 => Ok(Self::Utf8),
+            4 => Ok(Self::Int64),
             _ => Err(()),
         }
     }
@@ -285,6 +290,12 @@ impl RuntimeEncodedCopy {
             HeapObjectType::UInt => (
                 EncodedLeafKind::UInt64,
                 with_typed_ptr::<HeapUInt, _>(value, HeapObjectType::UInt, |ptr| unsafe {
+                    (*ptr).value.to_le_bytes().to_vec()
+                })?,
+            ),
+            HeapObjectType::Int => (
+                EncodedLeafKind::Int64,
+                with_typed_ptr::<crate::value::heap::HeapInt, _>(value, HeapObjectType::Int, |ptr| unsafe {
                     (*ptr).value.to_le_bytes().to_vec()
                 })?,
             ),
@@ -364,6 +375,9 @@ impl RuntimeEncodedCopy {
             EncodedLeafKind::UInt64 => Some(RuntimeValue::from_u64(u64::from_le_bytes(
                 self.payload.as_slice().try_into().ok()?,
             ))),
+            EncodedLeafKind::Int64 => Some(RuntimeValue::from_int(i64::from_le_bytes(
+                self.payload.as_slice().try_into().ok()?,
+            ))),
             EncodedLeafKind::Utf8 => {
                 std::str::from_utf8(&self.payload).ok()?;
                 Some(rt_string_new(self.payload.as_ptr(), self.payload.len() as u64))
@@ -376,7 +390,7 @@ impl RuntimeEncodedCopy {
             return false;
         }
         match self.kind {
-            EncodedLeafKind::Float64 | EncodedLeafKind::UInt64 => self.payload.len() == 8,
+            EncodedLeafKind::Float64 | EncodedLeafKind::UInt64 | EncodedLeafKind::Int64 => self.payload.len() == 8,
             EncodedLeafKind::Utf8 => std::str::from_utf8(&self.payload).is_ok(),
         }
     }
