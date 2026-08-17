@@ -44,6 +44,45 @@ assumption this defect violates.
 This is a fail-open shape: the guard does not report that it cannot identify
 the receiver kind, it silently claims it can.
 
+## MECHANISM — largely explained by an already-filed row (added 2026-08-17)
+
+`doc/08_tracking/bug/rt_enum_discriminant_is_enum_id_blind_name_hash_2026-08-08.md`
+documents, with a measured truth table, that `rt_enum_discriminant(v)` returns
+`hash_variant_discriminant(<variant name>)` — a Rust `DefaultHasher` over the
+**variant name string**, truncated to 32 bits — and that it returns `-1`
+**only** for a value that is not a `HeapObjectType::Enum`.
+
+That reframes this row substantially, and the reframing is better supported
+than the original "garbage" wording:
+
+- **1337030607 is almost certainly not garbage.** It has the exact shape of the
+  values in that row's measured table (`465620071`, `3803938095`, `810919283`,
+  `1457792540` — all large positive 32-bit name hashes). It is most likely the
+  name hash of whichever `HirExprKind` variant the receiver actually is.
+- **The `< 0` guard is therefore unreachable by DESIGN, not by corruption.**
+  `-1` is reserved for "not an enum at all". A well-formed `receiver.kind` is
+  always an enum, so it can never be negative. The lowering code was written
+  against an assumption (`-1` means "kind not identifiable") that the runtime
+  contract never offered.
+
+This makes the branch dead code just as originally reported, but it means the
+fix belongs in the LOWERING code's use of the sentinel, not in the runtime
+returning a wrong number.
+
+**Still genuinely unexplained, and the reason this row stays OPEN:** the report
+that the *same* constant comes back for **every receiver shape**. Under the
+name-hash mechanism, different variants must hash differently. Either the probe
+only ever observed one receiver variant (likely — the probe fired on a single
+call shape, `method=stat`), or something upstream is collapsing distinct kinds.
+That distinction is **not measured** and should be settled by probing at least
+two provably different receiver variants before anyone acts on this row.
+
+Note also the enum_id-blindness in that same 2026-08-08 row: `HirExprKind` is
+explicitly listed among the collision-eligible families, so two different enum
+families sharing a variant name (`Named`, `Tuple`, …) yield identical
+discriminants. `method_calls_literals.spl:1180-1181` compares two discriminants
+directly and is exactly the shape that trap targets.
+
 ## Scope of what is verified
 
 - **Verified:** the returned value is 1337030607, on the native lane, for the
