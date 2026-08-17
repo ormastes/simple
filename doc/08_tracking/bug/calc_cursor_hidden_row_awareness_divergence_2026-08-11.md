@@ -82,6 +82,8 @@ rather than treated as a blocker. Re-run when the box is quiet:
 ```
 bin/simple test test/01_unit/app/office/sheets/access_controller_spec.spl
 ```
+Status: OPEN (P2) — PARTIALLY FIXED 2026-08-17 (commit ff66bac92f85)
+Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Partial fix 2026-08-17 — `ff66bac92f85`:** path 1 (`_tui_move`,
 `src/app/office/interactive.spl`) is now hidden-row aware. Evidence: grepped
