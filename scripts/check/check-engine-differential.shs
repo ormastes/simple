@@ -1,401 +1,42 @@
 #!/bin/sh
-# check-engine-differential.shs
+# Thin CI wrapper for scripts/check/check_engine_differential.spl.
 #
-# CROSS-ENGINE DIFFERENTIAL GATE — run ONE deterministic program under the
-# tree-walk INTERPRETER, the Cranelift JIT, and the NATIVE/AOT backend, and
-# fail when the three do not agree, cell by cell.
+# The harness itself is pure Simple; this wrapper exists only so CI can invoke
+# it the same way as the other scripts/check/check-*.shs gates, and so the
+# repo-root requirement is enforced rather than assumed.
 #
-# WHY THIS EXISTS
+# `native-build` resolves its source root from the tree it is invoked in, so a
+# run from anywhere but the repo root makes every native build fail and the
+# whole native lane reads as a false LANE_ERROR. Fail closed on that instead
+# of reporting a vacuous pass.
 #
-# Every codegen defect found on 2026-08-17 lived in exactly ONE engine, and
-# every one of them was found by a human noticing a wrong number:
+# Exit code is the number of UNBASELINED divergences (0 = no new divergence).
+# Known, already-filed divergences are listed in the harness's baselines() and
+# do not fail the gate.
 #
-#   * hir/lower/expr/access.rs:288 — `.unwrap_or(0)` on the
-#     `CannotInferFieldType` recovery path. A struct returned BY VALUE lost its
-#     receiver type and EVERY field read returned field 0's value.
-#     `W3(first: 9, length: n, tag: 77)` printed `first=9 length=9 tag=9`.
-#     No diagnostic. Plausible output. Blocked the bootstrap six times.
-#   * doc/08_tracking/bug/f32_struct_field_reads_as_zero_2026-08-17.md
-#   * doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
-#   * the `[u64]` element divide-by-8 stride defect
+# Usage:
+#   sh scripts/check/check-engine-differential.shs
+#   DIFF_LANES=interpret,jit sh scripts/check/check-engine-differential.shs
 #
-# None of them could be caught by the spec suite, because A SPEC BODY RUNS
-# INTERPRETED — the one engine that was correct in most of these.
-#
-# The key property of this gate is that it needs NO ORACLE. Writing expected
-# values requires knowing the right answer, and not knowing the right answer
-# for one particular cell is precisely how each of these shipped. Three
-# implementations of one language must not DISAGREE on a deterministic
-# program; a disagreement is a defect in at least one of them, and this gate
-# names the cell without anyone having predicted it in advance.
-#
-# It is therefore a member of the class it defends against: a differential
-# harness that runs zero engines, or compares zero cells, would "agree"
-# trivially. Non-vacuity is enforced absolutely — see the ERROR cases below.
-#
-# USAGE
-#   sh scripts/check/check-engine-differential.shs [--probe FILE] [--quick]
-#   sh scripts/check/check-engine-differential.shs --selftest
-#
-#   SIMPLE_BIN     compiler under test (default: bin/simple)
-#   --quick        interpreter + JIT only; RECORDED in the verdict, never
-#                  silently — a 2-engine run states that it was one
-#
-# VERDICT is the LAST line of stdout, per .claude/rules/vcs.md:
-#   PASS  — <n> cell(s) checked across <e> engine(s), 0 disagreement   exit 0
-#   FAIL  — <n> cell(s) checked across <e> engine(s), <k> disagree: …  exit 1
-#   ERROR — nothing was checked                                        exit 2
-set -u
+# The native lane runs a full native-build per fixture and takes several
+# minutes; DIFF_LANES=interpret,jit is the fast pre-push configuration.
 
-PROBE="test/01_unit/compiler/codegen/probe_engine_differential.spl"
-QUICK=0
-SELFTEST=0
-BUILD_TIMEOUT="${ENGINE_DIFF_BUILD_TIMEOUT:-900}"
-RUN_TIMEOUT="${ENGINE_DIFF_RUN_TIMEOUT:-600}"
+set -e
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --probe) PROBE="${2:-}"; shift 2 ;;
-        --quick) QUICK=1; shift ;;
-        --selftest) SELFTEST=1; shift ;;
-        *) shift ;;
-    esac
-done
-
-WORK=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked"; exit 2; }
-cleanup() { [ -n "${KEEP_WORK:-}" ] || rm -rf "$WORK"; }
-trap cleanup EXIT INT TERM
-
-# ---------------------------------------------------------------------------
-# extract_obs <raw> <out>
-#
-# Pull `OBS <key> = <value>` lines out of an engine's stdout. Engine output is
-# NOT clean: the native lane interleaves `[mir-lower-expr] …` diagnostics, so
-# an unfiltered diff would report noise as disagreement. Only the OBS prefix
-# and the terminating count line are contractual.
-# ---------------------------------------------------------------------------
-extract_obs() {
-    sed -n 's/^OBS \([A-Za-z0-9_]*\) = \(.*\)$/\1\t\2/p' "$1" > "$2"
-}
-
-probe_count() {
-    sed -n 's/^ENGINE_DIFFERENTIAL PROBE: \([0-9]*\) OBSERVATIONS$/\1/p' "$1" | tail -1
-}
-
-# ---------------------------------------------------------------------------
-# compare_engines <namelist-file> <dir>
-#
-# The whole verdict logic, isolated from engine invocation so --selftest can
-# drive it with recorded fixtures. <dir> holds `<name>.obs` per engine plus
-# `<name>.count` (the probe's self-reported observation total, or empty if the
-# run never reached its final line).
-#
-# Writes a human-readable disagreement report to <dir>/report and echoes
-# "<cells>|<engines>|<disagreements>|<names>" on stdout.
-# ---------------------------------------------------------------------------
-compare_engines() {
-    _names=$(cat "$1")
-    _dir="$2"
-    : > "$_dir/report"
-
-    _engines=0
-    for _e in $_names; do _engines=$((_engines + 1)); done
-    [ "$_engines" -lt 2 ] && { echo "0|$_engines|0|"; return; }
-
-    # A run that died mid-stream must never look like agreement. The probe
-    # prints its own observation total as its last line; a missing or short
-    # count is a hard disagreement, not a skip.
-    _first=""
-    for _e in $_names; do [ -z "$_first" ] && _first="$_e"; done
-    _expected=$(cat "$_dir/$_first.count" 2>/dev/null)
-
-    _bad_runs=""
-    for _e in $_names; do
-        _c=$(cat "$_dir/$_e.count" 2>/dev/null)
-        _lines=$(wc -l < "$_dir/$_e.obs" 2>/dev/null | tr -d ' ')
-        [ -z "$_lines" ] && _lines=0
-        if [ -z "$_c" ]; then
-            echo "  $_e: run did not reach its terminating count line (truncated or crashed after $_lines observation(s))" >> "$_dir/report"
-            _bad_runs="$_bad_runs $_e"
-        elif [ "$_c" != "$_lines" ]; then
-            echo "  $_e: printed $_lines observation(s) but self-reported $_c" >> "$_dir/report"
-            _bad_runs="$_bad_runs $_e"
-        fi
-    done
-
-    # Union of every key any engine emitted. A key MISSING from one engine is a
-    # disagreement — that is how a crash-after-partial-output surfaces rather
-    # than being silently tolerated as "nothing to compare".
-    cut -f1 "$_dir"/*.obs 2>/dev/null | sort -u > "$_dir/keys"
-    _cells=$(wc -l < "$_dir/keys" | tr -d ' ')
-    [ "$_cells" -eq 0 ] && { echo "0|$_engines|0|"; return; }
-
-    _dis=0
-    _dislist=""
-    while IFS= read -r _k; do
-        _ref=""
-        _refeng=""
-        _differ=0
-        _detail=""
-        for _e in $_names; do
-            _v=$(awk -F'\t' -v k="$_k" '$1==k{print $2; exit}' "$_dir/$_e.obs")
-            if ! grep -q "^$_k	" "$_dir/$_e.obs" 2>/dev/null; then
-                _v="<ABSENT>"
-            fi
-            _detail="$_detail $_e=[$_v]"
-            if [ -z "$_refeng" ]; then
-                _ref="$_v"; _refeng="$_e"
-            elif [ "$_v" != "$_ref" ]; then
-                _differ=1
-            fi
-        done
-        if [ "$_differ" -eq 1 ]; then
-            _dis=$((_dis + 1))
-            _dislist="$_dislist $_k"
-            echo "  DISAGREE $_k:$_detail" >> "$_dir/report"
-        else
-            echo "  agree    $_k = $_ref" >> "$_dir/agreements"
-        fi
-    done < "$_dir/keys"
-
-    if [ -n "$_bad_runs" ] && [ "$_dis" -eq 0 ]; then
-        # Every engine truncated identically: the cells agree but the runs are
-        # not trustworthy. Report it as a disagreement rather than a pass.
-        _dis=$((_dis + 1))
-        _dislist="$_dislist <truncated-run:$_bad_runs>"
-    fi
-
-    echo "$_cells|$_engines|$_dis|$_dislist"
-}
-
-# ---------------------------------------------------------------------------
-# --selftest — fatal, runs before every real scan.
-#
-# A gate that cannot FAIL is not evidence. These fixtures drive the comparison
-# logic directly with recorded engine outputs, so the selftest is fast and does
-# not depend on the compiler being healthy.
-# ---------------------------------------------------------------------------
-selftest() {
-    _fail=0
-    _t="$WORK/selftest"
-
-    # Fixture 1 (must FAIL): replays the REAL access.rs:288 defect. A struct
-    # returned by value collapsed every field onto field 0, so the native lane
-    # reports first=9 length=9 tag=9 where the interpreter reports 9/3/77.
-    rm -rf "$_t"; mkdir -p "$_t"
-    printf 'interpreter jit native\n' > "$_t/names"
-    for _e in interpreter jit; do
-        printf 'retval_w3_first\t9\nretval_w3_length\t3\nretval_w3_tag\t77\n' > "$_t/$_e.obs"
-        printf '3\n' > "$_t/$_e.count"
-    done
-    printf 'retval_w3_first\t9\nretval_w3_length\t9\nretval_w3_tag\t9\n' > "$_t/native.obs"
-    printf '3\n' > "$_t/native.count"
-    _r=$(compare_engines "$_t/names" "$_t")
-    _d=$(echo "$_r" | cut -d'|' -f3)
-    _l=$(echo "$_r" | cut -d'|' -f4)
-    if [ "$_d" != "2" ]; then
-        echo "selftest fixture 1 FAILED: access.rs field-collapse not detected (disagreements=$_d)"
-        _fail=1
-    fi
-    case "$_l" in
-        *retval_w3_length*retval_w3_tag*) ;;
-        *) echo "selftest fixture 1 FAILED: verdict did not name the collapsed fields ($_l)"; _fail=1 ;;
-    esac
-
-    # Fixture 2 (must PASS): identical engines must not be reported as
-    # disagreeing, so fixture 1's failure came from the defect, not from the
-    # comparator flagging everything.
-    rm -rf "$_t"; mkdir -p "$_t"
-    printf 'interpreter jit native\n' > "$_t/names"
-    for _e in interpreter jit native; do
-        printf 'a\t1\nb\t2.5\nc\tok\n' > "$_t/$_e.obs"
-        printf '3\n' > "$_t/$_e.count"
-    done
-    _r=$(compare_engines "$_t/names" "$_t")
-    if [ "$(echo "$_r" | cut -d'|' -f3)" != "0" ]; then
-        echo "selftest fixture 2 FAILED: identical engines reported as disagreeing ($_r)"
-        _fail=1
-    fi
-    if [ "$(echo "$_r" | cut -d'|' -f1)" != "3" ]; then
-        echo "selftest fixture 2 FAILED: wrong cell count ($_r)"
-        _fail=1
-    fi
-
-    # Fixture 3 (must FAIL): a key present on two engines and ABSENT on the
-    # third. This is the crash-after-partial-output shape, and a naive
-    # intersection-based comparator would silently pass it.
-    rm -rf "$_t"; mkdir -p "$_t"
-    printf 'interpreter jit native\n' > "$_t/names"
-    for _e in interpreter jit; do
-        printf 'a\t1\nb\t2\n' > "$_t/$_e.obs"
-        printf '2\n' > "$_t/$_e.count"
-    done
-    printf 'a\t1\n' > "$_t/native.obs"
-    printf '2\n' > "$_t/native.count"
-    _r=$(compare_engines "$_t/names" "$_t")
-    if [ "$(echo "$_r" | cut -d'|' -f3)" -lt 1 ]; then
-        echo "selftest fixture 3 FAILED: absent key on one engine not flagged ($_r)"
-        _fail=1
-    fi
-
-    # Fixture 4 (must FAIL): all engines truncated IDENTICALLY. Cells agree, so
-    # a cell-only comparator passes — but no engine finished. The self-reported
-    # count is what catches it.
-    rm -rf "$_t"; mkdir -p "$_t"
-    printf 'interpreter jit native\n' > "$_t/names"
-    for _e in interpreter jit native; do
-        printf 'a\t1\n' > "$_t/$_e.obs"
-        : > "$_t/$_e.count"
-    done
-    _r=$(compare_engines "$_t/names" "$_t")
-    if [ "$(echo "$_r" | cut -d'|' -f3)" -lt 1 ]; then
-        echo "selftest fixture 4 FAILED: identically-truncated runs passed as agreement ($_r)"
-        _fail=1
-    fi
-
-    # Fixture 5 (must yield 0 cells): an empty comparison must return zero so
-    # the caller is FORCED into ERROR. A harness that "agrees" about nothing is
-    # itself an instance of the fail-open class this gate exists to catch.
-    rm -rf "$_t"; mkdir -p "$_t"
-    printf 'interpreter jit\n' > "$_t/names"
-    for _e in interpreter jit; do : > "$_t/$_e.obs"; printf '0\n' > "$_t/$_e.count"; done
-    _r=$(compare_engines "$_t/names" "$_t")
-    if [ "$(echo "$_r" | cut -d'|' -f1)" != "0" ]; then
-        echo "selftest fixture 5 FAILED: empty comparison did not report 0 cells ($_r)"
-        _fail=1
-    fi
-
-    # Fixture 6 (must yield <2 engines): a single-engine run is not a
-    # differential at all and must not be able to reach PASS.
-    rm -rf "$_t"; mkdir -p "$_t"
-    printf 'interpreter\n' > "$_t/names"
-    printf 'a\t1\n' > "$_t/interpreter.obs"
-    printf '1\n' > "$_t/interpreter.count"
-    _r=$(compare_engines "$_t/names" "$_t")
-    if [ "$(echo "$_r" | cut -d'|' -f2)" -ge 2 ]; then
-        echo "selftest fixture 6 FAILED: single engine counted as a differential ($_r)"
-        _fail=1
-    fi
-
-    return $_fail
-}
-
-if ! selftest; then
-    echo "ERROR — nothing was checked"
+if [ ! -d .git ] && [ ! -d .jj ]; then
+    echo "ERROR — must run from the repo root (native-build resolves its source root from cwd); nothing was checked"
     exit 2
 fi
 
-if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 6 selftest fixture(s) checked, 0 failed"
-    exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Real scan.
-# ---------------------------------------------------------------------------
-BIN="${SIMPLE_BIN:-bin/simple}"
-[ -x "$BIN" ] || { echo "compiler under test not executable: $BIN"; echo "ERROR — nothing was checked"; exit 2; }
-[ -f "$PROBE" ] || { echo "probe not found: $PROBE"; echo "ERROR — nothing was checked"; exit 2; }
-
-echo "probe:    $PROBE"
-echo "compiler: $BIN"
-
-DIR="$WORK/run"
-mkdir -p "$DIR"
-NAMES=""
-
-run_mode() {
-    _name="$1"
-    _mode="$2"
-    # rc is read on the NEXT line, NEVER through a pipe: a pipeline's $? is the
-    # LAST command's status, which has produced false greens in this repo.
-    SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE="$_mode" \
-        nice -n 19 timeout "$RUN_TIMEOUT" "$BIN" run "$PROBE" > "$DIR/$_name.raw" 2>"$DIR/$_name.err"
-    _rc=$?
-    extract_obs "$DIR/$_name.raw" "$DIR/$_name.obs"
-    probe_count "$DIR/$_name.raw" > "$DIR/$_name.count"
-    _n=$(wc -l < "$DIR/$_name.obs" | tr -d ' ')
-    echo "  $_name: rc=$_rc, $_n observation(s)"
-    NAMES="$NAMES $_name"
-}
-
-run_mode interpreter interpreter
-run_mode jit jit
-
-if [ "$QUICK" -eq 0 ]; then
-    NATIVE_BIN="$WORK/probe_native"
-    nice -n 19 timeout "$BUILD_TIMEOUT" env -u SIMPLE_BOOTSTRAP SIMPLE_RUST_SEED_WARNING=0 \
-        "$BIN" native-build "$PROBE" -o "$NATIVE_BIN" > "$DIR/native.build.log" 2>&1
-    BRC=$?
-    if [ "$BRC" -ne 0 ] || [ ! -x "$NATIVE_BIN" ]; then
-        # A native lane that will not BUILD is a finding, not a skip. It is
-        # fatal: silently continuing with two engines while the caller believes
-        # three ran is the exact fail-open shape this gate exists to prevent.
-        #
-        # But the failure must not SWALLOW the comparison already in hand. An
-        # earlier revision exited here announcing "0 cell(s) checked", which hid
-        # 29 real interpreter-vs-JIT disagreements behind an unrelated build
-        # timeout — a build problem masquerading as an absence of findings,
-        # which is itself an instance of this defect class. So the two engines
-        # that DID run are compared and reported first, and the verdict states
-        # both facts.
-        echo "native-build FAILED (rc=$BRC); last lines:"
-        tail -5 "$DIR/native.build.log" | sed 's/^/    /'
-        [ "$BRC" -eq 124 ] && echo "    (rc=124 is a TIMEOUT at ${BUILD_TIMEOUT}s — raise ENGINE_DIFF_BUILD_TIMEOUT on a loaded box)"
-        echo ""
-        echo "Comparing the two engines that DID run, so this build failure does not hide their findings:"
-        echo "$NAMES" > "$DIR/names"
-        : > "$DIR/agreements"
-        PARTIAL=$(compare_engines "$DIR/names" "$DIR")
-        P_CELLS=$(echo "$PARTIAL" | cut -d'|' -f1)
-        P_DIS=$(echo "$PARTIAL" | cut -d'|' -f3)
-        P_LIST=$(echo "$PARTIAL" | cut -d'|' -f4)
-        echo ""
-        echo "=== partial cell matrix (interpreter vs jit) ==="
-        cat "$DIR/agreements" 2>/dev/null
-        cat "$DIR/report" 2>/dev/null
-        echo "=== end matrix ==="
-        echo ""
-        echo "FAIL — $P_CELLS cell(s) checked across 2 of 3 engine(s), native lane did not build; $P_DIS disagree among the two that ran:$P_LIST"
-        exit 1
-    fi
-    nice -n 19 timeout "$RUN_TIMEOUT" "$NATIVE_BIN" > "$DIR/native.raw" 2>"$DIR/native.err"
-    NRC=$?
-    extract_obs "$DIR/native.raw" "$DIR/native.obs"
-    probe_count "$DIR/native.raw" > "$DIR/native.count"
-    NN=$(wc -l < "$DIR/native.obs" | tr -d ' ')
-    echo "  native: rc=$NRC, $NN observation(s)"
-    NAMES="$NAMES native"
-fi
-
-echo "$NAMES" > "$DIR/names"
-: > "$DIR/agreements"
-RESULT=$(compare_engines "$DIR/names" "$DIR")
-CELLS=$(echo "$RESULT" | cut -d'|' -f1)
-ENGINES=$(echo "$RESULT" | cut -d'|' -f2)
-DIS=$(echo "$RESULT" | cut -d'|' -f3)
-LIST=$(echo "$RESULT" | cut -d'|' -f4)
-
-echo ""
-echo "=== full cell matrix ==="
-cat "$DIR/agreements" 2>/dev/null
-cat "$DIR/report" 2>/dev/null
-echo "=== end matrix ==="
-echo ""
-
-# Non-vacuity is absolute. Zero cells, or fewer than two engines, is ERROR —
-# never a pass. This gate is a member of the defect class it defends against.
-if [ "$CELLS" -eq 0 ] || [ "$ENGINES" -lt 2 ]; then
-    echo "ERROR — nothing was checked"
+if [ ! -d test/fixtures/engine_differential ]; then
+    echo "ERROR — fixture corpus test/fixtures/engine_differential is missing; nothing was checked"
     exit 2
 fi
 
-SUFFIX=""
-[ "$QUICK" -eq 1 ] && SUFFIX=" (--quick: native/AOT lane NOT run)"
-
-if [ "$DIS" -gt 0 ]; then
-    echo "FAIL — $CELLS cell(s) checked across $ENGINES engine(s), $DIS disagree:$LIST$SUFFIX"
-    exit 1
+SIMPLE="${SIMPLE_BIN:-bin/simple}"
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — compiler binary '$SIMPLE' not found or not executable; nothing was checked"
+    exit 2
 fi
-echo "PASS — $CELLS cell(s) checked across $ENGINES engine(s), 0 disagreement$SUFFIX"
-exit 0
+
+"$SIMPLE" run scripts/check/check_engine_differential.spl

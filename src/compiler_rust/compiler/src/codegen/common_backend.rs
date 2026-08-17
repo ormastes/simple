@@ -183,12 +183,8 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             )
                         {
                             names.insert(
-                                if *to_ty == TypeId::U64 {
-                                    "rt_value_as_u64"
-                                } else {
-                                    "rt_value_as_int"
-                                }
-                                .to_string(),
+                                if *to_ty == TypeId::U64 { "rt_value_as_u64" } else { "rt_value_as_int" }
+                                    .to_string(),
                             );
                         }
                     }
@@ -392,11 +388,6 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_string_len",
                             "rt_string_starts_with",
                             "rt_string_to_float",
-                            // methods.rs parses a STRING receiver rather than
-                            // bit-converting its pointer; both helpers must be
-                            // pre-declared or the emit fails to resolve them.
-                            "rt_string_to_int",
-                            "rt_value_as_float",
                             "rt_tuple_get",
                             "rt_tuple_len",
                             "rt_tuple_set",

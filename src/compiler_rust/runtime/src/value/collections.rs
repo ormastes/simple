@@ -1838,8 +1838,7 @@ fn free_transient_heap(value: RuntimeValue) {
             | HeapObjectType::Closure
             | HeapObjectType::Enum
             | HeapObjectType::Float
-            | HeapObjectType::UInt
-            | HeapObjectType::Int,
+            | HeapObjectType::UInt,
         ) => unsafe {
             let ptr = value.as_heap_ptr();
             let size = (*ptr).size as usize;

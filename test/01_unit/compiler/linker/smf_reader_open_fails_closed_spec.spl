@@ -1,0 +1,51 @@
+"""
+# `SmfReaderFfi.open` must fail closed on a path that does not exist
+
+**Category:** Linker / SMF reader (reproducer)
+**Bug:** doc/08_tracking/bug/smf_reader_bridge_silent_nil.md
+
+## Overview
+
+`rt_smf_reader_open` is an unregistered extern -- there is no implementation
+anywhere in the tree. An unregistered extern does not fail to link; it yields a
+silent `0`. The guard in `SmfReaderFfi.open` was `handle < 0`, which `0` does
+not satisfy, so `open()` returned `Ok` for EVERY path, including one that does
+not exist, and every subsequent read handed back empty data.
+
+The observable consequence: a missing input object and an empty one were
+indistinguishable. This spec pins the missing-file case as an `Err`.
+
+## Why this spec does not need a subprocess
+
+Unlike the MIR/native-codegen bugs in this cluster, the defect here is in
+library control flow (a guard that could never be true), not in code
+generation. It is equally present interpreted, so an in-process example has
+teeth. The `SIMPLE_BOOTSTRAP`-style native round trip would add ten minutes and
+prove nothing extra.
+"""
+
+use std.spec.*
+use compiler.backend.linker.smf_reader.{SmfReaderFfi}
+
+describe "SmfReaderFfi.open on a nonexistent path":
+
+    it "reports Err rather than a usable-looking reader":
+        step("Open a path that certainly does not exist")
+        val missing = "build/test-artifacts/definitely-not-here-smf_reader_spec.smf"
+        val opened = SmfReaderFfi.open(missing)
+
+        step("The result is Err, not a silently-empty Ok")
+        match opened:
+            case Err(msg):
+                expect(msg).to_contain("no such file")
+                expect(msg).to_contain("definitely-not-here")
+            case Ok(_):
+                # Under the defect this arm is taken and the reader then
+                # answers every read with empty data under exit 0.
+                expect("open() returned Ok for a nonexistent path").to_equal("Err")
+
+    it "does not treat the empty path as openable either":
+        step("The empty string is not a file")
+        match SmfReaderFfi.open(""):
+            case Err(_): expect(true).to_equal(true)
+            case Ok(_): expect("open(\"\") returned Ok").to_equal("Err")

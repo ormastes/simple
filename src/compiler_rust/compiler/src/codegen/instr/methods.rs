@@ -136,43 +136,6 @@ pub(crate) fn compile_builtin_method<M: Module>(
             to_ty,
             TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
         );
-        // A STRING receiver must be PARSED, never bit-converted. Without this,
-        // `text.to_int()` fell through to the generic conversion below, which
-        // assumes `receiver_val` is already a raw numeric register and simply
-        // handed back the string's HEAP POINTER as a "successful" integer --
-        // a large, run-varying value, exit 0, no warning, and `?? -1` could not
-        // rescue it because the cast never reported failure. The sibling
-        // dispatch in `closures_structs.rs::try_compile_builtin_method_call`
-        // has had this branch for a while; this one did not, so which of the
-        // two compiled a given call decided whether it was correct.
-        // See doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md
-        if from_ty == TypeId::STRING && (to_is_int || matches!(to_ty, TypeId::F32 | TypeId::F64)) {
-            let helper = if to_is_int { "rt_string_to_int" } else { "rt_string_to_float" };
-            let parsed = call_runtime_1(ctx, builder, helper, receiver_val);
-            let converted = if to_is_int {
-                match to_ty {
-                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, parsed),
-                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, parsed),
-                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, parsed),
-                    _ => parsed,
-                }
-            } else {
-                // rt_string_to_float returns a heap-boxed RuntimeValue (like
-                // rt_value_float), so it must be unboxed to a genuine raw f64
-                // register rather than used as-is.
-                let raw = call_runtime_1(ctx, builder, "rt_value_as_float", parsed);
-                if to_ty == TypeId::F32 {
-                    builder.ins().fdemote(types::F32, raw)
-                } else {
-                    raw
-                }
-            };
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, converted);
-                ctx.vreg_types.insert(*d, to_ty);
-            }
-            return Ok(());
-        }
         let converted = if from_ty == to_ty {
             receiver_val
         } else if actual_is_float && to_is_int {

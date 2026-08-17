@@ -1,6 +1,7 @@
 # SimpleOS rv64 link aliases lost call targets (`unknown_N`) to real functions via `--defsym`
 
-- **Status:** OPEN — currently inert, but armed
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 04).
 - **Severity:** HIGH (latent memory-safety / wrong-signature calls)
 - **Area:** `src/compiler/70.backend/backend/llvm_native_link.spl`, SimpleOS riscv64 link
 - **Filed:** 2026-07-28
@@ -94,3 +95,38 @@ this text on `main` but not necessarily where the code was originally authored.
 - `doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md`
   — the fabricated-`rt_*` link guard intended to cover the adjacent fail-open
   class on x86_64.
+
+## 2026-08-17 — fail-closed: unknown_N no longer aliased onto real functions
+
+Status: FIXED (link-path half).
+
+Root cause chain, both ends verified against current source on 2026-08-17:
+
+1. `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3396`
+   `symbol_to_operand` names an unresolvable callee `unknown_<symbol-id>`.
+   That is the correct loud behaviour: it reaches the linker undefined.
+2. `src/compiler/70.backend/backend/llvm_native_link.spl:3115-3128` silenced it
+   with thirteen `--defsym=unknown_N=<real kernel function>` arguments on the
+   REAL-KERNEL riscv64 path (`not is_smoke_entry and not
+   uses_freestanding_runtime`), mapping the unknowns onto five functions with
+   unrelated signatures: `rt_riscv_uart_put`, `_uart_put`, `_boot_banner`,
+   `log_raw_println`, `rt_riscv_noalloc_pmm_init`, plus three
+   `rt_riscv_qemu_*` accessors. A call the compiler failed to resolve jumped
+   into an unrelated function with whatever was in the argument registers.
+
+Fix: all thirteen now defsym to `__simple_unresolved_call_trap`, a new function
+emitted into the generated riscv64 stub source (same function that builds the
+defsym list). It writes a message to the UART and halts on `wfi`.
+
+Why this needed no latent-breakage measurement: the set of DEFINED symbol names
+is unchanged, so every link that resolved before still resolves. The change is
+confined to what happens when a lost call is actually TAKEN at runtime — a halt
+with a message instead of silently running another function.
+
+Not proven: that no riscv64 kernel currently depends on one of these aliases
+being taken and behaving benignly. Reaching a trap on a real kernel boot would
+be evidence of a lost call, not a regression of this change.
+
+Spec: `test/01_unit/compiler/backend/unresolved_symbol_alias_fails_closed_spec.spl`
+(similar-problem detection: pins the RULE that no unknown_* may be aliased to a
+working function, not just the thirteen known sites).

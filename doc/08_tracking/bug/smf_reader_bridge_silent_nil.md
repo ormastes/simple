@@ -1,7 +1,8 @@
 # BUG: SMF reader bridge returns silent nil — six unimplemented `rt_smf_reader_*` externs
 
 - **Filed:** 2026-08-01
-- **Status:** OPEN — gate defect fixed and landed; the implement-vs-rescope
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 04).
   decision for the SMF bridge itself needs the **link owner**
 - **Severity:** High. Not a crash — a silent wrong answer. The reader reports
   success for files it never read.
@@ -154,3 +155,27 @@ resolution the owner picks.
 The enumeration table, the absence of implementations, the absence of
 name-variants, the dead `rt_smf_write`, and every gate measurement above are
 **PROVED** by direct grep and by running the gate.
+
+## 2026-08-17 — fail-closed on a nonexistent path
+
+Status: PARTIALLY FIXED.
+
+Reproduced against current source: `rt_smf_reader_open` still has zero
+implementations tree-wide (`git grep` finds only the declaration at
+`smf_reader.spl:61` and its single call site). An unregistered extern returns 0,
+the guard was `handle < 0`, so `open()` returned `Ok` for every path.
+
+Fixed: `SmfReaderFfi.open` now checks `file_exists(path)` first and returns
+`Err("failed to open SMF reader: no such file: ...")`. Behaviour for a path
+that DOES exist is byte-identical, so no caller (link.spl:267,
+object_provider.spl:222, lazy_instantiator.spl:190 — the only three) changes
+outcome on any input it can succeed on today. That bounds the latent breakage
+to zero without needing a full-suite measurement.
+
+Still open (pass_todo retained): the five remaining `rt_smf_reader_read_*`
+externs are still unimplemented, so a file that exists still reads back an
+empty header, no symbols and no sections. The prescribed rework — re-route onto
+`SmfReaderMemory.from_data` and delete the six dead externs — spans the
+SmfReaderImpl/SmfReaderMemory type seam and is unchanged by this commit.
+
+Spec: `test/01_unit/compiler/linker/smf_reader_open_fails_closed_spec.spl`

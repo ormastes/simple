@@ -3009,6 +3009,27 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     stub_src = stub_src + "void rt_riscv64_prefetch_r(uint64_t a){__asm__ volatile(\".option push\\n.option arch,+zicbop\\nprefetch.r 0(%0)\\n.option pop\"::\"r\"(a));}\n"
     stub_src = stub_src + "void rt_riscv64_prefetch_w(uint64_t a){__asm__ volatile(\".option push\\n.option arch,+zicbop\\nprefetch.w 0(%0)\\n.option pop\"::\"r\"(a));}\n"
     stub_src = stub_src + "void rt_riscv64_prefetch_i(uint64_t a){__asm__ volatile(\".option push\\n.option arch,+zicbop\\nprefetch.i 0(%0)\\n.option pop\"::\"r\"(a));}\n"
+    # FAIL-CLOSED TARGET FOR THE `unknown_N` DEFSYM ALIASES.
+    #
+    # `symbol_to_operand` (src/compiler/50.mir/_MirLoweringExpr/
+    # method_calls_literals.spl ~3396) names a callee it could not resolve
+    # `unknown_<symbol-id>`. That reaches the linker as an undefined symbol --
+    # which is loud and correct. The `--defsym=unknown_N=<real function>` block
+    # below used to silence it by aliasing each one onto an UNRELATED kernel
+    # function with an incompatible signature (`_uart_put`, `_boot_banner`,
+    # `log_raw_println`, ...), so a call the compiler failed to resolve
+    # executed some other function's code with whatever happened to be in the
+    # argument registers. That is fail-open: exit 0, a booting kernel, and
+    # silently wrong behaviour.
+    #
+    # The aliases now all point HERE instead. The link still succeeds (the same
+    # symbol names are still defined, so this is not a build-breaking change and
+    # needs no measurement of which unknown_N are live), but reaching one at
+    # runtime prints a message on the UART and halts, instead of running an
+    # unrelated function. A lost call is now observable at the exact moment it
+    # is taken. See doc/08_tracking/bug/
+    # simpleos_riscv64_defsym_unknown_symbol_aliasing_2026-07-28.md.
+    stub_src = stub_src + "void __simple_unresolved_call_trap(void){const char*m=\"\\r\\nFATAL: unresolved call (unknown_N) reached at runtime; MIR lowering failed to resolve a callee\\r\\n\";while(*m)rt_riscv_uart_put((uint64_t)(unsigned char)*m++);for(;;){__asm__ volatile(\"wfi\");}}\n"
     stub_src = stub_src + "typedef struct{int64_t error;int64_t value;} RtRiscv64SbiRet;\n"
     stub_src = stub_src + "RtRiscv64SbiRet rt_riscv64_sbi_call(uint64_t ext,uint64_t fid,uint64_t x0,uint64_t x1,uint64_t x2,uint64_t x3,uint64_t x4,uint64_t x5){register uint64_t a0 __asm__(\"a0\")=x0;register uint64_t a1 __asm__(\"a1\")=x1;register uint64_t a2 __asm__(\"a2\")=x2;register uint64_t a3 __asm__(\"a3\")=x3;register uint64_t a4 __asm__(\"a4\")=x4;register uint64_t a5 __asm__(\"a5\")=x5;register uint64_t a6 __asm__(\"a6\")=fid;register uint64_t a7 __asm__(\"a7\")=ext;__asm__ volatile(\"ecall\":\"+r\"(a0),\"+r\"(a1):\"r\"(a2),\"r\"(a3),\"r\"(a4),\"r\"(a5),\"r\"(a6),\"r\"(a7):\"memory\");RtRiscv64SbiRet r={(int64_t)a0,(int64_t)a1};return r;}\n"
     stub_src = stub_src + "void rt_qemu_exit_success(void){SIFIVE_TEST[0]=0x5555U;for(;;){}}\n"
@@ -3092,19 +3113,12 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     if spl_start != "":
         args.push("--defsym=spl_start={spl_start}")
     if not is_smoke_entry and not uses_freestanding_runtime:
-        args = args.push("--defsym=unknown_0=rt_riscv_uart_put")
-        args = args.push("--defsym=unknown_1=_uart_put")
-        args = args.push("--defsym=unknown_2=rt_riscv_qemu_reserved_end")
-        args = args.push("--defsym=unknown_3=rt_riscv_qemu_ram_base")
-        args = args.push("--defsym=unknown_4=rt_riscv_qemu_heap_size")
-        args = args.push("--defsym=unknown_5=rt_riscv_uart_put")
-        args = args.push("--defsym=unknown_6=_boot_banner")
-        args = args.push("--defsym=unknown_7=rt_riscv_qemu_ram_size")
-        args = args.push("--defsym=unknown_8=_boot_banner")
-        args = args.push("--defsym=unknown_9=log_raw_println")
-        args = args.push("--defsym=unknown_10=_uart_put")
-        args = args.push("--defsym=unknown_11=rt_riscv_noalloc_pmm_init")
-        args = args.push("--defsym=unknown_12=_uart_put")
+        # Every unknown_N resolves to the trap, NOT to an unrelated function.
+        # See __simple_unresolved_call_trap in the stub source above for why.
+        var unknown_idx = 0
+        while unknown_idx <= 12:
+            args = args.push("--defsym=unknown_{unknown_idx}=__simple_unresolved_call_trap")
+            unknown_idx = unknown_idx + 1
     args = args.push(entry_o)
     for obj in user_objects:
         args = args.push(obj)

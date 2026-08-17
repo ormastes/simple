@@ -254,7 +254,6 @@ fn heap_value_eq(a: RuntimeValue, b: RuntimeValue, visited: &mut Vec<(usize, usi
             unsafe { (*sa).as_bytes() == (*sb).as_bytes() }
         }
         (Some(HeapObjectType::UInt), Some(HeapObjectType::UInt)) => a.as_heap_u64() == b.as_heap_u64(),
-        (Some(HeapObjectType::Int), Some(HeapObjectType::Int)) => a.as_heap_i64() == b.as_heap_i64(),
         (Some(HeapObjectType::Enum), Some(HeapObjectType::Enum)) => {
             let Some(ea) = get_typed_ptr::<RuntimeEnum>(a, HeapObjectType::Enum) else {
                 return false;

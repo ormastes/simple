@@ -1,0 +1,94 @@
+"""
+# No link path may alias an UNRESOLVED symbol onto a real function
+
+**Category:** Backend / linker fail-open (similar-problem detection)
+**Bug:** doc/08_tracking/bug/simpleos_riscv64_defsym_unknown_symbol_aliasing_2026-07-28.md
+
+## Overview
+
+When MIR lowering cannot resolve a callee, `symbol_to_operand`
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) names it
+`unknown_<symbol-id>`. That is a deliberately undefined symbol: reaching the
+linker as `undefined symbol: unknown_7` is the LOUD, correct outcome.
+
+The riscv64 real-kernel link path then silenced exactly that signal with
+thirteen `--defsym=unknown_N=<real kernel function>` arguments, mapping the
+unknowns onto `rt_riscv_uart_put`, `_uart_put`, `_boot_banner`,
+`log_raw_println`, `rt_riscv_noalloc_pmm_init` and friends -- functions with
+entirely unrelated signatures. A call the compiler failed to resolve therefore
+did not fail: it jumped into some other function with whatever happened to be
+in the argument registers, and the kernel booted and behaved wrongly under
+exit 0.
+
+## Why this spec is a source-text scan, not a link
+
+Reproducing through an actual riscv64 kernel link needs a cross toolchain, a
+kernel tree and minutes of wall time, and it can only observe ONE unknown_N
+mapping at a time. The defect is a property of the argument list the linker
+driver constructs, and that property is decidable statically. Scanning the
+source catches the whole class in milliseconds -- including a NEW alias added
+later, which is the regression this is really guarding against.
+
+## The generalization
+
+The reproducer would have pinned the thirteen known aliases. This spec instead
+pins the RULE: on any link path, an `unknown_*` symbol may only ever be
+defsym'd to the trap. Any other target -- a function that does real work -- is
+a fail-open by construction, whatever its name.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val LINK_SRC: text = "src/compiler/70.backend/backend/llvm_native_link.spl"
+val TRAP_SYMBOL: text = "__simple_unresolved_call_trap"
+
+fn defsym_unknown_lines() -> text:
+    # `grep` here is a wrapped ugrep honouring .gitignore; the source file is
+    # tracked, so that is fine. Exit status is deliberately not read through a
+    # pipe -- `|| true` keeps a no-match (exit 1) from failing the shell, and
+    # the emptiness of the output is what the assertions test.
+    val out = process_run("sh", ["-c",
+        "/usr/bin/grep -rn -- '--defsym=unknown_' src/compiler/70.backend/ || true"])
+    out.0
+
+describe "an unresolved unknown_N symbol is never aliased onto a working function":
+
+    it "defsyms every unknown_N to the fail-closed trap and to nothing else":
+        step("Collect every --defsym=unknown_ site in the backend")
+        val lines = defsym_unknown_lines()
+
+        step("Refuse to pass vacuously if the scan found no sites at all")
+        # If the defsym block is ever deleted outright this spec must be
+        # rewritten, not silently pass on an empty scan.
+        expect(lines).to_contain("--defsym=unknown_")
+
+        step("The trap is the alias target")
+        expect(lines).to_contain(TRAP_SYMBOL)
+
+        step("None of the known fail-open targets is an alias target")
+        # These are the exact five functions the incident aliased onto. Each is
+        # a real function with an unrelated signature; jumping into any of them
+        # from a lost call is the defect.
+        expect(lines.contains("unknown_0=rt_riscv_uart_put")).to_equal(false)
+        expect(lines.contains("=_uart_put")).to_equal(false)
+        expect(lines.contains("=_boot_banner")).to_equal(false)
+        expect(lines.contains("=log_raw_println")).to_equal(false)
+        expect(lines.contains("=rt_riscv_qemu_ram_base")).to_equal(false)
+        expect(lines.contains("=rt_riscv_qemu_ram_size")).to_equal(false)
+        expect(lines.contains("=rt_riscv_qemu_heap_size")).to_equal(false)
+        expect(lines.contains("=rt_riscv_qemu_reserved_end")).to_equal(false)
+        expect(lines.contains("=rt_riscv_noalloc_pmm_init")).to_equal(false)
+
+    it "defines the trap it aliases to, so the link still resolves":
+        step("The trap must be EMITTED, not merely referenced")
+        # An alias to a symbol nobody defines would trade a silent wrong call
+        # for a broken build. The trap is generated into the riscv64 stub
+        # source in the same function that builds the defsym arguments.
+        # `grep -c` is deliberately NOT used: its count is compared as text and
+        # "10" contains "0", which would make the assertion silently wrong. The
+        # matched LINE is the unambiguous evidence.
+        val defined = process_run("sh", ["-c",
+            "/usr/bin/grep -n 'void " + TRAP_SYMBOL + "(void)' " + LINK_SRC + " || true"])
+        expect(defined.0).to_contain(TRAP_SYMBOL)
+        expect(defined.0).to_contain("wfi")

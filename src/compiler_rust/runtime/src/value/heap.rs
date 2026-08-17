@@ -44,20 +44,6 @@ pub enum HeapObjectType {
     Float = 0x1C,
     /// Heap-backed full-width unsigned integer at erased RuntimeValue boundaries.
     UInt = 0x1D,
-    /// Heap-backed full-width SIGNED integer.
-    ///
-    /// The inline TAG_INT representation is `v << 3`, which keeps only a 61-bit
-    /// signed payload. Any `|v| >= 2^60` had its top 3 bits shifted out and was
-    /// sign-extended back as a DIFFERENT number on unbox: `2^60` flipped sign,
-    /// `2^62` read as `0`, and `i64::MAX` read as `-1`. Wide values are boxed
-    /// here instead, preserving all 64 bits.
-    ///
-    /// This is deliberately NOT `UInt`: that variant means "full-width
-    /// *unsigned*" and its display path renders the payload with
-    /// `u64::to_string`, which would print every wide NEGATIVE i64 as a huge
-    /// positive number. Signedness has to survive the round trip, so it gets
-    /// its own tag.
-    Int = 0x1E,
 }
 
 /// Header for all heap-allocated objects
@@ -91,14 +77,6 @@ pub struct HeapFloat {
 pub struct HeapUInt {
     pub header: HeapHeader,
     pub value: u64,
-}
-
-/// Heap-boxed full-width signed i64 (see `HeapObjectType::Int`). A leaf object,
-/// same shape as `HeapUInt` but carrying signed semantics.
-#[repr(C)]
-pub struct HeapInt {
-    pub header: HeapHeader,
-    pub value: i64,
 }
 
 /// GC flag bits stored in HeapHeader::gc_flags
@@ -523,7 +501,7 @@ impl From<HeapObjectType> for ValueKind {
             HeapObjectType::FfiObject => ValueKind::FfiObject,
             // Heap-boxed float presents as a plain float to the value system.
             HeapObjectType::Float => ValueKind::Float,
-            HeapObjectType::UInt | HeapObjectType::Int => ValueKind::Int,
+            HeapObjectType::UInt => ValueKind::Int,
         }
     }
 }

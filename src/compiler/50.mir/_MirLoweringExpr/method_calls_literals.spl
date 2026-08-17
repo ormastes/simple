@@ -1529,7 +1529,27 @@ impl MirLowering:
             # because nil survives the shift as nil. Route through the shared
             # helper the `d[k]` index read uses, so both readers of rt_dict_get
             # resolve, decode and register identically.
-            return self.lower_dict_runtime_get(receiver, receiver_local, key_local)
+            #
+            # Bug native_dict_get_miss_returns_zero_not_nil_2026-07-28
+            # (re-opened 2026-08-17): routing through the shared helper must
+            # NOT flatten the one way the two readers legitimately DIFFER.
+            # `d[k]` is not an Option and has nowhere to put a miss signal, so
+            # it decodes unconditionally; `d.get(k)` declares `V?` and must
+            # route rt_dict_get's flat nil sentinel (RT_NIL == 3) AROUND
+            # decode_runtime_value, which otherwise destroys it (3 >> 3 -> 0
+            # for an integer, rt_interp_cstr(3) -> NULL for a str).
+            #
+            # This arm called `lower_dict_runtime_get`, which hardcodes
+            # `as_option: false` -- so the entire miss-sentinel guard added on
+            # 2026-08-01 (dict_get_preserve_flat_nil, plus the Option<bool>
+            # raw-word arm) was DEAD CODE: `as_option` was never true at any
+            # call site in the tree. Re-measured 2026-08-17 on a native
+            # --entry-closure build, `Dict<text,i64>` MISS reported NOTNIL and
+            # `?? -77` yielded `0` -- byte-for-byte the "before" column of the
+            # bug doc's table, i.e. a silent regression of a landed fix, not a
+            # residual. Call the `as_option: true` reader directly so the
+            # guard is actually reachable.
+            return self.lower_dict_runtime_read(receiver, receiver_local, key_local, true)
 
         # `.remove(key)` / `.delete(key)` -> rt_dict_remove (mutates in place,
         # returns whether the key was present -- discarded here). The oracle
@@ -3275,8 +3295,24 @@ impl MirLowering:
                 case IntLit(value, _):
                     value
                 case _:
-                    # Non-constant dim: lower to MIR but use 0 as fallback
+                    # SAME FAIL-OPEN CLASS as the unresolved-method const-0
+                    # placeholder further down this file: a value the lowering
+                    # could not determine was replaced by a plausible default
+                    # instead of a diagnostic. Here a NON-CONSTANT dimension
+                    # argument silently became dimension 0, so
+                    # `thread_idx(d)` for a computed `d` read the X index
+                    # whatever `d` was -- wrong data under exit 0.
+                    #
+                    # The intrinsic genuinely requires a compile-time constant
+                    # dimension (it selects which intrinsic to emit), so the
+                    # honest answer is a diagnostic. The `0` is retained only
+                    # as the placeholder the rest of this function needs to
+                    # keep building a well-formed MIR body; the error above
+                    # makes the build fail on every lane that reads it, and
+                    # the print makes it visible on the lanes that do not.
                     val dim_local = self.lower_expr(dim_expr)
+                    self.error("GPU thread-index dimension must be a compile-time constant", nil)
+                    print "[mir-lower] WARNING: non-constant GPU thread-index dimension lowered to dimension 0 (silent-default risk)"
                     0
         else:
             0

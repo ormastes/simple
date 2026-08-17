@@ -18,6 +18,7 @@
 use compiler.backend.linker.obj_taker (SmfSymbol, SymbolType, SymbolBinding)
 use compiler.backend.linker.smf_enums (Platform, Arch, CompressionType)
 use compiler.mono.monomorphize.note_sdn (NoteSdnMetadata)
+use std.io_runtime.{file_exists}
 
 # ============================================================================
 # Rust SFFI Declarations
@@ -70,7 +71,25 @@ struct SmfReaderFfi:
 
 impl SmfReaderFfi:
     static fn open(path: text) -> Result<SmfReaderFfi, text>:
-        pass_todo("rt_smf_reader_open has no implementation; it returns 0, so this reports Ok for any path including a nonexistent one. Re-route onto SmfReaderMemory.from_data", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
+        # FAIL CLOSED on a path that does not exist.
+        #
+        # `rt_smf_reader_open` is an unregistered extern (see the block above):
+        # it returns 0, the `handle < 0` guard below is therefore never true,
+        # and this reported `Ok` for EVERY path -- including one that does not
+        # exist -- after which every read yielded empty data. A missing input
+        # object was indistinguishable from an empty one.
+        #
+        # The existence check is deliberately the whole of the fix here. It
+        # converts the one silent-success case into a diagnostic while leaving
+        # the behaviour for a path that DOES exist byte-identical, so no
+        # existing caller (link.spl, object_provider.spl, lazy_instantiator.spl)
+        # changes outcome on any input it can succeed on today. The deeper
+        # rework -- re-routing onto SmfReaderMemory.from_data and deleting the
+        # six dead externs -- spans the SmfReaderImpl/SmfReaderMemory type seam
+        # and stays filed.
+        if not file_exists(path):
+            return Err("failed to open SMF reader: no such file: {path}")
+        pass_todo("the five remaining rt_smf_reader_* externs have no implementation, so reads still yield empty data on a file that DOES exist. Re-route onto SmfReaderMemory.from_data", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val handle = rt_smf_reader_open(path)
         if handle < 0:
             Err("failed to open SMF reader: {path}")
