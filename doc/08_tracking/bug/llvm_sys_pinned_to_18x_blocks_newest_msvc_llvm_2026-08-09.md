@@ -1,5 +1,8 @@
 # `llvm-sys` pinned to 18.x blocks using the newest MSVC-built LLVM (OPEN, scoped)
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Date: 2026-08-09
 Area: Windows Rust-seed build toolchain, `llvm-sys`/`inkwell` dependency
 
@@ -50,3 +53,24 @@ recent-enough MSVC LLVM build and the bootstrap it produces is fully verified
 (see `directx_windows_probe_and_rust_seed_rebuild_chain_2026-08-09.md`).
 Recording this as a separate, explicitly scoped follow-up rather than silently
 treating "most recent LLVM" as satisfied by the 18.x pin.
+
+## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE, pin located
+
+The pin the doc could not previously locate is indirect, which is why a
+`grep llvm-sys` on `compiler/Cargo.toml` found nothing:
+`src/compiler_rust/compiler/Cargo.toml:105` —
+`inkwell = { version = "0.5", optional = true, features = ["llvm18-0"] }`,
+enabled by `:18` `llvm = ["inkwell"]`. That feature maps to `llvm-sys-180`
+(`src/compiler_rust/vendor/inkwell/Cargo.toml:78-81`) and the vendored crate is
+`version = "180.0.0"` (`src/compiler_rust/vendor/llvm-sys/Cargo.toml:14`). No
+19/20/21 option is wired anywhere. Pin confirmed at 18.x.
+
+## Content re-verification 2026-08-17 (m2_rust_compiler lane) — pin located, OUT OF SCOPE
+
+The pin is not in `src/compiler_rust/compiler/Cargo.toml` (zero `llvm-sys` hits there,
+which is why triage could not confirm it). `llvm-sys` is **vendored**:
+`src/compiler_rust/vendor/llvm-sys/Cargo.toml`, reached via
+`src/compiler_rust/vendor/inkwell`, and recorded in `src/compiler_rust/Cargo.lock:2375`.
+`src/compiler_rust/vendor/**` is excluded third-party source under CLAUDE.md's
+Owned-Code Scope, so this row is not actionable from the compiler crate and is
+an environment/toolchain constraint rather than a silent-wrong-result defect.

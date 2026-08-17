@@ -1,5 +1,8 @@
 # Membership queries (.contains/.has/in): untagged needle in the seed LLVM backend
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-08-02 · **Severity:** medium (latent — lane not currently shipped) · **Area:** seed LLVM codegen
 
 ## Status of the family
@@ -36,3 +39,27 @@ release seed ships without the `llvm` feature, `native-build` delegates to
 the pure-Simple worker, and the `SIMPLE_BOOTSTRAP=1` replay dies on an
 unrelated `'span'` semantic error. Behavioral proof needs an llvm-feature
 seed build.
+
+## 2026-08-17 re-classification (lane s2_rust_codegen) — NOT in the silent-wrong-result class
+
+This row was swept as part of the "CORE + P1 + silently wrong results" batch. It
+does not belong to that class, by this doc's own evidence (line 21): the seed
+LLVM backend **fails closed**, raising `MIR unresolved method call: contains`,
+rather than returning a wrong answer.
+
+That makes it a loud, self-announcing capability gap — the opposite of the defect
+class being hunted, which compiles clean, exits 0, and hands back a wrong result.
+It is still a real open gap and should stay open, but it should not be
+prioritised or triaged as a silent-miscompile row.
+
+No source change made. No reproduction attempted, because a fail-closed
+diagnostic needs none.
+
+## Content re-verification 2026-08-17 (m2_rust_compiler lane) — ALREADY-FIXED
+
+`src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:323` now maps
+`"contains" | "contains_key" | "has_key" | "has" => Some("rt_contains")`, with a
+unit assertion at `emitter.rs:2328`. The documented behaviour was a fail-CLOSED
+gap ("MIR unresolved method call: contains") rather than a miscompile; the method
+is now resolved, so the gap is closed rather than a wrong answer being fixed.
+Not runtime-verified on this host (no seed cargo build under the live bootstrap).

@@ -1,6 +1,7 @@
 # Backend divergence: `index_of` routes to a different runtime symbol under LLVM than under Cranelift/JIT
 
-- **Status:** OPEN
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-07-28
 - **Class:** wrong-answer (silent), backend divergence
 - **Base revision:** origin/main `b410e53a7a2`
@@ -177,3 +178,52 @@ It therefore cannot demonstrate this divergence: on it BOTH backends route to
 `rt_string_find` and every array `index_of` returns -1 identically. All A/B
 evidence above comes from a compiler built from `origin/main` `b410e53a7a2`
 with `--features llvm`.
+
+## 2026-08-17 re-verification (lane s2_rust_codegen) — ALREADY FIXED, closing
+
+Classified by CONTENT of current source, not by commit ancestry (SHA ancestry is
+unsound in this repo — constant rebasing rewrites SHAs).
+
+This doc's own `## Fix` section prescribes retargeting both LLVM emission sites
+to the receiver-polymorphic `rt_index_of`. Both are present in current source:
+
+- `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:356` —
+  `"index_of" => Some("rt_index_of")`, with the surrounding comment block
+  (lines 349-355) recording exactly why it must not go straight to the string
+  symbol.
+- `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:2519` —
+  `"index_of" => Some("rt_index_of")`.
+- Regression assertion present at `emitter.rs:2368`:
+  `assert_eq!(LlvmEmitter::runtime_method_name("index_of"), Some("rt_index_of"))`.
+
+The callee is genuinely receiver-polymorphic —
+`src/compiler_rust/runtime/src/value/collections.rs:5048`
+`rt_index_of` tries `rt_array_index_of` first and falls back to `rt_string_find`
+only when that returns `< 0`. So Cranelift and LLVM now emit the same symbol and
+cannot diverge per backend.
+
+Note for future triage: the worklist evidence line "no `rt_array_index_of`
+emitted" was a mis-specified test. The chosen fix deliberately does NOT emit
+`rt_array_index_of` from codegen — it emits `rt_index_of`, which calls it. Do not
+reopen this row on a grep for `rt_array_index_of` in the backends.
+
+Not proven here: no native LLVM execution was run this session; the evidence
+above is source-level plus the existing in-crate unit assertion.
+
+## Content re-verification 2026-08-17 (m2_rust_compiler lane) — ALREADY-FIXED
+
+The triage evidence looked for `rt_array_index_of` being emitted; the landed fix
+instead routes to a receiver-polymorphic `rt_index_of`, so the grep was a false negative.
+
+- `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:349-356` — `"index_of" => Some("rt_index_of")`,
+  with an explanatory comment naming this exact divergence ("Same source, two different answers per backend").
+- `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:2515-2519` — same mapping on the
+  second LLVM emission path, comment records the old `rt_string_find` misrouting.
+- `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:451-452` declares
+  `rt_index_of` (`&[I64,I64] -> &[I64]`); `src/compiler_rust/runtime/src/value/collections.rs:5049`
+  defines it, tag-dispatching to `rt_array_index_of` then `rt_string_find`.
+- A unit assertion exists at `emitter.rs:2368`:
+  `assert_eq!(LlvmEmitter::runtime_method_name("index_of"), Some("rt_index_of"))`.
+
+Cranelift routes through the same `rt_index_of` tag dispatch
+(`codegen/instr/closures_structs.rs:196`), so the two backends now agree.

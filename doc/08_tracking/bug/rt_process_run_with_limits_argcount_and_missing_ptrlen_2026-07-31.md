@@ -78,3 +78,24 @@ Whoever wires up a call site owns fixing both defects before landing the change.
 ## Cross-Reference
 
 See also: `doc/08_tracking/bug/rt_process_spawn_async_jit_missing_ptr_len_expansion_2026-07-31.md` — the live sibling defect that prompted this audit.
+
+## Content re-verification 2026-08-17 (m2_rust_compiler lane) — ALREADY-FIXED
+
+Classified by CONTENT (grep of current source), not by commit ancestry.
+
+- `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs:1394-1398` now declares
+  `RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64,I64,I64,I64,I64,I64,I64,I64], &[I64])`
+  — **8** I64 params, not the 5 recorded in triage.
+- `src/compiler_rust/runtime/src/value/sffi/env_process.rs:1269-1278` defines the Rust fn
+  with exactly 8 params (`cmd_ptr, cmd_len, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs`).
+  Arities match.
+- The missing ptr/len half is also wired: `codegen/instr/calls.rs:2631-2632` and
+  `codegen/llvm/functions/calls.rs:172-173` both map
+  `"rt_process_run_with_limits" => Some(&[0])`, marking arg 0 as a (ptr, len) pair.
+- A guard comment at `runtime_sffi.rs:1391-1393` now pins the invariant
+  ("Must match the Rust definition ... exactly — an under-declared arity hands the
+  callee garbage registers for the missing parameters").
+
+Not runtime-verified (a seed cargo build was not run on this shared host under a
+live bootstrap), but the declared-vs-defined arity mismatch that constituted the
+defect is gone from the source.

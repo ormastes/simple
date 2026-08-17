@@ -1,5 +1,8 @@
 # JIT Method-Dispatch Worklist — remaining gaps after 2026-07-29 sweeps
 
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 Derived from `doc/08_tracking/bug/jit_method_dispatch_audit_2026-07-29.md`.
 Already-landed methods are NOT relisted: `count`/`drop`/`entries`/`insert`/
 `max`/`min`/`skip`/`sum`/`take` (array insert/max/min/skip/sum/take, dict
@@ -121,3 +124,53 @@ grep + existing dispatch-arm shapes in
 - Every candidate MUST be re-confirmed on a `fn main()`-wrapped probe on the
   freshly-built seed (JIT==interp, [jit-addr]) before landing — the worklist was
   inferred from grep, not run.
+
+## 2026-08-17 partial re-verification (lane s2_rust_codegen) — the `text.reverse` row is STALE
+
+Classified by CONTENT of current source, not by commit ancestry.
+
+The worklist row for `reverse` (table line 48) states: *"none (`rt_string_reverse`
+does not exist) but arm already present as a no-op … wired to nothing (silent
+no-op)"*. That is no longer true, and the triage evidence line
+"`grep -rl rt_string_reverse` returns ZERO hits: runtime fn still absent" is a
+mis-specified test — the implemented design deliberately never introduces a
+symbol by that name.
+
+Current source wires `reverse` to the **receiver-polymorphic** `rt_reverse_mut`:
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs:3656` — `"reverse" => Some("rt_reverse_mut")`
+- `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:2028` — `"reverse" => "rt_reverse_mut"`
+- `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:292` — same mapping, with
+  the assertion at `emitter.rs:2350` pinning it.
+
+And that callee genuinely handles a **text** receiver, not just arrays —
+`src/compiler_rust/runtime/src/value/collections.rs` `rt_reverse_mut`: the array
+branch is tried first (`:3066`), and the text branch at `:3071` returns
+`new_string(&s.chars().rev().collect::<String>())`, falling through to
+`refuse_non_text_receiver("reverse")` (`:3072`) only for a receiver that is
+neither. So there is no silent no-op on this arm.
+
+**Do not close the whole worklist on this.** Only the `reverse` cell is settled.
+The rest of the 63-method worklist was not re-verified here and should be assumed
+live — including the rows this lane spot-checked nothing for (`sort_desc`, `zip`,
+`join`, `parse_float`, `transpose`) and the sibling `reversed` row at line 93,
+which is a genuinely different method and was NOT checked.
+
+### Could NOT prove
+No execution was run for this row; the evidence is source-level only. The
+neighbouring `text.clear` row (line 49), described as the same "arm exists, wired
+wrong" shape, was NOT checked and may still be a live silent no-op.
+
+## Content re-verification 2026-08-17 (m2_rust_compiler lane) — CONFIRMED STILL OPEN
+
+`rt_string_reverse` is absent from every runtime in the tree. Scoped grep over
+`src/compiler_rust/compiler/src`, `src/compiler_rust/runtime/src` and `src/runtime`
+returns only `src/runtime/runtime_native.c:4644 static int64_t rt_string_reverse_chars(RtCoreString*)`
+(file-local, used at :4684 and :4722, never exported). `grep -n reverse` over
+`src/compiler_rust/compiler/src/codegen/instr/methods.rs` returns zero hits — the
+`reverse` arm does not exist there at all any more, so the "no-op arm" description is
+stale in form but the gap is real in substance.
+
+Fixing this needs a new exported `rt_string_reverse` in `src/compiler_rust/runtime/src`
+plus a `RuntimeFuncSpec` and a dispatch arm; the runtime crate is outside the
+`src/compiler_rust/compiler/**` scope of this lane, so it was not attempted.
+Wiring the arm alone would emit a call to a nonexistent symbol.

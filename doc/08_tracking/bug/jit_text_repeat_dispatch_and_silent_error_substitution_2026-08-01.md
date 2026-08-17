@@ -1,7 +1,8 @@
 # JIT text-method dispatch gap silently substitutes the string `error`
 
 - **ID:** jit_text_repeat_dispatch_and_silent_error_substitution_2026-08-01
-- **Status:** partially fixed -- 49 of 51 sibling methods wired; **2 remain**
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   (`parse_i64`, `ptr`), both blocked on a decision rather than on transcription.
   See the batch 5 section at the end for why.
 - **Severity:** critical — silent, zero-exit data corruption that can reach files on disk
@@ -690,3 +691,21 @@ source files reverted. Identical failure list, identical pass count:
 
 None of the three batches in this document adds a failure. They are recorded
 here so a later lane does not attribute them to this work.
+
+## Content re-verification 2026-08-17 (m2_rust_compiler lane) — PARTIALLY FIXED, 1 arm left
+
+Of the two arms this doc recorded as unwired:
+
+- **`repeat` is now wired.** `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:2058`
+  (`"repeat" => "rt_string_repeat"`) and `codegen/instr/calls.rs:3502`
+  (`"repeat" => Some("rt_string_repeat")`).
+- **The literal-`"error"` substitution is gone.** `grep -n '"error"' src/compiler_rust/compiler/src/codegen/instr/`
+  returns zero hits, so nothing in the instr dispatch layer can substitute that string any more.
+- **`reverse` is still unwired and STILL A REAL GAP.**
+  `grep -n reverse src/compiler_rust/compiler/src/codegen/instr/methods.rs` returns zero hits, and
+  `rt_string_reverse` does not exist anywhere in `src/compiler_rust/runtime/src` or `src/runtime`
+  — the only near-match is the file-local C helper `rt_string_reverse_chars`
+  (`src/runtime/runtime_native.c:4644`), which is `static` and not an exported runtime symbol.
+  Closing this requires a new exported runtime function (outside `src/compiler_rust/compiler/**`),
+  so it was not attempted by this lane. This is the same residual tracked by
+  `jit_dispatch_worklist_2026-07-29.md`.
