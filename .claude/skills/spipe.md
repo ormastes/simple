@@ -2483,3 +2483,15 @@ under pressure (a 3.1 GB worker died at 9.97% free), so treat a vanished
 runner as possible OOM, not a matcher bug. For fleet-style sweeps, run
 per-directory under `timeout` and drop to per-file on crash so one crashing
 spec never stops the sweep.
+
+Later 2026-08-17: a frozen rsync bootstrap tree must keep vendored `gen/`
+dirs (`vendor/typenum/src/gen` — a blanket `--exclude 'gen/'` breaks offline
+cargo) and a `.git` (the stage engine binds Stage-3 git HEAD/dirty state).
+The planner-admission-v2 gate is unconditionally fail-closed and blocks all
+bootstraps (`doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md`;
+last working script: `b1ff6537ed8`). Incremental profile clamps selfhost
+jobs to 2 — patch to 16 on a big box (8 under 40 GB free). If two phase-1
+generations land before phase 2 starts, phase 2 takes the NEWEST; never stop
+at first failure — collect all problems through phase 4. Every bug fix ships
+a reproducing spec plus a similar-problem generalization spec, cited in the
+bug doc.

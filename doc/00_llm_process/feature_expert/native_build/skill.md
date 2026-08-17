@@ -133,3 +133,8 @@ find-and-fix, go per-directory under `timeout` and drop to per-file on crash;
 fixes landed in the source tree get compiled into later stages for free.
 Runtime parity note: `rt_file_atomic_write` now exists in the Rust staticlib
 (`src/compiler_rust/native_all/src/lib.rs:1155`).
+
+Standing test rule (2026-08-17): every native-build bug fix ships a spec
+reproducing the exact defect plus a generalization spec probing similar
+problems nearby, both cited in the bug doc. A fix without its reproducing
+spec is not done.

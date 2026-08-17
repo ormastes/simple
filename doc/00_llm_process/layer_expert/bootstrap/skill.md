@@ -435,3 +435,28 @@ emulation (`208f11786f8`: DELETE WHERE fail-closed, real BEGIN/ROLLBACK
 snapshots, UNIQUE), argv publish for delegated subcommands (`bdafd9d5b5a`,
 `rt_set_args_vec`), `rt_file_atomic_write` in the Rust staticlib
 (`src/compiler_rust/native_all/src/lib.rs:1155`).
+
+## Snapshot-tree bootstrap gotchas (2026-08-17, later same day)
+
+- **A frozen rsync tree must include vendored `gen/` dirs AND a `.git`.** A
+  blanket `--exclude 'gen/'` stripped `src/compiler_rust/vendor/typenum/src/gen`
+  and broke offline cargo (vendored checksums no longer match). And the stage
+  engine binds Stage-3 identity to git HEAD/dirty state, so a snapshot tree
+  without `.git` fails there too. Snapshot = full tree minus build outputs only.
+- **planner-admission-v2 gate is unconditionally fail-closed** — it currently
+  blocks ALL bootstraps; see
+  `doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md`.
+  Last known-working script version: `b1ff6537ed8` ("feat: add admitted Stage4
+  resume checkpoint").
+- **Incremental profile clamps `selfhost_jobs` to 2**
+  (`scripts/bootstrap/bootstrap-from-scratch.sh:815-819`). On a big box patch
+  to 16 (fallback 8 when free memory < 40 GB) — the clamp is tuned for small
+  machines.
+- **Phase-generation rule:** if two phase-1 generations land before phase 2
+  starts, phase 2 uses the NEWEST. Phases never stop at the first failure when
+  forward progress is possible — collect ALL problems through phase 4, then
+  fix in one pass.
+
+**Standing test rule:** every bug fix ships (1) a spec reproducing the exact
+defect and (2) a generalization spec probing similar problems nearby, both
+cited in the bug doc. A fix without its reproducing spec is not done.
