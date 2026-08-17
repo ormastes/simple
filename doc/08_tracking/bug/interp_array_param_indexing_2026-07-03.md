@@ -502,3 +502,83 @@ LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
 Any "re-verified by source inspection" stamp above is void per repo policy.
 Full method, population counts and probe paths:
 `<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.
+
+---
+
+## ROOT CAUSE PROVEN + FIXED — isolated ablation 2026-08-17
+
+`src/compiler_rust/compiler/src/hir/lower/expr/operators.rs:53` typed an
+arithmetic binary expression as `left_hir.ty` — the RIGHT operand's type was
+never consulted:
+
+```rust
+ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In | ast::BinOp::NotIn => TypeId::BOOL,
+_ => left_hir.ty,
+```
+
+`mir/lower/lowering_expr_ops.rs` deliberately RE-BOXES the result of an
+arithmetic/bit op that had an ANY operand (a consumer of an ANY value always
+decodes the tag-boxed form — `seed_mir_any_binop_result_unboxed_2026-08-15.md`).
+The consumer's unbox decision is made by `unbox_scalar_for_raw_slot`, which
+gates on this very TypeId. So whenever the ANY operand was on the RIGHT the
+expression was typed `i64`, the unbox was skipped, and the caller read `v << 3`.
+ANY-on-the-left and ANY-on-both already produced `ANY` here and were correct —
+exactly the measured asymmetry.
+
+Fix: propagate `TypeId::ANY` when the left side is concrete and the right side is
+ANY. Deliberately mirrors the MIR guard, which only unboxes/re-boxes when the
+concrete side is a NUMERIC scalar, so `"s" + any_value` (string concat) is not
+covered there and is not retyped here.
+
+### Ablation (isolated — the first attempt was confounded, see below)
+
+Both binaries built from the SAME working tree, differing ONLY by the hunk
+above. Distinct by checksum. Verdict lines verbatim, `rc` read from a variable
+on the line after the command.
+
+| arm | binary md5 | rc | verdict |
+|---|---|---|---|
+| A — hunk REVERTED | `ec0ec6a0858ec3ee2aef5bb787934124` | 1 | `FAIL — 16 probe(s) checked, divergent/wrong: rsub(want=90 interp=90 jit=720) any_right_add(want=11 interp=11 jit=88) any_right_mul(want=20 interp=20 jit=160) any_right_div(want=10 interp=10 jit=80)` |
+| B — hunk APPLIED | `3634279b567eec8488db049dd5ed99c0` | 0 | `PASS — 16 probe(s) checked, interpreter and jit agree on every array-parameter element read` |
+
+The control genuinely fails, naming all four ANY-on-the-right shapes, so the
+gate is discriminating and not vacuous.
+
+Regression sweep, same two binaries, 40 fixtures under `SIMPLE_EXECUTION_MODE=jit`,
+byte-comparing full stdout+stderr: **39 IDENTICAL, 1 DIVERGED** — the diverged
+one being this row's own fixture, i.e. the intended change and nothing else.
+
+### Why the FIRST ablation did not count (recorded, not buried)
+
+The first pair of arms was built ~16 minutes apart from a SHARED worktree that
+~16 other lanes edit live. At the time of the second build three other lanes had
+uncommitted modifications under `src/compiler_rust/`, one of them
+`hir/lower/stmt_lowering.rs` — the same subsystem. The two builds therefore
+differed by more than the hunk under test, so that ablation proved nothing about
+attribution even though its arms read FAIL then PASS.
+
+The tell was in the regression sweep: it reported 3 diverged fixtures, two of
+which (`enum_runtime_identity_guard`, `native_repeated_text_result_probe`)
+differed only by emitting FEWER "Deprecated syntax for type parameters"
+warnings. Those sites are `>=` and `!=` comparisons, which take the
+`TypeId::BOOL` branch this hunk cannot reach — so the hunk could not explain
+them. Re-running with isolated arms dropped them, confirming they came from the
+concurrent edits. Predicting that BEFORE re-measuring, and re-measuring anyway,
+is what separates this from the earlier "re-verified by source inspection"
+stamps that were wrong 3/3.
+
+Two adjacent traps hit in the process, both caught by checksum rather than
+assumption, both worth knowing:
+
+- A control build failed transiently (`BUILD_RC=101`, cargo "failed to determine
+  package fingerprint"), so no new binary was produced, and the follow-on `cp`
+  silently captured the WITH-FIX binary under the name `simple_NOFIX_clean`.
+  Running the ablation against that would have compared a binary to ITSELF and
+  "proven" anything asked of it. Arms are now pinned by md5, printed in the
+  table above.
+- `cargo test -p simple-compiler --lib` was first run as `... | tail -25; echo
+  "TEST_RC=$?"`, which reads `tail`'s status, not cargo's. It printed
+  `TEST_RC=0` while the real summary was
+  `test result: FAILED. 3671 passed; 67 failed`. This is precisely the pipeline
+  false-green the repo rules warn about; the rc must be read from a variable on
+  the line AFTER the command.

@@ -50,6 +50,40 @@ impl Lowerer {
             // it decoded the raw 0/1 as a heap handle ("nil"/"0"). Branching
             // still worked, which is why this hid behind `if x not in y`.
             ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In | ast::BinOp::NotIn => TypeId::BOOL,
+            // An arithmetic/bit op with an ANY operand has an ANY RESULT, because
+            // `mir/lower/lowering_expr_ops.rs` deliberately RE-BOXES that result
+            // (a consumer of an ANY value always decodes the tag-boxed form; see
+            // seed_mir_any_binop_result_unboxed_2026-08-15.md). Typing the
+            // expression from `left_hir.ty` alone lost that whenever the ANY
+            // operand was on the RIGHT: `unbox_scalar_for_raw_slot` gates on this
+            // very TypeId, so `return 1 + a.get(0)` in a `-> i64` fn saw `i64`,
+            // skipped the unbox, and returned `v << 3`. Measured 2026-08-17:
+            // `a.get(0)+1` -> 11 correct but `1+a.get(0)` -> 88 == 11<<3, and
+            // likewise 100-a.get(0) -> 720, 2*a.get(0) -> 160, 100/a.get(0) -> 80.
+            // ANY-on-the-left and ANY-on-both already yielded ANY here and were
+            // correct, which is exactly the asymmetry this closes.
+            //
+            // Mirrors the MIR guard precisely: that band-aid only unboxes/re-boxes
+            // when the concrete side is a numeric scalar, so `"s" + any_value`
+            // (string concat) is NOT covered there and must NOT be retyped here.
+            _ if left_hir.ty != TypeId::ANY
+                && right_hir.ty == TypeId::ANY
+                && matches!(
+                    left_hir.ty,
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                ) =>
+            {
+                TypeId::ANY
+            }
             _ => left_hir.ty,
         };
 
