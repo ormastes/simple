@@ -65,3 +65,36 @@ Root-cause the Any-erasure path so an undeclared return type infers the
 trailing expression's type instead of dropping the value, and so an untyped
 parameter's indexed read is unboxed before returning. A/B against the
 interpreter, JIT, and native engines.
+
+## RE-VERIFIED 2026-08-17 — STILL LIVE, reproduced on a freshly built seed
+
+Seed built from current `src/compiler_rust` (`BUILDRC=0`, binary 2026-08-17
+08:15). Probe: `test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl`.
+
+    SIMPLE_EXECUTION_MODE=jit
+      FAIL untyped_fn_result_add got=<value:0x5> want=5
+      FAIL untyped_fn_result_id  got=<value:0x7> want=7
+    SIMPLE_EXECUTION_MODE=interpreter
+      PASS untyped_fn_result_add
+      PASS untyped_fn_result_id
+
+Refinement of the title: the result is NOT erased to zero. The correct value
+IS present (`0x5` is 5, `0x7` is 7) but its static type is `TypeId::ANY`, so
+the value reaches the rendering site still TAGGED and prints `<value:0x..>`
+instead of the number. Same silent-wrong-result class, different mechanism —
+the boxing is never undone rather than the value being lost.
+
+Fixture shape (`fn untyped_result(a: i64, b: i64): return a + b` — no declared
+return type). The interpreter is correct because it decodes the tag
+dynamically per value; the JIT makes the decision statically and has no type
+to make it from.
+
+Not fixed in this pass: unlike the chained-builtin sibling below, there is no
+per-callee name to classify — the fix is to infer the return type from the
+body's return expressions in `hir/lower/type_resolver.rs`, or to emit a
+dynamic `UnboxInt` (now total via `rt_value_unbox_int`) at the consumption
+site. Both are larger than a lookup-table entry and were not attempted here.
+
+Detection spec: `test/01_unit/compiler/codegen/any_typed_value_consumption_class_spec.spl`
+(the `renders an untyped function result as a number` example is RED by design
+until this is fixed).

@@ -203,3 +203,23 @@ test. Cover `ends_with` and `contains` too.
   receivers … chains fail only when a link's receiver type is erased." This
   bug is that documented hazard biting inside the compiler's own resolution,
   not just in user code.
+
+## RE-VERIFIED 2026-08-17 — DID NOT REPRODUCE
+
+Fixture: a `struct ByteSpanLike` with its own `starts_with(self, p: i64) -> bool`
+method declared in the same module as a `text.starts_with(text)` call, which is
+the name collision this doc describes.
+
+    R14 span   = true      (bs.starts_with(3), off == 3)
+    R14 text   = true      ("hello".starts_with("he"))
+
+Both dispatch correctly; neither call resolved to the other's implementation.
+Run on the deployed seed AND consistent with a seed freshly built from current
+source. `builtin_method_result_type`
+(`codegen/instr/closures_structs.rs:1390`) also now classifies `starts_with`
+as `TypeId::BOOL` on every receiver.
+
+**Status: candidate CLOSE.** Not proven for every collision shape — only for a
+user struct method colliding with a text builtin of the same name and arity in
+one module. A lane with the original failing program should re-check before
+closing outright.

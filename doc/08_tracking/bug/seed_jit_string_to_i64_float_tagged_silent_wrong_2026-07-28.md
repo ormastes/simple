@@ -202,3 +202,103 @@ types** in Simple source:
 `core_bdd.spl` is the native/freestanding SPipe BDD subset and does not run
 through the seed interpreter, so the two do not collide today. If that file
 ever runs interpreted, the declarations disagree about the encoding.
+
+## REPRODUCED AND FIXED 2026-08-17
+
+### Reproduced on a freshly built seed
+
+Seed built from current `src/compiler_rust` in an isolated `CARGO_TARGET_DIR`
+(`cargo build --release --bin simple`, `BUILDRC=0`, binary 2026-08-17 08:15;
+rc read on the line AFTER the command, never through a pipe).
+Probe: `test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl`.
+
+    SIMPLE_EXECUTION_MODE=jit   (BEFORE)
+      PASS text_to_i64_direct
+      FAIL text_to_i64_after_trim    got=2887700398081 want=42
+      FAIL text_to_i64_after_upper   got=2887700397953 want=42
+      PASS text_to_i64_after_replace
+    SIMPLE_EXECUTION_MODE=interpreter (control arm, correct throughout)
+      PASS on every entry
+
+The returned values are HEAP POINTERS (they change between runs — an earlier
+run on the deployed seed produced 5214297603201/5214297603425), not a
+float-tagged number as the title says. Exit 0, no error, no warning.
+
+The UNCHAINED form `"42".to_i64()` was always correct: it records a STRING
+receiver type, so `to_int` takes the `from_ty == TypeId::STRING` branch that
+routes to `rt_string_to_int`. The CHAINED form has no recorded receiver type
+and the numeric-cast block defaults a missing type to `TypeId::I64`
+(`unwrap_or(TypeId::I64)`), falling into the generic raw-register conversion
+that hands back the intermediate text's pointer.
+
+### Root cause
+
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`,
+`builtin_method_result_type` (definition at :1390, called at :600, :642, :1116).
+
+That helper already existed and was written for exactly this defect, but every
+text-in/text-out method was gated on `receiver_ty == Some(TypeId::STRING)` —
+i.e. it declined to classify precisely when the receiver type was unknown,
+which is the only situation a chained builtin can produce. It was therefore
+inert for its own motivating case. (This also explains the triage note "no
+retag landed": the doc comment there describes the fix, not the bug.)
+
+### Fix
+
+Split the arm. `trim`/`trim_start`/`trim_end`/`to_upper`/`to_uppercase`/
+`to_lower`/`to_lowercase`/`char_at`/`replace` exist on a text receiver and on
+NO other receiver, so classifying their result as `TypeId::STRING`
+unconditionally cannot mis-type anything else. `substring`/`slice`/`concat`
+stay receiver-gated because they are shared with array receivers, where the
+result is an array rather than text.
+
+### After — same probe, same freshly built seed, patch applied (BUILDRC=0)
+
+    SIMPLE_EXECUTION_MODE=jit
+      PASS text_to_i64_direct
+      PASS text_to_i64_after_trim
+      PASS text_to_i64_after_upper
+      PASS text_to_i64_after_replace
+    SIMPLE_EXECUTION_MODE=interpreter
+      ANY_TYPED_CONSUMPTION PROBE: ALL PASS
+
+### Specs
+
+- reproducing: `test/01_unit/compiler/codegen/chained_text_builtin_to_int_spec.spl`
+- class detection: `test/01_unit/compiler/codegen/any_typed_value_consumption_class_spec.spl`
+- shared run-path probe: `test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl`
+
+Both specs shell out to the probe under BOTH engines, because a spec body runs
+INTERPRETED and the interpreter was correct here throughout — an in-process
+example can never go red on this defect.
+
+### Shared root cause with two sibling rows
+
+This is one of three separately-filed P1 rows that are the same defect class:
+an ANY-typed value reaching a consumption site that handles the raw tagged
+word instead of decoding it. See
+`untyped_list_element_read_seed_rootcause_2026-07-30.md` (already fixed
+in-tree) and `untyped_fn_result_erased_to_zero_2026-08-01.md` (still live).
+
+### Spec-level RED -> GREEN (both quoted, same spec file, same test runner)
+
+The only variable between the two runs is `SIMPLE_BIN`, i.e. which seed the
+spec's subprocess executes. `SPECRC` was assigned on the line AFTER the
+command, never through a pipe.
+
+    SIMPLE_BIN = deployed seed (defect present)
+      SPEC FILE VERDICT: ... declared>=3 executed=3 passed=1 failed=2 dropped=0
+      Results: 3 total, 1 passed, 2 failed
+      SPECRC=1
+
+    SIMPLE_BIN = seed built from current source WITH the patch (BUILDRC=0)
+      SPEC FILE VERDICT: ... declared>=3 executed=3 passed=3 failed=0 dropped=0
+      Results: 3 total, 3 passed, 0 failed
+      SPECRC=0
+
+`executed=3` in both runs, so neither verdict is vacuous.
+
+Host note: an earlier attempt at the RED run, made while 99 `simple` processes
+were live, returned `timeout=1 reason=daemon-no-response` with no `Results:`
+line. That is UNVERIFIED, not RED — it is not quoted as evidence above. The
+RED line above comes from a later, completed run.
