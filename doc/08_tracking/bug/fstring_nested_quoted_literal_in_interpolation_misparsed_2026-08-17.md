@@ -1,4 +1,8 @@
-# f-string: a nested double-quoted literal inside an interpolation is mis-parsed
+# f-string: a string literal on the RHS of `??` inside an interpolation is mis-parsed
+
+(Filename says "nested quoted literal" — that was the initial, and wrong,
+characterisation. The trigger is specifically the `??` right-hand side; see the
+isolation table below. Filename kept stable so existing references still resolve.)
 
 - **Filed:** 2026-08-17
 - **Status:** OPEN (grammar defect unfixed); the one load-bearing call site is worked around
@@ -8,15 +12,37 @@
 
 ## Symptom
 
-A double-quoted string literal nested inside an f-string interpolation is
-mis-parsed. The interpolation scanner terminates the inner literal early, so the
-literal's *contents* are then read as an expression — a bare identifier in call
-position:
+A string literal on the right-hand side of `??` inside an f-string interpolation is
+mis-parsed. The scanner terminates that literal early, so its *contents* are then
+read as an expression — a bare identifier, in call or variable position:
 
 ```
 error[E1002]: function `TMPDIR` not found
   = help: check the function name or import the module that defines it
 ```
+
+## The trigger is `??` with a string-literal RHS — NOT nested quotes generally
+
+**Corrected after further isolation.** An earlier draft of this row blamed "a
+nested double-quoted literal inside an interpolation". That is measurably WRONG
+and would have misdirected the fix. Isolation, same binary:
+
+| variant | source | rc | result |
+|---|---|---|---|
+| A | `"{pick("TMPDIR")}/x.log"` — nested literal as a call ARG, no `??` | **0** | PASSES, prints `p=TMPDIR/x.log` |
+| B | `"{q ?? "/tmp"}/x.log"` — string literal as `??` RHS, no nested call | **1** | ``error: semantic: variable `tmp` not found`` |
+| A+B | `"{pick("TMPDIR") ?? "/tmp"}/x.log"` | **1** | ``error[E1002]: function `TMPDIR` not found`` |
+
+Variant A **passes**, so nested quoting inside an interpolation is fine on its
+own. The necessary element is a **string literal on the right-hand side of `??`
+inside an f-string interpolation**.
+
+Variant B's error text pins the mechanism exactly: the reported missing name is
+`tmp`, which is the *tail* of the literal `"/tmp"`. The scanner ends the literal
+at the `"/` and then parses the remainder, `tmp`, as an identifier. When a nested
+call argument is also present (A+B) the corrupted scan surfaces on the earlier
+token instead, which is why the original symptom named `TMPDIR` rather than `tmp`
+and sent this investigation toward the wrong hypothesis.
 
 ## Minimal repro — 6 lines, no imports
 
@@ -64,18 +90,34 @@ sites repo-wide:
 - `src/app/cli/native_build_main.spl:226` — **worked around** (hoisted to a local,
   with a comment pointing here). This is the load-bearing one.
 - `src/lib/nogc_sync_mut/debug_doctor/matrix.spl:335` —
-  `"{_pad("target", target_w)}  {_pad("attach", attach_w)}  ..."`. **NOT yet
-  verified** to fail; it is left untouched deliberately so a real repro of the
-  grammar defect survives in-tree. Whoever fixes the grammar should check it.
+  `"{_pad("target", target_w)}  {_pad("attach", attach_w)}  ..."`. **VERIFIED
+  UNAFFECTED** — reproduced as a standalone fixture, rc=**0**, prints
+  `target  attach  profile`. It has nested literals but no `??`, i.e. it is
+  variant A above. Correctly left untouched: it was never broken.
+
+So after the fix there are **zero** affected sites in tree, and the grammar defect
+has **no** surviving in-tree reproducer. The 6-line fixture in this row is the
+reproducer; a regression spec should be added when the grammar is fixed.
 
 ## Real fix (not done here)
 
 The workaround normalises the call site; per the repo rule against silently
 normalising a failing short form, the grammar itself is the defect and is
-recorded here rather than treated as closed. The fix belongs in the f-string
-interpolation scanner: when scanning an interpolation, string literals inside the
-braces must be consumed as literals, with brace/quote nesting tracked, instead of
-the interpolation being delimited by a naive scan to the next `"` or `}`.
+recorded here rather than treated as closed.
+
+The fix belongs in the f-string interpolation scanner, and the isolation above
+narrows *where*: literals as call arguments are already consumed correctly
+(variant A passes), so the naive-scan-to-next-quote theory cannot be the whole
+story. What fails is the literal after the `??` operator. The likely shape is that
+the interpolation's expression scanner has a special path for `??` — or stops
+tracking quote state once it has seen an operator at that precedence — and hands
+the RHS to a scan that terminates the literal at `"/`. Anyone fixing this should
+start by finding why the `??` RHS position is scanned differently from an argument
+position, rather than rewriting the whole interpolation scanner.
+
+Regression coverage to add with the fix: all three variants above, since a fix
+that only repairs A+B while leaving bare B broken would look green on the original
+symptom.
 
 ## Not related to the receiver-erasure hypothesis
 
