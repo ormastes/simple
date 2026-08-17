@@ -66,6 +66,12 @@ fn sheet_grid_text(sheet: Sheet) -> text:
         c = c + 1
     var r = start.row
     while r <= end_ref.row:
+        # Hidden rows are omitted entirely, matching the GUI grid render
+        # (gui.spl) — the row numbers stay the sheet's own, so a gap in the
+        # numbering is how a hidden row shows up, same as in Calc.
+        if sheet.is_row_hidden((r + 1).to_i64()):
+            r = r + 1
+            continue
         out = "{out}\n{_pad("{r + 1}", 4)}"
         ci = 0
         c = start.col
@@ -114,14 +120,14 @@ fn editor_apply(sheet: Sheet, line: text) -> EditorStep:
     surface, testable without a terminal.
 
     Commands: set <ref> <value> | get <ref> | del <ref> | show |
-              save <path> | help | quit"""
+              hide <row> | unhide <row> | save <path> | help | quit"""
     val trimmed = line.trim()
     if trimmed == "" or trimmed == "quit" or trimmed == "exit":
         return _step(sheet, "bye", true)
     val parts = trimmed.split(" ")
     val cmd = parts[0].lower()
     if cmd == "help":
-        return _step(sheet, "commands: set <ref> <value> | get <ref> | del <ref> | show | save <path> | quit", false)
+        return _step(sheet, "commands: set <ref> <value> | get <ref> | del <ref> | show | hide <row> | unhide <row> | save <path> | quit", false)
     if cmd == "show":
         return _step(sheet, sheet_grid_text(sheet), false)
     if cmd == "get" and parts.len() >= 2:
@@ -143,6 +149,18 @@ fn editor_apply(sheet: Sheet, line: text) -> EditorStep:
         sh.set_value(ref_str, value)
         sh = recalculate_formula_cells(sh)
         return _step(sh, "{ref_str} = {cell_display_text(sh.get_cell(ref_str))}", false)
+    if (cmd == "hide" or cmd == "unhide") and parts.len() >= 2:
+        val row_num = parts[1].to_i64()
+        # to_i64 yields 0 for non-numeric text, and rows are 1-based, so 0 is
+        # rejected either way; the upper bound is Sheet.hide_row's own.
+        if row_num < 1 or row_num > sheet.row_count.to_i64():
+            return _step(sheet, "error: invalid row {parts[1]}", false)
+        var sh = sheet
+        if cmd == "hide":
+            sh.hide_row(row_num)
+            return _step(sh, "hid row {row_num}", false)
+        sh.unhide_row(row_num)
+        return _step(sh, "unhid row {row_num}", false)
     if cmd == "save" and parts.len() >= 2:
         if editor_save_sheet(sheet, parts[1]):
             return _step(sheet, "saved {parts[1]}", false)

@@ -153,3 +153,58 @@ describe "interactive editor: hidden-row cursor awareness":
         s = tui_apply_key(s, 67)   # C -> right
         expect(s.cur.col).to_equal(1)
         expect(s.cur.row).to_equal(0)
+
+describe "interactive editor: hide/unhide row commands":
+    it "hide removes the row from the rendered grid, unhide restores it":
+        var sh = Sheet.new("h")
+        var step = editor_apply(sh, "set A1 top")
+        step = editor_apply(step.sheet, "set A2 middle")
+        step = editor_apply(step.sheet, "set A3 bottom")
+        expect(sheet_grid_text(step.sheet)).to_contain("middle")
+        step = editor_apply(step.sheet, "hide 2")
+        expect(step.reply).to_equal("hid row 2")
+        val hidden_view = sheet_grid_text(step.sheet)
+        expect(hidden_view.contains("middle")).to_equal(false)
+        expect(hidden_view).to_contain("top")
+        expect(hidden_view).to_contain("bottom")
+        step = editor_apply(step.sheet, "unhide 2")
+        expect(step.reply).to_equal("unhid row 2")
+        expect(sheet_grid_text(step.sheet)).to_contain("middle")
+
+    it "hiding a row does not delete its data":
+        var sh = Sheet.new("h")
+        var step = editor_apply(sh, "set A2 keepme")
+        step = editor_apply(step.sheet, "hide 2")
+        step = editor_apply(step.sheet, "get A2")
+        expect(step.reply).to_equal("A2 = keepme")
+
+    it "hidden rows still feed formulas":
+        var sh = Sheet.new("h")
+        var step = editor_apply(sh, "set A1 10")
+        step = editor_apply(step.sheet, "set A2 32")
+        step = editor_apply(step.sheet, "hide 2")
+        step = editor_apply(step.sheet, "set B1 =A1+A2")
+        expect(step.reply).to_equal("B1 = 42")
+
+    it "rejects a non-numeric or out-of-range row":
+        var sh = Sheet.new("h")
+        expect(editor_apply(sh, "hide zero").reply).to_start_with("error:")
+        expect(editor_apply(sh, "hide 0").reply).to_start_with("error:")
+        expect(editor_apply(sh, "hide -1").reply).to_start_with("error:")
+        expect(editor_apply(sh, "unhide 99999").reply).to_start_with("error:")
+
+    it "hide is idempotent and unhide of a visible row is a no-op":
+        var sh = Sheet.new("h")
+        var step = editor_apply(sh, "set A1 x")
+        step = editor_apply(step.sheet, "hide 1")
+        step = editor_apply(step.sheet, "hide 1")
+        expect(step.reply).to_equal("hid row 1")
+        step = editor_apply(step.sheet, "unhide 1")
+        step = editor_apply(step.sheet, "unhide 1")
+        expect(step.reply).to_equal("unhid row 1")
+        expect(sheet_grid_text(step.sheet)).to_contain("x")
+
+    it "advertises the new commands in help":
+        val reply = editor_apply(Sheet.new("h"), "help").reply
+        expect(reply).to_contain("hide <row>")
+        expect(reply).to_contain("unhide <row>")
