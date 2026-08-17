@@ -76,7 +76,7 @@ The gaps are elsewhere — see below.
 | A | `test_runner_args.spl`, `test_runner_types.spl` | DONE `a3738dd8d0c` |
 | B | `test_executor_parsing.spl`, `test_runner_output.spl` | DONE `882fb6e31ea` |
 | C | `test/fixtures/unstable_mode/**` (new files only) | pending |
-| D | `test_runner_main.spl` | pending |
+| D | `test_runner_main.spl` | DONE `e37cc015713` |
 | E | requirement doc + LLM wiki | DONE `32a5d018082` |
 
 ## Log
@@ -130,3 +130,29 @@ The gaps are elsewhere — see below.
   - **`total_timed_out` aggregation in `test_runner_modes.spl:261-374` is
     COMMENTED OUT**, so those totals are unreliable — an independent reason the
     error-prefix derivation is right here rather than merely lazy.
+- 2026-08-17 — Lane D landed `e37cc015713`. A/D integration VERIFIED by
+  content: `unstable_mode` + `unstable_mode_set` exist in
+  `test_runner_types.spl:88-89` and are consumed at
+  `test_runner_main.spl:194-198`. (Lane D reported the fields as missing; that
+  was a stale read taken before Lane A committed. No action needed.)
+  - **Bootstrap detection = `env_get("SIMPLE_BOOTSTRAP") == "1"`** — an
+    EXISTING signal, not invented. Exported by
+    `scripts/bootstrap/bootstrap-from-scratch.sh:1569` (+ ~10 per-invocation
+    sites), `resume-stage3-from-admitted.sh`, and two
+    `scripts/check/lib/bootstrap-stage3/*.shs`; already consumed inside the
+    compiler at `module_lowering.spl:362,941,1536,1890,1966,2489`,
+    `declaration_lowering.spl:206,274`, and `spec/env_detect.spl:120`.
+    `ci_mode` was REJECTED as the signal: `--ci` is a user flag that also
+    fires on non-bootstrap CI runs, so it would turn unstable mode on for
+    ordinary interactive CI — exactly what the user ruled out.
+  - Mode line: `Unstable mode: {ON|OFF} ({--unstable|--no-unstable|bootstrap
+    default|interactive default})`. When ON, `fail_fast = false` is set
+    EXPLICITLY rather than left as an emergent default.
+  - Per-spec process isolation audit — interpreter, smf, native, compile and
+    safe all spawn a real process per spec (`process_run_*` /
+    `process_run_with_limits_bounded`). **`fork` mode is the one real gap:**
+    `test_runner_fork.spl:43` `rt_fork_child_setup()` gives a child per spec
+    (so a crash IS contained) but it is COW-forked from the parent's
+    already-loaded interpreter image, so accumulated in-process state is
+    INHERITED, not reset. That is not a fresh-process-per-unit guarantee.
+    OPEN — `test_runner_fork.spl` was outside every lane's ownership.
