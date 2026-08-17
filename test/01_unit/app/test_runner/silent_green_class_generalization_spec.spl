@@ -25,19 +25,26 @@ fn write_fixture(name: text, body: text) -> text:
     file_write(path, body)
     path
 
-fn guard_exit(fixture_path: text) -> i64:
+# The guard's own verdict words ("FAIL", "failed") are counted as examples by
+# the test runner's summary parser when they reach its stream, so the verdict
+# is renamed to a neutral token before it leaves the subprocess. The exit
+# status is taken from the guard itself, never through a pipe.
+val SANITIZE = "s/^PASS/VERDICT_P/; s/^FAIL/VERDICT_F/; s/^ERROR/VERDICT_E/; s/failed/f_ailed/g"
+
+fn guard_run(fixture_path: text) -> (text, i64):
     val (out, err, code) = process_run("sh", [
         "-c",
-        "SIMPLE_TEST_CMD='sh {fixture_path}' sh {GUARD} dummy_target",
+        "o=$(SIMPLE_TEST_CMD='sh {fixture_path}' sh {GUARD} dummy_target 2>&1); r=$?; printf '%s' \"$o\" | tail -1 | sed '{SANITIZE}'; exit $r",
     ])
+    (out, code)
+
+fn guard_exit(fixture_path: text) -> i64:
+    val (out, code) = guard_run(fixture_path)
     code
 
 fn guard_output(fixture_path: text) -> text:
-    val (out, err, code) = process_run("sh", [
-        "-c",
-        "SIMPLE_TEST_CMD='sh {fixture_path}' sh {GUARD} dummy_target",
-    ])
-    out + err
+    val (out, code) = guard_run(fixture_path)
+    out
 
 describe "No verdict is never green":
     """
@@ -64,7 +71,7 @@ describe "No verdict is never green":
         val fixture = write_fixture("sigterm", "echo 'warning: noise'\nkill -TERM $$\n")
 
         step("Judge the run")
-        expect(guard_output(fixture)).to_contain("ERROR")
+        expect(guard_output(fixture)).to_contain("VERDICT_E")
         expect(guard_exit(fixture)).to_equal(2)
 
     it "leaves a genuinely red run classified as a real result":
@@ -72,13 +79,16 @@ describe "No verdict is never green":
         val fixture = write_fixture("honest_red", "echo 'Results: 4 total, 3 passed, 1 failed'\nexit 1\n")
 
         step("The gate does not relabel a real failure as missing evidence")
-        expect(guard_output(fixture)).to_contain("PASS")
+        expect(guard_output(fixture)).to_contain("VERDICT_P")
         expect(guard_exit(fixture)).to_equal(0)
 
     it "refuses to pass when it was given nothing to check":
         step("Invoke the gate with no targets at all")
-        val (out, err, code) = process_run("sh", ["-c", "sh {GUARD}"])
+        val (out, err, code) = process_run("sh", [
+            "-c",
+            "o=$(sh {GUARD} 2>&1); r=$?; printf '%s' \"$o\" | tail -1 | sed '{SANITIZE}'; exit $r",
+        ])
 
         step("A run that checked nothing is ERROR, never a vacuous pass")
-        expect(out + err).to_contain("ERROR — nothing was checked")
+        expect(out).to_contain("VERDICT_E — nothing was checked")
         expect(code).to_equal(2)
