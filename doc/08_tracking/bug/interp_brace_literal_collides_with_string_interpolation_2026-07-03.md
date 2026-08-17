@@ -136,6 +136,43 @@ follow-up session rather than fixed inline (shared frontend/MIR positional
 contract, not a small isolated change, per this lane's fix-vs-file
 threshold).
 
+## 2026-08-17: frontend half closed; the reported swallow is NOT in this lane
+
+Measured, not inferred. The 2026-07-17 sub-case above guessed the defect lived
+in `flat_bridge_build_string_interps` / `split_interpolation_segments`. It does
+not. `parse_interpolation_fragment`
+(`src/compiler/10.frontend/core/string_interpolation_expand.spl:35`) already
+returned `-1` for the reported **whitespace-padded** shapes `" {inner} "` and
+`" {inner}"` before any change today — proven by deleting the new guard and
+re-running the spec, which still passed. With the fragment rejected the whole
+string falls back to a verbatim literal, which is exactly what the oracle
+prints. So the pure-Simple frontend never produced the empty-string swallow;
+the remaining `N1:|END` report belongs to the other lowering lane and could not
+be reproduced here (see "not proven" below).
+
+What the sweep DID find, via the generalizing spec rather than the reported
+repro: the class was handled **inconsistently**. The padded spellings were
+rejected only because the padding fails to parse — `.trim()` is not normalising
+these fragments — while the **unpadded** `{inner}` / `{a: 1}` / `{1, 2}` parsed
+cleanly as dict/set literals and were accepted as interpolations, the precise
+shape that lowers to nothing. Only half the class was safe, by accident.
+
+Fix: `interpolation_fragment_is_brace_literal` (same file) rejects any region
+whose first non-blank character opens a brace literal, so the verbatim fallback
+is uniform. Leading blanks are skipped explicitly rather than by `.trim()`,
+because the padded-vs-unpadded split is itself evidence the trim does not
+normalise here. Regression spec:
+`test/01_unit/compiler/frontend/interp_brace_literal_fragment_spec.spl`
+(before: `Results: 3 total, 2 passed, 1 failed`; after: `Results: 3 total, 3
+passed, 0 failed`).
+
+**Not proven:** the native/`native-build` lane. `bin/simple` is a Rust
+bootstrap seed and no self-hosted binary is deployed, so the `N1:|END` output
+in the 2026-07-17 note could not be re-measured; this change fences the
+pure-Simple frontend only. Also unproven: whether an unpadded `{...}` region is
+reachable from source at all (`"{{inner}}"` is consumed by the `{{` escape
+first) — the guard closes it as a latent trap regardless.
+
 ## Symptom
 
 A double-quoted interpolated string that contains a literal `{ ... }` span
