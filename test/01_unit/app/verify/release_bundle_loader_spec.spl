@@ -1,0 +1,195 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2,
+    AssuranceGrade, AssuranceConvention, ResolvedAssurancePolicyV2,
+    assurance_policy_authority_hash_v3}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.verified_release_gate.{ApprovedReleaseSignerV1,
+    ReleaseEvidenceOutcomeV1, VerifiedReleaseEvidenceV1,
+    VerifiedReleaseEvidenceV2, evaluate_verified_release_v2}
+use app.verify.release_bundle_loader.{ApprovedReleaseSignerPolicyV2,
+    ApprovedReleaseSignerPolicyV3,
+    LoadedReleaseBundleV2, parse_release_signers_sdn_v3,
+    admit_loaded_release_bundle_v2, admit_loaded_release_bundle_v3,
+    release_signer_policy_authority_diagnostic_v3}
+use app.verify.release_signer_policy.{repository_release_signer_policy_path_v3,
+    release_signer_policy_fixed_path_diagnostic_v3,
+    release_signer_policy_root_authority_diagnostic_v3,
+    release_signer_policy_legacy_v1_execution_diagnostic,
+    release_signer_allow_list_hash_v3}
+
+fn release_policy() -> ResolvedAssurancePolicyV2:
+    ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified,
+        "nogc_async_mut_noalloc", AssuranceGrade.NoGrade,
+        AssuranceConvention.NoConvention)
+
+fn signer_policy_source(policy: ResolvedAssurancePolicyV2) -> text:
+    val signers = [ApprovedReleaseSignerV1("release-key",
+        sha256_text("release-public-key"))]
+    "{schema: simple.formal.release-signers.v3, " +
+        "policy_hash_v2: \"" + policy.policy_hash() + "\", " +
+        "policy_authority_sha256: \"" +
+        assurance_policy_authority_hash_v3(policy) + "\", " +
+        "signer_allow_list_sha256: \"" +
+        release_signer_allow_list_hash_v3(signers) + "\", " +
+        "signers: [{signer_id: release-key, public_key_hash: \"" +
+        sha256_text("release-public-key") + "\"}]}"
+
+fn zero_bytes(count: i64) -> [u8]:
+    var values: [u8] = []
+    for _ in 0..count: values.push(0)
+    values
+
+fn loaded_release(policy: ResolvedAssurancePolicyV2) -> LoadedReleaseBundleV2:
+    val artifact = sha256_text("artifact")
+    val base = VerifiedReleaseEvidenceV1("verified",
+        FormalStatus.ArtifactVerified, [FormalStatus.ArtifactVerified],
+        artifact, artifact, [sha256_text("proof")],
+        [sha256_text("certificate")], sha256_text("trust"), "",
+        sha256_text("replay"), sha256_text("mutation"),
+        sha256_text("non-vacuity"),
+        [ReleaseEvidenceOutcomeV1.ProvedWithCertificate], 0, 0, 0, 0,
+        sha256_text("delivery"))
+    val evidence = VerifiedReleaseEvidenceV2(policy, base)
+    LoadedReleaseBundleV2(evidence,
+        evaluate_verified_release_v2(evidence).evidence_hash, "release-key",
+        zero_bytes(32), zero_bytes(64), [])
+
+describe "release bundle loader signer-policy authority":
+    it "rejects caller-selected signer-policy paths":
+        expect(release_signer_policy_fixed_path_diagnostic_v3(
+            "/tmp/caller-policy.sdn", true, true)).to_contain(
+            "FV2-E-RELEASE-POLICY-FIXED-PATH-V3")
+
+    it "rejects a missing fixed signer-policy file":
+        expect(release_signer_policy_fixed_path_diagnostic_v3(
+            repository_release_signer_policy_path_v3(), false,
+            false)).to_contain("FV2-E-RELEASE-POLICY-MISSING-V3")
+
+    it "rejects a nonregular or symlink fixed signer-policy file":
+        expect(release_signer_policy_fixed_path_diagnostic_v3(
+            repository_release_signer_policy_path_v3(), true,
+            false)).to_contain("non-regular or a symlink")
+
+    it "fails closed without a trusted executable or install root":
+        expect(release_signer_policy_root_authority_diagnostic_v3()).to_contain(
+            "FV2-E-RELEASE-POLICY-ROOT-AUTHORITY-V3")
+
+    it "disables legacy V1 admission at the production execution boundary":
+        expect(release_signer_policy_legacy_v1_execution_diagnostic()).to_contain(
+            "FV2-E-RELEASE-POLICY-LEGACY-V1-ROOT-EXECUTION-AUTHORITY")
+
+    it "parses compatibility and cryptographic authority identities":
+        val policy = release_policy()
+        match parse_release_signers_sdn_v3(signer_policy_source(policy)):
+            case Err(message): fail("V3 signer policy rejected: " + message)
+            case Ok(parsed):
+                expect(parsed.policy_hash_v2).to_equal(policy.policy_hash())
+                expect(parsed.policy_authority_sha256).to_equal(
+                    assurance_policy_authority_hash_v3(policy))
+                expect(parsed.signer_allow_list_sha256).to_equal(
+                    release_signer_allow_list_hash_v3(parsed.signers))
+                expect(parsed.signers.len()).to_equal(1)
+
+    it "makes signer allow-list identity stable under row reordering":
+        val first = ApprovedReleaseSignerV1("alpha", sha256_text("alpha-key"))
+        val second = ApprovedReleaseSignerV1("beta", sha256_text("beta-key"))
+        expect(release_signer_allow_list_hash_v3([first, second])).to_equal(
+            release_signer_allow_list_hash_v3([second, first]))
+
+    it "changes signer allow-list identity for membership or key mutation":
+        val first = ApprovedReleaseSignerV1("alpha", sha256_text("alpha-key"))
+        val second = ApprovedReleaseSignerV1("beta", sha256_text("beta-key"))
+        val baseline = release_signer_allow_list_hash_v3([first, second])
+        expect(baseline == release_signer_allow_list_hash_v3([first])).to_be(false)
+        expect(baseline == release_signer_allow_list_hash_v3([first,
+            ApprovedReleaseSignerV1("beta", sha256_text("mutated-key"))])).to_be(false)
+
+    it "rejects a parsed V3 policy after signer membership mutation":
+        val policy = release_policy()
+        val claimed = release_signer_allow_list_hash_v3([
+            ApprovedReleaseSignerV1("alpha", sha256_text("alpha-key"))])
+        val source = "{schema: simple.formal.release-signers.v3, " +
+            "policy_hash_v2: \"" + policy.policy_hash() + "\", " +
+            "policy_authority_sha256: \"" +
+            assurance_policy_authority_hash_v3(policy) + "\", " +
+            "signer_allow_list_sha256: \"" + claimed + "\", " +
+            "signers: [{signer_id: alpha, public_key_hash: \"" +
+            sha256_text("alpha-key") + "\"}, {signer_id: beta, " +
+            "public_key_hash: \"" + sha256_text("beta-key") + "\"}]}"
+        match parse_release_signers_sdn_v3(source):
+            case Err(message): expect(message).to_contain(
+                "FV2-E-RELEASE-POLICY-SIGNER-ALLOW-LIST-V3")
+            case Ok(_): fail("signer membership mutation unexpectedly accepted")
+
+    it "rejects duplicate signer identities while parsing V3":
+        val policy = release_policy()
+        val source = "{schema: simple.formal.release-signers.v3, " +
+            "policy_hash_v2: \"" + policy.policy_hash() + "\", " +
+            "policy_authority_sha256: \"" +
+            assurance_policy_authority_hash_v3(policy) + "\", " +
+            "signer_allow_list_sha256: \"" + sha256_text("duplicate-set") +
+            "\", signers: [{signer_id: duplicate, public_key_hash: \"" +
+            sha256_text("first-key") + "\"}, {signer_id: duplicate, " +
+            "public_key_hash: \"" + sha256_text("second-key") + "\"}]}"
+        match parse_release_signers_sdn_v3(source):
+            case Err(message): expect(message).to_contain(
+                "signer identity and public key identity must both be unique")
+            case Ok(_): fail("duplicate signer identity unexpectedly accepted")
+
+    it "rejects legacy APOLV2 signer policy as stale for V2 release":
+        val policy = release_policy()
+        val legacy = "{schema: simple.formal.release-signers.v2, " +
+            "policy_hash: \"" + policy.policy_hash() + "\", " +
+            "signers: [{signer_id: release-key, public_key_hash: \"" +
+            sha256_text("release-public-key") + "\"}]}"
+        match parse_release_signers_sdn_v3(legacy):
+            case Err(message): expect(message).to_contain(
+                "FV2-E-RELEASE-POLICY-STALE-V2")
+            case Ok(_): fail("legacy signer policy unexpectedly accepted")
+
+    it "rejects a constructed signer policy with the wrong authority":
+        val policy = release_policy()
+        val forged = ApprovedReleaseSignerPolicyV3(policy.policy_hash(),
+            sha256_text("different-policy-authority"),
+            release_signer_allow_list_hash_v3([ApprovedReleaseSignerV1(
+                "release-key", sha256_text("release-public-key"))]),
+            [ApprovedReleaseSignerV1("release-key",
+                sha256_text("release-public-key"))])
+        expect(release_signer_policy_authority_diagnostic_v3(policy,
+            forged)).to_contain("FV2-E-RELEASE-BUNDLE-POLICY-AUTHORITY-V3")
+
+    it "rejects constructed V3 signer-set identity mutation":
+        val policy = release_policy()
+        val signer = ApprovedReleaseSignerV1("release-key",
+            sha256_text("release-public-key"))
+        val forged = ApprovedReleaseSignerPolicyV3(policy.policy_hash(),
+            assurance_policy_authority_hash_v3(policy),
+            sha256_text("different-signer-set"), [signer])
+        expect(release_signer_policy_authority_diagnostic_v3(policy,
+            forged)).to_contain("FV2-E-RELEASE-BUNDLE-SIGNER-ALLOW-LIST-V3")
+
+    it "does not admit a constructed V3 signer policy with matching hashes":
+        val policy = release_policy()
+        val constructed = ApprovedReleaseSignerPolicyV3(policy.policy_hash(),
+            assurance_policy_authority_hash_v3(policy),
+            release_signer_allow_list_hash_v3([ApprovedReleaseSignerV1(
+                "release-key", sha256_text("release-public-key"))]),
+            [ApprovedReleaseSignerV1("release-key",
+                sha256_text("release-public-key"))])
+        val decision = admit_loaded_release_bundle_v3(
+            loaded_release(policy), constructed)
+        expect(decision.admitted).to_be(false)
+        expect(decision.diagnostic).to_contain(
+            "FV2-E-RELEASE-SIGNER-POLICY-EXECUTION-AUTHORITY-V3")
+
+    it "does not admit a constructed legacy V2 signer policy":
+        val policy = release_policy()
+        val constructed = ApprovedReleaseSignerPolicyV2(policy.policy_hash(),
+            [ApprovedReleaseSignerV1("release-key",
+                sha256_text("release-public-key"))])
+        val decision = admit_loaded_release_bundle_v2(
+            loaded_release(policy), constructed)
+        expect(decision.admitted).to_be(false)
+        expect(decision.diagnostic).to_contain(
+            "FV2-E-RELEASE-POLICY-STALE-V2")
