@@ -339,14 +339,57 @@ fn eval_assign_expr(eid: i64) -> i64:
 
 # ===== Interpolated String =====
 
+# Kept behaviourally identical to the copy in _EvalOps/access_literal_assign_eval.spl.
+# This copy had DRIFTED: it joined only the evaluated parts and discarded every
+# literal segment, so `"heap_registry={n} phase={p}"` rendered as the bare digits
+# `"8073392"`. Only scripts/check/class_identity_pure_simple_driver.spl imports this
+# module (`use compiler.frontend.core.interpreter.eval_access.*`), so the mainline
+# interpreter was unaffected — but the two definitions are co-compiled with an
+# identical `(i64) -> i64` signature, which resolves by "last definition wins".
+# See doc/08_tracking/bug/selfhosted_stage4_interpreter_string_interpolation_broken_2026-07-30.md
+fn eval_interpolation_segments(value: text) -> [text]:
+    var segments: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        if depth == 0 and ch == "{" and next == "{":
+            current = current + "{"
+            i = i + 1
+        elif depth == 0 and ch == "}" and next == "}":
+            current = current + "}"
+            i = i + 1
+        elif depth == 0 and ch == "{":
+            segments.push(current)
+            current = ""
+            depth = 1
+        elif depth > 0 and ch == "{":
+            depth = depth + 1
+        elif depth > 0 and ch == "}":
+            depth = depth - 1
+        elif depth == 0:
+            current = current + ch
+        i = i + 1
+    segments.push(current)
+    segments
+
 fn eval_interpolated_string(eid: i64) -> i64:
-    val parts = expr_get(eid).args
-    var parts_text: [text] = []
-    for part_eid in parts:
+    val node = expr_get(eid)
+    val parts = node.args
+    val segments = eval_interpolation_segments(node.s_val)
+    if segments.len() != parts.len() + 1:
+        eval_set_error("invalid interpolated string")
+        return -1
+    var result = segments[0]
+    var i = 0
+    while i < parts.len():
+        val part_eid = parts[i]
         val part_val = eval_expr(part_eid)
         if eval_had_error: return -1
-        parts_text.push(val_to_text(part_val))
-    val result = parts_text.join("")
+        result = result + val_to_text(part_val) + segments[i + 1]
+        i = i + 1
     val_make_text(result)
 
 # ===== Null Coalesce =====

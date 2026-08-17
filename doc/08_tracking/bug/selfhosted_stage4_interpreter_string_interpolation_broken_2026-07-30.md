@@ -411,3 +411,46 @@ would resolve.
 **Recommended disposition:** do NOT close on this evidence alone. Re-run the new
 promotion spec plus a genuine self-hosted `run` when a stage4 binary next exists;
 if both are green, close.
+
+## 2026-08-17 (W6) — NOT REPRODUCED on the mainline pure-Simple path; one drifted duplicate fixed
+
+Reproduce command (binary: the STALE Rust seed at
+`bin/release/x86_64-unknown-linux-gnu/simple`, mtime 2026-08-16 22:59 — stated
+because a seed RED says nothing about `src/compiler/**`, which is read as source):
+
+    bin/simple test test/01_unit/compiler/interpreter/pure_simple_interpolation_literal_segments_spec.spl
+
+New spec `test/01_unit/compiler/interpreter/pure_simple_interpolation_literal_segments_spec.spl`
+drives the pure-Simple frontend + interpreter from source (parse ->
+`expand_string_interpolations` -> `EXPR_INTERPOLATED_STRING` ->
+`eval_interpolated_string`) and asserts the rendered text, not just promotion.
+Result: `Results: 4 total, 4 passed, 0 failed`. The canonical path
+(`interpreter/_EvalOps/access_literal_assign_eval.spl:799` `eval_interpolation_segments`
++ `:827` `eval_interpolated_string`) handles literal segments, `{{`/`}}` escapes,
+expression regions and multi-region literals correctly. **The row's headline
+symptom does not reproduce.**
+
+Ablation (proof the spec has teeth): replacing `var result = segments[0]` with
+`var result = ""` in `access_literal_assign_eval.spl:834` turns the spec
+`Results: 4 total, 0 passed, 4 failed`; restoring it returns it to 4/4.
+
+What WAS a real defect, and is now fixed: `interpreter/eval_access.spl` is a
+deliberately duplicated copy of `_EvalOps/access_literal_assign_eval.spl`
+(the pair is documented as "kept byte-identical" at
+`access_literal_assign_eval.spl:702`, and `eval_calls.spl:374-377` warns they can
+drift). Its `eval_interpolated_string` HAD drifted: it joined only the evaluated
+parts and threw every literal segment away, so `"heap_registry={n} phase={p}"`
+rendered as `"8073392"`. Its sole importer is
+`scripts/check/class_identity_pure_simple_driver.spl:61`
+(`use compiler.frontend.core.interpreter.eval_access.*`), so the mainline
+interpreter never saw it — but both definitions are co-compiled with an identical
+`(i64) -> i64` signature, which the runner resolves by "last definition wins", so
+the exposure was load-order dependent. The segment-aware implementation has been
+brought across.
+
+Two failing examples remain in the older
+`test/01_unit/compiler/interpreter/string_interpolation_spec.spl`
+(`Results: 3 total, 1 passed, 2 failed`: `{{literal}}` and a non-expression
+`{value}` region). Those are **the Rust seed's own lexer/interpreter**, i.e.
+`src/compiler_rust/**` — not the self-hosted frontend this row names. Left OPEN
+and unowned by W6 (out of file-ownership scope).

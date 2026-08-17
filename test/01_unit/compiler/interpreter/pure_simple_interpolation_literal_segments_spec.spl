@@ -1,0 +1,131 @@
+# Pure-Simple interpreter must KEEP the literal segments of an interpolated string.
+#
+# Rows:
+#   doc/08_tracking/bug/selfhosted_stage4_interpreter_string_interpolation_broken_2026-07-30.md
+#   doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md
+#
+# FAMILY (collapsed by W6): the pure-Simple interpreter carries TWO co-compiled
+# definitions of `eval_interpolated_string` — the deliberately duplicated pair
+# `interpreter/eval_access.spl` and `interpreter/_EvalOps/access_literal_assign_eval.spl`
+# (that pair is documented at access_literal_assign_eval.spl:702 as "kept
+# byte-identical"). They DRIFTED: the `_EvalOps` copy splits the owner text into
+# literal segments via `eval_interpolation_segments` and interleaves them with the
+# evaluated parts, while the `eval_access.spl` copy joined ONLY the evaluated parts
+# and threw every literal segment away. Duplicate co-compiled definitions with an
+# identical `(i64) -> i64` signature resolve by "last definition wins", so which
+# behaviour you get is load-order dependent.
+#
+# Dropping literal segments renders `"heap_registry={n} phase={p}"` as the bare
+# digits `"807339" + "2"` — which is exactly the Build9 GDB evidence in the
+# stage3_numeric_interpolation row: the faulting load held `rcx=0x393333373038`,
+# little-endian ASCII `807339`, i.e. the heap-registry NUMBER with its literal
+# prefix gone. Numeric interpolation was never the defect; segment loss was.
+#
+# The reproducer below asserts the literal text survives. The detection spec
+# generalizes to the CLASS: leading/trailing/interior literals, brace escapes,
+# and a no-parts string all have to round-trip.
+#
+# @cover src/compiler/10.frontend/core/interpreter/eval_access.spl
+# @cover src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl
+
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{
+    EXPR_INTERPOLATED_STRING,
+    expr_count, expr_tag
+}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+use compiler.frontend.core.interpreter.hashmap.*
+use compiler.frontend.core.interpreter.value.{val_make_int, val_get_text}
+use compiler.frontend.core.interpreter.env.{env_init, env_reset, env_define}
+use compiler.frontend.core.interpreter.ops.*
+use compiler.frontend.core.interpreter.eval.*
+use compiler.frontend.core.interpreter.eval_ops.{eval_interpolated_string}
+use std.string_core.{char_from_code}
+
+fn lb() -> text:
+    char_from_code(123)
+
+fn rb() -> text:
+    char_from_code(125)
+
+fn first_interp() -> i64:
+    var idx = 0
+    while idx < expr_count():
+        if expr_tag[idx] == EXPR_INTERPOLATED_STRING:
+            return idx
+        idx = idx + 1
+    -1
+
+# Parse `src`, bind `names[i]` to `ints[i]`, evaluate the first interpolated
+# string node with the pure-Simple interpreter, and return the rendered text.
+fn render(src: text, names: [text], ints: [i64]) -> text:
+    ast_reset()
+    if not core_frontend_parse_reset(src, "interp_segments_probe.spl"):
+        return "<parse-failed>"
+    val eid = first_interp()
+    if eid < 0:
+        return "<not-promoted>"
+    env_reset()
+    env_init()
+    var i = 0
+    while i < names.len():
+        env_define(names[i], val_make_int(ints[i]))
+        i = i + 1
+    val out = eval_interpolated_string(eid)
+    if out < 0:
+        return "<eval-failed>"
+    val_get_text(out)
+
+fn prog(body_expr: text) -> text:
+    "fn main():\n    print(" + body_expr + ")\n"
+
+describe "pure-Simple interpreter interpolated-string literal segments":
+
+    # ---- reproducer: the exact stage3 diagnostic shape ----
+    it "keeps the literal prefix and separator of a numeric diagnostic":
+        # print("heap_registry={n} phase={p}")
+        val src = prog(
+            "\"heap_registry=" + lb() + "n" + rb() +
+            " phase=" + lb() + "p" + rb() + "\""
+        )
+        val names: [text] = ["n", "p"]
+        val ints: [i64] = [807339, 2]
+        # RED shape when the drifted copy wins: "8073392" — literals dropped.
+        expect(render(src, names, ints)).to_equal("heap_registry=807339 phase=2")
+
+    # ---- detection spec: generalize to the defect CLASS ----
+    it "keeps leading, interior and trailing literal text in every position":
+        val leading = prog("\"pre=" + lb() + "a" + rb() + "\"")
+        val nm: [text] = ["a"]
+        val iv: [i64] = [7]
+        expect(render(leading, nm, iv)).to_equal("pre=7")
+
+        val trailing = prog("\"" + lb() + "a" + rb() + "=post\"")
+        expect(render(trailing, nm, iv)).to_equal("7=post")
+
+        val both = prog("\"[" + lb() + "a" + rb() + "]\"")
+        expect(render(both, nm, iv)).to_equal("[7]")
+
+        val nm2: [text] = ["a", "b"]
+        val iv2: [i64] = [7, 9]
+        val interior = prog(
+            "\"" + lb() + "a" + rb() + " to " + lb() + "b" + rb() + "\""
+        )
+        expect(render(interior, nm2, iv2)).to_equal("7 to 9")
+
+    it "decodes doubled brace escapes in the literal segments":
+        # print("{{literal}} {a}") must render "{literal} 7"
+        val src = prog(
+            "\"" + lb() + lb() + "literal" + rb() + rb() +
+            " " + lb() + "a" + rb() + "\""
+        )
+        val nm: [text] = ["a"]
+        val iv: [i64] = [7]
+        expect(render(src, nm, iv)).to_equal(lb() + "literal" + rb() + " 7")
+
+    it "renders an expression region alongside its literal text":
+        val src = prog("\"sum=" + lb() + "a + b" + rb() + "!\"")
+        val nm: [text] = ["a", "b"]
+        val iv: [i64] = [2, 3]
+        expect(render(src, nm, iv)).to_equal("sum=5!")
