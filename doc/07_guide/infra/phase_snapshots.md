@@ -12,3 +12,13 @@ Rules:
   never bin/simple and never the in-place stage output (those get replaced).
 - A new fix landing = a NEW generation (new t1); running phase2/3 tasks keep
   their old lineage until they finish, then next round uses the newest.
+
+## Tooling (2026-08-17)
+`scripts/bootstrap/preserve-phase-binary.shs` makes the rules above mechanical:
+- `preserve-phase-binary.shs <binary> <phaseN>` — snapshot with lineage naming,
+  LINEAGE file, read-only dir/binary; refuses to overwrite an existing dir.
+  Hooked into bootstrap-from-scratch.sh after each stage's verification.
+- Pinning: a task using a snapshot runs `chmod u+w <dir> && touch <dir>/PINNED.<task> && chmod u-w <dir>`;
+  remove the marker when done.
+- `preserve-phase-binary.shs --gc <days>` — removes only generations older than
+  <days> days AND carrying no `PINNED.*` marker. Pinned dirs are never removed.

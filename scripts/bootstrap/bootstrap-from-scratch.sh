@@ -1872,6 +1872,11 @@ else
   # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
+  # Preserve the verified phase-1 (seed) compiler as an immutable lineage snapshot.
+  if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+    sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${seed_bin}" phase1 || \
+      echo "  warning: phase1 snapshot preservation failed (non-fatal)" >&2
+  fi
   bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
   mkdir -p "${stage2_provenance_cache}"
   # Stage 2 failure is reported before Stage 3; no later stage may claim it.
@@ -2141,6 +2146,11 @@ else
         echo "error: could not publish immutable Stage 2 admission receipt" >&2
         stage2_status=4
       else
+        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
+        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
+            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
+        fi
         chmod 500 "${stage2_admitted_dir}"
       fi
     fi
@@ -2289,6 +2299,11 @@ else
       "${stage_build_path}"; then
       stage3_ok=1
       echo "  Stage 3 succeeded and passed bootstrap compiler sanity"
+      # Preserve the verified phase-3 compiler as an immutable lineage snapshot.
+      if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+        sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage3_bin}" phase3 || \
+          echo "  warning: phase3 snapshot preservation failed (non-fatal)" >&2
+      fi
     else
       stage3_status=2
       rm -f "${stage3_bin}"

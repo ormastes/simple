@@ -1,0 +1,74 @@
+#!/bin/sh
+# preserve-phase-binary.shs — immutable lineage snapshots of phase compiler binaries.
+#
+# Usage:
+#   preserve-phase-binary.shs <binary> <phase>      # phase = phase1|phase2|phase3
+#       Copies <binary> into build/phase_snapshots/<lineage>_<phase>_<epoch>/simple,
+#       where <lineage> is read from the LINEAGE file of the NEWEST snapshot dir of
+#       the parent phase (phase1 starts a fresh epoch). Writes a LINEAGE file,
+#       chmods the binary and dir read-only, and NEVER overwrites an existing dir.
+#   preserve-phase-binary.shs --gc <days>
+#       Deletes snapshot generations older than <days> days that contain NO
+#       PINNED.* marker file. Tasks pin a snapshot by `touch <dir>/PINNED.<task>`
+#       (the dir itself stays writable enough for markers via chmod u+w on demand:
+#       use `chmod u+w <dir>` before touching, `chmod u-w` after — or simply rely
+#       on gc honouring any PINNED.* present).
+#   Env: PHASE_SNAPSHOT_ROOT overrides the snapshot root (for tests).
+set -u
+root="${PHASE_SNAPSHOT_ROOT:-$(cd "$(dirname -- "$0")/../.." && pwd)/build/phase_snapshots}"
+mkdir -p "${root}" || exit 1
+
+if [ "${1:-}" = "--gc" ]; then
+  days="${2:?usage: --gc <days>}"
+  now=$(date +%s)
+  cutoff=$((now - days * 86400))
+  for d in "${root}"/phase1_*; do
+    [ -d "$d" ] || continue
+    # pinned?
+    set -- "$d"/PINNED.*
+    [ -e "$1" ] && { echo "gc: keep (pinned) ${d##*/}"; continue; }
+    mtime=$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d") || continue
+    if [ "${mtime}" -lt "${cutoff}" ]; then
+      chmod -R u+w "$d" && rm -rf "$d" && echo "gc: removed ${d##*/}"
+    else
+      echo "gc: keep (recent) ${d##*/}"
+    fi
+  done
+  exit 0
+fi
+
+bin="${1:?usage: preserve-phase-binary.shs <binary> <phase>}"
+phase="${2:?usage: preserve-phase-binary.shs <binary> <phase>}"
+[ -x "${bin}" ] || { echo "error: not an executable: ${bin}" >&2; exit 1; }
+epoch=$(date +%s)
+
+case "${phase}" in
+  phase1) lineage="phase1_${epoch}" ;;
+  phase2|phase3)
+    [ "${phase}" = phase2 ] && parent=phase1 || parent=phase2
+    [ "${phase}" = phase2 ] && next_after_parent=phase2 || next_after_parent=phase3
+    parent_dir=$(ls -1dt "${root}"/*/ 2>/dev/null | while IFS= read -r d; do
+        d=${d%/}
+        case "${d##*/}" in
+          *"${next_after_parent}"_*) ;;                 # already deeper than parent
+          *"${parent}"_[0-9]*) printf '%s\n' "${d}"; break ;;
+        esac
+      done | head -1)
+    [ -n "${parent_dir}" ] && [ -f "${parent_dir}/LINEAGE" ] || {
+      echo "error: no ${parent} snapshot with LINEAGE found for ${phase}" >&2; exit 1; }
+    lineage="$(cat "${parent_dir}/LINEAGE")_${phase}_${epoch}"
+    ;;
+  *) echo "error: phase must be phase1|phase2|phase3" >&2; exit 1 ;;
+esac
+
+dest="${root}/${lineage}"
+if [ -e "${dest}" ]; then
+  echo "error: refusing to overwrite existing snapshot ${dest}" >&2
+  exit 1
+fi
+mkdir "${dest}" || exit 1
+cp -p "${bin}" "${dest}/simple" || { rm -rf "${dest}"; exit 1; }
+printf '%s\n' "${lineage}" > "${dest}/LINEAGE"
+chmod a-w "${dest}/simple" "${dest}/LINEAGE"
+chmod a-w "${dest}"
+echo "preserved: ${dest}/simple"
