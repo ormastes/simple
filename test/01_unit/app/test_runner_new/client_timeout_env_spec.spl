@@ -1,0 +1,100 @@
+"""Test-runner client timeout budget — where it comes from, and in what order.
+
+Audience: anyone who exports SIMPLE_TIMEOUT_SECONDS before a `bin/simple test`
+run and expects the budget to change, and anyone editing
+`src/app/test_runner_new/timeout_budget.spl`.
+
+Why this spec exists: SIMPLE_TIMEOUT_SECONDS was read by NOTHING on the client
+path. `parse_client_run` hardcoded 120, and `run.timeout_secs` is what feeds
+both the light-daemon request budget and the direct-child `--timeout` argument —
+so every session exporting the variable silently got 120s, and healthy specs
+that needed longer were recorded as `failed=1 reason=daemon-no-response
+budget_ms=120000`. That is a false RED, the worst kind of wrong verdict: it
+looks like a defect in the code under test.
+Bug: doc/08_tracking/bug/simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md
+
+The similar-problem generalisation is the PRECEDENCE LADDER, not the single env
+read: a budget has three possible sources (explicit flag, environment, built-in
+default) and the class of defect is any source being silently dropped, or a less
+specific source silently winning. Each rung the library owns is pinned below,
+including the malformed-value rung — a budget that parses junk as 0 expires
+instantly and reports every spec as a timeout, which is strictly worse than
+ignoring the variable. The remaining rung (an explicit `--timeout` beating the
+environment) lives in `parse_client_run`, which cannot be imported here: that
+file is a standalone script with a bare `fn main` and importing it trips the
+documented fn-main collision that flips green specs to FAIL. It is covered by
+the command-line evidence recorded in the bug doc instead.
+
+# @req REQ-TESTRUNNER-TIMEOUT-BUDGET
+"""
+
+use std.spec.*
+
+use app.test_runner_new.timeout_budget.{
+    CLIENT_DEFAULT_TIMEOUT_SECS,
+    client_default_timeout_secs,
+    parse_env_timeout_secs
+}
+
+use std.io_runtime.{env_set}
+
+describe "Where the test-runner client gets its default timeout budget":
+
+    it "falls back to the built-in default when the environment says nothing":
+        """With no override exported, the client uses its documented
+        120-second default."""
+
+        step("Clear SIMPLE_TIMEOUT_SECONDS and ask for the default budget")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "")
+        expect(CLIENT_DEFAULT_TIMEOUT_SECS).to_equal(120)
+        expect(client_default_timeout_secs()).to_equal(120)
+
+    it "honours SIMPLE_TIMEOUT_SECONDS when it is set":
+        """This is the reproducing case. Before the fix this returned 120 — the
+        exported value was read by nothing on this path — and any spec needing
+        more than two minutes was reported as a daemon timeout rather than run
+        to a verdict."""
+
+        step("Export a budget far above the default and read it back")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "800")
+        expect(client_default_timeout_secs()).to_equal(800)
+
+        step("Confirm a different value is not cached from the previous read")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "1800")
+        expect(client_default_timeout_secs()).to_equal(1800)
+
+    it "ignores a malformed value instead of expiring instantly":
+        """A budget parsed as 0 is worse than an ignored one: every spec would
+        time out immediately and the whole suite would read RED for a reason
+        having nothing to do with the code under test."""
+
+        step("Try each shape of unusable value in turn")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "abc")
+        expect(client_default_timeout_secs()).to_equal(120)
+
+        env_set("SIMPLE_TIMEOUT_SECONDS", "800s")
+        expect(client_default_timeout_secs()).to_equal(120)
+
+        env_set("SIMPLE_TIMEOUT_SECONDS", "-5")
+        expect(client_default_timeout_secs()).to_equal(120)
+
+        step("Leave the environment clean for any later example")
+        env_set("SIMPLE_TIMEOUT_SECONDS", "")
+
+describe "The environment-value parser, in isolation":
+
+    it "accepts a run of decimal digits and rejects everything else":
+        """Pinned separately from the ladder above so a parser regression names
+        itself rather than surfacing as a mysterious 120 somewhere else."""
+
+        step("Accept well-formed positive budgets")
+        expect(parse_env_timeout_secs("800")).to_equal(800)
+        expect(parse_env_timeout_secs("1")).to_equal(1)
+        expect(parse_env_timeout_secs("1800")).to_equal(1800)
+
+        step("Reject empty, non-numeric, suffixed, signed, and spaced values")
+        expect(parse_env_timeout_secs("")).to_equal(0)
+        expect(parse_env_timeout_secs("abc")).to_equal(0)
+        expect(parse_env_timeout_secs("800s")).to_equal(0)
+        expect(parse_env_timeout_secs("-5")).to_equal(0)
+        expect(parse_env_timeout_secs(" 800")).to_equal(0)

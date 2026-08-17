@@ -1,0 +1,256 @@
+#!/bin/sh
+# check-stage-log-diagnosable.shs — a failing bootstrap stage must say WHY.
+#
+# Bug: doc/08_tracking/bug/bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md
+#
+# WHY THIS EXISTS
+# ---------------
+# A full-bootstrap run had stage2 exit 1 with a 0-byte
+# `stage2-native-build.log` — no error text anywhere, in the log or on the
+# console. The exit status alone said "something failed" and nothing said what.
+# Three genuinely different situations were indistinguishable, and all three
+# were silent:
+#
+#   1. the transcribed-run wrapper refused on a PRECONDITION before executing
+#      anything, so the log was never created at all;
+#   2. `native-build` ran and died mid-build — it writes nothing to a non-tty
+#      until completion or a flushed error, so the log exists at 0 bytes;
+#   3. exit 125, which is the wrapper's POST-run transcript/env verification
+#      failing, not the compiler failing at all.
+#
+# The bug doc records this as "MITIGATED (diagnostic added)". It was not:
+# `git log -S 'precondition refusal' --all` over
+# scripts/bootstrap/bootstrap-from-scratch.sh returns NOTHING, and the strings
+# the doc describes appear nowhere in the tree. The mitigation was never
+# landed. This script is that mitigation, written as a standalone guard so its
+# classification can be exercised by `--selftest` without running a bootstrap.
+#
+# CONTRACT
+# --------
+#   sh scripts/check/check-stage-log-diagnosable.shs --log PATH --status N \
+#      [--stage NAME] [--transcript PATH]
+#   sh scripts/check/check-stage-log-diagnosable.shs --selftest
+#
+# The verdict is the LAST line of stdout, and the question it answers is
+# "could a reader learn from this run why the stage failed?":
+#
+#   PASS  — <n> check(s) ...      exit 0   (n is always > 0)
+#   FAIL  — <n> check(s) ..., ... exit 1   the failure is UNDIAGNOSABLE
+#   ERROR — nothing was checked   exit 2   could not determine
+#
+# A successful stage (status 0) is a PASS with nothing to diagnose. A run that
+# checked zero things is an ERROR, never a vacuous pass.
+#
+# Note on reading exit status: every status below is captured into a variable
+# on the line immediately after the command. It is never read through a pipe —
+# a pipeline's $? belongs to the LAST stage (grep/tail/head), which has
+# produced false greens in this repo before.
+
+set -u
+
+EV_CHECKED=0
+EV_STAGE="stage"
+EV_LOG=""
+EV_STATUS=""
+EV_TRANSCRIPT=""
+
+# Lines that count as real diagnostic TEXT. Deliberately broad: the point is
+# "did the run leave a reason behind", not "is the reason well-formatted".
+# `[hir-fatal]` is included because the driver now emits fatal HIR diagnostics
+# with their text at the moment they are recorded, which is the only thing that
+# survives a stage that dies before its end-of-phase summary.
+diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|Segmentation fault|SIGSEGV|Assertion|fatal|undefined reference|cannot find|No space left'
+
+usage() {
+    echo "usage: $0 --log PATH --status N [--stage NAME] [--transcript PATH]"
+    echo "       $0 --selftest"
+}
+
+# classify_failure LOG STATUS
+# Prints a human diagnosis block on stdout and returns:
+#   0 = the failure is diagnosable (a reason is available)
+#   1 = the failure is UNDIAGNOSABLE (this is the defect being guarded against)
+classify_failure() {
+    _log="$1"
+    _status="$2"
+
+    if [ "${_status}" -eq 125 ]; then
+        # 125 is the wrapper's own post-run verification, not the compiler.
+        # Reporting it as "the build failed" sent an earlier lane hunting a
+        # compiler bug that did not exist.
+        echo "  diagnosis: exit 125 = transcribed-run wrapper POST-run transcript/env"
+        echo "             verification failed. The compiler itself may have succeeded."
+        echo "             Look at the command transcript, not the build log."
+        return 0
+    fi
+
+    if [ ! -e "${_log}" ]; then
+        echo "  diagnosis: the log was NEVER CREATED, so nothing ever executed."
+        echo "             This is a wrapper PRECONDITION refusal (pre-exec), not a"
+        echo "             compile failure. Nothing in the compiler is implicated."
+        echo "  UNDIAGNOSABLE: no reason was recorded for the refusal."
+        return 1
+    fi
+
+    if [ ! -s "${_log}" ]; then
+        echo "  diagnosis: the log EXISTS but is 0 bytes. The compiler was executed and"
+        echo "             died without flushing anything. native-build buffers stdout/"
+        echo "             stderr to a non-tty until completion or a flushed error, so a"
+        echo "             mid-build death (SIGSEGV, OOM kill, timeout) leaves exactly"
+        echo "             this: a real failure with zero evidence."
+        echo "  UNDIAGNOSABLE: replay the command from the transcript on a tty."
+        return 1
+    fi
+
+    # `grep -c` already prints 0 on no match AND exits 1. Appending
+    # `|| echo 0` therefore produced the two-line value "0\n0", which made the
+    # numeric test blow up with "Illegal number" and — because the comparison
+    # errored rather than being false — reported an undiagnosable log as
+    # diagnosable. The counts-without-text fixture caught exactly that.
+    _hits=$(grep -c -E "${diag_pattern}" "${_log}" 2>/dev/null)
+    if [ -z "${_hits}" ]; then
+        _hits=0
+    fi
+    if [ "${_hits}" -eq 0 ]; then
+        _bytes=$(wc -c < "${_log}" 2>/dev/null | tr -d ' ')
+        echo "  diagnosis: the log has content (${_bytes} bytes) but NOT ONE line matching"
+        echo "             any diagnostic pattern. Counts and progress without a reason."
+        echo "             This is the '[bootstrap-error-count] count=21' shape: proof"
+        echo "             that diagnostics existed, and no diagnostic text."
+        echo "  UNDIAGNOSABLE: the stage failed with no error message of any kind."
+        return 1
+    fi
+
+    echo "  diagnosis: ${_hits} diagnostic line(s) found. First 5:"
+    grep -E "${diag_pattern}" "${_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    return 0
+}
+
+run_check() {
+    if [ -z "${EV_LOG}" ] || [ -z "${EV_STATUS}" ]; then
+        echo "ERROR — nothing was checked (--log and --status are both required)"
+        exit 2
+    fi
+    case "${EV_STATUS}" in
+        ''|*[!0-9]*)
+            echo "ERROR — nothing was checked (--status must be a number, got '${EV_STATUS}')"
+            exit 2
+            ;;
+    esac
+
+    EV_CHECKED=1
+    echo "stage: ${EV_STAGE}"
+    echo "log:   ${EV_LOG}"
+    echo "exit:  ${EV_STATUS}"
+    if [ -n "${EV_TRANSCRIPT}" ]; then
+        echo "transcript: ${EV_TRANSCRIPT}"
+    fi
+
+    if [ "${EV_STATUS}" -eq 0 ]; then
+        echo "PASS — ${EV_CHECKED} check(s), stage ${EV_STAGE} succeeded, nothing to diagnose"
+        exit 0
+    fi
+
+    classify_failure "${EV_LOG}" "${EV_STATUS}"
+    _diagnosable=$?
+
+    if [ "${_diagnosable}" -eq 0 ]; then
+        echo "PASS — ${EV_CHECKED} check(s), stage ${EV_STAGE} failed (exit ${EV_STATUS}) and said why"
+        exit 0
+    fi
+    echo "FAIL — ${EV_CHECKED} check(s), stage ${EV_STAGE} failed (exit ${EV_STATUS}) with NO diagnostic text"
+    exit 1
+}
+
+# --- selftest ---------------------------------------------------------------
+# Fatal, and runs before any real scan. Each fixture pins one branch of the
+# classification, including the two that must PASS — a guard that only proves
+# it can fail is not proof it can pass.
+selftest() {
+    _dir=$(mktemp -d)
+    _fails=0
+    _ran=0
+
+    _assert() {
+        # _assert NAME EXPECTED_EXIT ARGS...
+        _name="$1"; shift
+        _want="$1"; shift
+        # Re-enter through `sh` explicitly: the file is not required to carry
+        # the executable bit, and a bare `"$0"` fails with 126 for every
+        # fixture (which the harness correctly reported rather than passing).
+        _out=$(sh "$0" "$@" 2>&1)
+        _got=$?
+        _ran=$((_ran + 1))
+        if [ "${_got}" -ne "${_want}" ]; then
+            echo "  selftest FAIL ${_name}: wanted exit ${_want}, got ${_got}"
+            echo "${_out}" | sed 's/^/      /'
+            _fails=$((_fails + 1))
+        else
+            echo "  selftest ok   ${_name} (exit ${_got})"
+        fi
+    }
+
+    # 1. success: nothing to diagnose
+    : > "${_dir}/ok.log"
+    _assert "success-status-0" 0 --log "${_dir}/ok.log" --status 0 --stage t1
+
+    # 2. the incident itself: log exists, 0 bytes, nonzero exit
+    : > "${_dir}/empty.log"
+    _assert "empty-log-must-fail" 1 --log "${_dir}/empty.log" --status 1 --stage t2
+
+    # 3. wrapper precondition refusal: log never created
+    _assert "missing-log-must-fail" 1 --log "${_dir}/never-made.log" --status 1 --stage t3
+
+    # 4. counts but no diagnostic text — the exact stage-3 shape
+    printf '[bootstrap-error-count] source_idx=0 point=entry count=0\n[bootstrap-error-count] source_idx=1 point=post-lowering count=21\n' > "${_dir}/counts.log"
+    _assert "counts-without-text-must-fail" 1 --log "${_dir}/counts.log" --status 1 --stage t4
+
+    # 5. a real error message present -> diagnosable, must PASS
+    printf 'building...\nerror: semantic: undefined field kind at foo.spl:12:3\n' > "${_dir}/real.log"
+    _assert "real-error-text-must-pass" 0 --log "${_dir}/real.log" --status 1 --stage t5
+
+    # 6. the driver's own mid-phase fatal line must count as diagnostic text
+    printf '[hir-fatal] source_idx=2 path=a.spl error_idx=0 text=HIR lowering error in m (a.spl:9:1): unresolved type X\n' > "${_dir}/hirfatal.log"
+    _assert "hir-fatal-line-must-pass" 0 --log "${_dir}/hirfatal.log" --status 1 --stage t6
+
+    # 7. error text BELOW the truncation banner must still be found — the
+    #    AOT-smoke miss recorded in the bug doc came from grepping only above it
+    printf 'noise\n!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!\nerror: semantic: undefined field kind\n' > "${_dir}/truncated.log"
+    _assert "text-below-truncation-banner-must-pass" 0 --log "${_dir}/truncated.log" --status 1 --stage t7
+
+    # 8. exit 125 is wrapper verification, self-explaining, must PASS
+    : > "${_dir}/e125.log"
+    _assert "exit-125-must-pass" 0 --log "${_dir}/e125.log" --status 125 --stage t8
+
+    # 9. non-vacuity: missing arguments must ERROR, never pass
+    _assert "no-args-must-error" 2 --stage t9
+
+    # 10. a non-numeric status must ERROR rather than being coerced
+    _assert "bad-status-must-error" 2 --log "${_dir}/ok.log" --status abc --stage t10
+
+    rm -rf "${_dir}"
+    if [ "${_ran}" -eq 0 ]; then
+        echo "ERROR — nothing was checked (selftest ran 0 fixtures)"
+        exit 2
+    fi
+    if [ "${_fails}" -ne 0 ]; then
+        echo "FAIL — ${_ran} selftest fixture(s), ${_fails} failed"
+        exit 1
+    fi
+    echo "PASS — ${_ran} selftest fixture(s), 0 failed"
+    exit 0
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest ;;
+        --log) EV_LOG="${2:-}"; shift 2 ;;
+        --status) EV_STATUS="${2:-}"; shift 2 ;;
+        --stage) EV_STAGE="${2:-}"; shift 2 ;;
+        --transcript) EV_TRANSCRIPT="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument '$1')"; exit 2 ;;
+    esac
+done
+
+run_check

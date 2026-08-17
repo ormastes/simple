@@ -2195,6 +2195,23 @@ else
     fi
   fi
   if [ "${stage2_status}" -ne 0 ]; then
+    # A failing stage must say WHY. Before this, stage2 could exit 1 with a
+    # 0-byte stage2-native-build.log and no error text anywhere, and the three
+    # distinct causes (wrapper precondition refusal / compiler died unflushed /
+    # exit-125 post-run verification) were indistinguishable and all silent.
+    # The classification is a separate guard so it is exercisable by
+    # `--selftest` without running a bootstrap.
+    # doc/08_tracking/bug/bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md
+    sh "${repo_root}/scripts/check/check-stage-log-diagnosable.shs" \
+      --stage stage2 \
+      --status "${stage2_status}" \
+      --log "${log_dir}/stage2-native-build.log" \
+      --transcript "${stage3_provenance_dir}/stage2-command.transcript" >&2
+    stage2_diag_status=$?
+    if [ "${stage2_diag_status}" -ne 0 ]; then
+      echo "error: stage2 failed with NO diagnostic text (see the block above);" >&2
+      echo "       this is itself a defect — a stage that dies must leave evidence." >&2
+    fi
     if [ "${strict_bootstrap}" -eq 1 ]; then
       echo "error: strict bootstrap stage2 failed (exit ${stage2_status}); refusing seed fallback" >&2
       exit "${stage2_status}"

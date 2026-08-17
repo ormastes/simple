@@ -1,0 +1,124 @@
+# @cover src/os/drivers/gpu/board_vulkan/provider_nvidia.spl 60%
+# @req REQ-BOARD-VULKAN-002
+"""
+# Independence gate must group by `independence_group`, never by `provider_id`
+
+**Category:** OS / GPU driver
+**Status:** In Progress
+**Architecture:** doc/04_architecture/os/vulkan/simpleos_board_vulkan_driver_architecture_2026-08-10.md
+**Bug:** doc/08_tracking/bug/board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11.md
+
+## Purpose and Audience
+
+`independence_gate_executed_group_count` exists to answer one question: how
+many INDEPENDENT implementations actually executed for this boundary run.
+Independence is carried by `SourceResult.independence_group` — every Mesa
+ICD (anv, lavapipe, radv, nouveau, asahi, venus-guest) collapses to the
+single group `mesa` no matter how many distinct `provider_id`s they carry.
+
+This spec is the reproducing regression for a fail-open in which the gate
+keyed on `provider_id` instead. Under that defect any two differently-named
+providers satisfied the gate, so six Mesa ICDs counted as six independent
+references and a source whose `independence_group` was relabelled into
+`mesa` still counted as independent — defeating the exact sabotage the gate
+was built to catch.
+
+## Scope and Preconditions
+
+Pure predicate-level. No GPU, no subprocess, no device is required: the
+selections are constructed in-process from the lane's own source builders.
+
+## Primary Workflow
+
+Build selections that differ ONLY in `independence_group` while keeping
+`provider_id` distinct, and require the gate's count to follow the group,
+not the id.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| independence_group | The implementation-family key; the only valid grouping key |
+| provider_id | A per-source name; distinct even within one family |
+| executed | Only `ProviderStatus.executed` sources may count |
+
+## Related Specifications
+
+- [NVIDIA independent reference gate](nvidia_independent_reference_gate_spec.spl) — the lane spec this regression protects
+
+## Evidence and Provenance
+
+Derived from a direct read of `independence_gate_executed_group_count` in
+`src/os/drivers/gpu/board_vulkan/provider_nvidia.spl`, whose own doc comment
+describes grouping by `independence_group` while the body grouped by
+`provider_id`.
+
+## Recovery and Troubleshooting
+
+A RED here means the gate is fail-open and every "two independent
+references" verdict produced by a board-Vulkan boundary run is unsound.
+
+## Compatibility and Limitations
+
+Predicate-level only; it does not assert that any counterpart actually ran.
+"""
+
+use std.spec.*
+use std.common.spec.evidence.counterpart.model.{ProviderStatus}
+use os.drivers.gpu.board_vulkan.provider_nvidia.{
+    INDEPENDENCE_GROUP_MESA,
+    INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY,
+    independence_gate_executed_group_count,
+    independence_gate_satisfied,
+    mesa_reference_source,
+    nvidia_reference_source,
+    simple_candidate_source
+}
+
+describe("independence gate grouping key"):
+    it("counts many distinctly-named Mesa providers as exactly one independent group"):
+        step("six Mesa ICDs, six distinct provider_ids, one independence_group")
+        val all_mesa = [
+            mesa_reference_source("anv", ProviderStatus.executed),
+            mesa_reference_source("lavapipe", ProviderStatus.executed),
+            mesa_reference_source("radv", ProviderStatus.executed),
+            mesa_reference_source("nouveau", ProviderStatus.executed),
+            mesa_reference_source("asahi", ProviderStatus.executed),
+            mesa_reference_source("venus-guest", ProviderStatus.executed)
+        ]
+        step("the gate must follow independence_group, not provider_id")
+        assert_equal(independence_gate_executed_group_count(all_mesa), 1)
+        assert_false(independence_gate_satisfied(all_mesa))
+
+    it("does not let the candidate's empty independence_group count as a group"):
+        step("candidate alone has an empty independence_group")
+        val candidate_only = [simple_candidate_source(ProviderStatus.executed)]
+        assert_equal(independence_gate_executed_group_count(candidate_only), 0)
+
+        step("candidate plus one Mesa reference is still one independent group")
+        val candidate_plus_mesa = [
+            simple_candidate_source(ProviderStatus.executed),
+            mesa_reference_source("anv", ProviderStatus.executed)
+        ]
+        assert_equal(independence_gate_executed_group_count(candidate_plus_mesa), 1)
+        assert_false(independence_gate_satisfied(candidate_plus_mesa))
+
+    it("collapses a source relabelled into mesa even though its provider_id stays unique"):
+        step("honest selection: mesa + nvidia-proprietary are two groups")
+        val honest = [
+            simple_candidate_source(ProviderStatus.executed),
+            mesa_reference_source("anv", ProviderStatus.executed),
+            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_NVIDIA_PROPRIETARY)
+        ]
+        assert_equal(independence_gate_executed_group_count(honest), 2)
+        assert_true(independence_gate_satisfied(honest))
+
+        step("relabel only the group; provider_id host-nvidia-proprietary is untouched")
+        val relabelled = [
+            simple_candidate_source(ProviderStatus.executed),
+            mesa_reference_source("anv", ProviderStatus.executed),
+            nvidia_reference_source(ProviderStatus.executed, INDEPENDENCE_GROUP_MESA)
+        ]
+        step("a provider_id-keyed gate would still say 2 here; a correct gate says 1")
+        assert_equal(independence_gate_executed_group_count(relabelled), 1)
+        assert_false(independence_gate_satisfied(relabelled))

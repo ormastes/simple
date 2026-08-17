@@ -159,6 +159,110 @@ misdiagnosis and not something fixable by a compiler change. No code changes mad
 this pass — implementing the three missing modules is real feature work (per the doc's
 own "Fix recipe ... do not guess" caveat), not bug-triage scope. Status left OPEN.
 
+## 2026-08-17 — SCOPE for the feature work (no code written; do NOT stub)
+
+Status unchanged (OPEN, feature gap). What follows is the precise scope the
+earlier passes deferred: the exact API surface, the behavioural contract the
+assertions define, and a size estimate. **Read this before writing a line.**
+
+### Why a stub is worse than the RED spec
+Every symbol below is reachable by an assertion that constrains its *behaviour*,
+not merely its existence. A module that returns fixed values sized to satisfy
+these assertions would go green while painting nothing — converting an honest
+"unimplemented" signal into a false "implemented" one, in a subsystem where
+nothing else is checking. The four RED specs are currently the only record that
+a third of the Blink paint/input path is unwritten. Keep them RED until the
+behaviour is real.
+
+### Good news: every dependency already exists
+Nothing needs inventing underneath these four modules.
+
+| dependency | status |
+|---|---|
+| `src/lib/common/render_scene/paint_types.spl` | present, 34L — and already declares **exactly** the 4 variants needed: `FillRect`, `DrawBorder`, `DrawText`, `DrawImage` |
+| `src/lib/skia/entity/canvas.spl`, `entity/picture.spl` | present, both carry `op_count` — the recorder sink exists |
+| `src/lib/skia/entity/{color,geometry}.spl` | present (`sk_color4f`, `SkRect`) |
+| `src/lib/blink/layout/block_flow.spl` | present, 540L — `block_flow_spec` PASSES, so the box tree is a trustworthy input |
+| `src/lib/blink/dom/interaction_state.spl` | present, 23L — `form_state.spl` pairs with it |
+| `src/lib/blink/entity/computed_style.spl` | present, 235L |
+
+### The 4 modules, in dependency order
+
+**1. `src/lib/blink/input/event.spl`** — pure data, no deps. ~60–80 lines.
+Surface: `InputEvent`, `EventType`, `Point`, `mouse_event(type, x, y, _, _)`,
+`key_event(...)`. `EventType` needs at least `MouseDown` (used directly).
+
+**2. `src/lib/blink/input/hit_test.spl`** — ~120–160 lines. Surface:
+`HitTestResult`, `hit_test_empty`, `point_in_rect`, `hit_test`,
+`hit_test_event`, `hit_test_ancestors`.
+Contract fixed by assertions:
+- `hit_test_empty().hit_box_id == -1` (the miss sentinel);
+- `point_in_rect(SkRect(0,0,100,100), 50,50) == true`; `(150,50) == false`;
+- `hit_test(ctx, 100,50)` on a single box → that box's id;
+- **innermost wins**: nested child at the same point returns the CHILD's id (2),
+  not the parent's — this is the one real algorithmic requirement (depth-first,
+  deepest match, not first match);
+- a point outside everything returns the `-1` sentinel;
+- `hit_test_event` maps an `InputEvent` to the same result and populates
+  `local_x`/`local_y` (box-relative, asserted `>= 0.0`).
+
+**3. `src/lib/blink/dom/form_state.spl`** — ~100–130 lines. Surface:
+`FormState`, `FormFieldEntry`, `form_state_empty`, `form_state_set_value`,
+`form_state_get_value`, `form_state_with_field`, `form_state_get_placeholder`.
+Contract:
+- value round-trips by `node_id`; absent node returns `""` (not nil);
+- `with_field` **replaces** an existing entry for the same `node_id` —
+  `fields.len() == 1` after two writes to node 5, so it is upsert, not append;
+- `set_value` **preserves an existing placeholder** (asserted: placeholder
+  `"search…"` survives a later `set_value`).
+
+**4. `src/lib/blink/paint/paint_tree_walker.spl`** — the substantial one,
+~350–450 lines. Surface: `StyledBox`, `ImageEntry`, `FormFieldPaintEntry`,
+`PaintContext`, `paint_tree_new`, `paint_tree_new_with_images`,
+`paint_tree_new_with_forms`, `paint_tree`, `collect_display_list`,
+`finalize_paint`.
+
+**Design point the specs force, easy to miss: there are TWO paint sinks.**
+- `paint_tree_spec` drives a **skia canvas recorder** — `pc.canvas.width/height`
+  mirror the viewport, and `finalize_paint(pc)` yields an `SkPicture` whose
+  `op_count` is asserted (0 when nothing drawn, 2 after a parent+child walk).
+- `image_paint_spec` / `form_paint_spec` drive a **`DisplayList` of `PaintOp`**
+  via `collect_display_list`.
+A single implementation must serve both; picking one sink and adapting the other
+late is the main rework risk here.
+
+Behavioural contract:
+- `find_style` returns an Option — `None` for a missing `layout_id`, `Some` when
+  present (both branches asserted);
+- background with `a > 0` emits a draw op; **`a == 0` emits none** (transparency
+  is a real skip, not a transparent draw);
+- a 2-box tree emits exactly 2 ops — one per box, no duplicates;
+- images: exactly 1 `DrawImage` per registered `ImageEntry`, carrying the
+  correct rect (`x,y,w,h` = 0,0,40,20) and `src_url`; a box with no `ImageEntry`
+  emits **zero** `DrawImage` ops;
+- form input with a value emits `FillRect` + `DrawBorder` + `DrawText(value)`,
+  exactly 1 each, `ops.len() >= 3`;
+- empty value draws the **placeholder** text instead;
+- **focused vs unfocused borders must differ** in colour or width (the spec
+  accepts either axis) — this is where a stub returning a constant border is
+  caught;
+- a button emits `FillRect` + `DrawText(label)`, `ops.len() >= 2`.
+
+### Size estimate
+**~650–820 lines of new pure-Simple across 4 files**, plus export wiring
+(`src/lib/blink/{paint,input}/` are new directories). Module 4 is roughly half
+the total and carries all the risk; modules 1–3 are mostly data plumbing with
+one real algorithm (innermost-wins traversal in module 2).
+
+Realistically a **multi-session feature lane**, not a bug fix — consistent with
+this doc's original "real feature work, do not guess" caveat. Suggested landing
+order is the dependency order above, each module turning its own spec green:
+module 2 greens `hit_test_spec`; module 4 greens `paint_tree_walker_spec` and
+`image_paint_spec`; modules 3+4 together green `form_paint_spec`.
+
+No `doc/03_plan/` entry added: the scope fits in this record, and a plan doc for
+work nobody has scheduled would be speculative.
+
 ## 2026-08-17 third-pass re-verification — still a feature gap, unchanged
 
 All four modules the four RED specs import are still absent (checked by direct

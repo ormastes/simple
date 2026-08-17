@@ -1045,8 +1045,7 @@ impl ExecCore {
             path,
             project_hint.as_deref(),
             duplicate_structs,
-        )
-        {
+        ) {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
         };
@@ -1118,8 +1117,7 @@ impl ExecCore {
         // examples live INSIDE `main` is unaffected: extract_file_test_meta does
         // not descend into function bodies, so total_tests counts module-level
         // examples only.
-        let module_level_examples =
-            simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests;
+        let module_level_examples = simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests;
         if module_level_examples > 0 {
             return Err(format!(
                 "module declares {module_level_examples} top-level BDD example(s) that the JIT \
@@ -1302,8 +1300,7 @@ const PARENLESS_ACCESSOR_STRUCTS: [&str; 3] = ["struct 'Array'", "struct 'String
 /// interpreter also evaluates correctly, which is why it accumulated the most
 /// sites. Genuine user structs with a `length` field are unaffected: they
 /// resolve, so they never reach the error this matches on.
-const PARENLESS_ACCESSOR_FIELDS: [&str; 8] =
-    ["length", "len", "size", "empty", "chars", "first", "last", "capacity"];
+const PARENLESS_ACCESSOR_FIELDS: [&str; 8] = ["length", "len", "size", "empty", "chars", "first", "last", "capacity"];
 
 /// True when a HIR lowering error is the paren-less-container-accessor class.
 ///
@@ -1338,6 +1335,28 @@ fn jit_strict_fallback_error_for(kind: &str, err: &impl std::fmt::Display, path:
         None => String::new(),
     };
     let msg = format!("{err}");
+
+    // An import naming a module that does not exist can never be satisfied by
+    // any later stage, so de-JITing to the interpreter does not "recover" it --
+    // it just moves the failure to the first CALL, where it surfaces as
+    // `semantic: function <name> not found` with no mention of the import that
+    // caused it. That is exactly how six stdlib files shipped
+    // `use string.{char_from_code}` (a module path that never existed in this
+    // tree), silently breaking DNS label/TXT decoding and SMTP base64. Escalate
+    // unconditionally, on the same reasoning as the paren-less accessor class
+    // above: a file with an unresolvable import already fails `simple compile`,
+    // so making `run` agree cannot regress a build that works today.
+    if msg.contains("cannot resolve import") {
+        eprintln!(
+            "[jit-fallback] {kind}: {msg}{where_}: the import names a module that does not exist. \
+             This is a hard error in every lane -- falling back to the interpreter would only defer \
+             the failure to the first call site, reported as an unrelated 'function not found'. \
+             Set SIMPLE_ALLOW_UNRESOLVED_IMPORTS=1 to restore the old warn-and-continue behaviour."
+        );
+        return format!(
+            "SIMPLE_JIT_STRICT: {kind}: {msg}{where_}: unresolved import; refusing to fall back to the interpreter"
+        );
+    }
 
     if is_parenless_container_accessor(&msg) {
         eprintln!(

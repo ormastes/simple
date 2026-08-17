@@ -1,0 +1,74 @@
+# @cover src/compiler/00.common/assurance/policy_schema.spl
+# @cover src/compiler/80.driver/driver_safety_severity.spl
+# @cover src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+#
+# GENERALIZATION of the `verified` rung failures in
+#   test/01_unit/compiler/assurance/policy_five_site_convergence_spec.spl
+# (the repro spec: it went red on three examples, naming
+# safety_pass_severity_for_name and parse_lint_profile).
+#
+# The repro proves the five sites agree on the canonical NAME. This file states
+# the rule that the two broken sites had each independently violated, as a rule
+# rather than as a table row:
+#
+#   `verified` is the STRONGEST rung of canonical_profile_names(), and it has no
+#   variant of its own in any V1 projection (AssuranceStrictness, LintProfile,
+#   SafetyPassSeverity). policy_schema.from_name() therefore projects it onto
+#   the strongest V1 rung -- Critical -- explicitly "rather than the permissive
+#   default". Every other V1 projection must make the SAME conservative choice.
+#
+# The defect both sites had was the permissive one: an unmatched `verified`
+# fell through to the bottom of the ladder (Advisory / nil), so requesting the
+# strictest profile on the ladder was WEAKER than requesting `robust`, and lint
+# rejected it outright. A monotonicity check catches that class of fallthrough
+# for any future rung, not just this one.
+
+use std.spec
+
+use compiler.common.assurance.policy_names.{canonical_profile_names}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.driver.driver_safety_severity.{
+    SafetyPassSeverity, safety_pass_severity_for_name
+}
+use compiler.tools.lint.main.{parse_lint_profile}
+
+fn severity_rank(s: SafetyPassSeverity) -> i64:
+    match s:
+        SafetyPassSeverity.Advisory: 0
+        SafetyPassSeverity.Warn: 1
+        SafetyPassSeverity.Deny: 2
+
+describe "the `verified` rung projects conservatively onto every V1 site":
+
+    it "is the top rung of the canonical ladder":
+        step("if this moves, the expectations below are about the wrong name")
+        val ladder = canonical_profile_names()
+        expect(ladder[ladder.len() - 1]).to_equal("verified")
+
+    it "the schema projects it onto the strongest V1 strictness":
+        expect(AssuranceStrictness.from_name("verified"))
+            .to_equal(AssuranceStrictness.from_name("critical"))
+
+    it "the driver severity projection agrees with the schema, not the default":
+        expect(safety_pass_severity_for_name("verified"))
+            .to_equal(safety_pass_severity_for_name("critical"))
+        expect(safety_pass_severity_for_name("verified"))
+            .to_equal(SafetyPassSeverity.Deny)
+
+    it "the lint projection accepts it and agrees with the schema":
+        step("returning nil here made lint reject the strictest profile")
+        expect(parse_lint_profile("verified")).to_be_truthy()
+        expect(parse_lint_profile("verified")).to_equal(parse_lint_profile("critical"))
+
+    it "driver severity never DECREASES as the canonical ladder ascends":
+        step("the fallthrough bug made the top rung weaker than 'robust'")
+        var prev = -1
+        for name in canonical_profile_names():
+            val rank = severity_rank(safety_pass_severity_for_name(name))
+            expect(rank).to_be_greater_than_or_equal(prev)
+            prev = rank
+
+    it "no rung of the ladder is rejected by lint":
+        step("every canonical name must resolve at every V1 site")
+        for name in canonical_profile_names():
+            expect(parse_lint_profile(name)).to_be_truthy()

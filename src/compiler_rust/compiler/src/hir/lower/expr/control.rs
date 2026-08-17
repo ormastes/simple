@@ -133,8 +133,7 @@ impl Lowerer {
         // whose absence caused the undeclared-global defect.
         let bindings = self.extract_pattern_bindings(pattern, subject_ty);
         let previous_bindings = self.register_match_bindings(pattern, &bindings, ctx);
-        let binding_stmts =
-            self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+        let binding_stmts = self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
 
         let then_hir = self.lower_expr(then_branch, ctx)?;
         let ty = then_hir.ty;
@@ -729,18 +728,22 @@ impl Lowerer {
             // Kept in sync with the statement-form twin
             // `lower_pattern_condition_stmt` (hir/lower/stmt_lowering.rs): match
             // ARMS route through that one, this is the expression form.
-            Pattern::Tuple(elements) => Ok(self
-                .sequence_condition(&subject_ref, elements, false, ctx)
-                .unwrap_or(HirExpr {
-                    kind: HirExprKind::Bool(true),
-                    ty: TypeId::BOOL,
-                })),
-            Pattern::Array(elements) => Ok(self
-                .sequence_condition(&subject_ref, elements, true, ctx)
-                .unwrap_or(HirExpr {
-                    kind: HirExprKind::Bool(true),
-                    ty: TypeId::BOOL,
-                })),
+            Pattern::Tuple(elements) => {
+                Ok(self
+                    .sequence_condition(&subject_ref, elements, false, ctx)
+                    .unwrap_or(HirExpr {
+                        kind: HirExprKind::Bool(true),
+                        ty: TypeId::BOOL,
+                    }))
+            }
+            Pattern::Array(elements) => {
+                Ok(self
+                    .sequence_condition(&subject_ref, elements, true, ctx)
+                    .unwrap_or(HirExpr {
+                        kind: HirExprKind::Bool(true),
+                        ty: TypeId::BOOL,
+                    }))
+            }
             // Named-field spelling. Same rule as the positional twin above: the
             // class itself is fixed by the type system, the FIELD sub-patterns
             // are not, and this used to be an unconditional `Bool(true)`.
@@ -760,11 +763,9 @@ impl Lowerer {
     /// emitting a discriminant check for a struct pattern would test an object
     /// pointer's enum header and never match.
     pub(crate) fn is_real_enum_variant_name(&self, variant: &str) -> bool {
-        let resolves_to_struct = self
-            .module
-            .types
-            .lookup(variant)
-            .map_or(false, |tid| matches!(self.module.types.get(tid), Some(HirType::Struct { .. })));
+        let resolves_to_struct = self.module.types.lookup(variant).map_or(false, |tid| {
+            matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
+        });
         if resolves_to_struct {
             return false;
         }
@@ -838,12 +839,7 @@ impl Lowerer {
     ///     if rt_enum_id(subj) >= 0: rt_enum_payload(subj) else: subj
     /// See §22 of
     /// doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md.
-    pub(crate) fn payload_slot_expr(
-        outer_variant: &str,
-        subject_ref: &HirExpr,
-        i: usize,
-        arity: usize,
-    ) -> HirExpr {
+    pub(crate) fn payload_slot_expr(outer_variant: &str, subject_ref: &HirExpr, i: usize, arity: usize) -> HirExpr {
         let legacy_payload_expr = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: "rt_enum_payload".to_string(),
@@ -920,7 +916,10 @@ impl Lowerer {
         // arm emits nothing for a program that trips this code path. Set
         // SIMPLE_DEBUG_PATTERN_LOWER=1 to see this walk fire.
         if std::env::var_os("SIMPLE_DEBUG_PATTERN_LOWER").is_some() {
-            eprintln!("[pattern-lower] subpattern_condition kind={}", pattern_kind_name(pattern));
+            eprintln!(
+                "[pattern-lower] subpattern_condition kind={}",
+                pattern_kind_name(pattern)
+            );
         }
         match pattern {
             // Irrefutable: binds or ignores, never rejects.
@@ -1008,11 +1007,7 @@ impl Lowerer {
                 }
                 acc
             }
-            Pattern::Enum {
-                variant,
-                payload,
-                ..
-            } => {
+            Pattern::Enum { variant, payload, .. } => {
                 // A struct/class spelling (`Point(x, y)`) also arrives as
                 // Pattern::Enum. Emitting a discriminant check for it would
                 // read an object pointer's enum header and never match — see
@@ -1856,20 +1851,20 @@ impl Lowerer {
         );
         let statically_non_nullable = !receiver_is_optional_accessor
             && matches!(
-            expr_hir.ty,
-            TypeId::BOOL
-                | TypeId::I8
-                | TypeId::I16
-                | TypeId::I32
-                | TypeId::I64
-                | TypeId::U8
-                | TypeId::U16
-                | TypeId::U32
-                | TypeId::U64
-                | TypeId::F32
-                | TypeId::F64
-                | TypeId::CHAR
-        );
+                expr_hir.ty,
+                TypeId::BOOL
+                    | TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::F32
+                    | TypeId::F64
+                    | TypeId::CHAR
+            );
         if std::env::var("SIMPLE_DEBUG_COALESCE").is_ok() {
             eprintln!(
                 "[coalesce] operand ty={:?} optional_accessor={} non_nullable={}",
@@ -2255,6 +2250,49 @@ impl Lowerer {
         // Lower the inner expression once and bind it to a temp.
         let inner_hir = self.lower_expr(inner, ctx)?;
         let subject_ty = inner_hir.ty;
+
+        // A nullable SCALAR (`i64?`, `f64?`, `bool?`, `text?`) is not a
+        // Result/Option enum: it lowers to `HirType::Pointer { inner }` and its
+        // runtime value is the tagged payload itself, with nil as the absent
+        // case. Routing it through `rt_enum_payload` below asked a non-enum for
+        // its payload, which answers `rt_core_nil()` — so `x!` on a plainly
+        // non-nil `i64? = 42` evaluated to `nil`.
+        // Bug: doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+        // The tagged word IS the payload here (this is the same "bare/flat-
+        // nullable payload convention" `rt_unwrap_or_value` already documents),
+        // so unwrapping is the identity on the value and only the static type
+        // narrows from `T?` to `T`.
+        if self.result_like_payload_type(subject_ty).is_none() {
+            if let Some(HirType::Pointer { inner: pointee, .. }) = self.module.types.get(subject_ty) {
+                let pointee = *pointee;
+                if matches!(
+                    pointee,
+                    TypeId::BOOL
+                        | TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                        | TypeId::STRING
+                ) {
+                    // Type it `ANY`, not `pointee`: the runtime word is still a
+                    // TAGGED RuntimeValue, and claiming the raw scalar type here
+                    // would make the next consumer read `42 << 3` as a raw int.
+                    // `ANY` is what every other tagged-value producer reports.
+                    let _ = pointee;
+                    return Ok(HirExpr {
+                        kind: inner_hir.kind,
+                        ty: TypeId::ANY,
+                    });
+                }
+            }
+        }
+
         let payload_ty = self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY);
 
         let subject_idx = ctx.locals.len();
@@ -2418,7 +2456,9 @@ fn bind_pattern_identifiers(pattern: &Pattern, bound: &mut Vec<String>, identifi
                 bind_pattern_identifiers(p, bound, identifiers);
             }
         }
-        Pattern::Enum { payload: Some(pats), .. } => {
+        Pattern::Enum {
+            payload: Some(pats), ..
+        } => {
             for p in pats {
                 bind_pattern_identifiers(p, bound, identifiers);
             }
@@ -2771,9 +2811,7 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         | Expr::OptionalChain { expr, .. } => {
             collect_identifiers_recursive(expr, bound, identifiers);
         }
-        Expr::UnwrapOr { expr, default }
-        | Expr::CastOr { expr, default, .. }
-        | Expr::Coalesce { expr, default } => {
+        Expr::UnwrapOr { expr, default } | Expr::CastOr { expr, default, .. } | Expr::Coalesce { expr, default } => {
             collect_identifiers_recursive(expr, bound, identifiers);
             collect_identifiers_recursive(default, bound, identifiers);
         }
@@ -2817,7 +2855,16 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         Expr::Spawn(inner) => {
             collect_identifiers_recursive(inner, bound, identifiers);
         }
-        Expr::Forall { pattern, range, predicate } | Expr::Exists { pattern, range, predicate } => {
+        Expr::Forall {
+            pattern,
+            range,
+            predicate,
+        }
+        | Expr::Exists {
+            pattern,
+            range,
+            predicate,
+        } => {
             collect_identifiers_recursive(range, bound, identifiers);
             let mark = bound.len();
             bind_pattern_identifiers(pattern, bound, identifiers);

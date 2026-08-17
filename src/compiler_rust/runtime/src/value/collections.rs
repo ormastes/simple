@@ -14,8 +14,7 @@ use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{
     gc_flags, get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, register_heap_ptr, unregister_heap_ptr,
-    unregister_heap_ptr_checked,
-    HeapHeader, HeapObjectType,
+    unregister_heap_ptr_checked, HeapHeader, HeapObjectType,
 };
 use super::objects::{
     rt_closure_func_ptr, rt_option_map, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject,
@@ -3779,11 +3778,7 @@ pub extern "C" fn rt_string_split(string: RuntimeValue, delimiter: RuntimeValue)
 
 /// Split a string at most `limit - 1` times, preserving the remainder.
 #[no_mangle]
-pub extern "C" fn rt_string_split_limit(
-    string: RuntimeValue,
-    delimiter: RuntimeValue,
-    limit: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_string_split_limit(string: RuntimeValue, delimiter: RuntimeValue, limit: i64) -> RuntimeValue {
     if limit <= 0 {
         return rt_string_split(string, delimiter);
     }
@@ -4836,9 +4831,7 @@ pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> R
 /// answer instead of silently acquiring a new one.
 #[no_mangle]
 pub extern "C" fn rt_find(receiver: RuntimeValue, arg: RuntimeValue) -> i64 {
-    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some()
-        && !rt_closure_func_ptr(arg).is_null()
-    {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() && !rt_closure_func_ptr(arg).is_null() {
         return rt_array_find(receiver, arg).to_raw() as i64;
     }
     rt_string_find(receiver, arg)
@@ -5075,6 +5068,57 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         let len = (*arr).len;
+
+        // PACKED arrays store RAW element words, not tagged RuntimeValues, so
+        // the generic `as_slice()` + `rt_array_push` loop below is wrong for
+        // them twice over: it reinterprets each raw word as a tagged value,
+        // and it produces an UNPACKED result whose reader then untags what it
+        // finds. The untag is a `>> 3`, so every element came back divided by
+        // eight -- 5 copied as 0, and 1234567890123456789 as 154320986265432098.
+        // A `[u64]` array reaching this path is not exotic: `val b = a` on any
+        // array-typed binding lowers to rt_array_copy (see
+        // compiler/src/mir/lower/lowering_stmt.rs), which is how a zeroed x_3
+        // silently broke the X25519 ladder.
+        //
+        // Reproduce the source layout instead of flattening it. `data` slots
+        // are 8 bytes wide for both the packed-u64 and the generic layout, and
+        // one byte wide for the byte-packed layout.
+        if (*arr).is_u64_packed() {
+            let result = rt_array_new_uninit_u64(len.max(1));
+            if result.is_nil() {
+                return result;
+            }
+            let dst =
+                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
+                std::ptr::copy_nonoverlapping(
+                    (*arr).data as *const u64,
+                    (*dst).data as *mut u64,
+                    len as usize,
+                );
+            }
+            (*dst).len = len;
+            return result;
+        }
+
+        if (*arr).is_byte_packed() {
+            let result = rt_byte_array_new(len.max(1));
+            if result.is_nil() {
+                return result;
+            }
+            let dst =
+                as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
+                std::ptr::copy_nonoverlapping(
+                    (*arr).data as *const u8,
+                    (*dst).data as *mut u8,
+                    len as usize,
+                );
+            }
+            (*dst).len = len;
+            return result;
+        }
+
         let result = rt_array_new(len);
         if result.is_nil() {
             return result;
@@ -5745,14 +5789,13 @@ mod tests;
 #[cfg(test)]
 mod string_free_contract_tests {
     use super::{
-        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new,
-        rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
-        rt_transient_array_scope_pause, rt_transient_heap_promote,
+        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
+        rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
+        rt_transient_heap_promote,
     };
     use crate::value::dict::{rt_dict_get, rt_dict_new, rt_dict_set};
     use crate::value::objects::{
-        rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_new,
-        rt_enum_payload,
+        rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_new, rt_enum_payload,
     };
     use crate::value::heap::rt_heap_registry_count;
     use std::sync::Mutex;
@@ -5838,7 +5881,11 @@ mod string_free_contract_tests {
         assert!(rt_array_push(right, string));
         assert_eq!(rt_heap_registry_count(), before + 3);
         assert!(rt_transient_array_scope_end());
-        assert_eq!(rt_heap_registry_count(), before, "string and aliases reclaim exactly once");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before,
+            "string and aliases reclaim exactly once"
+        );
         assert_eq!(rt_string_len(string), -1, "reclaimed string is no longer readable");
     }
 
@@ -5869,7 +5916,11 @@ mod string_free_contract_tests {
         assert_eq!(rt_enum_payload(en), text);
         assert_eq!(rt_closure_get_capture(closure, 0), text);
         assert_eq!(rt_string_len(unreachable), -1, "unreachable sibling is reclaimed");
-        assert_eq!(rt_heap_registry_count(), before + 5, "only five promoted graph nodes survive");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before + 5,
+            "only five promoted graph nodes survive"
+        );
     }
 
     #[test]
@@ -5931,7 +5982,9 @@ mod string_free_contract_tests {
 mod aux_byte_accounting_tests {
     use super::{rt_array_free, rt_array_new, rt_array_push_grow};
     use crate::value::core::RuntimeValue;
-    use crate::value::heap::{rt_heap_array_capacity_bytes, rt_heap_aux_live_bytes, rt_heap_aux_live_bytes_by_kind, HeapObjectType};
+    use crate::value::heap::{
+        rt_heap_array_capacity_bytes, rt_heap_aux_live_bytes, rt_heap_aux_live_bytes_by_kind, HeapObjectType,
+    };
 
     #[test]
     fn aux_counters_rise_on_array_growth_and_fall_on_free() {
@@ -6001,12 +6054,25 @@ mod array_free_deep_contract_tests {
         let _g = GUARD.lock().unwrap();
         let before = rt_heap_registry_count();
         let a = rt_array_new(4);
-        assert!(rt_array_push(a, mkstr("deep free element one, long enough to avoid the cache")));
-        assert!(rt_array_push(a, mkstr("deep free element two, long enough to avoid the cache")));
-        assert!(rt_array_push(a, mkstr("deep free element three, long enough to avoid the cache")));
+        assert!(rt_array_push(
+            a,
+            mkstr("deep free element one, long enough to avoid the cache")
+        ));
+        assert!(rt_array_push(
+            a,
+            mkstr("deep free element two, long enough to avoid the cache")
+        ));
+        assert!(rt_array_push(
+            a,
+            mkstr("deep free element three, long enough to avoid the cache")
+        ));
         assert_eq!(rt_heap_registry_count(), before + 4, "array + three strings register");
         assert_eq!(rt_array_free_deep(a), 1, "tree of non-shared strings is reclaimed");
-        assert_eq!(rt_heap_registry_count(), before, "every node returned to the registry baseline");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before,
+            "every node returned to the registry baseline"
+        );
     }
 
     #[test]
@@ -6014,7 +6080,10 @@ mod array_free_deep_contract_tests {
         let _g = GUARD.lock().unwrap();
         let before = rt_heap_registry_count();
         let inner = rt_array_new(4);
-        assert!(rt_array_push(inner, mkstr("nested deep free leaf string, unique and long")));
+        assert!(rt_array_push(
+            inner,
+            mkstr("nested deep free leaf string, unique and long")
+        ));
         let outer = rt_array_new(4);
         assert!(rt_array_push(outer, inner));
         assert!(rt_array_push(outer, RuntimeValue::from_int(41)));
@@ -6040,7 +6109,11 @@ mod array_free_deep_contract_tests {
         let _g = GUARD.lock().unwrap();
         let before = rt_heap_registry_count();
         let a = rt_byte_array_new(64);
-        assert_eq!(rt_array_free_deep(a), 1, "packed payload holds no heap refs by construction");
+        assert_eq!(
+            rt_array_free_deep(a),
+            1,
+            "packed payload holds no heap refs by construction"
+        );
         assert_eq!(rt_heap_registry_count(), before);
     }
 
@@ -6110,7 +6183,11 @@ mod array_free_deep_contract_tests {
             0,
             "string root refused"
         );
-        assert_eq!(rt_array_free_deep(RuntimeValue::from_int(7)), 0, "immediate root refused");
+        assert_eq!(
+            rt_array_free_deep(RuntimeValue::from_int(7)),
+            0,
+            "immediate root refused"
+        );
         assert_eq!(rt_array_free_deep(RuntimeValue::NIL), 0, "nil root refused");
         let a = rt_array_new(4);
         assert!(rt_array_push(a, mkstr("freed exactly once by the deep path, unique")));

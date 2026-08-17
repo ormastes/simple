@@ -1,0 +1,187 @@
+# Array Copy Element-Type Matrix — Similar-Problem Detection Spec
+#
+# Companion to packed_array_copy_roundtrip_spec.spl.
+#
+# The `[u64]` copy defect
+# (doc/08_tracking/bug/typed_array_variable_binding_zeroes_elements_2026-08-17.md)
+# came from ONE element type having a packed heap layout that the shared copy
+# path did not recognise. The layout choice is per-element-type, so the same
+# mistake can be made again the next time a type gains a packed representation
+# — `[u8]` already has one (gc_flags::BYTE_PACKED), and it was excluded from
+# copying rather than supported.
+#
+# This spec sweeps the element-type matrix so a future packed layout that the
+# copy path does not understand fails HERE, loudly, instead of surfacing as a
+# wrong cryptographic answer three layers up.
+#
+# Measured 2026-08-17 on the pre-fix binary: [u64] was the only broken type.
+# i64, f64, u8, u32, u16, text and bool all round-tripped correctly. That is
+# the baseline this spec locks in.
+#
+# ENGINE NOTE: the defect lived only in the cranelift JIT; spec files run on
+# the interpreter. The in-process examples therefore guard the interpreter,
+# and the subprocess example is what actually exercises the JIT.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# ============================================================================
+# One fixture per element type. Each returns a fresh array (a call result is
+# NOT copied); the examples then bind it to a second name to force the copy.
+# ============================================================================
+
+fn _u64s() -> [u64]:
+    [11u64, 12u64]
+
+fn _i64s() -> [i64]:
+    [11, 12]
+
+fn _f64s() -> [f64]:
+    [11.5, 12.5]
+
+fn _u8s() -> [u8]:
+    [11u8, 12u8]
+
+fn _u32s() -> [u32]:
+    [11u32, 12u32]
+
+fn _u16s() -> [u16]:
+    [11u16, 12u16]
+
+fn _texts() -> [text]:
+    ["eleven", "twelve"]
+
+fn _bools() -> [bool]:
+    [true, false]
+
+val MATRIX_SOURCE: text = "fn u64s() -> [u64]:\n" +
+    "    [11u64, 12u64]\n" +
+    "fn i64s() -> [i64]:\n" +
+    "    [11, 12]\n" +
+    "fn f64s() -> [f64]:\n" +
+    "    [11.5, 12.5]\n" +
+    "fn u8s() -> [u8]:\n" +
+    "    [11u8, 12u8]\n" +
+    "fn u32s() -> [u32]:\n" +
+    "    [11u32, 12u32]\n" +
+    "fn u16s() -> [u16]:\n" +
+    "    [11u16, 12u16]\n" +
+    "fn texts() -> [text]:\n" +
+    "    [\"eleven\", \"twelve\"]\n" +
+    "fn bools() -> [bool]:\n" +
+    "    [true, false]\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val a1 = u64s()\n" +
+    "    val c1 = a1\n" +
+    "    print \"u64={c1[0]}\"\n" +
+    "    val a2 = i64s()\n" +
+    "    val c2 = a2\n" +
+    "    print \"i64={c2[0]}\"\n" +
+    "    val a3 = f64s()\n" +
+    "    val c3 = a3\n" +
+    "    print \"f64={c3[0]}\"\n" +
+    "    val a4 = u8s()\n" +
+    "    val c4 = a4\n" +
+    "    print \"u8={c4[0]}\"\n" +
+    "    val a5 = u32s()\n" +
+    "    val c5 = a5\n" +
+    "    print \"u32={c5[0]}\"\n" +
+    "    val a6 = u16s()\n" +
+    "    val c6 = a6\n" +
+    "    print \"u16={c6[0]}\"\n" +
+    "    val a7 = texts()\n" +
+    "    val c7 = a7\n" +
+    "    print \"text={c7[0]}\"\n" +
+    "    val a8 = bools()\n" +
+    "    val c8 = a8\n" +
+    "    print \"bool={c8[0]}\"\n"
+
+fn _run_matrix_in_mode(mode: text) -> text:
+    val path = "build/test-artifacts/array_copy_matrix_repro.spl"
+    file_write(path, MATRIX_SOURCE)
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+# ============================================================================
+# In-process matrix
+# ============================================================================
+
+describe "every integer element type survives a binding copy":
+
+    it "copies a [u64] without altering its elements":
+        step("Bind a [u64] to a second name and read element 0")
+        val src = _u64s()
+        val copy = src
+        expect(copy[0]).to_equal(11u64)
+
+    it "copies a [i64] without altering its elements":
+        val src = _i64s()
+        val copy = src
+        expect(copy[0]).to_equal(11)
+
+    it "copies a [u32] without altering its elements":
+        val src = _u32s()
+        val copy = src
+        expect(copy[0]).to_equal(11u32)
+
+    it "copies a [u16] without altering its elements":
+        val src = _u16s()
+        val copy = src
+        expect(copy[0]).to_equal(11u16)
+
+    it "copies a [u8] without altering its elements":
+        # [u8] is the OTHER packed layout (gc_flags::BYTE_PACKED). It is the
+        # most likely next home for this class of defect.
+        val src = _u8s()
+        val copy = src
+        expect(copy[0]).to_equal(11u8)
+
+describe "non-integer element types survive a binding copy":
+
+    it "copies a [f64] without altering its elements":
+        val src = _f64s()
+        val copy = src
+        expect(copy[0] == 11.5).to_equal(true)
+
+    it "copies a [text] without altering its elements":
+        val src = _texts()
+        val copy = src
+        expect(copy[0]).to_equal("eleven")
+
+    it "copies a [bool] without altering its elements":
+        val src = _bools()
+        val copy = src
+        expect(copy[0]).to_equal(true)
+
+# ============================================================================
+# Subprocess matrix — exercises the JIT, where the defect actually lived
+# ============================================================================
+
+describe "the element-type matrix agrees across both engines":
+
+    it "gives every element type the same copied value under JIT and interpreter":
+        step("Run the whole element-type matrix under the cranelift JIT")
+        val jit_out = _run_matrix_in_mode("jit")
+
+        step("Run the identical program under the tree-walk interpreter")
+        val interp_out = _run_matrix_in_mode("interpreter")
+
+        step("Each type must report the value that was stored")
+        expect(jit_out).to_contain("u64=11")
+        expect(jit_out).to_contain("i64=11")
+        expect(jit_out).to_contain("u8=11")
+        expect(jit_out).to_contain("u32=11")
+        expect(jit_out).to_contain("u16=11")
+        expect(jit_out).to_contain("text=eleven")
+        expect(jit_out).to_contain("bool=true")
+
+        step("A divide-by-eight would turn 11 into 1 — that must not appear")
+        expect(jit_out.contains("u64=1\n")).to_equal(false)
+
+        step("Both engines must agree byte for byte across the whole matrix")
+        expect(jit_out).to_equal(interp_out)

@@ -1124,6 +1124,37 @@ fn browser_shared_wm_needs_main_thread() -> bool {
     false
 }
 
+/// Write the coverage artifact if coverage collection is enabled.
+///
+/// Returns 0 when there was nothing to do or the artifact was written, and a
+/// non-zero exit code when coverage was requested but could not be produced.
+/// Never returns success without having verified the file exists on disk — a
+/// coverage run that reports success but wrote nothing is exactly the silent
+/// no-op this function exists to prevent.
+fn flush_coverage_before_exit() -> i32 {
+    if !simple_compiler::is_coverage_enabled() {
+        return 0;
+    }
+
+    if let Err(e) = simple_compiler::save_global_coverage() {
+        eprintln!("error: SIMPLE_COVERAGE was set but the coverage artifact could not be written: {e}");
+        return 1;
+    }
+
+    // Verify rather than trust: confirm the artifact is actually on disk at the
+    // path the caller asked for.
+    if let Some(path) = simple_compiler::get_coverage_output_path() {
+        if !std::path::Path::new(&path).exists() {
+            eprintln!(
+                "error: SIMPLE_COVERAGE was set but no coverage artifact exists at {path} after writing"
+            );
+            return 1;
+        }
+    }
+
+    0
+}
+
 fn real_main() {
     // Initialize metrics and startup tracking
     let (metrics_enabled, mut metrics) = init_metrics();
@@ -1231,6 +1262,24 @@ fn real_main() {
 
     // Print resolve stats before exit (if SIMPLE_PROFILE is set)
     simple_compiler::interpreter::print_resolve_stats();
+
+    // Flush coverage before exit.
+    //
+    // `init_coverage_from_env()` above turns COLLECTION on for every command
+    // whenever SIMPLE_COVERAGE is set, but until 2026-08-17 the only caller of
+    // `save_global_coverage()` was the `test` subcommand. So
+    // `SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<p> bin/simple run x.spl`
+    // collected coverage, wrote NO file to any candidate location, and exited
+    // 0 — a silent no-op in a coverage tool, which makes every coverage number
+    // it produces unverified. This is the single choke point every command
+    // path converges on before exit, so flushing here covers `run` and every
+    // other subcommand without duplicating the call per command.
+    //
+    // Fail-closed per repo convention: if coverage was requested and we cannot
+    // produce the artifact, say so on stderr and exit non-zero. Silently
+    // exiting 0 with no file is the defect being fixed and must not recur.
+    let coverage_exit = flush_coverage_before_exit();
+    let exit_code = if coverage_exit != 0 { coverage_exit } else { exit_code };
 
     if metrics_enabled {
         exit_with_metrics(exit_code, &metrics);

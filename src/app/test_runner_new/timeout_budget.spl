@@ -1,0 +1,56 @@
+"""Where a test-runner invocation's timeout budget comes from.
+
+Three sources, most-specific-wins: an explicit `--timeout N` / `--timeout=N`
+flag, then the SIMPLE_TIMEOUT_SECONDS environment variable, then the built-in
+default. This lives in its own module rather than inside
+`test_runner_client.spl` for two reasons: that file is a standalone script with
+a bare `fn main`, which collides with the `fn main` every interpreter-mode spec
+is given (see `.claude/rules/testing.md`, "fn main name collision"), so a spec
+cannot import it; and the same ladder is wanted by more than one entry point.
+
+History: until 2026-08-17 SIMPLE_TIMEOUT_SECONDS was read by nothing on the
+client path. `parse_client_run` hardcoded 120, and since `run.timeout_secs`
+feeds both the light-daemon request budget and the direct-child `--timeout`
+argument, every session exporting the variable silently got 120s and long specs
+were recorded as `failed=1 reason=daemon-no-response budget_ms=120000` — a false
+RED that reads like a defect in the spec under test. Bug:
+`doc/08_tracking/bug/simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md`.
+Spec: `test/01_unit/app/test_runner_new/client_timeout_env_spec.spl`.
+"""
+
+use app.io.mod.{env_get}
+
+val CLIENT_DEFAULT_TIMEOUT_SECS = 120
+
+pub fn parse_env_timeout_secs(raw: text) -> i64:
+    """Parse a SIMPLE_TIMEOUT_SECONDS value. Returns 0 for anything that is not
+    a non-empty run of decimal digits, so a malformed value falls back to the
+    built-in default rather than silently becoming a 0-second — instantly
+    expiring — budget that would report every spec as a timeout."""
+    if raw == "":
+        return 0
+    var value: i64 = 0
+    var digits = 0
+    var i = 0
+    while i < raw.len():
+        val c = raw.char_code_at(i)
+        if c < 48 or c > 57:
+            return 0
+        value = value * 10 + (c - 48)
+        digits = digits + 1
+        i = i + 1
+    if digits == 0:
+        return 0
+    value
+
+pub fn client_default_timeout_secs() -> i64:
+    """The budget to use when no explicit `--timeout` was given: the
+    environment override when it is usable, otherwise the built-in default."""
+    val env_secs = parse_env_timeout_secs(env_get("SIMPLE_TIMEOUT_SECONDS") ?? "")
+    if env_secs > 0:
+        return env_secs
+    CLIENT_DEFAULT_TIMEOUT_SECS
+
+export CLIENT_DEFAULT_TIMEOUT_SECS
+export parse_env_timeout_secs
+export client_default_timeout_secs

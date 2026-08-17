@@ -91,3 +91,45 @@ Byte-identical to the originally recorded failure. This remains a host QEMU
 packaging defect (a rebuilt/repackaged `qemu-system-x86` with a matching
 `hw-display-virtio-gpu-gl.so`, or a locally built QEMU, is the only unblock);
 it is not addressable from this repository, and B0/venus stays gated behind it.
+
+---
+
+## 2026-08-17 re-verification on a REAL-GPU host — blocker CONFIRMED, prior triage wording was FALSE
+
+This host has two real NVIDIA GPUs and a complete host GL/EGL stack. The
+2026-08-17 triage note above ("requires QEMU host GL stack ... diagnosable only
+on a machine with that stack installed") is **false as stated** and is retracted
+here: the stack IS installed, and the failure is unaffected by it.
+
+Probes run on this host:
+
+```
+$ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+NVIDIA RTX A6000, 49140 MiB, 580.126.16
+NVIDIA TITAN RTX, 24576 MiB, 580.126.16
+
+$ ls /usr/share/glvnd/egl_vendor.d/
+10_nvidia.json   50_mesa.json          # both EGL vendor ICDs present
+
+$ qemu-system-x86_64 -device virtio-gpu-gl,help
+qemu-system-x86_64: -device virtio-gpu-gl,help: failed to open module:
+/usr/lib/x86_64-linux-gnu/qemu/hw-display-virtio-gpu-gl.so: undefined symbol:
+qemu_egl_display
+
+$ nm -D /usr/bin/qemu-system-x86_64 | grep -c qemu_egl_display
+0
+$ nm -D /usr/lib/x86_64-linux-gnu/qemu/hw-display-virtio-gpu-gl.so | grep egl_display
+                 U qemu_egl_display
+```
+
+**Root cause confirmed and now unambiguous:** `qemu_egl_display` is QEMU's OWN
+symbol (defined in QEMU's `ui/egl-helpers.c`, exported from the main binary only
+when configured `--enable-opengl`). It is not exported by libEGL, by any GPU
+driver, or by any Mesa/NVIDIA component. The module lists it `U` (undefined) and
+the main binary exports it 0 times. **No GPU, driver, or EGL vendor on the host
+can ever satisfy this link** — installing hardware was never the unblock, and any
+future triage that defers this as "needs a GPU/GL host" is wrong.
+
+The only unblock remains a `qemu-system-x86_64` actually built with working
+`--enable-opengl` (verify with the `nm -D` probe above before trusting a host).
+Status stays OPEN and correctly hardware-independent.
