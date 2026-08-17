@@ -1,0 +1,30 @@
+use std.spec
+use compiler.backend.introspection.elf_symbols.{elf_symbol_cstring_to_text}
+
+# Generalization of test/01_unit/compiler/backend/introspection/elf_symbols_byte_text_spec.spl
+#
+# Repro spec (cited above) pinned one high byte (0xFF). The defect it exposed was
+# general: elf_symbol_cstring_to_text() passed every byte >= 0x80 through
+# char_from_code(), which latin-1-widens it into a 2-byte UTF-8 sequence. That
+# both corrupts the name and silently LENGTHENS it, so an ELF symbol name of N
+# bytes could decode to more than N characters. This spec fences the whole
+# high-byte range and the length invariant, not just 0xFF.
+describe "ELF symbol C-string high-byte sanitization":
+    it "replaces every byte above 0x7E with a single placeholder":
+        val decoded = elf_symbol_cstring_to_text([128u8, 200u8, 255u8, 0u8], 0)
+        expect(decoded).to_equal("???")
+
+    it "never lengthens the decoded name beyond the source byte count":
+        # 4 name bytes in, at most 4 characters out — the latin-1 widening bug
+        # produced 8 bytes here.
+        val decoded = elf_symbol_cstring_to_text([65u8, 200u8, 66u8, 255u8, 0u8], 0)
+        expect(decoded).to_equal("A?B?")
+        expect(decoded.len()).to_equal(4)
+
+    it "leaves the printable ASCII range untouched":
+        val decoded = elf_symbol_cstring_to_text([95u8, 90u8, 122u8, 48u8, 126u8, 0u8], 0)
+        expect(decoded).to_equal("_Zz0~")
+
+    it "still decodes the whitespace escapes and honours the offset":
+        val decoded = elf_symbol_cstring_to_text([0u8, 97u8, 10u8, 13u8, 9u8, 0u8], 1)
+        expect(decoded).to_equal("a\n\r\t")
