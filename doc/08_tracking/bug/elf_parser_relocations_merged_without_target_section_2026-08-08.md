@@ -1,6 +1,50 @@
 # `ElfObject.relocations` merges every SHT_RELA section without recording its target section
 
-- Status: OPEN
+- Status: RESOLVED 2026-08-17 (fix + reproducing spec + class-detection spec landed).
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
+## Resolution (2026-08-17)
+
+Root cause, precisely: `ElfSectionHeader`
+(`src/compiler/70.backend/linker/elf_inspect.spl:56-63`) had **no `sh_info`
+field at all**. Both section-header readers — `elf_parse_sections`
+(`elf_inspect.spl:171-190`) and the richer one inside `elf_parse_object`
+(`elf_parser.spl:331-351`) — therefore skipped ELF64 shdr offset 44 entirely.
+An earlier partial fix had added `ElfRelocation.section_idx` (which RELA
+section an entry came from), but with `sh_info` unparsed that index could not
+be resolved to a target, so the information was still unrecoverable.
+
+Fix:
+- Parse `sh_info` (offset 44, u32) in **both** readers.
+- Add `ElfSectionHeader.sh_info`.
+- Add `ElfRelocation.target_section_idx`, populated from the owning RELA
+  section's `sh_info` in `elf_parse_relocations`
+  (`src/compiler/70.backend/linker/elf_parser.spl:259-265`).
+
+This is exactly step 1 of the "Unblock condition" below. Step 2 (consumers
+keying off the field) still applies to whoever adds the first consumer.
+
+Specs:
+- `test/01_unit/compiler/backend/linker/elf_reloc_target_section_spec.spl`
+  (reproducing) — a synthetic object with two RELA sections, `sh_info` 1 and 2.
+- `test/01_unit/compiler/backend/linker/elf_section_header_field_parity_spec.spl`
+  (class detection) — every section-header field cross-checked against an
+  independent raw-byte re-read, through BOTH readers.
+
+Evidence, fix reverted to `val sh_info = 0`:
+
+    reproducer      Results: 4 total, 2 passed, 2 failed
+    detection spec  Results: 4 total, 0 passed, 4 failed
+
+The detection spec caught strictly more than the reproducer, including the
+`elf_inspect.elf_parse_sections` reader that the reproducer never exercises.
+
+Evidence, fix in place:
+
+    elf_reloc_target_section_spec.spl          Results: 4 total, 4 passed, 0 failed
+    elf_section_header_field_parity_spec.spl   Results: 4 total, 4 passed, 0 failed
+    elf_parser_spec.spl (pre-existing)         Results: 16 total, 16 passed, 0 failed
+
 - Severity: LOW (latent — no production consumer reads `ElfObject.relocations` today)
 - Found: adversarial review of ELF/linker code, 2026-08-08, alongside two related
   MEDIUM defects in `src/compiler/80.driver/smf_elf_parser.spl` (see
