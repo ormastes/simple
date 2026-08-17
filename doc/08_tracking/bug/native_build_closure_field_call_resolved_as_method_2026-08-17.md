@@ -175,8 +175,64 @@ method-dispatch layer.
 
 ## Verification status of the guards (honest account)
 
-Neither spec has a `Results: N total, N passed, N failed` line. The one run that
-reached completion ended in a harness timeout, not an assertion verdict:
+### Reproducing spec — GREEN after the fix
+
+```
+  ✓ never calls the closure-valued field directly as self.owner_collect_fn(...)
+  ✓ still declares the owner_collect_fn field and its setter
+  ✓ invokes the collect hook through a local binding
+SPEC FILE VERDICT: test/01_unit/compiler/driver/parallel_owner_collect_closure_field_call_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
+rc=0
+```
+
+The corresponding RED is established by CONTENT, not by a `Results:` line — the
+pre-fix run timed out in the harness before the fix landed. The pre-fix source
+is recoverable at `3135fde42df~1`, and contains exactly what the spec forbids:
+
+```
+$ git show 3135fde42df~1:src/compiler/80.driver/driver_build/parallel.spl | grep -n 'self.owner_collect_fn('
+336:                            collect_error = self.owner_collect_fn(build_unit.path, output)
+399:                                    collect_error = self.owner_collect_fn(build_unit.path, output)
+```
+
+Assertion 1 (`contains("self.owner_collect_fn(")` must be false) and assertion 3
+(local binding must be present) both fail against that content, so the spec is
+demonstrably not vacuous. The defect-class scanner over the same pre-fix blob
+reports `OFFENDER owner_collect_fn`.
+
+### Class-detection spec — GREEN
+
+```
+  ✓ finds no self.<any-typed field>(...) call sites anywhere under 80.driver
+  ✓ detects the defect shape when it is present (self-test of the scanner)
+SPEC FILE VERDICT: test/01_unit/compiler/driver/driver_closure_field_call_class_detection_spec.spl declared>=2 executed=2 passed=2 failed=0 dropped=0
+Results: 2 total, 2 passed, 0 failed
+rc=0
+```
+
+Its first RED was **a defect in the spec itself, not a detection of the bug** —
+`shell()` returns a `ProcessResult`, so `.trim()` on it failed:
+
+```
+  ✗ finds no self.<any-typed field>(...) call sites anywhere under 80.driver
+    semantic: method `trim` not found on type `ProcessResult`
+Results: 2 total, 0 passed, 2 failed
+```
+
+Fixed by reading `.stdout` first. Two earlier attempts before that produced no
+`Results:` line at all (one harness timeout, one `rc=143` SIGTERM) — both
+**UNVERIFIED, not failed**.
+
+Note the honest limitation: because the spec was only made runnable *after* the
+source fix landed, it has **never been observed failing on the real defect**.
+Its non-vacuity rests on the second example, which builds a synthetic file
+containing the defective shape and asserts the scanner flags it. The
+defect-detection RED itself is evidenced by running the scanner directly against
+the pre-fix blob (`OFFENDER owner_collect_fn`), not by the harness.
+
+A stale-daemon transcript from the earlier attempts, retained because it shows
+how a non-verdict presents:
 
 ```
 ERROR: test daemon timed out: test/01_unit/compiler/driver/parallel_owner_collect_closure_field_call_spec.spl
