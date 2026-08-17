@@ -2,7 +2,49 @@
 
 **Date:** 2026-06-26  
 **Severity:** P2 — affects usability of generic helper free functions  
-**Status:** RESOLVED — ALREADY-FIXED, re-verified 2026-08-17.
+**Status:** REOPENED 2026-08-17 — the 2026-08-17 "already-fixed" re-verification
+ran on an UNPINNED engine and therefore measured only the interpreter arm. With
+the engine pinned, the JIT arm is wrong. (~~RESOLVED — ALREADY-FIXED,
+re-verified 2026-08-17.~~)
+
+## Measured arms 2026-08-17 (engine PINNED, both arms executed)
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+59536728 bytes, mtime 2026-08-16 22:59:37.799277177 +0000 (stale Rust seed).
+No rebuild, no redeploy. `rc` read from a variable on the line AFTER the
+command, never through a pipe.
+
+Probe — the doc's own reproducer, moved inside a `fn` and carrying the in-`fn`
+2^60 JIT-compilation control (a top-level body runs interpreted regardless of
+the pin):
+
+```
+struct Box<T>:
+    item: T
+fn box_get<T>(b: Box<T>) -> T?:
+    b.item
+fn main():
+    print("v=" + box_get(Box(item: 42)).to_string())
+    val p60 = 1152921504606846976
+    print("pow=" + p60.to_string())
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run q05_freefnopt.spl   # rc=0
+v=42
+pow=1152921504606846976
+
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run q05_freefnopt.spl           # rc=0
+v=0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002
+pow=-1152921504606846976
+```
+
+Expected `v=42`. The negated `pow` proves the JIT arm actually compiled. Both
+arms rc=0 — a wrong value, not a crash, so NOT an rc=143/137/144 UNVERIFIED.
+The JIT arm prints the integer payload 42 reinterpreted as an f64 denormal
+(2e-322 ≈ raw bits 42), i.e. the correct value is present and only the
+tag/type recovery on the generic `T?` return is wrong — the same
+"value-is-there, unboxing-is-missing" shape as the other rows in this family.
 
 ## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
 

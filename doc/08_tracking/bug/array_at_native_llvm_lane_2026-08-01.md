@@ -1,8 +1,47 @@
 # Array `.at(i)` on the native LLVM lane — dispatch + missing C runtime accessor
 
 **Date:** 2026-08-01
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: REOPENED 2026-08-17 — diverges under a PINNED JIT arm (see "Measured arms" below)
+Status: ~~CLOSED (not reproducible)~~
+~~Status re-verified 2026-08-17 by source inspection (triage shard 00).~~ — that
+stamp was source inspection only and is superseded by execution.
+
+## Measured arms 2026-08-17 (engine PINNED, both arms executed)
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+59536728 bytes, mtime 2026-08-16 22:59:37.799277177 +0000 (stale Rust seed).
+No rebuild, no redeploy. `rc` read from a variable on the line AFTER the
+command, never through a pipe.
+
+Probe (`.at()` inside a `fn`, carrying the in-`fn` 2^60 JIT-compilation control;
+a top-level body runs interpreted regardless of the pin, so the control must sit
+inside a `fn`):
+
+```
+fn pick(a: [i64], i: i64) -> i64:
+    return a.at(i)
+fn main():
+    print("v=" + pick([10, 20, 30], 1).to_string())
+    val p60 = 1152921504606846976
+    print("pow=" + p60.to_string())
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run q06_arrayat.spl   # rc=0
+v=20
+pow=1152921504606846976
+
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run q06_arrayat.spl           # rc=0
+v=6126812864993
+pow=-1152921504606846976
+```
+
+Expected `v=20`. The negated `pow` proves the JIT arm actually compiled. Both
+arms rc=0, so this is a wrong value, not a crash — NOT an rc=143/137/144
+UNVERIFIED. `6126812864993` is an unrelated-looking integer read out of a
+still-tagged slot, the same shape as `native_to_i64_nil_coalesce_print_tagbox_leak`'s
+`3775049836129` and `interp_array_param_indexing`'s `480 == 60 << 3`: this row is
+part of the same array-element-read unboxing family.
 **Parent bug:** `array_at_returns_nil_for_every_index_2026-08-01.md`
 **Prior lanes:** interpreter `f18c5963132`, JIT `ceee960ca8e`
 **Severity:** CRITICAL — silent wrong answer, no error, no crash
