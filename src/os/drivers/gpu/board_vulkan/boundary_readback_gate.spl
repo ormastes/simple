@@ -25,9 +25,10 @@
 
 use std.common.spec.evidence.counterpart.model.{
     CounterpartRelation,
-    ExecutionReceipt,
+    ExecutionReceipt, ProviderStatus,
     execution_receipt_gpu_gate_failures
 }
+use os.drivers.gpu.board_vulkan.boundary_readback_lavapipe_provider.{LavapipeReadbackResult}
 use os.drivers.gpu.board_vulkan.soc_profile.{board_vulkan_boundary_readback}
 
 # One readback candidate: the receipt describing how the frame was produced,
@@ -38,16 +39,18 @@ pub struct ReadbackCandidate:
     receipt: ExecutionReceipt
     candidate_image_bytes: text
     reference_image_bytes: text
+    reference_status: ProviderStatus
 
-pub fn readback_candidate(
+pub fn readback_candidate_from_counterpart(
     receipt: ExecutionReceipt,
     candidate_image_bytes: text,
-    reference_image_bytes: text
+    counterpart: LavapipeReadbackResult
 ) -> ReadbackCandidate:
     ReadbackCandidate(
         receipt: receipt,
         candidate_image_bytes: candidate_image_bytes,
-        reference_image_bytes: reference_image_bytes
+        reference_image_bytes: counterpart.reference_image_bytes,
+        reference_status: counterpart.status
     )
 
 # Readback is compared `image_exact` against the deterministic software
@@ -64,7 +67,9 @@ pub fn readback_boundary_rejections(candidate: ReadbackCandidate) -> [text]:
     var failures: [text] = []
     for reason in execution_receipt_gpu_gate_failures(candidate.receipt):
         failures.push(readback_reason_sentence(reason))
-    if candidate.candidate_image_bytes != candidate.reference_image_bytes:
+    if candidate.reference_status != ProviderStatus.executed:
+        failures.push("Rejected: the lavapipe counterpart did not execute and produce a device readback.")
+    else if candidate.candidate_image_bytes != candidate.reference_image_bytes:
         failures.push("image_exact comparison failed: the candidate readback image does not byte-match the lavapipe reference image.")
     failures
 

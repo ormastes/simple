@@ -177,3 +177,15 @@ hour to reach its first output.
 Status: OPEN. Items 1 and 2 are closed by measurement; item 3 is unchanged; item
 4 is now a concrete, specified, spec-covered code defect rather than a lane-rework
 task.
+
+## 2026-08-17 L3 production wiring
+
+The readback boundary no longer accepts caller-authored reference bytes.
+`lavapipe_readback_reference` pins the lavapipe ICD and launches an admitted
+cached Engine2D Vulkan readback worker artifact through the portable bounded
+process facade (30-second wall bound, 4 MiB capture bound). The captured execution is
+projected through `ExecCapture` / `exec_to_evidence`; only an exit-zero
+transcript naming the Vulkan backend, `device_readback`, `overall=pass`, and a
+non-empty checksum can become the reference image identity. Missing workers,
+empty output, incomplete transcripts, and nonzero exits remain unavailable or
+crashed and are rejected by the gate. No GNU `timeout` command is involved.
