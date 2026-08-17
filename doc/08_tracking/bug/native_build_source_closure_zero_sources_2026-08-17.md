@@ -1,7 +1,11 @@
 # native-build discovers ZERO sources (`source_closure 0/0`), and the `object` receiver-erasure hypothesis is refuted
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN — primary failure not yet fixed. Two hypotheses refuted here.
+- **Status:** **REFUTED / CLOSED as a compiler defect** 2026-08-17 (see the
+  REFUTED #3 section at the bottom). Source discovery is not broken. The `0/0`
+  measurement was taken with an `--entry` value the four guards never pass.
+  A fail-open that let the wrong `--entry` form look like a discovery defect is
+  fixed. Two further hypotheses are refuted below.
 
 ## Binary identity for every measurement below
 
@@ -164,6 +168,81 @@ log, consistent with the refutation above.
 
 The `source_closure 0/0` measurement earlier in this row is *not* subject to that
 confound — it came from single, direct `native-build` invocations.
+
+## REFUTED #3 — source discovery is NOT broken; the `--entry` value form was wrong
+
+Measured 2026-08-17 against the **same** binary this row already pins
+(`bin/release/x86_64-unknown-linux-gnu/simple`, size **59537240**, mtime
+**2026-08-17 12:58:51 UTC**, md5 `78ffcbcd3f4cfaa11e3d9c1db37bf0b2`), from a
+fresh isolated `git worktree add --detach` at `98155fe41a55`. Every `rc` below
+was read from a variable on the line **after** the command, never through a
+pipe; nothing was run under a short timeout.
+
+Two arms differing **only** in the `--entry` value:
+
+| arm | `--entry` value | counters | rc |
+|---|---|---|---|
+| A — what the four guards actually pass | `test/fixtures/native_trailing_default_param/main.spl` (FILE path) | `source_closure 0/1` -> `source_closure 2/2 complete` -> `load_sources 3/3 complete` -> `parse 0/2` | reached lowering; **did not** report `0/0` |
+| B — what this row hand-ran | `native_trailing_default_param.main` (MODULE path) | `source_closure 0/0 pending` -> `source_closure 0/0 complete` -> `load_sources 0/0 complete` | **1**, `error: native entry source not found: native_trailing_default_param.main` |
+
+**Arm A discovers 2 physical / 3 logical sources.** So `source_closure 0/0` is
+not reproducible through the guards' invocation and is not a compiler defect.
+The guards read their entry from
+`FIXTURE="${FIXTURE:-test/fixtures/native_trailing_default_param/main.spl}"`
+(`scripts/check/check-native-trailing-default-param.shs:61`) and pass it
+verbatim at line 247 — a file path, i.e. arm A.
+
+### Mechanism, at file:line
+
+`src/compiler/80.driver/driver_source_pipeline_loading.spl:116-117` makes the
+entry the **sole** seed:
+
+```
+if native_entry_input != "" and not native_entry_closure_pre:
+    driver_inputs = [native_entry_input]
+```
+
+and line 141 feeds it to `_driver_collect_sources(input_path)` — a
+**filesystem** collector. `--entry` is therefore a path, by contract (cf.
+`--entry src/app/cli/bootstrap_main.spl` in
+`src/compiler_rust/driver/src/cli/commands/misc_commands.rs:520`). A
+module-path argument (`pkg.main`) names no file, collects zero sources, and the
+closure walk at line 189 then honestly reports `0/0` — of an empty seed set.
+
+### The genuine defect here was a fail-open, and it is fixed
+
+Zero collected sources fell through silently. The only surfaced diagnostic was
+the much later `native entry source not found`
+(`driver_source_pipeline_parsing.spl:447`), which reads as "resolution failed
+inside a loaded graph" rather than "nothing was ever loaded" — which is exactly
+how two separate investigations misread it. Fixed in
+`driver_source_pipeline_loading.spl` immediately after the input-seeding loop:
+an explicit native entry that collects zero sources is now a loud error naming
+the entry and stating the path-vs-module-path contract. It is gated on
+`not native_entry_closure_pre`, the same condition that made the entry the sole
+seed, so a re-entrant worker seeded from `--source` roots is unaffected.
+
+### Consequences for the four guards
+
+`check-predicate-parser-native-build`, `check-native-trailing-default-param`,
+`check-native-object-cache-granularity` and
+`check-native-inprocess-positional-nonvacuous` are **not** red because of
+source discovery. Arm A shows they get past discovery and into `parse`/lowering,
+so their real causes lie downstream — and the sibling row
+`native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.md`
+becomes reproducible again, not masked. Note the trailing-default fixture is
+exactly that row's shape: `test/fixtures/native_trailing_default_param/main.spl`
+begins `use dep.{cross}` and then declares its own `class Widget` with
+`me bump(...)`.
+
+### Unrelated but confirmed while measuring
+
+The deployed binary above (mtime 12:58:51) **predates** the `Dict.clear()`
+runtime fix `8510a8368ca` (committed 13:20:01 the same day). That is a
+C/Rust runtime change, so the deployed seed does **not** contain it. Any
+hypothesis that an empty source-discovery Dict was caused by inert
+`Dict.clear()` is therefore untestable on this binary — and is in any case
+excluded by arm A, which populates the closure normally.
 
 ## Next step for whoever picks this up
 

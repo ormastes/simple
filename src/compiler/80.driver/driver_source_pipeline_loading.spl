@@ -152,6 +152,23 @@ impl CompilerDriver:
         log_phase(
             "phase1:load_sources:seeded inputs={input_len} total={all_sources.len()}")
 
+        # FAIL-CLOSED on an empty seed set. An explicit native-build entry that
+        # collects zero source files used to fall through silently: the closure
+        # walk below then logged `source_closure 0/0` and the only surfaced
+        # diagnostic was a much later "native entry source not found", which
+        # reads like a resolution failure inside a loaded graph rather than
+        # "nothing was ever loaded". Measured 2026-08-17: passing a module PATH
+        # (`pkg.main`) instead of a FILE path (`.../main.spl`) to --entry lands
+        # here, because `--entry` is a filesystem path and is fed straight to
+        # `_driver_collect_sources`. Two separate investigations misread that
+        # `0/0` as a source-discovery defect. Name the cause at its origin.
+        # Gated on the exact condition that made the entry the sole seed at
+        # line 116-117, so a re-entrant worker (ENTRY_CLOSURE already 1, seeds
+        # taken from --source roots) keeps its old behaviour.
+        if native_entry_input != "" and not native_entry_closure_pre and all_sources.len() == 0:
+            self.ctx.add_error("native-build entry '{native_entry_input}' collected zero source files: --entry takes a path to a .spl file (e.g. 'dir/main.spl'), not a module path (e.g. 'dir.main'), and the path is resolved relative to the current working directory")
+            return (self.ctx, false)
+
         # ROOT FIX (#138 Wall #1): a native-build seeded with one entry used to
         # load ONLY the entry file — never its import closure. ctx.modules then
         # lacked every imported module, resolve_import_symbols registered no
