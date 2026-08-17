@@ -784,9 +784,23 @@ fn try_skip_ident_generic_args():
     # arg list — break immediately.
     var depth = 1
     var ok = false
+    # A numeric literal in generic-argument position spells a CONST GENERIC
+    # argument (`Tensor<i64, 2>`). Simple has no const generic parameters, so it
+    # is not a type. Consume it here so the list can still reach its closing `>`,
+    # and remember that we saw one: once the shape is CONFIRMED to be a generic
+    # argument list (closing `>` followed by `.` or `(`) the const argument is
+    # reported precisely. Without this the whole list backtracked into a
+    # comparison chain and the failure surfaced far away as
+    # "expected expression, found Comma", naming neither the construct nor the
+    # limitation. Parity: Rust postfix.rs try_skip_ident_generic_args.
+    # doc/08_tracking/bug/const_generic_argument_rejected_in_constructor_call_2026-08-17.md
+    var saw_const_arg = false
     while true:
         val k = par_kind_get()
-        if k == 83:
+        if k == TOK_INT_LIT:
+            saw_const_arg = true
+            parser_advance()
+        elif k == 83:
             # TOK_GT '>' — depth decreases
             depth = depth - 1
             if depth == 0:
@@ -850,6 +864,10 @@ fn try_skip_ident_generic_args():
         parser_tok_restore(saved_tok_nums, saved_tok_text)
     else:
         lex_snapshot_commit(snap)
+        if saw_const_arg:
+            parser_error("const generic arguments are not supported: a numeric literal such as " +
+                "`Tensor<i64, 2>` is not a type, and Simple has no const generic parameters. " +
+                "Drop the explicit generic arguments and let them be inferred, e.g. `Tensor(...)`")
 
 # Nested tuple-index re-split: `pair.0.1`.
 #

@@ -249,55 +249,12 @@ impl<'a> MirLowerer<'a> {
                     //
                     // Bool goes through `rt_value_bool`, not BoxInt -- see the
                     // matching note in lowering_expr_call.rs::box_arg_for_any_param.
-                    let target_is_any = effective_declared_ty == TypeId::ANY;
-                    let needs_int_boxing = target_is_any
-                        && matches!(
-                            value_ty,
-                            TypeId::I8
-                                | TypeId::I16
-                                | TypeId::I32
-                                | TypeId::I64
-                                | TypeId::U8
-                                | TypeId::U16
-                                | TypeId::U32
-                                | TypeId::U64
-                        );
-                    let needs_float_boxing = target_is_any && matches!(value_ty, TypeId::F32 | TypeId::F64);
-                    let needs_bool_boxing = target_is_any && value_ty == TypeId::BOOL;
-                    let vreg = if needs_bool_boxing {
-                        self.with_func(|func, current_block| {
-                            let boxed = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::Call {
-                                dest: Some(boxed),
-                                target: CallTarget::from_name("rt_value_bool"),
-                                args: vec![vreg],
-                            });
-                            boxed
-                        })?
-                    } else if needs_int_boxing {
-                        self.with_func(|func, current_block| {
-                            let boxed = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::BoxInt {
-                                dest: boxed,
-                                value: vreg,
-                            });
-                            boxed
-                        })?
-                    } else if needs_float_boxing {
-                        self.with_func(|func, current_block| {
-                            let boxed = func.new_vreg();
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::BoxFloat {
-                                dest: boxed,
-                                value: vreg,
-                            });
-                            boxed
-                        })?
-                    } else {
-                        vreg
-                    };
+                    //
+                    // A nullable scalar `T?` is the SAME kind of slot: it must be
+                    // able to hold tagged nil, so it too stores a tagged
+                    // RuntimeValue. `slot_holds_tagged_value` covers both, which is
+                    // what fixes `val x: i64? = 42` printing a denormal float.
+                    let vreg = self.box_scalar_for_tagged_slot(effective_declared_ty, value_ty, vreg)?;
 
                     // Track tagged status: if storing a tagged VReg, mark the local as tagged
                     if self.tagged_vregs.contains(&vreg) {
@@ -835,62 +792,10 @@ impl<'a> MirLowerer<'a> {
                     // lowering_expr_struct.rs.
                     HirExprKind::Global(name) => {
                         let global_name = name.clone();
-                        let target_is_any = target.ty == TypeId::ANY;
-                        let needs_int_boxing = target_is_any
-                            && matches!(
-                                ty,
-                                TypeId::I8
-                                    | TypeId::I16
-                                    | TypeId::I32
-                                    | TypeId::I64
-                                    | TypeId::U8
-                                    | TypeId::U16
-                                    | TypeId::U32
-                                    | TypeId::U64
-                            );
-                        let needs_float_boxing = target_is_any && matches!(ty, TypeId::F32 | TypeId::F64);
-                        let needs_bool_boxing = target_is_any && ty == TypeId::BOOL;
-                        let stored_val = if needs_bool_boxing {
-                            self.with_func(|func, current_block| {
-                                let boxed = func.new_vreg();
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::Call {
-                                    dest: Some(boxed),
-                                    target: CallTarget::from_name("rt_value_bool"),
-                                    args: vec![val_reg],
-                                });
-                                boxed
-                            })?
-                        } else if ty == TypeId::U64 && target_is_any {
-                            self.box_u64_runtime_value(val_reg)?
-                        } else if needs_int_boxing {
-                            self.with_func(|func, current_block| {
-                                let boxed = func.new_vreg();
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::BoxInt {
-                                    dest: boxed,
-                                    value: val_reg,
-                                });
-                                boxed
-                            })?
-                        } else if needs_float_boxing {
-                            self.with_func(|func, current_block| {
-                                let boxed = func.new_vreg();
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::BoxFloat {
-                                    dest: boxed,
-                                    value: val_reg,
-                                });
-                                boxed
-                            })?
-                        } else {
-                            val_reg
-                        };
-                        let stored_ty = if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
-                            TypeId::ANY
-                        } else {
-                            ty
-                        };
+                        // Nullable scalar globals (`T?`) are tagged-value slots too,
+                        // not just `Any` -- see `slot_holds_tagged_value`.
+                        let stored_val = self.box_scalar_for_tagged_slot(target.ty, ty, val_reg)?;
+                        let stored_ty = if stored_val != val_reg { TypeId::ANY } else { ty };
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::GlobalStore {
@@ -946,7 +851,9 @@ impl<'a> MirLowerer<'a> {
                                 unboxed
                             })?
                         } else {
-                            val_reg
+                            // Assigning a raw scalar into a `T?`/`Any` local is
+                            // the same tagged-slot store the `Let` arm boxes for.
+                            self.box_scalar_for_tagged_slot(target.ty, ty, val_reg)?
                         };
 
                         let addr_reg = self.lower_lvalue(target)?;
@@ -967,6 +874,12 @@ impl<'a> MirLowerer<'a> {
             HirStmt::Return(value) => {
                 let ret_reg = if let Some(v) = value {
                     let reg = self.lower_expr(v)?;
+                    // `fn give() -> i64?: return 7` returns into a tagged-value
+                    // slot; returning the raw word 7 made `7 & 7 == 7` an
+                    // invalid tag, printed as `<value:0x7>` by rt_to_string and
+                    // unwrapped to nil by `!`. Same rule as a `T?`/`Any` local.
+                    let ret_ty = self.with_func(|func, _| func.return_type)?;
+                    let reg = self.box_scalar_for_tagged_slot(ret_ty, v.ty, reg)?;
                     Some(reg)
                 } else {
                     None

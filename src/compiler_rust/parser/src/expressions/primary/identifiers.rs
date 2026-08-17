@@ -174,7 +174,7 @@ impl<'a> Parser<'a> {
         let name = name.to_string();
         self.advance();
         if self.check(&TokenKind::Lt) {
-            self.try_skip_ident_generic_args();
+            self.try_skip_ident_generic_args()?;
         }
         // Check for path expression: Name::Variant
         // DEPRECATED: Use dot syntax instead (Name.Variant)

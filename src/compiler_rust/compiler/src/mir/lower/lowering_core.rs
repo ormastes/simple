@@ -1118,7 +1118,13 @@ impl<'a> MirLowerer<'a> {
                 infos.keys().collect::<Vec<_>>(),
                 infos
                     .keys()
-                    .map(|t| (t.as_str(), self.dependency_graph.get_implementations(t).map(|i| i.len()).unwrap_or(0)))
+                    .map(|t| (
+                        t.as_str(),
+                        self.dependency_graph
+                            .get_implementations(t)
+                            .map(|i| i.len())
+                            .unwrap_or(0)
+                    ))
                     .collect::<Vec<_>>(),
                 self.local_trait_impls.keys().collect::<Vec<_>>()
             );
@@ -1321,6 +1327,96 @@ impl<'a> MirLowerer<'a> {
                 expected: "Lowering".to_string(),
                 found: "Idle".to_string(),
             }),
+        }
+    }
+
+    /// True when a DECLARED slot type stores a tagged `RuntimeValue` rather
+    /// than a raw machine scalar.
+    ///
+    /// `TypeId::ANY` is the obvious case. The one this exists for is a
+    /// nullable scalar `T?`, which HIR lowers to `HirType::Pointer { inner: T }`
+    /// (see `hir/lower/option_pattern_shape_diag.rs`). Its slot must be able to
+    /// hold tagged nil (`3`), so it is a tagged-value slot exactly like `ANY` —
+    /// but every boxing guard in MIR lowering used to test `== TypeId::ANY`
+    /// only, so `val x: i64? = 42` stored the RAW word 42. `42 & 7 == 2` is
+    /// `TAG_FLOAT`, so `rt_to_string` re-read it as an inline f64 and printed
+    /// the denormal `~2.08e-322`; `return 7` from `-> i64?` gave `7 & 7 == 7`,
+    /// no valid tag at all, printing `<value:0x7>`. Neither `!` nor `??` could
+    /// see the corruption because the word was non-nil.
+    /// Bug: `doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`.
+    pub(super) fn slot_holds_tagged_value(&self, ty: TypeId) -> bool {
+        if ty == TypeId::ANY {
+            return true;
+        }
+        matches!(
+            self.type_registry.and_then(|tr| tr.get(ty)),
+            Some(crate::hir::HirType::Pointer { inner, .. }) if Self::is_raw_scalar_type(*inner)
+        )
+    }
+
+    /// Primitive types whose machine representation is a raw (untagged) word.
+    pub(super) fn is_raw_scalar_type(ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+        )
+    }
+
+    /// Box a raw scalar `value` (of static type `value_ty`) into a tagged
+    /// `RuntimeValue` when `declared_ty` is a tagged-value slot; otherwise
+    /// return `value` unchanged. Consolidates the int / u64 / float / bool
+    /// boxing choice that was previously open-coded at each call site.
+    pub(super) fn box_scalar_for_tagged_slot(
+        &mut self,
+        declared_ty: TypeId,
+        value_ty: TypeId,
+        value: VReg,
+    ) -> MirLowerResult<VReg> {
+        if !self.slot_holds_tagged_value(declared_ty) {
+            return Ok(value);
+        }
+        match value_ty {
+            // Bool goes through `rt_value_bool`, not `BoxInt` -- see the note in
+            // lowering_expr_call.rs::box_arg_for_any_param.
+            TypeId::BOOL => self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(boxed),
+                    target: CallTarget::from_name("rt_value_bool"),
+                    args: vec![value],
+                });
+                boxed
+            }),
+            TypeId::U64 => self.box_u64_runtime_value(value),
+            TypeId::F32 | TypeId::F64 => self.with_func(|func, current_block| {
+                let boxed = func.new_vreg();
+                func.block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::BoxFloat { dest: boxed, value });
+                boxed
+            }),
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::BoxInt { dest: boxed, value });
+                    boxed
+                })
+            }
+            _ => Ok(value),
         }
     }
 

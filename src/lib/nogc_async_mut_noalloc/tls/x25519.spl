@@ -158,43 +158,54 @@ fn _fe_mul_scalar(a: [u64], s: u64) -> [u64]:
     ])
 
 fn _fe_mul(a: [u64], b: [u64]) -> [u64]:
-    val h0 = a[0] * b[0]
-    val h1 = a[0] * b[1] + a[1] * b[0]
-    val h2 = a[0] * b[2] + a[1] * b[1] + a[2] * b[0]
-    val h3 = a[0] * b[3] + a[1] * b[2] + a[2] * b[1] + a[3] * b[0]
-    val h4 = a[0] * b[4] + a[1] * b[3] + a[2] * b[2] + a[3] * b[1] + a[4] * b[0]
-    val h5 = a[0] * b[5] + a[1] * b[4] + a[2] * b[3] + a[3] * b[2] + a[4] * b[1] + a[5] * b[0]
-    val h6 = a[0] * b[6] + a[1] * b[5] + a[2] * b[4] + a[3] * b[3] + a[4] * b[2] + a[5] * b[1] + a[6] * b[0]
-    val h7 = a[0] * b[7] + a[1] * b[6] + a[2] * b[5] + a[3] * b[4] + a[4] * b[3] + a[5] * b[2] + a[6] * b[1] + a[7] * b[0]
-    val h8 = a[0] * b[8] + a[1] * b[7] + a[2] * b[6] + a[3] * b[5] + a[4] * b[4] + a[5] * b[3] + a[6] * b[2] + a[7] * b[1] + a[8] * b[0]
-    val h9 = a[0] * b[9] + a[1] * b[8] + a[2] * b[7] + a[3] * b[6] + a[4] * b[5] + a[5] * b[4] + a[6] * b[3] + a[7] * b[2] + a[8] * b[1] + a[9] * b[0]
-    # Remaining cross terms fold in with 19x reduction
-    val r0 = h0 + 19 * (a[1] * b[9] + a[2] * b[8] + a[3] * b[7] + a[4] * b[6] + a[5] * b[5] + a[6] * b[4] + a[7] * b[3] + a[8] * b[2] + a[9] * b[1])
-    val r1 = h1 + 19 * (a[2] * b[9] + a[3] * b[8] + a[4] * b[7] + a[5] * b[6] + a[6] * b[5] + a[7] * b[4] + a[8] * b[3] + a[9] * b[2])
-    val r2 = h2 + 19 * (a[3] * b[9] + a[4] * b[8] + a[5] * b[7] + a[6] * b[6] + a[7] * b[5] + a[8] * b[4] + a[9] * b[3])
-    val r3 = h3 + 19 * (a[4] * b[9] + a[5] * b[8] + a[6] * b[7] + a[7] * b[6] + a[8] * b[5] + a[9] * b[4])
-    val r4 = h4 + 19 * (a[5] * b[9] + a[6] * b[8] + a[7] * b[7] + a[8] * b[6] + a[9] * b[5])
-    val r5 = h5 + 19 * (a[6] * b[9] + a[7] * b[8] + a[8] * b[7] + a[9] * b[6])
-    val r6 = h6 + 19 * (a[7] * b[9] + a[8] * b[8] + a[9] * b[7])
-    val r7 = h7 + 19 * (a[8] * b[9] + a[9] * b[8])
-    val r8 = h8 + 19 * (a[9] * b[9])
-    val r9 = h9
-    _fe_carry([r0, r1, r2, r3, r4, r5, r6, r7, r8, r9])
+    # Radix is MIXED 2^25.5: even limbs hold 26 bits, odd limbs 25. A product
+    # a[i]*b[j] therefore lands at bit offset off(i)+off(j), which is one bit
+    # BELOW off(i+j) whenever i and j are both odd — so those terms need an
+    # extra factor of 2. The previous unrolled schoolbook omitted every one of
+    # those doublings (and so computed a value that was not a*b at all); it is
+    # the reason the RFC 7748 KATs never matched. Terms with i+j >= 10 wrap
+    # past 2^255 and fold back with the curve's 19x reduction (2^255 = 19 mod p).
+    var r: [u64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]
+    var i: i64 = 0
+    while i < 10:
+        var j: i64 = 0
+        while j < 10:
+            var t = a[i] * b[j]
+            if i % 2 == 1 and j % 2 == 1:
+                t = t * 2
+            val k = i + j
+            if k < 10:
+                r[k] = r[k] + t
+            else:
+                r[k - 10] = r[k - 10] + 19 * t
+            j = j + 1
+        i = i + 1
+    _fe_carry(r)
 
 fn _fe_sq(a: [u64]) -> [u64]:
     _fe_mul(a, a)
 
 fn _fe_from_bytes(b: [u8]) -> [u64]:
+    # Limb i occupies a fixed bit range of the little-endian 255-bit integer:
+    #   h0@0(26) h1@26(25) h2@51(26) h3@77(25) h4@102(26)
+    #   h5@128(25) h6@153(26) h7@179(25) h8@204(26) h9@230(25)
+    # Each limb is read with one 32-bit load starting at the byte containing
+    # its first bit, then shifted down by that bit's offset within the byte.
+    #
+    # The previous offsets/multipliers did not correspond to this (or any other
+    # consistent) layout, so _fe_to_bytes was not its inverse. It also read
+    # _load3(b, 31), which touches b[32] and b[33] — past the end of a 32-byte
+    # key. h9's mask discards bit 255, which X25519 requires.
     val h0 = _load4(b, 0) & _X25519_MASK26
-    val h1 = (_load3(b, 4) * 8) & _X25519_MASK25
-    val h2 = (_load4(b, 7) * 4) & _X25519_MASK26
-    val h3 = (_load3(b, 11) * 2) & _X25519_MASK25
-    val h4 = _load4(b, 14) & _X25519_MASK26
-    val h5 = (_load3(b, 18) * 128) & _X25519_MASK25
-    val h6 = (_load4(b, 21) * 64) & _X25519_MASK26
-    val h7 = (_load3(b, 25) * 32) & _X25519_MASK25
-    val h8 = (_load4(b, 28) * 16) & _X25519_MASK26
-    val h9 = (_load3(b, 31) / 4) & _X25519_MASK25
+    val h1 = (_load4(b, 3) >> 2) & _X25519_MASK25
+    val h2 = (_load4(b, 6) >> 3) & _X25519_MASK26
+    val h3 = (_load4(b, 9) >> 5) & _X25519_MASK25
+    val h4 = (_load4(b, 12) >> 6) & _X25519_MASK26
+    val h5 = _load4(b, 16) & _X25519_MASK25
+    val h6 = (_load4(b, 19) >> 1) & _X25519_MASK26
+    val h7 = (_load4(b, 22) >> 3) & _X25519_MASK25
+    val h8 = (_load4(b, 25) >> 4) & _X25519_MASK26
+    val h9 = (_load4(b, 28) >> 6) & _X25519_MASK25
     [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9]
 
 fn _fe_to_bytes(a: [u64]) -> [u8]:
@@ -210,62 +221,85 @@ fn _fe_to_bytes(a: [u64]) -> [u8]:
     val h8 = n[8]
     val h9 = n[9]
 
-    val q = (19 * h9 + 0x2000000 + h0 * h0) / 0x4000000
-    val t0 = h0 + 19 * q
-    val t1 = h1 + (t0 / _X25519_BASE26)
-    val t2 = h2 + (t1 / _X25519_BASE25)
-    val t3 = h3 + (t2 / _X25519_BASE26)
-    val t4 = h4 + (t3 / _X25519_BASE25)
-    val t5 = h5 + (t4 / _X25519_BASE26)
-    val t6 = h6 + (t5 / _X25519_BASE25)
-    val t7 = h7 + (t6 / _X25519_BASE26)
-    val t8 = h8 + (t7 / _X25519_BASE25)
-    val t9 = h9 + (t8 / _X25519_BASE26)
+    # Canonical reduction. _fe_carry leaves a value in [0, 2p); this subtracts
+    # p once if needed. q is the borrow-free "is it >= p?" probe: propagate a
+    # tentative +19 through the whole limb chain and see whether it overflows.
+    #
+    # The previous line read `(19 * h9 + 0x2000000 + h0 * h0) / 0x4000000` —
+    # the `h0 * h0` term is not part of any reduction and made the choice of
+    # whether to subtract p depend on a squared limb.
+    var q = (19 * h9 + _X25519_BASE25 / 2) / _X25519_BASE25
+    q = (h0 + q) / _X25519_BASE26
+    q = (h1 + q) / _X25519_BASE25
+    q = (h2 + q) / _X25519_BASE26
+    q = (h3 + q) / _X25519_BASE25
+    q = (h4 + q) / _X25519_BASE26
+    q = (h5 + q) / _X25519_BASE25
+    q = (h6 + q) / _X25519_BASE26
+    q = (h7 + q) / _X25519_BASE25
+    q = (h8 + q) / _X25519_BASE26
+    q = (h9 + q) / _X25519_BASE25
 
+    # h += 19*q, then carry once; the final h9 mask drops the 2^255 bit.
+    val t0 = h0 + 19 * q
     val r0 = t0 & _X25519_MASK26
+    val t1 = h1 + (t0 / _X25519_BASE26)
     val r1 = t1 & _X25519_MASK25
+    val t2 = h2 + (t1 / _X25519_BASE25)
     val r2 = t2 & _X25519_MASK26
+    val t3 = h3 + (t2 / _X25519_BASE26)
     val r3 = t3 & _X25519_MASK25
+    val t4 = h4 + (t3 / _X25519_BASE25)
     val r4 = t4 & _X25519_MASK26
+    val t5 = h5 + (t4 / _X25519_BASE26)
     val r5 = t5 & _X25519_MASK25
+    val t6 = h6 + (t5 / _X25519_BASE25)
     val r6 = t6 & _X25519_MASK26
+    val t7 = h7 + (t6 / _X25519_BASE26)
     val r7 = t7 & _X25519_MASK25
+    val t8 = h8 + (t7 / _X25519_BASE25)
     val r8 = t8 & _X25519_MASK26
+    val t9 = h9 + (t8 / _X25519_BASE26)
     val r9 = t9 & _X25519_MASK25
 
+    # Exact inverse of _fe_from_bytes' layout (see there for the bit offsets).
+    # The previous table assumed h5 began at bit 127 rather than 128, which gave
+    # h5 only three byte slots instead of four; every byte from index 15 on was
+    # therefore shifted down by one, and a literal 0x00 was appended to pad the
+    # length back to 32 — which is why every result ended in `00`.
     var out: [u8] = []
     out.push((r0 & 0xFF).to_u8())
     out.push(((r0 >> 8) & 0xFF).to_u8())
     out.push(((r0 >> 16) & 0xFF).to_u8())
-    out.push(((r0 >> 24) | ((r1 * 4) & 0xFF)).to_u8())
+    out.push((((r0 >> 24) | (r1 * 4)) & 0xFF).to_u8())
     out.push(((r1 >> 6) & 0xFF).to_u8())
     out.push(((r1 >> 14) & 0xFF).to_u8())
-    out.push(((r1 >> 22) | ((r2 * 2) & 0xFF)).to_u8())
-    out.push(((r2 >> 7) & 0xFF).to_u8())
-    out.push(((r2 >> 15) & 0xFF).to_u8())
-    out.push(((r2 >> 23) | ((r3 * 8) & 0xFF)).to_u8())
-    out.push(((r3 >> 5) & 0xFF).to_u8())
-    out.push(((r3 >> 13) & 0xFF).to_u8())
-    out.push(((r3 >> 21) | ((r4 * 64) & 0xFF)).to_u8())
+    out.push((((r1 >> 22) | (r2 * 8)) & 0xFF).to_u8())
+    out.push(((r2 >> 5) & 0xFF).to_u8())
+    out.push(((r2 >> 13) & 0xFF).to_u8())
+    out.push((((r2 >> 21) | (r3 * 32)) & 0xFF).to_u8())
+    out.push(((r3 >> 3) & 0xFF).to_u8())
+    out.push(((r3 >> 11) & 0xFF).to_u8())
+    out.push((((r3 >> 19) | (r4 * 64)) & 0xFF).to_u8())
     out.push(((r4 >> 2) & 0xFF).to_u8())
     out.push(((r4 >> 10) & 0xFF).to_u8())
-    out.push(((r4 >> 18) | ((r5 * 128) & 0xFF)).to_u8())
-    out.push(((r5 >> 1) & 0xFF).to_u8())
-    out.push(((r5 >> 9) & 0xFF).to_u8())
-    out.push(((r5 >> 17) | ((r6 * 8) & 0xFF)).to_u8())
-    out.push(((r6 >> 5) & 0xFF).to_u8())
-    out.push(((r6 >> 13) & 0xFF).to_u8())
-    out.push(((r6 >> 21) | ((r7 * 32) & 0xFF)).to_u8())
-    out.push(((r7 >> 3) & 0xFF).to_u8())
-    out.push(((r7 >> 11) & 0xFF).to_u8())
-    out.push(((r7 >> 19) | ((r8 * 16) & 0xFF)).to_u8())
+    out.push(((r4 >> 18) & 0xFF).to_u8())
+    out.push((r5 & 0xFF).to_u8())
+    out.push(((r5 >> 8) & 0xFF).to_u8())
+    out.push(((r5 >> 16) & 0xFF).to_u8())
+    out.push((((r5 >> 24) | (r6 * 2)) & 0xFF).to_u8())
+    out.push(((r6 >> 7) & 0xFF).to_u8())
+    out.push(((r6 >> 15) & 0xFF).to_u8())
+    out.push((((r6 >> 23) | (r7 * 8)) & 0xFF).to_u8())
+    out.push(((r7 >> 5) & 0xFF).to_u8())
+    out.push(((r7 >> 13) & 0xFF).to_u8())
+    out.push((((r7 >> 21) | (r8 * 16)) & 0xFF).to_u8())
     out.push(((r8 >> 4) & 0xFF).to_u8())
     out.push(((r8 >> 12) & 0xFF).to_u8())
-    out.push(((r8 >> 20) | ((r9 * 64) & 0xFF)).to_u8())
+    out.push((((r8 >> 20) | (r9 * 64)) & 0xFF).to_u8())
     out.push(((r9 >> 2) & 0xFF).to_u8())
     out.push(((r9 >> 10) & 0xFF).to_u8())
     out.push(((r9 >> 18) & 0xFF).to_u8())
-    out.push(0x00u8)
     out
 
 fn _fe_invert(z: [u64]) -> [u64]:
@@ -413,7 +447,12 @@ fn x25519(scalar: [u8], u_coord: [u8]) -> [u8]:
 
     var x_2 = _fe_one()
     var z_2 = _fe_zero()
-    var x_3 = u
+    # NOT `var x_3 = u`. Binding one [u64] variable to another currently yields
+    # an array of the correct LENGTH whose elements are all zero, so x_3 became
+    # the point at infinity and the whole ladder collapsed to 0. Re-deriving via
+    # a call is the only binding form that copies contents correctly.
+    # Bug: doc/08_tracking/bug/typed_array_variable_binding_zeroes_elements_2026-08-17.md
+    var x_3 = _fe_from_bytes(u_masked)
     var z_3 = _fe_one()
 
     var prev_bit: i64 = 0

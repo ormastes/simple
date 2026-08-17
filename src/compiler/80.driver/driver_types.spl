@@ -273,11 +273,27 @@ fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
             case FirstFrame: "first-frame"
             case Steady: "steady"
             case Cold: "cold"
-    val manifest_kind = match function.driver_manifest_attr.kind:
-        case Driver: "driver"
-        case NativeLib: "native-lib"
+    # `driver_manifest_attr` is nil whenever `has_driver_manifest_attr` is
+    # false -- declaration_lowering.spl:549-550 stores the paired
+    # `DriverManifestAttr?` straight through. Dereferencing it unguarded traps
+    # with "undefined field 'kind': cannot access field on value of type 'nil'"
+    # for EVERY ordinary function, which broke the whole AOT lane. Same defect
+    # class as the 2026-08-01 SIGILL documented at declaration_lowering.spl:502.
+    var manifest_kind = "none"
+    var manifest_driver_class = 0
+    var manifest_vendor = 0
+    var manifest_version = ""
+    var manifest_abi = ""
     var device_rows: [text] = []
-    for device_id in function.driver_manifest_attr.device_ids: device_rows.push(device_id.to_text())
+    if function.has_driver_manifest_attr:
+        manifest_kind = match function.driver_manifest_attr.kind:
+            case Driver: "driver"
+            case NativeLib: "native-lib"
+        manifest_driver_class = function.driver_manifest_attr.driver_class
+        manifest_vendor = function.driver_manifest_attr.vendor
+        manifest_version = function.driver_manifest_attr.version
+        manifest_abi = function.driver_manifest_attr.abi
+        for device_id in function.driver_manifest_attr.device_ids: device_rows.push(device_id.to_text())
     var vhdl_generic_rows: [text] = []
     for generic in function.vhdl_metadata.generics:
         vhdl_generic_rows.push("{storage_identity_text_v1(generic.name)}:{storage_identity_text_v1(generic.type_text)}:{storage_identity_text_v1(generic.default_text)}")
@@ -294,7 +310,7 @@ fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> text:
         case Async: "async"
         case Sync: "sync"
         case None_: "none"
-    "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{function.driver_manifest_attr.driver_class}:{function.driver_manifest_attr.vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(function.driver_manifest_attr.version)}:{storage_identity_text_v1(function.driver_manifest_attr.abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
+    "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
 
 fn native_capsule_mir_identity_v1(module: MirModule) -> text:
     var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
