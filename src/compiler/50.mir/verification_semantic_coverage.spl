@@ -1,0 +1,343 @@
+# Canonical SemanticCoverage v1 records and exhaustive resolved-MIR inventory.
+# The V1 record stays frozen; the V2 producer binds its canonical manifest to
+# the resolved VerificationIR companion.
+
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.mir.mir_instructions.{MirInstKind, MirTerminator}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _coverage_frame_v2(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _coverage_frames_v2(values: [text]) -> text:
+    var framed: [text] = []
+    for value in values: framed.push(_coverage_frame_v2(value))
+    values.len().to_string() + ":[" + framed.join("") + "]"
+
+pub enum SemanticClass:
+    Exact
+    AbstractedWithRefinement
+    ExternalWithContract
+    Unsupported
+
+impl SemanticClass:
+    fn name() -> text:
+        match self:
+            case Exact: "exact"
+            case AbstractedWithRefinement: "abstracted_with_refinement"
+            case ExternalWithContract: "external_with_contract"
+            case Unsupported: "unsupported"
+
+pub struct SemanticCoverageV1:
+    construct_variant: text
+    semantic_class: SemanticClass
+    lowering_owner: text
+    negative_test_owner: text
+
+impl SemanticCoverageV1:
+    fn diagnostic() -> text:
+        if self.construct_variant == "":
+            return "VIR-E-COVERAGE-VARIANT: construct variant is required"
+        if self.lowering_owner == "":
+            return "VIR-E-COVERAGE-LOWERING: lowering owner is required"
+        if self.negative_test_owner == "":
+            return "VIR-E-COVERAGE-NEGATIVE: negative-test owner is required"
+        ""
+
+    fn canonical_text() -> text:
+        "SemanticCoverageV1" + _coverage_frame_v2(self.construct_variant) +
+            _coverage_frame_v2(self.semantic_class.name()) +
+            _coverage_frame_v2(self.lowering_owner) +
+            _coverage_frame_v2(self.negative_test_owner)
+
+    fn hash() -> text:
+        if self.diagnostic() != "": return ""
+        sha256_text(self.canonical_text())
+
+fn _coverage_row_v2(
+    construct_variant: text,
+    semantic_class: SemanticClass
+) -> SemanticCoverageV1:
+    SemanticCoverageV1(construct_variant, semantic_class,
+        "compiler.mir.verification_semantic_coverage",
+        "test/01_unit/compiler/mir/verification_ir_spec.spl")
+
+# VerificationIR v1 has no instruction-state transformer. Every opcode stays
+# explicit and unsupported until a versioned instruction-semantics owner lands.
+pub fn semantic_coverage_for_mir_instruction_v2(
+    kind: MirInstKind
+) -> SemanticCoverageV1:
+    val variant = match kind:
+        case Const(_, _, _): "MirInstKind.Const"
+        case Copy(_, _): "MirInstKind.Copy"
+        case Move(_, _): "MirInstKind.Move"
+        case TransferOut(_, _, _, _, _, _): "MirInstKind.TransferOut"
+        case TransferIn(_, _, _, _): "MirInstKind.TransferIn"
+        case FreezeRegion(_): "MirInstKind.FreezeRegion"
+        case AcquireSnapshot(_, _): "MirInstKind.AcquireSnapshot"
+        case CommitUpdates(_, _, _): "MirInstKind.CommitUpdates"
+        case Drop(_): "MirInstKind.Drop"
+        case BinOp(_, _, _, _): "MirInstKind.BinOp"
+        case UnaryOp(_, _, _): "MirInstKind.UnaryOp"
+        case CheckedBinOp(_, _, _, _): "MirInstKind.CheckedBinOp"
+        case Alloc(_, _): "MirInstKind.Alloc"
+        case Load(_, _): "MirInstKind.Load"
+        case Store(_, _): "MirInstKind.Store"
+        case GetElementPtr(_, _, _): "MirInstKind.GetElementPtr"
+        case LoadGlobal(_, _): "MirInstKind.LoadGlobal"
+        case StoreGlobal(_, _): "MirInstKind.StoreGlobal"
+        case Aggregate(_, _, _): "MirInstKind.Aggregate"
+        case GetField(_, _, _): "MirInstKind.GetField"
+        case SetField(_, _, _): "MirInstKind.SetField"
+        case ResultMatchSemantic(_, _, _, _, _, _, _): "MirInstKind.ResultMatchSemantic"
+        case Cast(_, _, _): "MirInstKind.Cast"
+        case Bitcast(_, _, _): "MirInstKind.Bitcast"
+        case Call(_, _, _): "MirInstKind.Call"
+        case CallIndirect(_, _, _, _): "MirInstKind.CallIndirect"
+        case Intrinsic(_, _, _): "MirInstKind.Intrinsic"
+        case DecisionProbe(_, _, _, _, _, _): "MirInstKind.DecisionProbe"
+        case ConditionProbe(_, _, _, _, _, _, _, _): "MirInstKind.ConditionProbe"
+        case SimdAddF32x4(_, _, _): "MirInstKind.SimdAddF32x4"
+        case SimdSubF32x4(_, _, _): "MirInstKind.SimdSubF32x4"
+        case SimdMulF32x4(_, _, _): "MirInstKind.SimdMulF32x4"
+        case SimdDivF32x4(_, _, _): "MirInstKind.SimdDivF32x4"
+        case SimdFmaF32x4(_, _, _, _): "MirInstKind.SimdFmaF32x4"
+        case SimdAddF32x8(_, _, _): "MirInstKind.SimdAddF32x8"
+        case SimdSubF32x8(_, _, _): "MirInstKind.SimdSubF32x8"
+        case SimdMulF32x8(_, _, _): "MirInstKind.SimdMulF32x8"
+        case SimdDivF32x8(_, _, _): "MirInstKind.SimdDivF32x8"
+        case SimdFmaF32x8(_, _, _, _): "MirInstKind.SimdFmaF32x8"
+        case SimdAddF64x4(_, _, _): "MirInstKind.SimdAddF64x4"
+        case SimdSubF64x4(_, _, _): "MirInstKind.SimdSubF64x4"
+        case SimdMulF64x4(_, _, _): "MirInstKind.SimdMulF64x4"
+        case SimdDivF64x4(_, _, _): "MirInstKind.SimdDivF64x4"
+        case SimdFmaF64x4(_, _, _, _): "MirInstKind.SimdFmaF64x4"
+        case SimdAddI32x4(_, _, _): "MirInstKind.SimdAddI32x4"
+        case SimdSubI32x4(_, _, _): "MirInstKind.SimdSubI32x4"
+        case SimdMulI32x4(_, _, _): "MirInstKind.SimdMulI32x4"
+        case SimdXorI32x4(_, _, _): "MirInstKind.SimdXorI32x4"
+        case SimdAndI32x4(_, _, _): "MirInstKind.SimdAndI32x4"
+        case SimdOrI32x4(_, _, _): "MirInstKind.SimdOrI32x4"
+        case SimdShlI32x4(_, _, _): "MirInstKind.SimdShlI32x4"
+        case SimdShrI32x4(_, _, _): "MirInstKind.SimdShrI32x4"
+        case SimdAddI32x8(_, _, _): "MirInstKind.SimdAddI32x8"
+        case SimdSubI32x8(_, _, _): "MirInstKind.SimdSubI32x8"
+        case SimdMulI32x8(_, _, _): "MirInstKind.SimdMulI32x8"
+        case SimdXorI32x8(_, _, _): "MirInstKind.SimdXorI32x8"
+        case SimdAndI32x8(_, _, _): "MirInstKind.SimdAndI32x8"
+        case SimdOrI32x8(_, _, _): "MirInstKind.SimdOrI32x8"
+        case SimdShlI32x8(_, _, _): "MirInstKind.SimdShlI32x8"
+        case SimdShrI32x8(_, _, _): "MirInstKind.SimdShrI32x8"
+        case SimdHaddF32x4(_, _): "MirInstKind.SimdHaddF32x4"
+        case SimdHmaxF32x4(_, _): "MirInstKind.SimdHmaxF32x4"
+        case SimdHminF32x4(_, _): "MirInstKind.SimdHminF32x4"
+        case InlineAsm(_, _, _, _, _, _, _): "MirInstKind.InlineAsm"
+        case PipeForward(_, _, _): "MirInstKind.PipeForward"
+        case Compose(_, _, _, _): "MirInstKind.Compose"
+        case Parallel(_, _): "MirInstKind.Parallel"
+        case LayerConnect(_, _, _): "MirInstKind.LayerConnect"
+        case DebugValue(_, _): "MirInstKind.DebugValue"
+        case Nop: "MirInstKind.Nop"
+        case CreatePromise(_, _, _): "MirInstKind.CreatePromise"
+        case Await(_, _): "MirInstKind.Await"
+        case Yield(_): "MirInstKind.Yield"
+        case Spawn(_, _, _): "MirInstKind.Spawn"
+        case Send(_, _, _): "MirInstKind.Send"
+        case Receive(_, _): "MirInstKind.Receive"
+        case Ref(_, _, _): "MirInstKind.Ref"
+        case GpuKernelDef(_): "MirInstKind.GpuKernelDef"
+        case GpuLaunch(_): "MirInstKind.GpuLaunch"
+        case GpuGlobalId(_, _): "MirInstKind.GpuGlobalId"
+        case GpuLocalId(_, _): "MirInstKind.GpuLocalId"
+        case GpuBlockId(_, _): "MirInstKind.GpuBlockId"
+        case GpuBlockDim(_, _): "MirInstKind.GpuBlockDim"
+        case GpuGridDim(_, _): "MirInstKind.GpuGridDim"
+        case GpuBarrier(_): "MirInstKind.GpuBarrier"
+        case GpuMemFence(_): "MirInstKind.GpuMemFence"
+        case GpuSharedAlloc(_, _, _): "MirInstKind.GpuSharedAlloc"
+        case GpuAtomicOp(_, _, _, _): "MirInstKind.GpuAtomicOp"
+        case GpuAtomicCas(_, _, _, _): "MirInstKind.GpuAtomicCas"
+        case HostGpuLaneBegin(_, _): "MirInstKind.HostGpuLaneBegin"
+        case HostGpuLaneEnd(_): "MirInstKind.HostGpuLaneEnd"
+        case VhdlProcess(_, _): "MirInstKind.VhdlProcess"
+        case VhdlSignalAssign(_, _, _): "MirInstKind.VhdlSignalAssign"
+        case VhdlVarAssign(_, _): "MirInstKind.VhdlVarAssign"
+        case VhdlPortMap(_, _, _): "MirInstKind.VhdlPortMap"
+        case VhdlResize(_, _, _, _): "MirInstKind.VhdlResize"
+        case VhdlSlice(_, _, _, _): "MirInstKind.VhdlSlice"
+        case VhdlConcat(_, _): "MirInstKind.VhdlConcat"
+        case ScalableVecFence(_): "MirInstKind.ScalableVecFence"
+        case MirSimdSplat(_, _, _): "MirInstKind.MirSimdSplat"
+        case MirSimdLoad(_, _, _, _): "MirInstKind.MirSimdLoad"
+        case MirSimdStore(_, _, _): "MirInstKind.MirSimdStore"
+        case MirSimdGather(_, _, _, _): "MirInstKind.MirSimdGather"
+        case MirSimdScatter(_, _, _): "MirInstKind.MirSimdScatter"
+        case MirSimdBinop(_, _, _, _): "MirInstKind.MirSimdBinop"
+        case MirSimdTernop(_, _, _, _, _): "MirInstKind.MirSimdTernop"
+        case MirSimdUnop(_, _, _): "MirInstKind.MirSimdUnop"
+        case MirSimdReduce(_, _, _): "MirInstKind.MirSimdReduce"
+        case MirSimdShuffle(_, _, _, _): "MirInstKind.MirSimdShuffle"
+        case MirSimdPermute(_, _, _): "MirInstKind.MirSimdPermute"
+        case MirSimdCmp(_, _, _, _): "MirInstKind.MirSimdCmp"
+        case MirSimdSelect(_, _, _, _): "MirInstKind.MirSimdSelect"
+        case MirSimdMaskOp(_, _, _, _): "MirInstKind.MirSimdMaskOp"
+        case MirSimdScalableVsetvl(_, _, _): "MirInstKind.MirSimdScalableVsetvl"
+        case MaskFromCmp(_, _, _, _): "MirInstKind.MaskFromCmp"
+        case MaskedAdd(_, _, _, _): "MirInstKind.MaskedAdd"
+        case MaskedMul(_, _, _, _): "MirInstKind.MaskedMul"
+        case MaskedFma(_, _, _, _, _): "MirInstKind.MaskedFma"
+        case PredicatedAdd(_, _, _, _, _, _): "MirInstKind.PredicatedAdd"
+        case PredicatedMul(_, _, _, _, _, _): "MirInstKind.PredicatedMul"
+        case PredicatedFma(_, _, _, _, _, _, _): "MirInstKind.PredicatedFma"
+        case MirWarpShfl(_, _, _, _, _): "MirInstKind.MirWarpShfl"
+        case MirWarpReduce(_, _, _, _, _): "MirInstKind.MirWarpReduce"
+        case MirWarpBallot(_, _, _): "MirInstKind.MirWarpBallot"
+        case MirWarpActivesMask(_): "MirInstKind.MirWarpActivesMask"
+        case MirWarpSync(_): "MirInstKind.MirWarpSync"
+    _coverage_row_v2(variant, SemanticClass.Unsupported)
+
+# Terminators are a distinct semantic surface from instructions. Keep this
+# match exhaustive so adding a CFG exit cannot silently evade the manifest.
+# V2 has no state-transition algebra, therefore even Ret remains unsupported;
+# a later additive VIR version must bind its value/type and CFG transition.
+pub fn semantic_coverage_for_mir_terminator_v2(
+    terminator: MirTerminator
+) -> SemanticCoverageV1:
+    val variant = match terminator:
+        case Goto(_): "MirTerminator.Goto"
+        case Ret(_): "MirTerminator.Ret"
+        case If(_, _, _): "MirTerminator.If"
+        case Switch(_, _, _): "MirTerminator.Switch"
+        case Unreachable: "MirTerminator.Unreachable"
+        case Abort(_): "MirTerminator.Abort"
+        case CallTerminator(_, _, _, _, _): "MirTerminator.CallTerminator"
+    _coverage_row_v2(variant, SemanticClass.Unsupported)
+
+pub fn semantic_coverage_for_mir_type_v2(type_: MirType) -> SemanticCoverageV1:
+    match type_.kind:
+        case I8: _coverage_row_v2("MirTypeKind.I8", SemanticClass.Exact)
+        case I16: _coverage_row_v2("MirTypeKind.I16", SemanticClass.Exact)
+        case I32: _coverage_row_v2("MirTypeKind.I32", SemanticClass.Exact)
+        case I64: _coverage_row_v2("MirTypeKind.I64", SemanticClass.Exact)
+        case U8: _coverage_row_v2("MirTypeKind.U8", SemanticClass.Exact)
+        case U16: _coverage_row_v2("MirTypeKind.U16", SemanticClass.Exact)
+        case U32: _coverage_row_v2("MirTypeKind.U32", SemanticClass.Exact)
+        case U64: _coverage_row_v2("MirTypeKind.U64", SemanticClass.Exact)
+        case Bool: _coverage_row_v2("MirTypeKind.Bool", SemanticClass.Exact)
+        case Char: _coverage_row_v2("MirTypeKind.Char", SemanticClass.Exact)
+        case Unit: _coverage_row_v2("MirTypeKind.Unit", SemanticClass.Exact)
+        case Never: _coverage_row_v2("MirTypeKind.Never", SemanticClass.Exact)
+        case Array(_, _): _coverage_row_v2("MirTypeKind.Array", SemanticClass.Exact)
+        case Tuple(_): _coverage_row_v2("MirTypeKind.Tuple", SemanticClass.Exact)
+        case Result(_, _): _coverage_row_v2("MirTypeKind.Result", SemanticClass.Exact)
+        case Bits(_, _): _coverage_row_v2("MirTypeKind.Bits", SemanticClass.Exact)
+        case Struct(_): _coverage_row_v2("MirTypeKind.Struct", SemanticClass.AbstractedWithRefinement)
+        case Enum(_): _coverage_row_v2("MirTypeKind.Enum", SemanticClass.AbstractedWithRefinement)
+        case Opaque(_): _coverage_row_v2("MirTypeKind.Opaque", SemanticClass.ExternalWithContract)
+        case F32: _coverage_row_v2("MirTypeKind.F32", SemanticClass.Unsupported)
+        case F64: _coverage_row_v2("MirTypeKind.F64", SemanticClass.Unsupported)
+        case Vec4f: _coverage_row_v2("MirTypeKind.Vec4f", SemanticClass.Unsupported)
+        case Vec8f: _coverage_row_v2("MirTypeKind.Vec8f", SemanticClass.Unsupported)
+        case Vec4d: _coverage_row_v2("MirTypeKind.Vec4d", SemanticClass.Unsupported)
+        case Vec4i: _coverage_row_v2("MirTypeKind.Vec4i", SemanticClass.Unsupported)
+        case Vec8i: _coverage_row_v2("MirTypeKind.Vec8i", SemanticClass.Unsupported)
+        case Ptr(_, _): _coverage_row_v2("MirTypeKind.Ptr", SemanticClass.Unsupported)
+        case Ref(_, _): _coverage_row_v2("MirTypeKind.Ref", SemanticClass.Unsupported)
+        case FuncPtr(_): _coverage_row_v2("MirTypeKind.FuncPtr", SemanticClass.Unsupported)
+        case Dict(_, _): _coverage_row_v2("MirTypeKind.Dict", SemanticClass.Unsupported)
+        case Slice(_): _coverage_row_v2("MirTypeKind.Slice", SemanticClass.Unsupported)
+        case Union(_): _coverage_row_v2("MirTypeKind.Union", SemanticClass.Unsupported)
+        case ScalableVec(_, _): _coverage_row_v2("MirTypeKind.ScalableVec", SemanticClass.Unsupported)
+        case Promise(_): _coverage_row_v2("MirTypeKind.Promise", SemanticClass.Unsupported)
+        case Generator(_, _): _coverage_row_v2("MirTypeKind.Generator", SemanticClass.Unsupported)
+        case ActorType(_): _coverage_row_v2("MirTypeKind.ActorType", SemanticClass.Unsupported)
+
+fn _coverage_add_unique_v2(
+    rows: [SemanticCoverageV1], row: SemanticCoverageV1
+) -> [SemanticCoverageV1]:
+    var result = rows
+    for present in result:
+        if present.construct_variant == row.construct_variant: return result
+    result.push(row)
+    result
+
+fn _coverage_add_type_v2(
+    rows: [SemanticCoverageV1], type_: MirType
+) -> [SemanticCoverageV1]:
+    var result = _coverage_add_unique_v2(rows,
+        semantic_coverage_for_mir_type_v2(type_))
+    match type_.kind:
+        case Ptr(inner, _) | Ref(inner, _) | Slice(inner) | Promise(inner) | ActorType(inner) | ScalableVec(inner, _):
+            result = _coverage_add_type_v2(result, inner)
+        case Array(inner, _): result = _coverage_add_type_v2(result, inner)
+        case Dict(key, value):
+            result = _coverage_add_type_v2(result, key)
+            result = _coverage_add_type_v2(result, value)
+        case Tuple(elements) | Union(elements):
+            for element in elements:
+                result = _coverage_add_type_v2(result, element)
+        case Result(ok_type, err_type) | Generator(ok_type, err_type):
+            result = _coverage_add_type_v2(result, ok_type)
+            result = _coverage_add_type_v2(result, err_type)
+        case FuncPtr(signature):
+            for parameter in signature.params:
+                result = _coverage_add_type_v2(result, parameter)
+            result = _coverage_add_type_v2(result, signature.return_type)
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Bool | Char | Unit | Vec4f | Vec8f | Vec4d | Vec4i | Vec8i | Struct(_) | Enum(_) | Bits(_, _) | Never | Opaque(_): pass
+    result
+
+fn _coverage_functions_by_symbol_v2(module: MirModule) -> [MirFunction]:
+    var functions: [MirFunction] = []
+    for symbol in module.functions.keys(): functions.push(module.functions[symbol])
+    var i = 0
+    while i < functions.len():
+        var j = i + 1
+        while j < functions.len():
+            if functions[j].symbol.id < functions[i].symbol.id:
+                val temporary = functions[i]
+                functions[i] = functions[j]
+                functions[j] = temporary
+            j = j + 1
+        i = i + 1
+    functions
+
+fn _coverage_sort_v2(rows: [SemanticCoverageV1]) -> [SemanticCoverageV1]:
+    var result = rows
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].construct_variant < result[i].construct_variant:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+pub fn semantic_coverage_hash_v2(rows: [SemanticCoverageV1]) -> text:
+    var canonical: [text] = []
+    for row in rows:
+        if row.diagnostic() != "": return ""
+        canonical.push(row.canonical_text())
+    sha256_text("SemanticCoverageManifest-v2" +
+        _coverage_frames_v2(canonical))
+
+pub fn semantic_coverage_from_reachable_mir_v2(
+    module: MirModule
+) -> [SemanticCoverageV1]:
+    var rows: [SemanticCoverageV1] = []
+    for function in _coverage_functions_by_symbol_v2(module):
+        for parameter in function.signature.params:
+            rows = _coverage_add_type_v2(rows, parameter)
+        rows = _coverage_add_type_v2(rows, function.signature.return_type)
+        for local in function.locals:
+            rows = _coverage_add_type_v2(rows, local.type_)
+        for block in function.blocks:
+            for instruction in block.instructions:
+                rows = _coverage_add_unique_v2(rows,
+                    semantic_coverage_for_mir_instruction_v2(instruction.kind))
+            rows = _coverage_add_unique_v2(rows,
+                semantic_coverage_for_mir_terminator_v2(block.terminator))
+    _coverage_sort_v2(rows)
