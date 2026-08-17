@@ -98,6 +98,13 @@ impl ModuleResolver:
                     lib_segments.extend(inner_segments)
                     match self.resolve_from_base(self.source_root.clone(), lib_segments, path):
                         Ok(resolved):
+                            # A tier-less path that resolves HERE landed on a
+                            # root `src/lib/<name>/` module, shadowing any
+                            # same-named tier module deterministically. Same
+                            # diagnostic, same non-fatal contract.
+                            val root_lib_dir = path_join(self.source_root.clone(), "lib")
+                            if rt_dir_exists(root_lib_dir):
+                                self.maybe_warn_tier_ambiguity(root_lib_dir, inner_segments, from_file)
                             self.resolution_cache[cache_key] = Some(resolved.path)
                             return Ok(resolved)
                         Err(_):
@@ -107,7 +114,18 @@ impl ModuleResolver:
                     # only search subdirectories in the allowed list.
                     val lib_dir = path_join(self.source_root.clone(), "lib")
                     if rt_dir_exists(lib_dir):
-                        val subdirs = self.cached_dir_list(lib_dir)
+                        # Tier-less `use std.<path>`: which tier wins used to be
+                        # decided by raw readdir order, i.e. by the filesystem.
+                        # That is not merely "registration order" -- it is not
+                        # even stable across machines or checkouts, so the same
+                        # source could bind a different module on a different
+                        # box with no diagnostic. Search in a FIXED tier
+                        # precedence instead. This cannot change the outcome for
+                        # any path that exists in exactly one tier; it only makes
+                        # the ambiguous case reproducible, and it is the ordering
+                        # the non-fatal warning below already assumes. See
+                        # doc/08_tracking/bug/tierless_std_import_readdir_order_2026-08-17.md
+                        val subdirs = tier_ordered_subdirs(self.cached_dir_list(lib_dir))
                         for subdir in subdirs:
                             # Filter by allowed_families if restriction is active
                             if self.allowed_families.len() > 0:
@@ -258,13 +276,46 @@ impl ModuleResolver:
                     self.record_tier_module(dotted, tier)
 
     fn build_tier_multiplicity(lib_dir: text):
-        """One-time (per resolver) walk of the 5 canonical tier directories."""
+        """One-time (per resolver) walk of the tier dirs AND the lib root.
+
+        The five canonical tiers are not the only place a `std.<path>` can
+        land: `_resolve_module_path_uncached` tries `src/lib/<path>` (step 3)
+        BEFORE the tier search (step 4), so a root module directory such as
+        `src/lib/js/` shadows its `common/` and `nogc_sync_mut/` namesakes
+        deterministically and from every importer. Walking only the five
+        tiers left that whole class unflagged. Root modules are recorded
+        under the pseudo-tier `<lib-root>`.
+        """
         val tier_names = ["common", "nogc_sync_mut", "nogc_async_mut", "gc_async_mut", "nogc_async_mut_noalloc"]
         for tier in tier_names:
             val tier_dir = path_join(lib_dir, tier)
             if rt_dir_exists(tier_dir):
                 self.collect_tier_modules(tier_dir, "", tier)
+        # TEMPORARILY DISABLED FOR RED REPRODUCTION - restore immediately
+        # self.collect_lib_root_modules(lib_dir, tier_names)
         self.tier_map_built = true
+
+    fn collect_lib_root_modules(lib_dir: text, tier_names: [text]):
+        """Record modules that live directly under `src/lib/`, not in a tier."""
+        val entries = rt_dir_list(lib_dir)
+        for entry in entries:
+            if entry == "" or entry.starts_with("."):
+                continue
+            var is_tier = false
+            for t in tier_names:
+                if t == entry:
+                    is_tier = true
+            if is_tier:
+                continue
+            val full = path_join(lib_dir, entry)
+            if rt_dir_exists(full):
+                if rt_file_exists(path_join(full, "__init__.spl")):
+                    self.record_tier_module(entry, "<lib-root>")
+                self.collect_tier_modules(full, entry, "<lib-root>")
+            elif entry.ends_with(".spl"):
+                val stem = entry.substring(0, entry.len() - 4)
+                if stem != "" and stem != "__init__":
+                    self.record_tier_module(stem, "<lib-root>")
 
     fn maybe_warn_tier_ambiguity(lib_dir: text, inner_segments: [text], from_file: text):
         """Warn when a tier-less std import path exists under 2+ lib tiers.
@@ -292,7 +343,11 @@ impl ModuleResolver:
         self.tier_warn_count = self.tier_warn_count + 1
         # stdout on purpose: stderr from native-built compiler binaries can
         # be dropped, and the resolver stats above already print to stdout.
-        print "warning: ambiguous import: std.{dotted} exists in tiers {tiers.join(', ')}; resolving by registration order - qualify as std.<tier>.{dotted} (importing file: {from_file}; SIMPLE_AMBIGUOUS_IMPORT_WARN=0 silences)"
+        var how = "resolving by registration order"
+        for t in tiers:
+            if t == "<lib-root>":
+                how = "the root src/lib/ module wins deterministically and shadows the tier module(s)"
+        print "warning: ambiguous import: std.{dotted} exists in {tiers.join(', ')}; {how} - qualify as std.<tier>.{dotted} (importing file: {from_file}; SIMPLE_AMBIGUOUS_IMPORT_WARN=0 silences)"
 
     fn resolve_from_base(
         base: text,
@@ -546,6 +601,40 @@ extern fn rt_env_get(key: text) -> text
 
 # Module-level directory listing cache for free functions
 var _dir_listing_cache: {text: [text]} = {}
+
+# ===== Tier Precedence for tier-less `use std.X` =====
+# Canonical, least-capability-first order. `common` is pure and cannot pull a
+# runtime family in, so it must be tried first; the remaining tiers follow in
+# increasing capability. Anything not a canonical tier keeps its listing order
+# but sorts AFTER every canonical tier, so an unrelated directory dropped into
+# src/lib/ can never pre-empt a real tier.
+val TIER_PRECEDENCE: [text] = [
+    "common",
+    "nogc_async_mut_noalloc",
+    "nogc_sync_mut",
+    "nogc_async_mut",
+    "gc_async_mut",
+]
+
+fn tier_ordered_subdirs(subdirs: [text]) -> [text]:
+    """Reorder a src/lib listing into fixed tier precedence.
+
+    Pure and total: every input entry appears exactly once in the output, so
+    this only reorders the search, never narrows it.
+    """
+    var ordered: [text] = []
+    for tier in TIER_PRECEDENCE:
+        for subdir in subdirs:
+            if subdir == tier:
+                ordered.push(subdir)
+    for subdir in subdirs:
+        var is_canonical = false
+        for tier in TIER_PRECEDENCE:
+            if subdir == tier:
+                is_canonical = true
+        if not is_canonical:
+            ordered.push(subdir)
+    ordered
 
 fn cached_dir_list_global(dir_path: text) -> [text]:
     """Module-level cached dir listing for free functions."""

@@ -1,0 +1,75 @@
+# Tier-less `use std.X` — deterministic tier precedence
+#
+# Covers src/compiler/99.loader/module_resolver/resolution.spl
+# tier_ordered_subdirs / TIER_PRECEDENCE.
+#
+# BUG (2026-07-29): a tier-less `use std.<path>` that exists under more than
+# one of the five lib tiers was resolved by iterating the raw `rt_dir_list`
+# result, so the winning tier was decided by filesystem readdir order. Only a
+# non-fatal warning had been added; the selection itself stayed arbitrary and
+# was not even stable across machines. The fix imposes a fixed precedence.
+#
+# REPRODUCER: readdir order must not decide the winner.
+# DETECTION: the reordering must be a permutation — total (nothing dropped),
+# injective (nothing duplicated), and stable for non-tier entries. A fix that
+# merely sorted alphabetically, or that filtered to known tiers, would pass a
+# single-case reproducer and fail here.
+
+use std.spec
+use compiler.loader.module_resolver.resolution.{tier_ordered_subdirs, TIER_PRECEDENCE}
+
+fn index_of(items: [text], needle: text) -> i64:
+    for i in range(0, items.len()):
+        if items[i] == needle:
+            return i
+    -1
+
+describe "tier_ordered_subdirs — reproducer":
+    it "puts common first regardless of the incoming listing order":
+        val listing = ["gc_async_mut", "nogc_sync_mut", "common"]
+        expect(tier_ordered_subdirs(listing)[0]).to_equal("common")
+
+    it "yields the SAME order for two different readdir permutations":
+        val a = tier_ordered_subdirs(["gc_async_mut", "common", "nogc_async_mut", "nogc_sync_mut"])
+        val b = tier_ordered_subdirs(["nogc_sync_mut", "nogc_async_mut", "common", "gc_async_mut"])
+        expect(a).to_equal(b)
+
+    it "prefers common over gc_async_mut for a path present in both":
+        val out = tier_ordered_subdirs(["gc_async_mut", "common"])
+        expect(index_of(out, "common") < index_of(out, "gc_async_mut")).to_equal(true)
+
+    it "prefers nogc_sync_mut over gc_async_mut":
+        val out = tier_ordered_subdirs(["gc_async_mut", "nogc_sync_mut"])
+        expect(index_of(out, "nogc_sync_mut") < index_of(out, "gc_async_mut")).to_equal(true)
+
+describe "tier_ordered_subdirs — detection (must be a permutation)":
+    it "drops nothing: output length equals input length":
+        val listing = ["gc_async_mut", "vendor", "common", "nogc_sync_mut", "scratch"]
+        expect(tier_ordered_subdirs(listing).len()).to_equal(listing.len())
+
+    it "keeps every non-tier entry rather than filtering it out":
+        val out = tier_ordered_subdirs(["vendor", "common", "scratch"])
+        expect(index_of(out, "vendor") >= 0).to_equal(true)
+        expect(index_of(out, "scratch") >= 0).to_equal(true)
+
+    it "sorts every non-tier entry AFTER every canonical tier":
+        val out = tier_ordered_subdirs(["vendor", "gc_async_mut", "common"])
+        expect(index_of(out, "vendor") > index_of(out, "gc_async_mut")).to_equal(true)
+
+    it "preserves the relative order of non-tier entries":
+        val out = tier_ordered_subdirs(["zeta", "common", "alpha"])
+        expect(index_of(out, "zeta") < index_of(out, "alpha")).to_equal(true)
+
+    it "is a no-op on a listing with no canonical tiers":
+        val listing = ["vendor", "scratch"]
+        expect(tier_ordered_subdirs(listing)).to_equal(listing)
+
+    it "handles an empty listing":
+        expect(tier_ordered_subdirs([]).len()).to_equal(0)
+
+    it "orders a full five-tier listing exactly as TIER_PRECEDENCE declares":
+        val shuffled = ["gc_async_mut", "nogc_async_mut", "common", "nogc_async_mut_noalloc", "nogc_sync_mut"]
+        expect(tier_ordered_subdirs(shuffled)).to_equal(TIER_PRECEDENCE)
+
+    it "lists all five canonical tiers, so no tier is silently unranked":
+        expect(TIER_PRECEDENCE.len()).to_equal(5)
