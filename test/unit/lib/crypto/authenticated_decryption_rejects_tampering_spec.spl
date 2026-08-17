@@ -1,0 +1,130 @@
+# CLASS-DETECTION SPEC — "authenticated decryption returns Ok on a tampered
+# ciphertext".
+#
+# This generalizes the v4.local defect (paseto.spl `_p4_b64u_decode` idx3 scope
+# bug) to the whole class: any AEAD construction in this tree must return an
+# error, not Ok, when ANY byte of an authenticated token is altered. It sweeps
+# every position class of the token instead of one hand-picked offset, so a MAC
+# that is enforced over only part of the message still goes red.
+#
+# It also pins the two halves that make a bypass invisible:
+#   (a) the tamper must actually change the token (a no-op "tamper" is how the
+#       v4.public arm of the KAT spec produced a FALSE RED on 2026-08-17);
+#   (b) the untampered token must still decrypt, so "everything is rejected" is
+#       not mistaken for correct authentication.
+
+use std.spipe.*
+use os.crypto.paseto.{
+    paseto_v4_local_encrypt,
+    paseto_v4_local_decrypt,
+    PasetoLocalResult
+}
+
+fn _t2u(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+fn _u2t(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    while i < b.len():
+        s = s + b[i].to_i64().chr()
+        i = i + 1
+    s
+
+fn _ramp(n: i64) -> [u8]:
+    var a: [u8] = []
+    var i = 0
+    while i < n:
+        a.push(((i * 7 + 3) & 0xFF).to_u8())
+        i = i + 1
+    a
+
+fn _empty() -> [u8]:
+    var e: [u8] = []
+    e
+
+fn _plaintext() -> text:
+    "{\"data\":\"authenticated\",\"exp\":\"2022-01-01T00:00:00+00:00\"}"
+
+fn _token_text() -> text:
+    _u2t(paseto_v4_local_encrypt(_t2u(_plaintext()), _empty(), _empty(), _ramp(32), _ramp(32)))
+
+# Flip one base64url character at `pos` to a guaranteed-different character.
+fn _flip_at(pos: i64) -> text:
+    val tok = _token_text()
+    val c = tok.substring(pos, pos + 1)
+    var repl = "A"
+    if c == "A":
+        repl = "B"
+    tok.substring(0, pos) + repl + tok.substring(pos + 1, tok.length())
+
+fn _decrypt_ok(tok_text: text) -> bool:
+    val r = paseto_v4_local_decrypt(_t2u(tok_text), _empty(), _empty(), _ramp(32))
+    match r:
+        case PasetoLocalResult.Ok(payload):
+            return true
+        case PasetoLocalResult.Err(e):
+            return false
+
+fn _decrypted_text() -> text:
+    val r = paseto_v4_local_decrypt(_t2u(_token_text()), _empty(), _empty(), _ramp(32))
+    match r:
+        case PasetoLocalResult.Ok(payload):
+            return _u2t(payload)
+        case PasetoLocalResult.Err(e):
+            return "<ERR>"
+
+# The payload blob after "v4.local." is n(32) || c(var) || t(32); base64url
+# expands 3 bytes to 4 chars, so offsets below are chosen to land in the nonce
+# region, the ciphertext region, and the MAC region respectively.
+fn _pos_nonce() -> i64:
+    9 + 4
+
+fn _pos_ciphertext() -> i64:
+    9 + 48
+
+fn _pos_mac() -> i64:
+    _token_text().length() - 3
+
+# Number of tampered variants (out of 3) that were WRONGLY accepted.
+fn _accepted_tamper_count() -> i64:
+    var n = 0
+    if _decrypt_ok(_flip_at(_pos_nonce())):
+        n = n + 1
+    if _decrypt_ok(_flip_at(_pos_ciphertext())):
+        n = n + 1
+    if _decrypt_ok(_flip_at(_pos_mac())):
+        n = n + 1
+    n
+
+# Number of tampered variants (out of 3) that genuinely differ from the original
+# — guards against a vacuous "tamper" that changed nothing.
+fn _really_tampered_count() -> i64:
+    val orig = _token_text()
+    var n = 0
+    if _flip_at(_pos_nonce()) != orig:
+        n = n + 1
+    if _flip_at(_pos_ciphertext()) != orig:
+        n = n + 1
+    if _flip_at(_pos_mac()) != orig:
+        n = n + 1
+    n
+
+describe "authenticated decryption must reject any tampered ciphertext":
+
+    it "each tampered variant really differs from the original token":
+        expect(_really_tampered_count()).to_equal(3)
+
+    it "no tampered variant is accepted, in the nonce, ciphertext or MAC region":
+        expect(_accepted_tamper_count()).to_equal(0)
+
+    it "the untampered token still decrypts, so rejection is not blanket":
+        expect(_decrypt_ok(_token_text())).to_equal(true)
+
+    it "the untampered token decrypts to the exact original plaintext":
+        expect(_decrypted_text()).to_equal(_plaintext())
