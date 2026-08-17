@@ -47,3 +47,26 @@ pure-Simple compiler.
 ## Related
 - `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md`
 - `doc/08_tracking/bug/x64_freestanding_rt_string_to_int_stub.md`
+
+## Verification note 2026-08-17 (content check, NOT a close)
+
+Re-checked `src/os/apps/sshd/sshd.spl:63-81` — the documented byte-array
+tokenizer workaround is present exactly as claimed:
+
+```
+63: # `text.char_code_at(i)` itself mis-decodes when `text` is a DYNAMICALLY built
+...
+69: # text is the raw [u8] byte-array accessor pair `rt_string_to_byte_array` +
+70: # `rt_bytes_u8_at` (already proven elsewhere, e.g.
+74: fn _sshd_tokenize_command(command: text) -> [text]:
+75:     val bytes = rt_string_to_byte_array(command)
+...
+81:         val code = rt_bytes_u8_at(bytes, i)
+```
+
+`_sshd_tokenize_command` never calls `char_code_at` on dynamically-built
+text, matching the doc's "workaround in use" section. Did not attempt a
+QEMU rebuild/boot to verify the doc's "Fix (root)" claim that the underlying
+cranelift `char_code_at` lowering itself is now fixed — that remains
+unverified this pass, consistent with the doc's own "current-source
+freestanding QEMU proof pending" status line. Not upgraded to resolved.

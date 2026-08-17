@@ -98,3 +98,19 @@ representation in the cranelift lowering, so `rt_push_byte`-style helpers are
 safe again. The separately-retracted
 `x64_freestanding_chained_len_cast_miscompile.md` was a mis-attribution of THIS
 corruption to a chained cast.
+
+## Verification note 2026-08-17 (content check, NOT a close)
+
+Greped current `src/os/apps/sshd/ssh_session.spl` for the specific defect
+pattern (`.to_i64()` on a `_u8_at(...)` result inside a reassignment loop,
+i.e. `rt_push_byte(payload, _u8_at(data,i).to_i64())`). Result: **zero**
+`.to_i64()` call sites in the file at all; the only `rt_push_byte` call sites
+present (lines 61-89) build a static SSH banner byte-by-byte with literal
+hex constants, not the `_build_channel_data_stable` data loop this doc
+describes. **I could NOT locate `_build_channel_data_stable` in the current
+tree to confirm the `.push` fix byte-for-byte** — it may have been renamed,
+moved, or refactored since this doc was written. This is "no regression
+pattern present" evidence, not a positive confirmation that the described
+fix landed exactly as stated. Status unchanged: open per doc (root cause is
+a frontend method-resolution collision, not yet fixed structurally — only
+worked around at one call site). Not upgraded to resolved.

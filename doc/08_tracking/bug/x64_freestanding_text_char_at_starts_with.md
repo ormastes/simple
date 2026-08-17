@@ -128,3 +128,25 @@ buffer the way `fs_exec_prod_ring3_entry.spl` does before pmm/vmm, or (b) make
 in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
+
+## Verification note 2026-08-17 (content check, NOT a close)
+
+Re-checked `src/os/apps/sshd/ssh_session.spl:162-181` — the documented
+`_u8_at()` raw-byte-comparison workaround is present and load-bearing exactly
+as claimed:
+
+```
+162:        if _u8_at(payload, start + i) != _u8_at(expected, i):
+...
+170:    _u8_at(payload, 0) == 90 and
+171:        _u8_at(payload, 1) == 0 and
+...
+181:        _u8_at(payload, 11) == 0x6F
+```
+
+No `.starts_with()` call sites appear in the exec-dispatch path. This
+confirms the workaround is still in place; it does NOT confirm or deny
+whether the underlying deep-stack `starts_with` codegen defect (item 3,
+"REAL RESIDUAL") is still live, since that requires a QEMU boot with the
+workaround removed, which was not attempted this pass. Status unchanged:
+open per doc. Not upgraded to resolved.

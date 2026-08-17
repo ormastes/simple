@@ -85,3 +85,14 @@ run end-to-end with no other changes needed.
 
 Unit V3, `doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md`,
 2026-08-08.
+
+## Verification note 2026-08-17 (BLOCKED, NOT a close)
+
+Re-ran the doc's own evidence commands: `find build/os -iname '*virtio*gpu*'`
+returns nothing, and no `build/os/simpleos_x86_64_virtio_gpu_capset_probe.img`
+exists — confirms the guest probe image is still missing exactly as
+described. `src/os/drivers/virtio/virtio_gpu_capset.spl` is present and
+unchanged in scope; no code defect to grep for, since the gap is a missing
+*artifact* (bootable guest image), not a defective code pattern. Status:
+BLOCKED on guest-kernel engineering, unchanged from doc. Not upgraded to
+resolved.

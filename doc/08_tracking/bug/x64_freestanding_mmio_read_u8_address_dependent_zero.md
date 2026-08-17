@@ -34,3 +34,21 @@ Regression: read back a raw buffer at a `0x0D5Dxxxx`-class address via `rt_mmio_
 
 - `doc/03_plan/os/in_guest_clang_streaming_loader_roadmap.md` — blocker section corrected (was misattributed to DMA).
 - `doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md` — earlier sighting of the same family.
+
+## Verification note 2026-08-17 (BLOCKED, NOT a close)
+
+Cannot be settled by static grep: the defect is address/layout-dependent —
+`rt_mmio_read_u8` reads correctly at one `.bss` layout (buffer at
+`~0x0D56Bxxx`, current origin tip) and incorrectly at another
+(`~0x0D5Dxxxx`, only reachable with specific in-flight compiler mods). There
+is no source-level pattern in `rt_mmio_read_u8`'s implementation
+(`src/os/**` / `src/runtime/**`) that is "wrong" in isolation — the doc
+itself confirms the current tip does NOT reproduce it. Grepping current
+source proves only that the non-reproducing layout is what's checked out
+now, which the doc already states. Harness needed to settle this: (1) apply
+the specific in-flight `var_reassign_ssa.spl`/mir-lowering mods that shift
+`.bss` into the `0x0D5Dxxxx` region (or otherwise force that layout), (2)
+rebuild + boot the freestanding kernel via real-firmware QEMU, (3) compare
+`rt_mmio_read_u8` output against a C-side load at the identical physical
+address for the same buffer. Status: BLOCKED, latent-not-reproduced at
+current tip, unchanged from doc. Not upgraded to resolved.
