@@ -7,13 +7,23 @@
 # produced a verdict in ~5min took >60min in that window.
 #
 # Usage:  sh scripts/resource/test-slot.shs bin/simple test <path> --timeout 800
-# Env:    SIMPLE_TEST_SLOTS (default 6), SIMPLE_TEST_SLOT_WAIT (default 3600s)
+# Env:    SIMPLE_TEST_SLOTS (default 12), SIMPLE_TEST_SLOT_WAIT (default 3600s)
+#
+# Why 12 and not 6 (re-measured 2026-08-17): the cap of 6 was set while a
+# 16-thread native_compile was running. During stage-3 parse the build is
+# SINGLE-threaded (measured: nlwp=1, tree_cpu_pct=80, i.e. 0.8 of one core),
+# so 6 slots starved 58 queued lanes to protect one core -- only 2 of 33
+# `simple test` runs reached a verdict all day. 12 leaves 20 of 32 cores for
+# the build's own peak (--threads 16 during native_compile).
+# ponytail: a static number, not a load-adaptive controller. If the build's
+# codegen phase is measurably starved again, lower it for that window rather
+# than building a feedback loop.
 #
 # ponytail: flock on N lock files, not a daemon. Slots free automatically when a
 # holder dies, including SIGKILL — no stale-slot reaper needed.
 set -u
 
-SLOTS=${SIMPLE_TEST_SLOTS:-6}
+SLOTS=${SIMPLE_TEST_SLOTS:-12}
 WAIT=${SIMPLE_TEST_SLOT_WAIT:-3600}
 DIR=${TMPDIR:-/tmp}/simple-test-slots
 mkdir -p "$DIR" 2>/dev/null || true
