@@ -10,7 +10,10 @@
 # WRITES A SENTINEL FILE immediately before crashing itself:
 #   sentinel present + died by signal = a REAL CRASH
 #   sentinel absent  + died by signal = TERMINATED / UNVERIFIED (earlyoom)
-# Sentinel: build/unstable_mode_crash_sentinel.txt
+# Sentinel path is the LANDED CONTRACT from lane B,
+# `take_crash_sentinel` in test_executor_parsing.spl: `<spec_path>.crashed`.
+# The runner deletes it on read, so a stale sentinel cannot mislabel a
+# later run.
 #
 # @skip  <- keeps it out of the default suite; run this directory with
 #           `--only-skipped` to execute it.
@@ -19,27 +22,24 @@ use std.spec.*
 use std.fs.*
 use std.nogc_sync_mut.ffi.system.*
 
-# Kill this very process by signal. Two rejected alternatives, recorded so
-# nobody re-tries them:
+# Four crash mechanisms were tried. Three do NOT work — recorded so nobody
+# re-tries them:
 #   - unbounded recursion: the tree-walk interpreter guards it at depth 1000
 #     and reports an ordinary assertion failure ("stack overflow: recursion
 #     depth 1000 exceeded") — exactly the outcome this fixture must NOT give;
-#   - `extern fn abort()`: rejected with `semantic: unknown extern function:
-#     abort` — the interpreter only resolves the runtime's `rt_*` exports.
-#   - `rt_process_kill(rt_getpid())`: it only kills processes in the
-#     runtime's SPAWNED_CHILDREN registry, so on our own PID it returns
-#     false and the spec PASSES — a false green, the worst outcome here.
-# What works: the release profile sets `panic = "abort"`
-# (src/compiler_rust/Cargo.toml), so `rt_panic` aborts the process.
-#   - `extern fn rt_panic(...)`: also `unknown extern function` — the
-#     interpreter's extern allowlist is narrow, `rt_panic` is not on it,
-#     even though the release profile is `panic = "abort"`.
-# What is left is SIGKILL on our own PID via the shell.
+#   - `extern fn abort()`: `semantic: unknown extern function: abort` — the
+#     interpreter only resolves the runtime's `rt_*` exports;
+#   - `extern fn rt_panic(...)`: also `unknown extern function`; the extern
+#     allowlist is narrow, even though the release profile is `panic = abort`;
+#   - `rt_process_kill(rt_getpid())`: only kills processes in the runtime's
+#     SPAWNED_CHILDREN registry, so on our own PID it returns false and the
+#     spec then PASSES — a false green, the worst possible outcome here.
+# What works is SIGKILL on our own PID via the shell.
 extern fn rt_getpid() -> i64
 
 describe "unstable mode crash fixture":
     it "writes a sentinel and then dies by signal":
-        file_write_text("build/unstable_mode_crash_sentinel.txt", "deliberate crash fixture: about to die by signal")
+        file_write_text("test/fixtures/unstable_mode/crash_spec.spl.crashed", "deliberate crash fixture: about to die by signal")
         val pid = rt_getpid()
         shell("kill -9 {pid}")
         expect(1).to_equal(1)
