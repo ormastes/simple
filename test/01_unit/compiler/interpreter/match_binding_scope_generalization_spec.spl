@@ -1,0 +1,66 @@
+use std.spec
+
+# Generalization spec for match-arm binding scope.
+#
+# Repro: test/01_unit/compiler/interpreter/match_expr_binding_scope_spec.spl
+#   (a `case n if guard:` binding leaking `n` into the enclosing scope).
+#
+# Source of truth: src/compiler_rust/compiler/src/interpreter/expr/control.rs
+#   lines ~173-190 -- both the guard and the arm body run in a CLONE of the
+#   enclosing env (`guard_env` / `arm_env`), so an arm binding can never be
+#   observed after the match, whether the guard passed, failed, or the arm was
+#   never taken.
+#
+# The general invariant: NO arm binding, of any pattern shape, is visible in the
+# enclosing scope after the match -- and an outer variable of the same name
+# keeps its original value.
+
+enum Shape:
+    Circle(i64)
+    Rect(i64, i64)
+    Empty
+
+describe "interpreter match-arm binding scope (generalized)":
+    it "does not leak a binding from an arm whose guard failed":
+        var n = 99
+        val result = match 5:
+            case n if n < 0: -1
+            case _: 0
+        expect(result).to_equal(0)
+        expect(n).to_equal(99)
+
+    it "does not leak a binding from the arm that was taken":
+        var n = 99
+        val result = match 5:
+            case n if n > 0: n
+            case _: 0
+        expect(result).to_equal(5)
+        expect(n).to_equal(99)
+
+    it "does not leak an enum payload binding":
+        var radius = 7
+        val shape = Shape.Circle(3)
+        val described = match shape:
+            case Shape.Circle(radius): radius * 10
+            case _: -1
+        expect(described).to_equal(30)
+        expect(radius).to_equal(7)
+
+    it "does not leak a multi-field payload binding":
+        var w = 1
+        var h = 2
+        val shape = Shape.Rect(6, 7)
+        val area = match shape:
+            case Shape.Rect(w, h): w * h
+            case _: -1
+        expect(area).to_equal(42)
+        expect(w).to_equal(1)
+        expect(h).to_equal(2)
+
+    it "does not leak a binding from an arm that was never reached":
+        var later = 5
+        val result = match 1:
+            case 1: 100
+            case later: later
+        expect(result).to_equal(100)
+        expect(later).to_equal(5)
