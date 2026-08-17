@@ -150,9 +150,47 @@ one family with many identities must count 1 — paired with a separation proper
 one identity across two families must count 2; no identity-keyed implementation
 can satisfy both.)
 
-Both specs were committed RED-first in `a046b58ebc7`. **Verdict capture is
-still pending** and the fix is deliberately NOT applied until the RED is quoted;
-applying it first would destroy the reproduce-first evidence.
+Both specs were committed RED-first in `a046b58ebc7`, then the fix landed in
+`7709144473e`. Reproduce-first evidence, both verdict lines quoted verbatim from
+`bin/simple test <spec> --timeout 800`:
+
+**Before the fix** (reproducer, at `a046b58ebc7`):
+
+```
+    assert_false failed: got true
+    assert_false failed: got true
+    assert_false failed: got true
+3 examples, 3 failures
+SPEC FILE VERDICT: test/01_unit/os/vulkan/independence_group_key_regression_spec.spl declared>=3 executed=3 passed=0 failed=3 dropped=0
+Results: 3 total, 0 passed, 3 failed
+```
+
+All three failures are `assert_false` on `independence_gate_satisfied(...)` — the
+gate reporting independence SATISFIED where it does not hold, i.e. failing in the
+fail-open direction, exactly as predicted from the source read.
+
+**After the fix** (`7709144473e`, all three specs in one run):
+
+```
+SPEC FILE VERDICT: test/01_unit/os/vulkan/independence_group_key_regression_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
+SPEC FILE VERDICT: test/01_unit/os/vulkan/independence_gate_key_confusion_detection_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
+SPEC FILE VERDICT: test/01_unit/os/vulkan/nvidia_independent_reference_gate_spec.spl declared>=5 executed=5 passed=5 failed=0 dropped=0
+Results: 5 total, 5 passed, 0 failed
+```
+
+The third file is the lane's own pre-existing spec, deliberately included in the
+re-run. Its sabotage (a) asserts `independence_gate_executed_group_count == 1`
+for a selection the provider_id-keyed gate necessarily counted as 3, so that
+spec was RED on `main` for as long as the defect existed (deduced from the same
+source read — its pre-fix verdict was not separately captured, because the run
+attempting it was killed by an outer `timeout 900` before emitting one).
+
+**The fix** (`src/os/drivers/gpu/board_vulkan/provider_nvidia.spl:200-217`): key
+on `source.independence_group` instead of `source.provider_id`, and skip the
+empty group so the candidate's deliberately-blank group can never count as an
+independent reference.
 
 Recorded here because it cost this session an hour and will cost the next one the
 same: `scripts/check/check-test-verdict-not-silent.shs` printed

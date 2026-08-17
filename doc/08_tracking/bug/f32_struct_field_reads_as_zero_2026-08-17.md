@@ -1,9 +1,7 @@
 # f32 struct fields always read back as 0.0
 
 - **Date:** 2026-08-17
-- **Status:** FIXED by `ac438753ebb` — re-verified 2026-08-17 on a freshly built
-  seed (see "Resolution" below). The deployed `bin/simple` predates the fix and
-  still reproduces it, which is why this stayed open-looking.
+- **Status:** OPEN
 - **Severity:** HIGH — silently wrong numerics, no error, no warning
 - **Found by:** `test/03_system/` sweep (test/03_system/game_net, test/03_system/game3d)
 
@@ -164,29 +162,6 @@ interpreter against the JIT in a subprocess, because a spec file falls back to
 the interpreter and the in-process examples therefore could never have been red.
 `SIMPLE_BIN` points the subprocess arm at a candidate binary; it defaults to
 `bin/simple`, so the JIT arm stays red until the fixed seed is deployed.
-
-### Independent re-verification, 2026-08-17
-
-Confirmed on a freshly built seed
-(`CARGO_TARGET_DIR=/mnt/data/cargo-target-jit-hp cargo build --release --bin
-simple`) while fixing the sibling report
-`jit_optional_i64_payload_reinterpreted_2026-08-17.md`. The bug report's minimal
-repro under the JIT:
-
-```
-BEFORE (deployed bin/simple, 2026-08-16 seed)   0.0  3.5  ->  s.a lost
-AFTER  (rebuilt seed, same source tree)         2.5  3.5  8.5 7.5
-```
-
-`f32_struct_field_roundtrip_spec.spl` reports `Results: 5 total, 5 passed, 0
-failed` with `SIMPLE_BIN` pointed at that binary.
-
-The two reports are ONE defect class — a primitive written into a slot whose
-read re-interprets it at a different type or width — so they now share a
-class-detection spec that covers all three erased-slot boundaries at once:
-`test/01_unit/compiler/codegen/scalar_slot_roundtrip_class_spec.spl` driving
-`test/01_unit/compiler/codegen/probe_scalar_slot_roundtrip_jit.spl`
-(pre-fix `30 FAILED`, post-fix `ALL PASS` on both engines).
 
 ### Not closed by this change
 
