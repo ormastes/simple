@@ -1,0 +1,86 @@
+# Run-path probe: aliased `mut` / non-`mut` parameter write-back.
+#
+# Executed as a SUBPROCESS by the two sibling specs under both
+# SIMPLE_EXECUTION_MODE=interpreter and =jit. Every oracle below is an ABSOLUTE
+# literal — never "the two engines agree", which would pass while both engines
+# are wrong in the same way.
+#
+# Defect (reproduced 2026-08-17, rc=0 on both engines, no diagnostic):
+# when the SAME caller variable is passed to both a `mut` parameter and a
+# non-`mut` parameter, the interpreter's argument write-back runs once per
+# argument. The non-`mut` parameter still holds the PRE-call snapshot, so
+# writing it back afterwards silently reverts the mutation the `mut` parameter
+# legitimately made. Measured: interpreter printed len 2, JIT printed len 3.
+
+fn touch_array(mut a: [i64], b: [i64]) -> i64:
+    a.push(99)
+    b.len()
+
+fn touch_array_reversed(b: [i64], mut a: [i64]) -> i64:
+    a.push(99)
+    b.len()
+
+fn only_mut(mut a: [i64]):
+    a.push(99)
+
+fn two_readers(mut a: [i64], b: [i64], c: [i64]) -> i64:
+    a.push(7)
+    b.len() + c.len()
+
+fn touch_dict(mut d: {text: i64}, e: {text: i64}) -> i64:
+    d["added"] = 1
+    e.len()
+
+var failures = 0
+
+fn check(label: text, got: i64, want: i64):
+    if got != want:
+        failures = failures + 1
+        print("FAIL " + label + ": got " + got.to_text() + " want " + want.to_text())
+
+fn main():
+    # Baseline: a lone `mut` param must write back. This already worked and is
+    # here so a fix that simply disables write-back cannot pass this probe.
+    var base = [1, 2]
+    only_mut(base)
+    check("lone_mut_len", base.len(), 3)
+
+    # The defect: aliased mut + non-mut, mut argument FIRST.
+    var arr = [1, 2]
+    val inner = touch_array(arr, arr)
+    check("aliased_after_len", arr.len(), 3)
+    # NOTE: `inner` (the non-`mut` alias observed from INSIDE the callee) is a
+    # separate, still-open defect: the interpreter clones each argument at bind
+    # time, so `b` never sees `a`'s push. The JIT reports 3. That is deliberately
+    # reported, not asserted, so this probe's verdict tracks the write-back
+    # defect alone. See the doc referenced in the spec header.
+    print("INFO inner_alias_sees=" + inner.to_text() + " (jit reports 3)")
+
+    # Same defect with the argument order reversed — the non-`mut` param is
+    # written back FIRST here, so a fix that only depends on ordering is caught.
+    var arr2 = [1, 2]
+    touch_array_reversed(arr2, arr2)
+    check("aliased_reversed_after_len", arr2.len(), 3)
+
+    # More than one non-`mut` alias of the same variable.
+    var arr3 = [5]
+    two_readers(arr3, arr3, arr3)
+    check("two_readers_after_len", arr3.len(), 2)
+
+    # Non-aliased control: distinct variables must be unaffected by the fix.
+    var m = [1]
+    var r = [1, 2, 3]
+    val rl = touch_array(m, r)
+    check("nonaliased_reader_len", rl, 3)
+    check("nonaliased_mut_len", m.len(), 2)
+    check("nonaliased_reader_unchanged", r.len(), 3)
+
+    # Same class, different container: Dict.
+    var d = {"a": 1}
+    touch_dict(d, d)
+    check("aliased_dict_len", d.len(), 2)
+
+    if failures == 0:
+        print("PROBE_VERDICT: PASS")
+    else:
+        print("PROBE_VERDICT: FAIL " + failures.to_text())
