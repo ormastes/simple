@@ -1,0 +1,46 @@
+# Class-detection spec for the defect class behind:
+#   doc/08_tracking/bug/private_helper_name_collision_across_modules_has_2026-08-17.md
+#
+# CLASS: a `_`-prefixed, non-`pub` top-level function is NOT module-private —
+# the interpreter resolves free functions by NAME across the whole co-compiled
+# module set. Any two modules that happen to pick the same helper name silently
+# share one body, and every caller of the loser gets wrong answers with exit 0.
+#
+# The reproducing spec pins the one concrete instance (`_has` in
+# app.build.targets.change_classifier vs a spec-local `_has`). This spec pins
+# the GENERAL shape with two minimal fixture modules, so any future recurrence
+# under a different name is caught here even if the `_has` instance is
+# individually worked around by renaming.
+#
+# Fixtures: test/fixtures/compiler/private_collision_mod_a.spl
+#           test/fixtures/compiler/private_collision_mod_b.spl
+# Both define `fn _collision_probe_shared(x: i64) -> i64` (module-private) with
+# different bodies (+1 and +100) and export a pub wrapper that calls it.
+
+use test.fixtures.compiler.private_collision_mod_a.{probe_a}
+use test.fixtures.compiler.private_collision_mod_b.{probe_b}
+
+describe "module-private free functions must resolve module-locally":
+
+    it "gives module A's wrapper module A's own private helper":
+        expect(probe_a(1)).to_equal(2)
+
+    it "gives module B's wrapper module B's own private helper":
+        expect(probe_b(1)).to_equal(101)
+
+    it "keeps the two same-named private helpers distinct in one program":
+        # Whichever body wins under name-based resolution, the two wrappers
+        # collapse to the same offset from their argument. Distinct offsets are
+        # the invariant: A adds 1, B adds 100.
+        expect(probe_b(0) - probe_a(0)).to_equal(99)
+
+    it "holds across repeated interleaved calls, not just first use":
+        # Guards against a resolution cache that binds correctly once and then
+        # serves the other module's body on later lookups.
+        var i = 0
+        var ok = true
+        while i < 3:
+            if probe_a(i) != i + 1: ok = false
+            if probe_b(i) != i + 100: ok = false
+            i = i + 1
+        expect(ok).to_equal(true)
