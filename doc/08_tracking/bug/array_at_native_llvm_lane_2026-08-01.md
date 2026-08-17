@@ -36,7 +36,21 @@ v=6126812864993
 pow=-1152921504606846976
 ```
 
-Expected `v=20`. The negated `pow` proves the JIT arm actually compiled. Both
+Expected `v=20`.
+
+**JIT-compilation witness (the sound one).** The negated `pow` above is NOT a
+valid witness in general: it depends on the int61 truncation defect still
+existing, so on a binary where that is fixed the arms AGREE and the witness
+reads backwards. An engine witness must not itself be a defect. Re-verified on
+the same binary with the version-independent trace:
+
+```
+$ SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit bin/simple run q06_arrayat.spl
+# rc=0, 2 `[jit-addr] <fn> 0x...` lines, 0 jit-fallback lines
+```
+
+Two functions were genuinely JIT-compiled and nothing was demoted to the
+interpreter, so the divergence above is a real JIT result. Both
 arms rc=0, so this is a wrong value, not a crash — NOT an rc=143/137/144
 UNVERIFIED. `6126812864993` is an unrelated-looking integer read out of a
 still-tagged slot, the same shape as `native_to_i64_nil_coalesce_print_tagbox_leak`'s

@@ -39,7 +39,21 @@ v=0.0000000000000000000000000000000000000000000000000000000000000000000000000000
 pow=-1152921504606846976
 ```
 
-Expected `v=42`. The negated `pow` proves the JIT arm actually compiled. Both
+Expected `v=42`.
+
+**JIT-compilation witness (the sound one).** The negated `pow` above is NOT a
+valid witness in general: it depends on the int61 truncation defect still
+existing, so on a binary where that is fixed the arms AGREE and the witness
+reads backwards. An engine witness must not itself be a defect. Re-verified on
+the same binary with the version-independent trace:
+
+```
+$ SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit bin/simple run q05_freefnopt.spl
+# rc=0, 2 `[jit-addr] <fn> 0x...` lines, 0 jit-fallback lines
+```
+
+Two functions were genuinely JIT-compiled and nothing was demoted to the
+interpreter, so the divergence above is a real JIT result. Both
 arms rc=0 — a wrong value, not a crash, so NOT an rc=143/137/144 UNVERIFIED.
 The JIT arm prints the integer payload 42 reinterpreted as an f64 denormal
 (2e-322 ≈ raw bits 42), i.e. the correct value is present and only the
