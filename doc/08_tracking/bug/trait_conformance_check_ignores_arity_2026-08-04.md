@@ -754,7 +754,18 @@ JIT-path conformance check (or hoisting the check ahead of engine selection).
 
 ### Runtime hazard
 
-The class spec runs 10 nested compiles and was SIGTERMed (`rc=143`) at the
-shared 600s kill-monitor threshold. It needs a raised threshold or a split to
-produce a verdict on a loaded host; its arms are individually verified by the
-A/B table above.
+**Neither engine-pinned spec has produced a `Results:` line yet.** Both were
+SIGTERMed (`rc=143`) at the shared 600s kill-monitor threshold — the class spec
+runs 10 nested compiles, the reproducing spec 4, and each nested compile costs
+~2min on this loaded host. They need a raised threshold, a split, or an idle
+host to return a verdict.
+
+Until then the engine gap rests on the A/B table above (direct, one binary, one
+toggle), which is the stronger evidence anyway; the specs encode it for
+regression, not discovery. Treat their status as INCONCLUSIVE, never green —
+the earlier unpinned green was a false one, so an unverified re-run must not be
+read as a pass.
+
+Beware the wrapper: a backgrounded run of these specs reported "exit code 0"
+while the captured status line said `rc=143`. Read the captured `rc`, not the
+harness's summary.

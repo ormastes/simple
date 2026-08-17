@@ -1,8 +1,5 @@
 # Bug: JIT SIGSEGV calling GameBackend trait methods via `LoopDriver.step`
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 **Date:** 2026-07-02
 **Component:** Cranelift JIT path (`bin/simple run` / `src/compiler_rust/target/release/simple run`),
 `src/lib/nogc_sync_mut/game2d/{backend,loop}/*.spl`.
@@ -268,8 +265,3 @@ Lane design (recorded, not implemented here):
 Interim mitigation: the 2026-08-02 determinism fix makes the winner stable;
 divergent-layout pairs above rarely co-load (different tiers/domains), and the
 browser_engine resolver spec pins the engine2d family green (6/6).
-
-
-## 2026-08-17 CORE-P1 triage: STILL PRESENT in current source
-
-Re-verified against CURRENT SOURCE during the crit_01 CORE-P1 sweep. Confirmed still present, but the SYMPTOM HAS CHANGED and the doc title is now misleading: it no longer SIGSEGVs, it traps loudly. `src/compiler_rust/compiler/src/mir/lower/lowering_core.rs:1137-1142` makes `slot_for` return `DUCK_DISPATCH_UNSUPPORTED_SLOT` when `!trait_is_implemented(trait_name)`, and `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:2302-2311` turns that sentinel into a diagnostic plus `builder.ins().trap(...unwrap_user(13))`. So the crash is now fail-closed and diagnosable rather than a wild jump. What was NEVER implemented is the actual fix: trait-method RECEIVER-TYPE RECOVERY. A live duck-dispatch site still cannot dispatch.\n\n**ROOT-CAUSE COLLAPSE: this doc and `native_with_trait_impl_no_vtable_duck_trap_2026-07-28.md` are two faces of ONE defect** -- the same sentinel and the same trap site at closures_structs.rs:2302. Fix them together; a vtable is only written when `vtable_data_id` is present (closures_structs.rs:351-355, stored at object offset 0), which is driven by a recorded `impl Trait for Type`, and a bare `class X with Trait` declaration alone never populates it. NOT explained by the 2026-08-15/17 ClassInstance / COW-write-back / int-box fix family.

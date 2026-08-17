@@ -112,8 +112,3 @@ native builds and is tracked here.
   (`simple_web_html_layout_renderer_core.spl:1785`) is a pure wall-clock
   deadline (`WEB_RENDER_BUDGET_MS`), shares no data with the above, and is an
   independent perf issue. **Not the cause.**
-
-
-## 2026-08-17 CORE-P1 triage: STILL PRESENT in current source
-
-Re-verified against CURRENT SOURCE during the crit_01 CORE-P1 sweep. Confirmed still present. A vtable is written only when `vtable_data_id` is present (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:351-355`, stored at object offset 0), and that is driven by a recorded `impl Trait for Type`; a bare `class X with Trait` declaration alone does not populate it. The call then hits `closures_structs.rs:2302`, whose own comment reads "duck-typed virtual method call (trait has no `impl Trait for ...` in unit; no vtable)", and lowers to `builder.ins().trap(...)` -- which is the `ud2` this doc decoded from `rip` (`0f 0b`). The trap is deliberate and fail-closed; the missing piece is real trait-receiver dispatch.\n\n**ROOT-CAUSE COLLAPSE: same single defect as `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`** -- same sentinel (`DUCK_DISPATCH_UNSUPPORTED_SLOT`, `mir/lower/lowering_core.rs:1137-1142`), same trap site. Two P1 docs, one fix.
