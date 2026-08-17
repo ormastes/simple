@@ -112,3 +112,50 @@ warranted here — the gate is already correctly classifying this as `ERROR —
 nothing was checked` rather than blaming a commit, per the "Gate correction"
 section above. Leaving OPEN; someone with a drained, bootstrap-capable
 environment still needs to run the fix command and re-deploy.
+
+## 2026-08-17 re-triage (triage shard) — STILL OPEN, reproduced byte-for-byte
+
+Binary identity: `readlink -f bin/simple` =
+`bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes, mtime
+2026-08-16 22:59:37 — still the Rust seed (prints the seed banner). Note the
+mtime is FRESH: a new seed was copied in on 2026-08-16, which is exactly the
+`.claude/rules/bootstrap.md` trap of a freshly-dated seed masquerading as a
+deployed self-hosted binary. Freshness is not provenance.
+
+Gate re-run (read-only; the script builds and deploys nothing — verified by
+grepping it for `deploy`/`cargo`/`cp` into `bin/` first):
+
+```
+$ sh scripts/check/check-bootstrap-essential-tools-smoke.shs ; echo rc=$?
+essential_tools_identity_rc=0
+error=rust_seed_binary
+rc=1
+```
+
+Identical to the 2026-08-09 report. The gate is behaving correctly; the defect
+is the absent self-hosted artifact.
+
+### Why this shard did not fix it
+
+The only fix is `bin/simple build bootstrap` + redeploy of the shared
+`bin/release/**`. This checkout is shared by ~15 concurrent lanes and a redeploy
+clobbers all of them, so the shard was explicitly forbidden from deploying.
+**Left OPEN for a lane that owns the deploy window** — recorded as an honest
+non-verification rather than a fabricated green.
+
+### Spec added (fences the dangerous half)
+
+`test/01_unit/app/cli/bootstrap_smoke_gate_seed_fail_closed_spec.spl` —
+`Results: 3 total, 3 passed, 0 failed`.
+
+The row's own text makes the point that the gate failing "is the only thing that
+*surfaced* the problem". So the spec pins the inverse-of-usual invariant: **while
+`bin/simple` is a Rust seed, the smoke gate must NOT pass** — a green from the
+gate is the failure condition. It also requires the gate to *name* the reason
+(`rust_seed_binary`) rather than exiting non-zero mutely, and reads rc directly
+from the `rt_process_run_timeout` 3-tuple, never through a pipe.
+
+**Ablation (causation proved):** repointing the spec's `GATE` at `/bin/true` — a
+gate that passes vacuously, i.e. the false-green this row warns about — gives
+`Results: 3 total, 1 passed, 2 failed`. Restoring the real gate returns it to
+3/3.
