@@ -78,6 +78,7 @@ The gaps are elsewhere — see below.
 | C | `test/fixtures/unstable_mode/**` (new files only) | pending |
 | D | `test_runner_main.spl` | DONE `e37cc015713` |
 | E | requirement doc + LLM wiki | DONE `32a5d018082` |
+| F | `test_runner_execute.spl` | DONE `530fa623afa` — UNVERIFIED post-change run |
 
 ## Log
 
@@ -156,3 +157,38 @@ The gaps are elsewhere — see below.
     already-loaded interpreter image, so accumulated in-process state is
     INHERITED, not reset. That is not a fresh-process-per-unit guarantee.
     OPEN — `test_runner_fork.spl` was outside every lane's ownership.
+- 2026-08-17 — Lane C proved D4 by ABLATION (post-change vs `882fb6e31ea~1`
+  swapped into an isolated worktree `/mnt/data/wt-ablate`):
+  - post-change: `Results: 5 total, 2 passed, 3 failed, 1 timed out, 1 crashed`
+    with `Error: CRASHED: child died by signal after writing its crash sentinel`
+  - ablated: both `, 1 crashed` and the `CRASHED:` line VANISH; the crash
+    degrades to `Error: Process exited with code -1`
+  - restored and re-verified by grep. Causation established.
+  Corrected attribution: Lane C reported B's `(unverified)`/`INCONCLUSIVE` code
+  as absent from the tree. It is NOT — 7 matches in both WT and HEAD. The
+  observation was right, the diagnosis wrong.
+- 2026-08-17 — Lane F landed `530fa623afa`. The real cause of TIMEOUT counting
+  as a failure: the three `if result.limit_exceeded:` early returns in
+  `test_runner_execute.spl` hardcode `failed: 1` and return BEFORE
+  `make_result_from_output`, so B's classification was unreachable on that path.
+  `limit_type` values are `memory|procs|cpu|fds|timeout`. Now
+  timeout/memory/cpu -> `failed: 0` + `TIMEOUT:`/`TERMINATED:` prefix
+  (outside-kills, unverified); fds/procs stay `failed: 1` (the test itself
+  exhausted them). Error string always non-empty so `is_ok()` stays false.
+  **NOT YET RE-MEASURED — no post-change run, no ablation.** Lane F died to a
+  session limit before its BEFORE measurement; the edit is mine, unverified.
+- OPEN, carried forward:
+  - **The single-spec path bypasses classification entirely.**
+    `bin/simple test <one_file.spl>` and any `--no-session-daemon` run route to
+    `test_runner_single.spl`, which never calls `make_result_from_output`. That
+    is the path humans use interactively, so none of this lane's classification
+    applies there. Largest remaining gap.
+  - `--no-session-daemon` cannot run a directory (`expected .spl test file`),
+    so the acceptance run is only reachable THROUGH the daemon.
+  - `fork` mode COW-inherits the parent interpreter image — crash contained but
+    not fresh-process-per-unit.
+  - `--unstable` still has no user-visible help text.
+  - BUILD-side run-to-end (the source list) is still entirely unaddressed.
+  - `/mnt/data/wt-ablate` needs `git worktree remove`.
+  - `rc` is unusable for this suite: correct summary at ~63s, then ~55min hang
+    in post-run work. The `Results:` line is the only authoritative verdict.
