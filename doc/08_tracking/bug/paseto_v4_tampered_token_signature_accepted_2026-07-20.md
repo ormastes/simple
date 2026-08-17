@@ -341,3 +341,239 @@ would make this doc a sibling of
 `shellout_specs_target_refusing_production_wrapper_2026-08-17.md`: a
 plausible-looking, security-shaped false RED produced by test infrastructure
 rather than by the code under test.
+
+## CORRECTION #3, 2026-08-17 — the session-daemon attribution is WRONG too
+
+**Retracting the "the remaining difference between the two runs is the session
+daemon" explanation in CORRECTION #2.** The isolation run was performed: the
+same fixed spec, same slot helper, daemon **ENABLED** (no `--no-session-daemon`):
+
+```
+sh scripts/resource/test-slot.shs bin/simple test \
+   test/unit/lib/crypto/paseto_v4_kat_spec.spl --timeout 2400
+rc=0
+Results: 16 total, 16 passed, 0 failed
+```
+
+Identical to the daemon-disabled run. **The session daemon is exonerated** — it
+does not cause the failures, and the `guard_backend_parity_spec.spl:101-108`
+stale-environment hazard, while real in general, is not the mechanism here.
+
+### What is established, and what is not
+
+Established (three independent runs):
+- The current spec is **16/16 GREEN with the daemon on AND off**. No PASETO
+  authentication bypass is reproducible on current source. CORRECTION #2s
+  headline verdict stands; only its causal explanation was wrong.
+- The v4.public fixture defect was real and is fixed (7/7 class spec GREEN).
+
+**NOT established: why the first run reported `14 total, 8 passed, 6 failed`.**
+Two candidate explanations remain, and I could not separate them before this
+batch closed:
+
+1. **Host corruption of the run itself.** That run executed at peak degradation
+   — ~94 concurrent `simple` processes, 108/125 GB used, ~2 GB free, zero swap,
+   and `earlyoom` actively SIGTERMing neighbouring `simple` processes
+   (`--prefer ^(simple|...)`). If a run under those conditions can report
+   *wrong example outcomes* rather than merely dying, that is a serious finding
+   in its own right and would mean **any RED collected during todays load peak
+   is untrustworthy, not just the absent-`Results:` ones.**
+2. **Something in the edit.** Considered and judged unlikely but not excluded:
+   the four flipped examples (`4-E-1`/`4-E-3` decrypt, `correct footer allows
+   decryption`, `4-S-1 verifies`) call helpers the edit never touched, so no
+   direct mechanism is visible. An indirect one (example count/order changing
+   from 14 to 16) is speculative.
+
+A discriminating probe — the exact pre-edit blob (`79ad784175ab~1`) re-run on
+todays quieter host — was launched; see the parent report for its outcome. If
+that probe is GREEN, explanation (1) holds and the original RED was never real.
+
+**Do not cite CORRECTION #2s daemon explanation.** It is superseded by this
+section. The verdict (NOT-REPRODUCIBLE, close) is unchanged.
+
+## CORRECTION #4, 2026-08-17 — DO NOT CLOSE. A real silent-wrong-result defect is here, and my spec edit MASKED it.
+
+**Retracting CORRECTION #2s "CLOSE as NOT-REPRODUCIBLE".** That verdict rested
+on the fixed spec being GREEN. The pre-edit spec was then re-run on a quiet host
+via the same slot helper, and it reproduces **deterministically**:
+
+```
+git show 79ad784175ab~1:test/unit/lib/crypto/paseto_v4_kat_spec.spl   (pre-edit blob)
+sh scripts/resource/test-slot.shs bin/simple test <that blob> --no-session-daemon --timeout 2400
+rc=1
+  ✓ 4-E-1 / 4-E-2 / 4-E-3 encrypt → exact token      ✓ 4-S-1 / 4-S-2 sign → exact token
+  ✗ 4-E-1 decrypts to original payload               ✗ 4-E-3 decrypts to original payload
+  ✗ tampered ciphertext is rejected by BLAKE2b MAC   ✗ correct footer allows decryption
+  ✗ 4-S-1 verifies and payload matches               ✗ tampered token signature is rejected
+  ✓ wrong footer is rejected                         ✓ v3.local / v3.public rejected
+Results: 14 total, 8 passed, 6 failed
+```
+
+So **host degradation is excluded** (CORRECTION #3s explanation (1) is dead
+too): the RED is deterministic on a quiet host, in both daemon modes.
+
+### The actual defect is in the interpreter, not in PASETO
+
+`diff` between the pre-edit and post-edit specs touches **only the two tamper
+helpers**. But four of the six failing examples — `4-E-1 decrypts to original
+payload`, `4-E-3 decrypts to original payload`, `correct footer allows
+decryption`, `4-S-1 verifies and payload matches` — call `_decrypt_4e1`,
+`_decrypt_4e3`, `_footer_correct_ok` and `_verify_4s1_payload`, which are
+**byte-identical in both files and were never edited**.
+
+**Editing one function changed the observable behaviour of other, untouched
+functions in the same module.** That is a silent wrong result — precisely the
+class this batch exists to find — and it is a compiler/interpreter defect, not a
+cryptographic one.
+
+The structural difference the edit removed:
+
+```
+OLD:  fn _tampered_local_ok() -> bool:
+          val good = "<187-char literal>"          # long literal bound to a LOCAL VAL
+          val tampered = good.substring(0, 15) + "X" + good.substring(16, good.length())
+
+NEW:  fn _local_token_4e1() -> text:
+          "<same 187-char literal>"                # returned directly, no local binding
+```
+
+i.e. a long string literal bound to a local `val` and duplicated across two
+functions of one module, versus the same literal returned directly.
+
+### My edit is a MASK, not a fix — treat it as such
+
+The repair to the v4.public tamper fixture is independently correct and stays
+(that no-op was real: `char_at_15` was already `"X"`). **But it also removed the
+trigger for the interpreter defect, turning a true RED into a green.** That is
+the worst possible outcome of a test-lane edit and is recorded here rather than
+left to be discovered. Anyone reading `16/16 GREEN` on the current spec must not
+infer that the underlying defect is gone.
+
+### Consequences
+
+- **The crypto verdict is INDETERMINATE, not clean.** With module behaviour
+  corrupted, the ✗ on `tampered ciphertext is rejected by BLAKE2b MAC` cannot be
+  read as an authentication bypass *or* as sound rejection. PASETO can only be
+  judged once the interpreter defect is fixed.
+- **This bug doc should be SPLIT**: a compiler/interpreter row (the real,
+  reproducible defect) and a PASETO row (blocked on it).
+- **Other specs may be silently affected.** Any spec with a long string literal
+  bound to a local `val` and duplicated in the same module is a candidate, and
+  the corruption is invisible — the examples simply return wrong answers.
+
+### Isolation probe filed
+
+`test/01_unit/compiler/interpreter/long_literal_local_val_aliasing_probe_spec.spl`
+reduces the shape to pure text identities with no crypto. Result pending; if it
+passes, the trigger is narrower than "duplicate long literal via local val" and
+the paseto blob remains the only known witness — which must be stated, not
+smoothed over.
+
+Root cause is in the interpreter (`src/compiler_rust/**` / interpreter string
+handling), outside the test lanes file scope: **DIAGNOSIS ONLY.**
+
+### Isolation probe result — hypothesis FALSIFIED, trigger is narrower
+
+`test/01_unit/compiler/interpreter/long_literal_local_val_aliasing_probe_spec.spl`:
+
+```
+rc=0
+  ✓ the directly-returned literal has the expected length
+  ✓ the local-val-bound literal has the expected length
+  ✓ both binding styles yield the same text
+  ✓ a split-and-rejoin of the local-val copy reconstructs the original
+  ✓ keeps its header
+  ✓ agrees with the direct copy at the index the old fixture mutated
+  ✓ agrees with the direct copy on its final characters
+Results: 7 total, 7 passed, 0 failed
+```
+
+**"Long string literal bound to a local `val` and duplicated in one module" is
+NOT the trigger.** That shape is handled correctly in isolation, so the
+mechanism proposed in CORRECTION #4 is wrong even though its *observation*
+stands: editing one function still demonstrably changes the behaviour of
+untouched functions in the paseto spec.
+
+The probe spec is kept rather than deleted — it pins correct behaviour for a
+shape that had to be ruled out, and a future regression in it would be
+meaningful.
+
+### A sharper reading of the failure set
+
+Grouping the pre-edit failures by the helper they route through is more
+informative than grouping by name:
+
+| example | helper | verdict |
+|---|---|---|
+| 4-E-1 / 4-E-3 decrypt to original payload | `_local_payload` | ✗ |
+| tampered ciphertext rejected | `_local_ok` | ✗ |
+| correct footer allows decryption | `_local_ok_with_footer` | ✗ |
+| **wrong footer is rejected** | **`_local_ok_with_footer`** | **✓** |
+| 4-S-1 verifies and payload matches | `_public_payload` | ✗ |
+| tampered token signature rejected | `_public_ok` | ✗ |
+| v3.local / v3.public rejected | *inline `match`, no helper* | ✓ |
+| all encrypt / sign KATs | *no decrypt/verify at all* | ✓ |
+
+Two facts constrain any explanation: the **same** helper
+(`_local_ok_with_footer`) both passes and fails depending on the example, and
+the two consumption examples that bypass the `_*_ok` wrappers with an inline
+`match` both pass. So the corruption is not a blanket "decrypt always fails" —
+it is selective, and it involves the wrapper-helper call path.
+
+A declaration-count bisect (pre-edit blob plus a single trivial unused function,
+nothing else changed) is running to test whether the defect is sensitive to
+module layout rather than to any specific edit content. Result pending.
+
+## CORRECTION #5, 2026-08-17 — FINAL. Cause found; this row is BLOCKED, not closeable.
+
+The declaration-layout bisect resolved it. Pre-edit blob **plus one trivial,
+unused function** (`fn _zz_probe_unused() -> i64: 1`), nothing else changed:
+
+```
+(A) baseline            Results: 14 total,  8 passed, 6 failed
+(B) baseline + 1 fn     Results: 14 total, 13 passed, 1 failed
+```
+
+**Five examples flipped ✗→✓ because an unused function was added.** They do not
+call it, reference it, or share state with it. Example count is identical (14).
+This is an interpreter defect, now filed separately as
+`doc/08_tracking/bug/interpreter_declaration_layout_changes_unrelated_example_results_2026-08-17.md`.
+
+### The complete, coherent picture
+
+Three distinct things were tangled together in this row:
+
+1. **Interpreter layout defect (REAL, P1, newly filed).** Module layout changes
+   the results of unrelated examples. This produced five of the six original
+   failures and is the reason this docs P1 looked like a crypto bug.
+2. **The v4.public tamper fixture (REAL, fixed, verified).** `char_at_15` was
+   already `"X"`, so the "tamper" was a byte-for-byte no-op and the example
+   demanded that a VALID token be rejected. It is the **single remaining failure
+   in variant (B)** — an excellent control, since it proves (B) is not
+   "everything passes now" and that this defect is genuinely independent of the
+   layout bug. Fixed via `_flip_char_at` plus two guard examples; verified by the
+   7/7 GREEN class-detection spec.
+3. **PASETO cryptography (NO DEFECT FOUND).** Every encrypt/sign KAT reproduces
+   its RFC vector byte-exactly in every variant. Once the layout defect is
+   dodged, `tampered ciphertext is rejected by BLAKE2b MAC` **passes** — the MAC
+   is enforced. There is no evidence of an authentication bypass.
+
+### Corrections to my own earlier sections in this file
+
+- CORRECTION #2s "close as NOT-REPRODUCIBLE" — wrong; the RED was real and
+  deterministic.
+- CORRECTION #2/#3s session-daemon explanation — wrong; daemon exonerated.
+- CORRECTION #3s host-corruption explanation — wrong; reproduces on a quiet host.
+- CORRECTION #4s "long literal via local val" mechanism — wrong; probed 7/7 GREEN.
+- CORRECTION #4s core *observation* — **correct** and now explained: editing one
+  function did change untouched functions behaviour, because module layout is
+  the trigger.
+
+### Status
+
+**BLOCKED on the interpreter defect. Do not close, and do not re-verify by
+re-running this spec** — a green result in this file is not trustworthy while
+layout perturbation can flip five examples. Re-assess PASETO only after
+`interpreter_declaration_layout_changes_unrelated_example_results_2026-08-17.md`
+is fixed. Severity of THIS row should drop from P1 (authentication bypass) to a
+tracking row, since no bypass has been demonstrated.
