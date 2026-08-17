@@ -1,5 +1,14 @@
 # `office_render` adapter: unknown adapter names not detected/warned; "word" adapter output uses "LibreOffice Writer" not "Word"
 
+**Status:** Finding 1 RESOLVED 2026-08-17 — commit `7c7079bf63c9`. Evidence:
+grepped `src/app/office/render_adapter.spl`; it now computes a `known` surface
+predicate (line ~429) and, when the name is unknown, pushes
+`"Unknown adapter name '{surface}'; rendered the suite index instead."` into
+`warnings` and emits `"Office render: Unknown adapter '{surface}' ..."` as
+`text_output`. **Finding 2 (Writer/Word display-name drift) remains OPEN** — the
+adapter still uses `"LibreOffice Writer"`; that is a naming-convention decision,
+untouched by this commit. Doc stays open until Finding 2 is dispositioned.
+
 **Date:** 2026-07-20
 **Component:** `src/app/office/render_adapter.spl` (`office_render`)
 **Severity:** Low-Medium — 3 of ~7 examples in the spec fail; the "known

@@ -1,8 +1,18 @@
 # Calc cursor movement: only the GUI session honours hidden rows
 
 **Date:** 2026-08-11
-Status: OPEN (P2)
+Status: OPEN (P2) — PARTIALLY FIXED 2026-08-17 (commit ff66bac92f85)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
+**Partial fix 2026-08-17 — `ff66bac92f85`:** path 1 (`_tui_move`,
+`src/app/office/interactive.spl`) is now hidden-row aware. Evidence: grepped
+`_tui_move` in the current tree — its body calls
+`s.sheet.is_row_hidden((scan + 1).to_i64())` in a same-direction skip loop that
+falls back to the original row at the grid edge (no wrap), matching
+`_sheet_gui_move_within_bounds`. Path 2 (`SheetsApp.navigate_to`,
+`src/app/office/sheets/sheets_app.spl`) is **still not** hidden-row aware —
+grep for `is_row_hidden` in its body returns nothing — so this row stays OPEN
+until that path converges or is deliberately exempted.
 **Area:** app/office (Calc)
 **Severity:** Medium — a user-visible correctness gap on two of three surfaces
 

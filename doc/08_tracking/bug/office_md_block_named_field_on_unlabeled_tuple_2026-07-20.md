@@ -1,6 +1,10 @@
 # `parse_markdown_document` accesses named fields on an unlabeled tuple return
 
-**Status:** open
+**Status:** RESOLVED 2026-08-17 — commit `33d242cf0e1c`. Evidence: grepped
+`parse_inline_spans` in `src/app/office/file_formats.spl` (declared
+`-> InlineSpanParseResult`); its body now ends on the expression
+`InlineSpanParseResult(spans: spans, comments: comments)` instead of an `if`
+statement, so it no longer returns nil to `parse_markdown_document`.
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/app/office/file_formats.spl`
 
