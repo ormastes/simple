@@ -63,3 +63,14 @@ this lane wrote none, because a generic-resolution fix in the type checker is a 
 feature change well outside a bug-fix lane's blast radius.
 
 UNPROVEN: no runtime reproduction was attempted.
+
+## HANDED TO CRITICAL LANE 2026-08-17 (w0001 compiler_spl lane)
+
+Root cause for this row lives in `src/compiler/30.types/type_system/checker.spl`.
+That file was removed from this lane's scope mid-session by the coordinator (a P0
+silently-wrong-results lane took it), so **no source was read for edit and no change
+was made here**. Row handed off unfixed and unreproduced.
+
+Only fact established: the workaround in `src/lib/common/crypto/typed/ctypes.spl`
+(fixed-size `[u8]`) is still what ships, so the underlying language limitation is
+still present.

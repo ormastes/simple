@@ -146,3 +146,16 @@ returns nothing). The named spec `test/01_unit/compiler/build_graph/target_graph
 is likewise absent, so there is nothing to run — the work has still not landed from the
 agent worktree. No reproduction is possible and no patch is appropriate: this is a
 landing/VCS task, not a code defect.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Path drift re-confirmed by direct filesystem check — all three cited paths are ABSENT:
+- `src/compiler/80.driver/cache/target_graph.spl` — absent
+- `src/compiler/80.driver/build_graph/` — absent (`No such file or directory`)
+- `test/01_unit/compiler/build_graph/target_graph_spec.spl` — absent
+
+`git grep -l target_graph src/compiler/` returns **no files at all**. The A2 target-IR
+work is genuinely not in the tree; there is nothing to reproduce and nothing to fix.
+`src/compiler/80.driver/driver_build/incremental.spl` (789 lines) does exist but
+contains no target-graph traversal. Row stands OPEN as "work never landed", not as a
+behavioural defect.

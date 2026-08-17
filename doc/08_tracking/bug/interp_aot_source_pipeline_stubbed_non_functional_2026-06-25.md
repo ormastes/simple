@@ -144,3 +144,22 @@ $SEED run src/compiler/80.driver/main.spl -c /tmp/hello.spl --target wasm32 -o /
 # before parse fix: "accessing field 'functions' on nil"
 # after parse fix:  reaches HIR/MIR stub -> empty module
 ```
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+The row's `file` column (`src/compiler/80.driver/driver_pipeline.spl`) no longer holds
+any logic. The file is now **6 lines**, a pure re-export facade:
+
+```
+# CompilerDriver pipeline method registration facade.
+
+use compiler.driver.driver_pipeline_lowering.*
+use compiler.driver.driver_pipeline_execution.*
+use compiler.driver.driver_pipeline_passes.*
+use compiler.driver.driver_pipeline_aop.*
+```
+
+`grep -rn "HirModule(functions" src/compiler/80.driver/` returns **nothing**, so the
+literal empty-`HirModule` stub the doc describes is no longer present at that path. That
+is NOT sufficient to close the row: the code moved into the four `driver_pipeline_*`
+modules and was not audited here. Row left OPEN with the path corrected.

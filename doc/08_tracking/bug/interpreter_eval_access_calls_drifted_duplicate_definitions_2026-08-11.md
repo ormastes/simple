@@ -274,3 +274,22 @@ Removed from `eval_calls.spl`: `parse_float_text`, `char_digit`,
 
 All four pass (verified 2026-08-11, exit 0) and all four are source-text greps.
 Their passing is **not** evidence about dispatch.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Two corrections to how this row is being tracked:
+
+1. **The silent-wrong-result premise is falsified by the doc's own body** (line 28):
+   "the STALE copies WIN and therefore users get wrong answers" — falsified. The row
+   should therefore not be carried in the silently-wrong-results batch; it is a
+   maintainability/drift row (~100 KB of self-contradictory duplicated source), which
+   is what the doc actually concludes.
+
+2. **The row's `file` column points at the wrong file.** It names
+   `src/compiler/80.driver/driver_source_loading.spl`, which contains **no** `eval_access`
+   reference (`grep -n "eval_access\b"` on it is empty). The duplicated modules the doc
+   discusses live under `src/compiler/10.frontend/core/interpreter/` — a lane claimed by
+   another session. Left untouched here for that reason.
+
+The doc's own instruction "DO NOT DEDUPE — needs a load-order fix, not deletion"
+is respected: no source was changed.

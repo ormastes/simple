@@ -357,3 +357,16 @@ whoever picks this up next, roughly in order of leverage:
 3. Persisting partial per-module parse/HIR state to the cache dir earlier in
    the pipeline (rather than only after a module fully reaches object code)
    would make retries cheaper regardless of the root cause above.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+The row's `file` column (`src/compiler/80.driver/driver.spl`) is wrong: that file is a
+151-line facade and `grep -n "entry_closure\|entry-closure"` on it is **empty**. The
+entry-closure logic is spread across six other files in the same directory:
+`driver_source_pipeline_loading.spl`, `driver_pipeline_lowering.spl`,
+`driver_source_loading.spl`, `driver_bootstrap.spl`, `driver_hir_pipeline_lowering.spl`,
+`driver_source_pipeline_parsing.spl`. Retarget the row before anyone attempts a fix.
+
+Not reproduced by this lane — exercising the ~1469-1515-line global stdlib prefix needs
+a full native-build run against `test/fixtures/rt_io_file_roundtrip/main.spl`, which was
+not affordable alongside the live bootstrap. Row remains OPEN and UNVERIFIED here.

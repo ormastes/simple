@@ -681,3 +681,25 @@ Two reasons, both evidence-based:
 Detection remains open per §5. Concrete next step for whoever picks this up: make
 `has_default` faithful at the three `20.hir/hir_lowering` sites listed above, THEN re-arm the
 error at `resolve.spl:815`, and prove it through the pure-Simple pipeline (not the seed).
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Row confirmed OPEN by current source. `src/compiler/35.semantics/resolve.spl`,
+`fill_call_defaults` (~line 775), carries the disarm explicitly in-source at ~line 821:
+
+```
+# Arity-error half intentionally omitted (M12 3b). The lean
+# bridge currently hardcodes `has_default: false`
+# (_FlatAstBridge/convert_nodes.spl:571/682), so emitting a "too few
+# arguments" error here would FALSE-FIRE on every valid
+# omitted-default call. ...
+# Re-enable the arity error
+# only after the bridge captures has_default faithfully.
+return filled
+```
+
+So the checker is not merely unwritten — it is written-and-deliberately-suppressed,
+and the blocker is named: the lean bridge must capture `has_default` faithfully first.
+**That is the real fix target, not `resolve.spl`.** No patch applied: arming the check
+without the bridge fix would false-fire on every valid omitted-default call, which is a
+worse regression than the bug. Prerequisite filed as the actual dependency.

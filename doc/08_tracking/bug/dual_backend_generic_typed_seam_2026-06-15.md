@@ -109,3 +109,36 @@ Seam A: write separate non-generic helpers per output type (`alpha_run_digest`,
 
 - `doc/08_tracking/bug/crypto_digest_generic_struct_2026-06-15.md` — generic struct params
 - `doc/08_tracking/bug/generic_type_alias_parse_reject_2026-06-10.md`
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Re-reproduced against the deployed seed `bin/simple`. **The doc's framing is wrong:
+the defect is not generics and not trait bounds.** Four minimal fixtures:
+
+| fixture | result |
+|---|---|
+| `fn pick<T>(a: T, b: T) -> T` called with i64 | **PASS** — `v=3` |
+| plain `struct` field read `b.n` | **PASS** — `n=3` |
+| inherent `impl Blk: fn size2(self) -> i64: self.n` | **PASS** — `s=3` |
+| `impl T2 for Blk` whose method body returns a constant (no `self.` read) | **PASS** — `k=7` |
+| `impl Sized2 for Blk: fn size2(self) -> i64: self.n` | **CRASH** |
+
+Failing case output:
+```
+runtime error: invalid field receiver
+Illegal instruction (core dumped)   # rc=132
+```
+
+Narrowed root cause: **a TRAIT-impl method that reads `self.<field>` fails to bind
+`self` to the receiver struct**; the identical body inside an INHERENT `impl`
+works. Generic type parameters and trait bounds are both innocent — a generic fn
+with no trait impl involved runs correctly.
+
+Notes for whoever picks this up:
+- This is a LOUD crash (rc=132, SIGILL), not a silent wrong result, so it does
+  not belong to the silently-wrong-results batch this lane was scoped to.
+- It is in the Rust seed interpreter, **not** in `src/compiler/40.mono/instantiation.spl`
+  as the row's `file` column claims. `instantiation.spl` (87 lines) is a name-mangling
+  + cache facade and contains no `self`-binding logic.
+- No fix attempted here: the code is outside this lane's slice
+  (`src/compiler/**.spl`). Re-file against the interpreter's field-access path.

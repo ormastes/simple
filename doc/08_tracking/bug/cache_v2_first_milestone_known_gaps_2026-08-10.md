@@ -140,3 +140,14 @@ worth fixing: an unmarked gap is invisible to every scan. Recommend adding TODO 
 specific unimplemented call sites so the backlog is greppable.
 
 No patch attempted: this is scoped, deliberately-deferred milestone work, not a defect.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Partial correction to the row's evidence column, which claims "admission.spl and
+lease.spl present in tree". Filesystem check:
+- `src/compiler/80.driver/cache/gc/admission.spl` — **PRESENT** (112 lines); grep for
+  `TODO|not implemented|stub` returns nothing, so it is not a stub.
+- `src/compiler/80.driver/cache/gc/lease.spl` — **ABSENT**.
+
+So the lease half of the milestone is not merely gapped, it does not exist. Row stays
+OPEN; the doc's own Status ("OPEN - recorded, not fixed") is accurate.

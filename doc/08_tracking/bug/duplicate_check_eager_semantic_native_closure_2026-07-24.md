@@ -86,3 +86,18 @@ either support a capability-aware optional semantic closure or provide the
 required canonical runtime symbols in the admitted full-CLI lane. Then build one
 fresh Stage-4 CLI and run the focused phase-2 spec plus essential-tools smoke
 once. The three-cycle cap for this session is exhausted; do not retry unchanged.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+Current source confirms the doc's "INTERPRETED SOURCE FIXED / NATIVE CLOSURE OPEN"
+status. `src/compiler/90.tools/duplicate_check/main.spl:9-10`:
+
+```
+use lazy compiler.tools.duplicate_check.semantic.{run_semantic_analysis, run_semantic_analysis_local}
+use lazy compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
+```
+
+The `use lazy` markers are present, so the interpreted-frontend half is in place.
+Row stays OPEN on the native side only. Not reproduced by this lane: proving the
+native-closure half requires a native-build link, which needs an isolated
+`CARGO_TARGET_DIR` and a live bootstrap slot; the host bootstrap had priority.

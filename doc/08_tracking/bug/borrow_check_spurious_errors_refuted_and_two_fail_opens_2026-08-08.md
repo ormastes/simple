@@ -212,3 +212,18 @@ name; they remain open and unlocated.
 UNPROVEN: the two secondary fail-opens. They are described only in prose here, have no
 in-source marker, and `test/01_unit/compiler/borrow/borrow_check_spec.spl` does not target
 them. Someone must first pin them to a `file:line` before they can be fixed or closed.
+
+## Verification 2026-08-17 (w0001 compiler_spl lane)
+
+`src/compiler/55.borrow/borrow_check/nll.spl:363` still reads
+`return self.errors.is_empty()` — the row's stated evidence is confirmed intact.
+
+Reproduction run (deployed seed, `sh scripts/resource/test-slot.shs`):
+```
+bin/simple test test/01_unit/compiler/borrow/borrow_check_spec.spl --timeout 900
+rc=0
+Results: 13 total, 13 passed, 0 failed
+```
+GREEN. The primary spurious-error claim remains refuted, consistent with the doc.
+The two secondary driver fail-opens are **not** covered by this spec (it exercises
+`nll.spl` directly, not the driver seam), so they stay OPEN and UNPROVEN here.
