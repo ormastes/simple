@@ -4,8 +4,16 @@
 - **Severity:** P2 (blocks loading `common.ui.style`, hence the slides/word GUI
   widget render chain, from new dependents)
 - **Discovered:** 2026-06-14, wiring slides render to the office style resolver
-- **Status:** CLOSED 2026-08-17 — the parser false positive no longer fires.
-  See "Verdict 2026-08-17" at the end.
+- **Status:** REOPENED 2026-08-17 — the closure below was premature. The false
+  positive still fires; see
+  `parser_bracket_index_after_less_than_still_misread_as_generics_2026-08-17.md`.
+  The closure verified this row's single original reproducer
+  (`src/lib/common/ui/style.spl`) but not the defect class: the actual trigger is a
+  bracket index on the RHS of `<`, and a second live instance survives at
+  `src/compiler/70.backend/backend/native/regalloc.spl:158:58`, reproduced by two
+  independently built seeds. Note this row's own reproducer (line 559, quoted below)
+  is also an index after `<` — the two are the same defect.
+  The prior "Verdict 2026-08-17" at the end is retained unedited for history.
 
 ## Summary
 
