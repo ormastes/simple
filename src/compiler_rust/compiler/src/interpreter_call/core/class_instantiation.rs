@@ -133,7 +133,26 @@ pub(crate) fn instantiate_class(
             Some(name) => new_method.params.iter().any(|param| &param.name == name),
             None => true,
         });
-        let should_call_new = (args.len() == new_param_count && named_args_fit_new) || has_inject;
+        // A fully-named literal on a value-type struct whose names all match the
+        // struct's OWN fields is the canonical `Point(x: 3, y: 4)` constructor
+        // form and must build the struct directly. Auto-routing it to a static
+        // `new` whose param names happen to coincide (but whose param TYPES may
+        // differ, e.g. `type_args: [ConcreteType]` vs field `type_args: text`)
+        // misbinds the args and surfaces spurious errors from inside `new` —
+        // seen as "method 'join' not found on value of type enum in nested call
+        // context" (doc/08_tracking/bug/enum_field_in_nested_call_arg_join_not_found_2026-08-17.md).
+        // `is_value_type` alone is not enough: the spec-module registration
+        // path registers structs with is_value_type=false, so also treat an
+        // explicit `static fn new` (an associated constructor, invoked as
+        // `Type.new(...)`) as never auto-callable from a fully-named literal.
+        let all_named_struct_literal = (class_def.is_value_type || new_method.is_static)
+            && !args.is_empty()
+            && args.iter().all(|arg| match &arg.name {
+                Some(name) => class_def.fields.iter().any(|f| &f.name == name),
+                None => false,
+            });
+        let should_call_new =
+            ((args.len() == new_param_count && named_args_fit_new) && !all_named_struct_literal) || has_inject;
 
         if should_call_new && !already_in_new {
             let self_val = Value::Object {
