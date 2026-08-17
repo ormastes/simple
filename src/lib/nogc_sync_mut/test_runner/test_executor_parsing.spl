@@ -396,6 +396,29 @@ fn take_crash_sentinel(file_path: text) -> bool:
     file_delete(sentinel)
     true
 
+# Second, sentinel-free CRASHED signal: the child's own dying words.
+#
+# The sentinel above is only ever written by a deliberately-crashing FIXTURE, so
+# on its own it classifies every real segfault in a real spec as TERMINATED --
+# exactly backwards. The signal number is unrecoverable here (see
+# make_result_from_output), so the only other evidence is what the child managed
+# to print before dying. A process killed by an external SIGTERM (earlyoom) is
+# silent: it gets no chance to emit any of these. A process that faults, aborts,
+# or panics does. Absence of a marker is therefore NOT taken as proof of a crash
+# -- silence falls through to TERMINATED, the unverified class.
+fn has_crash_evidence(combined: text) -> bool:
+    if combined.contains("fatal runtime error"):
+        return true
+    if combined.contains("Segmentation fault") or combined.contains("SIGSEGV"):
+        return true
+    if combined.contains("SIGABRT") or combined.contains("Aborted"):
+        return true
+    if combined.contains("panicked at") or combined.contains("stack overflow"):
+        return true
+    if combined.contains("double free") or combined.contains("memory allocation of"):
+        return true
+    false
+
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Outcome classification -- contract frozen in .spipe/unstable_test_mode/state.md.
     #
@@ -421,7 +444,9 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
     if exit_code == -1 or exit_code == 143 or exit_code == 144:
         if take_crash_sentinel(file_path):
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after writing its crash sentinel", timed_out: false, cached: false)
-        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child died by signal with no crash sentinel (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
+        if has_crash_evidence(stdout + "\n" + stderr):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after emitting a fault diagnostic; last output: {extract_error_message(stdout + "\n" + stderr)}", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child died by signal with no crash sentinel and no fault diagnostic (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
 
     # Stdout summaries are presentation, not authenticated execution evidence.
     # Every mode that still reaches this legacy mapper must fail closed under

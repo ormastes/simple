@@ -1,0 +1,43 @@
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{make_result_from_output}
+
+# Defect CLASS: the runtime erases the signal number -- every signal death and
+# every timeout arrives as the SAME exit_code -1 sentinel
+# (`status.code().unwrap_or(-1)`, runtime/src/value/sffi/env_process.rs; zero
+# uses of `.signal()`/`ExitStatusExt` anywhere in the runtime). So the ONLY
+# evidence separating an external SIGTERM from a genuine crash is what the child
+# printed before it died. Collapsing the two -- in either direction -- is the bug
+# this file exists to catch: earlyoom SIGTERMs `simple` on this host constantly,
+# so a TERMINATED counted as a failure reports host contention as a defect.
+describe "TERMINATED is separated from CRASHED and is never a failure":
+    it "reports a silent signal death as TERMINATED, not CRASHED":
+        # Reproducing case: earlyoom kills the child, which prints nothing.
+        val r = make_result_from_output("t_spec.spl", "", "", -1, 10, 60)
+        expect(r.error.starts_with("TERMINATED")).to_equal(true)
+        expect(r.error.starts_with("CRASHED")).to_equal(false)
+
+    it "never counts a TERMINATED unit as a failure":
+        # The whole point: an unverified outcome must not inflate the failed count.
+        val r = make_result_from_output("t2_spec.spl", "", "", -1, 10, 60)
+        expect(r.failed).to_equal(0)
+        expect(r.passed).to_equal(0)
+        expect(r.timed_out).to_equal(false)
+
+    it "reports a shell-propagated rc 143 as TERMINATED too":
+        # An intermediate shell turns SIGTERM into a plain 143 rather than -1.
+        val r = make_result_from_output("t3_spec.spl", "", "", 143, 10, 60)
+        expect(r.error.starts_with("TERMINATED")).to_equal(true)
+        expect(r.failed).to_equal(0)
+
+    it "never counts a TIMEOUT as a failure either":
+        val r = make_result_from_output("t4_spec.spl", "", "TIMEOUT", -1, 10, 60)
+        expect(r.timed_out).to_equal(true)
+        expect(r.failed).to_equal(0)
+        expect(r.error.starts_with("TIMEOUT")).to_equal(true)
+
+    it "still calls a signal death WITH a fault diagnostic a CRASHED failure":
+        # The opposite direction of the same defect class: a real segfault must
+        # not be laundered into the unverified bucket just because it shares the
+        # -1 sentinel with an earlyoom kill.
+        val r = make_result_from_output("c_spec.spl", "", "Segmentation fault", -1, 10, 60)
+        expect(r.error.starts_with("CRASHED")).to_equal(true)
+        expect(r.failed).to_equal(1)
