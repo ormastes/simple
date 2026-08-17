@@ -399,3 +399,42 @@ them together, after that redeploy:
 
 Until then a consumer parsing `SPEC FILE VERDICT` still sees a timeout as a
 failure, and this lane's contract holds only for the `Results:` summary line.
+
+## 2026-08-17 — ROOT CAUSE of the repo-wide push block (do NOT "fix" by reverting)
+
+**Every push is blocked**, and the cause is now pinned:
+
+- `origin/main`'s `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+  **does not parse**: `Unexpected token: expected Fn, found Assign` — an
+  assignment sitting where the `impl MirLowering:` block expects a method.
+- The **main tree's committed copy PARSES** (`bin/simple run <file>` rc=0). It
+  differs from origin by **-88/+19**: it lacks the 88-line addition that arrived
+  with `251a75f5355 chore(sync): merge origin/main` (the B5b Phase 2
+  scalar-literal dispatch / flat-if-chain work).
+- So the defect is INSIDE that 88-line addition as it exists at origin.
+
+**Why it blocks everything:** `check-native-trailing-default-param.shs` runs a
+real `native-build`, which reads `src/` as SOURCE from the tree it runs in. The
+broken file makes the guard's own **--selftest** fail, so the guard exits before
+any scan and the pre-push hook blocks the push. Chain:
+broken source -> selftest fails -> guard errors -> hook blocks -> no lane can push.
+
+**Diagnosis trap that cost time here — do not repeat:**
+- Truncating the file (`head -N`) to bisect is INVALID: cutting mid-block
+  manufactures its own parse error, so every prefix "BREAKS" and the bisect is
+  meaningless.
+- `bin/simple check <file>` pulls the whole module graph and exceeds 100s.
+  **`bin/simple run <file>` parses in seconds** — a clean module reports
+  ``no `main` function``, a broken one reports the parse error. That is the cheap
+  parse oracle.
+- The parse error carries **NO line/column**, which is a real diagnostic-quality
+  defect of its own.
+- The guard emits ZERO output when its selftest fails this way, despite having a
+  correct `no-compiler -> ERROR/exit 2` path (verified working from the main
+  tree: rc=2, 3 lines). Guard is fine; the SOURCE is broken.
+
+**NOT FIXED HERE, deliberately.** The 88 lines are another lane's feature work.
+Reverting them at origin to unblock a push would destroy it — exactly the
+clobber pattern this repo keeps suffering. The owning lane must repair the
+assignment-at-impl-level inside that addition. The main tree's parsing copy is
+the reference for what a working version looks like.
