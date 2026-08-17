@@ -1,7 +1,123 @@
 # Build11 Stage 3 CompileContext corruption after clean parse
 
-Status: OPEN (P1)
+Status: OPEN (P1) — but the TITLE'S CLAIM IS NOW DISPROVED at the named
+boundary; see "2026-08-17 measured evidence" immediately below before spending
+another cycle on this doc's queued repairs. All four of them are already landed.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
+## 2026-08-17 measured evidence (no bootstrap cycle consumed)
+
+This pass ran measurements instead of another bootstrap attempt. Four results,
+each reproducible from the commands given.
+
+**1. Every repair this doc queues as "the next repair" is already in main.**
+The closing paragraphs demand that if/elif parsing and FlatAstBridge conversion
+be made iterative/flat. Both already are:
+- `parse_if_stmt` — `src/compiler/10.frontend/core/parser_stmts.spl:1170`, single
+  forward `while collecting:` pass into parallel `[i64]` arm arrays
+  (`:1186-1235`), then one backward fold (`:1244-1275`). Its own comment at
+  `:1171-1173` states the recursive version was removed. Landed `9d6c19787cb`.
+- `parse_if_expr` — same file `:1782`, same shape.
+- Statement-form bridge — `convert_flat_if_stmt`,
+  `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:1564-1610`,
+  `while walking:` at `:1574`, `current = else_stmts[0]` at `:1591`. Landed
+  `93af7e55930`.
+- Expression-form bridge — same file `:943-966`, `while walking:` at `:951`.
+- The 97-arm `ascii_utils.spl` chain is gone: `grep -c elif` returns **0**; it is
+  a `char_code` range check.
+Coverage exists at `test/.../frontend/flat_ast_if_else_bridge_spec.spl` (added by
+`9d6c19787cb` and `98cab679d49`). **Do not re-do this work.**
+
+**2. The boundary the "Evidence" section names is measurably sound.**
+`test/02_integration/compiler/stage3_context_tuple_return_native_probe.spl`
+(the `(Context, bool)` return + reinstall + direct-scalar-vs-getter read that
+mirrors `lower_and_check_impl`) was executed both hosted and, more importantly,
+as a real NATIVE binary:
+
+```
+bin/simple native-build --source test/02_integration/compiler \
+  --entry test/02_integration/compiler/stage3_context_tuple_return_native_probe.spl -o /tmp/s3probe
+/tmp/s3probe
+# stage3_context_tuple_return_direct_count=1
+# stage3_context_tuple_return_getter_count=1
+# stage3_context_tuple_return_status=pass   (exit 0)
+```
+
+Both reads return 1 natively. A bad aggregate copy or fabricated receiver at
+this boundary would have failed here. This is seed-produced native code (and
+specifically the pre-12:58Z stale seed — see item 4), so it is not Stage-3
+acceptance evidence — but it is enough to stop treating
+"CompileContext corruption" as the leading hypothesis. Every later section of
+this doc already reports RSS exhaustion (exit 139 at 24-25 GiB, i.e. the
+address-space guard) or external SIGTERM (143), never a wrong value. The
+`CompileContext.error_count` GDB frame is consistent with a *downstream* read
+after allocation failure, not with an independent corruption defect. **Two
+different failure modes are conflated under one title.**
+
+**3. Arm count no longer drives superlinear parser cost.** The current
+pure-Simple `parse_if_stmt` was driven directly (`ast_reset(); parser_init(src);
+parse_statement()`) on generated chains of N `elif` arms, one process per N,
+peak RSS via `/usr/bin/time`:
+
+| arms | 25 | 50 | 100 | 200 | 400 |
+|---|---|---|---|---|---|
+| peak RSS | 133 MB | 135 MB | 141 MB | 145 MB | 162 MB |
+
+Flat-to-linear across a 16x range in N, correct `stmt_get_tag` (6) at every N.
+The "systemic recursive-if-chain cost" hypothesis does not reproduce against
+current source at the parser level. (Interpreted under the seed, so this is not
+the no-GC native heap — it does not exonerate the native path, but it removes
+the parser's algorithmic shape as the owner.)
+
+**4. Why this doc's own history contradicts itself: the tree mutates under
+every measurement.** During this session 12 `src/**/*.spl` files were modified
+by other lanes in this shared working copy, including
+`src/compiler/80.driver/driver_build/parallel.spl`. The stdlib and compiler are
+read as SOURCE on every run, so identical `native-build` invocations minutes
+apart produced three different outcomes:
+- BUILT, correct output (several runs);
+- `error: semantic: method \`compile\` not found on type \`object\`
+  (receiver value: CompilerDriver(ctx: CompileContext(...)))` — note this is
+  *this doc's exact Evidence signature*, `CompilerDriver.compile` failing
+  method lookup on an ERASED receiver while the context's own fields print
+  intact;
+- `error[E1002]: function \`TMPDIR\` not found` — the string argument of
+  `rt_env_get("TMPDIR")` (`src/compiler/70.backend/backend/runtime_compiler.spl:55`,
+  with `extern fn rt_env_get` declared at `:21`) reported as the callee.
+The same four fixture programs both built and failed within ten minutes with no
+edit of my own. A second, independent source of churn was confirmed afterwards:
+the deployed `bin/simple` was itself a STALE SEED (built 2026-08-16 22:59Z,
+missing two parser fixes that landed 07:36Z and 12:14Z) and was rebuilt and
+redeployed at 12:58Z — i.e. mid-session, while these runs were in flight. All
+measurements above therefore ran on the pre-12:58Z seed. This does not weaken
+the conclusion that identical inputs give non-identical results in this tree; it
+adds a second mechanism for it. It does mean the specific `TMPDIR` and
+erased-`compile` failures cannot be attributed to a located source defect — the
+binary and the sources both moved — and they must be re-established on a pinned
+binary before anyone files them. **Nondeterminism across identical inputs means each historical
+"cycle" recorded here measured a different source closure**, which is a simpler
+explanation for the mutually inconsistent frontiers (parse progress 128 vs 200
+vs source index 2) than any single corruption defect. Note the erased-receiver
+signature: it is the documented "chained methods on erased receivers"
+limitation, not memory corruption, and it is the more likely reading of the
+original GDB frame.
+
+### What the next lane must do differently
+
+- Do NOT re-implement iterative if-chain parsing or bridge conversion (done).
+- Do NOT retry getter-vs-direct-scalar edits at `error_count` (the native probe
+  passes; two prior lanes already found no change).
+- Measure in a PRIVATE checkout with a pinned revision, or the result is
+  uninterpretable — this is now demonstrated, not theoretical.
+- Split this doc: the address-space/RSS failure (exit 139) and the
+  erased-receiver dispatch failure are separate defects and one title cannot
+  own both. The RSS half overlaps
+  `stage3_current_source_hir_rss_termination_2026-08-14.md`; on the evidence
+  above they are very likely ONE bug (heap exhaustion during the frontend), and
+  the "corruption" framing here is a symptom of it.
+- The admission-v2 receipt prerequisite (last section) still blocks any Stage-3
+  run, so no fresh Stage-3 frontier could be established today. No repair is
+  claimed here, because none was localized to a reproducible source defect.
 
 ## Lane-B IfChain continuation (2026-08-14)
 
