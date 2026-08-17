@@ -110,6 +110,30 @@ the other is loudly ERROR at exit 2.
   generalization over the defect class: zero-examples, loader failure with no
   summary, SIGTERM kill, honest red, zero targets.
 
+Spec run results (`SIMPLE_TIMEOUT_SECONDS=3600 bin/simple test <spec>`):
+
+```
+SPEC FILE VERDICT: .../silent_green_verdict_spec.spl declared>=2 executed=2 passed=2 failed=0 dropped=0
+Results: 2 total, 2 passed, 0 failed          EXIT=0
+
+SPEC FILE VERDICT: .../silent_green_class_generalization_spec.spl declared>=5 executed=5 passed=5 failed=0 dropped=0
+5 examples, 0 failures
+Results: 37 total, 5 passed, 32 failed        EXIT=1
+```
+
+**Separate, newly-observed defect — the aggregate line over-counts.** The
+generalization spec's five examples all pass (`✓` on each, per-file verdict
+`failed=0`, per-describe `5 examples, 0 failures`), yet the aggregate reports
+`37 total, 5 passed, 32 failed` and `error: test-runner: spec failed`. The 32
+have no `✗` anywhere in the log — this is the documented harness-plumbing
+signature (trailing subprocess/warning text miscounted as failed examples;
+`.claude/skills/spipe.md` § "A `Results:` FAIL can be harness plumbing").
+Sanitizing the guard's own verdict words out of the subprocess output did not
+change the count, so the source is the runner's own trailing stream, not the
+spec. This direction is fail-CLOSED (over-reporting, exit 1) and therefore not
+a silent green, but it is a real defect and should be filed separately. The
+authoritative line for these two specs is the per-file `SPEC FILE VERDICT`.
+
 **Not coverable from inside a spec:** an example cannot observe the exit code
 or the summary stream of the very runner process that is executing it — by the
 time the summary is printed and the status chosen, every example has already
