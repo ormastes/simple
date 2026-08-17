@@ -603,3 +603,35 @@ bootstrap, so nothing was edited there. **Row stays OPEN / BLOCKED-CROSS-OWNER.*
   banner), so it cannot produce pure-Simple-lane RSS evidence for this row.
 - The 08-14 warning still stands: status 143 without a monotonic RSS trace is
   not a reproduction of this bug.
+
+### Guard evidence executed today (both green, on the seed)
+
+| spec | verdict | wall | peak RSS |
+|---|---|---|---|
+| `driver_memory_lifecycle_family_spec.spl` | `5 total, 5 passed, 0 failed` exit 0 | 13:46.53 | 3,347,772 KiB |
+| `stage3_hir_lowerer_reuse_contract_spec.spl` | `4 total, 4 passed, 0 failed` exit 0 | 11:02.83 | 3,353,964 KiB |
+
+Host load average 44.18 at launch, 28.07 at finish — contended, and both runs
+were on the **Rust seed**, so the ~3.35 GiB figure is that interpreter's
+per-spec baseline (cf. the W2 lane's 3,050,124 KiB for a one-file `--check`).
+It is **not** a measurement of this bug's lane and must not be quoted as one.
+Both specs are source-TEXT contracts; passing them fences the fix's shape and
+proves nothing about RSS.
+
+`stage3_hir_lowerer_reuse_contract_spec.spl` was found **RED on arrival** at
+`4 total, 3 passed, 1 failed`: the example "validates compatibility spellings
+through physical source identity" died with `semantic: variable source_idx not
+found`. That was a defect in the SPEC, not the driver — the anchor literal
+spelled the driver line out in full including `index={source_idx}`, and Simple
+interpolates `{...}` in the spec's own string, so the example aborted while
+building its anchor, before any comparison ran. The three examples that guard
+this row's actual owner fix were passing throughout.
+
+Fixed by truncating the `end` anchor to stop before the brace. Verified first
+that this was not masking a second failure: the anchor text exists verbatim at
+`driver_hir_pipeline_lowering.spl:731`, `var validation_surface_index: i64 = -1`
+occurs exactly once (`:690`), and all six positive assertions plus the negative
+one resolve inside the extracted 690..730 range (`:714`, `:718`, `:699`/`:719`,
+`:691`, `:692`, `:701`/`:721`; `module_surface_index_for_source(` appears
+nowhere in the file). No assertion was weakened or removed and the driver was
+not touched.
