@@ -119,3 +119,18 @@ and said why`, versus `FAIL — ... with NO diagnostic text` on a 0-byte log.
 
 Still open: `native-build` output buffering itself. The guard names the case and
 refuses to be silent about it, but does not make a mid-build death flush.
+
+## 2026-08-17 root fix — progress survives redirected non-TTY builds
+
+`driver_log_helpers.log_build_progress` previously returned immediately when
+`SIMPLE_BUILD_PROGRESS_EVENTS` was unset. Stage 2 does not configure that
+optional durable-event path, so all already-cadenced load/parse/HIR/MIR/native
+compile/link progress was discarded. A crash before the final diagnostic could
+therefore leave the redirected stage log at zero bytes.
+
+The helper now writes every existing cadence event to stderr and explicitly
+flushes it before optionally appending the same line to the configured event
+file. The event-file sink remains optional; it no longer controls whether
+human-readable process output exists. The focused source contract pins both
+the flush ordering and the adjacent durable-file behavior in
+`test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl`.
