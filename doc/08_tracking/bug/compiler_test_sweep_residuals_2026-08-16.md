@@ -148,3 +148,196 @@ full in-process driver instead of the external delegator), or run this spec in
 an environment where `SIMPLE_BINARY` points at a genuinely different compiler
 binary and the delegation marker is not inherited. Specs stay RED per
 testing.md — assertions are correct and must not be weakened.
+
+### ROOT CAUSE FOUND (2026-08-17) — a public-symbol collision, not a facade choice
+
+The diagnosis above asked why the spec's `check_file` "resolves to" the
+external facade even though it explicitly imports
+`compiler.driver.driver_api_compile_single` — which is the genuine **in-process**
+driver (`compiler_driver_create` / `compiler_driver_run_compile`, no subprocess
+anywhere). It is not a resolution *preference*; it is a **duplicate-definition
+collision**.
+
+Six names were defined twice, with byte-identical signatures:
+
+| name | in-process definition | external delegator definition |
+|---|---|---|
+| `compile_file`, `compile_files`, `compile_to_smf`, `jit_file`, `check_file`, `parse_sdn_file` | `driver_api_compile_single.spl` | `driver_public_compile_process.spl` |
+
+Both were also publicly re-exported by two parallel aggregators —
+`driver_api_core.spl` (in-process) and `driver_api.spl` -> `driver_public_compile.spl`
+(external). Under co-compilation each name therefore had **two definitions**, and
+the cross-module collision resolver dispatches an ambiguous call to the **last**
+definition (the same mechanism behind the
+`compiler_cross_module_private_symbol_collision` warnings, and the family
+tracked in `cross_module_public_symbol_collisions_2026-08-16.md`). So the
+explicit Tier-2 import silently landed on the delegator, which spawns the
+resolved `simple` CLI — which under `bin/simple test` is the CLI already
+running. Every call then re-entered `check_compile_delegation_guard`.
+
+Two distinct symptoms came from this one cause:
+1. **Deterministic guard errors** when the guard recognised the re-entry (the 10
+   failures diagnosed above).
+2. **A silent non-terminating run** when it did not: `find_simple_binary()`
+   prefers `bin/release/simple`, which is a *shell wrapper* (`file` reports
+   "Bourne-Again shell script") that execs `bin/release/<triple>/simple`. The
+   guard's textual same-path test did not equate wrapper with target, so the
+   facade spawned it and re-entered at a full CLI startup per hop, producing no
+   error and no `Results:` line at all.
+
+**Fix (landed):**
+- `driver_public_compile_process.spl` now defines its entry points as
+  `external_*`; `driver_public_compile.spl` aliases them back to the short
+  public names, so the compatibility surface is unchanged and no name has two
+  definitions. Dispatch is deterministic and Tier-2 importers reach the real
+  in-process driver.
+- `driver_public_shared.is_release_wrapper_self_delegation` teaches the guard
+  the wrapper/target shape, so the un-guarded variant fails deterministically
+  instead of spinning.
+
+Regression + generalization coverage:
+`test/01_unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl`
+(mirror-synced to `test/unit/...`) pins the wrapper shape, the
+no-facade-shadows-the-driver invariant, and the alias surface —
+`declared>=9 executed=9 passed=9 failed=0`, exit 0.
+
+**Measured before/after** on `advanced_types_spec.spl`. Both runs use the same
+worker the daemon spawns (`bin/simple run
+src/app/test_runner_new/test_runner_single.spl <spec> --no-session-daemon
+--sequential --timeout 1500`), same tree, same binary:
+
+| | pre-fix | post-fix |
+|---|---|---|
+| verdict line | **none emitted** | `12 total, 4 passed, 8 failed` |
+| examples executed | 0 (`executed=1 timeout=1`) | 12 |
+| exit | 143 (SIGTERM at the 1500s outer timeout) | 1 |
+| `compile delegation loop detected` occurrences | every check/compile call | **0** |
+
+So the loop is gone and all 12 examples now execute against the real
+in-process compiler. Vacuous greens are gone too: the two examples that used to
+"pass" only because the guard error also satisfied "fails and emits no
+artifact" now assert against real behaviour.
+
+**Residual 8 failures are a different, genuine defect set** — real compiler
+diagnostics, no guard text — and stay RED per testing.md:
+- mutual recursive value layout reports only one side (`expected  to contain
+  Right`), both for the single-file and the cross-module case;
+- the in-process `check` REJECTS programs the spec expects to accept: union
+  with payloads + pattern matching, and `vec[4, f32]` SIMD signatures (check
+  and smf variants, 4 examples);
+- parser rejects intersection `&` / refinement `where` correctly but spells the
+  token differently than the asserted `Ampersand` / `Where`.
+
+Note the daemon path still caps a worker at a hard **120s** budget regardless of
+`SIMPLE_TIMEOUT_SECONDS` / `--timeout` (observed `budget_ms=119955`), so plain
+`bin/simple test <this spec>` reports `daemon-worker-timeout` rather than the
+verdict above — a separate harness limitation, not a delegation problem.
+
+---
+
+## mdsoc cluster (`test/01_unit/compiler/mdsoc/`) — 2026-08-16
+
+Sweep baseline: 285/324 passing; three failing spec files. Two were stale specs
+(now ported and GREEN), one is a genuine RED pin against a never-implemented
+module. Two substantive compiler/language defects surfaced and are filed below.
+
+### DEFECT 1 (compiler, filed) — a `use pkg.Mod.{Sym}` import where the module basename equals the imported symbol resolves to the MODULE NAMESPACE, not the symbol
+
+`transform_adapters_spec.spl` failed 32/67 with, e.g.:
+
+```
+semantic: method `empty` not found on type `dict`
+  (receiver value: {MirProgram: <constructor:MirProgram>, MirProgram__empty: <fn:MirProgram__empty>})
+```
+
+The receiver is the module's namespace dict. The struct's *constructor* call
+`MirProgram(...)` still works (the dict carries the constructor), so only
+`static fn` calls fail — which is why 35 examples passed and every static
+factory (`MirProgram.empty`, `TokenStreamView.from_lexer_output`, …) failed.
+
+Affected import shape: `use <pkg>.<Name>.{<Name>}` where the file
+`<Name>.spl` defines struct `<Name>`. In this spec that is MirProgram,
+MirDebugInfo, TokenStreamView, MirOptView, ObjectFileView, LoadedModuleView.
+Imports where the module basename differs from the symbol
+(`TypedAstView.{TypedAstContext}`, `HirView.{CfgContext}`) were unaffected.
+
+Not reproducible with a single such import in a one-example spec (verified
+GREEN in isolation) — it needs the module co-compiled alongside its siblings /
+package `__init__`, so the shadowing comes from namespace merging, not from the
+single import alone.
+
+Workaround applied to the spec (intent preserved, no assertion weakened):
+import through the package re-export instead —
+`use compiler.mdsoc.transform.feature.mir_to_backend.entity_view.{MirProgram}`.
+Every `entity_view/__init__.spl` already `export`s the symbol.
+
+Note also `.../mir_to_backend/entity_view/MirView.spl` still imports via the
+pre-rename path `compiler.transform.feature....` (missing the `mdsoc` segment)
+and its `__init__.spl` exports `MirProgram`/`MirDebugInfo` twice.
+
+### DEFECT 2 (language, filed) — binding `.?` to a `val` yields the PAYLOAD, not a bool
+
+`layer_checker_spec.spl` failed 6/43, all with the same shape:
+
+```
+val is_denied = violation.?          # violation: LayerViolation?
+expect(is_denied).to_equal(true)
+# expected LayerViolation(message: layer 'infra' (level 3) cannot depend on ...) to equal true
+```
+
+The `LayerChecker` implementation is correct — it *did* produce the violation.
+Only the assertion is wrong-typed: `.?` in a `val` binding evaluates to the
+unwrapped payload, while the same `.?` in a condition (`if violation.?`) and in
+a comparison (`if grant_opt.? == false`, `layer_checker.spl:169`) behaves as a
+bool. That inconsistency is the defect; it silently converts a presence check
+into a payload binding.
+
+Spec ported to the type-correct form of the same intent:
+`expect(violation).to_not_be_nil()` (6 sites, incl. one on `v2`).
+
+### GENUINE RED (left in place) — `compiler.mdsoc.feature.cache.cache_port` does not exist
+
+`pipeline_integration_spec.spl` (13 passed, 1 failed):
+`error: semantic: Cannot resolve module: compiler.mdsoc.feature.cache.cache_port`.
+
+`grep -rl "cache_port\|CachePort" src/ doc/` finds **zero** source hits — no
+`src/compiler/85.mdsoc/feature/cache/` directory exists at all, and no such
+module was ever deleted. The sibling ports it is modelled on do exist
+(`feature/metrics/metrics_port.spl`, `feature/events/ports.spl`), so the spec's
+Phase-5 `CachePort` block is a contract for an unimplemented port, not a stale
+path. Already tracked as row 3 of
+`doc/08_tracking/bug/spec_imports_declared_nowhere_2026-08-04.md`.
+
+Left RED per `.claude/rules/testing.md` — the assertions are correct and must
+not be weakened. Unblock condition: implement
+`src/compiler/85.mdsoc/feature/cache/cache_port.spl` exposing `CachePort`
+(fields `name`, `check_fn`, `store_fn`, `invalidate_fn`, `get_stats_fn`),
+`CacheCheckStatus` (`is_fresh`), `CacheStats`
+(`hits`/`misses`/`stores`/`invalidations`) and `create_noop_cache_port()`,
+mirroring `metrics_port.spl`.
+
+### Progress note 2026-08-17
+
+- `transform_adapters_spec.spl` was found back at 32/67 red in this worktree —
+  the DEFECT-1 workaround described above was NOT present in the file (direct
+  `entity_view.<Name>.{<Name>}` imports still in place; likely clobbered or
+  never landed here). Re-applied the package re-export import form (with an
+  explanatory NOTE comment): now **67/67 GREEN**. Mirror
+  `test/unit/compiler/mdsoc/transform_adapters_spec.spl` synced.
+- Fixed the adjacent stale-path defect: `entity_view/MirView.spl` imported via
+  the pre-rename `compiler.transform.feature....` path (missing `mdsoc`
+  segment) — corrected to `compiler.mdsoc.transform.feature....`; and removed
+  the duplicate `export MirProgram, MirDebugInfo` line from
+  `entity_view/__init__.spl`.
+- Interpreter items 1-8 and the seed-side fixes (erased-receiver dispatch,
+  `rt_process_run_capture`, wasm `CompileOptions`) remain blocked on a seed
+  rebuild/redeploy, which is prohibited while the current bootstrap runs —
+  unchanged, still RED as filed.
+
+### Adjacent observation (not fixed)
+
+`BypassGrant` / `BypassUsage` are defined **twice, identically**, in
+`src/compiler/85.mdsoc/types/bypass_grant.spl` (+`bypass_usage.spl`) and in
+`src/compiler/85.mdsoc/mdsoc/types.spl:425+`. Not the cause of the failures
+above (verified — the impl behaves correctly), but it is exactly the co-compiled
+class-collision shape the compiler warns about elsewhere.

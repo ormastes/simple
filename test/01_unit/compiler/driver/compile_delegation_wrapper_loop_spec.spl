@@ -1,0 +1,136 @@
+# Regression coverage for the bin/release/simple WRAPPER self-delegation loop
+# (the "compile delegation loop" that blocked the advanced_types integration
+# specs, 2026-08-17).
+#
+# Root cause: `find_simple_binary()` prefers `bin/release/simple`, which is a
+# shell WRAPPER that execs `bin/release/<triple>/simple`. When the current
+# process already IS a deployed release runtime, the guard's textual
+# same-path comparison did not recognize the wrapper as "this same CLI", so
+# the facade spawned it — re-entering the same CLI at a full ~30-40s startup
+# per hop until the test-daemon worker budget (120s) killed the run with no
+# error. Before the fix the decision core returned "" (spawn allowed) for
+# exactly this shape; after the fix it blocks deterministically.
+#
+# Like compile_delegation_guard_spec.spl, this exercises the pure decision
+# core plus source-level invariants — no process is ever spawned, so the spec
+# is fast and cannot itself hang.
+
+use compiler.driver.driver_public_shared.{
+    compile_delegation_guard_decision,
+    is_release_wrapper_self_delegation
+}
+use std.io_runtime.{read_file}
+
+fn check(condition: bool):
+    expect condition == true
+
+describe "release-wrapper self-delegation (delegation-loop regression)":
+    it "blocks spawning the bin/release/simple wrapper from a deployed release runtime with no marker set":
+        # The exact reproducing shape: no SIMPLE_COMPILE_DELEGATED marker,
+        # resolved binary is the wrapper, current exe is the deployed runtime
+        # the wrapper would exec. Pre-fix this returned "" and the facade
+        # spawned an unbounded re-entry chain.
+        val result = compile_delegation_guard_decision(
+            "type check", "", "bin/release/simple",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"
+        )
+        check(result != "")
+        check(result.contains("compile delegation loop detected"))
+
+    it "blocks the wrapper by absolute path and from bootstrap-stage binaries too":
+        check(is_release_wrapper_self_delegation(
+            "/opt/simple/bin/release/simple",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"))
+        check(is_release_wrapper_self_delegation(
+            "bin/release/simple",
+            "/opt/simple/bootstrap/stage3/simple"))
+
+    it "still allows genuinely external binaries and unknown identities":
+        check(not is_release_wrapper_self_delegation(
+            "src/compiler_rust/target/bootstrap/simple",
+            "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"))
+        check(not is_release_wrapper_self_delegation(
+            "bin/release/simple", "/usr/local/bin/other_tool"))
+        check(not is_release_wrapper_self_delegation("bin/release/simple", ""))
+        check(not is_release_wrapper_self_delegation("", "/opt/simple/bin/release/x86_64-unknown-linux-gnu/simple"))
+
+describe "delegation-cycle generalization: every external spawn in the driver facades is guarded":
+    it "guards every rt_process_run(simple_bin, ...) call site with the delegation guard":
+        # Probes for SIMILAR cycles: any facade function that spawns the
+        # resolved `simple` binary must consult check_compile_delegation_guard
+        # first. A new unguarded spawn is a fresh loop waiting to happen.
+        val facades = [
+            "src/compiler/80.driver/driver_public_compile_process.spl",
+            "src/compiler/80.driver/driver_public_compile_backends.spl",
+            "src/compiler/80.driver/driver_public_shared.spl"
+        ]
+        for facade in facades:
+            val source = read_file(facade)
+            if source.contains("rt_process_run(simple_bin"):
+                check(source.contains("check_compile_delegation_guard("))
+                check(source.contains("mark_compile_delegated()"))
+
+    it "keeps the lightweight facade lightweight: it never loads the full in-process driver":
+        # The delegating facade must stay a pure process-spawner. Importing the
+        # full driver here would make every selective import evaluate the whole
+        # compiler graph under the test interpreter.
+        val source = read_file("src/compiler/80.driver/driver_public_compile_process.spl")
+        expect(source.contains("use lazy compiler.driver.driver_api_compile_single")).to_equal(false)
+        expect(source.contains("compiler_driver_create")).to_equal(false)
+
+    it "fires the wrapper rule inside the full decision core, not only the helper":
+        val result = compile_delegation_guard_decision(
+            "aot compile", "", "/repo/bin/release/simple",
+            "/repo/bin/release/aarch64-unknown-linux-gnu/simple"
+        )
+        check(result != "")
+
+describe "delegation-cycle root cause: the external facade must not shadow the in-process driver":
+    # THE defect this file exists for. `driver_api_compile_single.spl` is the
+    # real in-process driver; `driver_public_compile_process.spl` delegates
+    # every op to a separate `simple` CLI. While BOTH defined `check_file`,
+    # `compile_files`, `compile_to_smf`, `compile_file`, `jit_file` and
+    # `parse_sdn_file` with byte-identical signatures, each name had two
+    # co-compiled definitions and the cross-module collision resolver
+    # dispatched ambiguous calls to the LAST one. So
+    # `use compiler.driver.driver_api_compile_single.{check_file}` reached the
+    # DELEGATOR, which spawned the CLI already running — the compile
+    # delegation loop. Pre-fix, `pub fn check_file(` appeared in both files.
+    val COLLIDING = [
+        "compile_file", "compile_files", "compile_to_smf",
+        "jit_file", "check_file", "parse_sdn_file"
+    ]
+
+    it "defines every delegating entry point under a distinct external_ name":
+        val delegator = read_file("src/compiler/80.driver/driver_public_compile_process.spl")
+        val in_process = read_file("src/compiler/80.driver/driver_api_compile_single.spl")
+        for name in COLLIDING:
+            # The in-process driver keeps the short name...
+            check(in_process.contains("pub fn " + name + "("))
+            # ...and the delegator must NOT also define it.
+            expect(delegator.contains("pub fn " + name + "(")).to_equal(false)
+            check(delegator.contains("pub fn external_" + name + "("))
+
+    it "still exposes the short public names to existing importers via aliases":
+        # The rename must not break the compatibility surface: every short name
+        # is re-exported from the small facade.
+        val facade = read_file("src/compiler/80.driver/driver_public_compile.spl")
+        for name in COLLIDING:
+            check(facade.contains("external_" + name + " as " + name))
+
+    it "generalizes: no delegating facade redefines an in-process driver entry point":
+        # Probes for the SAME class of cycle elsewhere — any other facade that
+        # spawns the `simple` CLI must not also define a name the in-process
+        # driver owns, or it can be dispatched to by an unrelated import.
+        val in_process = read_file("src/compiler/80.driver/driver_api_compile_single.spl")
+        val delegating = [
+            "src/compiler/80.driver/driver_public_compile_process.spl",
+            "src/compiler/80.driver/driver_public_compile_backends.spl",
+            "src/compiler/80.driver/driver_public_compile_vhdl.spl"
+        ]
+        for path in delegating:
+            val source = read_file(path)
+            if source.contains("rt_process_run(simple_bin"):
+                for name in COLLIDING:
+                    if in_process.contains("pub fn " + name + "("):
+                        expect(source.contains("pub fn " + name + "(")).to_equal(false)

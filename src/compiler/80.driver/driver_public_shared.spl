@@ -605,10 +605,28 @@ pub fn is_same_binary_path(a: text, b: text) -> bool:
     a.ends_with("/" + b) or b.ends_with("/" + a)
 
 # Pure decision core: no I/O, fully unit-testable without spawning processes.
+# `bin/release/simple` is a shell WRAPPER that execs the deployed
+# `bin/release/<triple>/simple` runtime. When the current process already IS a
+# deployed release runtime (or a bootstrap stage binary), spawning the wrapper
+# re-enters this same CLI — a self-delegation chain that burns a full CLI
+# startup (~30-40s) per hop and made the advanced_types integration specs blow
+# their 120s test-daemon worker budget with no error (observed 2026-08-17).
+# Recognize that shape textually so the guard fires and the caller takes the
+# bounded fallback instead.
+pub fn is_release_wrapper_self_delegation(resolved_bin: text, current_exe: text) -> bool:
+    if resolved_bin == "" or current_exe == "":
+        return false
+    val is_wrapper = resolved_bin == "bin/release/simple" or resolved_bin.ends_with("/bin/release/simple")
+    if not is_wrapper:
+        return false
+    current_exe.contains("/bin/release/") or current_exe.contains("/bootstrap/")
+
 pub fn compile_delegation_guard_decision(op_desc: text, marker: text, resolved_bin: text, current_exe: text) -> text:
     if marker == "1":
         return compile_delegation_guard_message(op_desc)
     if is_same_binary_path(resolved_bin, current_exe):
+        return compile_delegation_guard_message(op_desc)
+    if is_release_wrapper_self_delegation(resolved_bin, current_exe):
         return compile_delegation_guard_message(op_desc)
     ""
 
