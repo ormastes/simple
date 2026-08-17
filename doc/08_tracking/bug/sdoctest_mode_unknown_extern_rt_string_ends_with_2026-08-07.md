@@ -108,3 +108,24 @@ captured stream output beneath the prompt — see
 document-model round trips (`.ipynb` <-> `.snb.sdn` <-> `.ipynb`) are fully
 green. Only the final "run it through `simple test --sdoctest`" acceptance
 step is blocked by this pre-existing, unrelated defect.
+
+## RESOLVED 2026-08-17 — RED and GREEN both observed on full binaries
+
+Closed end-to-end by the coordinator, same probe, three runs, rc assigned on the
+line after each command:
+
+| binary / engine | rc | output |
+|---|---|---|
+| stale seed (pre-fix), `interpreter` | 1 | `error: semantic: unknown extern function: rt_string_ends_with` |
+| fixed build, `interpreter` | 0 | `ends=true rfind=3` |
+| fixed build, `jit` | 0 | `ends=true rfind=3` |
+
+The defect was the missing `EXTERN_DISPATCH` entry for `rt_string_ends_with` (and
+`rt_string_rfind`, which backs `last_index_of`), not the reported `--sdoctest`
+surface. That surface stopped reproducing only because the default engine moved
+to JIT — **a decayed repro, not a fixed bug**. Pinning `SIMPLE_EXECUTION_MODE`
+and comparing arms is what separated the two.
+
+Method note for anyone re-running this: the probe must run with the repo root as
+cwd. From `/tmp` it fails with "stdlib import `std.text` resolves from the
+project stdlib roots only", which is a resolution error, not this defect.

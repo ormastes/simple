@@ -109,3 +109,23 @@ Lesson worth keeping: a parser change that widens *which token starts an
 expression* narrows *which token starts a statement*, and the fixtures for the
 first half cannot see the second half. Pair such a change with at least one
 end-to-end `.spl` parse.
+
+## GREEN half closed 2026-08-17 — full binary, by the coordinator
+
+The gap this doc recorded ("RED proven on a full binary, GREEN owed") is now
+closed. Built `--bin simple` from the fixed tree in an isolated
+`CARGO_TARGET_DIR` (`BUILD_RC=0`, 8m10s) and ran the relative-import repro:
+
+```
+/tmp/relimp/helper.spl   fn helper_value() -> i64: 41
+/tmp/relimp/main.spl     use .helper.{helper_value}   ->   print helper_value()+1
+
+fixed binary   rc=0   relimp=42
+```
+
+rc read into a variable on the line AFTER the command, never through a pipe.
+
+So the parser-crate 7/7 is no longer standing in for end-to-end proof: a real
+binary loads a relative import again. Note the stale seed also returns `rc=0`
+here — it predates `3c4e6551b7a` and never had the regression, which is why the
+RED is only observable on a binary built from that commit (recorded above).
