@@ -1,0 +1,171 @@
+# ELF relocation target-section attribution — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/elf_parser_relocations_merged_without_target_section_2026-08-08.md
+#
+# elf_parse_object merges the entries of EVERY SHT_RELA section into one flat
+# ElfObject.relocations list. Before the fix, ElfSectionHeader never parsed
+# sh_info — the ELF64 field that names the section a RELA section's entries
+# apply to — so once merged, a .text relocation and a .data relocation were
+# indistinguishable. A linker consuming this list has to guess.
+#
+# This object has two RELA sections with DIFFERENT sh_info targets. The oracle
+# is that every relocation still names its own target after the merge.
+#
+# @cover src/compiler/70.backend/linker/elf_parser.spl
+# @cover src/compiler/70.backend/linker/elf_inspect.spl
+
+use std.spec.*
+use compiler.backend.linker.elf_inspect.{
+    ElfSectionHeader, ELF64_SHDR_SIZE, SHT_NULL, SHT_PROGBITS
+}
+use compiler.backend.linker.elf_parser.{
+    elf_parse_object, SHT_RELA, ELF64_RELA_SIZE
+}
+
+# ---------------------------------------------------------------------------
+# Little-endian byte-appending helpers (build the fixture sequentially, so no
+# index assignment is needed and the layout below is literal and auditable).
+# ---------------------------------------------------------------------------
+
+fn app_u8(b: [u8], v: i64) -> [u8]:
+    b.push((v & 255) as u8)
+
+fn app_zeros(b: [u8], n: i64) -> [u8]:
+    var out = b
+    var i: i64 = 0
+    while i < n:
+        out = app_u8(out, 0)
+        i = i + 1
+    out
+
+fn app_le(b: [u8], v: i64, width: i64) -> [u8]:
+    var out = b
+    var i: i64 = 0
+    var x = v
+    while i < width:
+        out = app_u8(out, x & 255)
+        x = x / 256
+        i = i + 1
+    out
+
+# ELF64 section header: 64 bytes, fields at their real offsets.
+fn app_shdr(b: [u8], sh_type: i64, sh_offset: i64, sh_size: i64, sh_info: i64) -> [u8]:
+    var out = b
+    out = app_le(out, 0, 4)          #  0 sh_name
+    out = app_le(out, sh_type, 4)    #  4 sh_type
+    out = app_le(out, 0, 8)          #  8 sh_flags
+    out = app_le(out, 0, 8)          # 16 sh_addr
+    out = app_le(out, sh_offset, 8)  # 24 sh_offset
+    out = app_le(out, sh_size, 8)    # 32 sh_size
+    out = app_le(out, 0, 4)          # 40 sh_link
+    out = app_le(out, sh_info, 4)    # 44 sh_info  <-- the field under test
+    out = app_le(out, 0, 8)          # 48 sh_addralign
+    out = app_le(out, 0, 8)          # 56 sh_entsize
+    out
+
+fn app_rela(b: [u8], r_offset: i64, r_info: i64, r_addend: i64) -> [u8]:
+    var out = b
+    out = app_le(out, r_offset, 8)
+    out = app_le(out, r_info, 8)
+    out = app_le(out, r_addend, 8)
+    out
+
+# ---------------------------------------------------------------------------
+# Fixture layout (all offsets literal, total 456 bytes):
+#     0..64    ELF header
+#    64..112   .rela.text data  (2 entries)
+#   112..136   .rela.data data  (1 entry)
+#   136..456   section header table (5 headers x 64)
+# Sections: 0 NULL, 1 .text, 2 .data, 3 .rela.text (sh_info=1), 4 .rela.data (sh_info=2)
+# ---------------------------------------------------------------------------
+
+val SHOFF: i64 = 136
+val TEXT_IDX: i64 = 1
+val DATA_IDX: i64 = 2
+val RELA_TEXT_IDX: i64 = 3
+val RELA_DATA_IDX: i64 = 4
+
+fn build_two_rela_object() -> [u8]:
+    var b: [u8] = []
+
+    # --- ELF header ---
+    b = app_u8(b, 127)
+    b = app_u8(b, 69)             # 'E'
+    b = app_u8(b, 76)             # 'L'
+    b = app_u8(b, 70)             # 'F'
+    b = app_u8(b, 2)              # EI_CLASS = ELFCLASS64
+    b = app_u8(b, 1)              # EI_DATA  = little-endian
+    b = app_u8(b, 1)              # EI_VERSION
+    b = app_zeros(b, 9)           # EI_OSABI .. EI_PAD -> offset 16
+    b = app_le(b, 1, 2)           # 16 e_type = ET_REL
+    b = app_le(b, 62, 2)          # 18 e_machine = EM_X86_64
+    b = app_le(b, 1, 4)           # 20 e_version
+    b = app_le(b, 0, 8)           # 24 e_entry
+    b = app_le(b, 0, 8)           # 32 e_phoff
+    b = app_le(b, SHOFF, 8)       # 40 e_shoff
+    b = app_le(b, 0, 8)           # 48 e_flags(4) + e_ehsize(2) + e_phentsize(2)
+    b = app_le(b, 0, 2)           # 56 e_phnum
+    b = app_le(b, ELF64_SHDR_SIZE, 2)  # 58 e_shentsize
+    b = app_le(b, 5, 2)           # 60 e_shnum
+    b = app_le(b, 0, 2)           # 62 e_shstrndx (section 0: empty)
+
+    # --- .rela.text data at 64: two entries ---
+    b = app_rela(b, 16, 100, 0)
+    b = app_rela(b, 32, 200, 0)
+    # --- .rela.data data at 112: one entry ---
+    b = app_rela(b, 8, 300, 0)
+
+    # --- section header table at 136 ---
+    b = app_shdr(b, SHT_NULL, 0, 0, 0)
+    b = app_shdr(b, SHT_PROGBITS, 0, 0, 0)                                 # 1 .text
+    b = app_shdr(b, SHT_PROGBITS, 0, 0, 0)                                 # 2 .data
+    b = app_shdr(b, SHT_RELA, 64, 2 * ELF64_RELA_SIZE, TEXT_IDX)           # 3 .rela.text
+    b = app_shdr(b, SHT_RELA, 112, 1 * ELF64_RELA_SIZE, DATA_IDX)          # 4 .rela.data
+    b
+
+describe "ELF relocations keep their target section across the merge":
+
+    it "parses the fixture object at all":
+        val obj_r = elf_parse_object(build_two_rela_object())
+        assert_true(obj_r.is_ok())
+        val obj = obj_r.unwrap()
+        assert_equal(obj.sections.len(), 5)
+        # Guard against a vacuous run: the merged list must be non-empty.
+        assert_equal(obj.relocations.len(), 3)
+
+    it "records sh_info on each RELA section header":
+        val obj = elf_parse_object(build_two_rela_object()).unwrap()
+        assert_equal(obj.sections[RELA_TEXT_IDX].sh_info, TEXT_IDX)
+        assert_equal(obj.sections[RELA_DATA_IDX].sh_info, DATA_IDX)
+        # A non-RELA section's sh_info is 0 here, so a hardcoded constant
+        # cannot satisfy both assertions above and this one.
+        assert_equal(obj.sections[TEXT_IDX].sh_info, 0)
+
+    it "attributes every merged relocation to the section it applies to":
+        val obj = elf_parse_object(build_two_rela_object()).unwrap()
+
+        var to_text: i64 = 0
+        var to_data: i64 = 0
+        var unattributed: i64 = 0
+        for r in obj.relocations:
+            if r.target_section_idx == TEXT_IDX:
+                to_text = to_text + 1
+            else:
+                if r.target_section_idx == DATA_IDX:
+                    to_data = to_data + 1
+                else:
+                    unattributed = unattributed + 1
+
+        # This is the assertion that was impossible before the fix: with sh_info
+        # unparsed every relocation reported target 0 and unattributed == 3.
+        assert_equal(unattributed, 0)
+        assert_equal(to_text, 2)
+        assert_equal(to_data, 1)
+
+    it "keeps target_section_idx consistent with the owning RELA header":
+        val obj = elf_parse_object(build_two_rela_object()).unwrap()
+        var checked: i64 = 0
+        for r in obj.relocations:
+            assert_equal(r.target_section_idx, obj.sections[r.section_idx].sh_info)
+            checked = checked + 1
+        assert_equal(checked, 3)

@@ -1,0 +1,227 @@
+# ELF section-header field parity — SIMILAR-PROBLEM DETECTION spec (defect CLASS)
+#
+# The bug this generalises:
+#   doc/08_tracking/bug/elf_parser_relocations_merged_without_target_section_2026-08-08.md
+#   ElfSectionHeader simply did not have a field for ELF64 sh_info, so every
+#   consumer downstream of it was structurally unable to attribute a relocation
+#   to its target section. Nothing failed loudly; information was dropped at
+#   parse time and the loss was invisible.
+#
+# The CLASS is wider than sh_info and wider than relocations:
+#
+#   (a) A section-header field that exists in the file but not in the struct is
+#       silently lost. No error, no warning — downstream code just reads 0.
+#   (b) There are TWO independent readers of the same 64-byte layout:
+#         src/compiler/70.backend/linker/elf_inspect.spl  elf_parse_sections
+#         src/compiler/70.backend/linker/elf_parser.spl   elf_parse_object
+#       A field wired into one and not the other produces a reader-dependent
+#       answer. The reproducing spec for the original bug goes through
+#       elf_parse_object ONLY, so it cannot see an elf_inspect regression.
+#
+# The oracle here is an INDEPENDENT re-read of the raw fixture bytes at the
+# real ELF64 offsets, compared against BOTH readers for EVERY section. It is
+# never "the two readers agree", which would pass while both drop a field.
+#
+# @cover src/compiler/70.backend/linker/elf_inspect.spl
+# @cover src/compiler/70.backend/linker/elf_parser.spl
+
+use std.spec.*
+use compiler.backend.linker.elf_inspect.{
+    ElfSectionHeader, ElfHeader,
+    elf_parse_header, elf_parse_sections,
+    ELF64_SHDR_SIZE, SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB
+}
+use compiler.backend.linker.elf_parser.{
+    elf_parse_object, SHT_RELA, ELF64_RELA_SIZE
+}
+
+fn app_u8(b: [u8], v: i64) -> [u8]:
+    b.push((v & 255) as u8)
+
+fn app_zeros(b: [u8], n: i64) -> [u8]:
+    var out = b
+    var i: i64 = 0
+    while i < n:
+        out = app_u8(out, 0)
+        i = i + 1
+    out
+
+fn app_le(b: [u8], v: i64, width: i64) -> [u8]:
+    var out = b
+    var i: i64 = 0
+    var x = v
+    while i < width:
+        out = app_u8(out, x & 255)
+        x = x / 256
+        i = i + 1
+    out
+
+# Independent oracle: little-endian read straight out of the fixture bytes.
+fn raw_le(bytes: [u8], off: i64, width: i64) -> i64:
+    var acc: i64 = 0
+    var i: i64 = width - 1
+    while i >= 0:
+        acc = acc * 256 + (bytes[off + i] as i64)
+        i = i - 1
+    acc
+
+fn app_shdr(b: [u8], sh_name: i64, sh_type: i64, sh_flags: i64,
+            sh_offset: i64, sh_size: i64, sh_link: i64, sh_info: i64) -> [u8]:
+    var out = b
+    out = app_le(out, sh_name, 4)    #  0
+    out = app_le(out, sh_type, 4)    #  4
+    out = app_le(out, sh_flags, 8)   #  8
+    out = app_le(out, 0, 8)          # 16 sh_addr
+    out = app_le(out, sh_offset, 8)  # 24
+    out = app_le(out, sh_size, 8)    # 32
+    out = app_le(out, sh_link, 4)    # 40
+    out = app_le(out, sh_info, 4)    # 44
+    out = app_le(out, 0, 8)          # 48 sh_addralign
+    out = app_le(out, 0, 8)          # 56 sh_entsize
+    out
+
+fn app_rela(b: [u8], r_offset: i64, r_info: i64) -> [u8]:
+    var out = b
+    out = app_le(out, r_offset, 8)
+    out = app_le(out, r_info, 8)
+    out = app_le(out, 0, 8)
+    out
+
+val SHOFF: i64 = 200
+val NSEC: i64 = 6
+
+# Sections, each with a DISTINCT sh_info and sh_link so a hardcoded or
+# copy-from-a-neighbour implementation cannot satisfy all of them:
+#   0 NULL            sh_info 0
+#   1 .text           sh_info 0
+#   2 .data           sh_info 0
+#   3 .rela.text RELA sh_info 1  (target .text)
+#   4 .rela.data RELA sh_info 2  (target .data)
+#   5 .symtab   SYMTAB sh_info 3  (index of first non-local symbol)
+fn build_fixture() -> [u8]:
+    var b: [u8] = []
+
+    b = app_u8(b, 127)
+    b = app_u8(b, 69)
+    b = app_u8(b, 76)
+    b = app_u8(b, 70)
+    b = app_u8(b, 2)
+    b = app_u8(b, 1)
+    b = app_u8(b, 1)
+    b = app_zeros(b, 9)
+    b = app_le(b, 1, 2)                 # 16 e_type = ET_REL
+    b = app_le(b, 62, 2)                # 18 e_machine
+    b = app_le(b, 1, 4)                 # 20 e_version
+    b = app_le(b, 0, 8)                 # 24 e_entry
+    b = app_le(b, 0, 8)                 # 32 e_phoff
+    b = app_le(b, SHOFF, 8)             # 40 e_shoff
+    b = app_le(b, 0, 8)                 # 48 e_flags/e_ehsize/e_phentsize
+    b = app_le(b, 0, 2)                 # 56 e_phnum
+    b = app_le(b, ELF64_SHDR_SIZE, 2)   # 58 e_shentsize
+    b = app_le(b, NSEC, 2)              # 60 e_shnum
+    b = app_le(b, 0, 2)                 # 62 e_shstrndx
+
+    # 64..112  .rela.text data (2 entries)
+    b = app_rela(b, 16, 100)
+    b = app_rela(b, 32, 200)
+    # 112..136 .rela.data data (1 entry)
+    b = app_rela(b, 8, 300)
+    # 136..200 filler so the section header table starts exactly at SHOFF
+    b = app_zeros(b, SHOFF - 136)
+
+    b = app_shdr(b, 0,  SHT_NULL,     0, 0,   0,                     0, 0)
+    b = app_shdr(b, 1,  SHT_PROGBITS, 6, 0,   0,                     0, 0)
+    b = app_shdr(b, 7,  SHT_PROGBITS, 3, 0,   0,                     0, 0)
+    b = app_shdr(b, 13, SHT_RELA,     0, 64,  2 * ELF64_RELA_SIZE,   5, 1)
+    b = app_shdr(b, 24, SHT_RELA,     0, 112, 1 * ELF64_RELA_SIZE,   5, 2)
+    b = app_shdr(b, 35, SHT_SYMTAB,   0, 0,   0,                     0, 3)
+    b
+
+describe "every ELF64 section-header field survives BOTH readers":
+
+    it "elf_inspect's reader matches an independent raw byte read, per section":
+        val bytes = build_fixture()
+        val header = elf_parse_header(bytes).unwrap()
+        val secs = elf_parse_sections(bytes, header)
+        assert_equal(secs.len(), NSEC)
+
+        var checked: i64 = 0
+        var nonzero_info: i64 = 0
+        var i: i64 = 0
+        while i < NSEC:
+            val base = SHOFF + i * ELF64_SHDR_SIZE
+            assert_equal(secs[i].sh_name,  raw_le(bytes, base + 0, 4))
+            assert_equal(secs[i].sh_type,  raw_le(bytes, base + 4, 4))
+            assert_equal(secs[i].sh_flags, raw_le(bytes, base + 8, 8))
+            assert_equal(secs[i].sh_size,  raw_le(bytes, base + 32, 8))
+            assert_equal(secs[i].sh_info,  raw_le(bytes, base + 44, 4))
+            if secs[i].sh_info != 0:
+                nonzero_info = nonzero_info + 1
+            checked = checked + 1
+            i = i + 1
+
+        # Non-vacuity: the loop really ran, and really exercised distinct
+        # sh_info values rather than comparing 0 against 0 six times.
+        assert_equal(checked, NSEC)
+        assert_equal(nonzero_info, 3)
+
+    it "elf_parser's reader matches the same independent raw byte read":
+        val bytes = build_fixture()
+        val obj = elf_parse_object(bytes).unwrap()
+        assert_equal(obj.sections.len(), NSEC)
+
+        var checked: i64 = 0
+        var nonzero_info: i64 = 0
+        var i: i64 = 0
+        while i < NSEC:
+            val base = SHOFF + i * ELF64_SHDR_SIZE
+            assert_equal(obj.sections[i].sh_name,  raw_le(bytes, base + 0, 4))
+            assert_equal(obj.sections[i].sh_type,  raw_le(bytes, base + 4, 4))
+            assert_equal(obj.sections[i].sh_flags, raw_le(bytes, base + 8, 8))
+            assert_equal(obj.sections[i].sh_size,  raw_le(bytes, base + 32, 8))
+            assert_equal(obj.sections[i].sh_info,  raw_le(bytes, base + 44, 4))
+            # elf_parser deliberately repurposes sh_addr as the FILE OFFSET.
+            assert_equal(obj.sections[i].sh_addr,  raw_le(bytes, base + 24, 8))
+            if obj.sections[i].sh_info != 0:
+                nonzero_info = nonzero_info + 1
+            checked = checked + 1
+            i = i + 1
+
+        assert_equal(checked, NSEC)
+        assert_equal(nonzero_info, 3)
+
+    it "attributes every merged relocation, and never to a single lumped target":
+        val obj = elf_parse_object(build_fixture()).unwrap()
+        assert_equal(obj.relocations.len(), 3)
+
+        var distinct_targets: [i64] = []
+        for r in obj.relocations:
+            # Each relocation's recorded target must be the sh_info of the RELA
+            # section it actually came from — a per-entry invariant, not a count.
+            assert_equal(r.target_section_idx, obj.sections[r.section_idx].sh_info)
+            assert_equal(obj.sections[r.section_idx].sh_type, SHT_RELA)
+            # The target must name a real section, never SHN_UNDEF/0.
+            assert_true(r.target_section_idx > 0)
+            assert_true(r.target_section_idx < NSEC)
+            if not distinct_targets.contains(r.target_section_idx):
+                distinct_targets = distinct_targets.push(r.target_section_idx)
+
+        # The whole point of the original bug: two RELA sections must NOT
+        # collapse into one indistinguishable target after the merge.
+        assert_equal(distinct_targets.len(), 2)
+
+    it "does not mistake a SYMTAB sh_info for a relocation target":
+        # sh_info is overloaded in ELF: on SHT_SYMTAB it is the index of the
+        # first non-local symbol, not a section index. Parsing it is correct;
+        # treating it as a relocation target would not be. No relocation in this
+        # object may claim the symtab's sh_info as its own target section.
+        val obj = elf_parse_object(build_fixture()).unwrap()
+        val symtab_idx: i64 = 5
+        assert_equal(obj.sections[symtab_idx].sh_type, SHT_SYMTAB)
+        assert_equal(obj.sections[symtab_idx].sh_info, 3)
+
+        var from_symtab: i64 = 0
+        for r in obj.relocations:
+            if r.section_idx == symtab_idx:
+                from_symtab = from_symtab + 1
+        assert_equal(from_symtab, 0)
