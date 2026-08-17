@@ -1,0 +1,144 @@
+# Class-detection spec for the "PEM body routed through `text` corrupts binary
+# DER" defect class.
+#
+# The reproducing spec (pem_rfc7468_kat_spec.spl) round-trips a 32-byte DER
+# fixture whose bytes are 0..31 — every one of them below 0x80. That fixture
+# passes just as happily against an implementation that converts the body to
+# `text` and back, because ASCII-range bytes survive a UTF-8 round trip
+# unchanged. Real DER is arbitrary binary: any byte >= 0x80 becomes a
+# multi-byte UTF-8 sequence, so the bytes that come back out are not the ones
+# that went in, and the corruption is invisible to an ASCII-only fixture.
+#
+# This spec pins the byte-space contract directly:
+#   1. All 256 byte values round-trip through pem_encode/pem_decode exactly.
+#   2. The base64 body matches a known answer (RFC 4648 alphabet + padding),
+#      so "round-trips with itself" cannot stand in for "is actually base64".
+#   3. The body is wrapped at 64 columns, so a decoder that only tolerates one
+#      long line is not silently accepted.
+#
+# @req REQ-CRYPTO-PEM-BINARY-ROUNDTRIP
+
+use std.spipe.*
+use os.crypto.pem.{pem_encode, pem_decode, PemBlock}
+
+fn _text_to_u8(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < s.len():
+        out.push(s.byte_at(i))
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# Every byte value 0x00..0xFF, in order.
+fn _all_256_bytes() -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 256:
+        out.push(i.to_u8())
+        i = i + 1
+    out
+
+# Bytes that a UTF-8 text round trip would mangle: the 0x80..0xFF half.
+fn _high_bytes() -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 128
+    while i < 256:
+        out.push(i.to_u8())
+        i = i + 1
+    out
+
+fn _label() -> [u8]:
+    _text_to_u8("CERTIFICATE")
+
+describe "PEM binary round-trip class — high bytes":
+
+    it "guards the fixture: the high-byte input really contains bytes >= 0x80":
+        # Without this, an implementation that silently dropped the high half
+        # could still satisfy the round-trip assertions below on an empty body.
+        val der = _high_bytes()
+        expect(der.len()).to_equal(128u64)
+        expect(der[0]).to_equal(128u8)
+        expect(der[127]).to_equal(255u8)
+
+    it "round-trips DER made entirely of bytes >= 0x80":
+        val der = _high_bytes()
+        val result = pem_decode(pem_encode(_label(), der))
+        expect(result.is_ok()).to_equal(true)
+        val block = result.unwrap()
+        expect(_bytes_eq(block.der, der)).to_equal(true)
+
+    it "round-trips all 256 byte values exactly":
+        val der = _all_256_bytes()
+        val result = pem_decode(pem_encode(_label(), der))
+        expect(result.is_ok()).to_equal(true)
+        val block = result.unwrap()
+        expect(_bytes_eq(block.der, der)).to_equal(true)
+
+    it "preserves length for all 256 byte values":
+        val der = _all_256_bytes()
+        val result = pem_decode(pem_encode(_label(), der))
+        expect(result.is_ok()).to_equal(true)
+        val block = result.unwrap()
+        expect(block.der.len()).to_equal(256u64)
+
+describe "PEM binary round-trip class — body is real base64":
+
+    it "encodes the 3-byte input 0xFB 0xFF 0xFE as the RFC 4648 answer +//+":
+        # Exercises both high bytes and the two alphabet characters ('+', '/')
+        # that a hand-rolled table most often gets wrong.
+        val der: [u8] = [0xfbu8, 0xffu8, 0xfeu8]
+        val pem = pem_encode(_label(), der)
+        var s = ""
+        var i: u64 = 0
+        while i < pem.len():
+            s = s + pem[i].to_i64().chr()
+            i = i + 1
+        expect(s.contains("+//+")).to_equal(true)
+
+    it "pads a 1-byte body with two '=' characters":
+        val der: [u8] = [0x00u8]
+        val pem = pem_encode(_label(), der)
+        var s = ""
+        var i: u64 = 0
+        while i < pem.len():
+            s = s + pem[i].to_i64().chr()
+            i = i + 1
+        expect(s.contains("AA==")).to_equal(true)
+
+describe "PEM binary round-trip class — line wrapping":
+
+    it "wraps the base64 body at 64 columns":
+        # 256 bytes of DER is 344 base64 characters, so a correctly wrapped
+        # body has more than one line and no line longer than 64.
+        val pem = pem_encode(_label(), _all_256_bytes())
+        var s = ""
+        var i: u64 = 0
+        while i < pem.len():
+            s = s + pem[i].to_i64().chr()
+            i = i + 1
+        var longest: i64 = 0
+        var cur: i64 = 0
+        var j: i64 = 0
+        while j < s.len():
+            if s.byte_at(j) == 10u8:
+                if cur > longest:
+                    longest = cur
+                cur = 0
+            else:
+                cur = cur + 1
+            j = j + 1
+        if cur > longest:
+            longest = cur
+        # The BEGIN/END marker lines are longer than the body lines, but both
+        # are well under 64 for the "CERTIFICATE" label, so the bound holds.
+        expect(longest).to_be_less_than(65)
