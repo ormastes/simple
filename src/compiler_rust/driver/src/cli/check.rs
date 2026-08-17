@@ -1000,7 +1000,7 @@ fn validate_concurrency_api_expr(
         | Expr::Try(operand)
         | Expr::ForceUnwrap(operand)
         | Expr::ExistsCheck(operand)
-        | Expr::UnwrapOrReturn(operand)
+        | Expr::UnwrapOrReturn { expr: operand, .. }
         | Expr::CastOrReturn { expr: operand, .. }
         | Expr::ContractOld(operand) => validate_concurrency_api_expr(file_path, operand, ctx, errors),
         Expr::If {
@@ -1214,7 +1214,7 @@ fn share_nothing_expr(
         | Expr::Try(operand)
         | Expr::ForceUnwrap(operand)
         | Expr::ExistsCheck(operand)
-        | Expr::UnwrapOrReturn(operand)
+        | Expr::UnwrapOrReturn { expr: operand, .. }
         | Expr::CastOrReturn { expr: operand, .. }
         | Expr::ContractOld(operand) => share_nothing_expr(operand, globals, locals, reported, violations),
         Expr::Index { receiver, index } => {

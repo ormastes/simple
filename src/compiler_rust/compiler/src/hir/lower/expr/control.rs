@@ -2811,7 +2811,7 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         | Expr::Try(expr)
         | Expr::ForceUnwrap(expr)
         | Expr::ExistsCheck(expr)
-        | Expr::UnwrapOrReturn(expr)
+        | Expr::UnwrapOrReturn { expr, .. }
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
         | Expr::OptionalChain { expr, .. } => {

@@ -409,7 +409,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             "[mod-probe] items={} has_try={} has_unwrap_or_return={}",
             items.len(),
             dump.contains("Try("),
-            dump.contains("UnwrapOrReturn(")
+            dump.contains("UnwrapOrReturn")
         );
     }
     // Clear const names, extern functions, and moved variables from previous runs

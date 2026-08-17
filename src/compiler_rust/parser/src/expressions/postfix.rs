@@ -609,7 +609,11 @@ impl<'a> Parser<'a> {
                         }
                         TokenKind::OrReturn => {
                             self.advance();
-                            expr = Expr::UnwrapOrReturn(Box::new(expr));
+                            let default = self.parse_expression()?;
+                            expr = Expr::UnwrapOrReturn {
+                                expr: Box::new(expr),
+                                default: Box::new(default),
+                            };
                         }
                         _ => {
                             return Err(ParseError::syntax_error_with_span(

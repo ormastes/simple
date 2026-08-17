@@ -194,7 +194,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::ExistsCheck(_) => "ExistsCheck",
             Expr::UnwrapOr { .. } => "UnwrapOr",
             Expr::UnwrapElse { .. } => "UnwrapElse",
-            Expr::UnwrapOrReturn(_) => "UnwrapOrReturn",
+            Expr::UnwrapOrReturn { .. } => "UnwrapOrReturn",
             Expr::CastOr { .. } => "CastOr",
             Expr::CastElse { .. } => "CastElse",
             Expr::CastOrReturn { .. } => "CastOrReturn",

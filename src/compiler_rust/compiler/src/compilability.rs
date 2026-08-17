@@ -893,7 +893,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             analyze_expr(fallback_fn, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
-        Expr::UnwrapOrReturn(inner) => {
+        Expr::UnwrapOrReturn { expr: inner, .. } => {
             analyze_expr(inner, reasons, mode);
             add_reason(reasons, FallbackReason::TryOperator);
         }
