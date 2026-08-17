@@ -9,6 +9,7 @@
 use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
 use compiler.semantics.lint.primitive_types.{bare_primitive_types}
+use compiler.tools.fix.rules.impl_.lint_allow.{source_allows_rule, line_is_allowed}
 
 struct PrimitiveApiAuditEntry:
     file: text
@@ -97,9 +98,19 @@ fn check_primitive_api(source: text, file: text) -> [EasyFix]:
     var line_num = 0
     var byte_offset = 0
 
+    # File-scope suppression: `#![allow(primitive_api)]` in the header block.
+    if source_allows_rule(source, "primitive_api"):
+        return fixes
+
     for line in lines:
         line_num = line_num + 1
         val trimmed = line.trim()
+
+        # Item-scope suppression: `@allow(primitive_api)` / `#[allow(...)]`
+        # on the comment/annotation lines directly above this declaration.
+        if line_is_allowed(lines, line_num - 1, "primitive_api"):
+            byte_offset = byte_offset + line.len() + 1
+            continue
 
         val is_extern_fn = trimmed.starts_with("extern fn ")
         val is_pub_fn = trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ") or trimmed.starts_with("pub static fn ")

@@ -1,0 +1,107 @@
+# @cover src/compiler/90.tools/fix/rules/impl_/lint_allow.spl 90%
+# @req REQ-LINT-ALLOW-ATTR-001
+"""
+# `#![allow(RULE)]` / `@allow(RULE)` lint suppression
+
+**Category:** Compiler / Lint
+**Status:** Regression guard
+
+## Purpose and Audience
+
+The `primitive_api` rule header has documented two suppression mechanisms since
+it was written — `@allow(primitive_api)` on an item and `#[allow(raw_unit)]` for
+its neighbour rule — and neither existed. Files under
+`src/lib/nogc_sync_mut/engine/physics/` already carried those annotations as if
+they were load-bearing; the lint ignored them completely, so every run reported
+byte-identical findings with and without the annotation.
+
+An annotation that silently does nothing is worse than no annotation: it teaches
+authors that the debt is handled.
+
+The audience is anyone adding a text-scanning EasyFix lint rule that needs a
+suppression escape.
+
+## Scope and Preconditions
+
+`compiler.tools.fix.rules.impl_.lint_allow` is the shared machinery: file-scope
+`#![allow(...)]` recognised in the header block, and item-scope `@allow(...)` /
+`#[allow(...)]` recognised on the contiguous comment/annotation run directly
+above a declaration.
+
+Honest scope limit, asserted below rather than glossed: because these rules are
+line scanners over raw source, "item scope" reaches exactly one contiguous
+comment block upward. Function-body and module-item scope require the AST rule
+in `compiler.semantics.lint.primitive_api` and are NOT provided here.
+
+See doc/08_tracking/bug/primitive_api_allow_annotation_unimplemented_2026-08-11.md
+"""
+
+use std.spec.*
+use compiler.tools.fix.rules.impl_.lint_allow.{line_has_allow, source_allows_rule, line_is_allowed}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
+
+fn _sample_offender() -> text:
+    # Mixed primitive-in / non-primitive-out: NOT exempt as a pure-math function,
+    # so the two bare-i64 parameters are genuine primitive_api findings.
+    "pub fn selector_binary_field(lsb: i64, width: i64) -> text:\n    str(lsb)\n"
+
+describe "lint allow attributes":
+
+    it "recognises every documented spelling of an allow attribute":
+        step("The Rust-inner spelling used for file scope")
+        expect(line_has_allow("#![allow(primitive_api)]", "primitive_api")).to_be(true)
+
+        step("The Rust-outer spelling used for item scope")
+        expect(line_has_allow("#[allow(raw_unit)]", "raw_unit")).to_be(true)
+
+        step("The Simple annotation spelling, bare and inside a comment")
+        expect(line_has_allow("@allow(primitive_api)", "primitive_api")).to_be(true)
+        expect(line_has_allow("# @allow(primitive_api)", "primitive_api")).to_be(true)
+
+        step("A comma-separated list names more than one rule")
+        expect(line_has_allow("@allow(primitive_api, raw_unit)", "raw_unit")).to_be(true)
+
+        step("A different rule name is NOT suppressed by this line")
+        expect(line_has_allow("@allow(raw_unit)", "primitive_api")).to_be(false)
+
+    it "suppresses the whole file from a header-block #![allow]":
+        step("Without the annotation the offending signature is reported")
+        val bare = check_primitive_api(_sample_offender(), "model.spl")
+        expect(bare.len()).to_be_greater_than(0)
+
+        step("With #![allow(primitive_api)] as the first line, nothing is reported")
+        val allowed = check_primitive_api("#![allow(primitive_api)]\n" + _sample_offender(), "model.spl")
+        expect(allowed.len()).to_equal(0)
+
+        step("An unrelated rule name does not suppress this one")
+        val other = check_primitive_api("#![allow(raw_unit)]\n" + _sample_offender(), "model.spl")
+        expect(other.len()).to_equal(bare.len())
+
+    it "ignores a #![allow] that appears after code has started":
+        step("File scope means the HEADER block, not anywhere in the file")
+        val src = _sample_offender() + "#![allow(primitive_api)]\n"
+        expect(check_primitive_api(src, "model.spl").len()).to_be_greater_than(0)
+
+    it "suppresses a single declaration from an @allow directly above it":
+        step("Annotate only the offending declaration")
+        val src = "# @allow(primitive_api)\n" + _sample_offender()
+        expect(check_primitive_api(src, "model.spl").len()).to_equal(0)
+
+        step("A second, unannotated declaration further down is still reported")
+        val two = "# @allow(primitive_api)\n" + _sample_offender() + "\npub fn evidence_node_at(order: i64) -> text:\n    str(order)\n"
+        expect(check_primitive_api(two, "model.spl").len()).to_be_greater_than(0)
+
+    it "does not let an @allow reach across intervening code":
+        step("A blank line is transparent, but a code line ends the annotation run")
+        val lines = ["@allow(primitive_api)", "", "pub fn f(a: i64) -> i64:"]
+        expect(line_is_allowed(lines, 2, "primitive_api")).to_be(true)
+
+        val broken = ["@allow(primitive_api)", "pub fn g(b: i64) -> i64:", "pub fn f(a: i64) -> i64:"]
+        expect(line_is_allowed(broken, 2, "primitive_api")).to_be(false)
+
+    it "records the honest scope limit of a text-scanning rule":
+        step("File-scope detection reads only the leading comment/annotation block")
+        expect(source_allows_rule("# header comment\n#![allow(primitive_api)]\n\npub fn f(a: i64) -> i64:\n", "primitive_api")).to_be(true)
+
+        step("It deliberately reports false once real code has begun")
+        expect(source_allows_rule("pub fn f(a: i64) -> i64:\n#![allow(primitive_api)]\n", "primitive_api")).to_be(false)

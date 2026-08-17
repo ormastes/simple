@@ -1,0 +1,90 @@
+# Shared allow-attribute machinery for the text-scanning EasyFix lint rules.
+#
+# Two suppression forms are recognised, matching what the rule headers have
+# documented (but never implemented) since 2026-08-11:
+#
+#   #![allow(RULE)]        file scope   -- anywhere in the file's header block
+#   @allow(RULE)           item scope   -- on the line(s) directly above an item
+#   #[allow(RULE)]         item scope   -- ditto, Rust-attribute spelling
+#
+# `RULE` is the bare lint code, e.g. `primitive_api` or `raw_unit`. A comma
+# separated list is accepted: `@allow(primitive_api, raw_unit)`.
+#
+# Scope note (deliberate, not a shortcut): these rules are line scanners over
+# raw source, so "item scope" means the contiguous run of comment/annotation
+# lines immediately preceding the flagged line. That is exactly as much scope as
+# a text scanner can honestly resolve; a function-body or module-item scope
+# needs the AST rule (`compiler.semantics.lint.primitive_api`) and is NOT
+# claimed here.
+#
+# See doc/08_tracking/bug/primitive_api_allow_annotation_unimplemented_2026-08-11.md
+
+# True when `text` contains an allow-attribute naming `rule`.
+# Matches `allow(` ... `)` and checks the comma-separated names inside.
+fn _allow_names_match(fragment: text, rule: text) -> bool:
+    var i = 0
+    val names = fragment.split(",")
+    while i < names.len():
+        if names[i].trim() == rule:
+            return true
+        i = i + 1
+    false
+
+fn line_has_allow(line: text, rule: text) -> bool:
+    val t = line.trim()
+    var marker = ""
+    if t.starts_with("#![allow(") :
+        marker = "#![allow("
+    elif t.starts_with("#[allow("):
+        marker = "#[allow("
+    elif t.starts_with("@allow("):
+        marker = "@allow("
+    elif t.starts_with("# @allow("):
+        marker = "# @allow("
+    elif t.starts_with("#!allow("):
+        marker = "#!allow("
+    else:
+        return false
+    val rest = t.substring(marker.len(), t.len())
+    val close = rest.index_of(")")
+    if close < 0:
+        return false
+    _allow_names_match(rest.substring(0, close), rule)
+
+fn _is_file_scope_allow(line: text) -> bool:
+    val t = line.trim()
+    t.starts_with("#![allow(") or t.starts_with("#!allow(")
+
+# File-scope suppression: a `#![allow(RULE)]` line anywhere in the leading
+# header block (comments, annotations and blank lines) of the file.
+fn source_allows_rule(source: text, rule: text) -> bool:
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val t = lines[i].trim()
+        if _is_file_scope_allow(t) and line_has_allow(t, rule):
+            return true
+        # The header block ends at the first line that is neither blank nor a
+        # comment/annotation. Everything after that is code.
+        if t != "" and not t.starts_with("#") and not t.starts_with("@"):
+            return false
+        i = i + 1
+    false
+
+# Item-scope suppression: walk backwards from `index` over the contiguous run of
+# comment/annotation lines and report whether any of them allows `rule`.
+fn line_is_allowed(lines: [text], index: i64, rule: text) -> bool:
+    var i = index - 1
+    while i >= 0:
+        val t = lines[i].trim()
+        if t == "":
+            i = i - 1
+            continue
+        if not t.starts_with("#") and not t.starts_with("@"):
+            return false
+        if line_has_allow(t, rule):
+            return true
+        i = i - 1
+    false
+
+export line_has_allow, source_allows_rule, line_is_allowed
