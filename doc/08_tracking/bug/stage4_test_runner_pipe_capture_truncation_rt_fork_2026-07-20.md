@@ -396,3 +396,54 @@ index 41cc9536cea..e310e0170b4 100644
      }
  
 ```
+
+---
+
+## 2026-08-17 (worker W7) — runtime fix present; the CONSUMER was the live half
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed). No bootstrap.
+
+**The `runtime_fork.c` fix is in current source** and is no longer "written but
+unlanded": `FORK_EXIT_GRACE_POLLS = 40` at line 321, break-site (B) gone, the
+grace counter at 368-378. End-to-end confirmation on a stage-4 binary still
+requires `--full-bootstrap` and stays **BLOCKED-NEEDS-BOOTSTRAP** (a live
+bootstrap owns this machine).
+
+### Truncation is now bounded and LOUD — the threshold, quantified
+
+`FORK_CAPTURE_LIMIT` is **4 MiB** (line 74), split `FORK_CAPTURE_HEAD` 2 MiB +
+`FORK_CAPTURE_TAIL` 2 MiB. Beyond that the **MIDDLE** is dropped and
+`capture_finish` splices in `[output truncated: N bytes omitted]` (line 146).
+So it is no longer *silent* — but it is still lossy, and the loss lands exactly
+where per-example lines live.
+
+### The live defect: nobody in `src/lib` read the marker
+
+`src/app/test_runner_new/test_runner_single.spl:391` already tests for
+`[output truncated:` and refuses to trust the scraped counts. The **stdlib**
+mapper `make_result_from_output`
+(`src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl`) did not — it
+scraped `Passed:`/`Failed:` out of a capture that may have lost its middle and
+reported the survivors as the file's result. A file whose output exceeds 4 MiB
+was therefore reported GREEN with an under-counted example total: the original
+symptom of this row, reachable today, on the stdlib path.
+
+Fixed: the mapper now fails closed on the marker. Keyed on the literal
+`[output truncated:` (colon included) so prose mentioning truncation cannot red
+a file.
+
+Specs: `test/01_unit/lib/test_runner/truncated_capture_fail_closed_spec.spl`
+(3 reproducing + 4 detection examples, incl. stderr-side marker, varying
+omitted-byte count, and a must-not-fire prose case).
+**Before: `Results: 7 total, 2 passed, 5 failed`.
+After: `Results: 7 total, 7 passed, 0 failed`.**
+Ablation: restoring the pre-fix file reproduces the 5 failures exactly.
+
+Regression: `crash_classification_spec.spl` reports `3 total, 2 passed, 1
+failed` **with and without** this change — pre-existing, not introduced.
+
+### Residual, stated not papered over
+
+With `timeout_ms > 0` the grace counter is skipped (line 368) and a descendant
+holding an inherited pipe fd makes the loop spin to the full deadline rather
+than break early. That is a latency cost, not data loss, and is unchanged here.
