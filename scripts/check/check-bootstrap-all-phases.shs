@@ -1,0 +1,342 @@
+#!/bin/sh
+# check-bootstrap-all-phases.shs — umbrella aggregator for per-phase bootstrap
+# verification.
+#
+# WHY THIS EXISTS
+# ---------------
+# The full bootstrap is a multi-phase pipeline (seed -> stage2 -> stage3 ->
+# stage4 -> deploy). Each phase has, or should have, its own gate. Until now the
+# gates were scattered: some invoked from inside
+# scripts/bootstrap/bootstrap-from-scratch.sh, some only ever run by hand, and
+# several never run at all. There was no single command that answered "is EVERY
+# phase of the bootstrap covered by a gate, and is every one of those gates
+# green?" — so a phase could silently pass unverified. This script is that
+# command, and doc/07_guide/tooling/bootstrap_phase_verification.md is its map.
+#
+# WHAT IT DOES AND DOES NOT DO
+# ----------------------------
+# It does NOT run a bootstrap. A bootstrap takes hours and produces artifacts;
+# an umbrella that required one could never be run routinely, and an umbrella
+# that is never run is not a gate. Instead each registry entry declares a MODE:
+#
+#   run     — the gate is source-static (greps, `sh -n`, its own --selftest) and
+#             is EXECUTED here. Its exit status is the verdict.
+#   static  — the gate needs a built artifact (a stage binary, a provenance
+#             receipt) that does not exist outside a real bootstrap run. It
+#             cannot be executed here, so what IS verified is that the gate
+#             exists, is executable-by-sh, and PARSES as POSIX shell (`sh -n`).
+#             That is deliberately weaker than running it, and the doc says so.
+#             It still catches the failure mode that matters most for an
+#             umbrella: a phase whose gate script was deleted, renamed, or left
+#             syntactically broken, which would make the phase's gate a silent
+#             no-op at real bootstrap time.
+#
+# A `static` entry is NEVER reported as if the gate had run. The verdict line
+# reports the two counts separately.
+#
+# FAIL-CLOSED AND NON-VACUOUS
+# ---------------------------
+#   * 0 gates evaluated  => ERROR exit 2. A run that checked nothing is never a
+#     pass. This is the single most important property: the repo has a
+#     documented incident (fourth_tree_wipe_6f86ff32a7d) where a guard was
+#     silently downgraded to a no-op and a tree wipe went undetected.
+#   * A registry entry whose script does not exist => ERROR exit 2, never a
+#     skip. "The gate isn't written yet" is exactly the condition this umbrella
+#     was built to surface.
+#   * Every gate's exit status is read DIRECTLY into a variable on the line
+#     after the invocation. Never through a pipe — a pipeline's `$?` is the LAST
+#     component's status, which has produced false greens in this repo before.
+#
+# VERDICT CONTRACT (last line of stdout, always):
+#   PASS  — <n> gate(s) checked, ...           exit 0   (n > 0 always)
+#   FAIL  — ...                                exit 1
+#   ERROR — nothing was checked                exit 2
+#
+# --selftest runs before every scan and is fatal.
+
+set -u
+
+SCRIPT_PATH=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+
+usage() {
+    cat <<'EOF'
+usage: check-bootstrap-all-phases.shs [--selftest-only] [--registry FILE] [--list]
+
+  (no args)         run --selftest, then evaluate every bootstrap phase gate
+  --selftest-only   run the fixture selftest and stop
+  --registry FILE   evaluate an alternate registry (used by --selftest)
+  --list            print the phase/gate registry and stop
+  --no-selftest     internal: skip the selftest (used by fixture invocations)
+
+Registry line format (# and blank lines ignored):
+  <mode>|<phase>|<script-path-relative-to-repo-root>|<args>
+  mode is `run` or `static`.
+EOF
+}
+
+# --------------------------------------------------------------------------
+# The registry. ORDER IS THE BOOTSTRAP ORDER — phase 0 first, deploy last.
+# Keep in sync with doc/07_guide/tooling/bootstrap_phase_verification.md.
+# --------------------------------------------------------------------------
+default_registry() {
+    cat <<'EOF'
+# mode  | phase                                | script                                                  | args
+run|p0-preflight-portability|scripts/check/check-bootstrap-portability.shs|
+run|p0-preflight-cache-scope|scripts/check/check-cache-scope-ownership.shs|--selftest
+static|p0-preflight-cache-policy|scripts/bootstrap/bootstrap-cache-policy.shs|
+static|p1-seed-reason-receipt|scripts/check/check-bootstrap-reason-receipt-guard.shs|
+static|p1-seed-planner-admission|scripts/check/verify-bootstrap-planner-admission-bound.shs|
+static|p2-stage2-struct-receiver|scripts/check/check-bootstrap-stage2-struct-receiver.shs|
+static|p2-stage2-nonentry-module-global|scripts/check/check-bootstrap-nonentry-module-global.shs|
+static|p3-stage3-selfverify|scripts/check/check-bootstrap-stage3-selfverify.shs|
+static|p3-stage3-diagnostic-sweep|scripts/check/bootstrap-diagnostic-sweep.shs|
+static|p4-stage4-selfverify|scripts/check/check-bootstrap-stage4-selfverify.shs|
+static|p4-stage4-sspec|scripts/check/check-post-bootstrap-stage4-sspec.shs|
+static|p4-stage4-essential-tools|scripts/check/check-bootstrap-essential-tools-smoke.shs|
+static|p5-deploy-platform-handoff|scripts/check/check-bootstrap-platform-handoff-readiness.shs|
+run|px-os-collect-parent|scripts/check/check-bootstrap-user-collect-parent.shs|
+run|px-os-reap-root-owner|scripts/check/check-x86-64-bootstrap-reap-root-owner.shs|
+EOF
+}
+
+# --------------------------------------------------------------------------
+# Core evaluation. Prints one line per gate, then sets EV_* globals.
+#   EV_TOTAL  gates evaluated (run + static)
+#   EV_RUN    gates actually executed
+#   EV_STATIC gates structurally verified only
+#   EV_FAIL   failing gate names (space separated)
+#   EV_ERROR  error gate names (missing script / malformed entry)
+# --------------------------------------------------------------------------
+evaluate_registry() {
+    _reg=$1
+    _root=$2
+    EV_TOTAL=0
+    EV_RUN=0
+    EV_STATIC=0
+    EV_FAIL=
+    EV_ERROR=
+
+    while IFS= read -r _line; do
+        case "$_line" in
+            ''|'#'*) continue ;;
+        esac
+        _mode=$(printf '%s\n' "$_line" | cut -d'|' -f1)
+        _phase=$(printf '%s\n' "$_line" | cut -d'|' -f2)
+        _script=$(printf '%s\n' "$_line" | cut -d'|' -f3)
+        _args=$(printf '%s\n' "$_line" | cut -d'|' -f4-)
+
+        if [ -z "$_phase" ] || [ -z "$_script" ]; then
+            EV_TOTAL=$((EV_TOTAL + 1))
+            EV_ERROR="$EV_ERROR $_phase(malformed-entry)"
+            echo "ERROR  $_phase: malformed registry entry"
+            continue
+        fi
+
+        EV_TOTAL=$((EV_TOTAL + 1))
+        _abs=$_root/$_script
+
+        # Missing gate script is an ERROR, never a skip.
+        if [ ! -f "$_abs" ]; then
+            EV_ERROR="$EV_ERROR $_phase(missing:$_script)"
+            echo "ERROR  $_phase: gate script does not exist: $_script"
+            continue
+        fi
+
+        case "$_mode" in
+            run)
+                EV_RUN=$((EV_RUN + 1))
+                # Exit status read DIRECTLY into a variable. Never via a pipe.
+                sh "$_abs" $_args >/dev/null 2>&1
+                _rc=$?
+                if [ "$_rc" -eq 0 ]; then
+                    echo "PASS   $_phase: $_script (ran, exit 0)"
+                else
+                    EV_FAIL="$EV_FAIL $_phase(exit=$_rc)"
+                    echo "FAIL   $_phase: $_script exited $_rc"
+                fi
+                ;;
+            static)
+                EV_STATIC=$((EV_STATIC + 1))
+                sh -n "$_abs" >/dev/null 2>&1
+                _rc=$?
+                if [ "$_rc" -eq 0 ]; then
+                    echo "PRESENT $_phase: $_script (exists, parses; needs bootstrap artifacts to run)"
+                else
+                    EV_FAIL="$EV_FAIL $_phase(parse-error)"
+                    echo "FAIL   $_phase: $_script is not parseable POSIX shell (sh -n exit $_rc)"
+                fi
+                ;;
+            *)
+                EV_ERROR="$EV_ERROR $_phase(bad-mode:$_mode)"
+                echo "ERROR  $_phase: unknown mode '$_mode'"
+                ;;
+        esac
+    done <"$_reg"
+}
+
+emit_verdict() {
+    if [ "$EV_TOTAL" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ -n "$EV_ERROR" ]; then
+        echo "ERROR — nothing was checked reliably:${EV_ERROR} (registry references a gate that is absent or malformed)"
+        return 2
+    fi
+    if [ -n "$EV_FAIL" ]; then
+        echo "FAIL — $EV_TOTAL gate(s) checked ($EV_RUN executed, $EV_STATIC structurally verified), failing:${EV_FAIL}"
+        return 1
+    fi
+    echo "PASS — $EV_TOTAL gate(s) checked, $EV_RUN executed green, $EV_STATIC present and parseable (artifact-dependent, not executed here)"
+    return 0
+}
+
+# --------------------------------------------------------------------------
+# --selftest: fixtures. Fatal — a failing fixture aborts before any real scan.
+# --------------------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-all-phases-selftest.XXXXXX") || return 1
+    _fail=0
+    _n=0
+
+    mkdir -p "$_t/scripts/check"
+    printf '#!/bin/sh\nexit 0\n' >"$_t/scripts/check/green.shs"
+    printf '#!/bin/sh\nexit 1\n' >"$_t/scripts/check/red.shs"
+    printf '#!/bin/sh\nif [ then\n' >"$_t/scripts/check/broken.shs"
+    printf '#!/bin/sh\nexit 0\n' >"$_t/scripts/check/artifact.shs"
+
+    _case() { # name expected_exit expected_substring registry_content
+        _n=$((_n + 1))
+        _name=$1; _exp=$2; _sub=$3; _content=$4
+        printf '%s\n' "$_content" >"$_t/reg.txt"
+        _out=$(sh "$SCRIPT_PATH" --no-selftest --registry "$_t/reg.txt" --root "$_t" 2>&1)
+        _rc=$?
+        _last=$(printf '%s\n' "$_out" | tail -n 1)
+        if [ "$_rc" -ne "$_exp" ]; then
+            echo "selftest FAIL [$_name]: expected exit $_exp got $_rc (verdict: $_last)" >&2
+            _fail=$((_fail + 1))
+            return
+        fi
+        case "$_last" in
+            *"$_sub"*) : ;;
+            *)
+                echo "selftest FAIL [$_name]: verdict line missing '$_sub': $_last" >&2
+                _fail=$((_fail + 1))
+                return
+                ;;
+        esac
+        echo "selftest ok [$_name]"
+    }
+
+    # 1. must-PASS: a single executable green gate.
+    _case must-pass 0 'PASS — 1 gate(s) checked' \
+        'run|f-green|scripts/check/green.shs|'
+
+    # 2. must-FAIL: a gate that exits non-zero must fail the umbrella.
+    _case must-fail 1 'FAIL — 1 gate(s) checked' \
+        'run|f-red|scripts/check/red.shs|'
+
+    # 3. vacuous: an empty registry must be ERROR, never a pass.
+    _case vacuous 2 'ERROR — nothing was checked' \
+        '# only a comment, no gates'
+
+    # 4. missing gate script must be ERROR, not a silent skip.
+    _case missing-gate 2 'ERROR — nothing was checked reliably' \
+        'static|f-absent|scripts/check/does-not-exist.shs|'
+
+    # 5. an artifact-dependent gate that exists and parses is PRESENT -> PASS,
+    #    and must be counted as structurally verified, NOT as executed.
+    _case static-present 0 '1 executed green, 1 present and parseable' \
+        'run|f-green|scripts/check/green.shs|
+static|f-art|scripts/check/artifact.shs|'
+
+    # 6. an artifact-dependent gate that does NOT parse must FAIL, because a
+    #    syntactically broken gate is a silent no-op at real bootstrap time.
+    _case static-broken 1 'FAIL — 1 gate(s) checked' \
+        'static|f-broken|scripts/check/broken.shs|'
+
+    # 7. one green + one red must FAIL (no partial-credit pass).
+    _case mixed 1 'FAIL — 2 gate(s) checked' \
+        'run|f-green|scripts/check/green.shs|
+run|f-red|scripts/check/red.shs|'
+
+    # 8. a malformed registry line is an ERROR, not ignored.
+    _case malformed 2 'ERROR — nothing was checked reliably' \
+        'run||scripts/check/green.shs|'
+
+    rm -rf -- "$_t"
+    if [ "$_fail" -ne 0 ]; then
+        echo "selftest: $_fail of $_n fixture(s) FAILED — aborting" >&2
+        return 1
+    fi
+    if [ "$_n" -eq 0 ]; then
+        echo "selftest: no fixtures ran — aborting" >&2
+        return 1
+    fi
+    echo "selftest: $_n/$_n fixtures passed"
+    return 0
+}
+
+# --------------------------------------------------------------------------
+main() {
+    do_selftest=1
+    selftest_only=0
+    registry_file=
+    list_only=0
+    root=$REPO_ROOT
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --selftest|--selftest-only) selftest_only=1 ;;
+            --no-selftest) do_selftest=0 ;;
+            --registry) shift; registry_file=${1:-} ;;
+            --root) shift; root=${1:-} ;;
+            --list) list_only=1 ;;
+            -h|--help) usage; exit 0 ;;
+            *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+        esac
+        shift
+    done
+
+    if [ "$list_only" -eq 1 ]; then
+        default_registry
+        exit 0
+    fi
+
+    if [ "$selftest_only" -eq 1 ]; then
+        selftest || exit 1
+        exit 0
+    fi
+
+    if [ "$do_selftest" -eq 1 ]; then
+        selftest || {
+            echo "ERROR — nothing was checked"
+            exit 2
+        }
+    fi
+
+    tmp_reg=
+    if [ -n "$registry_file" ]; then
+        reg=$registry_file
+        if [ ! -f "$reg" ]; then
+            echo "ERROR — nothing was checked"
+            exit 2
+        fi
+    else
+        tmp_reg=$(mktemp "${TMPDIR:-/tmp}/bootstrap-phase-registry.XXXXXX") || {
+            echo "ERROR — nothing was checked"
+            exit 2
+        }
+        default_registry >"$tmp_reg"
+        reg=$tmp_reg
+    fi
+
+    evaluate_registry "$reg" "$root"
+    [ -n "$tmp_reg" ] && rm -f -- "$tmp_reg"
+
+    emit_verdict
+    exit $?
+}
+
+main "$@"

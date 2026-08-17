@@ -118,6 +118,37 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
 
+## Stage-3 self-verification gate
+
+`sh scripts/check/check-bootstrap-stage3-selfverify.shs` (exit 0 = safe) is the
+consumer-side gate for a Stage-3 output. It never starts a bootstrap: it reads
+`build/bootstrap/stage3/<platform>/provenance.env`, **rehashes the live Stage-2
+and Stage-3 binaries and prints their path/size/sha256 as a receipt** (success is
+never inferred from an exit code), asserts the self-host chain (the Stage-3
+command transcript's `executable:` must be `stage2_path`), asserts both stages
+compiled the same `--entry`, and then executes Stage 3: `--version` must succeed
+without a Rust-seed banner, `lint` must be **rejected** (Stage 3 is the minimal
+bootstrap entry and has no full CLI — asserting the refusal stops a green verdict
+being read as full-CLI evidence), and a trivial program must compile and run
+(`--no-deep` to skip).
+
+**Fixpoint:** stage2 and stage3 are emitted by *different* producers (Rust seed
+vs Stage-2 compiler), so byte-identity between them is not guaranteed and is not
+asserted; byte-*equality* would mean `cp stage2 stage3`, so the gate enforces
+inequality plus the producer chain. Strict fixpoint (stage3 recompiling its own
+entry reproduces stage3) is asserted only when the artifact is supplied via
+`--fixpoint-binary`. `--full-provenance` delegates to the existing
+`bootstrap_stage3_verify_manifest` authority rather than duplicating it.
+
+Same verdict convention as the pre-push guards: `PASS — <n> assertion(s)
+checked, ...` exit 0 / `FAIL — ...` exit 1 / `ERROR — nothing was checked` exit
+2; a run that checked 0 assertions, or a host with no Stage-3 artifact, is ERROR
+and never a pass. `--selftest` runs before every scan and is fatal (7 fixtures:
+healthy must-PASS; tampered-bytes, stage3-is-a-copy-of-stage2, dead binary,
+Rust-seed banner, and `lint`-accepted must-FAIL; empty fixture must force
+ERROR). Contract, verdict table, and overlap survey:
+`doc/07_guide/compiler/bootstrap_stage3_selfverify_gate.md`.
+
 ## Verification tiering — match the gate to the change
 
 The authoritative feature-development policy is
