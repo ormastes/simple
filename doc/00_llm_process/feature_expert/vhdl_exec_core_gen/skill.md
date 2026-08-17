@@ -144,6 +144,29 @@ After any change to the generator, the aspect, the goldens, or the pin manifest,
 refresh this skill with the new gate output and evidence links — and re-run
 `check-vhdl-golden-match.shs --require-generated` before claiming parity.
 
+## VHDL tool process-facade acceptance
+
+The generated-core lane ultimately relies on the shared GHDL/Yosys wrapper
+boundary. Its canonical system acceptance is
+`test/03_system/feature/usage/vhdl_spec.spl`, requirement
+`REQ-VHDL-SFFI-001`, with the operator manual at
+`doc/06_spec/03_system/feature/usage/vhdl_spec.md` and plan at
+`doc/03_plan/sys_test/vhdl_process_facade.md`.
+
+Keep this boundary distinct from golden parity: a generator golden-match PASS
+does not prove process capture, and a process-facade PASS does not prove RTL
+generation. The process spec must retain three visible `step("...")` flows for
+positive, edge, and error behavior. Missing `SIMPLE_VHDL_TEST=1`, an admitted
+full CLI, GHDL/Yosys, a per-file verdict, docgen `0 stubs`, or a blocker-free
+sspec-maintain result is FAIL/`TEST_BLOCKED`, never a skip PASS. Never use the
+Rust seed, an unadmitted runtime, or the earlier native fixture as replacement
+SSpec evidence.
+
+As of 2026-08-16 runtime/docgen/maintain are `TEST_BLOCKED`: the admitted
+recovery Stage2 exposes only `compile` and `native-build`. Resume with the exact
+commands in the test plan when a qualified full CLI is admitted, and update
+this section plus `.spipe/vhdl-gen-backend/state.md` only from retained output.
+
 ## Compiler HWIR boundary
 
 This feature expert owns `src/lib/hardware/vhdl_gen`, not compiler Gen2 HWIR.

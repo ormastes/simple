@@ -1,0 +1,99 @@
+"""Concrete SOSIX positioned-I/O bridge to kernel-owned FAT32 file objects.
+
+This module is intentionally a leaf rather than an ``os.sosix.fs`` aggregate
+export.  The SOSIX service owns the abstract positioned backend contract; the
+kernel composition root may opt into this FAT32 implementation without making
+the kernel FAT32 owner depend on SOSIX.
+"""
+
+use os.kernel.errno.{EBADF, EBUSY, EFBIG, EINVAL, EIO, ENOSPC, ENOSYS}
+use os.kernel.fs.fat32_fd_table.{
+    fat32_fd_read_object_at_into,
+    fat32_fd_write_object_at_from
+}
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+pub val SOSIX_FAT32_POSITIONED_MAX_LENGTH_V1: u64 = 0x7fffffffu64
+
+pub fn sosix_fat32_positioned_error_reason_v1(status: i32) -> text:
+    """Map the kernel's typed errno result to a stable SOSIX diagnostic."""
+    if status == -EBADF: return "fat32-positioned-file-object-invalid"
+    if status == -ENOSYS: return "fat32-positioned-mount-unavailable"
+    if status == -ENOSPC: return "fat32-positioned-no-space"
+    if status == -EFBIG: return "fat32-positioned-file-too-large"
+    if status == -EBUSY: return "fat32-positioned-busy"
+    if status == -EINVAL: return "fat32-positioned-invalid-argument"
+    if status == -EIO: return "fat32-positioned-io-error"
+    "fat32-positioned-unknown-error"
+
+fn _range_overflows(offset: u64, length: u64) -> bool:
+    offset + length < offset
+
+fn _owned_copy(bytes: [u8]) -> [u8]:
+    var copied: [u8] = []
+    var i = 0i32
+    while i < bytes.len():
+        copied.push(bytes[i])
+        i = i + 1
+    copied
+
+fn _owned_zeroes(length: i32) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0i32
+    while i < length:
+        bytes.push(0u8)
+        i = i + 1
+    bytes
+
+fn _owned_prefix(bytes: [u8], length: u64) -> [u8]:
+    var copied: [u8] = []
+    var i = 0u64
+    while i < length:
+        copied.push(bytes[i.to_i32()])
+        i = i + 1
+    copied
+
+pub class SosixFat32PositionedVfsBackendV1:
+    """Cursor-independent FAT32 implementation of the SOSIX VFS contract."""
+
+impl SosixPositionedVfsBackendV1 for SosixFat32PositionedVfsBackendV1:
+    fn positioned_io_available() -> bool:
+        true
+
+    fn read_at(
+        file_object_id: u64, offset: u64, length: u64
+    ) -> Result<[u8], text>:
+        if length > SOSIX_FAT32_POSITIONED_MAX_LENGTH_V1:
+            return Err("fat32-positioned-length-overflow")
+        if _range_overflows(offset, length):
+            return Err("fat32-positioned-range-overflow")
+
+        var owned = _owned_zeroes(length.to_i32())
+        val read_result = fat32_fd_read_object_at_into(file_object_id, offset, owned)
+        if read_result.is_err():
+            return Err(sosix_fat32_positioned_error_reason_v1(read_result.unwrap_err()))
+        val transferred = read_result.unwrap()
+        if transferred > length or transferred > owned.len().to_u64():
+            return Err("fat32-positioned-read-count-invalid")
+        Ok(_owned_prefix(owned, transferred))
+
+    me fn write_at(
+        file_object_id: u64, offset: u64, data: [u8]
+    ) -> Result<u64, text>:
+        val length = data.len().to_u64()
+        if length > SOSIX_FAT32_POSITIONED_MAX_LENGTH_V1:
+            return Err("fat32-positioned-length-overflow")
+        if _range_overflows(offset, length):
+            return Err("fat32-positioned-range-overflow")
+
+        val owned = _owned_copy(data)
+        val write_result = fat32_fd_write_object_at_from(file_object_id, offset, owned)
+        if write_result.is_err():
+            return Err(sosix_fat32_positioned_error_reason_v1(write_result.unwrap_err()))
+        val transferred = write_result.unwrap()
+        if transferred > owned.len().to_u64():
+            return Err("fat32-positioned-write-count-invalid")
+        Ok(transferred)
+
+export SOSIX_FAT32_POSITIONED_MAX_LENGTH_V1
+export SosixFat32PositionedVfsBackendV1, sosix_fat32_positioned_error_reason_v1

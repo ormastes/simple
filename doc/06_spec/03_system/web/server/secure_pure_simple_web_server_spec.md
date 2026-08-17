@@ -2,52 +2,81 @@
 
 Source: `test/03_system/web/server/secure_pure_simple_web_server_spec.spl`
 
-## Primary operator flow
+## Purpose and audience
 
-1. **Bind the production listener.** Construct `SecureServerPolicy.production`,
-   validate every bound, and confirm plaintext development mode is disabled.
-2. **Reject an unsafe web request before dispatch.** Reject encoded traversal,
-   ambiguous `Content-Length`, every unsupported transfer coding, and duplicate
-   singleton security headers before the router can invoke application code.
-   The native line API's 4096-byte truncation boundary is explicit evidence.
-3. Start TLS only with present, structurally valid certificate and private-key
-   material. Missing or invalid material is a startup error. Plaintext requires
-   an explicit capability passed to both `SecureServerPolicy.plaintext_dev`
-   and `start_plaintext`.
-4. Attach the socket peer address to the request before routing and apply
-   default CSP, nosniff, frame-denial, and referrer headers before writing.
-5. A TLS accept failure owns and closes its TCP stream. GAP-TLS-3 remains the
-   exact blocker to encrypted application traffic; no plaintext fallback is
-   accepted as production evidence. A failed connection with empty ALPN is
-   classified as neither HTTP/1 nor HTTP/2.
-6. A shared atomic admission owner claims before thread spawn. Exactly the
-   configured connection boundary is admitted; boundary+1 closes before thread
-   spawn, while every admitted handler releases its slot
-   on completion.
+This manual is for operators and reviewers validating REQ-002 response framing
+through the canonical synchronous Pure-Simple web server. It covers positive,
+edge, and error behavior at the serializer and over a real loopback TCP
+connection. It does not claim production TLS completion.
 
-## Absolute oracles
+## Preconditions
 
-Runtime status: **WARN: spec runtime not executed; compilation attempted and
-failed.** The temporary staged bootstrap binary
-identified successfully but exposes neither `check` nor `test`; both one-time
-focused attempts have only an unverified operator observation of `unknown
-command`. Static scenarios below remain
-designed evidence, not credited runtime evidence.
+- Use the exact current-source Stage-4 full CLI whose adjacent provenance file
+  passes the repository admission contract.
+- Never substitute the Rust seed or a Stage-2/3 bootstrap compiler.
+- Run from the repository root with loopback bind/connect available.
+- Treat a missing admitted CLI as `TEST_BLOCKED`, never PASS or skip.
 
-An unverified operator observation says the final one-shot LLVM `native-build`
-route also did not execute this spec: it stopped in HIR because the native compiler could not infer the `ANY` field
-`error?` used by Result assertions. It produced no executable, and no retry or
-flag variant was permitted. This is blocker evidence, not a passing oracle.
+## Primary operator workflow
 
-- Production policy validation returns the empty error string and retains one
-  request per connection with finite read/write bounds.
-- Unsafe traversal is `false`; malformed framing returns its exact rejection
-  category; invalid TLS material returns a non-empty error.
-- No executable spec is stored under `doc/06_spec`; a static author scan found
-  no placeholder stubs. No maintained-manual scorecard is claimed.
-- Plaintext startup requires both an explicit development policy and a
-  non-empty `PlaintextDevelopmentCapability` audit reason.
-- The default production `start()` returns an error and never silently opens a
-  plaintext listener; loopback callers handle their typed startup result.
-- A two-slot admission fixture accepts two, rejects the third, releases to one,
-  and accepts a replacement through the same shared atomic handle.
+1. **Construct one valid application response.** Add one safe trace header.
+2. **Serialize through the server-owned framing writer.** Require one canonical
+   length, forced close, no transfer coding, the trace header, and the complete
+   body.
+3. **Construct conflicting application response framing.** Supply mixed-case
+   and whitespace-bypass framing fields, an invalid token name, control-bearing
+   values, and an unsafe attempted security-header override.
+4. **Reject overrides, injection, and incomplete framing.** Prove every hostile
+   value is absent and the canonical header block remains singular.
+5. **Bind the production listener.** Use an ephemeral loopback listener and a
+   real client/server stream pair.
+6. **Route one request to the hostile application handler.** Traverse request
+   parsing, routing, default security headers, bounded `write_all`, and close.
+7. **Verify the complete server-owned wire response.** Read through EOF and
+   require the exact body plus the safe frame-denial default.
+
+## Scenario narratives and absolute oracles
+
+- **Positive:** a safe application header survives beside exactly one
+  `Content-Length: 2`, one `Connection: close`, no `Transfer-Encoding`, and
+  body `ok`.
+- **Edge:** case variants, leading/trailing whitespace, colon-bearing names,
+  tabs, CR/LF injection, and conflicting framing values are all absent.
+- **Error/live:** a hostile routed handler cannot suppress the safe
+  `X-Frame-Options: DENY` default or change the complete loopback wire body.
+- Existing request-framing scenarios also reject traversal, duplicate lengths,
+  unsupported coding, singleton-security conflicts, and malformed request
+  lines before dispatch.
+
+## REQ traceability
+
+| Requirement | Executable source | Positive | Edge | Error/live |
+|---|---|---|---|---|
+| REQ-002 / AC-2 | `test/03_system/web/server/secure_pure_simple_web_server_spec.spl` | valid application header | conflicting/control-bearing fields | real loopback hostile handler |
+
+## Quality scorecard
+
+Status: **TEST_BLOCKED**. Static quality and repository guards are recorded in
+the lane state. Runtime execution, `sspec-maintain scan`, and `spipe-docgen`
+were not run because no provenance-admitted Stage-4 CLI is available. This
+Markdown file is a synchronized manual, not a generated zero-stub receipt.
+
+## Findings and remediation
+
+The repaired writer is the sole response-framing owner. If a future run emits
+an application framing field, duplicate canonical field, injected line, missing
+security default, partial body, nonzero test exit, or missing scenario count,
+the lane fails. Repair the owning writer or spec; do not weaken the oracle.
+
+## Evidence and provenance
+
+Retain the admitted CLI absolute path, SHA-256, adjacent provenance path,
+source revision, exact test command, exit status, scenario totals, maintenance
+scorecard, and docgen `0 stubs` receipt. The canonical command order is in
+`doc/03_plan/sys_test/secure_pure_simple_servers.md`.
+
+## Compatibility and limitations
+
+GAP-TLS-3 still blocks encrypted application traffic. Loopback plaintext in
+this spec proves the canonical parser/router/writer socket path only; it is not
+production HTTPS evidence. No executable `.spl` belongs under `doc/06_spec`.

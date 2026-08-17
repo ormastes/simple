@@ -1,0 +1,67 @@
+# @cover src/lib/nogc_sync_mut/tiny/draw/writer.spl 80%
+# @cover src/lib/nogc_sync_mut/tiny/draw/validate.spl 80%
+use std.spec
+use std.tiny.common.abi.{TinyDrawStreamV1, TINY_2D_CAP_DRAW_STREAM_V1, TINY_ABI_MAJOR, TINY_DRAW_STREAM_V1_NAME_LENGTH, tiny_draw_stream_validate}
+use std.tiny.common.status.{TINY_OK, TINY_ERR_ABI, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_MALFORMED, TINY_ERR_UNSUPPORTED}
+use std.tiny.draw.opcode.*
+use std.tiny.draw.writer.{TinyDrawWriter}
+use std.tiny.draw.validate.{tiny_draw_validate, tiny_draw_validate_counted}
+
+describe "TinyDrawStream writer and validator":
+    it "builds a bounded, balanced stream":
+        var writer = TinyDrawWriter.create(32)
+        expect(writer.clear(-16777216).code).to_equal(TINY_OK)
+        expect(writer.push_translate(2, 3).code).to_equal(TINY_OK)
+        expect(writer.push_clip(0, 0, 4, 4).code).to_equal(TINY_OK)
+        expect(writer.fill_rect(0, 0, 2, 2, -65536).code).to_equal(TINY_OK)
+        expect(writer.pop_clip().code).to_equal(TINY_OK)
+        expect(writer.pop_translate().code).to_equal(TINY_OK)
+        expect(writer.end_stream().code).to_equal(TINY_OK)
+        expect(tiny_draw_validate_counted(writer.stream(), writer.count(), 16, 4).code).to_equal(TINY_OK)
+        val envelope = writer.envelope(TINY_2D_CAP_DRAW_STREAM_V1)
+        expect(envelope.abi_major).to_equal(TINY_ABI_MAJOR)
+        expect(envelope.word_count).to_equal(writer.count())
+        expect(envelope.words.len()).to_equal(32)
+        expect(tiny_draw_stream_validate(envelope, 32, TINY_DRAW_STREAM_V1_NAME_LENGTH).code).to_equal(TINY_OK)
+
+    it "rejects malformed versioned envelope metadata":
+        var envelope = TinyDrawStreamV1.create([TINY_DRAW_END], TINY_2D_CAP_DRAW_STREAM_V1)
+        envelope.word_count = 0
+        expect(tiny_draw_stream_validate(envelope, 8, TINY_DRAW_STREAM_V1_NAME_LENGTH).code).to_equal(TINY_ERR_MALFORMED)
+        envelope = TinyDrawStreamV1.create([TINY_DRAW_END], TINY_2D_CAP_DRAW_STREAM_V1)
+        envelope.abi_major = TINY_ABI_MAJOR + 1
+        expect(tiny_draw_stream_validate(envelope, 8, TINY_DRAW_STREAM_V1_NAME_LENGTH).code).to_equal(TINY_ERR_ABI)
+
+    it "rejects capacity atomically and writes nothing":
+        var writer = TinyDrawWriter.create(5)
+        val status = writer.fill_rect(0, 0, 1, 1, 7)
+        expect(status.code).to_equal(TINY_ERR_CAPACITY)
+        expect(writer.count()).to_equal(0)
+        expect(writer.stream().len()).to_equal(5)
+        var clear_writer = TinyDrawWriter.create(1)
+        expect(clear_writer.clear(7).code).to_equal(TINY_ERR_CAPACITY)
+        expect(clear_writer.count()).to_equal(0)
+        expect(clear_writer.stream().len()).to_equal(1)
+
+    it "rejects invalid writer dimensions":
+        var writer = TinyDrawWriter.create(16)
+        expect(writer.fill_rect(0, 0, -1, 2, 7).code).to_equal(TINY_ERR_INVALID)
+        expect(writer.border_rect(0, 0, 0, 2, 7).code).to_equal(TINY_ERR_INVALID)
+        expect(writer.glyph_mono(0, 0, 32, 1, 7, [1]).code).to_equal(TINY_ERR_INVALID)
+        expect(writer.blit_argb(0, 0, 2147483647, 2, []).code).to_equal(TINY_ERR_INVALID)
+
+    it "rejects truncation, unknown commands, and trailing words":
+        expect(tiny_draw_validate([TINY_DRAW_FILL_RECT, 0], 8, 4).code).to_equal(TINY_ERR_MALFORMED)
+        expect(tiny_draw_validate([TINY_DRAW_BORDER_RECT, 0, 0, 0, 2, 7, TINY_DRAW_END], 8, 4).detail_id).to_equal(TINY_DRAW_DETAIL_DIMENSION)
+        expect(tiny_draw_validate([TINY_DRAW_BLIT_ARGB, 0, 0, 2147483647, 2, TINY_DRAW_END], 8, 4).detail_id).to_equal(TINY_DRAW_DETAIL_DIMENSION)
+        expect(tiny_draw_validate([99, TINY_DRAW_END], 8, 4).code).to_equal(TINY_ERR_UNSUPPORTED)
+        expect(tiny_draw_validate([TINY_DRAW_END, 1], 8, 4).detail_id).to_equal(TINY_DRAW_DETAIL_TRAILING_DATA)
+
+    it "rejects unbalanced and overflowing stacks":
+        expect(tiny_draw_validate([TINY_DRAW_POP_CLIP, TINY_DRAW_END], 8, 2).detail_id).to_equal(TINY_DRAW_DETAIL_CLIP_STACK)
+        expect(tiny_draw_validate([TINY_DRAW_PUSH_TRANSLATE, 1, 1, TINY_DRAW_END], 8, 2).detail_id).to_equal(TINY_DRAW_DETAIL_TRANSLATE_STACK)
+        expect(tiny_draw_validate([TINY_DRAW_PUSH_CLIP, 0, 0, 1, 1, TINY_DRAW_PUSH_CLIP, 0, 0, 1, 1, TINY_DRAW_END], 8, 1).detail_id).to_equal(TINY_DRAW_DETAIL_CLIP_STACK)
+
+    it "requires explicit end and respects command budget":
+        expect(tiny_draw_validate([], 8, 4).code).to_equal(TINY_ERR_MALFORMED)
+        expect(tiny_draw_validate([TINY_DRAW_CLEAR, 1, TINY_DRAW_END], 1, 4).detail_id).to_equal(TINY_DRAW_DETAIL_COMMAND_LIMIT)

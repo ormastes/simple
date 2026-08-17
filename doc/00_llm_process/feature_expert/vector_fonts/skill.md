@@ -175,6 +175,21 @@ read at the wrong shift" shape, different call sites.
 - Per repo rule: a boring/compact construct that silently fails on this
   lane must be fixed or filed, not silently worked around without a doc.
 
+## Chrome differential lane (2026-08-15, green)
+
+A vector-font differential lane compares Simple's glyph output against real
+Chrome:
+
+- Tool: `tools/vector_font_diff/` — `run_vector_font_diff.shs` drives
+  `chrome_vector_font_dump.js` (Chrome side) and
+  `simple_vector_font_dump.spl` (Simple side), diffing dumps under `out/`
+  (`chrome.json` / `simple.json` / `summary.txt`).
+- Gate: `test/03_system/browser_engine/chrome_vector_font_differential_spec.spl`.
+  Run: `SIMPLE_TIMEOUT_SECONDS=600 bin/simple test --no-session-daemon
+  test/03_system/browser_engine/chrome_vector_font_differential_spec.spl`.
+- This follows the counterpart-conformance discipline (one differential
+  pipeline; see [counterpart_conformance](../counterpart_conformance/skill.md)).
+
 ## Update Rule
 
 After any rasterizer, font-config, or Engine2D-text-path change —

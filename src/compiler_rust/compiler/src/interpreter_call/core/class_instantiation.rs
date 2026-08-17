@@ -5,11 +5,32 @@ use super::di_injection::resolve_injected_args;
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn};
 use crate::value::*;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode, Type};
 use simple_runtime::value::diagram_sffi;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Fill value for a declared field with no `= default` when the construction
+/// site omits it. Value-type structs zero-fill primitive fields (matching the
+/// compiled/MIR zero-value semantic pinned by
+/// test/01_unit/compiler/struct_init_field_order_fill_spec.spl); everything
+/// else — reference classes, and non-primitive field types — stays `nil`.
+pub fn undefaulted_field_fill(ty: &Type, is_value_type: bool) -> Value {
+    if !is_value_type {
+        return Value::Nil;
+    }
+    match ty {
+        Type::Simple(name) => match name.as_str() {
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "uint" | "usize" | "isize"
+            | "Int" => Value::Int(0),
+            "f32" | "f64" | "float" | "Float" => Value::Float(0.0),
+            "bool" | "Bool" => Value::Bool(false),
+            _ => Value::Nil,
+        },
+        _ => Value::Nil,
+    }
+}
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
@@ -110,7 +131,7 @@ pub(crate) fn instantiate_class(
         let val = if let Some(default_expr) = &field.default {
             evaluate_expr(default_expr, env, functions, classes, enums, impl_methods)?
         } else {
-            Value::Nil
+            undefaulted_field_fill(&field.ty, class_def.is_value_type)
         };
         fields.insert(field.name.clone(), val);
     }
@@ -155,10 +176,7 @@ pub(crate) fn instantiate_class(
             ((args.len() == new_param_count && named_args_fit_new) && !all_named_struct_literal) || has_inject;
 
         if should_call_new && !already_in_new {
-            let self_val = Value::Object {
-                class: class_name.to_string(),
-                fields: Arc::new(fields.clone()),
-            };
+            let self_val = Value::aggregate(class_name.to_string(), fields.clone(), class_def.is_value_type);
 
             let mut local_env = env.clone();
             local_env.insert(METHOD_SELF.to_string(), self_val);
@@ -220,6 +238,9 @@ pub(crate) fn instantiate_class(
                 impl_methods,
             ) {
                 Ok((crate::interpreter::Control::Return(v), _)) => Ok(v),
+                Ok((_, Some(value @ Value::ClassInstance(_)))) if value.aggregate_class() == Some(class_name) => {
+                    Ok(value)
+                }
                 // Implicit return: a `new` whose body ends in a bare expression that
                 // constructs its own type (e.g. `SymbolId(id: id)`) returns that value,
                 // like any function — previously its value was discarded and the
@@ -236,10 +257,10 @@ pub(crate) fn instantiate_class(
                     class,
                     fields: obj_fields,
                 }),
-                Ok((_, _)) => Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
-                    class: class_name.to_string(),
-                    fields: Arc::new(fields),
-                })),
+                Ok((_, _)) => Ok(local_env
+                    .get("self")
+                    .cloned()
+                    .unwrap_or_else(|| Value::aggregate(class_name.to_string(), fields, class_def.is_value_type))),
                 Err(CompileError::TryError(val)) => Ok(*val),
                 Err(e) => Err(e),
             };
@@ -254,10 +275,7 @@ pub(crate) fn instantiate_class(
     // Check if class has __init__ method for Python-style initialization
     if let Some(init_method) = class_def.methods.iter().find(|m| m.name == METHOD_INIT) {
         // Create the object with default field values first
-        let self_val = Value::Object {
-            class: class_name.to_string(),
-            fields: Arc::new(fields.clone()),
-        };
+        let self_val = Value::aggregate(class_name.to_string(), fields.clone(), class_def.is_value_type);
 
         // Set up local environment for __init__
         let mut local_env = env.clone();
@@ -293,10 +311,10 @@ pub(crate) fn instantiate_class(
         }
 
         // Return the modified self from local_env
-        return Ok(local_env.get(METHOD_SELF).cloned().unwrap_or(Value::Object {
-            class: class_name.to_string(),
-            fields: Arc::new(fields),
-        }));
+        return Ok(local_env
+            .get(METHOD_SELF)
+            .cloned()
+            .unwrap_or_else(|| Value::aggregate(class_name.to_string(), fields, class_def.is_value_type)));
     }
 
     // Field-based construction
@@ -327,6 +345,11 @@ pub(crate) fn instantiate_class(
         };
         let base_val = evaluate_expr(base_expr, env, functions, classes, enums, impl_methods)?;
         match &base_val {
+            Value::ClassInstance(instance) => {
+                for (k, v) in instance.fields_snapshot() {
+                    fields.insert(k, v);
+                }
+            }
             Value::Object {
                 fields: base_fields, ..
             } => {
@@ -435,10 +458,11 @@ pub(crate) fn instantiate_class(
         }
     }
 
-    Ok(Value::Object {
-        class: class_name.to_string(),
-        fields: Arc::new(fields),
-    })
+    Ok(Value::aggregate(
+        class_name.to_string(),
+        fields,
+        class_def.is_value_type,
+    ))
 }
 
 fn has_inject_attr(method: &FunctionDef) -> bool {

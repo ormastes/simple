@@ -7,6 +7,16 @@ Lane verified: host x86_64-unknown-linux-gnu, `bin/simple` = Rust bootstrap seed
 interpreter path (JIT fell back: `HIR lowering error: Cannot infer field type:
 struct 'CompileOptions' field 'mode' [in src/app/test_runner_new/main.spl]`).
 
+## 2026-08-17 partial implementation
+
+The missing form-state and input owners are now implemented rather than
+stubbed. Focused evidence passed for input events (8/8), hit testing (7/7), and
+form state (4/4), including adjacent deepest-child hit selection and form-field
+upsert/placeholder preservation. The paint-tree owner remains open: its first
+implementation reaches semantic lowering but the paint examples fail with
+`value is not callable`. That file is not admitted as completed code until the
+call owner is diagnosed and all paint sinks pass.
+
 ## `STATICS_FAILED_KEY` is a red herring — premise falsified
 
 The reported failure mode "four blink specs RED with `STATICS_FAILED_KEY`,

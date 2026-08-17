@@ -2473,6 +2473,39 @@ the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
 
+Running spec lanes beside an active bootstrap (2026-08-17): pin the runner to
+an immutable lineage-named snapshot under `build/phase_snapshots/`
+(`phase1_<t1>_phase2_<t2>/simple`; see its README), never `bin/simple` or an
+in-place stage output — those are replaced mid-flight and a swapped binary
+crashes the lane. The phase compiler build owns CPU/memory: run spec lanes
+`nice`d with <=2 concurrent test processes; earlyoom kills `simple` first
+under pressure (a 3.1 GB worker died at 9.97% free), so treat a vanished
+runner as possible OOM, not a matcher bug. For fleet-style sweeps, run
+per-directory under `timeout` and drop to per-file on crash so one crashing
+spec never stops the sweep.
+
+Later 2026-08-17: a frozen rsync bootstrap tree must keep vendored `gen/`
+dirs (`vendor/typenum/src/gen` — a blanket `--exclude 'gen/'` breaks offline
+cargo) and a `.git` (the stage engine binds Stage-3 git HEAD/dirty state).
+The planner-admission-v2 gate is unconditionally fail-closed and blocks all
+bootstraps (`doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md`;
+last working script: `b1ff6537ed8`). Incremental profile clamps selfhost
+jobs to 2 — patch to 16 on a big box (8 under 40 GB free). If two phase-1
+generations land before phase 2 starts, phase 2 takes the NEWEST; never stop
+at first failure — collect all problems through phase 4. Every bug fix ships
+a reproducing spec plus a similar-problem generalization spec, cited in the
+bug doc.
+
+Build-lane doctrine (2026-08-17): exactly ONE compile-build owner at a time —
+two concurrent stage-2 builds nearly triggered earlyoom; the script-driven
+run survives, ad-hoc builds yield. Phase builds never wait for verification:
+sanity/tool-harness runs in a parallel niced lane. Phase 2 completed via
+dynload, so the phase-4 relink needs `--full-cli`/`--mode=one-binary`. Known
+pipeline traps (unfiled — file on next touch): silent stage-2 exit-1 with a
+0-byte log under the transcribed sandbox env; a phantom
+`stage2-capability.log` reference; native-build has no keep-going flag. The
+LintDiag LLVM codegen defect is the canonical phase-2-found compiler bug —
+phase 2 doubles as a compiler-bug detector.
 ## 2026-08-17 — run-to-end phases, silent green, reserved words
 
 **Per-phase run-to-end loop.** Each bootstrap phase runs to completion and

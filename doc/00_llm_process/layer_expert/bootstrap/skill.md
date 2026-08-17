@@ -407,6 +407,84 @@ with new wall status, fixed issue links, and concrete gotchas.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
 
+## Phase snapshots + resource policy (2026-08-17)
+
+**Phase-snapshot convention** — `build/phase_snapshots/README.md`. Immutable,
+lineage-named per-phase binaries: `phase1_<t1>/`, `phase1_<t1>_phase2_<t2>/`,
+`..._phase3_<t3>/`, each holding `simple` (+ `.a` if needed). A snapshot is
+copied ONCE at phase completion and never overwritten; phase N+1 (and every
+side-lane task) runs against an explicit snapshot path — never `bin/simple`,
+never the in-place stage output, both of which get replaced mid-flight. A
+mid-bootstrap fix landing = a NEW generation (new t1); in-flight phase2/3
+tasks keep their old lineage until done. The bootstrap script has its own
+sibling mechanism: `src/compiler_rust/target/bootstrap.generations`
+(`scripts/bootstrap/bootstrap-from-scratch.sh:1067`).
+
+**Resource policy during bootstrap** — the phase compiler build OWNS
+CPU/memory. Test/tool lanes run beside it `nice`d, capped at <=2 concurrent
+test processes. earlyoom kills `simple` first under pressure: a 3.1 GB test
+worker was killed at 9.97% free memory this session — an OOM-killed lane looks
+like a crash, so check `dmesg`/earlyoom logs before debugging the binary.
+
+**Parallel find-and-fix fleet** — sweep per-DIRECTORY under `timeout`,
+dropping to per-FILE on a crash, so one crashing file never stops the sweep.
+Land fixes in the SOURCE tree: later stages compile them in for free. Land via
+scoped plumbing commits (only your paths) through all 7 pre-push guards
+(`.claude/rules/vcs.md`). Fixes cross-linked from this round: seed sqlite
+emulation (`208f11786f8`: DELETE WHERE fail-closed, real BEGIN/ROLLBACK
+snapshots, UNIQUE), argv publish for delegated subcommands (`bdafd9d5b5a`,
+`rt_set_args_vec`), `rt_file_atomic_write` in the Rust staticlib
+(`src/compiler_rust/native_all/src/lib.rs:1155`).
+
+## Snapshot-tree bootstrap gotchas (2026-08-17, later same day)
+
+- **A frozen rsync tree must include vendored `gen/` dirs AND a `.git`.** A
+  blanket `--exclude 'gen/'` stripped `src/compiler_rust/vendor/typenum/src/gen`
+  and broke offline cargo (vendored checksums no longer match). And the stage
+  engine binds Stage-3 identity to git HEAD/dirty state, so a snapshot tree
+  without `.git` fails there too. Snapshot = full tree minus build outputs only.
+- **planner-admission-v2 gate is unconditionally fail-closed** — it currently
+  blocks ALL bootstraps; see
+  `doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md`.
+  Last known-working script version: `b1ff6537ed8` ("feat: add admitted Stage4
+  resume checkpoint").
+- **Incremental profile clamps `selfhost_jobs` to 2**
+  (`scripts/bootstrap/bootstrap-from-scratch.sh:815-819`). On a big box patch
+  to 16 (fallback 8 when free memory < 40 GB) — the clamp is tuned for small
+  machines.
+- **Phase-generation rule:** if two phase-1 generations land before phase 2
+  starts, phase 2 uses the NEWEST. Phases never stop at the first failure when
+  forward progress is possible — collect ALL problems through phase 4, then
+  fix in one pass.
+
+**Standing test rule:** every bug fix ships (1) a spec reproducing the exact
+defect and (2) a generalization spec probing similar problems nearby, both
+cited in the bug doc. A fix without its reproducing spec is not done.
+
+## Build-lane doctrine + pipeline bugs (2026-08-17, third round)
+
+- **Exactly ONE compile-build owner at a time.** Two concurrent stage-2 builds
+  nearly triggered earlyoom. Deconfliction: the SCRIPT-DRIVEN run survives;
+  any ad-hoc/manual build yields and waits or pins to a snapshot.
+- **Phase builds never wait for verification.** Sanity/tool-harness checks
+  always run in a parallel `nice`d lane beside the phase build, never inline.
+- **Phase 2 completed via dynload** — the phase-4 relink therefore needs
+  `--full-cli` / `--mode=one-binary`; a dynload-shaped phase-2 output is not
+  the one-binary artifact.
+- **Pipeline bugs observed this session** (no bug docs filed yet — file on
+  next touch): (1) stage-2 exits 1 SILENTLY with a 0-byte log under the
+  transcribed sandbox env; (2) a phantom `stage2-capability.log` reference in
+  the pipeline; (3) native-build has no keep-going flag — first error aborts
+  the whole build, forcing the per-directory/per-file sweep workaround above.
+- **Canonical phase-2-found compiler bug:** the LintDiag LLVM codegen defect —
+  a real miscompile surfaced only by building the compiler with the phase
+  binary. Treat phase 2 as a compiler-bug detector, not just a build step.
+- **Stale-base clobber pattern (3 incidents tonight):** an agent editing on a
+  stale base and landing verbatim reverts other sessions' fixes. Rules:
+  commit SCOPED immediately after editing (Edit-tool changes are not
+  auto-snapshotted), and the push lane must graft PER-FILE diffs onto current
+  origin — never land a whole file verbatim. See `.claude/rules/vcs.md`
+  (anti-revert protocol) for the general form.
 ## Per-phase run-to-end loop (2026-08-17)
 
 Doctrine for every bootstrap generation, per phase:

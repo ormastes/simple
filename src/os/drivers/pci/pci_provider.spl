@@ -6,6 +6,60 @@ enum PciProviderKind:
     Q35ConfigIo
     Ecam
 
+enum PciWindowKind:
+    NonPrefetchable
+    Prefetchable64
+
+struct PciAddressWindow:
+    kind: PciWindowKind
+    pci_base: u64
+    cpu_base: u64
+    size: u64
+
+struct PciHostDescriptor:
+    """Host-neutral PCI resources. Board ports validate firmware/DT data before construction."""
+    provider: text
+    domain: u32
+    bus_start: u8
+    bus_end: u8
+    ecam_base: u64
+    ecam_size: u64
+    windows: [PciAddressWindow]
+    dma_base: u64
+    dma_size: u64
+    coherent: bool
+
+fn pci_host_descriptor_reason(host: PciHostDescriptor) -> text:
+    if host.provider == "":
+        return "pci-host-missing-provider"
+    if host.ecam_base == 0u64 or host.ecam_size < 0x100000u64:
+        return "pci-host-invalid-ecam"
+    if host.bus_end < host.bus_start:
+        return "pci-host-invalid-bus-range"
+    val visible_buses = host.bus_end.to_u64() - host.bus_start.to_u64() + 1u64
+    if visible_buses > host.ecam_size / 0x100000u64:
+        return "pci-host-bus-range-exceeds-ecam"
+    if host.windows.len() == 0:
+        return "pci-host-missing-address-window"
+    for window in host.windows:
+        if window.size == 0u64:
+            return "pci-host-empty-address-window"
+        if window.cpu_base > 0xFFFFFFFFFFFFFFFFu64 - window.size:
+            return "pci-host-window-overflow"
+    "ready"
+
+fn pci_host_config_addr(host: PciHostDescriptor, target: PciConfigTarget) -> Result<u64, text>:
+    val reason = pci_host_descriptor_reason(host)
+    if reason != "ready":
+        return Err(reason)
+    if target.bus < host.bus_start or target.bus > host.bus_end:
+        return Err("pci-host-target-outside-bus-range")
+    val offset = (target.bus.to_u64() - host.bus_start.to_u64()) << 20
+    val function_offset = (target.device.to_u64() << 15) + (target.func.to_u64() << 12) + (target.offset.to_u64() & 0xFFFu64)
+    if offset + function_offset + 4u64 > host.ecam_size:
+        return Err("pci-host-target-outside-ecam")
+    Ok(host.ecam_base + offset + function_offset)
+
 struct PciConfigTarget:
     bus: u8
     device: u8
@@ -69,7 +123,7 @@ fn pci_provider_kind_name(kind: PciProviderKind) -> text:
 fn pci_provider_from_board(board_id: text) -> PciProviderKind:
     if board_id == "x86_64-q35":
         return PciProviderKind.Q35ConfigIo
-    if board_id == "riscv64-virt" or board_id == "xck26-ml-carrier":
+    if board_id == "riscv64-virt" or board_id == "xck26-ml-carrier" or board_id == "starfive-jh7110":
         return PciProviderKind.Ecam
     PciProviderKind.NoPci
 

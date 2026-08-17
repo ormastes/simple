@@ -6,7 +6,8 @@ use compiler.tools.verify.replay_receipt.{ReplayCheckerClassV1,
     close_independent_replay_v1}
 use compiler.tools.verify.replay_runner.{ReplayRunnerConfigV1,
     replay_module_name_is_safe_v1, replay_runner_config_error_v1,
-    replay_executable_identity_hash_v1, run_independent_replay_adapter_v1}
+    replay_executable_identity_hash_v1, run_fresh_leanchecker_v1,
+    run_independent_replay_adapter_v1}
 
 fn replay_receipt(
     class_: ReplayCheckerClassV1,
@@ -29,14 +30,14 @@ describe "FV2 fresh and independent proof replay receipts":
         val closure = close_independent_replay_v1(
             replay_receipt(ReplayCheckerClassV1.FreshLeanKernel),
             replay_receipt(ReplayCheckerClassV1.IndependentKernel))
-        expect(closure.accepted).to_equal(true)
-        expect(closure.hash() == "").to_equal(false)
+        expect(closure.accepted).to_be(true)
+        expect(closure.hash() == "").to_be(false)
 
     it "does not mislabel two Lean-kernel replays as independent":
         val closure = close_independent_replay_v1(
             replay_receipt(ReplayCheckerClassV1.FreshLeanKernel),
             replay_receipt(ReplayCheckerClassV1.FreshLeanKernel))
-        expect(closure.accepted).to_equal(false)
+        expect(closure.accepted).to_be(false)
         expect(closure.diagnostic).to_contain("INDEPENDENT-CLASS")
 
     it "rejects relabelled checker binaries and malformed accepted identities":
@@ -48,7 +49,7 @@ describe "FV2 fresh and independent proof replay receipts":
             fresh.command_policy_hash, fresh.output_hash,
             ReplayOutcomeV1.Accepted, "")
         val closure = close_independent_replay_v1(fresh, relabelled)
-        expect(closure.accepted).to_equal(false)
+        expect(closure.accepted).to_be(false)
         expect(closure.diagnostic).to_contain("INDEPENDENCE")
         val malformed = ReplayCheckerReceiptV1(
             "ReplayCheckerReceipt-v1", ReplayCheckerClassV1.FreshLeanKernel,
@@ -56,7 +57,7 @@ describe "FV2 fresh and independent proof replay receipts":
             "Verified.Module.root", sha256_text("artifact"),
             sha256_text("policy"), sha256_text("output"),
             ReplayOutcomeV1.Accepted, "")
-        expect(malformed.accepted()).to_equal(false)
+        expect(malformed.accepted()).to_be(false)
 
     it "rejects a caller-invented checker family despite a valid-looking hash":
         val forged = ReplayCheckerReceiptV1(
@@ -66,7 +67,7 @@ describe "FV2 fresh and independent proof replay receipts":
             "Verified.Module.root", sha256_text("artifact"),
             sha256_text("policy"), sha256_text("output"),
             ReplayOutcomeV1.Accepted, "")
-        expect(forged.accepted()).to_equal(false)
+        expect(forged.accepted()).to_be(false)
 
     it "rejects declaration-root drift inside one module and artifact":
         val fresh = replay_receipt(ReplayCheckerClassV1.FreshLeanKernel)
@@ -76,7 +77,7 @@ describe "FV2 fresh and independent proof replay receipts":
             "Verified.Module.weaker_root", sha256_text("artifact"), sha256_text("command-policy"),
             sha256_text("output"), ReplayOutcomeV1.Accepted, "")
         val closure = close_independent_replay_v1(fresh, independent)
-        expect(closure.accepted).to_equal(false)
+        expect(closure.accepted).to_be(false)
         expect(closure.diagnostic).to_contain("REPLAY-ROOT")
 
     it "rejects checker disagreement artifact drift and lost output":
@@ -84,26 +85,26 @@ describe "FV2 fresh and independent proof replay receipts":
             replay_receipt(ReplayCheckerClassV1.FreshLeanKernel),
             replay_receipt(ReplayCheckerClassV1.IndependentKernel,
                 sha256_text("artifact"), ReplayOutcomeV1.Rejected))
-        expect(rejected.accepted).to_equal(false)
+        expect(rejected.accepted).to_be(false)
         expect(rejected.diagnostic).to_contain("INDEPENDENT")
 
         val drift = close_independent_replay_v1(
             replay_receipt(ReplayCheckerClassV1.FreshLeanKernel, sha256_text("first")),
             replay_receipt(ReplayCheckerClassV1.IndependentKernel, sha256_text("second")))
-        expect(drift.accepted).to_equal(false)
+        expect(drift.accepted).to_be(false)
         expect(drift.diagnostic).to_contain("ARTIFACT")
 
         val lost = replay_receipt(
             ReplayCheckerClassV1.FreshLeanKernel, sha256_text("artifact"),
             ReplayOutcomeV1.MissingOutput, "")
-        expect(lost.accepted()).to_equal(false)
+        expect(lost.accepted()).to_be(false)
 
     it "rejects command injection and incomplete runner identities before execution":
-        expect(replay_module_name_is_safe_v1("Verified.Module_1")).to_equal(true)
-        expect(replay_module_name_is_safe_v1("Verified;touch.bad")).to_equal(false)
-        expect(replay_module_name_is_safe_v1("../Verified")).to_equal(false)
-        expect(replay_module_name_is_safe_v1("Verified..root")).to_equal(false)
-        expect(replay_module_name_is_safe_v1("1Verified.root")).to_equal(false)
+        expect(replay_module_name_is_safe_v1("Verified.Module_1")).to_be(true)
+        expect(replay_module_name_is_safe_v1("Verified;touch.bad")).to_be(false)
+        expect(replay_module_name_is_safe_v1("../Verified")).to_be(false)
+        expect(replay_module_name_is_safe_v1("Verified..root")).to_be(false)
+        expect(replay_module_name_is_safe_v1("1Verified.root")).to_be(false)
 
         val invalid = ReplayRunnerConfigV1(
             "/tmp/project", "Verified.Module", "Verified.root", "/tmp/module.olean", sha256_text("artifact"),
@@ -111,22 +112,35 @@ describe "FV2 fresh and independent proof replay receipts":
             "nanoda-adapter", "", 1000)
         expect(replay_runner_config_error_v1(invalid)).to_contain("IDENTITY")
 
-    it "binds the independent adapter hash to the exact executable launcher":
-        val mismatch = ReplayRunnerConfigV1(
-            "/tmp/project", "Verified.Module", "Verified.root", "/tmp/module.olean", "artifact", "/bin/sh",
-            "/bin/false", "nanoda-adapter", "pinned", 1000)
-        val receipt = run_independent_replay_adapter_v1(mismatch)
-        expect(receipt.accepted()).to_equal(false)
+    it "rejects caller-selected fresh replay tools without canonical authority":
+        val caller_selected = ReplayRunnerConfigV1(
+            "/tmp/project", "Verified.Module", "Verified.root",
+            "/tmp/module.olean", sha256_text("artifact"), "/bin/echo",
+            "/bin/echo", "leanchecker", "caller-version", 1000)
+        val receipt = run_fresh_leanchecker_v1(caller_selected)
+        expect(receipt.accepted()).to_be(false)
         expect(receipt.outcome).to_equal(ReplayOutcomeV1.ToolFailure)
-        expect(receipt.diagnostic).to_contain("ADAPTER-IDENTITY")
+        expect(receipt.diagnostic).to_contain("REPLAY-AUTHORITY")
+        expect(receipt.diagnostic).to_contain("Lake and leanchecker")
+
+    it "rejects a self-consistent caller adapter without canonical authority":
+        val caller_selected = ReplayRunnerConfigV1(
+            "/tmp/project", "Verified.Module", "Verified.root",
+            "/tmp/module.olean", sha256_text("artifact"), "/bin/echo",
+            "/bin/echo", "nanoda-adapter", "caller-version", 1000)
+        val receipt = run_independent_replay_adapter_v1(caller_selected)
+        expect(receipt.accepted()).to_be(false)
+        expect(receipt.outcome).to_equal(ReplayOutcomeV1.ToolFailure)
+        expect(receipt.diagnostic).to_contain("REPLAY-AUTHORITY")
+        expect(receipt.diagnostic).to_contain("adapter, lean4export, and nanoda")
 
     it "binds both the launcher and checker binary into replay identity":
         val lake = sha256_text("lake-a")
         val checker = sha256_text("leanchecker-a")
         val baseline = replay_executable_identity_hash_v1(lake, checker)
-        expect(baseline == "").to_equal(false)
-        expect(replay_executable_identity_hash_v1(sha256_text("lake-b"), checker) == baseline).to_equal(false)
-        expect(replay_executable_identity_hash_v1(lake, sha256_text("leanchecker-b")) == baseline).to_equal(false)
+        expect(baseline == "").to_be(false)
+        expect(replay_executable_identity_hash_v1(sha256_text("lake-b"), checker) == baseline).to_be(false)
+        expect(replay_executable_identity_hash_v1(lake, sha256_text("leanchecker-b")) == baseline).to_be(false)
         expect(replay_executable_identity_hash_v1("", checker)).to_equal("")
         expect(replay_executable_identity_hash_v1("lake-a", checker)).to_equal("")
 

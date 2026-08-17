@@ -1,5 +1,39 @@
 #!/bin/sh
 
+# The coordinated strategy supervisor is the default entry for an ordinary
+# multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
+# diagnostic sweeps keep their direct fail-closed paths. The supervisor sets
+# SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED before launching this stage engine.
+if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
+  bootstrap_strategy_entry=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+  bootstrap_strategy_arg=${SIMPLE_BOOTSTRAP_STRATEGY:-normal}
+  bootstrap_strategy_output=build/bootstrap
+  bootstrap_strategy_bypass=0
+  bootstrap_strategy_expect_value=0
+  for bootstrap_strategy_option in "$@"; do
+    if [ "${bootstrap_strategy_expect_value}" -eq 1 ]; then
+      bootstrap_strategy_arg=${bootstrap_strategy_option}
+      bootstrap_strategy_expect_value=0
+      continue
+    fi
+    case "${bootstrap_strategy_option}" in
+      --strategy=*) bootstrap_strategy_arg=${bootstrap_strategy_option#*=} ;;
+      --strategy) bootstrap_strategy_expect_value=1 ;;
+      --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
+      --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
+      --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|--diagnostic-sweep)
+        bootstrap_strategy_bypass=1
+        ;;
+      --target=simpleos-*|--target=freebsd-*) bootstrap_strategy_bypass=1 ;;
+    esac
+  done
+  if [ "${bootstrap_strategy_bypass}" -eq 0 ]; then
+    exec "${bootstrap_strategy_entry}/bootstrap-strategy.sh" \
+      --strategy="${bootstrap_strategy_arg}" \
+      --output="${bootstrap_strategy_output}" -- "$@"
+  fi
+fi
+
 # Keep bootstrap and every non-detached descendant in one dedicated kernel
 # process group. Lock recovery remains fail-closed while any group member lives.
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
@@ -75,6 +109,13 @@ Options:
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
+  --strategy=<name>  Bootstrap scheduling strategy: adhoc, normal, or full
+                     (default: normal; env: SIMPLE_BOOTSTRAP_STRATEGY).
+                     normal reuses incremental caches and schedules isolated
+                     phase verification; full inventories every eligible build
+                     and test to a terminal summary even after task crashes.
+  --stop-after-stage2
+                     Build and admit Stage 2, then stop before Stage 3.
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
                      using a new one-thread recovery transcript/evidence lane.
@@ -102,7 +143,7 @@ Options:
                      --progress. Debug also keeps LLVM IR and memory snapshots.
   --diagnostic-root=<path>
                      File or directory selected by --diagnostic-sweep
-                     (default: src/compiler; repeatable)
+                     (default: src/compiler, src/lib, and src/app; repeatable)
   --diagnostic-child-compiler=<path>
                      Admitted pure-Simple worker used by diagnostic check
                      processes (default: bin/simple; env:
@@ -143,12 +184,14 @@ full_cli=0
 fresh_cache=0
 release_tests=0
 diagnostic_sweep=0
+stop_after_stage2=0
 diagnostic_roots=""
 diagnostic_child_compiler="${SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER:-bin/simple}"
 diagnostics_mode="${SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE:-off}"
 progress_log="${SIMPLE_BOOTSTRAP_PROGRESS_LOG:-}"
 progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
+bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
@@ -191,6 +234,18 @@ while [ "$#" -gt 0 ]; do
     --full-bootstrap)
       full_bootstrap=1
       ;;
+    --strategy=*)
+      bootstrap_strategy=${1#*=}
+      ;;
+    --strategy)
+      shift
+      if [ "$#" -eq 0 ]; then
+        echo "error: --strategy requires adhoc, normal, or full" >&2
+        usage >&2
+        exit 1
+      fi
+      bootstrap_strategy=$1
+      ;;
     --resume-stage3-from-admitted=*)
       resume_stage3_output=${1#*=}
       ;;
@@ -211,6 +266,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --diagnostic-sweep)
       diagnostic_sweep=1
+      ;;
+    --stop-after-stage2)
+      stop_after_stage2=1
       ;;
     --diagnostics)
       diagnostics_mode=debug
@@ -285,7 +343,22 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ "${stop_after_stage3}" -eq 1 ]; then
+if [ "${stop_after_stage2}" -eq 1 ]; then
+  [ "${stop_after_stage3}" -eq 0 ] &&
+    [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
+    [ "${full_cli}" -eq 0 ] && [ "${deploy}" -eq 0 ] &&
+    [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
+    [ "${diagnostics_mode}" = off ] && [ "${bootstrap_mode}" = dynload ] || {
+    echo "error: --stop-after-stage2 excludes Stage 3/4, resume/full-cli/deploy/release/diagnostic options and requires --mode=dynload" >&2
+    exit 1
+  }
+  case "${target}" in
+    simpleos-x86_64)
+      echo "error: --stop-after-stage2 is unavailable for the SimpleOS target lane" >&2
+      exit 1
+      ;;
+  esac
+elif [ "${stop_after_stage3}" -eq 1 ]; then
   [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
     [ "${full_cli}" -eq 0 ] && [ "${deploy}" -eq 0 ] &&
     [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
@@ -307,7 +380,9 @@ case "${bootstrap_receipt_path}" in
   *) bootstrap_receipt_path="${PWD}/${bootstrap_receipt_path}" ;;
 esac
 bootstrap_receipt_target='//bootstrap:stage4'
-if [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
+if [ "${stop_after_stage2}" -eq 1 ]; then
+  bootstrap_receipt_target='//bootstrap:stage2'
+elif [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
   bootstrap_receipt_target='//bootstrap:stage3'
 fi
 bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
@@ -356,6 +431,21 @@ case "${execution_profile}" in
     exit 1
     ;;
 esac
+
+. "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
+bootstrap_strategy_validate "${bootstrap_strategy}" || {
+  echo "error: unknown --strategy '${bootstrap_strategy}' (expected adhoc, normal, or full)" >&2
+  exit 1
+}
+bootstrap_failure_policy=$(bootstrap_strategy_failure_policy "${bootstrap_strategy}")
+SIMPLE_BOOTSTRAP_STRATEGY=${bootstrap_strategy}
+SIMPLE_BOOTSTRAP_FAILURE_POLICY=${bootstrap_failure_policy}
+export SIMPLE_BOOTSTRAP_STRATEGY SIMPLE_BOOTSTRAP_FAILURE_POLICY
+
+if [ "${stop_after_stage2}" -eq 1 ] && [ -n "${resume_stage3_output}" ]; then
+  echo "error: --stop-after-stage2 and --resume-stage3-from-admitted conflict" >&2
+  exit 1
+fi
 
 if [ -n "${resume_stage3_output}" ]; then
   [ "${full_bootstrap}" -eq 0 ] && [ "${full_cli}" -eq 0 ] &&
@@ -1140,6 +1230,7 @@ if [ "${diagnostic_sweep}" -eq 1 ]; then
   if sh scripts/check/bootstrap-diagnostic-sweep.shs \
     --compiler="${seed_bin}" --child-compiler="${diagnostic_child_compiler}" \
     --cache-dir="${output_dir}/diagnostic-cache" \
+    --evidence-dir="${output_dir}/diagnostic-evidence" \
     --jobs="${jobs}" ${diagnostic_roots}; then
     exit 0
   else
@@ -1572,6 +1663,7 @@ echo "  runtime:  ${SIMPLE_RUNTIME_PATH}"
 echo "  platform: ${PLATFORM}"
 echo "  backend:  ${backend}"
 echo "  ps-mode:  ${bootstrap_mode}"
+echo "  strategy: ${bootstrap_strategy} (${bootstrap_failure_policy})"
 echo "  diagnose: ${diagnostics_mode}"
 echo "  output:   ${output_dir}"
 if [ "${full_bootstrap}" -eq 1 ]; then
@@ -1616,6 +1708,8 @@ else
   stage2_command_transcript="${stage3_provenance_dir}/stage2-command.transcript"
   stage3_command_transcript="${stage3_provenance_dir}/stage3-command.transcript"
   stage2_sanity_evidence="${stage3_provenance_dir}/stage2-sanity.env"
+  stage2_receiver_evidence="${stage3_provenance_dir}/stage2-receiver.env"
+  stage2_receiver_log="${stage3_provenance_dir}/stage2-receiver.log"
   stage3_sanity_evidence="${stage3_provenance_dir}/stage3-sanity.env"
   stage2_provenance_cache="${stage3_provenance_dir}/stage2-native-cache"
   stage3_provenance_cache="${stage3_provenance_dir}/stage3-native-cache"
@@ -1625,6 +1719,7 @@ else
   stage3_provenance_tmp="${stage3_provenance_dir}/stage3-tmp"
   stage2_admitted_dir="${stage3_provenance_dir}/stage2-admitted"
   stage2_admitted_bin="${stage2_admitted_dir}/simple${exe_suffix}"
+  stage2_admission_receipt="${stage2_admitted_dir}/admission.env"
   stage2_runtime_authority="${stage3_provenance_dir}/stage2-runtime-authority"
   runtime_origin_before="${stage3_provenance_dir}/runtime-origin-before.txt"
   runtime_origin_after="${stage3_provenance_dir}/runtime-origin-after.txt"
@@ -1643,7 +1738,8 @@ else
     "${stage3_source_before}" "${stage3_source_after}" \
     "${stage3_git_before}" "${stage3_git_after}" \
     "${stage2_command_transcript}" "${stage3_command_transcript}" \
-    "${stage2_sanity_evidence}" "${stage3_sanity_evidence}"
+    "${stage2_sanity_evidence}" "${stage2_receiver_evidence}" \
+    "${stage2_receiver_log}" "${stage3_sanity_evidence}"
   rm -rf "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"
@@ -1815,6 +1911,11 @@ else
   # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
+  # Preserve the verified phase-1 (seed) compiler as an immutable lineage snapshot.
+  if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+    sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${seed_bin}" phase1 || \
+      echo "  warning: phase1 snapshot preservation failed (non-fatal)" >&2
+  fi
   bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
   mkdir -p "${stage2_provenance_cache}"
   # Stage 2 failure is reported before Stage 3; no later stage may claim it.
@@ -1835,6 +1936,8 @@ else
   stage2_output_absolute="${stage2_bin}"
   stage3_output_absolute="${stage3_bin}"
   stage2_admitted_absolute="$(absolute_path "${stage2_admitted_bin}")"
+  stage2_admission_receipt_absolute="$(absolute_path \
+    "${stage2_admission_receipt}")"
   stage_runtime_absolute="$(absolute_path "${stage2_runtime_authority}")"
   stage2_cache_absolute="$(absolute_path "${stage2_provenance_cache}")"
   stage3_cache_absolute="$(absolute_path "${stage3_provenance_cache}")"
@@ -1983,17 +2086,113 @@ else
     fi
   fi
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
-    stage2_origin_sha_before=$(bootstrap_stage3_hash_file "${stage2_bin}")
-    mkdir -p "${stage2_admitted_dir}"
-    cp -p "${stage2_bin}" "${stage2_admitted_bin}"
-    chmod 500 "${stage2_admitted_dir}" "${stage2_admitted_bin}"
-    stage2_origin_sha_after=$(bootstrap_stage3_hash_file "${stage2_bin}")
-    [ "${stage2_origin_sha_before}" = "${stage2_origin_sha_after}" ] &&
-      [ "${stage2_origin_sha_before}" = \
-        "$(bootstrap_stage3_hash_file "${stage2_admitted_bin}")" ] || {
-      echo "error: Stage 2 compiler changed during private admission" >&2
-      exit 1
-    }
+    echo "  Stage 2: proving struct receiver/runtime capability"
+    stage2_receiver_sha_before=$(bootstrap_stage3_hash_file "${stage2_bin}")
+    set +e
+    env HOME="${stage2_home_absolute}" TMPDIR="${stage2_tmp_absolute}" \
+      PATH="${stage_build_path}" LC_ALL=C LANG=C \
+      SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+      sh "${repo_root}/scripts/check/check-bootstrap-stage2-struct-receiver.shs" \
+        "${stage2_bin}" "${stage_runtime_absolute}" "${PLATFORM}" "${backend}" \
+        >"${stage2_receiver_log}" 2>&1
+    stage2_receiver_status=$?
+    set -e
+    stage2_receiver_sha_after=$(bootstrap_stage3_hash_file "${stage2_bin}")
+    bootstrap_stage3_directory_snapshot \
+      "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt" \
+      "${stage_runtime_absolute}" || exit 1
+    receiver_status=fail
+    if [ "${stage2_receiver_status}" -eq 0 ] &&
+      [ "${stage2_receiver_sha_before}" = "${stage2_receiver_sha_after}" ] &&
+      cmp -s "${runtime_admitted_snapshot}" \
+        "${stage3_provenance_dir}/runtime-after-stage2-receiver.txt"; then
+      receiver_status=pass
+    fi
+    {
+      echo "schema=simple-bootstrap-stage2-receiver-evidence-v1"
+      echo "status=${receiver_status}"
+      echo "probe_exit=${stage2_receiver_status}"
+      echo "candidate_sha256_before=${stage2_receiver_sha_before}"
+      echo "candidate_sha256_after=${stage2_receiver_sha_after}"
+      echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "${runtime_admitted_snapshot}")"
+      echo "probe_log=${stage2_receiver_log}"
+      echo "probe_log_sha256=$(bootstrap_stage3_hash_file "${stage2_receiver_log}")"
+    } >"${stage2_receiver_evidence}"
+    if [ "${receiver_status}" != pass ]; then
+      echo "error: Stage 2 struct receiver/runtime capability failed" >&2
+      stage2_status=3
+      stage2_rejected_dir="${output_dir}/stage2-rejected/${PLATFORM}"
+      stage2_rejected_bin="${stage2_rejected_dir}/simple${exe_suffix}"
+      stage2_rejected_receipt="${stage2_rejected_dir}/rejection.env"
+      mkdir -p "${stage2_rejected_dir}"
+      mv "${stage2_bin}" "${stage2_rejected_bin}"
+      chmod 400 "${stage2_rejected_bin}"
+      {
+        echo "schema=simple-bootstrap-rejected-stage2-v1"
+        echo "status=rejected"
+        echo "reason=stage2-struct-receiver-failed"
+        echo "candidate=${stage2_rejected_bin}"
+        echo "candidate_sha256=$(bootstrap_stage3_hash_file "${stage2_rejected_bin}")"
+        echo "sanity_evidence=${stage2_sanity_evidence}"
+        echo "receiver_evidence=${stage2_receiver_evidence}"
+      } >"${stage2_rejected_receipt}"
+      chmod 400 "${stage2_rejected_receipt}"
+    fi
+  fi
+  if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
+    bootstrap_stage3_tool_authority_snapshot \
+      "$(absolute_path "${tool_authority_after}")" "${PATH}" "${repo_root}" || exit 1
+    bootstrap_stage3_git_state "${repo_root}" "${stage3_git_after}" || exit 1
+    bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || exit 1
+    if ! cmp -s "${tool_authority_before}" "${tool_authority_after}" ||
+       ! cmp -s "${stage3_source_before}" "${stage3_source_after}" ||
+       ! grep -qx 'status=pass' "${stage2_sanity_evidence}" ||
+       ! grep -qx 'status=pass' "${stage2_receiver_evidence}"; then
+      echo "error: refused incomplete Stage 2 admission provenance" >&2
+      stage2_status=4
+    else
+      stage2_origin_sha_before=$(bootstrap_stage3_hash_file "${stage2_bin}")
+      mkdir -p "${stage2_admitted_dir}"
+      cp -p "${stage2_bin}" "${stage2_admitted_bin}"
+      chmod 500 "${stage2_admitted_bin}"
+      stage2_origin_sha_after=$(bootstrap_stage3_hash_file "${stage2_bin}")
+      [ "${stage2_origin_sha_before}" = "${stage2_origin_sha_after}" ] &&
+        [ "${stage2_origin_sha_before}" = \
+          "$(bootstrap_stage3_hash_file "${stage2_admitted_bin}")" ] || {
+        echo "error: Stage 2 compiler changed during private admission" >&2
+        exit 1
+      }
+      # Re-snapshot after publication: a concurrent source edit invalidates
+      # the private copy and prevents a stop-after-stage2 false admission.
+      bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || exit 1
+      if ! cmp -s "${stage3_source_before}" "${stage3_source_after}"; then
+        chmod u+w "${stage2_admitted_bin}"
+        rm -f "${stage2_admitted_bin}"
+        rmdir "${stage2_admitted_dir}" 2>/dev/null || true
+        echo "error: refused incomplete Stage 2 admission provenance" >&2
+        stage2_status=4
+      elif ! bootstrap_stage3_write_stage2_admission_receipt \
+        "${stage2_admission_receipt_absolute}" \
+        "${stage2_admitted_absolute}" "$(absolute_path "${stage3_source_before}")" \
+        "$(absolute_path "${runtime_admitted_snapshot}")" \
+        "$(absolute_path "${tool_authority_before}")" \
+        "${stage2_build_args_sha256}" \
+        "$(absolute_path "${stage2_sanity_evidence}")" \
+        "$(absolute_path "${stage2_receiver_evidence}")"; then
+        chmod u+w "${stage2_admitted_bin}"
+        rm -f "${stage2_admitted_bin}" "${stage2_admission_receipt}"
+        rmdir "${stage2_admitted_dir}" 2>/dev/null || true
+        echo "error: could not publish immutable Stage 2 admission receipt" >&2
+        stage2_status=4
+      else
+        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
+        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
+            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
+        fi
+        chmod 500 "${stage2_admitted_dir}"
+      fi
+    fi
   fi
   if [ "${stage2_status}" -ne 0 ]; then
     # A failing stage must say WHY. Before this, stage2 could exit 1 with a
@@ -2019,6 +2218,15 @@ else
     fi
     echo "  warning: stage2 native-build failed (exit ${stage2_status}); Stage 3/full CLI unavailable" >&2
     echo "  warning: see doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
+  fi
+
+  if [ "${stop_after_stage2}" -eq 1 ]; then
+    [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_admitted_bin}" ] || {
+      echo "error: --stop-after-stage2 requires a successful admitted Stage 2 compiler" >&2
+      exit 1
+    }
+    echo "Stage 2 admitted; stopping before Stage 3 as requested."
+    exit 0
   fi
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
@@ -2147,6 +2355,11 @@ else
       "${stage_build_path}"; then
       stage3_ok=1
       echo "  Stage 3 succeeded and passed bootstrap compiler sanity"
+      # Preserve the verified phase-3 compiler as an immutable lineage snapshot.
+      if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+        sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage3_bin}" phase3 || \
+          echo "  warning: phase3 snapshot preservation failed (non-fatal)" >&2
+      fi
     else
       stage3_status=2
       rm -f "${stage3_bin}"
@@ -2195,8 +2408,10 @@ else
     BSTAGE3_RUNTIME_ORIGIN_AFTER="$(absolute_path "${runtime_origin_after}")"
     BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT="$(absolute_path "${runtime_admitted_snapshot}")"
     BSTAGE3_TOOL_AUTHORITY="$(absolute_path "${tool_authority_after}")"
+    BSTAGE3_TOOL_AUTHORITY_BEFORE="$(absolute_path "${tool_authority_before}")"
     BSTAGE3_STAGE2="$(absolute_path "${stage2_bin}")"
     BSTAGE3_STAGE2_ADMITTED="${stage2_admitted_absolute}"
+    BSTAGE3_STAGE2_ADMISSION="${stage2_admission_receipt_absolute}"
     BSTAGE3_STAGE3="$(absolute_path "${stage3_bin}")"
     BSTAGE3_SOURCE_BEFORE="$(absolute_path "${stage3_source_before}")"
     BSTAGE3_SOURCE_AFTER="$(absolute_path "${stage3_source_after}")"
@@ -2224,6 +2439,7 @@ else
     BSTAGE3_STAGE2_TRANSCRIPT="$(absolute_path "${stage2_command_transcript}")"
     BSTAGE3_STAGE3_TRANSCRIPT="$(absolute_path "${stage3_command_transcript}")"
     BSTAGE3_STAGE2_SANITY="$(absolute_path "${stage2_sanity_evidence}")"
+    BSTAGE3_STAGE2_RECEIVER="$(absolute_path "${stage2_receiver_evidence}")"
     BSTAGE3_STAGE3_SANITY="$(absolute_path "${stage3_sanity_evidence}")"
     BSTAGE3_LOCK="$(absolute_path "${bootstrap_lock}")"
     BSTAGE3_RUST_LOG="${stage_build_rust_log}"
@@ -2231,10 +2447,11 @@ else
       BSTAGE3_MODE BSTAGE3_SEED BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
       BSTAGE3_RUNTIME_ORIGIN_BEFORE BSTAGE3_RUNTIME_ORIGIN_AFTER \
       BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT \
-      BSTAGE3_TOOL_AUTHORITY \
+      BSTAGE3_TOOL_AUTHORITY BSTAGE3_TOOL_AUTHORITY_BEFORE \
       BSTAGE3_SEED_STAMP BSTAGE3_HELPER BSTAGE3_HELPER_SHA256_BEFORE \
       BSTAGE3_HELPER_BUNDLE_FINGERPRINT_BEFORE \
-      BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED BSTAGE3_STAGE3 \
+      BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED BSTAGE3_STAGE2_ADMISSION \
+      BSTAGE3_STAGE3 \
       BSTAGE3_SOURCE_BEFORE \
       BSTAGE3_SOURCE_AFTER BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG \
       BSTAGE3_STAGE2_ARGS_SHA256 BSTAGE3_STAGE3_ARGS_SHA256 \
@@ -2246,7 +2463,8 @@ else
       BSTAGE3_SEED_INPUTS_FINGERPRINT BSTAGE3_SEED_FEATURES \
       BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
       BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT \
-      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK \
+      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE2_RECEIVER \
+      BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK \
       BSTAGE3_RUST_LOG
     bootstrap_stage3_write_manifest || {
       echo "error: refusing Stage 3 without canonical provenance" >&2
@@ -2698,7 +2916,14 @@ if [ "${deploy}" -eq 1 ]; then
     fi
   fi
 
+  full_hash="$(hash_file "${full_bin}")"
   current_hash="$(hash_file "${deployed_bin}")"
+  if [ "${current_hash}" != "${full_hash}" ]; then
+    echo "ERROR: deployed compiler hash differs from admitted Stage 4 candidate" >&2
+    echo "  candidate: ${full_hash}" >&2
+    echo "  deployed:  ${current_hash}" >&2
+    exit 1
+  fi
   backup_hash="none"
   [ "${backup_created}" -eq 1 ] && [ -f "${prev_bin}" ] && [ ! -L "${prev_bin}" ] && backup_hash="$(hash_file "${prev_bin}")"
   {
@@ -2706,6 +2931,7 @@ if [ "${deploy}" -eq 1 ]; then
     echo "platform=${PLATFORM}"
     echo "current_path=${deployed_bin}"
     echo "current_sha256=${current_hash}"
+    echo "stage4_candidate_sha256=${full_hash}"
     echo "backup_path=${prev_bin}"
     echo "backup_sha256=${backup_hash}"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

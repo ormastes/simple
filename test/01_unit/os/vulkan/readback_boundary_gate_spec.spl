@@ -71,6 +71,7 @@ as a measurement.
 """
 
 use std.spec.*
+use std.io_runtime.{file_read}
 use std.common.spec.evidence.counterpart.model.{
     ExecutionMode,
     ExecutionReceipt,
@@ -85,12 +86,15 @@ use os.drivers.gpu.board_vulkan.boundary_readback_gate.{
     readback_attempt_status_name,
     readback_boundary_accepted,
     readback_boundary_rejections,
-    readback_candidate
+    readback_candidate_from_counterpart
 }
 use os.drivers.gpu.board_vulkan.boundary_readback_lavapipe_provider.{
     anv_provider_manifest,
     lavapipe_independence_group,
-    lavapipe_provider_manifest
+    lavapipe_provider_manifest,
+    lavapipe_readback_reference,
+    lavapipe_readback_worker,
+    LavapipeReadbackResult
 }
 
 # A receipt with every field set to the value the gate requires. Every
@@ -110,12 +114,15 @@ fn valid_receipt() -> ExecutionReceipt:
     )
 
 fn matching_image() -> text:
-    "pixel-hash:8f3a9c2b-64x64-rgba8"
+    "checksum:813248"
+
+fn executed_reference() -> LavapipeReadbackResult:
+    lavapipe_readback_worker("/bin/sh", ["-c", "printf 'backend_name=vulkan\\nrect_readback_source=device_readback\\nrect_actual_checksum=813248\\noverall=pass\\n'"])
 
 describe("board vulkan readback boundary — baseline"):
     it("accepts a fully valid receipt with an exact image match"):
         step("build a valid receipt against a byte-identical reference image")
-        val candidate = readback_candidate(valid_receipt(), matching_image(), matching_image())
+        val candidate = readback_candidate_from_counterpart(valid_receipt(), matching_image(), executed_reference())
         step("run the gate")
         assert_equal(readback_boundary_rejections(candidate).len(), 0)
         assert_true(readback_boundary_accepted(candidate))
@@ -143,7 +150,7 @@ describe("board vulkan readback boundary — sabotage proofs"):
             dropped_events: 0,
             completed: true
         )
-        val candidate = readback_candidate(bad, matching_image(), matching_image())
+        val candidate = readback_candidate_from_counterpart(bad, matching_image(), executed_reference())
         step("run the gate")
         val reasons = readback_boundary_rejections(candidate)
         assert_false(readback_boundary_accepted(candidate))
@@ -168,7 +175,7 @@ describe("board vulkan readback boundary — sabotage proofs"):
             dropped_events: 0,
             completed: true
         )
-        val candidate = readback_candidate(bad, matching_image(), matching_image())
+        val candidate = readback_candidate_from_counterpart(bad, matching_image(), executed_reference())
         step("run the gate")
         val reasons = readback_boundary_rejections(candidate)
         assert_false(readback_boundary_accepted(candidate))
@@ -192,7 +199,7 @@ describe("board vulkan readback boundary — sabotage proofs"):
             dropped_events: 0,
             completed: true
         )
-        val candidate = readback_candidate(bad, matching_image(), matching_image())
+        val candidate = readback_candidate_from_counterpart(bad, matching_image(), executed_reference())
         step("run the gate")
         val reasons = readback_boundary_rejections(candidate)
         assert_false(readback_boundary_accepted(candidate))
@@ -204,10 +211,10 @@ describe("board vulkan readback boundary — sabotage proofs"):
 
     it("rejects a one-pixel image difference by image_exact comparison"):
         step("build a valid receipt but diverge the candidate image by one pixel")
-        val candidate = readback_candidate(
+        val candidate = readback_candidate_from_counterpart(
             valid_receipt(),
-            "pixel-hash:8f3a9c2c-64x64-rgba8",
-            matching_image()
+            "checksum:813249",
+            executed_reference()
         )
         step("run the gate")
         val reasons = readback_boundary_rejections(candidate)
@@ -248,3 +255,33 @@ describe("board vulkan readback boundary — lavapipe counterpart descriptor"):
     it("keeps anv in the same independence group as lavapipe, so the pair is one reference not two"):
         step("compare independence groups")
         assert_equal(anv_provider_manifest().independence_group, lavapipe_independence_group())
+
+describe("board vulkan readback boundary — executed counterpart"):
+    it("launches an admitted worker artifact without a raw source runner"):
+        val provider = file_read("src/os/drivers/gpu/board_vulkan/boundary_readback_lavapipe_provider.spl")
+        assert_true(provider.contains("worker_binary"))
+        assert_false(provider.contains("scripts/check/vulkan_engine2d_readback_evidence.spl"))
+        assert_false(provider.contains("simple_binary, \"run\""))
+
+    it("feeds only a successful device-readback worker checksum into the gate"):
+        val result = executed_reference()
+        assert_equal(result.status, ProviderStatus.executed)
+        assert_equal(result.reference_image_bytes, matching_image())
+        assert_true(readback_boundary_accepted(
+            readback_candidate_from_counterpart(valid_receipt(), matching_image(), result)))
+
+    it("rejects unavailable, empty, and failed worker output"):
+        val unavailable = lavapipe_readback_worker("/definitely/missing/lavapipe-worker", [])
+        assert_equal(unavailable.status, ProviderStatus.unavailable)
+        assert_equal(unavailable.reference_image_bytes, "")
+
+        val empty = lavapipe_readback_worker("/bin/sh", ["-c", "exit 0"])
+        assert_equal(empty.status, ProviderStatus.crashed)
+        assert_equal(empty.reference_image_bytes, "")
+
+        val failed = lavapipe_readback_worker("/bin/sh", ["-c", "printf 'rect_actual_checksum=authored\\n'; exit 7"])
+        assert_equal(failed.status, ProviderStatus.crashed)
+        assert_equal(failed.reference_image_bytes, "")
+
+        assert_false(readback_boundary_accepted(
+            readback_candidate_from_counterpart(valid_receipt(), matching_image(), unavailable)))

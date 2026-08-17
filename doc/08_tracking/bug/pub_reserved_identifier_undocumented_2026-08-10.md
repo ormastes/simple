@@ -1,5 +1,13 @@
 # `pub` rejected as an identifier but absent from the reserved-keyword list
 
+**RESOLVED 2026-08-17** — option (a): `pub` is now documented as reserved in
+`doc/07_guide/quick_reference/syntax_quick_reference.md` (new "Reserved
+keywords that cannot be used as identifiers" line) and appended to the
+reserved-keyword list in `.claude/rules/language.md`. Regression specs (both
+green): `test/01_unit/doc/reserved_keyword_pub_documented_spec.spl` (repro +
+full-set generalization) and its mirror
+`test/unit/doc/reserved_keyword_pub_documented_spec.spl`.
+
 **Found:** 2026-08-10, wave C5 spec authoring.
 
 ## Symptom

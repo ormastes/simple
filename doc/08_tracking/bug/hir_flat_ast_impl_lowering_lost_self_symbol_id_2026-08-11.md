@@ -2,6 +2,22 @@
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** RESOLVED 2026-08-17 — the deleted save/set/restore triple was
+  restored in `module_lowering.spl`'s flat-AST impl loop (save
+  `previous_impl_self_symbol_id` before the loop, set
+  `impl_owner_symbol.id` when valid, restore after), mirroring the intact
+  sites in `declaration_lowering.spl:634-649` and
+  `trait_impl_lowering.spl:204-231`. Verified: `grep -c
+  current_method_self_symbol_id` in the file is back to **3** (was 0),
+  matching the pre-regression count at `83d21f1808~1`. Full effect lands with
+  the next bootstrap deploy (this path only runs under `SIMPLE_BOOTSTRAP`).
+  **Regression specs** (both PASS post-fix; repro asserts the exact triple
+  that was absent pre-fix, so it is RED against the regressed source):
+  repro `test/01_unit/compiler/hir/impl_lowering_self_symbol_id_spec.spl`;
+  generalization (same defect class across all three method-entering lowering
+  paths + field existence)
+  `test/01_unit/compiler/hir/method_self_context_save_restore_spec.spl`.
+  Both mirrored to `test/unit/compiler/hir/`.
 - **Found:** 2026-08-11, during skeptical review of landed refactor commits
 - **Introduced by:** `83d21f1808` ("refactor(compiler): consolidate 4-way duplicated
   module-name-from-path derivation") — collateral, unrelated to that commit's stated scope

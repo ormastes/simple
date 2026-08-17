@@ -1,7 +1,16 @@
 use common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
-use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess, HostedBrowserRendererResult
+}
+# The broker+raster handshake lives in one place; see that module's header for
+# why it is a session rather than a one-shot `html -> pixels` call (this file's
+# animation path is the reason).
+use os.hosted.hosted_browser_render_session.{
+    HostedBrowserRenderSession,
+    hosted_browser_render_session_open,
+    hosted_browser_render_session_close,
+    hosted_browser_render_session_frame,
+    hosted_browser_render_session_rasterize
 }
 
 extern fn rt_sleep_ms(milliseconds: i64)
@@ -50,81 +59,79 @@ fn _await_evidence_frame(renderer: HostedBrowserRendererProcess) -> HostedBrowse
         attempts = attempts + 1
     nil
 
-fn _close_evidence(renderer: HostedBrowserRendererProcess, raster: Engine2dCompositorBackend) -> bool:
-    val closed = renderer.close()
-    raster.shutdown()
-    closed
+fn _close_evidence(session: HostedBrowserRenderSession) -> bool:
+    hosted_browser_render_session_close(session)
 
-fn _close_evidence_failure(renderer: HostedBrowserRendererProcess, raster: Engine2dCompositorBackend, reason: text) -> text:
-    if not _close_evidence(renderer, raster):
+fn _close_evidence_failure(session: HostedBrowserRenderSession, reason: text) -> text:
+    if not _close_evidence(session):
         return "{reason}; renderer cleanup failed"
     reason
 
 pub fn hosted_browser_html_css_evidence(executable: text) -> text:
-    var renderer = HostedBrowserRendererProcess.create(2, 64, 48)
-    val raster = Engine2dCompositorBackend.create_named(64, 48, "software")
-    val started = renderer.start(executable, 2000)
-    if not started.ok:
-        raster.shutdown()
-        return "renderer launch failed: {started.reason}"
-    val frame = renderer.render(
+    val session = match hosted_browser_render_session_open(executable, 2, 64, 48, 2000):
+        Ok(opened): opened
+        Err(reason): return reason
+    val frame = match hosted_browser_render_session_frame(
+        session,
         "init",
         "<style>.card{position:absolute;left:4px;top:6px;width:48px;height:30px;background-color:#ef4444;color:#ffffff;font-size:8px}#stage{background-color:#2563eb}</style><section><div id='stage' class='card'>Cascade text</div></section>",
         2000
-    )
-    if not frame.ok:
-        return _close_evidence_failure(renderer, raster, "static frame failed: {frame.reason}")
-    val rendered = raster.render_draw_ir_composition(frame.composition, [])
+    ):
+        Ok(rendered): rendered
+        Err(reason): return _close_evidence_failure(session, "static frame {reason}")
+    val rendered = frame.raster
     var text_commands: i64 = 0
-    for batch in frame.composition.batches:
+    for batch in frame.result.composition.batches:
         for command in batch.commands:
             if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value == "Cascade text":
                 text_commands = text_commands + 1
     val blue_pixels = _evidence_count_color(rendered.pixels, 0xFF2563EBu32)
     val red_pixels = _evidence_count_color(rendered.pixels, 0xFFEF4444u32)
-    val closed = _close_evidence(renderer, raster)
+    val closed = _close_evidence(session)
     if not closed: return "renderer cleanup failed"
-    if frame.composition.batches.len() <= 0: return "Draw IR has no batches"
-    if frame.composition.batches[0].commands.len() <= 0: return "Draw IR has no commands"
+    if frame.result.composition.batches.len() <= 0: return "Draw IR has no batches"
+    if frame.result.composition.batches[0].commands.len() <= 0: return "Draw IR has no commands"
     if text_commands <= 0: return "Draw IR text command missing"
     if rendered.fallback_required: return "software raster requested fallback"
     if rendered.rendered_command_count <= 0: return "software raster rendered no commands"
     if rendered.pixels.len() != 64 * 48: return "software raster size mismatch"
     if blue_pixels <= 1000: return "CSS id cascade did not produce blue pixels"
     if red_pixels != 0: return "lower-specificity CSS class remained visible"
-    if frame.next_animation_ms != -1: return "static frame unexpectedly scheduled animation"
+    if frame.result.next_animation_ms != -1: return "static frame unexpectedly scheduled animation"
     ""
 
 pub fn hosted_browser_animation_evidence(executable: text) -> text:
-    var renderer = HostedBrowserRendererProcess.create(1, 64, 48)
-    val raster = Engine2dCompositorBackend.create_named(64, 48, "software")
-    val started = renderer.start(executable, 2000)
-    if not started.ok:
-        raster.shutdown()
-        return "renderer launch failed: {started.reason}"
-    val initial = renderer.render("init", HOSTED_BROWSER_ANIMATION_EVIDENCE_HTML, 2000)
-    if not initial.ok:
-        return _close_evidence_failure(renderer, raster, "initial frame failed: {initial.reason}")
-    val first = raster.render_draw_ir_composition(initial.composition, [])
-    match renderer.begin_advance(16, 2000):
+    # One session spans init -> advance -> poll -> second rasterize. This is
+    # exactly why the shared helper is a session and not a one-shot render.
+    val session = match hosted_browser_render_session_open(executable, 1, 64, 48, 2000):
+        Ok(opened): opened
+        Err(reason): return reason
+    val initial_frame = match hosted_browser_render_session_frame(
+        session, "init", HOSTED_BROWSER_ANIMATION_EVIDENCE_HTML, 2000
+    ):
+        Ok(rendered): rendered
+        Err(reason): return _close_evidence_failure(session, "initial frame {reason}")
+    val initial = initial_frame.result
+    val first = initial_frame.raster
+    match session.renderer.begin_advance(16, 2000):
         Err(reason):
-            return _close_evidence_failure(renderer, raster, "animation start failed: {reason}")
+            return _close_evidence_failure(session, "animation start failed: {reason}")
         Ok(started_advance):
             if not started_advance:
-                return _close_evidence_failure(renderer, raster, "animation did not start")
-    val advanced = match _await_evidence_frame(renderer):
+                return _close_evidence_failure(session, "animation did not start")
+    val advanced = match _await_evidence_frame(session.renderer):
         Some(frame): frame
         nil:
-            return _close_evidence_failure(renderer, raster, "animation poll exhausted")
+            return _close_evidence_failure(session, "animation poll exhausted")
     if not advanced.ok:
-        return _close_evidence_failure(renderer, raster, "animation frame failed: {advanced.reason}")
-    val second = raster.render_draw_ir_composition(advanced.composition, [])
+        return _close_evidence_failure(session, "animation frame failed: {advanced.reason}")
+    val second = hosted_browser_render_session_rasterize(session, advanced).raster
     val initial_red = _evidence_count_color(first.pixels, 0xFFEF4444u32)
     val advanced_blue = _evidence_count_color(second.pixels, 0xFF2563EBu32)
     val advanced_green = _evidence_count_color(second.pixels, 0xFF22C55Eu32)
     val advanced_yellow = _evidence_count_color(second.pixels, 0xFFEAB308u32)
     val changed = not _evidence_pixels_equal(first.pixels, second.pixels)
-    val closed = _close_evidence(renderer, raster)
+    val closed = _close_evidence(session)
     if not closed: return "renderer cleanup failed"
     if initial.next_animation_ms != 16: return "initial animation deadline mismatch"
     if initial.composition.batches.len() <= 0 or initial.composition.batches[0].commands.len() <= 0: return "initial animation Draw IR is empty"

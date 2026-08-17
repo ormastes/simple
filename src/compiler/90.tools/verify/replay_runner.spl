@@ -89,6 +89,18 @@ fn replay_failed_receipt_v1(
         config.artifact_hash,
         policy_hash, "", outcome, diagnostic)
 
+# A build-directory manifest cannot authorize itself: an attacker able to
+# replace the replay executable can replace an adjacent manifest too.  Until a
+# repository-owned/provisioned trust anchor and resolver pin these exact
+# identities, the public receipt-owning entrypoints must not promote a
+# caller-supplied configuration into accepted replay evidence.
+fn replay_authority_error_v1(class_: ReplayCheckerClassV1) -> text:
+    match class_:
+        case ReplayCheckerClassV1.FreshLeanKernel:
+            "FV2-E-REPLAY-AUTHORITY: canonical fresh-replay authority is unavailable; provision a trust-anchored manifest/resolver for exact Lake and leanchecker paths, SHA-256 identities, and versions"
+        case ReplayCheckerClassV1.IndependentKernel:
+            "FV2-E-REPLAY-AUTHORITY: canonical independent-replay authority is unavailable; provision a trust-anchored manifest/resolver for the exact adapter, lean4export, and nanoda paths, SHA-256 identities, and versions"
+
 fn replay_run_v1(
     class_: ReplayCheckerClassV1,
     config: ReplayRunnerConfigV1,
@@ -178,6 +190,13 @@ fn replay_run_v1(
 pub fn run_fresh_leanchecker_v1(
     config: ReplayRunnerConfigV1
 ) -> ReplayCheckerReceiptV1:
+    val authority_error = replay_authority_error_v1(
+        ReplayCheckerClassV1.FreshLeanKernel)
+    if authority_error != "":
+        return replay_failed_receipt_v1(
+            ReplayCheckerClassV1.FreshLeanKernel, config,
+            sha256_text("fresh-leanchecker-v1|authority-unavailable"),
+            ReplayOutcomeV1.ToolFailure, authority_error)
     # Lake -d selects the package without shell-level `cd`.
     val args = ["-d", config.project_dir, "env", config.tool_path, "--fresh",
         config.module_name]
@@ -189,6 +208,13 @@ pub fn run_fresh_leanchecker_v1(
 pub fn run_independent_replay_adapter_v1(
     config: ReplayRunnerConfigV1
 ) -> ReplayCheckerReceiptV1:
+    val authority_error = replay_authority_error_v1(
+        ReplayCheckerClassV1.IndependentKernel)
+    if authority_error != "":
+        return replay_failed_receipt_v1(
+            ReplayCheckerClassV1.IndependentKernel, config,
+            sha256_text("independent-adapter-v1|authority-unavailable"),
+            ReplayOutcomeV1.ToolFailure, authority_error)
     # The pinned adapter accepts PROJECT_DIR MODULE ARTIFACT_PATH and must export the exact
     # module with lean4export, invoke nanoda with sorryAx disabled, and retain
     # a nonempty result record.  Its binary hash is part of this receipt.

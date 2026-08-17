@@ -187,6 +187,7 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 
 ## Rules
 
+- **One App, One Host Interface:** Design apps to run on all OSes identically; platform difference lives only behind HAL (SOSIX, CompositorBackend, DedicatedHost) or config. Ban per-OS code forks, platform conditionals in app logic, and adapter copying. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - If requirements missing, do research first — never design without requirements
 - If another LLM already created artifacts, review and extend — never overwrite
 - Every REQ-NNN must have test coverage

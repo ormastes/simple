@@ -296,3 +296,53 @@ Full writeup + probe transcript:
 New regression spec: `test/01_unit/compiler/global_c_repr_struct_field_read_spec.spl`.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Never identify the builtin `Option` by NAME (2026-08-16, from `8d96687c991`)
+
+Match lowering must separate two things that share a name:
+
+| | Builtin `Option<T>` | User-declared `enum Option` |
+|---|---|---|
+| Runtime shape | nil-boxing | ordinary allocated enum object |
+| Identity | reserved enum id `OPTION_ENUM_ID` = **1** | ordinary dynamically assigned id |
+| Correct path | optional fast path (`rt_is_none`/`rt_is_some`) | discriminant path |
+
+Both register as `HirType::Enum` named `"Option"` owning `Some`/`None`, so the
+**name cannot distinguish them**. Both runtimes key on the id and nothing else —
+`runtime/src/value/objects.rs:490` (`enum_id == OPTION_ENUM_ID`) and
+`src/runtime/simple_core/core_values.spl:61` (`if rt_enum_id(value) != 1`).
+
+`8d96687c991` added a builtin-`Option` exception keyed on `name == "Option"` plus
+the 2-variant `Some(payload)`/`None` shape. That matches user enums too, and
+misroutes them:
+
+- `case Option::Some(v)` → `rt_is_some(obj)` → `!rt_is_none(obj)`; obj is
+  non-nil and `enum_id != 1`, so it is **unconditionally true — irrefutable**,
+  and the early return fires before payload handling, **dropping the binding**.
+- `case Option::None` → `rt_is_none(obj)` → `enum_id != 1` → **never matches**.
+
+This is exactly what `subject_enum_owns_variant` was introduced to prevent; its
+own comment records the original symptom as *"made `case Some(x)` irrefutable
+and bound x = 3"*.
+
+### Rules
+
+1. **Key on the reserved enum id, never the name string.** If the id is not
+   reachable at the decision point, thread it there. A name test can only be
+   narrowed, never made correct — a user enum may legally take that name and shape.
+2. **The predicate lives in TWO places that must agree** —
+   `hir/lower/expr/control.rs` and `hir/lower/stmt_lowering.rs`, ~14 lines
+   duplicated verbatim, held in sync only by a comment. Change both; prefer one
+   shared helper.
+3. **Any fence for this class must be a NATIVE lane.** The tree-walk interpreter
+   binds match arms from `HirFunction` directly and reports green against a
+   broken compiler.
+
+Reachable in-tree: `driver/tests/runner_tests.rs:851,870,892`
+(`runner_handles_option_type`, asserting 42 and 99) and
+`src/compiler/30.types/bidirectional_types.spl:105`.
+
+Bug: `doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_enum_2026-08-16.md`.
+Fence: `test/03_system/compiler/user_option_enum_match_lowering_system_spec.spl`
+(fail-closed, unexecuted — no qualified pure-Simple runtime exists).
+Guide: `doc/07_guide/language/user_option_enum_match_lowering.md`.

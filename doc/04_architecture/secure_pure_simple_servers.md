@@ -33,7 +33,10 @@ first become an authenticated encrypted stream, then use the same bounded
 parser/router/writer path as explicit plaintext development mode. Parser
 limits are applied during reads rather than after allocation. Request identity
 and security headers are created in the canonical dispatch path. Parse,
-framing, traversal, and capacity failures terminate before routing.
+framing, traversal, and capacity failures terminate before routing. The writer
+is the sole response-framing owner: it emits one canonical `Content-Length`
+and `Connection: close`, suppresses application attempts to supply those fields
+or `Transfer-Encoding`, and drops invalid field names or control-bearing values.
 
 TLS is deliberately fail-closed today. `TlsServerConfig` can validate material
 and `tls_server_accept` reports unavailability, but no owned encrypted overlay
@@ -44,8 +47,17 @@ without plaintext fallback.
 
 ## Database capsule
 
-`DbListener` owns bind/accept/shutdown; `TcpDbListener` and
-`DbServerCapsule.listen/stop_listening` compose it with `TcpDbTransport`.
+`DbListener` owns bind/accept/shutdown; `TcpDbListener`,
+`DbListenerControl`, and `DbServerCapsule.listen/serve_listener` compose it
+with `TcpDbTransport`. Each control keeps its listener value owner-local while
+all copies share a scalar mutex lease/terminal-close receipt; accept holds that
+gate only for its bounded timeout, and close waits for the attempt before
+publishing terminal state and releasing the fd exactly once. Cross-owner
+shutdown retains only `DbStopControl`, never a raw listener copy. A shared
+bounded accept-attempt counter provides lifecycle evidence
+without granting another mutable store/session owner. If stop is published
+while bounded accept is in flight, the serving owner closes the completed
+transport before authentication, session creation, or request dispatch.
 Each connection has one session identity and cleanup path. Frame,
 message, connection, batch/range, and response limits are checked before
 allocation or mutation. `OPEN` resolves credentials to an

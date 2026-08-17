@@ -107,6 +107,18 @@ here. Filing as a blocker so it isn't silently stepped over.
   users won't see until the next `--full-bootstrap --deploy`.
 - Board-runnable: N/A — this is a CLI dispatch fix, not board/QEMU-related.
 
+## RESOLVED — dispatch gap closed (verified 2026-08-17)
+
+`bin/simple stats` and `bin/simple doc-coverage` no longer print
+`error: file not found: <cmd>` + help. Both are recognized commands; on a host
+without a deployed self-hosted binary they now say
+`error: pure-Simple tool 'stats' unavailable; refusing Rust fallback`, which is
+the intended seed behavior. The seed-command-table gap this doc reports is gone.
+
+Spec coverage note (2026-08-17): no unit spec added — the defect is seed CLI
+command-table dispatch (process-level `bin/simple stats` behavior), not a
+library function; a unit spec cannot observe it without spawning the seed
+binary, which the unit tree forbids. Verified manually instead (see above).
 ---
 
 ## RESOLVED 2026-08-17 — dispatch gap closed; residual is the known bootstrap blocker

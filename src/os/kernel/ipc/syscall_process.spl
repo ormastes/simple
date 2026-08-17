@@ -31,7 +31,8 @@ use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write16, mmio_write32}
 use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
 use os.kernel.pipe_compat.{posix_pipe}
 use os.kernel.fd_io.{posix_close, posix_dup, posix_dup2, posix_lseek}
-use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS}
+use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, fd_current_task, MAX_FDS}
+use os.kernel.fs.fat32_fd_table.{fat32_fd_alias, fat32_fd_is_registered, fat32_fd_object_id, fat32_fd_clear, fat32_fd_clear_task}
 use os.kernel.errno.{EACCES, EFAULT, EINVAL, ENAMETOOLONG}
 use os.kernel.ipc.syscall.{_u64_to_priority, g_scheduler_next_task_id, CURRENT_EXEC_ARCH, MAX_BINARY_PATH_LEN, MAX_EXEC_ARG_COUNT, MAX_EXEC_ENV_COUNT, MAX_EXEC_STRING_LEN, MAX_EXEC_TOTAL_STRING_BYTES, _is_userspace_ptr, _is_userspace_range, g_current_vmspace, _use_x86_64_direct_spawn_handoff, _alloc_x86_64_direct_spawn_pid}
 use os.kernel.ipc.syscall_device.{_dma_release_task_allocs}
@@ -59,6 +60,32 @@ fn _close_all_live_fds_with_backends() -> u32:
             closed = closed + 1u32
         i = i + 1
     closed
+
+fn _publish_fat32_dup_alias(task_id: u64, old_fd: i32, duplicated_fd: i32) -> i32:
+    """Mirror a successful generic fd duplication into the FAT32 object owner.
+
+    A non-FAT32 source must clear any replaced target mapping. A FAT32 source
+    attaches the new descriptor to the same canonical object, so positioned
+    and sequential operations share metadata while only sequential operations
+    advance the shared cursor.
+    """
+    if duplicated_fd < 0:
+        return duplicated_fd
+    if not fat32_fd_is_registered(task_id, old_fd):
+        fat32_fd_clear(task_id, duplicated_fd)
+        return duplicated_fd
+    val aliased = fat32_fd_alias(task_id, old_fd, task_id, duplicated_fd)
+    if aliased.is_err():
+        return aliased.unwrap_err()
+    duplicated_fd
+
+fn _publish_fat32_fork_aliases(parent_task_id: u64, child_task_id: u64):
+    """Mirror the generic fd-context fork into canonical FAT32 aliases."""
+    var fd = 0i32
+    while fd.to_u64() < MAX_FDS:
+        if fd_is_valid(fd) and fat32_fd_is_registered(parent_task_id, fd):
+            val _alias = fat32_fd_alias(parent_task_id, fd, child_task_id, fd)
+        fd = fd + 1
 
 fn _close_cloexec_fds_with_backends() -> u32:
     """Apply exec close-on-exec cleanup through backend-aware close."""
@@ -195,6 +222,7 @@ fn _handle_exit_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
 
     # Step 4: Close process descriptors for the current process lifecycle.
     _close_all_live_fds_with_backends()
+    fat32_fd_clear_task(exiting_task.id)
 
     # Step 4: Mark as zombie in scheduler
     sched.exit_task(code.to_i32())
@@ -293,6 +321,7 @@ fn _handle_fork_state(args: SyscallArgs, scheduler: Scheduler) -> ProcessSyscall
     if child.id == 0:
         return ProcessSyscallState(result: SyscallResult(value: -12), scheduler: sched)
     fd_prepare_fork_to_task(child.id)
+    _publish_fat32_fork_aliases(parent.id, child.id)
     ProcessSyscallState(result: SyscallResult(value: child.id.to_i64()), scheduler: sched)
 
 fn _handle_fork(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
@@ -451,11 +480,17 @@ fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
 
 fn _handle_dup2(args: SyscallArgs) -> SyscallResult:
     """Duplicate oldfd onto newfd using POSIX dup2 replacement semantics."""
-    SyscallResult(value: posix_dup2(args.arg0 as i32, args.arg1 as i32) as i64)
+    val task_id = fd_current_task()
+    val duplicated = posix_dup2(args.arg0 as i32, args.arg1 as i32)
+    SyscallResult(value: _publish_fat32_dup_alias(
+        task_id, args.arg0 as i32, duplicated) as i64)
 
 fn _handle_dup(args: SyscallArgs) -> SyscallResult:
     """Duplicate oldfd to the lowest available descriptor."""
-    SyscallResult(value: posix_dup(args.arg0 as i32) as i64)
+    val task_id = fd_current_task()
+    val duplicated = posix_dup(args.arg0 as i32)
+    SyscallResult(value: _publish_fat32_dup_alias(
+        task_id, args.arg0 as i32, duplicated) as i64)
 
 fn _handle_dlopen(args: SyscallArgs) -> SyscallResult:
     """Load a path-backed dynamic object and return a kernel registry handle.
@@ -618,9 +653,13 @@ fn _handle_fcntl(args: SyscallArgs) -> SyscallResult:
     val F_SIMPLEOS_GET_OFD: i32 = 1397686273
 
     if cmd == F_DUPFD:
-        return SyscallResult(value: fd_dup_from(fd, arg as i32, false) as i64)
+        val duplicated = fd_dup_from(fd, arg as i32, false)
+        return SyscallResult(value: _publish_fat32_dup_alias(
+            fd_current_task(), fd, duplicated) as i64)
     if cmd == F_DUPFD_CLOEXEC:
-        return SyscallResult(value: fd_dup_from(fd, arg as i32, true) as i64)
+        val duplicated = fd_dup_from(fd, arg as i32, true)
+        return SyscallResult(value: _publish_fat32_dup_alias(
+            fd_current_task(), fd, duplicated) as i64)
     if not fd_is_valid(fd):
         return SyscallResult(value: -9)
     if cmd == F_GETFD:
@@ -632,6 +671,9 @@ fn _handle_fcntl(args: SyscallArgs) -> SyscallResult:
     if cmd == F_SETFL:
         return SyscallResult(value: fd_set_status_flags(fd, arg as u32) as i64)
     if cmd == F_SIMPLEOS_GET_OFD:
+        val fat32_object_id = fat32_fd_object_id(fd_current_task(), fd)
+        if fat32_object_id != 0u64:
+            return SyscallResult(value: fat32_object_id as i64)
         return SyscallResult(value: fd_get_object_id(fd) as i64)
     SyscallResult(value: -22)
 

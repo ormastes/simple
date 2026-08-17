@@ -70,3 +70,32 @@ observation and no code change is defensible.
 
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
+
+## Current-source audit 2026-08-17
+
+Status remains **FOCUSED PASS / STAGE 3 VERIFICATION PENDING**. The linked
+repair criteria are present in current source and no additional code gap was
+found:
+
+- `maybe_copy_array_value` passes only scalar local IDs to
+  `copy_local_hir_type_metadata`;
+- the `HirType` aggregate is read and copied only inside the aligned metadata
+  arrays owned by `MirLowering`;
+- missing source IDs and the same `nil`/raw-zero sentinel rejected by
+  `find_local_hir_type` return before destination mutation;
+- append and update copy isolation and resource state with the type value.
+
+The retained focused fixture and gate remain correctly scoped: append, update,
+missing-source, isolation-state, and resource-state behavior are executable,
+and the gate binds the production caller/helper plus the admitted compiler's
+receipt hash before building the fixture. The 2026-08-16 hashes above remain
+the latest positive provenance; they were not replaced by source inspection.
+
+The focused gate was invoked once in this worktree and failed immediately with
+`STATUS: FAIL scalar-metadata-copy reason=compiler-missing-or-symlink` because
+`build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple` is
+absent. No admitted compiler/receipt or bounded Stage-3 resume artifact exists
+under `build/bootstrap`, so Stage 3 was not started. No production or test edit
+is justified until an admitted artifact can re-run the existing focused gate;
+after that passes, run the single materially changed cache-preserving Stage 3
+resume required by the unblock condition.

@@ -2,10 +2,9 @@
 
 ## Status
 
-OPEN / EXECUTION BLOCKED. The source-only continuation path and sabotage
-contract now exist. Live acceptance remains blocked until an admitted Stage 3
-lane and planner receipt are available; this change deliberately did not run a
-Stage 3 or Stage 4 build.
+FIXED (source and sabotage contract). Live execution evidence remains pending
+until an admitted Stage 3 lane and planner receipt are available; no Stage 3 or
+Stage 4 build was launched without those authorities.
 
 ## Required repair
 
@@ -54,3 +53,24 @@ already written; what is missing is an execution environment, not code.
 
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
+
+## Closure audit 2026-08-17
+
+The canonical wrapper exposes `--resume-stage4-from-admitted`, requires the
+planner-authored `//bootstrap:stage4` receipt, re-verifies the Stage-3 candidate
+and provenance before compilation, holds the parent output lock, snapshots and
+rechecks immutable Stage-2/3 directories, suppresses Rust seed authority, and
+continues through candidate validity, `-c`, source-check, redeploy,
+essential-tools, candidate-provenance, deployment, and terminal continuation
+receipt gates. Deployment now additionally compares the installed binary hash
+against the admitted full Stage-4 candidate and records both in the v1 deploy
+receipt; mismatch is fatal before a pass receipt can be published.
+
+Focused executable sabotage contract:
+
+`sh test/01_unit/scripts/bootstrap_resume_stage4_from_admitted_contract_test.shs`
+
+passed once with: `PASS: admitted Stage 4 resume is planner-bound, locked,
+immutable, collision-safe, and uses existing gates`. No admitted Stage-3
+artifact and planner receipt were present in this worktree, so the live Stage-4
+continuation was correctly not started.

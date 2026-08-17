@@ -1336,6 +1336,33 @@ impl Clone for NativeFunction {
 }
 
 impl Value {
+    pub fn aggregate(class: String, fields: HashMap<String, Value>, is_value_type: bool) -> Self {
+        if is_value_type {
+            Value::Object {
+                class,
+                fields: Arc::new(fields),
+            }
+        } else {
+            Value::ClassInstance(Arc::new(ClassInstance::new(class, fields)))
+        }
+    }
+
+    pub fn aggregate_class(&self) -> Option<&str> {
+        match self {
+            Value::Object { class, .. } => Some(class),
+            Value::ClassInstance(instance) => Some(instance.class()),
+            _ => None,
+        }
+    }
+
+    pub fn aggregate_field(&self, name: &str) -> Option<Value> {
+        match self {
+            Value::Object { fields, .. } => fields.get(name).cloned(),
+            Value::ClassInstance(instance) => instance.field(name),
+            _ => None,
+        }
+    }
+
     pub fn text(value: impl Into<String>) -> Self {
         Value::Str(Arc::new(value.into()))
     }

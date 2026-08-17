@@ -1,0 +1,194 @@
+# Host-neutral GPT discovery and partition-window validation.
+#
+# This module deliberately owns no controller constants and performs no writes.
+# Callers provide the exact sector count of their already-bounded BlockDevice
+# lease. Formatting tools may consume GptFormatPlan, but must use an explicit
+# separate commit operation.
+
+use std.fs_driver.block_device.{BlockDevice}
+
+val GPT_MIN_HEADER_SIZE: u32 = 92u32
+val GPT_MIN_ENTRY_SIZE: u32 = 128u32
+val GPT_MAX_ENTRY_COUNT: u32 = 128u32
+
+struct GptPartition:
+    index: u32
+    first_lba: u64
+    last_lba: u64
+    type_guid_lo: u64
+    type_guid_hi: u64
+    unique_guid_lo: u64
+    unique_guid_hi: u64
+
+struct GptTable:
+    first_usable_lba: u64
+    last_usable_lba: u64
+    backup_header_lba: u64
+    partitions: [GptPartition]
+
+struct GptFormatPlan:
+    """Validated geometry only. Creating this value never writes media."""
+    sector_size: u32
+    sector_count: u64
+    entry_count: u32
+    entry_size: u32
+    primary_header_lba: u64
+    primary_entries_lba: u64
+    backup_entries_lba: u64
+    backup_header_lba: u64
+    first_usable_lba: u64
+    last_usable_lba: u64
+
+fn _gpt_u32_le(data: [u8], off: i64) -> u32:
+    data[off].to_u32() |
+        (data[off + 1].to_u32() << 8) |
+        (data[off + 2].to_u32() << 16) |
+        (data[off + 3].to_u32() << 24)
+
+fn _gpt_u64_le(data: [u8], off: i64) -> u64:
+    _gpt_u32_le(data, off).to_u64() | (_gpt_u32_le(data, off + 4).to_u64() << 32)
+
+fn gpt_crc32(data: [u8]) -> u32:
+    """IEEE CRC-32 used by EFI GPT (polynomial 0xedb88320)."""
+    var crc: u32 = 0xffffffffu32
+    var i: i64 = 0
+    while i < data.len():
+        crc = crc ^ data[i].to_u32()
+        var bit: i64 = 0
+        while bit < 8:
+            if (crc & 1u32) != 0u32:
+                crc = (crc >> 1) ^ 0xedb88320u32
+            else:
+                crc = crc >> 1
+            bit = bit + 1
+        i = i + 1
+    crc ^ 0xffffffffu32
+
+fn _gpt_crc_region(data: [u8], length: i64, zero_crc_field: bool) -> u32:
+    var region: [u8] = []
+    var i: i64 = 0
+    while i < length:
+        if zero_crc_field and i >= 16 and i < 20:
+            region.push(0u8)
+        else:
+            region.push(data[i])
+        i = i + 1
+    gpt_crc32(region)
+
+fn gpt_format_plan(sector_size: u32, sector_count: u64, entry_count: u32) -> Result<GptFormatPlan, text>:
+    """Validate standard GPT geometry without encoding or writing sectors."""
+    if sector_size < 512u32:
+        return Err("gpt-format-sector-size-too-small")
+    if entry_count == 0u32 or entry_count > GPT_MAX_ENTRY_COUNT:
+        return Err("gpt-format-entry-count-out-of-range")
+    val entry_bytes = entry_count.to_u64() * GPT_MIN_ENTRY_SIZE.to_u64()
+    val entry_sectors = (entry_bytes + sector_size.to_u64() - 1u64) / sector_size.to_u64()
+    val metadata_sectors = 3u64 + entry_sectors + entry_sectors
+    if sector_count <= metadata_sectors:
+        return Err("gpt-format-device-too-small")
+    val backup_header_lba = sector_count - 1u64
+    val backup_entries_lba = backup_header_lba - entry_sectors
+    val first_usable_lba = 2u64 + entry_sectors
+    val last_usable_lba = backup_entries_lba - 1u64
+    Ok(GptFormatPlan(
+        sector_size: sector_size,
+        sector_count: sector_count,
+        entry_count: entry_count,
+        entry_size: GPT_MIN_ENTRY_SIZE,
+        primary_header_lba: 1u64,
+        primary_entries_lba: 2u64,
+        backup_entries_lba: backup_entries_lba,
+        backup_header_lba: backup_header_lba,
+        first_usable_lba: first_usable_lba,
+        last_usable_lba: last_usable_lba
+    ))
+
+fn gpt_partition_window_reason(part: GptPartition, device_sector_count: u64) -> text:
+    if part.first_lba > part.last_lba:
+        return "gpt-partition-reversed"
+    if part.last_lba >= device_sector_count:
+        return "gpt-partition-out-of-bounds"
+    "ready"
+
+fn gpt_partition_sector_count(part: GptPartition) -> Result<u64, text>:
+    if part.first_lba > part.last_lba:
+        return Err("gpt-partition-reversed")
+    Ok(part.last_lba - part.first_lba + 1u64)
+
+fn gpt_read_primary(dev: BlockDevice, device_sector_count: u64) -> Result<GptTable, text>:
+    """Read and validate the primary GPT using exact single-sector I/O."""
+    if device_sector_count < 3u64:
+        return Err("gpt-device-too-small")
+    val sector_size = dev.sector_size()
+    if sector_size < 512u32:
+        return Err("gpt-sector-size-too-small")
+    val header_result = dev.read_sector(1u64)
+    if header_result.is_err():
+        return Err("gpt-header-read:" + header_result.unwrap_err())
+    val header = header_result.unwrap()
+    if header.len() != sector_size.to_i64():
+        return Err("gpt-header-short-sector")
+    if header[0] != 0x45u8 or header[1] != 0x46u8 or header[2] != 0x49u8 or header[3] != 0x20u8 or header[4] != 0x50u8 or header[5] != 0x41u8 or header[6] != 0x52u8 or header[7] != 0x54u8:
+        return Err("gpt-signature-invalid")
+    val header_size = _gpt_u32_le(header, 12)
+    if header_size < GPT_MIN_HEADER_SIZE or header_size > sector_size:
+        return Err("gpt-header-size-invalid")
+    if _gpt_u64_le(header, 24) != 1u64:
+        return Err("gpt-primary-current-lba-invalid")
+    val backup_lba = _gpt_u64_le(header, 32)
+    val first_usable = _gpt_u64_le(header, 40)
+    val last_usable = _gpt_u64_le(header, 48)
+    if backup_lba >= device_sector_count or backup_lba <= last_usable or first_usable > last_usable or last_usable >= device_sector_count:
+        return Err("gpt-header-geometry-invalid")
+    if _gpt_crc_region(header, header_size.to_i64(), true) != _gpt_u32_le(header, 16):
+        return Err("gpt-header-crc-mismatch")
+    val entries_lba = _gpt_u64_le(header, 72)
+    val entry_count = _gpt_u32_le(header, 80)
+    val entry_size = _gpt_u32_le(header, 84)
+    if entry_count == 0u32 or entry_count > GPT_MAX_ENTRY_COUNT:
+        return Err("gpt-entry-count-out-of-range")
+    if entry_size < GPT_MIN_ENTRY_SIZE or (entry_size & 7u32) != 0u32:
+        return Err("gpt-entry-size-invalid")
+    val entries_bytes = entry_count.to_u64() * entry_size.to_u64()
+    val entries_sectors = (entries_bytes + sector_size.to_u64() - 1u64) / sector_size.to_u64()
+    if entries_lba < 2u64 or entries_lba >= device_sector_count or entries_sectors > device_sector_count - entries_lba:
+        return Err("gpt-entry-array-out-of-bounds")
+    if entries_sectors > first_usable or entries_lba > first_usable - entries_sectors:
+        return Err("gpt-entry-array-overlaps-usable-range")
+    var entries: [u8] = []
+    var s: u64 = 0u64
+    while s < entries_sectors:
+        val sector_result = dev.read_sector(entries_lba + s)
+        if sector_result.is_err():
+            return Err("gpt-entry-read:" + sector_result.unwrap_err())
+        val sector = sector_result.unwrap()
+        if sector.len() != sector_size.to_i64():
+            return Err("gpt-entry-short-sector")
+        var b: i64 = 0
+        while b < sector.len() and entries.len().to_u64() < entries_bytes:
+            entries.push(sector[b])
+            b = b + 1
+        s = s + 1u64
+    if gpt_crc32(entries) != _gpt_u32_le(header, 88):
+        return Err("gpt-entry-crc-mismatch")
+    var parts: [GptPartition] = []
+    var index: u32 = 0u32
+    while index < entry_count:
+        val off = index.to_i64() * entry_size.to_i64()
+        val type_lo = _gpt_u64_le(entries, off)
+        val type_hi = _gpt_u64_le(entries, off + 8)
+        if type_lo != 0u64 or type_hi != 0u64:
+            val part = GptPartition(
+                index: index + 1u32,
+                first_lba: _gpt_u64_le(entries, off + 32),
+                last_lba: _gpt_u64_le(entries, off + 40),
+                type_guid_lo: type_lo,
+                type_guid_hi: type_hi,
+                unique_guid_lo: _gpt_u64_le(entries, off + 16),
+                unique_guid_hi: _gpt_u64_le(entries, off + 24)
+            )
+            if gpt_partition_window_reason(part, device_sector_count) != "ready" or part.first_lba < first_usable or part.last_lba > last_usable:
+                return Err("gpt-partition-geometry-invalid")
+            parts.push(part)
+        index = index + 1u32
+    Ok(GptTable(first_usable_lba: first_usable, last_usable_lba: last_usable, backup_header_lba: backup_lba, partitions: parts))

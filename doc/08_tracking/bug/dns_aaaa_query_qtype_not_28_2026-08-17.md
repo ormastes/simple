@@ -1,5 +1,6 @@
 # DNS AAAA query does not carry QTYPE=28
 
+- Status: OPEN
 - Status: CLOSED (2026-08-17)
 - Found: 2026-08-17, `test/01_unit/lib/` sweep
 - Severity: MEDIUM — AAAA (IPv6) lookups are affected

@@ -4,6 +4,8 @@ The pure-Simple GUI lane is verified by **three canonical check apps**, one per
 rendering surface. After any GUI / engine2d / web-render change, run all three
 and verify the **framebuffer** (not the screenshot — see the oracle rule below).
 
+**Host-interface rule:** All per-OS rendering difference lives in `CompositorBackend` implementations and optional capability traits (e.g., `as_glass_capable()`), never as branches in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
+
 On macOS the pure-Simple lane = **Engine2D CPU/NEON** (aarch64) + **Metal** (GPU).
 
 > **Linux Vulkan-backed browser lane IS available (verified 2026-06-25).** Do not

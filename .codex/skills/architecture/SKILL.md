@@ -143,6 +143,7 @@ Proposed | Accepted | Deprecated | Superseded by ADR-XXX
 
 ## Rules
 
+- **One App, One Host Interface:** Apps run on all OSes identically; only HAL/backend varies behind established boundaries (SOSIX, CompositorBackend, DedicatedHost). No per-OS app forks, platform conditionals in app logic, or adapter copying. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - All code in `.spl` — no Python, no Bash
 - NO inheritance — use composition, alias forwarding, traits, or mixins
 - Prefer tree-private by default; allow sibling access only through extracted common nodes

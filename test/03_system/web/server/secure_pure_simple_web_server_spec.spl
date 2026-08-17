@@ -1,17 +1,22 @@
-# Secure Pure-Simple production web server (AC-1..AC-3).
-#
-# The operator vocabulary is frozen in
-# `.spipe/secure_pure_simple_servers/state.md`. These scenarios exercise the
-# production policy and the same parser/router/TLS owners used by the listener.
+# codex-system-test
+# @cover src/lib/nogc_sync_mut/http_server/response.spl 80%
+# @req REQ-001 REQ-002 REQ-003
+"""# Secure Pure-Simple production web server
+
+These operator scenarios exercise the production policy and the same
+parser/router/writer/TLS owners used by the listener. REQ-002 response-framing
+coverage stays future-executable and fail-closed: absence of an admitted
+Stage-4 CLI blocks evidence, never turns a scenario into a placeholder pass.
+"""
 
 use std.spec.*
 use std.nogc_sync_mut.http_server.parser.{headers_decision, parse_request_line, request_line_without_terminator, RUNTIME_READ_LINE_CAP}
 use std.nogc_sync_mut.http_server.router.{Router, path_is_safe}
 use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, ConnectionAdmission, plaintext_development_capability, secure_server_policy_error}
-use std.nogc_sync_mut.http_server.response.{with_default_security_headers, serialize_response}
-use std.nogc_sync_mut.http_server.types.{HttpResponse}
+use std.nogc_sync_mut.http_server.response.{with_default_security_headers, serialize_response, response_wire_size, response_wire_fits, bounded_response_wire}
+use std.nogc_sync_mut.http_server.types.{HttpMethod, HttpRequest, HttpResponse}
 use std.nogc_sync_mut.http_server.tls_server.{tls_server_config_new, tls_server_config_error, tls_server_accept, tls_conn_is_h2, tls_conn_is_http1}
-use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 
 fn secure_web_server_fixture() -> SecureServerPolicy:
     SecureServerPolicy.production()
@@ -20,21 +25,49 @@ fn expect_web_request_rejected(headers: [(text, text)], expected: text):
     val decision = headers_decision(headers, 1024)
     expect(decision.0).to_contain(expected)
 
+fn hostile_framing_response(request: HttpRequest) -> HttpResponse:
+    val _path = request.path
+    var response = HttpResponse.ok("ok")
+    response = response.with_header("cOnTeNt-LeNgTh", "999")
+    response = response.with_header("Transfer-Encoding", "chunked")
+    response = response.with_header("CONNECTION", "keep-alive")
+    response = response.with_header("Content-Length ", "998")
+    response = response.with_header(" Transfer-Encoding", "compress")
+    response = response.with_header("Bad:Name", "bad-colon")
+    response = response.with_header("X-Injected", "safe\r\nTransfer-Encoding: chunked")
+    response = response.with_header("X-Control", "safe\tunsafe")
+    response = response.with_header("X-Frame-Options", "DENY\r\nX-Injected: yes")
+    response
+
 describe "Secure Pure-Simple production web routing":
     it "AC-1 Bind the production listener":
+        step("Bind the production listener")
         val policy = secure_web_server_fixture()
         expect(secure_server_policy_error(policy)).to_equal("")
-        expect(policy.plaintext_development).to_equal(false)
+        expect(policy.plaintext_development).to_be(false)
         expect(policy.max_keep_alive_requests).to_equal(1)
         expect(policy.max_connections).to_be_greater_than(0)
+        expect(policy.max_response_bytes).to_be_greater_than(0)
         var invalid = SecureServerPolicy.production()
         invalid.max_connections = 0
         expect(secure_server_policy_error(invalid)).to_contain("max_connections must be positive")
+        invalid = SecureServerPolicy.production()
+        invalid.max_response_bytes = 0
+        expect(secure_server_policy_error(invalid)).to_contain("max_response_bytes must be positive")
 
-    it "AC-2 Reject an unsafe web request before dispatch":
-        expect(path_is_safe("/assets/%2e%2e/secrets.txt")).to_equal(false)
+    it "should reject unsafe request framing before dispatch":
+        # @req REQ-002
+        step("Construct malformed and ambiguous request framing")
+        step("Reject an unsafe web request before dispatch")
+        expect(path_is_safe("/assets/%2e%2e/secrets.txt")).to_be(false)
         expect_web_request_rejected([("Content-Length", "3"), ("Content-Length", "4")], "Duplicate Content-Length")
-        expect_web_request_rejected([("Transfer-Encoding", "gzip")], "Transfer-Encoding is not supported")
+        val gzip = headers_decision([("Transfer-Encoding", "gzip")], 1024)
+        expect(gzip.0).to_equal("501 Transfer-Encoding is not supported")
+        val identity = headers_decision([("Transfer-Encoding", "identity")], 1024)
+        expect(identity.0).to_equal("501 Transfer-Encoding is not supported")
+        val absent = headers_decision([("Host", "example.test")], 1024)
+        expect(absent.0).to_equal("")
+        expect(absent.1).to_equal(0)
         expect_web_request_rejected([("Authorization", "one"), ("authorization", "two")], "Conflicting duplicate security header")
         expect(parse_request_line("GET / HTTP/1.1 extra").0).to_equal("")
         expect(parse_request_line(" GET / HTTP/1.1").0).to_equal("")
@@ -46,43 +79,153 @@ describe "Secure Pure-Simple production web routing":
         expect(tls_server_config_error(missing)).to_contain("certificate material is missing")
         val invalid = tls_server_config_new("00", "11", ["http/1.1"])
         expect(tls_server_config_error(invalid)).to_contain("certificate material is invalid")
-        val missing_capability = plaintext_development_capability("")
-        expect(missing_capability.error?).to_equal(true)
+        match plaintext_development_capability(""):
+            Err(e): expect(e).to_contain("non-empty audit reason")
+            Ok(_): fail("empty audit reason unexpectedly minted plaintext authority")
         match plaintext_development_capability("system-test explicit development mode"):
-            Err(_): expect(false).to_equal(true)
+            Err(e): fail("unexpected plaintext development capability failure: {e}")
             Ok(capability):
                 val dev = SecureServerPolicy.plaintext_dev(capability)
-                expect(dev.plaintext_development).to_equal(true)
+                expect(dev.plaintext_development).to_be(true)
 
     it "AC-1 attaches default security headers before writing":
         val secured = with_default_security_headers(HttpResponse.ok("ok"), false)
         val wire = serialize_response(secured)
         expect(wire).to_contain("X-Content-Type-Options: nosniff")
         expect(wire).to_contain("X-Frame-Options: DENY")
-        expect(wire.contains("Strict-Transport-Security")).to_equal(false)
+        expect(wire.contains("Strict-Transport-Security")).to_be(false)
+
+    it "should preserve a valid application header beside canonical framing":
+        # @req REQ-002
+        step("Construct one valid application response")
+        var response = HttpResponse.ok("ok")
+        response = response.with_header("X-Trace-Id", "trace-1")
+        step("Serialize through the server-owned framing writer")
+        val wire = serialize_response(response)
+        val lower_wire = wire.to_lower()
+        val content_length_parts = lower_wire.split("content-length:")
+        val connection_parts = lower_wire.split("connection:")
+        step("Verify one canonical header block and complete body")
+        expect(content_length_parts.len()).to_equal(2)
+        expect(connection_parts.len()).to_equal(2)
+        expect(lower_wire).to_contain("content-length: 2\r\n")
+        expect(lower_wire).to_contain("connection: close\r\n")
+        expect(lower_wire.contains("transfer-encoding")).to_be(false)
+        expect(wire).to_contain("X-Trace-Id: trace-1\r\n")
+        expect(wire).to_end_with("\r\n\r\nok")
+
+    it "should reject conflicting and control-bearing application framing":
+        # @req REQ-002
+        step("Construct conflicting application response framing")
+        val wire = serialize_response(hostile_framing_response(HttpRequest.new(HttpMethod.Get, "/framing")))
+        step("Serialize through the server-owned framing writer")
+        val lower_wire = wire.to_lower()
+        val content_length_parts = lower_wire.split("content-length:")
+        val connection_parts = lower_wire.split("connection:")
+        step("Reject overrides, injection, and incomplete framing")
+        expect(wire).to_contain("Content-Length: 2\r\n")
+        expect(content_length_parts.len()).to_equal(2)
+        expect(lower_wire.contains("transfer-encoding")).to_be(false)
+        expect(wire).to_contain("Connection: close\r\n")
+        expect(connection_parts.len()).to_equal(2)
+        expect(lower_wire.contains("999")).to_be(false)
+        expect(lower_wire.contains("998")).to_be(false)
+        expect(lower_wire.contains("keep-alive")).to_be(false)
+        expect(lower_wire.contains("bad-colon")).to_be(false)
+        expect(lower_wire.contains("safe\tunsafe")).to_be(false)
+        expect(wire.contains("X-Injected")).to_be(false)
+        expect(wire).to_end_with("\r\n\r\nok")
+
+    it "should send only server-owned framing over a real loopback connection":
+        # @req REQ-002
+        step("Bind the production listener")
+        var listener = match TcpListener.bind("127.0.0.1:0"):
+            Err(error): panic("web framing bind failed: {error.message}")
+            Ok(value): value
+        val addr = match listener.local_addr():
+            Err(error): panic("web framing local_addr failed: {error.message}")
+            Ok(value): value
+        var client = match TcpStream.connect(addr):
+            Err(error): panic("web framing connect failed: {error.message}")
+            Ok(value): value
+        var accepted = match listener.accept_timeout(1000):
+            Err(error): panic("web framing accept failed: {error.message}")
+            Ok(value): value
+        match listener.close():
+            Err(error): panic("web framing listener close failed: {error.message}")
+            Ok(_): pass
+
+        var router = Router.new()
+        router.get("/framing", hostile_framing_response)
+        var server = SimpleHttpServer.new("127.0.0.1", 0, router)
+        step("Route one request to the hostile application handler")
+        expect(client.write_text_status("GET /framing HTTP/1.1\r\nHost: loopback.test\r\n\r\n")).to_be(true)
+        server.handle_connection(accepted)
+        val wire = match client.read_text():
+            Err(error): panic("web framing response read failed: {error.message}")
+            Ok(value): value
+        val lower_wire = wire.to_lower()
+        val content_length_parts = lower_wire.split("content-length:")
+        val connection_parts = lower_wire.split("connection:")
+        step("Verify the complete server-owned wire response")
+        expect(content_length_parts.len()).to_equal(2)
+        expect(lower_wire).to_contain("content-length: 2\r\n")
+        expect(lower_wire.contains("transfer-encoding")).to_be(false)
+        expect(lower_wire).to_contain("connection: close\r\n")
+        expect(connection_parts.len()).to_equal(2)
+        expect(lower_wire.contains("999")).to_be(false)
+        expect(lower_wire.contains("998")).to_be(false)
+        expect(lower_wire.contains("keep-alive")).to_be(false)
+        expect(lower_wire.contains("bad-colon")).to_be(false)
+        expect(lower_wire.contains("safe\tunsafe")).to_be(false)
+        expect(lower_wire).to_contain("x-frame-options: deny\r\n")
+        expect(lower_wire.contains("x-injected")).to_be(false)
+        expect(wire).to_end_with("\r\n\r\nok")
+        val _client_closed = client.close()
+
+    it "NFR-002 bounds a complete response at boundary and boundary plus one":
+        val secured = with_default_security_headers(HttpResponse.ok("ok"), false)
+        val exact_size = response_wire_size(secured)
+        expect(response_wire_fits(secured, exact_size)).to_be(true)
+        expect(response_wire_fits(secured, exact_size - 1)).to_be(false)
+        var oversized_body = ""
+        var i = 0
+        while i < 2048:
+            oversized_body = "{oversized_body}x"
+            i = i + 1
+        val fallback = bounded_response_wire(
+            with_default_security_headers(HttpResponse.ok(oversized_body), false),
+            1024
+        )
+        expect(fallback).to_start_with("HTTP/1.1 500 Internal Server Error")
+        expect(fallback).to_contain("X-Content-Type-Options: nosniff")
+        expect(fallback).to_contain("X-Frame-Options: DENY")
+        expect(fallback).to_end_with("response exceeds configured byte limit")
+        expect(fallback.len()).to_be_less_than(1025)
 
     it "AC-3 closes a connection when TLS cannot be established":
         val stream = TcpStream.from_accepted_fd(-1)
         val config = tls_server_config_new("3000000000000000", "3000000000000000", ["http/1.1"])
         val conn = tls_server_accept(stream, config)
-        expect(conn.tls_active).to_equal(false)
+        expect(conn.tls_active).to_be(false)
         expect(conn.error).to_contain("GAP-TLS-3")
         expect(conn.negotiated_protocol).to_equal("")
-        expect(tls_conn_is_http1(conn)).to_equal(false)
-        expect(tls_conn_is_h2(conn)).to_equal(false)
-        expect(conn.tcp.is_open()).to_equal(false)
+        expect(tls_conn_is_http1(conn)).to_be(false)
+        expect(tls_conn_is_h2(conn)).to_be(false)
+        expect(conn.tcp.is_open()).to_be(false)
 
     it "AC-3 returns a production startup failure instead of opening plaintext":
         val server = SimpleHttpServer.new("127.0.0.1", 0, Router.new())
-        val result = server.start()
-        expect(result.error?).to_equal(true)
+        match server.start():
+            Err(e): expect(e).to_contain("production policy requires TLS")
+            Ok(_): fail("production start unexpectedly opened plaintext")
 
     it "AC-2 admits the configured connection boundary and rejects boundary plus one":
         val admission = ConnectionAdmission.new(2)
-        expect(admission.try_acquire()).to_equal(true)
-        expect(admission.try_acquire()).to_equal(true)
+        expect(admission.try_acquire()).to_be(true)
+        expect(admission.try_acquire()).to_be(true)
         expect(admission.count()).to_equal(2)
-        expect(admission.try_acquire()).to_equal(false)
+        expect(admission.try_acquire()).to_be(false)
         admission.release()
         expect(admission.count()).to_equal(1)
-        expect(admission.try_acquire()).to_equal(true)
+        expect(admission.try_acquire()).to_be(true)

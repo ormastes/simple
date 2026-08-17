@@ -5,6 +5,7 @@
 
 ## Key Rules
 
+- **One app, one host interface** - Apps run on all OSes (SimpleOS, Linux, macOS, Windows) using a single codebase. Per-OS differences belong only in the HAL layer (SOSIX adapters, `CompositorBackend`, `DedicatedHost`). Banned: per-OS sibling files, `if target_os == ...` branches in app logic, per-OS file copies. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - **Simple-first product code** - Implement features in `.spl` wherever the repo can express them. Rust remains the bootstrap seed/runtime substrate; do not add Rust unless the task is explicitly seed/runtime work.
 - **Immutable by default:** `val x = 5` (preferred), `var x = 5` (when mutation needed)
 - **Implicit self:** Methods use `fn` (read-only) or `me` (mutable), self is implicit in signature but explicit in body (`self.field`)

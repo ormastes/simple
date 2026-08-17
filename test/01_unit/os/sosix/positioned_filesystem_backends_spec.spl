@@ -1,0 +1,88 @@
+# @cover src/os/sosix/fs/nvfs_positioned_vfs_backend.spl 80%
+# @cover src/os/sosix/fs/dbfs_positioned_vfs_backend.spl 80%
+# @cover src/os/services/vfs/vfs_positioned_ops.spl 80%
+"""SOSIX NVFS/DBFS positioned backends over canonical MountTable objects."""
+
+# codex-system-test
+use std.spec.*
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs}
+use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_open, g_vfs_positioned_close}
+use os.sosix.fs.dbfs_positioned_vfs_backend.{SosixDbfsPositionedVfsBackendV1}
+use os.sosix.fs.nvfs_positioned_vfs_backend.{SosixNvfsPositionedVfsBackendV1}
+use os.sosix.fs.service_vfs_backend_v1.{SosixPositionedVfsBackendV1}
+
+fn mount_dbfs_object(path: text) -> u64:
+    _clear_vfs_rootfs_for_test()
+    vfs_mount_rootfs(DriverInstance.DbFs(DbFsDriver.new_hosted())).unwrap()
+    g_vfs_positioned_open(path, OpenFlags.create_write()).unwrap()
+
+fn mount_nvfs_object(path: text) -> u64:
+    _clear_vfs_rootfs_for_test()
+    vfs_mount_rootfs(DriverInstance.Nvfs(NvfsDriver.new("sosix-nvfs"))).unwrap()
+    g_vfs_positioned_open(path, OpenFlags.create_write()).unwrap()
+
+describe "SOSIX positioned filesystem backends":
+    # @req: REQ-SQ-021
+    # @req: REQ-SQ-022
+    it "should round-trip binary DBFS bytes with overwrite and sparse extension":
+        step("Exercise NVFS and DBFS positioned owners")
+        val object_id = mount_dbfs_object("/dbfs.bin")
+        val backend = SosixDbfsPositionedVfsBackendV1()
+        expect(backend.write_at(object_id, 2, [0u8, 255u8]).unwrap()).to_equal(2u64)
+        expect(backend.read_at(object_id, 0, 8).unwrap()).to_equal([0u8, 0u8, 0u8, 255u8])
+        expect(backend.write_at(object_id, 1, [7u8]).unwrap()).to_equal(1u64)
+        expect(backend.read_at(object_id, 0, 8).unwrap()).to_equal([0u8, 7u8, 0u8, 255u8])
+
+    # @req: REQ-SQ-021
+    # @req: REQ-SQ-022
+    it "should round-trip binary NVFS bytes without changing read position":
+        step("Exercise NVFS and DBFS positioned owners")
+        val object_id = mount_nvfs_object("/nvfs.bin")
+        val backend = SosixNvfsPositionedVfsBackendV1()
+        expect(backend.write_at(object_id, 0, [10u8, 20u8, 30u8, 40u8]).unwrap()).to_equal(4u64)
+        expect(backend.read_at(object_id, 2, 2).unwrap()).to_equal([30u8, 40u8])
+        expect(backend.read_at(object_id, 0, 2).unwrap()).to_equal([10u8, 20u8])
+
+    # @req: REQ-SQ-022
+    it "should reject cross-filesystem and retired object identities":
+        step("Validate positioned filesystem source contracts")
+        val object_id = mount_dbfs_object("/kind.bin")
+        val nvfs = SosixNvfsPositionedVfsBackendV1()
+        val dbfs = SosixDbfsPositionedVfsBackendV1()
+        expect(nvfs.read_at(object_id, 0, 1).unwrap_err()).to_equal("nvfs-positioned-unsupported")
+        g_vfs_positioned_close(object_id).unwrap()
+        expect(dbfs.read_at(object_id, 0, 1).unwrap_err()).to_equal("dbfs-positioned-stale-file-object")
+
+    # @req: REQ-SQ-022
+    it "should reject raw and overflowing object requests before driver dispatch":
+        step("Validate positioned filesystem source contracts")
+        val backend = SosixDbfsPositionedVfsBackendV1()
+        expect(backend.read_at(1u64, 0, 1).unwrap_err()).to_equal("dbfs-positioned-stale-file-object")
+        expect(backend.read_at(1u64, 0xffffffffffffffffu64, 2).unwrap_err()).to_equal("dbfs-positioned-invalid-argument")
+
+    # @req: REQ-SQ-022
+    it "should keep colliding raw driver handles distinct behind virtual objects":
+        step("Validate positioned filesystem source contracts")
+        var table = MountTable.new()
+        table.mount(
+            "/", DriverInstance.Nvfs(NvfsDriver.new("collision-nvfs")),
+            MountOptions.default()).unwrap()
+        table.mount(
+            "/db", DriverInstance.DbFs(DbFsDriver.new_hosted()),
+            MountOptions.default()).unwrap()
+        val nvfs_object = table.open("/nvfs.bin", OpenFlags.create_write()).unwrap()
+        val dbfs_object = table.open("/db/dbfs.bin", OpenFlags.create_write()).unwrap()
+        expect(nvfs_object.id == dbfs_object.id).to_be(false)
+        expect(table.positioned_write_bytes(
+            nvfs_object.id, PositionedDriverKind.Nvfs, 0u64, [11u8]).unwrap()).to_equal(1u64)
+        expect(table.positioned_write_bytes(
+            dbfs_object.id, PositionedDriverKind.Dbfs, 0u64, [22u8]).unwrap()).to_equal(1u64)
+        expect(table.positioned_read_bytes(
+            nvfs_object.id, PositionedDriverKind.Nvfs, 0u64, 1u64).unwrap()).to_equal([11u8])
+        expect(table.positioned_read_bytes(
+            dbfs_object.id, PositionedDriverKind.Dbfs, 0u64, 1u64).unwrap()).to_equal([22u8])

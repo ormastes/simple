@@ -32,6 +32,12 @@ bootstrap_stage3_verify_manifest() {
         stage2_build_log_path stage2_command_transcript_path \
         stage2_command_transcript_sha256 stage2_sanity_status \
         stage2_sanity_evidence_path stage2_sanity_evidence_sha256 \
+        stage2_receiver_status stage2_receiver_evidence_path \
+        stage2_receiver_evidence_sha256 stage2_check_policy \
+        stage2_admission_identity stage2_admission_receipt_path \
+        stage2_admission_receipt_sha256 \
+        stage2_checks_executed_at_admission \
+        stage2_checks_replayed_during_stage3 \
         stage3_path stage3_sha256 stage3_threads \
         stage3_command_output stage3_build_args_sha256 stage3_build_log_sha256 \
         stage3_build_log_path stage3_command_transcript_path \
@@ -53,7 +59,7 @@ bootstrap_stage3_verify_manifest() {
     done
 
     [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_manifest")" = \
-        simple-bootstrap-stage3-provenance-v3 ] || return 1
+        simple-bootstrap-stage3-provenance-v4 ] || return 1
     [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_manifest")" = \
         pass ] || return 1
     [ "$(bootstrap_stage3_manifest_value artifact_kind "$bootstrap_stage3_manifest")" = \
@@ -66,6 +72,15 @@ bootstrap_stage3_verify_manifest() {
         src/compiler:src/app:src/lib ] || return 1
     [ "$(bootstrap_stage3_manifest_value stage2_sanity_status \
         "$bootstrap_stage3_manifest")" = pass ] || return 1
+    [ "$(bootstrap_stage3_manifest_value stage2_receiver_status \
+        "$bootstrap_stage3_manifest")" = pass ] || return 1
+    [ "$(bootstrap_stage3_manifest_value stage2_check_policy \
+        "$bootstrap_stage3_manifest")" = \
+        identity-scoped-receipt-reuse ] || return 1
+    [ "$(bootstrap_stage3_manifest_value stage2_checks_executed_at_admission \
+        "$bootstrap_stage3_manifest")" = 1 ] || return 1
+    [ "$(bootstrap_stage3_manifest_value stage2_checks_replayed_during_stage3 \
+        "$bootstrap_stage3_manifest")" = 0 ] || return 1
     [ "$(bootstrap_stage3_manifest_value stage3_sanity_status \
         "$bootstrap_stage3_manifest")" = pass ] || return 1
     [ "$(bootstrap_stage3_manifest_value bootstrap_script_path \
@@ -91,6 +106,8 @@ bootstrap_stage3_verify_manifest() {
         stage2_sha256 stage2_admitted_sha256 \
         stage2_build_args_sha256 stage2_build_log_sha256 \
         stage2_command_transcript_sha256 stage2_sanity_evidence_sha256 \
+        stage2_receiver_evidence_sha256 stage2_admission_identity \
+        stage2_admission_receipt_sha256 \
         stage3_sha256 stage3_build_args_sha256 stage3_build_log_sha256 \
         stage3_command_transcript_sha256 stage3_sanity_evidence_sha256 \
         runtime_origin_snapshot_sha256 runtime_admitted_snapshot_sha256 \
@@ -233,6 +250,8 @@ bootstrap_stage3_verify_manifest() {
         "stage2_command_transcript_path:$bootstrap_stage3_manifest_dir/stage2-command.transcript" \
         "stage3_command_transcript_path:$bootstrap_stage3_manifest_dir/stage3-command.transcript" \
         "stage2_sanity_evidence_path:$bootstrap_stage3_manifest_dir/stage2-sanity.env" \
+        "stage2_receiver_evidence_path:$bootstrap_stage3_manifest_dir/stage2-receiver.env" \
+        "stage2_admission_receipt_path:$bootstrap_stage3_manifest_dir/stage2-admitted/admission.env" \
         "stage3_sanity_evidence_path:$bootstrap_stage3_manifest_dir/stage3-sanity.env"; do
         bootstrap_stage3_layout_key=${bootstrap_stage3_layout_pair%%:*}
         bootstrap_stage3_layout_path=${bootstrap_stage3_layout_pair#*:}
@@ -261,6 +280,13 @@ bootstrap_stage3_verify_manifest() {
         bootstrap_stage3_transcript_explicit_env_value \
             "$bootstrap_stage3_stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS
     ) || return 1
+    bootstrap_stage3_stage2_compile_stack_mib=$(
+        bootstrap_stage3_transcript_argv_value_after \
+            "$bootstrap_stage3_stage2_transcript" --compile-stack-mib
+    ) || return 1
+    case "$bootstrap_stage3_stage2_compile_stack_mib" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
     bootstrap_stage3_stage3_library_path=$(
         bootstrap_stage3_transcript_explicit_env_value \
             "$bootstrap_stage3_stage3_transcript" LIBRARY_PATH
@@ -300,8 +326,11 @@ bootstrap_stage3_verify_manifest() {
         [ "$bootstrap_stage3_stage3_streaming" = 1 ] &&
         [ "$bootstrap_stage3_malloc_arena_max" = 2 ] &&
         [ "$bootstrap_stage3_malloc_trim_threshold" = 0 ] || return 1
-    [ "$bootstrap_stage3_stage2_progress" = "$bootstrap_stage3_expected_progress" ] &&
-        [ "$bootstrap_stage3_stage3_progress" = "$bootstrap_stage3_expected_progress" ] ||
+    case "$bootstrap_stage3_stage2_progress" in
+        ''|"$bootstrap_stage3_expected_progress") ;;
+        *) bootstrap_stage3_provenance_fail "build-progress-path-outside-output-root"; return 1 ;;
+    esac
+    [ "$bootstrap_stage3_stage3_progress" = "$bootstrap_stage3_expected_progress" ] ||
         bootstrap_stage3_provenance_fail "build-progress-path-outside-output-root" ||
         return 1
     bootstrap_stage3_expected_stage2_args=$(
@@ -320,6 +349,7 @@ bootstrap_stage3_verify_manifest() {
             --runtime-bundle core-c-bootstrap \
             --source src/compiler --source src/app --source src/lib \
             --entry-closure --threads "$bootstrap_stage3_stage2_threads" \
+            --compile-stack-mib "$bootstrap_stage3_stage2_compile_stack_mib" \
             --cache-dir "$bootstrap_stage3_stage2_cache_dir" \
             --mode "$bootstrap_stage3_mode" \
             --entry src/app/cli/bootstrap_main.spl \
@@ -347,6 +377,7 @@ bootstrap_stage3_verify_manifest() {
         --runtime-bundle core-c-bootstrap \
         --source src/compiler --source src/app --source src/lib \
         --entry-closure --threads "$bootstrap_stage3_stage2_threads" \
+        --compile-stack-mib "$bootstrap_stage3_stage2_compile_stack_mib" \
         --cache-dir "$bootstrap_stage3_stage2_cache_dir" \
         --mode "$bootstrap_stage3_mode" \
         --entry src/app/cli/bootstrap_main.spl \
@@ -442,6 +473,8 @@ bootstrap_stage3_verify_manifest() {
         stage2_build_log_path:stage2_build_log_sha256 \
         stage2_command_transcript_path:stage2_command_transcript_sha256 \
         stage2_sanity_evidence_path:stage2_sanity_evidence_sha256 \
+        stage2_receiver_evidence_path:stage2_receiver_evidence_sha256 \
+        stage2_admission_receipt_path:stage2_admission_receipt_sha256 \
         stage3_build_log_path:stage3_build_log_sha256 \
         stage3_command_transcript_path:stage3_command_transcript_sha256 \
         stage3_sanity_evidence_path:stage3_sanity_evidence_sha256 \
@@ -554,20 +587,62 @@ bootstrap_stage3_verify_manifest() {
         bootstrap_stage3_manifest_value stage2_sanity_evidence_path \
             "$bootstrap_stage3_manifest"
     ) || return 1
+    bootstrap_stage3_stage2_receiver=$(
+        bootstrap_stage3_manifest_value stage2_receiver_evidence_path \
+            "$bootstrap_stage3_manifest"
+    ) || return 1
+    bootstrap_stage3_stage2_admission=$(
+        bootstrap_stage3_manifest_value stage2_admission_receipt_path \
+            "$bootstrap_stage3_manifest"
+    ) || return 1
     bootstrap_stage3_stage3_sanity=$(
         bootstrap_stage3_manifest_value stage3_sanity_evidence_path \
             "$bootstrap_stage3_manifest"
     ) || return 1
-    bootstrap_stage3_verify_sanity_evidence \
+    bootstrap_stage3_verify_sanity_evidence_receipt \
         "$bootstrap_stage3_stage2_sanity" \
+        "$bootstrap_stage3_stage2_executable" || return 1
+    bootstrap_stage3_verify_receiver_evidence_receipt \
+        "$bootstrap_stage3_stage2_receiver" \
         "$bootstrap_stage3_stage2_executable" \
-        "$bootstrap_stage3_root" "$bootstrap_stage3_backend" \
-        "$(bootstrap_stage3_transcript_host_value \
-            "$bootstrap_stage3_stage2_transcript" HOME)" \
-        "$(bootstrap_stage3_transcript_host_value \
-            "$bootstrap_stage3_stage2_transcript" TMPDIR)" \
-        "$(bootstrap_stage3_transcript_host_value \
-            "$bootstrap_stage3_stage2_transcript" PATH)" || return 1
+        "$bootstrap_stage3_runtime_admitted_snapshot" \
+        "$bootstrap_stage3_manifest_dir/stage2-receiver.log" || return 1
+    bootstrap_stage3_verify_stage2_admission_receipt \
+        "$bootstrap_stage3_stage2_admission" \
+        "$bootstrap_stage3_expected_stage2_admitted_path" \
+        "$bootstrap_stage3_manifest_dir/source-inputs-before.txt" \
+        "$bootstrap_stage3_runtime_admitted_snapshot" \
+        "$bootstrap_stage3_manifest_dir/tool-authority-before.txt" \
+        "$(bootstrap_stage3_manifest_value stage2_build_args_sha256 \
+            "$bootstrap_stage3_manifest")" \
+        "$bootstrap_stage3_stage2_sanity" \
+        "$bootstrap_stage3_stage2_receiver" || return 1
+    bootstrap_stage3_expected_admission_identity=$(
+        bootstrap_stage3_stage2_admission_identity \
+            "$(bootstrap_stage3_hash_file \
+                "$bootstrap_stage3_stage2_executable")" \
+            "$(bootstrap_stage3_manifest_value source_snapshot_sha256 \
+                "$bootstrap_stage3_manifest")" \
+            "$(bootstrap_stage3_manifest_value \
+                runtime_admitted_snapshot_sha256 \
+                "$bootstrap_stage3_manifest")" \
+            "$(bootstrap_stage3_manifest_value tool_authority_sha256 \
+                "$bootstrap_stage3_manifest")" \
+            "$(bootstrap_stage3_manifest_value stage2_build_args_sha256 \
+                "$bootstrap_stage3_manifest")" \
+            "$(bootstrap_stage3_manifest_value \
+                stage2_sanity_evidence_sha256 \
+                "$bootstrap_stage3_manifest")" \
+            "$(bootstrap_stage3_manifest_value \
+                stage2_receiver_evidence_sha256 \
+                "$bootstrap_stage3_manifest")"
+    ) || return 1
+    [ "$(bootstrap_stage3_manifest_value stage2_admission_identity \
+        "$bootstrap_stage3_manifest")" = \
+        "$bootstrap_stage3_expected_admission_identity" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value admission_identity \
+        "$bootstrap_stage3_stage2_admission")" = \
+        "$bootstrap_stage3_expected_admission_identity" ] || return 1
     bootstrap_stage3_verify_sanity_evidence \
         "$bootstrap_stage3_stage3_sanity" \
         "$bootstrap_stage3_output" \

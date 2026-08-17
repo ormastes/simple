@@ -4,6 +4,7 @@
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong-answer bug. No diagnostic, correct length, wrong
 contents. Found because it made X25519 compute the wrong shared secret.
+**Status:** OPEN
 **Status:** ROOT-CAUSED and FIXED 2026-08-17 in `rt_array_copy`
 (`src/compiler_rust/runtime/src/value/collections.rs`), commit `a4cc6f61dfb`.
 

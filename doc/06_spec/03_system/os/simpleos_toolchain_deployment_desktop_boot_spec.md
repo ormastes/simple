@@ -18,7 +18,41 @@ compile, link, and execute exact `Hello World` inside that same guest.
 Unavailable prerequisites are BLOCKED failures. There is no opt-in skip or
 non-execution green path.
 
+Current source status (2026-08-16): the production wrapper and shared receipt
+validator exist. Their 16-case hermetic self-test passes with
+`platform_acceptance_claimed=false`; production mode uses the canonical
+Stage-4 provenance verifier rather than path or marker-based admission.
+Default live mode remains blocked because the canonical desktop owner has no
+same-run network/SSHD guest-command hook, so the system scenario has no runtime
+PASS.
+
+**TEST_BLOCKED (2026-08-16):** no current-source, canonically admitted
+pure-Simple CLI is available in this worktree or the registered worktrees.
+Runtime execution, SPipe docgen, and `sspec-maintain scan` were therefore not
+run. This Markdown is the reviewed mirrored manual for the future-executable
+spec; it is not generated-runtime evidence and cannot promote the live gate.
+
 ## Procedure
+
+### Validate the receipt contract without claiming platform acceptance
+
+Run the production wrapper with `--self-test`. The scenario requires exit zero,
+empty stderr, the exact PASS prefix, all 16 validator cases, and
+`platform_acceptance_claimed=false`. This is positive host-fixture evidence
+only; it does not claim a booted desktop or guest execution.
+
+### Reject extra receipt self-test arguments
+
+Run `--self-test unexpected`. The scenario requires usage exit 2, empty stdout,
+and the canonical usage message. Accepting extra arguments would make the
+evidence mode ambiguous and is an error.
+
+### Reject production execution without an admitted runtime
+
+Run production mode after explicitly removing `SIMPLE_BIN`,
+`SIMPLEOS_TOOLCHAIN_IMAGE`, and `SIMPLEOS_STAGE4_ADMISSION_RECEIPT` from the
+child environment. The scenario requires exit 1, empty stdout, and
+`blocked:simple-bin-not-set`; a skip or non-execution PASS is forbidden.
 
 ### Prepare the toolchain deployment image
 
@@ -70,13 +104,23 @@ apps, fixed SSH responses, and historical artifacts are rejected.
 
 ## Requirement traceability
 
-| Requirement | Executable owner | Evidence |
+| Requirement | Executable scenario/checker | Evidence |
 |---|---|---|
-| REQ-SOS-TD-001 | prepare step | admitted producer and target payload identity |
-| REQ-004 / REQ-SOS-TD-002 | manifest checker | embedded manifest and image receipt |
-| REQ-SOS-TD-003 / NFR-005 | desktop checker | OVMF/GRUB/QEMU/desktop/framebuffer receipt |
+| REQ-SOS-TD-001 | missing-runtime rejection; prepare step | fail-closed admission plus admitted producer and target payload identity |
+| REQ-004 / REQ-SOS-TD-002 | receipt self-test; manifest checker | 16-case host-fixture contract plus embedded manifest and image receipt |
+| REQ-SOS-TD-003 / NFR-005 | missing-runtime rejection; desktop checker | no unqualified production PASS; OVMF/GRUB/QEMU/desktop/framebuffer receipt when qualified |
 | REQ-005 / REQ-007 | guest checker | exact commands, ELF, output, and rc |
-| REQ-SOS-TD-004 | all helpers | frozen names, steps, and fail-closed behavior |
+| REQ-SOS-TD-004 | self-test boundary scenarios; all helpers | strict CLI surface, frozen names, visible steps, and fail-closed behavior |
+
+## Static quality scorecard
+
+- Four executable scenarios: one positive host-fixture path, one CLI edge, one
+  admission error, and one full live-guest path.
+- Every scenario has concrete built-in matcher assertions.
+- The live scenario still calls the production owner and validates durable
+  receipts; no source-string or test-only live oracle was added.
+- Runtime, docgen, and all-seven-score maintenance status: `TEST_BLOCKED` until
+  a canonically admitted pure-Simple CLI is available.
 
 ## Operator result
 

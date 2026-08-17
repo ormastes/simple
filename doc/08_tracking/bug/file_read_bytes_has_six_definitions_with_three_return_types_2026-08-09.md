@@ -1,5 +1,15 @@
 # `file_read_bytes` has six definitions across three incompatible return types
 
+> **SIGNATURES UNIFIED 2026-08-16.** The last `[i64]` definition
+> (`src/lib/nogc_sync_mut/io/file_ops.spl`) now returns `[u8]` (canonical
+> signature), and its raw i64 shape survives under the unique name
+> `file_read_bytes_i64` (callers migrated: 10 `src/lib/scv/*` files +
+> `src/compiler/80.driver/cache/cache_validator.spl`). All remaining
+> co-compiled definitions are identical `(text)->[u8]`, so the
+> differing-signature ambiguous-dispatch warning no longer fires (verified:
+> spec-harness run shows zero `file_read_bytes` collision warnings). Full
+> convergence to ONE definition (the guard spec's red example) remains open.
+
 > **PARTIALLY FIXED 2026-08-09 (stream G2).** Six definitions → **four**. The
 > dangerous `[i64]?` shape is **gone**: both were mocks returning a hardcoded
 > `"Hello"` for every path, and both had zero importers. The remaining four are

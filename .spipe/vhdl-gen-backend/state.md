@@ -143,3 +143,23 @@ sh scripts/fpga/generate_exec_core_vhdl.shs
 ALLOW_CONCURRENT_BUILD=1 RTL_DIR=build/fpga/rtl_gen_rv32 bash scripts/fpga/build_k26_rv32_ddr_bitstream.shs
 bash scripts/fpga/bringup_kv260_rv32_ddr.shs     # rv64: swap 32->64 in both
 ```
+
+## VHDL process-facade SSpec follow-up (2026-08-16)
+
+- Requirement: `REQ-VHDL-SFFI-001`.
+- Executable: `test/03_system/feature/usage/vhdl_spec.spl` — three modern
+  step-based scenarios covering positive qualified GHDL analysis, exact result
+  edge semantics, and real invalid-VHDL error capture.
+- Fail-closed admission: absent `SIMPLE_VHDL_TEST=1` prints `TEST_BLOCKED`,
+  fails the `ready` matcher, and returns before host-tool execution; no skip can
+  become PASS.
+- Manual: `doc/06_spec/03_system/feature/usage/vhdl_spec.md`.
+- Plan/traceability: `doc/03_plan/sys_test/vhdl_process_facade.md`.
+- Runtime status: `TEST_BLOCKED`. The admitted Stage2 recovery runtime supports
+  `compile`/`native-build` only, not `test`, `spipe-docgen`, or
+  `sspec-maintain`. The earlier admitted native probe PASS remains
+  implementation evidence and is not reused as SSpec/docgen evidence.
+- Resume once: with an admitted full CLI and GHDL/Yosys installed, set
+  `SIMPLE_VHDL_TEST=1`, run the SSpec, docgen, and sspec-maintain commands from
+  the plan exactly once, then replace the manual's blocked provenance only if
+  all three gates pass.

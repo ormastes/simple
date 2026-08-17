@@ -12,7 +12,7 @@ use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
 use compiler.common.assurance.trust_audit.{TrustAuditStatus, TrustAuditResult,
     audit_lean_axiom_report, canonical_trust_audit_hash_v1}
 use compiler.mir.verification_ir.{SemanticClass, VerificationIrType,
-    VerificationIrModuleV1}
+    VerificationIrModuleV1, ResolvedVerificationIrModuleV2}
 use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1,
     WeaveManifestV1, AspectCertificateV1, AspectEvidenceClassV1,
     RuntimeAssumptionMonitorReceiptV1}
@@ -163,11 +163,23 @@ pub fn finalize_formal_gate_collection_v2(
                 "FV2-E-RECEIPT-FINALIZE: duplicate final receipt content"), [])
         hashes.push(receipt_hash)
         files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
-    val evidence_hash = sha256_text("FormalDeliveryGateEvidence-v2|gate=" +
-        gate.name() + "|semantic=" + semantic_evidence_hash + "|receipts=" +
-        fv2_gate_frames_v1(hashes))
+    # Phase 4 is explicitly outside this recovery lane. Preserve its existing
+    # serializer behavior unchanged; its authority boundary must be handled by
+    # the Phase-4 owner rather than folded into FV2 recovery work.
+    if gate == FormalDeliveryGateV1.SimpleOsVerticalSlice:
+        val evidence_hash = sha256_text("FormalDeliveryGateEvidence-v2|gate=" +
+            gate.name() + "|semantic=" + semantic_evidence_hash + "|receipts=" +
+            fv2_gate_frames_v1(hashes))
+        return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+            FormalDeliveryGateStatusV1.Passed, hashes, evidence_hash, ""), files)
+    # This public serializer receives only caller-owned values.  Exact hashes
+    # establish consistency, not execution provenance, so it cannot publish a
+    # passed gate or receipt files.  Accepting envelope construction must move
+    # behind a runner-owned producer instead of adding a forgeable authority
+    # field to this frozen interface.
     FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
-        FormalDeliveryGateStatusV1.Passed, hashes, evidence_hash, ""), files)
+        FormalDeliveryGateStatusV1.Failed, [], "",
+        "FV2-E-GATE-FINALIZER-AUTHORITY: public caller-owned receipt finalization cannot publish passed delivery-gate evidence"), [])
 
 pub fn trust_audit_hash_v1(audit: TrustAuditResult, artifact_hash: text) -> text:
     canonical_trust_audit_hash_v1(audit, artifact_hash)
@@ -185,7 +197,7 @@ pub fn truthfulness_item_diagnostic_v1(item: TruthfulnessProofEvidenceV1) -> tex
         return "FV2-E-TRUTH-STATUS: proof evidence has no proven refinement status"
     if receipt.proof_root == "":
         return "FV2-E-TRUTH-ROOT: proof root is empty"
-    if item.cache_key.diagnostic() != "" or
+    if item.cache_key.verified_identity_diagnostic() != "" or
             receipt.cache_key_hash != item.cache_key.hash():
         return "FV2-E-TRUTH-CACHE: receipt does not bind its exact verified toolchain and semantic cache key"
     if receipt.diagnostic() != "":
@@ -226,6 +238,23 @@ fn failed_truthfulness_collection_v1(diagnostic: text) -> FormalGateCollectionV1
         FormalDeliveryGateV1.VerificationTruthfulness,
         FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
 
+# Structural receipt closure cannot attest that a checker, generator, or
+# validator actually ran.  These three public collectors accept frozen record
+# values from their caller, so they remain diagnostic validators until a
+# runner-owned producer can supply execution-bound authority without a
+# caller-forgeable flag or token.
+fn caller_record_execution_authority_error_v1(
+    gate: FormalDeliveryGateV1
+) -> text:
+    match gate:
+        case FormalDeliveryGateV1.VerificationTruthfulness:
+            "FV2-E-TRUTH-EXECUTION-AUTHORITY: canonical runner-owned proof checker, retained axiom report, and replay-bound receipt production is unavailable"
+        case FormalDeliveryGateV1.ExactCoreSemantics:
+            "FV2-E-EXACT-EXECUTION-AUTHORITY: canonical runner-owned exact-core tool execution and retained-output production is unavailable"
+        case FormalDeliveryGateV1.VirCompilerRelation:
+            "FV2-E-RELATION-EXECUTION-AUTHORITY: canonical compiler-owned VIR construction and certificate-validator execution is unavailable"
+        case _: ""
+
 pub fn collect_verification_truthfulness_gate_v1(
     items: [TruthfulnessProofEvidenceV1]
 ) -> FormalGateCollectionV1:
@@ -257,6 +286,10 @@ pub fn collect_verification_truthfulness_gate_v1(
         files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
     val evidence_hash = sha256_text("VerificationTruthfulnessGate-v1" +
         fv2_gate_frames_v1(receipt_hashes))
+    val authority_error = caller_record_execution_authority_error_v1(
+        FormalDeliveryGateV1.VerificationTruthfulness)
+    if authority_error != "":
+        return failed_truthfulness_collection_v1(authority_error)
     finalize_formal_gate_collection_v2(
         FormalDeliveryGateV1.VerificationTruthfulness, evidence_hash, files)
 
@@ -301,8 +334,10 @@ fn failed_exact_core_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
         FormalDeliveryGateV1.ExactCoreSemantics,
         FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
 
-pub fn collect_exact_core_semantics_gate_v1(
+fn collect_exact_core_semantics_gate_from_binding_v2(
     vir: VerificationIrModuleV1,
+    evidence_semantic_hash: text,
+    semantic_binding: text,
     checks: [ExecutedExactCoreCheckV1]
 ) -> FormalGateCollectionV1:
     if not vir.closure_ready():
@@ -354,7 +389,7 @@ pub fn collect_exact_core_semantics_gate_v1(
             return failed_exact_core_collection_v1(
                 "FV2-E-EXACT-CHECK-ORDER: exact-core checks must use the frozen complete order")
         val check_diagnostic = exact_core_check_diagnostic_v1(check,
-            vir.semantic_hash)
+            evidence_semantic_hash)
         if check_diagnostic != "":
             return failed_exact_core_collection_v1(check_diagnostic)
         val check_content = exact_core_check_content_v1(check)
@@ -363,6 +398,7 @@ pub fn collect_exact_core_semantics_gate_v1(
         files.push(FormalDeliveryReceiptFileV1(check_hash, check_content))
     val content = "ExactCoreSemanticsReceipt-v1" +
         fv2_gate_frame_v1(vir.canonical_text()) +
+        fv2_gate_frame_v1(semantic_binding) +
         fv2_gate_frames_v1(check_hashes)
     val receipt_hash = sha256_text(content)
     files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
@@ -370,9 +406,34 @@ pub fn collect_exact_core_semantics_gate_v1(
     all_receipt_hashes.push(receipt_hash)
     val evidence_hash = sha256_text("ExactCoreSemanticsGate-v1" +
         fv2_gate_frame_v1(receipt_hash) +
-        fv2_gate_frame_v1(vir.semantic_hash))
+        fv2_gate_frame_v1(evidence_semantic_hash))
+    val authority_error = caller_record_execution_authority_error_v1(
+        FormalDeliveryGateV1.ExactCoreSemantics)
+    if authority_error != "":
+        return failed_exact_core_collection_v1(authority_error)
     finalize_formal_gate_collection_v2(
         FormalDeliveryGateV1.ExactCoreSemantics, evidence_hash, files)
+
+pub fn collect_exact_core_semantics_gate_v1(
+    vir: VerificationIrModuleV1,
+    checks: [ExecutedExactCoreCheckV1]
+) -> FormalGateCollectionV1:
+    collect_exact_core_semantics_gate_from_binding_v2(vir,
+        vir.semantic_hash, "VerificationIRModule-v1|" + vir.semantic_hash,
+        checks)
+
+pub fn collect_exact_core_semantics_gate_v2(
+    resolved: ResolvedVerificationIrModuleV2,
+    checks: [ExecutedExactCoreCheckV1]
+) -> FormalGateCollectionV1:
+    if not resolved.closure_ready():
+        return failed_exact_core_collection_v1(
+            "FV2-E-EXACT-COVERAGE-BINDING: resolved VIR semantic coverage is not canonically bound")
+    # ResolvedVerificationIrModuleV2 binds only a construct inventory. It does
+    # not bind instruction/terminator transitions, local widths, or CFG edges,
+    # so caller-built Exact rows cannot authorize exact-core evidence.
+    failed_exact_core_collection_v1(
+        "FV2-E-EXACT-TRANSITION-MANIFEST: resolved VIR v2 has no canonical MIR transition manifest")
 
 fn executed_relation_diagnostic_v1(
     schema: text,
@@ -502,6 +563,10 @@ pub fn collect_vir_compiler_relation_gate_v1(
         fv2_gate_frame_v1(vir.semantic_hash) +
         fv2_gate_frame_v1(artifact_hash) +
         fv2_gate_frames_v1(receipt_hashes))
+    val authority_error = caller_record_execution_authority_error_v1(
+        FormalDeliveryGateV1.VirCompilerRelation)
+    if authority_error != "":
+        return failed_vir_relation_collection_v1(authority_error)
     finalize_formal_gate_collection_v2(
         FormalDeliveryGateV1.VirCompilerRelation, evidence_hash, files)
 
@@ -632,11 +697,6 @@ pub fn collect_aop_macro_closure_gate_v1(
         return failed_aop_macro_collection_v1(
             "FV2-E-AOP-CERTIFICATE-COUNT: every resolved advice requires one certificate")
     var certified_ids: [text] = []
-    var files: [FormalDeliveryReceiptFileV1] = []
-    var receipt_hashes: [text] = []
-    val manifest_content = manifest.canonical_text()
-    files.push(FormalDeliveryReceiptFileV1(manifest_hash, manifest_content))
-    receipt_hashes.push(manifest_hash)
     for certificate in aspect_certificates:
         if certificate.diagnostic() != "" or
                 not advice_ids.contains(certificate.advice_id) or
@@ -670,30 +730,12 @@ pub fn collect_aop_macro_closure_gate_v1(
             return failed_aop_macro_collection_v1(
                 "FV2-E-AOP-PROOF-MATERIAL: aspect proof receipt is not materialized exactly once")
         certified_ids.push(certificate.advice_id)
-        val content = certificate.canonical_text()
-        val hash = certificate.hash()
-        files.push(FormalDeliveryReceiptFileV1(hash, content))
-        receipt_hashes.push(hash)
-    val execution_content = "ExecutedWeaveClosure-v1" +
-        fv2_gate_frame_v1(manifest_hash) +
-        fv2_gate_frame_v1(vir.semantic_hash) +
-        fv2_gate_frame_v1(execution.weaver_identity_hash) +
-        fv2_gate_frame_v1(execution.command_policy_hash) +
-        fv2_gate_frame_v1(execution.introduced_symbol_closure_hash) +
-        fv2_gate_frame_v1(execution.post_vir_transform_hash) +
-        fv2_gate_frame_v1(execution.dynamic_transform_lock_hash) +
-        fv2_gate_frame_v1(sha256_text(execution.retained_output)) +
-        fv2_gate_frame_v1(execution.outcome.name())
-    val execution_hash = sha256_text(execution_content)
-    files.push(FormalDeliveryReceiptFileV1(execution_hash, execution_content))
-    receipt_hashes.push(execution_hash)
-    val aggregate_content = "AopMacroClosureReceipt-v1" +
-        fv2_gate_frame_v1(vir.semantic_hash) +
-        fv2_gate_frames_v1(receipt_hashes)
-    val aggregate_hash = sha256_text(aggregate_content)
-    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
-    receipt_hashes.push(aggregate_hash)
-    val evidence_hash = sha256_text("AopMacroClosureGate-v1" +
-        fv2_gate_frames_v1(receipt_hashes))
-    finalize_formal_gate_collection_v2(
-        FormalDeliveryGateV1.AopMacroClosure, evidence_hash, files)
+    # The structural checks above are necessary, but they cannot establish
+    # who produced `manifest`: both it and `execution` are public value inputs.
+    # The canonical HIR/MIR weaving pipeline does not yet emit
+    # `WeaveManifestV1`, so accepting this otherwise-consistent pair would let
+    # a caller describe a weave that the compiler never performed.  Keep Gate
+    # 3 fail-closed until the compiler-owned producer supplies this evidence
+    # directly from the same woven MIR used to construct VIR.
+    failed_aop_macro_collection_v1(
+        "FV2-E-AOP-MANIFEST-AUTHORITY: canonical compiler weave-manifest producer is unavailable")

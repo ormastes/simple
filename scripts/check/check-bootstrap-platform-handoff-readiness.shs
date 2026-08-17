@@ -194,14 +194,25 @@ check_stage3() {
     STAGE3_STATUS=blocked
     if ! canonical_file "$STAGE3_MANIFEST" >/dev/null 2>&1; then STAGE3_REASON=missing_or_symlinked_manifest; return 1; fi
     if ! canonical_file "$STAGE3_CANDIDATE" >/dev/null 2>&1; then STAGE3_REASON=missing_or_symlinked_candidate; return 1; fi
-    expect_field schema "$STAGE3_MANIFEST" simple-bootstrap-stage3-provenance-v3 || { STAGE3_REASON=invalid_schema; return 1; }
+    expect_field schema "$STAGE3_MANIFEST" simple-bootstrap-stage3-provenance-v4 || { STAGE3_REASON=invalid_schema; return 1; }
     expect_field status "$STAGE3_MANIFEST" pass || { STAGE3_REASON=manifest_not_pass; return 1; }
     expect_field artifact_kind "$STAGE3_MANIFEST" pure-simple-bootstrap-compiler || { STAGE3_REASON=invalid_artifact_kind; return 1; }
+    expect_field stage2_receiver_status "$STAGE3_MANIFEST" pass || { STAGE3_REASON=stage2_receiver_not_pass; return 1; }
+    expect_field stage2_check_policy "$STAGE3_MANIFEST" identity-scoped-receipt-reuse || { STAGE3_REASON=invalid_stage2_check_policy; return 1; }
+    expect_field stage2_checks_executed_at_admission "$STAGE3_MANIFEST" 1 || { STAGE3_REASON=invalid_stage2_admission_count; return 1; }
+    expect_field stage2_checks_replayed_during_stage3 "$STAGE3_MANIFEST" 0 || { STAGE3_REASON=stage2_checks_replayed; return 1; }
+    stage2_admission_identity=$(manifest_value stage2_admission_identity "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admission_identity; return 1; }
+    valid_sha256 "$stage2_admission_identity" || { STAGE3_REASON=invalid_stage2_admission_identity; return 1; }
+    stage2_admission_receipt=$(manifest_value stage2_admission_receipt_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admission_receipt; return 1; }
+    stage2_admission_receipt_sha=$(manifest_value stage2_admission_receipt_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admission_receipt_hash; return 1; }
+    valid_sha256 "$stage2_admission_receipt_sha" || { STAGE3_REASON=invalid_stage2_admission_receipt_hash; return 1; }
     stage3_path=$(manifest_value stage3_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage3_path; return 1; }
     stage3_sha=$(manifest_value stage3_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage3_hash; return 1; }
     output_path=$(manifest_value output_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_output_path; return 1; }
     output_sha=$(manifest_value output_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_output_hash; return 1; }
     base=$(dirname "$STAGE3_MANIFEST")
+    same_file_reference "$stage2_admission_receipt" "$base/stage2-admitted/admission.env" "$base" || { STAGE3_REASON=stage2_admission_receipt_path_mismatch; return 1; }
+    verify_hashed_file "$stage2_admission_receipt" "$stage2_admission_receipt_sha" || { STAGE3_REASON=stage2_admission_receipt_hash_mismatch; return 1; }
     same_file_reference "$stage3_path" "$STAGE3_CANDIDATE" "$base" || { STAGE3_REASON=stage3_path_mismatch; return 1; }
     same_file_reference "$output_path" "$STAGE3_CANDIDATE" "$base" || { STAGE3_REASON=output_path_mismatch; return 1; }
     verify_hashed_file "$STAGE3_CANDIDATE" "$stage3_sha" || { STAGE3_REASON=stage3_hash_mismatch; return 1; }
@@ -485,9 +496,21 @@ bootstrap_essential_tools_smoke=true'
     smoke_sha=$(hash_file "$smoke")
     stage3_manifest="$test_root/stage3.provenance.env"
     stage4_manifest="$test_root/stage4.provenance.env"
-    self_test_file "$stage3_manifest" "schema=simple-bootstrap-stage3-provenance-v3
+    mkdir -p "$test_root/stage2-admitted"
+    stage2_admission_receipt="$test_root/stage2-admitted/admission.env"
+    self_test_file "$stage2_admission_receipt" 'schema=simple-bootstrap-stage2-admission-v1
+status=admitted'
+    stage2_admission_receipt_sha=$(hash_file "$stage2_admission_receipt")
+    self_test_file "$stage3_manifest" "schema=simple-bootstrap-stage3-provenance-v4
 status=pass
 artifact_kind=pure-simple-bootstrap-compiler
+stage2_receiver_status=pass
+stage2_check_policy=identity-scoped-receipt-reuse
+stage2_admission_identity=0000000000000000000000000000000000000000000000000000000000000000
+stage2_admission_receipt_path=$stage2_admission_receipt
+stage2_admission_receipt_sha256=$stage2_admission_receipt_sha
+stage2_checks_executed_at_admission=1
+stage2_checks_replayed_during_stage3=0
 stage3_path=$stage3
 stage3_sha256=$stage3_sha
 output_path=$stage3

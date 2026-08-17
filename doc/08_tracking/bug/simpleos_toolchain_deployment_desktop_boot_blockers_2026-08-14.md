@@ -13,9 +13,25 @@ Owner plan:
 | B-TARGET-SIMPLE | `scripts/os/simpleos-native-build.shs:1` | No fresh target payload built by an admitted pure-Simple Stage 4 CLI | Strict build produces target-native static ELF and provenance receipt with fallback disabled |
 | B-GUEST-LLD | `src/os/port/llvm/build.spl:1` | No genuine guest-static x86_64 SimpleOS `ld.lld` in this worktree | Pinned-fork build produces a validated static target ELF and dependency/hash receipts |
 | B-IMAGE | `src/os/installer/image_builder.spl:1` | No versioned embedded component manifest plus external image admission receipt | Image builder emits both non-self-referential records and validates every canonical alias byte-for-byte |
-| B-DESKTOP-LIVE | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl:1` | No same-run production desktop and in-guest Simple compile/run receipt | One OVMF/GRUB run binds desktop, scanout/framebuffer, toolchain, output, rc, kernel, and image evidence |
+| B-DESKTOP-LIVE | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl:625`; `scripts/check/check-simpleos-wm-fullscreen-evidence.shs:1193` | Combined wrapper preflight/receipt contract is source-complete and self-tested, but the canonical desktop owner uses `-net none`, terminates after capture, and the guest entry never starts/cooperatively polls SSHD; no same-run guest commands or receipt | Add the service-poll/network hook to the canonical desktop owner, then one OVMF/GRUB run binds desktop, scanout/framebuffer, toolchain, output, rc, kernel, and image evidence |
 | B-SPEC | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl:1` | Frozen fail-closed scenario/manual now call the canonical production wrapper and validate all three receipts; pure-Simple execution/docgen and `sspec-maintain` evidence remain unavailable until Stage 4 and B-DESKTOP unblock | Run the executable scenario, docgen, and one all-seven-score maintenance scan with the admitted Stage-4 runner; no source-only PASS |
 | B-PHYSICAL | `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md:38` | Board not acquired/identified and physical NIC driver/live transcript absent | Named board plus stable by-id media path, reviewed image write, boot/download path, and fresh serial or SSH transcript |
+
+## Current wrapper evidence (2026-08-16)
+
+- `scripts/check/check-simpleos-toolchain-desktop-boot.shs` now owns production
+  preflight and refuses a noncanonical/unadmitted Stage-4 CLI, missing target
+  image, manifest/image receipts, component identities, kernel/image hash
+  mismatches, stale live receipts, Rust seed paths, and the absent same-run
+  desktop/SSH interface.
+- `scripts/check/lib/simpleos-toolchain-desktop-boot-receipt-contract.shs`
+  validates sorted unique keys, final recomputed `record_sha256`, schemas,
+  producer/source/run identity, cross-record fields, mounted-filesystem origin,
+  target linker identity, and explicit false shortcut flags.
+- `sh test/01_unit/scripts/simpleos_toolchain_desktop_boot_receipt_contract_test.shs`
+  passes 16 bounded hermetic cases with
+  `platform_acceptance_claimed=false`. This is validator evidence only, not a
+  live QEMU or guest PASS.
 
 ## Historical/superseded attempt ledger
 

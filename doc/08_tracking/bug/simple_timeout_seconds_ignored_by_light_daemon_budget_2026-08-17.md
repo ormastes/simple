@@ -1,6 +1,7 @@
 # `SIMPLE_TIMEOUT_SECONDS` does not raise the light-daemon budget — specs report `daemon-no-response` instead of a verdict
 
 - **Filed:** 2026-08-17
+- **Status:** OPEN
 - **Status:** CLOSED (2026-08-17)
 - **Severity:** high for tooling/CI honesty (produces INCONCLUSIVE runs that read as failures)
 - **Component:** `src/app/test_runner_new/test_runner_client.spl`,
@@ -148,6 +149,14 @@ Scope note for other lanes: the third rung (explicit `--timeout` beating the
 environment) lives in `parse_client_run` and is not spec-covered, for the
 fn-main reason above; it is structurally guaranteed by the flag branches
 overwriting the default.
+
+The remaining verdict-honesty gap is also closed in source. A client that gets
+no daemon response cannot know that the spec executed, so it now emits
+`executed=0 passed=0 failed=0 dropped=1 timeout=1 inconclusive=1` with
+`reason=daemon-no-response`. Genuine worker and outer-bound timeouts continue
+to use the red timeout verdict (`executed=1 failed=1`). The adjacent regression
+pins both shapes so an infrastructure outage cannot be laundered into a failed
+assertion, and a real worker timeout cannot be laundered into inconclusive.
 
 **Impact on tonight's results:** any lane that set `SIMPLE_TIMEOUT_SECONDS`
 instead of `--timeout` ran on a 120s budget. RED verdicts from those runs

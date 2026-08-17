@@ -1,0 +1,509 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/stage4-tooling-matrix-test.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT INT TERM HUP
+fake_root="$fixture/repo"
+mkdir -p "$fake_root/scripts/bootstrap" "$fake_root/scripts/check/cert/redeploy_gate" \
+  "$fake_root/scripts/smoke" "$fake_root/test/01_unit/lib/tooling" \
+  "$fake_root/test/02_integration/app/cli" "$fake_root/test/01_unit/app/mcp_unit" \
+  "$fake_root/test/01_unit/app/lsp" "$fake_root/test/01_unit/compiler/bootstrap" \
+  "$fake_root/test/01_unit/compiler_core" "$fake_root/config/mcp" \
+  "$fake_root/test/fixtures/fmt" "$fake_root/test/fixtures/pure_simple_tooling" \
+  "$fake_root/test/fixtures/doc_coverage" "$fake_root/src/app/cli" \
+  "$fake_root/src/app/mcp" "$fake_root/src/app/simple_lsp_mcp" \
+  "$fake_root/src/app/test_daemon" "$fake_root/src/app/verify" "$fake_root/src/app/build" \
+  "$fake_root/src/compiler" "$fake_root/src/lib" "$fake_root/bin" \
+  "$fake_root/build/authority" "$fake_root/build/journals" "$fake_root/build/objects"
+
+cp "$repo_root/scripts/bootstrap/stage4-tools-only.sh" "$fake_root/scripts/bootstrap/"
+cp "$repo_root/scripts/bootstrap/stage4-tooling-matrix.shs" "$fake_root/scripts/bootstrap/"
+chmod +x "$fake_root/scripts/bootstrap/stage4-tools-only.sh" \
+  "$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+
+fail() {
+  echo "bootstrap_stage4_tooling_matrix_test: $*" >&2
+  exit 1
+}
+
+hash_file() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+hash_text() {
+  printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+
+FAKE_LINK_COUNT="$fixture/link-count"
+FAKE_GATE_COUNT="$fixture/gate-count"
+FAKE_TOOL_TEMPLATE="$fixture/fake-tool-template"
+FAKE_TEST_ARGS="$fixture/test-args"
+FAKE_ESSENTIAL_COUNT="$fixture/essential-count"
+export FAKE_LINK_COUNT FAKE_GATE_COUNT FAKE_TOOL_TEMPLATE FAKE_TEST_ARGS FAKE_ESSENTIAL_COUNT
+: >"$FAKE_LINK_COUNT"
+: >"$FAKE_GATE_COUNT"
+: >"$FAKE_TEST_ARGS"
+: >"$FAKE_ESSENTIAL_COUNT"
+
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  'printf "tool:%s\n" "${1:-none}" >>"$FAKE_GATE_COUNT"' \
+  'cmd=${1:-}' \
+  'case "$cmd" in' \
+  '  --help) case "$0" in *simple_mcp_server) echo "Simple MCP Server"; echo "Usage: simple mcp [options]" ;; *simple_lsp_mcp_server) echo "Usage: simple_lsp_mcp_server [options]"; echo "--log-mode <human|llm|json>"; echo "--progress <summary|count|dot|none>" ;; *) echo "Usage: simple <command>" ;; esac; exit 0 ;;' \
+  '  --version) case "$0" in *simple_mcp_server) echo "Simple MCP Server v4.0.0" ;; *simple_lsp_mcp_server) echo "simple-lsp-mcp 0.9.8" ;; *) echo "simple fake" ;; esac; exit 0 ;;' \
+  '  check) echo "Checking fake.spl..."; echo OK; exit 0 ;;' \
+  '  test)' \
+  '    shift; total=0; paths=; for arg in "$@"; do case "$arg" in *.spl) printf "%s\n" "$arg" >>"$FAKE_TEST_ARGS"; paths="$paths $arg"; case "$arg" in *bootstrap_flat_llvm_receiver_ownership_spec.spl|*simple_lsp_mcp_log_modes_spec.spl) count=5 ;; *sibling_describe_green_spec.spl) count=2 ;; *) count=1 ;; esac; total=$((total + count)) ;; esac; done' \
+  '    case "$paths" in *font_evidence_runner_fail_spec.spl*) echo "SPEC FILE VERDICT: $arg declared>=1 executed=1 passed=0 failed=1 dropped=0"; echo "Results: 1 total, 0 passed, 1 failed"; exit 1 ;; *font_evidence_runner_empty_spec.spl*) echo "--assert-ran: no BDD examples executed"; exit 1 ;; esac' \
+  '    [ "${FAKE_TEST_MODE:-}" != zero ] || { echo "Results: 0 total, 0 passed, 0 failed"; exit 0; }' \
+  '    [ "${FAKE_TEST_MODE:-}" != missing ] || exit 0' \
+  '    failed=0; emitted=0; for path in $paths; do case "$path" in *bootstrap_flat_llvm_receiver_ownership_spec.spl) count=5; [ "${FAKE_TEST_MODE:-}" != focused-wrong ] || count=4 ;; *simple_lsp_mcp_log_modes_spec.spl) count=5 ;; *sibling_describe_green_spec.spl) count=2 ;; *) count=1 ;; esac; [ "${FAKE_TEST_MODE:-}" = omit ] && [ "$emitted" -eq 0 ] || echo "SPEC FILE VERDICT: $path declared>=$count executed=$count passed=$count failed=0 dropped=0"; emitted=$((emitted + 1)); done' \
+  '    [ "${FAKE_TEST_MODE:-}" != fail ] || { echo "Results: $total total, $((total - 1)) passed, 1 failed"; exit 0; }' \
+  '    case "$paths:${FAKE_TEST_MODE:-}" in *bootstrap_flat_llvm_receiver_ownership_spec.spl:focused-wrong) total=4 ;; esac' \
+  '    echo "Results: $total total, $total passed, 0 failed"; exit 0 ;;' \
+  '  lint) [ "${2:-}" = --help ] && { echo "Usage: simple lint"; exit 0; }; echo "Lint passed: all files clean"; exit 0 ;;' \
+  '  duplicate-check) [ "${2:-}" = --help ] && { echo "Usage: simple duplicate-check"; exit 0; }; echo "{\"status\":\"ok\",\"duplicates\":[]}"; case "$*" in *dup_pair*) exit 1 ;; esac; exit 0 ;;' \
+  '  run) [ "${2:-}" = "" ] || { case "${2:-}" in *simple_lsp_protocol_smoke.spl) echo "STATUS: PASS simple_lsp_protocol_smoke" ;; *) echo 5 ;; esac; }; exit 0 ;;' \
+  '  test-daemon) echo "  simple test-daemon start       Start test daemon"; exit 1 ;;' \
+  '  examples-check) echo "{\"command\":\"examples-check\",\"status\":\"ok\",\"total\":1,\"passed\":1,\"failed\":0,\"crashed\":0,\"timed_out\":0}"; exit 0 ;;' \
+  '  fmt|fix) echo "$cmd ok"; exit 0 ;;' \
+  '  verify) echo "Usage: simple verify"; exit 0 ;;' \
+  '  security) echo "security: no findings"; exit 0 ;;' \
+  '  build) echo "build-explain-error: --target <name> required"; exit 2 ;;' \
+  '  doc-coverage) echo orphan_fn; exit 0 ;;' \
+  '  vscode) [ "${2:-}" != build ] || [ "${FAKE_VSCODE_FAIL:-0}" != 1 ] || { echo vscode-build-failed; exit 9; }; echo "Usage: simple vscode"; exit 0 ;;' \
+  '  electron) echo "Usage: simple electron"; exit 0 ;;' \
+  '  spipe-docgen)' \
+  '    shift; out=; while [ "$#" -gt 0 ]; do [ "$1" = --output ] && { shift; out=$1; }; shift; done' \
+  '    [ -n "$out" ]; mkdir -p "$out"; echo manual >"$out/fake.md"; exit 0 ;;' \
+  '  native-build)' \
+  '    [ "${2:-}" = --help ] && { echo native-build-help; exit 0; }' \
+  '    shift; out=; while [ "$#" -gt 0 ]; do case "$1" in --output|-o) shift; out=$1 ;; esac; shift; done' \
+  '    [ -n "$out" ]; mkdir -p "$(dirname "$out")"; printf "%s\n" "#!/bin/sh" "echo 5" >"$out"; chmod +x "$out"; exit 0 ;;' \
+  '  "") cat >/dev/null; echo "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"protocolVersion\":\"2025-06-18\"}}"; echo "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"result\":{\"tools\":[{\"name\":\"debug_create_session\",\"inputSchema\":{}}]}}"; echo "{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"result\":{\"content\":\"spipe: linked\"}}"; echo "{\"jsonrpc\":\"2.0\",\"id\":\"4\",\"result\":{\"content\":\"No results found.\"}}"; exit 0 ;;' \
+  'esac' \
+  'exit 0' >"$FAKE_TOOL_TEMPLATE"
+chmod +x "$FAKE_TOOL_TEMPLATE"
+
+fake_linker="$fake_root/fake-linker"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  'out=' \
+  'while [ "$#" -gt 0 ]; do' \
+  '  case "$1" in -o) shift; out=$1 ;; esac' \
+  '  shift' \
+  'done' \
+  '[ -n "$out" ]' \
+  'printf "link\n" >>"$FAKE_LINK_COUNT"' \
+  'cp "$FAKE_TOOL_TEMPLATE" "$out"' \
+  'chmod +x "$out"' >"$fake_linker"
+chmod +x "$fake_linker"
+
+stage3="$fake_root/build/authority/stage3-simple"
+identity='simple-stage3-test 1.0'
+printf '%s\n' '#!/bin/sh' "[ \"\${1:-}\" = --version ] && { echo '$identity'; exit 0; }" 'exit 0' >"$stage3"
+chmod +x "$stage3"
+printf 'compiler archive\n' >"$fake_root/build/authority/compiler.a"
+printf 'compiler interface\n' >"$fake_root/build/authority/compiler.interface"
+printf 'runtime archive\n' >"$fake_root/build/authority/runtime.a"
+
+stage3_hash=$(hash_file "$stage3")
+compiler_archive_hash=$(hash_file "$fake_root/build/authority/compiler.a")
+compiler_interface_hash=$(hash_file "$fake_root/build/authority/compiler.interface")
+runtime_archive_hash=$(hash_file "$fake_root/build/authority/runtime.a")
+admission="$fake_root/build/authority/Stage3AdmissionReceiptV1.env"
+{
+  echo 'schema_version=Stage3AdmissionReceiptV1'
+  echo 'admission_status=PASS'
+  echo "compiler_identity=$identity"
+  echo 'backend=llvm'
+  echo 'target=x86_64-unknown-linux-gnu'
+  echo 'compiler_abi=compiler-abi-v1'
+  echo 'runtime_abi=runtime-abi-v1'
+  echo "compiler_executable_hash=$stage3_hash"
+  echo "compiler_archive_hash=$compiler_archive_hash"
+  echo "compiler_interface_hash=$compiler_interface_hash"
+  echo "runtime_archive_hash=$runtime_archive_hash"
+} >"$admission"
+admission_hash=$(hash_file "$admission")
+
+source_hash=$(hash_text source)
+producer_hash=$(hash_text producer)
+manifest="$fake_root/build/authority/CompilerArtifactManifestV1.env"
+{
+  echo 'schema_version=CompilerArtifactManifestV1'
+  echo "source_hash=$source_hash"
+  echo "producer_hash=$producer_hash"
+  echo 'backend=llvm'
+  echo 'target=x86_64-unknown-linux-gnu'
+  echo 'compiler_abi=compiler-abi-v1'
+  echo 'runtime_abi=runtime-abi-v1'
+  echo "compiler_identity=$identity"
+  echo "admission_receipt_path=$admission"
+  echo "admission_receipt_hash=$admission_hash"
+  echo "compiler_executable_path=$stage3"
+  echo "compiler_executable_hash=$stage3_hash"
+  echo "compiler_archive_path=$fake_root/build/authority/compiler.a"
+  echo "compiler_archive_hash=$compiler_archive_hash"
+  echo "compiler_interface_path=$fake_root/build/authority/compiler.interface"
+  echo "compiler_interface_hash=$compiler_interface_hash"
+  echo "runtime_archive_path=$fake_root/build/authority/runtime.a"
+  echo "runtime_archive_hash=$runtime_archive_hash"
+} >"$manifest"
+
+canonical="$fixture/manifest.canonical"
+: >"$canonical"
+frame() {
+  name=$1
+  value=$2
+  printf '%s:%s%s:%s' "$(printf %s "$name" | wc -c | tr -d ' ')" "$name" \
+    "$(printf %s "$value" | wc -c | tr -d ' ')" "$value" >>"$canonical"
+}
+frame schema CompilerArtifactManifestV1
+frame source "$source_hash"
+frame producer "$producer_hash"
+frame backend llvm
+frame target x86_64-unknown-linux-gnu
+frame compiler_abi compiler-abi-v1
+frame runtime_abi runtime-abi-v1
+frame compiler_identity "$identity"
+frame admission_receipt_path "$admission"
+frame admission_receipt_hash "$admission_hash"
+frame compiler_executable_path "$stage3"
+frame compiler_executable_hash "$stage3_hash"
+frame compiler_archive_path "$fake_root/build/authority/compiler.a"
+frame compiler_archive_hash "$compiler_archive_hash"
+frame compiler_interface_path "$fake_root/build/authority/compiler.interface"
+frame compiler_interface_hash "$compiler_interface_hash"
+frame runtime_archive_path "$fake_root/build/authority/runtime.a"
+frame runtime_archive_hash "$runtime_archive_hash"
+manifest_hash=$(hash_file "$canonical")
+
+make_journal() {
+  tool=$1
+  entry=$2
+  journal="$fake_root/build/journals/$tool.env"
+  object="$fake_root/build/objects/$tool.o"
+  printf 'object:%s\n' "$tool" >"$object"
+  mkdir -p "$fake_root/$(dirname "$entry")"
+  printf 'fn main() -> i64: 0\n' >"$fake_root/$entry"
+  {
+    echo 'schema_version=ToolCompileJournalV1'
+    echo "tool_id=$tool"
+    echo "entry_path=$entry"
+    echo "compiler_manifest_hash=$manifest_hash"
+    echo "compiler_executable_hash=$stage3_hash"
+    echo "source_hash=$source_hash"
+    echo "producer_hash=$producer_hash"
+    echo 'backend=llvm'
+    echo 'target=x86_64-unknown-linux-gnu'
+    echo 'compiler_abi=compiler-abi-v1'
+    echo 'runtime_abi=runtime-abi-v1'
+    echo "compiler_archive_hash=$compiler_archive_hash"
+    echo "compiler_interface_hash=$compiler_interface_hash"
+    echo "runtime_archive_hash=$runtime_archive_hash"
+    echo 'compiler_sources_compiled=0'
+    echo 'stage4_compiler_files=0'
+    printf 'unit\t%s\t%s\t%s\t%s\n' "$entry" "$(hash_file "$fake_root/$entry")" \
+      "$object" "$(hash_file "$object")"
+  } >"$journal"
+}
+make_journal cli src/app/cli/main.spl
+printf 'fn cli_helper() -> i64: 1\n' >"$fake_root/src/app/cli/nonentry.spl"
+printf 'object:cli-helper\n' >"$fake_root/build/objects/cli-helper.o"
+printf 'unit\t%s\t%s\t%s\t%s\n' \
+  'src/app/cli/nonentry.spl' "$(hash_file "$fake_root/src/app/cli/nonentry.spl")" \
+  "$fake_root/build/objects/cli-helper.o" "$(hash_file "$fake_root/build/objects/cli-helper.o")" \
+  >>"$fake_root/build/journals/cli.env"
+mkdir -p "$fake_root/src/app/journal_support"
+printf 'fn journal_helper() -> i64: 1\n' >"$fake_root/src/app/journal_support/nonentry.spl"
+printf 'object:journal-helper\n' >"$fake_root/build/objects/journal-helper.o"
+printf 'unit\t%s\t%s\t%s\t%s\n' \
+  'src/app/journal_support/nonentry.spl' "$(hash_file "$fake_root/src/app/journal_support/nonentry.spl")" \
+  "$fake_root/build/objects/journal-helper.o" "$(hash_file "$fake_root/build/objects/journal-helper.o")" \
+  >>"$fake_root/build/journals/cli.env"
+make_journal mcp src/app/mcp/main.spl
+make_journal lsp src/app/simple_lsp_mcp/main.spl
+
+mkdir -p "$fake_root/scripts/check/cert/redeploy_gate/fixtures"
+printf 'fn main(): print 5\n' >"$fake_root/scripts/check/cert/redeploy_gate/fixtures/p2_add.spl"
+printf 'fake compiler\n' >"$fake_root/src/compiler/fake.spl"
+printf 'fake library\n' >"$fake_root/src/lib/fake.spl"
+mkdir -p "$fake_root/src/lib/std/common/format"
+printf 'fake format fixed\n' >"$fake_root/src/lib/std/common/format/format_fixed.spl"
+printf 'fake daemon\n' >"$fake_root/src/app/test_daemon/fake.spl"
+printf 'fake verify\n' >"$fake_root/src/app/verify/fake.spl"
+printf 'fake build\n' >"$fake_root/src/app/build/cli_entry.spl"
+printf 'fake vscode\n' >"$fake_root/src/app/cli/vscode_entry.spl"
+printf 'fake electron\n' >"$fake_root/src/app/cli/electron_entry.spl"
+printf 'fake bootstrap spec\n' >"$fake_root/test/01_unit/compiler/bootstrap/fake_spec.spl"
+printf 'fake focused spec\n' >"$fake_root/test/01_unit/compiler/bootstrap/bootstrap_flat_llvm_receiver_ownership_spec.spl"
+printf 'fake compiler spec\n' >"$fake_root/test/01_unit/compiler/fake_full_spec.spl"
+printf 'fake compiler core spec\n' >"$fake_root/test/01_unit/compiler_core/fake_core_spec.spl"
+printf 'fake mcp spec\n' >"$fake_root/test/01_unit/app/mcp_unit/fake_spec.spl"
+printf 'fake lsp spec\n' >"$fake_root/test/01_unit/app/lsp/fake_spec.spl"
+printf 'unformatted\n' >"$fake_root/test/fixtures/fmt/unformatted.spl"
+printf 'fn main(): print 1\n' >"$fake_root/test/fixtures/pure_simple_tooling/clean.spl"
+printf 'describe "green":\n    it "passes":\n        expect(1).to_equal(1)\n' >"$fake_root/test/fixtures/pure_simple_tooling/sibling_describe_green_spec.spl"
+printf 'pub fn orphan_fn(): 1\n' >"$fake_root/test/fixtures/doc_coverage/partial_docs.spl"
+printf 'fake bridge\n' >"$fake_root/bin/mcp_stdio_bridge.js"
+printf 'fake cmd wrapper\n' >"$fake_root/bin/simple_lsp_mcp_server.cmd"
+mkdir -p "$fake_root/scripts/setup"
+printf 'fake setup\n' >"$fake_root/scripts/setup/setup.shs"
+printf 'fake install\n' >"$fake_root/config/mcp/install.shs"
+
+write_gate() {
+  gate_path=$1
+  shift
+  mkdir -p "$(dirname "$gate_path")"
+  {
+    echo '#!/bin/sh'
+    echo 'printf "gate\\n" >>"$FAKE_GATE_COUNT"'
+    for gate_line in "$@"; do printf '%s\n' "$gate_line"; done
+    echo 'exit 0'
+  } >"$gate_path"
+  chmod +x "$gate_path"
+}
+write_gate "$fake_root/scripts/check/check-core-runtime-smoke.shs" 'echo core_runtime_smoke=true'
+write_gate "$fake_root/scripts/check/cert/redeploy_gate/redeploy_gate.shs" 'echo redeploy_gate=true'
+write_gate "$fake_root/scripts/check/check-bootstrap-essential-tools-smoke.shs" \
+  'printf "essential\n" >>"$FAKE_ESSENTIAL_COUNT"' \
+  '[ "${FAKE_ESSENTIAL_FAIL:-0}" != 1 ] || { echo forced-essential-failure; exit 7; }' \
+  'echo essential_list_constructor_smoke=true' \
+  'echo essential_test_runner_smoke=true' 'echo essential_lint_smoke=true' \
+  'echo essential_duplicate_checker_smoke=true' 'echo bootstrap_essential_tools_smoke=true'
+write_gate "$fake_root/scripts/check/check-mcp-native-smoke.shs" \
+  'echo mcp_core_request_ids_preserved=true' 'echo mcp_server_exit_code=0' \
+  'echo lsp_mcp_server_exit_code=0'
+write_gate "$fake_root/scripts/check/check-simple-core-runtime-smoke.shs" 'echo should_not_run=true'
+printf 'fake lsp smoke\n' >"$fake_root/scripts/smoke/simple_lsp_protocol_smoke.spl"
+printf 'fake spec\n' >"$fake_root/test/01_unit/lib/tooling/bootstrap_stage_split_spec.spl"
+printf 'fake spec\n' >"$fake_root/test/02_integration/app/cli/stage4_tools_only_manifest_spec.spl"
+printf 'fake spec\n' >"$fake_root/test/02_integration/app/mcp_stdio_integration_spec.spl"
+printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_stdio_spec.spl"
+printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_log_modes_spec.spl"
+
+runner="$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
+common_args="--source-root=$fake_root --compiler-manifest=$manifest --cli-journal=$fake_root/build/journals/cli.env --mcp-journal=$fake_root/build/journals/mcp.env --lsp-journal=$fake_root/build/journals/lsp.env --linker=$fake_linker --timeout-seconds=30"
+
+# shellcheck disable=SC2086
+expected_full_status=1
+full_status=0
+"$runner" --matrix-id=full $common_args || full_status=$?
+[ "$full_status" -eq "$expected_full_status" ] || fail "full fail-closed matrix returned $full_status"
+summary="$fake_root/build/mini_builds/stage4_tooling_full/summary.env"
+grep -Fxq 'overall=BLOCKED' "$summary" || fail "unfinished required rows did not remain fail-closed"
+grep -Fxq 'admission_eligible=false' "$summary" || fail "blocked matrix claimed admission eligibility"
+grep -Fxq 'terminal_count=49' "$summary" || fail "full matrix did not terminalize"
+grep -Fxq 'passed=44' "$summary" || fail "full matrix PASS distribution changed"
+grep -Fxq 'failed=0' "$summary" || fail "full matrix masked a failed row"
+grep -Fxq 'blocked=2' "$summary" || fail "full matrix blocked-row distribution changed"
+grep -Fxq 'remaining=0' "$summary" || fail "full matrix retained pending rows"
+grep -Fxq 'unsupported=3' "$summary" || fail "optional unsupported rows missing"
+grep -Fxq 'required_not_pass=2' "$summary" || fail "required blocked count changed"
+grep -Fxq 'optional_failed=0' "$summary" || fail "optional failure aggregate wrong"
+grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "blocked matrix claimed zero compiler files"
+grep -Fxq 'result=UNSUPPORTED' "$fake_root/build/mini_builds/stage4_tooling_full/state/simple_core_smoke.env" || fail "simple-core unsupported receipt missing"
+
+full_matrix="$fake_root/build/mini_builds/stage4_tooling_full/matrix.tsv"
+full_state="$fake_root/build/mini_builds/stage4_tooling_full/state"
+while IFS="$(printf '\t')" read -r matrix_task matrix_required matrix_deps; do
+  matrix_receipt="$full_state/$matrix_task.env"
+  [ -f "$matrix_receipt" ] || fail "$matrix_task receipt missing"
+  if [ "$matrix_required" = required ]; then
+    case "$matrix_task" in
+      mcp_stdio_integration|lsp_stdio_integration)
+        grep -Fxq 'result=BLOCKED_UPSTREAM' "$matrix_receipt" || fail "$matrix_task was not blocked"
+        grep -Fxq 'status=protocol-root-contract-not-accepted' "$matrix_receipt" || fail "$matrix_task blocker status changed"
+        grep -Fxq 'command_executed=false' "$matrix_receipt" || fail "$matrix_task claimed command execution"
+        grep -Fxq 'test_executed=false' "$matrix_receipt" || fail "$matrix_task claimed test execution"
+        grep -Fxq 'executed_test_count=0' "$matrix_receipt" || fail "$matrix_task claimed examples"
+        grep -Fxq 'pass_marker=-' "$matrix_receipt" || fail "$matrix_task claimed a PASS marker"
+        grep -Fxq 'command_path=-' "$matrix_receipt" || fail "$matrix_task retained a command transcript"
+        ;;
+      *) grep -Fxq 'result=PASS' "$matrix_receipt" || fail "$matrix_task required row did not PASS" ;;
+    esac
+  else
+    grep -Fxq 'result=UNSUPPORTED' "$matrix_receipt" || fail "$matrix_task optional row was not explicit UNSUPPORTED"
+  fi
+done <"$full_matrix"
+matrix_tab=$(printf '\t')
+grep -Fxq "lint_help${matrix_tab}required${matrix_tab}essential_tools" "$full_matrix" || fail "lint help dependency changed"
+grep -Fxq "lint_focused${matrix_tab}required${matrix_tab}lint_help" "$full_matrix" || fail "lint focused dependency changed"
+grep -Fxq "duplicate_help${matrix_tab}required${matrix_tab}essential_tools" "$full_matrix" || fail "duplicate help dependency changed"
+grep -Fxq "duplicate_focused${matrix_tab}required${matrix_tab}duplicate_help" "$full_matrix" || fail "duplicate focused dependency changed"
+[ "$(wc -l <"$FAKE_ESSENTIAL_COUNT" | tr -d ' ')" -eq 1 ] || fail "canonical essential smoke did not run exactly once"
+
+for tool in cli mcp lsp; do
+  receipt="$fake_root/build/stage4-tools/full_$tool/ToolingLinkReceiptV1.env"
+  [ -f "$receipt" ] || fail "$tool receipt missing"
+  grep -Fxq "tool_id=$tool" "$receipt" || fail "$tool identity missing"
+  grep -Fxq 'compiler_sources_compiled=0' "$receipt" || fail "$tool compiler source count wrong"
+  grep -Fxq 'stage4_compiler_files=0' "$receipt" || fail "$tool Stage4 compiler count wrong"
+  if [ "$tool" = cli ]; then expected_units=3; else expected_units=1; fi
+  grep -Fxq "compiled_unit_count=$expected_units" "$receipt" || fail "$tool compiled unit count missing"
+  grep -Fxq 'help_smoke_passed=false' "$receipt" || fail "$tool link receipt falsely claimed help execution"
+  grep -Fxq 'version_smoke_passed=false' "$receipt" || fail "$tool link receipt falsely claimed version execution"
+done
+grep -Fxq 'test_executed=false' "$fake_root/build/mini_builds/stage4_tooling_full/state/essential_tools.env" || fail "essential shell gate claimed Simple test count"
+grep -Fxq 'executed_test_count=0' "$fake_root/build/mini_builds/stage4_tooling_full/state/essential_tools.env" || fail "essential shell gate synthesized a test count"
+for test_task in format_fixed_focused_regression compiler_bootstrap_tests compiler_core_tests compiler_full_tests tooling_contract_tests mcp_unit_tests lsp_unit_tests lsp_log_modes_tests; do
+  test_receipt="$fake_root/build/mini_builds/stage4_tooling_full/state/$test_task.env"
+  grep -Fxq 'test_executed=true' "$test_receipt" || fail "$test_task did not prove execution"
+  case "$test_task" in
+    tooling_contract_tests) expected_count=2 ;;
+    format_fixed_focused_regression|lsp_log_modes_tests) expected_count=5 ;;
+    *) expected_count=1 ;;
+  esac
+  grep -Fxq "executed_test_count=$expected_count" "$test_receipt" || fail "$test_task count missing"
+done
+for blocked_stdio in mcp_stdio_integration lsp_stdio_integration; do
+  grep -Fxq 'result=BLOCKED_UPSTREAM' \
+    "$fake_root/build/mini_builds/stage4_tooling_full/state/$blocked_stdio.env" || \
+    fail "$blocked_stdio was not retained fail-closed"
+done
+[ "$(grep -Fxc "$fake_root/test/01_unit/compiler/bootstrap/bootstrap_flat_llvm_receiver_ownership_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "focused format spec was rerun"
+[ "$(grep -Fxc "$fake_root/test/01_unit/compiler/bootstrap/fake_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "bootstrap shard was not disjoint"
+[ "$(grep -Fxc "$fake_root/test/01_unit/compiler/fake_full_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "full compiler shard was not disjoint"
+[ "$(grep -Fxc "$fake_root/test/01_unit/compiler_core/fake_core_spec.spl" "$FAKE_TEST_ARGS")" -eq 1 ] || fail "compiler-core shard was not distinct"
+[ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq 3 ] || fail "approved tool set was not linked exactly once"
+
+for negative_mode in zero missing fail omit focused-wrong; do
+  negative_status=0
+  export FAKE_TEST_MODE="$negative_mode"
+  # shellcheck disable=SC2086
+  "$runner" --matrix-id="negative-$negative_mode" $common_args || negative_status=$?
+  unset FAKE_TEST_MODE
+  [ "$negative_status" -eq 1 ] || fail "$negative_mode test evidence was accepted"
+  negative_summary="$fake_root/build/mini_builds/stage4_tooling_negative-$negative_mode/summary.env"
+  grep -Fxq 'overall=BLOCKED' "$negative_summary" || fail "$negative_mode did not fail closed"
+  grep -Fxq 'result=FAIL' \
+    "$fake_root/build/mini_builds/stage4_tooling_negative-$negative_mode/state/format_fixed_focused_regression.env" || \
+    fail "$negative_mode did not fail the exact focused evidence row"
+done
+
+essential_status=0
+export FAKE_ESSENTIAL_FAIL=1
+# shellcheck disable=SC2086
+"$runner" --matrix-id=essential-fail $common_args || essential_status=$?
+unset FAKE_ESSENTIAL_FAIL
+[ "$essential_status" -eq 1 ] || fail "essential runner failure was accepted"
+for blocked_test in format_fixed_focused_regression compiler_bootstrap_tests compiler_core_tests compiler_full_tests; do
+  grep -Fxq 'result=BLOCKED_UPSTREAM' \
+    "$fake_root/build/mini_builds/stage4_tooling_essential-fail/state/$blocked_test.env" || \
+    fail "$blocked_test did not depend on essential runner proof"
+done
+resume_link_count=$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')
+first_gate_count=$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')
+
+# A byte-identical resume must reuse all valid PASS and UNSUPPORTED rows.
+# shellcheck disable=SC2086
+resume_status=0
+"$runner" --matrix-id=full --resume $common_args || resume_status=$?
+[ "$resume_status" -eq 1 ] || fail "blocked resume returned $resume_status"
+[ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq "$resume_link_count" ] || fail "resume relinked a valid PASS"
+[ "$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')" -eq "$first_gate_count" ] || fail "resume reran a green gate"
+
+run_blocked_resume() {
+  resume_label=$1
+  resume_rc=0
+  # shellcheck disable=SC2086
+  "$runner" --matrix-id=full --resume $common_args || resume_rc=$?
+  [ "$resume_rc" -eq 1 ] || fail "$resume_label resume returned $resume_rc"
+  grep -Fxq 'overall=BLOCKED' "$summary" || fail "$resume_label escaped fail-closed summary"
+  grep -Fxq 'admission_eligible=false' "$summary" || fail "$resume_label exposed admission"
+  grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "$resume_label exposed compiler-file zero"
+}
+
+# Every reusable evidence component is tamper-evident. Each mutation must
+# rerun the exact row and replace the corrupted evidence envelope.
+for tamper_spec in \
+  'log:duplicate_help.log' \
+  'command:lint_help.command' \
+  'marker:lint_focused.pass-marker'; do
+  tamper_kind=${tamper_spec%%:*}
+  tamper_file=${tamper_spec#*:}
+  before_tamper_count=$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')
+  case "$tamper_kind" in
+    log|command) printf 'tamper\n' >>"$fake_root/build/mini_builds/stage4_tooling_full/logs/$tamper_file" ;;
+    marker) printf 'tamper\n' >>"$fake_root/build/mini_builds/stage4_tooling_full/state/$tamper_file" ;;
+  esac
+  run_blocked_resume "$tamper_kind tamper"
+  after_tamper_count=$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')
+  [ "$after_tamper_count" -gt "$before_tamper_count" ] || fail "$tamper_spec was reused"
+done
+
+receipt_path="$fake_root/build/mini_builds/stage4_tooling_full/state/lsp_help.env"
+sed -i 's/^config_hash=.*/config_hash=tampered/' "$receipt_path"
+before_receipt_count=$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')
+run_blocked_resume 'receipt tamper'
+[ "$(wc -l <"$FAKE_GATE_COUNT" | tr -d ' ')" -gt "$before_receipt_count" ] || fail "tampered receipt was reused"
+
+# A non-entry source byte in the approved CLI journal closure invalidates the
+# frozen identity before any stale PASS can be reused.
+printf 'fn journal_helper() -> i64: 2\n' >"$fake_root/src/app/journal_support/nonentry.spl"
+source_drift_status=0
+# shellcheck disable=SC2086
+"$runner" --matrix-id=full --resume $common_args || source_drift_status=$?
+[ "$source_drift_status" -eq 2 ] || fail "non-entry source drift returned $source_drift_status"
+grep -Fxq 'overall=FAIL' "$summary" || fail "source drift retained a stale aggregate"
+grep -Fxq 'admission_eligible=false' "$summary" || fail "source drift exposed admission"
+grep -Fxq 'stage4_compiler_files=unknown' "$summary" || fail "source drift exposed compiler-file zero"
+printf 'fn journal_helper() -> i64: 1\n' >"$fake_root/src/app/journal_support/nonentry.spl"
+run_blocked_resume 'source restore'
+
+# Tampering invalidates only the affected PASS; the old publication is retained
+# under the matrix quarantine before the exact tool is republished.
+link_before_output_tamper=$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')
+printf 'tampered\n' >>"$fake_root/build/stage4-tools/full_cli/simple"
+# shellcheck disable=SC2086
+tamper_status=0
+"$runner" --matrix-id=full --resume $common_args || tamper_status=$?
+[ "$tamper_status" -eq 1 ] || fail "tampered blocked resume returned $tamper_status"
+[ "$(wc -l <"$FAKE_LINK_COUNT" | tr -d ' ')" -eq "$((link_before_output_tamper + 1))" ] || fail "tampered CLI was not relinked once"
+[ -d "$fake_root/build/mini_builds/stage4_tooling_full/quarantine/cli.1" ] || fail "invalid publication was not retained"
+
+# Once an optional capability is present, its execution failure is a real
+# matrix failure. Only an explicit prerequisite-backed UNSUPPORTED is neutral.
+mkdir -p "$fake_root/src/app/vscode_extension"
+printf '{}\n' >"$fake_root/src/app/vscode_extension/package.json"
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_root/bin/npm"
+chmod +x "$fake_root/bin/npm"
+optional_status=0
+export FAKE_VSCODE_FAIL=1
+original_path=$PATH
+PATH="$fake_root/bin:$PATH"
+export PATH
+# shellcheck disable=SC2086
+"$runner" --matrix-id=optional-fail $common_args || optional_status=$?
+PATH=$original_path
+export PATH
+unset FAKE_VSCODE_FAIL
+[ "$optional_status" -eq 1 ] || fail "optional execution failure returned $optional_status"
+optional_summary="$fake_root/build/mini_builds/stage4_tooling_optional-fail/summary.env"
+grep -Fxq 'overall=BLOCKED' "$optional_summary" || fail "required blocked rows were masked by optional failure"
+grep -Fxq 'optional_failed=1' "$optional_summary" || fail "optional failure count missing"
+grep -Fxq 'result=FAIL' "$fake_root/build/mini_builds/stage4_tooling_optional-fail/state/vscode_external.env" || fail "optional failure receipt missing"
+
+# A missing required journal terminalizes as BLOCKED_UPSTREAM; later sources
+# are not silently omitted and the scoped matrix is not admission-eligible.
+blocked_status=0
+# shellcheck disable=SC2086
+"$runner" --matrix-id=blocked --scope=link-only --source-root="$fake_root" \
+  --compiler-manifest="$manifest" --cli-journal="$fake_root/build/journals/cli.env" \
+  --mcp-journal="$fake_root/build/journals/missing.env" \
+  --lsp-journal="$fake_root/build/journals/lsp.env" --linker="$fake_linker" \
+  --timeout-seconds=30 || blocked_status=$?
+[ "$blocked_status" -eq 1 ] || fail "blocked matrix returned $blocked_status"
+blocked_summary="$fake_root/build/mini_builds/stage4_tooling_blocked/summary.env"
+grep -Fxq 'overall=BLOCKED' "$blocked_summary" || fail "blocked aggregate missing"
+grep -Fxq 'terminal_count=3' "$blocked_summary" || fail "blocked matrix did not reach the end"
+grep -Fxq 'remaining=0' "$blocked_summary" || fail "blocked matrix retained pending rows"
+grep -Fxq 'stage4_compiler_files=unknown' "$blocked_summary" || fail "blocked matrix claimed zero compiler files"
+grep -Fxq 'result=BLOCKED_UPSTREAM' "$fake_root/build/mini_builds/stage4_tooling_blocked/state/link_mcp.env" || fail "blocked row receipt missing"
+
+echo "PASS bootstrap Stage4 tooling matrix receipts and resume contract"

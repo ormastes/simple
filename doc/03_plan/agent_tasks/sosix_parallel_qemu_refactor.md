@@ -16,10 +16,11 @@ sources from an admissible kernel. The x86_32 source now binds `esp0` to the
 authenticated task/generation before each CPL3 handoff, but no admitted rebuild
 yet proves the new binding symbols are linked. The retained ARM32 kernel passes
 its linked gate, while the retained x86_32 kernel predates the binding and is
-rejected. Windows now has a six-row descriptor/admission wrapper and a
-producer-backed x86_64 guest-run path in source. The other five rows fail
-closed because their guests do not yet echo the distinct collector nonce;
-native PowerShell parsing, execution, and bundles also remain unverified.
+rejected. Windows now has a six-row descriptor/admission wrapper. All six
+guests have distinct, bounded `/SOSIXNON.TXT` readers, but only x86_64 and
+ARM32 currently expose the complete ordered workload/listing/program/reap
+source contract. Native PowerShell parsing, execution, and bundles remain
+unverified.
 FreeBSD requires admitted native media/execution; macOS requires native Darwin
 execution.  The modern executable handoff spec is
 `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`; its generated
@@ -73,8 +74,12 @@ admission-record path without an admission-record SHA-256. The collector now
 byte-binds that exact record, and a source-present v2 importer validates the
 closed 24-row wire, canonical base64/cells/nonces/trailer, admission and
 evidence hashes, cross-bound identities, and canonical retained artifacts.
-Focused mutation/late-row/artifact sabotage specs are present but have not run
-on a provenance-admitted Stage-4 CLI. The filesystem wrappers cannot pin a file
+The importer and structural parser now group every multiline boolean expression
+at the documented Simple grammar boundary without changing the 13/31-field
+wire. Focused mutation/late-row/artifact sabotage specs are present; both were
+attempted once with the deployed self-hosted CLI and exited 139 before scenario
+output, and a final module `check` printed its target then exited 139. They have
+not run on a provenance-admitted Stage-4 CLI. The filesystem wrappers cannot pin a file
 descriptor across each hash/read sequence, so hostile concurrent replacement
 remains a documented trust-hardening gap. The status is tracked in
 `doc/08_tracking/bug/sosix_qemu_v2_admission_record_hash_binding_2026-08-16.md`.
@@ -160,15 +165,15 @@ state is not permission to weaken the 24-row contract or claim matrix PASS.
 
 | Lane | Scope / exclusive owner files | Current state | Acceptance evidence | Sidecar | Merge owner | Final reviewer |
 | --- | --- | --- | --- | --- | --- | --- |
-| L0 shared matrix | settings, admission, producer, collector, typed v2 importer, matrix docs | source implemented; typed specs and docgen blocked on admitted full CLI | self-tests; v2 mutation/late-row/artifact sabotage; one pre-admitted bundle per changed schema; collector reject unless exactly 24 | N/A | root | root/high |
+| L0 shared matrix | settings, admission, producer, collector, typed v2 importer, matrix docs | source implemented and importer grammar repaired; typed specs and docgen blocked on admitted full CLI | self-tests; v2 mutation/late-row/artifact sabotage; one pre-admitted bundle per changed schema; collector reject unless exactly 24 | N/A | root | root/high |
 | L1 Linux x86_64 | x86_64 OVMF/GRUB fs-exec entry and boot artifacts | canonical PASS | OVMF→GRUB→guest-entry, real listing, mounted program stdout, exit37/reap/PASS | N/A | root | root/high |
 | L2 Linux ARM64 | ARM64 direct-kernel fs-exec entry, nonce reader and EL0 lifecycle | canonical PASS | direct-kernel v2 bundle, exact ordered serial lifecycle | N/A | root | root/high |
 | L3 Linux RV32 | RV32 direct-kernel trap lifecycle and nonce media | canonical PASS | direct-kernel v2 bundle, M-mode recovery and exact reap | N/A | root | root/high |
 | L4 Linux RV64 | RV64 compiler operand transport, real user lifecycle, and focused result-boundary spec | source implemented; verification blocked | provenance-admitted Stage-4 focused spec, fresh rebuild, then canonical run | N/A | compiler owner | root/high |
 | L5 Linux x86_32 | Broad i686 source closure plus task/generation-bound GDT/TSS/`esp0`, authenticated token, `enter_user_first`, trap return, and mounted ELF staging | source corrected; retained ELF predates and lacks strong `rt_x86_32_tss_set_esp0`/`rt_x86_32_tss_bind_task` | admitted rebuild, passing linked-symbol gate, then live iret/int80/exit37 continuation plus exact scheduler reap | N/A | x86_32 kernel owner | root/high |
 | L6 Linux ARM32 | Real `enter_user_first.s`, exception-vector/SVC entry, token/result lifecycle, scheduler binding, and mounted ELF staging | source and retained linked ELF admitted; live row blocked | canonical vector/TTBR lifecycle, target listing/program and exact reap | N/A | ARM32 kernel owner | root/high |
-| L10 SOSIX positioned I/O | typed operation/capability owner plus syscall 134/135 x86_64 dispatcher and strong Simple shim leaves | live fail-closed route implemented; no production backend install or true FAT32 positioned primitive; focused execution blocked by deployed CLI exit 139 | admit the linked route, add a true backend/install owner, then run focused interpreter specs on a provenance-admitted Stage-4 CLI | N/A | root | root/high |
-| L7 Windows | six-row PowerShell descriptors/admission plus x86_64 execution and canonical producer delegation | x86_64 run source implemented; five guests fail closed on missing collector-nonce echo; no native verification | add five guest nonce readers, then actual Windows `-Run` for all six bundles; no Linux relabeling | N/A | Windows + guest owners | root/high |
+| L10 SOSIX positioned I/O | typed operation/capability owner, true FAT32 explicit-offset primitives, generation-safe file objects, concrete backend, syscall 134/135 x86_64 dispatcher and strong Simple shim leaves | host-independent source complete; authenticated registry installation remains explicit; runtime/link/system execution blocked by absent admitted Stage-4 CLI and fresh kernel ELF | run `check-sosix-fat32-positioned-io.shs --admit` once, then the focused system SSpec/docgen/maintenance gates with the same admitted runtime | N/A | root | root/high |
+| L7 Windows | six-row PowerShell descriptors/admission, distinct guest collector-nonce readers, execution, and canonical producer delegation | six nonce readers and x86_64/ARM32 full run contracts are source implemented; four rows fail closed on incomplete guest run contracts; no native verification | complete x86_32/ARM64/RV32/RV64 workload/listing/program/reap markers, then actual Windows `-Run`; RV64 also needs admitted OpenSBI identity | N/A | Windows + guest owners | root/high |
 | L8 FreeBSD | image/bootstrap and native FreeBSD matrix execution | blocked external host | checksum-pinned image/bootstrap, then all six FreeBSD bundles | N/A | FreeBSD operator | root/high |
 | L9 macOS | Darwin QEMU/firmware/native execution | postponed external host | prepared Darwin host, actual admission and six bundles | N/A | macOS operator | root/high |
 
@@ -193,11 +198,11 @@ are retained evidence and must not be rerun unchanged.
 | `SOSIX-LINUX-X86_32` | BLOCKED | strong i686 CPL3 entry/GDT/TSS/token/trap/scheduler symbols and mounted ELF staging | `sh scripts/check/check-sosix-qemu-matrix.shs --host linux --guest x86_32 --run` | `linux/x86_32/<run-id>/evidence.env` or typed blocker | x86_32 kernel owner |
 | `SOSIX-LINUX-ARM32` | BLOCKED | strong EL0 entry/vector/SVC/token/scheduler symbols and mounted ELF staging | `sh scripts/check/check-sosix-qemu-matrix.shs --host linux --guest arm32 --run` | `linux/arm32/<run-id>/evidence.env` or typed blocker | ARM32 kernel owner |
 | `SOSIX-WINDOWS-X86_64` | BLOCKED | producer-backed runner is source-present; native PowerShell/QEMU/media execution is unverified | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest x86_64 -Run` | `windows/x86_64/<run-id>/evidence.env` or typed blocker | Windows operator |
-| `SOSIX-WINDOWS-ARM64` | BLOCKED | ARM64 guest lacks the distinct collector-nonce media echo; native execution remains unverified | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest arm64 -Run` | explicit `collector-nonce-echo-not-implemented:arm64`, then canonical bundle after guest fix | Windows + ARM64 owner |
-| `SOSIX-WINDOWS-RISCV32` | BLOCKED | RV32 guest lacks the distinct collector-nonce media echo; native execution remains unverified | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest riscv32 -Run` | explicit `collector-nonce-echo-not-implemented:riscv32`, then canonical bundle after guest fix | Windows + RV32 owner |
-| `SOSIX-WINDOWS-RISCV64` | BLOCKED | RV64 guest lacks the distinct collector-nonce echo and requires explicit OpenSBI identity/path/version | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest riscv64 -Run` | explicit collector-nonce blocker, then canonical bundle after guest/firmware fix | Windows + RV64 owner |
-| `SOSIX-WINDOWS-X86_32` | BLOCKED | x86_32 guest lacks the distinct collector-nonce media echo; native execution remains unverified | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest x86_32 -Run` | explicit `collector-nonce-echo-not-implemented:x86_32`, then canonical bundle after guest fix | Windows + x86_32 owner |
-| `SOSIX-WINDOWS-ARM32` | BLOCKED | ARM32 guest lacks the distinct collector-nonce media echo; native execution remains unverified | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest arm32 -Run` | explicit `collector-nonce-echo-not-implemented:arm32`, then canonical bundle after guest fix | Windows + ARM32 owner |
+| `SOSIX-WINDOWS-ARM64` | BLOCKED | collector reader is source-present, but workload nonce, listing, and exact program-begin contracts are absent | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest arm64 -Run` | `guest-run-contract-not-implemented:arm64` until guest completion, then canonical bundle | Windows + ARM64 owner |
+| `SOSIX-WINDOWS-RISCV32` | BLOCKED | collector reader is source-present, but workload nonce and mounted listing/program/reap contracts are absent | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest riscv32 -Run` | `guest-run-contract-not-implemented:riscv32` until guest completion, then canonical bundle | Windows + RV32 owner |
+| `SOSIX-WINDOWS-RISCV64` | BLOCKED | collector/listing/program/reap owners are source-present, but the workload nonce echo and explicit OpenSBI identity/path/version remain required | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest riscv64 -Run` | guest-run blocker, then canonical firmware-bound bundle | Windows + RV64 owner |
+| `SOSIX-WINDOWS-X86_32` | BLOCKED | collector/listing/program/reap owners are source-present, but the required workload nonce echo is absent | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest x86_32 -Run` | `guest-run-contract-not-implemented:x86_32` until guest completion, then canonical bundle | Windows + x86_32 owner |
+| `SOSIX-WINDOWS-ARM32` | BLOCKED | complete collector/workload/listing/program/reap source contract is present; native execution remains unverified | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -Guest arm32 -Run` | canonical Windows bundle or typed native runtime blocker | Windows + ARM32 owner |
 | `SOSIX-FREEBSD-X86_64` | BLOCKED | checksum-admitted FreeBSD 14.4 media and native FreeBSD executor | `sh scripts/qemu/simple-freebsd-media.shs --check && sh scripts/check/check-sosix-qemu-matrix.shs --host freebsd --guest x86_64 --run` | `freebsd/x86_64/<run-id>/evidence.env` or typed blocker | FreeBSD operator |
 | `SOSIX-FREEBSD-ARM64` | BLOCKED | same FreeBSD media/executor prerequisite | `sh scripts/qemu/simple-freebsd-media.shs --check && sh scripts/check/check-sosix-qemu-matrix.shs --host freebsd --guest arm64 --run` | `freebsd/arm64/<run-id>/evidence.env` or typed blocker | FreeBSD operator |
 | `SOSIX-FREEBSD-RISCV32` | BLOCKED | same FreeBSD media/executor prerequisite | `sh scripts/qemu/simple-freebsd-media.shs --check && sh scripts/check/check-sosix-qemu-matrix.shs --host freebsd --guest riscv32 --run` | `freebsd/riscv32/<run-id>/evidence.env` or typed blocker | FreeBSD operator |
@@ -212,12 +217,17 @@ are retained evidence and must not be rerun unchanged.
 | `SOSIX-MACOS-ARM32` | POSTPONED | same Darwin executor prerequisite | `SIMPLE_QEMU_ACCELERATOR=tcg sh scripts/check/check-sosix-qemu-matrix.shs --host macos --guest arm32 --run` | `macos/arm32/<run-id>/evidence.env` or typed blocker | macOS operator |
 
 The Windows peer retains `-Preflight` as a readiness-only operator check. Its
-source-present x86_64 `-Run` path prepares isolated nonce media, executes QEMU
-with a bounded serial transcript, validates the ordered lifecycle, and
-delegates the PASS bundle to the canonical producer. The other five descriptors
-stop with an explicit collector-nonce owner blocker until their guest readers
-exist. Only actual Windows runs can verify these paths; preflight output is
-never row PASS. TCG on macOS proves correctness only, not native timing.
+x86_64 and ARM32 source-ready `-Run` paths prepare isolated nonce media, execute
+QEMU with a bounded serial transcript, validate the ordered lifecycle, and
+delegate the PASS bundle to the canonical producer. All six collector readers
+are source-present; the other four descriptors stop at
+`guest-run-contract-not-implemented:<guest>` before preflight can claim ready.
+The fail-closed source criterion
+`scripts/check/check-sosix-collector-nonce-readers.shs --self-test` passed once
+on 2026-08-16 after its negative-sabotage helper was corrected; it is still not
+native execution or row-admission evidence.
+Only actual Windows runs can verify these paths; preflight output is never row
+PASS. TCG on macOS proves correctness only, not native timing.
 
 ## Frozen operator/manual vocabulary
 
@@ -305,8 +315,8 @@ execution owner, merge owner, and final reviewer.
   links, expert/tracking knowledge, broad exclusions, and done-mark honesty.
 - Review corrections: the ledger is a separate status authority rather than a
   sixth interface. The later 2026-08-16 continuation implemented the Windows
-  `-Run` source path; native Windows verification and all six bundles remain
-  conditional and open.
+  `-Run` source path and all six distinct collector-nonce readers; native
+  Windows verification and all six bundles remain conditional and open.
 - Generated-manual status: required by the executable handoff spec, but not yet
   generated because the available self-hosted docgen exits 139. A handwritten
   manual is not accepted as a substitute.
@@ -326,3 +336,20 @@ unchanged green gates after the correction:
 
 This is `STATUS: PASS` for the plan-document goal only. It does not change the
 implementation handoff or make `SOSIX-MATRIX-COLLECT-24` pass.
+
+## Positioned filesystem parallel continuation — 2026-08-16
+
+| Lane | Exclusive ownership | Result / review status |
+| --- | --- | --- |
+| DBFS positioned primitives | `/root/dbfs_positioned_research` (Bernoulli): DBFS driver, superblock facades, focused DBFS specs | Implemented; static-reviewed; runtime pending admitted Stage 4 |
+| NVFS positioned primitives | `/root/nvfs_positioned_research` (Kant): NVFS native/POSIX drivers, focused NVFS spec | Implemented; static-reviewed; runtime pending admitted Stage 4 |
+| SimpleOS NVFS bridge | `/root/sosix_backend_bridge` (Noether): NVFS image/mkfs, boot mount/probe, focused image/boot specs | Implements honest `nvfs-dbfs-backed-v1`; reviewed and corrected for checksum-valid failover/strict oracles |
+| Canonical object/backend owner | `/root` plus production-route sidecar: `MountTable`, typed shim composition, registered-buffer SOSIX route, adapters/specs | Independent review blockers corrected; merge owner `/root` |
+| System evidence/docs | `/root` plus evidence/documentation sidecars: builder, closed receipts, matrix/live wrappers, modern SSpec, lane docs/manual | Static review complete; qualified runtime execution pending |
+
+Interface names, the seven displayed steps, and the five helper names were
+frozen by the merge owner before the sidecars started. Sidecars were forbidden
+from editing outside their exclusive lane and no sidecar runtime result can
+replace final high-capability review. The manual is intentionally marked
+future-executable/unrun until a receipt-bound pure-Simple Stage-4 environment
+executes it. This continuation does not alter the earlier 24-row ledger.

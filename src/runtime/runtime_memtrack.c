@@ -249,13 +249,18 @@ int64_t spl_memtrack_live_bytes(void) {
  * RuntimeValue allocations use raw allocation paths and are not covered.
  * These values must not classify production heap growth.
  *
- * WEAK on purpose: the hosted build links this archive alongside the Rust
- * runtime, which defines the same two names in value/heap.rs. Strong
- * definitions on both sides made `cargo build --release --bin simple` fail
- * with `rust-lld: error: duplicate symbol: rt_heap_live_bytes` — the seed did
- * not link at all. Weak here keeps the core-C-only link resolvable while
- * letting the Rust (authoritative, allocator-backed) definitions win whenever
- * they are present. */
+ * WEAK on purpose (2026-08-16): the Rust runtime (`value/heap.rs`) defines
+ * the same two symbols, strongly, with real allocator-registered accounting.
+ * When this file is whole-archived into the mixed Rust+C cdylib
+ * (`libsimple_runtime.so`), two strong definitions are a hard lld
+ * duplicate-symbol error — first observed the moment `runtime-tls` forced
+ * that cdylib to relink, having sat latent because the seed guard only
+ * `cargo check`s (which never links). Weak here means: standalone C builds
+ * keep these fallbacks; any link that also carries the Rust runtime gets the
+ * Rust accounting, which is the correct precedence. MSVC has no weak
+ * attribute, but Windows builds do not whole-archive this file into the
+ * Rust cdylib, so the strong fallback is fine there. */
+#if defined(__GNUC__) || defined(__clang__)
 __attribute__((weak)) int64_t rt_heap_live_bytes(void) {
     return g_live_bytes;
 }
@@ -263,6 +268,15 @@ __attribute__((weak)) int64_t rt_heap_live_bytes(void) {
 __attribute__((weak)) int64_t rt_heap_peak_bytes(void) {
     return g_peak_bytes;
 }
+#else
+int64_t rt_heap_live_bytes(void) {
+    return g_live_bytes;
+}
+
+int64_t rt_heap_peak_bytes(void) {
+    return g_peak_bytes;
+}
+#endif
 
 void spl_memtrack_reset(void) {
     if (g_entries) {

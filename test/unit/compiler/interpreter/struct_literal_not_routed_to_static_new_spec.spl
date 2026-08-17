@@ -1,0 +1,67 @@
+"""Struct literal construction must not be auto-routed to a static `new`.
+
+Repro for doc/08_tracking/bug/enum_field_in_nested_call_arg_join_not_found_2026-08-17.md:
+a fully-named struct literal whose field names coincide with an impl-static
+`new`'s param NAMES (but not its param TYPES) was dispatched to `new`,
+misbinding the args and surfacing spurious errors from inside `new`
+(seen as "method 'join' not found on value of type enum in nested call
+context"). `Point(x: 3, y: 4)` named-literal form is the canonical
+constructor and must build the struct directly.
+
+NOTE: fix landed 2026-08-17 in
+src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs;
+this spec goes green once the seed is redeployed.
+"""
+
+enum SlnColor:
+    Red
+    Blue
+
+struct SlnEntry:
+    name: text
+    tags: text
+    color: SlnColor
+
+impl SlnEntry:
+    static fn new(name: text, tags: [text], color: SlnColor) -> SlnEntry:
+        # Param `tags` is an ARRAY here, unlike the field (text). If the
+        # named literal below is misrouted to this `new`, `join` blows up.
+        SlnEntry(name: name, tags: tags.join(","), color: color)
+
+fn sln_take(e: SlnEntry) -> text:
+    e.tags
+
+describe "struct literal vs static new routing":
+    it "builds a fully-named struct literal directly, in statement position":
+        val e = SlnEntry(name: "x", tags: "pre", color: SlnColor.Red)
+        expect(e.tags).to_equal("pre")
+
+    it "builds a fully-named struct literal directly, in nested call-arg position":
+        expect(sln_take(SlnEntry(name: "x", tags: "pre", color: SlnColor.Blue))).to_equal("pre")
+
+    it "still routes an array-typed named call through the static new":
+        val e = SlnEntry.new(name: "y", tags: ["a", "b"], color: SlnColor.Red)
+        expect(e.tags).to_equal("a,b")
+
+# Generalization: adjacent constructor paths must be unaffected.
+
+class SlnPyCtor:
+    label: text
+
+    fn new(label: text):
+        # Python-style (non-static) constructor: still auto-called.
+        self.label = label + "!"
+
+struct SlnPlain:
+    a: i64
+    b: i64
+
+describe "constructor routing generalization":
+    it "keeps auto-calling a non-static Python-style new":
+        val c = SlnPyCtor(label: "hi")
+        expect(c.label).to_equal("hi!")
+
+    it "builds a plain struct with no new at all, nested in a call arg":
+        fn sln_sum(p: SlnPlain) -> i64:
+            p.a + p.b
+        expect(sln_sum(SlnPlain(a: 2, b: 3))).to_equal(5)

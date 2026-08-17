@@ -84,6 +84,20 @@ A commit whose message says "no other change" carried an unrelated,
 behavior-breaking rewrite of three functions. Diffs must be read in full even
 when the stated scope is a one-line delegation.
 
+## RESOLVED (verified 2026-08-17)
+
+`src/lib/common/text_advanced.spl` again uses `char_from_code(char_code(ch) ± 32)`
+at lines 182/189, 216/217, 243/244, and `char_from_code` is back in the
+`std.string_core` import (line 23). Runtime probe on the seed interpreter:
+`to_snake_case("HelloWorld")` -> `hello_world`, `to_title_case("hello world")`
+-> `Hello World`, `to_camel_case("hello_world")` -> `helloWorld`. Doc was stale.
+
+Spec coverage (2026-08-17): repro spec
+`test/01_unit/lib/common/text_advanced_case_conversion_spec.spl` (snake/title/
+camel oracles that fail under the `ch[0] ± 32` rewrite) and generalization spec
+`test/01_unit/lib/common/text_advanced_case_class_generalization_spec.spl`
+(kebab/pascal/screaming-snake + round-trip, same defect class; mirrored in
+`test/unit/lib/common/`). Both run green: 5 examples, 0 failures.
 ---
 
 ## RESOLVED (STALE) 2026-08-17 — arithmetic already restored, verified by execution

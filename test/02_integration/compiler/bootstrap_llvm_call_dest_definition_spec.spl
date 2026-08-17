@@ -1,0 +1,159 @@
+"""
+REQ-BSLLVM-001 acceptance lane for Stage 2 LLVM Call destinations.
+
+Frozen provenance:
+- compiler_sha256=06e0587baa6b5adcde4d144e9dd3fa6f72dfb4e885ac2ccee9032c818627a06d
+- wrapper_admission_sha256=407c906135c920a0bc927bf16c9a5b5a9c786fa09eaeaaf2dd2885c5060c8d1b
+- builtin_admission_sha256=888f6659f54796f226608b81313019ffde295c272d5819bd2ef468816f5cadd9
+- probe_receipt_sha256=454bf9c5f7c45a16340d5d7134937cdece9a6a37214362703c03e1c93215d5cd
+- preserved_ir_sha256=dc0798ac988bef4e04457f8453e093296a550d0e840c0b97e12a2de011778cad
+- c3_replay_receipt_sha256=0e263f28c1a4816bb309a767538cc0cc6ea489f76f6004822d37ad86ffdd92d4
+- backend_prechange_sha256=24bedca87134841f4be6d557478e0d1bf7ddd44c678d3d8a2dbf12f1aa29de43
+- target=x86_64
+- backend=llvm
+- mode=dynload
+- runtime=core-c-bootstrap
+
+Generated documentation must come from an admitted pure-Simple spipe-docgen
+run. This executable spec does not authorize a hand-written doc/06 mirror.
+"""
+
+use std.spec.*
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.diagnostics.span.{Span}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{BlockId}
+
+fn make_call_destination_function(indirect: bool) -> MirBody:
+    val return_type = MirType.i64()
+    val signature = MirSignature(params: [], return_type: return_type, is_variadic: false)
+    var locals: [MirLocal] = []
+    var instructions: [MirInst] = []
+    var result_local = LocalId(id: 0)
+
+    if indirect:
+        val pointer_local = LocalId(id: 0)
+        result_local = LocalId(id: 1)
+        locals = locals.push(MirLocal(
+            id: pointer_local,
+            name: nil,
+            type_: MirType(kind: MirTypeKind.FuncPtr(signature)),
+            kind: LocalKind.Arg(0),
+            is_ghost: false
+        ))
+        locals = locals.push(MirLocal(
+            id: result_local,
+            name: nil,
+            type_: return_type,
+            kind: LocalKind.Temp,
+            is_ghost: false
+        ))
+        var call_dest: LocalId? = nil
+        call_dest = result_local
+        instructions = instructions.push(MirInst(
+            kind: MirInstKind.CallIndirect(
+                call_dest,
+                mir_operand_copy(pointer_local),
+                [],
+                signature
+            ),
+            span: nil
+        ))
+    else:
+        locals = locals.push(MirLocal(
+            id: result_local,
+            name: nil,
+            type_: return_type,
+            kind: LocalKind.Temp,
+            is_ghost: false
+        ))
+        val callee = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("req_bsllvm_direct_callee"),
+            MirType(kind: MirTypeKind.FuncPtr(signature))
+        ))
+        var call_dest: LocalId? = nil
+        call_dest = result_local
+        instructions = instructions.push(MirInst(
+            kind: MirInstKind.Call(call_dest, callee, []),
+            span: nil
+        ))
+
+    var return_value: MirOperand? = nil
+    return_value = mir_operand_copy(result_local)
+    MirBody(
+        name: if indirect: "req_bsllvm_indirect" else: "req_bsllvm_direct",
+        blocks: [MirBlock(
+            id: BlockId.entry(),
+            label: nil,
+            instructions: instructions,
+            terminator: MirTerminator.Ret(return_value)
+        )],
+        locals: locals,
+        arg_count: if indirect: 1 else: 0,
+        return_ty: return_type
+    )
+
+fn emit_llvm_for_call_destination(body: MirBody) -> text:
+    val translator = MirToLlvm.create(
+        "req_bsllvm.call_destination",
+        CodegenTarget.X86_64,
+        nil
+    )
+    translator.translate_function(body.name, body, Span.empty())
+    translator.builder.build() + "\n" + translator.string_global_text
+
+fn count_local_definitions(ir: text, local_name: text) -> i64:
+    ir.split("{local_name} =").len() - 1
+
+fn local_defined_before_first_use(ir: text, local_name: text) -> bool:
+    var definition_seen = false
+    var later_use_seen = false
+    for line in ir.split("\n"):
+        if line.contains("{local_name} ="):
+            if definition_seen:
+                return false
+            definition_seen = true
+        elif line.contains(local_name):
+            if not definition_seen:
+                return false
+            later_use_seen = true
+    definition_seen and later_use_seen
+
+fn missing_destination_rejected() -> bool:
+    # Exercise the same complete-body checker that translate_function invokes
+    # before closing the LLVM function. A fresh translator has emitted none of
+    # this body's Call destinations, so the checker must identify local zero.
+    val body = make_call_destination_function(false)
+    val translator = MirToLlvm.create(
+        "req_bsllvm.missing_destination",
+        CodegenTarget.X86_64,
+        nil
+    )
+    translator.first_unemitted_call_destination(body) == 0
+
+describe "REQ-BSLLVM-001: Bootstrap LLVM call destinations":
+    it "should define direct-call destinations before later uses":
+        step("Lower a direct call with a used destination")
+        val body = make_call_destination_function(false)
+        val ir = emit_llvm_for_call_destination(body)
+
+        step("Inspect the emitted LLVM SSA definition")
+        expect(count_local_definitions(ir, "%l0")).to_equal(1)
+        expect(local_defined_before_first_use(ir, "%l0")).to_be(true)
+
+    it "should define indirect-call destinations before later uses":
+        step("Lower an indirect call with a used destination")
+        val body = make_call_destination_function(true)
+        val ir = emit_llvm_for_call_destination(body)
+
+        step("Inspect the emitted LLVM SSA definition")
+        expect(count_local_definitions(ir, "%l1")).to_equal(1)
+        expect(local_defined_before_first_use(ir, "%l1")).to_be(true)
+
+    it "should reject a referenced call destination that was not emitted":
+        step("Attempt to lower an unsupported call payload")
+        val rejected = missing_destination_rejected()
+
+        step("Verify missing destinations fail before LLVM assembly")
+        expect(rejected).to_be(true)

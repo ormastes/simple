@@ -91,6 +91,30 @@ fn _dbfs_slice_bytes(buf: [u8], count: i64) -> [u8]:
         i = i + 1
     out
 
+val _DBFS_POSITIONED_I64_MAX: i64 = 9223372036854775807
+val _DBFS_HOSTED_POSITIONED_MAX_BYTES: i64 = 64 * 1024 * 1024
+
+fn _dbfs_positioned_range_valid(offset: i64, length: i64) -> bool:
+    if offset < 0 or length < 0:
+        return false
+    offset <= _DBFS_POSITIONED_I64_MAX - length
+
+fn _dbfs_device_data_capacity_bytes(block_count: i64, sector_size: i64) -> i64:
+    if block_count <= 2 or sector_size <= 0:
+        return 0
+    val data_blocks = block_count - 2
+    if data_blocks > _DBFS_POSITIONED_I64_MAX / sector_size:
+        return _DBFS_POSITIONED_I64_MAX
+    data_blocks * sector_size
+
+fn _dbfs_byte_range(buf: [u8], offset: i64, length: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < length and offset + i < buf.len():
+        out.push(buf[(offset + i) as i32])
+        i = i + 1
+    out
+
 # --- DbFsDriver struct ---
 
 struct DbFsDriver:
@@ -216,6 +240,18 @@ fn _dbfs_record_device_blob(inst_id: i64, inode_id: u64, offset: i64, length: i6
     _dbfs_device_blob_offsets.push(offset)
     _dbfs_device_blob_lengths.push(length)
 
+fn _dbfs_restore_device_blob(inst_id: i64, inode_id: u64, existed: bool, offset: i64, length: i64):
+    """Restore the published blob mapping after a namespace commit failure."""
+    val idx = _dbfs_device_blob_idx(inst_id, inode_id)
+    if existed:
+        _dbfs_record_device_blob(inst_id, inode_id, offset, length)
+        return
+    if idx >= 0:
+        _dbfs_device_blob_inst_ids.remove(idx)
+        _dbfs_device_blob_inode_ids.remove(idx)
+        _dbfs_device_blob_offsets.remove(idx)
+        _dbfs_device_blob_lengths.remove(idx)
+
 fn _dbfs_device_store_idx(inst_id: i64) -> i32:
     var i: i32 = 0
     while i < _dbfs_device_store_inst_ids.len() as i32:
@@ -272,9 +308,9 @@ fn _dbfs_write_device_bytes(inst_id: i64, base_block: i64, block_count: i64, off
     if offset < 0:
         return Err(FsError.InvalidArg)
     val sector_size = _dbfs_sector_size(inst_id)
-    val max_data_bytes = (block_count - 2) * sector_size
+    val max_data_bytes = _dbfs_device_data_capacity_bytes(block_count, sector_size)
     val data_len: i64 = data.len() as i64
-    if offset + data_len > max_data_bytes:
+    if data_len > max_data_bytes or offset > max_data_bytes - data_len:
         return Err(FsError.TooLarge)
 
     var written: i64 = 0
@@ -583,6 +619,10 @@ impl DbFsDriver:
         if next_idx < 0:
             return Err(FsError.IoError(code: 0))
         val offset = _dbfs_device_next_offsets[next_idx]
+        val old_blob_idx = _dbfs_device_blob_idx(self.inst_id, inode_id)
+        val old_blob_existed = old_blob_idx >= 0
+        val old_blob_offset = if old_blob_existed: _dbfs_device_blob_offsets[old_blob_idx] else: 0
+        val old_blob_length = if old_blob_existed: _dbfs_device_blob_lengths[old_blob_idx] else: 0
         val r = _dbfs_write_device_bytes(self.inst_id, self.arena_base, self.arena_block_count, offset, data)
         if r.is_err():
             return Err(FsError.IoError(code: 0))
@@ -595,8 +635,35 @@ impl DbFsDriver:
         _dbfs_device_next_offsets[next_idx] = offset + written
         val persisted = _dbfs_persist_namespace(self.inst_id, self.arena_base, self.arena_block_count)
         if persisted.is_err():
-            return Err(FsError.IoError(code: 0))
+            _dbfs_restore_device_blob(
+                self.inst_id, inode_id, old_blob_existed,
+                old_blob_offset, old_blob_length)
+            _dbfs_device_next_offsets[next_idx] = offset
+            return Err(persisted.unwrap_err())
         Ok(true)
+
+    fn _positioned_write_capacity() -> i64:
+        """Maximum full-file image that pwrite may materialize right now."""
+        if self.arena_base < 0:
+            return _DBFS_HOSTED_POSITIONED_MAX_BYTES
+        if self.arena_block_count <= 2:
+            return 0
+        val next_idx = _dbfs_device_next_idx(self.inst_id)
+        if next_idx < 0:
+            return 0
+        val sector_size = _dbfs_sector_size(self.inst_id)
+        if sector_size <= 0:
+            return 0
+        val max_data_bytes = _dbfs_device_data_capacity_bytes(
+            self.arena_block_count, sector_size)
+        val used = _dbfs_device_next_offsets[next_idx]
+        if used < 0 or used > max_data_bytes:
+            return 0
+        val available = max_data_bytes - used
+        if available < _DBFS_HOSTED_POSITIONED_MAX_BYTES:
+            available
+        else:
+            _DBFS_HOSTED_POSITIONED_MAX_BYTES
 
     fn _read_inode_bytes_from_device(inode_id: u64, length: i64) -> Result<[u8], FsError>:
         if self.arena_base < 0:
@@ -744,6 +811,42 @@ impl DbFsDriver:
         val cap: i64 = if length < content.len(): length else: content.len()
         Ok(_dbfs_slice_bytes(content, cap))
 
+    fn pread_bytes_handle(handle: FileHandle, offset: i64, length: i64) -> Result<[u8], FsError>:
+        """Read an owned binary range without changing any sequential cursor."""
+        if not _dbfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        if length == 0:
+            return Ok([])
+
+        val inode = _dbfs_inodes[inode_idx]
+        if offset >= inode.size:
+            return Ok([])
+        val available = inode.size - offset
+        val want = if length < available: length else: available
+        val end_offset = offset + want
+
+        var content = inode.content_bytes
+        if self.arena_base >= 0:
+            val device = self._read_inode_bytes_from_device(inode.id, end_offset)
+            if device.is_err():
+                return Err(device.unwrap_err())
+            content = device.unwrap()
+        if content.len() < end_offset:
+            return Err(FsError.Corrupt)
+
+        val out = _dbfs_byte_range(content, offset, want)
+        if out.len() as i64 != want:
+            return Err(FsError.Corrupt)
+        Ok(out)
+
     # --- pread ---
 
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
@@ -843,6 +946,84 @@ impl DbFsDriver:
         if committed.is_err():
             return Err(FsError.IoError(code: 0))
         Ok(())
+
+    fn pwrite_bytes_handle(handle: FileHandle, offset: i64, patch: [u8]) -> Result<i64, FsError>:
+        """Overwrite a binary range without changing any sequential cursor.
+
+        Writes beyond EOF zero-fill the hole. Existing suffix bytes survive an
+        in-range overwrite, and device-backed instances publish the same full
+        file image and namespace metadata as write_bytes_handle.
+        """
+        val patch_len = patch.len() as i64
+        if not _dbfs_positioned_range_valid(offset, patch_len):
+            return Err(FsError.InvalidArg)
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as u64)
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        if patch_len == 0:
+            return Ok(0)
+
+        val old_size = _dbfs_inodes[inode_idx].size
+        val patch_end = offset + patch_len
+        val new_size = if patch_end > old_size: patch_end else: old_size
+        if new_size > self._positioned_write_capacity():
+            return Err(FsError.TooLarge)
+        val old = _dbfs_inodes[inode_idx]
+        var old_bytes = old.content_bytes
+        if self.arena_base >= 0 and old.size > 0:
+            val device = self._read_inode_bytes_from_device(old.id, old.size)
+            if device.is_err():
+                return Err(device.unwrap_err())
+            old_bytes = device.unwrap()
+        if old_bytes.len() < old.size:
+            return Err(FsError.Corrupt)
+
+        var content: [u8] = []
+        var i: i64 = 0
+        while i < offset:
+            if i < old.size:
+                content.push(old_bytes[i as i32])
+            else:
+                content.push(0u8)
+            i = i + 1
+        var j: i64 = 0
+        while j < patch_len:
+            content.push(patch[j as i32])
+            j = j + 1
+        var k = patch_end
+        while k < old.size:
+            content.push(old_bytes[k as i32])
+            k = k + 1
+        if content.len() as i64 != new_size:
+            return Err(FsError.Corrupt)
+
+        val owned = _dbfs_slice_bytes(content, new_size)
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  _dbfs_bytes_to_text(owned, new_size),
+            content_bytes: owned,
+            parent:   old.parent,
+            size:     new_size,
+            unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        val committed = self._commit_inode_bytes_to_device(old.id, owned)
+        if committed.is_err():
+            val published_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
+            if published_idx >= 0:
+                _dbfs_inodes.remove(published_idx)
+            _dbfs_inodes.push(old)
+            return Err(committed.unwrap_err())
+        Ok(patch_len)
 
     # --- pwrite ---
 
