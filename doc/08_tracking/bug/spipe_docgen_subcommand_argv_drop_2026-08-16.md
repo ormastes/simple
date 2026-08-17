@@ -1,7 +1,7 @@
 # Bug: Rust seed `spipe-docgen` subcommand drops argv (app sees argc=0)
 
 - **Date:** 2026-08-16
-- **Status:** OPEN (seed-side); pure-Simple workaround SHIPPED (see below)
+- **Status:** RESOLVED — seed fix landed 2026-08-17, pending redeploy; pure-Simple workaround SHIPPED (see below)
 - **Severity:** medium (blocked AC-11 manual regeneration via the documented CLI form)
 - **Binary:** Rust seed `bin/release/x86_64-unknown-linux-gnu/simple`
 
@@ -63,3 +63,24 @@ with `DONE Generated 1 docs (... 0 stubs)`; the `run` form is unchanged.
 Limitation: the fallback is Linux-procfs-specific; on other platforms the
 subcommand form still shows usage until the seed fix lands — use the `run`
 form there.
+
+## RESOLVED — seed fix landed, pending redeploy (2026-08-17)
+Seed-side fix applied per the suggestion above:
+`src/compiler_rust/driver/src/cli/basic.rs` `run_file_with_args()` now calls
+`simple_runtime::value::rt_set_args_vec(&args)` (guarded on non-empty args)
+before executing the file, so every delegated subcommand route publishes its
+argv into the PROGRAM_ARGS storage backing `rt_cli_get_args()` /
+`rt_cli_arg_count()` — the same publisher the `run` route uses
+(`driver/src/exec_core.rs:733/747/918`). This fixes the asymmetry for
+`spipe-docgen` and every other delegation that reaches `run_file_with_args`
+without a publisher, on all platforms (not just Linux procfs).
+
+Verification: `cargo check --release --bin simple` passes with the change
+(isolated CARGO_TARGET_DIR; deployed binaries untouched — a full bootstrap was
+running concurrently, so **the fix is pending seed rebuild/redeploy**).
+Behavioral verification today used the shipped pure-Simple procfs fallback:
+`timeout 120 bin/simple spipe-docgen test/03_system/app/enterprise/store_app_spec.spl
+--output <tmp> --no-index` → `DONE Generated 1 docs`, RC=0. After the next
+seed rebuild, the fallback should no longer trigger (args arrive via
+PROGRAM_ARGS); the fallback remains as harmless belt-and-braces. Status:
+**RESOLVED (pending redeploy)**.
