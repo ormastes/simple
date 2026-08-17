@@ -176,3 +176,36 @@ exit 0 even when it prints a diagnostic.
   `cargo +nightly --features wasm-wasi` (LLVM path) — see
   `wasm_cli_emit_no_artifact_2026-05-30.md` — but that is the Rust seed, not the
   pure-Simple compiler.
+
+---
+
+## 2026-08-17 (W2 driver lane) — BOTH NAMED FOLLOW-ON BLOCKERS RETIRED (measured)
+
+The two "next blockers" this doc closes with were re-tested against CURRENT
+SOURCE, classified by content rather than SHA. Binary: the Rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple` (a stale bootstrap seed), driving
+the pure-Simple driver as SOURCE via `bin/simple run
+src/compiler/80.driver/main.spl --check <file>` — the stdlib and compiler are
+read as `.spl` every run, so no build was needed and no binary was deployed.
+
+1. **`--target` rejected** — FIXED. `src/compiler/80.driver/main.spl:583` handles
+   the spaced form and `:589` the `--target=` form, both assigning
+   `cli_args.target`; `:121` maps the value onto the codegen backend
+   (wasm32/wasm select the pure-Simple wasm path). Both arms sit before the
+   `elif arg.starts_with("-")` catch-all at `:591` that used to swallow it.
+2. **`--check` exited 0 on a diagnostic** — FIXED. Measured directly:
+   - clean file (`fn main(): print("ok")`) → **rc=0**, phases 1-3 complete;
+   - file with `nope_undefined_fn()` → **rc=1**, and the diagnostic is printed:
+     `HIR lowering error ...: unresolved name: nope_undefined_fn at ...:2:35`,
+     preceded by the `[collect-all] 1 module(s) poisoned` summary.
+
+**The headline claim (548 unresolved symbols in the seed-built stage 4) remains
+UNVERIFIED, not retired** — checking it needs a native stage-4 link, which was
+not run. Only the two follow-on blockers are closed here.
+
+Guard: `test/01_unit/compiler/driver/driver_main_cli_contract_spec.spl` —
+`Results: 4 total, 4 passed, 0 failed`. It pins the `--target` arms, the
+arm-ordering-before-catch-all property that was the actual defect, the
+target→backend mapping, and the `--check` compile-mode routing. Behavioural
+re-verification costs ~4 minutes per invocation and is deliberately not
+spec-shaped.

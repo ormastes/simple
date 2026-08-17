@@ -1,0 +1,59 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+# Family detection spec for the three parse/HIR memory-blowup rows, which share
+# ONE root cause and must not be patched independently:
+#   doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md
+#   doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md
+#   doc/08_tracking/bug/bootstrap_stage4_ast_hir_overlap_memory_2026-07-27.md
+#
+# The shared root, recorded in-source at driver_types.spl:1080-1100 with probe
+# numbers: on the no-GC bootstrap lane the driver's three `evict_*` methods drop
+# REFERENCES only and reclaim nothing (0 of 2001 allocations, probe P0), because a
+# class instance is an untagged, unregistered, header-less rt_alloc block. Closing
+# these rows needs a codegen/representation change so class instances are
+# identifiable at runtime -- NOT a driver change.
+#
+# This spec exists because the two obvious "driver fixes" are both actively
+# harmful and have both been attempted:
+#   (a) calling rt_dict_free_deep from evict_* -- measured WORSE than the no-op:
+#       it frees key strings that are aliased from outside the dict by
+#       HIR/AST/SymbolTable, i.e. a use-after-free (probes P2/P3);
+#   (b) reconstructing the HIR lowerer per module, or copying the frozen surface
+#       and trait registries through per-iteration locals -- the retained
+#       aggregate boundary that drove the unbounded Stage-3 HIR RSS growth.
+# It fails if either is reintroduced, or if the hazard rationale is deleted.
+
+val TYPES = "src/compiler/80.driver/driver_types.spl"
+val HIR = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+describe "driver memory lifecycle family invariants":
+    it "keeps the three phase evictions reference-drop only":
+        val source = file_read(TYPES)
+        expect(source).to_contain("me evict_ast():")
+        expect(source).to_contain("me evict_hir():")
+        # No deep-free CALL anywhere in the driver context (the name appears once
+        # more, in the prohibition comment asserted by the next example).
+        expect(source.contains("rt_dict_free_deep(")).to_equal(false)
+
+    it "retains the measured rationale that forbids a deep free":
+        val source = file_read(TYPES)
+        expect(source).to_contain("Do NOT \"fix\" this by calling rt_dict_free_deep here")
+        expect(source).to_contain("reclaims NOTHING")
+
+    it "records that the real fix is a codegen change, not a driver change":
+        val source = file_read(TYPES)
+        expect(source).to_contain("NOT a driver change")
+
+    it "never constructs the HIR lowerer inside the per-source loop":
+        val source = file_read(HIR)
+        val loop = source.index_of("while source_idx < self.ctx.sources.len():")
+        expect(loop).to_be_greater_than(0)
+        val body = source.substring(loop, source.len())
+        expect(body.contains("hirlowering_for_module_with_diagnostics(")).to_equal(false)
+        expect(body.contains("hirlowering_new()")).to_equal(false)
+
+    it "reuses one diagnostics buffer and one trait-registry owner":
+        val source = file_read(HIR)
+        expect(source).to_contain("Allocate the diagnostics array before the long HIR loop")
+        expect(source).to_contain("This loop-owned lowerer is the trait registry owner")

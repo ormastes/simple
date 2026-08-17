@@ -364,3 +364,102 @@ hard link followed by temp-unlink or directory-fsync failure could leave a
 completed-looking receipt even though the analyzer returned failure. Both
 drafts and their tests were reverted. TODO666 retains the exact capsule and
 post-link rollback owners; no partial admission claim was made.
+
+---
+
+## RE-VERIFICATION 2026-08-17 (c_splmisc lane) — SOURCE FIX CONFIRMED PRESENT; VERIFICATION STILL GATED
+
+Classified by CONTENT, not by SHA.
+
+The doc's claim that "the owner fix landed source-side" is **confirmed** in
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl`. The two allocation
+behaviours that drove the unbounded HIR-build RSS growth are now explicitly
+hoisted out of the per-module loop, each with a comment naming the intent:
+
+- `:357` — "Allocate the diagnostics array before the long HIR loop and reuse
+  its ..." (per-module diagnostics array no longer reallocated per source)
+- `:466` — "This loop-owned lowerer is the trait registry owner. Do not copy"
+  (single lowerer owns the shared trait registry across every module, rather
+  than one lowerer per module)
+
+Also present and consistent with the doc: the durable phase/memory diagnostic
+sinks, gated behind `bootstrap_diag` (`:536`, `:604`, `:667`
+`[bootstrap-error-count] ... point=post-lowering|post-diagnostics|post-store`),
+plus the poisoned-module reporting at `:628-637`.
+
+**COULD NOT PROVE — and this is the honest state of the row.** The doc's own
+remediation requires a *cache-preserving canonical Stage 3 transaction*, i.e. a
+full Stage 2 + Stage 3 bootstrap cycle. A user bootstrap was LIVE during this
+session and is the stated top priority, so `build/bootstrap/**` was off-limits;
+no bootstrap was started, resumed, or otherwise touched. Nothing here measures
+RSS.
+
+**Methodological warning for whoever resumes this, because this row is uniquely
+exposed to it.** The bug's own signature is *status 143*. On this host (load
+80-130, ~90 concurrent `simple` processes) a healthy run is routinely SIGTERMed
+by a watchdog and ALSO exits 143 with no `Results:` line — indistinguishable by
+exit code alone. Worse, a `kill_simple_monitor.shs` misconfiguration was live
+until 06:35 today with `MIN_AGE_SECS=60`, below a normal spec's ~115s runtime.
+**Do not accept 143 as a reproduction of this bug without an RSS trace.** The
+distinguishing evidence is monotonic RSS growth across the HIR loop, not the
+exit status. Any 143 observation on this row recorded before 06:35 today should
+be re-run.
+
+---
+
+## 2026-08-17 (W2 driver lane) — FAMILY COLLAPSED; ROOT IS NOT IN 80.driver
+
+These three rows were re-examined together as instructed, on the hypothesis that
+one cause spans them (AST and HIR arenas live simultaneously):
+
+- `bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20`
+- `stage3_current_source_hir_rss_termination_2026-08-14`
+- `bootstrap_stage4_ast_hir_overlap_memory_2026-07-27`
+
+**The hypothesis is right, and the root cause is already written down in source,
+with probe numbers — in `src/compiler/80.driver/driver_types.spl:1080-1100`:**
+
+> The three evictions below drop references only. With no GC and no refcounting
+> that reclaims NOTHING -- measured at 0 of 2001 allocations by
+> `src/runtime/test/rt_driver_eviction_reclaim_selfcheck.c` (probe P0).
+> ... Unblocking this needs class instances to be identifiable at runtime, a
+> codegen/representation change, **NOT a driver change**.
+
+So `evict_sources()` / `evict_ast()` / `evict_hir()` / `evict_mir()` are all
+no-ops on the bootstrap lane, which is exactly why "clears the AST dictionary
+after HIR" never reduced the peak, and why moving the eviction earlier in the
+loop cannot help either. The overlap described in the 07-27 row is not a
+sequencing defect in the driver; it is that nothing the driver can call frees
+anything. The two obvious driver-level "fixes" were both already tried and both
+measured HARMFUL: `rt_dict_free_deep` frees key strings aliased from outside the
+dict by HIR/AST/SymbolTable (use-after-free, probes P2/P3), and per-module
+lowerer reconstruction is the retained-aggregate boundary the 08-14 row fixed.
+
+### Verdict per row
+- **08-14** — source fix CONFIRMED PRESENT and now guarded by a spec (single
+  lowerer hoisted out of the loop, one reused diagnostics buffer, no
+  surface/trait copies through per-iteration locals). Executable RSS evidence
+  still requires one canonical Stage-3 transaction; not run (a user bootstrap
+  was live and `build/bootstrap/**` was off-limits).
+- **07-20 / 07-27** — **BLOCKED-CROSS-OWNER.** The remaining fix is a runtime
+  representation change so that a class instance carries a tag/header the heap
+  registry can identify, in `src/runtime/runtime_native.c` (heap registry /
+  `rt_alloc` class-instance representation) plus the native class-layout emitter.
+  Those files are outside the 80.driver ownership boundary, so nothing was
+  edited there. No driver-side change can close these two rows.
+
+### What was NOT measured, stated plainly
+No RSS number was produced for the pure-Simple lane in this session. The only
+figure obtained was **3,050,124 KiB peak RSS** (`/usr/bin/time -v`) for the
+**Rust seed** `bin/release/x86_64-unknown-linux-gnu/simple` interpreting
+`src/compiler/80.driver/main.spl --check <one tiny file>` — a different memory
+model entirely, and therefore evidence for nothing on these rows. It is recorded
+only so it is not mistaken later for a lane measurement. Per the 08-14 row's own
+warning: on this host a status-143 exit is indistinguishable from an earlyoom or
+watchdog kill, so **143 without a monotonic RSS trace is not a reproduction.**
+
+### Family guard
+`test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl` —
+`Results: 5 total, 5 passed, 0 failed`. It fails if a deep-free call is
+reintroduced into the driver context, if the measured hazard rationale is
+deleted, or if the HIR loop goes back to constructing a lowerer per source.

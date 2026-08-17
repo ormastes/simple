@@ -1,0 +1,44 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+# Detection spec for the two follow-on blockers recorded at the end of
+# doc/08_tracking/bug/selfhost_bootstrap_unresolved_symbols_2026-06-24.md:
+#   1. the pure-Simple driver's arg parser rejected `--target` outright
+#      ("Error: unknown option --target"), so the wasm32 backend was unreachable
+#   2. `--check` returned exit 0 even when it printed a diagnostic
+# Both were measured FIXED on 2026-08-17 by running the driver through the
+# interpreter (`bin/simple run src/compiler/80.driver/main.spl --check <file>`):
+# a clean file gave rc=0, a file with `unresolved name` gave rc=1.
+# This spec pins the source-level contract so neither silently regresses; the
+# behavioural check costs ~4 minutes per invocation and is not spec-shaped.
+
+val MAIN = "src/compiler/80.driver/main.spl"
+
+describe "pure-Simple driver CLI contract":
+    it "accepts --target in both spaced and = forms":
+        val source = file_read(MAIN)
+        expect(source).to_contain("elif arg == \"--target\":")
+        expect(source).to_contain("elif arg.starts_with(\"--target=\"):")
+        # The value must reach the parsed args, not just be swallowed.
+        expect(source).to_contain("cli_args.target = ")
+
+    it "maps the target onto a codegen backend rather than dropping it":
+        val source = file_read(MAIN)
+        val idx = source.index_of("Map `--target` to the codegen backend")
+        expect(idx).to_be_greater_than(0)
+
+    it "declares --target before the unknown-option catch-all":
+        # `elif arg.starts_with("-")` rejects anything it reaches first, which is
+        # exactly how --target used to fail. Order is the contract.
+        val source = file_read(MAIN)
+        val target_arm = source.index_of("elif arg == \"--target\":")
+        expect(target_arm).to_be_greater_than(0)
+        # There is an earlier, unrelated `starts_with("-")` arm in the bootstrap
+        # pre-scan loop, so anchor the search at the --target arm itself.
+        val catch_all = source.index_of("elif arg.starts_with(\"-\"):", target_arm)
+        expect(catch_all).to_be_greater_than(target_arm)
+
+    it "routes --check through a real compile mode, not a no-op":
+        val source = file_read(MAIN)
+        expect(source).to_contain("elif arg == \"-k\" or arg == \"--check\":")
+        expect(source).to_contain("requested_mode_text = \"check\"")
