@@ -29,7 +29,14 @@ the matrix and the residual risks):
    authorises (provider_ref + kind + event id + tenant), not just the opaque
    payload, and must not cross tenants.
 6. **Denial of service** — no unauthenticated route performs unbounded work
-   before the request-limit and throttle rungs.
+   before the request-limit and throttle rungs, AND the throttle itself does
+   not get more expensive the harder it is exercised (W12-B).
+7. **Form parsing** — a value carrying an encoded separator is decoded once
+   and correctly rather than truncated or passed raw, malformed escapes fail
+   closed, and none of that weakens the escaping specs (W12-B).
+8. **Authorization consistency** — the booking and restaurant read families
+   are role-gated like the back-office ones, not open to any authenticated
+   session in the tenant (W12-B).
 
 ## Troubleshooting
 
@@ -74,7 +81,11 @@ use std.nogc_sync_mut.enterprise_payment.payment.{
 use std.nogc_sync_mut.enterprise_session.session.{
     session_setup, credential_seed, session_issue, session_revoke
 }
-use std.nogc_sync_mut.enterprise_session.throttle.{throttle_setup}
+use std.nogc_sync_mut.enterprise_session.throttle.{
+    throttle_setup, throttle_admit, throttle_count, throttle_window,
+    throttle_rows_retained
+}
+use app.enterprise_store_app.web_common.{form_value, percent_decode}
 use app.enterprise_store_app.main.{store_app_handle}
 use app.enterprise_store_app.auth_routes.{store_app_handle_bearer}
 
@@ -96,6 +107,9 @@ fn admin_of(tenant_marker: text) -> ActorContext:
 
 fn sales_actor() -> ActorContext:
     ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn booking_actor() -> ActorContext:
+    ActorContext(actor_id: "agent-1", role: "booking")
 
 fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
     SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
@@ -476,4 +490,149 @@ describe "attack: denial of service — unauthenticated flood and oversized bodi
         val gen = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
             "user=clerk-1&secret=wrong", 500, "ent-4")
         expect(http_status_code(gen.status) == 401 or http_status_code(gen.status) == 429).to_be(true)
+        store_close(store)
+
+# =============================================================================
+# 7. Throttle amplification — the defence must not get more expensive the
+#    harder it is exercised (residual risk 3 of the W9-D posture, fixed W12-B)
+# =============================================================================
+
+describe "attack: slow-burn amplification through the throttle's own counter table":
+    it "keeps the count correct across a window boundary AND keeps retained rows bounded":
+        val store = fresh_full("throttle_prune")
+
+        step("Saturate window 0 for one key (limit 3, 60s window)")
+        expect(throttle_admit(store, "tenant-a|anon", 0, 60, 3)).to_be(true)
+        expect(throttle_admit(store, "tenant-a|anon", 10, 60, 3)).to_be(true)
+        expect(throttle_admit(store, "tenant-a|anon", 20, 60, 3)).to_be(true)
+        step("The 4th request in the SAME window is rejected")
+        expect(throttle_admit(store, "tenant-a|anon", 30, 60, 3)).to_be(false)
+        expect(throttle_count(store, "tenant-a|anon", throttle_window(30, 60))).to_equal(3)
+
+        step("A second key in the same window is counted independently")
+        expect(throttle_admit(store, "tenant-a|login:bob", 30, 60, 3)).to_be(true)
+        expect(throttle_count(store, "tenant-a|login:bob", throttle_window(30, 60))).to_equal(1)
+        expect(throttle_count(store, "tenant-a|anon", throttle_window(30, 60))).to_equal(3)
+
+        step("Crossing the window boundary re-admits, and the count is the NEW window's")
+        expect(throttle_admit(store, "tenant-a|anon", 60, 60, 3)).to_be(true)
+        expect(throttle_count(store, "tenant-a|anon", throttle_window(60, 60))).to_equal(1)
+        step("The elapsed window's rows are gone — they can never change a later decision")
+        expect(throttle_count(store, "tenant-a|anon", throttle_window(0, 60))).to_equal(0)
+        expect(throttle_rows_retained(store)).to_equal(1)
+
+        step("ATTACK: 300 windows of sustained traffic on two rotating keys")
+        var w = 2
+        while w < 302:
+            val now = w * 60
+            throttle_admit(store, "tenant-a|anon", now, 60, 3)
+            throttle_admit(store, "tenant-a|anon", now + 1, 60, 3)
+            throttle_admit(store, "tenant-a|login:ghost-" + "{w}", now + 2, 60, 3)
+            w = w + 1
+
+        step("ABSOLUTE ORACLE: retained rows are bounded by the LIVE window, not by total traffic")
+        # 900 admits were attempted; unpruned this table would hold ~900 rows.
+        # Bound: (distinct keys in the live window) * limit = 2 * 3 = 6.
+        expect(throttle_rows_retained(store) <= 6).to_be(true)
+        step("...and the live window still decides correctly on that bounded data")
+        val last = 301 * 60
+        expect(throttle_count(store, "tenant-a|anon", throttle_window(last, 60))).to_equal(2)
+        expect(throttle_admit(store, "tenant-a|anon", last + 3, 60, 3)).to_be(true)
+        expect(throttle_admit(store, "tenant-a|anon", last + 4, 60, 3)).to_be(false)
+        store_close(store)
+
+# =============================================================================
+# 8. Form-value parsing — encoded separators and malformed escapes
+#    (residual risk 5 of the W9-D posture, fixed W12-B)
+# =============================================================================
+
+describe "attack: a hostile form value that the old parser truncated or mis-read":
+    it "decodes exactly once and fails closed on every malformed escape":
+        step("Ordinary pairs are unchanged")
+        expect(form_value("a=1&b=2", "b")).to_equal("2")
+        expect(form_value("a=1", "b")).to_equal("")
+        expect(form_value("a", "a")).to_equal("")
+
+        step("A separator INSIDE a value is now expressible (previously truncated to nothing)")
+        expect(form_value("a=x%26y&b=2", "a")).to_equal("x&y")
+        expect(form_value("a=x%3Dy", "a")).to_equal("x=y")
+        step("An unencoded '=' inside a value splits on the FIRST '=' only")
+        expect(form_value("a=x=y", "a")).to_equal("x=y")
+
+        step("'+' is a space")
+        expect(form_value("a=hello+world", "a")).to_equal("hello world")
+
+        step("Decoding happens EXACTLY once — %2526 is the literal %26, never '&'")
+        expect(form_value("a=%2526", "a")).to_equal("%26")
+
+        step("ATTACK: malformed escapes fail CLOSED, never pass raw")
+        expect(form_value("a=x%2", "a")).to_equal("")
+        expect(form_value("a=x%", "a")).to_equal("")
+        expect(form_value("a=x%ZZ", "a")).to_equal("")
+        step("ATTACK: a percent-encoded NUL is rejected outright")
+        expect(form_value("a=x%00y", "a")).to_equal("")
+
+        step("percent_decode reports the failure explicitly to any other caller")
+        expect(percent_decode("ok%20here").0).to_be(true)
+        expect(percent_decode("ok%20here").1).to_equal("ok here")
+        expect(percent_decode("bad%2").0).to_be(false)
+
+    it "does NOT weaken escaping: a decoded XSS payload still renders escaped":
+        val store = fresh_full("form_xss")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        val sa = session_for(admin, t)
+
+        step("ATTACK: an XSS payload smuggled through percent-encoding in a form value")
+        val encoded = "booking=%3Cscript%3Ealert%281%29%3C%2Fscript%3E&idem=k-xss"
+        step("The parser now sees the real payload rather than a truncated fragment")
+        expect(form_value(encoded, "booking")).to_equal("<script>alert(1)</script>")
+        val res = store_app_handle(store, sa, t, admin, "POST", "/booking/cancel", plain_headers(), encoded)
+        step("...and the surface that reflects it still escapes it")
+        expect(res.body.contains("<script>")).to_be(false)
+        expect(res.body.contains("&lt;script&gt;")).to_be(true)
+        store_close(store)
+
+# =============================================================================
+# 9. Authorization consistency — customer-facing families are role-gated too
+#    (residual risk 7 of the W9-D posture, decided and closed W12-B)
+# =============================================================================
+
+describe "attack: a low-privilege session reads the booking and restaurant families":
+    it "role-gates /booking/* and /restaurant/* reads with each family's own frozen action":
+        val store = fresh_full("family_rbac")
+        seed_tenant_a(store)
+        val t = tenant_a()
+        val admin = admin_of("a")
+        val clerk = sales_actor()
+        val agent = booking_actor()
+
+        step("ATTACK: a `sales` session enumerates the tenant's bookable resources")
+        val r1 = store_app_handle(store, session_for(clerk, t), t, clerk, "GET", "/booking/resources", plain_headers(), "")
+        expect(http_status_code(r1.status)).to_equal(403)
+        expect(r1.body.contains("RES-A-SECRET")).to_be(false)
+
+        step("ATTACK: a `sales` session probes a booking id")
+        val r2 = store_app_handle(store, session_for(clerk, t), t, clerk, "GET", "/booking/bk-1/status", plain_headers(), "")
+        expect(http_status_code(r2.status)).to_equal(403)
+
+        step("ATTACK: a `sales` session walks table ids to read open bills")
+        val r3 = store_app_handle(store, session_for(clerk, t), t, clerk, "GET", "/restaurant/session/t7/view", plain_headers(), "")
+        expect(http_status_code(r3.status)).to_equal(403)
+
+        step("The `booking` role — which already holds booking.hold — still reads its own family")
+        val ok1 = store_app_handle(store, session_for(agent, t), t, agent, "GET", "/booking/resources", plain_headers(), "")
+        expect(http_status_code(ok1.status)).to_equal(200)
+        expect(ok1.body.contains("RES-A-SECRET")).to_be(true)
+
+        step("...but the booking role does NOT reach the restaurant bill view")
+        val r4 = store_app_handle(store, session_for(agent, t), t, agent, "GET", "/restaurant/session/t7/view", plain_headers(), "")
+        expect(http_status_code(r4.status)).to_equal(403)
+
+        step("admin still reaches both — the gate is role_allows, not a new scheme")
+        val a1 = store_app_handle(store, session_for(admin, t), t, admin, "GET", "/booking/resources", plain_headers(), "")
+        expect(http_status_code(a1.status)).to_equal(200)
+        val a2 = store_app_handle(store, session_for(admin, t), t, admin, "GET", "/restaurant/session/t7/view", plain_headers(), "")
+        step("no active session at t7 -> 404, i.e. it passed the role gate")
+        expect(http_status_code(a2.status)).to_equal(404)
         store_close(store)

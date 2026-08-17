@@ -854,3 +854,49 @@ New acceptance criteria (extends AC-1..AC-12 above):
   did not help and was REVERTED rather than left in unverified. Filed:
   doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md.
   Under the interpreter the flag stays false, correctly.
+- RESIDUAL SECURITY RISKS CLOSED (2026-08-17, lane W12-B).
+  RISK 1 throttle amplification: throttle_admit now sweeps before deciding and
+  on the reject path; throttle_prune drops the counter table once EVERY
+  retained row belongs to an elapsed window; throttle_rows_retained is the
+  absolute oracle — after 900 admits across 300 windows, retained <= 6.
+  RED EVIDENCE IS ITSELF THE FINDING: with the sweep removed the spec NEVER
+  FINISHES and was killed at 900s — that is the amplification. Sweep made
+  unconditional -> 10 passed / 2 failed.
+  RISK 2 form_value: percent_decode does one pass, +->space, %XX->byte, and
+  FAILS CLOSED on truncated/non-hex/%00; form_value splits on the first = only.
+  12-row parsing table specced, plus a hostile case proving an encoded
+  <script> is now decoded to its real value AND still rendered &lt;script&gt;
+  — the escaping specs were not weakened. Red: naive parser restored ->
+  10 passed / 2 failed.
+  RISK 3 role-gating — W9-D's "deliberate customer-facing posture" DID NOT
+  SURVIVE INSPECTION, and this is a real authorization finding, not a
+  consistency tidy-up: there is no customer role and no per-customer scoping,
+  so "customer-facing" meant EVERY role in the tenant. A `sales` session could
+  enumerate the resource inventory, probe any booking id, and walk table ids to
+  read every open bill — lines, quantities, modifiers, totals — with no
+  ownership proof. Both families now re-check the frozen role_allows with their
+  own action (booking.hold, restaurant.table.open) -> 403 through the existing
+  deny() mapping. Red: gates forced open -> 11 passed / 1 failed.
+  SEED DEFECT FOUND EN ROUTE, FILED NOT WORKED AROUND SILENTLY: the Rust seed's
+  interpreter SQLite emulation parses `DELETE FROM <t>` and CLEARS THE WHOLE
+  TABLE, ignoring any WHERE — measured, `DELETE FROM t WHERE 1=0` removed both
+  rows and returned success, while the C runtime on real libsqlite3 honours
+  WHERE. One statement, two behaviours.
+  doc/08_tracking/bug/seed_sqlite_emulation_ignores_delete_where_2026-08-17.md.
+  Consequence: the store exposes only store_truncate, and the throttle
+  evaluates its predicate in pure Simple first — no conditional DELETE exists
+  anywhere in the suite.
+  ORCHESTRATOR NOTE: the lane reported enterprise_conformance_spec as
+  "does not exist at this tip" and correctly declined to fake a verdict. Its
+  search was wrong — the file exists in main and on disk. I ran it on the
+  merged tree: 8/8. Also enterprise_web_app 5/5 and security_audit re-run.
+  Lane verdicts: security_audit 12/12 (was 9 examples), auth_throttle 6/6,
+  back_office_web 7/7, enterprise_web_app 5/5, store_app 3/3.
+  REMAINING RESIDUAL (rewritten in security_posture.md): role_allows is still a
+  hardcoded table — this made the app CONSISTENT, not finer-grained (no role
+  gets "read the bill" without "open a table"); no CSRF/cookie flow; the
+  throttle is bounded but still a linear scan of the live window; the sweep is
+  all-or-nothing (a consequence of the seed DELETE defect — it can only cost
+  boundedness, never weaken a limit); percent_decode decodes BYTES not
+  characters; and no route role-gates a WRITE, because that authority lives in
+  the guarded commands by design.

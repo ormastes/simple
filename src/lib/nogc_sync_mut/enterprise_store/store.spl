@@ -265,16 +265,9 @@ fn store_insert2(conn: SqliteConnection, sql: text, v1: text, v2: text) -> bool:
     sqlite_finalize(stmt)
     ran == 1 or ran == 0
 
-# store_insert_row runs a prepared INSERT binding each value in order.
-fn store_insert_row(store: EnterpriseStore, sql: text, values: [text]) -> bool:
-    if not store.open_ok:
-        return false
-    if store_is_file(store):
-        val (table, cols) = parse_insert_target(sql)
-        if table == "" or cols.len() != values.len():
-            return false
-        return fb_insert(store.file_path, table, cols, values)
-    val stmt = sqlite_prepare(store.conn, sql)
+# exec_bound runs one prepared statement with `values` bound in order.
+fn exec_bound(conn: SqliteConnection, sql: text, values: [text]) -> bool:
+    val stmt = sqlite_prepare(conn, sql)
     if not stmt.is_valid:
         return false
     var i = 0
@@ -284,6 +277,47 @@ fn store_insert_row(store: EnterpriseStore, sql: text, values: [text]) -> bool:
     val ran = rt_sqlite_query_next(stmt.handle)
     sqlite_finalize(stmt)
     ran == 1 or ran == 0
+
+# store_insert_row runs a prepared INSERT binding each value in order.
+fn store_insert_row(store: EnterpriseStore, sql: text, values: [text]) -> bool:
+    if not store.open_ok:
+        return false
+    if store_is_file(store):
+        val (table, cols) = parse_insert_target(sql)
+        if table == "" or cols.len() != values.len():
+            return false
+        return fb_insert(store.file_path, table, cols, values)
+    exec_bound(store.conn, sql, values)
+
+# store_truncate empties a table outright.
+#
+# Insert-only discipline is UNCHANGED for business data — there is still no
+# UPDATE anywhere, and no business table is ever truncated. This exists for
+# expiring rows of a bounded COUNTER table (`throttle_hits`), where letting an
+# elapsed fixed window's rows accumulate forever is itself the defect: the
+# throttle's own cost grows with how hard it is attacked.
+#
+# Why unconditional and not `DELETE ... WHERE`: the Rust seed's interpreter
+# SQLite emulation parses `DELETE FROM <t>` and then clears the WHOLE table,
+# silently ignoring any WHERE clause
+# (`interpreter_extern/sffi_db.rs`, the `delete from ` branch). A conditional
+# delete therefore MEANS "truncate" in interpreter mode and "delete some rows"
+# under the C runtime — two different programs from one statement. Rather than
+# depend on a predicate the seed does not evaluate, the only delete this
+# module offers is the one both backends agree on, and the caller establishes
+# the predicate itself before calling. See
+# doc/08_tracking/bug/seed_sqlite_emulation_ignores_delete_where_2026-08-17.md.
+#
+# `table` is a module-supplied literal; no caller text reaches this statement.
+# The file backend is append-only by construction and cannot delete: it
+# returns false, and the caller keeps its previous (correct but unbounded)
+# behaviour rather than silently reporting a prune that did not happen.
+fn store_truncate(store: EnterpriseStore, table: text) -> bool:
+    if not store.open_ok:
+        return false
+    if store_is_file(store):
+        return false
+    sqlite_execute(store.conn, "DELETE FROM " + table)
 
 # =============================================================================
 # Corruption detection (AC-18)
@@ -396,7 +430,7 @@ export EnterpriseStore
 export store_open, store_open_file, store_close, store_backend_acid, store_error
 export uow_begin, uow_commit, uow_rollback
 export store_migrate, store_migration_applied
-export store_rows, store_insert_row
+export store_rows, store_insert_row, store_truncate
 export store_verify, store_open_verified, store_system_tables
 export StoreFaults, store_faults_none, store_faults_failing_commit
 export BufferedUow, buffered_uow_new, buffered_write, buffered_commit

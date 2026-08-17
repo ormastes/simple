@@ -15,6 +15,18 @@ Routes:
 
 `now` and `ttl` are digit-checked form values (caller-supplied server time;
 the library performs no wall-clock reads).
+
+## Reads are role-gated (W12-B)
+
+Both GETs re-check the FROZEN `role_allows` policy with `booking.hold` — the
+action the family's own writes already require — exactly as the back-office
+families do. Until W12-B they were authenticated only, which was recorded as
+"the deliberate customer-facing posture". That rationale did not survive
+inspection: there is no customer role and no per-customer scoping anywhere in
+this app, so "customer-facing" meant *every* role in the tenant, including
+`sales`, `finance` and `procurement`, could enumerate the whole resource
+inventory and probe any booking id. An open read has to be justified by who
+can actually reach it, not by who it was imagined for.
 """
 
 use std.common.net.http_core.{match_route_pattern, extract_route_params}
@@ -22,7 +34,7 @@ use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
-    TenantContext, ActorContext, SessionContext, CommandEnvelope
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, role_allows
 }
 use std.nogc_sync_mut.enterprise_booking.booking.{
     booking_status, booking_hold, booking_confirm, booking_cancel
@@ -52,8 +64,12 @@ fn command_page(reason: text, detail: text) -> HttpResponse:
 # booking_routes_handle serves every /booking/* route; unknown subpaths 404.
 fn booking_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
     if method == "GET" and match_route_pattern("/booking/resources", path):
+        if not role_allows(who.role, "booking.hold"):
+            return deny("forbidden", who.actor_id)
         return secured(HttpResponse.html(page_resources(store, tenant.tenant_id)))
     if method == "GET" and match_route_pattern("/booking/:id/status", path):
+        if not role_allows(who.role, "booking.hold"):
+            return deny("forbidden", who.actor_id)
         val params = extract_route_params("/booking/:id/status", path)
         var booking_id = ""
         for p in params:

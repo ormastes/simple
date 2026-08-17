@@ -15,6 +15,18 @@ Routes:
 - GET  /restaurant/session/:table/view — ACTIVE session at the table (any
   venue): escaped lines (sku, qty, modifiers, status) + served total.
   404 `no-session` when the table has no active session.
+
+## The read is role-gated (W12-B)
+
+`GET /restaurant/session/:table/view` re-checks the FROZEN `role_allows`
+policy with `restaurant.table.open` — the action the family's own writes
+already require — exactly as the back-office families do. It was
+authenticated-only until W12-B under a "customer-facing" rationale, but the
+page renders another party's open bill: every ordered line, its sku,
+quantity, modifiers, preparation status and the served total. Reaching it
+needs no booking reference and no ownership proof, only a table id, so any
+authenticated session in the tenant could walk `t1..tN` and read every open
+bill in the venue. That is a staff surface, and it is now gated like one.
 """
 
 use std.common.net.http_core.{match_route_pattern, extract_route_params}
@@ -22,7 +34,7 @@ use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
-    TenantContext, ActorContext, SessionContext, CommandEnvelope
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, role_allows
 }
 use std.nogc_sync_mut.enterprise_restaurant.restaurant.{
     restaurant_session_state, restaurant_line_status, restaurant_session_total,
@@ -69,6 +81,8 @@ fn command_page(reason: text, detail: text) -> HttpResponse:
 # restaurant_routes_handle serves every /restaurant/* route; unknown subpaths 404.
 fn restaurant_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
     if method == "GET" and match_route_pattern("/restaurant/session/:table/view", path):
+        if not role_allows(who.role, "restaurant.table.open"):
+            return deny("forbidden", who.actor_id)
         val params = extract_route_params("/restaurant/session/:table/view", path)
         var table_id = ""
         for p in params:

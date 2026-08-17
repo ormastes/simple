@@ -1,6 +1,6 @@
-# Enterprise Suite — Security Posture (W9-D adversarial audit)
+# Enterprise Suite — Security Posture (W9-D audit, W12-B residual-risk closure)
 
-Lane `.spipe/simple_enterprise_suite`, lane W9-D. This is the audit record for
+Lane `.spipe/simple_enterprise_suite`, lanes W9-D and W12-B. This is the audit record for
 the suite's trust boundaries: what was attacked, what the attack actually did,
 and what changed. The authoritative, executable form of everything here is
 `test/03_system/app/enterprise/enterprise_security_audit_spec.spl` — this page
@@ -26,8 +26,13 @@ Evidence: interpreter mode, Rust seed
 | 5b | Payment — replay a tenant-A webhook against tenant-B | `payment_webhook_receive` | **safe** — `payment_intent_by_ref` is tenant-scoped (`not-found`); now also signature-bound to the tenant | strengthened | regression test |
 | 6a | DoS — 20 MB unauthenticated login body | `POST /auth/login` | **ATTACK SUCCEEDED.** `body_decision` ran only inside `store_app_handle`, so the auth routes — the only unauthenticated surface — never applied it. 200 | `body_decision` moved to rung 0 of `store_app_handle_bearer` | 413 (and 400/501 for smuggling shapes) |
 | 6b | DoS — credential stuffing by rotating the `user` form field | `POST /auth/login` x40 | **ATTACK SUCCEEDED.** The only login throttle was keyed `tenant\|login:<user>`, a caller-controlled field; rotating it made the lockout unreachable and left the login path with no limit at all | a login is now charged to the tenant-wide `tenant\|anon` window *first*, then the per-user window | 429 |
+| 6c | DoS — slow-burn amplification through the throttle's OWN counter table (W12-B; was residual risk 3) | `throttle_admit` x900 across 300 windows | **DEFECT CONFIRMED.** `throttle_hits` was insert-only with no pruning and `throttle_count` scanned all of it, so every admitted request made the *next* one more expensive — the defence was the bottleneck. With the sweep removed the spec does not fail, it **never finishes**: killed at `SIMPLE_TIMEOUT_SECONDS=900` | `throttle_prune` drops the counter table once every retained row belongs to an elapsed window; the predicate is evaluated in pure Simple, the delete is `store_truncate` | rows retained bounded by the LIVE window (measured <= 6 after 900 admits), counts still exact across the boundary |
+| 8 | Filter bypass — an encoded separator in a form value (W12-B; was residual risk 5) | `form_value` + every route that reads a body | **DEFECT CONFIRMED.** `form_value` split on `&` and `=` and did no percent-decoding, so `a=x%26y` yielded the raw `x%26y`, `a=x=y` yielded nothing at all, and anything downstream that inspected the value (escaping, digit checks, id lookups) saw text that was not what the client sent | `percent_decode` — one pass, `+` -> space, `%XX` -> byte, and FAIL CLOSED on truncated / non-hex / `%00`; `form_value` splits on the first `=` only | full parsing table specced; the escaping specs are unchanged and still green (a decoded `<script>` still renders `&lt;script&gt;`) |
+| 9 | Authorization — `/booking/*` and `/restaurant/*` reads reachable by any authenticated role (W12-B; was residual risk 7) | `store_app_handle` on 3 reads with a `sales` session | **DEFECT CONFIRMED (reclassified).** W9-D recorded this as "the deliberate customer-facing posture". It is not: there is no customer role and no per-customer scoping in this app, so "customer-facing" meant every role in the tenant — a `sales` session could enumerate the resource inventory, probe any booking id, and walk table ids to read every open bill (lines, quantities, modifiers, totals) with no ownership proof | both families' reads now re-check the FROZEN `role_allows` with the family's own action (`booking.hold`, `restaurant.table.open`), exactly as the back-office families do | 403 for `sales`; `booking` role reads its own family and is 403 on the restaurant bill view; `admin` unchanged |
 
-Four attacks succeeded. All four are fixed and fenced by the spec.
+Four attacks succeeded in the W9-D pass; W12-B confirmed and closed three more
+defects that W9-D had deferred as residual. All seven are fixed and fenced by
+the spec.
 
 ## The fixes
 
@@ -42,6 +47,35 @@ Four attacks succeeded. All four are fixed and fenced by the spec.
 - `src/app/enterprise_store_app/auth_routes.spl` — `body_decision` as rung 0
   for every request; tenant-wide anonymous throttle applied to logins.
 
+### W12-B (2026-08-17)
+
+- `src/lib/nogc_sync_mut/enterprise_session/throttle.spl` — `throttle_prune`
+  + `throttle_rows_retained`; `throttle_admit` sweeps before it decides, on
+  the reject path too.
+- `src/lib/nogc_sync_mut/enterprise_store/store.spl` — `store_truncate`, the
+  only delete in the suite. **Deliberately unconditional:** the Rust seed's
+  interpreter SQLite emulation parses `DELETE FROM <t>` and then clears the
+  whole table, silently ignoring any WHERE clause, so a conditional delete
+  means two different programs in interpreter vs native mode. Filed as
+  `doc/08_tracking/bug/seed_sqlite_emulation_ignores_delete_where_2026-08-17.md`.
+  The throttle establishes the predicate itself before calling.
+- `src/app/enterprise_store_app/web_common.spl` — `percent_decode` and the
+  rewritten `form_value` (parsing table in the source docstring).
+- `src/app/enterprise_store_app/booking_routes.spl`,
+  `restaurant_routes.spl` — `role_allows` re-checked on the reads.
+
+Red-first evidence (interpreter mode, Rust seed 59536728 bytes 2026-08-16,
+`SIMPLE_TIMEOUT_SECONDS=900`, one spec per run), all against
+`enterprise_security_audit_spec.spl` at `declared>=12 executed=12`:
+
+| sabotage | verdict |
+|---|---|
+| `throttle_prune` call removed | **never finishes** — killed at 900s (the amplification itself) |
+| prune made unconditional (staleness predicate bypassed) | passed=10 failed=2 (count correctness AND the 6b login-throttle scenario) |
+| `form_value` reverted to the pre-W12-B naive parser | passed=10 failed=2 |
+| both role gates forced open | passed=11 failed=1 |
+| none (restored) | **passed=12 failed=0** |
+
 ## Residual risks (honest)
 
 1. **Entropy quality is still the caller's responsibility.** The derivation is
@@ -54,24 +88,42 @@ Four attacks succeeded. All four are fixed and fenced by the spec.
    is `sha256(shared_secret | material)`, not a real provider HMAC scheme with
    timestamp tolerance. It is not constant-time compared. Replacing the seam
    with a provider SDK is a one-struct change.
-3. **Throttle counting is a full table scan.** `throttle_count` scans all
-   `throttle_hits` rows for every admitted request, and rows are insert-only
-   with no pruning. A sustained flood therefore makes each *subsequent* request
-   more expensive — an amplification surface the fixed window bounds only per
-   window, not over time. A pruning sweep or an indexed count is the follow-up.
-4. **`role_allows` is a hardcoded role table, not a registry.** Back-office
-   reads reuse an existing write action (`hcm.leave.decide`,
-   `proc.requisition.approve`, `finance.period.close`) as their read grant, so
-   read and write authority are not separable per role today.
-5. **`form_value` cannot express values containing `&` or `=`,** and does no
-   percent-decoding. Business identifiers carrying those characters silently
-   parse as empty rather than being rejected.
-6. **No CSRF token and no cookie flow.** The app is bearer-token only, which
+Risks 3, 5 and 7 of the W9-D list are CLOSED by W12-B — they are rows 6c, 8
+and 9 of the matrix above. What remains:
+
+3. **`role_allows` is a hardcoded role table, not a registry.** Every
+   role-gated read reuses an existing write action as its read grant
+   (`hcm.leave.decide`, `proc.requisition.approve`, `finance.period.close`,
+   and now `booking.hold`, `restaurant.table.open`), so read and write
+   authority are not separable per role. W12-B widened the surface this
+   applies to rather than fixing it: gating the booking and restaurant reads
+   made the app CONSISTENT, not finer-grained. Concretely, no role can be
+   granted "read the open bill" without also being granted "open a table".
+4. **No CSRF token and no cookie flow.** The app is bearer-token only, which
    sidesteps CSRF; introducing cookies would require this to be revisited.
-7. **`/booking/*` and `/restaurant/*` reads are authenticated but not
-   role-gated** — any active session in the tenant may read them. That is the
-   deliberate customer-facing posture, not an oversight, but it is stated here
-   so a future privacy-sensitive field on those pages gets a second look.
+5. **The throttle is bounded but still a linear scan of the live window.**
+   `throttle_count` walks the whole retained set rather than an index. The
+   set is now bounded by the live window instead of by all traffic ever, so
+   the amplification is gone, but the per-request cost is still O(live window
+   traffic), not O(1). An index on `(key, window)` is the follow-up.
+6. **The throttle sweep is all-or-nothing.** `throttle_prune` fires only when
+   EVERY retained row is stale. A key that is exercised without pause across
+   a boundary keeps its window's rows alive and blocks the sweep for all
+   other keys in that instant; the next boundary with a genuine gap clears
+   them. This is a consequence of the seed's DELETE defect above (no
+   per-row delete is available), and it can only cost boundedness — it can
+   never let a request past a limit.
+7. **`percent_decode` decodes bytes, not characters.** `%C3%A9` yields two
+   separate bytes appended as text rather than one `é`. No route compares
+   business identifiers after Unicode normalisation, so nothing today depends
+   on it, but a future field that does would need normalisation added
+   deliberately rather than assumed.
+8. **Nothing role-gates a WRITE at the route.** Writes are gated inside the
+   guarded commands (rung order in `guarded_command_contract.md`), which is
+   where the authority actually lives; the route-level checks added by W12-B
+   cover reads only. This is by design — two gates for one decision is how
+   they drift — but it means a route added without a guarded command behind
+   it inherits no authorization at all.
 
 ## Related
 
