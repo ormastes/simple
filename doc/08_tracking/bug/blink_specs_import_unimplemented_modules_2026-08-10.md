@@ -158,3 +158,16 @@ genuine, precisely-characterized ARCHITECTURAL/feature-gap end-state, not a
 misdiagnosis and not something fixable by a compiler change. No code changes made in
 this pass — implementing the three missing modules is real feature work (per the doc's
 own "Fix recipe ... do not guess" caveat), not bug-triage scope. Status left OPEN.
+
+## 2026-08-17 third-pass re-verification — still a feature gap, unchanged
+
+All four modules the four RED specs import are still absent (checked by direct
+`ls`, each returning `No such file or directory`):
+`src/lib/blink/paint/paint_tree_walker.spl`, `src/lib/blink/input/event.spl`,
+`src/lib/blink/input/hit_test.spl`, `src/lib/blink/dom/form_state.spl`.
+
+Verdict stands from the second pass and is not re-litigated: this is
+implementable feature work (three new Blink modules with real paint/hit-test/
+form semantics), not a compiler defect and not bug-triage scope. Per
+`.claude/rules/testing.md`, the four specs are correct and stay RED as the
+record of the gap; they must not be weakened or marked pending. Status OPEN.

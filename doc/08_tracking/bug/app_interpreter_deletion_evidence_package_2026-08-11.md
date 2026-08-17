@@ -213,3 +213,13 @@ reason to keep 99 uncompilable files on disk indefinitely.
   `git grep` against that commit object, not the working tree (I/O-saturated
   environment; working-tree `grep -r .` timed out with no output — see §2
   method note). No build, lint, or test run performed; no binary touched.
+
+## 2026-08-17 re-verification — unchanged; awaiting the repo owner's decision
+
+`git ls-files src/app/interpreter/ | wc -l` still returns **99**. Nothing about
+the diagnosis has changed. This is not a defect a triage lane can close: the
+deletion is a scoped, reviewed change that removes 99 tracked files, and the
+prior doc explicitly reserves that decision for the repo owner. Deleting them
+here would also collide with the `check-tree-size-push.shs` load-bearing-path
+and file-count gates, which is exactly the review those gates exist to force.
+Status OPEN, owner-gated, no code change.

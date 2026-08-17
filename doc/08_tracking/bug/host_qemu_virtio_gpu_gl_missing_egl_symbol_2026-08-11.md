@@ -77,3 +77,17 @@ Reviewed in the second-pass backlog sweep. Not actionable from this session:
 the missing EGL symbol is a property of the host's virtio-gpu/GL libraries, diagnosable only on a machine with that stack installed and a QEMU run. No code change is possible without that, so no
 speculative fix was attempted. Classification recorded here so future sweeps
 skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.
+
+## 2026-08-17 re-verification — still BLOCKED, unchanged
+
+```
+$ qemu-system-x86_64 -device virtio-gpu-gl,help
+qemu-system-x86_64: -device virtio-gpu-gl,help: failed to open module:
+/usr/lib/x86_64-linux-gnu/qemu/hw-display-virtio-gpu-gl.so: undefined symbol:
+qemu_egl_display
+```
+
+Byte-identical to the originally recorded failure. This remains a host QEMU
+packaging defect (a rebuilt/repackaged `qemu-system-x86` with a matching
+`hw-display-virtio-gpu-gl.so`, or a locally built QEMU, is the only unblock);
+it is not addressable from this repository, and B0/venus stays gated behind it.
