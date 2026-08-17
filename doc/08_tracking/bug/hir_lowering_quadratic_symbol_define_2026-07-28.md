@@ -1,9 +1,43 @@
 # HIR lowering is quadratic in symbols-per-module (stage-4 blocker)
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
-  second pass on 2026-07-28 — see "CORRECTION" below before doing anything.
-  Root causes 2 and 3 remain unproven and unfixed; no fix landed.
+- Status: **RETIRED 2026-08-17 — all three root causes are refuted or fixed in
+  current source.** Do not re-open this row for the live stage-3/stage-4 parse
+  stall; that is a different defect (see
+  `stage3_parse_stalls_at_tail_43_files_2026-08-17.md`).
+- The earlier line here ("Root causes 2 and 3 remain unproven and unfixed; no fix
+  landed", stamped "re-verified 2026-08-17 by source inspection") was WRONG on
+  both counts. Re-verified by grepping current source, not by SHA ancestry:
+
+  | root cause | verdict 2026-08-17 | proof in current source |
+  |---|---|---|
+  | 1. `SymbolTable.define` O(scope) copy | REFUTED on the native lane (see CORRECTION below; both forms linear, flat form slower) | unchanged, correctly so |
+  | 2. unmemoized recursive glob expansion | **FIXED** | `glob_expand_memo` memo (`GLB2`) at `module_lowering.spl:1566-1573`, field declared `hir_lowering/types.spl:158`, initialised `:209/:247`, cleared per module `:312`. Re-entry at same-or-shallower depth returns early. |
+  | 3. O(G²) per-module rebuild of the global fn accumulator | **FIXED** | `module_lowering.spl:1928` is now `val flat_functions: [HirFunction] = lowered_module.functions.values()` — the `while idx < bootstrap_hir_function_count(): flat_functions = flat_functions.push(...)` loop is gone. `bootstrap_hir_function_count` now has only two referencing files (`lowering_helpers.spl`, where it is defined, and an import line in `80.driver/driver_bootstrap.spl`); no per-module rebuild remains. |
+
+  The interpreter-only offshoot this report discovered ("`self.<dict field>[k] = v`
+  inside a `me` method copies the whole target dict, O(size) per write") also
+  **no longer reproduces**. Probe: a class with a `Dict<text,i64>` field, prefilled
+  to N, then 2000 writes to one hot key, run under
+  `env SIMPLE_EXECUTION_MODE=interpreter bin/simple run` (binary: the stale Rust
+  seed at `bin/simple`, mtime 2026-08-16 22:59 — stated because it is not current
+  source):
+
+  | N (prefill) | wall, 2000 hot writes | doc's 2026-07-28 figure |
+  |---|---|---|
+  | 1000 | 0.07 s | 387 ms |
+  | 2000 | 0.07 s | 572 ms |
+  | 4000 | 0.07 s | 929 ms |
+  | 8000 | 0.10 s | 1775 ms |
+
+  Flat, not quadratic (the residual 0.03 s at N=8000 is the linear prefill). No
+  separate interpreter bug needs filing.
+
+  Incidental observation from the same probe, NOT part of this row: under the JIT
+  (`bin/simple run` with no `SIMPLE_EXECUTION_MODE`) `Dict.len()` returned `-1`
+  while the interpreter returned the correct value. That is the old
+  native-`Dict.len()` defect which `.claude/rules/code-style.md` records as fixed
+  2026-08-01 — consistent with `bin/simple` being a pre-fix stale seed, so it is
+  evidence about that binary, not a live regression.
 - **Filed:** 2026-07-28
 - **Severity:** blocks the stage-4 bootstrap run (three-plus modules consume ~72% of total HIR phase time)
 - **Area:** `src/compiler/20.hir/hir_types.spl` (`SymbolTable.define`),
