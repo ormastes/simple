@@ -211,6 +211,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --no-incremental    Disable incremental compilation");
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");
+                println!("  --cache-scope <name> Private cache lane (env: SIMPLE_CACHE_SCOPE)");
                 println!("  --no-mangle         Disable name mangling");
                 println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
                 println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
@@ -312,6 +313,16 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     i += 2;
                 } else {
                     eprintln!("error: --cache-dir requires a directory path");
+                    return 1;
+                }
+            }
+            // See doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+            "--cache-scope" => {
+                if i + 1 < args_vec.len() {
+                    std::env::set_var("SIMPLE_CACHE_SCOPE", &args_vec[i + 1]);
+                    i += 2;
+                } else {
+                    eprintln!("error: --cache-scope requires a scope name");
                     return 1;
                 }
             }
@@ -1494,12 +1505,8 @@ fn execute_native_process(
         }
     };
 
-    let stdout = stdout_reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
+    let stdout = stdout_reader.and_then(|reader| reader.join().ok()).unwrap_or_default();
+    let stderr = stderr_reader.and_then(|reader| reader.join().ok()).unwrap_or_default();
 
     match status {
         Some(status) => (stdout, stderr, status.code().unwrap_or(-1) as i64),
@@ -2101,8 +2108,7 @@ mod tests {
             "i=0; while [ \"$i\" -lt 4096 ]; do printf '0123456789abcdef'; printf 'fedcba9876543210' >&2; i=$((i + 1)); done";
         let args = vec!["-c".to_string(), script.to_string()];
 
-        let (stdout, stderr, exit_code) =
-            execute_native_process("/bin/sh", &args, std::time::Duration::from_secs(5));
+        let (stdout, stderr, exit_code) = execute_native_process("/bin/sh", &args, std::time::Duration::from_secs(5));
 
         assert_eq!(exit_code, 0);
         assert_eq!(stdout.len(), 65_536);
@@ -2119,7 +2125,10 @@ mod tests {
         let (stdout, stderr, exit_code) =
             execute_native_process("/bin/sh", &args, std::time::Duration::from_millis(20));
 
-        assert_eq!((stdout.as_str(), stderr.as_str(), exit_code), ("", "Execution timed out", 124));
+        assert_eq!(
+            (stdout.as_str(), stderr.as_str(), exit_code),
+            ("", "Execution timed out", 124)
+        );
     }
 
     #[test]
@@ -2176,30 +2185,33 @@ mod tests {
         assert_eq!(keys, vec!["alpha".to_string(), "beta".to_string()]);
     }
 }
-    #[test]
-    fn atomic_write_file_replaces_complete_content_and_fails_closed() {
-        assert_eq!(atomic_write_parent(Path::new("state.txt")), Path::new("."));
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("state.txt");
-        std::fs::write(&target, b"old").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4740)).unwrap();
-        }
-
-        assert!(atomic_write_file(&target, b"complete replacement"));
-        assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777, 0o4740);
-        }
-
-        let occupied = dir.path().join("occupied");
-        std::fs::create_dir(&occupied).unwrap();
-        let before = std::fs::read_dir(dir.path()).unwrap().count();
-        assert!(!atomic_write_file(&occupied, b"must not replace a directory"));
-        assert!(occupied.is_dir());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+#[test]
+fn atomic_write_file_replaces_complete_content_and_fails_closed() {
+    assert_eq!(atomic_write_parent(Path::new("state.txt")), Path::new("."));
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("state.txt");
+    std::fs::write(&target, b"old").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4740)).unwrap();
     }
+
+    assert!(atomic_write_file(&target, b"complete replacement"));
+    assert_eq!(std::fs::read(&target).unwrap(), b"complete replacement");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o4740
+        );
+    }
+
+    let occupied = dir.path().join("occupied");
+    std::fs::create_dir(&occupied).unwrap();
+    let before = std::fs::read_dir(dir.path()).unwrap().count();
+    assert!(!atomic_write_file(&occupied, b"must not replace a directory"));
+    assert!(occupied.is_dir());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+}
