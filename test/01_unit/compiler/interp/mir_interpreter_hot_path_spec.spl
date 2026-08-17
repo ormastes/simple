@@ -1,0 +1,182 @@
+# MIR interpreter hot-path spec (Phase D startup-perf slice).
+#
+# Correctness oracle for the measured incremental optimizations in
+# src/compiler/95.interp/mir_interpreter.spl (cached debug-log gate,
+# single-lookup cached callee resolution, one-pass callee local init).
+# Semantics must be IDENTICAL to the pre-optimization reference path:
+# arith, branch, call, and loop results are pinned to expected constants,
+# and the debug-log gate is accessor-observable (off by default, togglable).
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+fn hp_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn hp_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.new(0),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: nil
+    )
+
+fn hp_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn hp_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: insts, terminator: term)
+
+fn hp_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn hp_str_operand(s: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(s), MirType.i64()))
+
+# fn arith() = (7 + 5) * 3 - 4
+fn hp_arith_fn() -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Temp), hp_local(1, LocalKind.Temp), hp_local(2, LocalKind.Temp)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.BinOp(hp_lid(0), MirBinOp.Add, mir_operand_const_int(7), mir_operand_const_int(5))),
+        hp_inst(MirInstKind.BinOp(hp_lid(1), MirBinOp.Mul, mir_operand_copy(hp_lid(0)), mir_operand_const_int(3))),
+        hp_inst(MirInstKind.BinOp(hp_lid(2), MirBinOp.Sub, mir_operand_copy(hp_lid(1)), mir_operand_const_int(4)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(2)))))
+    hp_fn("arith", locals, [b0])
+
+# fn branch(c) = if c != 0: 7 else: 9 -- c preloaded as a Const in b0
+fn hp_branch_fn(c: i64) -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Var)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.Const(hp_lid(0), MirConstValue.Int(c), MirType.i64()))
+    ], MirTerminator.If(mir_operand_copy(hp_lid(0)), BlockId.new(1), BlockId.new(2)))
+    val b1 = hp_blk(1, [], MirTerminator.Ret(Some(mir_operand_const_int(7))))
+    val b2 = hp_blk(2, [], MirTerminator.Ret(Some(mir_operand_const_int(9))))
+    hp_fn("branch", locals, [b0, b1, b2])
+
+# sum 0..n-1 via loop
+fn hp_loop_fn(n: i64) -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Var), hp_local(1, LocalKind.Var), hp_local(2, LocalKind.Temp)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.Const(hp_lid(0), MirConstValue.Int(0), MirType.i64())),
+        hp_inst(MirInstKind.Const(hp_lid(1), MirConstValue.Int(0), MirType.i64()))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b1 = hp_blk(1, [
+        hp_inst(MirInstKind.BinOp(hp_lid(2), MirBinOp.Lt, mir_operand_copy(hp_lid(0)), mir_operand_const_int(n)))
+    ], MirTerminator.If(mir_operand_copy(hp_lid(2)), BlockId.new(2), BlockId.new(3)))
+    val b2 = hp_blk(2, [
+        hp_inst(MirInstKind.BinOp(hp_lid(1), MirBinOp.Add, mir_operand_copy(hp_lid(1)), mir_operand_copy(hp_lid(0)))),
+        hp_inst(MirInstKind.BinOp(hp_lid(0), MirBinOp.Add, mir_operand_copy(hp_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b3 = hp_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(1)))))
+    hp_fn("loop_sum", locals, [b0, b1, b2, b3])
+
+# callee add1(a) = a + 1
+fn hp_callee_fn() -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Arg(0)), hp_local(1, LocalKind.Temp)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.BinOp(hp_lid(1), MirBinOp.Add, mir_operand_copy(hp_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(1)))))
+    hp_fn("add1", locals, [b0])
+
+# caller: loop n times, acc = add1(acc) -- exercises the cached callee lookup
+fn hp_call_loop_fn(n: i64) -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Var), hp_local(1, LocalKind.Var), hp_local(2, LocalKind.Temp)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.Const(hp_lid(0), MirConstValue.Int(0), MirType.i64())),
+        hp_inst(MirInstKind.Const(hp_lid(1), MirConstValue.Int(0), MirType.i64()))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b1 = hp_blk(1, [
+        hp_inst(MirInstKind.BinOp(hp_lid(2), MirBinOp.Lt, mir_operand_copy(hp_lid(0)), mir_operand_const_int(n)))
+    ], MirTerminator.If(mir_operand_copy(hp_lid(2)), BlockId.new(2), BlockId.new(3)))
+    val b2 = hp_blk(2, [
+        hp_inst(MirInstKind.Call(Some(hp_lid(1)), hp_str_operand("add1"), [mir_operand_copy(hp_lid(1))])),
+        hp_inst(MirInstKind.BinOp(hp_lid(0), MirBinOp.Add, mir_operand_copy(hp_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b3 = hp_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(1)))))
+    hp_fn("call_loop", locals, [b0, b1, b2, b3])
+
+describe "MIR interpreter hot path (Phase D slice)":
+    it "arith: (7 + 5) * 3 - 4 == 32":
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(hp_arith_fn())
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(32)
+
+    it "branch: nonzero condition takes the then block":
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(hp_branch_fn(1))
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(7)
+
+    it "branch: zero condition takes the else block":
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(hp_branch_fn(0))
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(9)
+
+    it "loop: sum 0..49 == 1225":
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(hp_loop_fn(50))
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(1225)
+
+    it "call: repeated direct calls through the cached lookup give 5":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["add1"] = hp_callee_fn()
+        interp.set_function_table(table)
+        val res = interp.execute_function(hp_call_loop_fn(5))
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(5)
+
+    it "call result is identical across two runs (cache warm vs cold)":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["add1"] = hp_callee_fn()
+        interp.set_function_table(table)
+        val cold = interp.execute_function(hp_call_loop_fn(4))
+        val warm = interp.execute_function(hp_call_loop_fn(4))
+        expect(cold[0] ?? -1).to_equal(4)
+        expect(warm[0] ?? -1).to_equal(4)
+
+    it "debug logging is off by default (accessor-observed)":
+        var interp = MirInterpreter.create()
+        expect(interp.is_debug_log_enabled()).to_equal(false)
+
+    it "debug logging can be enabled and disabled via the gate":
+        var interp = MirInterpreter.create()
+        interp.set_debug_log_enabled(true)
+        expect(interp.is_debug_log_enabled()).to_equal(true)
+        # Execution semantics unchanged while enabled
+        val res = interp.execute_function(hp_arith_fn())
+        expect(res[0] ?? -1).to_equal(32)
+        interp.set_debug_log_enabled(false)
+        expect(interp.is_debug_log_enabled()).to_equal(false)

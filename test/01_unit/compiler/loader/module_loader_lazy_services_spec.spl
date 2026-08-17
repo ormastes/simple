@@ -1,0 +1,89 @@
+"""
+# Module Loader Lazy Services
+
+Phase D (startup perf plan 2026-08-17): ModuleLoader construction must not
+build heavy services (compiler ctx, ObjTaker, provider, JIT, mapper,
+lifecycle/cache). Services are created on first use by ensure_* helpers, and
+a disabled JIT config never creates the JIT service through symbol lookup.
+"""
+
+use compiler.loader.loader.module_loader.{
+    LazyModuleLoaderConfig, lazymoduleloaderconfig_default,
+    lazymoduleloader_new, lazymoduleloader_with_defaults,
+    moduleloader_load, moduleloader_resolve_symbol,
+    moduleloader_any_heavy_service_created,
+    moduleloader_compiler_ctx_created, moduleloader_obj_taker_created,
+    moduleloader_provider_created, moduleloader_jit_service_created,
+    moduleloader_loader_mapper_created, moduleloader_lifecycle_created
+}
+
+fn lazy_default_config() -> LazyModuleLoaderConfig:
+    lazymoduleloaderconfig_default()
+
+fn lazy_no_jit_config() -> LazyModuleLoaderConfig:
+    LazyModuleLoaderConfig(
+        enable_jit: false,
+        enable_cache: true,
+        max_cache_size: 100,
+        verbose: false,
+        hot_reload: false
+    )
+
+describe "Module Loader Lazy Services":
+    """Construction-time laziness and first-use service creation."""
+
+    it "creates no heavy services at construction":
+        val loader = lazymoduleloader_new(lazy_default_config())
+        expect(moduleloader_any_heavy_service_created(loader)).to_equal(false)
+        expect(moduleloader_compiler_ctx_created(loader)).to_equal(false)
+        expect(moduleloader_obj_taker_created(loader)).to_equal(false)
+        expect(moduleloader_provider_created(loader)).to_equal(false)
+        expect(moduleloader_jit_service_created(loader)).to_equal(false)
+        expect(moduleloader_loader_mapper_created(loader)).to_equal(false)
+        expect(moduleloader_lifecycle_created(loader)).to_equal(false)
+
+    it "creates no heavy services via with_defaults either":
+        val loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_any_heavy_service_created(loader)).to_equal(false)
+
+    it "symbol lookup creates exactly lifecycle and jit, not provider or obj_taker":
+        val loader = lazymoduleloader_new(lazy_default_config())
+        match moduleloader_resolve_symbol(loader, "no_such_symbol_lazy_spec"):
+            case NotFound(_):
+                expect(true).to_equal(true)
+            case _:
+                expect("unexpected resolve result").to_equal("NotFound")
+        expect(moduleloader_lifecycle_created(loader)).to_equal(true)
+        expect(moduleloader_jit_service_created(loader)).to_equal(true)
+        expect(moduleloader_provider_created(loader)).to_equal(false)
+        expect(moduleloader_obj_taker_created(loader)).to_equal(false)
+        expect(moduleloader_compiler_ctx_created(loader)).to_equal(false)
+
+    it "module load attempt creates provider, lifecycle, and exec-mapper host":
+        val loader = lazymoduleloader_new(lazy_default_config())
+        match moduleloader_load(loader, "/nonexistent/lazy_spec_module.smf"):
+            case Error(_):
+                expect(true).to_equal(true)
+            case _:
+                expect("unexpected load result").to_equal("Error")
+        expect(moduleloader_provider_created(loader)).to_equal(true)
+        expect(moduleloader_lifecycle_created(loader)).to_equal(true)
+        expect(moduleloader_jit_service_created(loader)).to_equal(true)
+        expect(moduleloader_obj_taker_created(loader)).to_equal(false)
+
+    it "disabled jit config never creates the JIT service on lookup (fail-closed)":
+        val loader = lazymoduleloader_new(lazy_no_jit_config())
+        match moduleloader_resolve_symbol(loader, "no_such_symbol_nojit_spec"):
+            case NotFound(_):
+                expect(true).to_equal(true)
+            case _:
+                expect("unexpected resolve result").to_equal("NotFound")
+        expect(moduleloader_jit_service_created(loader)).to_equal(false)
+        expect(moduleloader_lifecycle_created(loader)).to_equal(true)
+
+    it "repeated lookups keep working and do not duplicate services":
+        val loader = lazymoduleloader_new(lazy_default_config())
+        val _r1 = moduleloader_resolve_symbol(loader, "sym_a_lazy_spec")
+        val _r2 = moduleloader_resolve_symbol(loader, "sym_a_lazy_spec")
+        expect(moduleloader_jit_service_created(loader)).to_equal(true)
+        expect(moduleloader_lifecycle_created(loader)).to_equal(true)

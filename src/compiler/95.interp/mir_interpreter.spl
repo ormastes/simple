@@ -14,7 +14,7 @@
 #
 # Port of rust/compiler/src/codegen/mir_interpreter.rs (1,058 lines)
 
-use std.log.{debug}
+use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
 use compiler.common.diagnostics.span.{Span}
 
@@ -102,11 +102,26 @@ class MirInterpreter:
     strict_mode: bool       # Miri-mode: SIMPLE_STRICT_INTERP=1, read once at create()
     current_function: text  # Name of the function currently executing
     error_frames: [text]    # Innermost-first frame names captured when an error escapes
+    # Perf (Phase D): log-facade debug() costs an rt_env_get + string compares
+    # per call even when the level gate rejects it. Cache the verdict once at
+    # create() (level-gated, default off) instead of paying the facade on the
+    # execute_function hot path. Toggle via set_debug_log_enabled for tests.
+    debug_enabled: bool
+    # Perf (Phase D): repeated direct calls to the same callee re-do a
+    # contains() + [] pair on function_table per call. Cache the last
+    # resolved (name, function). Invalidated by set_function_table.
+    cached_call_name: text
+    cached_call_fn: MirFunction?
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
         """Create a new interpreter instance."""
-        debug("interp", "Creating MIR interpreter instance")
+        # Level-gated (default off): read the log level ONCE here; the facade
+        # itself costs an env read + string compares per call, too expensive
+        # for the dispatch hot path.
+        val dbg = log_get_level() <= LOG_DEBUG
+        if dbg:
+            debug("interp", "Creating MIR interpreter instance")
         MirInterpreter(
             locals: {},
             globals: {},
@@ -125,8 +140,20 @@ impl MirInterpreter:
             # never re-read per instruction.
             strict_mode: (rt_env_get("SIMPLE_STRICT_INTERP") ?? "") == "1",
             current_function: "<toplevel>",
-            error_frames: []
+            error_frames: [],
+            debug_enabled: dbg,
+            cached_call_name: "",
+            cached_call_fn: nil
         )
+
+    fn is_debug_log_enabled() -> bool:
+        """Accessor: is per-run debug logging active? Cached once at create."""
+        self.debug_enabled
+
+    me set_debug_log_enabled(on: bool):
+        """Enable/disable the cached debug-log gate (observability only --
+        never affects execution semantics)."""
+        self.debug_enabled = on
 
     me _record_error_frame():
         """Record the currently-executing function as an unwound error frame.
@@ -206,8 +233,26 @@ impl MirInterpreter:
 
     me set_function_table(table: {text: MirFunction}):
         """Set the function table for cross-function calls."""
-        debug("interp", "Setting function table ({table.keys().len()} functions)")
+        if self.debug_enabled:
+            debug("interp", "Setting function table ({table.keys().len()} functions)")
         self.function_table = table
+        # Invalidate the direct-call cache: entries may have changed.
+        self.cached_call_name = ""
+        self.cached_call_fn = nil
+
+    me _resolve_function(name: text) -> MirFunction?:
+        """Resolve a callee by name with a one-entry cache for repeated
+        direct calls (hot in call-heavy loops). Semantics identical to
+        contains()+[] on function_table; cache invalidated whenever the
+        table is replaced (set_function_table)."""
+        if name == self.cached_call_name and self.cached_call_fn.?:
+            return self.cached_call_fn
+        if self.function_table.contains(name):
+            val f = self.function_table[name]
+            self.cached_call_name = name
+            self.cached_call_fn = Some(f)
+            return Some(f)
+        nil
 
     # ========================================================================
     # Instruction Execution
@@ -319,9 +364,9 @@ impl MirInterpreter:
                 val func_name = _extract_func_name(call_target)
                 if func_name.?:
                     val name = func_name.unwrap()
-                    val has_func = self.function_table.contains(name)
-                    if has_func:
-                        val callee = self.function_table[name]
+                    val callee_opt = self._resolve_function(name)
+                    if callee_opt.?:
+                        val callee = callee_opt.unwrap()
                         val call_result = self._call_function(callee, args)
                         if call_result[1].?:
                             return call_result[1]
@@ -343,9 +388,9 @@ impl MirInterpreter:
                 val func_name = _extract_func_name(ptr)
                 if func_name.?:
                     val name = func_name.unwrap()
-                    val has_func = self.function_table.contains(name)
-                    if has_func:
-                        val callee = self.function_table[name]
+                    val callee_opt = self._resolve_function(name)
+                    if callee_opt.?:
+                        val callee = callee_opt.unwrap()
                         val call_result = self._call_function(callee, args)
                         if call_result[1].?:
                             return call_result[1]
@@ -668,17 +713,16 @@ impl MirInterpreter:
         for block in callee.blocks:
             self.blocks[block.id.id] = block
 
-        # Initialize callee locals
+        # Initialize callee locals and bind arguments in one pass (perf:
+        # avoids a second dict write per Arg local; same resulting state).
         for local in callee.locals:
-            self.locals[local.id.id] = 0
-
-        # Bind arguments to parameter locals
-        for local in callee.locals:
+            var init_val: i64 = 0
             match local.kind:
                 case Arg(index):
                     if index < arg_values.len():
-                        self.locals[local.id.id] = arg_values[index]
+                        init_val = arg_values[index]
                 case _: pass
+            self.locals[local.id.id] = init_val
 
         # Start at entry block
         self.current_block = Some(callee.entry_block.id)
@@ -872,7 +916,8 @@ impl MirInterpreter:
 
     me execute_function(func: MirFunction) -> (i64?, InterpError?):
         """Execute a MIR function and return result."""
-        debug("interp", "Executing function: {func.name} ({func.blocks.len()} blocks, {func.locals.len()} locals)")
+        if self.debug_enabled:
+            debug("interp", "Executing function: {func.name} ({func.blocks.len()} blocks, {func.locals.len()} locals)")
         self.current_function = func.name
         self.error_frames = []
         # Initialize blocks
@@ -914,7 +959,8 @@ impl MirInterpreter:
             max_iterations = max_iterations - 1
 
         if max_iterations == 0:
-            debug("interp", "Infinite loop detected in function: {func.name}")
+            if self.debug_enabled:
+                debug("interp", "Infinite loop detected in function: {func.name}")
             self._record_error_frame()
             return (nil, Some(InterpError.RuntimeError(message: "Infinite loop detected")))
 
@@ -967,9 +1013,9 @@ impl MirInterpreter:
                 val func_name = _extract_func_name(call_target)
                 if func_name.?:
                     val name = func_name.unwrap()
-                    val has_func = self.function_table.contains(name)
-                    if has_func:
-                        val callee = self.function_table[name]
+                    val callee_opt = self._resolve_function(name)
+                    if callee_opt.?:
+                        val callee = callee_opt.unwrap()
                         val call_result = self._call_function(callee, args)
                         if call_result[1].?:
                             # Error during call - jump to unwind if available
