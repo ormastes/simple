@@ -1,0 +1,212 @@
+"""Class-detection spec for the "SFFI bridge silently returns empty" defect class.
+
+Related bug: doc/08_tracking/bug/smf_reader_bridge_silent_nil.md
+
+The defect class is NOT "one extern was missing". It is: a reader whose data
+path runs through an unregistered extern still reports SUCCESS, and hands back
+a well-formed but EMPTY answer. Nothing crashes, nothing logs, and the caller
+cannot tell an empty module from a module it failed to read.
+
+The generalizing invariant asserted here is a DIFFERENTIAL one, and it holds
+regardless of which extern is or is not implemented:
+
+    for the same bytes, the file-backed reader (SmfReaderImpl) and the
+    in-memory reader (SmfReaderMemory, ~919 lines of pure Simple with no
+    externs at all) must agree.
+
+SmfReaderMemory is the oracle: it has no extern in its path, so it cannot
+exhibit this defect and it cannot be silently emptied. Any future change that
+re-routes a reader back onto an unimplemented extern -- or onto any bridge that
+fails open -- breaks parity here even if the reproducing spec's specific
+assertions were re-tuned around it.
+
+The last two examples pin NON-VACUITY: the oracle itself must report non-empty
+for a non-empty input, so a run where BOTH readers return empty is a failure
+rather than a spurious pass.
+"""
+
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use std.io_runtime.{file_write_bytes}
+
+fn push_u32_le(out: [u8], v: i64) -> [u8]:
+    var o = out
+    o.push((v % 256) as u8)
+    o.push(((v / 256) % 256) as u8)
+    o.push(((v / 65536) % 256) as u8)
+    o.push(((v / 16777216) % 256) as u8)
+    o
+
+fn push_u64_le(out: [u8], v: i64) -> [u8]:
+    var o = push_u32_le(out, v)
+    o = push_u32_le(o, 0)
+    o
+
+fn pad_to(out: [u8], n: i64) -> [u8]:
+    var o = out
+    while o.len() < n:
+        o.push(0)
+    o
+
+fn build_header(section_count: i64, symbol_table_offset: i64, symbol_count: i64) -> [u8]:
+    var h: [u8] = []
+    h.push(83)
+    h.push(77)
+    h.push(70)
+    h.push(0)
+    h.push(1)
+    h.push(1)
+    h.push(1)
+    h.push(0)
+    h = push_u32_le(h, 0)
+    h.push(0)
+    h = pad_to(h, 16)
+    h = push_u32_le(h, section_count)
+    h = push_u64_le(h, 0)
+    h = push_u64_le(h, symbol_table_offset)
+    h = push_u32_le(h, symbol_count)
+    h = push_u32_le(h, symbol_count)
+    h = push_u64_le(h, 0)
+    h = push_u32_le(h, 0)
+    h = push_u32_le(h, 0)
+    pad_to(h, 128)
+
+fn build_symbol(name_offset: i64, value: i64, size: i64) -> [u8]:
+    var s: [u8] = []
+    s = push_u32_le(s, name_offset)
+    s = push_u32_le(s, 0)
+    s.push(1)
+    s.push(1)
+    s.push(0)
+    s.push(0)
+    s = pad_to(s, 16)
+    s = push_u64_le(s, value)
+    s = push_u64_le(s, size)
+    s = push_u32_le(s, 0)
+    s = push_u32_le(s, 0)
+    s.push(0)
+    s = pad_to(s, 48)
+    s = push_u64_le(s, 0)
+    pad_to(s, 56)
+
+fn append_all(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn append_name(dst: [u8], bytes: [u8]) -> [u8]:
+    var out = append_all(dst, bytes)
+    out.push(0)
+    out
+
+# Symbol names as raw byte arrays, so no interpolation is involved anywhere.
+fn name_alpha() -> [u8]:
+    [97, 108, 112, 104, 97]
+
+fn name_beta() -> [u8]:
+    [98, 101, 116, 97]
+
+fn name_gamma() -> [u8]:
+    [103, 97, 109, 109, 97]
+
+# Zero symbols -- the degenerate case the broken bridge was accidentally
+# CORRECT about. It must stay correct.
+fn fixture_no_symbols() -> [u8]:
+    build_header(0, 128, 0)
+
+# One symbol.
+fn fixture_one_symbol() -> [u8]:
+    var data = build_header(0, 128, 1)
+    data = append_all(data, build_symbol(1, 0, 16))
+    data.push(0)
+    append_name(data, name_alpha())
+
+# Three symbols -- string-table offsets 1, 7, 12.
+fn fixture_three_symbols() -> [u8]:
+    var data = build_header(0, 128, 3)
+    data = append_all(data, build_symbol(1, 0, 8))
+    data = append_all(data, build_symbol(7, 8, 24))
+    data = append_all(data, build_symbol(12, 32, 40))
+    data.push(0)
+    data = append_name(data, name_alpha())
+    data = append_name(data, name_beta())
+    append_name(data, name_gamma())
+
+fn write_fixture(tag: text, data: [u8]) -> text:
+    val path = "/tmp/smf_bridge_parity_" + tag + ".smf"
+    expect(file_write_bytes(path, data)).to_equal(true)
+    path
+
+# The differential check itself, applied to one fixture.
+fn assert_parity(tag: text, data: [u8]):
+    val path = write_fixture(tag, data)
+
+    val oracle_result = SmfReaderMemory.from_data(data)
+    expect(oracle_result.is_ok()).to_equal(true)
+    val oracle = oracle_result.unwrap()
+
+    val subject_result = SmfReaderImpl.open(path)
+    expect(subject_result.is_ok()).to_equal(true)
+    val subject = subject_result.unwrap()
+
+    # Header parity.
+    expect(subject.header.symbol_count).to_equal(oracle.get_header().symbol_count)
+    expect(subject.header.section_count).to_equal(oracle.get_header().section_count)
+
+    # Symbol-set parity: every symbol the oracle can see, the subject must see.
+    for sym in oracle.exported_symbols():
+        val found = subject.lookup_symbol(sym.name)
+        expect(found.is_ok()).to_equal(true)
+        expect(found.unwrap().size).to_equal(sym.size)
+
+    # Cardinality parity -- catches a subject that "finds" everything by
+    # returning a wildcard, and a subject that quietly drops entries.
+    expect(subject.exported_symbols().len()).to_equal(oracle.exported_symbols().len())
+
+describe "SMF reader bridges never fail open into an empty answer":
+    """
+    ## Differential parity against an extern-free oracle
+
+    Detects the whole "unimplemented extern yields a silent empty success"
+    class, not just the six `rt_smf_reader_*` symbols that triggered the
+    original report.
+    """
+
+    it "agrees with the in-memory oracle on a module with no symbols":
+        assert_parity("none", fixture_no_symbols())
+
+    it "agrees with the in-memory oracle on a module with one symbol":
+        assert_parity("one", fixture_one_symbol())
+
+    it "agrees with the in-memory oracle on a module with three symbols":
+        assert_parity("three", fixture_three_symbols())
+
+    it "propagates a read failure instead of reporting an empty success":
+        # A path that does not exist must be an Err. The defining symptom of
+        # this class was Ok-with-nothing-in-it.
+        val result = SmfReaderImpl.open("/tmp/smf_bridge_parity_absent_7c21.smf")
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects a file that is not SMF instead of reporting an empty success":
+        var junk: [u8] = [0, 1, 2, 3]
+        while junk.len() < 300:
+            junk.push(7)
+        val path = write_fixture("junk", junk)
+        expect(SmfReaderImpl.open(path).is_err()).to_equal(true)
+
+    # ---- non-vacuity guards for the oracle itself ----
+
+    it "the oracle reports a non-empty symbol set for a non-empty fixture":
+        val oracle = SmfReaderMemory.from_data(fixture_three_symbols()).unwrap()
+        expect(oracle.get_header().symbol_count).to_equal(3)
+        expect(oracle.exported_symbols().len()).to_equal(3)
+
+    it "the oracle resolves each fixture symbol by its real name":
+        val oracle = SmfReaderMemory.from_data(fixture_three_symbols()).unwrap()
+        expect(oracle.lookup_symbol("alpha").is_ok()).to_equal(true)
+        expect(oracle.lookup_symbol("beta").is_ok()).to_equal(true)
+        expect(oracle.lookup_symbol("gamma").is_ok()).to_equal(true)
+        expect(oracle.lookup_symbol("not_present").is_err()).to_equal(true)
