@@ -46,3 +46,91 @@ must decide before source edits.
 5. Keep the conflict diagnostic fail-closed; no import reshuffling, local type
    renaming, Rust-seed fallback, stub generation, or source exclusion may be
    accepted as the root fix.
+
+---
+
+## RE-VERIFICATION 2026-08-17 (c_splmisc lane) — ALREADY FIXED BY CONTENT. Close.
+
+Classified by CONTENT, not by SHA (SHAs are rewritten constantly in this repo
+and prove nothing in either direction).
+
+`src/compiler/90.tools/lint/_LintMain/config_and_model.spl` today contains
+**zero** declarations of `enum LintCategory`:
+
+```
+$ /usr/bin/grep -c '^ *enum LintCategory' src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+0
+$ /usr/bin/grep -n 'LintCategory' src/compiler/90.tools/lint/_LintMain/config_and_model.spl
+19:use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
+723:# A second local `enum LintCategory` used to be declared here, colliding with
+731:    category: LintCategory
+737:    fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint:
+```
+
+Only the single import at line 19 survives. Lines 722-726 are an explicit
+tombstone comment recording the removal and its rationale (the two declarations
+had byte-identical variant sets, so the local one was pure duplication — the
+same defect already fixed for `LintLevel`). Lines 731 and 737 are *uses* of the
+imported type, not declarations.
+
+**The triage evidence column for this row is FALSE.** It asserted "line 737
+declares enum LintCategory"; line 737 is the signature
+`fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint`
+— a type reference. Anyone re-triaging from that column will reopen a dead bug.
+
+No code change made. No spec written: a content-close is not a fix, and the
+project's two-spec rule applies to fixes.
+
+Residual worth stating: the resolution chosen was deduplication (single
+canonical import), which satisfies remediation item 5 (the fail-closed terminal
+collision diagnostic was NOT weakened). Remediation item 4 — the canonical
+cache-backed Stage 4 rebuild — was NOT run here: a user bootstrap was live and
+`build/bootstrap/**` was off-limits.
+
+---
+
+## INDEPENDENT re-verification 2026-08-17 (bug-triage lane) — CONFIRMS the close
+
+The stamp above was NOT taken on trust: re-verification stamps in this tracker
+have been wrong on a material fraction of the rows they touch, so the content
+claim was re-derived from scratch. It holds.
+
+Exhaustive declaration census over both implicated trees (GNU
+`/usr/bin/grep`, not the ambient ugrep, which honours `.gitignore`):
+
+```
+$ /usr/bin/grep -rn "enum LintCategory\|enum LintLevel" \
+    src/compiler/90.tools/lint/ src/lib/nogc_sync_mut/tooling/easy_fix/
+src/compiler/90.tools/lint/_LintMain/config_and_model.spl:723:# A second local `enum LintCategory` used to be declared here, colliding with
+src/lib/nogc_sync_mut/tooling/easy_fix/types.spl:8:pub enum LintLevel:
+src/lib/nogc_sync_mut/tooling/easy_fix/types.spl:13:pub enum LintCategory:
+```
+
+**Exactly ONE declaration of each enum survives, and both are in the single
+canonical module `src/lib/nogc_sync_mut/tooling/easy_fix/types.spl`.** The only
+hit inside the lint tree is a comment. Every other `LintLevel`/`LintCategory`
+occurrence in `config_and_model.spl` (lines 19, 317-326, 434-457, 477, 523-533,
+597-609, 730-737) is an import or a type *reference* — never a declaration. A
+terminal collision between two declarations is therefore not constructible from
+current source: there is no second terminal to collide with.
+
+Also linted the surviving canonical declaration site (one file at a time — cost
+here is superlinear in declaration content, and batching two files has exceeded
+600s where one took 119s):
+
+```
+$ sh scripts/check/lint-cached.shs src/lib/nogc_sync_mut/tooling/easy_fix/types.spl
+PASS — 1 file(s) checked (0 cached, 1 linted)
+```
+
+**Row RETIRED.** Caveats carried forward unchanged, and deliberately not
+papered over: (a) the 2026-08-03 runtime failure itself was NOT re-run — no
+self-hosted stage2/stage3 binary exists in this checkout, `bin/simple` is the
+Rust seed (mtime 2026-08-16 22:59) which never reads `src/compiler/**.spl` as
+compiler logic, and `build/bootstrap/**` was off-limits to this lane; the close
+rests on the collision being unconstructible from source, which is the stronger
+claim anyway. (b) Remediation item 5 is satisfied — the fail-closed terminal
+collision diagnostic was NOT weakened; the fix was deduplication. (c) No specs
+added: this row is retired as a content-close, not a fix, so the two-spec rule
+does not attach. (d) The `evidence` column for this row remains FALSE (it cites
+line 737, a function signature, as a declaration) — do not re-triage from it.
