@@ -10,6 +10,17 @@ the lane's capacity transitions (book / hold / cancel / no-show / open slots).
 use std.spec
 use lanes.reservation.{Reservation, validate_reservation, can_book, book, hold, cancel, no_show, open_slots, submit_reservation_write}
 use framework.guarded.{Tenant, Actor, Session}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_open}
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+
+# Each scenario opens its own durable store: the interpreter backend caches
+# open databases per path in-process, so every it-block gets a fresh path.
+fn fresh_store(name: text) -> EnterpriseStore:
+    dir_create_all("build/test-artifacts")
+    val db = "build/test-artifacts/erp_reservation_lane_" + name + ".db"
+    if file_exists(db):
+        file_delete(db)
+    store_open(db)
 
 describe "Reservation lane — guarded writes":
     it "accepts a valid write through the gate":
@@ -17,8 +28,8 @@ describe "Reservation lane — guarded writes":
         val user = Actor { id: 1, name: "Mina", role: "operator" }
         val session = Session { token: "sess-1", user_id: 1, tenant_id: "t1", active: true }
         val r = Reservation { id: 1, resource: "room A", kind: "meeting", capacity: 10, booked: 6, status: "open", deposit: 0 }
-        var used: [text] = []
-        val res = submit_reservation_write(session, tenant, user, r, "resv-1", used)
+        val store = fresh_store("s1")
+        val res = submit_reservation_write(session, tenant, user, r, "resv-1", store)
         expect(res.ok).to_equal(true)
         expect(res.reason).to_equal("accepted")
         expect(res.ledger_key).to_equal("resv-1")
@@ -28,8 +39,8 @@ describe "Reservation lane — guarded writes":
         val user = Actor { id: 1, name: "Mina", role: "operator" }
         val session = Session { token: "sess-1", user_id: 1, tenant_id: "t1", active: false }
         val r = Reservation { id: 1, resource: "room A", kind: "meeting", capacity: 10, booked: 6, status: "open", deposit: 0 }
-        var used: [text] = []
-        val res = submit_reservation_write(session, tenant, user, r, "resv-1", used)
+        val store = fresh_store("s2")
+        val res = submit_reservation_write(session, tenant, user, r, "resv-1", store)
         assert_false(res.ok)
         expect(res.reason).to_equal("invalid-session")
 
@@ -38,8 +49,8 @@ describe "Reservation lane — guarded writes":
         val user = Actor { id: 3, name: "Jae", role: "auditor" }
         val session = Session { token: "sess-3", user_id: 3, tenant_id: "t1", active: true }
         val r = Reservation { id: 1, resource: "room A", kind: "meeting", capacity: 10, booked: 6, status: "open", deposit: 0 }
-        var used: [text] = []
-        val res = submit_reservation_write(session, tenant, user, r, "resv-1", used)
+        val store = fresh_store("s3")
+        val res = submit_reservation_write(session, tenant, user, r, "resv-1", store)
         assert_false(res.ok)
         expect(res.reason).to_equal("forbidden")
 
@@ -48,8 +59,8 @@ describe "Reservation lane — guarded writes":
         val user = Actor { id: 1, name: "Mina", role: "operator" }
         val session = Session { token: "sess-1", user_id: 1, tenant_id: "t1", active: true }
         val r = Reservation { id: 1, resource: "room A", kind: "meeting", capacity: 4, booked: 9, status: "open", deposit: 0 }
-        var used: [text] = []
-        val res = submit_reservation_write(session, tenant, user, r, "resv-1", used)
+        val store = fresh_store("s4")
+        val res = submit_reservation_write(session, tenant, user, r, "resv-1", store)
         assert_false(res.ok)
         expect(res.reason).to_equal("invalid-record")
 
@@ -58,9 +69,9 @@ describe "Reservation lane — guarded writes":
         val user = Actor { id: 1, name: "Mina", role: "operator" }
         val session = Session { token: "sess-1", user_id: 1, tenant_id: "t1", active: true }
         val r = Reservation { id: 1, resource: "room A", kind: "meeting", capacity: 10, booked: 6, status: "open", deposit: 0 }
-        var used: [text] = []
-        used.push("resv-1")
-        val res = submit_reservation_write(session, tenant, user, r, "resv-1", used)
+        val store = fresh_store("s5")
+        submit_reservation_write(session, tenant, user, r, "resv-1", store)
+        val res = submit_reservation_write(session, tenant, user, r, "resv-1", store)
         assert_false(res.ok)
         expect(res.reason).to_equal("duplicate-key")
 

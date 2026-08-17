@@ -1,0 +1,162 @@
+"""
+# Enterprise Web App — shared hardened-dispatch helpers
+
+Shared by `main.spl` and the sibling route modules (`booking_routes`,
+`restaurant_routes`, `hcm_routes`, `procurement_routes`, `finance_routes`,
+`dashboard`): HTML escaping for ALL business data, form-body parsing, the
+shared security-header policy wrapper, and the FROZEN denial-reason -> HTTP
+status mapping.
+
+## Mapping completeness
+`deny()` covers the WHOLE closed set `foundation.reason_set()` — every reason
+has an explicit arm rather than falling into the 409 default by accident.
+The two reasons no web route emits today (`store-error`,
+`invalid-credentials`) are mapped here anyway, because the closed set is an
+executable predicate and a new emitter must not silently inherit a 409.
+
+Denial mapping (CommandResult.reason -> HTTP):
+- invalid-session | invalid-credentials -> 401
+- forbidden -> 403
+- not-found | no-session | line-not-found -> 404
+- conflict | table-occupied | session-closed | invalid-transition |
+  unserved-lines | insufficient-stock | invalid-record -> 409
+- store-error -> 500
+- accepted / duplicate-key never reach deny(): a success and an idempotent
+  replay both return the recorded result with 200.
+"""
+
+use std.common.string_core.{char_code, char_from_code}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.http_server.response.{with_default_security_headers}
+
+# esc HTML-escapes ALL interpolated business data.
+fn esc(s: text) -> text:
+    var out = s.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+    out = out.replace("\"", "&quot;")
+    out = out.replace("'", "&#39;")
+    out
+
+# hex_nibble maps one hex digit to 0..15; anything else is -1.
+fn hex_nibble(c: text) -> i64:
+    val code = char_code(c)
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 87
+    if code >= 65 and code <= 70:
+        return code - 55
+    -1
+
+# percent_decode decodes ONE application/x-www-form-urlencoded token exactly
+# once: `+` -> space, `%XX` -> that byte, everything else verbatim.
+#
+# Fails CLOSED — returns (false, "") — rather than passing the raw text
+# through, for every malformed shape: a truncated `%` or `%A` at the end, a
+# non-hex `%ZZ`, and an encoded NUL (`%00`). Passing the raw text through on a
+# bad escape is the filter-bypass: a later stage would then inspect text that
+# is not what the client actually sent.
+#
+# Decoding is applied EXACTLY once. There is deliberately no second pass, so
+# `%2526` decodes to the literal `%26` and never to `&`.
+fn percent_decode(s: text) -> (bool, text):
+    var chars: [text] = []
+    for ch in s:
+        chars.push(ch)
+    var out = ""
+    var i = 0
+    while i < chars.len():
+        val c = chars[i]
+        if c == "+":
+            out = out + " "
+            i = i + 1
+        elif c == "%":
+            if i + 2 >= chars.len():
+                return (false, "")
+            val hi = hex_nibble(chars[i + 1])
+            val lo = hex_nibble(chars[i + 2])
+            if hi < 0 or lo < 0:
+                return (false, "")
+            val code = hi * 16 + lo
+            if code == 0:
+                return (false, "")
+            out = out + char_from_code(code)
+            i = i + 3
+        else:
+            out = out + c
+            i = i + 1
+    (true, out)
+
+# form_value parses an `k=v&k=v` body and returns the DECODED value of `key`.
+#
+# Parsing table (each row is a spec case in
+# `test/03_system/app/enterprise/enterprise_security_audit_spec.spl`):
+#
+# | body                | key | result | why                                  |
+# |---------------------|-----|--------|--------------------------------------|
+# | `a=1&b=2`           | b   | `2`    | ordinary pair                        |
+# | `a=x%26y`           | a   | `x&y`  | separator expressible when encoded   |
+# | `a=x%3Dy`           | a   | `x=y`  | `=` expressible when encoded         |
+# | `a=x=y`             | a   | `x=y`  | split on the FIRST `=` only          |
+# | `a=hello+world`     | a   | `hello world` | `+` is a space                |
+# | `a=%2526`           | a   | `%26`  | decoded exactly once, never twice    |
+# | `a=x%2`             | a   | ``     | truncated escape -> fail closed      |
+# | `a=x%`              | a   | ``     | dangling `%` -> fail closed          |
+# | `a=x%ZZ`            | a   | ``     | non-hex escape -> fail closed        |
+# | `a=x%00y`           | a   | ``     | encoded NUL -> fail closed           |
+# | `a`                 | a   | ``     | no `=` -> absent                     |
+# | `a=1`               | b   | ``     | absent key                           |
+#
+# A rejected value is indistinguishable from an absent one, and both are the
+# empty string: every caller already treats "" as "not supplied", so failing
+# closed needs no new denial reason.
+fn form_value(body: text, key: text) -> text:
+    for pair in body.split("&"):
+        val kv = pair.split("=")
+        if kv.len() >= 2:
+            val (key_ok, decoded_key) = percent_decode(kv[0])
+            if key_ok and decoded_key == key:
+                # Rejoin on "=" so a value may itself contain "=".
+                var raw = kv[1]
+                var j = 2
+                while j < kv.len():
+                    raw = raw + "=" + kv[j]
+                    j = j + 1
+                val (ok, value) = percent_decode(raw)
+                if not ok:
+                    return ""
+                return value
+    ""
+
+# form_int digit-checks a form field before int(); non-digits -> 0.
+fn form_int(body: text, key: text) -> i64:
+    val t = form_value(body, key)
+    var digits = t != ""
+    for ch in t:
+        if ch < "0" or ch > "9":
+            digits = false
+    if digits:
+        int(t)
+    else:
+        0
+
+# secured applies the EXISTING shared security-header policy (never duplicated).
+fn secured(resp: HttpResponse) -> HttpResponse:
+    with_default_security_headers(resp, false)
+
+# deny maps a frozen CommandResult denial reason onto an HTTP response.
+fn deny(reason: text, detail: text) -> HttpResponse:
+    val status = if reason == "invalid-session" or reason == "invalid-credentials":
+        HttpStatus.Unauthorized
+    elif reason == "forbidden":
+        HttpStatus.Forbidden
+    elif reason == "not-found" or reason == "no-session" or reason == "line-not-found":
+        HttpStatus.NotFound
+    elif reason == "store-error":
+        HttpStatus.InternalError
+    else:
+        HttpStatus.Conflict
+    secured(HttpResponse.error(status, reason + ": " + esc(detail)))
+
+export esc, percent_decode, form_value, form_int, secured, deny

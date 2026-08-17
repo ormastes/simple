@@ -3128,6 +3128,192 @@ uint64_t simpleos_fat32_path_read_buffer_addr(void)
     return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
 }
 
+/* ---- enterprise-store kernel-tier facade backing (lane W8-B) --------------
+ * Backs the externs in
+ * examples/09_embedded/simple_os/arch/x86_64/ent_store_fat32_kernel_facade.spl.
+ * Two single-`text`-arg calls (latch path, then write) rather than one
+ * two-`text` call: the measured Simple->C ABI passes ONE RuntimeString
+ * pointer per text arg, and a second (ptr,len) pair arrives as garbage — a
+ * 5-byte write then asked for ~480 KB and filled the volume.
+ */
+static char     _entstore_path[128];
+static uint32_t _entstore_path_len = 0;
+static uint8_t  _entstore_read_buf[32768];
+
+/* Resolve a Simple `text` argument to (data,len) without the 128-byte path
+ * truncation _fat32_copy_path_arg imposes. Same dual tagged/raw probe. */
+static int _entstore_text_arg(const char *src, const char **out, uint32_t *out_len)
+{
+    if (!src || !out || !out_len)
+        return -1;
+    RuntimeValue rv = (RuntimeValue)(uintptr_t)src;
+    if (IS_HEAP(rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(rv);
+        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            *out = s->data;
+            *out_len = s->len;
+            return 0;
+        }
+    }
+    RuntimeString *r = (RuntimeString *)(uintptr_t)src;
+    if (r && r->hdr.type == HEAP_STRING && r->len < 0x100000) {
+        *out = r->data;
+        *out_len = r->len;
+        return 0;
+    }
+    return -1;
+}
+
+/* Kernel-tier rt_file_exists / rt_file_size providers (lane W10-B, AC-17 L4).
+ *
+ * These are C, not Simple `@export("C")` in ent_store_fat32_kernel_facade.spl,
+ * and the link graph makes the reason unambiguous:
+ *
+ *  1. ABI. Both names are in codegen's `text_arg_indices` table
+ *     (compiler/src/codegen/instr/calls.rs + the LLVM twin), so EVERY Simple
+ *     call site lowers `rt_file_exists(p)` to
+ *     `rt_file_exists(rt_string_data(p), rt_string_len(p))` — a raw (ptr, len)
+ *     pair. A Simple provider `fn rt_file_exists(path: text)` takes one boxed
+ *     RuntimeValue and would be handed the raw data pointer instead. It cannot
+ *     be correct even if it wins the link.
+ *  2. Link order. The freestanding link passes `-z muldefs`
+ *     (pipeline/native_project/linker.rs), so two STRONG definitions do not
+ *     error — the first in link order silently wins, and the boot C objects
+ *     precede the Simple module objects. `nm` on the pre-fix kernel showed
+ *     exactly that split: rt_file_atomic_write/rt_file_read_text_at resolved to
+ *     the facade, while rt_file_exists/rt_file_size resolved to the C stubs
+ *     (NOP1 in rt_extras.c returning NIL_VALUE, and a TRAP_STUB_RET here that
+ *     would have halted the CPU). Both of those stubs are now deleted in favour
+ *     of the real definitions below, so there is one definition, not a race.
+ *
+ * `_fat32_copy_path_arg` decodes a boxed RuntimeValue text first and only falls
+ * back to (ptr, len), so these stay correct under either calling shape.
+ */
+int rt_file_exists(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return 0;
+    return fat32_find_file(path_buf, &cluster, &file_size) == 0 ? 1 : 0;
+}
+
+int64_t rt_file_size(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return -1;
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return -1;
+    return (int64_t)file_size;
+}
+
+int64_t entstore_fat32_set_path(const char *path)
+{
+    int n = _fat32_copy_path_arg(path, -1, _entstore_path, sizeof(_entstore_path));
+    if (n <= 0) {
+        _entstore_path_len = 0;
+        return -1;
+    }
+    _entstore_path_len = (uint32_t)n;
+    return 0;
+}
+
+int64_t entstore_fat32_write_pending(const char *content)
+{
+    const char *data = "";
+    uint32_t len = 0;
+    if (_entstore_path_len == 0)
+        return -1;
+    if (_entstore_text_arg(content, &data, &len) != 0)
+        return -1;
+    serial_puts("[ent-store-c] write len=");
+    serial_put_dec((int64_t)len);
+    serial_puts("\r\n");
+    return fat32_write_file(_entstore_path, (const uint8_t *)data, len) == 0 ? 0 : -1;
+}
+
+/* Ground-truth byte extraction in C. The Simple-side tail
+ * (mmio_read8 + rt_push_byte + rt_bytes_to_text) is bypassed because
+ * an `extern fn mmio_read8` DECLARED IN A .spl FILE does not bind to the
+ * kernel's Simple `os.kernel.boot.mmio.mmio_read8`: it binds to the C symbol
+ * `mmio_read8` (type_stubs.c / auto_stubs.c weak), whose body is
+ * `return NIL_VALUE` — every byte reads back 0. Every other kernel entry
+ * `use`s the real Simple mmio module instead. Plain C loads are
+ * authoritative here (see also rt_dump_phys16's note above). */
+RuntimeValue entstore_fat32_read_slice_text(const char *path, int64_t offset, int64_t size)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+    uint32_t off, want;
+
+    if (offset < 0 || size <= 0)
+        return rt_string_new(0, 0);
+    if (_fat32_copy_path_arg(path, -1, path_buf, sizeof(path_buf)) <= 0)
+        return rt_string_new(0, 0);
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return rt_string_new(0, 0);
+    if (file_size == 0 || file_size > sizeof(_entstore_read_buf))
+        return rt_string_new(0, 0);
+    if (simpleos_fat32_stream_open(path_buf, (int64_t)strlen(path_buf)) < 0)
+        return rt_string_new(0, 0);
+    if (simpleos_fat32_stream_read_at(0, (uint64_t)(uintptr_t)_entstore_read_buf,
+                                      (uint64_t)file_size) != (int64_t)file_size)
+        return rt_string_new(0, 0);
+
+    off = (uint32_t)offset;
+    if (off >= file_size)
+        return rt_string_new(0, 0);
+    want = (uint32_t)size;
+    if (off + want > file_size)
+        want = file_size - off;
+    return rt_string_new((RuntimeValue)(uintptr_t)(_entstore_read_buf + off),
+                         (RuntimeValue)want);
+}
+
+/* Diagnostic (lane W8-B resume step): dump, via plain C loads, the first 16
+ * bytes of `path` as they sit in the very buffer the Simple extraction loop
+ * reads, so "absent / shifted / mis-assembled" can be told apart. */
+void entstore_fat32_dump_first16(const char *path)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+    int64_t n;
+    int i;
+
+    if (_fat32_copy_path_arg(path, -1, path_buf, sizeof(path_buf)) <= 0) {
+        serial_puts("[ent-store-dump] bad-path\r\n");
+        return;
+    }
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0) {
+        serial_puts("[ent-store-dump] not-found ");
+        serial_puts(path_buf);
+        serial_puts("\r\n");
+        return;
+    }
+    if (simpleos_fat32_stream_open(path_buf, (int64_t)strlen(path_buf)) < 0) {
+        serial_puts("[ent-store-dump] open-fail\r\n");
+        return;
+    }
+    n = simpleos_fat32_stream_read_at(0, (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf,
+                                      (uint64_t)file_size);
+    serial_puts("[ent-store-dump] ");
+    serial_puts(path_buf);
+    serial_puts(" fsize=");
+    serial_put_dec((int64_t)file_size);
+    serial_puts(" n=");
+    serial_put_dec(n);
+    serial_puts(" cbytes:");
+    for (i = 0; i < 16; i++) {
+        serial_puts(" ");
+        serial_put_dec((int64_t)simpleos_fat32_path_read_buf[i]);
+    }
+    serial_puts("\r\n");
+}
+
 static int64_t simpleos_fat32_read_known_app_size_raw(uint64_t app_id)
 {
     const char *name = simpleos_known_app_name(app_id);
@@ -3465,20 +3651,6 @@ int64_t rt_qemu_nonce_echo(void) {
                         &bytes_read) != 0)
         return 0;
     size_t line_len = x86_64_nonce_slot_line_length(nonce_file, bytes_read);
-    if (line_len == 0U) return 0;
-    for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
-    return 1;
-}
-
-/* Canonical evidence nonce: distinct from the workload nonce in QEMUNONC. */
-int64_t rt_sosix_collector_nonce_echo(void) {
-    uint8_t nonce_file[118];
-    uint32_t bytes_read = 0;
-    if (!_fat32.initialized && _fat32_init() != 0) return 0;
-    if (fat32_read_file("/SOSIXNON.TXT", nonce_file, sizeof(nonce_file),
-                        &bytes_read) != 0)
-        return 0;
-    size_t line_len = x86_64_collector_nonce_slot_line_length(nonce_file, bytes_read);
     if (line_len == 0U) return 0;
     for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
     return 1;
@@ -8940,48 +9112,6 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
         *(volatile uint32_t *)(uintptr_t)(base + i * 4) = c;
     }
     return 0;
-}
-
-static uint32_t gui_blend_argb(uint32_t s, uint32_t d)
-{
-    uint32_t sa = s >> 24;
-    if (sa == 255u) return s;
-    if (sa == 0u) return d;
-    uint32_t da = d >> 24;
-    uint32_t dw = (da * (255u - sa)) / 255u;
-    uint32_t oa = sa + dw;
-    uint32_t r = ((((s >> 16) & 255u) * sa) +
-                  (((d >> 16) & 255u) * dw)) / oa;
-    uint32_t g = ((((s >> 8) & 255u) * sa) +
-                  (((d >> 8) & 255u) * dw)) / oa;
-    uint32_t b = (((s & 255u) * sa) + ((d & 255u) * dw)) / oa;
-    return (oa << 24) | (r << 16) | (g << 8) | b;
-}
-
-RuntimeValue rt_gui_blend_span4(RuntimeValue xy, RuntimeValue src_value,
-                                RuntimeValue src_offset_value,
-                                RuntimeValue count_value)
-{
-    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
-    uint32_t y = (uint32_t)(uint64_t)xy;
-    int64_t src_offset = (int64_t)src_offset_value;
-    int64_t count = (int64_t)count_value;
-    RuntimeArray *src = runtime_array_from_abi(src_value);
-    RuntimeValue *items = runtime_array_items(src);
-    if (!src || !items || src_offset < 0 || count <= 0 ||
-        src_offset > (int64_t)src->len || count > (int64_t)src->len - src_offset ||
-        x >= g_fb_w || y >= g_fb_height || (uint64_t)count > g_fb_w - x) {
-        return 0;
-    }
-    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)
-        (g_fb_addr + ((uint64_t)y * g_fb_w + x) * 4u);
-    for (int64_t i = 0; i < count; i++) {
-        RuntimeValue tagged = items[src_offset + i];
-        uint32_t source = (uint32_t)(IS_INT(tagged) ?
-            (uint64_t)DECODE_INT(tagged) : (uint64_t)tagged);
-        dst[i] = gui_blend_argb(source, dst[i]);
-    }
-    return 1;
 }
 
 RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
@@ -15176,7 +15306,11 @@ TRAP_STUB_RET(rt_file_read, 1)
 TRAP_STUB_RET(rt_file_write, 2)
 TRAP_STUB_RET(rt_file_delete, 1)
 TRAP_STUB_RET(rt_file_append, 2)
-TRAP_STUB_RET(rt_file_size, 1)
+/* rt_file_size is defined for real above, over the FAT32-on-NVMe API, with the
+ * (ptr, len) ABI its call sites actually emit. The TRAP stub that used to sit
+ * here was a second STRONG definition; under `-z muldefs` it won by link order
+ * and would have halted the CPU the moment std.enterprise_store's file backend
+ * asked for a file size. See the note on rt_file_exists above (lane W10-B). */
 TRAP_STUB_RET(rt_file_copy, 2)
 TRAP_STUB_RET(rt_file_move, 2)
 TRAP_STUB_RET(rt_file_rename, 2)
@@ -16317,11 +16451,6 @@ __attribute__((naked)) static void _rich_fault_entry(void)
 void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
                         uint64_t rflags, uint64_t cr2, uint64_t cr3)
 {
-    extern uint64_t _ring3_iret_rip;
-    extern uint64_t _ring3_iret_rsp;
-    extern uint64_t _ring3_iret_cs;
-    extern uint64_t _ring3_iret_ss;
-    extern uint64_t _ring3_iret_rflags;
     serial_puts("\r\n[fault] *** EXCEPTION FRAME ***\r\n");
     serial_puts("[fault] rip=");     _serial_puthex64(rip);     serial_puts("\r\n");
     serial_puts("[fault] errcode="); _serial_puthex64(errcode); serial_puts("\r\n");
@@ -16329,11 +16458,6 @@ void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
     serial_puts("[fault] rflags=");  _serial_puthex64(rflags);  serial_puts("\r\n");
     serial_puts("[fault] cr2=");     _serial_puthex64(cr2);     serial_puts("\r\n");
     serial_puts("[fault] cr3=");     _serial_puthex64(cr3);     serial_puts("\r\n");
-    serial_puts("[fault] iret-rip="); _serial_puthex64(_ring3_iret_rip); serial_puts("\r\n");
-    serial_puts("[fault] iret-rsp="); _serial_puthex64(_ring3_iret_rsp); serial_puts("\r\n");
-    serial_puts("[fault] iret-cs="); _serial_puthex64(_ring3_iret_cs); serial_puts("\r\n");
-    serial_puts("[fault] iret-ss="); _serial_puthex64(_ring3_iret_ss); serial_puts("\r\n");
-    serial_puts("[fault] iret-rflags="); _serial_puthex64(_ring3_iret_rflags); serial_puts("\r\n");
     _bt_dump_from(g_fault_rbp); /* DEBUG-INSTR */
     serial_puts("[fault] *** END FRAME (recovering) ***\r\n");
 }
@@ -16946,8 +17070,6 @@ __attribute__((weak)) int64_t spl_handle_file_open(uint64_t, uint64_t, uint64_t,
 __attribute__((weak)) int64_t spl_handle_file_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-__attribute__((weak)) int64_t spl_handle_fs_pread_registered_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-__attribute__((weak)) int64_t spl_handle_fs_pwrite_registered_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_stat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_mkdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_readdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -17938,8 +18060,6 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 97: return spl_handle_set_hostname(a0, a1, a2, a3, a4, a5);
         case 106: return spl_handle_schedule(a0, a1, a2, a3, a4, a5);
         case 107: return spl_handle_schedctl(a0, a1, a2, a3, a4, a5);
-        case 134: return spl_handle_fs_pread_registered_v1(a0, a1, a2, a3, a4, a5);
-        case 135: return spl_handle_fs_pwrite_registered_v1(a0, a1, a2, a3, a4, a5);
         default:
             /* Loud ENOSYS — the discovery loop for growing the exec syscall
              * surface. Log the number + first two args so a missing syscall in
@@ -18183,20 +18303,6 @@ __attribute__((weak)) int64_t spl_handle_file_write(uint64_t a0, uint64_t a1, ui
 
 __attribute__((weak)) int64_t spl_handle_file_close(uint64_t a0, uint64_t a1, uint64_t a2,
                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -38;
-}
-
-__attribute__((weak)) int64_t spl_handle_fs_pread_registered_v1(
-    uint64_t a0, uint64_t a1, uint64_t a2,
-    uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -38;
-}
-
-__attribute__((weak)) int64_t spl_handle_fs_pwrite_registered_v1(
-    uint64_t a0, uint64_t a1, uint64_t a2,
-    uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }
@@ -19779,15 +19885,6 @@ static uint32_t _bm_blend_pixel(uint32_t sp, uint32_t dp)
     if (sa == 0u) return dp;
     uint32_t da = (dp >> 24) & 0xFFu;
     uint32_t inv = 255u - sa;
-    if (da == 255u) {
-        uint32_t r = ((((sp >> 16) & 0xFFu) * sa) +
-                      (((dp >> 16) & 0xFFu) * inv)) / 255u;
-        uint32_t g = ((((sp >> 8) & 0xFFu) * sa) +
-                      (((dp >> 8) & 0xFFu) * inv)) / 255u;
-        uint32_t b = (((sp & 0xFFu) * sa) +
-                      ((dp & 0xFFu) * inv)) / 255u;
-        return 0xFF000000u | (r << 16) | (g << 8) | b;
-    }
     uint32_t dst_weight = (da * inv) / 255u;
     uint32_t out_a = sa + dst_weight;          /* >= sa >= 1 */
     uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * dst_weight) / out_a;
@@ -19930,9 +20027,7 @@ RuntimeValue rt_engine2d_simd_blend_span_u32(RuntimeValue dst, int64_t dst_offse
     RuntimeValue *si = runtime_array_items(s);
     if (!di || !si) return dst;
 
-    int backwards = (di == si && d_off > s_off && d_off - s_off < n);
-    for (int64_t step = 0; step < n; step++) {
-        int64_t i = backwards ? n - 1 - step : step;
+    for (int64_t i = 0; i < n; i++) {
         uint32_t sp = _bm_unbox_pixel(si[s_off + i]);
         uint32_t dp = _bm_unbox_pixel(di[d_off + i]);
         di[d_off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
@@ -20049,11 +20144,6 @@ RuntimeValue rt_engine2d_simd_blend_const_span_u32(RuntimeValue dst, int64_t off
     uint32_t sp = (uint32_t)(uint64_t)const_color;
     uint32_t sa = (sp >> 24) & 0xFFu;
     if (sa == 0u) return dst;
-    if (sa == 255u) {
-        RuntimeValue word = _bm_box_pixel(sp);
-        for (int64_t i = 0; i < n; i++) items[off + i] = word;
-        return dst;
-    }
     for (int64_t i = 0; i < n; i++) {
         uint32_t dp = _bm_unbox_pixel(items[off + i]);
         items[off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));

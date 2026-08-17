@@ -1,0 +1,191 @@
+"""
+# Enterprise Web App — HCM back-office route family (/hcm/*)
+
+Dispatched from `main.store_app_handle` AFTER the hardened prelude
+(limits -> path safety -> session auth). Executes ONLY the frozen guarded
+commands of `std.enterprise_hcm`; every rendered business value goes through
+`esc()`, every response through `secured()`, every numeric form field through
+the digit-checking `form_int()`.
+
+Routes:
+- GET  /hcm/employees        — roster: id, name, status, current wage
+- POST /hcm/hire             — employee, name, start, wage, hours, idem
+- POST /hcm/clock/in         — employee, now, idem
+- POST /hcm/clock/out        — employee, now, idem
+- POST /hcm/leave/request    — leave, employee, start, end, type, idem
+- POST /hcm/leave/decide     — leave, approve (1/0), idem
+- GET  /hcm/payroll/export   — payroll-engine INPUT table (NOT a payslip)
+
+## Read authorization
+Reads reuse the FROZEN `role_allows` policy with an action that already
+exists in it — `hcm.leave.decide`, the vertical's back-office tier (admin or
+`hcm`). No new auth scheme and no new action string is introduced: a role
+without the HCM back-office grant gets 403 on the reads exactly as it does on
+the writes.
+
+## Period window for the reads
+`GET /hcm/employees` reports the contract-effective wage at `WAGE_AS_OF`
+(a far-future epoch), i.e. the latest amended wage. `GET /hcm/payroll/export`
+takes its `[start, end)` window from the same digit-checked form parser used
+everywhere else in this app (`start` / `end` in the request body); an absent
+or non-numeric window degrades to the full range, never to a crash.
+"""
+
+use std.common.net.http_core.{match_route_pattern}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_rows, store_migration_applied
+}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, role_allows
+}
+use std.nogc_sync_mut.enterprise_hcm.hcm.{
+    hcm_employee_status, hcm_wage_at, hcm_payroll_export,
+    hcm_hire, hcm_clock_in, hcm_clock_out,
+    hcm_leave_request, hcm_leave_decide
+}
+use app.enterprise_store_app.web_common.{esc, form_value, form_int, secured, deny}
+
+# WAGE_AS_OF is the "today" the roster reports the effective wage at: far
+# enough forward that the latest contract amendment always wins. The library
+# performs no wall-clock reads, so this stays an explicit constant.
+fn wage_as_of() -> i64:
+    4102444800
+
+# PAYROLL_MAX_EPOCH bounds an unspecified payroll window's upper end.
+fn payroll_max_epoch() -> i64:
+    4102444800
+
+# hcm_employee_ids lists the tenant's distinct hired employees, in hire order.
+# Returns [] when the HCM schema was never applied to this store.
+fn hcm_employee_ids(store: EnterpriseStore, tenant_id: text) -> [text]:
+    var out: [text] = []
+    if not store_migration_applied(store, "hcm_001_employee_events"):
+        return out
+    for row in store_rows(store, "hcm_employee_events", "id, tenant_id, employee_id, event, detail"):
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        if sqlite_row_get(row, "event") != "hired":
+            continue
+        val emp = sqlite_row_get(row, "employee_id")
+        var known = false
+        for x in out:
+            if x == emp:
+                known = true
+        if not known:
+            out.push(emp)
+    out
+
+# hcm_employee_count is the dashboard roll-up figure (distinct hired ids).
+fn hcm_employee_count(store: EnterpriseStore, tenant_id: text) -> i64:
+    hcm_employee_ids(store, tenant_id).len()
+
+# hcm_employee_name returns the name recorded on the hire event ("" unknown).
+fn hcm_employee_name(store: EnterpriseStore, tenant_id: text, employee_id: text) -> text:
+    var name = ""
+    if not store_migration_applied(store, "hcm_001_employee_events"):
+        return name
+    for row in store_rows(store, "hcm_employee_events", "id, tenant_id, employee_id, event, detail"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id and sqlite_row_get(row, "event") == "hired":
+            name = sqlite_row_get(row, "detail")
+    name
+
+fn page_employees(store: EnterpriseStore, tenant_id: text) -> text:
+    var body = "<h1>Employees</h1><ul class=\"employees\">"
+    for emp in hcm_employee_ids(store, tenant_id):
+        val name = hcm_employee_name(store, tenant_id, emp)
+        val status = hcm_employee_status(store, tenant_id, emp)
+        val wage = hcm_wage_at(store, tenant_id, emp, wage_as_of())
+        body = body + "<li data-employee=\"" + esc(emp) + "\">"
+        body = body + "<span class=\"emp-id\">" + esc(emp) + "</span>"
+        body = body + " — <span class=\"emp-name\">" + esc(name) + "</span>"
+        body = body + " — <span class=\"emp-status\">" + esc(status) + "</span>"
+        body = body + " — <span class=\"emp-wage\">" + esc("{wage}") + "</span>"
+        body = body + "</li>"
+    body + "</ul>"
+
+# page_payroll renders the boundary export as a table, labelled for what it
+# is: INPUT for an external payroll engine, never a payslip. Each export line
+# is `employee|wage_cents_per_hour|worked_seconds|approved_leave_days`.
+fn page_payroll(store: EnterpriseStore, tenant_id: text, period_start: i64, period_end: i64) -> text:
+    val export = hcm_payroll_export(store, tenant_id, period_start, period_end)
+    var body = "<h1>Payroll Export</h1>"
+    body = body + "<p class=\"payroll-notice\">Calculation INPUT for an external payroll engine — NOT a payslip. No gross or net pay, no tax, no deductions are computed here.</p>"
+    body = body + "<p class=\"payroll-window\">Window: <span class=\"from\">" + esc("{period_start}") + "</span> to <span class=\"to\">" + esc("{period_end}") + "</span></p>"
+    body = body + "<table class=\"payroll\"><tr><th>Employee</th><th>Wage cents/hour</th><th>Worked seconds</th><th>Approved leave days</th></tr>"
+    if export != "":
+        for line in export.split("\n"):
+            val cols = line.split("|")
+            if cols.len() != 4:
+                continue
+            body = body + "<tr data-employee=\"" + esc(cols[0]) + "\">"
+            body = body + "<td class=\"emp\">" + esc(cols[0]) + "</td>"
+            body = body + "<td class=\"wage\">" + esc(cols[1]) + "</td>"
+            body = body + "<td class=\"worked\">" + esc(cols[2]) + "</td>"
+            body = body + "<td class=\"leave\">" + esc(cols[3]) + "</td>"
+            body = body + "</tr>"
+    body + "</table>"
+
+fn command_page(reason: text, detail: text) -> HttpResponse:
+    secured(HttpResponse.html("<p class=\"result\">" + esc(reason) + ": " + esc(detail) + "</p>"))
+
+# hcm_routes_handle serves every /hcm/* route; unknown subpaths 404.
+fn hcm_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
+    if method == "GET" and match_route_pattern("/hcm/employees", path):
+        if not role_allows(who.role, "hcm.leave.decide"):
+            return deny("forbidden", who.actor_id)
+        return secured(HttpResponse.html(page_employees(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/hcm/payroll/export", path):
+        if not role_allows(who.role, "hcm.leave.decide"):
+            return deny("forbidden", who.actor_id)
+        val start = form_int(body, "start")
+        var end = form_int(body, "end")
+        if end <= start:
+            end = payroll_max_epoch()
+        return secured(HttpResponse.html(page_payroll(store, tenant.tenant_id, start, end)))
+    if method == "POST" and match_route_pattern("/hcm/hire", path):
+        val employee_id = form_value(body, "employee")
+        val env = CommandEnvelope(request_id: "req-hire-" + employee_id, idempotency_key: form_value(body, "idem"), action: "hcm.hire", payload: body)
+        val r = hcm_hire(store, session, tenant, who, env, employee_id,
+            form_value(body, "name"), form_int(body, "start"),
+            form_int(body, "wage"), form_int(body, "hours"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/hcm/clock/in", path):
+        val employee_id = form_value(body, "employee")
+        val env = CommandEnvelope(request_id: "req-clockin-" + employee_id, idempotency_key: form_value(body, "idem"), action: "hcm.clock.in", payload: body)
+        val r = hcm_clock_in(store, session, tenant, who, env, employee_id, form_int(body, "now"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/hcm/clock/out", path):
+        val employee_id = form_value(body, "employee")
+        val env = CommandEnvelope(request_id: "req-clockout-" + employee_id, idempotency_key: form_value(body, "idem"), action: "hcm.clock.out", payload: body)
+        val r = hcm_clock_out(store, session, tenant, who, env, employee_id, form_int(body, "now"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/hcm/leave/request", path):
+        val leave_id = form_value(body, "leave")
+        val env = CommandEnvelope(request_id: "req-leave-" + leave_id, idempotency_key: form_value(body, "idem"), action: "hcm.leave.request", payload: body)
+        val r = hcm_leave_request(store, session, tenant, who, env, leave_id,
+            form_value(body, "employee"), form_int(body, "start"), form_int(body, "end"),
+            form_value(body, "type"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/hcm/leave/decide", path):
+        val leave_id = form_value(body, "leave")
+        val approve = form_int(body, "approve") == 1
+        val env = CommandEnvelope(request_id: "req-decide-" + leave_id, idempotency_key: form_value(body, "idem"), action: "hcm.leave.decide", payload: body)
+        val r = hcm_leave_decide(store, session, tenant, who, env, leave_id, approve)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+
+export hcm_employee_ids, hcm_employee_count, hcm_employee_name
+export page_employees, page_payroll
+export hcm_routes_handle

@@ -50,6 +50,10 @@ proxy and expose these servers on private HTTP/1.1 only. See the assessment:
 - `test/01_unit/lib/common/net/http_core_spec.spl` — core policy corpus.
 - `test/01_unit/lib/http_server/{parser_limits,path_safety,chunked_rejection}_spec.spl` — sync transport.
 - `test/01_unit/lib/nogc_async_mut/http_server/async_{parser_limits,path_safety,dynamic_dispatch}_spec.spl` — async transport.
+- `test/03_system/app/enterprise/store_web_harden_spec.spl` — the store web
+  app consuming this core live: unauthenticated denial, HTML escaping, shared
+  security headers, http_core limit/traversal gating (manual:
+  `doc/06_spec/store_web_harden_spec.md`).
 
 Known gaps (tracked in `.spipe/simple_enterprise_suite/state.md`): the
 tier-copied `std.http.{limits,path_security}` modules overlap this policy and

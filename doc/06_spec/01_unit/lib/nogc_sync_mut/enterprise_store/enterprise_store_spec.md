@@ -24,7 +24,7 @@ The enterprise store is the durable foundation of the Simple Enterprise Suite: s
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_spec.spl` |
-| Updated | 2026-08-14 |
+| Updated | 2026-08-16 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -84,7 +84,6 @@ Lane: .spipe/simple_enterprise_suite (Wave B, AC-5/AC-6/AC-7).
 - Verify system tables exist and start empty
    - Expected: store_rows(store, "outbox", "id, tenant_id, event_type, payload").len() equals `0`
    - Expected: store_rows(store, "audit_log", "id, tenant_id, actor, action, detail, prev_hash, hash").len() equals `0`
-- store close
 
 
 <details>
@@ -109,12 +108,8 @@ store_close(store)
 
 - Open the store and read the ACID capability
 - Cross-check the probe against a direct rollback experiment
-- uow begin
-- outbox append
-- uow rollback
    - Expected: leaked equals `0`
    - Expected: leaked equals `1`
-- store close
 
 
 <details>
@@ -149,7 +144,6 @@ store_close(store)
 #### applies a named migration and records it
 
 - Apply the products-table migration
-- store close
 
 
 <details>
@@ -171,11 +165,9 @@ store_close(store)
 
 #### re-running the same migration is a no-op
 
-- store migrate
 - Apply the same migration a second time
 - Verify it was recorded exactly once
    - Expected: count equals `1`
-- store close
 
 
 <details>
@@ -205,10 +197,8 @@ store_close(store)
 #### records a command key and detects the replay
 
 - Record the first execution of command key ord-1
-- idempotency record
 - Replay the same key
    - Expected: idempotency_result(store, "tenant-a", "ord-1") equals `accepted:order-100`
-- store close
 
 
 <details>
@@ -232,9 +222,7 @@ store_close(store)
 
 #### scopes keys per tenant — tenant B does not see tenant A's key
 
-- idempotency record
 - Check the same key under a different tenant
-- store close
 
 
 <details>
@@ -258,14 +246,10 @@ store_close(store)
 #### returns a tenant's events in append order
 
 - Append two events for tenant A and one for tenant B
-- outbox append
-- outbox append
-- outbox append
 - Read tenant A's pending events
    - Expected: pending.len() equals `2`
    - Expected: pending[0].0 equals `sales.order.created`
    - Expected: pending[1].0 equals `inventory.stock.reserved`
-- store close
 
 
 <details>
@@ -295,12 +279,9 @@ store_close(store)
 #### chains records with sha256 over the predecessor
 
 - Append two audit records
-- audit append
-- audit append
 - Verify the whole chain recomputes
 - Verify the second record covers the first record's hash
    - Expected: audit_last_hash(store, "tenant-a") equals `h2`
-- store close
 
 
 <details>
@@ -327,12 +308,9 @@ store_close(store)
 
 #### detects a tampered chain
 
-- audit append
 - Forge a record whose prev_hash skips the chain head
    - Expected: forged.len() equals `1`
-- "INSERT INTO audit log
 - Verify the chain check fails closed
-- store close
 
 
 <details>
@@ -365,18 +343,10 @@ store_close(store)
 #### reopens a file-backed store with all records intact
 
 - Start from a clean database file
-- dir create all
-- file delete
 - Open a file-backed store and write records
-- store migrate
-- idempotency record
-- outbox append
-- audit append
-- store close
 - Reopen the same database file (simulated restart)
 - Verify migration, idempotency, outbox, and audit all survived
    - Expected: outbox_pending(store2, "tenant-a").len() equals `1`
-- store close
 
 
 <details>

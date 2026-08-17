@@ -1,0 +1,154 @@
+#!/bin/sh
+# check-enterprise-store-in-guest-ovmf.shs — AC-17 rungs L3.5a/L3.5b.
+#
+# Proves that std.enterprise_store's file backend runs INSIDE SimpleOS, on a
+# real FAT32-on-NVMe filesystem, with the kernel-tier rt_file_* facade
+# (examples/09_embedded/simple_os/arch/x86_64/ent_store_fat32_kernel_facade.spl)
+# providing rt_file_exists / rt_file_size / rt_file_read_text_at /
+# rt_file_atomic_write.
+#
+# Boot is OVMF pflash -> GRUB-EFI (a real EFI application) -> multiboot1
+# kernel. NEVER QEMU `-kernel`, NEVER isa-debug-exit — the point of the lane
+# is that the same artifact could boot on hardware.
+#
+# The NVMe drive is a bare mkfs.vfat FAT32 volume with NO partition table:
+# the kernel's _fat32_init reads the BPB from LBA 0 directly. It starts EMPTY
+# on purpose — every file the probe reads back is one the guest itself wrote,
+# so a green run cannot be satisfied by host-staged content.
+#
+# GATES (serial log):
+#   L1    "[grub-uefi] multiboot loading"           OVMF -> GRUB-EFI app ran
+#   L2    "SimpleOS SSH + ring-3"                   multiboot handoff -> _start
+#   L3    "[ent-store] probe begin"                 facade probe entered
+#   L3.5a "[ent-store] direct write rc=0"           guest WROTE to FAT32
+#   L3.5b "[ent-store] facade write+read-back=OK"   guest READ ITS MARKER BACK
+#   L4    "enterprise store open=true verify=[]"    file backend end-to-end
+#
+# Env: SEED, SKIP_KERNEL=1 (reuse existing kernel), QEMU_MEM (2G), BOOT_WAIT.
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_clang_entry.spl"
+LINKER="examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld"
+KERNEL="build/os/simpleos_entstore_uefi128.elf"
+IMG="build/os/entstore/fat32-entstore.img"
+SERIAL="build/os/entstore/ent_store_in_guest_ovmf.serial.log"
+CACHE="build/os/entstore/cache"
+BUILD="build/os/entstore/uefi"
+ESP="$BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-120}"
+
+fail() { echo "FAIL — $1"; exit 1; }
+command -v grub-mkstandalone >/dev/null 2>&1 || { echo "ERROR — nothing was checked: grub-mkstandalone missing"; exit 2; }
+command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "ERROR — nothing was checked: qemu-system-x86_64 missing"; exit 2; }
+command -v mkfs.vfat >/dev/null 2>&1 || { echo "ERROR — nothing was checked: mkfs.vfat missing"; exit 2; }
+[ -f "$OVMF_CODE" ] || { echo "ERROR — nothing was checked: OVMF_CODE missing at $OVMF_CODE"; exit 2; }
+[ -f "$SEED" ] || { echo "ERROR — nothing was checked: seed missing at $SEED"; exit 2; }
+mkdir -p build/os/entstore build/os/generated
+
+# ---- 1. Empty FAT32 NVMe volume (raw, no partition table) ------------------
+rm -f "$IMG"
+truncate -s 64M "$IMG"
+mkfs.vfat -F 32 -n ENTSTORE "$IMG" >/dev/null
+
+# ---- 2. Kernel -------------------------------------------------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
+    printf 'pub fn ssh_live_build_marker() -> text:\n    "ssh-ring3-build:entstore-uefi-128"\n' \
+        > build/os/generated/ssh_live_build_marker.spl
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    rm -rf "$CACHE"; mkdir -p "$CACHE"; rm -f "$KERNEL"
+    echo "[entstore] building kernel -> $KERNEL"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+        --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
+        --entry "$ENTRY" --target x86_64-unknown-none -o "$KERNEL" \
+        --linker-script "$LINKER" 2>&1 | tail -20
+    [ -f "$KERNEL" ] || fail "kernel build produced no $KERNEL"
+fi
+echo "[entstore] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes)"
+
+# ---- 3. ESP: self-contained BOOTX64.EFI with the kernel in its memdisk -----
+rm -rf "$BUILD"; mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS enterprise-store in-guest probe (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$BUILD/grub.cfg" "boot/kernel.elf=$KERNEL"
+[ -f "$EFIAPP" ] || fail "grub-mkstandalone produced no $EFIAPP"
+
+# ---- 4. Boot under OVMF pflash (NOT -kernel, no isa-debug-exit) ------------
+rm -f "$SERIAL"
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL" \
+    -drive "file=$IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    >/dev/null 2>&1 &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+i=0
+while [ "$i" -lt "$BOOT_WAIT" ]; do
+    if [ -f "$SERIAL" ] && grep -q "ent-store] probe" "$SERIAL" 2>/dev/null \
+       && { grep -q "enterprise store open=true" "$SERIAL" 2>/dev/null \
+            || grep -q "PROBE FAILED" "$SERIAL" 2>/dev/null; }; then
+        break
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+sleep 2
+kill "$QEMU_PID" 2>/dev/null || true
+[ -f "$SERIAL" ] || { echo "ERROR — nothing was checked: no serial log produced"; exit 2; }
+
+# ---- 5. Verdict ------------------------------------------------------------
+CHECKED=0
+MISSING=""
+check_rung() {
+    CHECKED=$((CHECKED + 1))
+    if grep -qF "$2" "$SERIAL"; then
+        echo "  [OK]   $1  $2"
+    else
+        echo "  [MISS] $1  $2"
+        MISSING="$MISSING $1"
+    fi
+}
+echo "[entstore] serial log: $SERIAL"
+check_rung L1    "[grub-uefi] multiboot loading"
+check_rung L2    "SimpleOS SSH + ring-3"
+check_rung L3    "[ent-store] probe begin"
+check_rung L3.5a "[ent-store] direct write rc=0"
+check_rung L3.5b "[ent-store] facade write+read-back=OK"
+check_rung L4    "enterprise store open=true verify=[]"
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ -n "$MISSING" ]; then
+    fail "$CHECKED rung(s) checked, missing:$MISSING (transcript: $SERIAL)"
+fi
+echo "PASS — $CHECKED rung(s) checked, enterprise store read its own marker in-guest (transcript: $SERIAL)"

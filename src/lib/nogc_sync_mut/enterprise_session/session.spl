@@ -1,0 +1,173 @@
+"""
+# Enterprise Session Store — durable credential-guarded session issuance
+
+Lane `.spipe/simple_enterprise_suite` W5-A: real session issuance for the
+enterprise web app, built ONLY on `std.enterprise_store` (insert-only rows +
+pure-Simple filtering) and the frozen `SessionContext` contract from
+`std.enterprise_sale.foundation`. No wall-clock and no randomness inside this
+library: the caller supplies `now_epoch` and server-side `entropy`.
+
+Tables (insert-only; lookup = pure filtering, latest row wins):
+- `credentials` — per-tenant actor + role + salted sha256 secret hash.
+  NEVER stores plaintext secrets. Seeding is admin-guarded
+  (`session_valid` + `role_allows`), same rung order as every guarded write.
+- `sessions` — one row per issued session: token, tenant, actor, role,
+  issued_at, ttl. Token = sha256(entropy | tenant | actor | issued_at |
+  secret_hash | issuance_seq) — the last two terms are server-side values a
+  requester cannot observe, so a deployment that mistakenly wires a CONSTANT
+  `entropy` still cannot let one actor derive another's token, and two logins
+  in the same second cannot collide (W9-D security audit).
+- `session_revocations` — revocation is a row, never an update/delete.
+
+`session_resolve` is the bearer-token rung for the web dispatcher: it returns
+an inactive `SessionContext` for a missing, revoked, or expired token and an
+active one otherwise (expired = `now_epoch >= issued_at + ttl`).
+
+Failure detail discipline: `session_issue` denies with the single generic
+reason `invalid-credentials` for BOTH unknown actor and wrong secret — no
+user-enumeration channel.
+"""
+
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get, SqliteRow}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row
+}
+use std.nogc_sync_mut.enterprise_store.records.{audit_append}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn session_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "session_001_credentials",
+        "CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY, tenant_id TEXT, actor_id TEXT, role TEXT, salt TEXT, secret_hash TEXT)")
+    ok = ok and store_migrate(store, "session_002_sessions",
+        "CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY, tenant_id TEXT, actor_id TEXT, role TEXT, token TEXT, issued_at TEXT, ttl TEXT)")
+    ok = ok and store_migrate(store, "session_003_revocations",
+        "CREATE TABLE IF NOT EXISTS session_revocations (id INTEGER PRIMARY KEY, tenant_id TEXT, token TEXT)")
+    ok
+
+# =============================================================================
+# Hashing — sha256 facade; NEVER plaintext
+# =============================================================================
+
+fn credential_hash(salt: text, secret: text) -> text:
+    sha256_text(salt + "|" + secret)
+
+# session_token_derive mixes the caller's entropy with two SERVER-SIDE values
+# the requester cannot observe:
+# - `binding`: the actor's stored salted secret hash. Without it, a deployment
+#   that wires a CONSTANT `entropy` hands every party the whole preimage
+#   (entropy | tenant | actor | epoch) and therefore any other actor's token.
+# - `seq`: a monotonically increasing per-store issuance counter, so two logins
+#   for the same actor within the same second cannot collide onto one token.
+fn session_token_derive(entropy: text, tenant_id: text, actor_id: text, now_epoch: i64, binding: text, seq: i64) -> text:
+    sha256_text(entropy + "|" + tenant_id + "|" + actor_id + "|" + "{now_epoch}" + "|" + binding + "|" + "{seq}")
+
+# session_issued_count is the per-store issuance sequence (insert-only rows).
+fn session_issued_count(store: EnterpriseStore) -> i64:
+    var n: i64 = 0
+    for row in store_rows(store, "sessions", "id, tenant_id, actor_id, role, token, issued_at, ttl"):
+        n = n + 1
+    n
+
+# =============================================================================
+# Credentials — admin-guarded seeding
+# =============================================================================
+
+fn credential_seed(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, actor_id: text, role: text, salt: text, secret: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", actor_id)
+    if not role_allows(who.role, "session.credential.seed"):
+        return denied("forbidden", actor_id)
+    if actor_id == "" or role == "" or salt == "" or secret == "":
+        return denied("invalid-record", actor_id)
+    store_insert_row(store,
+        "INSERT INTO credentials (tenant_id, actor_id, role, salt, secret_hash) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, actor_id, role, salt, credential_hash(salt, secret)])
+    audit_append(store, tenant.tenant_id, who.actor_id, "session.credential.seed", actor_id)
+    accepted(actor_id)
+
+# credential_row returns (role, salt, secret_hash) of the LATEST credential
+# row for tenant+actor, or ("", "", "") when none exists.
+fn credential_row(store: EnterpriseStore, tenant_id: text, actor_id: text) -> (text, text, text):
+    var role = ""
+    var salt = ""
+    var hash = ""
+    val rows = store_rows(store, "credentials", "id, tenant_id, actor_id, role, salt, secret_hash")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "actor_id") == actor_id:
+            role = sqlite_row_get(row, "role")
+            salt = sqlite_row_get(row, "salt")
+            hash = sqlite_row_get(row, "secret_hash")
+    (role, salt, hash)
+
+# =============================================================================
+# Issuance / revocation / resolution
+# =============================================================================
+
+# session_entropy_min_len — the library performs no randomness reads by design
+# (the deployment supplies `entropy` from its CSPRNG), but it DOES refuse an
+# entropy value too short to have come from one: empty or under 8 bytes is
+# rejected with the same generic denial (W13-C defensive boundary check).
+fn session_entropy_min_len() -> i64:
+    8
+
+# session_issue verifies the salted-hash credential and writes a session row.
+# On success the token is in CommandResult.detail. Unknown actor and wrong
+# secret produce the SAME generic denial (no user enumeration).
+fn session_issue(store: EnterpriseStore, tenant_id: text, actor_id: text, secret: text, now_epoch: i64, ttl: i64, entropy: text) -> CommandResult:
+    if tenant_id == "" or actor_id == "" or ttl <= 0 or entropy.len() < session_entropy_min_len():
+        return denied("invalid-credentials", "")
+    val cred = credential_row(store, tenant_id, actor_id)
+    if cred.2 == "" or credential_hash(cred.1, secret) != cred.2:
+        return denied("invalid-credentials", "")
+    val token = session_token_derive(entropy, tenant_id, actor_id, now_epoch, cred.2, session_issued_count(store))
+    store_insert_row(store,
+        "INSERT INTO sessions (tenant_id, actor_id, role, token, issued_at, ttl) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant_id, actor_id, cred.0, token, "{now_epoch}", "{ttl}"])
+    audit_append(store, tenant_id, actor_id, "session.issue", actor_id)
+    accepted(token)
+
+fn session_revoke(store: EnterpriseStore, tenant_id: text, token: text) -> bool:
+    if tenant_id == "" or token == "":
+        return false
+    store_insert_row(store,
+        "INSERT INTO session_revocations (tenant_id, token) VALUES (?, ?)",
+        [tenant_id, token])
+    true
+
+fn session_revoked(store: EnterpriseStore, tenant_id: text, token: text) -> bool:
+    val rows = store_rows(store, "session_revocations", "id, tenant_id, token")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "token") == token:
+            return true
+    false
+
+# session_resolve maps a bearer token onto (SessionContext, role).
+# Missing / revoked / expired -> active: false, empty role.
+fn session_resolve(store: EnterpriseStore, tenant_id: text, token: text, now_epoch: i64) -> (SessionContext, text):
+    val dead = SessionContext(token: token, actor_id: "", tenant_id: tenant_id, active: false)
+    if token == "" or session_revoked(store, tenant_id, token):
+        return (dead, "")
+    val rows = store_rows(store, "sessions", "id, tenant_id, actor_id, role, token, issued_at, ttl")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "token") == token:
+            val issued_at = int(sqlite_row_get(row, "issued_at"))
+            val ttl = int(sqlite_row_get(row, "ttl"))
+            if now_epoch >= issued_at + ttl:
+                return (dead, "")
+            val actor_id = sqlite_row_get(row, "actor_id")
+            val role = sqlite_row_get(row, "role")
+            return (SessionContext(token: token, actor_id: actor_id, tenant_id: tenant_id, active: true), role)
+    (dead, "")
+
+export session_setup
+export credential_hash, session_token_derive, session_issued_count, session_entropy_min_len
+export credential_seed, credential_row
+export session_issue, session_revoke, session_revoked, session_resolve

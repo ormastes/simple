@@ -1,0 +1,562 @@
+"""
+# Guarded-Command Conformance — one contract, every enterprise vertical
+
+## Overview
+
+The enterprise suite has many vertical modules that each copy ONE frozen
+guarded-write sequence:
+
+    session -> rbac -> validation -> idempotency -> effects in one UoW
+
+They were written by different lanes at different times, so they drift. This
+spec is the executable conformance gate for that contract. It does NOT read
+module source text — source-text/grep assertions are banned as evidence in
+this repo. Every invariant here is proven by DRIVING the real commands
+against a real store and reading the resulting rows.
+
+Invariants exercised, across booking, restaurant, payment, HCM, procurement,
+channel-hub, outbox-worker, session, and goods-sale:
+
+1. **Replay returns the recorded result, not a re-evaluation.** Every guarded
+   command is run twice with the SAME idempotency key. The second call must
+   answer `duplicate-key` carrying the recorded detail — never a denial
+   produced by re-checking state that the command's own first execution
+   changed. This is the exact defect class already found in procurement and
+   goods_sale (state-dependent feasibility evaluated before replay detection).
+2. **Exactly one effect.** The outbox+audit row fingerprint for the tenant is
+   captured after the first call and must be byte-identical after the replay.
+3. **Closed reason set.** Every reason any command returns — accepted or
+   denied — must satisfy `reason_allowed` from `enterprise_sale.foundation`.
+   That predicate IS the closed set; prose is not the oracle.
+4. **Tenant scoping.** A session issued for tenant B is denied by every
+   command in every module when tenant A is the authoritative tenant.
+
+## Deliberate scope gap
+
+`sale_pay_order` / `sale_refund_order` / `sale_place_order` replay rows are
+NOT asserted here: `enterprise_sale/goods_sale.spl` is owned by lane W7-A
+while it lands the same ordering fix. goods_sale still participates in the
+closed-reason-set and tenant-scoping scenarios. Add the three replay
+assertions to the replay scenarios once W7-A lands — see
+doc/07_guide/app/enterprise/guarded_command_contract.md.
+
+## Troubleshooting
+
+- A replay answering `invalid-transition`, `conflict`, `table-occupied`,
+  `session-closed`, `invalid-record`, or `insufficient-stock` instead of
+  `duplicate-key` is THE drift this spec exists to catch: a state-dependent
+  rung is being evaluated before replay detection. Gate that rung behind
+  `if not replayed:` — identity checks (not-found) stay unconditional.
+- A changed effect fingerprint means the replay wrote a second effect.
+
+**Requirements:** N/A
+**Plan:** .spipe/simple_enterprise_suite/state.md
+**Design:** doc/07_guide/app/enterprise/guarded_command_contract.md
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W7-B).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_open, store_close, store_rows
+}
+use std.nogc_sync_mut.enterprise_store.records.{outbox_pending, audit_verify_chain}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, CommandResult, Money,
+    reason_allowed, reason_set
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{
+    sale_setup, sale_add_product, sale_receive_stock, sale_place_order,
+    sale_pay_order, sale_refund_order, sale_available_stock
+}
+use std.nogc_sync_mut.enterprise_booking.booking.{
+    booking_setup, booking_create_resource,
+    booking_hold, booking_confirm, booking_cancel, booking_no_show
+}
+use std.nogc_sync_mut.enterprise_restaurant.restaurant.{
+    restaurant_setup, table_open_session, order_add_line,
+    kitchen_mark_ready, line_mark_served, bill_close_session
+}
+use std.nogc_sync_mut.enterprise_payment.payment.{
+    PaymentProvider, provider_sign_webhook, payment_setup,
+    payment_create_intent, payment_webhook_receive
+}
+use std.nogc_sync_mut.enterprise_hcm.hcm.{
+    hcm_setup, hcm_hire, hcm_contract_amend, hcm_terminate,
+    hcm_clock_in, hcm_clock_out, hcm_leave_request, hcm_leave_decide
+}
+use std.nogc_sync_mut.enterprise_procurement.procurement.{
+    proc_setup, proc_supplier_add,
+    proc_requisition_create, proc_requisition_approve,
+    proc_po_create, proc_receive, proc_invoice_record
+}
+use std.nogc_sync_mut.enterprise_channel.channel_hub.{
+    ChannelOrder, channel_setup, channel_register, channel_kill,
+    mock_channel, mock_channel_down, channel_import_orders,
+    channel_ack_order, channel_inbox_count, channel_list_product
+}
+use std.nogc_sync_mut.enterprise_outbox.outbox_worker.{
+    outbox_worker_setup, dispatch_target_ok, outbox_dispatch_batch
+}
+use std.nogc_sync_mut.enterprise_session.session.{
+    session_setup, credential_seed, session_issue
+}
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+fn usd(amount_cents: i64) -> Money:
+    Money(amount_cents: amount_cents, currency: "USD")
+
+# One database path per scenario: the interpreter backend caches open
+# databases per path in-process, so scenarios must not share a path.
+fn db_path(name: text) -> text:
+    "build/test-artifacts/conformance_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: "conformance", payload: "body")
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    store_open(db_path(name))
+
+# audit_rows counts the tenant's audit-chain records — half of the effect
+# fingerprint (a replay must add neither an outbox nor an audit row).
+fn audit_rows(store: EnterpriseStore, tenant_id: text) -> i64:
+    var n: i64 = 0
+    for row in store_rows(store, "audit_log", "id, tenant_id, actor, action, detail, prev_hash, hash"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            n = n + 1
+    n
+
+# effect_fingerprint is the observable-effect oracle for one tenant.
+fn effect_fingerprint(store: EnterpriseStore, tenant_id: text) -> text:
+    "outbox={outbox_pending(store, tenant_id).len()};audit={audit_rows(store, tenant_id)}"
+
+# =============================================================================
+# Replay conformance — every guarded command, driven twice
+# =============================================================================
+
+describe "guarded-command conformance — replay returns the recorded result":
+    it "booking: hold, confirm, cancel, and no-show replay to duplicate-key with one effect":
+        step("Seed two exclusive-unit resources")
+        val store = fresh_store("booking")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        booking_setup(store)
+        expect(booking_create_resource(store, s, t, admin, "res-1", "exclusive-unit", 1, "v1").reason).to_equal("accepted")
+        expect(booking_create_resource(store, s, t, admin, "res-2", "exclusive-unit", 1, "v1").reason).to_equal("accepted")
+
+        step("hold: first call accepted, replay of the SAME key is duplicate-key")
+        expect(booking_hold(store, s, t, admin, envelope("bk-hold"), "bk-1", "res-1", 100, 200, 1, "", 50, 1000).reason).to_equal("accepted")
+        val fp_hold = effect_fingerprint(store, "tenant-a")
+        val hold_replay = booking_hold(store, s, t, admin, envelope("bk-hold"), "bk-1", "res-1", 100, 200, 1, "", 50, 1000)
+        expect(hold_replay.reason).to_equal("duplicate-key")
+        expect(hold_replay.detail).to_equal("bk-1")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_hold)
+
+        step("confirm: the confirmed status must not be re-checked on replay")
+        expect(booking_confirm(store, s, t, admin, envelope("bk-conf"), "bk-1", 60).reason).to_equal("accepted")
+        val fp_conf = effect_fingerprint(store, "tenant-a")
+        val conf_replay = booking_confirm(store, s, t, admin, envelope("bk-conf"), "bk-1", 60)
+        expect(conf_replay.reason).to_equal("duplicate-key")
+        expect(conf_replay.detail).to_equal("bk-1")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_conf)
+
+        step("cancel: the cancelled status must not be re-checked on replay")
+        expect(booking_cancel(store, s, t, admin, envelope("bk-can"), "bk-1").reason).to_equal("accepted")
+        val fp_can = effect_fingerprint(store, "tenant-a")
+        expect(booking_cancel(store, s, t, admin, envelope("bk-can"), "bk-1").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_can)
+
+        step("no-show on a second booking: replays to duplicate-key")
+        booking_hold(store, s, t, admin, envelope("bk-hold2"), "bk-2", "res-2", 100, 200, 1, "", 50, 1000)
+        booking_confirm(store, s, t, admin, envelope("bk-conf2"), "bk-2", 60)
+        expect(booking_no_show(store, s, t, admin, envelope("bk-ns"), "bk-2").reason).to_equal("accepted")
+        val fp_ns = effect_fingerprint(store, "tenant-a")
+        expect(booking_no_show(store, s, t, admin, envelope("bk-ns"), "bk-2").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_ns)
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+    it "restaurant: open, add-line, ready, serve, and close replay to duplicate-key with one effect":
+        step("Seed the venue and one menu item")
+        val store = fresh_store("restaurant")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        restaurant_setup(store)
+        sale_add_product(store, s, t, admin, "SKU-1", "Soup", usd(500))
+
+        step("open the table session; the table it occupies is its OWN effect")
+        expect(table_open_session(store, s, t, admin, envelope("rs-open"), "sess-1", "v1", "t1", 2).reason).to_equal("accepted")
+        val fp_open = effect_fingerprint(store, "tenant-a")
+        val open_replay = table_open_session(store, s, t, admin, envelope("rs-open"), "sess-1", "v1", "t1", 2)
+        expect(open_replay.reason).to_equal("duplicate-key")
+        expect(open_replay.detail).to_equal("sess-1")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_open)
+
+        step("add-line replays (already fixed upstream — regression fence)")
+        expect(order_add_line(store, s, t, admin, envelope("rs-line"), "sess-1", "line-1", "SKU-1", 2, "").reason).to_equal("accepted")
+        val fp_line = effect_fingerprint(store, "tenant-a")
+        expect(order_add_line(store, s, t, admin, envelope("rs-line"), "sess-1", "line-1", "SKU-1", 2, "").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_line)
+
+        step("kitchen ready: the line's new state must not be re-checked on replay")
+        expect(kitchen_mark_ready(store, s, t, admin, envelope("rs-ready"), "sess-1", "line-1").reason).to_equal("accepted")
+        val fp_ready = effect_fingerprint(store, "tenant-a")
+        expect(kitchen_mark_ready(store, s, t, admin, envelope("rs-ready"), "sess-1", "line-1").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_ready)
+
+        step("serve: same forward-only transition, same replay rule")
+        expect(line_mark_served(store, s, t, admin, envelope("rs-serve"), "sess-1", "line-1").reason).to_equal("accepted")
+        val fp_serve = effect_fingerprint(store, "tenant-a")
+        expect(line_mark_served(store, s, t, admin, envelope("rs-serve"), "sess-1", "line-1").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_serve)
+
+        step("bill close: the session it closes is its own effect; detail is the total")
+        val closed = bill_close_session(store, s, t, admin, envelope("rs-close"), "sess-1")
+        expect(closed.reason).to_equal("accepted")
+        expect(closed.detail).to_equal("1000")
+        val fp_close = effect_fingerprint(store, "tenant-a")
+        val close_replay = bill_close_session(store, s, t, admin, envelope("rs-close"), "sess-1")
+        expect(close_replay.reason).to_equal("duplicate-key")
+        expect(close_replay.detail).to_equal("1000")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_close)
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+    it "payment: intent-create and captured webhook replay to duplicate-key with one effect":
+        step("Seed a created, stocked order")
+        val store = fresh_store("payment")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        sale_setup(store)
+        payment_setup(store)
+        sale_add_product(store, s, t, admin, "SKU-1", "Widget", usd(2500))
+        sale_receive_stock(store, s, t, admin, "SKU-1", 10)
+        expect(sale_place_order(store, s, t, admin, envelope("py-ord"), "order-1", "SKU-1", 1).reason).to_equal("accepted")
+
+        step("intent create: the pending intent it writes is its own effect")
+        val intent = payment_create_intent(store, s, t, admin, envelope("py-int"), "int-1", "order-1", 100)
+        expect(intent.reason).to_equal("accepted")
+        expect(intent.detail).to_equal("prov-tenant-a-int-1")
+        val fp_int = effect_fingerprint(store, "tenant-a")
+        val intent_replay = payment_create_intent(store, s, t, admin, envelope("py-int"), "int-1", "order-1", 100)
+        expect(intent_replay.reason).to_equal("duplicate-key")
+        expect(intent_replay.detail).to_equal("prov-tenant-a-int-1")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_int)
+
+        step("captured webhook replays on provider_event_id (already fixed — regression fence)")
+        val provider = PaymentProvider(name: "mock", shared_secret: "s3cr3t")
+        val env_wh = envelope("py-wh")
+        val sig = provider_sign_webhook(provider, "tenant-a", "prov-tenant-a-int-1", "captured", "evt-1", env_wh.payload)
+        expect(payment_webhook_receive(store, s, t, admin, env_wh, provider, "prov-tenant-a-int-1", "captured", sig, "evt-1", 200).reason).to_equal("accepted")
+        val fp_wh = effect_fingerprint(store, "tenant-a")
+        val wh_replay = payment_webhook_receive(store, s, t, admin, env_wh, provider, "prov-tenant-a-int-1", "captured", sig, "evt-1", 200)
+        expect(wh_replay.reason).to_equal("duplicate-key")
+        expect(wh_replay.detail).to_equal("int-1:captured")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_wh)
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+    it "hcm: hire, amend, clock in/out, leave request/decide, and terminate replay with one effect":
+        step("Hire an employee")
+        val store = fresh_store("hcm")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        hcm_setup(store)
+        expect(hcm_hire(store, s, t, admin, envelope("hc-hire"), "emp-1", "Ann", 0, 2000, 40).reason).to_equal("accepted")
+        val fp_hire = effect_fingerprint(store, "tenant-a")
+        expect(hcm_hire(store, s, t, admin, envelope("hc-hire"), "emp-1", "Ann", 0, 2000, 40).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_hire)
+
+        step("contract amend replays")
+        expect(hcm_contract_amend(store, s, t, admin, envelope("hc-am"), "emp-1", 100, 2500, 40).reason).to_equal("accepted")
+        val fp_am = effect_fingerprint(store, "tenant-a")
+        expect(hcm_contract_amend(store, s, t, admin, envelope("hc-am"), "emp-1", 100, 2500, 40).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_am)
+
+        step("clock in: the open punch it creates is its own effect")
+        expect(hcm_clock_in(store, s, t, admin, envelope("hc-ci"), "emp-1", 1000).reason).to_equal("accepted")
+        val fp_ci = effect_fingerprint(store, "tenant-a")
+        expect(hcm_clock_in(store, s, t, admin, envelope("hc-ci"), "emp-1", 1000).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_ci)
+
+        step("clock out: the punch it closes is its own effect")
+        expect(hcm_clock_out(store, s, t, admin, envelope("hc-co"), "emp-1", 2000).reason).to_equal("accepted")
+        val fp_co = effect_fingerprint(store, "tenant-a")
+        expect(hcm_clock_out(store, s, t, admin, envelope("hc-co"), "emp-1", 2000).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_co)
+
+        step("leave request and decision both replay")
+        expect(hcm_leave_request(store, s, t, admin, envelope("hc-lr"), "lv-1", "emp-1", 5000, 9000, "annual").reason).to_equal("accepted")
+        val fp_lr = effect_fingerprint(store, "tenant-a")
+        expect(hcm_leave_request(store, s, t, admin, envelope("hc-lr"), "lv-1", "emp-1", 5000, 9000, "annual").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_lr)
+        expect(hcm_leave_decide(store, s, t, admin, envelope("hc-ld"), "lv-1", true).reason).to_equal("accepted")
+        val fp_ld = effect_fingerprint(store, "tenant-a")
+        expect(hcm_leave_decide(store, s, t, admin, envelope("hc-ld"), "lv-1", true).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_ld)
+
+        step("terminate replays")
+        expect(hcm_terminate(store, s, t, admin, envelope("hc-tm"), "emp-1", 99999).reason).to_equal("accepted")
+        val fp_tm = effect_fingerprint(store, "tenant-a")
+        expect(hcm_terminate(store, s, t, admin, envelope("hc-tm"), "emp-1", 99999).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_tm)
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+    it "procurement: requisition, approval, PO, receipt, and invoice replay with one effect":
+        step("Register a supplier and raise a requisition")
+        val store = fresh_store("procurement")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        sale_setup(store)
+        proc_setup(store)
+        proc_supplier_add(store, s, t, admin, "sup-1", "Acme Supply")
+        expect(proc_requisition_create(store, s, t, admin, envelope("pr-req"), "req-1", "SKU-1", 5).reason).to_equal("accepted")
+        val fp_req = effect_fingerprint(store, "tenant-a")
+        expect(proc_requisition_create(store, s, t, admin, envelope("pr-req"), "req-1", "SKU-1", 5).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_req)
+
+        step("approve: the approved status is this command's OWN effect")
+        expect(proc_requisition_approve(store, s, t, admin, envelope("pr-app"), "req-1").reason).to_equal("accepted")
+        val fp_app = effect_fingerprint(store, "tenant-a")
+        val app_replay = proc_requisition_approve(store, s, t, admin, envelope("pr-app"), "req-1")
+        expect(app_replay.reason).to_equal("duplicate-key")
+        expect(app_replay.detail).to_equal("req-1")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_app)
+
+        step("PO create replays")
+        expect(proc_po_create(store, s, t, admin, envelope("pr-po"), "po-1", "req-1", "sup-1", usd(1000)).reason).to_equal("accepted")
+        val fp_po = effect_fingerprint(store, "tenant-a")
+        expect(proc_po_create(store, s, t, admin, envelope("pr-po"), "po-1", "req-1", "sup-1", usd(1000)).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_po)
+
+        step("receipt and invoice replay (reference shape — regression fence)")
+        expect(proc_receive(store, s, t, admin, envelope("pr-rc"), "po-1", 5).reason).to_equal("accepted")
+        val fp_rc = effect_fingerprint(store, "tenant-a")
+        expect(proc_receive(store, s, t, admin, envelope("pr-rc"), "po-1", 5).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_rc)
+        expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(5)
+        expect(proc_invoice_record(store, s, t, admin, envelope("pr-inv"), "po-1", "inv-1", 5).reason).to_equal("accepted")
+        val fp_inv = effect_fingerprint(store, "tenant-a")
+        expect(proc_invoice_record(store, s, t, admin, envelope("pr-inv"), "po-1", "inv-1", 5).reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_inv)
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+    it "channel hub and outbox worker: re-import, re-ack, and re-dispatch produce no second effect":
+        step("Register a mock channel with one scripted external order")
+        val store = fresh_store("channel")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        sale_setup(store)
+        channel_setup(store)
+        outbox_worker_setup(store)
+        sale_add_product(store, s, t, admin, "SKU-1", "Widget", usd(2500))
+        sale_receive_stock(store, s, t, admin, "SKU-1", 100)
+        expect(channel_register(store, s, t, admin, "ch-1", "mock").reason).to_equal("accepted")
+        val adapter = mock_channel([ChannelOrder(external_id: "x-1", sku: "SKU-1", qty: 1)], 10)
+
+        step("First import creates exactly one internal order")
+        val run1 = channel_import_orders(store, s, t, admin, envelope("ch-imp"), adapter, "ch-1", 10)
+        expect(run1.ok).to_be(true)
+        expect(run1.imported).to_equal(1)
+        expect(run1.duplicates).to_equal(0)
+        expect(channel_inbox_count(store, "tenant-a", "ch-1")).to_equal(1)
+
+        step("Re-import from cursor 0 dedupes on the external order id — no second effect")
+        val run2 = channel_import_orders(store, s, t, admin, envelope("ch-imp"), mock_channel([ChannelOrder(external_id: "x-1", sku: "SKU-1", qty: 1)], 10), "ch-1", 10)
+        expect(run2.ok).to_be(true)
+        expect(run2.imported).to_equal(0)
+        expect(channel_inbox_count(store, "tenant-a", "ch-1")).to_equal(1)
+
+        step("Ack once, then again: the second ack is a recorded duplicate-key")
+        expect(channel_ack_order(store, s, t, admin, adapter, "ch-1", "x-1").reason).to_equal("accepted")
+        val fp_ack = effect_fingerprint(store, "tenant-a")
+        expect(channel_ack_order(store, s, t, admin, adapter, "ch-1", "x-1").reason).to_equal("duplicate-key")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_ack)
+
+        step("Outbox dispatch is exactly-once per row: a rerun dispatches nothing")
+        val d1 = outbox_dispatch_batch(store, "tenant-a", dispatch_target_ok(), 1000, 50)
+        expect(d1.failed).to_equal(0)
+        val d2 = outbox_dispatch_batch(store, "tenant-a", dispatch_target_ok(), 1000, 50)
+        expect(d2.attempted).to_equal(0)
+        expect(d2.dispatched).to_equal(0)
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+# =============================================================================
+# Closed reason set — every reason any command returns must be a member
+# =============================================================================
+
+describe "guarded-command conformance — closed reason set":
+    it "every reason returned across the suite satisfies reason_allowed":
+        step("Drive a denial from every module and collect the reasons")
+        val store = fresh_store("reasons")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        sale_setup(store)
+        proc_setup(store)
+        booking_setup(store)
+        restaurant_setup(store)
+        payment_setup(store)
+        hcm_setup(store)
+        channel_setup(store)
+        session_setup(store)
+        var dead = session_for(admin, t)
+        dead.active = false
+        val clerk = ActorContext(actor_id: "clerk-1", role: "sales")
+        val cs = session_for(clerk, t)
+
+        var reasons: [text] = []
+        # goods_sale (W7-A-owned file, still contract-checked here)
+        reasons.push(sale_place_order(store, dead, t, admin, envelope("rz-1"), "o-1", "SKU-X", 1).reason)
+        reasons.push(sale_place_order(store, s, t, admin, envelope("rz-2"), "o-1", "SKU-X", 1).reason)
+        sale_add_product(store, s, t, admin, "SKU-1", "Widget", usd(2500))
+        reasons.push(sale_place_order(store, s, t, admin, envelope("rz-3"), "o-1", "SKU-1", 5).reason)
+        reasons.push(sale_add_product(store, s, t, admin, "SKU-1", "Widget", usd(0)).reason)
+        # procurement
+        reasons.push(proc_supplier_add(store, cs, t, clerk, "sup-x", "X").reason)
+        reasons.push(proc_receive(store, s, t, admin, envelope("rz-4"), "po-404", 1).reason)
+        # booking
+        booking_create_resource(store, s, t, admin, "res-1", "exclusive-unit", 1, "v1")
+        reasons.push(booking_hold(store, s, t, admin, envelope("rz-5"), "b-1", "res-404", 1, 2, 1, "", 0, 10).reason)
+        booking_hold(store, s, t, admin, envelope("rz-6"), "b-1", "res-1", 100, 200, 1, "", 50, 1000)
+        reasons.push(booking_hold(store, s, t, admin, envelope("rz-7"), "b-2", "res-1", 150, 250, 1, "", 50, 1000).reason)
+        # restaurant
+        reasons.push(order_add_line(store, s, t, admin, envelope("rz-8"), "sess-404", "l-1", "SKU-1", 1, "").reason)
+        table_open_session(store, s, t, admin, envelope("rz-9"), "sess-1", "v1", "t1", 2)
+        reasons.push(table_open_session(store, s, t, admin, envelope("rz-10"), "sess-2", "v1", "t1", 2).reason)
+        reasons.push(line_mark_served(store, s, t, admin, envelope("rz-11"), "sess-1", "l-404").reason)
+        order_add_line(store, s, t, admin, envelope("rz-12"), "sess-1", "l-1", "SKU-1", 1, "")
+        reasons.push(line_mark_served(store, s, t, admin, envelope("rz-13"), "sess-1", "l-1").reason)
+        reasons.push(bill_close_session(store, s, t, admin, envelope("rz-14"), "sess-1").reason)
+        # payment
+        val provider = PaymentProvider(name: "mock", shared_secret: "s3cr3t")
+        reasons.push(payment_webhook_receive(store, s, t, admin, envelope("rz-15"), provider, "prov-x", "captured", "bad-sig", "evt-x", 1).reason)
+        reasons.push(payment_create_intent(store, s, t, admin, envelope("rz-16"), "int-1", "order-404", 1).reason)
+        # hcm
+        reasons.push(hcm_clock_in(store, s, t, admin, envelope("rz-17"), "emp-404", 1).reason)
+        hcm_hire(store, s, t, admin, envelope("rz-18"), "emp-1", "Ann", 0, 2000, 40)
+        reasons.push(hcm_hire(store, s, t, admin, envelope("rz-19"), "emp-1", "Ann", 0, 2000, 40).reason)
+        # channel hub
+        channel_register(store, s, t, admin, "ch-1", "mock")
+        reasons.push(channel_list_product(store, s, t, admin, mock_channel_down([], 10), "ch-1", "SKU-1", usd(2500)).reason)
+        channel_kill(store, s, t, admin, "ch-1")
+        reasons.push(channel_ack_order(store, s, t, admin, mock_channel([], 10), "ch-1", "x-1").reason)
+        reasons.push(channel_import_orders(store, s, t, admin, envelope("rz-20"), mock_channel([], 10), "ch-1", 10).reason)
+        # session vertical — the generic, non-enumerating issuance denial
+        credential_seed(store, s, t, admin, "user-1", "sales", "salt", "secret")
+        reasons.push(session_issue(store, "tenant-a", "user-1", "wrong", 100, 900, "entropy-conf").reason)
+        reasons.push(session_issue(store, "tenant-a", "user-404", "secret", 100, 900, "entropy-conf").reason)
+        reasons.push(session_issue(store, "tenant-a", "user-1", "secret", 100, 900, "entropy-conf").reason)
+
+        step("The collected set is non-trivial and wholly inside the closed set")
+        expect(reasons.len() > 20).to_be(true)
+        for r in reasons:
+            expect(reason_allowed(r)).to_be(true)
+
+        step("The closed set itself is the frozen 16-reason list")
+        expect(reason_set().len()).to_equal(16)
+        expect(reason_allowed("totally-made-up")).to_be(false)
+        store_close(store)
+
+# =============================================================================
+# Tenant scoping — a cross-tenant session is denied everywhere
+# =============================================================================
+
+describe "guarded-command conformance — tenant scoping":
+    it "a session issued for tenant B is denied by every guarded command of tenant A":
+        step("Seed tenant A state, then attack it with a tenant-B session")
+        val store = fresh_store("tenancy")
+        val ta = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, ta)
+        sale_setup(store)
+        proc_setup(store)
+        booking_setup(store)
+        restaurant_setup(store)
+        payment_setup(store)
+        hcm_setup(store)
+        channel_setup(store)
+        sale_add_product(store, s, ta, admin, "SKU-1", "Widget", usd(2500))
+        sale_receive_stock(store, s, ta, admin, "SKU-1", 10)
+        booking_create_resource(store, s, ta, admin, "res-1", "exclusive-unit", 1, "v1")
+        table_open_session(store, s, ta, admin, envelope("tn-open"), "sess-1", "v1", "t1", 2)
+        hcm_hire(store, s, ta, admin, envelope("tn-hire"), "emp-1", "Ann", 0, 2000, 40)
+        channel_register(store, s, ta, admin, "ch-1", "mock")
+        # Refundable money state: a PAID order (sale_refund_order's feasible target).
+        sale_place_order(store, s, ta, admin, envelope("tn-seed-o"), "o-1", "SKU-1", 1)
+        sale_pay_order(store, s, ta, admin, envelope("tn-seed-p"), "o-1")
+        # Receivable inventory state: an approved requisition turned into a PO.
+        proc_supplier_add(store, s, ta, admin, "sup-1", "Supplies Inc")
+        proc_requisition_create(store, s, ta, admin, envelope("tn-seed-r"), "req-1", "SKU-1", 5)
+        proc_requisition_approve(store, s, ta, admin, envelope("tn-seed-a"), "req-1")
+        proc_po_create(store, s, ta, admin, envelope("tn-seed-po"), "po-1", "req-1", "sup-1", usd(100))
+        val fp_before = effect_fingerprint(store, "tenant-a")
+
+        step("The intruder's session is valid for tenant B, but tenant A is authority")
+        val tb = tenant_b()
+        val intruder = ActorContext(actor_id: "intruder-1", role: "admin")
+        val bad = session_for(intruder, tb)
+
+        var denials: [text] = []
+        denials.push(sale_place_order(store, bad, ta, intruder, envelope("tn-1"), "o-x", "SKU-1", 1).reason)
+        denials.push(sale_add_product(store, bad, ta, intruder, "SKU-X", "X", usd(100)).reason)
+        denials.push(proc_supplier_add(store, bad, ta, intruder, "sup-x", "X").reason)
+        denials.push(proc_requisition_create(store, bad, ta, intruder, envelope("tn-2"), "req-x", "SKU-1", 1).reason)
+        denials.push(booking_hold(store, bad, ta, intruder, envelope("tn-3"), "b-x", "res-1", 1, 2, 1, "", 0, 10).reason)
+        denials.push(booking_cancel(store, bad, ta, intruder, envelope("tn-4"), "b-x").reason)
+        denials.push(table_open_session(store, bad, ta, intruder, envelope("tn-5"), "sess-x", "v1", "t2", 2).reason)
+        denials.push(order_add_line(store, bad, ta, intruder, envelope("tn-6"), "sess-1", "l-x", "SKU-1", 1, "").reason)
+        denials.push(bill_close_session(store, bad, ta, intruder, envelope("tn-7"), "sess-1").reason)
+        denials.push(payment_create_intent(store, bad, ta, intruder, envelope("tn-8"), "int-x", "o-1", 1).reason)
+        denials.push(hcm_clock_in(store, bad, ta, intruder, envelope("tn-9"), "emp-1", 1).reason)
+        denials.push(hcm_terminate(store, bad, ta, intruder, envelope("tn-10"), "emp-1", 9).reason)
+        denials.push(channel_register(store, bad, ta, intruder, "ch-x", "mock").reason)
+        denials.push(channel_ack_order(store, bad, ta, intruder, mock_channel([], 10), "ch-1", "x-1").reason)
+        denials.push(channel_import_orders(store, bad, ta, intruder, envelope("tn-11"), mock_channel([], 10), "ch-1", 10).reason)
+        # W13-C gap check: two guarded commands never before exercised for
+        # cross-tenant mutation, both aimed at FEASIBLE tenant-A state — a
+        # paid order (refund would move money) and an open PO (receive would
+        # move inventory).
+        denials.push(sale_refund_order(store, bad, ta, intruder, envelope("tn-16"), "o-1").reason)
+        denials.push(proc_receive(store, bad, ta, intruder, envelope("tn-17"), "po-1", 5).reason)
+
+        step("Every one of them is invalid-session — no rung leaks past the first")
+        expect(denials.len()).to_equal(17)
+        for d in denials:
+            expect(d).to_equal("invalid-session")
+
+        step("Tenant A's observable state is byte-identical afterwards")
+        expect(effect_fingerprint(store, "tenant-a")).to_equal(fp_before)
+        expect(effect_fingerprint(store, "tenant-b")).to_equal("outbox=0;audit=0")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)

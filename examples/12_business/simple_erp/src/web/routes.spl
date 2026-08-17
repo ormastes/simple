@@ -10,6 +10,7 @@
 
 use framework.guarded.{Tenant, Actor, Session, WriteResult, gate_write_for, role_can_for, session_valid}
 use framework.registry.{LaneDef, default_lanes}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore}
 
 struct Route:
     val method: text
@@ -48,7 +49,7 @@ fn find_route(method: text, path: text) -> Route:
 # routes are denied with reason "not-found". Read routes still require a valid
 # session, then check the actor's role (no idempotency needed for a read).
 # Write routes go through the full framework gate pipeline.
-fn dispatch_for(lanes: [LaneDef], session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, used_keys: [text]) -> WriteResult:
+fn dispatch_for(lanes: [LaneDef], session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, store: EnterpriseStore) -> WriteResult:
     val route = find_route_in(routes_for(lanes), method, path)
     if route.action == "":
         return WriteResult { ok: false, reason: "not-found", audit_action: "", ledger_key: "" }
@@ -58,7 +59,7 @@ fn dispatch_for(lanes: [LaneDef], session: Session, tenant: Tenant, user: Actor,
         if role_can_for(lanes, user.role, route.action):
             return WriteResult { ok: true, reason: "accepted", audit_action: route.action, ledger_key: "" }
         return WriteResult { ok: false, reason: "forbidden", audit_action: route.action, ledger_key: "" }
-    return gate_write_for(lanes, session, tenant, user, route.action, record_valid, key, used_keys)
+    return gate_write_for(lanes, store, session, tenant, user, route.action, record_valid, key)
 
-fn dispatch(session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, used_keys: [text]) -> WriteResult:
-    return dispatch_for(default_lanes(), session, tenant, user, method, path, record_valid, key, used_keys)
+fn dispatch(session: Session, tenant: Tenant, user: Actor, method: text, path: text, record_valid: bool, key: text, store: EnterpriseStore) -> WriteResult:
+    return dispatch_for(default_lanes(), session, tenant, user, method, path, record_valid, key, store)

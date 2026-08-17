@@ -1,0 +1,457 @@
+"""
+# HCM Vertical — employee lifecycle, attendance/time, leave, payroll BOUNDARY
+
+Safer-first-release HCM scope of the Simple Enterprise Suite (lane
+`.spipe/simple_enterprise_suite`, W6-A; design §6.5): employee, contract,
+attendance, time, leave. **Payroll here is a BOUNDARY, not an engine** —
+`hcm_payroll_export` emits the calculation INPUT rows (effective wage,
+worked seconds, approved leave days) for an external payroll system; no
+pay, tax, deduction, or jurisdiction logic exists in this module, by design.
+The Korean payroll/tax pack is a future reviewed lane, not implied here.
+
+Every write runs the frozen guarded sequence over the durable store:
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+Storage model is insert-only + derive (identical philosophy to goods-sale):
+- `hcm_employee_events`: hired/terminated event stream; status is derived.
+- `hcm_contracts`: effective-dated rows, NEVER mutated. An amendment appends
+  a NEW row; the latest `effective_epoch <= now` wins. Termination appends a
+  terminated event carrying the end epoch — history stays fully visible.
+- `hcm_time_events`: clock-in/clock-out punches; intervals are derived by
+  pairing (an `in` opens, the next `out` closes). Double clock-in and
+  clock-out-without-in are `invalid-transition` denials.
+- `hcm_leaves` + `hcm_leave_events`: requested rows plus decision events.
+  Approving a range overlapping an already-approved leave of the same
+  employee is a `conflict` denial. Balance is a pure data read: approved
+  days inside a caller-supplied window.
+
+Time is caller-supplied: every command takes epochs from the caller and the
+library performs no wall-clock reads. All denial reasons come from the
+frozen closed set in `std.enterprise_sale.foundation` (invalid-session,
+forbidden, invalid-record, not-found, invalid-transition, conflict,
+duplicate-key) — no new reason was added for this vertical.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn hcm_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "hcm_001_employee_events",
+        "CREATE TABLE IF NOT EXISTS hcm_employee_events (id INTEGER PRIMARY KEY, tenant_id TEXT, employee_id TEXT, event TEXT, detail TEXT)")
+    ok = ok and store_migrate(store, "hcm_002_contracts",
+        "CREATE TABLE IF NOT EXISTS hcm_contracts (id INTEGER PRIMARY KEY, tenant_id TEXT, employee_id TEXT, effective_epoch TEXT, wage_cents_per_hour TEXT, weekly_hours TEXT)")
+    ok = ok and store_migrate(store, "hcm_003_time_events",
+        "CREATE TABLE IF NOT EXISTS hcm_time_events (id INTEGER PRIMARY KEY, tenant_id TEXT, employee_id TEXT, kind TEXT, epoch TEXT)")
+    ok = ok and store_migrate(store, "hcm_004_leaves",
+        "CREATE TABLE IF NOT EXISTS hcm_leaves (id INTEGER PRIMARY KEY, tenant_id TEXT, leave_id TEXT, employee_id TEXT, start_epoch TEXT, end_epoch TEXT, leave_type TEXT)")
+    ok = ok and store_migrate(store, "hcm_005_leave_events",
+        "CREATE TABLE IF NOT EXISTS hcm_leave_events (id INTEGER PRIMARY KEY, tenant_id TEXT, leave_id TEXT, event TEXT, detail TEXT)")
+    ok
+
+# =============================================================================
+# Derived reads (pure-Simple filtering; see store docstring)
+# =============================================================================
+
+# "" (unknown) -> active -> terminated, derived from the event stream.
+fn hcm_employee_status(store: EnterpriseStore, tenant_id: text, employee_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "hcm_employee_events", "id, tenant_id, employee_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            val ev = sqlite_row_get(row, "event")
+            if ev == "hired":
+                status = "active"
+            if ev == "terminated":
+                status = "terminated"
+    status
+
+# hcm_contract_count exposes the full effective-dated history size — an
+# amendment grows it, never shrinks or rewrites it.
+fn hcm_contract_count(store: EnterpriseStore, tenant_id: text, employee_id: text) -> i64:
+    var n: i64 = 0
+    val rows = store_rows(store, "hcm_contracts", "id, tenant_id, employee_id, effective_epoch, wage_cents_per_hour, weekly_hours")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            n = n + 1
+    n
+
+# hcm_wage_at: the contract row with the greatest effective_epoch <= now wins.
+fn hcm_wage_at(store: EnterpriseStore, tenant_id: text, employee_id: text, now_epoch: i64) -> i64:
+    var best_eff: i64 = -1
+    var wage: i64 = -1
+    val rows = store_rows(store, "hcm_contracts", "id, tenant_id, employee_id, effective_epoch, wage_cents_per_hour, weekly_hours")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            val eff = int(sqlite_row_get(row, "effective_epoch"))
+            if eff <= now_epoch and eff >= best_eff:
+                best_eff = eff
+                wage = int(sqlite_row_get(row, "wage_cents_per_hour"))
+    wage
+
+# hcm_open_clock_in returns the epoch of an unmatched clock-in, or -1.
+fn hcm_open_clock_in(store: EnterpriseStore, tenant_id: text, employee_id: text) -> i64:
+    var open_epoch: i64 = -1
+    val rows = store_rows(store, "hcm_time_events", "id, tenant_id, employee_id, kind, epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            if sqlite_row_get(row, "kind") == "in":
+                open_epoch = int(sqlite_row_get(row, "epoch"))
+            else:
+                open_epoch = -1
+    open_epoch
+
+# hcm_time_entries: number of CLOSED intervals (in/out pairs) on record.
+fn hcm_time_entries(store: EnterpriseStore, tenant_id: text, employee_id: text) -> i64:
+    var entries: i64 = 0
+    var open = false
+    val rows = store_rows(store, "hcm_time_events", "id, tenant_id, employee_id, kind, epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            if sqlite_row_get(row, "kind") == "in":
+                open = true
+            else:
+                if open:
+                    entries = entries + 1
+                open = false
+    entries
+
+# hcm_worked_seconds: sum of CLOSED intervals clipped to [period_start, period_end).
+# Open intervals contribute nothing until closed.
+fn hcm_worked_seconds(store: EnterpriseStore, tenant_id: text, employee_id: text, period_start: i64, period_end: i64) -> i64:
+    var total: i64 = 0
+    var open_at: i64 = -1
+    val rows = store_rows(store, "hcm_time_events", "id, tenant_id, employee_id, kind, epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            val at = int(sqlite_row_get(row, "epoch"))
+            if sqlite_row_get(row, "kind") == "in":
+                open_at = at
+            else:
+                if open_at >= 0:
+                    var lo = open_at
+                    var hi = at
+                    if lo < period_start:
+                        lo = period_start
+                    if hi > period_end:
+                        hi = period_end
+                    if hi > lo:
+                        total = total + (hi - lo)
+                open_at = -1
+    total
+
+fn hcm_leave_status(store: EnterpriseStore, tenant_id: text, leave_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "hcm_leave_events", "id, tenant_id, leave_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "leave_id") == leave_id:
+            status = sqlite_row_get(row, "event")
+    status
+
+# hcm_leave_overlaps_approved: does [start,end) overlap any APPROVED leave of
+# the same employee (excluding the leave under decision itself)?
+fn hcm_leave_overlaps_approved(store: EnterpriseStore, tenant_id: text, employee_id: text, start_epoch: i64, end_epoch: i64, exclude_leave_id: text) -> bool:
+    val rows = store_rows(store, "hcm_leaves", "id, tenant_id, leave_id, employee_id, start_epoch, end_epoch, leave_type")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            val other = sqlite_row_get(row, "leave_id")
+            if other != exclude_leave_id and hcm_leave_status(store, tenant_id, other) == "approved":
+                val os = int(sqlite_row_get(row, "start_epoch"))
+                val oe = int(sqlite_row_get(row, "end_epoch"))
+                if start_epoch < oe and os < end_epoch:
+                    return true
+    false
+
+# hcm_leave_balance: approved leave DAYS falling inside the caller-supplied
+# window [win_start, win_end), computed as clipped seconds / 86400. Pure read.
+fn hcm_leave_balance(store: EnterpriseStore, tenant_id: text, employee_id: text, win_start: i64, win_end: i64) -> i64:
+    var seconds: i64 = 0
+    val rows = store_rows(store, "hcm_leaves", "id, tenant_id, leave_id, employee_id, start_epoch, end_epoch, leave_type")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "employee_id") == employee_id:
+            if hcm_leave_status(store, tenant_id, sqlite_row_get(row, "leave_id")) == "approved":
+                var lo = int(sqlite_row_get(row, "start_epoch"))
+                var hi = int(sqlite_row_get(row, "end_epoch"))
+                if lo < win_start:
+                    lo = win_start
+                if hi > win_end:
+                    hi = win_end
+                if hi > lo:
+                    seconds = seconds + (hi - lo)
+    seconds / 86400
+
+# =============================================================================
+# Employee lifecycle (guarded)
+# =============================================================================
+
+fn hcm_hire(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, employee_id: text, name: text, start_epoch: i64, wage_cents_per_hour: i64, weekly_hours: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", employee_id)
+    if not role_allows(who.role, "hcm.hire"):
+        return denied("forbidden", employee_id)
+    if employee_id == "" or wage_cents_per_hour <= 0 or weekly_hours <= 0 or weekly_hours > 168:
+        return denied("invalid-record", employee_id)
+    # The already-exists rung is state-DEPENDENT: the active employee IS this
+    # command's own first effect, so a replay must not be re-checked against
+    # it. Hiring the same id twice with a FRESH key is still `conflict`.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_employee_status(store, tenant.tenant_id, employee_id) != "":
+        return denied("conflict", employee_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_employee_events (tenant_id, employee_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, employee_id, "hired", name])
+    store_insert_row(store,
+        "INSERT INTO hcm_contracts (tenant_id, employee_id, effective_epoch, wage_cents_per_hour, weekly_hours) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, employee_id, "{start_epoch}", "{wage_cents_per_hour}", "{weekly_hours}"])
+    outbox_append(store, tenant.tenant_id, "hcm.employee.hired", employee_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.hire", employee_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, employee_id)
+    uow_commit(store)
+    accepted(employee_id)
+
+# hcm_contract_amend appends a NEW effective-dated row — never a mutation.
+fn hcm_contract_amend(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, employee_id: text, effective_epoch: i64, wage_cents_per_hour: i64, weekly_hours: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", employee_id)
+    if not role_allows(who.role, "hcm.contract.amend"):
+        return denied("forbidden", employee_id)
+    if wage_cents_per_hour <= 0 or weekly_hours <= 0 or weekly_hours > 168:
+        return denied("invalid-record", employee_id)
+    val status = hcm_employee_status(store, tenant.tenant_id, employee_id)
+    if status == "":
+        return denied("not-found", employee_id)
+    if status == "terminated":
+        return denied("invalid-transition", employee_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_contracts (tenant_id, employee_id, effective_epoch, wage_cents_per_hour, weekly_hours) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, employee_id, "{effective_epoch}", "{wage_cents_per_hour}", "{weekly_hours}"])
+    outbox_append(store, tenant.tenant_id, "hcm.contract.amended", employee_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.contract.amend", employee_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, employee_id)
+    uow_commit(store)
+    accepted(employee_id)
+
+# hcm_terminate end-dates the employee. Further commands for the employee are
+# denied (invalid-transition); reads keep working over the preserved history.
+fn hcm_terminate(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, employee_id: text, end_epoch: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", employee_id)
+    if not role_allows(who.role, "hcm.terminate"):
+        return denied("forbidden", employee_id)
+    val status = hcm_employee_status(store, tenant.tenant_id, employee_id)
+    # not-found is state-independent and unconditional; `terminated` is this
+    # command's own first effect, so that rung is gated on a fresh command.
+    if status == "":
+        return denied("not-found", employee_id)
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and status == "terminated":
+        return denied("invalid-transition", employee_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_employee_events (tenant_id, employee_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, employee_id, "terminated", "{end_epoch}"])
+    outbox_append(store, tenant.tenant_id, "hcm.employee.terminated", employee_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.terminate", employee_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, employee_id)
+    uow_commit(store)
+    accepted(employee_id)
+
+# =============================================================================
+# Attendance / time (guarded; caller-supplied now_epoch)
+# =============================================================================
+
+fn hcm_clock_in(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, employee_id: text, now_epoch: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", employee_id)
+    if not role_allows(who.role, "hcm.clock.in"):
+        return denied("forbidden", employee_id)
+    if hcm_employee_status(store, tenant.tenant_id, employee_id) != "active":
+        return denied("invalid-transition", employee_id)
+    # The open-punch rung is state-DEPENDENT: the open punch IS this
+    # command's own first effect. A double clock-in with a FRESH key is
+    # still `invalid-transition`.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_open_clock_in(store, tenant.tenant_id, employee_id) >= 0:
+        return denied("invalid-transition", employee_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_time_events (tenant_id, employee_id, kind, epoch) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, employee_id, "in", "{now_epoch}"])
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.clock.in", employee_id + ":{now_epoch}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, employee_id)
+    uow_commit(store)
+    accepted(employee_id)
+
+fn hcm_clock_out(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, employee_id: text, now_epoch: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", employee_id)
+    if not role_allows(who.role, "hcm.clock.out"):
+        return denied("forbidden", employee_id)
+    # Both rungs are state-DEPENDENT: this command CLOSES the open punch, so
+    # after its own first execution there is none to find. Re-evaluating
+    # either for a replay would deny a command that was accepted.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    val open_at = hcm_open_clock_in(store, tenant.tenant_id, employee_id)
+    if not replayed:
+        if open_at < 0:
+            return denied("invalid-transition", employee_id)
+        if now_epoch <= open_at:
+            return denied("invalid-record", employee_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_time_events (tenant_id, employee_id, kind, epoch) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, employee_id, "out", "{now_epoch}"])
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.clock.out", employee_id + ":{now_epoch}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, employee_id)
+    uow_commit(store)
+    accepted(employee_id)
+
+# =============================================================================
+# Leave (guarded)
+# =============================================================================
+
+fn hcm_leave_request(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, leave_id: text, employee_id: text, start_epoch: i64, end_epoch: i64, leave_type: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", leave_id)
+    if not role_allows(who.role, "hcm.leave.request"):
+        return denied("forbidden", leave_id)
+    if leave_id == "" or end_epoch <= start_epoch or leave_type == "":
+        return denied("invalid-record", leave_id)
+    if hcm_employee_status(store, tenant.tenant_id, employee_id) != "active":
+        return denied("invalid-transition", leave_id)
+    # The leave-already-exists rung is state-DEPENDENT: the `requested` event
+    # IS this command's own first effect. A fresh key still gets `conflict`.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_leave_status(store, tenant.tenant_id, leave_id) != "":
+        return denied("conflict", leave_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_leaves (tenant_id, leave_id, employee_id, start_epoch, end_epoch, leave_type) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, leave_id, employee_id, "{start_epoch}", "{end_epoch}", leave_type])
+    store_insert_row(store,
+        "INSERT INTO hcm_leave_events (tenant_id, leave_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, leave_id, "requested", employee_id])
+    outbox_append(store, tenant.tenant_id, "hcm.leave.requested", leave_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.leave.request", leave_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, leave_id)
+    uow_commit(store)
+    accepted(leave_id)
+
+# hcm_leave_decide: admin-guarded (admin or hcm role). Approving a range that
+# overlaps an existing APPROVED leave of the same employee is a `conflict`.
+fn hcm_leave_decide(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, leave_id: text, approve: bool) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", leave_id)
+    if not role_allows(who.role, "hcm.leave.decide"):
+        return denied("forbidden", leave_id)
+    # The must-still-be-requested rung is state-DEPENDENT: the decision event
+    # IS this command's own first effect. Deciding twice with a FRESH key is
+    # still `invalid-transition`. The identity rung (`not-found`, below) and
+    # the overlap rung are handled after the leave row is resolved.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_leave_status(store, tenant.tenant_id, leave_id) != "requested":
+        return denied("invalid-transition", leave_id)
+    var employee_id = ""
+    var lo: i64 = 0
+    var hi: i64 = 0
+    val rows = store_rows(store, "hcm_leaves", "id, tenant_id, leave_id, employee_id, start_epoch, end_epoch, leave_type")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant.tenant_id and sqlite_row_get(row, "leave_id") == leave_id:
+            employee_id = sqlite_row_get(row, "employee_id")
+            lo = int(sqlite_row_get(row, "start_epoch"))
+            hi = int(sqlite_row_get(row, "end_epoch"))
+    if employee_id == "":
+        return denied("not-found", leave_id)
+    # The overlap rung excludes THIS leave, so it is already replay-stable
+    # (this command's own approval can never conflict with itself).
+    if not replayed and approve and hcm_leave_overlaps_approved(store, tenant.tenant_id, employee_id, lo, hi, leave_id):
+        return denied("conflict", leave_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    var verdict = "denied"
+    if approve:
+        verdict = "approved"
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO hcm_leave_events (tenant_id, leave_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, leave_id, verdict, employee_id])
+    outbox_append(store, tenant.tenant_id, "hcm.leave." + verdict, leave_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "hcm.leave.decide", leave_id + ":" + verdict)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, leave_id)
+    uow_commit(store)
+    accepted(leave_id)
+
+# =============================================================================
+# Payroll BOUNDARY — calculation INPUT export, NOT a payroll result
+# =============================================================================
+
+# hcm_payroll_export emits one line per employee ever hired in the tenant:
+#
+#     employee_id|wage_cents_per_hour|worked_seconds|approved_leave_days
+#
+# - wage is the contract-effective wage at period_end (latest effective row);
+# - worked_seconds sums CLOSED intervals clipped to [period_start, period_end);
+# - approved_leave_days is the approved-leave balance in the same window.
+#
+# This is evidence-bearing INPUT data for an external payroll engine. It is
+# NOT a payroll calculation: no gross/net pay, no tax, no deductions — that
+# scope is an explicitly separate, reviewed future lane (design §6.5).
+fn hcm_payroll_export(store: EnterpriseStore, tenant_id: text, period_start: i64, period_end: i64) -> text:
+    var out = ""
+    var seen: [text] = []
+    val rows = store_rows(store, "hcm_employee_events", "id, tenant_id, employee_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "event") == "hired":
+            val emp = sqlite_row_get(row, "employee_id")
+            var dup = false
+            for s in seen:
+                if s == emp:
+                    dup = true
+            if not dup:
+                seen.push(emp)
+                val wage = hcm_wage_at(store, tenant_id, emp, period_end)
+                val worked = hcm_worked_seconds(store, tenant_id, emp, period_start, period_end)
+                val leave_days = hcm_leave_balance(store, tenant_id, emp, period_start, period_end)
+                if out != "":
+                    out = out + "\n"
+                out = out + emp + "|{wage}|{worked}|{leave_days}"
+    out
+
+export hcm_setup
+export hcm_employee_status, hcm_contract_count, hcm_wage_at
+export hcm_open_clock_in, hcm_time_entries, hcm_worked_seconds
+export hcm_leave_status, hcm_leave_overlaps_approved, hcm_leave_balance
+export hcm_hire, hcm_contract_amend, hcm_terminate
+export hcm_clock_in, hcm_clock_out
+export hcm_leave_request, hcm_leave_decide
+export hcm_payroll_export

@@ -1,0 +1,136 @@
+"""
+# Enterprise Store — pure-Simple file backend (sqlite-free fallback)
+
+Append-only, line-oriented storage behind the SAME `store.spl` facade,
+selected by composition when the `rt_sqlite_*` externs are unavailable
+(SimpleOS in-guest — lane `.spipe/simple_enterprise_suite` AC-17).
+
+One store = one text file. Line format (columns percent-encoded so any
+value round-trips):
+
+    SPLSTORE1                      <- format marker line (corruption detector)
+    table\tcol=val\tcol=val...     <- one insert per line, append order
+
+The `id` column every system table declares is IMPLICIT: it is the row's
+1-based per-table append index, assigned on read. Only the existing
+`file_ops` io facade is used (`file_read` / `file_atomic_write` /
+`file_exists`) — no new runtime externs. Whole-file atomic rewrite makes
+each single insert all-or-nothing; multi-write atomicity is provided one
+layer up by `BufferedUow` in store.spl (raw begin/rollback do not undo,
+and the honest ACID probe therefore reports acid=false — same contract as
+the interpreter sqlite emulation).
+"""
+
+use std.nogc_sync_mut.io.sqlite_sffi.{SqliteRow}
+
+# Local extern declarations instead of `use std...io.file_ops`: importing
+# file_ops pulls its whole module, and its file_read/file_read_text use the
+# `??` TryOperator, which blocks standalone-SMF cross-compilation for the
+# SimpleOS target (AC-17). Same-signature local declaration precedent:
+# src/lib/nogc_sync_mut/shell/file.spl, terminal/credential/store.spl.
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+extern fn rt_file_atomic_write(path: text, content: text) -> bool
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_atomic_write(path: text, content: text) -> bool:
+    rt_file_atomic_write(path, content)
+
+val FB_MAGIC = "SPLSTORE1"
+
+# fb_read: whole-file read via the offset facade — deliberately NOT
+# file_read/file_read_text, whose `??` TryOperator blocks standalone-SMF
+# cross-compilation for the SimpleOS target (AC-17).
+fn fb_read(path: text) -> text:
+    rt_file_read_text_at(path, 0, rt_file_size(path))
+
+# --- value encoding (tab/newline/percent/equals-safe) ---
+
+fn fb_encode(v: text) -> text:
+    v.replace("%", "%25").replace("\t", "%09").replace("\n", "%0A").replace("=", "%3D")
+
+fn fb_decode(v: text) -> text:
+    v.replace("%3D", "=").replace("%0A", "\n").replace("%09", "\t").replace("%25", "%")
+
+# --- store file lifecycle ---
+
+# fb_is_store reports whether path holds a file-backend store (magic line).
+fn fb_is_store(path: text) -> bool:
+    if not file_exists(path):
+        return false
+    fb_read(path).starts_with(FB_MAGIC)
+
+# fb_open creates the store file when absent. Fail closed on an existing
+# file that is not a store (blank/truncated/foreign — never adopt it).
+fn fb_open(path: text) -> bool:
+    if file_exists(path):
+        return fb_is_store(path)
+    file_atomic_write(path, FB_MAGIC + "\n")
+
+# --- rows ---
+
+# fb_insert appends one row (whole-file atomic rewrite).
+fn fb_insert(path: text, table: text, columns: [text], values: [text]) -> bool:
+    if not fb_is_store(path):
+        return false
+    if columns.len() != values.len():
+        return false
+    var line = table
+    var i = 0
+    while i < columns.len():
+        line = line + "\t" + columns[i] + "=" + fb_encode(values[i])
+        i = i + 1
+    file_atomic_write(path, fb_read(path) + line + "\n")
+
+# fb_rows returns all rows of `table` with the requested columns, append
+# order, as SqliteRow so records.spl's sqlite_row_get works unchanged.
+# The implicit `id` column is the 1-based append index; a column a row
+# never stored reads as "".
+fn fb_rows(path: text, table: text, columns: [text]) -> [SqliteRow]:
+    var out: [SqliteRow] = []
+    if not fb_is_store(path):
+        return out
+    var next_id = 1
+    for line in fb_read(path).split("\n"):
+        if line == "" or line == FB_MAGIC:
+            continue
+        val fields = line.split("\t")
+        if fields[0] != table:
+            continue
+        var vals: [text] = []
+        for col in columns:
+            if col == "id":
+                vals.push(next_id.to_text())
+            else:
+                vals.push(fb_field(fields, col))
+        out.push(SqliteRow(values: vals, column_names: columns))
+        next_id = next_id + 1
+    out
+
+fn fb_field(fields: [text], col: text) -> text:
+    var i = 1
+    while i < fields.len():
+        val pair = fields[i].split("=")
+        if pair.len() == 2 and pair[0] == col:
+            return fb_decode(pair[1])
+        i = i + 1
+    ""
+
+# fb_count mirrors sqlite_query_value("SELECT COUNT(*) ..."): number as
+# text for a healthy store, "" for a missing/foreign file (fail-closed
+# corruption signal store_verify relies on).
+fn fb_count(path: text, table: text) -> text:
+    if not fb_is_store(path):
+        return ""
+    var n = 0
+    for line in fb_read(path).split("\n"):
+        if line == "" or line == FB_MAGIC:
+            continue
+        if line.split("\t")[0] == table:
+            n = n + 1
+    n.to_text()
+
+export fb_is_store, fb_open, fb_insert, fb_rows, fb_count

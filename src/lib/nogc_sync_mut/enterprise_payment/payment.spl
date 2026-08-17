@@ -1,0 +1,318 @@
+"""
+# Payment Provider Boundary — intents, verified webhooks, reconciliation
+
+Lane `.spipe/simple_enterprise_suite` W5-B (design
+doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md
+§7.1, §7.2, §10.2). The hosted-provider posture is structural:
+
+- **No PAN/CVV, ever.** Card entry happens on the provider's hosted page;
+  this module stores only provider references, event kinds, and statuses.
+  Webhook payloads are opaque text passed through the signature check and
+  are NOT persisted.
+- **Provider interaction is OUTSIDE.** `payment_create_intent` records a
+  pending intent and hands the caller a `provider_ref`; talking to the
+  provider (redirect, SDK, hosted page) is the caller's job. Results come
+  back only as verified webhooks.
+- **Verified, deduplicated webhooks.** Every webhook must carry a signature
+  the `PaymentProvider` seam verifies, and a `provider_event_id` that is
+  deduplicated: a replayed webhook returns the recorded result and produces
+  exactly one effect.
+
+## Signature seam — stand-in, not PCI evidence
+
+`PaymentProvider` verifies `sha256(shared_secret + "|" + material)`, where
+`material` is the canonical `webhook_signing_material` binding tenant,
+provider_ref, event kind, provider event id AND the opaque payload — an
+HMAC-style shared-secret check using the repo's own sha256. It is a
+composition seam standing in for real provider SDK verification
+(e.g. Stripe's `t=..,v1=..` HMAC-SHA256 scheme); swapping in a real
+provider replaces this struct only. It is NOT PCI-DSS evidence — the PCI
+posture is "hosted provider assumed": card data never transits this system.
+
+## Lifecycle (insert-only event rows, status derived)
+
+    pending -> authorized -> captured
+    pending|authorized -> failed
+
+On `captured` the intent event AND `sale_pay_order` run in the SAME unit of
+work, so order payment state and intent state cannot diverge. On `failed`
+the intent fails and the order is untouched. (Backend honesty: on the
+interpreter's non-ACID sqlite emulation begin/commit are no-ops, so the
+inner `sale_pay_order` uow flattens into the outer one harmlessly; on an
+ACID backend sqlite ignores a nested BEGIN, giving one flat transaction.)
+
+Guarded commands copy the frozen sequence from goods_sale:
+session -> rbac -> domain validation -> idempotency -> effects in one UoW.
+Reasons reuse the closed set: `invalid-record` for a bad signature or bad
+transition, `duplicate-key` for a replayed `provider_event_id`.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{sale_order_status, sale_pay_order}
+
+# =============================================================================
+# Provider seam
+# =============================================================================
+
+# PaymentProvider is the composition seam for provider verification. See the
+# module docstring: shared-secret sha256 stand-in, not PCI evidence.
+struct PaymentProvider:
+    name: text
+    shared_secret: text
+
+fn provider_sign(provider: PaymentProvider, payload: text) -> text:
+    sha256_text(provider.shared_secret + "|" + payload)
+
+fn provider_verify(provider: PaymentProvider, payload: text, signature: text) -> bool:
+    signature != "" and provider_sign(provider, payload) == signature
+
+# webhook_signing_material is the canonical string a webhook signature MUST
+# cover. Signing the opaque payload alone binds nothing the command acts on:
+# the W9-D security audit lifted a valid capture signature onto a DIFFERENT
+# provider_ref and captured another order. The signature therefore binds the
+# tenant, the provider reference, the event kind and the provider event id
+# alongside the payload.
+fn webhook_signing_material(tenant_id: text, provider_ref: text, event_kind: text, provider_event_id: text, payload: text) -> text:
+    "pwh/v2|" + tenant_id + "|" + provider_ref + "|" + event_kind + "|" + provider_event_id + "|" + payload
+
+fn provider_sign_webhook(provider: PaymentProvider, tenant_id: text, provider_ref: text, event_kind: text, provider_event_id: text, payload: text) -> text:
+    provider_sign(provider, webhook_signing_material(tenant_id, provider_ref, event_kind, provider_event_id, payload))
+
+fn provider_verify_webhook(provider: PaymentProvider, tenant_id: text, provider_ref: text, event_kind: text, provider_event_id: text, payload: text, signature: text) -> bool:
+    provider_verify(provider, webhook_signing_material(tenant_id, provider_ref, event_kind, provider_event_id, payload), signature)
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn payment_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "payment_001_intent_events",
+        "CREATE TABLE IF NOT EXISTS payment_intent_events (id INTEGER PRIMARY KEY, tenant_id TEXT, intent_id TEXT, order_id TEXT, event TEXT, provider_ref TEXT, detail TEXT, at TEXT)")
+
+# =============================================================================
+# Derived reads (pure-Simple filtering; insert-only event rows)
+# =============================================================================
+
+# payment_intent_status derives the intent's status from its event stream:
+# "" (unknown) -> pending -> authorized -> captured | failed
+fn payment_intent_status(store: EnterpriseStore, tenant_id: text, intent_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "payment_intent_events", "id, tenant_id, intent_id, order_id, event, provider_ref, detail, at")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "intent_id") == intent_id:
+            status = sqlite_row_get(row, "event")
+    status
+
+# payment_intent_by_ref resolves a provider_ref to (intent_id, order_id)
+# from the intent's pending event; ("", "") if unknown to this tenant.
+fn payment_intent_by_ref(store: EnterpriseStore, tenant_id: text, provider_ref: text) -> (text, text):
+    val rows = store_rows(store, "payment_intent_events", "id, tenant_id, intent_id, order_id, event, provider_ref, detail, at")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "provider_ref") == provider_ref:
+            if sqlite_row_get(row, "event") == "pending":
+                return (sqlite_row_get(row, "intent_id"), sqlite_row_get(row, "order_id"))
+    ("", "")
+
+# payment_intent_ref returns the provider_ref recorded for an intent.
+fn payment_intent_ref(store: EnterpriseStore, tenant_id: text, intent_id: text) -> text:
+    val rows = store_rows(store, "payment_intent_events", "id, tenant_id, intent_id, order_id, event, provider_ref, detail, at")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "intent_id") == intent_id:
+            if sqlite_row_get(row, "event") == "pending":
+                return sqlite_row_get(row, "provider_ref")
+    ""
+
+# =============================================================================
+# Guarded commands (frozen sequence copied from goods_sale)
+# =============================================================================
+
+fn append_intent_event(store: EnterpriseStore, tenant_id: text, intent_id: text, order_id: text, event: text, provider_ref: text, detail: text, at: i64):
+    store_insert_row(store,
+        "INSERT INTO payment_intent_events (tenant_id, intent_id, order_id, event, provider_ref, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant_id, intent_id, order_id, event, provider_ref, detail, "{at}"])
+
+# payment_create_intent records a pending intent for a created (unpaid)
+# order. The amount comes from the ORDER's journal — never from the caller.
+# `now` is caller-supplied wall time (seconds) used by reconciliation TTLs.
+# On success the result detail is the provider_ref the caller hands to the
+# hosted provider flow.
+fn payment_create_intent(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, intent_id: text, order_id: text, now: i64) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", intent_id)
+    # 2. rbac
+    if not role_allows(who.role, "payment.intent.create"):
+        return denied("forbidden", intent_id)
+    # 3. domain validation
+    if intent_id == "" or order_id == "":
+        return denied("invalid-record", intent_id)
+    if sale_order_status(store, tenant.tenant_id, order_id) != "created":
+        return denied("invalid-record", order_id)
+    val amount = order_amount_cents(store, tenant.tenant_id, order_id)
+    # 4. idempotency — checked BEFORE the intent-existence rung, which is
+    #    state-dependent: the pending intent IS this command's own recorded
+    #    effect on a replay, so validating it first would answer
+    #    `invalid-record` to a command that was accepted. (The order-status
+    #    rung above is state-INDEPENDENT here — creating an intent never
+    #    moves the order out of `created` — and stays unconditional.)
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and payment_intent_status(store, tenant.tenant_id, intent_id) != "":
+        return denied("invalid-record", intent_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    val provider_ref = "prov-" + tenant.tenant_id + "-" + intent_id
+    uow_begin(store)
+    append_intent_event(store, tenant.tenant_id, intent_id, order_id, "pending", provider_ref, "{amount}", now)
+    outbox_append(store, tenant.tenant_id, "payment.intent.created", intent_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "payment.intent.create", intent_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, provider_ref)
+    uow_commit(store)
+    accepted(provider_ref)
+
+# payment_webhook_receive processes a provider callback. `envelope.payload`
+# is the OPAQUE webhook body (never persisted, never parsed for card data);
+# `signature` must verify against the provider seam; `provider_event_id`
+# is the dedupe key — a replay returns the recorded result with exactly one
+# effect. event_kind: authorized | captured | failed. On captured the intent
+# transition and sale_pay_order commit in the SAME unit of work.
+fn payment_webhook_receive(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, provider: PaymentProvider, provider_ref: text, event_kind: text, signature: text, provider_event_id: text, now: i64) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", provider_ref)
+    # 2. rbac
+    if not role_allows(who.role, "payment.webhook.receive"):
+        return denied("forbidden", provider_ref)
+    # 3. domain validation — signature FIRST: an unverified webhook is
+    #    untrusted input and must cause no state change of any kind.
+    #    The signature binds the EVENT, not just the payload: tenant,
+    #    provider_ref, event_kind and provider_event_id are all covered, so a
+    #    signature cannot be lifted onto another reference, kind, event id or
+    #    tenant (W9-D security audit).
+    if not provider_verify_webhook(provider, tenant.tenant_id, provider_ref, event_kind, provider_event_id, envelope.payload, signature):
+        return denied("invalid-record", provider_ref)
+    if provider_event_id == "":
+        return denied("invalid-record", provider_ref)
+    if event_kind != "authorized" and event_kind != "captured" and event_kind != "failed":
+        return denied("invalid-record", event_kind)
+    val target = payment_intent_by_ref(store, tenant.tenant_id, provider_ref)
+    val intent_id = target.0
+    val order_id = target.1
+    if intent_id == "":
+        return denied("not-found", provider_ref)
+    # 4. idempotency — dedupe by provider_event_id (tenant-scoped). Checked
+    #    BEFORE the transition rung: the replayed event already caused its
+    #    transition, so status-validating first would misreport a replay as
+    #    invalid-record instead of returning the recorded result.
+    val dedupe_key = "pwh:" + provider_event_id
+    if idempotency_seen(store, tenant.tenant_id, dedupe_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, dedupe_key))
+    val status = payment_intent_status(store, tenant.tenant_id, intent_id)
+    if event_kind == "authorized" and status != "pending":
+        return denied("invalid-record", intent_id)
+    if event_kind == "captured" and status != "pending" and status != "authorized":
+        return denied("invalid-record", intent_id)
+    if event_kind == "failed" and status != "pending" and status != "authorized":
+        return denied("invalid-record", intent_id)
+    # 5. effects — one unit of work
+    uow_begin(store)
+    append_intent_event(store, tenant.tenant_id, intent_id, order_id, event_kind, provider_ref, provider_event_id, now)
+    if event_kind == "captured":
+        # Same uow: order paid and intent captured commit or fail together.
+        val pay = sale_pay_order(store, session, tenant, who, CommandEnvelope(request_id: envelope.request_id, idempotency_key: "pay:" + dedupe_key, action: "sale.order.pay", payload: ""), order_id)
+        if not pay.ok:
+            uow_rollback(store)
+            return denied(pay.reason, order_id)
+    outbox_append(store, tenant.tenant_id, "payment.webhook." + event_kind, intent_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "payment.webhook.receive", intent_id + ":" + event_kind)
+    idempotency_record(store, tenant.tenant_id, dedupe_key, intent_id + ":" + event_kind)
+    uow_commit(store)
+    accepted(intent_id)
+
+# =============================================================================
+# Reconciliation (§7.2 divergence classes) — pure data report
+# =============================================================================
+
+struct PaymentReconcileReport:
+    pending_over_ttl: [text]
+    captured_without_paid_order: [text]
+    paid_order_without_captured_intent: [text]
+
+# payment_reconcile scans a tenant's intents and orders for divergence.
+# `now`/`ttl_seconds` are caller-supplied: an intent still pending after the
+# TTL is flagged for follow-up with the provider.
+fn payment_reconcile(store: EnterpriseStore, tenant_id: text, now: i64, ttl_seconds: i64) -> PaymentReconcileReport:
+    var pending_stale: [text] = []
+    var captured_unpaid: [text] = []
+    var paid_uncaptured: [text] = []
+    # Collect each intent's latest state, creation time, and order.
+    var intent_ids: [text] = []
+    val rows = store_rows(store, "payment_intent_events", "id, tenant_id, intent_id, order_id, event, provider_ref, detail, at")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val iid = sqlite_row_get(row, "intent_id")
+        if not intent_ids.contains(iid):
+            intent_ids.push(iid)
+    var captured_orders: [text] = []
+    for iid in intent_ids:
+        val status = payment_intent_status(store, tenant_id, iid)
+        var order_id = ""
+        var created_at: i64 = 0
+        for row in rows:
+            if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "intent_id") == iid:
+                if sqlite_row_get(row, "event") == "pending":
+                    order_id = sqlite_row_get(row, "order_id")
+                    created_at = int(sqlite_row_get(row, "at"))
+        if status == "pending" and now - created_at > ttl_seconds:
+            pending_stale.push(iid)
+        if status == "captured":
+            captured_orders.push(order_id)
+            if sale_order_status(store, tenant_id, order_id) != "paid":
+                captured_unpaid.push(iid)
+    # paid orders lacking a captured intent
+    val order_rows = store_rows(store, "order_events", "id, tenant_id, order_id, event, detail")
+    for row in order_rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        if sqlite_row_get(row, "event") != "paid":
+            continue
+        val oid = sqlite_row_get(row, "order_id")
+        if not captured_orders.contains(oid) and not paid_uncaptured.contains(oid):
+            paid_uncaptured.push(oid)
+    PaymentReconcileReport(pending_over_ttl: pending_stale, captured_without_paid_order: captured_unpaid, paid_order_without_captured_intent: paid_uncaptured)
+
+# =============================================================================
+# Internal derivations
+# =============================================================================
+
+# order_amount_cents mirrors goods_sale's private derivation: the order's
+# sales_revenue credit posted at creation.
+fn order_amount_cents(store: EnterpriseStore, tenant_id: text, order_id: text) -> i64:
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "order_id") == order_id:
+            if sqlite_row_get(row, "account") == "sales_revenue" and sqlite_row_get(row, "side") == "credit":
+                return int(sqlite_row_get(row, "amount_cents"))
+    0
+
+export PaymentProvider, provider_sign, provider_verify
+export webhook_signing_material, provider_sign_webhook, provider_verify_webhook
+export payment_setup
+export payment_intent_status, payment_intent_by_ref, payment_intent_ref
+export payment_create_intent, payment_webhook_receive
+export PaymentReconcileReport, payment_reconcile

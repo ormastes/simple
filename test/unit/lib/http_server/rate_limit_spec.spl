@@ -7,26 +7,68 @@
 #
 # ## Overview
 # Tests for rate limiting configuration, defaults, and peer tracking.
-# Validates that request limits and time windows are correct.
+# Validates that request limits and time windows are correct, and that the
+# PreRead-phase handler admits requests within the limit and rejects with 429
+# once a peer's token bucket is exhausted.
+#
+# ## API note (2026-08-17, lane W11-A)
+# This spec previously imported `default_rate_limit_config`,
+# `new_rate_limit_store` and `check_rate_limit`. `git log -S
+# default_rate_limit_config -- src/` returns ZERO commits: those free
+# functions never existed. The module (added together with this spec in
+# cfe0506e336b) has always exposed `RateLimitConfig.default()`,
+# `RateLimitStore.new()` and `rate_limit_handler`, and the config field is
+# `requests_per_window` (not `max_requests`); there is no `enabled` field —
+# "enabled by default" is expressed by the default config having no exempt
+# paths and no trusted proxies, so the limiter applies to every request and
+# cannot be bypassed via X-Forwarded-For.
 
-use std.http_server.rate_limit.{RateLimitConfig, default_rate_limit_config, RateLimitStore, new_rate_limit_store, check_rate_limit}
+use std.spec.*
+use std.http_server.rate_limit.{RateLimitConfig, RateLimitStore, rate_limit_handler}
+use std.http_server.types.{PhaseResult, HttpRequestData, default_server_config}
+
+fn request_from(peer: text) -> HttpRequestData:
+    HttpRequestData(
+        method: "GET",
+        path: "/api/resource",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: peer
+    )
+
+fn phase_status(result: PhaseResult) -> i64:
+    """0 when the phase continues, otherwise the rejection status code."""
+    match result:
+        PhaseResult.Continue: 0
+        PhaseResult.Error(status, _msg): status
+        _: -1
+
+fn admit(store: RateLimitStore, config: RateLimitConfig, peer: text) -> i64:
+    phase_status(rate_limit_handler(request_from(peer), default_server_config(), config, store))
 
 # ============================================================================
 # Test Group 1: Configuration defaults
 # ============================================================================
 
 describe "RateLimitConfig defaults":
-    it "defaults to 100 requests":
-        val config = default_rate_limit_config()
-        expect(config.max_requests).to_equal(100)
+    it "defaults to 100 requests per window":
+        val config = RateLimitConfig.default()
+        expect(config.requests_per_window).to_equal(100)
 
     it "defaults to 60000ms window":
-        val config = default_rate_limit_config()
+        val config = RateLimitConfig.default()
         expect(config.window_ms).to_equal(60000)
 
-    it "has enabled set to true by default":
-        val config = default_rate_limit_config()
-        expect(config.enabled).to_equal(true)
+    it "applies to every request by default":
+        val config = RateLimitConfig.default()
+        expect(config.exempt_paths.len()).to_equal(0)
+        expect(config.trusted_proxies.len()).to_equal(0)
+        var store = RateLimitStore.new()
+        expect(admit(store, config, "203.0.113.9")).to_equal(0)
+        expect(store.find_peer("203.0.113.9")).to_equal(0)
 
 # ============================================================================
 # Test Group 2: Rate limit checking
@@ -34,23 +76,45 @@ describe "RateLimitConfig defaults":
 
 describe "Rate limit checking":
     it "allows requests within limit":
-        val config = default_rate_limit_config()
-        var store = new_rate_limit_store()
-        val result = check_rate_limit(store, config, "192.168.1.1")
-        expect(result).to_equal(true)
+        val config = RateLimitConfig.default()
+        var store = RateLimitStore.new()
+        expect(admit(store, config, "192.168.1.1")).to_equal(0)
 
     it "tracks peer request count":
-        val config = default_rate_limit_config()
-        var store = new_rate_limit_store()
-        val first = check_rate_limit(store, config, "10.0.0.1")
-        val second = check_rate_limit(store, config, "10.0.0.1")
-        expect(first).to_equal(true)
-        expect(second).to_equal(true)
+        val config = RateLimitConfig.default()
+        var store = RateLimitStore.new()
+        expect(admit(store, config, "10.0.0.1")).to_equal(0)
+        val after_first = store.tokens[store.find_peer("10.0.0.1")]
+        expect(admit(store, config, "10.0.0.1")).to_equal(0)
+        val after_second = store.tokens[store.find_peer("10.0.0.1")]
+        expect(after_first).to_equal(config.requests_per_window + config.burst_size - 1)
+        expect(after_second).to_equal(after_first - 1)
 
     it "tracks different peers independently":
-        val config = default_rate_limit_config()
-        var store = new_rate_limit_store()
-        val result_a = check_rate_limit(store, config, "10.0.0.1")
-        val result_b = check_rate_limit(store, config, "10.0.0.2")
-        expect(result_a).to_equal(true)
-        expect(result_b).to_equal(true)
+        val config = RateLimitConfig.default()
+        var store = RateLimitStore.new()
+        expect(admit(store, config, "10.0.0.1")).to_equal(0)
+        expect(admit(store, config, "10.0.0.1")).to_equal(0)
+        expect(admit(store, config, "10.0.0.2")).to_equal(0)
+        expect(store.peers.len()).to_equal(2)
+        val a = store.tokens[store.find_peer("10.0.0.1")]
+        val b = store.tokens[store.find_peer("10.0.0.2")]
+        expect(b).to_equal(a + 1)
+
+# ============================================================================
+# Test Group 3: Enforcement
+# ============================================================================
+
+describe "Rate limit enforcement":
+    it "rejects with 429 once the bucket is exhausted":
+        val config = RateLimitConfig(
+            requests_per_window: 2,
+            window_ms: 60000,
+            burst_size: 0,
+            exempt_paths: [],
+            trusted_proxies: []
+        )
+        var store = RateLimitStore.new()
+        expect(admit(store, config, "198.51.100.7")).to_equal(0)
+        expect(admit(store, config, "198.51.100.7")).to_equal(0)
+        expect(admit(store, config, "198.51.100.7")).to_equal(429)

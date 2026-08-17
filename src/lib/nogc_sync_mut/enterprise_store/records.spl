@@ -20,10 +20,10 @@ All rows are tenant-scoped; readers filter by tenant in pure Simple.
 """
 
 use std.nogc_sync_mut.enterprise_store.store.{
-    EnterpriseStore, store_rows, store_insert_row
+    EnterpriseStore, store_rows, store_insert_row, store_migration_applied
 }
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
-use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.enterprise_store.audit_hash.{audit_sha256_hex}
 
 # =============================================================================
 # Idempotency keys
@@ -79,7 +79,7 @@ fn outbox_pending(store: EnterpriseStore, tenant_id: text) -> [(text, text)]:
 # Note: `actor` is a reserved keyword in Simple — parameters use actor_id;
 # the audit_log column keeps the name "actor" (SQL string only).
 fn audit_hash(prev_hash: text, tenant_id: text, actor_id: text, action: text, detail: text) -> text:
-    sha256_text(prev_hash + "|" + tenant_id + "|" + actor_id + "|" + action + "|" + detail)
+    audit_sha256_hex(prev_hash + "|" + tenant_id + "|" + actor_id + "|" + action + "|" + detail)
 
 # audit_last_hash returns the newest hash in the tenant's chain ("" for empty).
 fn audit_last_hash(store: EnterpriseStore, tenant_id: text) -> text:
@@ -119,6 +119,60 @@ fn audit_verify_chain(store: EnterpriseStore, tenant_id: text) -> bool:
         expected_prev = sqlite_row_get(row, "hash")
     true
 
+# =============================================================================
+# Journal period seam (enterprise_finance W6-C)
+# =============================================================================
+#
+# THE shared seam every journal writer must post through. A period close
+# (enterprise_finance.fin_period_close) records an insert-only lock row in
+# `period_locks`; `journal_post_pair` refuses any posting dated at or before
+# the tenant's latest closed period end. Modules that insert into `journal`
+# directly bypass this check — goods_sale and restaurant are wired through it;
+# any NEW journal writer must call journal_post_pair, never raw inserts.
+# The lock table is finance-owned and optional: when the finance migration has
+# not been applied on a store, postings are always allowed (probe, not crash).
+
+# period_locks_present reports whether the finance period-lock table exists.
+fn period_locks_present(store: EnterpriseStore) -> bool:
+    store_migration_applied(store, "fin_001_period_locks")
+
+# period_latest_close returns the tenant's newest closed period end epoch
+# (0 when the finance module is absent or nothing was closed).
+fn period_latest_close(store: EnterpriseStore, tenant_id: text) -> i64:
+    if not period_locks_present(store):
+        return 0
+    var latest: i64 = 0
+    val rows = store_rows(store, "period_locks", "id, tenant_id, period_end_epoch, closed_by, debit_total, credit_total, closed_at_epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val end = int(sqlite_row_get(row, "period_end_epoch"))
+        if end > latest:
+            latest = end
+    latest
+
+# journal_post_allowed is the READ-ONLY half of the seam: true when a posting
+# dated `posted_at_epoch` would be accepted. Callers validate with this BEFORE
+# opening their unit of work, so a denial needs no rollback at all — see the
+# rollback caveat in doc/07_guide/app/enterprise/finance.md.
+fn journal_post_allowed(store: EnterpriseStore, tenant_id: text, posted_at_epoch: i64) -> bool:
+    posted_at_epoch > period_latest_close(store, tenant_id)
+
+# journal_post_pair writes one balanced debit/credit pair, DENYING (false,
+# no rows) any posting dated inside a closed period. Call inside the caller's
+# unit of work; on false the caller must roll back and deny invalid-transition.
+fn journal_post_pair(store: EnterpriseStore, tenant_id: text, ref_id: text, debit_account: text, credit_account: text, amount_cents: i64, posted_at_epoch: i64) -> bool:
+    if posted_at_epoch <= period_latest_close(store, tenant_id):
+        return false
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, ref_id, debit_account, "debit", "{amount_cents}"])
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, ref_id, credit_account, "credit", "{amount_cents}"])
+    true
+
+export period_locks_present, period_latest_close, journal_post_allowed, journal_post_pair
 export idempotency_seen, idempotency_result, idempotency_record
 export outbox_append, outbox_pending
 export audit_hash, audit_last_hash, audit_append, audit_verify_chain

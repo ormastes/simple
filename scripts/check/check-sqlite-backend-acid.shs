@@ -1,0 +1,68 @@
+#!/bin/sh
+# Reproduces the native-ACID finding recorded in
+#   doc/08_tracking/bug/interpreter_sqlite_externs_nonacid_emulation_2026-08-14.md
+#   (§ Refinement 2026-08-16) and doc/07_guide/lib/database/enterprise_store.md
+#   (§ Native-ACID status).
+#
+# It does NOT gate anything. It answers one question honestly: does THIS host
+# reach real, ACID SQLite through the Simple toolchain?
+#
+# Verdict is the last line of stdout:
+#   ACID    — rollback removed the row AND the UNIQUE violation was rejected
+#   NONACID — the rt_sqlite_* emulation is in play (rollback no-op / no UNIQUE)
+#   BLOCKED — the AOT --native link fails (the known blocker); reason printed
+set -u
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+PROBE="$ROOT/test/fixture/enterprise_store/sqlite_acid_probe.spl"
+[ -s "$PROBE" ] || { echo "BLOCKED — missing probe $PROBE"; exit 2; }
+SIMPLE="$ROOT/bin/simple"
+[ -x "$SIMPLE" ] || { echo "BLOCKED — no bin/simple at $SIMPLE"; exit 2; }
+
+echo "binary: $(readlink -f "$SIMPLE")"
+WORK=$(mktemp -d) || { echo "BLOCKED — mktemp failed"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+
+strip_ansi() { sed -e 's/\x1b\[[0-9;]*m//g'; }
+
+# The only path that can link real sqlite3 is the AOT --native compile.
+OUT="$WORK/probe"
+BUILD_LOG="$WORK/build.log"
+"$SIMPLE" compile "$PROBE" --native -o "$OUT" >"$BUILD_LOG" 2>&1
+BUILD_RC=$?
+if [ "$BUILD_RC" -ne 0 ] || [ ! -x "$OUT" ]; then
+  REASON=$(strip_ansi <"$BUILD_LOG" | grep -i "error" | head -1)
+  [ -n "$REASON" ] || REASON="compile --native exited $BUILD_RC with no error line"
+  echo "BLOCKED — AOT native build failed: $REASON"
+  exit 2
+fi
+
+RUN_LOG="$WORK/run.log"
+"$OUT" >"$RUN_LOG" 2>&1
+strip_ansi <"$RUN_LOG"
+# Presence is read as TEXT, not via sqlite_count -- see the probe's header for
+# why the count helper cannot carry this evidence today.
+field() { strip_ansi <"$RUN_LOG" | sed -n "s/^$1=//p" | head -1; }
+IN_TX=$(field in_tx_row1)
+ROLLBACK=$(field after_rollback_row1)
+DUP=$(field dup_insert_ok)
+COMMITTED=$(field committed_row2)
+REJECTED=$(field rejected_row3)
+if [ -z "$ROLLBACK" ] || [ -z "$DUP" ] || [ -z "$COMMITTED" ]; then
+  echo "BLOCKED — probe produced no verdict fields"
+  exit 2
+fi
+
+# Non-vacuity first: a backend where NOTHING is ever written would satisfy
+# "rollback removed the row" and "dup rejected" for free. Demand positive
+# evidence that writes and reads work at all before believing either.
+if [ "$IN_TX" != "[alpha]" ] || [ "$COMMITTED" != "[beta]" ]; then
+  echo "BLOCKED — probe is vacuous: in_tx_row1=$IN_TX committed_row2=$COMMITTED (expected [alpha] / [beta]); writes or reads are not working, so the ACID fields prove nothing"
+  exit 2
+fi
+
+if [ "$ROLLBACK" = "[]" ] && [ "$DUP" = "false" ] && [ "$REJECTED" = "[]" ]; then
+  echo "ACID — rollback removed the row, UNIQUE violation rejected"
+  exit 0
+fi
+echo "NONACID — after_rollback_row1=$ROLLBACK dup_insert_ok=$DUP rejected_row3=$REJECTED (expected [] / false / [])"
+exit 1

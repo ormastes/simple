@@ -495,6 +495,68 @@ pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf
     build_c_runtime_library(build_dir, true)
 }
 
+/// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
+///
+/// The single-file `compile --native` path links `libsimple_runtime.a` built by
+/// `build_core_c_runtime_library` (`include_stage4_hosted = false`), which
+/// deliberately omits `runtime_sqlite.c` so that ordinary native binaries do
+/// not acquire a hard `libsqlite3` dependency. A source that actually calls
+/// `sqlite_*` therefore failed to link with
+/// `codegen: undefined symbol: rt_sqlite_open`.
+///
+/// Rather than widening the shared core archive (which would change its
+/// identity fingerprint and put `-lsqlite3` on every link line), this builds
+/// the one translation unit on demand. The caller adds it — plus `-lsqlite3` —
+/// only when the entry object genuinely references a sqlite runtime symbol.
+/// Flags mirror `build_c_runtime_library` exactly so the object is ABI-identical
+/// to the archive members it links beside.
+pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
+    let runtime_root = find_core_c_runtime_source_root()?;
+    let source = "runtime_sqlite.c";
+    let source_path = runtime_root.join(source);
+    if !source_path.exists() {
+        return None;
+    }
+    let target = effective_target();
+    let object = build_dir.join(format!("runtime_sqlite.{}", host_object_extension()));
+
+    // Reuse a previously built object when it is newer than its source.
+    if let (Ok(obj_meta), Ok(src_meta)) = (std::fs::metadata(&object), std::fs::metadata(&source_path)) {
+        if obj_meta.len() > 0
+            && match (obj_meta.modified(), src_meta.modified()) {
+                (Ok(o), Ok(s)) => o >= s,
+                _ => false,
+            }
+        {
+            return Some(object);
+        }
+    }
+
+    std::fs::create_dir_all(build_dir).ok()?;
+    let cc = target_c_compiler(target);
+    let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
+    let status = std::process::Command::new(&cc)
+        .arg("-c")
+        .arg("-Os")
+        .arg("-ffunction-sections")
+        .arg("-fdata-sections")
+        .arg("-fno-unwind-tables")
+        .arg("-fno-asynchronous-unwind-tables")
+        .arg("-fno-stack-protector")
+        .arg("-fPIC")
+        .arg("-std=gnu11")
+        .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+        .args(core_c_target_flags(target, source, riscv_vector))
+        .arg(format!("-I{}", runtime_root.display()))
+        .arg(format!("-I{}", runtime_root.join("platform").display()))
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .ok()?;
+    (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
+}
+
 pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf> {
     let bootstrap_root = if runtime_path.file_name() == Some(OsStr::new("bootstrap")) {
         runtime_path.to_path_buf()

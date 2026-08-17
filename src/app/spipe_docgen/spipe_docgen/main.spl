@@ -269,8 +269,36 @@ fn run_spipe_docgen(args: [text]) -> i64:
     print "FAILED Generated {docs_written}/{spec_files.len()} docs ({stats.specs_without_docs} stubs)"
     1
 
+# Fallback for the Rust-seed `bin/simple spipe-docgen ...` route, where the
+# delegation path never populates the runtime CLI-args storage and
+# rt_cli_get_args() returns an empty array (see
+# doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md).
+# Recovers the true process argv from /proc/self/cmdline (NUL-separated).
+fn args_from_proc_cmdline() -> [text]:
+    val raw = native_fs_read_string("/proc/self/cmdline")
+    if raw == "":
+        return []
+    var out: [text] = []
+    var cur = ""
+    var i = 0
+    while i < raw.len():
+        val ch = raw[i]
+        if ch == "\0":
+            if cur != "": out = out.push(cur)
+            cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur != "": out = out.push(cur)
+    out
+
 fn main() -> i64:
-    val raw = rt_cli_get_args()
+    var raw = rt_cli_get_args()
+    if raw.len() <= 1:
+        # Seed subcommand route drops argv — recover it from the kernel.
+        val recovered = args_from_proc_cmdline()
+        if recovered.len() > 1:
+            raw = recovered
     var args: [text] = []
     var skipped_program = false
     for arg in raw:

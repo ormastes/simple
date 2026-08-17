@@ -11,6 +11,17 @@ approval never masks a session/rbac/validation failure.
 
 use std.spec
 use framework.guarded.{Tenant, Actor, Session, gate_write_with_approval}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_open}
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+
+# Each scenario opens its own durable store: the interpreter backend caches
+# open databases per path in-process, so every it-block gets a fresh path.
+fn fresh_store(name: text) -> EnterpriseStore:
+    dir_create_all("build/test-artifacts")
+    val db = "build/test-artifacts/erp_framework_approval_" + name + ".db"
+    if file_exists(db):
+        file_delete(db)
+    store_open(db)
 
 fn demo_tenant() -> Tenant:
     return Tenant { id: "t1", name: "Demo" }
@@ -32,8 +43,8 @@ describe "Framework — approval overlay on the guarded gate":
         val tenant = demo_tenant()
         val user = operator_user()
         val session = active_for(user)
-        var used: [text] = []
-        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-1", used, 100, 500000, "admin")
+        val store = fresh_store("s1")
+        val r = gate_write_with_approval(store, session, tenant, user, "sale.write", true, "appr-1", 100, 500000, "admin")
         expect(r.ok).to_equal(true)
         expect(r.reason).to_equal("accepted")
 
@@ -41,8 +52,8 @@ describe "Framework — approval overlay on the guarded gate":
         val tenant = demo_tenant()
         val user = operator_user()
         val session = active_for(user)
-        var used: [text] = []
-        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-2", used, 500000, 500000, "admin")
+        val store = fresh_store("s2")
+        val r = gate_write_with_approval(store, session, tenant, user, "sale.write", true, "appr-2", 500000, 500000, "admin")
         assert_false(r.ok)
         expect(r.reason).to_equal("needs-approval")
 
@@ -50,8 +61,8 @@ describe "Framework — approval overlay on the guarded gate":
         val tenant = demo_tenant()
         val user = operator_user()
         val session = active_for(user)
-        var used: [text] = []
-        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-3", used, 999999, 500000, "operator")
+        val store = fresh_store("s3")
+        val r = gate_write_with_approval(store, session, tenant, user, "sale.write", true, "appr-3", 999999, 500000, "operator")
         expect(r.ok).to_equal(true)
         expect(r.reason).to_equal("accepted")
 
@@ -59,8 +70,8 @@ describe "Framework — approval overlay on the guarded gate":
         val tenant = demo_tenant()
         val user = admin_user()
         val session = active_for(user)
-        var used: [text] = []
-        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-4", used, 999999, 500000, "manager")
+        val store = fresh_store("s4")
+        val r = gate_write_with_approval(store, session, tenant, user, "sale.write", true, "appr-4", 999999, 500000, "manager")
         expect(r.ok).to_equal(true)
         expect(r.reason).to_equal("accepted")
 
@@ -68,7 +79,7 @@ describe "Framework — approval overlay on the guarded gate":
         val tenant = demo_tenant()
         val user = operator_user()
         val session = inactive_for(user)
-        var used: [text] = []
-        val r = gate_write_with_approval(session, tenant, user, "sale.write", true, "appr-5", used, 999999, 500000, "admin")
+        val store = fresh_store("s5")
+        val r = gate_write_with_approval(store, session, tenant, user, "sale.write", true, "appr-5", 999999, 500000, "admin")
         assert_false(r.ok)
         expect(r.reason).to_equal("invalid-session")

@@ -14,7 +14,16 @@ an ADR + compatibility review per the lane's cooperative-review plan.
 - `CommandResult` — explicit accepted/denied outcome with a closed-set
   machine-readable reason:
   accepted | invalid-session | forbidden | invalid-record | duplicate-key |
-  insufficient-stock | not-found | store-error
+  insufficient-stock | not-found | store-error | conflict |
+  table-occupied | no-session | session-closed | invalid-transition |
+  unserved-lines | line-not-found | invalid-credentials
+  (`conflict` added for the booking vertical's overlap-policy rejections —
+  a valid record denied because it would collide with an active reservation,
+  which no existing reason expresses. `invalid-credentials` is the session
+  vertical's deliberately generic issuance denial: unknown actor and wrong
+  secret must be indistinguishable, so no user-enumeration channel exists.)
+  `reason_allowed` is the EXECUTABLE form of this set — the conformance
+  spec asserts membership by calling it, never by reading this prose.
 - `Money` — integer minor units (cents) + currency code. Never floats.
 """
 
@@ -53,6 +62,25 @@ fn accepted(detail: text) -> CommandResult:
 fn denied(reason: text, detail: text) -> CommandResult:
     CommandResult(ok: false, reason: reason, detail: detail)
 
+# reason_set is the CLOSED set of machine-readable CommandResult reasons.
+# Every module in the suite denies with a member of this list and nothing
+# else; a new reason requires an ADR + this list (see module docstring).
+fn reason_set() -> [text]:
+    ["accepted", "invalid-session", "forbidden", "invalid-record",
+     "duplicate-key", "insufficient-stock", "not-found", "store-error",
+     "conflict", "table-occupied", "no-session", "session-closed",
+     "invalid-transition", "unserved-lines", "line-not-found",
+     "invalid-credentials"]
+
+# reason_allowed reports membership in the closed set. This is the
+# conformance oracle: a spec drives real commands and asserts every returned
+# reason satisfies this predicate.
+fn reason_allowed(reason: text) -> bool:
+    for r in reason_set():
+        if r == reason:
+            return true
+    false
+
 # session_valid is the first rung of every guarded write: an active session
 # whose actor matches and whose tenant is the authoritative tenant.
 fn session_valid(session: SessionContext, tenant: TenantContext, who: ActorContext) -> bool:
@@ -67,8 +95,27 @@ fn role_allows(role: text, action: text) -> bool:
         return true
     if role == "sales":
         return action == "sale.order.place" or action == "sale.order.pay" or action == "sale.order.refund"
+    if role == "payments":
+        # sale.order.pay: a captured webhook marks the order paid in the
+        # same unit of work as the intent transition (enterprise_payment).
+        return action == "payment.intent.create" or action == "payment.webhook.receive" or action == "sale.order.pay"
+    if role == "procurement":
+        # Purchase-to-stock vertical (enterprise_procurement, design §6.4).
+        return action == "proc.requisition.create" or action == "proc.requisition.approve" or action == "proc.po.create" or action == "proc.po.receive" or action == "proc.invoice.record"
+    if role == "booking":
+        return action == "booking.hold" or action == "booking.confirm" or action == "booking.cancel" or action == "booking.no_show"
+    if role == "finance":
+        # Period control (enterprise_finance, W6-C). Reports are pure reads
+        # and need no action grant; closing a period is guarded.
+        return action == "finance.period.close" or action == "finance.journal.post"
+    if role == "hcm":
+        # HCM vertical (W6-A): lifecycle, attendance, leave. hcm.leave.decide
+        # is the admin-tier decision action — admin also passes via the
+        # blanket admin rule above.
+        return action == "hcm.hire" or action == "hcm.contract.amend" or action == "hcm.terminate" or action == "hcm.clock.in" or action == "hcm.clock.out" or action == "hcm.leave.request" or action == "hcm.leave.decide"
     false
 
 export TenantContext, ActorContext, SessionContext, Money
 export CommandEnvelope, CommandResult
 export accepted, denied, session_valid, role_allows
+export reason_set, reason_allowed

@@ -1,0 +1,212 @@
+"""
+# Enterprise Outbox — dispatch worker and reconciliation
+
+Outbox dispatch + reconciliation over `std.enterprise_store` (lane
+`.spipe/simple_enterprise_suite`, W2-F; design:
+doc/01_research/app/enterprise/*.md §5/§8).
+
+Builds ONLY on the enterprise store surface. Insert-only on both backends:
+a dispatch is recorded as a NEW `outbox_dispatch` row keyed by the outbox
+row id — never an UPDATE (the interpreter's rt_sqlite emulation has no
+UPDATE/WHERE; see store.spl docstring). Pending = outbox rows minus
+dispatch records, filtered in pure Simple.
+
+## Delivery contract (document once, rely on everywhere)
+
+Dispatch is **at-least-once**: a handler failure leaves the row pending
+(the retry is recorded as an `outbox_retry` row), and a crash between
+handler success and dispatch-record commit can redeliver. **Exactly-once
+EFFECT is the CONSUMER'S responsibility**: the dedup key is the outbox row
+id (`OutboxEvent.outbox_id`), carried with every delivery — consumers must
+treat a repeated outbox_id as a no-op. Inside one store, replay safety is
+enforced here too: a row with an existing dispatch record is never
+re-dispatched, so a re-run of `outbox_dispatch_batch` yields exactly one
+dispatch record per row.
+
+On success the dispatch record is committed atomically WITH an audit-chain
+entry in one unit of work (atomicity requires an ACID backend — the store
+records `acid` honestly; on the interpreter emulation the writes still
+land append-only, in order).
+
+`DispatchTarget` is a composition seam like `StoreFaults`: a small struct
+with a `mode` field ("ok" | "fail_all" | "fail_payload") rather than a
+captured-mutable-state closure — closures stored in structs are copied by
+value in the interpreter.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback, store_migrate
+}
+use std.nogc_sync_mut.enterprise_store.records.{audit_append}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+
+# =============================================================================
+# Schema (insert-only side tables)
+# =============================================================================
+
+# outbox_worker_setup applies the worker's migrations once. Idempotent.
+fn outbox_worker_setup(store: EnterpriseStore) -> bool:
+    if not store_migrate(store, "outbox_worker_001_dispatch",
+        "CREATE TABLE IF NOT EXISTS outbox_dispatch (id INTEGER PRIMARY KEY, tenant_id TEXT, outbox_id TEXT, dispatched_at TEXT)"):
+        return false
+    store_migrate(store, "outbox_worker_002_retry",
+        "CREATE TABLE IF NOT EXISTS outbox_retry (id INTEGER PRIMARY KEY, tenant_id TEXT, outbox_id TEXT, reason TEXT)")
+
+# =============================================================================
+# Dispatch target — composition seam (spec-injectable ok/fail behavior)
+# =============================================================================
+
+struct DispatchTarget:
+    mode: text          # "ok" | "fail_all" | "fail_payload"
+    fail_payload: text  # payload that fails when mode == "fail_payload"
+
+fn dispatch_target_ok() -> DispatchTarget:
+    DispatchTarget(mode: "ok", fail_payload: "")
+
+fn dispatch_target_failing() -> DispatchTarget:
+    DispatchTarget(mode: "fail_all", fail_payload: "")
+
+fn dispatch_target_failing_payload(payload: text) -> DispatchTarget:
+    DispatchTarget(mode: "fail_payload", fail_payload: payload)
+
+# dispatch_target_deliver reports whether the target accepted the event.
+fn dispatch_target_deliver(target: DispatchTarget, event_type: text, payload: text) -> bool:
+    if target.mode == "fail_all":
+        return false
+    if target.mode == "fail_payload" and payload == target.fail_payload:
+        return false
+    true
+
+# =============================================================================
+# Pending — outbox rows minus dispatch records, pure-Simple filtering
+# =============================================================================
+
+struct OutboxEvent:
+    outbox_id: text     # the consumer's dedup key
+    event_type: text
+    payload: text
+
+fn dispatched_ids(store: EnterpriseStore, tenant_id: text) -> [text]:
+    var ids: [text] = []
+    for row in store_rows(store, "outbox_dispatch", "id, tenant_id, outbox_id, dispatched_at"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            ids.push(sqlite_row_get(row, "outbox_id"))
+    ids
+
+fn id_listed(ids: [text], id: text) -> bool:
+    for x in ids:
+        if x == id:
+            return true
+    false
+
+# outbox_worker_pending lists the tenant's undispatched outbox rows in insertion order.
+fn outbox_worker_pending(store: EnterpriseStore, tenant_id: text) -> [OutboxEvent]:
+    val done = dispatched_ids(store, tenant_id)
+    var out: [OutboxEvent] = []
+    for row in store_rows(store, "outbox", "id, tenant_id, event_type, payload"):
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val oid = sqlite_row_get(row, "id")
+        if id_listed(done, oid):
+            continue
+        out.push(OutboxEvent(
+            outbox_id: oid,
+            event_type: sqlite_row_get(row, "event_type"),
+            payload: sqlite_row_get(row, "payload")))
+    out
+
+# outbox_retry_count counts recorded delivery failures for one outbox row.
+fn outbox_retry_count(store: EnterpriseStore, tenant_id: text, outbox_id: text) -> int:
+    var n = 0
+    for row in store_rows(store, "outbox_retry", "id, tenant_id, outbox_id, reason"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "outbox_id") == outbox_id:
+            n = n + 1
+    n
+
+# =============================================================================
+# Dispatch batch
+# =============================================================================
+
+struct DispatchReport:
+    attempted: int
+    dispatched: int
+    failed: int
+
+# outbox_dispatch_batch delivers up to `max_batch` pending events to the
+# target. Success records the dispatch atomically WITH an audit entry in
+# one unit of work; failure records a retry row and leaves the event
+# pending (at-least-once — see module docstring for the dedup contract).
+fn outbox_dispatch_batch(store: EnterpriseStore, tenant_id: text, target: DispatchTarget, now_epoch: int, max_batch: int) -> DispatchReport:
+    val pending = outbox_worker_pending(store, tenant_id)
+    var attempted = 0
+    var ok_count = 0
+    var fail_count = 0
+    for ev in pending:
+        if attempted >= max_batch:
+            break
+        attempted = attempted + 1
+        if dispatch_target_deliver(target, ev.event_type, ev.payload):
+            uow_begin(store)
+            val wrote = store_insert_row(store,
+                "INSERT INTO outbox_dispatch (tenant_id, outbox_id, dispatched_at) VALUES (?, ?, ?)",
+                [tenant_id, ev.outbox_id, "{now_epoch}"])
+            if wrote and audit_append(store, tenant_id, "outbox-worker", "outbox.dispatch", ev.outbox_id + ":" + ev.event_type):
+                uow_commit(store)
+                ok_count = ok_count + 1
+            else:
+                uow_rollback(store)
+                fail_count = fail_count + 1
+        else:
+            store_insert_row(store,
+                "INSERT INTO outbox_retry (tenant_id, outbox_id, reason) VALUES (?, ?, ?)",
+                [tenant_id, ev.outbox_id, "handler-failure"])
+            fail_count = fail_count + 1
+    DispatchReport(attempted: attempted, dispatched: ok_count, failed: fail_count)
+
+# =============================================================================
+# Reconciliation — inconsistency detection as data, not prints
+# =============================================================================
+
+struct ReconcileReport:
+    total_rows: int
+    dispatched_count: int
+    pending_count: int
+    dead_letter_ids: [text]      # pending with retries > max_retries
+    orphan_dispatch_ids: [text]  # dispatch record without an outbox row (corruption)
+
+# reconcile_report scans one tenant's outbox state and reports dead-letter
+# candidates (pending with more than `max_retries` recorded failures) and
+# corruption (a dispatch record whose outbox row is absent).
+fn reconcile_report(store: EnterpriseStore, tenant_id: text, max_retries: int) -> ReconcileReport:
+    var row_ids: [text] = []
+    for row in store_rows(store, "outbox", "id, tenant_id, event_type, payload"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            row_ids.push(sqlite_row_get(row, "id"))
+    val done = dispatched_ids(store, tenant_id)
+
+    var dead: [text] = []
+    var pending_n = 0
+    for oid in row_ids:
+        if id_listed(done, oid):
+            continue
+        pending_n = pending_n + 1
+        if outbox_retry_count(store, tenant_id, oid) > max_retries:
+            dead.push(oid)
+
+    var orphans: [text] = []
+    for did in done:
+        if not id_listed(row_ids, did):
+            orphans.push(did)
+
+    ReconcileReport(
+        total_rows: row_ids.len(),
+        dispatched_count: done.len() - orphans.len(),
+        pending_count: pending_n,
+        dead_letter_ids: dead,
+        orphan_dispatch_ids: orphans)
+
+export DispatchTarget, dispatch_target_ok, dispatch_target_failing, dispatch_target_failing_payload, dispatch_target_deliver
+export OutboxEvent, outbox_worker_setup, outbox_worker_pending, outbox_retry_count
+export DispatchReport, outbox_dispatch_batch
+export ReconcileReport, reconcile_report

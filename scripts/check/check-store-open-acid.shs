@@ -1,0 +1,106 @@
+#!/bin/sh
+# Does enterprise_store's OWN acid probe answer truthfully on this host?
+#
+# scripts/check/check-sqlite-backend-acid.shs answers the layer below: is real
+# SQLite reachable at all. This one answers the layer store_open() actually
+# lives at: after the durability pragmas, the system-table CREATEs and the
+# store-format marker write, does probe_backend_acid() still say true?
+#
+# It exists because those two answers disagreed. Measured 2026-08-17 (lane
+# W12-A) the sqlite gate said ACID while store_open() reported acid=false,
+# because rt_sqlite_* passed sqlite3 a non-NUL-terminated rt_string payload:
+# `ROLLBACK` arrived as `ROLLBACK<heap garbage>` -> syntax error -> the
+# transaction stayed open -> every later BEGIN failed with "cannot start a
+# transaction within a transaction". Fixed in src/runtime/runtime_sqlite.c.
+#
+# Verdict is the last line of stdout:
+#   PASS    — <n> stage(s) checked, probe_backend_acid true at every stage
+#   FAIL    — <names> (a stage where the probe went false)
+#   BLOCKED — the AOT --native build failed; reason printed
+#   ERROR   — nothing was checked
+set -u
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+PROBE="$ROOT/test/fixture/enterprise_store/store_open_acid_probe.spl"
+[ -s "$PROBE" ] || { echo "ERROR — nothing was checked: missing probe $PROBE"; exit 2; }
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked: no simple binary at $SIMPLE"; exit 2; }
+echo "binary: $(readlink -f "$SIMPLE") ($(stat -c %s "$(readlink -f "$SIMPLE")") bytes)"
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT
+strip_ansi() { sed -e 's/\x1b\[[0-9;]*m//g'; }
+
+# A stale core archive makes the compiler silently fall back to the
+# interpreter while still producing output — clear it before trusting a
+# --native run.
+rm -rf "$ROOT/build/simple-core"
+rm -rf /tmp/store_open_acid_probe
+mkdir -p /tmp/store_open_acid_probe
+
+OUT="$WORK/probe"
+"$SIMPLE" compile "$PROBE" --native -o "$OUT" >"$WORK/build.log" 2>&1
+BUILD_RC=$?
+if [ "$BUILD_RC" -ne 0 ] || [ ! -x "$OUT" ]; then
+  REASON=$(strip_ansi <"$WORK/build.log" | grep -i "error" | head -1)
+  [ -n "$REASON" ] || REASON="compile --native exited $BUILD_RC with no error line"
+  echo "BLOCKED — AOT native build failed: $REASON"
+  exit 2
+fi
+
+"$OUT" >"$WORK/run.log" 2>&1
+strip_ansi <"$WORK/run.log"
+
+# Non-vacuity first: a backend that never writes anything would satisfy
+# "rollback removed the row" for free. Every stage must show mid=[n] one
+# higher than before=[n], i.e. the insert was really visible inside the
+# transaction, before any acid=true is believed.
+MIDS=$(strip_ansi <"$WORK/run.log" | grep -c "insert=true mid=\[1\]\|insert=true mid=\[2\]")
+STAGES=$(strip_ansi <"$WORK/run.log" | grep -c "^  acid[A-D]=")
+if [ "$STAGES" -eq 0 ]; then
+  echo "ERROR — nothing was checked: probe produced no acid stage lines"
+  exit 2
+fi
+if [ "$MIDS" -ne "$STAGES" ]; then
+  echo "BLOCKED — probe is vacuous: $MIDS of $STAGES stages showed the in-transaction insert; the acid verdicts prove nothing"
+  exit 2
+fi
+
+BAD=$(strip_ansi <"$WORK/run.log" | grep "^  acid[A-D]=false" | sed -e 's/^  //' | tr '\n' ' ')
+if [ -n "$BAD" ]; then
+  echo "FAIL — $STAGES stage(s) checked, probe_backend_acid went false at: $BAD"
+  exit 1
+fi
+
+# Stage 2 (lane W13-A): the store module ITSELF, natively. This probe imports
+# std.enterprise_store — pulling in file_backend.spl's rt_file_atomic_write
+# extern, the symbol whose missing Rust-runtime definition used to fail the
+# single-file --native link — and reads store_backend_acid() from the built
+# binary. See doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md.
+STORE_PROBE="$ROOT/test/fixture/enterprise_store/store_native_acid_probe.spl"
+[ -s "$STORE_PROBE" ] || { echo "ERROR — nothing was checked: missing probe $STORE_PROBE"; exit 2; }
+rm -rf /tmp/store_native_acid_probe
+mkdir -p /tmp/store_native_acid_probe
+STORE_OUT="$WORK/store_probe"
+"$SIMPLE" compile "$STORE_PROBE" --native -o "$STORE_OUT" >"$WORK/store_build.log" 2>&1
+STORE_RC=$?
+if [ "$STORE_RC" -ne 0 ] || [ ! -x "$STORE_OUT" ]; then
+  REASON=$(strip_ansi <"$WORK/store_build.log" | grep -i "error" | head -1)
+  [ -n "$REASON" ] || REASON="compile --native exited $STORE_RC with no error line"
+  echo "FAIL — native store link stage: $REASON"
+  exit 1
+fi
+"$STORE_OUT" >"$WORK/store_run.log" 2>&1
+strip_ansi <"$WORK/store_run.log"
+if ! strip_ansi <"$WORK/store_run.log" | grep -q "^store_open_ok=true"; then
+  echo "FAIL — native store stage: store_open_ok not true"
+  exit 1
+fi
+STORE_ACID=$(strip_ansi <"$WORK/store_run.log" | grep "^store_acid=" | head -1)
+if [ "$STORE_ACID" != "store_acid=true" ]; then
+  echo "FAIL — native store stage: ${STORE_ACID:-no store_acid line}"
+  exit 1
+fi
+
+TOTAL=$((STAGES + 1))
+echo "PASS — $TOTAL stage(s) checked, probe_backend_acid true at every stage and native store_backend_acid=true"
+exit 0

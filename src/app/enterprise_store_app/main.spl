@@ -1,0 +1,178 @@
+"""
+# Enterprise Store App — customer-facing store vertical over the hardened core
+
+Lane `.spipe/simple_enterprise_suite` (Goal Set v2, AC-15/AC-16).
+
+Browse catalog -> cart -> guarded order -> pay -> receipt, built ONLY on:
+- `std.enterprise_store` / `std.enterprise_sale` (durable store + frozen
+  guarded sequence — no new storage, no new guard path);
+- `std.common.net.http_core` routing/limits/path safety (AC-15 route path);
+- `std.nogc_sync_mut.http_server` response types + the EXISTING
+  `with_default_security_headers` policy (never duplicated here).
+
+Every dispatched response carries the shared security-header policy, every
+piece of business data rendered into HTML goes through `esc()`, and every
+request is checked in order: limits (`body_decision`) -> path safety
+(`path_is_safe`) -> authenticated session (`session_valid`) -> route.
+
+Route families are split into cohesive siblings, all dispatched through
+THIS hardened prelude: `booking_routes` (/booking/*), `restaurant_routes`
+(/restaurant/*), `hcm_routes` (/hcm/*), `procurement_routes` (/proc/*),
+`finance_routes` (/fin/*), `dashboard` (GET /admin/dashboard). Shared
+helpers (esc/form_value/form_int/secured/deny) live in `web_common`.
+
+Denial mapping (CommandResult.reason -> HTTP), frozen in web_common.deny
+and covering the WHOLE closed `foundation.reason_set()`: invalid-session /
+invalid-credentials 401, forbidden 403, not-found / no-session /
+line-not-found 404, conflict / table-occupied / session-closed /
+invalid-transition / unserved-lines / insufficient-stock / invalid-record
+409, store-error 500, duplicate-key 200 (idempotent replay: recorded
+result), accepted 200.
+"""
+
+use std.common.net.http_core.{
+    MAX_BODY_SIZE, body_decision, path_is_safe,
+    match_route_pattern, extract_route_params
+}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, session_valid
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{
+    sale_place_order, sale_pay_order, sale_order_status, sale_product_price
+}
+export use app.enterprise_store_app.web_common.{esc, form_value}
+use app.enterprise_store_app.web_common.{secured, deny}
+use app.enterprise_store_app.booking_routes.{booking_routes_handle}
+use app.enterprise_store_app.restaurant_routes.{restaurant_routes_handle}
+use app.enterprise_store_app.dashboard.{dashboard_handle}
+use app.enterprise_store_app.hcm_routes.{hcm_routes_handle}
+use app.enterprise_store_app.procurement_routes.{procurement_routes_handle}
+use app.enterprise_store_app.finance_routes.{finance_routes_handle}
+
+# =============================================================================
+# Cart — pure request-scoped model (no storage; checkout is the effect)
+# =============================================================================
+
+struct CartItem:
+    sku: text
+    qty: i64
+
+fn cart_new() -> [CartItem]:
+    []
+
+fn cart_add(cart: [CartItem], sku: text, qty: i64) -> [CartItem]:
+    var out = cart
+    if qty > 0 and sku != "":
+        out.push(CartItem(sku: sku, qty: qty))
+    out
+
+fn cart_total_cents(store: EnterpriseStore, tenant_id: text, cart: [CartItem]) -> i64:
+    var total: i64 = 0
+    for item in cart:
+        val price = sale_product_price(store, tenant_id, item.sku)
+        if price > 0:
+            total = total + price * item.qty
+    total
+
+# =============================================================================
+# Views — escaped HTML text
+# =============================================================================
+
+fn page_catalog(store: EnterpriseStore, tenant_id: text) -> text:
+    var body = "<h1>Store Catalog</h1><ul>"
+    val rows = store_rows(store, "products", "id, tenant_id, sku, name, price_cents, currency")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            val sku = esc(sqlite_row_get(row, "sku"))
+            val name = esc(sqlite_row_get(row, "name"))
+            val price = esc(sqlite_row_get(row, "price_cents"))
+            val currency = esc(sqlite_row_get(row, "currency"))
+            body = body + "<li data-sku=\"" + sku + "\">" + name + " — " + price + " " + currency + "</li>"
+    body + "</ul>"
+
+fn page_receipt(store: EnterpriseStore, tenant_id: text, order_id: text) -> text:
+    val status = sale_order_status(store, tenant_id, order_id)
+    var body = "<h1>Receipt</h1>"
+    body = body + "<p>Order: <span class=\"order\">" + esc(order_id) + "</span></p>"
+    body = body + "<p>Status: <span class=\"status\">" + esc(status) + "</span></p>"
+    body
+
+# =============================================================================
+# Dispatcher — hardened route path
+# =============================================================================
+
+# store_app_handle dispatches one request through the hardened path:
+# limits -> path safety -> session auth -> route match -> guarded command.
+fn store_app_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, headers: [(text, text)], body: text) -> HttpResponse:
+    # 1. shared request limits / smuggling policy (http_core)
+    val decision = body_decision(headers, MAX_BODY_SIZE, false)
+    if decision.0 != "":
+        val status = if decision.0.starts_with("413"):
+            HttpStatus.PayloadTooLarge
+        elif decision.0.starts_with("501"):
+            HttpStatus.NotImplemented
+        else:
+            HttpStatus.BadRequest
+        return secured(HttpResponse.error(status, decision.0))
+    # 2. path traversal safety (http_core)
+    if not path_is_safe(path):
+        return secured(HttpResponse.error(HttpStatus.BadRequest, "unsafe path"))
+    # 3. authenticated session — the ONLY auth scheme is the frozen one
+    if not session_valid(session, tenant, who):
+        return secured(HttpResponse.error(HttpStatus.Unauthorized, "invalid-session: authentication required"))
+    # 4. routes (http_core pattern matching); sibling route families first
+    if path.starts_with("/booking/"):
+        return booking_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/restaurant/"):
+        return restaurant_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/hcm/"):
+        return hcm_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/proc/"):
+        return procurement_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/fin/"):
+        return finance_routes_handle(store, session, tenant, who, method, path, body)
+    if match_route_pattern("/admin/dashboard", path):
+        return dashboard_handle(store, session, tenant, who, method, path)
+    if method == "GET" and match_route_pattern("/store/catalog", path):
+        return secured(HttpResponse.html(page_catalog(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/store/order/:id/receipt", path):
+        val params = extract_route_params("/store/order/:id/receipt", path)
+        var order_id = ""
+        for p in params:
+            if p.0 == "id":
+                order_id = p.1
+        if sale_order_status(store, tenant.tenant_id, order_id) == "":
+            return deny("not-found", order_id)
+        return secured(HttpResponse.html(page_receipt(store, tenant.tenant_id, order_id)))
+    if method == "POST" and match_route_pattern("/store/order", path):
+        val order_id = form_value(body, "order")
+        val sku = form_value(body, "sku")
+        val qty_text = form_value(body, "qty")
+        var qty_digits = qty_text != ""
+        for ch in qty_text:
+            if ch < "0" or ch > "9":
+                qty_digits = false
+        val qty = if qty_digits:
+            int(qty_text)
+        else:
+            0
+        val env = CommandEnvelope(request_id: "req-" + order_id, idempotency_key: form_value(body, "idem"), action: "sale.order.place", payload: body)
+        val r = sale_place_order(store, session, tenant, who, env, order_id, sku, qty)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return secured(HttpResponse.html("<p class=\"result\">" + esc(r.reason) + ": " + esc(r.detail) + "</p>"))
+    if method == "POST" and match_route_pattern("/store/pay", path):
+        val order_id = form_value(body, "order")
+        val env = CommandEnvelope(request_id: "req-pay-" + order_id, idempotency_key: form_value(body, "idem"), action: "sale.order.pay", payload: body)
+        val r = sale_pay_order(store, session, tenant, who, env, order_id)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return secured(HttpResponse.html("<p class=\"result\">" + esc(r.reason) + ": " + esc(r.detail) + "</p>"))
+    secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+
+export CartItem, cart_new, cart_add, cart_total_cents
+export page_catalog, page_receipt
+export store_app_handle

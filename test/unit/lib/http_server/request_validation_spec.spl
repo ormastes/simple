@@ -8,8 +8,48 @@
 # ## Overview
 # Tests for request path validation and URI safety checks.
 # Validates rejection of path traversal, null bytes, and overly long URIs.
+#
+# ## API note (2026-08-17, lane W11-A)
+# This spec previously imported `validate_request_path`, `validate_uri_length`
+# and `default_max_uri_length`. `git log -S` over `src/` returns ZERO commits
+# for those names: they never existed. The module (added together with this
+# spec in cfe0506e336b) validates through the Read-phase middleware entry
+# point `request_validation_handler(request, config)`, backed by
+# `is_path_traversal` / `contains_null_byte` and the `MAX_URI_SIZE` limit.
+# The spec is repointed at that handler, so each example now exercises the
+# real server path and asserts the 400 rejection (or Continue) it produces.
 
-use std.http_server.request_validation.{validate_request_path, validate_uri_length, default_max_uri_length}
+use std.spec.*
+use std.http_server.request_validation.{request_validation_handler, contains_null_byte, MAX_URI_SIZE}
+use std.http_server.types.{PhaseResult, HttpRequestData, default_server_config}
+
+fn request_for(path: text, query: text) -> HttpRequestData:
+    HttpRequestData(
+        method: "GET",
+        path: path,
+        query: query,
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: "203.0.113.5"
+    )
+
+fn path_accepted(path: text) -> bool:
+    """True when the Read-phase validator lets the path through."""
+    match request_validation_handler(request_for(path, ""), default_server_config()):
+        PhaseResult.Continue: true
+        _: false
+
+fn uri_accepted(path: text, query: text) -> bool:
+    match request_validation_handler(request_for(path, query), default_server_config()):
+        PhaseResult.Continue: true
+        _: false
+
+fn rejection_status(path: text) -> i64:
+    match request_validation_handler(request_for(path, ""), default_server_config()):
+        PhaseResult.Error(status, _msg): status
+        _: 0
 
 # ============================================================================
 # Test Group 1: Path traversal detection
@@ -17,16 +57,14 @@ use std.http_server.request_validation.{validate_request_path, validate_uri_leng
 
 describe "Request path validation":
     it "rejects path traversal with ../":
-        val result = validate_request_path("/../etc/passwd")
-        expect(result).to_equal(false)
+        expect(path_accepted("/../etc/passwd")).to_equal(false)
+        expect(rejection_status("/../etc/passwd")).to_equal(400)
 
     it "rejects path traversal with encoded ../":
-        val result = validate_request_path("/%2e%2e/etc/passwd")
-        expect(result).to_equal(false)
+        expect(path_accepted("/%2e%2e/etc/passwd")).to_equal(false)
 
     it "rejects path traversal in middle of path":
-        val result = validate_request_path("/api/../admin/secret")
-        expect(result).to_equal(false)
+        expect(path_accepted("/api/../admin/secret")).to_equal(false)
 
 # ============================================================================
 # Test Group 2: Null byte detection
@@ -35,8 +73,13 @@ describe "Request path validation":
 describe "Null byte rejection":
     it "rejects null bytes in path":
         val path = "/api/resource\x00.html"
-        val result = validate_request_path(path)
-        expect(result).to_equal(false)
+        expect(contains_null_byte(path)).to_equal(true)
+        expect(path_accepted(path)).to_equal(false)
+        expect(rejection_status(path)).to_equal(400)
+
+    it "rejects URL-encoded null bytes in path":
+        expect(contains_null_byte("/api/resource%00.html")).to_equal(true)
+        expect(path_accepted("/api/resource%00.html")).to_equal(false)
 
 # ============================================================================
 # Test Group 3: Normal path acceptance
@@ -44,20 +87,16 @@ describe "Null byte rejection":
 
 describe "Valid path acceptance":
     it "accepts normal paths":
-        val result = validate_request_path("/api/users/123")
-        expect(result).to_equal(true)
+        expect(path_accepted("/api/users/123")).to_equal(true)
 
     it "accepts root path":
-        val result = validate_request_path("/")
-        expect(result).to_equal(true)
+        expect(path_accepted("/")).to_equal(true)
 
     it "accepts path with query string":
-        val result = validate_request_path("/search?q=hello")
-        expect(result).to_equal(true)
+        expect(uri_accepted("/search", "q=hello")).to_equal(true)
 
     it "accepts path with dots in filename":
-        val result = validate_request_path("/static/style.min.css")
-        expect(result).to_equal(true)
+        expect(path_accepted("/static/style.min.css")).to_equal(true)
 
 # ============================================================================
 # Test Group 4: URI length validation
@@ -70,14 +109,13 @@ describe "URI length validation":
         while i < 10000:
             long_uri = long_uri + "a"
             i = i + 1
-        val result = validate_uri_length(long_uri, default_max_uri_length())
-        expect(result).to_equal(false)
+        expect(long_uri.len() > MAX_URI_SIZE).to_equal(true)
+        expect(path_accepted(long_uri)).to_equal(false)
+        expect(rejection_status(long_uri)).to_equal(400)
 
     it "accepts normal length URIs":
-        val result = validate_uri_length("/api/data", default_max_uri_length())
-        expect(result).to_equal(true)
+        expect(path_accepted("/api/data")).to_equal(true)
 
     it "default max URI length is reasonable":
-        val max_len = default_max_uri_length()
-        val is_reasonable = max_len > 0 and max_len <= 65536
+        val is_reasonable = MAX_URI_SIZE > 0 and MAX_URI_SIZE <= 65536
         expect(is_reasonable).to_equal(true)

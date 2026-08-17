@@ -1,0 +1,115 @@
+"""
+# Enterprise Request Throttle — pure fixed-window counter over insert-only rows
+
+Lane `.spipe/simple_enterprise_suite` W5-A. Deterministic fixed-window rate
+limiting: the caller supplies `now_epoch`; the window is
+`now_epoch / window_secs` (integer division). Each admitted request is one
+insert-only counter row; the decision is a pure-Simple filter-and-count over
+rows with the same key + window. Over-limit requests insert NOTHING, so a
+denied burst cannot extend its own lockout.
+
+Windowing is also what bounds the COST of the throttle. Rows of a window that
+has already elapsed can never change a later decision, so `throttle_admit`
+expires them (`throttle_prune`) before counting. Without that sweep the
+counter's scan grew with all traffic ever admitted, which made the defence
+cheaper to attack the harder it was attacked. Business data remains strictly
+insert-only — the only thing ever deleted is an expired counter row.
+
+Key discipline (chosen by the caller): `tenant + "|" + actor-or-ip`, with a
+stricter (smaller limit) window for login attempts — anti-brute-force.
+"""
+
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row, store_truncate
+}
+
+fn throttle_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "throttle_001_hits",
+        "CREATE TABLE IF NOT EXISTS throttle_hits (id INTEGER PRIMARY KEY, key TEXT, window TEXT)")
+
+fn throttle_window(now_epoch: i64, window_secs: i64) -> i64:
+    if window_secs <= 0:
+        return 0
+    now_epoch / window_secs
+
+fn throttle_count(store: EnterpriseStore, key: text, window: i64) -> i64:
+    var n: i64 = 0
+    val rows = store_rows(store, "throttle_hits", "id, key, window")
+    for row in rows:
+        if sqlite_row_get(row, "key") == key and sqlite_row_get(row, "window") == "{window}":
+            n = n + 1
+    n
+
+# throttle_rows_retained is the absolute oracle for boundedness: how many
+# counter rows the table is holding right now, across every key.
+fn throttle_rows_retained(store: EnterpriseStore) -> i64:
+    var n: i64 = 0
+    for row in store_rows(store, "throttle_hits", "id, key, window"):
+        n = n + 1
+    n
+
+# throttle_prune drops the counter table when — and ONLY when — every row it
+# holds belongs to a window strictly older than `window`. Such rows can never
+# influence a later window's decision, so dropping them is
+# information-preserving: the live window's count is unchanged, and the
+# retained-row set is bounded by (distinct keys seen in the live window) *
+# limit rather than growing with all traffic for the life of the store.
+#
+# The predicate is evaluated HERE, in pure Simple, rather than handed to the
+# backend as a WHERE clause: the seed's interpreter SQLite emulation ignores
+# WHERE on DELETE (see `store_truncate`), so the only delete both backends
+# agree on is the unconditional one. Establishing "every row is stale" first
+# makes the unconditional delete exactly equal to the conditional one.
+#
+# A row from a NEWER window (a caller that replayed an out-of-order
+# `now_epoch`) makes the predicate false and blocks the sweep, so
+# non-monotonic time can only cost boundedness, never weaken a limit.
+#
+# Deterministic: `window` is derived only from the caller-supplied
+# `now_epoch`, so a replay with the same inputs prunes identically.
+fn throttle_prune(store: EnterpriseStore, window: i64) -> bool:
+    var seen = false
+    var all_stale = true
+    for row in store_rows(store, "throttle_hits", "id, key, window"):
+        seen = true
+        if not window_is_older(sqlite_row_get(row, "window"), window):
+            all_stale = false
+    if not seen or not all_stale:
+        return false
+    store_truncate(store, "throttle_hits")
+
+# window_is_older decides whether a stored window label is strictly older than
+# `window`. A label that is not a plain non-negative integer is treated as NOT
+# older — an unrecognised row is never a reason to drop the table.
+fn window_is_older(label: text, window: i64) -> bool:
+    if label == "":
+        return false
+    for ch in label:
+        if ch < "0" or ch > "9":
+            return false
+    int(label) < window
+
+# throttle_admit admits (true) or rejects (false) one request for `key` at
+# `now_epoch` under a fixed window of `window_secs` allowing `limit` requests.
+# Admission records one counter row; rejection records nothing.
+#
+# Every call first expires older windows, so the scan `throttle_count`
+# performs is bounded by the live window's traffic instead of by all traffic
+# ever seen. Pruning happens BEFORE the decision and on the reject path too:
+# a flood must not be able to skip the sweep and make the defence the
+# bottleneck.
+fn throttle_admit(store: EnterpriseStore, key: text, now_epoch: i64, window_secs: i64, limit: i64) -> bool:
+    if key == "" or limit <= 0:
+        return false
+    val window = throttle_window(now_epoch, window_secs)
+    throttle_prune(store, window)
+    if throttle_count(store, key, window) >= limit:
+        return false
+    store_insert_row(store,
+        "INSERT INTO throttle_hits (key, window) VALUES (?, ?)",
+        [key, "{window}"])
+    true
+
+export throttle_setup, throttle_window, throttle_count, throttle_admit
+export throttle_prune, throttle_rows_retained

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ The first proving vertical of the Simple Enterprise Suite, exercised end to end 
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/goods_sale_vertical_spec.spl` |
-| Updated | 2026-08-14 |
+| Updated | 2026-08-16 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -97,7 +97,6 @@ Lane: .spipe/simple_enterprise_suite (Wave C, AC-9/AC-10).
    - Expected: sale_order_status(store, "tenant-a", "order-100") equals `refunded`
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `10`
 - Verify the audit chain recomputes end to end
-- store close
 
 
 <details>
@@ -112,7 +111,7 @@ val store = fresh_store("e2e")
 val t = tenant_a()
 val admin = admin_a()
 val admin_session = session_for(admin, t)
-val add = sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", 2500, "USD")
+val add = sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
 expect(add.reason).to_equal("accepted")
 
 step("Receive 10 units of stock")
@@ -156,10 +155,8 @@ store_close(store)
 
 #### rejects an inactive session
 
-- var dead = session for
 - Attempt an order with an inactive session
    - Expected: r.reason equals `invalid-session`
-- store close
 
 
 <details>
@@ -187,7 +184,6 @@ store_close(store)
 
 - Attempt an order as a viewer
    - Expected: r.reason equals `forbidden`
-- store close
 
 
 <details>
@@ -210,14 +206,11 @@ store_close(store)
 
 #### rejects an unknown SKU and an oversell
 
-- sale add product
-- sale receive stock
 - Order an unknown SKU
    - Expected: r1.reason equals `not-found`
 - Order more units than available — stock must never go negative
    - Expected: r2.reason equals `insufficient-stock`
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `2`
-- store close
 
 
 <details>
@@ -231,7 +224,7 @@ val store = fresh_store("guard_stock")
 val t = tenant_a()
 val admin = admin_a()
 val admin_session = session_for(admin, t)
-sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, admin_session, t, admin, "SKU-1", 2)
 val clerk = clerk_a()
 val cs = session_for(clerk, t)
@@ -251,8 +244,6 @@ store_close(store)
 
 #### replaying the same order command changes nothing
 
-- sale add product
-- sale receive stock
 - Place the order once
    - Expected: first.reason equals `accepted`
 - Replay the SAME idempotency key
@@ -261,7 +252,6 @@ store_close(store)
 - Verify NO second effect — stock and outbox unchanged
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `stock_after_first`
    - Expected: outbox_pending(store, "tenant-a").len() equals `outbox_after_first`
-- store close
 
 
 <details>
@@ -275,7 +265,7 @@ val store = fresh_store("replay")
 val t = tenant_a()
 val admin = admin_a()
 val admin_session = session_for(admin, t)
-sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, admin_session, t, admin, "SKU-1", 10)
 val clerk = clerk_a()
 val cs = session_for(clerk, t)
@@ -300,12 +290,185 @@ store_close(store)
 
 </details>
 
+### goods-sale vertical — a replay of a self-infeasible command still replays
+
+#### replays an order that consumed the last of the stock
+
+- Seed exactly 3 units — enough for exactly one order of 3
+- Place the order for all 3 units
+   - Expected: first.reason equals `accepted`
+   - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `0`
+- Replay the SAME key — stock is now 0, but the replay must NOT be re-judged for feasibility
+   - Expected: replay.reason equals `duplicate-key`
+   - Expected: replay.detail equals `order-400`
+- No second effect
+   - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `0`
+   - Expected: outbox_pending(store, "tenant-a").len() equals `outbox_after_first`
+- A FRESH key for the same infeasible order is still denied
+   - Expected: fresh.reason equals `insufficient-stock`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("replay_last_stock")
+val t = tenant_a()
+val admin = admin_a()
+val admin_session = session_for(admin, t)
+sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
+step("Seed exactly 3 units — enough for exactly one order of 3")
+sale_receive_stock(store, admin_session, t, admin, "SKU-1", 3)
+val clerk = clerk_a()
+val cs = session_for(clerk, t)
+
+step("Place the order for all 3 units")
+val first = sale_place_order(store, cs, t, clerk, envelope("last-stock-key", "sale.order.place"), "order-400", "SKU-1", 3)
+expect(first.reason).to_equal("accepted")
+expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(0)
+val outbox_after_first = outbox_pending(store, "tenant-a").len()
+
+step("Replay the SAME key — stock is now 0, but the replay must NOT be re-judged for feasibility")
+val replay = sale_place_order(store, cs, t, clerk, envelope("last-stock-key", "sale.order.place"), "order-400", "SKU-1", 3)
+expect(replay.ok).to_be(true)
+expect(replay.reason).to_equal("duplicate-key")
+expect(replay.detail).to_equal("order-400")
+
+step("No second effect")
+expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(0)
+expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after_first)
+
+step("A FRESH key for the same infeasible order is still denied")
+val fresh = sale_place_order(store, cs, t, clerk, envelope("fresh-key", "sale.order.place"), "order-401", "SKU-1", 3)
+expect(fresh.reason).to_equal("insufficient-stock")
+store_close(store)
+```
+
+</details>
+
+#### replays a payment whose own effect advanced the order status
+
+- Pay once — status advances created -> paid
+   - Expected: paid.reason equals `accepted`
+   - Expected: sale_order_status(store, "tenant-a", "order-500") equals `paid`
+- Replay the SAME payment key — status is no longer 'created', but this is a replay
+   - Expected: replay.reason equals `duplicate-key`
+   - Expected: replay.detail equals `order-500`
+   - Expected: outbox_pending(store, "tenant-a").len() equals `outbox_after_pay`
+- A FRESH key paying an already-paid order is still denied
+   - Expected: fresh.reason equals `invalid-record`
+- An unknown order is still not payable, replay or not
+   - Expected: unknown.reason equals `invalid-record`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("replay_pay")
+val t = tenant_a()
+val admin = admin_a()
+val sa = session_for(admin, t)
+sale_add_product(store, sa, t, admin, "SKU-1", "Widget", usd(2500))
+sale_receive_stock(store, sa, t, admin, "SKU-1", 5)
+val clerk = clerk_a()
+val cs = session_for(clerk, t)
+sale_place_order(store, cs, t, clerk, envelope("pay-ord", "sale.order.place"), "order-500", "SKU-1", 1)
+
+step("Pay once — status advances created -> paid")
+val paid = sale_pay_order(store, cs, t, clerk, envelope("pay-replay-key", "sale.order.pay"), "order-500")
+expect(paid.reason).to_equal("accepted")
+expect(sale_order_status(store, "tenant-a", "order-500")).to_equal("paid")
+val outbox_after_pay = outbox_pending(store, "tenant-a").len()
+
+step("Replay the SAME payment key — status is no longer 'created', but this is a replay")
+val replay = sale_pay_order(store, cs, t, clerk, envelope("pay-replay-key", "sale.order.pay"), "order-500")
+expect(replay.ok).to_be(true)
+expect(replay.reason).to_equal("duplicate-key")
+expect(replay.detail).to_equal("order-500")
+expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after_pay)
+expect(sale_journal_balanced(store, "tenant-a")).to_be(true)
+
+step("A FRESH key paying an already-paid order is still denied")
+val fresh = sale_pay_order(store, cs, t, clerk, envelope("pay-fresh-key", "sale.order.pay"), "order-500")
+expect(fresh.ok).to_be(false)
+expect(fresh.reason).to_equal("invalid-record")
+
+step("An unknown order is still not payable, replay or not")
+val unknown = sale_pay_order(store, cs, t, clerk, envelope("pay-unknown-key", "sale.order.pay"), "order-nope")
+expect(unknown.reason).to_equal("invalid-record")
+store_close(store)
+```
+
+</details>
+
+#### replays a refund whose own effect advanced the order status
+
+- Refund once — status advances paid -> refunded
+   - Expected: refunded.reason equals `accepted`
+- Replay the SAME refund key — must return duplicate-key, not invalid-record
+   - Expected: replay.reason equals `duplicate-key`
+   - Expected: replay.detail equals `order-600`
+- No second refund effect — stock and outbox unchanged, journal balanced
+   - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `stock_after_refund`
+   - Expected: outbox_pending(store, "tenant-a").len() equals `outbox_after_refund`
+- A FRESH key refunding an already-refunded order is still denied
+   - Expected: fresh.reason equals `invalid-record`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("replay_refund")
+val t = tenant_a()
+val admin = admin_a()
+val sa = session_for(admin, t)
+sale_add_product(store, sa, t, admin, "SKU-1", "Widget", usd(2500))
+sale_receive_stock(store, sa, t, admin, "SKU-1", 5)
+val clerk = clerk_a()
+val cs = session_for(clerk, t)
+sale_place_order(store, cs, t, clerk, envelope("ref-ord", "sale.order.place"), "order-600", "SKU-1", 2)
+sale_pay_order(store, cs, t, clerk, envelope("ref-pay", "sale.order.pay"), "order-600")
+
+step("Refund once — status advances paid -> refunded")
+val refunded = sale_refund_order(store, cs, t, clerk, envelope("ref-replay-key", "sale.order.refund"), "order-600")
+expect(refunded.reason).to_equal("accepted")
+val stock_after_refund = sale_available_stock(store, "tenant-a", "SKU-1")
+val outbox_after_refund = outbox_pending(store, "tenant-a").len()
+
+step("Replay the SAME refund key — must return duplicate-key, not invalid-record")
+val replay = sale_refund_order(store, cs, t, clerk, envelope("ref-replay-key", "sale.order.refund"), "order-600")
+expect(replay.ok).to_be(true)
+expect(replay.reason).to_equal("duplicate-key")
+expect(replay.detail).to_equal("order-600")
+
+step("No second refund effect — stock and outbox unchanged, journal balanced")
+expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(stock_after_refund)
+expect(outbox_pending(store, "tenant-a").len()).to_equal(outbox_after_refund)
+expect(sale_journal_balanced(store, "tenant-a")).to_be(true)
+
+step("A FRESH key refunding an already-refunded order is still denied")
+val fresh = sale_refund_order(store, cs, t, clerk, envelope("ref-fresh-key", "sale.order.refund"), "order-600")
+expect(fresh.reason).to_equal("invalid-record")
+store_close(store)
+```
+
+</details>
+
 ### goods-sale vertical — tenant isolation
 
 #### tenant B cannot read or affect tenant A's catalog and stock
 
-- sale add product
-- sale receive stock
 - Tenant B sees no stock and no product for tenant A's SKU
    - Expected: sale_available_stock(store, "tenant-b", "SKU-1") equals `0`
 - A tenant-B clerk cannot order tenant A's product
@@ -314,7 +477,6 @@ store_close(store)
    - Expected: r2.reason equals `invalid-session`
 - Tenant A's stock is untouched by the attempts
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `5`
-- store close
 
 
 <details>
@@ -328,7 +490,7 @@ val store = fresh_store("isolation")
 val ta = tenant_a()
 val admin = admin_a()
 val sa = session_for(admin, ta)
-sale_add_product(store, sa, ta, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, sa, ta, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, sa, ta, admin, "SKU-1", 5)
 
 step("Tenant B sees no stock and no product for tenant A's SKU")
@@ -359,18 +521,13 @@ store_close(store)
 
 #### reopens the database with orders, stock, and ledgers intact
 
-- sale add product
-- sale receive stock
-- sale place order
 - Close the store (simulated shutdown)
-- store close
 - Reopen and verify orders, stock, journal, audit, and replay guard
    - Expected: sale_order_status(store2, "tenant-a", "order-300") equals `created`
    - Expected: sale_available_stock(store2, "tenant-a", "SKU-1") equals `8`
 - Replay the pre-restart command against the reopened store
    - Expected: replay.reason equals `duplicate-key`
    - Expected: sale_available_stock(store2, "tenant-a", "SKU-1") equals `8`
-- store close
 
 
 <details>
@@ -384,7 +541,7 @@ val store = fresh_store("restart")
 val t = tenant_a()
 val admin = admin_a()
 val sa = session_for(admin, t)
-sale_add_product(store, sa, t, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, sa, t, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, sa, t, admin, "SKU-1", 10)
 val clerk = clerk_a()
 val cs = session_for(clerk, t)
@@ -413,8 +570,8 @@ store_close(store2)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
