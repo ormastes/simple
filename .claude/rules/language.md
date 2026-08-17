@@ -26,3 +26,19 @@ alwaysApply: false
 ## Syntax Quick Reference
 See `doc/07_guide/quick_reference/syntax_quick_reference.md` for complete reference.
 See `.claude/memory/ref_coding.md` for coding conventions and common mistakes.
+
+## `.?` is a payload, not a predicate — settled, do not re-file (2026-08-17)
+
+`.?` returns `T?` — the value if present, `nil` if absent (presence = not nil
+AND not empty; `syntax_quick_reference.md:548-552`). It is **not** a bool.
+`expect(x.?).to_be(true)` compares the unwrapped payload against `true` and the
+matcher is telling the truth when it reports the value. Correct predicate form:
+
+    expect(x.? != nil).to_be(true)     # or assert_true(x.? != nil)
+
+This has been triaged twice and closed both times — `3264274affec` ("SPEC
+MISUSE, not a compiler defect") and `4e73e47eb2ad` (re-triage closing
+`existence_check_conflates_absent_with_empty_text` as NOT A DEFECT). A third
+session re-diagnosed it as a compiler bug on 2026-08-17 and filed a duplicate;
+that doc was deleted. If a spec fails on `.?`, fix the **spec**, and do not
+change `.?` lowering.

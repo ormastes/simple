@@ -201,3 +201,18 @@ cold lint of a real file is still ~2 minutes, and a first-time full-repo lint
 is still impractical. Fixing that means making the rule passes cheaper inside
 `lint_cli_source` (`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`),
 which needs a bootstrap rebuild to measure and was out of scope here.
+
+## Bootstrap stage builds: the cache flag is the whole story (2026-08-17)
+
+`bin/simple build bootstrap` hardcodes `--threads 1` and passes **no
+`--cache-dir`** (`src/compiler_rust/driver/src/cli/commands/misc_commands.rs`,
+both branches), so every invocation is a cold uncached recompile — measured 15+
+minutes at 100% of one core without reaching codegen. Use
+`scripts/bootstrap/bootstrap-from-scratch.sh`, which passes `--cache-dir`,
+`--low-memory`, `--mode one-binary` and `--runtime-bundle core-c-bootstrap`.
+
+Memory is the binding constraint on this host, not CPU: one `simple test`
+process peaks ~3 GB and the stage worker holds ~2.9 GB, while `earlyoom` kills
+`simple` preferentially at ~10% free. Bootstrap and broad test sweeps must
+alternate. A native-build "timeout" should be checked against
+`journalctl -u earlyoom` before it is believed.
