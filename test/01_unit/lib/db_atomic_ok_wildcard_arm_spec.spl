@@ -1,0 +1,47 @@
+"""
+# Atomic Database `Ok(_)` Wildcard Arm Regression
+
+Reproducing spec for `doc/08_tracking/bug/stage4_db_atomic_hir_names_2026-08-02.md`.
+
+That bug doc claims the async no-GC mirror "now uses the same `?` Result
+propagation as the sync implementation instead of matching `Ok(_)`, which Stage4
+treated as an unresolved identifier". The claim was false: seven `Ok(_)` arms
+survived in `src/lib/nogc_async_mut/db_atomic.spl` (create/load/reload), and the
+pre-existing contract spec only excluded ONE specific `Ok(_)` message string, so
+it passed vacuously.
+
+This spec asserts the general property the doc claims: NO `Ok(_)` match arm
+anywhere in either mirror.
+"""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val ASYNC_MIRROR = "src/lib/nogc_async_mut/db_atomic.spl"
+val SYNC_MIRROR = "src/lib/nogc_sync_mut/db_atomic.spl"
+
+fn check_no_ok_wildcard_arm(path: text):
+    val source = rt_file_read_text(path) ?? ""
+    expect(source.len() > 0).to_equal(true)
+    expect(source.contains("Ok(_)")).to_equal(false)
+    expect(source.contains("case Ok(_)")).to_equal(false)
+
+describe "atomic database has no Ok(_) wildcard match arms":
+    it "holds for the async no-GC mirror":
+        check_no_ok_wildcard_arm(ASYNC_MIRROR)
+
+    it "holds for the sync no-GC mirror":
+        check_no_ok_wildcard_arm(SYNC_MIRROR)
+
+    it "uses ? propagation for atomic_read and extract_table_from_sdn in the async mirror":
+        val source = rt_file_read_text(ASYNC_MIRROR) ?? ""
+        expect(source).to_contain("val content = atomic_read(path, config)?")
+        expect(source).to_contain("val content = atomic_read(self.path, self.config)?")
+        expect(source).to_contain("atomic_write(path, header, config)?")
+        expect(source).to_contain("extract_table_from_sdn(sdn_value, table_name)?")
+        expect(source).to_contain("extract_table_from_sdn(sdn_value, self.table_name)?")
+
+    it "no longer carries the dead is_ok pre-check plus duplicate match pattern":
+        val source = rt_file_read_text(ASYNC_MIRROR) ?? ""
+        expect(source.contains("if not content_result.is_ok()")).to_equal(false)
+        expect(source.contains("if not parse_result.is_ok()")).to_equal(false)
+        expect(source.contains("if not table_data.is_ok()")).to_equal(false)

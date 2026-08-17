@@ -1,0 +1,58 @@
+"""
+# Atomic Database Sync/Async Mirror Result-Handling Parity
+
+Similar-problem-detection spec for
+`doc/08_tracking/bug/stage4_db_atomic_hir_names_2026-08-02.md`.
+
+The class of defect that bug doc actually exhibited was **mirror drift hidden by
+a too-narrow assertion**: the doc asserted that the async no-GC mirror had been
+brought to parity with the sync mirror's `?` Result propagation, while the
+existing contract spec only excluded ONE literal `Ok(_)` message string. Seven
+`Ok(_)` arms plus three dead `if not <x>.is_ok()` pre-checks survived unnoticed.
+
+This spec detects the same drift generically: for each Result-handling idiom the
+two mirrors are supposed to share, both files must agree — so a future edit that
+regresses only one side fails here regardless of the exact message text used.
+"""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val ASYNC_MIRROR = "src/lib/nogc_async_mut/db_atomic.spl"
+val SYNC_MIRROR = "src/lib/nogc_sync_mut/db_atomic.spl"
+
+fn read_mirror(path: text) -> text:
+    val source = rt_file_read_text(path) ?? ""
+    expect(source.len() > 0).to_equal(true)
+    source
+
+fn expect_parity(name: text, needle: text):
+    val a = read_mirror(ASYNC_MIRROR)
+    val s = read_mirror(SYNC_MIRROR)
+    expect(a.contains(needle)).to_equal(s.contains(needle))
+
+describe "db_atomic mirrors agree on Result handling shape":
+    it "agrees on absence of Ok wildcard arms":
+        expect_parity("ok wildcard", "Ok(_)")
+
+    it "agrees on absence of dead is_ok pre-checks before a duplicate match":
+        expect_parity("is_ok precheck", "if not content_result.is_ok()")
+        expect_parity("is_ok precheck", "if not parse_result.is_ok()")
+        expect_parity("is_ok precheck", "if not table_data.is_ok()")
+
+    it "agrees on using ? for table extraction":
+        val a = read_mirror(ASYNC_MIRROR)
+        val s = read_mirror(SYNC_MIRROR)
+        expect(a).to_contain("extract_table_from_sdn(sdn_value, table_name)?")
+        expect(s).to_contain("extract_table_from_sdn(sdn_value, table_name)?")
+
+    it "agrees on the SDN parse error message shape":
+        val a = read_mirror(ASYNC_MIRROR)
+        val s = read_mirror(SYNC_MIRROR)
+        expect(a).to_contain("return Err(\"Failed to parse SDN:")
+        expect(s).to_contain("return Err(\"Failed to parse SDN:")
+
+    it "neither mirror reintroduces a without-error placeholder message":
+        val a = read_mirror(ASYNC_MIRROR)
+        val s = read_mirror(SYNC_MIRROR)
+        expect(a.contains("without error\")")).to_equal(false)
+        expect(s.contains("without error\")")).to_equal(false)

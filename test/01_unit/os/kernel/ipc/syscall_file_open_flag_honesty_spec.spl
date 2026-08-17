@@ -1,0 +1,23 @@
+"""
+Focused static regression for the syscall-file open flag contract.
+
+The kernel syscall handler requires the full scheduler/VMM/IPC bootstrap graph,
+so this test keeps the flag checks directly observable without a host-side
+kernel harness.
+"""
+use std.spec.{describe, it, expect}
+use std.fs.{file_exists, file_read}
+
+val SYSCALL_FILE_PATH: text = "src/os/kernel/ipc/syscall_file.spl"
+
+describe("file-open flag honesty"):
+    it("rejects truncation before filesystem mutation"):
+        expect(file_exists(SYSCALL_FILE_PATH)).to_equal(true)
+        val body: text = file_read(SYSCALL_FILE_PATH)
+        expect(body.contains("if (flags & O_TRUNC) != 0:")).to_equal(true)
+        expect(body.contains("return SyscallResult(value: _FS_EOPNOTSUPP)")).to_equal(true)
+
+    it("rejects exclusive create when the target already exists"):
+        val body: text = file_read(SYSCALL_FILE_PATH)
+        expect(body.contains("open_r.is_ok() and (flags & O_CREAT) != 0 and (flags & O_EXCL) != 0")).to_equal(true)
+        expect(body.contains("return SyscallResult(value: _FS_EEXIST)")).to_equal(true)

@@ -1,0 +1,133 @@
+# Run-path probe: SIMILAR-PROBLEM DETECTION for the untagged-word-escape class.
+#
+# Class definition (not one bug): a scalar that is DERIVED from a heap/user-typed
+# receiver keeps that receiver's TypeId stamp in
+# `codegen::instr::body::build_vreg_types` (a `BinOp` dest inherits its LEFT
+# operand's type). Every downstream site that boxes "only if this is a scalar" —
+# `MirInst::BoxInt`'s `t.0 >= 16` pass-through being the one measured — then
+# skips tagging, and the RAW machine word reaches a consumer that expects a
+# tagged RuntimeValue. The low 3 bits are re-read as a type tag:
+#
+#     v & 7 == 0  -> boxed int, value silently DIVIDED BY 8   (8 prints as "1")
+#     v & 7 == 1  -> heap pointer   -> "<invalid-heap:0x9>"
+#     v & 7 == 2  -> inline float   -> a denormal
+#     v & 7 == 3  -> nil            -> "nil"
+#     otherwise                     -> "<value:0x5>"
+#
+# The known instance is `@packed` bitfield reads
+# (doc/08_tracking/bug/jit_packed_bitfield_field_read_returns_nil_2026-08-10.md),
+# where only the print/interpolation surface was ever reported. This probe walks
+# the OTHER consumer surfaces of the same derived value — comparison, arithmetic,
+# argument passing, return values, array elements, nested reads, and a u64
+# backing store — so the next site that forgets to tag fails HERE instead of
+# shipping as a plausible small number.
+#
+# Every oracle is an ABSOLUTE literal this probe did not compute.
+
+@packed
+struct Flags:
+    a: u32:1
+    b: u32:3
+    c: u32:12
+    d: u32:16
+
+@packed
+struct Wide:
+    lo: u64:32
+    hi: u64:32
+
+var failures: i64 = 0
+
+fn check_text(name: text, got: text, want: text):
+    if got == want:
+        print "PASS " + name
+    else:
+        failures = failures + 1
+        print "FAIL " + name + " got=" + got + " want=" + want
+
+fn takes_u32(v: u32) -> text:
+    # A derived value crossing a call boundary: the callee sees whatever the
+    # caller put in the argument slot.
+    "{v}"
+
+fn read_b(f: Flags) -> u32:
+    # A derived value crossing a RETURN boundary.
+    f.b
+
+fn main() -> i64:
+    var f = Flags(0)
+    f.a = 1
+    f.b = 5
+    f.c = 8
+    f.d = 300
+
+    # --- Surface 1: interpolation (the one originally reported) -------------
+    check_text("interp_a_is_1", "{f.a}", "1")
+    check_text("interp_b_is_5", "{f.b}", "5")
+    check_text("interp_c_is_8", "{f.c}", "8")
+    check_text("interp_d_is_300", "{f.d}", "300")
+
+    # --- Surface 2: comparison against a literal ----------------------------
+    # A raw word compares fine as an integer even when it formats as garbage,
+    # so these must stay green in BOTH the broken and fixed states. They are
+    # here as anti-vacuity controls: if they ever go red the value itself was
+    # corrupted, which is a different and worse defect than a formatting leak.
+    if f.b == 5u32:
+        print "PASS compare_b_is_5"
+    else:
+        failures = failures + 1
+        print "FAIL compare_b_is_5"
+
+    # --- Surface 3: arithmetic on the derived value, then formatted ---------
+    val sum: u32 = f.b + f.c
+    check_text("arith_b_plus_c_is_13", "{sum}", "13")
+
+    # --- Surface 4: argument passing ----------------------------------------
+    check_text("arg_pass_b_is_5", takes_u32(f.b), "5")
+    check_text("arg_pass_c_is_8", takes_u32(f.c), "8")
+
+    # --- Surface 5: return value --------------------------------------------
+    check_text("return_b_is_5", "{read_b(f)}", "5")
+
+    # --- Surface 6: array element (a genuinely tagged slot) -----------------
+    # Storing a derived value into an array REQUIRES tagging: an array slot is
+    # a RuntimeValue. An untagged store here is read back wrong on every access.
+    val xs: [u32] = [f.b, f.c, f.d]
+    check_text("array_elem0_is_5", "{xs[0]}", "5")
+    check_text("array_elem1_is_8", "{xs[1]}", "8")
+    check_text("array_elem2_is_300", "{xs[2]}", "300")
+
+    # --- Surface 8: a u64-backed bitfield -----------------------------------
+    # u64 takes a DIFFERENT boxing path (rt_raw_u64_to_string / u64 heap box),
+    # so it is a separate opportunity to forget the tag.
+    var w = Wide(0)
+    w.lo = 9
+    w.hi = 17
+    check_text("u64_bitfield_lo_is_9", "{w.lo}", "9")
+    check_text("u64_bitfield_hi_is_17", "{w.hi}", "17")
+
+    # --- Surface 9: every low-3-bit residue class ---------------------------
+    # One value per tag bucket, so no single decode path can be missed.
+    var g = Flags(0)
+    g.d = 8
+    check_text("residue0_is_8", "{g.d}", "8")
+    g.d = 9
+    check_text("residue1_is_9", "{g.d}", "9")
+    g.d = 10
+    check_text("residue2_is_10", "{g.d}", "10")
+    g.d = 11
+    check_text("residue3_is_11", "{g.d}", "11")
+    g.d = 12
+    check_text("residue4_is_12", "{g.d}", "12")
+    g.d = 13
+    check_text("residue5_is_13", "{g.d}", "13")
+    g.d = 14
+    check_text("residue6_is_14", "{g.d}", "14")
+    g.d = 15
+    check_text("residue7_is_15", "{g.d}", "15")
+
+    if failures == 0:
+        print "TAG_ESCAPE_SURFACES PROBE: ALL PASS"
+    else:
+        print "TAG_ESCAPE_SURFACES PROBE: FAILURES"
+    0

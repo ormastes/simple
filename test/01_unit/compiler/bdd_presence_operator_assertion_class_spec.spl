@@ -1,0 +1,66 @@
+use std.spec.describe
+use std.spec.it
+use std.spec.expect
+
+# Similar-problem detection for the defect CLASS behind
+# doc/08_tracking/bug/sspec_test_path_value_semantics_divergence_2026-07-20.md.
+#
+# Class: an operator whose evaluated Value is deliberately NOT its documented
+# surface type (here `.?`, which evaluates to payload-or-nil rather than a
+# bool) is silently wrong in every ASSERTION position, not just the one shape
+# the original report happened to use. This spec sweeps the shapes:
+#   - bare subject                       expect(x.?)
+#   - left operand of a comparison       expect(x.? == true)
+#   - right operand of a comparison      expect(true == x.?)
+#   - inequality                         expect(x.? != false)
+#   - across every "absent" spelling the evaluator recognises: nil, a dict
+#     miss, an empty string, an empty array
+#   - across "present but falsy" payloads (0, false, ""-in-a-nonempty-array),
+#     which must NOT be confused with absence when the payload itself is falsy
+# A regression in any one of these means the operator leaked its payload into
+# an assertion again.
+describe "presence operator across every assertion position":
+    it "bare subject is true for a present value":
+        val present = "x"
+        expect(present.?).to_equal(true)
+
+    it "bare subject is false for nil":
+        val absent = nil
+        expect(absent.?).to_equal(false)
+
+    it "left operand of == compares as a bool":
+        val present2 = 7
+        expect(present2.? == true).to_equal(true)
+
+    it "right operand of == compares as a bool":
+        val absent2 = nil
+        expect(false == absent2.?).to_equal(true)
+
+    it "!= against a bool literal works":
+        val present3 = "y"
+        expect(present3.? != false).to_equal(true)
+
+    it "empty string counts as absent":
+        val empty = ""
+        expect(empty.?).to_equal(false)
+
+    it "empty array counts as absent":
+        val empty_arr = []
+        expect(empty_arr.?).to_equal(false)
+
+    it "non-empty array counts as present":
+        val arr = [1, 2]
+        expect(arr.?).to_equal(true)
+
+    it "zero is a present payload, not absence":
+        val zero = 0
+        expect(zero.?).to_equal(true)
+
+    it "false is a present payload, not absence":
+        val flag = false
+        expect(flag.?).to_equal(true)
+
+    it "dict miss is absent and dict hit is present":
+        val d = {"a": 1}
+        expect(d.get("zzz").?).to_equal(false)
+        expect(d.get("a").?).to_equal(true)

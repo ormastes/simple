@@ -1,0 +1,125 @@
+# Silent-Default Lint — SIMILAR-PROBLEM DETECTION Specification
+#
+# Generalizes past the one reproduced line (silent_default_reproducer_spec.spl)
+# to the CLASS of fail-open code, and — just as importantly — pins what the rule
+# must NOT flag. A silent-default rule that fires on all 146 `.unwrap_or(<const>)`
+# sites in this tree would be switched off within a week, so the discrimination
+# assertions below are load-bearing, not decoration.
+#
+# The discriminator: an IN-DOMAIN default (0, 1, true, "") is indistinguishable
+# from a real result; an OUT-OF-DOMAIN sentinel (-1) forces the caller to test.
+
+use std.spec.*
+use compiler.semantics.lint.silent_default.{
+    SilentDefaultFinding,
+    check_silent_default
+}
+
+
+describe "silent_default: the fail-open class, and its non-members":
+    """
+    ## Discriminating real fail-opens from legitimate defaults
+
+    Covers all three codes (W-MC-DEF-001/002/003), the in-domain vs
+    out-of-domain discriminator, mission-critical scoping (path and marker),
+    and the reason-carrying suppression.
+    """
+
+    context "when the default is OUT of the result domain":
+
+        it "does not flag the -1 not-found sentinel":
+            val source = "fn f():\n    val i = s.index_of(\"x\").unwrap_or(-1)\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "when the receiver is not a lookup":
+
+        it "does not flag a genuine configuration default":
+            val source = "fn f():\n    val port = cfg.port_setting().unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "when other lookup shapes default in-domain":
+
+        it "warns on a slot lookup defaulting to 0":
+            val source = "fn f():\n    val s = table.slot_of(key).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("slot_of")
+
+        it "warns on an offset lookup defaulting to 0":
+            val source = "fn f():\n    val o = layout.offset_of(f).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "warns on unwrap_or_default on a resolution":
+            val source = "fn f():\n    val r = resolve(name).unwrap_or_default()\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+        it "warns on an empty-string default for a lookup":
+            val source = "fn f():\n    val n = lookup(id).unwrap_or(\"\")\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+    context "when a reasoned suppression is present":
+
+        it "suppresses on the same line when a reason is given":
+            val source = "fn f():\n    val i = resolve(n).unwrap_or(0)  # lint:allow(silent_default) caller pre-checked\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "suppresses from the line above":
+            val source = "fn f():\n    # lint:allow(silent_default) key is always present\n    val i = resolve(n).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "does NOT suppress when the marker carries no reason":
+            val source = "fn f():\n    val i = resolve(n).unwrap_or(0)  # lint:allow(silent_default)\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+
+    context "when code is vendored":
+
+        it "never lints third-party source":
+            val source = "fn f():\n    val i = resolve(n).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/runtime/vendor/x.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "when the file is outside mission-critical scope":
+
+        it "does not flag a discarded error with .ok()":
+            val source = "fn f():\n    val r = risky().ok()\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(0)
+
+    context "when the file IS mission-critical by path":
+
+        it "warns on .ok() discarding an error":
+            val source = "fn f():\n    val r = risky().ok()\n"
+            val findings = check_silent_default(source, "src/lib/common/mission_critical/a.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("W-MC-DEF-002")
+
+    context "when the file opts in with the inert @mission_critical marker":
+
+        it "warns on .ok() in an opted-in module":
+            val source = "@mission_critical\nfn f():\n    val r = risky().ok()\n"
+            val findings = check_silent_default(source, "src/app/demo.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("W-MC-DEF-002")
+
+    context "when a success predicate is vacuously true":
+
+        it "warns when success only checks a failure counter":
+            # TestRunResult::success() was literally `total_failed == 0`, so a
+            # run that executed ZERO tests reported success.
+            val source = "@mission_critical\nfn success() -> bool:\n    self.total_failed == 0\n"
+            val findings = check_silent_default(source, "src/app/runner.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("W-MC-DEF-003")
+
+        it "does not warn when a non-vacuity check is conjoined":
+            val source = "@mission_critical\nfn success() -> bool:\n    self.total_failed == 0 and self.total_run > 0\n"
+            val findings = check_silent_default(source, "src/app/runner.spl")
+            expect(findings.len()).to_equal(0)

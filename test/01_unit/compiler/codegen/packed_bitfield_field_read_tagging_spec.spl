@@ -1,0 +1,92 @@
+# REPRODUCING spec for
+# doc/08_tracking/bug/jit_packed_bitfield_field_read_returns_nil_2026-08-10.md
+#
+# Symptom (JIT only): reading a `@packed` bitfield field printed `nil` instead
+# of its value. Root cause is NOT the shift/mask extraction — the emitted MIR is
+# arithmetically correct. It is the TypeId stamped on the mask result:
+# `codegen::instr::body::build_vreg_types` derives a `BinOp` dest type from its
+# LEFT operand, and the left operand traced back to a `Load { ty: <Bitfield> }`
+# (TypeId >= 16). `MirInst::BoxInt` then took its "already a tagged heap handle,
+# pass through" early-return, so the RAW scalar reached the formatter and its low
+# 3 bits were read as a runtime type tag.
+#
+# Fix: `src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs` —
+# put the ConstInt mask on the LEFT of the commutative BitAnd, so the dest is
+# stamped I64 and BoxInt tags it like every other scalar field read.
+#
+# WHY A SUBPROCESS. A spec body runs on the tree-walk INTERPRETER, which was
+# always correct here (verified below as the control arm). An in-process example
+# can therefore never go red on this bug. The oracle is the sibling run-path
+# probe `probe_packed_bitfield_read_jit.spl`, executed under both engines; it
+# self-checks against absolute decimal literals and prints one verdict line.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_packed_bitfield_read_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate seed; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "packed bitfield field reads are tagged before formatting":
+    it "reads every bitfield through the interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was correct in the original report — a red here means the probe or harness is broken, not the JIT")
+        expect(interp).to_contain("PACKED_BITFIELD_READ PROBE: ALL PASS")
+
+        step("The probe must actually have executed its checks, not exited early")
+        expect(interp).to_contain("PASS bitfield_bit0_is_1")
+        expect(interp).to_contain("PASS bitfield_byte1_is_9")
+
+    it "reads every bitfield through the cranelift JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the bug lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The exact expression from the bug report: a 1-bit field holding 1 printed `nil`")
+        expect(jit).to_contain("PASS bitfield_bit0_is_1")
+        expect(jit).to_contain("PASS bitfield_bit1_is_1")
+
+        step("A zero-valued wide field always rendered correctly and must keep doing so")
+        expect(jit).to_contain("PASS bitfield_wide_is_0")
+
+        step("Byte-wide fields at offsets 0/8/16 — these printed <value:0x5> and <invalid-heap:0x9>")
+        expect(jit).to_contain("PASS bitfield_byte0_is_5")
+        expect(jit).to_contain("PASS bitfield_byte1_is_9")
+        expect(jit).to_contain("PASS bitfield_word_is_300")
+
+        step("The quietest form: a multiple of 8 has tag bits 0, so it came back silently divided by 8 (8 printed as 1) with no marker text")
+        expect(jit).to_contain("PASS bitfield_byte0_is_8")
+
+        step("Control: an ordinary non-bitfield u32 struct field was never broken")
+        expect(jit).to_contain("PASS plain_u32_field_is_7")
+
+        step("The documented workaround — routing the read through a local — must keep working")
+        expect(jit).to_contain("PASS bitfield_via_local_is_1")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("PACKED_BITFIELD_READ PROBE: ALL PASS")
+
+    it "leaks no untagged word under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("A raw word reaching the formatter renders with one of these tag-decode markers")
+        expect(jit.contains("<value:0x")).to_equal(false)
+        expect(jit.contains("<invalid-heap:0x")).to_equal(false)
+        expect(interp.contains("<value:0x")).to_equal(false)
+        expect(interp.contains("<invalid-heap:0x")).to_equal(false)
+
+        step("No check may have failed under either engine")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

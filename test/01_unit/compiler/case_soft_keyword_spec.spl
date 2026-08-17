@@ -1,0 +1,73 @@
+# Reproducer: `case` must be usable as an ordinary identifier outside a match arm.
+#
+# Bug: doc/08_tracking/bug/case_is_reserved_outside_match_2026-08-04.md
+#
+# Before the fix, the seed lexer emitted TokenKind::Case unconditionally and no
+# identifier/pattern position accepted it, so a plain loop variable named `case`
+# aborted the ENTIRE compilation unit at parse time:
+#
+#     error: compile failed: parse: Unexpected token: expected pattern, found Case
+#     Results: 1 total, 0 passed, 1 failed
+#
+# One loop variable therefore cost every example in the file (4 examples in the
+# original sfnt_spec.spl), and the diagnostic described the parser's internal
+# state rather than telling the author `case` was reserved. `case` is not on the
+# documented reserved-word list in .claude/rules/language.md, and the pure-Simple
+# frontend already accepted it -- only the seed hard-reserved it.
+#
+# The fix makes `case` a soft keyword: it is consumed explicitly as the match-arm
+# MARKER before any pattern is parsed, so it is unambiguous as a name anywhere
+# else. Both halves must hold, so this file asserts both.
+
+use std.spipe.*
+
+struct Scenario:
+    label: text
+    weight: i64
+
+describe "`case` is a soft keyword, not a reserved word":
+
+    it "binds `case` as a for-loop variable":
+        # THE ORIGINAL REPRO: this line alone used to kill the whole file.
+        var total = 0
+        for case in [1, 2, 3]:
+            total = total + case
+        expect total to_equal 6
+
+    it "binds `case` as a val and reads a field off it":
+        val case = Scenario(label: "alpha", weight: 7)
+        expect case.label to_equal "alpha"
+        expect case.weight to_equal 7
+
+    it "reassigns `case` as a var":
+        var case = 1
+        case = case + 41
+        expect case to_equal 42
+
+    it "iterates structs bound to `case`, the shape sfnt_spec.spl used":
+        val cases = [Scenario(label: "a", weight: 1), Scenario(label: "b", weight: 2)]
+        var sum = 0
+        var names = ""
+        for case in cases:
+            sum = sum + case.weight
+            names = names + case.label
+        expect sum to_equal 3
+        expect names to_equal "ab"
+
+    it "still parses `case` as a match arm marker":
+        # The un-reservation must NOT cost the keyword its real job.
+        val classify = \n: match n:
+            case 0: "zero"
+            case 1: "one"
+            case _: "many"
+        expect classify(0) to_equal "zero"
+        expect classify(1) to_equal "one"
+        expect classify(9) to_equal "many"
+
+    it "uses a variable named `case` inside a match arm body":
+        var case = 10
+        val label = match case:
+            case 10: "ten"
+            case _: "other"
+        expect label to_equal "ten"
+        expect case to_equal 10

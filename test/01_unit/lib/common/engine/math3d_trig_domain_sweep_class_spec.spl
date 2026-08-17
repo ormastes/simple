@@ -1,0 +1,160 @@
+"""
+Similar-problem detection spec for the defect CLASS behind
+`math3d_cos_taylor_precision_2026-07-20`.
+
+The class is: *a transcendental helper in the stdlib that is accurate near its
+expansion point and silently degrades across the rest of its domain.* A
+reproducer that only probes one or two angles cannot catch this -- a truncated
+series is exact at 0 and merely bad far away, so any spec that samples near the
+expansion point passes with the bug fully present.
+
+This spec therefore sweeps the WHOLE circle at 15-degree steps and checks
+sin/cos against independently sourced exact literals (never against another
+series implementation, which would let the same truncation error cancel on both
+sides of the comparison).
+
+Observation surface is `Quaternion.from_axis_angle(up, 2a)`, whose normalised
+components are y = sin(a) and w = cos(a). Normalisation divides both by
+sqrt(sin^2 + cos^2), which is 1 for any correct implementation, so it neither
+masks a phase error nor a sign error.
+
+A future regression that reintroduces a low-order series, narrows the range
+reduction, or drops the quadrant fold will go red here even if it stays green on
+the small-angle reproducer.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.math3d.{Vec3, Quaternion}
+use std.common.engine.units.{Angle}
+
+fn abs_f(x: f64) -> f64:
+    if x < 0.0:
+        0.0 - x
+    else:
+        x
+
+# sin(a) for a = 0, 15, 30, ... 360 degrees. Exact literals, not computed.
+fn sin_table() -> [f64]:
+    [
+        0.0,
+        0.25881904510252074,
+        0.49999999999999994,
+        0.7071067811865476,
+        0.8660254037844386,
+        0.9659258262890683,
+        1.0,
+        0.9659258262890683,
+        0.8660254037844387,
+        0.7071067811865476,
+        0.49999999999999994,
+        0.25881904510252074,
+        0.0,
+        -0.25881904510252074,
+        -0.49999999999999994,
+        -0.7071067811865476,
+        -0.8660254037844386,
+        -0.9659258262890683,
+        -1.0,
+        -0.9659258262890683,
+        -0.8660254037844387,
+        -0.7071067811865476,
+        -0.49999999999999994,
+        -0.25881904510252074,
+        0.0
+    ]
+
+fn cos_table() -> [f64]:
+    [
+        1.0,
+        0.9659258262890683,
+        0.8660254037844387,
+        0.7071067811865476,
+        0.49999999999999994,
+        0.25881904510252074,
+        0.0,
+        -0.25881904510252074,
+        -0.49999999999999994,
+        -0.7071067811865476,
+        -0.8660254037844387,
+        -0.9659258262890683,
+        -1.0,
+        -0.9659258262890683,
+        -0.8660254037844387,
+        -0.7071067811865476,
+        -0.49999999999999994,
+        -0.25881904510252074,
+        0.0,
+        0.25881904510252074,
+        0.49999999999999994,
+        0.7071067811865476,
+        0.8660254037844387,
+        0.9659258262890683,
+        1.0
+    ]
+
+describe "math3d trig accuracy across the full domain (class detection)":
+
+    it "matches sin at every 15-degree step of the full circle":
+        val sins = sin_table()
+        var worst: f64 = 0.0
+        var worst_i: i64 = -1
+        var i: i64 = 0
+        while i < 25:
+            # half-angle is i*15 degrees, so the rotation angle is i*30.
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees((i * 30) * 1.0))
+            val err = abs_f(q.y - sins[i])
+            if err > worst:
+                worst = err
+                worst_i = i
+            i = i + 1
+        expect(worst_i >= 0).to_equal(true)
+        expect(worst < 0.000000001).to_equal(true)
+
+    it "matches cos at every 15-degree step of the full circle":
+        val coss = cos_table()
+        var worst: f64 = 0.0
+        var worst_i: i64 = -1
+        var i: i64 = 0
+        while i < 25:
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees((i * 30) * 1.0))
+            val err = abs_f(q.w - coss[i])
+            if err > worst:
+                worst = err
+                worst_i = i
+            i = i + 1
+        expect(worst_i >= 0).to_equal(true)
+        expect(worst < 0.000000001).to_equal(true)
+
+    it "stays accurate outside the primary reduction range":
+        # A range reduction that only subtracts one period, or that leaves the
+        # argument in a band the series cannot cover, breaks here while the
+        # small-angle cases above stay green.
+        var i: i64 = 0
+        var worst: f64 = 0.0
+        var checked: i64 = 0
+        while i < 12:
+            # rotation angles of 720 + i*30 degrees are congruent to i*30.
+            val far = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(720.0 + (i * 30) * 1.0))
+            val near = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees((i * 30) * 1.0))
+            val ey = abs_f(far.y - near.y)
+            val ew = abs_f(far.w - near.w)
+            if ey > worst:
+                worst = ey
+            if ew > worst:
+                worst = ew
+            checked = checked + 1
+            i = i + 1
+        expect(checked).to_equal(12)
+        expect(worst < 0.000000001).to_equal(true)
+
+    it "keeps the sin^2 + cos^2 == 1 identity before normalisation can hide it":
+        # from_axis_angle normalises, so this checks the identity indirectly:
+        # if sin and cos are individually wrong but by the SAME factor, the
+        # table checks above would still pass. Comparing the tangent ratio
+        # y/w against exact literals closes that hole.
+        val q45 = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(90.0))
+        expect(abs_f(q45.y / q45.w - 1.0) < 0.000000001).to_equal(true)
+        val q30 = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(60.0))
+        expect(abs_f(q30.y / q30.w - 0.5773502691896257) < 0.000000001).to_equal(true)
+        val q60 = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(120.0))
+        expect(abs_f(q60.y / q60.w - 1.7320508075688772) < 0.000000001).to_equal(true)

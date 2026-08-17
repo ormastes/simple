@@ -1,0 +1,131 @@
+"""
+# `native-build` exit 0 must imply the artifact contains a function
+
+**Category:** Driver / native-build — vacuous success (similar-problem detection)
+**Bug:** doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md
+
+## Overview
+
+A `native-build` was observed emitting an 11 KB ELF whose symbol table held
+294 `FILE` symbols and **zero `FUNC` symbols**, while the lane printed
+`Build complete` and exited 0. A binary with no defined function has no
+`main`/`_start` body; it cannot be a successful build.
+
+This is the same defect class as `TestRunResult::success()` being
+`total_failed == 0` — a process reporting success while its own accounting
+says it produced nothing. It is dangerous in proportion to how much is
+downstream of it: many lanes use the `native-build` exit code as their sole
+oracle, inspecting no symbols and executing no result.
+
+## What this spec pins
+
+Not one observed artifact, but the INVARIANT the observation violated:
+
+    native-build exit 0  ==>  the emitted artifact defines >= 1 FUNC symbol
+
+asserted across several program shapes, so a fix that special-cases the one
+reported shape does not satisfy it. The shapes differ in what could plausibly
+make codegen emit nothing:
+
+| shape | why it is a distinct member |
+|---|---|
+| `main` only | the minimum a program can be |
+| `main` + a called helper | a second body that must also survive |
+| `main` + an UNCALLED helper | dead code must not take live code with it |
+
+The negative half — that a genuinely functionless artifact is REJECTED — is
+covered by `scripts/check/check-native-build-artifact-has-functions.shs`,
+whose own fatal `--selftest` assembles a real 0-`FUNC` ELF and requires it to
+be rejected. This spec invokes that selftest so the two cannot drift apart:
+a spec that only ever sees good builds would pass with the gate deleted.
+
+## Why this MUST run in a SUBPROCESS
+
+`native-build` is a codegen + link path. A spec body runs INTERPRETED and
+never reaches it, so an in-process example could not go red no matter how
+broken the driver is. Every measurement here is taken by shelling out and
+reading `readelf -sW` on the artifact the build actually produced. Exit codes
+are captured with `echo RC=$?` immediately after the command — never through a
+pipe, whose status belongs to its last stage.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside a
+# spec's own string literal is resolved by the SPEC's lexer and kills the whole
+# file with `zero-examples` before any example runs.
+
+val PROGRAM_SOURCE: text = ("fn helper(n: i64) -> i64:\n" +
+    "    n + 41\n" +
+    "\n" +
+    "fn never_called(n: i64) -> i64:\n" +
+    "    n * 7\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(helper(1))\n")
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn build_and_census() -> text:
+    """Build the program, then report `RC=<n>` and the artifact's FUNC count.
+
+    Output shape: `RC=<n> FUNC=<n> EXISTS=<0|1>` on one line.
+    """
+    val dir = "build/test-artifacts/native_build_success_implies_functions"
+    val src = dir + "/prog.spl"
+    val bin_out = dir + "/prog.bin"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, PROGRAM_SOURCE)
+    val cmd = ("SIMPLE_BOOTSTRAP=1 SIMPLE_TIMEOUT_SECONDS=0 nice -n 19 " +
+        simple_bin() + " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "RC=$?; " +
+        "if [ -f " + bin_out + " ]; then " +
+        "  EXISTS=1; " +
+        "  FUNC=$(readelf -sW " + bin_out + " 2>/dev/null | grep -c ' FUNC ' || true); " +
+        "else EXISTS=0; FUNC=0; fi; " +
+        "echo \"RC=$RC FUNC=$FUNC EXISTS=$EXISTS\"")
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a native-build that exits 0 has emitted at least one function":
+
+    it "produces an artifact with real function bodies for a normal program":
+        # Deliberately ONE example over a three-function program: each
+        # `native_build_and_census()` costs a full native-build, and spec module
+        # globals do not persist across examples, so three examples would mean
+        # three builds for no extra coverage.
+        step("Build a program with a live helper, a called path, and dead code")
+        val census = build_and_census()
+
+        step("Refuse to pass on a run that produced no census line at all")
+        expect(census).to_contain("RC=")
+        expect(census).to_contain("FUNC=")
+
+        step("The build reported success")
+        expect(census).to_contain("RC=0")
+
+        step("An artifact exists — the existence check the old funnel had")
+        expect(census).to_contain("EXISTS=1")
+
+        step("And it is NOT functionless — the check the old funnel did not have")
+        # This is the whole point: `EXISTS=1` was already enforced at
+        # compile_targets.spl:1239 and is satisfied by an 11 KB ELF with 294
+        # FILE symbols and 0 FUNC symbols. Only the line below rejects that.
+        expect(census.contains("FUNC=0")).to_equal(false)
+
+    it "keeps the functionless-artifact gate's own negative control alive":
+        step("Run the gate's fatal selftest, which assembles a real 0-FUNC ELF")
+        val out = process_run("sh", ["-c",
+            "sh scripts/check/check-native-build-artifact-has-functions.shs " +
+            "--selftest 2>&1; echo RC=$?"])
+        step("It must both PASS and say it rejected the 0-FUNC control")
+        # Asserting only `RC=0` would pass if the selftest were gutted to a
+        # `true`; asserting the control text keeps the negative control real.
+        expect(out.0).to_contain("RC=0")
+        expect(out.0).to_contain("0-FUNC rejected")

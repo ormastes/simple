@@ -1,69 +1,50 @@
-# End-to-end test of optimized bootstrap components
+# End-to-end checks of the MCP bootstrap components
+#
+# Converted 2026-08-17 from a print-only `fn main()` script. Every check was
+# written as `if ok: print("OK") else: print("FAIL")`, so a regression printed a
+# "x" line and the process still exited 0 with no `Results:` line at all — the
+# silent-green defect class. Same checks, now asserted.
+#
+# Also dropped `use app.mcp.session.{McpState}`: that module does not exist
+# anywhere in the tree (`src/app/mcp/session.spl` is absent and `McpState` is
+# defined nowhere under `src/app/mcp/`), so the import could never have
+# resolved. The McpState construction check is therefore not re-expressible and
+# is recorded in the bug doc rather than silently dropped.
 
-use app.io.mod (get_args)
-use app.mcp.session.{McpState}
 use std.mcp.helpers.{LB, RB, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_error_response, make_result_response}
 use std.mcp.schema.{get_all_tool_schemas, init_core_schemas}
 
-fn main():
-    print("Testing optimized bootstrap components...")
+describe "MCP bootstrap components":
 
-    # Test 1: Schema initialization
-    init_core_schemas()
-    val schemas = get_all_tool_schemas()
-    if schemas.len() > 100:
-        print("✓ Schema initialization works ({schemas.len()} chars)")
-    else:
-        print("✗ Schema initialization failed")
+    it "initializes the core tool schemas to a non-trivial payload":
+        init_core_schemas()
+        val schemas = get_all_tool_schemas()
+        expect(schemas.len()).to_be_greater_than(100)
 
-    # Test 2: McpState creation
-    val state = McpState.create()
-    print("✓ McpState creation works")
+    it "extracts a top-level string field from a JSON-RPC request":
+        val test_json = """{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"""
+        expect(extract_json_string_v2(test_json, "method")).to_equal("initialize")
 
-    # Test 3: JSON extraction
-    val test_json = """{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"""
-    val method = extract_json_string_v2(test_json, "method")
-    if method == "initialize":
-        print("✓ extract_json_string_v2 works")
-    else:
-        print("✗ extract_json_string_v2 failed: got {method}")
+    it "extracts a top-level raw value from a JSON-RPC request":
+        val test_json = """{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"""
+        assert_true(extract_json_value(test_json, "id").contains("1"))
 
-    val id_val = extract_json_value(test_json, "id")
-    if id_val.contains("1"):
-        print("✓ extract_json_value works")
-    else:
-        print("✗ extract_json_value failed: got {id_val}")
+    it "extracts a nested string field from a JSON-RPC request":
+        val test_json = """{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"""
+        expect(extract_nested_string(test_json, "params", "protocolVersion")).to_equal("2024-11-05")
 
-    val protocol = extract_nested_string(test_json, "params", "protocolVersion")
-    if protocol == "2024-11-05":
-        print("✓ extract_nested_string works")
-    else:
-        print("✗ extract_nested_string failed: got {protocol}")
+    it "builds a three-field JSON-RPC response object":
+        val init_result = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}"""
+        val response = jo3(jp("jsonrpc", js("2.0")), jp("id", "1"), jp("result", init_result))
+        assert_true(response.contains("jsonrpc"))
+        assert_true(response.contains("protocolVersion"))
 
-    # Test 4: Response builders
-    val init_result = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}"""
-    val response = jo3(jp("jsonrpc", js("2.0")), jp("id", "1"), jp("result", init_result))
-    if response.contains("jsonrpc") and response.contains("protocolVersion"):
-        print("✓ Response builders work")
-    else:
-        print("✗ Response builders failed")
+    it "builds a JSON-RPC error response carrying the code":
+        val error_resp = make_error_response("1", -32601, "Method not found")
+        assert_true(error_resp.contains("error"))
+        assert_true(error_resp.contains("-32601"))
 
-    # Test 5: Error response
-    val error_resp = make_error_response("1", -32601, "Method not found")
-    if error_resp.contains("error") and error_resp.contains("-32601"):
-        print("✓ Error response works")
-    else:
-        print("✗ Error response failed")
-
-    # Test 6: Tool result response
-    val tool_resp = make_result_response("1", LB() + jp("content", "[{\"type\":\"text\",\"text\":\"test\"}]") + RB())
-    if tool_resp.contains("result") and tool_resp.contains("content"):
-        print("✓ Tool result response works")
-    else:
-        print("✗ Tool result response failed")
-
-    print("")
-    print("All optimized bootstrap components working!")
-    print("Phase 6 validation: READY FOR DEPLOYMENT")
-
-main()
+    it "builds a tools/call result response carrying the content block":
+        val tool_resp = make_result_response("1", LB() + jp("content", "[{\"type\":\"text\",\"text\":\"test\"}]") + RB())
+        assert_true(tool_resp.contains("result"))
+        assert_true(tool_resp.contains("content"))

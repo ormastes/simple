@@ -1,0 +1,123 @@
+# Similar-problem detection spec for the defect CLASS behind
+# doc/08_tracking/bug/feature_block_not_a_bdd_keyword_2026-08-04.md
+#
+# THE CLASS: the compiler ADVERTISES a set of BDD keywords in one place and
+# EXECUTES a different, smaller set somewhere else. When those two sets diverge,
+# a spec file using an advertised-but-unexecuted keyword does not fail one
+# example -- it dies at resolution time (`error[E1002]: function `X` not found`)
+# and reports ONE synthetic failure while hiding every `it` block inside it.
+# That is why `feature` hid 300 examples across 10 files for months while the
+# tracker showed "1 failed" per file.
+#
+# The reproducer (bdd_feature_group_keyword_spec.spl) only pins `feature`.
+# It would go green the moment `feature` alone was wired up, and would say
+# nothing about the NEXT keyword someone adds to the advertised list.
+# This spec closes that gap: it reads the advertised list out of the frontend
+# and requires every name in it to be handled by BOTH seed executor lanes and
+# by the type-system builtin registry. Adding a name to the advertised list
+# without wiring it into the executors turns this spec RED.
+#
+# Advertiser:  src/compiler/10.frontend/parser/test_analyzer.spl (GROUP_FUNCTIONS)
+# Executors:   src/compiler_rust/compiler/src/interpreter_call/bdd.rs
+#              src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs
+# Registry:    src/compiler/30.types/type_system/builtin_registry.spl
+#              src/compiler/30.types/type_system/checker.spl
+
+use std.spipe.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val ANALYZER_PATH = "src/compiler/10.frontend/parser/test_analyzer.spl"
+val INTERP_PATH = "src/compiler_rust/compiler/src/interpreter_call/bdd.rs"
+val LOWER_PATH = "src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs"
+val REGISTRY_PATH = "src/compiler/30.types/type_system/builtin_registry.spl"
+val CHECKER_PATH = "src/compiler/30.types/type_system/checker.spl"
+
+# Extract the names quoted inside the `val GROUP_FUNCTIONS = [...]` literal,
+# so this spec tracks the advertised list instead of hard-coding a copy of it.
+fn advertised_group_keywords(src: text) -> [text]:
+    val marker = "val GROUP_FUNCTIONS = ["
+    val start = src.index_of(marker)
+    if start < 0:
+        return []
+    val rest = src.substring(start + marker.len(), src.len())
+    val close = rest.index_of("]")
+    if close < 0:
+        return []
+    val body = rest.substring(0, close)
+    var names: [text] = []
+    var cur = ""
+    var inside = false
+    for ch in body.chars():
+        if ch == "\"":
+            if inside:
+                names = names + [cur]
+                cur = ""
+            inside = not inside
+        else:
+            if inside:
+                cur = cur + ch
+    names
+
+describe "BDD keyword executor coverage (defect class: advertised != executed)":
+
+    it "finds a non-empty advertised group-keyword list to check against":
+        val src = rt_file_read_text(ANALYZER_PATH) ?? ""
+        expect(src.len() > 0).to_equal(true)
+        val names = advertised_group_keywords(src)
+        # Vacuity guard: an empty list would make every assertion below trivially
+        # true, which is exactly how the original defect stayed invisible.
+        expect(names.len() > 0).to_equal(true)
+        expect(names.contains("describe")).to_equal(true)
+        expect(names.contains("feature")).to_equal(true)
+
+    it "wires every advertised group keyword into the interpreter lane":
+        val names = advertised_group_keywords(rt_file_read_text(ANALYZER_PATH) ?? "")
+        val interp = rt_file_read_text(INTERP_PATH) ?? ""
+        expect(interp.len() > 0).to_equal(true)
+        for kw in names:
+            expect(interp.contains("\"" + kw + "\"")).to_equal(true)
+
+    it "wires every advertised group keyword into the HIR/JIT lowering lane":
+        val names = advertised_group_keywords(rt_file_read_text(ANALYZER_PATH) ?? "")
+        val lower = rt_file_read_text(LOWER_PATH) ?? ""
+        expect(lower.len() > 0).to_equal(true)
+        for kw in names:
+            expect(lower.contains("\"" + kw + "\"")).to_equal(true)
+
+    it "registers every advertised group keyword as a Testing builtin":
+        val names = advertised_group_keywords(rt_file_read_text(ANALYZER_PATH) ?? "")
+        val reg = rt_file_read_text(REGISTRY_PATH) ?? ""
+        expect(reg.len() > 0).to_equal(true)
+        for kw in names:
+            expect(reg.contains("self.register(\"" + kw + "\", BuiltinCategory.Testing")).to_equal(true)
+
+    it "binds every advertised group keyword in the type checker environment":
+        val names = advertised_group_keywords(rt_file_read_text(ANALYZER_PATH) ?? "")
+        val checker = rt_file_read_text(CHECKER_PATH) ?? ""
+        expect(checker.len() > 0).to_equal(true)
+        for kw in names:
+            expect(checker.contains("\"" + kw + "\"")).to_equal(true)
+
+    it "keeps the example-level keyword set identical across both executor lanes":
+        # Same class, other half: `it`/`test`/`example`/`specify` are the
+        # example-level aliases. If one lane grows an alias the other lacks,
+        # a spec goes green in the interpreter and dies under JIT (or vice
+        # versa) -- silent, lane-dependent example loss.
+        val interp = rt_file_read_text(INTERP_PATH) ?? ""
+        val lower = rt_file_read_text(LOWER_PATH) ?? ""
+        for kw in ["it", "test", "example", "specify", "slow_it"]:
+            expect(interp.contains("\"" + kw + "\"")).to_equal(true)
+            expect(lower.contains("\"" + kw + "\"")).to_equal(true)
+
+    it "documents limited_it as a KNOWN, deliberate lane asymmetry":
+        # `limited_it` is intentionally interpreter-only: it carries a
+        # `resource_limits` named argument and the HIR/JIT lane has no runtime
+        # hook to enforce it, so wiring it up there would silently drop the
+        # limits (a fail-open) rather than fix anything. This example pins the
+        # asymmetry as DELIBERATE so it cannot be mistaken for the bug above,
+        # and turns RED if someone wires it up without a limits hook.
+        val interp = rt_file_read_text(INTERP_PATH) ?? ""
+        val lower = rt_file_read_text(LOWER_PATH) ?? ""
+        expect(interp.contains("\"limited_it\"")).to_equal(true)
+        expect(lower.contains("\"limited_it\"")).to_equal(false)

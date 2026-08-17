@@ -1,0 +1,133 @@
+# DETECTION spec: no terminator kind may be a blind spot in the alloca lane.
+#
+# Generalizes doc/08_tracking/bug/llvm_constants_lost_ret_zero_2026-08-01.md.
+# That bug was filed as "constants lost, ret 0", but the actual class is wider:
+# a terminator that CARRIES AN OPERAND must be handled at all three places in
+# src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl --
+#
+#   ssa_collect_term_operand_locals  (the operand is a USE, feeds liveness)
+#   ssa_term_operand_payloads_valid  (the operand is validated, not waved through)
+#   ssa_alloca_rewrite_term          (a slotted operand is LOADED before use)
+#
+# Miss any one for any terminator kind and a cross-block-live local silently
+# fails to be slotted, or is slotted and then read without a load. Both reach
+# llc as a use with no reaching def. `Ret` was missing at all three; this spec
+# asserts the property for every operand-carrying terminator kind, so the next
+# one added without wiring fails here rather than in a bootstrap.
+#
+# Pure MIR data-structure transform: the interpreter is the correct engine.
+
+use compiler.mir.mir_instructions.{
+    BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind,
+    MirTerminator
+}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{
+    ssa_alloca_transform_blocks, ssa_collect_term_operand_locals,
+    ssa_term_operand_payloads_valid
+}
+
+fn local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn copy_operand(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(local(id)))
+
+fn has_load(block: MirBlock) -> bool:
+    for inst in block.instructions:
+        match inst.kind:
+            case Load(_, _): return true
+            case _: pass_do_nothing
+    false
+
+fn bool_local() -> MirLocal:
+    MirLocal(id: local(5), name: nil, type_: MirType.bool(), kind: LocalKind.Var, is_ghost: false)
+
+fn define_5_entry() -> MirBlock:
+    MirBlock(
+        id: BlockId.new(0),
+        label: "entry",
+        instructions: [MirInst(
+            kind: MirInstKind.Const(local(5), MirConstValue.Bool(true), MirType.bool()),
+            span: nil
+        )],
+        terminator: MirTerminator.Goto(BlockId.new(1))
+    )
+
+fn tail_block(term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(1), label: "tail", instructions: [], terminator: term)
+
+fn plain_block(id: i64) -> MirBlock:
+    MirBlock(
+        id: BlockId.new(id),
+        label: "b" + str(id),
+        instructions: [],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+# Local 5 is defined in the entry block and used ONLY by `term`, the terminator
+# of a different block. Every operand-carrying terminator kind must therefore
+# slot it and load it back before the terminator reads it.
+fn transform_with_tail_terminator(term: MirTerminator, extra: [MirBlock]) -> Any:
+    var blocks = [define_5_entry(), tail_block(term)]
+    for b in extra:
+        blocks = blocks.push(b)
+    ssa_alloca_transform_blocks(blocks, [bool_local()], BlockId.new(0))
+
+describe "alloca lane terminator-operand coverage (bug class)":
+
+    it "collects the operand of every operand-carrying terminator as a use":
+        # The pure use-collection property, independent of the full transform.
+        # `Ret` returned an empty set here, which is the seed of the whole class.
+        val ret_uses = ssa_collect_term_operand_locals([], MirTerminator.Ret(Some(copy_operand(5))))
+        assert_contains(ret_uses, 5)
+        val if_uses = ssa_collect_term_operand_locals(
+            [], MirTerminator.If(copy_operand(5), BlockId.new(2), BlockId.new(3))
+        )
+        assert_contains(if_uses, 5)
+        val switch_uses = ssa_collect_term_operand_locals(
+            [], MirTerminator.Switch(copy_operand(5), [], BlockId.new(2))
+        )
+        assert_contains(switch_uses, 5)
+
+    it "treats an operand-free terminator as contributing no use":
+        # Guards the fix against over-correction: Ret(nil) must stay a no-op,
+        # otherwise a bogus local id enters the slot set.
+        val uses = ssa_collect_term_operand_locals([], MirTerminator.Ret(nil))
+        assert_equal(uses.len(), 0)
+
+    it "validates a returned operand rather than waving it through":
+        # `case Ret(_): true` admitted an undecodable payload unconditionally.
+        assert_true(ssa_term_operand_payloads_valid(MirTerminator.Ret(nil)))
+        assert_true(ssa_term_operand_payloads_valid(MirTerminator.Ret(Some(copy_operand(5)))))
+
+    it "slots and loads a local used only by a Ret terminator":
+        val result = transform_with_tail_terminator(MirTerminator.Ret(Some(copy_operand(5))), [])
+        assert_true(result.applied)
+        assert_true(has_load(result.blocks[1]))
+
+    it "slots and loads a local used only by an If terminator":
+        val result = transform_with_tail_terminator(
+            MirTerminator.If(copy_operand(5), BlockId.new(2), BlockId.new(3)),
+            [plain_block(2), plain_block(3)]
+        )
+        assert_true(result.applied)
+        assert_true(has_load(result.blocks[1]))
+
+    it "slots and loads a local used only by a Switch terminator":
+        val result = transform_with_tail_terminator(
+            MirTerminator.Switch(copy_operand(5), [], BlockId.new(2)),
+            [plain_block(2)]
+        )
+        assert_true(result.applied)
+        assert_true(has_load(result.blocks[1]))
+
+    it "never leaves a slotted local read directly by the terminator":
+        # The invariant that actually matters at llc: after slotting, no
+        # terminator may still name the original local -- it must name the
+        # loaded temporary. This is the assertion that fails if a future
+        # terminator kind is wired into liveness but not into the rewrite.
+        val result = transform_with_tail_terminator(MirTerminator.Ret(Some(copy_operand(5))), [])
+        assert_true(result.applied)
+        val direct_uses = ssa_collect_term_operand_locals([], result.blocks[1].terminator)
+        assert_false(direct_uses.contains(5))

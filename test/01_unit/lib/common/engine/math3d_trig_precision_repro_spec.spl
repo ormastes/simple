@@ -1,0 +1,72 @@
+"""
+Reproducer for `math3d_cos_taylor_precision_2026-07-20`.
+
+`src/lib/common/engine/math3d.spl` implements `_sin` as a raw Taylor series
+truncated after the x^7 term, applied over the whole range (-pi, pi] after a
+crude 2*pi range reduction. The series is only accurate near zero; at the ends
+of the reduced range it is catastrophically wrong:
+
+    _sin(pi)    -> -0.0752   (true value 0.0)
+    _cos(pi/2)  -> -0.0752   (true value 0.0, since _cos(x) = _sin(x + pi/2))
+    _tan(pi/4)  ->  1.0107   (true value 1.0)
+
+`_sin`/`_cos`/`_tan` are module-private, so this spec observes them through the
+two public surfaces that consume them:
+
+  * `Quaternion.from_axis_angle` — w is cos(angle/2), y is sin(angle/2)
+  * `Mat4.perspective`          — data[0] is 1/(tan(fov/2) * aspect)
+
+Both compile clean, exit 0, and hand back a silently wrong number.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.math3d.{Vec3, Mat4, Quaternion}
+use std.common.engine.units.{Angle}
+
+fn abs_f(x: f64) -> f64:
+    if x < 0.0:
+        0.0 - x
+    else:
+        x
+
+describe "math3d trig precision (repro: math3d_cos_taylor_precision_2026-07-20)":
+
+    describe "Quaternion.from_axis_angle w = cos(angle/2)":
+
+        it "gives w == 0 for a 180 degree rotation (cos(pi/2) == 0)":
+            # half-angle is pi/2, the worst point of the truncated series:
+            # the buggy _cos returns -0.0752 here instead of 0.0.
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(180.0))
+            expect(abs_f(q.w) < 0.000000001).to_equal(true)
+
+        it "gives y == 1 for a 180 degree rotation (sin(pi/2) == 1)":
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(180.0))
+            expect(abs_f(q.y - 1.0) < 0.000000001).to_equal(true)
+
+        it "gives w == -1 for a 360 degree rotation (cos(pi) == -1)":
+            # half-angle is pi. The buggy _sin(pi + pi/2) reduces to -pi/2 and
+            # returns -1.0013, so normalisation cannot hide the error either.
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(360.0))
+            expect(abs_f(q.w + 1.0) < 0.000000001).to_equal(true)
+
+        it "gives y == 0 for a 360 degree rotation (sin(pi) == 0)":
+            # This is the headline number: sin(pi) must be 0, the truncated
+            # series returns -0.0752 -- a 7.5% error on a unit quaternion.
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(360.0))
+            expect(abs_f(q.y) < 0.000000001).to_equal(true)
+
+        it "gives w == cos(45 deg) for a 90 degree rotation":
+            val q = Quaternion.from_axis_angle(Vec3.up(), Angle.from_degrees(90.0))
+            expect(abs_f(q.w - 0.7071067811865476) < 0.000000001).to_equal(true)
+
+    describe "Mat4.perspective data[0] = 1/(tan(fov/2) * aspect)":
+
+        it "gives exactly 1.0 for a 90 degree fov at aspect 1.0":
+            # tan(pi/4) is exactly 1, so data[0] must be exactly 1.
+            # The buggy _tan returns 1.0107, a 1% projection error.
+            val m = Mat4.perspective(Angle.from_degrees(90.0), 1.0, 0.1, 100.0)
+            expect(abs_f(m.data[0] - 1.0) < 0.000000001).to_equal(true)
+
+        it "gives 1/tan(30 deg) for a 60 degree fov at aspect 1.0":
+            val m = Mat4.perspective(Angle.from_degrees(60.0), 1.0, 0.1, 100.0)
+            expect(abs_f(m.data[0] - 1.7320508075688772) < 0.000000001).to_equal(true)

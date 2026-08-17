@@ -1,0 +1,94 @@
+#!/usr/bin/env simple
+# Dead-lexer / parser forward-progress regression.
+#
+# 2026-08-09: a Stage-2 self-hosted binary reported "806 compiled, 0 failed",
+# linked a 126 MB executable, passed the bootstrap sanity gate — and then could
+# not lex a single source file. Every token came back as `Unknown(0) ''` at
+# line 1:1, and parse_module_body()'s `while true` loop (whose ONLY exit is the
+# EOF token, kind 190) re-reported the identical parser error forever: 444 MB
+# of log / 6,299,344 lines / 32 GB RSS before the run was killed.
+#
+# Root cause: the seed MIR copied the mutable CoreLexer receiver, while
+# core/lexer.spl's lex_next() also failed to rebind the updated value-type
+# lexer. The scan mutated only temporaries and the owner kept its constructor
+# defaults, so EOF (190) was never observable.
+#
+# Fixes under test:
+#   (a) lex_next() receives and rebinds the updated CoreLexer plus token kind,
+#       and fails closed on impossible kind 0 with one bounded diagnostic.
+#   (b) parse_module_body() asserts forward progress: if the (kind, line, col)
+#       triple repeats across iterations it emits one error and breaks, instead
+#       of looping unboundedly.
+#
+# See doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
+
+use compiler.frontend.core.ast.{ast_reset, module_get_decls, decl_get_tag, decl_get_name, DECL_FN}
+use compiler.frontend.core.lexer.{lex_init, lex_next, lex_token_text}
+use compiler.frontend.core.parser.{parse_module, parse_module_silent_checked, parser_has_errors}
+use compiler.frontend.core.tokens.{TOK_KW_FN, TOK_IDENT, TOK_LPAREN, TOK_RPAREN, TOK_COLON}
+
+describe "lexer produces a live token stream and the parser always advances":
+
+    it "rebinds lexer state across consecutive tokens":
+        lex_init("fn main():\n    1\n")
+        expect(lex_next()).to_equal(TOK_KW_FN)
+        expect(lex_token_text()).to_equal("fn")
+        expect(lex_next()).to_equal(TOK_IDENT)
+        expect(lex_token_text()).to_equal("main")
+        expect(lex_next()).to_equal(TOK_LPAREN)
+        expect(lex_next()).to_equal(TOK_RPAREN)
+        expect(lex_next()).to_equal(TOK_COLON)
+
+    it "lexes and parses the exact two-line program the dead Stage-2 binary choked on":
+        # This is byte-for-byte the probe from the bug report. Under the defect
+        # it produced `[parser_error] line 1:1: unexpected token in expression:
+        # Unknown(0) ''` forever. A correct lexer yields one fn decl named main.
+        val source = "fn main():\n    print(\"hi\")\n"
+
+        ast_reset()
+        parse_module(source, "lexer_dead_stream_probe.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        expect(decl_get_tag(decls[0])).to_equal(DECL_FN)
+        expect(decl_get_name(decls[0])).to_equal("main")
+
+    it "reaches EOF on a longer multi-declaration module rather than stalling":
+        # A stalled lexer never observes EOF, so the decl count would be 0 (or
+        # the parse would not terminate at all). Counting decls proves the
+        # stream actually advanced through the whole file.
+        val source = "fn a() -> i64:\n    1\n\n" +
+            "fn b() -> i64:\n    2\n\n" +
+            "fn c() -> i64:\n    3\n"
+
+        ast_reset()
+        parse_module(source, "lexer_dead_stream_multi.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module_get_decls().len()).to_equal(3)
+
+    it "terminates with a bounded error on an unconsumable module-level token":
+        # A bare `)` cannot start a module-level declaration or expression, so
+        # parse_primary_expr's catch-all arm fires. The parser must report an
+        # error and RETURN. Under the defect this exact shape is what looped.
+        # The oracle is twofold: the parse reports failure (not a silent pass),
+        # and this example completes at all — a non-advancing loop would never
+        # return control to the runner.
+        ast_reset()
+        val failed = parse_module_silent_checked(")\n", "lexer_dead_stream_bad.spl")
+        expect(failed).to_equal(true)
+
+    it "terminates on a module that is nothing but repeated unconsumable tokens":
+        # The forward-progress invariant is what bounds this: without it, each
+        # unconsumable token that fails to advance re-enters the loop at the
+        # same (kind, line, col).
+        ast_reset()
+        val failed = parse_module_silent_checked(")\n)\n)\n", "lexer_dead_stream_bad2.spl")
+        expect(failed).to_equal(true)
+
+    it "parses an empty module to zero declarations without erroring or looping":
+        # The empty-source path must reach EOF immediately. Under the read-back
+        # defect an empty source was indistinguishable from a dead lexer.
+        ast_reset()
+        parse_module("", "lexer_dead_stream_empty.spl")
+        expect(module_get_decls().len()).to_equal(0)

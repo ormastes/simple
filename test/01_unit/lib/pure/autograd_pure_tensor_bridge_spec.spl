@@ -1,0 +1,84 @@
+# Class-generalizing prevention spec for the defect recorded in
+# doc/08_tracking/bug/pure_nn_layers_mix_autograd_tensor_and_puretensor_2026-07-25.md
+#
+# The CLASS of bug is not "Linear.forward has the wrong parameter type". It is:
+# `std.pure` carries two structurally identical f64 tensor representations
+# (`PureTensor<f64>` and the autograd `Tensor`'s inner `TensorF64`) with
+# DIVERGENT accessor surfaces and NO declared conversion, so any new API that
+# touches both silently mixes them and only fails at the call site.
+#
+# This spec pins the three invariants that keep the two surfaces honest,
+# independently of `nn.Linear`:
+#   1. accessor parity — both representations answer their dimensions through a
+#      method, not only a field, so generic code can be written against either;
+#   2. a declared, total crossing exists in BOTH directions;
+#   3. the crossing is value-lossless and shape-lossless for arbitrary ranks,
+#      so no future caller has to reach into `.data` / `.value` by hand.
+
+use std.pure.tensor (PureTensor, tensor_from_data, tensor_zeros, tensor_ones)
+use std.pure.autograd (Tensor)
+use std.pure.autograd_bridge (to_pure, to_autograd, pure_from_f64, f64_from_pure)
+
+describe "std.pure f64 tensor representations stay convertible and accessor-compatible":
+
+    describe "accessor parity (invariant 1)":
+        it "PureTensor answers its dimensions through a method":
+            assert_equal(tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2]).dims(), [2, 2])
+
+        it "autograd Tensor answers its dimensions through a method":
+            assert_equal(Tensor.from_data([1.0, 2.0, 3.0, 4.0], [2, 2], requires_grad: false).shape(), [2, 2])
+
+        it "the method agrees with the underlying field on PureTensor":
+            val p = tensor_zeros([3, 4])
+            assert_equal(p.dims(), p.shape)
+
+        it "both representations agree on element count for the same shape":
+            val p = tensor_ones([2, 3, 4])
+            val t = Tensor.ones([2, 3, 4], requires_grad: false)
+            assert_equal(p.numel(), t.numel())
+
+    describe "a declared crossing exists in both directions (invariant 2)":
+        it "converts autograd Tensor -> PureTensor":
+            val t = Tensor.from_data([5.0, 6.0], [2], requires_grad: false)
+            assert_equal(to_pure(t).dims(), [2])
+
+        it "converts PureTensor -> autograd Tensor":
+            val p = tensor_from_data([5.0, 6.0], [2])
+            assert_equal(to_autograd(p, requires_grad: false).shape(), [2])
+
+        it "converts TensorF64 -> PureTensor without reaching into fields":
+            val t = Tensor.from_data([7.0, 8.0, 9.0], [3], requires_grad: false)
+            assert_equal(pure_from_f64(t.value).dims(), [3])
+
+        it "converts PureTensor -> TensorF64 without reaching into fields":
+            val p = tensor_from_data([7.0, 8.0, 9.0], [3])
+            assert_equal(f64_from_pure(p).numel(), 3)
+
+    describe "the crossing is lossless at every rank tested (invariant 3)":
+        it "round-trips a rank-1 tensor's shape and values":
+            val p = tensor_from_data([1.5, 2.5, 3.5], [3])
+            val r = to_pure(to_autograd(p, requires_grad: false))
+            assert_equal(r.dims(), [3])
+            assert_equal(r.data, [1.5, 2.5, 3.5])
+
+        it "round-trips a rank-2 tensor":
+            val p = tensor_from_data([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+            val r = to_pure(to_autograd(p, requires_grad: false))
+            assert_equal(r.dims(), [2, 3])
+            assert_equal(r.data, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+        it "round-trips a rank-3 tensor":
+            val p = tensor_from_data([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [2, 2, 2])
+            val r = to_pure(to_autograd(p, requires_grad: false))
+            assert_equal(r.dims(), [2, 2, 2])
+            assert_equal(r.numel(), 8)
+
+        it "preserves strides across the crossing":
+            val p = tensor_from_data([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+            assert_equal(to_pure(to_autograd(p, requires_grad: false)).strides, p.strides)
+
+        it "round-trips starting from the autograd side":
+            val t = Tensor.from_data([9.0, 8.0, 7.0, 6.0], [2, 2], requires_grad: false)
+            val r = to_autograd(to_pure(t), requires_grad: false)
+            assert_equal(r.shape(), [2, 2])
+            assert_equal(r.value.data, [9.0, 8.0, 7.0, 6.0])

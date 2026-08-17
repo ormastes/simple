@@ -1,0 +1,184 @@
+#!/usr/bin/env simple
+# Typed lexer snapshot regression for speculative parser backtracking.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
+extern fn rt_heap_array_capacity_bytes() -> i64
+
+use compiler.frontend.core.ast.{ast_reset}
+use compiler.frontend.core.parser.{parse_module, parser_has_errors}
+use compiler.frontend.core.lexer.{lex_init, lex_source_char_at}
+
+describe "typed lexer snapshots":
+
+    it "copies the indent stack and keeps restore free of text serialization":
+        val source = rt_file_read_text("src/compiler/10.frontend/core/lexer.spl") ?? ""
+        expect(source).to_contain("struct LexSnapshot:")
+        expect(source).to_contain("indent_stack: [i64]")
+        expect(source).to_contain("for indent in lx.indent_stack:")
+        expect(source).to_contain("indent_stack: saved_indent_stack")
+        expect(source).to_contain("lx.indent_stack = snapshot.indent_stack")
+        expect(source).to_contain("fn lex_snapshot_release(snapshot: LexSnapshot, release_indent_stack: bool):")
+        expect(source).to_contain("rt_array_free(snapshot.nums)")
+        expect(source).to_contain("rt_array_free(snapshot.texts)")
+        expect(source).to_contain("rt_array_free(snapshot.indent_stack)")
+        expect(source).to_contain("rt_array_free(lx.indent_stack)")
+        expect(source).to_contain("lex_snapshot_release(snapshot, false)")
+        expect(source).to_contain("lex_snapshot_release(snapshot, true)")
+        expect(source).to_contain("lx.cur_kind = nums[10]")
+        expect(source).to_contain("lex_generic_close_pending[0] = nums[11] == 1")
+        expect(source).to_contain("lex_cur_kind_direct[0] = saved_kind")
+        expect(source).to_contain("current_core_lexer_save(loaded)\n    val env_save = lex_env_save_enabled[0]")
+        expect(source).to_contain("if env_save:")
+        expect(source.contains("saved_indent_raw")).to_equal(false)
+        expect(source.contains("current_core_indent_stack_set(restored_indent_stack)")).to_equal(false)
+        expect(source.contains("current_core_indent_stack_parse(saved_indent_raw)")).to_equal(false)
+        expect(source.contains("lex_cur_kind_set(saved_kind)")).to_equal(false)
+        expect(source).to_contain("explicit lexer boundary paths")
+        expect(source).to_contain("fn lex_snapshot_restore(snapshot: LexSnapshot):")
+        # The active CoreLexer owns aggregate source/indent buffers directly;
+        # a one-element aggregate cache can survive an AST reset with retired
+        # payloads.  Its liveness bit makes every recovery path rebuild a
+        # fresh owner, and release must drop that owner before its mirrors.
+        expect(source).to_contain("var current_core_lexer: CoreLexer = make_core_lexer(\"\")")
+        expect(source).to_contain("var current_core_lexer_live: bool = false")
+        expect(source).to_contain("current_core_lexer = make_core_lexer(core_source)\n    current_core_lexer_live = true")
+        expect(source).to_contain("if not current_core_lexer_live:\n        current_core_lexer = current_core_lexer_load()\n        current_core_lexer_live = true")
+        expect(source).to_contain("pub fn lexer_release_parse_source_globals():")
+        expect(source).to_contain("current_core_lexer = make_core_lexer(\"\")\n    current_core_lexer_live = false")
+        expect(source.contains("current_core_lexer_slot")).to_equal(false)
+
+        val parser = rt_file_read_text("src/compiler/10.frontend/core/parser.spl") ?? ""
+        # Parser token state has the same reset boundary, but is scalar data.
+        # Keep recovery opt-in cached as a scalar too; no aggregate cache may
+        # be consulted after ast_reset() starts a new source.
+        expect(parser).to_contain("var par_kind_cached: i64 = 0")
+        expect(parser).to_contain("var par_text_cached: text = \"\"")
+        expect(parser).to_contain("var par_line_cached: i64 = 0")
+        expect(parser).to_contain("var par_col_cached: i64 = 0")
+        expect(parser).to_contain("var par_env_save_cached: i64 = -1")
+        expect(parser).to_contain("par_kind_cached = 0\n    par_text_cached = \"\"\n    par_line_cached = 0\n    par_col_cached = 0")
+        expect(parser).to_contain("fn par_kind_set(value: i64):\n    par_kind_cached = value")
+        expect(parser).to_contain("fn par_text_set(value: text):\n    par_text_cached = value")
+        expect(parser.contains("par_kind_slot")).to_equal(false)
+        expect(parser.contains("par_text_slot")).to_equal(false)
+        expect(parser.contains("par_line_slot")).to_equal(false)
+        expect(parser.contains("par_col_slot")).to_equal(false)
+        expect(parser.contains("par_env_save_slot")).to_equal(false)
+
+        # Decl count and env-mirror high-water state crosses the same reset
+        # boundary. Keep these four values scalar so native reset cannot
+        # retain a retired aggregate cache.
+        val decl_nodes = rt_file_read_text("src/compiler/10.frontend/core/_Ast/decl_nodes.spl") ?? ""
+        expect(decl_nodes).to_contain("var ast_decl_count_cached: i64 = 0")
+        expect(decl_nodes).to_contain("var ast_module_decl_count_cached: i64 = 0")
+        expect(decl_nodes).to_contain("var ast_decl_mirror_high_cached: i64 = 0")
+        expect(decl_nodes).to_contain("var ast_module_decl_mirror_high_cached: i64 = 0")
+        expect(decl_nodes.contains("ast_decl_count_slot")).to_equal(false)
+        expect(decl_nodes.contains("ast_module_decl_count_slot")).to_equal(false)
+        expect(decl_nodes.contains("ast_decl_mirror_high_slot")).to_equal(false)
+        expect(decl_nodes.contains("ast_module_decl_mirror_high_slot")).to_equal(false)
+
+        # Mirror entries must be dropped while their high-water marks survive;
+        # count reset follows only after the clear in ast_reset().
+        val module_state = rt_file_read_text("src/compiler/10.frontend/core/_Ast/module_state.spl") ?? ""
+        expect(module_state).to_contain("ast_decl_env_mirror_clear()\n    ast_module_decl_slots_clear()")
+        expect(module_state).to_contain("ast_decl_count_set(0)\n    ast_module_decl_count_set(0)")
+        # Compare the real call sequences (two-line snippets) so a prose
+        # comment mentioning ast_decl_count_set(0) cannot win the index race.
+        expect(module_state.index_of("ast_decl_env_mirror_clear()\n    ast_module_decl_slots_clear()")).to_be_less_than(module_state.index_of("ast_decl_count_set(0)\n    ast_module_decl_count_set(0)"))
+
+        val stmts = rt_file_read_text("src/compiler/10.frontend/core/parser_stmts.spl") ?? ""
+        val expr = rt_file_read_text("src/compiler/10.frontend/core/parser_expr.spl") ?? ""
+        val decls = rt_file_read_text("src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl") ?? ""
+        expect(stmts.contains("lex_snapshot_restore(")).to_equal(false)
+        expect(expr.contains("lex_snapshot_restore(")).to_equal(false)
+        expect(decls.contains("lex_snapshot_restore(")).to_equal(false)
+        expect(stmts).to_contain("lex_snapshot_commit(")
+        expect(stmts).to_contain("lex_snapshot_rollback(")
+        expect(expr).to_contain("lex_snapshot_commit(")
+        expect(expr).to_contain("lex_snapshot_rollback(")
+        expect(decls).to_contain("lex_snapshot_commit(")
+        expect(decls).to_contain("lex_snapshot_rollback(")
+    it "preserves nested parser indentation across repeated speculation":
+        val source = "fn main() -> i64:\n" +
+            "    if true:\n" +
+            "        val nested = 1\n" +
+            "        nested\n" +
+            "    0\n"
+        var round = 0
+        while round < 8:
+            ast_reset()
+            parse_module(source, "lexer_snapshot_spec.spl")
+            expect(parser_has_errors()).to_equal(false)
+            round = round + 1
+
+    it "keeps repeated source character access at a memory plateau":
+        lex_init("abcdefghij")
+        var warmup = 0
+        while warmup < 8:
+            lex_source_char_at(4)
+            warmup = warmup + 1
+
+        val before_live = rt_heap_live_bytes()
+        val before_aux = rt_heap_aux_live_bytes()
+        val before_capacity = rt_heap_array_capacity_bytes()
+        var observed = ""
+        var round = 0
+        while round < 4096:
+            observed = lex_source_char_at(4)
+            round = round + 1
+
+        val after_live = rt_heap_live_bytes()
+        val after_aux = rt_heap_aux_live_bytes()
+        val after_capacity = rt_heap_array_capacity_bytes()
+        expect(observed).to_equal("e")
+        expect(after_live).to_equal(before_live)
+        expect(after_aux).to_equal(before_aux)
+        expect(after_capacity).to_equal(before_capacity)
+
+    it "keeps successful repeated speculation within live memory budgets":
+        val source = "fn main() -> i64:\n" +
+            "    val value = make<i64>()\n" +
+            "    if true:\n" +
+            "        val nested = value\n" +
+            "        nested\n" +
+            "    0\n"
+        var warmup = 0
+        while warmup < 3:
+            ast_reset()
+            parse_module(source, "lexer_snapshot_memory_spec.spl")
+            expect(parser_has_errors()).to_equal(false)
+            warmup = warmup + 1
+        val before_live = rt_heap_live_bytes()
+        val before_aux = rt_heap_aux_live_bytes()
+        val before_capacity = rt_heap_array_capacity_bytes()
+        var previous_live = before_live
+        var previous_aux = before_aux
+        var previous_capacity = before_capacity
+        var round = 0
+        while round < 24:
+            ast_reset()
+            parse_module(source, "lexer_snapshot_memory_spec.spl")
+            expect(parser_has_errors()).to_equal(false)
+            val round_live = rt_heap_live_bytes()
+            val round_aux = rt_heap_aux_live_bytes()
+            val round_capacity = rt_heap_array_capacity_bytes()
+            # Per-round slopes catch a renewed leak even if the aggregate
+            # budget is raised for a slower but valid runtime.
+            expect(round_live - previous_live).to_be_less_than(2 * 1024 * 1024)
+            expect(round_aux - previous_aux).to_be_less_than(4 * 1024 * 1024)
+            expect(round_capacity - previous_capacity).to_be_less_than(4 * 1024 * 1024)
+            previous_live = round_live
+            previous_aux = round_aux
+            previous_capacity = round_capacity
+            round = round + 1
+        val after_live = rt_heap_live_bytes()
+        val after_aux = rt_heap_aux_live_bytes()
+        val after_capacity = rt_heap_array_capacity_bytes()
+        # Fixed-N broad budgets tolerate allocator variation while catching the
+        # former per-restore text split/format fan-out.
+        expect(after_live - before_live).to_be_less_than(32 * 1024 * 1024)
+        expect(after_aux - before_aux).to_be_less_than(64 * 1024 * 1024)
+        expect(after_capacity - before_capacity).to_be_less_than(64 * 1024 * 1024)

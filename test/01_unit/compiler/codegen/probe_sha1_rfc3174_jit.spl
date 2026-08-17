@@ -1,0 +1,72 @@
+# Run-path probe: RFC 3174 SHA-1 vectors, plus the erased-`list` slot class the
+# SHA-1 defect actually belonged to.
+#
+# Executed as a SUBPROCESS by `sha1_rfc3174_jit_spec.spl` under
+# SIMPLE_EXECUTION_MODE=jit and =interpreter. A spec body runs interpreted, so a
+# JIT miscompile cannot go red from a spec body alone.
+#
+# Every oracle below is an ABSOLUTE literal published by RFC 3174 / FIPS 180-4,
+# or an arithmetic identity — never "the two engines agree", which would pass
+# while both engines are wrong in the same way.
+
+use std.common.crypto.sha1.{sha1_hex}
+use std.crypto.sha1.{sha1_bytes}
+use std.common.crypto.types.{text_to_bytes, bytes_to_hex}
+
+var failures = 0
+
+fn check(name: text, got: text, want: text):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got + " want=" + want)
+        failures = failures + 1
+
+# The erased-slot class itself: a function DECLARED `-> list` returns
+# Array<Any>, so every element read is a tagged RuntimeValue. Binding one into
+# a native scalar slot must UNBOX it; the defect stored the tagged word raw and
+# every consumer saw `value * 8`.
+fn mk_list() -> list:
+    [10, 20, 30]
+
+fn takes_i64(x: i64) -> i64:
+    x + 1
+
+fn main():
+    print("SHA1 RFC 3174 PROBE START")
+
+    # --- RFC 3174 §7.3 published test vectors, both SHA-1 modules -------------
+    check("common_sha1_abc", sha1_hex("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+    check("common_sha1_empty", sha1_hex(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+    check(
+        "common_sha1_two_block",
+        sha1_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "84983e441c3bd26ebaae4aa1f95129e5e54670f1")
+    check("common_sha1_a", sha1_hex("a"), "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8")
+
+    check(
+        "crypto_sha1_abc",
+        bytes_to_hex(sha1_bytes(text_to_bytes("abc"))),
+        "a9993e364706816aba3e25717850c26c9cd0d89d")
+    check(
+        "crypto_sha1_empty",
+        bytes_to_hex(sha1_bytes(text_to_bytes(""))),
+        "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+
+    # --- The generalised defect class: erased `list` element reads ------------
+    val d = mk_list()
+    val e0: i64 = d[0]
+    val e1: i64 = d[1]
+    check("list_elem_typed_let", "" + e0 + "," + e1, "10,20")
+    check("list_elem_call_arg", "" + takes_i64(d[1]), "21")
+    check("list_elem_method_get", "" + takes_i64(d.get(2)), "31")
+    var reassigned: i64 = 0
+    reassigned = d[2]
+    check("list_elem_assign", "" + reassigned, "30")
+    check("list_elem_interpolated", "" + d[1], "20")
+    check("list_len", "" + d.len(), "3")
+
+    if failures == 0:
+        print("SHA1 RFC 3174 PROBE: ALL PASS")
+    else:
+        print("SHA1 RFC 3174 PROBE: " + failures + " FAILURES")

@@ -1,0 +1,75 @@
+# @tag:unit, spec
+"""
+# Similar-Problem Detection: Mutation Through a By-Value Spec Helper
+
+Generalizes the defect class in
+doc/08_tracking/bug/spec_value_type_helper_mutates_copy_family_2026-08-10.md:
+a helper that takes the subject BY VALUE mutates a throwaway copy, so every
+absence assertion afterwards ("no lease is held", "the queue is empty") is
+vacuously true and tests nothing.
+
+`src/lib/nogc_sync_mut/service/lease_manager.spl` is the canonical case:
+`LeaseManager` was a `struct` mutated through free `fn`s, so `next_id` never
+advanced and `leases` never grew. It is now a `class` (reference type).
+
+Oracle shape that catches the whole class: pass the subject through an
+INDIRECT helper (a plain `fn` taking it by value, exactly the shape that
+used to lose the write), then assert the mutation is visible through the
+ORIGINAL binding. A copy-semantics regression makes the presence assertions
+fail -- and, crucially, the absence assertions here are paired with presence
+assertions so a vacuous "nothing is held" can never pass alone.
+"""
+
+use std.spec.*
+use std.io_runtime
+use std.service.lease_manager
+
+extern fn rt_getpid() -> i64
+
+# Deliberately by-value, no `mut`: the exact helper shape that used to drop
+# the mutation on the floor.
+fn helper_take_exclusive(mgr: LeaseManager, pid: i64) -> LeaseResult:
+    try_acquire_exclusive(mgr, pid, 30000i64)
+
+fn helper_release(mgr: LeaseManager, lease_id: text) -> bool:
+    release_lease(mgr, lease_id)
+
+describe "lease manager mutation survives a by-value helper boundary":
+    it "makes a lease taken inside a by-value helper visible to the caller":
+        var mgr = lease_manager_new()
+        # Paired baseline: prove the absence assertion is not vacuous by
+        # showing the SAME assertion flips after the mutation.
+        assert_equal(active_lease_count(mgr), 0i64)
+        val result = helper_take_exclusive(mgr, rt_getpid())
+        assert_true(result.ok)
+        assert_equal(active_lease_count(mgr), 1i64)
+        assert_true(has_active_exclusive(mgr))
+
+    it "blocks a second exclusive acquire taken through the helper":
+        var mgr = lease_manager_new()
+        val first = helper_take_exclusive(mgr, rt_getpid())
+        assert_true(first.ok)
+        val second = helper_take_exclusive(mgr, rt_getpid())
+        # A lost write would make this `true` -- the false-success shape.
+        assert_false(second.ok)
+        assert_contains(second.busy_message, "BUSY")
+
+    it "advances the id counter across a by-value helper boundary":
+        var mgr = lease_manager_new()
+        val first = helper_take_exclusive(mgr, rt_getpid())
+        val released = helper_release(mgr, first.lease_id)
+        assert_true(released)
+        val second = helper_take_exclusive(mgr, rt_getpid())
+        # next_id living on a copy gave EVERY lease the id `lease-1`.
+        val fid = first.lease_id
+        val sid = second.lease_id
+        assert_not_equal(fid, sid)
+
+    it "restores availability through the by-value release helper":
+        var mgr = lease_manager_new()
+        val first = helper_take_exclusive(mgr, rt_getpid())
+        assert_equal(active_lease_count(mgr), 1i64)
+        val released = helper_release(mgr, first.lease_id)
+        assert_true(released)
+        assert_equal(active_lease_count(mgr), 0i64)
+        assert_false(has_active_exclusive(mgr))

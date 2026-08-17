@@ -1,0 +1,100 @@
+use app.build.targets.action_identity.{
+    NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
+    native_action_input_receipt_text_v1, parse_native_action_input_receipt_v1,
+    native_action_input_error_v1, load_current_native_action_input_v1,
+    aggregate_action_identity_text_v1, aggregate_action_identity_digest_v1
+}
+use app.build.targets.artifact_receipt.{
+    ImportedClosureInputV1, publish_dependency_manifest_layer_v1,
+    publish_imported_closure_layer_v1, target_cache_namespace_v1,
+    target_action_key_v1, digest_is_sha256
+}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_write, file_hash_sha256, dir_create_all, getpid}
+
+val ACTION_IDENTITY_ROOT = "/tmp/simple-action-identity-spec-{getpid()}"
+
+fn _setup_identity() -> NativeActionInputIdentityV1:
+    val cache_dir = ACTION_IDENTITY_ROOT + "/build/target_cache/app"
+    dir_create_all(ACTION_IDENTITY_ROOT + "/src")
+    dir_create_all(ACTION_IDENTITY_ROOT + "/build/tools")
+    file_write(ACTION_IDENTITY_ROOT + "/src/main.spl", "fn main(): 0\n")
+    file_write(ACTION_IDENTITY_ROOT + "/build/tools/simple", "admitted-simple-tool\n")
+    val tool_artifact = file_hash_sha256(ACTION_IDENTITY_ROOT + "/build/tools/simple")
+    val tool_behavior = sha256_text("compiler-behavior-v1")
+    val dependency_digest = publish_dependency_manifest_layer_v1(
+        ACTION_IDENTITY_ROOT, cache_dir, "//app:main", []
+    )
+    val closure_digest = publish_imported_closure_layer_v1(
+        ACTION_IDENTITY_ROOT, cache_dir, "//app:main", "src/main.spl",
+        tool_behavior, dependency_digest, [
+            ImportedClosureInputV1(
+                "src/main.spl",
+                file_hash_sha256(ACTION_IDENTITY_ROOT + "/src/main.spl")
+            )
+        ]
+    )
+    val producer_abi = sha256_text("producer-abi-v1")
+    val target_identity = sha256_text("x86_64-unknown-linux-gnu")
+    val namespace = target_cache_namespace_v1(
+        producer_abi, target_identity, "release", "binary"
+    )
+    val key = target_action_key_v1(
+        "//app:main", "native-build", "P1", "B3", namespace,
+        dependency_digest, closure_digest, tool_behavior, "binary"
+    )
+    NativeActionInputIdentityV1(
+        NATIVE_ACTION_INPUT_PRODUCER_V1, "//app:main", "native-build",
+        "src/main.spl", "build/tools/simple", tool_artifact, tool_behavior,
+        producer_abi, target_identity, "release", dependency_digest,
+        closure_digest, key, []
+    )
+
+describe "independent current native action identity":
+    it "binds current tool manifest imported closure and expected action key":
+        val identity = _setup_identity()
+        val body = native_action_input_receipt_text_v1(identity)
+        val parsed = parse_native_action_input_receipt_v1(body)
+        expect(parsed.errors.len()).to_equal(0)
+        expect(native_action_input_error_v1(
+            ACTION_IDENTITY_ROOT, ACTION_IDENTITY_ROOT + "/build/target_cache/app",
+            "//app:main", "P1", "B3", "src/main.spl", "binary",
+            identity.tool_artifact_digest, parsed
+        )).to_equal("")
+
+    it "rejects historical input evidence for a different current tool":
+        val identity = _setup_identity()
+        expect(native_action_input_error_v1(
+            ACTION_IDENTITY_ROOT, ACTION_IDENTITY_ROOT + "/build/target_cache/app",
+            "//app:main", "P1", "B3", "src/main.spl", "binary",
+            sha256_text("different-current-tool"), identity
+        )).to_contain("current-tool-artifact-mismatch")
+
+    it "loads only the compiler-authored canonical current receipt":
+        val identity = _setup_identity()
+        val cache_dir = ACTION_IDENTITY_ROOT + "/build/target_cache/app"
+        expect(dir_create_all(cache_dir + "/inputs")).to_be(true)
+        expect(file_write(
+            cache_dir + "/inputs/current.receipt",
+            native_action_input_receipt_text_v1(identity)
+        )).to_be(true)
+        val loaded = load_current_native_action_input_v1(
+            ACTION_IDENTITY_ROOT, cache_dir, "//app:main", "P1", "B3",
+            "src/main.spl", "binary", identity.tool_artifact_digest
+        )
+        expect(loaded.errors.len()).to_equal(0)
+        expect(loaded.action_key).to_equal(identity.action_key)
+
+describe "aggregate action identity":
+    it "binds product producer tool and dependency manifest canonically":
+        val tool = sha256_text("current-tool")
+        val dependencies = sha256_text("dependency-manifest")
+        val body = aggregate_action_identity_text_v1(
+            "//product:p1", "P1", "B3", tool, dependencies
+        )
+        val digest = aggregate_action_identity_digest_v1(
+            "//product:p1", "P1", "B3", tool, dependencies
+        )
+        expect(body).to_contain("target=//product:p1")
+        expect(body).to_contain("dependency-manifest=" + dependencies)
+        expect(digest_is_sha256(digest)).to_be(true)

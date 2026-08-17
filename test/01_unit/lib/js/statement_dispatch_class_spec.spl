@@ -1,0 +1,57 @@
+# Class-detection spec for
+# seed_gc_js_engine_typeof_undefined_and_for_desugar_regression_2026-08-15
+# Generalizes the defect class: EVERY JS statement keyword must dispatch as a
+# statement, and locals bound by any of them must remain resolvable. A single
+# keyword falling through to identifier lookup is the whole failure shape
+# ("ReferenceError: <keyword> is not defined" / "x is not defined").
+#
+# Numeric results are forced through JS `String(...)` so assertions compare
+# strings, not JS float formatting.
+use std.nogc_sync_mut.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn eval_str(src: text) -> text:
+    var rt = js_runtime_with_default_logger("stmt-class-spec")
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Undefined: "<undefined>"
+                _: "<other>"
+        Err(e):
+            "<err>"
+
+describe "JS statement keyword dispatch class":
+    it "switch dispatches as a statement":
+        expect(eval_str("var r = 'x'; switch (2) { case 2: r = 'two'; break; default: r = 'other'; } r")).to_equal("two")
+
+    it "do-while dispatches as a statement":
+        expect(eval_str("var i = 0; do { i = i + 1; } while (i < 3); String(i)")).to_equal("3")
+
+    it "try/catch dispatches as a statement":
+        expect(eval_str("var r = 'no'; try { throw 1; } catch (e) { r = 'caught'; } r")).to_equal("caught")
+
+    it "for-in dispatches as a statement":
+        expect(eval_str("var n = 0; for (var k in {a:1,b:2}) { n = n + 1; } String(n)")).to_equal("2")
+
+    it "function declaration dispatches as a statement":
+        expect(eval_str("function f(a) { return a + 1; } String(f(41))")).to_equal("42")
+
+    it "return inside a function body dispatches as a statement":
+        expect(eval_str("(function(){ return 'ok'; })()")).to_equal("ok")
+
+    it "void operator dispatches as an operator":
+        expect(eval_str("typeof void 0")).to_equal("undefined")
+
+    it "delete operator dispatches as an operator":
+        expect(eval_str("var o = {a:1}; delete o.a; typeof o.a")).to_equal("undefined")
+
+describe "locals bound by statements stay resolvable":
+    it "a var bound in a for body is readable after the loop":
+        expect(eval_str("for (var i = 0; i < 1; i = i + 1) { var y = 9; } String(y)")).to_equal("9")
+
+    it "nested loops keep both counters resolvable":
+        expect(eval_str("var t = 0; for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 2; j = j + 1) { t = t + 1; } } String(t)")).to_equal("6")
+
+    it "a function-scoped var survives an if statement":
+        expect(eval_str("var x = 1; if (x) { x = x + 1; } String(x)")).to_equal("2")

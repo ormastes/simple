@@ -1,0 +1,84 @@
+# Similar-bug-class detection: print-only test files that can never go RED.
+#
+# Class definition. A file under a test tree that is a plain `fn main()` script
+# whose checks are `if ok: print("...") else: print("...")` has NO oracle: the
+# failure branch prints and the process still exits 0, emitting no `Results:`
+# line. On the command every session uses as evidence (`bin/simple test <file>`)
+# such a file is indistinguishable from a file that passed. This is the exact
+# shape of two separately-filed bugs:
+#
+#   doc/08_tracking/bug/legacy_mcp_feature_tests_target_removed_api_and_assert_nothing_2026-08-04.md
+#   doc/08_tracking/bug/mcp_bootstrap_protocol_dead_main_optimized_subject_2026-07-20.md
+#
+# Both were in test/**/feature/lib/mcp/. A reproducing spec for either one only
+# pins that ONE file; this spec pins the CLASS across the directory, so a third
+# file reintroducing the shape goes red here instead of shipping silent-green.
+#
+# The rule enforced: every *_test.spl / *_spec.spl in the scanned directories
+# must contain at least one real oracle token (`expect(`, `assert_true`,
+# `assert_false`, `assert_equal`, `assert_not_equal`, `assert_contains`,
+# `assert_nil`). A file with zero oracle tokens is vacuous by construction,
+# regardless of how many `print` lines it has.
+#
+# @tag: mcp,testing,vacuous-green,meta
+
+use app.io.mod (dir_entries, file_exists, file_read)
+
+val SCANNED_DIRS: [text] = [
+    "test/03_system/feature/lib/mcp",
+    "test/feature/lib/mcp"
+]
+
+val ORACLE_TOKENS: [text] = [
+    "expect(",
+    "assert_true",
+    "assert_false",
+    "assert_equal",
+    "assert_not_equal",
+    "assert_contains",
+    "assert_nil"
+]
+
+fn has_oracle(source: text) -> bool:
+    for token in ORACLE_TOKENS:
+        if source.contains(token):
+            return true
+    false
+
+fn test_files_in(dir: text) -> [text]:
+    var found: [text] = []
+    if not file_exists(dir):
+        return found
+    for name in dir_entries(dir):
+        if name.ends_with("_test.spl") or name.ends_with("_spec.spl"):
+            found.push(dir + "/" + name)
+    found
+
+fn vacuous_files() -> [text]:
+    var bad: [text] = []
+    for dir in SCANNED_DIRS:
+        for path in test_files_in(dir):
+            if not has_oracle(file_read(path)):
+                bad.push(path)
+    bad
+
+describe "no vacuous print-only test files in the MCP feature trees":
+
+    it "scans a non-empty set of test files (guards against a vacuous scan)":
+        # A scan that finds nothing may have scanned nothing. This control MUST
+        # produce hits, otherwise the absence check below proves nothing.
+        var total = 0
+        for dir in SCANNED_DIRS:
+            total = total + test_files_in(dir).len()
+        expect(total).to_be_greater_than(0)
+
+    it "detects that the oracle-token rule itself can fail":
+        # Positive control for the predicate: a print-only body has no oracle.
+        val print_only = "fn main():\n    if ok:\n        print(\"ok\")\n    else:\n        print(\"fail\")\n"
+        expect(has_oracle(print_only)).to_equal(false)
+        val asserted = "describe \"x\":\n    it \"y\":\n        expect(1).to_equal(1)\n"
+        expect(has_oracle(asserted)).to_equal(true)
+
+    it "finds no test file lacking any assertion":
+        val bad = vacuous_files()
+        expect(bad.len()).to_equal(0)

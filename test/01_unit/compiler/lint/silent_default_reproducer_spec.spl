@@ -1,0 +1,74 @@
+# Silent-Default Lint — REPRODUCING Specification (W-MC-DEF-001)
+#
+# Reproduces the exact defect shape that motivated the rule:
+# `src/compiler_rust/compiler/src/hir/lower/expr/access.rs:288` resolved a struct
+# field index with `.unwrap_or(0)`. When resolution failed, every field read
+# field 0's slot — `struct W3: first, length, tag` built as
+# `W3(first: 9, length: n, tag: 77)` printed `first=9 length=9 tag=9`. It blocked
+# the bootstrap six times.
+#
+# This spec pins the ONE-LINE source shape. The generalizing companion is
+# silent_default_detection_spec.spl — keep both: on five occasions today a
+# reproducer passed with the fix removed and only the generalizing example
+# caught the defect.
+
+use std.spec.*
+use compiler.semantics.lint.silent_default.{
+    SilentDefaultFinding,
+    check_silent_default
+}
+use compiler.tools.lint._LintMain.config_and_model.{
+    profile_default_levels, map_lint_code_to_config_name, LintProfile
+}
+
+
+describe "W-MC-DEF-001: the field-index unwrap_or(0) fail-open":
+    """
+    ## A failed resolution must never become a valid-looking index
+
+    `resolve_field_index(name).unwrap_or(0)` turns "I could not find this
+    field" into "this field is field 0". Index 0 is a legitimate result, so no
+    caller can distinguish the two. The lint flags the in-domain constant.
+    """
+
+    context "when a field-index resolution defaults to 0":
+
+        it "warns on the access.rs defect shape":
+            val source = "fn lower():\n    val idx = resolve_field_index(name).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/compiler/50.mir/access.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("W-MC-DEF-001")
+            expect(findings[0].line_num).to_equal(2)
+
+        it "is a WARNING today, never an error":
+            val source = "fn lower():\n    val idx = resolve_field_index(name).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/compiler/50.mir/access.spl")
+            expect(findings[0].severity).to_equal("WARNING")
+
+        it "names the lookup whose failure was swallowed":
+            val source = "fn lower():\n    val idx = resolve_field_index(name).unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/compiler/50.mir/access.spl")
+            expect(findings[0].name).to_equal("resolve_field_index")
+
+        it "routes to the silent_default config family":
+            expect(map_lint_code_to_config_name("W-MC-DEF-001")).to_equal("silent_default")
+
+    context "when the escalation policy is read from the registry":
+
+        it "defaults to warn so existing code keeps compiling":
+            # The ONE line that promotes the family to a hard error lives in
+            # config_and_model.spl. Today it must read "warn": existing code
+            # keeps compiling ("at least warning now, latter bug when sw
+            # stable"). Flip that line and this assertion is what tells you.
+            val levels = profile_default_levels(LintProfile.Critical)
+            expect(levels["silent_default"]).to_equal("warn")
+
+    context "when the real repo hit is reproduced":
+
+        it "warns on the erlang.spl index_of paren fail-open":
+            # src/compiler_rust/lib/std/src/mcp/multi_lang/erlang.spl:52 —
+            # a line with NO paren is treated as having one at column 0.
+            val source = "fn f():\n    val paren_idx = trimmed.index_of(\"(\").unwrap_or(0)\n"
+            val findings = check_silent_default(source, "src/app/erlang.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].name).to_equal("index_of")

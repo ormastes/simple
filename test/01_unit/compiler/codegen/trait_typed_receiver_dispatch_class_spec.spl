@@ -1,0 +1,102 @@
+# Trait-typed receiver dispatch — reproducing + similar-problem detection spec.
+#
+# ## Why this file exists
+#
+# `test/fixtures/native_trait_receiver_resolution/main.spl` was filed 2026-08-09
+# as the repro for
+# `doc/08_tracking/bug/native_trait_typed_return_receiver_unresolved_2026-08-09.md`.
+# Audited 2026-08-17 it was VACUOUS on two counts:
+#
+#   1. `grep -rn native_trait_receiver_resolution test/ scripts/` returned
+#      nothing — no spec, runner, or gate ever executed it.
+#   2. Its hard-failing case (Shape C, a trait-typed function RETURN value used
+#      directly as a method receiver) was COMMENTED OUT so "the rest of the file
+#      still builds". The one line that reproduced the bug could not run.
+#
+# A repro nobody runs, with the failing line commented out, is indistinguishable
+# from no repro at all. This spec makes both shapes live and asserted.
+#
+# ## Why a subprocess
+#
+# `bin/simple test` executes spec bodies on the tree-walk INTERPRETER. The filed
+# defect is in `native-build` MIR lowering. An in-process example therefore
+# cannot go red on it no matter what it asserts. The oracle is the sibling probe
+# `probe_trait_typed_receiver_dispatch.spl`, run as a subprocess under each
+# engine, self-checking ABSOLUTE literals ("optfield D") — never "the engines
+# agree", which passes when both are wrong the same way. Shape D was precisely
+# that: dispatch succeeded, `self.prefix` read empty, output was " D".
+#
+# ## Class generalisation
+#
+# The probe covers every receiver SHAPE a trait-typed value can occupy — local
+# var (A), struct field (B), call return used directly (C) and via a local (C2),
+# optional field (D), array element (E) — so the next shape whose owner
+# recovery is missing fails here instead of shipping as plausible output.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_trait_typed_receiver_dispatch.spl"
+
+fn simple_bin() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn run_probe_in_mode(mode: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        simple_bin() + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "trait-typed receiver dispatch across every receiver shape":
+    it "resolves every receiver shape under the interpreter":
+        step("Run the probe as a subprocess under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control arm — a red here means the probe is broken, not the backend")
+        expect(interp).to_contain("TRAIT_RECEIVER PROBE: ALL PASS")
+
+        step("The probe must actually have executed its checks, not exited early")
+        expect(interp).to_contain("PASS shape_a_local_var")
+        expect(interp).to_contain("PASS shape_b_struct_field")
+        expect(interp).to_contain("PASS shape_e_array_element")
+
+    it "resolves a trait-typed call RETURN value used directly as a receiver":
+        step("Shape C is the filed defect: `make_greeter().greet(...)`, where the call result's layout key is the TRAIT name but the method table is keyed by the IMPL type")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("Direct-on-return must dispatch to FriendlyGreeter::greet and see self.prefix")
+        expect(interp).to_contain("PASS shape_c_return_value")
+        expect(jit).to_contain("PASS shape_c_return_value")
+
+        step("Binding the same call to a local first must not change the answer — if C fails while C2 passes, the defect is in call-result provenance specifically")
+        expect(interp).to_contain("PASS shape_c2_return_via_local")
+        expect(jit).to_contain("PASS shape_c2_return_via_local")
+
+    it "keeps self intact through an optional trait-typed field receiver":
+        step("Shape D is the SILENTLY WRONG one: dispatch succeeded but self.prefix read empty, printing \" D\" instead of \"optfield D\" — no error, no crash")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        expect(interp).to_contain("PASS shape_d_optional_field")
+        expect(jit).to_contain("PASS shape_d_optional_field")
+
+    it "shows no failed shape and no unresolved-method signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("No individual shape may have failed")
+        expect(interp.contains("FAIL ")).to_equal(false)
+        expect(jit.contains("FAIL ")).to_equal(false)
+
+        step("The lowering failure mode of this bug family is a loud unresolved method call — assert it is absent rather than assuming it")
+        expect(interp.contains("unresolved method call")).to_equal(false)
+        expect(jit.contains("unresolved method call")).to_equal(false)
+
+        step("Both engines must reach the aggregate verdict line — a missing verdict means the probe died before asserting anything")
+        expect(interp).to_contain("TRAIT_RECEIVER PROBE:")
+        expect(jit).to_contain("TRAIT_RECEIVER PROBE:")

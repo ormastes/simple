@@ -1,0 +1,48 @@
+"""
+# MIR terminator variant name (regression)
+
+**Category:** Compiler / MIR
+**Status:** Stable
+
+## Overview
+
+Reproducer for `doc/08_tracking/bug/vhdl_backend_block_temps_emit_process_variables_not_signals_2026-08-04.md`
+(the "stale `MirTerminator.Return`" half). The `MirTerminator` enum declares
+`Ret`, never `Return`. Five spec files constructed `MirTerminator.Return(...)`,
+a variant that does not exist. Constructing an unknown variant is only
+diagnosed when the expression is actually evaluated, so the defect stayed
+invisible in files whose bodies were skipped, and detonated as
+`semantic: unknown variant or method 'Return' on enum MirTerminator`
+in the files whose bodies did run.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "MirTerminator variant naming":
+    it "declares Ret and does not declare Return":
+        val source = read("src/compiler/50.mir/mir_instruction_support.spl")
+
+        expect(source).to_contain("enum MirTerminator:")
+        expect(source).to_contain("Ret(value: MirOperand?)")
+        expect(source.contains("    Return(")).to_equal(false)
+
+    it "is not referenced as MirTerminator.Return by any previously affected spec":
+        val affected = [
+            "test/03_system/feature/compiler/mir_complex_spec.spl",
+            "test/03_system/feature/compiler/mir_native_spec.spl",
+            "test/03_system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl",
+            "test/system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl",
+            "test/integration/compiler/vhdl_backend_e2e_spec.spl"
+        ]
+
+        var i = 0
+        while i < affected.len():
+            val path = affected[i]
+            val source = read(path)
+            # Guard against a vacuous pass if the file is ever moved away.
+            expect(source.contains("MirTerminator.")).to_equal(true)
+            expect(source.contains("MirTerminator.Return")).to_equal(false)
+            i = i + 1

@@ -1,0 +1,37 @@
+# codex-system-test
+# @req REQ-008 REQ-009 REQ-014 NFR-001 NFR-007
+"""# CLI evidence inspection integrity
+
+The operator-facing `simple debug inspect <bundle>` command must reject a
+retained artifact whose bytes no longer match the exact digest in the bundle
+manifest. A parsed manifest is not sufficient evidence integrity.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, file_write, process_run}
+
+val BUILD_ID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn tampered_bundle(root: text):
+    expect(dir_create_all(root + "/raw")).to_equal(true)
+    expect(file_write(root + "/raw/core", "tampered-after-capture")).to_equal(true)
+    expect(file_write(root + "/receipts.sdn", "receipts: []\n")).to_equal(true)
+    val manifest = "schema: debug-evidence-bundle-v1\n" +
+        "session_id: \"captured-system\"\n" +
+        "build_id: \"" + BUILD_ID + "\"\n" +
+        "captured_at_ns: 42\nartifacts:\n" +
+        "  - path: \"raw/core\"\n" +
+        "    digest: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n" +
+        "    media_type: \"application/octet-stream\"\n" +
+        "    native: true\n    privacy: \"redacted\"\n" +
+        "receipts_digest: \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n"
+    expect(file_write(root + "/manifest.sdn", manifest)).to_equal(true)
+
+describe "simple debug inspect evidence integrity":
+    it "rejects a tampered retained artifact at the operator CLI boundary":
+        val root = "build/test-cli-debug-inspect-integrity-system"
+        tampered_bundle(root)
+        val (stdout, stderr, exit_code) = process_run(
+            "bin/simple", ["run", "src/app/cli_debug/main.spl", "inspect", root])
+        expect(exit_code != 0).to_equal(true)
+        expect(stdout + stderr).to_contain("artifact digest mismatch")

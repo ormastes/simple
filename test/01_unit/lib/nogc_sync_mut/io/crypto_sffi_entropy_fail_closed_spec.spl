@@ -1,0 +1,58 @@
+# crypto_sffi entropy gate — fail-closed reproducer
+#
+# doc/08_tracking/bug/crypto_sffi_random_hex_degrades_to_empty_string_on_entropy_failure_2026-08-08.md
+#
+# Defect: `random_hex` was `rt_random_hex(length) ?? ""`. The extern is declared
+# nullable precisely because the OS CSPRNG can fail; `?? ""` converted that
+# DETECTED failure back into a silent one, and `random_salt()` (a thin wrapper)
+# then handed every password the same empty salt with nothing logged or returned.
+#
+# The CSPRNG failure path cannot be provoked from a spec without taking down the
+# host entropy source, so the decision logic was split into `checked_entropy_hex`,
+# a pure total function this spec drives directly with the values a failing or
+# misbehaving provider would produce.
+
+use std.nogc_sync_mut.io.crypto_sffi.{checked_entropy_hex, entropy_hex_valid_for, random_hex, random_salt, secure_entropy_hex_valid}
+
+describe "crypto_sffi entropy gate fails closed":
+
+    it "provider nil does not become an empty string":
+        # The exact regression: pre-fix this path yielded "" and callers could
+        # not tell entropy failure from a legitimate value.
+        expect(checked_entropy_hex(nil, 16)).to_equal(nil)
+
+    it "provider empty string is rejected rather than passed through":
+        expect(checked_entropy_hex("", 16)).to_equal(nil)
+
+    it "a short result is rejected":
+        expect(checked_entropy_hex("abcd", 16)).to_equal(nil)
+
+    it "an all-zero result is rejected":
+        expect(checked_entropy_hex("00000000000000000000000000000000", 16)).to_equal(nil)
+
+    it "a non-hex result is rejected":
+        expect(checked_entropy_hex("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", 16)).to_equal(nil)
+
+    it "a well-formed result passes through unchanged":
+        val good = "0123456789abcdef0123456789abcdef"
+        expect(checked_entropy_hex(good, 16)).to_equal(good)
+
+describe "random_hex / random_salt expose failure instead of hiding it":
+
+    it "random_salt returns 32 hex chars on a healthy host":
+        val salt = random_salt() ?? ""
+        expect(salt.len()).to_equal(32)
+
+    it "random_salt output satisfies the entropy post-condition":
+        val salt = random_salt() ?? ""
+        expect(secure_entropy_hex_valid(salt)).to_equal(true)
+
+    it "random_hex never returns an empty string for a nonzero request":
+        # Empty is now representable only as nil, never as a text value.
+        val v = random_hex(16)
+        expect(v == "").to_equal(false)
+
+    it "two successive salts differ":
+        val a = random_salt() ?? "a"
+        val b = random_salt() ?? "b"
+        expect(a == b).to_equal(false)

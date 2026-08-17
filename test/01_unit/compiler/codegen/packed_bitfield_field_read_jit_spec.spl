@@ -1,0 +1,88 @@
+# `@packed` bitfield field reads — reproducing AND similar-problem detection
+#
+# Reproduces `doc/08_tracking/bug/jit_packed_bitfield_field_read_returns_nil_2026-08-10.md`:
+# a `@packed` struct built with the supported single positional raw constructor
+# read its 1-bit fields back as `nil` under the JIT
+# (`ready=nil ro=nil rsv=0` for a register holding 0b11).
+#
+# The narrowed cause, measured 2026-08-17: the TYPED read was always correct
+# (`val r: u32 = s.ready` gives 1). Only the ERASED read was wrong. MIR lowering
+# extracts the field as a shift-and-mask producing a RAW integer, and handed
+# that raw word to an `Any` consumer — string interpolation — which re-reads its
+# low 3 bits as a value tag. Raw 1 decodes as TAG_SPECIAL/nil, which is why
+# exactly the 1-bit fields holding 1 vanished while the 30-bit field holding 0
+# survived: raw 0 happens to decode as a tagged zero.
+#
+# So a spec that only checks typed reads is VACUOUS for this defect. Every
+# check in the probe is duplicated across both consumption forms, and the field
+# widths (1/1/30 and 4/12/16) and payloads (9, 2730, 43981) are chosen so that
+# a raw-vs-tagged confusion cannot coincidentally agree.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER. A JIT defect cannot go red from a spec body, so the oracle is the
+# sibling run-path probe `probe_packed_bitfield_read_jit.spl`, executed under
+# both engines.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_packed_bitfield_read_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "@packed bitfield field reads on the run path":
+    it "reads back the exact register contents under the cranelift JIT":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=jit — the engine the nil reads lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The probe must actually have started, so an empty capture cannot read as a pass")
+        expect(jit).to_contain("PACKED BITFIELD PROBE START")
+
+        step("The original repro: two 1-bit flags set to 1 above a 30-bit reserved field")
+        expect(jit).to_contain("PASS status_erased_ready")
+        expect(jit).to_contain("PASS status_erased_readonly")
+        expect(jit).to_contain("PASS status_erased_reserved")
+
+        step("The typed form was already correct — it is the control that localises the defect to the erased boundary")
+        expect(jit).to_contain("PASS status_typed_ready")
+        expect(jit).to_contain("PASS status_typed_readonly")
+        expect(jit).to_contain("PASS status_typed_reserved")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("PACKED BITFIELD PROBE: ALL PASS")
+
+    it "generalises across field widths and bit offsets":
+        step("Run the probe under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("Widths 4/12/16 at offsets 0/4/16, each payload chosen with distinct low 3 bits")
+        expect(jit).to_contain("PASS mixed_erased_lo")
+        expect(jit).to_contain("PASS mixed_erased_mid")
+        expect(jit).to_contain("PASS mixed_erased_hi")
+        expect(jit).to_contain("PASS mixed_typed_lo")
+        expect(jit).to_contain("PASS mixed_typed_mid")
+        expect(jit).to_contain("PASS mixed_typed_hi")
+
+        step("A field read must survive arithmetic, not only printing")
+        expect(jit).to_contain("PASS mixed_arith")
+
+        step("A zero-valued field is the case that accidentally survived the original defect; it must stay correct")
+        expect(jit).to_contain("PASS status_zero_erased_ready")
+        expect(jit).to_contain("PASS status_zero_typed_ready")
+
+    it "shows no tag-confusion signature and no failed check under the JIT":
+        step("Collect the JIT output")
+        val jit = run_probe_in_mode("jit")
+
+        step("A raw word re-read through the tag decoder renders as nil — the exact reported symptom")
+        expect(jit.contains("nil")).to_equal(false)
+
+        step("No check may have failed")
+        expect(jit.contains("FAIL ")).to_equal(false)

@@ -1,0 +1,55 @@
+use std.spec.{describe, it, assert_equal}
+use std.common.layout.text_metrics.{text_cell_width, codepoint_cells}
+
+# Similar-problem DETECTION spec for the class in
+# doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
+# and doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
+#
+# THE CLASS: `text.len()` / `text.length()` are BYTE counts, while
+# `char_at(i)` / `char_code_at(i)` are CODEPOINT-indexed. Any loop written as
+#     while i < s.len(): s.char_at(i)
+# therefore over-runs on every non-ASCII string. The two bugs above are the
+# same defect at different call sites (a wire-number parser and a text
+# advance measurer), so this spec pins the PRIMITIVES that make the class
+# detectable, plus the shared codepoint-correct leaf both fixed call sites
+# now route through.
+#
+# Probe string "aé€😀z": 5 codepoints, 11 UTF-8 bytes.
+
+describe "text length primitives are byte counts":
+    it "len and length both count UTF-8 bytes":
+        assert_equal("aé€😀z".len(), 11)
+        assert_equal("aé€😀z".length(), 11)
+        assert_equal("abc".len(), 3)
+
+    it "byte length equals codepoint length only for ASCII":
+        assert_equal("abc".len(), 3)
+        assert_equal("é".len(), 2)
+        assert_equal("漢".len(), 3)
+        assert_equal("😀".len(), 4)
+
+describe "text indexing primitives are codepoint indexed":
+    it "iteration yields codepoints, not bytes":
+        var n = 0
+        for ch in "aé€😀z":
+            n = n + 1
+        assert_equal(n, 5)
+
+    it "the last codepoint sits at index len_in_codepoints - 1":
+        assert_equal("aé€😀z".char_at(4), "z")
+
+    it "char_code_at reads whole codepoints":
+        assert_equal("é".char_code_at(0), 233)
+        assert_equal("漢".char_code_at(0), 28450)
+
+describe "the shared codepoint-correct measurement leaf":
+    it "measures by codepoint cells, not by UTF-8 byte count":
+        assert_equal(text_cell_width("abc"), text_cell_width("a") * 3)
+        assert_equal(codepoint_cells(233), codepoint_cells(97))
+        assert_equal(codepoint_cells(28450), codepoint_cells(97) * 2)
+
+    it "charges an accented letter the same as an unaccented one":
+        assert_equal(text_cell_width("é"), text_cell_width("e"))
+
+    it "charges a CJK glyph two cells, not its three UTF-8 bytes":
+        assert_equal(text_cell_width("漢"), text_cell_width("a") * 2)

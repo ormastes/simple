@@ -1,0 +1,47 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.{parse_composition_source_v1}
+use std.nogc_sync_mut.composition.types.{
+    CompositionReadResultV1, composition_diagnostic_v1
+}
+use app.simple_core.executor.{
+    SIMPLE_CORE_EXECUTION_OK,
+    SIMPLE_CORE_EXECUTION_ROUTE_REJECTED,
+    SIMPLE_CORE_EXECUTION_PROVIDER_FAILED,
+    simple_core_execute_v1
+}
+use app.simple_core.router.{SIMPLE_CORE_ROUTE_CORE, SIMPLE_CORE_ROUTE_PROVIDER}
+use app.simple_core.provider_dispatch.{SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED}
+
+val DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val ABI = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val SOURCE = "schema: simple.composition/1\nprofile: dev\ninterface_groups:\n  - id: cli.command\n    major: 1\n    minor: 0\n    abi_digest: " + ABI + "\nproviders:\n  - id: cli.formatter\n    artifact: build/providers/l3-executor-test-absent-01a00036.smf\n    kind: smf\n    artifact_digest: " + DIGEST + "\n    interface_groups: [cli.command]\n    required_capability_bits: 4\nbindings:\n  - service: cli.format\n    interface_group: cli.command\n    provider: cli.formatter\ncommands:\n  - name: fmt\n    aliases: [format]\n    summary: Format Simple source\n    binding: cli.format\n    interface_group: cli.command\n"
+
+fn _config() -> CompositionReadResultV1:
+    CompositionReadResultV1(
+        ok: true,
+        image: parse_composition_source_v1(SOURCE).unwrap(),
+        diagnostic: composition_diagnostic_v1("SCI_OK", "image", "accepted")
+    )
+
+describe "generic simple-core SCI command execution":
+    it "keeps recovery help static without provider activation":
+        val result = simple_core_execute_v1(["--help"], _config(), "1.0.0", 1, 4)
+        expect(result.status).to_equal(SIMPLE_CORE_EXECUTION_OK)
+        expect(result.route_kind).to_equal(SIMPLE_CORE_ROUTE_CORE)
+        expect(result.output).to_contain("simple-core commands")
+        expect(result.pin_released).to_equal(false)
+
+    it "routes a generic SCI command and fails closed for its missing locked artifact":
+        val result = simple_core_execute_v1(["format", "file.spl"], _config(), "1.0.0", 1, 4)
+        expect(result.status).to_equal(SIMPLE_CORE_EXECUTION_PROVIDER_FAILED)
+        expect(result.route_kind).to_equal(SIMPLE_CORE_ROUTE_PROVIDER)
+        expect(result.provider_status).to_equal(SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED)
+        expect(result.diagnostic).to_contain("artifact-missing")
+        expect(result.pin_released).to_equal(false)
+        expect(result.session_closed).to_equal(false)
+
+    it "rejects an unknown SCI command without probing a provider path":
+        val result = simple_core_execute_v1(["unknown", "file.spl"], _config(), "1.0.0", 1, 4)
+        expect(result.status).to_equal(SIMPLE_CORE_EXECUTION_ROUTE_REJECTED)
+        expect(result.diagnostic).to_contain("CLI_COMMAND_UNKNOWN")
+        expect(result.provider_status).to_equal(-1)

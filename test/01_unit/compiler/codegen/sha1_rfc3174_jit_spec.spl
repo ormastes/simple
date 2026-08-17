@@ -1,0 +1,94 @@
+# SHA-1 / erased-`list` element read — reproducing AND similar-problem detection
+#
+# Reproduces `doc/08_tracking/bug/jit_corrupts_i64_array_returned_from_sha1_bytes_2026-08-04.md`
+# in its 2026-08-17 form. The tag-garbage described in that doc is gone; what
+# remained was a WRONG DIGEST: `std.common.crypto.sha1.sha1_hex("abc")` returned
+# `9b00d430bb14d540564cd120d198c8d06a0dd3e0` under the JIT where RFC 3174
+# requires `a9993e364706816aba3e25717850c26c9cd0d89d`.
+#
+# Root cause is NOT in SHA-1. That module's whole state is the untyped `list`
+# type, which resolves to `Array<Any>`, so every element read is a TAGGED
+# RuntimeValue. Binding one into a native scalar slot — a typed `val`, an
+# assignment, or a native function parameter — must UNBOX it. MIR lowering only
+# had the opposite conversion (raw -> tagged), so the tagged word was stored
+# raw and every arithmetic consumer saw `value * 8`. `rotl32(h.get(0), 5)` then
+# rotated the wrong number 80 times per block.
+#
+# That is why this spec is not a SHA-1 spec: the digest vectors are the
+# end-to-end oracle, and the `list_elem_*` checks are the CLASS the digest
+# belongs to, so the next omission at the same boundary fails here rather than
+# shipping as a plausible-looking hash.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which was CORRECT throughout this bug. In-process examples
+# therefore cannot go red on it, no matter how many vectors they cover. The
+# oracle is the sibling run-path probe `probe_sha1_rfc3174_jit.spl`, executed
+# under both engines; it self-checks absolute RFC literals and prints one
+# verdict line.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_sha1_rfc3174_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "SHA-1 digests and erased-list element reads on the run path":
+    it "matches the RFC 3174 vectors under the cranelift JIT":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=jit — the engine the wrong digest lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The probe must actually have started, so an empty capture cannot read as a pass")
+        expect(jit).to_contain("SHA1 RFC 3174 PROBE START")
+
+        step("RFC 3174 §7.3: 'abc' hashes to a9993e36…, the empty string to da39a3ee…")
+        expect(jit).to_contain("PASS common_sha1_abc")
+        expect(jit).to_contain("PASS common_sha1_empty")
+        expect(jit).to_contain("PASS common_sha1_two_block")
+        expect(jit).to_contain("PASS common_sha1_a")
+
+        step("The sibling `[i64]`-typed implementation must agree with the same published vectors")
+        expect(jit).to_contain("PASS crypto_sha1_abc")
+        expect(jit).to_contain("PASS crypto_sha1_empty")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("SHA1 RFC 3174 PROBE: ALL PASS")
+
+    it "reads elements of an erased `list` return at every consumer form":
+        step("Run the probe under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("A function declared `-> list` returns Array<Any>; each consumer of an element must unbox it")
+        expect(jit).to_contain("PASS list_elem_typed_let")
+        expect(jit).to_contain("PASS list_elem_call_arg")
+        expect(jit).to_contain("PASS list_elem_method_get")
+        expect(jit).to_contain("PASS list_elem_assign")
+        expect(jit).to_contain("PASS list_elem_interpolated")
+
+        step("`.len()` was always correct — it is the control that proves the array itself was never damaged")
+        expect(jit).to_contain("PASS list_len")
+
+    it "gives the interpreter the identical published answers":
+        step("The interpreter was the correct arm throughout this bug, so a red here means the probe is broken rather than the engine")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("SHA1 RFC 3174 PROBE: ALL PASS")
+
+    it "shows no tag-confusion signature under either engine":
+        step("Collect both engines' output")
+        val jit = run_probe_in_mode("jit")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("A raw word re-read through the tag decoder renders as nil or as a leaked tagged word")
+        expect(jit.contains("nil")).to_equal(false)
+        expect(jit.contains("<value:0x")).to_equal(false)
+
+        step("No check may have failed under either engine")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

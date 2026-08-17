@@ -1,0 +1,126 @@
+# Similar-problem detection spec for the defect CLASS behind
+# doc/08_tracking/bug/case_is_reserved_outside_match_2026-08-04.md
+#
+# THE CLASS: a word that is only meaningful in ONE syntactic position is lexed
+# as a hard keyword, so using it as an ordinary name is not a local error --
+# it is a PARSE ABORT that takes the whole compilation unit with it. One loop
+# variable named `case` cost every example in a 229-line spec file, and the
+# diagnostic ("expected pattern, found Case") described the parser's internal
+# state instead of naming the reservation.
+#
+# The reproducer (case_soft_keyword_spec.spl) pins `case` only, and would go
+# green the moment `case` alone was un-reserved. It says nothing about the next
+# word someone hard-reserves, and nothing about the ASYMMETRY that made this bug
+# possible: a keyword can be un-reserved in `expect_identifier` (val/param names)
+# while still being rejected in PATTERN position (`for X in`), because those are
+# two separate lists in two separate files:
+#
+#   src/compiler_rust/parser/src/parser_helpers.rs   (expect_identifier)
+#   src/compiler_rust/parser/src/parser_patterns.rs  (parse_keyword_as_pattern)
+#   src/compiler_rust/parser/src/expressions/primary/{mod,identifiers}.rs
+#
+# So this spec sweeps the whole soft-keyword corpus through THREE identifier
+# positions at once -- for-loop binding (pattern), val binding, and field
+# access on the bound value -- and fails loudly if any of the three lists
+# drifts out of step with the others. Measured 2026-08-17: 22 of these 23
+# words already passed all three positions; `case` was the lone outlier, which
+# is what makes an outlier-hunting sweep the right shape for this defect.
+#
+# Note the failure mode this spec inherits by design: an over-reserved word
+# does not fail one example here, it aborts the file. That is the point --
+# a whole-file abort in a file named for the defect class is unmistakable,
+# whereas the same abort in an unrelated spec reads as "1 failed" and hides
+# everything else in it.
+
+use std.spipe.*
+
+struct SkBox:
+    n: i64
+
+# Each example exercises one soft keyword in all three identifier positions.
+# Kept as separate `it` blocks (not a loop) because the property under test is
+# a PARSE-TIME one: it can only be expressed by literally writing the word.
+
+describe "soft keywords usable as ordinary identifiers (parse-position sweep)":
+
+    it "case -- the reported defect: match-arm marker only":
+        var total = 0
+        for case in [1, 2, 3]:
+            total = total + case
+        val case = SkBox(n: 5)
+        expect total + case.n to_equal 11
+
+    it "context / feature / scenario -- BDD grouping keywords":
+        var t = 0
+        for context in [1, 2]:
+            t = t + context
+        val feature = SkBox(n: 3)
+        var scenario = 0
+        for scenario in [4]:
+            t = t + scenario
+        expect t + feature.n to_equal 10
+
+    it "given / when / then / outline -- Gherkin step keywords":
+        var t = 0
+        for given in [1]:
+            t = t + given
+        for when in [2]:
+            t = t + when
+        for then in [3]:
+            t = t + then
+        val outline = SkBox(n: 4)
+        expect t + outline.n to_equal 10
+
+    it "result / out / type -- contract keywords":
+        var t = 0
+        for result in [1]:
+            t = t + result
+        for out in [2]:
+            t = t + out
+        val type = SkBox(n: 3)
+        expect t + type.n to_equal 6
+
+    it "default / common -- config and stdlib-path keywords":
+        var t = 0
+        for default in [1, 2]:
+            t = t + default
+        val common = SkBox(n: 4)
+        expect t + common.n to_equal 7
+
+    it "lazy / skip / exists -- evaluation and test-control keywords":
+        var t = 0
+        for lazy in [1]:
+            t = t + lazy
+        for skip in [2]:
+            t = t + skip
+        val exists = SkBox(n: 3)
+        expect t + exists.n to_equal 6
+
+    it "new / old / from / by -- contract and pipeline keywords":
+        var t = 0
+        for new in [1]:
+            t = t + new
+        for old in [2]:
+            t = t + old
+        for from in [3]:
+            t = t + from
+        val by = SkBox(n: 4)
+        expect t + by.n to_equal 10
+
+    it "mod / union / examples -- declaration keywords":
+        var t = 0
+        for mod in [1]:
+            t = t + mod
+        for union in [2]:
+            t = t + union
+        val examples = SkBox(n: 3)
+        expect t + examples.n to_equal 6
+
+    it "un-reserving must not cost `case` its real job as a match-arm marker":
+        # The other half of the invariant: this spec must fail if someone
+        # "fixes" the reservation by deleting the keyword outright.
+        val classify = \n: match n:
+            case 0: "zero"
+            case _: "other"
+        expect classify(0) to_equal "zero"
+        expect classify(7) to_equal "other"

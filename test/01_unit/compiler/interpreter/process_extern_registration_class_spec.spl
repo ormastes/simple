@@ -1,0 +1,77 @@
+"""
+# Process-extern registration — similar-problem detection spec (defect CLASS)
+
+Generalises doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+
+THE CLASS: a runtime function that exists in `src/runtime/runtime_process.c`
+and is declared `extern fn` by shipping Simple code, but was never added to the
+interpreter's extern dispatch table in
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`.
+
+Nothing in the build links those two lists. The C side compiles, the `.spl`
+declaration parses, the JIT/native lane resolves the symbol at link time — and
+only the interpreter fails, at semantic analysis, with
+`unknown extern function: <name>`. There is no signal until a user runs the
+affected program interpreted.
+
+Five names (the entire piped sub-family) were missing SIMULTANEOUSLY and were
+discovered one at a time. A spec that covered only `rt_process_spawn_piped`
+would have shipped the other four. This spec therefore asserts the WHOLE
+`rt_process_*` surface resolves, so the next unregistered member fails here
+rather than in production.
+
+WHY A SUBPROCESS: an unregistered extern kills the entire file at semantic
+analysis, so an in-body call yields a ZERO-EXAMPLE file — which reads as a
+pass, not a failure. Only a subprocess can distinguish "resolved" from
+"the file never ran".
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val CLASS_PROBE: text = "test/01_unit/compiler/interpreter/probe_process_extern_registration.spl"
+
+fn run_class_probe() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=interpret " +
+        bin + " run " + CLASS_PROBE + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "every rt_process_* extern declared by shipping code resolves in the interpreter":
+    it "rejects any unregistered member of the process extern family":
+        step("Run the registration census probe under SIMPLE_EXECUTION_MODE=interpret")
+        val out = run_class_probe()
+
+        step("A single unregistered name aborts the whole file and names itself here")
+        expect(out).to_not_contain("unknown extern function")
+
+        step("Non-vacuity: the probe must have reached and printed its first resolution")
+        expect(out).to_contain("RESOLVED rt_process_run ")
+
+    it "resolves the long-registered process externs (control arm)":
+        step("These were always registered — a red here means the probe itself broke, not the table")
+        val out = run_class_probe()
+        expect(out).to_contain("RESOLVED rt_process_run_inherit")
+        expect(out).to_contain("RESOLVED rt_process_run_timeout")
+        expect(out).to_contain("RESOLVED rt_process_run_bounded")
+        expect(out).to_contain("RESOLVED rt_process_spawn_async")
+        expect(out).to_contain("RESOLVED rt_process_wait")
+        expect(out).to_contain("RESOLVED rt_process_kill")
+        expect(out).to_contain("RESOLVED rt_process_is_running")
+
+    it "resolves the piped sub-family that was entirely absent (regression arm)":
+        step("All five were missing at once — assert all five, not just the one that was noticed")
+        val out = run_class_probe()
+        expect(out).to_contain("RESOLVED rt_process_spawn_piped")
+        expect(out).to_contain("RESOLVED rt_process_write_stdin")
+        expect(out).to_contain("RESOLVED rt_process_read_stdout")
+        expect(out).to_contain("RESOLVED rt_process_is_alive")
+        expect(out).to_contain("RESOLVED rt_process_close_piped")
+
+    it "reports a census verdict naming the expected surface size":
+        step("The count is in the verdict so that silently shrinking the census is visible")
+        val out = run_class_probe()
+        expect(out).to_contain("PROCESS EXTERN REGISTRATION PROBE: ALL 13 RESOLVED")

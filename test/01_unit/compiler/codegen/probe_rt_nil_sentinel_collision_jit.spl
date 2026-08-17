@@ -1,0 +1,147 @@
+# Run-path (Cranelift JIT) probe for the RT_NIL SENTINEL COLLISION class.
+#
+# WHY THIS FILE EXISTS: `bin/simple test` executes specs on the tree-walk
+# INTERPRETER, which carries a real type tag and is therefore correct in every
+# case below. No in-process spec example can observe these defects. The spec
+# `rt_nil_sentinel_collision_class_spec.spl` runs this file as a SUBPROCESS
+# under both engines; the JIT arm is the one under test.
+#
+# THE CLASS. The runtime's nil sentinel is the raw machine word 3:
+#   RT_NIL == RuntimeValue::from_special(SPECIAL_NIL)
+#          == from_tag_payload(TAG_SPECIAL=0b011, payload=0) == 3
+# while a properly boxed inline integer 3 is `3 << 3` == 24. So the word 3 is
+# nil ONLY when it is a boxed RuntimeValue. Any site that hands a RAW (unboxed)
+# i64 into a context expecting a boxed value, or hands a boxed nil into a
+# context that unboxes unconditionally, makes the literal integer 3
+# indistinguishable from nil. Two filed bugs are the two DIRECTIONS of that one
+# hazard:
+#
+#   doc/08_tracking/bug/coalesce_raw_i64_sentinel_collision_2026-08-02.md
+#     RAW -> BOXED. `x ?? d` emitted a plain integer `!= 3` compare against an
+#     untagged scalar, so a legitimate 3 tested equal to nil and took the else
+#     branch. (Fixed 2026-08-04 in hir/lower/expr/control.rs.)
+#   doc/08_tracking/bug/jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md
+#     BOXED -> RAW. `rt_array_get` returns RuntimeValue::NIL on a miss/OOB; the
+#     array-index MIR arm unboxes the result unconditionally, so the sentinel
+#     prints as the ordinary integer 3.
+#
+# Every oracle here is an ABSOLUTE literal this probe did not itself compute —
+# never "the two engines agree", which would pass while both are wrong the same
+# way.
+#
+#   bin/simple run <this>                                    -> must ALL PASS
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this>   -> control arm
+#
+# If the interpreter arm ever fails, the probe is broken, not the JIT.
+
+use std.io_runtime.{exit}
+
+fn check(name: text, got: text, want: text, fails: i64) -> i64:
+    if got == want:
+        print("PASS " + name)
+        return fails
+    print("FAIL " + name + " got=" + got + " want=" + want)
+    return fails + 1
+
+fn main():
+    var fails = 0
+
+    # --- Direction A: RAW -> BOXED ------------------------------------------
+    # A non-nullable scalar can never legitimately be nil, so `?? d` must be the
+    # identity for EVERY value, most of all the sentinel-valued ones. The class
+    # is swept rather than spot-checked: 3 is the known collision, but 0 (a
+    # plausible "absent" encoding), 11/19 (the tagged bool words true/false) and
+    # 24 (the correct BOXING of 3) are the neighbours a future encoding change
+    # would most likely break next.
+    val n0: i64 = 0
+    val n1: i64 = 1
+    val n2: i64 = 2
+    val n3: i64 = 3
+    val n4: i64 = 4
+    val n11: i64 = 11
+    val n19: i64 = 19
+    val n24: i64 = 24
+    fails = check("raw_coalesce_0", (n0 ?? 987654).to_string(), "0", fails)
+    fails = check("raw_coalesce_1", (n1 ?? 987654).to_string(), "1", fails)
+    fails = check("raw_coalesce_2", (n2 ?? 987654).to_string(), "2", fails)
+    fails = check("raw_coalesce_3", (n3 ?? 987654).to_string(), "3", fails)
+    fails = check("raw_coalesce_4", (n4 ?? 987654).to_string(), "4", fails)
+    fails = check("raw_coalesce_11", (n11 ?? 987654).to_string(), "11", fails)
+    fails = check("raw_coalesce_19", (n19 ?? 987654).to_string(), "19", fails)
+    fails = check("raw_coalesce_24", (n24 ?? 987654).to_string(), "24", fails)
+
+    # Negatives and the sentinel reached through arithmetic rather than a
+    # literal — a constant-folding shortcut would miss these.
+    val nm3: i64 = 0 - 3
+    val computed3: i64 = 1 + 2
+    fails = check("raw_coalesce_neg3", (nm3 ?? 987654).to_string(), "-3", fails)
+    fails = check("raw_coalesce_computed3", (computed3 ?? 987654).to_string(), "3", fails)
+
+    # Same hazard on the other scalar lanes that share the untagged
+    # representation. A `char` of code 3 collided for exactly the same reason.
+    val u3: u8 = 3
+    val i3: i32 = 3
+    val b3: bool = true
+    fails = check("raw_coalesce_u8_3", (u3 ?? 99).to_string(), "3", fails)
+    fails = check("raw_coalesce_i32_3", (i3 ?? 99).to_string(), "3", fails)
+    fails = check("raw_coalesce_bool", (b3 ?? false).to_string(), "true", fails)
+
+    # --- Direction B: BOXED -> RAW ------------------------------------------
+    # A genuine miss must FORMAT as nil, not leak the sentinel as the integer 3.
+    # This is the half that was still OPEN when this probe was written.
+    val xs: [i64] = [10, 20, 30]
+    fails = check("array_get_miss_bare", "{xs.get(9)}", "nil", fails)
+    fails = check("array_get_miss_far", "{xs.get(100000)}", "nil", fails)
+    fails = check("array_get_miss_coalesce", (xs.get(9) ?? 0 - 1).to_string(), "-1", fails)
+
+    val empty: [i64] = []
+    fails = check("empty_get_miss_bare", "{empty.get(0)}", "nil", fails)
+    fails = check("empty_first_coalesce", (empty.first() ?? 0 - 1).to_string(), "-1", fails)
+    fails = check("empty_last_coalesce", (empty.last() ?? 0 - 1).to_string(), "-1", fails)
+
+    val d: {text: i64} = {}
+    fails = check("dict_get_miss_bare", "{d.get(\"nope\")}", "nil", fails)
+    fails = check("dict_get_miss_coalesce", (d.get("nope") ?? 0 - 1).to_string(), "-1", fails)
+
+    # --- The DISCRIMINATOR arm ---------------------------------------------
+    # The whole point of the class: a PRESENT value that happens to equal the
+    # sentinel must survive every one of those same paths untouched. Without
+    # these rows a "fix" that simply rewrites every 3 to nil would pass.
+    val ys: [i64] = [1, 2, 3]
+    fails = check("present_3_index", ys[2].to_string(), "3", fails)
+    fails = check("present_3_get_bare", "{ys.get(2)}", "3", fails)
+    fails = check("present_3_get_coalesce", (ys.get(2) ?? 0 - 1).to_string(), "3", fails)
+    fails = check("present_3_first", ([3, 4].first() ?? 0 - 1).to_string(), "3", fails)
+    fails = check("present_3_last", ([4, 3].last() ?? 0 - 1).to_string(), "3", fails)
+    fails = check("present_3_arith", (ys[2] + 1).to_string(), "4", fails)
+    # Arithmetic straight off the optional accessors. These rows are the
+    # regression fence for the fix: keeping the accessor result BOXED is what
+    # makes the sentinel distinguishable, so these prove that boxing did not
+    # cost the value its arithmetic.
+    fails = check("accessor_first_arith", ([3, 4].first() + 1).to_string(), "4", fails)
+    fails = check("accessor_last_arith", ([4, 3].last() + 1).to_string(), "4", fails)
+    fails = check("accessor_get_arith", ((ys.get(2) ?? 0) + 1).to_string(), "4", fails)
+    fails = check("accessor_first_bind", ([9, 8].first() ?? 0).to_string(), "9", fails)
+    fails = check("present_3_neg_index", ys[0 - 1].to_string(), "3", fails)
+
+    val d3: {text: i64} = {"k": 3}
+    fails = check("present_3_dict_bare", "{d3.get(\"k\")}", "3", fails)
+    fails = check("present_3_dict_coalesce", (d3.get("k") ?? 0 - 1).to_string(), "3", fails)
+
+    # Every small value, present, read back through the array-element path. If
+    # any single word is being confused with a sentinel this sweep names it.
+    val sweep: [i64] = [0, 1, 2, 3, 4, 5, 8, 10, 11, 12, 16, 18, 19, 20, 24, 27]
+    val want: [text] = ["0", "1", "2", "3", "4", "5", "8", "10",
+                        "11", "12", "16", "18", "19", "20", "24", "27"]
+    var i = 0
+    while i < 16:
+        fails = check("sweep_present_" + want[i], (sweep.get(i) ?? 987654).to_string(), want[i], fails)
+        i = i + 1
+
+    if fails == 0:
+        print("RT_NIL_SENTINEL PROBE: ALL PASS")
+        exit(0)
+    print("RT_NIL_SENTINEL PROBE: " + fails.to_string() + " FAILED")
+    exit(1)
+
+main()

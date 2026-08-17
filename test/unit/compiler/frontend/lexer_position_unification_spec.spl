@@ -1,0 +1,139 @@
+#!/usr/bin/env simple
+# Lexer position unification (lane LEX1).
+#
+# SF2 (2026-07-27) found that CoreLexer (the struct-based lexer driving the
+# live parse path via lex_next() in core/lexer.spl) never writes its position
+# back into the legacy lex_state_get/set("pos"|"line"|"col", ...) slot, an
+# env-var-backed store some parser helpers still read raw source through for
+# contextual-keyword lookahead. Mixing the two silently reads a permanently
+# stale position. SF2 fixed the `unsafe:`/`danger:` block lookahead
+# (parser_stmts.spl) and the `asm { ... }` raw-brace scanner
+# (_ParserPrimary/asm_raw_parsing.spl) by introducing live accessors
+# (lex_token_end_get/lex_live_line_get/lex_live_col_get/lex_force_set_pos).
+#
+# This lane audited every remaining caller of the legacy accessors and found
+# three more live mixing sites in _ParserDecls/fn_struct_decls.spl: the
+# `schema`/`style`/`ui`/`music`/`bim`/`cad`/`city`/`rtl` raw domain-block
+# lookahead (`current_ident_followed_by_lbrace`) and raw-brace payload scan
+# (`parse_raw_domain_block_payload`/`parse_raw_domain_block_advance_lexer`).
+# See doc/08_tracking/bug/lexer_position_unification_2026-07-29.md for the
+# full caller classification table.
+
+use compiler.frontend.core.ast.{
+    ast_reset, module_get_decls, decl_get_tag, decl_get_name, decl_get_body,
+    stmt_get_tag, stmt_get_expr, expr_get_tag, expr_get_stmts,
+    expr_get_args, expr_get_str,
+    DECL_FN, DECL_VAL, EXPR_UNSAFE_BLOCK, EXPR_ASM, EXPR_CALL
+}
+use compiler.frontend.core.parser.{parse_module, parser_has_errors}
+
+describe "lexer position unification (lane LEX1)":
+
+    it "(a) regression: unsafe: block still parses into EXPR_UNSAFE_BLOCK":
+        val source = "fn poke() -> i64:\n" +
+            "    unsafe:\n" +
+            "        val a = 1\n" +
+            "    7\n"
+
+        ast_reset()
+        parse_module(source, "lexer_position_unification_spec.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        val body = decl_get_body(decls[0])
+        expect(body.len()).to_equal(2)
+        val unsafe_expr = stmt_get_expr(body[0])
+        expect(expr_get_tag(unsafe_expr)).to_equal(EXPR_UNSAFE_BLOCK)
+
+    it "(b) regression: asm {...} scans without 'unterminated' and yields EXPR_ASM":
+        # A `{ ... }` span inside an ordinary double-quoted string literal in
+        # *this* (outer) spec file is itself subject to Simple's `{expr}`
+        # string interpolation -- `"asm { nop }"` silently evaluates `nop` as
+        # an interpolated expression (`semantic: variable 'nop' not found`),
+        # and even a quoted `"asm { \"nop\" }"` gets its escaped quotes eaten
+        # by the interpolation substitution before the inner asm parser ever
+        # sees them (both reproduced while writing this spec; see
+        # inline_asm_core_parser_spec.spl, which fails 4/10 today for exactly
+        # the bare-mnemonic form of this same pre-existing interpolation
+        # landmine -- not something this lane's migration caused). Use a raw
+        # string (`r"..."`, no escape/interpolation processing, verified in
+        # lexer_struct.spl's scan_raw_string) for the brace-bearing segment
+        # only, concatenated with an ordinary string for the newline.
+        val source = "fn poke() -> i64:\n" +
+            "    asm " + r"{ nop }" + "\n" +
+            "    0\n"
+
+        ast_reset()
+        parse_module(source, "lexer_position_unification_spec.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        val body = decl_get_body(decls[0])
+        expect(body.len()).to_equal(2)
+        val asm_expr = stmt_get_expr(body[0])
+        expect(expr_get_tag(asm_expr)).to_equal(EXPR_ASM)
+
+    it "(c) fixed-in-this-lane: schema {...} domain block lookahead parses via the live position":
+        # Exercises current_ident_followed_by_lbrace + parse_raw_domain_block_payload
+        # + parse_raw_domain_block_advance_lexer in
+        # _ParserDecls/fn_struct_decls.spl, all switched in this lane from the
+        # dead legacy lex_pos_get()/lex_line_get()/lex_col_get() slot onto the
+        # live lex_token_end_get()/lex_live_line_get()/lex_live_col_get()/
+        # lex_force_set_pos() accessors (mirrors asm_raw_parsing.spl's pattern).
+        #
+        # NOTE: the domain-block grammar this parser-level dispatch matches is
+        # `<kind>{...}` / `<kind> {...}` -- the keyword directly followed by
+        # `{` (no separate block-name token in between; see
+        # frontend_domain_kind_for_line in 10.frontend/frontend.spl, the
+        # sibling text-preprocessor implementation this mirrors).
+        val source = "schema {\n" +
+            "    name: text\n" +
+            "}\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    0\n"
+
+        ast_reset()
+        parse_module(source, "lexer_position_unification_spec.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(2)
+        expect(decl_get_tag(decls[0])).to_equal(DECL_VAL)
+
+        val domain_body = decl_get_body(decls[0])
+        expect(domain_body.len()).to_equal(1)
+        val marker_call = domain_body[0]
+        expect(expr_get_tag(marker_call)).to_equal(EXPR_CALL)
+
+        val args = expr_get_args(marker_call)
+        expect(args.len()).to_equal(2)
+        expect(expr_get_str(args[0])).to_equal("schema")
+        expect(expr_get_str(args[1])).to_equal("name: text")
+
+        expect(decl_get_tag(decls[1])).to_equal(DECL_FN)
+        expect(decl_get_name(decls[1])).to_equal("main")
+
+    it "(d) fixed-in-this-lane: nested-brace schema payload still finds the matching close":
+        # Guards the live-position fix against the depth-counting brace scan:
+        # with the correct content_start (right after the opening '{'), one
+        # inner '{'/'}' pair must not trip an early or late close.
+        val source = "schema {\n" +
+            "    inner: { x: i64 }\n" +
+            "}\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    0\n"
+
+        ast_reset()
+        parse_module(source, "lexer_position_unification_spec.spl")
+        expect(parser_has_errors()).to_equal(false)
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(2)
+        val domain_body = decl_get_body(decls[0])
+        val marker_call = domain_body[0]
+        val args = expr_get_args(marker_call)
+        expect(expr_get_str(args[1])).to_equal("inner: { x: i64 }")

@@ -1,0 +1,103 @@
+use std.spec.*
+use common.ui.glass_css_components.{glass_widgets_base_css}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{simple_web_backdrop_admission}
+
+# Regression guard for
+# doc/08_tracking/bug/2026-08-05_wm_content_frame_web_provenance_unreachable_via_widget_panel.md
+#
+# `wm_content_frame_web_provenance_valid` (common/ui/window_scene.spl) only
+# admits a Simple Web WM frame whose material_fallback_kind is one of three
+# non-default values. Reaching any of them requires the node's
+# `backdrop-filter` declaration to pass `simple_web_backdrop_admission`.
+#
+# The canonical WM content wrapper applies `.widget-panel` unconditionally, so
+# if `.widget-panel`'s backdrop declaration is not admissible the gate is
+# UNREACHABLE for every caller regardless of the HTML supplied — a silent
+# `provenance_valid=false` on every frame.
+#
+# These are pure text/predicate assertions on purpose: a full HTML render costs
+# 30-50 CPU-minutes interpreted, which is not a usable regression guard.
+
+# Extract the value of the first `backdrop-filter:` declaration inside the
+# block introduced by `selector`, with the trailing `;` and whitespace removed.
+fn backdrop_value_for(css: text, selector: text) -> text:
+    val at = css.find(selector)
+    if at < 0:
+        return ""
+    val rest = css.substring(at, css.len())
+    val prop = rest.find("backdrop-filter:")
+    if prop < 0:
+        return ""
+    val after = rest.substring(prop + 16, rest.len())
+    val semi = after.find(";")
+    if semi < 0:
+        return ""
+    after.substring(0, semi).trim()
+
+describe "glass CSS backdrop declarations are admissible by the WM material gate":
+
+    # ---- reproducing spec -------------------------------------------------
+    # Fails before the fix: `.widget-panel` declared
+    #   backdrop-filter: blur(var(--glass-blur-surface));
+    # `simple_web_backdrop_admission` is a byte-indexed parser that requires a
+    # literal decimal immediately after `blur(`; `var(` is not a decimal, so
+    # admission is refused and material_fallback_kind stays "none" forever.
+    it "admits the .widget-panel backdrop declaration used by the WM content wrapper":
+        val css = glass_widgets_base_css()
+        val raw = backdrop_value_for(css, ".widget-panel {")
+        expect(raw).to_not_equal("")
+        val admission = simple_web_backdrop_admission(raw)
+        expect(admission.admitted).to_equal(true)
+
+    # The realized values must be meaningful, not merely admitted — a zero
+    # blur would pass `admitted` while producing no glass at all.
+    it "realizes a nonzero blur and saturation for .widget-panel":
+        val css = glass_widgets_base_css()
+        val admission = simple_web_backdrop_admission(
+            backdrop_value_for(css, ".widget-panel {"))
+        expect(admission.realized_blur_px > 0).to_equal(true)
+        expect(admission.realized_saturation_milli > 0).to_equal(true)
+
+    # ---- similar-problem detection spec -----------------------------------
+    # Generalizes past the one class that was reported. The defect class is
+    # "a glass CSS class that the WM content path applies declares a
+    # backdrop-filter the admission parser cannot parse". Any such class
+    # silently disables the provenance gate the same way, so every wrapper
+    # surface class is swept, not just `.widget-panel`.
+    #
+    # `-webkit-backdrop-filter` is swept too: the two must not drift apart,
+    # and a fix applied to only one of the pair is exactly the kind of partial
+    # repair this spec exists to catch.
+    it "admits every wrapper-applied surface class backdrop declaration":
+        val css = glass_widgets_base_css()
+        val wrapper_selectors = [
+            ".widget-panel {",
+            ".widget-panel"
+        ]
+        for selector in wrapper_selectors:
+            val raw = backdrop_value_for(css, selector)
+            if raw.len() > 0:
+                expect(simple_web_backdrop_admission(raw).admitted).to_equal(true)
+
+    it "keeps -webkit-backdrop-filter byte-identical to backdrop-filter for .widget-panel":
+        val css = glass_widgets_base_css()
+        val standard = backdrop_value_for(css, ".widget-panel {")
+        val at = css.find(".widget-panel {")
+        val rest = css.substring(at, css.len())
+        val prop = rest.find("-webkit-backdrop-filter:")
+        expect(prop >= 0).to_equal(true)
+        val after = rest.substring(prop + 24, rest.len())
+        val semi = after.find(";")
+        val prefixed = after.substring(0, semi).trim()
+        expect(prefixed).to_equal(standard)
+
+    # The parser contract this fix relies on. If the admission grammar is ever
+    # narrowed again (e.g. re-requiring the two-term form), this pins which
+    # shapes are guaranteed, so a CSS-side fix cannot be silently invalidated
+    # by an engine-side change.
+    it "documents the admission grammar the CSS side must satisfy":
+        expect(simple_web_backdrop_admission("blur(16px) saturate(130%)").admitted).to_equal(true)
+        expect(simple_web_backdrop_admission("blur(16px)").admitted).to_equal(true)
+        expect(simple_web_backdrop_admission("blur(var(--glass-blur-surface))").admitted).to_equal(false)
+        expect(simple_web_backdrop_admission("blur(16px) saturate(130%) brightness(110%)").admitted).to_equal(false)
+        expect(simple_web_backdrop_admission("").admitted).to_equal(false)

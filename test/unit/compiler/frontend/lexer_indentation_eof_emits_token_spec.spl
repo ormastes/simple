@@ -1,0 +1,79 @@
+#!/usr/bin/env simple
+# handle_indentation() must never return without emitting a token.
+#
+# 2026-08-09 (5th campaign). The Stage-2 dead-lexer bug was blamed on native
+# codegen losing a value-type struct held in a module-level array slot. Four
+# progressively-faithful minimal repros, built with the EXACT seed + LLVM +
+# SIMPLE_BOOTSTRAP flags that produce Stage 2, all behaved correctly — the
+# codegen hypothesis is refuted.
+#
+# The real defect is in the lexer source and reproduces in the INTERPRETER:
+# CoreLexer.handle_indentation() had a bare `if is_end: return` — the ONLY
+# no-token return path in the entire scanner. When EOF is reached while
+# consuming a line's indentation, it emitted nothing, so `self.cur_kind` kept
+# whatever it already held. On the FIRST token of a file that is the
+# make_core_lexer() constructor default 0. next_token() then returned 0, which
+# is never a valid token kind, so the parser never saw EOF (190) and
+# parse_module_body()'s `while true` looped on `Unknown(0) ''` — the exact
+# 444 MB-log / 32 GB-RSS runaway.
+#
+# Proof of the defect (before the fix), interpreter only, no bootstrap:
+#   lex_init("   "); lex_next()
+#   -> [lexer_fatal] dead lexer: next_token() produced kind 0 ... source length 3
+#
+# Fix: clear at_line_start and re-dispatch through scan_token_rescan(), whose
+# at_end() branch emits the pending dedents and the real EOF token.
+#
+# See doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
+
+use compiler.frontend.core.lexer.{lex_init, lex_next}
+
+fn first_kind_of(source: text) -> i64:
+    lex_init(source)
+    lex_next()
+
+fn kinds_until_eof(source: text, cap: i64) -> [i64]:
+    lex_init(source)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < cap:
+        val k = lex_next()
+        out.push(k)
+        if k == 190 or k == 0:
+            break
+        i = i + 1
+    out
+
+describe "handle_indentation never leaves the token stream dead at EOF":
+
+    it "emits EOF (not the constructor default 0) for a whitespace-only source":
+        # The minimal trigger. `at_end()` is false at pos 0 (three chars of
+        # source), so scan_token() dispatches to handle_indentation(), which
+        # consumes all three spaces and then hit the bare `return`.
+        expect(first_kind_of("   ")).to_equal(190)
+
+    it "emits EOF for a tab-only source":
+        expect(first_kind_of("\t\t")).to_equal(190)
+
+    it "emits EOF for a genuinely empty source":
+        # Control: this took scan_token()'s own at_end() branch and was already
+        # correct. It must stay correct.
+        expect(first_kind_of("")).to_equal(190)
+
+    it "never yields kind 0, the impossible token kind, on any of these":
+        expect(first_kind_of("   ")).to_not_equal(0)
+        expect(first_kind_of("\t\t")).to_not_equal(0)
+        expect(first_kind_of(" \t ")).to_not_equal(0)
+
+    it "still reaches EOF on a normal program whose last line is blank-ish":
+        # Trailing indentation with no newline after it is the same shape as the
+        # trigger, reached mid-file instead of at pos 0.
+        val kinds = kinds_until_eof("fn main():\n    print(1)\n   ", 40)
+        expect(kinds.len() > 1).to_equal(true)
+        expect(kinds[kinds.len() - 1]).to_equal(190)
+
+    it "still reaches EOF on an ordinary well-formed program":
+        # Non-vacuity control: the fix must not have shortened a healthy stream.
+        val kinds = kinds_until_eof("fn main():\n    print(1)\n", 40)
+        expect(kinds[kinds.len() - 1]).to_equal(190)
+        expect(kinds.len() > 5).to_equal(true)

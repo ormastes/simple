@@ -1,0 +1,32 @@
+# Regression spec for doc/08_tracking/bug/rt_dir_list_platform_header_collides_with_extern_2026-08-10.md
+#
+# Repro: src/runtime/platform/{unix_common.h,platform_win.h} used to define a
+# NON-static global `rt_dir_list(const char*, int64_t*)`, colliding with the
+# real extern `rt_dir_list(ptr, len) -> RuntimeValue` (runtime_sffi.rs). Under
+# `-z muldefs` the C copy could win link order and turn a string length into a
+# wild out-pointer write. Fixed by renaming the private worker to
+# `rt_dir_list_cpath`. These specs FAIL if the collision is ever reintroduced.
+extern fn rt_file_read_text(path: text) -> text
+
+fn header(path: text) -> text:
+    rt_file_read_text("src/runtime/platform/{path}") ?? ""
+
+describe "rt_dir_list platform-header collision (repro)":
+    it "unix_common.h names the private C-string worker rt_dir_list_cpath, not rt_dir_list":
+        val src = header("unix_common.h")
+        expect(src).to_contain("rt_dir_list_cpath(const char*")
+        assert_false(src.contains("** rt_dir_list(const char*"))
+
+    it "platform_win.h names the private C-string worker rt_dir_list_cpath, not rt_dir_list":
+        val src = header("platform_win.h")
+        expect(src).to_contain("rt_dir_list_cpath(const char*")
+        assert_false(src.contains("** rt_dir_list(const char*"))
+
+describe "same defect class: renamed private workers stay renamed (generalization)":
+    it "headers were actually read (non-vacuous control)":
+        assert_true(header("unix_common.h").contains("rt_dir_list_cpath"))
+        assert_true(header("platform_win.h").contains("rt_dir_list_cpath"))
+
+    it "rt_dir_list_free keeps its distinct name in both headers":
+        assert_true(header("unix_common.h").contains("rt_dir_list_free(const char**"))
+        assert_true(header("platform_win.h").contains("rt_dir_list_free(const char**"))

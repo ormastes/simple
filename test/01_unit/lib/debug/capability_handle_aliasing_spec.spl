@@ -1,0 +1,207 @@
+# @cover src/lib/common/debug/ref_debug_session.spl 0%
+"""
+# Capability-handle aliasing survives every acquisition shape
+
+Regression + class-prevention cover for
+`doc/08_tracking/bug/ref_debug_profiler_handle_stops_aliasing_unless_tail_expression_2026-08-09.md`.
+
+## Purpose and Audience
+
+A capability handle (`ref_debug_profiler(session)` and friends) is a HANDLE, not
+a snapshot. Mutating it must be visible through the session that owns the
+target, no matter where the acquiring call sits syntactically.
+
+## Scope and Preconditions
+
+Interpreter engine — this is where the defect lived. The reported rule was that
+the acquisition's *syntactic position relative to the frame holding the session*
+decided whether mutations survived: a free function's TAIL expression aliased,
+while an acquisition bound to a local in the session's own frame, inlined into a
+constructor there, or returned inside a struct, silently did not.
+
+The partial survival is what made it dangerous. Mutations to a class-typed
+SUB-OBJECT survived, so stepping looked correct, while the target's own array
+field (`breaks`) and own bool field (`armed`) were silently discarded.
+
+Root cause was in the interpreter's by-value receiver write-back, fixed by
+`merge_shared_collection_fields`
+(`src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975`),
+which propagates Array/Dict/ByteArray fields from callee back to caller while
+deliberately keeping scalars and nested structs value-typed.
+
+## Primary Workflow
+
+Build a session owning a target, acquire a handle in each of the four shapes,
+mutate all three field KINDS through the handle, then read back through the
+ORIGINAL session. Every shape must show every mutation.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| acquisition shape | where the acquiring call sits relative to the session's frame |
+| field kind | scalar / array / bool — each had a different survival rule |
+| read-back oracle | always through the original session, never the handle |
+
+## Evidence and Provenance
+
+Shapes and field kinds are taken verbatim from the bug doc's own two matrices.
+"""
+
+class DbgTarget:
+    var steps: i64
+    var breaks: [i64]
+    var armed: bool
+
+    static fn new() -> DbgTarget:
+        DbgTarget(steps: 0, breaks: [], armed: false)
+
+    fn step():
+        self.steps = self.steps + 1
+
+    fn set_breakpoint(loc: i64) -> bool:
+        self.breaks = self.breaks.push(loc)
+        true
+
+    fn profile_begin():
+        self.armed = true
+
+class DbgSession:
+    var target: Option<DbgTarget>
+
+    static fn new() -> DbgSession:
+        DbgSession(target: Some(DbgTarget.new()))
+
+# The acquisition, as a free function whose TAIL expression is the field read.
+# This shape was reported WORKING and is the control.
+fn acquire(s: DbgSession) -> Option<DbgTarget>:
+    s.target
+
+struct Acq:
+    ok: bool
+    dp: Option<DbgTarget>
+
+# Drive all three field kinds through the handle.
+fn mutate(h: Option<DbgTarget>) -> bool:
+    match h:
+        case Some(t):
+            t.step()
+            val ok = t.set_breakpoint(loc: 15)
+            t.profile_begin()
+            true
+        case None:
+            false
+
+fn steps_of(s: DbgSession) -> i64:
+    match s.target:
+        case Some(t): t.steps
+        case None: -1
+
+fn breaks_of(s: DbgSession) -> i64:
+    match s.target:
+        case Some(t): t.breaks.len()
+        case None: -1
+
+fn armed_of(s: DbgSession) -> bool:
+    match s.target:
+        case Some(t): t.armed
+        case None: false
+
+describe "capability handle aliasing":
+
+    describe "the control shape the bug report found WORKING":
+
+        it "propagates every field kind when acquired as a free fn tail expression":
+            val s = DbgSession.new()
+            expect(mutate(h: acquire(s: s))).to_equal(true)
+            expect(steps_of(s: s)).to_equal(1)
+            expect(breaks_of(s: s)).to_equal(1)
+            expect(armed_of(s: s)).to_equal(true)
+
+    describe "the three shapes the bug report found BROKEN":
+
+        # Reported: "acquisition bound to a local in the same frame that built
+        # session" -> breakpoint did NOT survive.
+        it "propagates when the handle is bound to a local in the session's own frame":
+            val s = DbgSession.new()
+            val acquired = acquire(s: s)
+            expect(mutate(h: acquired)).to_equal(true)
+            expect(steps_of(s: s)).to_equal(1)
+            expect(breaks_of(s: s)).to_equal(1)
+            expect(armed_of(s: s)).to_equal(true)
+
+        # Reported: "acquisition returned inside a struct from a free fn" -> broken.
+        it "propagates when the handle is carried inside a struct built in that frame":
+            val s = DbgSession.new()
+            val boxed = Acq(ok: true, dp: acquire(s: s))
+            expect(mutate(h: boxed.dp)).to_equal(true)
+            expect(steps_of(s: s)).to_equal(1)
+            expect(breaks_of(s: s)).to_equal(1)
+            expect(armed_of(s: s)).to_equal(true)
+
+        # Reported neighbouring data point: reading the concrete field directly,
+        # `session.target.set_breakpoint(15)`, lost the mutation too.
+        it "propagates when the target field is read directly off the session":
+            val s = DbgSession.new()
+            expect(mutate(h: s.target)).to_equal(true)
+            expect(steps_of(s: s)).to_equal(1)
+            expect(breaks_of(s: s)).to_equal(1)
+            expect(armed_of(s: s)).to_equal(true)
+
+    # CLASS-GENERALIZING: the reported failure was PARTIAL — the sub-object
+    # mutation survived while the own array/bool fields were dropped. A spec
+    # that only checked `steps` would have passed throughout the entire defect.
+    # These pin each field KIND independently so a future regression that
+    # restores scalar-only propagation still goes red.
+    describe "partial survival — each field kind pinned independently":
+
+        it "does not lose an OWN ARRAY field mutation":
+            val s = DbgSession.new()
+            match acquire(s: s):
+                case Some(t):
+                    val ok = t.set_breakpoint(loc: 15)
+                    val ok2 = t.set_breakpoint(loc: 27)
+                case None:
+                    expect("acquire").to_equal("Some")
+            expect(breaks_of(s: s)).to_equal(2)
+
+        it "does not lose an OWN BOOL field mutation":
+            val s = DbgSession.new()
+            match acquire(s: s):
+                case Some(t):
+                    t.profile_begin()
+                case None:
+                    expect("acquire").to_equal("Some")
+            expect(armed_of(s: s)).to_equal(true)
+
+        it "does not lose an OWN SCALAR field mutation":
+            val s = DbgSession.new()
+            match acquire(s: s):
+                case Some(t):
+                    t.step()
+                    t.step()
+                case None:
+                    expect("acquire").to_equal("Some")
+            expect(steps_of(s: s)).to_equal(2)
+
+        # Two handles acquired separately must denote the SAME target, not two
+        # forked copies. A COW fork that merges only on return would pass every
+        # single-handle case above and still fail this one.
+        it "gives two separately-acquired handles the same underlying target":
+            val s = DbgSession.new()
+            val h1 = acquire(s: s)
+            val h2 = acquire(s: s)
+            expect(mutate(h: h1)).to_equal(true)
+            expect(mutate(h: h2)).to_equal(true)
+            expect(steps_of(s: s)).to_equal(2)
+            expect(breaks_of(s: s)).to_equal(2)
+
+        # Distinct sessions must stay isolated — the fix must not over-share.
+        it "keeps distinct sessions isolated":
+            val a = DbgSession.new()
+            val b = DbgSession.new()
+            expect(mutate(h: acquire(s: a))).to_equal(true)
+            expect(steps_of(s: a)).to_equal(1)
+            expect(steps_of(s: b)).to_equal(0)
+            expect(breaks_of(s: b)).to_equal(0)
+            expect(armed_of(s: b)).to_equal(false)

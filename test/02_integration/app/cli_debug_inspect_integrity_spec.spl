@@ -1,0 +1,38 @@
+# @req REQ-008 REQ-009 REQ-014 NFR-001 NFR-007
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, file_write}
+use app.cli_debug.evidence_inspect_v1.{inspect_debug_evidence_bundle_v1}
+
+val BUILD_ID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn write_bundle(root: text, artifact_digest: text, receipts_digest: text):
+    expect(dir_create_all(root + "/raw")).to_equal(true)
+    expect(file_write(root + "/raw/core", "retained-core")).to_equal(true)
+    expect(file_write(root + "/receipts.sdn", "receipts: []\n")).to_equal(true)
+    val manifest = "schema: debug-evidence-bundle-v1\n" +
+        "session_id: \"captured-integration\"\n" +
+        "build_id: \"" + BUILD_ID + "\"\n" +
+        "captured_at_ns: 42\nartifacts:\n" +
+        "  - path: \"raw/core\"\n" +
+        "    digest: \"sha256:" + artifact_digest + "\"\n" +
+        "    media_type: \"application/octet-stream\"\n" +
+        "    native: true\n    privacy: \"redacted\"\n" +
+        "receipts_digest: \"sha256:" + receipts_digest + "\"\n"
+    expect(file_write(root + "/manifest.sdn", manifest)).to_equal(true)
+
+describe "offline evidence inspector integrity boundary":
+    it "rejects retained artifact bytes that do not match the manifest":
+        val root = "build/test-cli-debug-inspect-integrity-artifact"
+        write_bundle(root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        val result = inspect_debug_evidence_bundle_v1(root)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects receipts whose bytes do not match the manifest":
+        val root = "build/test-cli-debug-inspect-integrity-receipts"
+        write_bundle(root,
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+        val result = inspect_debug_evidence_bundle_v1(root)
+        expect(result.is_err()).to_equal(true)

@@ -1,0 +1,213 @@
+use app.build.targets.artifact_receipt.{
+    DependencyArtifactInputV1, ImportedClosureInputV1, ActionReceiptV1,
+    digest_is_sha256, dependency_manifest_text_v1,
+    dependency_manifest_digest_v1, dependency_manifest_error_v1,
+    imported_closure_receipt_text_v1, imported_closure_receipt_error_v1,
+    imported_closure_digest_from_text_v1, target_cache_namespace_v1,
+    target_action_key_v1, target_cas_path_v1, target_action_receipt_text_v1,
+    target_action_receipt_error_v1, target_reuse_evidence_v1,
+    publish_dependency_manifest_layer_v1, publish_imported_closure_layer_v1,
+    publish_target_action_evidence_layers_v1,
+    target_layered_reuse_evidence_from_files_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_write, file_delete, file_hash_sha256, dir_create_all, getpid}
+
+val RECEIPT_FIXTURE_ROOT = "/tmp/simple-target-receipt-spec-{getpid()}"
+val ZERO_DIGEST = "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn _setup_receipt_fixture() -> bool:
+    dir_create_all(RECEIPT_FIXTURE_ROOT + "/build/targets/lib") and
+        dir_create_all(RECEIPT_FIXTURE_ROOT + "/build/targets/app") and
+        dir_create_all(RECEIPT_FIXTURE_ROOT + "/build/target_cas/v1/sha256") and
+        dir_create_all(RECEIPT_FIXTURE_ROOT + "/build/target_cache/app/receipts") and
+        dir_create_all(RECEIPT_FIXTURE_ROOT + "/src") and
+        file_write(RECEIPT_FIXTURE_ROOT + "/src/main.spl", "use app.lib\nfn main(): 0\n") and
+        file_write(RECEIPT_FIXTURE_ROOT + "/src/lib.spl", "fn lib(): 7\n") and
+        file_write(RECEIPT_FIXTURE_ROOT + "/build/targets/lib/lib.a", "archive-v1\n") and
+        file_write(RECEIPT_FIXTURE_ROOT + "/build/targets/app/app", "app-v1\n")
+
+fn _dep_input() -> DependencyArtifactInputV1:
+    val path = RECEIPT_FIXTURE_ROOT + "/build/targets/lib/lib.a"
+    DependencyArtifactInputV1(
+        "//lib:base", "runtime", "build/targets/lib/lib.a", "archive",
+        file_hash_sha256(path), sha256_text("link-export-v1"), sha256_text("abi-v1")
+    )
+
+fn _closure_inputs() -> [ImportedClosureInputV1]:
+    [
+        ImportedClosureInputV1("src/main.spl", file_hash_sha256(RECEIPT_FIXTURE_ROOT + "/src/main.spl")),
+        ImportedClosureInputV1("src/lib.spl", file_hash_sha256(RECEIPT_FIXTURE_ROOT + "/src/lib.spl"))
+    ]
+
+describe "named-target dependency artifact manifest":
+    it "orders declared dependency artifacts canonically and verifies exact files":
+        expect(_setup_receipt_fixture()).to_be(true)
+        val dep = _dep_input()
+        val manifest = dependency_manifest_text_v1("//product:p1", [dep])
+        expect(manifest).to_start_with("simple-target-dependency-manifest-v1\n")
+        expect(manifest).to_contain("dependency=//lib:base")
+        expect(manifest).to_contain("|identity=runtime|")
+        expect(manifest).to_contain("|kind=archive|")
+        expect(dependency_manifest_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", [dep]
+        )).to_equal("")
+        expect(digest_is_sha256(dependency_manifest_digest_v1("//product:p1", [dep]))).to_be(true)
+
+    it "rejects absent mismatched unsafe and duplicate dependency inputs":
+        expect(_setup_receipt_fixture()).to_be(true)
+        val dep = _dep_input()
+        var mismatch = dep
+        mismatch.artifact_digest = ZERO_DIGEST
+        expect(dependency_manifest_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", [mismatch]
+        )).to_contain("dependency-artifact-digest-mismatch")
+        var unsafe = dep
+        unsafe.artifact_path = "../lib.a"
+        expect(dependency_manifest_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", [unsafe]
+        )).to_contain("unsafe-dependency-path")
+        expect(dependency_manifest_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", [dep, dep]
+        )).to_contain("duplicate-dependency")
+
+describe "authoritative imported-closure receipt":
+    it "binds entry tool dependency manifest and every imported source digest":
+        expect(_setup_receipt_fixture()).to_be(true)
+        val deps_digest = dependency_manifest_digest_v1("//product:p1", [_dep_input()])
+        val tool_digest = sha256_text("admitted-b3-tool-behavior")
+        val inputs = _closure_inputs()
+        val receipt = imported_closure_receipt_text_v1(
+            "//product:p1", "src/main.spl", tool_digest, deps_digest, inputs
+        )
+        expect(imported_closure_receipt_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", "src/main.spl",
+            tool_digest, deps_digest, inputs, receipt
+        )).to_equal("")
+        expect(digest_is_sha256(imported_closure_digest_from_text_v1(receipt))).to_be(true)
+
+    it "rejects stale noncanonical and entry-omitting closure receipts":
+        expect(_setup_receipt_fixture()).to_be(true)
+        val deps_digest = dependency_manifest_digest_v1("//product:p1", [_dep_input()])
+        val tool_digest = sha256_text("admitted-b3-tool-behavior")
+        val inputs = _closure_inputs()
+        val receipt = imported_closure_receipt_text_v1(
+            "//product:p1", "src/main.spl", tool_digest, deps_digest, inputs
+        )
+        expect(imported_closure_receipt_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", "src/main.spl",
+            tool_digest, deps_digest, inputs, receipt + "trailing"
+        )).to_contain("non-canonical")
+        expect(imported_closure_receipt_error_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", "src/main.spl",
+            tool_digest, deps_digest, [inputs[1]], receipt
+        )).to_contain("entry-not-in-imported-closure")
+
+describe "layered action receipt and CAS reuse":
+    it "permits reuse only after action receipt published artifact and CAS all agree":
+        expect(_setup_receipt_fixture()).to_be(true)
+        val output = RECEIPT_FIXTURE_ROOT + "/build/targets/lib/lib.a"
+        val artifact_digest = file_hash_sha256(output)
+        val deps_digest = dependency_manifest_digest_v1("//product:p1", [_dep_input()])
+        val tool_digest = sha256_text("admitted-b3-tool-behavior")
+        val closure_text = imported_closure_receipt_text_v1(
+            "//product:p1", "src/main.spl", tool_digest, deps_digest, _closure_inputs()
+        )
+        val closure_digest = imported_closure_digest_from_text_v1(closure_text)
+        val producer_abi = sha256_text("producer-abi")
+        val target_identity = sha256_text("x86_64-unknown-linux-gnu")
+        val namespace = target_cache_namespace_v1(
+            producer_abi, target_identity, "release", "archive"
+        )
+        val key = target_action_key_v1(
+            "//product:p1", "native-build", "P1", "B3", namespace,
+            deps_digest, closure_digest, tool_digest, "archive"
+        )
+        val cas_path = target_cas_path_v1(RECEIPT_FIXTURE_ROOT, artifact_digest)
+        val receipt_path = RECEIPT_FIXTURE_ROOT + "/build/target_cache/app/receipts/" + key + ".receipt"
+        file_delete(cas_path)
+        file_delete(receipt_path)
+        val receipt = ActionReceiptV1(
+            "//product:p1", "native-build", "P1", "B3", namespace,
+            deps_digest, closure_digest, tool_digest, "archive", artifact_digest,
+            cas_path, "rebuilt", key, []
+        )
+        expect(target_action_receipt_error_v1(receipt)).to_equal("")
+        val before = target_reuse_evidence_v1(
+            RECEIPT_FIXTURE_ROOT, output, receipt_path, receipt
+        )
+        expect(before.reusable).to_be(false)
+        expect(before.compatibility).to_equal("unknown")
+        expect(file_write(cas_path, "archive-v1\n")).to_be(true)
+        expect(file_write(receipt_path, target_action_receipt_text_v1(receipt))).to_be(true)
+        val after = target_reuse_evidence_v1(
+            RECEIPT_FIXTURE_ROOT, output, receipt_path, receipt
+        )
+        expect(after.reusable).to_be(true)
+        expect(after.compatibility).to_equal("exact")
+
+        val wrong_cas = ActionReceiptV1(
+            receipt.target, receipt.action, receipt.product, receipt.producer,
+            receipt.cache_namespace, receipt.dependency_manifest_digest,
+            receipt.imported_closure_digest, receipt.tool_behavior_digest,
+            receipt.artifact_kind, receipt.artifact_digest,
+            RECEIPT_FIXTURE_ROOT + "/build/target_cas/wrong", receipt.result,
+            receipt.action_key, []
+        )
+        expect(target_reuse_evidence_v1(
+            RECEIPT_FIXTURE_ROOT, output, receipt_path, wrong_cas
+        ).reason).to_equal("cas-path-mismatch")
+
+    it "verifies dependency closure keyed receipt and CAS as one reuse decision":
+        expect(_setup_receipt_fixture()).to_be(true)
+        val cache_dir = RECEIPT_FIXTURE_ROOT + "/build/target_cache/app-layered"
+        val dep_digest = publish_dependency_manifest_layer_v1(
+            RECEIPT_FIXTURE_ROOT, cache_dir, "//product:p1", [_dep_input()]
+        )
+        expect(digest_is_sha256(dep_digest)).to_be(true)
+        val tool_digest = sha256_text("admitted-b3-tool-behavior")
+        val closure_digest = publish_imported_closure_layer_v1(
+            RECEIPT_FIXTURE_ROOT, cache_dir, "//product:p1", "src/main.spl",
+            tool_digest, dep_digest, _closure_inputs()
+        )
+        expect(digest_is_sha256(closure_digest)).to_be(true)
+        val output = RECEIPT_FIXTURE_ROOT + "/build/targets/app/app"
+        val artifact_digest = file_hash_sha256(output)
+        val namespace = target_cache_namespace_v1(
+            sha256_text("producer-abi"), sha256_text("x86_64-unknown-linux-gnu"),
+            "release", "binary"
+        )
+        val key = target_action_key_v1(
+            "//product:p1", "native-build", "P1", "B3", namespace,
+            dep_digest, closure_digest, tool_digest, "binary"
+        )
+        val receipt = ActionReceiptV1(
+            "//product:p1", "native-build", "P1", "B3", namespace,
+            dep_digest, closure_digest, tool_digest, "binary", artifact_digest,
+            target_cas_path_v1(RECEIPT_FIXTURE_ROOT, artifact_digest),
+            "rebuilt", key, []
+        )
+        val immutable_path = cache_dir + "/receipts/" + key + ".receipt"
+        file_delete(immutable_path)
+        file_delete(cache_dir + "/receipts/current.receipt")
+        expect(publish_target_action_evidence_layers_v1(
+            RECEIPT_FIXTURE_ROOT, output, cache_dir, receipt
+        )).to_equal("")
+        val evidence = target_layered_reuse_evidence_from_files_v1(
+            RECEIPT_FIXTURE_ROOT, "//product:p1", "native-build", "P1", "B3",
+            "src/main.spl", "binary", output, cache_dir
+        )
+        expect(evidence.reusable).to_be(true)
+        expect(evidence.compatibility).to_equal("exact")
+        expect(file_write(immutable_path, "tampered\n")).to_be(true)
+        expect(publish_target_action_evidence_layers_v1(
+            RECEIPT_FIXTURE_ROOT, output, cache_dir, receipt
+        )).to_equal("target-receipt-error: immutable-action-key-collision")
+
+    it "never upgrades unknown or mismatched evidence to reusable":
+        val invalid = ActionReceiptV1(
+            "//product:p1", "native-build", "P1", "B3", "", ZERO_DIGEST,
+            ZERO_DIGEST, ZERO_DIGEST, "archive", ZERO_DIGEST, "", "reused",
+            ZERO_DIGEST, []
+        )
+        expect(target_action_receipt_error_v1(invalid)).to_contain("action-key-mismatch")

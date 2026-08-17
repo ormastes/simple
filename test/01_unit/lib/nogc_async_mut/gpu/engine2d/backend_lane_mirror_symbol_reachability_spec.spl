@@ -1,0 +1,82 @@
+# @cover src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl 60%
+# @tag: unit, engine2d, backend, lane, nogc, similar-bug-detection
+#
+# Similar-problem detection spec for the defect CLASS behind
+# doc/08_tracking/bug/nogc_engine2d_backend_lane_missing_helpers_availability_2026-07-06.md
+#
+# CLASS: the nogc_async_mut Engine2D tree is a hand-maintained MIRROR of the
+# gc_async_mut tree. A partial port can copy a function body from the gc mirror
+# that calls a helper living only in gc (`helpers_availability.spl` has no nogc
+# counterpart). Such a call is not a load-time error — the module imports fine,
+# every OTHER entry point works, and the defect only surfaces when that one
+# function is finally invoked. Exercising a single entry point therefore cannot
+# detect it.
+#
+# This spec calls EVERY exported function of the nogc backend_lane module at
+# least once, so any gc-only symbol smuggled into any of them goes red here even
+# if the reproducing spec above never touches that code path.
+
+use std.spec.*
+use std.nogc_async_mut.gpu.engine2d.backend_lane.{
+    ENGINE2D_BACKEND_LANE_COMBINED,
+    ENGINE2D_BACKEND_LANE_DRAWING,
+    ENGINE2D_BACKEND_LANE_PROCESSING,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    engine2d_backend_lane_drawing_preference_order,
+    engine2d_backend_lane_full_preference_order,
+    engine2d_backend_lane_plan,
+    engine2d_backend_lane_preference_summary,
+    engine2d_backend_lane_preferred_candidate,
+    engine2d_backend_lane_preferred_font_offload_candidate,
+    engine2d_backend_lane_summary,
+    engine2d_combined_backend_lane,
+    engine2d_drawing_backend_lane,
+    engine2d_font_offload_backend_order,
+    engine2d_host_gpu_lane_schedule,
+    engine2d_host_gpu_lane_summary,
+    engine2d_operation_lane,
+    engine2d_processing_backend_lane
+}
+
+describe "nogc Engine2D backend_lane exports are all actually reachable":
+
+    it "resolves every lane-constructor export":
+        assert_equal(engine2d_drawing_backend_lane("vulkan").lane, ENGINE2D_BACKEND_LANE_DRAWING)
+        assert_equal(engine2d_processing_backend_lane("cuda").lane, ENGINE2D_BACKEND_LANE_PROCESSING)
+        assert_equal(engine2d_combined_backend_lane("metal").lane, ENGINE2D_BACKEND_LANE_COMBINED)
+
+    it "resolves every summary and plan export":
+        val lane = engine2d_drawing_backend_lane("vulkan")
+        assert_true(engine2d_backend_lane_summary(lane).len() > 0)
+        assert_true(engine2d_backend_lane_preference_summary().len() > 0)
+        val plan = engine2d_backend_lane_plan("vulkan", "cuda", true, false)
+        assert_equal(plan.drawing_backend.backend_name, "vulkan")
+        assert_equal(plan.processing_backend.backend_name, "cuda")
+
+    it "resolves every preference-order export":
+        assert_true(engine2d_backend_lane_full_preference_order().len() > 0)
+        assert_true(engine2d_backend_lane_drawing_preference_order().len() > 0)
+        assert_true(engine2d_font_offload_backend_order().len() > 0)
+
+    it "resolves both candidate pickers, not just the general one":
+        # The general picker was always fine; the font-offload picker was the
+        # one carrying a gc-only symbol. Both must answer.
+        assert_equal(engine2d_backend_lane_preferred_candidate(["cpu", "cuda"], false), "cuda")
+        assert_equal(engine2d_backend_lane_preferred_font_offload_candidate(["cpu", "cuda"]), "cuda")
+
+    it "resolves the operation-lane and host-gpu exports":
+        assert_true(engine2d_operation_lane("glyph_raster").len() > 0)
+        val schedule = engine2d_host_gpu_lane_schedule(
+            ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_HOST,
+            "glyph_raster", 64, 4096, false, false, true, 5
+        )
+        assert_equal(schedule.ok, true)
+        assert_true(engine2d_host_gpu_lane_summary(schedule).len() > 0)
+
+    it "agrees with the gc mirror on the font-offload backends unique to it":
+        # qualcomm and intel exist ONLY in the font-offload order, not in the
+        # general preference order — exactly the pair the partial port dropped.
+        for backend in ["qualcomm", "intel"]:
+            assert_equal(engine2d_backend_lane_preferred_font_offload_candidate([backend]), backend)
+            assert_equal(engine2d_backend_lane_preferred_candidate([backend], false), "")

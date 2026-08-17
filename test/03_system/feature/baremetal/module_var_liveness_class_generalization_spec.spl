@@ -1,0 +1,85 @@
+# Generalization of the defect class behind
+# doc/08_tracking/bug/spec_it_block_reads_stale_module_var_2026-08-04.md
+#
+# Class: a module-level `var`, read DIRECTLY by name from inside an `it` body,
+# must observe the live value — not the snapshot the body's captured env held at
+# spec-registration time. `modvar2_spec.spl` pins the single reported shape
+# (i64, one helper write, one direct read). This spec generalizes over the axes
+# that shape does not touch, because a fix that special-cases only the reported
+# shape passes `modvar2_spec.spl` and still leaves the class broken:
+#
+#   - value type (i64 / text / bool / array) — the stale read is a value clone,
+#     so every representation is equally exposed
+#   - write depth (helper -> helper -> var, not just helper -> var)
+#   - compound assignment (`+=`) through a helper
+#   - repeated reads inside one body after a second write (the body must track
+#     the var, not merely be seeded once)
+#   - a same-named LOCAL must still shadow the module var (the fix reads through
+#     to the live global on any non-local name; if the locality test is wrong,
+#     this example goes red instead of the others)
+#
+# The last example is the anti-over-reach arm: it fails if a fix makes the
+# global authoritative for names that are genuinely local.
+
+var gi = -999
+var gs = "unset"
+var gb = false
+var ga = [0]
+
+fn set_i(v: i64):
+    gi = v
+    0
+
+fn set_i_indirect(v: i64):
+    set_i(v)
+    0
+
+fn bump_i(v: i64):
+    gi += v
+    0
+
+fn set_s(v: text):
+    gs = v
+    0
+
+fn set_b(v: bool):
+    gb = v
+    0
+
+fn set_a(v: i64):
+    ga = [v, v]
+    0
+
+describe "module-level var liveness as seen from an it body":
+    it "i64: a two-hop helper write is visible to a direct read":
+        set_i_indirect(21)
+        expect(gi).to_equal(21)
+
+    it "i64: compound assignment through a helper is visible to a direct read":
+        set_i(100)
+        bump_i(5)
+        expect(gi).to_equal(105)
+
+    it "i64: a second write during the same body is seen by a second read":
+        set_i(1)
+        expect(gi).to_equal(1)
+        set_i(2)
+        expect(gi).to_equal(2)
+
+    it "text: a helper write is visible to a direct read":
+        set_s("live")
+        expect(gs).to_equal("live")
+
+    it "bool: a helper write is visible to a direct read":
+        set_b(true)
+        assert_true(gb)
+
+    it "array: a helper write is visible to a direct read":
+        set_a(7)
+        expect(ga.len()).to_equal(2)
+        expect(ga[0]).to_equal(7)
+
+    it "a same-named local still shadows the module var":
+        set_i(500)
+        val gi = 3
+        expect(gi).to_equal(3)

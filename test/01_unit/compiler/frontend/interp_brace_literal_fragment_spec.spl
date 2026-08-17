@@ -1,0 +1,54 @@
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.string_interpolation_expand.{parse_interpolation_fragment}
+
+# Bug: interp_brace_literal_collides_with_string_interpolation_2026-07-03
+#      (2026-07-17 sub-case -- "{ {inner} }" / "{ {inner}}" swallowed to an
+#      EMPTY string instead of falling back to verbatim literal text).
+#
+# This spec pins the PURE-SIMPLE frontend half of that contract. Measured
+# 2026-08-17: `parse_interpolation_fragment` already rejects a region whose
+# whole content is itself a brace literal, so `flat_bridge_build_string_interps`
+# returns [] and the string stays a verbatim literal -- which is what the
+# interpreter oracle prints. The reported empty-string swallow therefore does
+# NOT originate here; it belongs to the other lowering lane. Keeping this spec
+# fences the frontend half so a future "accept it as a dict literal" change
+# cannot silently reintroduce the swallow.
+#
+# NOTE: every brace-bearing fixture is BUILT BY CONCATENATION. Writing the
+# braces inline in a spec string makes this file's own literals interpolate at
+# run time (`semantic: variable 'inner' not found`) -- the very collision under
+# test.
+
+val LB = "{"
+val RB = "}"
+
+fn brace(inner: text) -> text:
+    LB + inner + RB
+
+describe "interpolation fragment brace-literal rejection":
+    it "rejects a region whose whole content is a brace literal":
+        # Warm the lexer/parser globals the fragment parser reuses.
+        val module = parse_and_build_module("fn warm() -> i64:\n    1\n", "warm.spl")
+        expect(module.functions.contains("warm")).to_equal(true)
+
+        # Exact shapes from the bug report: "{ {inner} }" and "{ {inner}}".
+        expect(parse_interpolation_fragment(" " + brace("inner") + " ")).to_equal(-1)
+        expect(parse_interpolation_fragment(" " + brace("inner"))).to_equal(-1)
+
+    it "rejects the wider brace-literal class, padded or not":
+        # Generalises past the two reported shapes: any padding, any inner
+        # syntax. A dict-shaped or set-shaped region is literal text, never an
+        # interpolation.
+        val module = parse_and_build_module("fn warm2() -> i64:\n    1\n", "warm2.spl")
+        expect(module.functions.contains("warm2")).to_equal(true)
+
+        expect(parse_interpolation_fragment(brace("inner"))).to_equal(-1)
+        expect(parse_interpolation_fragment(brace("a: 1"))).to_equal(-1)
+        expect(parse_interpolation_fragment("  " + brace("1, 2") + "  ")).to_equal(-1)
+
+    it "still accepts ordinary interpolation fragments":
+        val module = parse_and_build_module("fn warm3() -> i64:\n    1\n", "warm3.spl")
+        expect(module.functions.contains("warm3")).to_equal(true)
+
+        expect(parse_interpolation_fragment("inner") >= 0).to_equal(true)
+        expect(parse_interpolation_fragment(" a + b ") >= 0).to_equal(true)

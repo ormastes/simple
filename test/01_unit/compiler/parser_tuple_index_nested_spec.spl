@@ -1,0 +1,76 @@
+# @cover src/compiler_rust/parser/src/lexer/numbers.rs 0%
+# @req REQ-PARSER-TUPLE-INDEX-NESTED-001
+"""
+# Nested tuple indexing (`r.0.1`)
+
+**Category:** Language / Lexer
+**Status:** Regression guard (reproducing spec)
+
+## Purpose and Audience
+
+A tuple of tuples is indexed the obvious way: `r.0` picks the first component,
+and `r.0.1` picks the second component of that. Until 2026-08-17 the second form
+did not parse at all in the Rust seed. `scan_number`
+(`src/compiler_rust/parser/src/lexer/numbers.rs`) saw the digit `0`, then saw a
+following `.` with a digit after it, and greedily absorbed the pair as a
+fractional part — emitting a single `Float(0.1)` token where the source meant two
+separate tuple indices. The postfix parser then reported:
+
+    parse: Unexpected token: expected identifier, found Float(0.1)
+
+An error naming a float literal for source text containing no float literal.
+
+The audience is anyone touching numeric scanning in the seed lexer. The fix is a
+positional test, `preceded_by_member_dot`: a number whose immediately preceding
+character is a member-access `.` sits in an index position, and a float literal
+can never appear there, because a lone `.` always lexes to `TokenKind::Dot` and
+the language has no leading-dot float form.
+
+## Scope and Preconditions
+
+Requires a seed built at or after 2026-08-17; an older binary fails to LOAD this
+file with the `found Float(0.1)` error above, which is exactly the reproduction.
+
+## Primary Workflow
+
+Build nested tuples and read components through two- and three-deep index chains,
+asserting the component values arithmetic says they must be.
+
+See doc/08_tracking/bug/seed_nested_tuple_index_float_munch_2026-08-06.md
+"""
+
+use std.spec.*
+
+describe "nested tuple indexing":
+
+    it "reads the second component of the first component":
+        step("Build the exact `((1, 2), (3, 4))` shape from the bug report")
+        val r = ((1, 2), (3, 4))
+
+        step("A single index still works -- this was never broken")
+        val inner = r.0
+        expect(inner.1).to_equal(2)
+
+        step("The chained form `r.0.1` is the one that used to emit Float(0.1)")
+        expect(r.0.1).to_equal(2)
+
+        step("Every other two-deep combination must resolve independently")
+        expect(r.0.0).to_equal(1)
+        expect(r.1.0).to_equal(3)
+        expect(r.1.1).to_equal(4)
+
+    it "reads a three-deep index chain":
+        step("Nesting one level further exercises two consecutive munch sites")
+        val deep = ((("a", "b"), ("c", "d")), (("e", "f"), ("g", "h")))
+
+        step("`deep.0.1.0` would have munched `.1.0` into Float(1.0)")
+        expect(deep.0.1.0).to_equal("c")
+        expect(deep.0.0.1).to_equal("b")
+        expect(deep.1.1.1).to_equal("h")
+
+    it "indexes a tuple nested inside a tuple with mixed component types":
+        step("The defect was purely lexical, so it fired regardless of element type")
+        val mixed = ((10, "ten"), (2.5, true))
+        expect(mixed.0.0).to_equal(10)
+        expect(mixed.0.1).to_equal("ten")
+        expect(mixed.1.1).to_equal(true)

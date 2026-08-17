@@ -1,0 +1,63 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/ffi_cuda.spl 70%
+# @tag: unit, gpu, engine2d, cuda, ffi, regression
+#
+# Reproducing spec for
+# doc/08_tracking/bug/cuda_ffi_is_available_and_device_count_wrong_2026-08-09.md
+#
+# Defect: CUDA Driver API entry points whose real result arrives through an OUT
+# POINTER were being read from the function's CUresult return value via
+# DynLib.callN. DynLib has no out-parameter marshalling — call0..call4/call_n
+# all hand back the raw i64 return value — so on a host where the call
+# SUCCEEDED the CUresult was 0 (CUDA_SUCCESS) and that 0 was returned as the
+# payload. device_count() reported 0 GPUs on a two-GPU host, ctx_create()
+# reported context 0 (its own failure value) after a successful create, and
+# mem_alloc() reported device pointer 0 after a successful allocation.
+#
+# Silent-wrong-result: every one of these compiles clean, exits 0, and lies.
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.ffi_cuda.{CudaDynFfi}
+use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode}
+
+extern fn rt_cuda_device_count() -> i64
+
+describe "CudaDynFfi out-parameter results":
+
+    it "reports the same device count in dynamic mode as the marshalling static path":
+        # The static extern marshals cuDeviceGetCount's out pointer correctly.
+        # Dynamic mode must agree with it. Before the fix dynamic mode returned
+        # the CUresult (0 on success), so on any host with GPUs present the two
+        # disagreed, and on a host with none the wrong answer was invisible.
+        val truth = rt_cuda_device_count()
+
+        val dyn_ffi = CudaDynFfi.create(GpuFfiMode.Dynamic)
+        expect(dyn_ffi != nil).to_equal(true)
+        expect(dyn_ffi.device_count()).to_equal(truth)
+
+        val static_ffi = CudaDynFfi.create_static()
+        expect(static_ffi.device_count()).to_equal(truth)
+
+    it "never claims availability while reporting zero devices":
+        # is_available() used to be `call0("cuInit") == 0`. cuInit takes a flags
+        # argument, so call0 left that register undefined; and even a clean
+        # CUDA_SUCCESS only means the driver loaded, not that a GPU exists.
+        # "Available but zero devices" is the incoherent state that let callers
+        # walk into a device-0 lookup on a machine with no GPU.
+        val dyn_ffi = CudaDynFfi.create(GpuFfiMode.Dynamic)
+        if dyn_ffi.is_available():
+            expect(dyn_ffi.device_count() > 0).to_equal(true)
+
+        val static_ffi = CudaDynFfi.create_static()
+        if static_ffi.is_available():
+            expect(static_ffi.device_count() > 0).to_equal(true)
+
+    it "agrees between modes on whether CUDA is available at all":
+        val dyn_ffi = CudaDynFfi.create(GpuFfiMode.Dynamic)
+        val static_ffi = CudaDynFfi.create_static()
+        expect(dyn_ffi.is_available()).to_equal(static_ffi.is_available())
+
+    it "never returns a device count below zero in either mode":
+        # A CUresult leaking through as a payload can be a negative error code.
+        # A count is a cardinality and can never be negative.
+        expect(CudaDynFfi.create_static().device_count() >= 0).to_equal(true)
+        expect(CudaDynFfi.create(GpuFfiMode.Dynamic).device_count() >= 0).to_equal(true)

@@ -1,0 +1,68 @@
+use std.spec
+use std.common.engine.ids.{AudioClipId, NodeId, RawHandle, TextureId}
+
+# Reproducing + prevention spec for
+# doc/08_tracking/bug/rawhandle_generational_id_api_drift_2026-07-20.md
+#
+# Before the fix `RawHandle.new/2` did not exist at all — every call site,
+# INCLUDING production code in nogc_sync_mut/engine/scene/{node,node3d,
+# serializer}.spl, died with
+#   error: semantic: unknown static method new on class RawHandle
+# and `to_index()` returned the whole packed word instead of the index.
+
+describe "engine id packed generational handles":
+
+    # --- reproducing: the exact shape that used to fail ---
+
+    it "RawHandle.new packs an index and a generation into one i64":
+        val raw = RawHandle.new(3, 7)
+        expect(raw).to_equal(3 + (7 << 32))
+
+    it "NodeId built from RawHandle.new reports the arena index, not the packed word":
+        val id = NodeId(raw: RawHandle.new(3, 7))
+        expect(id.to_index()).to_equal(3)
+        expect(id.generation()).to_equal(7)
+        expect(id.is_valid()).to_equal(true)
+
+    it "TextureId built from RawHandle.new reports the arena index, not the packed word":
+        val id = TextureId(raw: RawHandle.new(5, 2))
+        expect(id.to_index()).to_equal(5)
+        expect(id.generation()).to_equal(2)
+
+    # --- class-generalizing prevention ---
+    #
+    # The defect class is "a packed handle read back through an accessor that
+    # forgot to unmask". Guard every packed id type on the same round trip,
+    # including the boundary cases that a naive `raw` passthrough gets right
+    # by accident (generation 0) and the ones it gets wrong (generation > 0).
+
+    it "index/generation round-trip holds for every packed id type":
+        for index in [0, 1, 3, 255, 65536]:
+            for gen_val in [0, 1, 2, 999]:
+                val raw = RawHandle.new(index, gen_val)
+                expect(RawHandle.index_of(raw)).to_equal(index)
+                expect(RawHandle.generation_of(raw)).to_equal(gen_val)
+                expect(NodeId(raw: raw).to_index()).to_equal(index)
+                expect(NodeId(raw: raw).generation()).to_equal(gen_val)
+                expect(TextureId(raw: raw).to_index()).to_equal(index)
+                expect(TextureId(raw: raw).generation()).to_equal(gen_val)
+
+    it "a bumped generation on the same slot yields a distinct handle":
+        # This is the whole point of a generational handle: a reused arena slot
+        # must not compare equal to the stale handle that used to own it.
+        val stale = RawHandle.new(4, 1)
+        val fresh = RawHandle.new(4, 2)
+        expect(stale == fresh).to_equal(false)
+        expect(NodeId(raw: stale).to_index()).to_equal(NodeId(raw: fresh).to_index())
+        expect(NodeId(raw: stale).generation()).to_equal(1)
+        expect(NodeId(raw: fresh).generation()).to_equal(2)
+
+    it "sentinel invalid ids stay invalid and are never confused with slot 0":
+        expect(NodeId.invalid().is_valid()).to_equal(false)
+        expect(TextureId.invalid().is_valid()).to_equal(false)
+        expect(AudioClipId.invalid().is_valid()).to_equal(false)
+        expect(NodeId(raw: RawHandle.new(0, 0)).is_valid()).to_equal(true)
+
+    it "RawHandle.null stays a null opaque foreign handle":
+        expect(RawHandle.null().is_null()).to_equal(true)
+        expect(RawHandle(value: 7).is_null()).to_equal(false)

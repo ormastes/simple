@@ -1,0 +1,112 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/ffi_cuda.spl 40%
+# @tag: unit, gpu, engine2d, ffi, detection, regression
+#
+# Similar-problem DETECTION spec for the defect class behind
+# doc/08_tracking/bug/cuda_ffi_is_available_and_device_count_wrong_2026-08-09.md
+#
+# The class: a C API function that returns its real payload through an OUT
+# POINTER, invoked through DynLib.call0/call1/call2/call3/call4/call_n, whose
+# i64 return value is then used AS the payload. DynLib has no out-parameter
+# marshalling, so the caller silently receives the status code instead of the
+# result — and for every one of these APIs the success status is 0, which is
+# also the caller's "failed" sentinel. The result is a clean exit with a wrong
+# answer and no diagnostic anywhere.
+#
+# The reproducing spec pins the three CUDA sites that were live. This spec
+# guards the whole family by source inspection, so a NEW out-param call added
+# to any GPU FFI dispatcher fails here instead of shipping. It is deliberately
+# source-level: the behavioural spec can only exercise whichever backends this
+# host actually has, and a host with no GPU exercises none of them.
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_fs_read_text(path: text) -> text?
+
+# C entry points across the GPU driver APIs whose payload arrives through a
+# pointer argument, never through the return value.
+fn out_param_symbols() -> [text]:
+    [
+        "cuDeviceGetCount",
+        "cuDeviceGet",
+        "cuCtxCreate",
+        "cuMemAlloc",
+        "cuModuleLoad",
+        "cuModuleLoadData",
+        "cuModuleGetFunction",
+        "clGetPlatformIDs",
+        "clGetDeviceIDs",
+        "vkEnumeratePhysicalDevices",
+        "vkCreateInstance",
+        "vkCreateDevice",
+        "vkAllocateMemory",
+        "hipGetDeviceCount",
+        "hipMalloc",
+    ]
+
+fn dyn_call_forms() -> [text]:
+    ["call0", "call1", "call2", "call3", "call4", "call_n"]
+
+fn ffi_sources() -> [text]:
+    [
+        "src/lib/nogc_sync_mut/gpu/engine2d/ffi_cuda.spl",
+        "src/lib/nogc_sync_mut/gpu/engine2d/ffi_opencl.spl",
+        "src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl",
+        "src/lib/nogc_sync_mut/gpu/engine2d/ffi_rocm.spl",
+        "src/lib/nogc_sync_mut/gpu/engine2d/ffi_intel.spl",
+    ]
+
+describe "GPU FFI out-parameter results are never read from a DynLib return value":
+
+    it "routes no out-parameter C symbol through a DynLib callN":
+        var offenders = 0
+        var report = ""
+
+        for path in ffi_sources():
+            val maybe_source = rt_fs_read_text(path)
+            if maybe_source == nil:
+                continue
+            val source = maybe_source
+
+            for sym in out_param_symbols():
+                for form in dyn_call_forms():
+                    # e.g. the historical defect: .call0("cuDeviceGetCount")
+                    val needle = form + "(\"" + sym + "\""
+                    if source.contains(needle):
+                        offenders = offenders + 1
+                        report = report + path + " -> " + needle + "; "
+
+        # An offending site means a success status is being handed back to a
+        # caller as if it were a count, a handle, or a device pointer.
+        expect(report).to_equal("")
+        expect(offenders).to_equal(0)
+
+    it "scans a non-empty corpus so a green verdict is not vacuous":
+        # If every path went missing this spec would pass while checking
+        # nothing — the exact silent-green shape it exists to catch.
+        var readable = 0
+        for path in ffi_sources():
+            if rt_fs_read_text(path) != nil:
+                readable = readable + 1
+
+        expect(readable > 0).to_equal(true)
+
+    it "detects the historical defect shape when it is present":
+        # Selftest of the matcher itself: the pre-fix source line must be
+        # recognised by the same needle construction used above.
+        val pre_fix_line = "                    self._dyn_lib.call0(\"cuDeviceGetCount\")"
+        val needle = "call0(\"cuDeviceGetCount\""
+
+        expect(pre_fix_line.contains(needle)).to_equal(true)
+
+    it "keeps the CUDA dispatcher itself clean of every listed out-param symbol":
+        val maybe_source = rt_fs_read_text("src/lib/nogc_sync_mut/gpu/engine2d/ffi_cuda.spl")
+        expect(maybe_source != nil).to_equal(true)
+        val source = maybe_source
+
+        expect(source.contains("call0(\"cuDeviceGetCount\"")).to_equal(false)
+        expect(source.contains("call2(\"cuCtxCreate\"")).to_equal(false)
+        expect(source.contains("call1(\"cuMemAlloc\"")).to_equal(false)
+
+        # cuInit genuinely has no out param, but it DOES take a flags argument,
+        # so it must never be invoked through the zero-argument form.
+        expect(source.contains("call0(\"cuInit\"")).to_equal(false)

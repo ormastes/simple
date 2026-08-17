@@ -1,0 +1,112 @@
+# @cover src/lib/skia/entity/path.spl 15%
+"""
+# SkPath builders are immutable — discarded-return defect class
+
+**Feature IDs:** #SKI-PATHOP
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Similar-problem detection spec generalizing the defect fixed in
+`doc/08_tracking/bug/skia_path_op_boolean_algorithm_2026-07-20.md`.
+
+The root cause there was not geometry: it was calling an IMMUTABLE builder
+(`_emit_rect` -> `SkPath.move_to/line_to/close`) as a bare expression
+statement and discarding the returned path. Any such call site silently
+does nothing.
+
+This spec pins the two properties that make that class of bug detectable:
+
+1. `SkPath` builder methods are PURE — the receiver is unchanged after the
+   call, so a discarded return value loses the work. If a future change ever
+   made them mutate in place, these examples go RED and the "always assign
+   the result" rule can be relaxed deliberately rather than by accident.
+2. Multi-contour `path_op` results are STRUCTURALLY complete — a result
+   built from two rectangles carries both rectangles' verbs, so an emit
+   whose return value is dropped shows up as a verb-count shortfall, not
+   merely as a membership surprise at one probe point.
+"""
+
+use std.spipe.*
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.feature.path_op.{PathOp, path_op}
+
+fn _rect(l: f64, t: f64, r: f64, b: f64) -> SkPath:
+    val p1 = sk_path_new().move_to(l, t)
+    val p2 = p1.line_to(r, t)
+    val p3 = p2.line_to(r, b)
+    val p4 = p3.line_to(l, b)
+    val p5 = p4.line_to(l, t)
+    p5.close()
+
+describe "SkPath builder immutability":
+    it "move_to returns a new path and leaves the receiver empty":
+        val empty = sk_path_new()
+        val before = empty.count_verbs()
+        val moved = empty.move_to(1.0, 2.0)
+        # The receiver must be untouched: this is why a bare statement call
+        # discards all the work.
+        expect(empty.count_verbs()).to_equal(before)
+        expect(moved.count_verbs()).to_be_greater_than(before)
+
+    it "line_to returns a new path and leaves the receiver unchanged":
+        val base = sk_path_new().move_to(0.0, 0.0)
+        val before = base.count_verbs()
+        val lined = base.line_to(5.0, 0.0)
+        expect(base.count_verbs()).to_equal(before)
+        expect(lined.count_verbs()).to_equal(before + 1)
+
+    it "close returns a new path and leaves the receiver unchanged":
+        val open_path = sk_path_new().move_to(0.0, 0.0).line_to(4.0, 0.0)
+        val before = open_path.count_verbs()
+        val closed = open_path.close()
+        expect(open_path.count_verbs()).to_equal(before)
+        expect(closed.count_verbs()).to_equal(before + 1)
+
+    it "a chain that discards an intermediate result loses that segment":
+        # Direct demonstration of the defect shape: `base.line_to(...)` used
+        # as a statement contributes nothing to `base`.
+        val base = sk_path_new().move_to(0.0, 0.0)
+        base.line_to(9.0, 9.0)
+        expect(base.count_verbs()).to_equal(1)
+
+describe "path_op results are structurally complete":
+    it "disjoint union carries the verbs of BOTH rectangles":
+        val a = _rect(0.0, 0.0, 4.0, 4.0)
+        val b = _rect(10.0, 10.0, 14.0, 14.0)
+        val one_rect = a.count_verbs()
+        val u = path_op(a, b, PathOp.Union)
+        # Dropping either emit leaves at most one rect's worth of verbs.
+        expect(u.count_verbs()).to_be_greater_than(one_rect)
+
+    it "overlapping union carries more verbs than a single rectangle":
+        val a = _rect(0.0, 0.0, 10.0, 10.0)
+        val b = _rect(5.0, 5.0, 15.0, 15.0)
+        val one_rect = a.count_verbs()
+        val u = path_op(a, b, PathOp.Union)
+        expect(u.count_verbs()).to_be_greater_than(one_rect)
+
+    it "union bbox is never smaller than either operand bbox":
+        val a = _rect(0.0, 0.0, 10.0, 10.0)
+        val b = _rect(5.0, 5.0, 15.0, 15.0)
+        val u = path_op(a, b, PathOp.Union)
+        val ba = a.bounds()
+        val bb = b.bounds()
+        val bu = u.bounds()
+        val covers_a = bu.left <= ba.left and bu.top <= ba.top and bu.right >= ba.right and bu.bottom >= ba.bottom
+        val covers_b = bu.left <= bb.left and bu.top <= bb.top and bu.right >= bb.right and bu.bottom >= bb.bottom
+        expect(covers_a).to_equal(true)
+        expect(covers_b).to_equal(true)
+
+    it "union is symmetric in its operands' bboxes":
+        val a = _rect(0.0, 0.0, 10.0, 10.0)
+        val b = _rect(5.0, 5.0, 15.0, 15.0)
+        val ab = path_op(a, b, PathOp.Union).bounds()
+        val ba = path_op(b, a, PathOp.Union).bounds()
+        # An emit dropped on only one side breaks this symmetry.
+        expect(ab.left).to_equal(ba.left)
+        expect(ab.top).to_equal(ba.top)
+        expect(ab.right).to_equal(ba.right)
+        expect(ab.bottom).to_equal(ba.bottom)

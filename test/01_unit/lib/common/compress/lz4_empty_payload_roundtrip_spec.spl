@@ -1,0 +1,68 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{
+    CompressionOptions,
+    CompressionCodec,
+    default_compression_options,
+    compress_bytes,
+    decompress_bytes
+}
+use std.common.compress.lz4.{lz4_compress_frame, lz4_decompress_frame}
+
+# Regression + detection specs for
+# doc/08_tracking/bug/compress_lz4_empty_payload_roundtrip_corruptstream_2026-07-20.md
+#
+# (a) reproducing spec: the LZ4 encoder used to emit a zero-length uncompressed
+#     data block (size word 0x80000000) for an empty payload, which its own
+#     decoder correctly rejects as `CorruptStream(lz4 empty data block)`.
+# (b) detection spec: generalises the class — no public codec may fail to
+#     round-trip its own output for the empty payload.
+
+
+describe("lz4 empty-payload frame round-trip"):
+
+    it("round-trips an empty payload through the public compress facade"):
+        val payload: [u8] = []
+        val options = default_compression_options(CompressionCodec.lz4)
+        val encoded = compress_bytes(payload, options)
+        val decoded = decompress_bytes(encoded, CompressionCodec.lz4)
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap().len()).to_equal(0)
+
+    it("emits header plus EndMark only, never a zero-length data block"):
+        val options = default_compression_options(CompressionCodec.lz4)
+        val encoded = lz4_compress_frame([], options)
+        # 4 magic + FLG + BD + HC + 4 EndMark = 11 bytes, no block size word.
+        expect(encoded.len()).to_equal(11)
+        val decoded = lz4_decompress_frame(encoded)
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap().len()).to_equal(0)
+
+describe("empty-payload self-round-trip across lz4 framing options (detection)"):
+
+    it("every lz4 framing option variant decodes its own empty-payload frame"):
+        # Generalises the class: the encoder must never emit a shape its own
+        # decoder rejects, under ANY combination of checksum / content-size
+        # framing options, not just the default one the original bug hit.
+        val base = default_compression_options(CompressionCodec.lz4)
+        var variants: [CompressionOptions] = []
+        variants = variants.push(base)
+        variants = variants.push(CompressionOptions(
+            base.codec, base.level, true, base.block_mode,
+            base.dictionary_bytes, base.dictionary_id, nil))
+        variants = variants.push(CompressionOptions(
+            base.codec, base.level, false, base.block_mode,
+            base.dictionary_bytes, base.dictionary_id, 0))
+        variants = variants.push(CompressionOptions(
+            base.codec, base.level, true, base.block_mode,
+            base.dictionary_bytes, base.dictionary_id, 0))
+
+        var failures = 0
+        for opts in variants:
+            val encoded = lz4_compress_frame([], opts)
+            val decoded = lz4_decompress_frame(encoded)
+            if decoded.is_err():
+                failures = failures + 1
+            else:
+                if decoded.unwrap().len() != 0:
+                    failures = failures + 1
+        expect(failures).to_equal(0)

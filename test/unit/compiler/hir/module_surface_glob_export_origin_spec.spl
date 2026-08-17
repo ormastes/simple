@@ -1,0 +1,108 @@
+"""
+# Module Surface Glob Export Origin Unit Spec
+
+Verifies that a facade's explicit glob import routes plain exports through the
+glob owner before same-package sibling inference.
+"""
+
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn glob_origin_logger() -> Logger:
+    Logger(level: 0)
+
+fn exact_glob_chain_result(reverse: bool) -> Result<ModuleSurfacesByName, text>:
+    val log = glob_origin_logger()
+    val leaf_source = "pub fn parse_int_text(value: text) -> i64:\n    1"
+    val primary_source = "export use stage4.core._ParserPrimary.asm_match_suffix.\{parse_int_text\}"
+    val legacy_source = "fn parse_int_text(value: text) -> i64:\n    2"
+    val expr_source = "use stage4.core.parser_primary.*\nexport parse_int_text"
+
+    var modules: Dict<text, Module> = {}
+    modules["stage4.core._ParserPrimary.asm_match_suffix"] = parse_full_frontend(
+        leaf_source, "stage4.core._ParserPrimary.asm_match_suffix",
+        "stage4.core._ParserPrimary.asm_match_suffix", log)
+    modules["stage4.core.parser_primary"] = parse_full_frontend(
+        primary_source, "stage4.core.parser_primary", "stage4.core.parser_primary", log)
+    modules["stage4.core.parser_asm"] = parse_full_frontend(
+        legacy_source, "stage4.core.parser_asm", "stage4.core.parser_asm", log)
+    modules["stage4.core.parser_expr"] = parse_full_frontend(
+        expr_source, "stage4.core.parser_expr", "stage4.core.parser_expr", log)
+
+    val leaf = SourceFile(
+        path: "stage4/core/_ParserPrimary/asm_match_suffix.spl", content: leaf_source,
+        module_name: "stage4.core._ParserPrimary.asm_match_suffix")
+    val primary = SourceFile(
+        path: "stage4/core/parser_primary.spl", content: primary_source,
+        module_name: "stage4.core.parser_primary")
+    val legacy = SourceFile(
+        path: "stage4/core/parser_asm.spl", content: legacy_source,
+        module_name: "stage4.core.parser_asm")
+    val expr = SourceFile(
+        path: "stage4/core/parser_expr.spl", content: expr_source,
+        module_name: "stage4.core.parser_expr")
+    val sources = if reverse:
+        [expr, legacy, leaf, primary]
+    else:
+        [primary, leaf, legacy, expr]
+    module_surfaces_from_modules(modules, sources)
+
+fn expect_exact_glob_chain(reverse: bool):
+    val result = exact_glob_chain_result(reverse)
+    expect(result.is_ok()).to_be(true)
+    if result.is_ok():
+        val surfaces = result.unwrap()
+        val facade = surfaces.surfaces[surfaces.index_by_name["stage4.core.parser_expr"]]
+        val origin = facade.export_origins["parse_int_text"]
+        expect(origin.owner_module).to_equal(
+            "stage4.core._ParserPrimary.asm_match_suffix")
+        expect(origin.source_name).to_equal("parse_int_text")
+        expect(origin.resolution_kind).to_equal("glob")
+
+describe "module surface explicit glob export origins":
+    it "routes the exact Stage 4 parser_expr export through parser_primary":
+        expect_exact_glob_chain(false)
+
+    it "routes the same delayed glob chain in reverse discovery order":
+        expect_exact_glob_chain(true)
+
+    it "fails closed when two explicit globs expose distinct terminals":
+        val log = glob_origin_logger()
+        val first_source = "pub fn shared_value() -> i64:\n    1"
+        val second_source = "pub fn shared_value() -> i64:\n    2"
+        val facade_source = "use glob.first.*\nuse glob.second.*\nexport shared_value"
+        var modules: Dict<text, Module> = {}
+        modules["glob.first"] = parse_full_frontend(
+            first_source, "glob.first", "glob.first", log)
+        modules["glob.second"] = parse_full_frontend(
+            second_source, "glob.second", "glob.second", log)
+        modules["glob.facade"] = parse_full_frontend(
+            facade_source, "glob.facade", "glob.facade", log)
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "glob/facade.spl", content: facade_source, module_name: "glob.facade"),
+            SourceFile(path: "glob/second.spl", content: second_source, module_name: "glob.second"),
+            SourceFile(path: "glob/first.spl", content: first_source, module_name: "glob.first")
+        ])
+        expect(result.is_err()).to_be(true)
+        if result.is_err():
+            expect(result.unwrap_err()).to_contain("ambiguous explicit facade export")
+
+    it "keeps a missing named import owner as an unresolved export":
+        val log = glob_origin_logger()
+        val facade_source = "use missing.owner.\{missing_value}\nexport missing_value"
+        var modules: Dict<text, Module> = {}
+        modules["missing.facade"] = parse_full_frontend(
+            facade_source, "missing.facade", "missing.facade", log)
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(
+                path: "missing/facade.spl", content: facade_source,
+                module_name: "missing.facade")
+        ])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val surfaces = result.unwrap()
+            val facade = surfaces.surfaces[surfaces.index_by_name["missing.facade"]]
+            expect(facade.export_origins.contains_key("missing_value")).to_be(false)

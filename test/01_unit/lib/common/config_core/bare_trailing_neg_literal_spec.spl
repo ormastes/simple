@@ -1,0 +1,72 @@
+# Regression: a bare trailing `-1` line must NOT fold into the previous line.
+#
+# Bug: doc/08_tracking/bug/parser_bare_trailing_neg_literal_folds_prev_line_2026-07-27.md
+# Reported symptom: `fn rank(x): if x: return 9 / <newline> -1` returned 8 for
+# x=true (the `-1` was parsed as binary minus continuing `return 9`) and nil on
+# the fallthrough path.
+#
+# This spec is a PARSE-level oracle: the fixture functions below are parsed when
+# this file is compiled, so a regression changes their observable return values
+# with no subprocess needed.
+#
+# Real-world site: src/lib/common/config_core/layers.spl `_cfg_find_char`, whose
+# miss path is exactly this shape.
+
+use std.spec.{step}
+use std.common.config_core.layers.{config_strip_inline_comment}
+
+# --- Fixtures: the exact shape from the bug report -------------------------
+
+fn rank(x: bool) -> i64:
+    if x: return 9
+    -1
+
+# The same shape where the trailing expression is itself a subtraction, so a
+# fold would produce 9 - 1 - 1 = 7 rather than the correct -2.
+fn rank_compound(x: bool) -> i64:
+    if x: return 9
+    -1 - 1
+
+# The `_cfg_find_char` shape verbatim: a while loop with an early `return i`
+# and a bare `-1` sentinel as the tail expression.
+fn find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+describe "parser — bare trailing negative literal":
+
+    describe "inline-if followed by a bare `-1` tail expression":
+        it "returns the inline-if value on the taken path, not value-minus-one":
+            step("call the fixture with the inline-if branch taken")
+            expect(rank(x: true)).to_equal(9)
+
+        it "returns the sentinel -1 on the fallthrough path, not nil":
+            step("call the fixture with the inline-if branch not taken")
+            expect(rank(x: false)).to_equal(-1)
+
+        it "keeps a compound trailing expression separate from the previous line":
+            step("`-1 - 1` must evaluate as -2, never fold into `return 9`")
+            expect(rank_compound(x: true)).to_equal(9)
+            expect(rank_compound(x: false)).to_equal(-2)
+
+    describe "the real config_core site (_cfg_find_char shape)":
+        it "returns the index on a hit":
+            step("search for a character that is present")
+            expect(find_char(s: "abc", ch: "b")).to_equal(1)
+
+        it "returns -1 on a miss instead of a folded or nil value":
+            step("search for a character that is absent")
+            expect(find_char(s: "abc", ch: "z")).to_equal(-1)
+
+    describe "the shipped caller that depends on the sentinel":
+        it "leaves a value with no inline comment untouched":
+            step("config_strip_inline_comment relies on the -1 miss sentinel")
+            expect(config_strip_inline_comment("true")).to_equal("true")
+
+        it "strips an inline comment when the sentinel search hits":
+            step("a `#` present must be found, not reported as a miss")
+            expect(config_strip_inline_comment("true   # note")).to_equal("true")

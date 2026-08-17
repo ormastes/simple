@@ -1,0 +1,81 @@
+## Source contract for the two bootstrap/native-build CLI entrypoints.
+##
+## These two files are the parent wrappers for every `native-build` invocation
+## in the bootstrap lanes. Their real end-to-end behaviour can only be observed
+## by running a full bootstrap, so the invariants that are cheap to break and
+## expensive to notice are pinned here as SOURCE contracts instead.
+##
+## Each assertion below corresponds to a claim in a `doc/08_tracking/bug/`
+## record; a change that silently reintroduces the old shape turns this spec
+## red instead of surfacing 20 minutes into a bootstrap.
+
+use std.spec
+use std.io_runtime.{file_read}
+
+fn seed_wrapper_marker(src: text) -> text:
+    ## Markers that would indicate the entry generates a Rust-seed wrapper or a
+    ## ret-0 stub as a "successful" artifact (bug
+    ## bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17).
+    if src.contains("compiler_rust"):
+        return "compiler_rust"
+    if src.contains("execv"):
+        return "execv"
+    if src.contains("SIMPLE_BOOTSTRAP_SEED"):
+        return "SIMPLE_BOOTSTRAP_SEED"
+    if src.contains("ret i64 0"):
+        return "ret i64 0"
+    "ok"
+
+describe "native-build / bootstrap CLI entry source contract":
+
+    it "never injects an execution mode into the worker argv":
+        ## baremetal_entry_closure_class_instantiation_fault_2026-07-06 recorded
+        ## that run_native_build_worker appended `--mode=interpreter` to the
+        ## worker argv, which the worker's own parser then rejected. The mode is
+        ## now carried by the SIMPLE_EXECUTION_MODE environment variable only.
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src.contains("--mode=interpreter")).to_equal(false)
+        expect(src).to_contain("env_set(\"SIMPLE_EXECUTION_MODE\", \"interpret\")")
+
+    it "keeps the rerun-diagnostics hint reachable from a failing worker":
+        ## bootstrap_logging_diagnostics_2026-07-07: a nil `.id` failure must
+        ## tell the operator which env vars re-run it with phase/function names.
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1")
+        expect(src).to_contain("undefined field 'id'")
+        expect(src).to_contain("native_build_print_failure_hints(stdout, stderr)")
+
+    it "preserves diagnostics across stderr truncation":
+        ## A head+tail truncation drops the middle, so a `grep -c` over the
+        ## relayed stderr can report 0 for a diagnostic that actually fired.
+        ## Every diagnostic line from the FULL stream must be re-emitted.
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("fn native_build_collect_diagnostics(output: text) -> [text]:")
+        expect(src).to_contain("BEGIN PRESERVED DIAGNOSTICS")
+        expect(src).to_contain("NATIVE-BUILD STDERR TRUNCATED")
+
+    it "treats a zero exit with no output binary as a hard failure":
+        ## The silent-wrong-result shape for this lane: worker chain dies in a
+        ## way that still exits 0 and the caller proceeds with a stale binary.
+        val src = file_read("src/app/cli/native_build_main.spl")
+        expect(src).to_contain("exited 0 but produced no output binary")
+
+    it "never reports in-process native-build success without a real artifact":
+        ## bootstrap_main's compile() could fall through with no mode matched,
+        ## return Success, emit nothing, and exit 0. Both in-process lanes must
+        ## assert the artifact exists AND is not a stub.
+        val src = file_read("src/app/cli/bootstrap_main.spl")
+        expect(src).to_contain("error: in-process native-build reported success without creating")
+        expect(src).to_contain("error: in-process native-build produced a stub artifact")
+        expect(src).to_contain("error: in-process SMF compile reported success without creating")
+        expect(src).to_contain("error: in-process SMF compile produced a stub artifact")
+
+    it "keeps the cli_mode_text override on both in-process compile lanes":
+        ## The enum `options.mode` does not survive struct transport into a
+        ## COMPILED stage2 driver; cli_mode_text is what makes the lane work.
+        val src = file_read("src/app/cli/bootstrap_main.spl")
+        expect(src).to_contain("options.cli_mode_text = \"aot\"")
+
+    it "keeps bootstrap_main free of seed-wrapper artifact generation":
+        val src = file_read("src/app/cli/bootstrap_main.spl")
+        expect(seed_wrapper_marker(src)).to_equal("ok")

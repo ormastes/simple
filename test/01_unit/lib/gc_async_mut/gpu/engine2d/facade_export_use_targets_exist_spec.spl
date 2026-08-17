@@ -1,0 +1,112 @@
+# DETECTION spec for the defect CLASS: dangling `export use` facade targets.
+#
+# Bug family: doc/08_tracking/bug/gc_async_mut_gpu_ffi_facades_are_dangling_2026-08-09.md
+#
+# A facade module is one line of `export use std.<path>.*`. If `<path>` names a
+# module that does not exist on disk, the compiler emits only a WARNING — the
+# facade compiles clean and silently exports NOTHING. Every consumer then fails
+# far away with `E1002 not found` (or a JIT NULL-jump deferral), with no hint
+# that the facade is the cause. That is a silently-wrong-result defect: a green
+# build over an empty public API.
+#
+# The reproducing spec pins the two vendors that were broken. This spec
+# generalises: it walks EVERY `.spl` under src/lib/gc_async_mut/gpu/engine2d/
+# and, for each `export use std.<dotted.path>` it finds, resolves the dotted
+# path back to a file (`<path>.spl` or `<path>/__init__.spl`) under src/lib/ and
+# asserts the file exists. A newly added facade pointing at a nonexistent
+# module fails here without anyone remembering to extend a hand-written list.
+#
+# Run: bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/facade_export_use_targets_exist_spec.spl
+
+use std.spec.{describe, context, it, assert_true, assert_equal}
+use std.io_runtime.{read_file, file_exists, dir_list}
+
+val LIB_ROOT = "src/lib/"
+val FACADE_DIR = "src/lib/gc_async_mut/gpu/engine2d/"
+
+# "std.a.b.c" -> "src/lib/a/b/c"  (the leading `std` maps onto src/lib/)
+fn std_path_to_fs(dotted: str) -> str:
+    var rest = dotted
+    if rest.starts_with("std."):
+        rest = rest.substring(4, rest.len())
+    var out = ""
+    var i = 0
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch == ".":
+            out = out + "/"
+        else:
+            out = out + ch
+        i = i + 1
+    LIB_ROOT + out
+
+fn module_resolves(dotted: str) -> bool:
+    val base = std_path_to_fs(dotted)
+    file_exists(base + ".spl") or file_exists(base + "/__init__.spl")
+
+# Extract the dotted module path from an `export use std.x.y.{...}` /
+# `export use std.x.y.*` line. Returns "" when the line is not such a use.
+fn export_use_target(line: str) -> str:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("export use std."):
+        return ""
+    var rest = trimmed.substring(11, trimmed.len())   # drop "export use "
+    # cut at the first delimiter that ends the module path
+    var i = 0
+    var out = ""
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch == " " or ch == "{" or ch == "\t":
+            i = rest.len()
+        else:
+            out = out + ch
+            i = i + 1
+    # strip a trailing ".*" or "."
+    if out.ends_with(".*"):
+        out = out.substring(0, out.len() - 2)
+    if out.ends_with("."):
+        out = out.substring(0, out.len() - 1)
+    out
+
+fn dangling_targets_in(path: str) -> [str]:
+    var bad: [str] = []
+    val text = read_file(path)
+    for line in text.split("\n"):
+        val target = export_use_target(line)
+        if target != "":
+            if not module_resolves(target):
+                bad.push(path + " -> " + target)
+    bad
+
+describe "no gc_async_mut engine2d facade re-exports a module that does not exist":
+
+    context "self-check of the resolver (guards against a vacuous green)":
+
+        it "resolves a module that is known to exist":
+            assert_true(module_resolves("std.nogc_sync_mut.gpu.engine2d.sffi_cuda"))
+
+        it "rejects a module that is known NOT to exist":
+            assert_true(not module_resolves("std.nogc_async_mut.gpu.engine2d.ffi_cuda"))
+
+        it "parses an export-use line into its dotted target":
+            assert_equal(
+                export_use_target("export use std.a.b.c.*"),
+                "std.a.b.c")
+
+    context "every facade in the engine2d directory":
+
+        it "has zero dangling export-use targets":
+            var dangling: [str] = []
+            var scanned = 0
+            for name in dir_list(FACADE_DIR):
+                if name.ends_with(".spl"):
+                    scanned = scanned + 1
+                    for bad in dangling_targets_in(FACADE_DIR + name):
+                        dangling.push(bad)
+            # non-vacuity: an empty scan must never read as a pass
+            assert_true(scanned > 0)
+            if dangling.len() > 0:
+                print("dangling export-use targets:")
+                for d in dangling:
+                    print("  " + d)
+            assert_equal(dangling.len(), 0)

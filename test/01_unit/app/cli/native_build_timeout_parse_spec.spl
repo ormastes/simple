@@ -1,0 +1,40 @@
+use std.spec
+use app.cli.native_build_main.{native_build_parse_secs, native_build_timeout_ms}
+
+# Reproducing spec for
+# doc/08_tracking/bug/native_build_worker_timeout_misaccounted_2026-08-09.md
+#
+# Root cause: native_build_main.spl's digit accumulator did
+#   n = n * 10 + int(ch)
+# but `int(ch)` on a ONE-CHARACTER text returns the CHARACTER CODE, not the
+# digit value (measured: int("0") == 48, int("7") == 55, int("9") == 57).
+# So `--timeout 7` parsed as 55 seconds and `--timeout 600` parsed as 5928
+# seconds. The parse succeeds, no error is printed, exit code is 0 -- the
+# worker is simply killed at a budget nobody asked for. A silent wrong result.
+
+describe "native-build --timeout is accounted in the seconds the user asked for":
+    it "parses a single digit as its VALUE, not its character code":
+        # Pre-fix this returned 55 (the ASCII code of "7").
+        expect(native_build_parse_secs("7")).to_equal(7)
+
+    it "parses a multi-digit budget without character-code contamination":
+        # Pre-fix "600" accumulated to 5928.
+        expect(native_build_parse_secs("600")).to_equal(600)
+        expect(native_build_parse_secs("7200")).to_equal(7200)
+
+    it "still rejects a non-numeric budget":
+        expect(native_build_parse_secs("nope")).to_equal(-1)
+        expect(native_build_parse_secs("-1")).to_equal(-1)
+        expect(native_build_parse_secs("12x")).to_equal(-1)
+
+    it "converts the separated --timeout form to the right millisecond budget":
+        expect(native_build_timeout_ms(["--timeout", "7"])).to_equal(7000)
+        expect(native_build_timeout_ms(["--timeout", "600"])).to_equal(600000)
+        expect(native_build_timeout_ms(["--timeout", "7200"])).to_equal(7200000)
+
+    it "converts the inline --timeout= form to the right millisecond budget":
+        expect(native_build_timeout_ms(["--timeout=7"])).to_equal(7000)
+        expect(native_build_timeout_ms(["--timeout=600"])).to_equal(600000)
+
+    it "keeps the budget correct when --timeout follows other flags":
+        expect(native_build_timeout_ms(["--entry", "a.spl", "-o", "out", "--timeout", "90"])).to_equal(90000)

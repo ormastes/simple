@@ -1,0 +1,86 @@
+# Similar-problem DETECTION spec for the defect class behind
+# doc/08_tracking/bug/generator_take_returns_empty_after_name_collision_fix_2026-08-17.md
+#
+# The CLASS is: a stdlib function whose body is a well-typed placeholder that
+# satisfies the return type while discarding all of its inputs -- `-> [T]` whose
+# body is `[]`, or `-> Iterator<T>` whose body is the untouched argument. These
+# compile clean, exit 0, and hand back a wrong answer with no diagnostic. Both
+# iter_collect and iter_take were exactly this, and no spec noticed because the
+# only spec in the tree grepped the source text for identifier names.
+#
+# Two independent nets below:
+#   1. BEHAVIOURAL -- every pipeline must be observably driven by its inputs,
+#      i.e. changing an input must change the output. A stub cannot pass this.
+#   2. STRUCTURAL  -- no function in src/lib/common/iterator/ may have a body
+#      that is a bare empty-collection literal or a bare echo of its parameter,
+#      which catches the next stub added to these files.
+
+use std.iterator.create.{iter_from_function}
+use std.iterator.transform.{iter_take}
+use std.iterator.reduce.{iter_collect}
+
+describe "iterator pipeline is not a silent stub":
+
+    it "iter_collect output length tracks the requested bound":
+        # A stub returning [] gives 0 for all three; identity iter_take gives
+        # the same number for all three. Only a real implementation varies.
+        val one = iter_collect(iter_take(iter_from_function(0, fn(n): (n + 1, true)), 1))
+        val three = iter_collect(iter_take(iter_from_function(0, fn(n): (n + 1, true)), 3))
+        val seven = iter_collect(iter_take(iter_from_function(0, fn(n): (n + 1, true)), 7))
+
+        expect(one.len()).to_equal(1)
+        expect(three.len()).to_equal(3)
+        expect(seven.len()).to_equal(7)
+
+    it "iter_collect output values track the step function":
+        # Same bound, different step: the CONTENTS must differ, so a stub that
+        # merely returns the right COUNT of something still fails here.
+        val inc = iter_collect(iter_take(iter_from_function(0, fn(n): (n + 1, true)), 3))
+        val dbl = iter_collect(iter_take(iter_from_function(1, fn(n): (n * 2, true)), 3))
+
+        expect(inc[0]).to_equal(0)
+        expect(inc[1]).to_equal(1)
+        expect(inc[2]).to_equal(2)
+        expect(dbl[0]).to_equal(1)
+        expect(dbl[1]).to_equal(2)
+        expect(dbl[2]).to_equal(4)
+
+    it "iter_collect output values track the initial state":
+        val from_zero = iter_collect(iter_take(iter_from_function(0, fn(n): (n + 1, true)), 2))
+        val from_ten = iter_collect(iter_take(iter_from_function(10, fn(n): (n + 1, true)), 2))
+
+        expect(from_zero[0]).to_equal(0)
+        expect(from_ten[0]).to_equal(10)
+
+    it "iter_take actually narrows and is not the identity function":
+        # The identity stub would let the inner bound of 2 be overwritten by 5.
+        val nested = iter_collect(iter_take(iter_take(iter_from_function(0, fn(n): (n + 1, true)), 2), 5))
+
+        expect(nested.len()).to_equal(2)
+
+    it "the should_continue flag terminates the pipeline":
+        # An unbounded collect must honour the step function saying stop, rather
+        # than running to the safety cap or returning nothing.
+        val bounded_by_flag = iter_collect(iter_from_function(0, fn(n): (n + 1, n < 2)))
+
+        expect(bounded_by_flag.len()).to_equal(3)
+
+    it "no iterator stdlib function has a placeholder body":
+        val files = [
+            "src/lib/common/iterator/create.spl",
+            "src/lib/common/iterator/transform.spl",
+            "src/lib/common/iterator/reduce.spl"
+        ]
+        var i = 0
+        while i < files.len():
+            val src = rt_file_read_text(files[i])
+
+            # `-> [T]:` followed by a docstring and then a bare `[]` was the
+            # exact shape of the iter_collect stub.
+            expect(src).to_not_contain("\n    []\n")
+            # `-> Iterator<T>:` whose whole body is the parameter was the exact
+            # shape of the iter_take stub.
+            expect(src).to_not_contain("\n    iter\n")
+            i = i + 1
+
+extern fn rt_file_read_text(path: text) -> text

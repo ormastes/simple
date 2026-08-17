@@ -1,0 +1,60 @@
+# Run-path probe: EVERY rt_process_* extern that real `.spl` callers declare
+# must be resolvable by the interpreter's extern dispatch table.
+#
+# Similar-problem DETECTION probe for the defect CLASS behind
+# doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+#
+# The class is: a runtime function that EXISTS in src/runtime/runtime_process.c
+# and is declared `extern fn` by shipping Simple code, but was never added to
+# `interpreter_extern/mod.rs`. Nothing links the two lists, so the omission is
+# invisible until an interpreted program touches the name and dies with
+# `error: semantic: unknown extern function: <name>`.
+#
+# Five names (the whole piped sub-family) were missing simultaneously and were
+# found one at a time. This probe names the entire surface at once, so the next
+# unregistered member fails here instead of shipping.
+#
+# NOTE ON MECHANISM: an unregistered extern is rejected at SEMANTIC analysis,
+# which kills the whole file before any statement runs. That is exactly why the
+# verdict line is at the END -- its ABSENCE is the failure signal, and the
+# compiler error names the offending symbol on stderr.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i64)
+extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
+extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
+extern fn rt_process_read_stdout(pid: i64) -> text
+extern fn rt_process_is_alive(pid: i64) -> bool
+extern fn rt_process_close_piped(pid: i64) -> bool
+
+fn main():
+    # Every name below is CALLED, not merely declared -- a call is what forces
+    # dispatch-table resolution. Args are harmless (/bin/true, unused pids).
+    val r = rt_process_run("/bin/true", [])
+    print("RESOLVED rt_process_run exit=" + r.2.to_string())
+    print("RESOLVED rt_process_run_inherit exit=" + rt_process_run_inherit("/bin/true", []).to_string())
+    val t = rt_process_run_timeout("/bin/true", [], 5000)
+    print("RESOLVED rt_process_run_timeout exit=" + t.2.to_string())
+    val b = rt_process_run_bounded("/bin/true", [], 5000, 4096)
+    print("RESOLVED rt_process_run_bounded exit=" + b.2.to_string())
+
+    val apid = rt_process_spawn_async("/bin/true", [])
+    print("RESOLVED rt_process_spawn_async pid_positive=" + (apid > 0).to_string())
+    print("RESOLVED rt_process_wait exit=" + rt_process_wait(apid, 5000).to_string())
+    print("RESOLVED rt_process_kill=" + rt_process_kill(apid).to_string())
+    print("RESOLVED rt_process_is_running=" + rt_process_is_running(apid).to_string())
+
+    val ppid = rt_process_spawn_piped("/bin/cat", [])
+    print("RESOLVED rt_process_spawn_piped pid_positive=" + (ppid > 0).to_string())
+    print("RESOLVED rt_process_write_stdin=" + rt_process_write_stdin(ppid, "x\n").to_string())
+    print("RESOLVED rt_process_read_stdout len_nonneg=" + (rt_process_read_stdout(ppid).len() >= 0).to_string())
+    print("RESOLVED rt_process_is_alive=" + rt_process_is_alive(ppid).to_string())
+    print("RESOLVED rt_process_close_piped=" + rt_process_close_piped(ppid).to_string())
+
+    print("PROCESS EXTERN REGISTRATION PROBE: ALL 13 RESOLVED")

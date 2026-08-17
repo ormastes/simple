@@ -1,0 +1,52 @@
+use std.spec.{describe, it, assert_equal}
+use lib.yaml.types.{yaml_null, yaml_boolean, yaml_number, yaml_string,
+    yaml_sequence, yaml_mapping}
+use lib.yaml.types.{is_yaml_null, is_yaml_boolean, is_yaml_number,
+    is_yaml_string, is_yaml_sequence, is_yaml_mapping}
+use lib.yaml.parse.{yaml_parse, yaml_parse_block, yaml_parse_scalar,
+    yaml_parse_flow_sequence, yaml_parse_flow_mapping}
+
+# Similar-problem DETECTION spec for the class behind
+# doc/08_tracking/bug/common_encoding_yaml_broken_cross_submodule_import_2026-07-20.md
+#
+# Class: a lib function that RETURNS A TUPLE but carries no return-type
+# annotation loses its tuple shape at the call site -- the caller's `.0`
+# reads back as nil instead of the tag. Every yaml value is a tagged
+# ("tag", payload) tuple, so a single unannotated constructor silently
+# breaks every consumer downstream of it. This spec pins the tag of every
+# constructor AND of every parser that forwards one, so a re-introduced
+# missing annotation anywhere in the chain goes red here.
+
+describe "yaml node constructors keep their tuple tag across the call boundary":
+    it "constructors expose .0 as the tag":
+        assert_equal(yaml_null().0, "null")
+        assert_equal(yaml_boolean(true).0, "boolean")
+        assert_equal(yaml_number("42").0, "number")
+        assert_equal(yaml_string("hi").0, "string")
+        assert_equal(yaml_sequence([]).0, "sequence")
+        assert_equal(yaml_mapping([]).0, "mapping")
+
+    it "tag predicates agree with the raw tag":
+        assert_equal(is_yaml_null(yaml_null()), true)
+        assert_equal(is_yaml_boolean(yaml_boolean(true)), true)
+        assert_equal(is_yaml_number(yaml_number("42")), true)
+        assert_equal(is_yaml_string(yaml_string("hi")), true)
+        assert_equal(is_yaml_sequence(yaml_sequence([])), true)
+        assert_equal(is_yaml_mapping(yaml_mapping([])), true)
+
+describe "yaml parsers forward the tuple tag intact":
+    it "scalar parsers tag their result":
+        assert_equal(yaml_parse_scalar("42").0, "number")
+        assert_equal(yaml_parse_scalar("hi").0, "string")
+
+    it "flow parsers tag their result":
+        assert_equal(yaml_parse_flow_sequence("[a, b]").0, "sequence")
+        assert_equal(yaml_parse_flow_mapping("{name: Alice}").0, "mapping")
+
+    it "block parser tags its result":
+        assert_equal(yaml_parse_block("name: Alice\nage: 30").0, "mapping")
+
+    it "top-level parse tags its result":
+        assert_equal(yaml_parse("name: Alice\nage: 30").0, "mapping")
+        assert_equal(yaml_parse("[a, b]").0, "sequence")
+        assert_equal(yaml_parse("").0, "null")

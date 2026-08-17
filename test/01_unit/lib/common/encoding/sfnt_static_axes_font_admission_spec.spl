@@ -1,0 +1,76 @@
+# Static-axes font admission — host reproduction of a guest-only rejection
+#
+# doc/08_tracking/bug/simpleos_static_axes_fonts_rejected_by_selected_asset_validation_2026-08-09.md
+#
+# That report was filed with its root cause explicitly marked "READ-DERIVED AND
+# UNVERIFIED (nothing was executed for this filing)", and its only evidence was a
+# line printed inside a booted SimpleOS guest:
+#
+#   [desktop-gui] font register accepted=1 catalog_complete=0 registered=14/16
+#     unregistered=Bungee=rejected:118996B,UnifrakturCook=rejected:42688B
+#
+# Both assets are present on the HOST at the byte lengths the guest reported, and
+# the refusing validator (std.common.encoding.sfnt) is pure Simple. So the
+# admission decision can be driven directly here, with no QEMU boot and no
+# desktop lane — which is the point of this spec: it converts a QEMU-only,
+# unverified row into a host-reproducible one that any lane can run.
+#
+# The report's stated hypothesis is that `default_axes == "static"` is what gets
+# these two rejected. Reading the validator, that hypothesis does not survive:
+# sfnt_manifest_default_axes_match returns `manifest == "static"` for any font
+# with no `fvar` table, i.e. it ACCEPTS exactly the static case. These
+# assertions pin which stage actually decides, so the next lane to look does not
+# have to re-derive it.
+
+use std.spec.*
+use std.common.encoding.sfnt.{parse_offset_table, validate_default_glyf_font, validate_glyf_font_instance, sfnt_manifest_default_axes_match}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val BUNGEE = "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+val UNIFRAKTUR = "assets/fonts/google-fonts/ofl/unifrakturcook/UnifrakturCook-Bold.ttf"
+
+describe "the two pinned static-axes faces are readable at their catalog sizes":
+
+    it "Bungee-Regular.ttf is present at 118996 bytes":
+        expect(file_read_bytes(BUNGEE).len()).to_equal(118996)
+
+    it "UnifrakturCook-Bold.ttf is present at 42688 bytes":
+        expect(file_read_bytes(UNIFRAKTUR).len()).to_equal(42688)
+
+describe "static-axes faces parse as sfnt":
+
+    it "Bungee has a parseable offset table":
+        expect(parse_offset_table(file_read_bytes(BUNGEE)) == None).to_equal(false)
+
+    it "UnifrakturCook has a parseable offset table":
+        expect(parse_offset_table(file_read_bytes(UNIFRAKTUR)) == None).to_equal(false)
+
+describe "the axes manifest is NOT what rejects them":
+    """The report blamed default_axes == "static". A font with no fvar table is
+    exactly the case sfnt_manifest_default_axes_match accepts, so this leg must
+    pass — if it ever fails, the report's hypothesis was right after all and the
+    fix belongs in the axes matcher."""
+
+    it "Bungee matches the \"static\" axes manifest":
+        expect(sfnt_manifest_default_axes_match(file_read_bytes(BUNGEE), "static")).to_equal(true)
+
+    it "UnifrakturCook matches the \"static\" axes manifest":
+        expect(sfnt_manifest_default_axes_match(file_read_bytes(UNIFRAKTUR), "static")).to_equal(true)
+
+describe "full admission decision — the actual contract the desktop lane needs":
+    """These are the legs that correspond to the guest's `rejected:<n>B`. They
+    are asserted POSITIVE because a pinned catalog face is supposed to be
+    admissible; a RED here is the real defect reproduced on the host, and the
+    `reason` string names the stage that refused."""
+
+    it "Bungee passes default-glyf format validation":
+        expect(validate_default_glyf_font(file_read_bytes(BUNGEE)).supported).to_equal(true)
+
+    it "UnifrakturCook passes default-glyf format validation":
+        expect(validate_default_glyf_font(file_read_bytes(UNIFRAKTUR)).supported).to_equal(true)
+
+    it "Bungee is admitted as a static instance":
+        expect(validate_glyf_font_instance(file_read_bytes(BUNGEE), "static").supported).to_equal(true)
+
+    it "UnifrakturCook is admitted as a static instance":
+        expect(validate_glyf_font_instance(file_read_bytes(UNIFRAKTUR), "static").supported).to_equal(true)

@@ -1,0 +1,43 @@
+# Regression spec for js_engine_ternary_and_statement_split_2026-07-11
+# Defect 1: `_js_parser_expression` had no conditional (`?:`) production, so
+# `5 < 2 ? 1 : 2` parsed as the bare comparison and the `? 1 : 2` tail was
+# silently discarded (evaluating to `false` instead of `2`).
+# Defect 2 (detection): a statement following a construct-closing `}` with no
+# `;` must still run.
+use std.nogc_sync_mut.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn eval_str(src: text) -> text:
+    var rt = js_runtime_with_default_logger("ternary-spec")
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Number(v: n): n.to_text()
+                JsValue.Boolean(v: b): if b: "true" else: "false"
+                JsValue.Undefined: "<undefined>"
+                _: "<other>"
+        Err(e):
+            "<err>"
+
+describe "JS subset parser conditional expressions":
+    it "evaluates a false-branch ternary": # @req: js_engine_ternary_and_statement_split_2026-07-11
+        expect(eval_str("var x = 5 < 2 ? 1 : 2; x")).to_equal("2")
+
+    it "evaluates a true-branch ternary":
+        expect(eval_str("var x = 2 < 5 ? 1 : 2; x")).to_equal("1")
+
+    it "gives the ternary lower precedence than arithmetic":
+        expect(eval_str("var x = 1 + 1 ? 10 + 1 : 20 + 2; x")).to_equal("11")
+
+    it "handles a nested ternary in the alternate position":
+        expect(eval_str("var x = 0 ? 1 : 0 ? 2 : 3; x")).to_equal("3")
+
+    it "handles a nested ternary in the consequent position":
+        expect(eval_str("var x = 1 ? 0 ? 7 : 8 : 9; x")).to_equal("8")
+
+    it "does not mistake optional chaining or nullish coalescing for a ternary":
+        expect(eval_str("var x = null ?? 5; x")).to_equal("5")
+
+    it "still evaluates a statement after a construct-closing brace":
+        expect(eval_str("function f(x) { return x + 1 } f(3)")).to_equal("4")

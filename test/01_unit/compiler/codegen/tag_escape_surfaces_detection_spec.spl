@@ -1,0 +1,119 @@
+# SIMILAR-PROBLEM DETECTION spec — the untagged-word-escape defect CLASS.
+#
+# The filed bug
+# (doc/08_tracking/bug/jit_packed_bitfield_field_read_returns_nil_2026-08-10.md)
+# reported exactly ONE surface: `print "{s.ready}"` showing `nil`. That framing
+# is too narrow. The real class is:
+#
+#   a scalar DERIVED from a heap/user-typed receiver keeps the receiver's TypeId
+#   stamp (`build_vreg_types` takes a BinOp dest's type from its LEFT operand),
+#   so every "box only if scalar" site downstream skips tagging and a RAW machine
+#   word reaches a consumer that expects a tagged RuntimeValue.
+#
+# The low 3 bits are then re-read as a type tag, and the failure mode depends on
+# the VALUE, which is why one-instance reporting keeps under-counting it:
+#   & 7 == 0 -> boxed int, silently DIVIDED BY 8   (8 reads back as 1)
+#   & 7 == 1 -> heap pointer  -> "<invalid-heap:0x9>"
+#   & 7 == 2 -> inline float  -> a denormal
+#   & 7 == 3 -> nil          -> "nil"     <- the only case ever filed
+#   else                     -> "<value:0x5>"
+#
+# This spec drives `probe_tag_escape_surfaces_jit.spl`, which walks the OTHER
+# consumer surfaces of the same derived value — comparison, arithmetic, argument
+# passing, return values, ARRAY ELEMENTS, a u64 backing store, and one value per
+# residue class. It earned its place immediately: on the unfixed binary the
+# array-element checks came back with genuinely WRONG VALUES (`[f.b, f.c, f.d]`
+# read back as 0 / 1 / 37 instead of 5 / 8 / 300) — silent data corruption, not
+# a formatting artifact, and a surface the reproducing spec never touched.
+#
+# WHY A SUBPROCESS: a spec body runs on the tree-walk INTERPRETER, which is
+# correct throughout this class. Only a cross-engine subprocess run can go red.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_tag_escape_surfaces_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "no derived scalar escapes untagged into a tagged consumer":
+    it "keeps every surface correct on the interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter is the control: it is correct across this whole class, so a red here means the probe or harness is broken")
+        expect(interp).to_contain("TAG_ESCAPE_SURFACES PROBE: ALL PASS")
+
+        step("Anti-vacuity: the probe must have reached its last check group, not exited early")
+        expect(interp).to_contain("PASS residue7_is_15")
+
+    it "keeps a derived scalar intact when it is STORED, not just printed":
+        step("Run under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("An array slot is a genuinely tagged slot — an untagged store corrupts the VALUE, which no amount of formatter fixing would catch")
+        expect(jit).to_contain("PASS array_elem0_is_5")
+        expect(jit).to_contain("PASS array_elem1_is_8")
+        expect(jit).to_contain("PASS array_elem2_is_300")
+
+    it "keeps a derived scalar intact across call and return boundaries":
+        step("Run under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("Argument slots")
+        expect(jit).to_contain("PASS arg_pass_b_is_5")
+        expect(jit).to_contain("PASS arg_pass_c_is_8")
+
+        step("Return slot")
+        expect(jit).to_contain("PASS return_b_is_5")
+
+        step("Arithmetic on the derived value, then formatted")
+        expect(jit).to_contain("PASS arith_b_plus_c_is_13")
+
+        step("Comparison against a literal — an anti-vacuity control that is green in BOTH states; a red here means the underlying value itself is corrupt")
+        expect(jit).to_contain("PASS compare_b_is_5")
+
+    it "covers every low-3-bit residue class, not just the nil one":
+        step("Run under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("residue 3 is the only bucket the original bug report ever observed; the other seven decode to different, equally silent wrong answers")
+        expect(jit).to_contain("PASS residue0_is_8")
+        expect(jit).to_contain("PASS residue1_is_9")
+        expect(jit).to_contain("PASS residue2_is_10")
+        expect(jit).to_contain("PASS residue3_is_11")
+        expect(jit).to_contain("PASS residue4_is_12")
+        expect(jit).to_contain("PASS residue5_is_13")
+        expect(jit).to_contain("PASS residue6_is_14")
+        expect(jit).to_contain("PASS residue7_is_15")
+
+        step("A u64 backing store takes a different boxing path and is a separate chance to forget the tag")
+        expect(jit).to_contain("PASS u64_bitfield_lo_is_9")
+        expect(jit).to_contain("PASS u64_bitfield_hi_is_17")
+
+    it "shows no tag-decode signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("A raw word read as a heap pointer or an unknown tag renders with a marker")
+        expect(jit.contains("<value:0x")).to_equal(false)
+        expect(jit.contains("<invalid-heap:0x")).to_equal(false)
+        expect(interp.contains("<value:0x")).to_equal(false)
+        expect(interp.contains("<invalid-heap:0x")).to_equal(false)
+
+        step("A raw word read as an inline float renders as a sub-normal double")
+        expect(jit.contains("0.0000000000000000000")).to_equal(false)
+        expect(interp.contains("0.0000000000000000000")).to_equal(false)
+
+        step("The aggregate verdict, and no failing check, under either engine")
+        expect(jit).to_contain("TAG_ESCAPE_SURFACES PROBE: ALL PASS")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

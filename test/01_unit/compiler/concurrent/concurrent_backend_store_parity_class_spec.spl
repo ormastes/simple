@@ -1,0 +1,140 @@
+"""
+# One value, one store: the concurrent-backend degradation class
+
+**Category:** Interpreter concurrency bridge (similar-problem detection)
+**Bugs:**
+- doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md
+- doc/08_tracking/bug/native_concurrent_backend_spawn_not_backend_aware_join_is_2026-08-04.md
+
+## Overview
+
+Those two bugs were filed nine days apart against different files and read as
+unrelated. They are the same fault: **a concurrent operation whose halves
+disagree about where the value lives, degrading silently instead of failing.**
+
+| filed as | the disagreement |
+|---|---|
+| Mutex/RwLock null `text` | `value_to_runtime` handled Int/Float/Bool and mapped everything else to `RuntimeValue::NIL` — the value went into the runtime object and could not come back out |
+| native `spawn`/`join` mismatch | `spawn` had no backend branch and wrote `THREAD_RESULTS`; `join` had one and read the native provider — write store and read store were different objects |
+
+Neither raised an error. The first returned `nil`, the second returned `nil`,
+and the pure_std join miss even defaulted to `Value::Int(0)` — three different
+silent substitutes for "I lost your value".
+
+The single-shape reproducing specs
+(`lock_value_fidelity_pure_std_spec.spl`, `spawn_join_backend_store_spec.spl`)
+pin the two observed cases. This spec sweeps the class, so a fix that repairs
+only the observed shapes cannot pass:
+
+| axis | members |
+|---|---|
+| value type | `text`, `i64`, `bool`, `f64`, array — the reported bug only nulled non-primitives, so primitives are the controls |
+| primitive | Mutex, RwLock, thread spawn/join |
+| backend | `pure_std` (the default) and `native` — the two bugs each broke exactly one, in opposite directions |
+
+## Why a subprocess
+
+`rt_set_concurrent_backend` mutates a **process-global** registry. Flipping it
+inside the shared spec-runner process would change Map/Channel/Thread behaviour
+for every other spec in the same run — the reason the 2026-07-28 report
+explicitly declined to apply the `native` backend as a workaround. The sweep
+therefore runs in a child process, and the fixture is driven through the
+tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`), which is the only
+engine that reaches `interpreter_extern/`; `run` alone is the Cranelift JIT and
+would make this spec vacuous.
+
+## Oracle
+
+Every expected value is a distinct literal, and none is `nil` or `0` — the two
+values the defects substituted. Assertions compare against those literals, never
+against a second value that travelled the same path, because under the defects
+both sides were `nil` and would have compared equal.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation in the embedded source — a `{name}` inside this
+# spec's own string literal is resolved by the SPEC's lexer and kills the file
+# with `zero-examples` before any example runs.
+val SWEEP_SOURCE: text = ("extern fn rt_mutex_new(initial: Any) -> Any\n" +
+    "extern fn rt_mutex_lock(m: Any) -> Any\n" +
+    "extern fn rt_rwlock_new(initial: Any) -> Any\n" +
+    "extern fn rt_rwlock_read(l: Any) -> Any\n" +
+    "extern fn rt_thread_spawn_isolated(closure: Any) -> i64\n" +
+    "extern fn rt_thread_join(handle: i64) -> Any\n" +
+    "extern fn rt_set_concurrent_backend(name: text)\n" +
+    "extern fn rt_get_concurrent_backend() -> text\n" +
+    "\n" +
+    "fn sweep(tag: text):\n" +
+    "    print(tag)\n" +
+    "    print(rt_get_concurrent_backend())\n" +
+    "    print(rt_mutex_lock(rt_mutex_new(\"mtext\")))\n" +
+    "    print(rt_mutex_lock(rt_mutex_new(41)))\n" +
+    "    print(rt_mutex_lock(rt_mutex_new(true)))\n" +
+    "    print(rt_mutex_lock(rt_mutex_new(2.5)))\n" +
+    "    print(rt_rwlock_read(rt_rwlock_new(\"rtext\")))\n" +
+    "    print(rt_rwlock_read(rt_rwlock_new(43)))\n" +
+    "    print(rt_thread_join(rt_thread_spawn_isolated(\\: 47)))\n" +
+    "    print(rt_thread_join(rt_thread_spawn_isolated(\\: \"stext\")))\n" +
+    "\n" +
+    "fn main():\n" +
+    "    rt_set_concurrent_backend(\"pure_std\")\n" +
+    "    sweep(\"SWEEP-PURESTD\")\n" +
+    "    rt_set_concurrent_backend(\"native\")\n" +
+    "    sweep(\"SWEEP-NATIVE\")\n" +
+    "    rt_set_concurrent_backend(\"pure_std\")\n" +
+    "    print(\"END\")\n")
+
+# Each backend's block, in the fixed print order of `sweep`. A wrong value in
+# any slot breaks the contiguous match, so one assertion covers the whole row.
+val EXPECTED_ROW: text = ("mtext\n41\ntrue\n2.5\nrtext\n43\n47\nstext")
+
+fn run_sweep() -> text:
+    val dir = "build/test-artifacts/concurrent_backend_store_parity"
+    val src = dir + "/sweep_fixture.spl"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir])
+    file_write(src, SWEEP_SOURCE)
+    val cmd = ("SIMPLE_BOOTSTRAP=1 SIMPLE_TIMEOUT_SECONDS=0 " +
+        "SIMPLE_EXECUTION_MODE=interpreter nice -n 19 " + bin +
+        " run " + src + " 2>/dev/null || echo SWEEP-FAILED")
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "every value type survives every lock and every backend":
+
+    it "returns the stored value for each type, primitive and backend":
+        # ONE example on purpose: the sweep costs a full compiler start-up and
+        # spec module globals do not persist between examples, so splitting it
+        # would mean one subprocess per row.
+        step("Run the two-backend sweep in a child process, interpreted")
+        val out = run_sweep()
+
+        step("Refuse to pass on a run that produced nothing")
+        # Without this a SWEEP-FAILED string satisfies every `not contains`
+        # assertion below and the spec is vacuously green.
+        expect(out.contains("SWEEP-FAILED")).to_equal(false)
+        expect(out).to_contain("END")
+
+        step("The fixture really switched backends — otherwise both rows are pure_std")
+        # This is the anti-tautology control for the backend axis: without it a
+        # no-op rt_set_concurrent_backend would let one working backend satisfy
+        # both rows.
+        expect(out).to_contain("SWEEP-PURESTD\npure_std")
+        expect(out).to_contain("SWEEP-NATIVE\nnative")
+
+        step("pure_std: text, int, bool, float, rwlock and spawn/join all intact")
+        expect(out).to_contain("SWEEP-PURESTD\npure_std\n" + EXPECTED_ROW)
+
+        step("native: the same row, from the same operations")
+        expect(out).to_contain("SWEEP-NATIVE\nnative\n" + EXPECTED_ROW)
+
+        step("Neither silent substitute — nil or 0 — appears anywhere in the sweep")
+        # `nil` was the Mutex/RwLock and native-join substitute; `0` was the
+        # pure_std join-miss substitute. Both are absent from every expected
+        # value above, so any occurrence is a degradation.
+        expect(out.contains("\nnil")).to_equal(false)
+        expect(out.contains("\n0\n")).to_equal(false)

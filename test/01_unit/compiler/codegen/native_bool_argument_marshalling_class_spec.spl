@@ -1,0 +1,160 @@
+"""
+# Native codegen: the BOOL-ARGUMENT MARSHALLING class
+
+**Category:** Codegen / call-boundary argument marshalling (similar-problem detection)
+**Bug:** doc/08_tracking/bug/rust_seed_native_bool_arg_inlined_call_wrong_value_2026-07-17.md
+
+## Overview
+
+The filed shape is exactly one member of a class:
+
+```
+fn f(x: bool) -> i64:
+    if x:
+        return 1
+    return 0
+
+fn main() -> i64:
+    return f(false)      # returns 1 — the FALSE argument arrives truthy
+```
+
+`f`'s own body was hand-traced at the Cranelift CLIF level and is sound; what
+is wrong is how the CALL SITE hands a false-valued `bool` across the (inlined)
+function boundary. That means the defect is a property of the boundary, not of
+`if`, and the following shapes ride the same boundary. A fix that repaired only
+the literal-`false` single-call case would leave every one of these silently
+wrong, and each returns a WRONG ANSWER rather than crashing:
+
+| shape | why it is a distinct member |
+|---|---|
+| literal `false` argument | the filed shape |
+| runtime-computed falsy expr (`1 > 2`) | rules out constant-propagation of the literal token as the sole trigger |
+| two calls to the same fn, both polarities | the filed doc also reports a SIGSEGV for `f(false) + f(true)` |
+| `bool` returned, not consumed by `if` | separates argument marshalling from branch lowering |
+| second-position `bool` param | rules out "first argument slot only" |
+| `bool` passed through two hops | a forwarded bool, not just a leaf one |
+| negated argument `f(not true)` | a bool produced by an operator, not a literal or a comparison |
+
+## Why the assertions are absolute, not relative
+
+Comparing `f(false)` against another `f(false)` would be a same-path tautology:
+under the defect both sides answer `1` and compare equal. Every oracle here is
+an ABSOLUTE literal, and the defect's own fingerprint (a false argument
+answering as if true) is asserted absent as well.
+
+Return values are packed into distinct decimal columns (e.g. `f(false)*10 +
+f(true)`) so a single combined number cannot be satisfied by getting one call
+right and the other wrong.
+
+## Engines
+
+A spec body runs INTERPRETED, and the interpreter is correct for every shape
+here — so the in-process path could never go red and would be vacuous. The one
+example below therefore shells out to a real `native-build` SUBPROCESS and
+reads the built binary's own output. That subprocess is the only thing in this
+file with teeth.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation anywhere in the embedded source — a `{name}`
+# inside a spec's own string literal is resolved by the SPEC's lexer and kills
+# the whole file with `zero-examples` before any example runs.
+val CLASS_SOURCE: text = ("fn f(x: bool) -> i64:\n" +
+    "    if x:\n" +
+    "        return 1\n" +
+    "    return 0\n" +
+    "\n" +
+    "fn second(n: i64, x: bool) -> i64:\n" +
+    "    if x:\n" +
+    "        return 1\n" +
+    "    return 0\n" +
+    "\n" +
+    "fn forward(x: bool) -> i64:\n" +
+    "    f(x)\n" +
+    "\n" +
+    "fn identity(x: bool) -> bool:\n" +
+    "    x\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"LIT\")\n" +
+    "    print(f(false))\n" +
+    "    print(f(true))\n" +
+    "    print(\"EXPR\")\n" +
+    "    print(f(1 > 2))\n" +
+    "    print(f(2 > 1))\n" +
+    "    print(\"BOTH\")\n" +
+    "    print(f(false) * 10 + f(true))\n" +
+    "    print(\"RET\")\n" +
+    "    print(identity(false))\n" +
+    "    print(identity(true))\n" +
+    "    print(\"SECOND\")\n" +
+    "    print(second(7, false))\n" +
+    "    print(second(7, true))\n" +
+    "    print(\"HOP\")\n" +
+    "    print(forward(false))\n" +
+    "    print(forward(true))\n" +
+    "    print(\"NEG\")\n" +
+    "    print(f(not true))\n" +
+    "    print(f(not false))\n")
+
+fn native_build_and_run_class() -> text:
+    val dir = "build/test-artifacts/native_bool_argument_class"
+    val src = dir + "/class_repro.spl"
+    val bin_out = dir + "/class_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, CLASS_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a bool argument keeps its value across every native call boundary":
+
+    it "marshals false and true correctly in every call shape":
+        # Deliberately ONE example: this costs a full native-build, and spec
+        # module globals do not persist across `it` blocks, so seven examples
+        # would mean seven builds.
+        step("Build the class sweep once and run the resulting binary")
+        val out = native_build_and_run_class()
+
+        step("Refuse to pass on a build that produced nothing")
+        # Without this, BUILD-FAILED would satisfy every `not contains`
+        # assertion below and the whole spec would be vacuously green.
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("LIT")
+        expect(out).to_contain("NEG")
+
+        step("The filed shape: a literal false argument must answer 0")
+        expect(out).to_contain("LIT\n0\n1")
+
+        step("A runtime-computed falsy expression, not a literal token")
+        expect(out).to_contain("EXPR\n0\n1")
+
+        step("Two calls to the same fn, packed so one right call cannot mask one wrong one")
+        expect(out).to_contain("BOTH\n1")
+
+        step("A bool RETURNED rather than consumed by `if` — separates marshalling from branch lowering")
+        expect(out).to_contain("RET\nfalse\ntrue")
+
+        step("A bool in the SECOND parameter slot")
+        expect(out).to_contain("SECOND\n0\n1")
+
+        step("A bool forwarded through a second call hop")
+        expect(out).to_contain("HOP\n0\n1")
+
+        step("A bool produced by an operator rather than a literal or comparison")
+        expect(out).to_contain("NEG\n0\n1")
+
+        step("The defect fingerprint — a false argument answering as true — appears in no shape")
+        expect(out.contains("LIT\n1\n1")).to_equal(false)
+        expect(out.contains("EXPR\n1\n1")).to_equal(false)
+        expect(out.contains("SECOND\n1\n1")).to_equal(false)
+        expect(out.contains("HOP\n1\n1")).to_equal(false)
+        expect(out.contains("NEG\n1\n1")).to_equal(false)

@@ -1,0 +1,122 @@
+# Alloca-slot transform: value-returning functions must be admitted and rewritten.
+#
+# REPRODUCER for doc/08_tracking/bug/llvm_constants_lost_ret_zero_2026-08-01.md.
+#
+# Root cause (one bug, three sites, all in
+# src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl): the returned operand of
+# `Ret(Some(...))` was treated as un-inspectable, so
+#   1. admission rejected EVERY value-returning function outright,
+#   2. the cross-block-live scan never counted a return as a use,
+#   3. the terminator rewrite never loaded a slotted local back out of its slot.
+# The net effect was that the alloca lane silently never ran on the population it
+# exists to serve, and a cross-block-live definition reached llc with no def --
+# the reported `ret i64 0`.
+#
+# This runs entirely on in-memory MIR data structures, so the tree-walking
+# interpreter the spec runner uses is the correct engine: no codegen, no JIT and
+# no subprocess is involved in the behaviour under test.
+
+use compiler.mir.mir_instructions.{
+    BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind,
+    MirTerminator
+}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_alloca_transform_blocks}
+
+fn local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn copy_operand(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(local(id)))
+
+fn inst_kind_name(k: MirInstKind) -> str:
+    match k:
+        case Alloc(_, _): "Alloc"
+        case Const(_, _, _): "Const"
+        case Store(_, _): "Store"
+        case Load(_, _): "Load"
+        case _: "Other"
+
+# entry: `%5 = <value>` ; goto return
+# return: (empty) ; ret %5
+# %5 is defined in entry and used only in the RETURN block's terminator, so it is
+# cross-block-live and must be slotted.
+fn transform_cross_block_return(value: MirConstValue, type_: MirType) -> Any:
+    val blocks = [
+        MirBlock(
+            id: BlockId.new(0),
+            label: "entry",
+            instructions: [MirInst(kind: MirInstKind.Const(local(5), value, type_), span: nil)],
+            terminator: MirTerminator.Goto(BlockId.new(1))
+        ),
+        MirBlock(
+            id: BlockId.new(1),
+            label: "return",
+            instructions: [],
+            terminator: MirTerminator.Ret(Some(copy_operand(5)))
+        )
+    ]
+    val locals = [MirLocal(id: local(5), name: nil, type_: type_, kind: LocalKind.Var, is_ghost: false)]
+    ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+
+fn entry_shape(result: Any) -> str:
+    var out = ""
+    for inst in result.blocks[0].instructions:
+        out = out + inst_kind_name(inst.kind) + " "
+    out.trim()
+
+describe "SSA alloca slotting for value-returning functions":
+
+    it "admits a value-returning function instead of rejecting it outright":
+        val result = transform_cross_block_return(MirConstValue.Bool(true), MirType.bool())
+        # Before the fix this was `false` with reason
+        # "unsupported value return terminator".
+        assert_true(result.applied)
+        assert_not_equal(result.reason, "unsupported value return terminator")
+
+    it "counts a returned local as a use so it is slotted":
+        val result = transform_cross_block_return(MirConstValue.Bool(true), MirType.bool())
+        # Second gate: with admission fixed but the liveness scan still blind to
+        # Ret, this rejected with "no slotted locals".
+        assert_not_equal(result.reason, "no slotted locals")
+        assert_true(result.applied)
+
+    it "keeps the defining constant and its slot store in the entry block":
+        val result = transform_cross_block_return(MirConstValue.Bool(true), MirType.bool())
+        # The whole point of the original bug: the def and its store survive.
+        assert_equal(entry_shape(result), "Alloc Const Store")
+
+    it "loads the slot back out in the returning block":
+        val result = transform_cross_block_return(MirConstValue.Bool(true), MirType.bool())
+        val ret_block = result.blocks[1]
+        assert_equal(ret_block.instructions.len(), 1)
+        assert_equal(inst_kind_name(ret_block.instructions[0].kind), "Load")
+
+    it "returns the loaded temporary, not the now-undefined original local":
+        val result = transform_cross_block_return(MirConstValue.Bool(true), MirType.bool())
+        val ret_block = result.blocks[1]
+        var loaded_id = -1
+        match ret_block.instructions[0].kind:
+            case Load(dest, _): loaded_id = dest.id
+            case _: loaded_id = -1
+        assert_true(loaded_id >= 0)
+        var returned_id = -1
+        match ret_block.terminator:
+            case Ret(returned):
+                match returned.unwrap().kind:
+                    case Copy(l): returned_id = l.id
+                    case _: returned_id = -1
+            case _: returned_id = -1
+        # Returning local 5 here is exactly the `ret` of a value with no def.
+        assert_not_equal(returned_id, 5)
+        assert_equal(returned_id, loaded_id)
+
+    it "applies the same rewrite to a text-pointer return":
+        # The adjacent case from the original report: a pointer-typed constant.
+        val result = transform_cross_block_return(
+            MirConstValue.Str("linux"),
+            MirType.ptr(MirType.i64(), false)
+        )
+        assert_true(result.applied)
+        assert_equal(entry_shape(result), "Alloc Const Store")
+        assert_equal(result.blocks[1].instructions.len(), 1)

@@ -1,0 +1,68 @@
+"""
+# Piped-process externs must be reachable from the interpreter
+
+Guards doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+
+`rt_process_spawn_piped` / `rt_process_write_stdin` / `rt_process_read_stdout` /
+`rt_process_is_alive` / `rt_process_close_piped` have existed in the C runtime
+(`src/runtime/runtime_process.c`) for a long time and are declared `extern fn`
+by shipping Simple code (`src/app/editor/debug_process_runtime.spl`), but none
+of the five was ever registered in the interpreter's extern dispatch table
+(`src/compiler_rust/compiler/src/interpreter_extern/mod.rs`). Any interpreted
+program touching them died at semantic analysis:
+
+    error: semantic: unknown extern function: rt_process_spawn_piped
+
+WHY A SUBPROCESS. An unregistered extern is rejected at semantic analysis, which
+kills the ENTIRE file before a single example runs. Calling these externs from a
+spec body directly would therefore not produce a failing example -- it would
+produce a zero-example file, which reads as a pass. The oracle is instead the
+sibling run-path probe executed as a subprocess, whose verdict line is present
+only when every extern resolved AND every behavioural check passed.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val REPRO_PROBE: text = "test/01_unit/compiler/interpreter/probe_piped_process_externs.spl"
+
+fn run_probe(path: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=interpret " +
+        bin + " run " + path + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "piped-process externs under the interpreter":
+    it "resolves rt_process_spawn_piped instead of failing semantic analysis":
+        step("Run the piped-process probe under SIMPLE_EXECUTION_MODE=interpret")
+        val out = run_probe(REPRO_PROBE)
+
+        step("The exact pre-fix symptom must be gone -- this is the reproducing assertion")
+        expect(out).to_not_contain("unknown extern function")
+
+        step("Non-vacuity: the probe must actually have reached its first check")
+        expect(out).to_contain("PASS spawn_piped_returns_real_pid")
+
+    it "round-trips real bytes through the child's stdin and stdout":
+        step("Run the probe again and read its behavioural checks")
+        val out = run_probe(REPRO_PROBE)
+
+        step("stdin write and non-blocking stdout read must move the exact payload")
+        expect(out).to_contain("PASS write_stdin_succeeds")
+        expect(out).to_contain("PASS read_stdout_returns_exactly_what_was_written")
+
+        step("A registered-but-stubbed extern would pass the resolution check and fail here")
+        expect(out).to_contain("PASS is_alive_true_for_fresh_child")
+        expect(out).to_contain("PASS close_piped_succeeds")
+        expect(out).to_contain("PASS is_alive_false_after_close")
+
+    it "reports an unambiguous all-pass verdict":
+        step("The verdict line is printed only when zero checks failed")
+        val out = run_probe(REPRO_PROBE)
+        expect(out).to_contain("PIPED PROCESS PROBE: ALL PASS")
+        expect(out).to_not_contain("FAILURES")

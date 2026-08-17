@@ -1,0 +1,39 @@
+# @cover src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl 40%
+# @tag: unit, engine2d, backend, lane, nogc, regression
+#
+# Reproducing spec for
+# doc/08_tracking/bug/nogc_engine2d_backend_lane_missing_helpers_availability_2026-07-06.md
+#
+# Before the fix, backend_lane.spl:128 called `backend_canonical_name`, which is
+# defined ONLY in the gc mirror's helpers_availability.spl — a module that does
+# not exist under nogc_async_mut and was never imported here. Every call to
+# engine2d_backend_lane_preferred_font_offload_candidate died with
+#   error[E1002]: function `backend_canonical_name` not found
+# so qualcomm/intel font-offload selection was unreachable in the nogc tier.
+
+use std.spec.*
+use std.nogc_async_mut.gpu.engine2d.backend_lane.{
+    engine2d_backend_lane_preferred_font_offload_candidate,
+    engine2d_font_offload_backend_order
+}
+
+describe "nogc Engine2D font-offload candidate selection":
+
+    it "selects qualcomm, which the gc mirror also tiers for font offload":
+        assert_equal(engine2d_backend_lane_preferred_font_offload_candidate(["qualcomm"]), "qualcomm")
+
+    it "selects intel, which the gc mirror also tiers for font offload":
+        assert_equal(engine2d_backend_lane_preferred_font_offload_candidate(["intel"]), "intel")
+
+    it "prefers the higher-tier backend when several candidates are offered":
+        assert_equal(
+            engine2d_backend_lane_preferred_font_offload_candidate(["cpu", "qualcomm", "cuda"]),
+            "cuda"
+        )
+
+    it "drops a backend that is not in the font-offload order at all":
+        assert_equal(engine2d_backend_lane_preferred_font_offload_candidate(["nvidia"]), "")
+
+    it "drops nothing silently: every name in the declared order is selectable":
+        for backend in engine2d_font_offload_backend_order():
+            assert_equal(engine2d_backend_lane_preferred_font_offload_candidate([backend]), backend)

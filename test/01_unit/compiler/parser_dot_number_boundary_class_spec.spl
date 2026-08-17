@@ -1,0 +1,99 @@
+# @cover src/compiler_rust/parser/src/lexer/numbers.rs 0%
+# @req REQ-PARSER-DOT-NUMBER-BOUNDARY-001
+"""
+# `.` / number token boundaries — similar-problem detection
+
+**Category:** Language / Lexer
+**Status:** Defect-class guard
+
+## Purpose and Audience
+
+The nested-tuple-index bug
+(`doc/08_tracking/bug/seed_nested_tuple_index_float_munch_2026-08-06.md`) was one
+instance of a class: **the seed lexer's number scanner deciding, with no
+positional context, that a `.` adjacent to digits belongs to the number** — when
+in this grammar a `.` next to digits can equally be member access (`r.0`), a
+tuple-index chain (`r.0.1`), an exclusive range (`1..2`), an inclusive range
+(`1..=2`), or an ellipsis (`1...`).
+
+`scan_number` already special-cased `1..2` with a one-character lookahead. The
+tuple-index case was missed because the ambiguity is *behind* the number, not
+ahead of it, and nobody had enumerated the boundary systematically. Fixing one
+direction while leaving the other is exactly how this recurs.
+
+So this spec does not re-test the reported shape. It pins **every** adjacency of
+`.` and digits at once, in both directions, so the next omission fails here
+rather than shipping as a `found Float(x.y)` error on innocent source.
+
+The audience is anyone editing `scan_number` or the `'.'` arm of `next_token`.
+
+## Scope and Preconditions
+
+Parse-time only: a failure of any group below prevents this FILE from loading, so
+the runner reports it as a load error rather than a failed example. That is the
+intended signal — the defect class is a parse defect. Requires a seed built at or
+after 2026-08-17.
+
+## Primary Workflow
+
+Four groups, each an independent direction of the ambiguity: real float literals
+must still be floats; ranges must still be ranges; member/index dots must never
+be absorbed; and the two must be able to abut each other.
+"""
+
+use std.spec.*
+
+describe "dot and number token boundaries":
+
+    it "still lexes genuine float literals as floats":
+        step("A number with a fraction, in ordinary expression position")
+        expect(1.5 + 1.5).to_equal(3.0)
+
+        step("Leading zero, trailing digits, and an exponent form")
+        expect(0.25 * 4.0).to_equal(1.0)
+        expect(2.5e2).to_equal(250.0)
+
+        step("A float as a function argument and inside a collection")
+        val xs = [0.5, 1.5]
+        expect(xs[1]).to_equal(1.5)
+
+    it "still lexes ranges rather than munching the dots into the number":
+        step("Exclusive range -- the case scan_number already guarded")
+        var seen = 0
+        for i in 1..4:
+            seen = seen + i
+        expect(seen).to_equal(6)
+
+        step("Inclusive range, where the third char after the digit is `=`")
+        var seen2 = 0
+        for i in 1..=3:
+            seen2 = seen2 + i
+        expect(seen2).to_equal(6)
+
+    it "never absorbs a member-access or tuple-index dot into the number":
+        step("One index -- the shallow case that always worked")
+        val pair = (11, 22)
+        expect(pair.0).to_equal(11)
+        expect(pair.1).to_equal(22)
+
+        step("Two indices in a row -- Float(0.1) / Float(1.0) munch sites")
+        val nested = ((11, 22), (33, 44))
+        expect(nested.0.1).to_equal(22)
+        expect(nested.1.0).to_equal(33)
+
+        step("An index whose digits could read as an exponent (`.0e1` style)")
+        val wide = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+        expect(wide.10).to_equal(11)
+
+    it "handles an index chain abutting a float and a method call":
+        step("A float VALUE reached through an index chain: both readings coexist")
+        val t = ((1.5, 2.5), (3.5, 4.5))
+        expect(t.0.1).to_equal(2.5)
+        expect(t.1.0).to_equal(3.5)
+
+        step("An index followed by a method call -- postfix dot after an index dot")
+        val words = (("alpha", "beta"), ("gamma", "delta"))
+        expect(words.0.1.to_upper()).to_equal("BETA")
+
+        step("A float literal immediately followed by a method call")
+        expect(str(2.5)).to_contain("2.5")

@@ -1,0 +1,41 @@
+# Reproducing spec for
+# seed_gc_js_engine_typeof_undefined_and_for_desugar_regression_2026-08-15
+# Statement keywords must execute as statements, never fall through to the
+# identifier-lookup path ("ReferenceError: for is not defined" /
+# "__simple_i is not defined"), and `typeof` on an undeclared identifier must
+# yield the string "undefined" instead of throwing.
+#
+# All results are forced through JS `String(...)` so the assertions compare
+# strings, not JS float formatting (`6` prints as `6.0` via JsValue.Number).
+use std.nogc_sync_mut.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn eval_str(src: text) -> text:
+    var rt = js_runtime_with_default_logger("stmt-dispatch-spec")
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Undefined: "<undefined>"
+                _: "<other>"
+        Err(e):
+            "<err>"
+
+describe "JS engine statement dispatch":
+    it "executes a classic for statement":
+        expect(eval_str("var s = 0; for (var i = 0; i < 4; i = i + 1) { s = s + i; } String(s)")).to_equal("6")
+
+    it "executes a for loop whose counter uses the reserved desugar temp name":
+        expect(eval_str("var n = 0; for (var __simple_i = 0; __simple_i < 3; __simple_i = __simple_i + 1) { n = n + 1; } String(n)")).to_equal("3")
+
+    it "executes an if statement":
+        expect(eval_str("var r = 'no'; if (1 < 2) { r = 'yes'; } r")).to_equal("yes")
+
+    it "executes a while statement":
+        expect(eval_str("var k = 0; while (k < 5) { k = k + 1; } String(k)")).to_equal("5")
+
+    it "typeof an undeclared identifier is the string undefined, not a throw":
+        expect(eval_str("typeof __no_such_global_at_all__")).to_equal("undefined")
+
+    it "the desugar temp name is usable as an ordinary variable":
+        expect(eval_str("var __simple_i = 'temp'; __simple_i")).to_equal("temp")

@@ -1,0 +1,69 @@
+# Similar-problem DETECTION spec — class: "sign of a magnitude parameter leaks
+# into the result".
+#
+# Defect class (see doc/08_tracking/bug/excel_floor_ceiling_negative_significance_sign_2026-07-20.md):
+# a rounding-to-multiple helper divides by a RAW SIGNED step instead of by its
+# magnitude. Dividing by a negative step flips the direction of the rounding,
+# so FLOOR silently rounds UP and CEILING silently rounds DOWN. Nothing throws,
+# nothing warns, the caller just gets a wrong number.
+#
+# This spec does NOT re-assert the two literal values from the original bug.
+# It asserts the INVARIANT that the whole family must satisfy:
+#
+#   f(x, s) == f(x, -s)   for every x and every s != 0
+#
+# i.e. the step's SIGN must never be observable in the result. Any member of
+# this family that reintroduces a raw-signed divide fails here even if its own
+# hand-picked regression values were updated.
+
+use app.office.sheets.math_bridge.{excel_floor, excel_ceiling}
+
+describe "Rounding-to-significance: step sign must not be observable":
+
+    it "FLOOR is invariant under negating the significance":
+        # Every pair must agree; the sign of the step carries no information.
+        assert_equal(excel_floor(10.0, 3.0), excel_floor(10.0, -3.0))
+        assert_equal(excel_floor(-10.0, 3.0), excel_floor(-10.0, -3.0))
+        assert_equal(excel_floor(3.7, 1.0), excel_floor(3.7, -1.0))
+        assert_equal(excel_floor(-3.7, 1.0), excel_floor(-3.7, -1.0))
+        assert_equal(excel_floor(0.0, 5.0), excel_floor(0.0, -5.0))
+        assert_equal(excel_floor(7.25, 0.5), excel_floor(7.25, -0.5))
+
+    it "CEILING is invariant under negating the significance":
+        assert_equal(excel_ceiling(10.0, 3.0), excel_ceiling(10.0, -3.0))
+        assert_equal(excel_ceiling(-10.0, 3.0), excel_ceiling(-10.0, -3.0))
+        assert_equal(excel_ceiling(3.2, 1.0), excel_ceiling(3.2, -1.0))
+        assert_equal(excel_ceiling(-3.2, 1.0), excel_ceiling(-3.2, -1.0))
+        assert_equal(excel_ceiling(0.0, 5.0), excel_ceiling(0.0, -5.0))
+        assert_equal(excel_ceiling(7.25, 0.5), excel_ceiling(7.25, -0.5))
+
+    it "FLOOR never rounds away from zero-ward direction under a negative step":
+        # Direction check, independent of the invariant above: FLOOR must never
+        # exceed its input. A raw-signed divide makes FLOOR(10, -3) = 12 > 10.
+        assert_true(excel_floor(10.0, -3.0) <= 10.0)
+        assert_true(excel_floor(3.7, -1.0) <= 3.7)
+        assert_true(excel_floor(-3.7, -1.0) <= -3.7)
+        assert_true(excel_floor(100.0, -7.0) <= 100.0)
+
+    it "CEILING never falls below its input under a negative step":
+        # A raw-signed divide makes CEILING(10, -3) = 9 < 10.
+        assert_true(excel_ceiling(10.0, -3.0) >= 10.0)
+        assert_true(excel_ceiling(3.2, -1.0) >= 3.2)
+        assert_true(excel_ceiling(-3.2, -1.0) >= -3.2)
+        assert_true(excel_ceiling(100.0, -7.0) >= 100.0)
+
+    it "FLOOR and CEILING bracket the input for either step sign":
+        # The pair must always straddle x, whichever sign the step is given in.
+        assert_true(excel_floor(41.0, 6.0) <= 41.0)
+        assert_true(excel_ceiling(41.0, 6.0) >= 41.0)
+        assert_true(excel_floor(41.0, -6.0) <= 41.0)
+        assert_true(excel_ceiling(41.0, -6.0) >= 41.0)
+        assert_true(excel_floor(-41.0, -6.0) <= -41.0)
+        assert_true(excel_ceiling(-41.0, -6.0) >= -41.0)
+
+    it "zero significance stays the documented degenerate case for both signs":
+        # Guard the early-return so a sign fix cannot accidentally divide by zero.
+        assert_equal(excel_floor(5.5, 0.0), 0.0)
+        assert_equal(excel_ceiling(5.5, 0.0), 0.0)
+        assert_equal(excel_floor(-5.5, 0.0), 0.0)
+        assert_equal(excel_ceiling(-5.5, 0.0), 0.0)

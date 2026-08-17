@@ -1,0 +1,83 @@
+# @cover src/compiler_rust/parser/src/parser_impl/core.rs 0%
+# @req REQ-PARSER-CONTEXTUAL-LITERAL-001
+"""
+# `literal` as an ordinary identifier
+
+**Category:** Language / Parser
+**Status:** Regression guard (reproducing spec)
+
+## Purpose and Audience
+
+`literal` introduces a literal-suffix function declaration — `literal fn _re(...)`
+— and nothing else. It is also an entirely reasonable variable name: a token's
+literal text, a parsed literal node, a config literal.
+
+The seed lexer maps the bare word to `TokenKind::Literal` unconditionally
+(`parser/src/lexer/identifiers.rs:254`), and *expression* position already coped
+with that via `parse_keyword_identifier("literal")`. **Statement** position did
+not: `parse_statement` routed `TokenKind::Literal` straight into
+`parse_literal_function`, whose first act is `expect(&TokenKind::Fn)`. So a
+statement as ordinary as
+
+    literal = 2
+
+died with
+
+    parse: Unexpected token: expected Fn, found Assign
+
+a diagnostic that names an unrelated token and never mentions that `literal` is a
+keyword — the reader has no way to reach the real cause from it.
+
+The audience is anyone touching the statement-start dispatch in
+`parser_impl/core.rs`. The fix mirrors the `from` disambiguation already sitting a
+few lines below it: route to the declaration parser only when the next token is
+`Fn`, otherwise fall through to `parse_expression_or_assignment`.
+
+## Scope and Preconditions
+
+Requires a seed built at or after 2026-08-17. On an older binary this file fails
+to LOAD with the `expected Fn, found Assign` error above — that load failure is
+the reproduction.
+
+## Primary Workflow
+
+Declare a variable named `literal`, then reassign it — the statement position that
+used to fail — and read it back in the ordinary expression positions.
+
+See doc/08_tracking/bug/seed_lexer_literal_soft_keyword_shadows_identifier_2026-07-30.md
+"""
+
+use std.spec.*
+
+describe "literal as an ordinary identifier":
+
+    it "reassigns a variable named literal in statement position":
+        step("Declare it -- the declaration form was already accepted")
+        var literal = 1
+
+        step("Reassign it as a bare statement: the shape that reported `expected Fn, found Assign`")
+        literal = 2
+        expect(literal).to_equal(2)
+
+        step("Compound reassignment goes through the same statement dispatch")
+        literal = literal + 40
+        expect(literal).to_equal(42)
+
+    it "reads a variable named literal in expression positions":
+        step("Expression position already worked; assert it still does after the fix")
+        var literal = 7
+        expect(literal + 1).to_equal(8)
+        expect(3 + literal).to_equal(10)
+
+        step("As a function argument and as an index")
+        val xs = [10, 20, 30]
+        var idx = 1
+        expect(xs[idx]).to_equal(20)
+        expect(str(literal)).to_equal("7")
+
+    it "uses literal as a text-valued name, the way a lexer would":
+        step("The motivating real-world use: a token's literal text")
+        var literal = "abc"
+        literal = literal + "d"
+        expect(literal).to_equal("abcd")
+        expect(literal.len()).to_equal(4)

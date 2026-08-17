@@ -1,0 +1,129 @@
+use std.nogc_sync_mut.composition.{
+    parse_composition_source_v1, encode_composition_image_v1,
+    decode_composition_image_v1
+}
+use os.services.launcher.launcher.{launcher_init, launcher_launch}
+use os.services.launcher.launcher_composition.{launcher_load_composition_bytes_v1}
+use os.services.launcher.launcher_app_launch_wire.{
+    SIMPLE_APP_LAUNCH_V1_SIZE,
+    encode_launcher_app_launch_v1, decode_launcher_app_launch_v1
+}
+use os.services.launcher.launcher_app_launch_consumer.{
+    SCI_APP_LAUNCH_OK, SCI_APP_LAUNCH_REQUEST_INVALID,
+    SCI_APP_LAUNCH_ARTIFACT_STALE, SCI_APP_LAUNCH_ACTION_UNSUPPORTED,
+    SCI_APP_LAUNCH_MANIFEST_REJECTED,
+    SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED,
+    launcher_prepare_composition_app_launch_v1,
+    launcher_validate_app_launch_arena_v1
+}
+use os.services.launcher.launcher_registry.{
+    app_pid, app_launch_state, app_launch_count,
+    process_app_index, process_app_id, process_active,
+    _app_index_by_name
+}
+
+fn _load_app(source: text) -> bool:
+    match parse_composition_source_v1(source):
+        case Err(_): false
+        case Ok(parsed):
+            val decoded = decode_composition_image_v1(encode_composition_image_v1(parsed))
+            decoded.ok and launcher_load_composition_bytes_v1(decoded.image.bytes).ok
+
+describe "REQ-008 SimpleAppLaunchV1 launcher consumer":
+    it "encodes the admitted SCI record into a canonical fixed-width arena":
+        launcher_init()
+        expect(_load_app("schema: simple.composition/1\napps:\n  - id: notes-launch\n    name: Notes Launch\n    artifact: /sys/apps/notes_launch.smf\n")).to_be(true)
+
+        val prepared = launcher_prepare_composition_app_launch_v1(
+            "notes-launch", ["/tmp/readme.notes"],
+        )
+        expect(prepared.ok).to_be(true)
+        expect(prepared.request.descriptor.descriptor_size).to_equal(SIMPLE_APP_LAUNCH_V1_SIZE)
+        val decoded = decode_launcher_app_launch_v1(prepared.request.bytes)
+        expect(decoded.ok).to_be(true)
+        expect(decoded.app_id).to_equal("notes-launch")
+        expect(decoded.artifact_id).to_equal("/sys/apps/notes_launch.smf")
+        expect(decoded.action_id).to_equal("launch")
+        expect(decoded.args).to_equal(["/tmp/readme.notes"])
+        expect(decoded.capability_words.len()).to_equal(0)
+
+        val plan = launcher_validate_app_launch_arena_v1(prepared.request.bytes)
+        expect(plan.ok).to_be(true)
+        expect(plan.status).to_equal(SCI_APP_LAUNCH_OK)
+        expect(plan.manifest_identity).to_contain("kind=smf")
+        expect(plan.manifest_identity).to_contain("entry=/sys/apps/notes_launch.smf")
+
+    it "re-resolves stable app ID after metadata and artifact reload":
+        launcher_init()
+        expect(_load_app("schema: simple.composition/1\napps:\n  - id: notes-stable\n    name: Notes Before\n    artifact: /sys/apps/notes_before.smf\n")).to_be(true)
+        val old_request = launcher_prepare_composition_app_launch_v1("notes-stable", [])
+        expect(old_request.ok).to_be(true)
+        val old_slot = _app_index_by_name("Notes Before").to_u64()
+        app_pid[old_slot] = 4200
+        app_launch_state[old_slot] = "running"
+        app_launch_count[old_slot] = 9
+        process_app_index[0] = old_slot.to_i64()
+        process_app_id[0] = "/sys/apps/notes_before.smf"
+        process_active[0] = true
+
+        expect(_load_app("schema: simple.composition/1\napps:\n  - id: notes-stable\n    name: Notes After\n    artifact: /sys/apps/notes_after.smf\n")).to_be(true)
+        val new_slot = _app_index_by_name("Notes After").to_u64()
+        expect(app_pid[new_slot]).to_equal(4200u64)
+        expect(app_launch_state[new_slot]).to_equal("running")
+        expect(app_launch_count[new_slot]).to_equal(9u64)
+        expect(process_app_index[0]).to_equal(new_slot.to_i64())
+        expect(process_app_id[0]).to_equal("notes-stable")
+
+        val stale = launcher_validate_app_launch_arena_v1(old_request.request.bytes)
+        expect(stale.ok).to_be(false)
+        expect(stale.status).to_equal(SCI_APP_LAUNCH_ARTIFACT_STALE)
+        val current = launcher_prepare_composition_app_launch_v1("notes-stable", [])
+        expect(current.ok).to_be(true)
+        val current_plan = launcher_validate_app_launch_arena_v1(current.request.bytes)
+        expect(current_plan.ok).to_be(true)
+        expect(current_plan.artifact_path).to_equal("/sys/apps/notes_after.smf")
+
+    it "rejects non-canonical offsets and unsupported actions before spawn":
+        val encoded = encode_launcher_app_launch_v1(
+            "notes", "/sys/apps/notes.smf", "inspect", [], [],
+        )
+        expect(encoded.ok).to_be(true)
+        val unsupported = launcher_validate_app_launch_arena_v1(encoded.bytes)
+        expect(unsupported.ok).to_be(false)
+        expect(unsupported.status).to_equal(SCI_APP_LAUNCH_ACTION_UNSUPPORTED)
+
+        var corrupt = encoded.bytes
+        corrupt[4] = 31u8
+        val malformed = launcher_validate_app_launch_arena_v1(corrupt)
+        expect(malformed.ok).to_be(false)
+        expect(malformed.status).to_equal(SCI_APP_LAUNCH_REQUEST_INVALID)
+
+    it "fails closed on capability words until scoped manifest projection exists":
+        launcher_init()
+        expect(_load_app("schema: simple.composition/1\napps:\n  - id: notes-cap\n    name: Notes Capability\n    artifact: /sys/apps/notes_cap.smf\n")).to_be(true)
+        val encoded = encode_launcher_app_launch_v1(
+            "notes-cap", "/sys/apps/notes_cap.smf", "launch", [], [1u64],
+        )
+        val plan = launcher_validate_app_launch_arena_v1(encoded.bytes)
+        expect(plan.ok).to_be(false)
+        expect(plan.status).to_equal(SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED)
+        expect(plan.code).to_equal("SCI_APP_LAUNCH_MANIFEST_CAPABILITY_PROJECTION_REQUIRED")
+
+    it "rejects artifacts outside the launcher recipe and known manifest kinds":
+        launcher_init()
+        expect(_load_app("schema: simple.composition/1\napps:\n  - id: outside-app\n    name: Outside App\n    artifact: /tmp/outside.smf\n")).to_be(true)
+        val outside = launcher_prepare_composition_app_launch_v1("outside-app", [])
+        val outside_plan = launcher_validate_app_launch_arena_v1(outside.request.bytes)
+        expect(outside_plan.ok).to_be(false)
+        expect(outside_plan.status).to_equal(SCI_APP_LAUNCH_MANIFEST_REJECTED)
+        expect(outside_plan.code).to_equal("SCI_APP_LAUNCH_RECIPE_SCOPE_REJECTED")
+
+        expect(_load_app("schema: simple.composition/1\napps:\n  - id: unknown-kind\n    name: Unknown Kind\n    artifact: /sys/apps/unknown.txt\n")).to_be(true)
+        val unknown = launcher_prepare_composition_app_launch_v1("unknown-kind", [])
+        val unknown_plan = launcher_validate_app_launch_arena_v1(unknown.request.bytes)
+        expect(unknown_plan.ok).to_be(false)
+        expect(unknown_plan.status).to_equal(SCI_APP_LAUNCH_MANIFEST_REJECTED)
+        expect(unknown_plan.code).to_equal("SCI_APP_LAUNCH_ARTIFACT_KIND_UNSUPPORTED")
+        val unknown_slot = _app_index_by_name("Unknown Kind").to_u64()
+        expect(launcher_launch("Unknown Kind")).to_equal(-1)
+        expect(app_launch_state[unknown_slot]).to_equal("idle")

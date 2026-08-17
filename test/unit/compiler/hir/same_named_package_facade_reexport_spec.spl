@@ -1,0 +1,154 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn facade_test_logger() -> Logger:
+    Logger(level: 0)
+
+fn facade_test_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn expect_host_facade_chain_resolves(reverse_facades: bool):
+    val log = facade_test_logger()
+    val time_source = "pub fn time_now_unix_micros() -> i64:\n    42"
+    val process_source = "pub fn getpid() -> i64:\n    7"
+    val sync_package_source = "# Re-exported from time_ops.spl\nexport time_now_unix_micros\n# Re-exported from sysinfo_ops.spl\nexport getpid"
+    val sync_file_source = "use graph.sync.io.*\nexport time_now_unix_micros, getpid"
+    val async_package_source = "export use graph.sync.io.\{time_now_unix_micros, getpid\}"
+    val async_file_source = "use graph.async.io.*\nexport time_now_unix_micros, getpid"
+    val consumer_source = "use graph.async.io.\{time_now_unix_micros, getpid\}\nfn main() -> i64:\n    time_now_unix_micros() + getpid()"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.sync.io.time_ops"] = facade_test_module(time_source, "graph.sync.io.time_ops", log)
+    modules["graph.sync.io.sysinfo_ops"] = facade_test_module(process_source, "graph.sync.io.sysinfo_ops", log)
+    modules["graph.sync.io.__init__"] = facade_test_module(sync_package_source, "graph.sync.io.__init__", log)
+    modules["graph.sync.io"] = facade_test_module(sync_file_source, "graph.sync.io", log)
+    modules["graph.async.io.__init__"] = facade_test_module(async_package_source, "graph.async.io.__init__", log)
+    modules["graph.async.io"] = facade_test_module(async_file_source, "graph.async.io", log)
+
+    val sync_package = SourceFile(path: "graph/sync/io/__init__.spl", content: sync_package_source, module_name: "graph.sync.io.__init__")
+    val sync_file = SourceFile(path: "graph/sync/io.spl", content: sync_file_source, module_name: "graph.sync.io")
+    val async_package = SourceFile(path: "graph/async/io/__init__.spl", content: async_package_source, module_name: "graph.async.io.__init__")
+    val async_file = SourceFile(path: "graph/async/io.spl", content: async_file_source, module_name: "graph.async.io")
+    val owners = [
+        SourceFile(path: "graph/sync/io/time_ops.spl", content: time_source, module_name: "graph.sync.io.time_ops"),
+        SourceFile(path: "graph/sync/io/sysinfo_ops.spl", content: process_source, module_name: "graph.sync.io.sysinfo_ops")
+    ]
+    val sources = if reverse_facades:
+        owners + [async_file, async_package, sync_file, sync_package]
+    else:
+        owners + [sync_package, sync_file, async_package, async_file]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    val consumer = facade_test_module(consumer_source, "graph.consumer", log)
+    var lowering = hirlowering_for_module("graph.consumer", surfaces)
+    val hir = lowering.lower_module(consumer)
+
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.symbols.lookup("time_now_unix_micros").?).to_be_truthy()
+    expect(hir.symbols.lookup("getpid").?).to_be_truthy()
+
+fn expect_actual_no_init_host_facade_chain_resolves(reverse_discovery: bool):
+    val log = facade_test_logger()
+    val consumer_source = "use std.io.\{time_now_unix_micros, getpid\}\nfn main() -> i64:\n    time_now_unix_micros() + getpid()"
+    val async_root_source = "use std.nogc_async_mut.io.*\nexport time_now_unix_micros, getpid"
+    val sync_root_source = "use std.nogc_sync_mut.io.*\nuse std.nogc_sync_mut.io.sysinfo_ops.\{getpid\}\nexport time_now_unix_micros, getpid"
+    val async_time_source = "export use std.nogc_sync_mut.io.time_ops.\{time_now_unix_micros\}"
+    val async_sysinfo_source = "export use std.nogc_sync_mut.io.sysinfo_ops.\{getpid\}"
+    val sync_time_source = "pub fn time_now_unix_micros() -> i64:\n    42"
+    val sync_sysinfo_source = "pub fn getpid() -> i64:\n    7"
+
+    var modules: Dict<text, Module> = {}
+    modules["lib.nogc_async_mut.database.test"] = facade_test_module(consumer_source, "lib.nogc_async_mut.database.test", log)
+    modules["lib.nogc_async_mut.io"] = parse_full_frontend(
+        async_root_source, "src/lib/nogc_async_mut/io.spl",
+        "lib.nogc_async_mut.io", log)
+    # The full Stage 4 manifest also indexes the same physical io.spl surface
+    # under its std spelling.  That alias turns the root's compatibility glob
+    # into a self-import; omitting it made the focused graph falsely green.
+    modules["std.nogc_async_mut.io"] = modules["lib.nogc_async_mut.io"]
+    modules["std.nogc_sync_mut.io.time_ops"] = facade_test_module(sync_time_source, "std.nogc_sync_mut.io.time_ops", log)
+    modules["std.nogc_sync_mut.io.sysinfo_ops"] = facade_test_module(sync_sysinfo_source, "std.nogc_sync_mut.io.sysinfo_ops", log)
+    modules["std.nogc_sync_mut.io"] = facade_test_module(sync_root_source, "std.nogc_sync_mut.io", log)
+    modules["lib.nogc_async_mut.io.sysinfo_ops"] = facade_test_module(async_sysinfo_source, "lib.nogc_async_mut.io.sysinfo_ops", log)
+    modules["std.nogc_async_mut.io.time_ops"] = facade_test_module(async_time_source, "std.nogc_async_mut.io.time_ops", log)
+
+    val consumer = SourceFile(path: "src/lib/nogc_async_mut/database/test.spl", content: consumer_source, module_name: "lib.nogc_async_mut.database.test")
+    val async_root = SourceFile(path: "src/lib/nogc_async_mut/io.spl", content: async_root_source, module_name: "lib.nogc_async_mut.io")
+    val sync_time = SourceFile(path: "src/std/nogc_sync_mut/io/time_ops.spl", content: sync_time_source, module_name: "std.nogc_sync_mut.io.time_ops")
+    val sync_sysinfo = SourceFile(path: "src/std/nogc_sync_mut/io/sysinfo_ops.spl", content: sync_sysinfo_source, module_name: "std.nogc_sync_mut.io.sysinfo_ops")
+    val sync_root = SourceFile(path: "src/std/nogc_sync_mut/io.spl", content: sync_root_source, module_name: "std.nogc_sync_mut.io")
+    val async_sysinfo = SourceFile(path: "src/lib/nogc_async_mut/io/sysinfo_ops.spl", content: async_sysinfo_source, module_name: "lib.nogc_async_mut.io.sysinfo_ops")
+    val async_time = SourceFile(path: "src/std/nogc_async_mut/io/time_ops.spl", content: async_time_source, module_name: "std.nogc_async_mut.io.time_ops")
+    val sources = if reverse_discovery:
+        [consumer, async_time, async_sysinfo, sync_root, sync_sysinfo, sync_time, async_root]
+    else:
+        # Exact relative order from the retained 1,431-source Stage4 graph.
+        [consumer, async_root, sync_time, sync_sysinfo, sync_root, async_sysinfo, async_time]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    val surfaces = surfaces_result.unwrap()
+    expect(surfaces.index_by_name["lib.nogc_async_mut.io"]).to_equal(
+        surfaces.index_by_name["std.nogc_async_mut.io"])
+    val root_surface = surfaces.surfaces[surfaces.index_by_name["lib.nogc_async_mut.io"]]
+    expect(root_surface.export_origins["time_now_unix_micros"].owner_module).to_equal("std.nogc_async_mut.io.time_ops")
+    expect(root_surface.export_origins["getpid"].owner_module).to_equal("lib.nogc_async_mut.io.sysinfo_ops")
+
+    var lowering = hirlowering_for_module("lib.nogc_async_mut.database.test", surfaces)
+    val hir = lowering.lower_module(modules["lib.nogc_async_mut.database.test"])
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.symbols.lookup("time_now_unix_micros").?).to_be_truthy()
+    expect(hir.symbols.lookup("getpid").?).to_be_truthy()
+
+fn expect_cyclic_facades_terminate_and_preserve_reachable_exports():
+    val log = facade_test_logger()
+    val owner_source = "pub fn reachable() -> i64:\n    42"
+    val left_source = "use graph.cycle.right.*\nexport reachable, missing"
+    val right_source = "use graph.cycle.left.*\nuse graph.cycle.owner.\{reachable\}\nexport reachable, missing"
+    val consumer_source = "use graph.cycle.left.\{reachable, missing\}\nfn main() -> i64:\n    reachable()"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.cycle.owner"] = facade_test_module(owner_source, "graph.cycle.owner", log)
+    modules["graph.cycle.left"] = facade_test_module(left_source, "graph.cycle.left", log)
+    modules["graph.cycle.right"] = facade_test_module(right_source, "graph.cycle.right", log)
+    modules["graph.cycle.consumer"] = facade_test_module(consumer_source, "graph.cycle.consumer", log)
+
+    val sources = [
+        SourceFile(path: "graph/cycle/owner.spl", content: owner_source, module_name: "graph.cycle.owner"),
+        SourceFile(path: "graph/cycle/left.spl", content: left_source, module_name: "graph.cycle.left"),
+        SourceFile(path: "graph/cycle/right.spl", content: right_source, module_name: "graph.cycle.right"),
+        SourceFile(path: "graph/cycle/consumer.spl", content: consumer_source, module_name: "graph.cycle.consumer")
+    ]
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    var lowering = hirlowering_for_module("graph.cycle.consumer", surfaces_result.unwrap())
+    val hir = lowering.lower_module(modules["graph.cycle.consumer"])
+
+    expect(hir.symbols.lookup("reachable").?).to_be_truthy()
+    expect(hir.symbols.lookup("missing").?).to_be_falsy()
+
+describe "same-named file and directory facade re-exports":
+    it "reaches host owners when package facades are discovered first":
+        expect_host_facade_chain_resolves(false)
+
+    it "reaches host owners when file facades are discovered first":
+        expect_host_facade_chain_resolves(true)
+
+describe "actual Stage4 host facades without init surfaces":
+    it "converges when transitive compatibility children are discovered late":
+        expect_actual_no_init_host_facade_chain_resolves(false)
+
+    it "converges with the adjacent facade discovery order reversed":
+        expect_actual_no_init_host_facade_chain_resolves(true)
+
+describe "cyclic facade re-exports":
+    it "terminates misses while preserving a reachable owner":
+        expect_cyclic_facades_terminate_and_preserve_reachable_exports()

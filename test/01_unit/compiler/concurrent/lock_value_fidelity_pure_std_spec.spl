@@ -1,0 +1,124 @@
+"""
+# Mutex/RwLock keep their protected value under the default `pure_std` backend
+
+**Category:** Interpreter concurrency bridge (reproducing spec)
+**Bug:** doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md
+
+## Overview
+
+`mutex_new("hello")` followed immediately by `rt_mutex_lock` returned `nil`
+under the `#[default]` `PureStd` concurrent backend. No error, no warning — the
+string was simply gone. `i64` round-tripped fine, which is exactly what made
+the defect survive: the obvious smoke test passes.
+
+The cause was not the mutex. Under `PureStd`,
+`interpreter_extern/atomic.rs` marshalled the interpreter's `Value` through
+`simple_runtime::value::RuntimeValue` via a local `value_to_runtime` helper
+whose `Value::Str` arm was a placeholder returning `RuntimeValue::NIL` — with a
+`// For now, ...` comment — and whose catch-all `_ =>` arm did the same for
+every other non-primitive variant. Anything that was not Int/Float/Bool/Nil was
+nulled on the way IN, and `runtime_to_value` had no path back either.
+
+## Why a subprocess
+
+The value under test is process-global state in the compiler binary, and the
+companion detection spec has to flip the *process-wide* concurrent backend to
+see the other half of the class. Both specs therefore drive a fixture in a
+child process, so nothing they do can leak into the shared spec-runner process.
+
+The fixture is run through the **interpreter** (`SIMPLE_EXECUTION_MODE=interpreter`),
+because `run` alone is the Cranelift JIT and does not reach
+`interpreter_extern/atomic.rs` at all — a JIT run of this fixture was green
+while the interpreter was red, which is precisely how a spec here can go
+vacuous.
+
+## Oracle
+
+Every assertion is against a literal expected value, never against another
+value that travelled the same path. `nil` is asserted absent explicitly: under
+the defect every text assertion's actual value was `nil`, so a
+"first == second" style check would have been a tautology.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# NOTE: no `{...}` interpolation anywhere in the embedded source — a `{name}`
+# inside this spec's own string literal is resolved by the SPEC's lexer and
+# kills the whole file with `zero-examples` before any example runs.
+val FIXTURE_SOURCE: text = ("extern fn rt_mutex_new(initial: Any) -> Any\n" +
+    "extern fn rt_mutex_lock(m: Any) -> Any\n" +
+    "extern fn rt_mutex_unlock(m: Any, v: Any) -> Any\n" +
+    "extern fn rt_rwlock_new(initial: Any) -> Any\n" +
+    "extern fn rt_rwlock_read(l: Any) -> Any\n" +
+    "extern fn rt_rwlock_write(l: Any) -> Any\n" +
+    "extern fn rt_rwlock_set(l: Any, v: Any) -> Any\n" +
+    "\n" +
+    "fn main():\n" +
+    "    print(\"MUTEX-TEXT\")\n" +
+    "    print(rt_mutex_lock(rt_mutex_new(\"hello\")))\n" +
+    "    print(\"MUTEX-INT\")\n" +
+    "    print(rt_mutex_lock(rt_mutex_new(41)))\n" +
+    "    print(\"RWLOCK-TEXT\")\n" +
+    "    print(rt_rwlock_read(rt_rwlock_new(\"world\")))\n" +
+    "    print(\"MUTEX-UPDATE\")\n" +
+    "    val m = rt_mutex_new(\"first\")\n" +
+    "    rt_mutex_lock(m)\n" +
+    "    rt_mutex_unlock(m, \"second\")\n" +
+    "    print(rt_mutex_lock(m))\n" +
+    "    print(\"RWLOCK-UPDATE\")\n" +
+    "    val r = rt_rwlock_new(\"alpha\")\n" +
+    "    rt_rwlock_write(r)\n" +
+    "    rt_rwlock_set(r, \"omega\")\n" +
+    "    print(rt_rwlock_read(r))\n" +
+    "    print(\"END\")\n")
+
+fn run_lock_fixture() -> text:
+    val dir = "build/test-artifacts/lock_value_fidelity_pure_std"
+    val src = dir + "/lock_fixture.spl"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir])
+    file_write(src, FIXTURE_SOURCE)
+    # SIMPLE_EXECUTION_MODE=interpreter is the ONLY knob that selects the
+    # tree-walk interpreter; SIMPLE_NO_JIT is a decoy with no reader in the
+    # Rust tree. Without it this fixture runs on the JIT and proves nothing
+    # about interpreter_extern/atomic.rs.
+    val cmd = ("SIMPLE_BOOTSTRAP=1 SIMPLE_TIMEOUT_SECONDS=0 " +
+        "SIMPLE_EXECUTION_MODE=interpreter nice -n 19 " + bin +
+        " run " + src + " 2>/dev/null || echo FIXTURE-FAILED")
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a pure_std Mutex/RwLock returns the value it was given":
+
+    it "round-trips text and int through mutex and rwlock without nulling":
+        # ONE example on purpose: each fixture run costs a full compiler
+        # start-up, and spec module globals do not persist across examples,
+        # so splitting this would mean one subprocess per assertion.
+        step("Run the lock fixture in a child process, interpreted")
+        val out = run_lock_fixture()
+
+        step("Refuse to pass on a run that produced nothing")
+        # Without this, a FIXTURE-FAILED string satisfies every `not contains`
+        # check below and the spec is vacuously green.
+        expect(out.contains("FIXTURE-FAILED")).to_equal(false)
+        expect(out).to_contain("END")
+
+        step("text survives mutex_new -> mutex_lock (the reported defect)")
+        expect(out).to_contain("MUTEX-TEXT\nhello")
+        expect(out.contains("MUTEX-TEXT\nnil")).to_equal(false)
+
+        step("int still round-trips — the control that always passed")
+        expect(out).to_contain("MUTEX-INT\n41")
+
+        step("text survives rwlock_new -> rwlock_read")
+        expect(out).to_contain("RWLOCK-TEXT\nworld")
+        expect(out.contains("RWLOCK-TEXT\nnil")).to_equal(false)
+
+        step("a text written back through unlock is the text read next")
+        expect(out).to_contain("MUTEX-UPDATE\nsecond")
+
+        step("a text written back through rwlock_set is the text read next")
+        expect(out).to_contain("RWLOCK-UPDATE\nomega")

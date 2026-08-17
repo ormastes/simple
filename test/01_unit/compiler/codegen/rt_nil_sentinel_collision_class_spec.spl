@@ -1,0 +1,162 @@
+# RT_NIL Sentinel Collision — Similar-Problem Detection Spec (defect CLASS)
+#
+# THE CLASS. The runtime nil sentinel is the raw machine word 3:
+#
+#   RT_NIL == RuntimeValue::from_special(SPECIAL_NIL)
+#          == from_tag_payload(TAG_SPECIAL = 0b011, payload = 0) == 3
+#
+# whereas a properly BOXED inline integer 3 is `3 << 3` == 24. The word 3 means
+# nil only while the value is boxed. Every defect in this class is the same
+# mistake in one of two directions: a RAW (unboxed) i64 handed into a context
+# that expects a boxed RuntimeValue, or a boxed nil handed into a context that
+# unboxes unconditionally. Either way the literal integer 3 becomes
+# indistinguishable from nil.
+#
+# Two bugs were filed separately and are the two directions of that one hazard:
+#
+#   doc/08_tracking/bug/coalesce_raw_i64_sentinel_collision_2026-08-02.md
+#     RAW -> BOXED: `x ?? d` compared an untagged scalar against 3.
+#   doc/08_tracking/bug/jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md
+#     BOXED -> RAW: `rt_array_get` returns RuntimeValue::NIL on an OOB/miss and
+#     the array-index MIR arm unboxes it unconditionally.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which carries a real type tag and is therefore CORRECT in every
+# case here. An in-process example cannot go red on any of these defects; it
+# would be vacuous. The oracles are two sibling run-path probes executed as
+# subprocesses under both engines:
+#
+#   probe_rt_nil_sentinel_collision_jit.spl   — 46 absolute-literal checks
+#   probe_rt_nil_bare_oob_index_jit.spl       — bare OOB index must panic
+#
+# Every oracle is an ABSOLUTE literal, never "the two engines agree" — engine
+# agreement would pass while both engines were wrong in the same way.
+#
+# GENERALISATION, not spot checks. The probe sweeps sentinel-adjacent words
+# (0/1/2/3/4/11/19/24, negatives, and a 3 produced by arithmetic rather than a
+# literal), several miss shapes (in-range-but-absent, far OOB, empty receiver,
+# dict miss), and — the row a naive "rewrite 3 to nil" fix would fail — a
+# DISCRIMINATOR arm where the value 3 is genuinely PRESENT and must survive
+# every one of those same paths untouched.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_rt_nil_sentinel_collision_jit.spl"
+val OOB_PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_rt_nil_bare_oob_index_jit.spl"
+
+fn probe_bin() -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    return bin
+
+fn run_probe_in_mode(path: text, mode: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + probe_bin() + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    return out.0
+
+fn run_oob_probe_rc(mode: text) -> text:
+    # The rc is captured by the shell and echoed on its own line: reading an
+    # exit status through a pipe would report the pipe's last stage instead.
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + probe_bin() + " run " + OOB_PROBE_PATH +
+        " > /dev/null 2>&1; echo RC=$?"
+    val out = process_run("sh", ["-c", cmd])
+    return out.0
+
+describe "RT_NIL sentinel (raw word 3) must never collide with the integer 3":
+    it "passes the whole class on the tree-walk interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode(PROBE_PATH, "interpreter")
+
+        step("The interpreter carries a real type tag and was correct in both filed bugs, so a red here means the PROBE is broken, not the engine")
+        expect(interp).to_contain("RT_NIL_SENTINEL PROBE: ALL PASS")
+
+        step("The probe must actually have run its checks rather than exiting early")
+        expect(interp).to_contain("PASS raw_coalesce_3")
+        expect(interp).to_contain("PASS array_get_miss_bare")
+        expect(interp).to_contain("PASS present_3_get_coalesce")
+
+    it "never treats a RAW scalar equal to the sentinel as nil (direction: raw -> boxed)":
+        step("Run the same probe under the cranelift JIT — the engine both bugs lived in")
+        val jit = run_probe_in_mode(PROBE_PATH, "jit")
+
+        step("A non-nullable scalar can never legitimately be nil, so `?? d` is the identity for EVERY value")
+        expect(jit).to_contain("PASS raw_coalesce_3")
+        expect(jit).to_contain("PASS raw_coalesce_computed3")
+        expect(jit).to_contain("PASS raw_coalesce_neg3")
+
+        step("The sentinel-adjacent neighbours a future encoding change would break next: 0, the tagged bool words 11/19, and 24 which is the correct BOXING of 3")
+        expect(jit).to_contain("PASS raw_coalesce_0")
+        expect(jit).to_contain("PASS raw_coalesce_11")
+        expect(jit).to_contain("PASS raw_coalesce_19")
+        expect(jit).to_contain("PASS raw_coalesce_24")
+
+        step("The other scalar lanes that share the untagged representation")
+        expect(jit).to_contain("PASS raw_coalesce_u8_3")
+        expect(jit).to_contain("PASS raw_coalesce_i32_3")
+        expect(jit).to_contain("PASS raw_coalesce_bool")
+
+    it "never leaks the boxed sentinel as the integer 3 (direction: boxed -> raw)":
+        val jit = run_probe_in_mode(PROBE_PATH, "jit")
+
+        step("An array `.get()` miss must FORMAT as nil, not as the raw sentinel word")
+        expect(jit).to_contain("PASS array_get_miss_bare")
+        expect(jit).to_contain("PASS array_get_miss_far")
+        expect(jit).to_contain("PASS empty_get_miss_bare")
+
+        step("A dict miss and the empty-receiver first/last accessors take the same producer path")
+        expect(jit).to_contain("PASS dict_get_miss_bare")
+        expect(jit).to_contain("PASS empty_first_coalesce")
+        expect(jit).to_contain("PASS empty_last_coalesce")
+
+    it "leaves a genuinely PRESENT 3 untouched on every one of those same paths (discriminator)":
+        val jit = run_probe_in_mode(PROBE_PATH, "jit")
+
+        step("This arm is what separates a real fix from one that merely rewrites every 3 to nil")
+        expect(jit).to_contain("PASS present_3_index")
+        expect(jit).to_contain("PASS present_3_get_bare")
+        expect(jit).to_contain("PASS present_3_get_coalesce")
+        expect(jit).to_contain("PASS present_3_first")
+        expect(jit).to_contain("PASS present_3_last")
+        expect(jit).to_contain("PASS present_3_dict_bare")
+        expect(jit).to_contain("PASS present_3_dict_coalesce")
+
+        step("A negative index is a supported Python-style wrap, not an out-of-bounds access")
+        expect(jit).to_contain("PASS present_3_neg_index")
+
+        step("Every small present value read back through the array-element path")
+        expect(jit).to_contain("PASS sweep_present_3")
+        expect(jit).to_contain("PASS sweep_present_0")
+        expect(jit).to_contain("PASS sweep_present_24")
+
+    it "reports one aggregate verdict with no failing row under either engine":
+        val jit = run_probe_in_mode(PROBE_PATH, "jit")
+        val interp = run_probe_in_mode(PROBE_PATH, "interpreter")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("RT_NIL_SENTINEL PROBE: ALL PASS")
+        expect(interp).to_contain("RT_NIL_SENTINEL PROBE: ALL PASS")
+
+        step("No individual check may have failed")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)
+
+    it "fails a bare out-of-bounds index loudly instead of returning the sentinel":
+        step("Run the dedicated bare-OOB probe, split out because the correct behaviour terminates the process")
+        val jit = run_oob_probe_rc("jit")
+
+        step("`xs[9]` on a 3-element array must not exit 0 — the filed bug recorded rc=0 with no panic")
+        expect(jit.contains("RC=0")).to_equal(false)
+
+        step("The interpreter is the control arm: it already panics with `array index out of bounds`")
+        val interp = run_oob_probe_rc("interpreter")
+        expect(interp.contains("RC=0")).to_equal(false)
+
+        step("Execution must not have reached the marker line past the faulting index")
+        val jit_out = run_probe_in_mode(OOB_PROBE_PATH, "jit")
+        expect(jit_out.contains("BARE_OOB PROBE: NO PANIC")).to_equal(false)

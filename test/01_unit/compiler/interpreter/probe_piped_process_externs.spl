@@ -1,0 +1,63 @@
+# Run-path probe: the piped-process extern family under the interpreter.
+#
+# Reproducer for
+# doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+#
+# Before the fix this file did not run AT ALL: the interpreter's extern dispatch
+# table had no entry for rt_process_spawn_piped (nor write_stdin / read_stdout /
+# is_alive / close_piped), so the whole file died at semantic analysis with
+#     error: semantic: unknown extern function: rt_process_spawn_piped
+# and printed no verdict line. That absence IS the red signal the sibling spec
+# asserts on.
+#
+# Oracles are ABSOLUTE: the text written into the child's stdin is compared
+# against the exact text read back out of its stdout. "Both engines agree" is
+# never used as an oracle here.
+
+extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
+extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
+extern fn rt_process_read_stdout(pid: i64) -> text
+extern fn rt_process_is_alive(pid: i64) -> bool
+extern fn rt_process_close_piped(pid: i64) -> bool
+
+var failures: i64 = 0
+
+fn check(name: text, ok: bool):
+    if ok:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name)
+        failures = failures + 1
+
+fn main():
+    # /bin/cat is a pure echo: whatever we write to stdin comes back on stdout.
+    val pid = rt_process_spawn_piped("/bin/cat", [])
+    check("spawn_piped_returns_real_pid", pid > 0)
+    if pid <= 0:
+        print("PIPED PROCESS PROBE: ABORTED (no child)")
+        return
+
+    check("is_alive_true_for_fresh_child", rt_process_is_alive(pid))
+
+    val payload = "hello-piped-42\n"
+    check("write_stdin_succeeds", rt_process_write_stdin(pid, payload))
+
+    # read_stdout is non-blocking by contract, so poll rather than assume the
+    # first read already has the bytes.
+    var seen: text = ""
+    var tries: i64 = 0
+    while tries < 200 and not seen.has("hello-piped-42"):
+        seen = seen + rt_process_read_stdout(pid)
+        tries = tries + 1
+
+    check("read_stdout_returns_exactly_what_was_written", seen.has("hello-piped-42"))
+    check("read_stdout_did_not_fabricate_data", not seen.has("goodbye"))
+
+    check("close_piped_succeeds", rt_process_close_piped(pid))
+    check("close_piped_is_idempotent_false_second_time", not rt_process_close_piped(pid))
+    check("is_alive_false_after_close", not rt_process_is_alive(pid))
+
+    if failures == 0:
+        print("PIPED PROCESS PROBE: ALL PASS")
+    else:
+        print("PIPED PROCESS PROBE: " + failures.to_string() + " FAILURES")

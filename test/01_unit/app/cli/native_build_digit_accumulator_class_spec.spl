@@ -1,0 +1,66 @@
+use std.spec
+use app.cli.native_build_main.{native_build_parse_secs, native_build_timeout_ms}
+
+# Similar-problem DETECTION spec for the defect CLASS behind
+# doc/08_tracking/bug/native_build_worker_timeout_misaccounted_2026-08-09.md
+#
+# The class is: "a hand-rolled numeric parser folds a single-character text
+# through int(), assuming int() yields the DIGIT VALUE, when it actually
+# yields the CHARACTER CODE." This is silent -- every input still parses, no
+# error is raised, and the caller acts confidently on a wrong magnitude.
+#
+# The reproducing spec pins three specific budgets. That is not enough: a
+# partial fix (e.g. subtracting 48 only on the first digit, or special-casing
+# the values that happened to be in the reproducer) would still pass it.
+# These examples generalize along the two axes the defect actually lives on:
+#   (a) EVERY digit 0-9 must contribute its own value, not its code;
+#   (b) POSITION must not matter -- a digit is worth the same in any column,
+#       which is exactly what a code-contaminated accumulator gets wrong,
+#       because the error is multiplied by 10 for each remaining column.
+
+describe "digit-accumulator character-code contamination (defect class)":
+    it "documents the primitive that makes this class possible":
+        # int() on a one-char text is a CODE, not a value. Any hand-rolled
+        # parser in this file that forgets this is the same bug again.
+        expect(int("0")).to_equal(48)
+        expect(int("9")).to_equal(57)
+
+    it "gives every digit 0-9 its own value in isolation":
+        expect(native_build_parse_secs("0")).to_equal(0)
+        expect(native_build_parse_secs("1")).to_equal(1)
+        expect(native_build_parse_secs("2")).to_equal(2)
+        expect(native_build_parse_secs("3")).to_equal(3)
+        expect(native_build_parse_secs("4")).to_equal(4)
+        expect(native_build_parse_secs("5")).to_equal(5)
+        expect(native_build_parse_secs("6")).to_equal(6)
+        expect(native_build_parse_secs("7")).to_equal(7)
+        expect(native_build_parse_secs("8")).to_equal(8)
+        expect(native_build_parse_secs("9")).to_equal(9)
+
+    it "is position-independent: the same digits in any column carry no code offset":
+        expect(native_build_parse_secs("10")).to_equal(10)
+        expect(native_build_parse_secs("100")).to_equal(100)
+        expect(native_build_parse_secs("1000")).to_equal(1000)
+        expect(native_build_parse_secs("12345")).to_equal(12345)
+        expect(native_build_parse_secs("999999")).to_equal(999999)
+
+    it "treats leading zeros as zeros, not as 48s":
+        expect(native_build_parse_secs("007")).to_equal(7)
+        expect(native_build_parse_secs("0090")).to_equal(90)
+
+    it "never returns a budget larger than the digits could justify":
+        # A code-contaminated accumulator inflates by ~5x per column; this is
+        # the cheap invariant that catches the whole class regardless of the
+        # specific arithmetic slip.
+        expect(native_build_parse_secs("9") <= 9).to_equal(true)
+        expect(native_build_parse_secs("99") <= 99).to_equal(true)
+        expect(native_build_parse_secs("999") <= 999).to_equal(true)
+
+    it "propagates the corrected value all the way to the millisecond budget":
+        expect(native_build_timeout_ms(["--timeout", "1"])).to_equal(1000)
+        expect(native_build_timeout_ms(["--timeout=99"])).to_equal(99000)
+
+    it "falls back to the default budget rather than a garbage one on bad input":
+        # -1 must not become a live budget; the caller must see the default.
+        expect(native_build_timeout_ms(["--timeout", "nope"]) > 0).to_equal(true)
+        expect(native_build_timeout_ms([]) > 0).to_equal(true)
