@@ -14,6 +14,48 @@ Compounding it: the output truncator dropped **55884 of 67884 bytes** — and it
 dropped them **from the MIDDLE**, keeping a head and a tail. Whatever
 attribution existed was in the discarded 82%.
 
+## REPRODUCED 2026-08-17, independently and twice
+
+Re-measured on a fresh unwrapped run of
+`scripts/check/check-native-trailing-default-param.shs` (no `timeout` wrapper;
+rc read into a variable, not through a pipe). rc=1, verdict verbatim:
+
+```
+FAIL — native-build failed to compile the fixture (exit 1, log saved to /tmp/check-native-trailing-default-param.last.log)
+```
+
+The saved log carries the defect verbatim at line 1795:
+
+```
+!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!
+[native-build] TRUNCATED: 55780 of 67780 bytes of worker stderr were dropped from the MIDDLE.
+```
+
+and again at line 2002 as
+`[stderr truncated by native-build entry: 55780 bytes omitted from the middle]`.
+The bare `ERROR=1` sits at line 1782 with no accompanying diagnostic; the only
+attribution reaching the reader is the unit-level
+`error: build failed: 1 failed, 0 unverified, 0 not run, 1 ok of 2 unit(s) — ERROR: test.fixtures.native_trailing_default_param.main`,
+which names the failing unit but not the reason.
+
+Two things this pins down:
+
+- **It is deterministic, not load noise.** A second lane running the same guard
+  concurrently from a different worktree
+  (`/mnt/data/tmp/claude-1000/wt-llvmcodegen`) produced the byte-identical
+  verdict line and rc=1 — an unplanned independent replication.
+- **The byte counts drift slightly** (55780/67780 here vs 55884/67884 when first
+  seen). The dropped fraction is stable at ~82%. The drift is consistent with
+  the discarded region containing run-varying text, which is exactly the text
+  worth keeping.
+
+Note the second truncation defect visible in the same log: the head that IS
+retained is spent on repeated
+`compiler_cross_module_private_symbol_collision` warnings (lines 1563-1574,
+repeated again at 1798-1809 in the tail). So the surviving 18% is largely
+duplicated warning noise, making the effective attribution yield lower still
+than the byte ratio suggests.
+
 ## Why the truncation half is the worse defect
 
 A build that fails is a bug. A build that fails **unattributably** is a bug
