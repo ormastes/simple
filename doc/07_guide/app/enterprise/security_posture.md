@@ -142,6 +142,18 @@ and 9 of the matrix above. What remains:
    applies to rather than fixing it: gating the booking and restaurant reads
    made the app CONSISTENT, not finer-grained. Concretely, no role can be
    granted "read the open bill" without also being granted "open a table".
+   **W15-B (2026-08-17): a data-driven equivalent now exists and is
+   equivalence-proven.** `src/lib/nogc_sync_mut/enterprise_sale/rbac_registry.spl`
+   expresses the SAME policy as data (`rbac_registry()` grant rows +
+   `registry_role_allows`), and
+   `test/01_unit/lib/nogc_sync_mut/enterprise_rbac_registry_equivalence_spec.spl`
+   proves it is behaviourally identical to the frozen `role_allows` across the
+   full 290-pair role×action cross-product (bite-tested: dropping one grant
+   turns it red). The frozen `role_allows` is UNCHANGED and every caller still
+   calls it — migrating callers onto `registry_role_allows` (or a store-backed
+   registry returning the same rows) is the ADR-gated follow-up. Read/write
+   separability is still not delivered; the registry is the seam that makes it
+   a data edit rather than an if-chain rewrite.
 3. **No CSRF token and no cookie flow.** The app is bearer-token only, which
    sidesteps CSRF; introducing cookies would require this to be revisited.
 4. **The throttle is bounded but still a linear scan of the live window.**
