@@ -1,0 +1,72 @@
+# Enum payload extraction — regression + similar-problem detection spec.
+#
+# Gates doc/08_tracking/bug/interp_run_enum_single_field_payload_corrupt_2026-06-15.md,
+# which reported that a single-field enum case returned its payload shifted
+# right by 3 (65 -> 8, 100 -> 12, 255 -> 31, 1 -> 0) under `bin/simple run`,
+# while two-field cases were fine. `>> 3` is the runtime boxed-integer tag
+# shift, so the generalising axis is variant ARITY crossed with payload TYPE,
+# not the single value someone happened to notice.
+#
+# WHY A SUBPROCESS. A spec body executes on the tree-walk interpreter, which
+# the report explicitly states was CORRECT. An in-process example therefore
+# cannot go red on this defect at all. The oracle is the sibling run-path probe
+# `probe_enum_single_field_payload.spl`, executed under both engines; it checks
+# 16 absolute literals it did not itself compute and prints one verdict line.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_enum_single_field_payload.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "enum payload extraction is arity- and type-independent":
+    it "extracts single-field payloads unshifted under the run path":
+        step("Run the run-path probe under the default engine used by `bin/simple run`")
+        val jit = run_probe_in_mode("jit")
+
+        step("The report's own values: a `>> 3` corruption turns these into 8, 12, 31 and 0")
+        expect(jit).to_contain("PASS one_65")
+        expect(jit).to_contain("PASS one_100")
+        expect(jit).to_contain("PASS one_255")
+        expect(jit).to_contain("PASS one_1")
+
+        step("Tag-boundary neighbours, where a shift defect is easiest to miss")
+        expect(jit).to_contain("PASS one_7")
+        expect(jit).to_contain("PASS one_8")
+        expect(jit).to_contain("PASS one_neg")
+        expect(jit).to_contain("PASS one_big")
+
+    it "extracts multi-field payloads, the report's stated control arm":
+        step("Two- and three-field variants must remain correct")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS two_x")
+        expect(jit).to_contain("PASS two_y")
+        expect(jit).to_contain("PASS three_a")
+        expect(jit).to_contain("PASS three_c")
+
+    it "extracts single-field payloads of non-integer type":
+        step("A boxed-integer tag defect can only touch integers, so text and bool generalise the class")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS str_payload")
+        expect(jit).to_contain("PASS flag_payload")
+
+    it "agrees with the interpreter, and neither engine reports a failure":
+        step("The interpreter is the control engine the report says was correct")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("ENUM_PAYLOAD PROBE: ALL PASS")
+
+        step("The run path must reach the same aggregate verdict")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("ENUM_PAYLOAD PROBE: ALL PASS")
+
+        step("No individual check may have failed under either engine")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

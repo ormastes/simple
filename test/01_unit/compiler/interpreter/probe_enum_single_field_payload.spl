@@ -1,0 +1,104 @@
+# Run-path probe: enum payload extraction across variant arities.
+#
+# Oracle for test/01_unit/compiler/interpreter/enum_single_field_payload_spec.spl
+# (doc/08_tracking/bug/interp_run_enum_single_field_payload_corrupt_2026-06-15.md).
+#
+# The filed defect was that a SINGLE-field enum case returned its payload
+# right-shifted by 3 (65 -> 8, 100 -> 12, 255 -> 31, 1 -> 0) under
+# `bin/simple run`, while two-field cases were correct. `>> 3` is the runtime
+# boxed-integer tag shift (low 3 bits, 0 = boxed int `v << 3`), so this probe
+# checks the whole arity axis rather than the one value that was noticed.
+#
+# Every expected value below is an ABSOLUTE literal written here by hand, never
+# a value the probe recomputed from the same expression it is testing.
+
+enum Tok:
+    One(b: i64)
+    Two(x: i64, y: i64)
+    Three(a: i64, b: i64, c: i64)
+    Str(s: text)
+    Flag(f: bool)
+    Zero
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got.to_text() + " want=" + want.to_text())
+        failures = failures + 1
+
+fn check_text(name: text, got: text, want: text):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got + " want=" + want)
+        failures = failures + 1
+
+fn one_payload(v: i64) -> i64:
+    val t = Tok.One(b: v)
+    match t:
+        case Tok.One(b: x):
+            return x
+        case _:
+            return -1
+
+fn main():
+    # Single-field cases — the exact values the bug report recorded, plus the
+    # tag-boundary neighbours (a `>> 3` corruption is invisible at 0 and 8).
+    check("one_1", one_payload(1), 1)
+    check("one_7", one_payload(7), 7)
+    check("one_8", one_payload(8), 8)
+    check("one_42", one_payload(42), 42)
+    check("one_65", one_payload(65), 65)
+    check("one_100", one_payload(100), 100)
+    check("one_255", one_payload(255), 255)
+    check("one_neg", one_payload(0 - 9), 0 - 9)
+    check("one_big", one_payload(1234567), 1234567)
+
+    # Two-field: the report's stated CONTROL arm. If this ever goes red the
+    # probe itself is broken, not the single-field path.
+    val t2 = Tok.Two(x: 3, y: 7)
+    match t2:
+        case Tok.Two(x: a, y: b):
+            check("two_x", a, 3)
+            check("two_y", b, 7)
+        case _:
+            check("two_matched", 0, 1)
+
+    # Three fields — the arity axis continued past what the report covered.
+    val t3 = Tok.Three(a: 11, b: 22, c: 33)
+    match t3:
+        case Tok.Three(a: x, b: y, c: z):
+            check("three_a", x, 11)
+            check("three_b", y, 22)
+            check("three_c", z, 33)
+        case _:
+            check("three_matched", 0, 1)
+
+    # Single-field of NON-integer payload types: a tag-shift defect would only
+    # ever hit the boxed-integer representation, so these generalise the class.
+    val ts = Tok.Str(s: "hello")
+    match ts:
+        case Tok.Str(s: sv):
+            check_text("str_payload", sv, "hello")
+        case _:
+            check_text("str_matched", "no", "yes")
+
+    val tf = Tok.Flag(f: true)
+    match tf:
+        case Tok.Flag(f: fv):
+            if fv:
+                print("PASS flag_payload")
+            else:
+                print("FAIL flag_payload got=false want=true")
+                failures = failures + 1
+        case _:
+            print("FAIL flag_matched")
+            failures = failures + 1
+
+    if failures == 0:
+        print("ENUM_PAYLOAD PROBE: ALL PASS")
+    else:
+        print("ENUM_PAYLOAD PROBE: FAILURES=" + failures.to_text())

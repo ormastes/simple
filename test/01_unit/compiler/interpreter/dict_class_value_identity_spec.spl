@@ -1,0 +1,74 @@
+# Container-held class instances keep reference identity — regression +
+# similar-problem detection spec.
+#
+# Gates doc/08_tracking/bug/interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md,
+# which reported that `Dict<K, ClassInstance>.get()` handed back a COPY: a field
+# written through the fetched instance was silently discarded, and the next
+# `.get()` returned the pre-mutation state. The real-world casualty was a
+# per-frame cache in `HostCompositor.content_caches` whose hit counters reset
+# every frame, worked around by an explicit `caches.set(id, cache)` write-back.
+#
+# The defect CLASS is broader than `Dict.get`: it is "a class instance reached
+# through a container loses its identity". The probe therefore also covers an
+# array element, two live handles on the same key, and — the shape that made
+# this family silent — a dict held as a FIELD and mutated inside a CALLEE, the
+# copy-on-write frame boundary now handled by `merge_shared_collection_fields`
+# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975).
+#
+# WHY A SUBPROCESS. A spec body runs interpreted, so it cannot discriminate the
+# run path from the test path. The oracle is the sibling run-path probe
+# `probe_dict_class_value_identity.spl`, run under BOTH engines; it checks
+# absolute literals and prints one verdict line.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_dict_class_value_identity.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "class instances reached through a container keep their identity":
+    it "persists a mutation made through Dict.get without a manual write-back":
+        step("Run the run-path probe under the default engine")
+        val jit = run_probe_in_mode("jit")
+
+        step("The report's own repro sketch: set, get, mutate, get again")
+        expect(jit).to_contain("PASS dict_get_mutate_int")
+        expect(jit).to_contain("PASS dict_get_mutate_text")
+
+        step("Key type must not change value semantics")
+        expect(jit).to_contain("PASS dict_text_key")
+
+    it "persists a mutation made inside a callee through a dict-valued field":
+        step("This is the shape the filed cache actually had, and the frame boundary the copy-on-write family died at")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS callee_field_dict_hits")
+        expect(jit).to_contain("PASS callee_field_dict_last")
+
+    it "keeps identity through other container kinds, not just Dict.get":
+        step("An array element is the same reference-identity question")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS array_elem_identity")
+
+        step("Two reads of one key must alias the same object, not yield two copies")
+        expect(jit).to_contain("PASS two_handles_alias")
+
+    it "behaves identically on both engines and reports no failure":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("Both must reach the aggregate verdict")
+        expect(interp).to_contain("DICT_CLASS_IDENTITY PROBE: ALL PASS")
+        expect(jit).to_contain("DICT_CLASS_IDENTITY PROBE: ALL PASS")
+
+        step("No individual check may have failed under either engine")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

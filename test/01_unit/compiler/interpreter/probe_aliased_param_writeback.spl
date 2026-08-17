@@ -1,0 +1,172 @@
+# Run-path probe for the ALIASED-PARAMETER WRITE-BACK CLOBBER class.
+#
+# WHY THIS FILE EXISTS: the defect is engine-divergent, and `bin/simple test`
+# runs spec bodies on the tree-walk INTERPRETER — which is the DEFECTIVE engine
+# here, not the correct one. The sibling spec therefore runs this probe as a
+# SUBPROCESS under both `SIMPLE_EXECUTION_MODE=interpreter` and `=jit` and
+# requires both to pass, so neither engine can drift away from the other again.
+#
+# THE DEFECT (doc/08_tracking/bug/aliased_array_mut_param_mutation_lost_interpreter_2026-08-06.md):
+#
+#   fn bump(mut a: [i64], b: [i64]):
+#       a.push(99)
+#   var w: [i64] = [1]
+#   bump(w, w)          # interpreter: w.len() == 1   JIT: w.len() == 2
+#
+# The interpreter models arrays/dicts/objects as `Arc<..>` with copy-on-write,
+# so a callee mutation forks the Arc and dies with the frame unless it is
+# explicitly written back to the caller's binding. `write_back_mutable_arguments`
+# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs) did
+# that write-back for EVERY container-typed parameter, `mut` or not. Harmless
+# while each caller binding reaches one parameter — but when the SAME variable
+# is passed twice, the write-backs run in argument order and the LAST wins. The
+# immutable parameter still holds the PRE-CALL Arc, so it silently overwrote the
+# mutation its `mut` sibling had just carried back. No diagnostic; exit 0.
+#
+# THIS PROBE GENERALISES THE CLASS rather than pinning the one filed shape.
+# The clobber is a property of "two parameters, one caller binding", so it is
+# swept over: which position the `mut` parameter occupies, how many aliases
+# there are, the container kind (array / dict / class instance), and named vs
+# positional argument syntax. Ordering matters especially: pinning only
+# `f(mut a, b)` would pass with a first-write-wins fix that still breaks
+# `f(b, mut a)`.
+#
+# Every oracle is an ABSOLUTE literal, never "the two engines agree" — that
+# would pass while both are wrong in the same way.
+#
+#   bin/simple run <this>                                    -> must ALL PASS
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this>   -> must ALL PASS
+
+use std.io_runtime.{exit}
+
+class Counter:
+    var n: i64
+
+fn check(name: text, got: text, want: text, fails: i64) -> i64:
+    if got == want:
+        print("PASS " + name)
+        return fails
+    print("FAIL " + name + ": got " + got + " want " + want)
+    fails + 1
+
+# --- arrays ------------------------------------------------------------------
+
+# The filed shape: the mutated parameter comes FIRST, the alias second.
+fn arr_mut_first(mut a: [i64], b: [i64]):
+    a.push(99)
+
+# The mirror image. A "first write wins" fix passes the shape above and still
+# fails this one, so both orders are required.
+fn arr_mut_second(b: [i64], mut a: [i64]):
+    a.push(99)
+
+# Three-way aliasing: two immutable siblings bracketing the mutable one.
+fn arr_mut_middle(b: [i64], mut a: [i64], c: [i64]):
+    a.push(99)
+
+# Both parameters mutate. Neither may be dropped; the caller must observe both.
+fn arr_both_mut(mut a: [i64], mut b: [i64]):
+    a.push(7)
+    b.push(8)
+
+# No parameter is declared `mut`, so nothing may reach the caller.
+fn arr_neither_mut(a: [i64], b: [i64]):
+    print("PASS neither_mut_ran")
+
+# --- dicts -------------------------------------------------------------------
+
+fn dict_mut_first(mut a: Dict<text, i64>, b: Dict<text, i64>):
+    a.set("added", 5)
+
+fn dict_mut_second(b: Dict<text, i64>, mut a: Dict<text, i64>):
+    a.set("added", 5)
+
+# --- class instances ---------------------------------------------------------
+
+fn obj_mut_second(b: Counter, mut a: Counter):
+    a.n = 42
+
+fn main():
+    var fails = 0
+
+    # ---- control arm: a NON-aliased call must be completely unaffected -------
+    var solo: [i64] = [1]
+    arr_mut_first(solo, [7])
+    fails = check("control_non_aliased_writeback", solo.len().to_string(), "2", fails)
+
+    var lhs: [i64] = [1]
+    var rhs: [i64] = [7]
+    arr_mut_first(lhs, rhs)
+    fails = check("control_distinct_bindings_mut", lhs.len().to_string(), "2", fails)
+    fails = check("control_distinct_bindings_immut", rhs.len().to_string(), "1", fails)
+
+    # ---- the filed shape ----------------------------------------------------
+    var w: [i64] = [1]
+    arr_mut_first(w, w)
+    fails = check("aliased_array_mut_first", w.len().to_string(), "2", fails)
+    # Guarded: when the write-back is clobbered the array is still length 1, and
+    # an unguarded `w[1]` would abort the probe before the remaining shapes ran.
+    var pushed = "missing"
+    if w.len() > 1:
+        pushed = w[1].to_string()
+    fails = check("aliased_array_mut_first_value", pushed, "99", fails)
+
+    # ---- the same defect with the argument order reversed -------------------
+    var x: [i64] = [1]
+    arr_mut_second(x, x)
+    fails = check("aliased_array_mut_second", x.len().to_string(), "2", fails)
+
+    # ---- an immutable alias on BOTH sides of the mutable one ----------------
+    var y: [i64] = [1]
+    arr_mut_middle(y, y, y)
+    fails = check("aliased_array_mut_middle", y.len().to_string(), "2", fails)
+
+    # ---- every alias mutates: KNOWN-OPEN RESIDUAL, deliberately not counted --
+    #
+    # When BOTH aliases are `mut` the interpreter still loses one push (2, not
+    # 3). This is NOT the same defect and is NOT fixed by the mut/immut rule:
+    # both parameters legitimately mutate, each forks its own Arc, and the last
+    # write-back still wins. A correct answer needs the callee's two parameter
+    # bindings to SHARE one handle, which is a deeper change to how the
+    # interpreter binds container arguments. The JIT gets 3.
+    #
+    # It is recorded rather than asserted so the aggregate verdict stays a
+    # truthful signal for the class that IS fixed — but it is PINNED by the
+    # sibling spec, so if this number moves in either direction someone is told.
+    var z: [i64] = [1]
+    arr_both_mut(z, z)
+    print("OBSERVE aliased_array_both_mut=" + z.len().to_string())
+
+    # ---- no alias is mutable: the caller must be untouched ------------------
+    var u: [i64] = [1]
+    arr_neither_mut(u, u)
+    fails = check("aliased_array_neither_mut", u.len().to_string(), "1", fails)
+
+    # ---- named-argument syntax reaches the same write-back path -------------
+    var n: [i64] = [1]
+    arr_mut_first(a: n, b: n)
+    fails = check("aliased_array_named_args", n.len().to_string(), "2", fails)
+
+    # ---- dicts share the copy-on-write Arc model, so share the defect -------
+    var d: Dict<text, i64> = {}
+    d.set("base", 1)
+    dict_mut_first(d, d)
+    fails = check("aliased_dict_mut_first", d.len().to_string(), "2", fails)
+
+    var d2: Dict<text, i64> = {}
+    d2.set("base", 1)
+    dict_mut_second(d2, d2)
+    fails = check("aliased_dict_mut_second", d2.len().to_string(), "2", fails)
+
+    # ---- class instances take the same Object write-back arm ----------------
+    val c = Counter(n: 0)
+    obj_mut_second(c, c)
+    fails = check("aliased_object_mut_second", c.n.to_string(), "42", fails)
+
+    if fails == 0:
+        print("ALIASED_PARAM_WRITEBACK PROBE: ALL PASS")
+        exit(0)
+    print("ALIASED_PARAM_WRITEBACK PROBE: " + fails.to_string() + " FAILED")
+    exit(1)
+
+main()

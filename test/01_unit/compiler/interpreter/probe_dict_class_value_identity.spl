@@ -1,0 +1,90 @@
+# Run-path probe: mutation through a container-held class instance persists.
+#
+# Oracle for test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl
+# (doc/08_tracking/bug/interp_dict_class_value_copy_on_get_mutation_loss_2026-07-06.md).
+#
+# Filed defect: `Dict<K, ClassInstance>.get()` handed back a COPY, so a field
+# written through the fetched instance was silently discarded and the next
+# `.get()` returned the pre-mutation state. The real-world shape was a per-frame
+# cache in `HostCompositor.content_caches`, whose hit counters reset every frame.
+#
+# This probe generalises past that one call: the same reference-identity
+# question applies to a class instance reached through an ARRAY element, and to
+# one reached through a dict that is itself a FIELD of another object and
+# mutated inside a CALLEE — the copy-on-write frame boundary that made this
+# family silent. Every expected value is an absolute literal.
+
+class Cache:
+    hits: i64
+    last: text
+
+class Host:
+    caches: Dict<i64, Cache>
+
+var failures: i64 = 0
+
+fn check(name: text, got: i64, want: i64):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got.to_text() + " want=" + want.to_text())
+        failures = failures + 1
+
+fn check_text(name: text, got: text, want: text):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got + " want=" + want)
+        failures = failures + 1
+
+fn bump(h: Host, id: i64):
+    val c = h.caches.get(id)
+    c.hits = c.hits + 1
+    c.last = "seen"
+
+fn main():
+    # 1. The report's own repro sketch, verbatim: get, mutate, get again.
+    var d: Dict<i64, Cache> = {}
+    d.set(1, Cache(hits: 0, last: "none"))
+    val c = d.get(1)
+    c.hits = 5
+    check("dict_get_mutate_int", d.get(1).hits, 5)
+    check_text("dict_get_mutate_text", d.get(1).last, "none")
+
+    # 2. text-keyed dict — the key type must not change value semantics.
+    var dt: Dict<text, Cache> = {}
+    dt.set("k", Cache(hits: 10, last: "a"))
+    val ct = dt.get("k")
+    ct.hits = 99
+    check("dict_text_key", dt.get("k").hits, 99)
+
+    # 3. The real-world shape: dict is a FIELD of another object, and the
+    #    mutation happens inside a CALLEE. This is the frame boundary the
+    #    copy-on-write family died at, and it is what the filed cache hit.
+    var hd: Dict<i64, Cache> = {}
+    hd.set(7, Cache(hits: 0, last: "none"))
+    val h = Host(caches: hd)
+    bump(h, 7)
+    bump(h, 7)
+    check("callee_field_dict_hits", h.caches.get(7).hits, 2)
+    check_text("callee_field_dict_last", h.caches.get(7).last, "seen")
+
+    # 4. Same identity question via an ARRAY element rather than a dict.
+    val arr: [Cache] = [Cache(hits: 1, last: "x")]
+    val ae = arr[0]
+    ae.hits = 42
+    check("array_elem_identity", arr[0].hits, 42)
+
+    # 5. Two reads of the same key must be the SAME object, not two copies:
+    #    mutate through the first handle, observe through the second.
+    var d2: Dict<i64, Cache> = {}
+    d2.set(3, Cache(hits: 0, last: "n"))
+    val h1 = d2.get(3)
+    val h2 = d2.get(3)
+    h1.hits = 77
+    check("two_handles_alias", h2.hits, 77)
+
+    if failures == 0:
+        print("DICT_CLASS_IDENTITY PROBE: ALL PASS")
+    else:
+        print("DICT_CLASS_IDENTITY PROBE: FAILURES=" + failures.to_text())

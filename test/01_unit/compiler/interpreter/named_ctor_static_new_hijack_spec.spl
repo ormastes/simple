@@ -1,0 +1,79 @@
+# Named-argument class literals must build fields, never dispatch to
+# `static fn new` — reproducing spec.
+#
+# *** KNOWN RED as of 2026-08-17. This spec documents a LIVE defect. ***
+#
+# Gates doc/08_tracking/bug/interp_static_fn_new_hijacks_named_ctor_2026-07-02.md.
+# The 2026-08-08 RESOLVED verdict on that report was wrong: it probed only
+# argument names that were already class FIELDS, and never ran the shape that
+# reproduces. The live case is an argument name taken from `static fn new`'s
+# PARAMETER list:
+#
+#     class Font:
+#         id: i64
+#         size: i64
+#         static fn new(path: text, size: i64) -> Font: Font(id: 77, size: size)
+#
+#     Font(path: "x", size: 8)   ->   id=77   (should be: no such field `path`)
+#
+# `path` is not a field. 77 exists nowhere but inside `new`'s body, so the
+# literal was routed into the static constructor with no diagnostic. A field
+# renamed out of a class whose old name happens to match a `new` parameter thus
+# constructs silently-wrong instances instead of erroring.
+#
+# ROOT CAUSE (located, not fixed here — the file is outside this lane's edit
+# grant): src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs
+# lines 148-155. `all_named_struct_literal` suppresses the auto-call to `new`
+# only when EVERY named argument is a class field; otherwise `named_args_fit_new`
+# plus an exact arity match sets `should_call_new`. Fix direction: with a
+# `static fn new`, any named argument in the `Class(name: value)` form must be
+# validated against the FIELD list and rejected if absent — the interpreter
+# already does exactly this for a name matching neither (`bogus`), so the check
+# exists and merely runs after `new`-dispatch.
+#
+# WHY A SUBPROCESS. Consistent with the sibling specs in this directory, and so
+# the same probe covers the run path as well as the test path. The defect
+# reproduces on BOTH engines.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_named_ctor_static_new_hijack.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "named-argument class construction versus static fn new":
+    it "binds field-named arguments to fields, in either order":
+        step("Controls — these already pass, and prove the named binder runs at all")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS field_names_build_struct_id")
+        expect(interp).to_contain("PASS field_names_build_struct_size")
+
+        step("Reversed argument order discriminates a name-honouring binder from a positional one")
+        expect(interp).to_contain("PASS reversed_order_id")
+        expect(interp).to_contain("PASS reversed_order_size")
+
+    it "still reaches the static constructor through an explicit .new call":
+        step("The fix must not break the legitimate route to `static fn new`")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS explicit_new_still_reaches_static")
+
+    it "does not dispatch a named literal to static fn new on the parameter names":
+        step("`path` is a parameter of `new` and NOT a field of Font; the sentinel id=77 is reachable only from inside `new`'s body")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS param_names_do_not_hijack")
+
+    it "does not dispatch on the run path either":
+        step("The same hijack reproduces under `bin/simple run`, so the fix must cover both engines")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS param_names_do_not_hijack")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("NAMED_CTOR_HIJACK PROBE: ALL PASS")

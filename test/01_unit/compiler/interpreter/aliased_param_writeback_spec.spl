@@ -1,0 +1,107 @@
+# Aliased-parameter write-back — reproducer + similar-problem detection spec.
+#
+# DEFECT (doc/08_tracking/bug/aliased_array_mut_param_mutation_lost_interpreter_2026-08-06.md):
+# passing the SAME caller binding to two parameters, one `mut` and one not, made
+# the interpreter silently discard the mutation:
+#
+#   fn bump(mut a: [i64], b: [i64]):
+#       a.push(99)
+#   var w: [i64] = [1]
+#   bump(w, w)      # interpreter: w.len() == 1   JIT: w.len() == 2
+#
+# Exit code 0, no diagnostic, and the two engines disagree about the program's
+# meaning. Root cause: `write_back_mutable_arguments`
+# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs) wrote
+# EVERY container-typed parameter back to the caller, `mut` or not; with an
+# aliased binding the immutable parameter's stale pre-call Arc landed last and
+# overwrote its `mut` sibling's real mutation.
+#
+# WHY A SUBPROCESS, AND WHY BOTH ENGINES. `bin/simple test` executes spec bodies
+# on the tree-walk interpreter — which is the DEFECTIVE engine here. Asserting
+# in-process would therefore pin only one side of a divergence. The oracle is
+# the sibling probe `probe_aliased_param_writeback.spl`, run as a subprocess
+# under BOTH engines against ABSOLUTE literal expectations. The JIT arm is what
+# proves the expectations are achievable rather than invented; the interpreter
+# arm is what was red.
+#
+# The probe deliberately generalises past the filed shape (mut-first) to the
+# CLASS — mut-second, mut-in-the-middle, three-way aliasing, named-argument
+# syntax, dicts and class instances as well as arrays — because a fix that only
+# reorders write-backs passes the filed shape and still breaks its mirror image.
+# Writing it that way immediately paid: the sweep found five further failing
+# shapes the filed reproducer never covered.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/interpreter/probe_aliased_param_writeback.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "aliased parameter write-back does not discard the mutation":
+    it "keeps the mutation when the same binding is passed as mut and non-mut (interpreter)":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter — the engine the defect lived in")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The filed shape: fn f(mut a, b) called as f(w, w) must push into the caller's array")
+        expect(interp).to_contain("PASS aliased_array_mut_first")
+        expect(interp).to_contain("PASS aliased_array_mut_first_value")
+
+        step("The mirror image: fn f(b, mut a). A first-write-wins fix would pass the shape above and fail here")
+        expect(interp).to_contain("PASS aliased_array_mut_second")
+
+        step("An immutable alias on BOTH sides of the mutable parameter")
+        expect(interp).to_contain("PASS aliased_array_mut_middle")
+
+        step("Named-argument syntax reaches the same write-back path and must behave identically")
+        expect(interp).to_contain("PASS aliased_array_named_args")
+
+        step("Dicts and class instances share the copy-on-write handle model, so they share the class")
+        expect(interp).to_contain("PASS aliased_dict_mut_first")
+        expect(interp).to_contain("PASS aliased_dict_mut_second")
+        expect(interp).to_contain("PASS aliased_object_mut_second")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(interp).to_contain("ALIASED_PARAM_WRITEBACK PROBE: ALL PASS")
+
+    it "does not regress the non-aliased write-back it is scoped around (interpreter)":
+        step("The fix must be invisible when each caller binding reaches exactly one parameter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("A mut parameter with a distinct argument still writes back")
+        expect(interp).to_contain("PASS control_non_aliased_writeback")
+        expect(interp).to_contain("PASS control_distinct_bindings_mut")
+
+        step("An immutable parameter with a distinct argument still must NOT write back")
+        expect(interp).to_contain("PASS control_distinct_bindings_immut")
+
+        step("When NO alias is declared mut, nothing may reach the caller — the callee body must still have run")
+        expect(interp).to_contain("PASS neither_mut_ran")
+        expect(interp).to_contain("PASS aliased_array_neither_mut")
+
+    it "agrees with the cranelift JIT, which was already correct":
+        step("Run the identical probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("The JIT arm is the proof that every expectation above is achievable, not invented")
+        expect(jit).to_contain("ALIASED_PARAM_WRITEBACK PROBE: ALL PASS")
+
+    it "pins the known-open both-aliases-mut residual so it cannot move unnoticed":
+        step("When BOTH aliases are declared mut the interpreter still loses one push")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Recorded, not asserted as correct: each mut parameter forks its own Arc and the last write-back wins. Fixing it needs the two parameter bindings to share one handle.")
+        expect(interp).to_contain("OBSERVE aliased_array_both_mut=2")
+
+        step("The JIT gets the right answer, so this remains a live engine divergence")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("OBSERVE aliased_array_both_mut=3")
