@@ -76,22 +76,65 @@ Red-first evidence (interpreter mode, Rust seed 59536728 bytes 2026-08-16,
 | both role gates forced open | passed=11 failed=1 |
 | none (restored) | **passed=12 failed=0** |
 
+### W13-C (2026-08-17)
+
+Evidence: interpreter mode, Rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple` (59536728 bytes, 2026-08-16),
+`SIMPLE_TIMEOUT_SECONDS=900`, one spec per run.
+
+- **Residual 1 (entropy quality) — audited, no production weak-entropy path
+  exists.** Every issuer of a session token goes through `session_issue`;
+  its only non-spec caller is `store_app_handle_bearer`
+  (`auth_routes.spl:101`), which takes `entropy` as a parameter — there is
+  no daemon in the repo that wires a constant. All weak/short entropy values
+  found were SPEC literals. Per the audit contract, a defensive boundary
+  check was added instead of trusting the caller:
+  `session_issue` now denies (generic `invalid-credentials`, no oracle) any
+  entropy under `session_entropy_min_len()` = 8 bytes
+  (`enterprise_session/session.spl`). Distinct-token-under-identical-inputs
+  was already fenced (the CONSTANT-entropy scenario); the new boundary
+  scenario is `enterprise_security_audit_spec` "rejects entropy too short to
+  have come from a CSPRNG". Sabotage (check reverted to `entropy == ""`):
+  passed=12 failed=1; restored: passed=13 failed=0. Spec-only short
+  entropies (`"e-lock"` etc. in `enterprise_auth_throttle_spec`) were
+  lengthened.
+- **Residual 7 (byte-wise percent-decode) — verified SAFE for multi-byte
+  UTF-8, fenced.** Probe + spec confirm `%C3%A9` (2-byte) and `%E2%82%AC`
+  (3-byte) decode byte-wise (mojibake, as documented) but every decoded byte
+  of a multi-byte sequence is >= 0x80, so no `<`, `>` or quote can be
+  manufactured from inside a sequence; a real `%3C` after a multi-byte value
+  still renders through `esc()` as `&lt;`. No XSS. Regression fences assert
+  presence AND exact byte-length of the decoded sequences (a first, weaker
+  fence that only checked absence-of-`<` survived a byte-dropping sabotage
+  and was strengthened). Sabotage (decoder drops bytes >= 0x80): passed=12
+  failed=1; restored: passed=13 failed=0. The charset-recombination gap
+  itself remains residual (renumbered 6 below).
+- **Gap check — two guarded commands never adversarially exercised for
+  cross-tenant mutation:** `sale_refund_order` (against a seeded PAID
+  tenant-A order) and `proc_receive` (against a seeded open tenant-A PO)
+  added to the conformance tenancy scenario (now 17 denials, all
+  `invalid-session`, state fingerprint byte-identical). **No cross-tenant
+  mutation succeeded.** Sabotage (tenant rung of `session_valid` forced
+  open): passed=7 failed=1; restored: passed=8 failed=0.
+
+Regression (one spec at a time): `enterprise_security_audit_spec` 13/13,
+`enterprise_auth_throttle_spec` 6/6, `enterprise_conformance_spec` 8/8,
+`back_office_web_spec` 7/7, `store_app_spec` 3/3.
+
 ## Residual risks (honest)
 
-1. **Entropy quality is still the caller's responsibility.** The derivation is
-   now collision-free and not cross-derivable, but a deployment that supplies a
-   guessable constant still weakens brute-force resistance for its *own*
-   actor's token if the attacker also learns that actor's `secret_hash`. The
-   library performs no randomness reads by design; the deployment must feed a
-   real CSPRNG.
-2. **The provider seam is still a stand-in, not PCI evidence.** The signature
+Risk 1 of the W9-D list is CLOSED by W13-C (boundary check above); risk 7's
+XSS question is answered safe and fenced, with only the
+charset-recombination remainder kept (item 6).
+
+1. **The provider seam is still a stand-in, not PCI evidence.** The signature
    is `sha256(shared_secret | material)`, not a real provider HMAC scheme with
    timestamp tolerance. It is not constant-time compared. Replacing the seam
    with a provider SDK is a one-struct change.
 Risks 3, 5 and 7 of the W9-D list are CLOSED by W12-B — they are rows 6c, 8
 and 9 of the matrix above. What remains:
 
-3. **`role_allows` is a hardcoded role table, not a registry.** Every
+2. **`role_allows` is a hardcoded role table, not a registry.** Every
    role-gated read reuses an existing write action as its read grant
    (`hcm.leave.decide`, `proc.requisition.approve`, `finance.period.close`,
    and now `booking.hold`, `restaurant.table.open`), so read and write
@@ -99,26 +142,27 @@ and 9 of the matrix above. What remains:
    applies to rather than fixing it: gating the booking and restaurant reads
    made the app CONSISTENT, not finer-grained. Concretely, no role can be
    granted "read the open bill" without also being granted "open a table".
-4. **No CSRF token and no cookie flow.** The app is bearer-token only, which
+3. **No CSRF token and no cookie flow.** The app is bearer-token only, which
    sidesteps CSRF; introducing cookies would require this to be revisited.
-5. **The throttle is bounded but still a linear scan of the live window.**
+4. **The throttle is bounded but still a linear scan of the live window.**
    `throttle_count` walks the whole retained set rather than an index. The
    set is now bounded by the live window instead of by all traffic ever, so
    the amplification is gone, but the per-request cost is still O(live window
    traffic), not O(1). An index on `(key, window)` is the follow-up.
-6. **The throttle sweep is all-or-nothing.** `throttle_prune` fires only when
+5. **The throttle sweep is all-or-nothing.** `throttle_prune` fires only when
    EVERY retained row is stale. A key that is exercised without pause across
    a boundary keeps its window's rows alive and blocks the sweep for all
    other keys in that instant; the next boundary with a genuine gap clears
    them. This is a consequence of the seed's DELETE defect above (no
    per-row delete is available), and it can only cost boundedness — it can
    never let a request past a limit.
-7. **`percent_decode` decodes bytes, not characters.** `%C3%A9` yields two
-   separate bytes appended as text rather than one `é`. No route compares
-   business identifiers after Unicode normalisation, so nothing today depends
-   on it, but a future field that does would need normalisation added
-   deliberately rather than assumed.
-8. **Nothing role-gates a WRITE at the route.** Writes are gated inside the
+6. **`percent_decode` decodes bytes, not characters.** `%C3%A9` yields two
+   separate bytes appended as text rather than one `é`. W13-C verified this
+   cannot smuggle markup (all bytes of a multi-byte sequence are >= 0x80)
+   and fenced it, so the remainder is purely the mojibake/normalisation gap:
+   no route compares business identifiers after Unicode normalisation today,
+   but a future field that does would need recombination added deliberately.
+7. **Nothing role-gates a WRITE at the route.** Writes are gated inside the
    guarded commands (rung order in `guarded_command_contract.md`), which is
    where the authority actually lives; the route-level checks added by W12-B
    cover reads only. This is by design — two gates for one decision is how

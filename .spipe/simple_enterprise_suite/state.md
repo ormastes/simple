@@ -977,3 +977,26 @@ New acceptance criteria (extends AC-1..AC-12 above):
   a missing verdict is NOT a pass, and those were re-run to completion.
   Merged-tree reruns: compression 20/20, static_compression_cache 8/8,
   range_numeric_guard 3/3, async_dynamic_dispatch 6/6, http_core 23/23.
+
+- W13-C (2026-08-17, done): residual-risk closure pass 2 + guarded-command gap
+  check. Rust seed 59536728B 2026-08-16, interpreter mode, one spec/run,
+  SIMPLE_TIMEOUT_SECONDS=900.
+  (1) Entropy: audited every issuer — only spec callers supply entropy; no
+  production constant-entropy path exists. Added defensive boundary:
+  session_issue denies entropy < session_entropy_min_len() (8 bytes) with the
+  generic invalid-credentials. New audit-spec scenario; short spec-only
+  entropies in enterprise_auth_throttle_spec lengthened. Sabotage (check
+  reverted): 12/1 -> restored 13/0.
+  (2) percent_decode multi-byte: verified SAFE — 2- and 3-byte UTF-8 escapes
+  decode byte-wise (documented mojibake) but all sequence bytes >= 0x80, so no
+  '<'/'>'/quote can appear from inside a sequence; %3C after a multi-byte
+  value still escapes via esc(). NO XSS. Fences assert exact decoded byte
+  lengths — a first absence-only fence survived a byte-dropping sabotage and
+  was strengthened. Sabotage (drop bytes >= 0x80): 12/1 -> restored 13/0.
+  (3) Gap check: sale_refund_order (vs seeded PAID order) and proc_receive
+  (vs seeded open PO) added to conformance tenancy scenario — 17 denials, all
+  invalid-session, fingerprint identical; no cross-tenant mutation. Sabotage
+  (session_valid tenant rung forced open): 7/1 -> restored 8/8.
+  Regression: audit 13/13, auth_throttle 6/6, conformance 8/8, back_office
+  7/7, store_app 3/3. Posture doc updated: residual 1 closed, residual 7
+  narrowed to normalisation-only; remainder renumbered 1-7.

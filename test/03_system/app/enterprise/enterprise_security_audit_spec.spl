@@ -85,7 +85,7 @@ use std.nogc_sync_mut.enterprise_session.throttle.{
     throttle_setup, throttle_admit, throttle_count, throttle_window,
     throttle_rows_retained
 }
-use app.enterprise_store_app.web_common.{form_value, percent_decode}
+use app.enterprise_store_app.web_common.{form_value, percent_decode, esc}
 use app.enterprise_store_app.main.{store_app_handle}
 use app.enterprise_store_app.auth_routes.{store_app_handle_bearer}
 
@@ -328,6 +328,23 @@ describe "attack: session handling — stolen, revoked, expired, cross-tenant to
         step("The victim's live token is not reachable by replaying the derivation inputs")
         val guess = session_issue(store, "tenant-a", "attacker", "attacker-secret", 5000, 600, fixed)
         expect(guess.detail == a1.detail).to_be(false)
+        store_close(store)
+
+    it "rejects entropy too short to have come from a CSPRNG (W13-C boundary check)":
+        val store = fresh_full("token_entropy_len")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        credential_seed(store, session_for(admin, t), t, admin, "victim", "sales", "salt-v", "victim-secret")
+
+        step("The library reads no randomness by design; the deployment feeds it.")
+        step("But an EMPTY or sub-8-byte entropy cannot be CSPRNG output — denied")
+        expect(session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, "").ok).to_be(false)
+        expect(session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, "abc").ok).to_be(false)
+        expect(session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, "1234567").ok).to_be(false)
+        step("...with the same generic denial as a bad credential (no oracle)")
+        expect(session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, "abc").reason).to_equal("invalid-credentials")
+        step("8 bytes or more passes the boundary")
+        expect(session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, "12345678").ok).to_be(true)
         store_close(store)
 
 # =============================================================================
@@ -576,6 +593,33 @@ describe "attack: a hostile form value that the old parser truncated or mis-read
         expect(percent_decode("ok%20here").0).to_be(true)
         expect(percent_decode("ok%20here").1).to_equal("ok here")
         expect(percent_decode("bad%2").0).to_be(false)
+
+        step("Multi-byte UTF-8 escapes decode as BYTES (documented residual: no")
+        step("charset recombination) — but never manufacture a '<', '>' or quote")
+        # 2-byte codepoint: %C3%A9 (é). Decoded byte-wise; both bytes >= 0x80,
+        # so no markup-significant ASCII can appear from inside the sequence.
+        val two = percent_decode("caf%C3%A9")
+        expect(two.0).to_be(true)
+        expect(two.1.contains("<")).to_be(false)
+        expect(two.1.contains(">")).to_be(false)
+        expect(two.1.contains("\"")).to_be(false)
+        expect(two.1.starts_with("caf")).to_be(true)
+        # Both decoded bytes must actually be PRESENT (not silently dropped):
+        # "caf" (3) + 0xC3 0xA9 decoded byte-wise as two chars (4 UTF-8 bytes).
+        expect(two.1.len()).to_equal(7)
+        # 3-byte codepoint: %E2%82%AC (€) — same property.
+        val three = percent_decode("%E2%82%AC")
+        expect(three.0).to_be(true)
+        expect(three.1.contains("<")).to_be(false)
+        expect(three.1.contains(">")).to_be(false)
+        expect(three.1.len()).to_equal(6)
+        # A multi-byte value with a REAL encoded '<' after it: the '<' comes
+        # only from its own %3C escape and is visible to the escaper.
+        val mixed = form_value("a=caf%C3%A9%3Cb%3E", "a")
+        expect(mixed.contains("<b>")).to_be(true)
+        expect(mixed.len()).to_equal(10)
+        expect(esc(mixed).contains("<")).to_be(false)
+        expect(esc(mixed).contains("&lt;b&gt;")).to_be(true)
 
     it "does NOT weaken escaping: a decoded XSS payload still renders escaped":
         val store = fresh_full("form_xss")

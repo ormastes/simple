@@ -111,11 +111,18 @@ fn credential_row(store: EnterpriseStore, tenant_id: text, actor_id: text) -> (t
 # Issuance / revocation / resolution
 # =============================================================================
 
+# session_entropy_min_len — the library performs no randomness reads by design
+# (the deployment supplies `entropy` from its CSPRNG), but it DOES refuse an
+# entropy value too short to have come from one: empty or under 8 bytes is
+# rejected with the same generic denial (W13-C defensive boundary check).
+fn session_entropy_min_len() -> i64:
+    8
+
 # session_issue verifies the salted-hash credential and writes a session row.
 # On success the token is in CommandResult.detail. Unknown actor and wrong
 # secret produce the SAME generic denial (no user enumeration).
 fn session_issue(store: EnterpriseStore, tenant_id: text, actor_id: text, secret: text, now_epoch: i64, ttl: i64, entropy: text) -> CommandResult:
-    if tenant_id == "" or actor_id == "" or ttl <= 0 or entropy == "":
+    if tenant_id == "" or actor_id == "" or ttl <= 0 or entropy.len() < session_entropy_min_len():
         return denied("invalid-credentials", "")
     val cred = credential_row(store, tenant_id, actor_id)
     if cred.2 == "" or credential_hash(cred.1, secret) != cred.2:
@@ -161,6 +168,6 @@ fn session_resolve(store: EnterpriseStore, tenant_id: text, token: text, now_epo
     (dead, "")
 
 export session_setup
-export credential_hash, session_token_derive, session_issued_count
+export credential_hash, session_token_derive, session_issued_count, session_entropy_min_len
 export credential_seed, credential_row
 export session_issue, session_revoke, session_revoked, session_resolve

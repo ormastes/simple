@@ -70,7 +70,7 @@ use std.nogc_sync_mut.enterprise_sale.foundation.{
 }
 use std.nogc_sync_mut.enterprise_sale.goods_sale.{
     sale_setup, sale_add_product, sale_receive_stock, sale_place_order,
-    sale_available_stock
+    sale_pay_order, sale_refund_order, sale_available_stock
 }
 use std.nogc_sync_mut.enterprise_booking.booking.{
     booking_setup, booking_create_resource,
@@ -474,9 +474,9 @@ describe "guarded-command conformance — closed reason set":
         reasons.push(channel_import_orders(store, s, t, admin, envelope("rz-20"), mock_channel([], 10), "ch-1", 10).reason)
         # session vertical — the generic, non-enumerating issuance denial
         credential_seed(store, s, t, admin, "user-1", "sales", "salt", "secret")
-        reasons.push(session_issue(store, "tenant-a", "user-1", "wrong", 100, 900, "e").reason)
-        reasons.push(session_issue(store, "tenant-a", "user-404", "secret", 100, 900, "e").reason)
-        reasons.push(session_issue(store, "tenant-a", "user-1", "secret", 100, 900, "e").reason)
+        reasons.push(session_issue(store, "tenant-a", "user-1", "wrong", 100, 900, "entropy-conf").reason)
+        reasons.push(session_issue(store, "tenant-a", "user-404", "secret", 100, 900, "entropy-conf").reason)
+        reasons.push(session_issue(store, "tenant-a", "user-1", "secret", 100, 900, "entropy-conf").reason)
 
         step("The collected set is non-trivial and wholly inside the closed set")
         expect(reasons.len() > 20).to_be(true)
@@ -512,6 +512,14 @@ describe "guarded-command conformance — tenant scoping":
         table_open_session(store, s, ta, admin, envelope("tn-open"), "sess-1", "v1", "t1", 2)
         hcm_hire(store, s, ta, admin, envelope("tn-hire"), "emp-1", "Ann", 0, 2000, 40)
         channel_register(store, s, ta, admin, "ch-1", "mock")
+        # Refundable money state: a PAID order (sale_refund_order's feasible target).
+        sale_place_order(store, s, ta, admin, envelope("tn-seed-o"), "o-1", "SKU-1", 1)
+        sale_pay_order(store, s, ta, admin, envelope("tn-seed-p"), "o-1")
+        # Receivable inventory state: an approved requisition turned into a PO.
+        proc_supplier_add(store, s, ta, admin, "sup-1", "Supplies Inc")
+        proc_requisition_create(store, s, ta, admin, envelope("tn-seed-r"), "req-1", "SKU-1", 5)
+        proc_requisition_approve(store, s, ta, admin, envelope("tn-seed-a"), "req-1")
+        proc_po_create(store, s, ta, admin, envelope("tn-seed-po"), "po-1", "req-1", "sup-1", usd(100))
         val fp_before = effect_fingerprint(store, "tenant-a")
 
         step("The intruder's session is valid for tenant B, but tenant A is authority")
@@ -535,9 +543,15 @@ describe "guarded-command conformance — tenant scoping":
         denials.push(channel_register(store, bad, ta, intruder, "ch-x", "mock").reason)
         denials.push(channel_ack_order(store, bad, ta, intruder, mock_channel([], 10), "ch-1", "x-1").reason)
         denials.push(channel_import_orders(store, bad, ta, intruder, envelope("tn-11"), mock_channel([], 10), "ch-1", 10).reason)
+        # W13-C gap check: two guarded commands never before exercised for
+        # cross-tenant mutation, both aimed at FEASIBLE tenant-A state — a
+        # paid order (refund would move money) and an open PO (receive would
+        # move inventory).
+        denials.push(sale_refund_order(store, bad, ta, intruder, envelope("tn-16"), "o-1").reason)
+        denials.push(proc_receive(store, bad, ta, intruder, envelope("tn-17"), "po-1", 5).reason)
 
         step("Every one of them is invalid-session — no rung leaks past the first")
-        expect(denials.len()).to_equal(15)
+        expect(denials.len()).to_equal(17)
         for d in denials:
             expect(d).to_equal("invalid-session")
 
