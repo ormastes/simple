@@ -1,0 +1,56 @@
+#!/bin/sh
+# check-enterprise-suite-enumeration.shs
+#
+# Drift guard for the Simple Enterprise Suite spec enumeration.
+#
+# The authoritative verification list lives in
+#   doc/00_llm_process/feature_expert/enterprise_suite/skill.md
+# and MUST equal the on-disk set of enterprise + http_server-tier spec files.
+# History: the recorded list silently omitted 21 http_server-tier specs for
+# weeks (see that wiki's landmine #10). This guard makes that drift mechanical.
+#
+# It enumerates from disk and compares the COUNT against EXPECTED below. Any
+# spec added or removed under the enterprise-suite scope changes the count and
+# fails the guard until both the wiki list and EXPECTED here are updated
+# together.
+#
+# Scope note: the http STACK (h2/h3/ws/client/...) is deliberately NOT included
+# — only the `http_server` tier plus the shared http_core / http_hardening /
+# live-socket specs the suite actually owns. The stale `test/unit/` mirror tree
+# is excluded (it is a separate, divergence-fenced duplicate).
+#
+# Verdict is the last line of stdout:
+#   PASS  — <n> spec(s) enumerated, matches EXPECTED   exit 0
+#   FAIL  — <n> enumerated, EXPECTED <m>: <drift>        exit 1
+#   ERROR — nothing was checked                          exit 2
+
+set -u
+EXPECTED=71
+
+cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" || {
+  echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+
+LIST=$(find test/01_unit test/03_system examples/12_business/simple_erp/ubs_test \
+  -name '*_spec.spl' -not -path 'test/unit/*' \( \
+    -path '*/http_server/*' \
+    -o -path '*enterprise*' \
+    -o -path '*ubs_test/*' \
+    -o -name 'http_core_spec.spl' \
+    -o -name 'http_hardening_spec.spl' \
+    -o -name 'http_dynamic_dispatch_live_socket_spec.spl' \
+  \) 2>/dev/null | sort -u)
+
+N=$(printf '%s\n' "$LIST" | grep -c '_spec.spl')
+
+if [ "$N" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 specs enumerated)"; exit 2
+fi
+
+if [ "$N" -ne "$EXPECTED" ]; then
+  echo "FAIL — $N spec(s) enumerated, EXPECTED $EXPECTED. Update the wiki list AND EXPECTED here together. Enumeration:"
+  printf '%s\n' "$LIST"
+  exit 1
+fi
+
+echo "PASS — $N spec(s) enumerated, matches EXPECTED ($EXPECTED)"
+exit 0

@@ -19,31 +19,31 @@ fn _make_bytes_10() -> [u8]:
 
 fn _make_bytes_20() -> [u8]:
     # 20 bytes (unit repeated twice) — different content from _make_bytes_10.
-    val unit: [u8] = [0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x45u8, 0x46u8, 0x47u8, 0x48u8, 0x49u8, 0x4au8]
+    val chunk: [u8] = [0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x45u8, 0x46u8, 0x47u8, 0x48u8, 0x49u8, 0x4au8]
     var out: [u8] = []
     var i: i64 = 0
     while i < 2:
-        out = out + unit
+        out = out + chunk
         i = i + 1
     out
 
 fn _make_bytes_30() -> [u8]:
     # 30 bytes — third distinct payload.
-    val unit: [u8] = [0x71u8, 0x72u8, 0x73u8, 0x74u8, 0x75u8, 0x76u8, 0x77u8, 0x78u8, 0x79u8, 0x7au8]
+    val chunk: [u8] = [0x71u8, 0x72u8, 0x73u8, 0x74u8, 0x75u8, 0x76u8, 0x77u8, 0x78u8, 0x79u8, 0x7au8]
     var out: [u8] = []
     var i: i64 = 0
     while i < 3:
-        out = out + unit
+        out = out + chunk
         i = i + 1
     out
 
 fn _make_bytes_100() -> [u8]:
     # 100 bytes — used for byte-bound eviction tests (10 * 10).
-    val unit: [u8] = [0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8, 0x69u8, 0x6au8]
+    val chunk: [u8] = [0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8, 0x69u8, 0x6au8]
     var out: [u8] = []
     var i: i64 = 0
     while i < 10:
-        out = out + unit
+        out = out + chunk
         i = i + 1
     out
 
@@ -95,17 +95,25 @@ describe "StaticCompressionCache":
         val cache = StaticCompressionCache.new(2, 16777216)
         cache.put("/a.html", "gzip", _make_bytes_10())
         cache.put("/b.css", "gzip", _make_bytes_20())
-        # Both present.
+        # Both present. NOTE these two probes are themselves accesses and so
+        # reorder recency: after them B (probed last) is MRU and A is LRU.
+        #
+        # This spec used to assert the opposite -- that B is evicted -- on the
+        # strength of a comment reading "After get("/a.html") above, A is MRU,
+        # B is LRU", which simply ignored the get("/b.css") on the very next
+        # line. The implementation was right and the spec's own reasoning was
+        # wrong; the promotion-on-get behaviour it meant to describe is already
+        # covered, deliberately, by the next example, which does a single
+        # targeted get(A) and no probe of B.
         expect(cache.get("/a.html", "gzip") != nil).to_equal(true)
         expect(cache.get("/b.css", "gzip") != nil).to_equal(true)
-        # After get("/a.html") above, A is MRU, B is LRU.
-        # Putting C should evict B.
+        # Putting C evicts the LRU, which is A.
         cache.put("/c.js", "gzip", _make_bytes_30())
         val a_hit = cache.get("/a.html", "gzip")
         val b_hit = cache.get("/b.css", "gzip")
         val c_hit = cache.get("/c.js", "gzip")
-        expect(a_hit != nil).to_equal(true)
-        expect(b_hit).to_equal(nil)
+        expect(a_hit).to_equal(nil)
+        expect(b_hit != nil).to_equal(true)
         expect(c_hit != nil).to_equal(true)
 
     it "get() promotes entry to MRU so subsequent eviction skips it":
