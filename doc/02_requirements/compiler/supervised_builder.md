@@ -146,3 +146,40 @@ worse. A control that fails to fail means the test is broken, not the code.
 - `4d1aca2d799` — parse now reports per file, so a stalled unit names itself.
 - `doc/01_research/compiler/incremental_build/lib_only_build_feasibility_2026-08-09.md`
   — why there is no target/dependency model today (relevant to R6).
+
+## R9 — Bounded accumulation (added 2026-08-17, from a live measurement)
+
+Collect-all must not kill the run it is reporting on.
+
+Measured during the first stage-3 run that got far enough to produce diagnostics
+at scale: at **124 of 619 files** the build had accumulated **2,926 errors** and
+its RSS was climbing **~1 GB per 30 seconds** (8.0 → 15.1 GB across six samples).
+Linear extrapolation to the full file set is roughly **14,500 errors** and
+**+25-30 GB**. On this host that is survivable only because ~75 GB was free;
+`earlyoom` fires at 10% free and had already killed an earlier bootstrap the same
+day.
+
+So the requirement "reach the end of the source list and report every failure"
+has a failure mode of its own: **unbounded retention of diagnostic text can OOM
+the very run that was supposed to report it**, converting a complete error census
+into no census at all.
+
+Note the existing 10-per-file display cap (`[hir-fatal-count] ... count=N
+shown=10`) bounds OUTPUT but evidently not RETENTION — the count keeps rising
+while memory keeps growing.
+
+Required:
+
+- **Cap retained detail per unit**, not just displayed detail. Keep the first N
+  diagnostics per file verbatim; discard the text of the rest.
+- **Never cap the COUNT.** `count=1948` must stay exact even when only 10 are
+  shown and only 10 are retained. A truncated count is a lie about the size of
+  the problem; truncated text is merely less convenient.
+- **Spill to the log, not the heap.** Diagnostics are written once and read later;
+  they do not need to be held in memory until the end of the build.
+- **Report the retention policy in the summary** so a reader knows whether they
+  are seeing everything (e.g. `shown=10 retained=10 total=1948`).
+
+This is a direct consequence of R3 (reach the end of the source list). R3 without
+R9 is self-defeating on any codebase with a systemic defect — and a systemic
+defect is exactly the case where running to the end matters most.
