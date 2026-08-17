@@ -1,7 +1,6 @@
 # Compiled checker asm-volatile indented-block gap
 
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: **fix implemented; admitted compiled-checker verification pending**
 - Severity: P1 (Stage 4 inventory blocker)
 - Found by: `stage4_expr_batch`
 - Owner: inline-assembly primary parser (unclaimed)
@@ -13,7 +12,13 @@ After the expression batch fixed the `unsafe:` diagnostic in frozen row
 indented form. This is a later independent grammar root; it is not evidence
 that the unsafe-block fix failed.
 
-Reproduce with the rebuilt checker against that exact file. The follow-up must
-compare the Rust parser's `asm volatile:` grammar, preserve existing braced and
-parenthesized asm behavior, and add exact, adjacent, malformed, and recovery
-coverage before changing the asm owner.
+The pure-Simple owner now routes the colon-indented form through the same
+operand model used by parenthesized asm. It retains instruction strings,
+`in`/`out`/`inout`/`lateout` operands, named operands, and option/clobber
+directives. Unknown directives still diagnose and recover at the next line.
+
+`test/01_unit/compiler/parser/asm_volatile_indented_block_spec.spl` covers the
+exact historical RISC-V form, adjacent named operands/options, malformed-to-
+valid recovery, and braced/parenthesized neighbors. Diagnostic execution
+passes 4/4. Final closure still requires the retained historical source to be
+replayed by a provenance-admitted compiled checker.
