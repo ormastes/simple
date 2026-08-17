@@ -1877,6 +1877,14 @@ impl Lowerer {
             ty: result_ty,
         };
 
+        // The then-branch yields a TAGGED RuntimeValue (that is what a `T?` slot
+        // holds). A raw scalar literal in the else-branch would leave the `If`
+        // producing a tagged word on one edge and a raw one on the other, and
+        // the consumer decodes by tag: `n ?? 9` on a nil `i64?` printed
+        // `<invalid-heap:0x9>` because `9 & 7 == 1` is TAG_HEAP.
+        // Bug: doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+        let default_hir = self.box_scalar_into_tagged_result(result_ty, default_hir);
+
         Ok(HirExpr {
             kind: HirExprKind::If {
                 condition: Box::new(condition),
@@ -1885,6 +1893,33 @@ impl Lowerer {
             },
             ty: result_ty,
         })
+    }
+
+    /// Box a raw-scalar expression when it must flow out through a slot whose
+    /// runtime representation is a tagged `RuntimeValue` (a nullable `T?`, or
+    /// `Any`). Returns the expression unchanged in every other case.
+    fn box_scalar_into_tagged_result(&self, result_ty: TypeId, value: HirExpr) -> HirExpr {
+        let tagged_slot = result_ty == TypeId::ANY
+            || matches!(self.module.types.get(result_ty), Some(HirType::Pointer { .. }));
+        if !tagged_slot {
+            return value;
+        }
+        let boxer = match value.ty {
+            TypeId::BOOL => "rt_value_bool",
+            TypeId::U64 => "rt_value_u64",
+            TypeId::F32 | TypeId::F64 => "rt_value_float",
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
+                "rt_value_int"
+            }
+            _ => return value,
+        };
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: boxer.to_string(),
+                args: vec![value],
+            },
+            ty: result_ty,
+        }
     }
 
     /// Lower an expression that appears in **condition position** — an
