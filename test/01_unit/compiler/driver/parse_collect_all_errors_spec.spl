@@ -1,0 +1,73 @@
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{
+    SourceFile,
+    driver_core_compile_options_default
+}
+use compiler.driver.driver.{CompilerDriver}
+
+fn fixture_source(path: text, content: text, module_name: text) -> SourceFile:
+    SourceFile(path: path, content: content, module_name: module_name)
+
+fn fixture_driver(sources: [SourceFile]) -> CompilerDriver:
+    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    driver.ctx.sources = sources
+    driver
+
+# Fixture tree: three deliberately broken files interleaved with clean ones.
+# The broken ones are NOT adjacent, so a fail-fast run can only ever name the
+# first of them.
+fn broken_tree_driver() -> CompilerDriver:
+    fixture_driver([
+        fixture_source("build/collect/broken_one.spl",
+            "fn one() -> i64:\n    return (\n", "fixture.broken_one"),
+        fixture_source("build/collect/clean_a.spl",
+            "fn clean_a() -> i64:\n    return 1\n", "fixture.clean_a"),
+        fixture_source("build/collect/broken_two.spl",
+            "fn two() -> i64:\n    return 1 +\n", "fixture.broken_two"),
+        fixture_source("build/collect/clean_b.spl",
+            "fn clean_b() -> i64:\n    return 2\n", "fixture.clean_b"),
+        fixture_source("build/collect/broken_three.spl",
+            "class Broken(\n", "fixture.broken_three")
+    ])
+
+fn error_blob(errors: [text]) -> text:
+    var blob = ""
+    var idx = 0
+    while idx < errors.len():
+        blob = blob + errors[idx] + "\n"
+        idx = idx + 1
+    blob
+
+describe "parse reaches the end of all sources":
+    it "reports all three broken files in one run":
+        var driver = broken_tree_driver()
+        val (ctx, ok) = driver.parse_all_impl()
+        expect(ok).to_equal(false)
+        val blob = error_blob(ctx.errors)
+        print "[collect-all] errors:\n{blob}"
+        expect(blob).to_contain("build/collect/broken_one.spl")
+        expect(blob).to_contain("build/collect/broken_two.spl")
+        expect(blob).to_contain("build/collect/broken_three.spl")
+        expect(ctx.poisoned_module_count()).to_equal(3)
+
+    # Defect CLASS detection: the failure mode is "a later source is never
+    # reached". Assert the clean files AFTER the first broken one still parsed,
+    # which is only possible if the run continued past the failure.
+    it "keeps parsing sources that follow a broken one":
+        var driver = broken_tree_driver()
+        val (ctx, _) = driver.parse_all_impl()
+        expect(ctx.modules.contains_key("fixture.clean_a")).to_equal(true)
+        expect(ctx.modules.contains_key("fixture.clean_b")).to_equal(true)
+        expect(ctx.modules.contains_key("fixture.broken_two")).to_equal(false)
+
+    it "still succeeds on a clean tree":
+        var driver = fixture_driver([
+            fixture_source("build/collect/clean_a.spl",
+                "fn clean_a() -> i64:\n    return 1\n", "fixture.clean_a"),
+            fixture_source("build/collect/clean_b.spl",
+                "fn clean_b() -> i64:\n    return 2\n", "fixture.clean_b")
+        ])
+        val (ctx, ok) = driver.parse_all_impl()
+        expect(ok).to_equal(true)
+        expect(ctx.errors.len()).to_equal(0)
+        expect(ctx.poisoned_module_count()).to_equal(0)

@@ -37,6 +37,10 @@ extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 
+# Marks the one recoverable failure of add_streaming_module_surface: the source
+# did not parse. Every other Err from it is an internal invariant break.
+val _STREAM_PARSE_ERROR_PREFIX: text = "parse error in "
+
 class ParsedEntryModuleBox:
     value: ParserModule
 
@@ -90,7 +94,7 @@ impl CompilerDriver:
             source.content, source.path, source.module_name, self.ctx.logger)
         if par_had_error_get():
             val _ended = driver_end_transient_parse_scope()
-            return Err("parse error in {source.path} (see [parser_error] output above)")
+            return Err("{_STREAM_PARSE_ERROR_PREFIX}{source.path} (see [parser_error] output above)")
         log_module_surface_stage(source.path, "parse-done")
         # Build the compact projection before pausing so all intermediate
         # arrays/dictionaries remain owned by the per-file transient scope.
@@ -143,8 +147,27 @@ impl CompilerDriver:
                 val parsed_result = self.add_streaming_module_surface(
                     builder, source, source_index, canonical_path)
                 if parsed_result.is_err():
+                    val stream_err = parsed_result.unwrap_err()
+                    # Collect-all default, same as parse_all_impl's entry-closure
+                    # and plain loops. A parse error leaves no surface for THIS
+                    # module, but every other file can still be parsed, so poison
+                    # this one and keep going instead of abandoning the remaining
+                    # sources. Only parse failures are recoverable here: a scope /
+                    # promotion / builder failure is an internal invariant break
+                    # and still bails immediately. `par_had_error` is reset per
+                    # file in parser_init_with_path, so continuing cannot leak a
+                    # stale flag. --fail-fast / SIMPLE_COMPILE_FAIL_FAST=1 restores
+                    # stop-at-first via the shared poison_budget cap.
+                    if stream_err.starts_with(_STREAM_PARSE_ERROR_PREFIX):
+                        self.ctx.add_error(stream_err)
+                        val poison_ctx: CompileContext = self.ctx
+                        poison_ctx.mark_module_poisoned(source.module_name)
+                        if poison_ctx.poison_budget_exhausted():
+                            return (self.ctx, false)
+                        source_index = source_index + 1
+                        continue
                     self.ctx.add_error(
-                        "Module surface extraction error: {parsed_result.unwrap_err()}")
+                        "Module surface extraction error: {stream_err}")
                     return (self.ctx, false)
                 builder = parsed_result.unwrap()
                 release_seq = release_seq + 1
