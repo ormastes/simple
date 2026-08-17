@@ -352,6 +352,16 @@ impl RuntimeValue {
         }
     }
 
+    /// The payload of a heap-boxed wide SIGNED integer, if this is one.
+    #[inline]
+    pub fn as_heap_i64(self) -> Option<i64> {
+        if matches!(self.heap_type(), Some(HeapObjectType::Int)) {
+            Some(unsafe { (*(self.as_heap_ptr() as *const super::heap::HeapInt)).value })
+        } else {
+            None
+        }
+    }
+
     // =========================================================================
     // Boolean operations
     // =========================================================================
@@ -566,6 +576,7 @@ impl RuntimeValue {
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => "float",
                 Some(HeapObjectType::UInt) => "int",
+                Some(HeapObjectType::Int) => "int",
                 None => "null",
             },
             _ => "unknown",
@@ -623,6 +634,7 @@ impl RuntimeValue {
                 // handles heap-boxed floats before this match.
                 Some(HeapObjectType::Float) => ValueKind::Float,
                 Some(HeapObjectType::UInt) => ValueKind::Int,
+                Some(HeapObjectType::Int) => ValueKind::Int,
                 None => ValueKind::Nil,
             },
             _ => ValueKind::Nil,
