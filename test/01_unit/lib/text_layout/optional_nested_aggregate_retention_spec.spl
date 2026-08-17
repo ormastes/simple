@@ -1,0 +1,55 @@
+# An optional nested-class field must survive a module-global store/read-back.
+#
+# This is the "one-assert state-retention probe" that
+# doc/08_tracking/bug/self_hosted_font_renderer_optional_field_shape_2026-07-11.md
+# asked for, reduced to 16 lines with no fonts, no SFFI and no Engine2D.
+#
+# Shape under test is exactly FontRenderer's:
+#     Outer { name: text, inner: Inner? }   with   Inner { blob: [u8] }
+# stored in a module-global `[Outer]` and read back -- the arrangement
+# src/lib/nogc_sync_mut/text_layout/font_renderer.spl:338-351 had to FLATTEN
+# away as a call-site workaround because the nested payload degraded.
+#
+# The workaround holds, so the font path itself is no longer red. The compiler
+# defect it worked around is not fixed, and this spec is the fence that says so.
+#
+# Measured 2026-08-17 on bin/release/x86_64-unknown-linux-gnu/simple:
+#   interpreter -> name=a blob_len=3            (correct)
+#   jit         -> name=a, then
+#                  `runtime error: invalid field receiver` + core dump
+# The scalar field survives; the optional nested aggregate does not. A spec
+# BODY cannot see this because `bin/simple test` is the tree-walk interpreter,
+# so the check shells out.
+#
+# Fix belongs in src/compiler_rust/** (aggregate field receiver under the
+# Cranelift lane) -- outside this lane's file ownership.
+
+use std.spipe.*
+use std.nogc_sync_mut.io.process_ops.{process_run}
+
+val PROBE = "test/01_unit/lib/text_layout/_optional_aggregate_jit_probe.spl"
+
+fn _out(mode: text) -> text:
+    val r = process_run("env", ["SIMPLE_EXECUTION_MODE=" + mode, "bin/simple", "run", PROBE])
+    r.0 + "\n" + r.1
+
+describe "optional nested aggregate survives a module-global round trip":
+
+    it "the JIT reads back the nested blob instead of faulting":
+        assert_contains(_out("jit"), "blob_len=3")
+
+describe "detection: the loss is specific to the NESTED optional, not the class":
+
+    # Generalises the reproducer. If a future change made the whole read-back
+    # fail, the assertion above would still fire and be blamed on the optional.
+    # Pinning the flat scalar separately keeps the diagnosis honest, and pinning
+    # the interpreter keeps this spec from going green by both engines breaking.
+    it "the flat scalar field round-trips on both engines":
+        assert_contains(_out("jit"), "name=a")
+        assert_contains(_out("interpreter"), "name=a")
+
+    it "the interpreter is the correct reference for the nested blob":
+        assert_contains(_out("interpreter"), "blob_len=3")
+
+    it "the read-back never reports the optional as nil":
+        assert_true(not _out("jit").contains("blob_len=NIL"))
