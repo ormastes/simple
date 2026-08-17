@@ -216,3 +216,41 @@ objdump -s -j .rodata.subsection mod_0.o     # _B slot reads 13 (=19), not 00
 - `doc/08_tracking/bug/llvm_backend_missing_module_init_heap_globals_2026-06-15.md`
   — the LLVM-side analogue of the heap/text module-init mechanism.
 - Memory topic `project_module_global_mir_lowering_2026-07-25`.
+
+## Update 2026-08-17 — ALREADY FIXED; prior "OPEN" re-verification inspected the wrong layer
+
+**Verdict: fixed in-tree. Not reproducible.**
+
+The 2026-08-17 triage re-verified this as OPEN by finding the `TypeId::BOOL` gate
+still present in `codegen/common_backend.rs` (now line 1726, doc cites 1607 —
+line drift only). That gate is real, but it is **not** where the fix lives, and
+by its own comment it is a deliberate no-op backstop.
+
+The fix moved **upstream** to HIR module lowering:
+`src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs:169`
+
+```rust
+fn bool_global_init(val: bool) -> i64 { i64::from(val) }
+```
+
+It is applied **unconditionally, with no TypeId gate**, at all three global
+initializer sites — statics (:676), consts (:734), and module-level locals
+(:821). Bool globals are therefore captured as raw `0`/`1` for *every* declared
+type, annotated or not, so the tag-boxed `19`/`11` values this bug describes are
+never written in the first place. Its doc-comment names this bug file directly
+and states the intent: "Emitting raw 0/1 here fixes every backend at once."
+
+Why the backend gate correctly stays gated on `TypeId::BOOL` (i.e. do **not**
+"fix" it by removing the gate): for an un-annotated slot a tagged `true` (11) is
+indistinguishable from the integer initializer `val x = 11`, so value-sniffing
+there would silently corrupt integer globals — trading this bug for a worse one.
+
+Consistency check (weak, wrong lane, recorded for completeness): a hosted probe
+with a module-level `val g = false` prints `ok: falsy` on both jit and
+interpreter. This does NOT exercise the cranelift `--target x86_64-unknown-none
+--emit-archive` lane the field report used, so it is corroboration only; the
+source evidence above is the basis for this verdict.
+
+**Action:** status corrected OPEN -> FIXED. Lesson for triage: verifying a fix by
+inspecting the layer the bug doc happens to name can produce a false OPEN when
+the fix landed upstream of it.

@@ -264,3 +264,49 @@ Probes at `/tmp/enum_probe/` (scratch, not committed):
 `d_cross_module.spl`, plus `.jit.out`/`.interp.out` pairs and `results.txt`
 (exit codes). Binary: `src/compiler_rust/target/debug/simple`, built by this
 lane, mtime 2026-07-29 01:05:36 UTC.
+
+## Update 2026-08-17 — DOES NOT REPRODUCE on the JIT; closing the JIT claim
+
+Both this doc and its sibling (`enum_associated_fn_never_called_on_jit_2026-07-28`
+/ `enum_impl_static_fn_scoping_2026-07-29`) assert that a declared enum
+associated fn yields a silent wrong value under the JIT. **That is no longer
+true.** These two rows collapse into one finding.
+
+Gate spec both docs name, run on the deployed seed:
+
+```
+test/shared/control_flow/static_fn_spec.spl
+SPEC FILE VERDICT: declared>=26 executed=26 passed=26 failed=0 dropped=0
+Results: 26 total, 26 passed, 0 failed
+```
+
+executed=26, so the run is non-vacuous, not a silent exit-0.
+
+Direct probe — the bodies genuinely execute and the values are correct:
+
+```simple
+enum Col: Red; Blue
+impl Col:
+    fn make() -> Col: print("BODY RAN"); Col.Blue
+    fn tag() -> i64:  print("TAG BODY RAN"); 7
+```
+
+JIT: `BODY RAN` / `is_blue=true` / `TAG BODY RAN` / `t=7`.
+
+**Measurement trap worth recording:** an earlier pass of this probe printed
+`c => <enum@0x4da548111a0>` and was very nearly filed as "returns a bogus
+value". That string is just `to_text()`'s formatting of an enum value — the
+value itself is correct, as `c == Col.Blue` -> `true` shows. Asserting on a
+`to_text()` rendering rather than on the value is how a correct enum gets
+reported as garbage.
+
+**Remaining live defect, out of scope for this batch:** the *interpreter* still
+rejects the same program outright —
+`error: semantic: unknown variant or method 'make' on enum Col`, exit 1. That is
+a real gap, but it is **loud** (non-zero exit, explicit diagnostic), not a
+silently-wrong result, and it lives in
+`src/compiler/10.frontend/core/interpreter/**`, which is claimed by another lane.
+Not fixed here; flagged for that lane.
+
+**Action:** JIT claim -> FIXED (does not reproduce). Interpreter gap re-filed as
+the surviving issue.

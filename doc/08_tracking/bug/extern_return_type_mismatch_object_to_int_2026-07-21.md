@@ -91,3 +91,26 @@ fn test3() -> i64:
 1. Fix MIR lowering to preserve extern function return type through inline_call pass
 2. Add regression test: function returning extern call result with --emit-object on riscv64
 3. Re-enable rv64 serial_shell_entry helper function pattern after fix
+
+## Update 2026-08-17 — DOES NOT REPRODUCE; closing
+
+Ran the doc's own Minimal Repro verbatim, with its own build command, on the
+deployed seed (`bin/simple`, mtime 2026-08-16 22:59):
+
+```
+bin/simple native-build --backend llvm --target riscv64-unknown-none \
+  --emit-object -o /tmp/extern_ret.o repro.spl
+rc=0
+[bootstrap-error-count] source_idx=0 point=post-diagnostics count=0
+```
+
+No `type mismatch: cannot convert object to int`. Non-vacuity confirmed — the
+build really produced a valid object, not nothing:
+
+```
+/tmp/extern_ret.o: ELF 64-bit LSB relocatable, UCB RISC-V, RVC, soft-float ABI
+```
+
+**Action:** status Filed -> FIXED (does not reproduce). Note this row was
+batched as a "silently wrong result"; it is not — the reported failure was a
+loud semantic error with a non-zero exit, which is the opposite failure mode.
