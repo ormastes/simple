@@ -159,3 +159,53 @@ fallback fails the spec before it can fork-bomb a host. The pre-existing
 `it "delegates non-srr replay logs to the rust CLI"` had been left asserting the
 *defective* behaviour and was silently red since `cac573c5ecf3`; it is replaced
 by those two.
+
+
+## 2026-08-17 closure
+
+**Spawn site (the missing half of this record):** `delegate_replay` in
+`src/app/replay/main.spl`. The build-log branch is unimplemented, and it used
+to handle that by re-invoking `./bin/simple replay <same args>` — so the child
+took the same branch and delegated again, unconditionally and without any
+depth bound, each ancestor staying alive blocked in `wait`.
+
+It is fixed: `delegate_replay` (main.spl:67-73) now returns a terminating
+diagnostic and spawns nothing. The rationale comment sits directly above it at
+lines 62-66.
+
+### Live re-verification, exact incident argv
+
+```
+$ bin/simple replay missing-build-log.json
+log file not found: missing-build-log.json
+EXIT=1
+```
+
+Run under a watchdog armed to `pkill -9` at >8 concurrent processes matching
+`replay missing-build-log`. **The watchdog never fired** and the user process
+count delta was 0 (300 before, 300 after). Contrast the incident: ~124
+processes/min, ~62 MB RSS each.
+
+### Regression specs (mirror-synced, byte-identical)
+
+- `test/01_unit/app/replay/replay_no_self_spawn_spec.spl`
+- `test/unit/app/replay/replay_no_self_spawn_spec.spl`
+
+`Results: 5 total, 5 passed, 0 failed`
+
+The spec is deliberately SOURCE-INVARIANT rather than execution-based: the
+failure under test is an unbounded fork chain, so a spec that reproduced it by
+running the binary would *be* the host-exhaustion event it guards against. It
+asserts the terminating diagnostics, the absence of any self-invocation, and
+generalizes over a table of CLI entrypoints rather than hardcoding `replay`.
+
+Three absence controls keep it honest — the detector must answer `true` on a
+real self-spawn, and `false` on both a comment quoting the old invocation and
+on the `print "Usage: simple replay ..."` banner. Both false-positive cases
+were found by the controls during development: an early name-only scan flagged
+`main.spl`'s own warning comment and then its usage string. The final
+discriminator requires a spawn call (`shell(`/`spawn`/`run_process`/`exec(`/
+`run_command`) on a non-comment line naming the binary's own subcommand.
+
+**Known limit:** static, so a self-spawn assembled from a runtime-built
+command string would not be caught.
