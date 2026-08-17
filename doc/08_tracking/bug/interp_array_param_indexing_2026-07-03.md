@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-03
 **Severity:** downgraded to low — see Re-triage 2026-08-01
-Status: CLOSED (not reproducible)
+Status: REOPENED 2026-08-17 (was CLOSED not-reproducible; reproduces under SIMPLE_EXECUTION_MODE=jit -- see REOPENED section at end)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 and are contradicted by shipped code. 1 narrow symptom survives (2D index
 assignment) and is a seed-interpreter lvalue gap, not an array-parameter bug.
@@ -196,6 +196,32 @@ justified by symptoms 1-2; the only part still justified is avoiding `a[r][c] =
 v`, which flat row-major indexing sidesteps anyway. Removing the workaround is
 safe to attempt but should be gated on an actual run, which ENOSPC blocked here.
 
+## REOPENED 2026-08-17 — closed on an UNPINNED engine
+
+The prior closure rested on an invocation that did not pin
+`SIMPLE_EXECUTION_MODE`, so it is evidence about one arbitrary engine, not
+about the defect. Re-probed in a minimal single-file probe, both arms pinned,
+`rc` read on the line AFTER the command. Binary: bin/simple (stale Rust seed, bin/release/x86_64-unknown-linux-gnu/simple, 59536728 B, mtime 2026-08-16 22:59).
+
+| probe | interpreter | jit | expected |
+|---|---|---|---|
+| `fn sum3(a: list) -> i64: return a.get(0)+a.get(1)+a.get(2)`, called with `[10,20,30]` | `sum=60` rc=0 | **`sum=480`** rc=0 | `60` |
+
+`480 == 60 << 3`: each element read out of the `list` PARAMETER comes back as a
+tagged word that is never shifted back down. This is the shift-and-tag family,
+same as `any_receiver_element_read_shift_and_tag_2026-08-06`. The closure and its
+"re-verified 2026-08-17 by source inspection" stamp were both made on the
+interpreter arm, which is exactly the arm where this reads correctly.
+
+Engine-identity control (`val p60 = 1152921504606846976` INSIDE `fn main()`):
+interpreter `1152921504606846976`, jit `-1152921504606846976` — so the jit arm
+demonstrably JIT-compiled and was not demoted. Note the same control at TOP
+LEVEL does NOT diverge; a top-level body runs interpreted regardless of the pin.
+
+Any "re-verified by source inspection" stamp above is void per repo policy.
+Full method, population counts and probe paths:
+`<scratchpad>/rv/UNPINNED_ENGINE_REVERIFICATION_2026-08-17.md`.
+
 ---
 
 ## MECHANISM LOCALISED 2026-08-17 (measured, not inferred)
@@ -388,3 +414,65 @@ survives an annotated copy.
 **Settling it requires the build ablation** (fix reverted -> reproducer FAILS;
 fix applied -> reproducer PASSES) against a privately-built seed. Until that is
 run, treat the exact line above as the leading candidate and not as proven.
+
+---
+
+## RESOLVED EXCEPT ONE SHAPE — build ablation 2026-08-17
+
+The defect was fixed by another lane between the stale shipped seed and current
+HEAD. Measured by building the seed from current source into a private
+`CARGO_TARGET_DIR` (no rebuild or redeploy of `bin/simple` or `bin/release/**`)
+and running the same gate against both binaries. Verdict lines verbatim:
+
+**Arm A — stale shipped seed** (`bin/release/x86_64-unknown-linux-gnu/simple`,
+59536728 B, mtime 2026-08-16 22:59:37), rc=1:
+
+```
+FAIL — 10 probe(s) checked, divergent/wrong: bare(want=10 interp=10 jit=80) bracket(want=10 interp=10 jit=80) unannotated(want=10 interp=10 jit=80) sum3(want=60 interp=60 jit=480) plus1(want=11 interp=11 jit=88) times2(want=20 interp=20 jit=160) rsub(want=90 interp=90 jit=720) hop1(want=10 interp=10 jit=80)
+```
+
+**Arm B — fresh build of current HEAD** (59563472 B, mtime 2026-08-17 11:47), rc=1:
+
+```
+FAIL — 10 probe(s) checked, divergent/wrong: rsub(want=90 interp=90 jit=720)
+```
+
+Seven of the eight broken shapes are fixed. **One residual survives**, and it is
+a clean asymmetry:
+
+| shape | ANY operand side | HEAD |
+|---|---|---|
+| `a.get(0) + 1` | left | 11 correct |
+| `a.get(0) * 2` | left | 20 correct |
+| `100 - a.get(0)` | **right** | **720 = `90 << 3`** |
+
+The value is still computed correctly (90) and then boxed once. So the surviving
+case is the same "ANY result reaches a raw-typed sink unboxed" mechanism as
+before, now narrowed to the operand-order case the fix did not cover: the
+mixed ANY/concrete band-aid in `lowering_expr_ops.rs` handles the ANY-on-LEFT
+orientation but a non-commutative op with the ANY operand on the RIGHT still
+returns a tag-boxed result into an `i64` return slot.
+
+`rsub` therefore stays OPEN as the residual; the other shapes are closed by
+measurement, not by inspection.
+
+### Correction to this gate's engine witness (important)
+
+The gate originally proved the jit arm had really compiled by requiring the two
+arms to DISAGREE about `1152921504606846976` (2^60 cannot survive `v << 3`
+boxing intact). That control depended on the int61 truncation BUG still being
+present. It is fixed at HEAD, so on Arm B the control fired and reported:
+
+```
+ERROR — nothing was checked: array_param_element_untag ctl agreed across arms (1152921504606846976); the jit arm did not JIT-compile, run is UNVERIFIED
+```
+
+...on a perfectly good binary. Had that been read as "the JIT didn't run" the
+conclusion would have been backwards; had the gate been trusted it would have
+become a permanent false blocker. **An engine witness must not itself be a
+defect.** Replaced with a direct witness of compilation: `SIMPLE_JIT_TRACE_ADDR=1`
+makes the JIT emit one `[jit-addr] <fn> 0x...` line per function it compiled to
+a real code address (`codegen/jit.rs:194-202`). Verified version-independent —
+0 lines interpreted / 13 lines jitted on BOTH the stale seed and the HEAD build.
+This is what disambiguated "already fixed" from "silently demoted to
+interpreter", which the value comparison alone could not do.

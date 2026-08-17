@@ -16,11 +16,21 @@
 # A run that compared 0 probes is an ERROR, never a pass. rc=143/137 (timeout /
 # OOM kill) is UNVERIFIED and is reported as ERROR, never as a pass or a fail.
 #
-# Non-vacuity is enforced by the `ctl` probe: it returns 2^60, which cannot
-# survive `v << 3` boxing intact, so the two arms MUST print different values
-# for it. If they agree, the JIT arm did not actually JIT-compile and the whole
-# run is UNVERIFIED -> ERROR. This is the check that every probe reported on
-# 2026-08-17 without an in-fn control was missing.
+# Non-vacuity is enforced by an ENGINE WITNESS: `SIMPLE_JIT_TRACE_ADDR=1` makes
+# the JIT print one `[jit-addr] <fn> 0x...` line per function it actually
+# compiled to a real code address (codegen/jit.rs:194-202). The jit arm MUST
+# emit at least one such line and the interpreter arm MUST emit none; otherwise
+# the run is UNVERIFIED -> ERROR, never a pass.
+#
+# This deliberately REPLACES the earlier 2^60 divergence control. That control
+# inferred "the jit arm compiled" from the arms DISAGREEING about
+# 1152921504606846976 -- i.e. it depended on the int61 truncation BUG still
+# being present. Once that bug was fixed the control started reporting ERROR on
+# a perfectly good binary (measured 2026-08-17 against a build of current HEAD),
+# which would have made this gate a false blocker. An engine witness must not be
+# a defect: witnessing compilation directly is version-independent and was
+# verified to give 0 lines interpreted / 13 lines jitted on BOTH the stale
+# shipped seed and a fresh HEAD build.
 
 set -u
 
@@ -56,7 +66,7 @@ run_arm() {
     # rc is read from a variable on the line AFTER the command, never through a
     # pipe -- a pipeline's $? is the LAST stage's status and has produced false
     # greens in this repo before.
-    SIMPLE_EXECUTION_MODE="$1" "$SIMPLE" run "$2" >"$3" 2>&1
+    SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE="$1" "$SIMPLE" run "$2" >"$3" 2>&1
     RC=$?
     return $RC
 }
@@ -80,16 +90,18 @@ check_fixture() {
         exit 2
     fi
 
-    # Engine-identity control: the two arms MUST disagree on ctl, else the jit
-    # arm silently ran interpreted and nothing about the JIT lane was tested.
-    CTL_I=$(sed -n 's/^ctl=//p' "$WORK/interp.out" | head -1)
-    CTL_J=$(sed -n 's/^ctl=//p' "$WORK/jit.out" | head -1)
-    if [ -z "$CTL_I" ] || [ -z "$CTL_J" ]; then
-        echo "ERROR — nothing was checked: $LABEL emitted no ctl= line; cannot prove the jit arm compiled"
+    # Engine witness: the jit arm must have actually compiled functions to real
+    # code addresses, and the interpreter arm must not have. Without this a
+    # silently-demoted jit arm would run interpreted and every probe would
+    # "pass" while testing nothing.
+    ADDR_J=$(grep -c '\[jit-addr\]' "$WORK/jit.out" 2>/dev/null || echo 0)
+    ADDR_I=$(grep -c '\[jit-addr\]' "$WORK/interp.out" 2>/dev/null || echo 0)
+    if [ "$ADDR_J" -lt 1 ]; then
+        echo "ERROR — nothing was checked: $LABEL jit arm emitted no [jit-addr] lines; it did not JIT-compile, run is UNVERIFIED"
         exit 2
     fi
-    if [ "$CTL_I" = "$CTL_J" ]; then
-        echo "ERROR — nothing was checked: $LABEL ctl agreed across arms ($CTL_I); the jit arm did not JIT-compile, run is UNVERIFIED"
+    if [ "$ADDR_I" -ne 0 ]; then
+        echo "ERROR — nothing was checked: $LABEL interpreter arm emitted $ADDR_I [jit-addr] line(s); the arms are not distinct, run is UNVERIFIED"
         exit 2
     fi
 
