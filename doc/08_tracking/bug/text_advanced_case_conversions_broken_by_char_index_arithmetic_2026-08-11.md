@@ -83,3 +83,47 @@ today, which is why a silent rewrite of their core arithmetic landed unnoticed.
 A commit whose message says "no other change" carried an unrelated,
 behavior-breaking rewrite of three functions. Diffs must be read in full even
 when the stated scope is a one-line delegation.
+
+---
+
+## RESOLVED (STALE) 2026-08-17 — arithmetic already restored, verified by execution
+
+Source check, `src/lib/common/text_advanced.spl`: the three functions are back
+on `char_from_code(char_code(ch) +/- 32)`, not `ch[0]`:
+
+- `to_title_case`: lines 182-183 (upper), 189-190 (lower)
+- `to_snake_case`: lines 216-217
+- `to_camel_case`: lines 243-244
+
+`ch[0]` survives only in `_is_uppercase_char` / `_is_lowercase_char`
+(lines 38, 43), where it is compared against char literals `'A'`/`'Z'` rather
+than used in arithmetic — not the defect described here.
+
+Behavioural repro (executed, deployed `bin/simple`):
+
+```
+use std.common.text_advanced.{to_snake_case, to_camel_case, to_title_case}
+fn main():
+    print("snake(HelloWorld)={to_snake_case("HelloWorld")}")
+    print("camel(hello_world)={to_camel_case("hello_world")}")
+    print("title(hello world)={to_title_case("hello world")}")
+```
+
+Output:
+```
+snake(HelloWorld)=hello_world
+camel(hello_world)=helloWorld
+title(hello world)=Hello World
+```
+
+All three correct — no `"H32"` concatenation, no `"g"` garbage. The regression
+introduced by `a9d3e0f0b1a` / `f45936abc35` is no longer present on `main`.
+Generalization specs already exist and are mirror-synced:
+`test/01_unit/lib/common/text_advanced_case_conversion_spec.spl` and
+`text_advanced_case_class_generalization_spec.spl` (the latter present in both
+`test/01_unit/lib/common/` and `test/unit/lib/common/`).
+
+Caveat recorded separately: running that spec through `bin/simple test`
+produced **1897 lines of warnings, zero pass/fail lines, exit 0** — the specs
+do not currently prove anything on their own. Filed as
+`test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
