@@ -232,3 +232,57 @@ Both root causes are glob-import symbol registration in 20.hir —
 `src/compiler/50.mir/mir_data.spl` is only the victim facade (its `export` lines
 `:733-735`). `register_glob_imported_symbols` has zero matches anywhere in
 `src/compiler`. Re-attribute this row to 20.hir module lowering.
+
+---
+
+## Triage 2026-08-17 (bug-triage lane) — STILL OPEN, and the stamp above is partly WRONG
+
+### The 2026-08-17 c_mir stamp's central factual claim is FALSE
+
+> "`register_glob_imported_symbols` has zero matches anywhere in `src/compiler`."
+
+It has **nine**, starting with its own definition:
+
+```
+$ /usr/bin/grep -rn "register_glob_imported_symbols" src/compiler/
+src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:1541:    me register_glob_imported_symbols(...)
+                                              :1548, :1557, :1779   (call sites)
+src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:1559:    me register_glob_imported_symbols_depth(...)
+                                              :1620, :1702          (recursive calls)
+src/compiler/20.hir/hir_lowering/types.spl:148                      (per-ROOT memo)
+src/compiler/10.frontend/core/parser_decls_use.spl:237              (reference)
+```
+
+Anyone reading that stamp would conclude the function had been deleted and the
+described fix no longer exists. It exists and is live. The stamp's *verdict*
+(mis-attributed to 50.mir; belongs to 20.hir module lowering) is nonetheless
+**correct and is retained** — it just was not established by the evidence it
+cites. Fixed here rather than left to mislead the next triager.
+
+### Claims re-derived from CURRENT source
+
+| claim in this doc | 2026-08-17 by content |
+|---|---|
+| Fix 1 — facade export lists swept for star imports | **PRESENT.** `register_glob_imported_symbols` -> `register_glob_imported_symbols_depth`, `module_lowering.spl:1541-1557`. |
+| Fix 2 — one-level transitive star sweep | **PRESENT and since GENERALIZED.** The sweep is now a `depth`-parameterised recursion (`:1559`, recursing at `:1620` and `:1702`), no longer capped at one level; the runaway is bounded by the per-ROOT memo documented at `hir_lowering/types.spl:148` (GLB2, 2026-08-01). The "deliberately non-recursive" wording above is therefore **stale** — and note this makes the OPEN CAVEAT *broader*, not narrower: glob visibility now reaches arbitrarily deep, so the undecided question of whether call sites should carry explicit imports instead applies to more of them than when the caveat was written. |
+| Remaining blocker 2 — module-key canonicalization | **IMPLEMENTED.** Three canonicalizers now fold every dotted spelling of one physical file onto one name by dropping all-digit tier segments and folding `std.` -> `lib.`: `_driver_canonical_module_name` (`80.driver/driver_source_loading.spl:196`), `hir_pkg_canonical_module_name` (`module_lowering.spl:84`, which also accepts a repo-relative PATH spelling), and `module_surface_canonical_module_name` (`hir_lowering/module_surface.spl:1058`). The doc's own three example spellings (`compiler.10.frontend.core.lexer` / `compiler.frontend.core.lexer` / `compiler.core.lexer`) are exactly what rule 1 folds, and the driver docstring records the fold as verified collision-free over every `src/**/*.spl`. This blocker is retired **by content**; whether the lexer-family counts (`TokenKind` 185, `lex_make_token` 160, ...) actually went to zero is a RUNTIME question, unanswered — see below. |
+| Remaining blocker 1 — `me` unresolved x543 | **UNVERIFIABLE HERE, and its follow-up was never actioned.** "Next diagnostics" item 1 asked for a dedicated bug doc; `doc/08_tracking/bug/` contains no `me`-as-unresolved-name row (the ~20 `me`/receiver rows there are all interpreter/JIT receiver-binding defects, a different family). Not filed from this lane, which owns only this row. |
+| OPEN CAVEAT (glob widening may paper over missing explicit imports) | **STILL UNDECIDED.** No design decision recorded anywhere in the tree; see the widened-scope note above. |
+
+### Why this row is NOT closed
+
+Every number in this doc is a stage4 focused-sub-build measurement, and that
+build was **not** re-run: `bin/simple` resolves to
+`bin/release/x86_64-unknown-linux-gnu/simple`, the **Rust seed** (59,536,728
+bytes, mtime 2026-08-16 22:59), which has its own Rust pipeline and never reads
+`src/compiler/**.spl` as compiler logic; no self-hosted stage2/stage3 binary
+exists in this checkout; and `build/bootstrap/**` was off-limits (another lane's
+bootstrap was live). So the headline claim — "stage 4 still FAILS overall" —
+can be neither confirmed nor retired here, and the unresolved-name count is
+unknown at current tip.
+
+No source change and no specs from this lane: both surviving mechanisms live in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`, which is owned by
+another lane in this session. Re-attributed to 20.hir module lowering (per the
+retained verdict above); the `related:` front-matter still points at 50.mir and
+should be corrected by whoever picks this up.
