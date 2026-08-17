@@ -47,6 +47,20 @@ and is fixed in the same change.
 in `interpreter_extern/mod.rs`. Byte-wise semantics mirror the C runtime
 (empty needle -> subject length for `rfind`, not 0).
 
+**Confirmed on full binaries** (coordinator, recorded as `b0a1839de71`) — all
+three arms, which is what makes this a real RED->GREEN rather than a probe:
+
+```
+stale seed,  interpreter: rc=1  error: semantic: unknown extern function: rt_string_ends_with
+fixed build, interpreter: rc=0  ends=true rfind=3
+fixed build, jit:         rc=0  ends=true rfind=3
+```
+
+**Trap when re-running the probe: use the REPO ROOT as cwd.** From `/tmp` it
+fails with `stdlib import 'std.text' resolves from the project stdlib roots
+only` — a module-resolution error, on a file about text, that reads exactly
+like a genuine RED. Check cwd before concluding the extern is missing again.
+
 **Specs:** `test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl`
 (calls the externs directly so it cannot go vacuous via the builtin method
 table) and two Rust unit tests in `interpreter_extern/mod.rs`.

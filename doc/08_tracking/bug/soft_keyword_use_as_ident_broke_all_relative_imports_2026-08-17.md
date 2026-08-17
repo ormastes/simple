@@ -85,13 +85,29 @@ left as they were.
   Covers both directions: the four relative-import shapes plus the absolute
   form, AND the concessions the introducing commit wanted (`var use = 3; use =
   use + 1`, `export.field`, `mod.field`).
-- **Full-binary re-verification NOT completed.** The `cargo build --release
-  --bin simple` re-run was starved out on this shared host (17 concurrent
-  processes on the same target dir; no log progress for 90 minutes) and was
-  left running. The RED half of the end-to-end evidence IS recorded above
-  (3-line repro, stale binary rc=0 vs HEAD-built binary rc=1). What is missing
-  is only the matching GREEN on a binary carrying this fix. Next session:
-  rebuild and re-run the 3-line repro plus any `bin/simple test <spec>`.
+- **Full binary, GREEN — gap now CLOSED** (coordinator, recorded as
+  `b0a1839de71`; `cargo build --release --bin simple` `BUILD_RC=0`, 8m10s, in
+  an isolated `CARGO_TARGET_DIR`). A relative import loads on a real binary
+  again:
+
+  ```
+  /tmp/relimp/helper.spl   fn helper_value() -> i64: 41
+  /tmp/relimp/main.spl     use .helper.{helper_value}
+  rc=0   relimp=42
+  ```
+
+  Paired with the RED above (stale binary rc=0 / HEAD-built binary rc=1), this
+  is a complete end-to-end RED->GREEN. The parser-crate 7/7 no longer stands in
+  for end-to-end proof — it never could, since those tests exercise the crate
+  directly and cannot show that a binary loads a module graph.
+
+  Author's note on why the gap existed: the first re-verify attempt was starved
+  out on the shared host (17 concurrent processes on one target dir, no log
+  progress for 90 minutes), and a second attempt failed for an unrelated
+  reason — another lane's UNCOMMITTED `node_exec.rs:607` edit
+  (`error[E0631]`) breaks `cargo build` in the shared working tree while HEAD
+  itself is clean. Any lane building there will see a failure that is not its
+  own; build in a `git worktree` at a known commit to escape it.
 
 ## How this got through
 
