@@ -71,3 +71,17 @@ small exact aggregate-receiver fixture triggers the failure class, but does
 not localize or repair it and does not admit Stage 3 or Stage 4. Do not rerun
 that command unchanged; the next lane must capture a symbolized backtrace or
 otherwise distinguish HIR receiver corruption from MIR writeback/resolution.
+
+
+## Triage 2026-08-17 — DEFERRED, blocker recorded
+
+Reviewed in the lines 32-46 backlog sweep. Not actionable from this session: identical blocker to `stage3_post_file_copy_exit139_2026-08-14.md`: needs a full
+bootstrap plus retained Stage-3 diagnostics. The record already says so itself
+("an unretained observation pending the next diagnostic reproduction, not a
+hash-bound receipt"), and explicitly warns that evidence from the sibling
+restart12 lane must NOT be attributed to this one. No speculative fix attempted:
+with no crash site and no retained log, any patch would be a guess dressed as a
+fix.
+
+Status unchanged. Recorded so future sweeps skip this in O(1) instead of
+re-deriving the same blocker.

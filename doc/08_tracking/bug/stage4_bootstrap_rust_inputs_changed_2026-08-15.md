@@ -52,3 +52,13 @@ the fingerprint immediately before launch and before seed publication; any
 change must abort. Other agents may edit documentation or unrelated projects,
 but must not edit compiler, runtime, bootstrap, or shared build inputs until the
 transaction completes.
+
+
+## Triage 2026-08-17 — DEFERRED, blocker recorded
+
+Reviewed in the lines 32-46 backlog sweep. Not actionable from this session: bootstrap-stage blocker; needs a full `--full-bootstrap` run, which this lane
+may not perform (never build the main compiler). Nothing about the Rust-input
+change detection can be re-measured without actually entering the stage.
+
+Status unchanged. Recorded so future sweeps skip this in O(1) instead of
+re-deriving the same blocker.

@@ -80,3 +80,12 @@ Reviewed in the second-pass backlog sweep. Not actionable from this session:
 the crash is in a JIT-compiled Vulkan sample needing a working Vulkan device and the 8K render harness. No code change is possible without that, so no
 speculative fix was attempted. Classification recorded here so future sweeps
 skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.
+
+
+## Triage 2026-08-17 — DEFERRED, blocker recorded
+
+Reviewed in the lines 32-46 backlog sweep. Not actionable from this session: GPU-hardware gated -- needs a working Vulkan device plus an 8K surface to
+reproduce a JIT-path sample crash. Not reproducible headless on this host.
+
+Status unchanged. Recorded so future sweeps skip this in O(1) instead of
+re-deriving the same blocker.

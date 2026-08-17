@@ -54,3 +54,19 @@ Run the materially changed cache-preserving Stage 3 build once. It must pass
 the symbolized `remember_local_hir_type` frontier and produce an admitted
 candidate; then run Stage 4 and the essential-tools gates. Do not use the Rust
 seed as acceptance authority.
+
+
+## Triage 2026-08-17 — DEFERRED, blocker recorded
+
+Reviewed in the lines 32-46 backlog sweep. Not actionable from this session: requires a full bootstrap (Stage 2 -> Stage 3) to reproduce. This lane is
+explicitly forbidden from building the main compiler, and no admitted Stage 2/3
+binary exists on this host. The record itself states the driver console was not
+retained, so there is no artifact here to analyse either.
+
+**Unblock:** one bootstrap run with the Stage-3 console RETAINED (redirect and
+keep `build/bootstrap/logs/<triple>/stage3-native-build.log` plus the driver
+stdout). Until a crash site is bound to a hash, exit 139 stays an unretained
+observation and no code change is defensible.
+
+Status unchanged. Recorded so future sweeps skip this in O(1) instead of
+re-deriving the same blocker.
