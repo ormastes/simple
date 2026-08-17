@@ -169,6 +169,46 @@ and 9 of the matrix above. What remains:
    they drift — but it means a route added without a guarded command behind
    it inherits no authorization at all.
 
+## W14-A — output-escaping + security-header completeness audit (2026-08-17)
+
+A reproduce-first sweep of EVERY interpolation of a request- or store-derived
+value into HTML across `booking_routes`, `restaurant_routes`, `dashboard`,
+`auth_routes`, `hcm_routes`, `procurement_routes`, `finance_routes`, and
+`web_common`. Conclusion: **already hardened — no unescaped attacker-influenceable
+interpolation, and no response path omits the security headers.** Full
+path:function -> escaped? audit list:
+`doc/01_research/app/enterprise/w14a_output_escaping_audit_2026-08-17.md`.
+
+Findings, all confirming safety (like W13-C):
+
+- **Every dynamic value passes through `esc()`.** All page renders interpolate
+  only store-/library-derived values (`sqlite_row_get`, `booking_status`, ledger
+  lines, employee/PO fields) or URL params, each wrapped in `esc()`. The
+  literal `esc("{wage}")`-style tokens are static placeholder strings, not data.
+- **`esc()` is attribute-context safe, not merely element-safe.** It escapes
+  `"`->`&quot;` and `'`->`&#39;` in addition to `&`/`<`/`>`. Every attribute in
+  the app is double-quoted (`data-resource`, `data-line`, `data-po`,
+  `data-account`, `data-employee`, `data-ref`), so a `">`-prefixed breakout
+  cannot escape the attribute. This was untested before W14-A (the prior fence
+  only exercised element context on `/store/catalog`) and is now fenced.
+- **Every response path is wrapped by `secured()`/`with_default_security_headers`
+  — including denials.** `deny()`, `command_page`, the trailing `404`, and the
+  auth `too_many()`/`unauthorized()`/`413`/`501`/`400` returns all wrap; a grep
+  for any unwrapped `HttpResponse.{html,error,...}` across the seven route files
+  returns nothing.
+- **`auth_routes` `"token=" + r.detail` (line 104) is NOT escaped but is safe by
+  source:** `r.detail` is the freshly issued session token derived from the
+  server-supplied `entropy` (see attack #3b), never an attacker-influenceable
+  field.
+
+Fence: `test/03_system/app/enterprise/enterprise_output_escaping_audit_spec.spl`
+(declared>=5 executed=5 passed=5). Red-first proof: temporarily disabling the
+`"`->`&quot;` replacement in `esc()` flips 3 of the 5 to red (the attribute-
+context assertions + the booking-resource breakout), restored to green — so the
+fence bites the exact attribute-context gap it claims to cover. Evidence:
+interpreter mode, Rust seed `bin/release/x86_64-unknown-linux-gnu/simple`
+(59536728 bytes, 2026-08-16), `SIMPLE_TIMEOUT_SECONDS=900`, one spec per run.
+
 ## Related
 
 - `doc/07_guide/app/enterprise/guarded_command_contract.md` — the rung order

@@ -1000,3 +1000,23 @@ New acceptance criteria (extends AC-1..AC-12 above):
   Regression: audit 13/13, auth_throttle 6/6, conformance 8/8, back_office
   7/7, store_app 3/3. Posture doc updated: residual 1 closed, residual 7
   narrowed to normalisation-only; remainder renumbered 1-7.
+
+- W14-A (2026-08-17) — output-escaping + security-header completeness audit.
+  Reproduce-first sweep of every HTML interpolation across booking/restaurant/
+  dashboard/auth/hcm/procurement/finance _routes + web_common. Conclusion:
+  ALREADY HARDENED (like W13-C). Every request-/store-derived value passes
+  through esc(); esc() escapes " -> &quot; and ' -> &#39; so it is
+  attribute-context safe (all attrs double-quoted); every response path —
+  including deny()/command_page/404/auth-error — is wrapped by secured().
+  The one non-esc() interpolation (auth "token=" + r.detail) is a server-
+  issued session token, not attacker-influenceable — safe by source.
+  Gaps closed were UNTESTED not UNSAFE: attribute context and the vertical
+  route families had no fence (prior fence covered only element context on
+  /store/catalog via the dispatcher). Added
+  test/03_system/app/enterprise/enterprise_output_escaping_audit_spec.spl
+  (declared>=5 executed=5 passed=5). Red-first: disabling the " -> &quot;
+  replace in esc() flips 3/5 red (attr-context assertions + booking breakout),
+  restored 5/5. Audit list: doc/01_research/app/enterprise/
+  w14a_output_escaping_audit_2026-08-17.md; posture doc W14-A section added.
+  Evidence: Rust seed bin/release/x86_64-unknown-linux-gnu/simple (59536728
+  bytes, 2026-08-16), interpreter mode, SIMPLE_TIMEOUT_SECONDS=900.
