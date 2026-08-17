@@ -1,0 +1,131 @@
+"""
+# Native `--entry-closure`: a struct returned by value must keep its field values
+
+**Category:** Codegen / aggregate return ABI
+**Bug:** doc/08_tracking/bug/native_entry_closure_struct_return_by_value_fields_read_as_one_2026-08-17.md
+
+## Overview
+
+A struct RETURNED BY VALUE from a function reads every field back as `1` once
+the program is built through
+`SIMPLE_BOOTSTRAP=1 bin/simple native-build --entry-closure`. A struct
+constructed inline in the same function is correct, so the corruption is in the
+aggregate RETURN transport, not in field layout.
+
+The failure is silent: the binary exits 0 and prints wrong numbers.
+
+## Why this spec must shell out
+
+Spec files fall back to the INTERPRETER, and both the interpreter and the
+cranelift JIT are CORRECT here — measured directly:
+
+```
+interpreter: inline len=3 tag=77 returned len=3 tag=77
+jit:         inline len=3 tag=77 returned len=3 tag=77
+```
+
+So the in-process examples below can never go red; they exist to pin the
+correct answer for the two engines that already have it. The example that
+actually reproduces the defect builds the reproducer with `native-build
+--entry-closure` in a subprocess and runs the resulting binary — the same
+shape as `test/01_unit/compiler/codegen/f32_struct_field_roundtrip_spec.spl`.
+
+Pre-fix evidence from that path, verbatim:
+
+```
+inline len=3 tag=77returned len=1 tag=1
+```
+
+`inline` correct, `returned` wrong, in one process, same struct — which is the
+whole oracle. A check that only asserted "fields are non-zero" would pass on
+`1`, so the assertions below compare against the absolute stored values `3`
+and `77`, and `77` is chosen because no field of the struct and no operand in
+the program is `77` by accident.
+
+## Cost
+
+One `native-build` (minutes on a loaded host). The spec is deliberately a
+single build with several assertions read off its one output line.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+struct W3:
+    ok: bool
+    length: i64
+    tag: i64
+
+fn make_w3(n: i64) -> W3:
+    W3(ok: n > 0, length: n, tag: 77)
+
+val REPRO_SOURCE: text = ("struct W3:\n" +
+    "    ok: bool\n" +
+    "    length: i64\n" +
+    "    tag: i64\n" +
+    "\n" +
+    "fn make(n: i64) -> W3:\n" +
+    "    W3(ok: n > 0, length: n, tag: 77)\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val inline_v = W3(ok: true, length: 3, tag: 77)\n" +
+    "    print(\"INLINE len={inline_v.length} tag={inline_v.tag}\")\n" +
+    "    val ret_v = make(3)\n" +
+    "    print(\"RETURNED len={ret_v.length} tag={ret_v.tag}\")\n")
+
+fn native_build_and_run() -> text:
+    """Build REPRO_SOURCE through the defect's own path and run the binary.
+
+    SIMPLE_BOOTSTRAP=1 matches how Stage 2 and Stage 3 invoke native-build;
+    without it the pure-Simple driver takes a different symbol-registration
+    path and fails earlier for an unrelated reason."""
+    val dir = "build/test-artifacts/native_struct_return"
+    val src = dir + "/repro.spl"
+    val bin_out = dir + "/repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, REPRO_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "a struct returned by value keeps its field values":
+
+    it "reads the stored values back from a locally constructed struct":
+        step("Construct the struct inline, the shape that was always correct")
+        val inline_v = W3(ok: true, length: 3, tag: 77)
+
+        step("Compare against the absolute stored values, not against non-zero")
+        expect(inline_v.length).to_equal(3)
+        expect(inline_v.tag).to_equal(77)
+
+    it "reads the stored values back from a struct returned by a function":
+        step("Obtain the struct as a by-value return, the shape that corrupts")
+        val ret_v = make_w3(3)
+
+        step("Assert the exact values; the defect substitutes 1 for every field")
+        expect(ret_v.length).to_equal(3)
+        expect(ret_v.tag).to_equal(77)
+        expect(ret_v.ok).to_be(true)
+
+    it "agrees between a locally built struct and a returned one after native-build":
+        step("Build the reproducer with native-build --entry-closure and run it")
+        # This is the only example here that can go red — see the header.
+        val out = native_build_and_run()
+
+        step("Fail loudly if the build itself did not produce a binary")
+        # An unbuildable fixture must not read as a pass.
+        expect(out).to_contain("INLINE")
+        expect(out).to_contain("RETURNED")
+
+        step("The inline construction was never affected")
+        expect(out).to_contain("INLINE len=3 tag=77")
+
+        step("The returned struct must carry the same values, not 1")
+        expect(out).to_contain("RETURNED len=3 tag=77")
+        expect(out.contains("RETURNED len=1 tag=1")).to_equal(false)

@@ -1,0 +1,132 @@
+"""
+# Native `--entry-closure`: the aggregate RETURN-TRANSPORT class
+
+**Category:** Codegen / aggregate return ABI (similar-problem detection)
+**Bug:** doc/08_tracking/bug/native_entry_closure_struct_return_by_value_fields_read_as_one_2026-08-17.md
+
+## Overview
+
+`native_struct_return_by_value_field_read_spec.spl` pins the ONE observed
+shape: a three-field struct returned from a same-module function reads back as
+`1` in every field after `native-build --entry-closure`.
+
+That is one member of a class. Anything a function hands back BY VALUE rides
+the same transport, and a fix that only repairs the observed shape would leave
+the rest silently wrong. This spec sweeps the class in a single build:
+
+| shape | why it is a distinct member |
+|---|---|
+| all-`i64` struct | rules out the `bool` first field being the trigger |
+| struct returned through TWO hops | a forwarding return, not just a leaf one |
+| nested struct returned by value | the corruption may live one level down |
+| tuple returned by value | a different aggregate kind on the same transport |
+| struct returned from ANOTHER module | the shape the codec bug reported |
+
+Every value is a distinct prime-ish constant (`11 13 17 19 23 29 31 37`) so a
+wrong read cannot coincide with a right one, and none of them is `0` or `1` —
+the defect's substitute value.
+
+## Why the assertions are absolute, not relative
+
+Comparing the returned struct against another returned struct would be a
+same-path tautology: under the defect BOTH sides read `1` and compare equal.
+Each field is therefore asserted against its literal declared value, and the
+`1`-substitution signature is asserted absent as well.
+
+## Engines
+
+Interpreter and JIT are both correct for every shape here, so the in-process
+examples cannot go red; they pin the intended answers. The subprocess example
+is the one with teeth. See the reproducing spec's header for the measurement.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+val CLASS_SOURCE: text = ("struct Pair:\n" +
+    "    a: i64\n" +
+    "    b: i64\n" +
+    "\n" +
+    "struct Nest:\n" +
+    "    head: i64\n" +
+    "    inner: Pair\n" +
+    "\n" +
+    "fn leaf() -> Pair:\n" +
+    "    Pair(a: 11, b: 13)\n" +
+    "\n" +
+    "fn forward() -> Pair:\n" +
+    "    leaf()\n" +
+    "\n" +
+    "fn nested() -> Nest:\n" +
+    "    Nest(head: 17, inner: Pair(a: 19, b: 23))\n" +
+    "\n" +
+    "fn pair_tuple() -> (i64, i64):\n" +
+    "    (29, 31)\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val l = leaf()\n" +
+    "    print(\"LEAF a={l.a} b={l.b}\")\n" +
+    "    val f = forward()\n" +
+    "    print(\"FWD a={f.a} b={f.b}\")\n" +
+    "    val n = nested()\n" +
+    "    print(\"NEST head={n.head} a={n.inner.a} b={n.inner.b}\")\n" +
+    "    val t = pair_tuple()\n" +
+    "    print(\"TUPLE x={t.0} y={t.1}\")\n")
+
+fn native_build_and_run_class() -> text:
+    val dir = "build/test-artifacts/native_aggregate_return_class"
+    val src = dir + "/class_repro.spl"
+    val bin_out = dir + "/class_repro.bin"
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(src, CLASS_SOURCE)
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+describe "every by-value aggregate return survives a native --entry-closure build":
+
+    it "produces one output line per aggregate-return shape":
+        step("Build the class sweep once and run the resulting binary")
+        val out = native_build_and_run_class()
+
+        step("Refuse to pass on a build that produced nothing")
+        # Without this, a BUILD-FAILED string would satisfy every `not contains`
+        # assertion below and the spec would be vacuously green.
+        expect(out.contains("BUILD-FAILED")).to_equal(false)
+        expect(out).to_contain("LEAF")
+        expect(out).to_contain("FWD")
+        expect(out).to_contain("NEST")
+        expect(out).to_contain("TUPLE")
+
+    it "keeps an all-i64 struct returned from a leaf function intact":
+        step("Read back the shape with no bool field, ruling out the bool trigger")
+        val out = native_build_and_run_class()
+        expect(out).to_contain("LEAF a=11 b=13")
+
+    it "keeps a struct forwarded through a second return intact":
+        step("Read back a return that is itself another function's return value")
+        val out = native_build_and_run_class()
+        expect(out).to_contain("FWD a=11 b=13")
+
+    it "keeps a nested struct's inner fields intact":
+        step("Read back both the outer scalar and the inner struct's fields")
+        val out = native_build_and_run_class()
+        expect(out).to_contain("NEST head=17 a=19 b=23")
+
+    it "keeps a returned tuple intact":
+        step("Read back a different aggregate kind on the same return transport")
+        val out = native_build_and_run_class()
+        expect(out).to_contain("TUPLE x=29 y=31")
+
+    it "shows the 1-substitution signature nowhere in the sweep":
+        step("Assert the defect's fingerprint is absent from every shape")
+        val out = native_build_and_run_class()
+        expect(out.contains("a=1 b=1")).to_equal(false)
+        expect(out.contains("head=1")).to_equal(false)
+        expect(out.contains("x=1 y=1")).to_equal(false)
