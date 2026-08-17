@@ -12,6 +12,18 @@ LOG_PATH="$BUILD_DIR/capture.log"
 VALIDATION_LOG="$BUILD_DIR/validation.env"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
+SEED_MARKER='Rust-built Simple binary is a bootstrap seed only'
+# Seed identity is a property of the BINARY, not of where it happens to sit.
+# The previous implementation classified purely by the `src/compiler_rust/`
+# path substring, so the *deployed default* seed --- which lives at
+# `bin/release/<triple>/simple` and is what `bin/simple` symlinks to --- was
+# classified NOT-SEED and admitted by the pre-flight gate below. Measured
+# 2026-08-17: path verdict NOT-SEED, content truth SEED. Now content-first:
+# only the Rust driver (`src/compiler_rust/driver/src/seed_warning.rs`) embeds
+# the seed warning literal, and the self-hosted `bootstrap/stage3/simple` does
+# not contain it (verified), so a binary-content probe separates the two
+# correctly in both directions. The path check is retained as an additional
+# positive signal for a seed built in place and not yet run/deployed.
 is_rust_seed_simple() {
     candidate="$1"
     candidate_dir="$(dirname -- "$candidate")"
@@ -20,9 +32,83 @@ is_rust_seed_simple() {
     fi
     case "$candidate" in
         src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
-        *) return 1 ;;
     esac
+    # Content probe. `grep -a` treats the binary as text; a match is decisive.
+    if [ -r "$candidate" ] && grep -a -q -F "$SEED_MARKER" "$candidate" 2>/dev/null; then
+        return 0
+    fi
+    return 1
 }
+
+hwce_selftest() {
+    st_dir="$(mktemp -d)"
+    st_fail=0
+    st_checked=0
+    st_case() { # name expected(seed|hosted) file
+        st_checked=$((st_checked + 1))
+        if is_rust_seed_simple "$3"; then st_got=seed; else st_got=hosted; fi
+        if [ "$st_got" = "$2" ]; then
+            echo "selftest ok: $1 ($st_got)"
+        else
+            echo "selftest FAIL: $1 expected=$2 got=$st_got"
+            st_fail=$((st_fail + 1))
+        fi
+    }
+
+    # (1) Reproducing fixture: a seed-content binary at a path with no
+    #     `src/compiler_rust/` component -- exactly the deployed
+    #     `bin/release/<triple>/simple` shape that the old path-only check
+    #     mis-admitted.
+    mkdir -p "$st_dir/bin/release/x86_64-unknown-linux-gnu"
+    printf 'ELF\0\0WARNING: this %s; do not use it.\n' "$SEED_MARKER" \
+        >"$st_dir/bin/release/x86_64-unknown-linux-gnu/simple"
+    chmod +x "$st_dir/bin/release/x86_64-unknown-linux-gnu/simple"
+    st_case "deployed-seed-outside-compiler_rust" seed \
+        "$st_dir/bin/release/x86_64-unknown-linux-gnu/simple"
+
+    # (2) Generalizing fixture: the defect class is "identity inferred from
+    #     location". Cover the whole matrix so neither probe can be dropped
+    #     without a red, and so the content probe cannot false-positive on a
+    #     genuinely self-hosted binary.
+    mkdir -p "$st_dir/src/compiler_rust/target/release"
+    printf 'ELF\0\0no marker here\n' >"$st_dir/src/compiler_rust/target/release/simple"
+    chmod +x "$st_dir/src/compiler_rust/target/release/simple"
+    st_case "seed-by-path-without-marker" seed \
+        "$st_dir/src/compiler_rust/target/release/simple"
+
+    mkdir -p "$st_dir/bootstrap/stage3"
+    printf 'ELF\0\0self-hosted Simple compiler\n' >"$st_dir/bootstrap/stage3/simple"
+    chmod +x "$st_dir/bootstrap/stage3/simple"
+    st_case "self-hosted-must-not-false-positive" hosted \
+        "$st_dir/bootstrap/stage3/simple"
+
+    # A seed-content binary reached through a symlink from a clean path --
+    # the `bin/simple` shape.
+    ln -s "$st_dir/bin/release/x86_64-unknown-linux-gnu/simple" "$st_dir/bin/simple"
+    st_case "symlink-to-seed" seed "$st_dir/bin/simple"
+
+    # Absence of evidence is not evidence of a hosted binary, but an
+    # unreadable/absent path must not crash the classifier either; it is
+    # rejected downstream by the -x check.
+    st_case "absent-path-does-not-crash" hosted "$st_dir/does-not-exist"
+
+    rm -rf "$st_dir"
+    if [ "$st_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ "$st_fail" -ne 0 ]; then
+        echo "FAIL — $st_checked selftest fixture(s) checked, $st_fail failed"
+        exit 1
+    fi
+    echo "PASS — $st_checked selftest fixture(s) checked, 0 failed"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    hwce_selftest
+    exit 0
+fi
+hwce_selftest >/dev/null || exit $?
 is_host_compatible_simple() {
     path="$1"
     [ -x "$path" ] || return 1

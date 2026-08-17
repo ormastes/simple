@@ -20,12 +20,38 @@
 #      VHDL (build/vhdl/rv32/soc_top_rv32_sim.vhd) is present; otherwise a
 #      warning (generation needs an rv32 payload ELF not kept in the tree).
 #
-# Prints a final "RISCV-HW-GATES: <n>/<m> PASS" and exits nonzero on any fail.
+# Verdict convention (.claude/rules/vcs.md § Pre-push guards): the LAST line of
+# stdout is always one of
+#   PASS  — <n> gate(s) checked, ...   exit 0   (n is always > 0)
+#   FAIL  — ...                        exit 1
+#   ERROR — nothing was checked: ...   exit 2
+# A run that checked zero gates is an ERROR, never a PASS.
+#
+# PROVENANCE (fixed 2026-08-17, see
+# doc/08_tracking/bug/riscv_gate_evidence_seed_attributed_bin_release_clobbered_2026-07-27.md):
+# every probe result was attributed to whatever `resolve_simple` happened to
+# find -- in practice `bin/release/<triple>/simple`, which on this machine is
+# the RUST SEED and says so on its own first stdout line:
+#
+#   $ bin/simple --version
+#   WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use
+#   it as the normal tool.
+#
+# The gate printed only `simple binary: <path>` and then `RISCV-HW-GATES: n/m
+# PASS`, so a green run read as a self-hosted result. That is a misattribution,
+# not a crash. Fixed: the engine is probed and CLASSIFIED before any gate runs,
+# the classification is carried into the final verdict line (`engine=rust-seed`
+# / `engine=self-hosted`), and a binary whose provenance cannot be determined is
+# an ERROR (exit 2) -- absence of evidence is never a pass.
+#
 # Missing OPTIONAL inputs warn; missing REQUIRED inputs fail (fail-closed).
 #
 # Env:
 #   SIMPLE_BIN           path to the simple binary (default: auto-discover)
 #   RISCV_GATE_TIMEOUT   per-gate timeout in seconds (default 600)
+#
+# Flags:
+#   --selftest           fatal fixture run (shim binaries, no hardware needed)
 
 set -u
 
@@ -38,6 +64,76 @@ if command -v timeout >/dev/null 2>&1; then
 else
     RUN_TIMEOUT=""
 fi
+
+# classify_engine <bin>
+# Echoes "rust-seed" or "self-hosted" and returns 0; on an indeterminate binary
+# echoes a reason and returns 2. rc is assigned on the line AFTER the command --
+# never through a pipe, whose $? is the last stage's.
+classify_engine() {
+    _ce_bin="$1"
+    _ce_out="$("$_ce_bin" --version 2>&1)" && _ce_rc=0 || _ce_rc=$?
+    if [ "$_ce_rc" -ne 0 ]; then
+        echo "--version exited $_ce_rc"
+        return 2
+    fi
+    if [ -z "$_ce_out" ]; then
+        echo "--version produced no output"
+        return 2
+    fi
+    if printf '%s\n' "$_ce_out" | grep -q "bootstrap seed only"; then
+        echo "rust-seed"
+    else
+        echo "self-hosted"
+    fi
+    return 0
+}
+
+selftest() {
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    fails=0
+    n=0
+    mk() { # mk <name> <exit> <text>
+        printf '#!/bin/sh\nprintf %%s\\\\n "%s"\nexit %s\n' "$3" "$2" >"$tmp/$1"
+        chmod +x "$tmp/$1"
+    }
+    expect() { # expect <desc> <bin> <want_rc> <want_stdout>
+        n=$((n + 1))
+        got="$(classify_engine "$tmp/$2")" && rc=0 || rc=$?
+        if [ "$rc" = "$3" ] && [ "$got" = "$4" ]; then
+            echo "  selftest ok [$1]"
+        else
+            echo "  SELFTEST FAIL [$1]: rc=$rc out='$got', wanted rc=$3 out='$4'"
+            fails=$((fails + 1))
+        fi
+    }
+
+    echo "=== check-riscv-hardware-gates --selftest ==="
+    # Incident replay: the real bin/release/<triple>/simple prints exactly this.
+    mk seed 0 'WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.'
+    mk hosted 0 'Simple Language v1.0.0-beta'
+    mk broken 1 'segfault'
+    mk silent 0 ''
+    expect "seed banner must classify as rust-seed, never self-hosted" seed 0 "rust-seed"
+    expect "no seed banner must classify as self-hosted" hosted 0 "self-hosted"
+    expect "unrunnable binary must be indeterminate (ERROR), never a pass" broken 2 "--version exited 1"
+    expect "silent --version must be indeterminate, never self-hosted" silent 2 "--version produced no output"
+
+    if [ "$fails" -ne 0 ]; then
+        echo "FAIL — selftest: $fails of $n fixture(s) failed"
+        exit 1
+    fi
+    echo "PASS — $n selftest fixture(s) checked"
+    exit 0
+}
+
+case "${1:-}" in
+    --selftest) selftest ;;
+    "") ;;
+    *) echo "usage: $0 [--selftest]"
+       echo "ERROR — nothing was checked: unknown argument '$1'"
+       exit 2 ;;
+esac
 
 TOTAL=0
 PASS=0
@@ -169,6 +265,7 @@ link_mux_jtag_debug|test/01_unit/lib/hardware/link_mux/jtag_debug_probe.spl|1"
 INTERP_PROBES="fpu_probe core_fpu_integration rv32_uart_console rv32_mmio_consistency link_mux_jtag_debug"
 
 SIMPLE="$(resolve_simple)" || SIMPLE=""
+ENGINE="unknown"
 if [ -z "$SIMPLE" ]; then
     # No simple binary: every required probe is blocked -> fail-closed.
     OLDIFS=$IFS; IFS='
@@ -183,7 +280,17 @@ if [ -z "$SIMPLE" ]; then
     done
     IFS=$OLDIFS
 else
-    echo "simple binary: $SIMPLE"
+    # --- Provenance, BEFORE any gate runs -------------------------------------
+    # rc is assigned on the line AFTER the command; a pipeline's $? would be the
+    # last stage's, which has produced false greens in this repo before.
+    SIMPLE_REAL="$(readlink -f "$SIMPLE" 2>/dev/null || echo "$SIMPLE")"
+    ENGINE="$(classify_engine "$SIMPLE")" && crc=0 || crc=$?
+    if [ "$crc" -ne 0 ]; then
+        echo "ERROR — nothing was checked: cannot determine engine provenance of $SIMPLE_REAL ($ENGINE)"
+        exit 2
+    fi
+    echo "simple binary: $SIMPLE_REAL"
+    echo "engine: $ENGINE ($(stat -c '%s bytes, mtime %y' "$SIMPLE_REAL" 2>/dev/null || echo 'stat unavailable'))"
     OLDIFS=$IFS; IFS='
 '
     for row in $PROBES; do
@@ -227,15 +334,15 @@ fi
 RV32_VALIDATE="scripts/fpga/ghdl_validate_rv32.shs"
 RV32_GEN_MARKER="build/vhdl/rv32/soc_top_rv32_sim.vhd"
 if [ ! -f "$RV32_VALIDATE" ]; then
-    gate_warn "ghdl_validate_rv32 --analyze" "script missing: $RV32_VALIDATE"
+    gate_warn "ghdl_validate_rv32 --analyze (ANALYZE-ONLY: no elaboration/simulation)" "script missing: $RV32_VALIDATE"
 elif [ ! -f "$RV32_GEN_MARKER" ]; then
-    gate_warn "ghdl_validate_rv32 --analyze" "generated VHDL absent ($RV32_GEN_MARKER); run scripts/fpga/generate_rv32_vhdl.shs first"
+    gate_warn "ghdl_validate_rv32 --analyze (ANALYZE-ONLY: no elaboration/simulation)" "generated VHDL absent ($RV32_GEN_MARKER); run scripts/fpga/generate_rv32_vhdl.shs first"
 else
     log="$LOG_DIR/ghdl_validate_rv32.log"
     if $RUN_TIMEOUT sh "$RV32_VALIDATE" --analyze >"$log" 2>&1; then
-        gate_pass "ghdl_validate_rv32 --analyze"
+        gate_pass "ghdl_validate_rv32 --analyze (ANALYZE-ONLY: no elaboration/simulation)"
     else
-        gate_fail "ghdl_validate_rv32 --analyze" "nonzero exit (see $log)"
+        gate_fail "ghdl_validate_rv32 --analyze (ANALYZE-ONLY: no elaboration/simulation)" "nonzero exit (see $log)"
         tail -10 "$log" | sed 's/^/      /'
     fi
 fi
@@ -246,7 +353,16 @@ fi
 echo "---"
 [ $WARN -gt 0 ] && echo "warnings (optional gates skipped): $WARN"
 echo "RISCV-HW-GATES: $PASS/$TOTAL PASS"
-if [ $FAIL -gt 0 ] || [ $TOTAL -eq 0 ] || [ $PASS -ne $TOTAL ]; then
+if [ $TOTAL -eq 0 ]; then
+    # Non-vacuity is absolute: a run that evaluated zero gates proved nothing.
+    echo "ERROR — nothing was checked: 0 gates evaluated"
+    exit 2
+fi
+if [ $FAIL -gt 0 ] || [ $PASS -ne $TOTAL ]; then
+    echo "FAIL — $TOTAL gate(s) checked, $FAIL failed (engine=$ENGINE)"
     exit 1
 fi
+# The engine is stated IN the verdict so a green line can never be read as a
+# self-hosted result when it was produced by the Rust seed.
+echo "PASS — $TOTAL gate(s) checked, 0 failed (engine=$ENGINE)"
 exit 0

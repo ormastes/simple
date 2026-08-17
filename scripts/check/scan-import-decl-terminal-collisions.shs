@@ -1,0 +1,197 @@
+#!/bin/sh
+# Scan Simple sources for the "import/declaration terminal-name collision" defect
+# CLASS: a file that BOTH imports a terminal name via `use pkg.mod.{A, B, C}`
+# (or `use pkg.mod.A`) AND declares a top-level type of that same terminal name.
+#
+# Filed instance:
+#   doc/08_tracking/bug/stage4_lint_enum_terminal_collision_2026_08_03.md
+#   src/compiler/90.tools/lint/_LintMain/config_and_model.spl imported
+#   LintCategory from std.tooling.easy_fix.types at line 19 and declared
+#   `enum LintCategory` at line 723. The LintLevel half of the same collision
+#   had already been fixed the same way (drop the local duplicate).
+#
+# The collision is silent: whichever binding wins is a coin flip across the
+# resolver's ordering, so the two declarations can diverge and consumers can
+# construct a variant the other declaration does not have.
+#
+# Usage:
+#   sh scripts/check/scan-import-decl-terminal-collisions.shs [ROOT ...]
+#   sh scripts/check/scan-import-decl-terminal-collisions.shs --selftest
+#
+# Verdict is the LAST line of stdout, matching the repo convention:
+#   PASS  — <n> file(s) scanned, 0 collision(s)        exit 0
+#   FAIL  — <n> file(s) scanned, <k> collision(s): ... exit 1
+#   ERROR — nothing was checked                        exit 2
+#
+# NON-VACUITY IS ABSOLUTE: a run that scanned 0 files is ERROR, never a pass.
+# This is the trap that made an earlier property spec in this repo unable to
+# either pass or fail -- it searched a path that did not exist and silently
+# found nothing.
+
+set -u
+
+scan_tree() {
+    # ONE awk process for the whole tree. The first draft forked two seds, an
+    # awk, a sort and a grep PER FILE; over src/compiler's 1695 .spl files that
+    # is ~7000 processes and it did not finish in 600s on a loaded box. A single
+    # pass keeping per-file state in arrays runs in seconds.
+    find "$@" -name '*.spl' -type f 2>/dev/null | LC_ALL=C sort | awk '
+        function flush(   name) {
+            if (curfile == "") return
+            for (name in imported) {
+                if (name in declared) printf "%s\t%s\n", curfile, name
+            }
+            delete imported
+            delete declared
+        }
+        FNR == 1 { flush(); curfile = FILENAME }
+
+        # Imported terminal names: `use a.b.{X, Y}` and plain `use a.b.X`.
+        /^[[:space:]]*(export[[:space:]]+)?use[[:space:]]/ {
+            line = $0
+            # NOTE: the brace literals are bracket-escaped, not backslash-
+            # escaped. A bare \{ in an awk ERE is parsed as the start of an
+            # interval expression, so /\{[^}]*\}/ matched nothing and the
+            # scanner silently found zero collisions -- caught only because the
+            # selftest asserts the incident fixture MUST be detected.
+            if (match(line, /[{][^}]*[}]/)) {
+                inner = substr(line, RSTART + 1, RLENGTH - 2)
+                n = split(inner, parts, ",")
+                for (i = 1; i <= n; i++) {
+                    # `X as Y` binds Y, not X -- tested BEFORE whitespace is
+                    # stripped, so a name merely CONTAINING "as" (Cast,
+                    # AstNode) is not skipped.
+                    if (parts[i] ~ /[[:space:]]as[[:space:]]/) continue
+                    gsub(/[[:space:]]/, "", parts[i])
+                    if (parts[i] != "" && parts[i] != "*") imported[parts[i]] = 1
+                }
+            } else {
+                sub(/^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+/, "", line)
+                sub(/[[:space:]].*$/, "", line)
+                n = split(line, seg, ".")
+                last = seg[n]
+                if (last != "" && last != "*") imported[last] = 1
+            }
+            next
+        }
+
+        # Top-level type declarations only: column 0, no leading whitespace, so
+        # a type nested inside a function body is not a redeclaration.
+        /^(pub[[:space:]]+)?(enum|class|struct|trait)[[:space:]]+[A-Za-z_]/ {
+            line = $0
+            sub(/^(pub[[:space:]]+)?(enum|class|struct|trait)[[:space:]]+/, "", line)
+            if (match(line, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+                declared[substr(line, 1, RLENGTH)] = 1
+            }
+        }
+
+        END { flush() }
+    ' /dev/null "$(find "$@" -name '*.spl' -type f 2>/dev/null | head -0)" 2>/dev/null
+}
+
+count_files() {
+    find "$1" -name '*.spl' -type f 2>/dev/null | wc -l
+}
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    trap 'rm -rf "$tmp"' EXIT
+
+    # Fixture 1: the real incident shape -- must be DETECTED.
+    mkdir -p "$tmp/bad"
+    cat > "$tmp/bad/collide.spl" <<'EOF'
+use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
+
+enum LintCategory:
+    Safety
+EOF
+    # Fixture 2: import only, no local decl -- must be CLEAN.
+    mkdir -p "$tmp/good"
+    cat > "$tmp/good/clean.spl" <<'EOF'
+use std.tooling.easy_fix.types.{EasyFix, LintLevel, LintCategory}
+
+class Lint:
+    category: LintCategory
+EOF
+    # Fixture 3: a same-named type declared but never imported -- must be CLEAN.
+    cat > "$tmp/good/local_only.spl" <<'EOF'
+use std.text.Text
+
+enum LintCategory:
+    Safety
+EOF
+    # Fixture 4: an indented (nested) declaration is not a top-level decl.
+    cat > "$tmp/good/nested.spl" <<'EOF'
+use std.a.b.{Widget}
+
+fn make():
+    class Widget:
+        x: Int
+EOF
+
+    fails=0
+    got=$(scan_tree "$tmp/bad")
+    if ! printf '%s' "$got" | grep -q 'LintCategory'; then
+        echo "SELFTEST FAIL: incident fixture not detected"
+        fails=$((fails + 1))
+    fi
+    got=$(scan_tree "$tmp/good")
+    if [ -n "$got" ]; then
+        echo "SELFTEST FAIL: clean fixtures flagged: $got"
+        fails=$((fails + 1))
+    fi
+    # Fixture 5: an empty tree must yield 0 files, forcing the caller to ERROR.
+    mkdir -p "$tmp/empty"
+    if [ "$(count_files "$tmp/empty")" -ne 0 ]; then
+        echo "SELFTEST FAIL: empty tree did not count 0 files"
+        fails=$((fails + 1))
+    fi
+
+    if [ "$fails" -ne 0 ]; then
+        echo "SELFTEST FAIL — $fails fixture(s) failed"
+        exit 1
+    fi
+    echo "SELFTEST PASS — 5 fixtures"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    selftest
+    exit 0
+fi
+
+selftest >/dev/null || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+if [ "$#" -eq 0 ]; then
+    set -- src/compiler src/lib src/app
+fi
+
+total=0
+for root in "$@"; do
+    [ -d "$root" ] || continue
+    total=$((total + $(count_files "$root")))
+done
+
+if [ "$total" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+hits=""
+for root in "$@"; do
+    [ -d "$root" ] || continue
+    r=$(scan_tree "$root")
+    [ -n "$r" ] && hits="${hits}${r}
+"
+done
+
+hits=$(printf '%s' "$hits" | sed '/^$/d')
+n=$(printf '%s' "$hits" | sed '/^$/d' | wc -l)
+
+if [ -n "$hits" ]; then
+    printf '%s\n' "$hits"
+    echo "FAIL — $total file(s) scanned, $n collision(s)"
+    exit 1
+fi
+
+echo "PASS — $total file(s) scanned, 0 collision(s)"
+exit 0

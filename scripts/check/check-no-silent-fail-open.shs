@@ -1,0 +1,295 @@
+#!/bin/sh
+# check-no-silent-fail-open.shs
+#
+# Fail closed when NEW silent-fail-open shapes appear in owned source.
+#
+# THE DEFECT CLASS: code that cannot determine an answer, substitutes a
+# plausible-looking one, and continues with NO diagnostic. The result is not a
+# crash, it is a WRONG ANSWER that looks like success -- the most expensive
+# failure mode there is, because nothing red ever appears.
+#
+# Every pattern below was extracted from a REAL defect found in this repo:
+#
+#   1. src/compiler_rust/compiler/src/hir/lower/expr/access.rs:288
+#      `.unwrap_or(0)` on the CannotInferFieldType recovery path. A struct
+#      returned BY VALUE loses its receiver type, field-index resolution falls
+#      through, and EVERY field read silently returns field 0's value.
+#      `make(3)` on `struct W3: ok, length, tag` printed `len=1 tag=1`.
+#      This blocked the bootstrap.
+#   2. Unresolved `use` imports were a WARNING; the JIT fallback then swallowed
+#      the E1034 and silently de-JIT'd, so a completely missing P-256 field
+#      implementation hid behind a public API. (1478ca64460 / ed9f490a91c)
+#   3. `TestRunResult::success()` was `self.total_failed == 0` -- zero tests
+#      executed satisfied it. Exit 0, no counts.
+#   4. `init_coverage_from_env()` ran for every command but
+#      `save_global_coverage()` had ONE caller: `run` collected coverage, wrote
+#      nothing, exited 0.
+#   5. `SIMPLE_TIMEOUT_SECONDS` was parsed and DISCARDED (hardcoded 120).
+#   6. Two pre-push guards failed OPEN on cwd: from a worktree with no `.git`
+#      they printed "nothing to push" and exited 0 having checked nothing.
+#
+# WHY THIS IS NARROWED, AND WHY THAT IS NOT A COMPROMISE
+#
+# A blanket scan for `unwrap_or(` alone hits 1694 lines in the Rust tree, 813
+# more for `unwrap_or_else(`, 343 for `unwrap_or_default()`. The overwhelming
+# majority are legitimate: a default capacity, a default config value, a
+# display fallback. Baselining 3000 lines produces a guard nobody reads and a
+# baseline nobody can review -- itself a vacuous pass.
+#
+# The signal is not the operator, it is WHAT IS BEING DEFAULTED. Every incident
+# above defaulted the result of a RESOLUTION or a LOOKUP: "which field index",
+# "which symbol", "which type", "which slot", "which binding". A resolution
+# that failed is not a missing preference with a sensible default -- it is a
+# question the compiler could not answer, and answering it anyway with `0` is
+# the bug. So a line is flagged only when a fail-open operator and a
+# resolution/lookup token appear together. That cuts Rust 1694 -> 116 and
+# Simple 149, a set small enough to actually review.
+#
+# Shell laundering (`|| true`, `|| echo 0`, `|| :`) is scanned only inside a
+# COMMAND SUBSTITUTION that feeds a variable, which is the shape that turns a
+# failed command into a plausible number (incident 5's cousin). A bare
+# `rm -f x || true` discards nothing anyone will later believe.
+#
+# BOTH TREES, as the class demands: Rust (src/compiler_rust/**) and pure
+# Simple (src/compiler/**, src/lib/**). Vendored code is out of scope per
+# CLAUDE.md Owned-Code Scope.
+#
+# Baselined like check-no-phantom-module-imports.shs: the pre-existing set is
+# recorded, and the gate fails only on NEW findings, so a new fail-open is
+# blocked immediately while the existing set is worked down. Baseline entries
+# carry NO line number -- an unrelated edit above a finding must not manufacture
+# a "new" one.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> site(s) checked, 0 new fail-open (baselined: <k>)   exit 0
+#   FAIL  — <n> site(s) checked, <k> NEW fail-open: ...             exit 1
+#   ERROR — nothing was checked                                     exit 2
+set -u
+
+BASELINE_NAME="scripts/check/silent_fail_open_baseline.txt"
+
+# Fail-open operators, by language.
+RUST_OPS='unwrap_or\(|unwrap_or_default\(\)|unwrap_or_else\('
+SIMPLE_OPS='unwrap_or\(|or_else\(|[?][?] '
+
+# A resolution/lookup being defaulted -- the thing that makes a default a bug.
+RESOLUTION='resolv|lookup|infer|field_index|field_idx|type_of|get_type|symbol|scope|find_|_find|index_of|slot|binding|decl'
+
+MODE="scan"
+ROOT="."
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) MODE="selftest" ;;
+        --generate-baseline) MODE="generate" ;;
+        --root) shift; ROOT="${1:-.}" ;;
+        *) ROOT="$1" ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+# --selftest: a gate that cannot FAIL is not evidence, so prove it can, using
+# fixtures that replay REAL defects rather than invented ones. Fatal: any
+# fixture miss aborts with ERROR and the scan never runs.
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "selftest" ]; then
+    SELF="$0"
+    TMP=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    trap 'rm -rf "$TMP"' EXIT
+    FAILED=""
+    NFIX=0
+
+    mkfixture() {
+        # $1 = fixture dir name; creates the owned-tree skeleton the scan walks.
+        mkdir -p "$TMP/$1/src/compiler_rust/compiler/src" \
+                 "$TMP/$1/src/compiler" "$TMP/$1/src/lib" "$TMP/$1/scripts/check"
+    }
+    verdict_of() { sh "$SELF" --root "$1" 2>&1 | tail -1; }
+    run_fixture() {
+        NFIX=$((NFIX + 1))
+        _name="$1"; _want_rc="$2"; _dir="$3"; _wantpat="${4:-}"
+        _out=$(sh "$SELF" --root "$_dir" 2>&1)
+        _rc=$?          # rc on its OWN line, never through a pipe: a pipeline's
+                        # $? is the LAST stage's status and has produced false
+                        # greens in this repo before.
+        if [ "$_rc" -ne "$_want_rc" ]; then
+            FAILED="$FAILED\n  fixture '$_name': rc=$_rc want=$_want_rc :: $(printf '%s' "$_out" | tail -1)"
+            return
+        fi
+        if [ -n "$_wantpat" ]; then
+            case "$_out" in
+                *"$_wantpat"*) ;;
+                *) FAILED="$FAILED\n  fixture '$_name': verdict did not mention '$_wantpat' :: $(printf '%s' "$_out" | tail -1)" ;;
+            esac
+        fi
+    }
+
+    # Fixture 1 (must FAIL) -- replays the access.rs bootstrap blocker verbatim.
+    mkfixture f1
+    cat > "$TMP/f1/src/compiler_rust/compiler/src/access.rs" <<'RSEOF'
+fn lower_field(&mut self, recv: &Ty, name: &str) -> u32 {
+    let idx = self.resolve_field_index(recv, name).unwrap_or(0);
+    idx
+}
+RSEOF
+    run_fixture "rust unwrap_or(0) on a field-index resolution" 1 "$TMP/f1" "access.rs"
+
+    # Fixture 2 (must FAIL) -- the pure-Simple half of the same shape. The user
+    # asked for BOTH engines; a Rust-only gate would be half a gate.
+    mkfixture f2
+    cat > "$TMP/f2/src/compiler/lower.spl" <<'SPEOF'
+fn field_slot(recv: Type, name: text) -> i64:
+    resolve_slot(recv, name) ?? 0
+SPEOF
+    run_fixture "simple ?? 0 on a slot resolution" 1 "$TMP/f2" "lower.spl"
+
+    # Fixture 3 (must FAIL) -- shell laundering a failed lookup into a number,
+    # the shape behind "0 tests executed, exit 0".
+    mkfixture f3
+    cat > "$TMP/f3/scripts/check/x.shs" <<'SHEOF'
+COUNT=$(grep -c '^ok' "$LOG" || echo 0)
+[ "$COUNT" -ge 0 ] && echo PASS
+SHEOF
+    run_fixture "shell || echo 0 inside a command substitution" 1 "$TMP/f3" "x.shs"
+
+    # Fixture 4 (must PASS) -- a benign default that is NOT a resolution. If
+    # this fixture failed, the gate would be crying wolf on ~3000 legitimate
+    # sites and would be switched off within a day.
+    mkfixture f4
+    cat > "$TMP/f4/src/compiler_rust/compiler/src/cfg.rs" <<'RSEOF'
+let capacity = opts.capacity.unwrap_or(16);
+let name = cfg.display_name.clone().unwrap_or_default();
+RSEOF
+    run_fixture "benign non-resolution default is not flagged" 0 "$TMP/f4" ""
+
+    # Fixture 5 (must PASS) -- vendored code is out of scope per CLAUDE.md, and
+    # must not be scanned even when it contains the exact offending shape.
+    mkfixture f5
+    mkdir -p "$TMP/f5/src/compiler_rust/vendor/x/src"
+    cat > "$TMP/f5/src/compiler_rust/vendor/x/src/v.rs" <<'RSEOF'
+let i = self.resolve_field_index(t, n).unwrap_or(0);
+RSEOF
+    cat > "$TMP/f5/src/compiler_rust/compiler/src/ok.rs" <<'RSEOF'
+let capacity = opts.capacity.unwrap_or(16);
+RSEOF
+    run_fixture "vendored tree is not scanned" 0 "$TMP/f5" ""
+
+    # Fixture 6 (must ERROR) -- the meta-guard. A tree with nothing scannable
+    # must NOT report a pass. A guard that passes without checking anything is
+    # itself an instance of the class this file gates against, so this fixture
+    # is the most important one here.
+    mkfixture f6
+    run_fixture "empty tree is ERROR, never a vacuous PASS" 2 "$TMP/f6" "ERROR"
+
+    # Fixture 7 (must PASS) -- baseline suppression works, AND fixture 8 proves
+    # it does not suppress everything.
+    mkfixture f7
+    cat > "$TMP/f7/src/compiler_rust/compiler/src/access.rs" <<'RSEOF'
+let idx = self.resolve_field_index(recv, name).unwrap_or(0);
+RSEOF
+    sh "$SELF" --root "$TMP/f7" --generate-baseline >/dev/null 2>&1
+    run_fixture "generated baseline suppresses the pre-existing finding" 0 "$TMP/f7" "baselined: 1"
+
+    # Fixture 8 (must FAIL) -- a NEW finding on top of a baseline still fails.
+    # Without this, fixture 7 would only prove the gate can be silenced.
+    cat > "$TMP/f7/src/compiler_rust/compiler/src/other.rs" <<'RSEOF'
+let s = self.lookup_symbol(name).unwrap_or(0);
+RSEOF
+    run_fixture "NEW finding on top of a baseline still fails" 1 "$TMP/f7" "other.rs"
+
+    if [ -n "$FAILED" ]; then
+        printf 'selftest: %d fixture(s) run, FAILURES:%b\n' "$NFIX" "$FAILED"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    echo "selftest: $NFIX fixture(s) passed"
+    exit 0
+fi
+
+cd "$ROOT" 2>/dev/null || { echo "ERROR — nothing was checked"; exit 2; }
+
+BASELINE="$BASELINE_NAME"
+
+# ---------------------------------------------------------------------------
+# Collect the candidate SITES (every line carrying a fail-open operator in a
+# scanned file). CHECKED counts these, not the findings -- the verdict must say
+# how much was examined, so that a scan which examined nothing cannot be
+# mistaken for a scan which found nothing.
+# ---------------------------------------------------------------------------
+SITES="$(mktemp)"; FIND="$(mktemp)"; NOW="$(mktemp)"
+trap 'rm -f "$SITES" "$FIND" "$NOW"' EXIT
+
+RUST_FILES=$(find src/compiler_rust -name '*.rs' 2>/dev/null | grep -v '/vendor/' | grep -v '/target')
+SPL_FILES=$(find src/compiler src/lib -name '*.spl' 2>/dev/null | grep -v '/vendor/')
+SH_FILES=$(find scripts -name '*.shs' 2>/dev/null)
+
+emit_sites() {
+    # $1 = newline-separated file list, $2 = operator regex, $3 = tag
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$1" | xargs grep -nE "$2" 2>/dev/null | sed "s/^/$3\t/"
+}
+
+{
+    emit_sites "$RUST_FILES" "$RUST_OPS"   rust
+    emit_sites "$SPL_FILES"  "$SIMPLE_OPS" simple
+    # Shell: only a substitution feeding a variable, per the header.
+    [ -n "$SH_FILES" ] && printf '%s\n' "$SH_FILES" | \
+        xargs grep -nE '=[^=]*\$\(.*\|\|[[:space:]]*(true|echo[[:space:]]+[0-9]+|:)' 2>/dev/null | sed 's/^/shell\t/'
+} > "$SITES" 2>/dev/null
+
+CHECKED=$(wc -l < "$SITES" | tr -d ' ')
+[ "${CHECKED:-0}" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+
+# A finding = a site whose defaulted value is a RESOLUTION result (rust/simple),
+# or any laundering substitution (shell -- there the shape alone is the defect).
+# Baseline key omits the line number so unrelated edits cannot fabricate a NEW
+# finding; the code text is squeezed so reindentation cannot either.
+awk -F'\t' '
+{
+    tag = $1
+    rest = $2
+    # rest = path:line:code -- split off path and line, keep code verbatim.
+    p = index(rest, ":");            path = substr(rest, 1, p - 1)
+    r2  = substr(rest, p + 1)
+    p2 = index(r2, ":");             code = substr(r2, p2 + 1)
+    gsub(/^[ \t]+|[ \t]+$/, "", code)
+    gsub(/[ \t]+/, " ", code)
+    if (tag != "shell" && code !~ RES) next
+    printf "%s\t%s\t%s\n", tag, path, code
+}' RES="$RESOLUTION" "$SITES" | sort -u > "$FIND"
+
+NFOUND=$(wc -l < "$FIND" | tr -d ' ')
+
+if [ "$MODE" = "generate" ]; then
+    mkdir -p "$(dirname "$BASELINE")"
+    cp "$FIND" "$BASELINE"
+    echo "wrote $BASELINE ($NFOUND entr(ies))"
+    echo "PASS — $CHECKED site(s) checked, baseline regenerated"
+    exit 0
+fi
+
+if [ -f "$BASELINE" ]; then
+    sort -u "$BASELINE" > "$NOW"
+    NEW=$(comm -23 "$FIND" "$NOW")
+    STALE=$(comm -13 "$FIND" "$NOW")
+else
+    NEW=$(cat "$FIND")
+    STALE=""
+fi
+
+NNEW=0
+[ -n "$NEW" ] && NNEW=$(printf '%s\n' "$NEW" | grep -c .)
+NBASE=$((NFOUND - NNEW))
+
+if [ "$NNEW" -gt 0 ]; then
+    printf '%s\n' "$NEW" | sed 's/^/NEW fail-open: /'
+    echo "FAIL — $CHECKED site(s) checked, $NNEW NEW fail-open (baselined: $NBASE)"
+    exit 1
+fi
+if [ -n "$STALE" ]; then
+    printf '%s\n' "$STALE" | sed 's/^/stale baseline entry (gone, drop it): /'
+    echo "FAIL — $CHECKED site(s) checked, baseline is stale"
+    exit 1
+fi
+echo "PASS — $CHECKED site(s) checked, 0 new fail-open (baselined: $NBASE)"
+exit 0

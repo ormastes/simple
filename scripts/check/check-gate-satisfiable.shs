@@ -1,0 +1,198 @@
+#!/bin/sh
+# check-gate-satisfiable.shs — detect UNSATISFIABLE fail-closed gates.
+#
+# Class of defect (generalises bug
+# doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md):
+# a verification function performs real work — structural checks, hash
+# comparisons, authorization-text derivation — and then ends with an
+# UNCONDITIONAL `return 1` / `exit 1`. Every caller is denied regardless of
+# input, so the gate is not "fail-closed", it is CLOSED: there is no input
+# that admits. That is indistinguishable at the call site from a genuine
+# policy rejection, which is exactly why the bootstrap admission gate sat
+# blocking every bootstrap while looking like a working security control.
+#
+# A deliberately-closed gate is legitimate ONLY if it is greppably declared,
+# by putting the marker below anywhere in the function body:
+#
+#     # gate-intentionally-closed: <reason>
+#
+# Verdict is the LAST line of stdout.
+#   PASS  — <n> gate function(s) checked, 0 unsatisfiable   exit 0
+#   FAIL  — <n> ... , <k> unsatisfiable: <names>            exit 1
+#   ERROR — nothing was checked                             exit 2
+
+set -u
+
+MARKER='gate-intentionally-closed'
+
+# Scan one shell file, print "file:line:function" for each unsatisfiable gate,
+# and print "COUNT <n>" for the number of gate functions examined.
+scan_file() {
+    awk -v FNAME="$1" -v MARKER="$MARKER" '
+    function flush(   last) {
+        if (fn == "") return
+        # A "gate function" is one that does guarded verification work:
+        # at least one conditional failure exit (|| return 1 / || exit 1).
+        if (guarded > 0) {
+            examined++
+            # Unsatisfiable when the last executable statement is a bare
+            # unconditional return/exit non-zero, and no opt-out marker.
+            if (lastexec ~ /^(return|exit)[ \t]+[1-9][0-9]*$/ && marker == 0)
+                printf "HIT %s:%d:%s\n", FNAME, fnline, fn
+        }
+        fn = ""; guarded = 0; lastexec = ""; marker = 0; depth = 0
+    }
+    {
+        line = $0
+        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+
+        if (fn == "" && line ~ /^[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{[ \t]*$/) {
+            fn = line; sub(/\(\).*/, "", fn); fnline = NR; depth = 1
+            guarded = 0; lastexec = ""; marker = 0
+            next
+        }
+        if (fn == "") next
+
+        if (index(line, MARKER) > 0) marker = 1
+        if (line ~ /^#/ || line == "") next
+
+        if (line == "}") { depth--; if (depth == 0) { flush(); next } }
+        else {
+            # crude nesting track: only count block openers/closers we emit
+            if (line ~ /\{[ \t]*$/ || line ~ /^(if|for|while|until|case)\b/) depth++
+            if (line ~ /^(fi|done|esac)$/) depth--
+        }
+
+        if (line ~ /\|\|[ \t]*(return|exit)[ \t]+[1-9]/) guarded++
+        lastexec = line
+    }
+    END { flush(); printf "COUNT %d\n", examined }
+    ' "$1"
+}
+
+run_scan() {
+    scan_root=$1
+    total=0
+    hits=""
+    nhits=0
+    for f in $(find "$scan_root" -name '*.shs' -o -name '*.sh' 2>/dev/null | sort); do
+        [ -f "$f" ] || continue
+        out=$(scan_file "$f")
+        n=$(printf '%s\n' "$out" | sed -n 's/^COUNT //p')
+        total=$((total + ${n:-0}))
+        for h in $(printf '%s\n' "$out" | sed -n 's/^HIT //p'); do
+            hits="$hits $h"
+            nhits=$((nhits + 1))
+        done
+    done
+    SCAN_TOTAL=$total
+    SCAN_HITS=$hits
+    SCAN_NHITS=$nhits
+}
+
+# ---------------------------------------------------------------- selftest --
+selftest() {
+    d=$(mktemp -d) || return 1
+    fail=0
+
+    # Fixture 1: must FAIL — replays the real incident shape.
+    cat >"$d/closed.shs" <<'EOF'
+verify_structure() {
+    [ -f "$1" ] || return 1
+    [ "$(cat "$1")" = ok ] || return 1
+}
+gate_verify() {
+    verify_structure "$1" || return 1
+    echo "policy-error: producer-unavailable" >&2
+    return 1
+}
+EOF
+
+    # Fixture 2: must PASS — an honest gate that can admit.
+    cat >"$d/open.shs" <<'EOF'
+gate_verify() {
+    [ -f "$1" ] || return 1
+    [ "$(cat "$1")" = ok ] || return 1
+    echo admitted
+}
+EOF
+
+    # Fixture 3: must PASS — deliberately closed AND declared.
+    cat >"$d/declared.shs" <<'EOF'
+gate_verify() {
+    # gate-intentionally-closed: feature removed 2026-01-01, see BUG-123
+    check_it "$1" || return 1
+    return 1
+}
+EOF
+
+    # Fixture 4: must PASS — bare `return 1` is inside a conditional, not final.
+    cat >"$d/conditional.shs" <<'EOF'
+gate_verify() {
+    verify "$1" || return 1
+    if [ "$2" = deny ]; then
+        return 1
+    fi
+    echo admitted
+}
+EOF
+
+    # Fixture 5: empty tree must examine 0 functions (forces caller to ERROR).
+    mkdir -p "$d/empty"
+
+    for spec in "closed.shs:1" "open.shs:0" "declared.shs:0" "conditional.shs:0"; do
+        f=${spec%:*}; want=${spec#*:}
+        mkdir -p "$d/one"; rm -f "$d/one"/*.shs; cp "$d/$f" "$d/one/"
+        run_scan "$d/one"
+        if [ "$SCAN_NHITS" -ne "$want" ]; then
+            echo "selftest: $f expected $want hit(s), got $SCAN_NHITS" >&2
+            fail=1
+        fi
+        if [ "$SCAN_TOTAL" -lt 1 ]; then
+            echo "selftest: $f examined 0 gate functions" >&2
+            fail=1
+        fi
+    done
+
+    run_scan "$d/empty"
+    if [ "$SCAN_TOTAL" -ne 0 ]; then
+        echo "selftest: empty tree examined $SCAN_TOTAL functions, expected 0" >&2
+        fail=1
+    fi
+
+    rm -rf "$d"
+    return $fail
+}
+
+# -------------------------------------------------------------------- main --
+root=scripts/check
+selftest_only=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) root=$2; shift 2 ;;
+        --selftest) selftest_only=1; shift ;;
+        *) echo "usage: $0 [--root DIR] [--selftest]" >&2; exit 2 ;;
+    esac
+done
+
+if ! selftest; then
+    echo "ERROR — selftest failed, no scan performed"
+    exit 2
+fi
+[ "$selftest_only" -eq 1 ] && { echo "PASS — selftest only, 5 fixture(s) checked"; exit 0; }
+
+[ -d "$root" ] || { echo "ERROR — nothing was checked (no such root: $root)"; exit 2; }
+
+run_scan "$root"
+
+if [ "$SCAN_TOTAL" -lt 1 ]; then
+    echo "ERROR — nothing was checked (0 gate functions found under $root)"
+    exit 2
+fi
+if [ "$SCAN_NHITS" -gt 0 ]; then
+    for h in $SCAN_HITS; do echo "unsatisfiable gate: $h"; done
+    echo "FAIL — $SCAN_TOTAL gate function(s) checked, $SCAN_NHITS unsatisfiable:$SCAN_HITS"
+    exit 1
+fi
+echo "PASS — $SCAN_TOTAL gate function(s) checked, 0 unsatisfiable"
+exit 0

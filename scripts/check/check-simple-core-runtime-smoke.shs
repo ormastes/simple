@@ -20,6 +20,176 @@ TUI_BIN="$BUILD_DIR/minimal_tui_smoke_simple_core"
 TUI_APP_ENTRY="$BUILD_DIR/minimal_tui_app_entry.spl"
 TUI_APP_BIN="$BUILD_DIR/minimal_tui_app_simple_core"
 
+# The closure-cleanliness scan used to be four inline lines ending in
+# `|| true` plus `${VAR:-0}` defaults. That laundered *tool failure* into a
+# clean verdict: with `strings`/`nm` unavailable both counts defaulted to 0 and
+# the gate reported `simple_core_closure_clean=true`, exit 0, on a file that
+# visibly contained BOTH forbidden markers (measured 2026-08-17 --- see
+# `doc/08_tracking/bug/simple_core_pure_simple_archive_builder.md`). `nm`
+# failing for any other reason (not a valid object file) laundered identically.
+# Absence of evidence is not evidence of absence: a missing or failing tool is
+# now ERROR exit 2, never a pass, and every exit status is read on the line
+# AFTER the command that produced it, never through a pipe.
+HOSTED_MARKER_RE='libsimple_native_all|rust-hosted'
+UNWIND_MARKER_RE='_Unwind|unwind'
+
+closure_marker_scan() {
+    cms_hosted=0
+    cms_unwind=0
+    cms_checked=0
+    for cms_tool in strings nm rg; do
+        if ! command -v "$cms_tool" >/dev/null 2>&1; then
+            echo "simple_core_closure_clean=unknown"
+            echo "error=closure_scan_tool_unavailable:$cms_tool"
+            echo "ERROR — nothing was checked"
+            return 2
+        fi
+    done
+    for cms_bin in "$@"; do
+        if [ ! -r "$cms_bin" ]; then
+            echo "simple_core_closure_clean=unknown"
+            echo "error=closure_scan_binary_unreadable:$cms_bin"
+            echo "ERROR — nothing was checked"
+            return 2
+        fi
+
+        # `set -e` would abort on a failing command substitution before the
+        # status could be inspected, so disable it around the capture and read
+        # the status on the line AFTER the command -- never through a pipe.
+        set +e
+        cms_strings="$(strings "$cms_bin" 2>/dev/null)"
+        cms_rc=$?
+        set -e
+        if [ "$cms_rc" -ne 0 ]; then
+            echo "simple_core_closure_clean=unknown"
+            echo "error=closure_scan_strings_failed:$cms_bin rc=$cms_rc"
+            echo "ERROR — nothing was checked"
+            return 2
+        fi
+        cms_n="$(printf '%s\n' "$cms_strings" | rg -c "$HOSTED_MARKER_RE" || true)"
+        cms_hosted=$((cms_hosted + ${cms_n:-0}))
+
+        set +e
+        cms_syms="$(nm -a "$cms_bin" 2>/dev/null)"
+        cms_rc=$?
+        set -e
+        if [ "$cms_rc" -ne 0 ]; then
+            echo "simple_core_closure_clean=unknown"
+            echo "error=closure_scan_nm_failed:$cms_bin rc=$cms_rc"
+            echo "ERROR — nothing was checked"
+            return 2
+        fi
+        cms_n="$(printf '%s\n' "$cms_syms" | rg -c "$UNWIND_MARKER_RE" || true)"
+        cms_unwind=$((cms_unwind + ${cms_n:-0}))
+
+        cms_checked=$((cms_checked + 1))
+    done
+    if [ "$cms_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ "$cms_hosted" -ne 0 ] || [ "$cms_unwind" -ne 0 ]; then
+        echo "simple_core_closure_clean=false"
+        echo "hosted_markers=$cms_hosted"
+        echo "unwind_markers=$cms_unwind"
+        echo "FAIL — $cms_checked binary(ies) scanned, hosted=$cms_hosted unwind=$cms_unwind"
+        return 1
+    fi
+    echo "simple_core_closure_scanned=$cms_checked"
+    return 0
+}
+
+scrs_selftest() {
+    st_dir="$(mktemp -d)"
+    st_fail=0
+    st_checked=0
+    st_case() { # name expected_rc; runs closure_marker_scan on remaining args
+        st_name="$1"; st_want="$2"; shift 2
+        st_checked=$((st_checked + 1))
+        st_out="$(closure_marker_scan "$@" 2>&1)" && st_got=0 || st_got=$?
+        if [ "$st_got" = "$st_want" ]; then
+            echo "selftest ok: $st_name (rc=$st_got)"
+        else
+            echo "selftest FAIL: $st_name want_rc=$st_want got_rc=$st_got"
+            printf '%s\n' "$st_out" | sed 's/^/    /'
+            st_fail=$((st_fail + 1))
+        fi
+    }
+
+    # A real, clean ELF object with no forbidden markers -- must PASS.
+    printf 'int spl_selftest_clean(void){return 0;}\n' >"$st_dir/clean.c"
+    st_cc=""
+    for st_c in cc clang gcc; do
+        if command -v "$st_c" >/dev/null 2>&1; then st_cc="$st_c"; break; fi
+    done
+    if [ -z "$st_cc" ]; then
+        # No compiler => we cannot build the must-PASS fixture. That is
+        # ERROR, not a pass: the same rule the scan itself now obeys.
+        echo "ERROR — nothing was checked (no C compiler for selftest fixtures)"
+        rm -rf "$st_dir"
+        exit 2
+    fi
+    "$st_cc" -c -o "$st_dir/clean.o" "$st_dir/clean.c" >/dev/null 2>&1
+    st_case "clean-object-passes" 0 "$st_dir/clean.o"
+
+    # (1) Reproducing fixture for the defect class: tools unavailable. The old
+    #     code returned a CLEAN verdict here on marker-bearing input.
+    mkdir -p "$st_dir/stub"
+    for st_t in strings nm; do
+        printf '#!/bin/sh\nexit 127\n' >"$st_dir/stub/$st_t"
+        chmod +x "$st_dir/stub/$st_t"
+    done
+    printf 'libsimple_native_all\n_Unwind_Resume\n' >"$st_dir/dirty"
+    # Subshell, not an assignment prefix: a var prefix on a shell FUNCTION is
+    # not portably scoped to it, and the stubbed PATH must be in effect for
+    # every command the function runs.
+    st_out="$( (PATH="$st_dir/stub:$PATH"; closure_marker_scan "$st_dir/dirty") 2>&1 )" \
+        && st_got=0 || st_got=$?
+    st_checked=$((st_checked + 1))
+    if [ "$st_got" = 2 ]; then
+        echo "selftest ok: missing-tool-is-ERROR-not-pass (rc=2)"
+    else
+        echo "selftest FAIL: missing-tool-is-ERROR-not-pass want_rc=2 got_rc=$st_got"
+        st_fail=$((st_fail + 1))
+    fi
+
+    # (2) Generalizing fixtures.
+    # A forbidden marker present in a real object must FAIL, not pass.
+    printf 'const char *spl_selftest_marker = "libsimple_native_all";\n' >"$st_dir/dirty.c"
+    "$st_cc" -c -o "$st_dir/dirty.o" "$st_dir/dirty.c" >/dev/null 2>&1
+    st_case "hosted-marker-in-object-fails" 1 "$st_dir/dirty.o"
+
+    # A non-object file makes `nm` fail; that must be ERROR, not a clean pass.
+    # Deliberately marker-FREE, so the only thing that can produce a non-zero
+    # verdict is the tool failure itself -- a marker-bearing file would FAIL
+    # for the other reason and the fixture would prove nothing.
+    printf 'just plain text, no forbidden markers here\n' >"$st_dir/notanobject"
+    st_case "nm-failure-is-ERROR-not-pass" 2 "$st_dir/notanobject"
+
+    # An unreadable / absent binary must be ERROR, never a vacuous pass.
+    st_case "absent-binary-is-ERROR" 2 "$st_dir/does-not-exist"
+
+    # Zero binaries scanned must be ERROR, never a pass -- the core
+    # non-vacuity rule.
+    st_case "empty-input-is-ERROR" 2
+
+    rm -rf "$st_dir"
+    if [ "$st_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ "$st_fail" -ne 0 ]; then
+        echo "FAIL — $st_checked selftest fixture(s) checked, $st_fail failed"
+        exit 1
+    fi
+    echo "PASS — $st_checked selftest fixture(s) checked, 0 failed"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    scrs_selftest
+    exit 0
+fi
+
 mkdir -p "$BUILD_DIR" "$CORE_DIR"
 
 build_archive_part() {
@@ -193,16 +363,7 @@ if ! printf '%s\n' "$TUI_APP_OUTPUT" | rg -q "UI closed."; then
     exit 1
 fi
 
-HOSTED_MARKERS="$(strings "$HELLO_BIN" "$CHR_BIN" "$TUI_BIN" "$TUI_APP_BIN" | rg -c 'libsimple_native_all|rust-hosted' || true)"
-UNWIND_MARKERS="$(nm -a "$HELLO_BIN" "$CHR_BIN" "$TUI_BIN" "$TUI_APP_BIN" 2>/dev/null | rg -c '_Unwind|unwind' || true)"
-HOSTED_MARKERS="${HOSTED_MARKERS:-0}"
-UNWIND_MARKERS="${UNWIND_MARKERS:-0}"
-if [ "$HOSTED_MARKERS" != "0" ] || [ "$UNWIND_MARKERS" != "0" ]; then
-    echo "simple_core_closure_clean=false"
-    echo "hosted_markers=$HOSTED_MARKERS"
-    echo "unwind_markers=$UNWIND_MARKERS"
-    exit 1
-fi
+closure_marker_scan "$HELLO_BIN" "$CHR_BIN" "$TUI_BIN" "$TUI_APP_BIN" || exit $?
 
 echo "simple_core_archive=$CORE_ARCHIVE"
 echo "simple_core_hello=true"

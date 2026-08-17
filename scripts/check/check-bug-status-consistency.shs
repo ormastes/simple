@@ -1,0 +1,258 @@
+#!/bin/sh
+# check-bug-status-consistency.shs
+#
+# Fails when a bug doc's `Status:` line disagrees with its `bug_db.sdn` row, or
+# when a bug doc has no parseable Status line at all.
+#
+# Why this exists: on 2026-08-17 a triage of all 2,132 OPEN/unparseable bug docs
+# found the status field unreliable in BOTH directions -- 628 docs marked OPEN
+# were already fixed in-tree, while several marked FIXED/RESOLVED/MITIGATED
+# verifiably were not (one cited a commit whose fix is absent from the tree;
+# another read `Status: MITIGATED (diagnostic added)` for a change `git log -S`
+# proves was never committed). 1,460 docs carried no parseable Status at all,
+# which is what let the backlog rot undetected for months. Text that no gate
+# reads is text that drifts.
+#
+# Checks (all fail-closed):
+#   A no-status          doc has no parseable `Status:` line in its first 60 lines
+#   B open-without-row   doc says OPEN (Pn) but has no row in bug_db.sdn
+#   C db-open-doc-done   bug_db.sdn says `open`, doc says FIXED/CLOSED/DUPLICATE
+#   D db-done-doc-open   bug_db.sdn says fixed/resolved/closed, doc says OPEN (Pn)
+#
+# Doc id == basename minus `.md`; that is the id convention bug_db.sdn uses.
+# A bug_db status that is neither open-ish nor done-ish (e.g.
+# `fix-implemented-verification-pending`) is deliberately not a conflict in
+# either direction -- it is an explicit in-between state, not drift.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS — <n> doc(s) checked, 0 disagreement(s)      exit 0
+#   FAIL — <n> doc(s) checked, <k> disagreement(s)    exit 1
+#   ERROR — nothing was checked                       exit 2
+# A run that checked 0 docs is ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/check-bug-status-consistency.shs [--root DIR] [--selftest]
+
+set -u
+
+ROOT=""
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------- scan engine
+# Emits offender lines on stdout and the checked count on the last line as
+# "CHECKED <n>". Never prints a verdict itself.
+scan() {
+    scan_dir="$1"
+    scan_db="$scan_dir/bug_db.sdn"
+    [ -f "$scan_db" ] || scan_db=/dev/null
+
+    nice -n 19 awk -v dbfile="$scan_db" -v dir="$scan_dir" '
+    function normdoc(s) {
+        # collapse a doc Status value to a class
+        if (s ~ /^OPEN[ \t]*\(P[0-9]+\)/)         return "OPEN"
+        if (s ~ /^FIXED/)                          return "DONE"
+        if (s ~ /^CLOSED/)                         return "DONE"
+        if (s ~ /^DUPLICATE/)                      return "DONE"
+        return "OTHER"
+    }
+    function normdb(s) {
+        if (s == "open")                                   return "OPEN"
+        if (s ~ /^fixed$|^resolved|^closed$|^done$/)       return "DONE"
+        return "OTHER"
+    }
+    BEGIN {
+        # ---- load bug_db.sdn ids from the bugs and bugs_active tables ----
+        tbl = ""
+        while ((getline line < dbfile) > 0) {
+            if (line ~ /^[a-z_]+ \|/) { split(line, h, " "); tbl = h[1]; continue }
+            if (line !~ /^    [A-Za-z0-9_.\-]+,/) continue
+            if (tbl != "bugs" && tbl != "bugs_active") continue
+            nf = split(line, f, ",")
+            id = f[1]; gsub(/^[ \t]+|[ \t]+$/, "", id)
+            st = f[3]; gsub(/^[ \t]+|[ \t]+$/, "", st)
+            dbstatus[id] = st
+        }
+        close(dbfile)
+
+        # ---- walk the bug docs ----
+        cmd = "ls -1 \"" dir "\"/*.md 2>/dev/null"
+        while ((cmd | getline path) > 0) {
+            base = path; sub(/^.*\//, "", base)
+
+            # generated indexes are not bug docs
+            if (base == "recent_bugs.md" || base ~ /^triage_/ || base ~ /^bug_report/) continue
+
+            found = 0; val = ""; generated = 0
+            n = 0
+            while ((getline l < path) > 0) {
+                n++
+                if (n <= 6 && l ~ /\*\*Generated:\*\*|^Generated:/) { generated = 1; break }
+                if (n <= 60 && !found &&
+                    l ~ /^[ \t]*(-[ \t]*)?[*_]*[ \t]*[Ss]tatus[ \t]*[*_]*[ \t]*:/) {
+                    val = l
+                    sub(/^[^:]*:[ \t]*/, "", val)
+                    gsub(/[*_`]/, "", val)
+                    gsub(/^[ \t]+|[ \t]+$/, "", val)
+                    found = n
+                }
+                if (n > 60) break
+            }
+            close(path)
+            if (generated) continue
+
+            checked++
+            id = base; sub(/\.md$/, "", id)
+
+            if (!found) { bad++; print "no-status\t" base "\t(no parseable Status: line in first 60 lines)"; continue }
+
+            dc = normdoc(val)
+            hasrow = (id in dbstatus)
+            dbc = hasrow ? normdb(dbstatus[id]) : ""
+
+            if (dc == "OPEN" && !hasrow) {
+                bad++; print "open-without-row\t" base "\tdoc says OPEN but bug_db.sdn has no row for id " id
+            } else if (hasrow && dbc == "OPEN" && dc == "DONE") {
+                bad++; print "db-open-doc-done\t" base "\tbug_db.sdn=open doc=\"" val "\""
+            } else if (hasrow && dbc == "DONE" && dc == "OPEN") {
+                bad++; print "db-done-doc-open\t" base "\tbug_db.sdn=" dbstatus[id] " doc=\"" val "\""
+            }
+        }
+        close(cmd)
+        printf "CHECKED %d\n", checked + 0
+    }'
+}
+
+# ------------------------------------------------------------------ selftest
+selftest() {
+    tdir=$(mktemp -d) || { echo "selftest: mktemp failed"; return 1; }
+    fails=0
+
+    mk_db() {
+        cat > "$1/bug_db.sdn" <<'DBEOF'
+#sdn-crc32:0
+bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|
+    fixture_open_bug, P1, open, "an open bug", src/x.spl, 0, NONE, 2026-08-17, 2026-08-17, true
+    fixture_fixed_bug, P2, fixed, "a fixed bug", src/y.spl, 0, NONE, 2026-08-17, 2026-08-17, true
+DBEOF
+    }
+
+    expect() { # name dir want_bad
+        _n="$1"; _d="$2"; _want="$3"
+        _out=$(scan "$_d")
+        _rc=$?
+        _checked=$(printf '%s\n' "$_out" | sed -n 's/^CHECKED //p')
+        _bad=$(printf '%s\n' "$_out" | grep -cv '^CHECKED ')
+        if [ "$_bad" != "$_want" ]; then
+            echo "selftest FAIL: $_n expected $_want offender(s), got $_bad"
+            printf '%s\n' "$_out"
+            fails=$((fails + 1))
+        fi
+    }
+
+    # 1 agree: doc OPEN, db open  -> clean
+    d="$tdir/f1"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\nStatus: OPEN (P1)\n' > "$d/fixture_open_bug.md"
+    expect "agree-open" "$d" 0
+
+    # 2 agree: doc FIXED, no db row -> clean
+    d="$tdir/f2"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\nStatus: FIXED\n' > "$d/fixture_no_row.md"
+    expect "agree-fixed-no-row" "$d" 0
+
+    # 3 MUST FAIL: db says open, doc says FIXED
+    d="$tdir/f3"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\nStatus: FIXED\n' > "$d/fixture_open_bug.md"
+    expect "db-open-doc-done" "$d" 1
+
+    # 4 MUST FAIL: db says fixed, doc says OPEN
+    d="$tdir/f4"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\nStatus: OPEN (P2)\n' > "$d/fixture_fixed_bug.md"
+    expect "db-done-doc-open" "$d" 1
+
+    # 5 MUST FAIL: no parseable Status at all
+    d="$tdir/f5"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\nDate: 2026-08-17\n' > "$d/fixture_no_row.md"
+    expect "no-status" "$d" 1
+
+    # 6 MUST FAIL: doc says OPEN but no db row
+    d="$tdir/f6"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\nStatus: OPEN (P3)\n' > "$d/fixture_no_row.md"
+    expect "open-without-row" "$d" 1
+
+    # 7 list-item and bold Status forms are parsed, not missed
+    d="$tdir/f7"; mkdir -p "$d"; mk_db "$d"
+    printf '# x\n\n- **Status:** OPEN (P1)\n' > "$d/fixture_open_bug.md"
+    expect "bold-list-status-form" "$d" 0
+
+    # 8 generated index files are not treated as bug docs (0 checked, so the
+    #   caller must ERROR rather than pass vacuously)
+    d="$tdir/f8"; mkdir -p "$d"; mk_db "$d"
+    printf '# Recent Bugs\n\n**Generated:** 2026-08-17\n' > "$d/some_generated_index.md"
+    _out=$(scan "$d")
+    _checked=$(printf '%s\n' "$_out" | sed -n 's/^CHECKED //p')
+    if [ "${_checked:-x}" != "0" ]; then
+        echo "selftest FAIL: generated-index expected 0 checked, got ${_checked:-none}"
+        fails=$((fails + 1))
+    fi
+
+    rm -rf "$tdir"
+    if [ "$fails" -ne 0 ]; then
+        echo "selftest: $fails fixture(s) failed"
+        return 1
+    fi
+    echo "selftest: 8 fixtures passed"
+    return 0
+}
+
+# --------------------------------------------------------------------- main
+selftest
+SELFTEST_RC=$?
+if [ "$SELFTEST_RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 8 fixture(s) checked, 0 disagreement(s)"
+    exit 0
+fi
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    GITRC=$?
+    if [ "$GITRC" -ne 0 ] || [ -z "$ROOT" ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+fi
+
+BUGDIR="$ROOT/doc/08_tracking/bug"
+if [ ! -d "$BUGDIR" ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+OUT=$(scan "$BUGDIR")
+CHECKED=$(printf '%s\n' "$OUT" | sed -n 's/^CHECKED //p')
+OFFENDERS=$(printf '%s\n' "$OUT" | grep -v '^CHECKED ')
+BAD=$(printf '%s\n' "$OUT" | grep -cv '^CHECKED ')
+
+if [ -z "${CHECKED:-}" ] || [ "$CHECKED" -eq 0 ] 2>/dev/null; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$BAD" -ne 0 ]; then
+    printf '%s\n' "$OFFENDERS"
+    echo "FAIL — $CHECKED doc(s) checked, $BAD disagreement(s)"
+    exit 1
+fi
+
+echo "PASS — $CHECKED doc(s) checked, 0 disagreement(s)"
+exit 0

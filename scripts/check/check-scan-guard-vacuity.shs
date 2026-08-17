@@ -1,0 +1,235 @@
+#!/bin/sh
+# check-scan-guard-vacuity.shs
+#
+# SIMILAR-PROBLEM DETECTION gate for the defect class found in
+# scripts/check/check-expect-footgun.shs on 2026-08-17:
+#
+#   A "scan" guard counts HITS but never counts the INPUTS it scanned, so a run
+#   that examined ZERO files produces byte-identical output to a run that
+#   examined the whole tree and found nothing -- and exits 0. Absence of
+#   evidence is reported as evidence of absence. Every pre-push guard in this
+#   repo that ever failed open failed open in exactly this shape.
+#
+# The reproducing fix (the footgun gate's own --selftest) pins ONE script. This
+# gate generalises to the CLASS: it asserts that every scanning guard under
+# scripts/check/ is capable of reporting a non-vacuous verdict at all.
+#
+# WHAT IS ASSERTED, per candidate script
+#   A script is a CANDIDATE if it is a scanning guard: its body invokes a
+#   corpus-walking command (find / git ls-files / grep -r) AND it is named
+#   check-*.shs. Non-scanning guards (which run a compiler, boot a VM, or probe
+#   hardware) are out of scope and are reported as such, never counted as passes.
+#
+#   For each candidate, BOTH must hold:
+#     1. NON-VACUITY ORACLE: the script contains an explicit path that treats a
+#        zero-input scan as ERROR / exit 2 -- i.e. it mentions "nothing was
+#        checked" or has a `-eq 0` guard leading to `exit 2`.
+#     2. COUNTED VERDICT: the script's success verdict states HOW MANY inputs it
+#        examined (a PASS/OK line that interpolates a count variable), so a
+#        vacuous run cannot be mistaken for a real one.
+#
+# This is a static oracle, deliberately. A dynamic oracle would have to run every
+# guard in the repo (minutes to hours, several needing GPUs or a VM), and the
+# 2026-08-11 gate-oracle census
+# (doc/08_tracking/bug/gate_oracle_soundness_census_2026-08-11.md) established
+# that the fail-open shape is statically visible in every confirmed instance.
+#
+# BASELINE, not a big-bang cleanup. The repo has many pre-existing offenders;
+# failing on all of them on day one would make the gate un-landable and it would
+# be disabled, which is how the last three ratchets died. So the known offenders
+# are recorded in scripts/check/scan_guard_vacuity_baseline.txt and this gate
+# FAILS on:
+#   - any NEW offender not in the baseline, and
+#   - any baselined entry that now passes (stale baseline -- ratchet forward).
+# There is no flag that widens the baseline silently; --generate-baseline exists
+# only for a deliberate, reviewed update.
+#
+# EXIT CODES (repo pre-push guard convention)
+#   PASS  -- <n> scanning guard(s) checked, ...   exit 0   (n > 0 always)
+#   FAIL  -- ...                                  exit 1
+#   ERROR -- nothing was checked                  exit 2
+#
+# Usage:
+#   sh scripts/check/check-scan-guard-vacuity.shs
+#   sh scripts/check/check-scan-guard-vacuity.shs --selftest
+#   sh scripts/check/check-scan-guard-vacuity.shs --generate-baseline
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+BASELINE="$SCRIPT_DIR/scan_guard_vacuity_baseline.txt"
+
+MODE=check
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) MODE=selftest ;;
+        --generate-baseline) MODE=genbaseline ;;
+        -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
+        *) echo "ERROR -- nothing was checked (unknown option: $arg)"; exit 2 ;;
+    esac
+done
+
+# is_scanning_guard <file> -> rc 0 if the script walks a corpus
+is_scanning_guard() {
+    grep -qE '(^|[^a-zA-Z_-])(find[[:space:]]|git ls-files|grep -r)' "$1" 2>/dev/null
+}
+
+# has_nonvacuity_oracle <file> -> rc 0 if a zero-input scan can reach exit 2
+has_nonvacuity_oracle() {
+    grep -qE 'nothing was checked' "$1" 2>/dev/null && return 0
+    # or: an explicit zero-count test whose body exits 2
+    grep -qE '\-(eq|lt)[[:space:]]+(0|1)\b' "$1" 2>/dev/null \
+        && grep -qE 'exit[[:space:]]+2' "$1" 2>/dev/null
+}
+
+# has_counted_verdict <file> -> rc 0 if the success line reports a count
+has_counted_verdict() {
+    grep -qE '(PASS|OK)[^"]*\$\{?[A-Za-z_][A-Za-z0-9_]*' "$1" 2>/dev/null
+}
+
+# classify_tree <dir> -> prints "OFFENDER <name>" / "CLEAN <name>" / "NONSCAN <name>"
+classify_tree() {
+    _dir="$1"
+    find "$_dir" -maxdepth 1 -name 'check-*.shs' -type f 2>/dev/null | sort | while IFS= read -r f; do
+        _n=$(basename "$f")
+        if ! is_scanning_guard "$f"; then
+            echo "NONSCAN $_n"
+        elif has_nonvacuity_oracle "$f" && has_counted_verdict "$f"; then
+            echo "CLEAN $_n"
+        else
+            echo "OFFENDER $_n"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------- SELFTEST
+# Fatal, runs before every scan. Five fixtures.
+run_selftest() {
+    t="$(mktemp -d)" || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+    n_fail=0
+    exp() { # exp <expected> <name>
+        _got=$(classify_tree "$t" | grep " $2\$" | cut -d' ' -f1)
+        if [ "$_got" != "$1" ]; then
+            echo "selftest: $2 expected $1, got '${_got:-<none>}'" >&2
+            n_fail=$((n_fail + 1))
+        fi
+    }
+
+    # 1. incident replay: counts hits, walks a corpus, no non-vacuity oracle
+    cat > "$t/check-replay.shs" <<'EOF'
+H=$(find test -name '*_spec.spl' | xargs grep -c foo | wc -l)
+if [ "$H" -gt 0 ]; then echo "found $H"; exit 1; fi
+echo "OK: nothing found"
+exit 0
+EOF
+    exp OFFENDER check-replay.shs
+
+    # 2. a correct scanning guard: ERROR path + counted PASS
+    cat > "$t/check-good.shs" <<'EOF'
+N=$(find src -name '*.spl' | wc -l)
+if [ "$N" -eq 0 ]; then echo "ERROR - nothing was checked"; exit 2; fi
+echo "PASS - $N file(s) checked, 0 problems"
+exit 0
+EOF
+    exp CLEAN check-good.shs
+
+    # 3. counted verdict but NO non-vacuity oracle -> still an offender
+    cat > "$t/check-counted-only.shs" <<'EOF'
+N=$(git ls-files 'src/*.spl' | wc -l)
+echo "PASS - $N file(s) checked"
+exit 0
+EOF
+    exp OFFENDER check-counted-only.shs
+
+    # 4. non-vacuity oracle but UNCOUNTED verdict -> still an offender
+    cat > "$t/check-uncounted.shs" <<'EOF'
+N=$(find src -name '*.spl' | wc -l)
+if [ "$N" -eq 0 ]; then echo "ERROR - nothing was checked"; exit 2; fi
+echo "PASS - no problems"
+exit 0
+EOF
+    exp OFFENDER check-uncounted.shs
+
+    # 5. a non-scanning guard (runs a compiler) -> out of scope, not a pass
+    cat > "$t/check-compiles.shs" <<'EOF'
+clang -fsyntax-only src/runtime/a.c
+rc=$?
+exit $rc
+EOF
+    exp NONSCAN check-compiles.shs
+
+    # 6. empty tree must classify zero scripts, forcing the caller to ERROR
+    e="$(mktemp -d)"
+    if [ "$(classify_tree "$e" | wc -l | tr -d ' ')" -ne 0 ]; then
+        echo "selftest: empty tree expected 0 classifications" >&2
+        n_fail=$((n_fail + 1))
+    fi
+    rm -rf "$e"
+
+    rm -rf "$t"
+    if [ "$n_fail" -gt 0 ]; then
+        echo "ERROR -- nothing was checked (selftest failed with $n_fail fixture failure(s))"
+        exit 2
+    fi
+}
+
+run_selftest
+if [ "$MODE" = selftest ]; then
+    echo "PASS -- 6 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+RESULTS="$(mktemp)" || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+classify_tree "$SCRIPT_DIR" > "$RESULTS"
+
+TOTAL=$(wc -l < "$RESULTS" | tr -d ' ')
+if [ "$TOTAL" -eq 0 ]; then
+    rm -f "$RESULTS"
+    echo "ERROR -- nothing was checked (no check-*.shs found under $SCRIPT_DIR)"
+    exit 2
+fi
+
+SCANNING=$(grep -vc '^NONSCAN ' "$RESULTS")
+if [ "$SCANNING" -eq 0 ]; then
+    rm -f "$RESULTS"
+    echo "ERROR -- nothing was checked ($TOTAL guard(s) found but none is a scanning guard; the classifier is broken)"
+    exit 2
+fi
+
+CUR="$(mktemp)"
+grep '^OFFENDER ' "$RESULTS" | cut -d' ' -f2 | sort > "$CUR"
+
+if [ "$MODE" = genbaseline ]; then
+    cp "$CUR" "$BASELINE"
+    N=$(wc -l < "$CUR" | tr -d ' ')
+    rm -f "$RESULTS" "$CUR"
+    echo "PASS -- $SCANNING scanning guard(s) checked, baseline regenerated with $N offender(s)"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    rm -f "$RESULTS" "$CUR"
+    echo "ERROR -- nothing was checked (baseline $BASELINE missing; run --generate-baseline once, reviewed)"
+    exit 2
+fi
+
+BASE="$(mktemp)"
+grep -vE '^[[:space:]]*(#|$)' "$BASELINE" | sort > "$BASE"
+
+NEW=$(comm -23 "$CUR" "$BASE" | tr '\n' ' ' | sed 's/ $//')
+FIXED=$(comm -13 "$CUR" "$BASE" | tr '\n' ' ' | sed 's/ $//')
+NOFF=$(wc -l < "$CUR" | tr -d ' ')
+
+rm -f "$RESULTS" "$CUR" "$BASE"
+
+if [ -n "$NEW" ]; then
+    echo "FAIL -- $SCANNING scanning guard(s) checked, newly fail-open: $NEW"
+    exit 1
+fi
+if [ -n "$FIXED" ]; then
+    echo "FAIL -- $SCANNING scanning guard(s) checked, stale baseline (these now pass, remove them): $FIXED"
+    exit 1
+fi
+
+echo "PASS -- $SCANNING scanning guard(s) checked, $NOFF baselined offender(s), 0 newly introduced"
+exit 0
