@@ -125,3 +125,17 @@ scripts/local-container-test.shs quick path/to/spec.spl  # Single container test
 
 ## SPipe Template
 See `.claude/templates/spipe_template.spl`
+
+## Silent green: exit 0 is not a pass (2026-08-17, HIGH)
+
+`bin/simple test <spec>` has been measured printing ~1897 lines — all warnings
+— with **zero** pass/fail/scenario/total lines, and exiting **0**. A spec that
+never ran is then indistinguishable from a spec that passed, on the command
+every session uses as evidence. Bug (OPEN):
+`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+
+Rule: **never accept exit 0 as proof of pass.** Require an explicit
+results/count line in the captured output. If there is none, the result is
+**INCONCLUSIVE** — not green — and must be confirmed by a direct
+`bin/simple run` repro of the behaviour under test before any claim is made.
+Same family as the already-listed `simple test <ABSOLUTE path>` no-op.

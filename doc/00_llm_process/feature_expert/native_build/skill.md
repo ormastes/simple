@@ -138,3 +138,20 @@ Standing test rule (2026-08-17): every native-build bug fix ships a spec
 reproducing the exact defect plus a generalization spec probing similar
 problems nearby, both cited in the bug doc. A fix without its reproducing
 spec is not done.
+## Per-phase run-to-end loop and evidence bar (2026-08-17)
+
+A phase build runs to completion and yields a full error census; the landed
+binary is snapshotted immutably with lineage naming before any verification
+claim references it; verification runs in a parallel niced lane attempting all
+tool builds (even when some fail) plus the test suites with that snapshot; the
+next phase starts on the newest available binary, waiting when a rebuild is in
+flight. The build owns CPU/memory — test lanes drop to 1 concurrent process
+when free RAM is low (2026-08-17: earlyoom killed `jobs=8` stage workers under
+~14 test lanes, forcing `jobs=2`; session-measured, unfiled).
+
+Evidence bar addition: exit 0 from `bin/simple test <spec>` is not a pass —
+~1897 warning lines with no result line and exit 0 is a measured shape
+(`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`).
+Require a results/count line, else INCONCLUSIVE plus a `bin/simple run` repro.
+This is the same failure family as the exit-0 native build with no fresh
+artifact above.

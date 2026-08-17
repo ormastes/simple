@@ -231,3 +231,19 @@ alternate. A native-build "timeout" should be checked against
   stage-2 exit-1 with a 0-byte log under the transcribed sandbox env; a
   phantom `stage2-capability.log` reference; native-build has no keep-going
   flag, so sweeps run per-directory under `timeout`, per-file on crash.
+## 6. Evidence hazards and lane priority (2026-08-17)
+
+- **Silent green.** `bin/simple test <spec>` can emit ~1897 warning lines, no
+  pass/fail line at all, and exit 0. Timing or verification runs on this
+  command prove nothing unless an explicit results/count line is present;
+  otherwise record INCONCLUSIVE and repro with `bin/simple run`. OPEN:
+  `doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+- **Memory priority.** The phase compiler build owns CPU/memory; test lanes
+  throttle to 1 concurrent process when free RAM is low. Measured 2026-08-17
+  (session-measured, unfiled): earlyoom killed `jobs=8` stage workers with ~14
+  test lanes running, forcing the build to `jobs=2` — so a "slow build" number
+  taken under parallel test load is a measurement of the load, not the build.
+- **Run to the end.** Where the tooling can continue past an error, collect the
+  full error census in one run rather than fixing one error per rebuild; the
+  same applies to tool builds during phase verification (attempt all, even when
+  some fail).
