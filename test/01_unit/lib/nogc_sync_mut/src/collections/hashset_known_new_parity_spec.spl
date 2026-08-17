@@ -1,0 +1,102 @@
+## HashSet fast-path insert parity
+#
+# @req REQ-LIB-HASHSET-KNOWN-NEW
+#
+# Prevention spec for the raw-pointer store defect fixed on 2026-08-17.
+# `HashSet.insert_known_new` used to write the text key through
+# `rt_array_data_ptr_text` + `spl_store_i64` — a raw i64 store aimed at a
+# `[text]` slot. That bypassed the typed element write, was unresolvable on the
+# interpreter (`semantic: unknown extern function: rt_array_data_ptr_text`), and
+# would have silently corrupted the slot array on any backend where a text
+# value is not a bare 8-byte word.
+#
+# The invariant this spec pins: the "known new" fast paths are pure
+# optimizations of `insert()`. They must never diverge from it in observable
+# state, and they must never reach for a raw pointer to do it.
+
+use std.spec.*
+use std.nogc_sync_mut.src.collections.hashset.{HashSet}
+
+describe "HashSet known-new fast paths":
+
+    it "stores a key that contains() can find again":
+        """A caller who already knows a key is absent uses the fast path and
+        still expects the set to behave like any other set afterwards."""
+
+        step("Insert three keys through the known-new fast path")
+        var set = HashSet.with_capacity(16)
+        set.insert_known_new("alpha")
+        set.insert_known_new("beta")
+        set.insert_known_new("gamma")
+
+        step("Look every key back up")
+        assert_true(set.contains("alpha"))
+        assert_true(set.contains("beta"))
+        assert_true(set.contains("gamma"))
+
+        step("Confirm an absent key is still absent")
+        assert_false(set.contains("delta"))
+        expect(set.size).to_equal(3)
+
+    it "agrees with the ordinary insert path on identical input":
+        """The fast path is an optimization, not a different data structure, so
+        a set built either way answers every membership question the same."""
+
+        step("Build one set with insert() and one with insert_known_new()")
+        var slow = HashSet.with_capacity(16)
+        var fast = HashSet.with_capacity(16)
+        val keys = ["one", "two", "three", "four", "five", "six", "seven"]
+        for k in keys:
+            slow.insert(k)
+            fast.insert_known_new(k)
+
+        step("Compare size")
+        expect(fast.size).to_equal(slow.size)
+        expect(fast.size).to_equal(7)
+
+        step("Compare membership for every inserted key")
+        for k in keys:
+            assert_true(slow.contains(k))
+            assert_true(fast.contains(k))
+
+        step("Compare membership for keys that were never inserted")
+        for k in ["eight", "nine", "ten"]:
+            assert_false(slow.contains(k))
+            assert_false(fast.contains(k))
+
+    it "survives a growth past the initial capacity":
+        """Resize rehashes every slot; a raw-pointer write captured before the
+        resize would have written into the freed old array."""
+
+        step("Insert far more keys than the starting capacity of 4")
+        var set = HashSet.with_capacity(4)
+        var i = 0
+        while i < 64:
+            set.insert_known_new("key_" + i.to_string())
+            i = i + 1
+
+        step("Every key inserted before and after each growth is still present")
+        expect(set.size).to_equal(64)
+        var j = 0
+        while j < 64:
+            assert_true(set.contains("key_" + j.to_string()))
+            j = j + 1
+
+    it "keeps the no-resize variant consistent with the resizing variant":
+        """`insert_known_new_no_resize` skips only the capacity check; its
+        storage write must be identical to the checked variant's."""
+
+        step("Preallocate enough capacity that no resize can occur")
+        var checked = HashSet.with_capacity(64)
+        var unchecked = HashSet.with_capacity(64)
+        val keys = ["red", "green", "blue", "cyan", "magenta", "yellow"]
+        for k in keys:
+            checked.insert_known_new(k)
+            unchecked.insert_known_new_no_resize(k)
+
+        step("Both sets report the same size and the same membership")
+        expect(unchecked.size).to_equal(checked.size)
+        for k in keys:
+            assert_true(checked.contains(k))
+            assert_true(unchecked.contains(k))
+        assert_false(unchecked.contains("black"))
