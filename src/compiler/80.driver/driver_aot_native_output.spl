@@ -30,6 +30,7 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBind
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet}
 use compiler.driver.driver_log_helpers.{log_build_progress}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -49,6 +50,65 @@ extern fn rt_stdout_flush()
 fn driver_log_info(log: Logger, message: text):
     if log.level >= 4:
         print "[INFO] {message}"
+
+# Outcome vocabulary lives in ONE place: driver_build/build_outcome.spl, shared
+# with the supervisor and the parallel builder so the three cannot drift into
+# incompatible notions of failure. This file only ADAPTS to it — it does not
+# define a second set of categories.
+#
+# Message-based classification for the IN-PROCESS compile path. The canonical
+# classifier, build_outcome_classify_status, decodes a child's wait status
+# (128+N). In-process there is no child and no wait status: a failed module
+# surfaces only as an error MESSAGE, so this maps that message onto the SAME
+# BuildOutcomeKind vocabulary. It is a narrower fallback, not a rival scheme —
+# once per-unit separate-process execution lands (driver_build/parallel.spl),
+# the status-based classifier is authoritative and this covers only clean
+# compiler verdicts.
+#
+# Read before "simplifying" TERMINATED or TIMEOUT into a failure: earlyoom on
+# this host runs `--prefer ^(simple|...)` and actively SIGTERMs `simple`, so a
+# 143 is INFRASTRUCTURE — the module is UNVERIFIED, not failed. Conflating them
+# manufactures phantom compiler bugs. BuildOutcomeSet.failure_count() already
+# excludes both; do not re-add them here.
+fn driver_native_classify_module_failure_v1(detail: text) -> BuildOutcomeKind:
+    val lowered = detail.to_lower()
+    if lowered.contains("timed out") or lowered.contains("timeout"):
+        return BuildOutcomeKind.TIMEOUT
+    if (lowered.contains("sigterm") or lowered.contains("signal 15")
+        or lowered.contains("exit 143") or lowered.contains("status 143")):
+        return BuildOutcomeKind.TERMINATED
+    if (lowered.contains("sigsegv") or lowered.contains("sigabrt")
+        or lowered.contains("sigkill") or lowered.contains("segmentation fault")
+        or lowered.contains("killed by signal") or lowered.contains("signal 11")
+        or lowered.contains("signal 6") or lowered.contains("signal 9")
+        or lowered.contains("exit 139") or lowered.contains("exit 134")
+        or lowered.contains("exit 137") or lowered.contains("out of memory")
+        or lowered.contains("oom")):
+        return BuildOutcomeKind.CRASHED
+    BuildOutcomeKind.ERROR
+
+# Record one FAILED module and keep going. The whole point of accumulating
+# rather than returning: ONE build must name EVERY bad module, instead of each
+# defect costing a full ~20-minute run to discover.
+fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
+                                       name: text, detail: text):
+    outcomes.record(BuildUnitOutcome(
+        unit_id: unit_id, source_path: name,
+        kind: driver_native_classify_module_failure_v1(detail),
+        status: 0, signal_num: 0, wall_ms: 0, peak_rss_kb: 0,
+        diagnostics: detail))
+
+# Deterministic end-of-build summary naming EVERY module in EVERY non-OK
+# category (R3), then the fail-closed verdict — "" when every module is OK.
+# The caller MUST NOT link when this is non-empty, and must never fabricate an
+# object for a module that did not build (R4; this repo already has that defect
+# at linker/native_binary/stubs.rs:209-221).
+fn driver_native_report_module_outcomes_v1(outcomes: BuildOutcomeSet) -> text:
+    if outcomes.all_ok():
+        return ""
+    print outcomes.summary()
+    rt_stdout_flush()
+    outcomes.verdict()
 
 fn driver_effective_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
     if ctx.options.opt_level.?:
@@ -507,6 +567,17 @@ impl CompilerDriver:
         if total_modules > 1000000:
             return CompileResult.CodegenError("native-build mir_modules exceeds sanity limit (1000000 modules)")
 
+        # Collect-all accumulator. A per-module failure records an outcome and the
+        # loop moves on, so ONE build names EVERY bad module instead of dying on
+        # the first — every defect used to cost a full ~20-minute bootstrap run to
+        # find. The two guards above (empty mir_modules, the 1000000 sanity limit)
+        # are whole-BUILD guards, not per-module failures, and stay immediate.
+        # See doc/02_requirements/compiler/supervised_builder.md R2/R3/R4.
+        var module_outcomes = BuildOutcomeSet.empty()
+        # Stable within one build; lets the attribution line name a unit even
+        # when its path is ambiguous.
+        var module_unit_id: i64 = 0
+
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
         var progress_cache_scanned = 0
@@ -535,6 +606,11 @@ impl CompilerDriver:
                     if all_in_scope and scoped_outputs.len() > 0 and outputs_exist:
                         print "[NATIVE] cache hit: {name}"
                         cache_hit_count = cache_hit_count + 1
+                        # A verified cache hit IS an OK outcome: the objects were
+                        # confirmed present on disk just above.
+                        module_unit_id = module_unit_id + 1
+                        module_outcomes.record(
+                            BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
                         if low_memory:
@@ -578,10 +654,15 @@ impl CompilerDriver:
                         val collect_error = driver_native_collect_capsule_result_v1(
                             capsules, build_cache, name, obj_path)
                         if collect_error != "":
-                            return CompileResult.CodegenError(collect_error)
+                            module_unit_id = module_unit_id + 1
+                            driver_native_record_module_failure(module_outcomes,
+                                module_unit_id, name, collect_error)
                         cache_miss_count = cache_miss_count + 1
                     case Err(e):
-                        return CompileResult.CodegenError(e)
+                        module_unit_id = module_unit_id + 1
+                        driver_native_record_module_failure(module_outcomes,
+                            module_unit_id, name, e)
+                        cache_miss_count = cache_miss_count + 1
             else:
                 val parallel_cfg = ParallelBuildConfig(
                     num_threads: driver_native_build_threads(),
@@ -603,12 +684,18 @@ impl CompilerDriver:
                     + build_result.stats.failed
 
                 if not build_result.success:
+                    # ParallelBuilder already accumulates EVERY unit's error; the
+                    # old code read errors[0] and threw the rest away. Record all
+                    # of them, classified, and keep going to the end of the phase.
+                    for unit_err in build_result.errors:
+                        module_unit_id = module_unit_id + 1
+                        driver_native_record_module_failure(module_outcomes,
+                            module_unit_id, unit_err[0], unit_err[1])
                     val first_err = build_result.errors[0]
                     log_build_progress("native_compile", "modules",
                         cache_hit_count + build_result.stats.completed,
                         total_modules, first_err[0], 5, 6,
                         build_result.stats.failed, cache_hit_count, "failed")
-                    return CompileResult.CodegenError(first_err[1])
 
             # Post-process: update cache and collect object paths. Do not rely
             # on BuildResult.outputs here: stage1-generated compilers can lose
@@ -621,16 +708,38 @@ impl CompilerDriver:
                 if capsule.ok and driver_native_capsule_result_valid_v1(capsule):
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
-                else:
-                    return CompileResult.CodegenError(
-                        "native capsule result missing or identity mismatch for {name}")
+                    module_unit_id = module_unit_id + 1
+                    module_outcomes.record(
+                        BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
+                elif not module_outcomes.has_path(name):
+                    # No object and no already-recorded failure: this unit was
+                    # never actually attempted (a dependency skip, or the phase
+                    # ended first). NOT_RUN is stated explicitly — silent absence
+                    # is forbidden (R3). Nothing is pushed to object_files, so no
+                    # artifact is ever fabricated for it (R4).
+                    module_unit_id = module_unit_id + 1
+                    module_outcomes.record(
+                        BuildUnitOutcome.not_run(module_unit_id, name))
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
                 for name in uncached_names:
                     ctx.evict_mir_module(name)
 
-        # Save build cache
+        # Save build cache. Done BEFORE the fail-closed check so the modules that
+        # did build stay reusable on the retry (a failing build must not also
+        # throw away the good work it did).
         build_cache.save()
+
+        # Fail closed at the boundary, not early (R4). Every module has now been
+        # attempted and the summary names them all; only now do we refuse to link.
+        # A partial build is NEVER linked silently, and no object is ever
+        # fabricated for a failed module — cf. the existing defect at
+        # linker/native_binary/stubs.rs:209-221, where fabricated zero-returning
+        # stubs masked missing symbols.
+        val outcome_verdict = driver_native_report_module_outcomes_v1(module_outcomes)
+        if outcome_verdict != "":
+            return CompileResult.CodegenError(outcome_verdict)
+
         log_build_progress("native_compile", "modules", total_modules,
             total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
         if trace and (cache_hit_count > 0 or cache_miss_count > 0):
