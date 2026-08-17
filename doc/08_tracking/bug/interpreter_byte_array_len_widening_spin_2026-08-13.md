@@ -8,6 +8,19 @@ Verified: `widget_draw_ir_widgets_spec` 10/10 (31s, previously timed out at
 300s), event specs 4/4, `vulkan_api_drawir_readback_spec` PASS,
 `web_css_essentials_spec` PASS.
 
+## Re-verification (2026-08-17)
+
+Fix confirmed still present at HEAD: packed `len`/`is_empty` fast path and
+`[bigba]` trace live in
+`src/compiler_rust/compiler/src/interpreter_method/collections.rs` (fn
+`handle_byte_array_methods`, ~line 992), now additionally covered by in-crate
+unit tests (`assert_metadata_without_widening`, `measure_byte_array_widens`).
+Behavioral check: `widget_draw_ir_widgets_spec` no longer spins — it runs to
+completion in seconds; its current 10/10 RED is an unrelated
+`unknown extern function: spl_fonts_call_init_blob` regression, tracked in
+`interpreter_extern_registration_wiring_clobbered_2026-08-17.md`. No further
+action for THIS bug.
+
 ## Symptom
 
 After the 2026-08-12 async/mimalloc batch (`c6c5eb2b`), any BDD spec whose
