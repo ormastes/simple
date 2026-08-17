@@ -1,0 +1,76 @@
+# @req BUG-HIR-SELF-SYMBOL-ID-002
+"""
+# Every HIR lowering path publishes `self` type and `self` owner together
+
+**Category:** Compiler
+**Status:** Implemented
+**Bug:** doc/08_tracking/bug/hir_flat_ast_impl_lowering_lost_self_symbol_id_2026-08-11.md
+
+## Purpose and Audience
+
+Compiler maintainers. `current_method_self_type` and
+`current_method_self_symbol_id` are two halves of one piece of state: the type
+answers `-> Self`, the symbol id answers `self.<field>`. They are set in three
+independent lowering paths, and a stale-snapshot landing silently removed one
+half from one of them, leaving the two disagreeing for every following
+declaration.
+
+## Scope and Preconditions
+
+The bug doc records one concrete instance (the flat-AST impl loop). This spec
+is the similar-problem generalization: it holds every lowering path that
+publishes a self type to also publish, and restore, the owner symbol id — so
+the next path that gains a self scope, or the next stale-snapshot landing that
+drops half of one, fails here instead of miscompiling silently.
+
+## Primary Workflow
+
+For each lowering source that establishes a `self` scope, assert both halves
+are present and that each save has a matching restore.
+
+## Compatibility and Limitations
+
+Source-contract scope, for the reason stated in
+`impl_self_symbol_id_scope_spec.spl`: these paths are reachable only from a
+self-hosted bootstrap compiler, which is not available to the host runner.
+"""
+
+use std.spec.*
+use app.io.mod.{file_read_text}
+
+val HIR_ITEMS = "src/compiler/20.hir/hir_lowering/_Items/"
+
+fn self_scope_sources() -> [text]:
+    return [
+        HIR_ITEMS + "module_lowering.spl",
+        HIR_ITEMS + "declaration_lowering.spl",
+        HIR_ITEMS + "trait_impl_lowering.spl",
+    ]
+
+fn occurrences(haystack: text, needle: text) -> i64:
+    return haystack.split(needle).len() - 1
+
+# Returns "" when the file is consistent, otherwise a message naming the file.
+fn self_context_pairing_problem(path: text) -> text:
+    val src = file_read_text(path)
+    if occurrences(src, "current_method_self_type") == 0:
+        return ""
+    if occurrences(src, "current_method_self_symbol_id") == 0:
+        return path + " publishes a self type but never a self owner symbol id"
+    val writes = occurrences(src, "self.current_method_self_symbol_id = ")
+    if writes < 2:
+        return path + " writes current_method_self_symbol_id without a matching restore"
+    return ""
+
+describe "HIR self-context halves stay paired":
+    it "no lowering path publishes a self type without a self owner symbol":
+        step("Scan every HIR lowering source that establishes a self scope")
+        for path in self_scope_sources():
+            step("Check " + path)
+            expect(self_context_pairing_problem(path)).to_equal("")
+
+    it "the field-resolution reader still consumes the owner symbol id":
+        step("Read the expression lowering that resolves self.<field>")
+        val src = file_read_text("src/compiler/20.hir/hir_lowering/expressions.spl")
+        step("Confirm the owner symbol id is still the field-resolution key")
+        expect(src).to_contain("self.field_type_for_owner_raw(self.current_method_self_symbol_id, field_name)")
