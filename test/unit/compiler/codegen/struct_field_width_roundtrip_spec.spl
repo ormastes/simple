@@ -1,0 +1,119 @@
+# Struct Field Store/Load Width Agreement — Prevention Spec
+#
+# Generalization of doc/08_tracking/bug/f32_struct_field_reads_as_zero_2026-08-17.md.
+#
+# The defect class is NOT "f32 is broken". It is: the backend loads a struct
+# field at the slot's DECLARED width and, on three separate store paths, wrote
+# it at the SOURCE value's width instead. Any declared field type narrower than
+# the value that reaches it is exposed — f32 was simply the case a system-test
+# sweep happened to hit first.
+#
+# The three store paths, all of which must agree with the single load path:
+#   1. compile_struct_init  (constructor)         -> widen_struct_field_value
+#   2. compile_field_set    (obj.field = value)   -> coerce_to_field_type
+#   3. MIR FieldSet lowering, which must carry the SLOT's declared type
+#      (target.ty), not the right-hand side's type
+#
+# This spec sweeps every declared width the layout supports through every store
+# path, and — critically — cross-checks the interpreter against the cranelift
+# JIT. The two engines diverged in the original defect (interpreter correct,
+# JIT wrong), and a spec file falls back to the interpreter, so an in-process
+# assertion alone can never see a JIT-only regression of this class again.
+#
+# Absolute oracles only: each field is compared against the literal that was
+# stored, never against another field or against the same expression recomputed.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run}
+
+struct Widths:
+    f: f32
+    d: f64
+    i: i32
+    b: u8
+
+val WIDTH_SOURCE: text = "struct W:\n" +
+    "    f: f32\n" +
+    "    d: f64\n" +
+    "    i: i32\n" +
+    "    b: u8\n" +
+    "\n" +
+    "fn main():\n" +
+    "    var w = W(f: 2.5, d: 3.5, i: 1000, b: 200)\n" +
+    "    print w.f\n" +
+    "    print w.d\n" +
+    "    print w.i\n" +
+    "    print w.b\n" +
+    "    w.f = 0.25\n" +
+    "    w.i = 77\n" +
+    "    w.b = 5\n" +
+    "    print w.f\n" +
+    "    print w.i\n" +
+    "    print w.b\n" +
+    "    val arr = [W(f: 1.5, d: 0.0, i: 1, b: 1)]\n" +
+    "    print arr[0].f\n"
+
+val EXPECTED_LINES: [text] = ["2.5", "3.5", "1000", "200", "0.25", "77", "5", "1.5"]
+
+fn run_width_sweep(mode: text) -> text:
+    val path = "build/test-artifacts/struct_field_width_sweep.spl"
+    file_write(path, WIDTH_SOURCE)
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " bin/simple run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "struct field store and load widths agree":
+    it "round-trips every declared field width through the constructor path":
+        step("Construct one struct carrying a 4-byte float, an 8-byte float, and two narrow integers")
+        val w = Widths(f: 2.5, d: 3.5, i: 1000, b: 200)
+
+        step("Each field must read back the literal that was stored, not a re-widened neighbour")
+        expect(w.f == 2.5).to_equal(true)
+        expect(w.d == 3.5).to_equal(true)
+        expect(w.i == 1000).to_equal(true)
+        expect(w.b == 200).to_equal(true)
+
+    it "round-trips every declared field width through the assignment path":
+        step("Start from a zeroed struct so a no-op store cannot masquerade as a pass")
+        var w = Widths(f: 0.0, d: 0.0, i: 0, b: 0)
+
+        step("Assign each field a value distinct from its initial value")
+        w.f = 0.25
+        w.d = 1.75
+        w.i = 77
+        w.b = 5
+
+        step("Every assigned field reads back exactly what was assigned")
+        expect(w.f == 0.25).to_equal(true)
+        expect(w.d == 1.75).to_equal(true)
+        expect(w.i == 77).to_equal(true)
+        expect(w.b == 5).to_equal(true)
+
+    it "round-trips a narrow field of a struct held in an array element":
+        step("An array element read is the same field read one indirection down")
+        val arr = [Widths(f: 1.5, d: 0.0, i: 1, b: 1)]
+        expect(arr[0].f == 1.5).to_equal(true)
+        expect(arr[0].d == 0.0).to_equal(true)
+
+    it "keeps a narrow float field usable in arithmetic after the round-trip":
+        step("A truncated field reads as 0.0 or a denormal, so arithmetic over it collapses")
+        val w = Widths(f: 2.5, d: 0.0, i: 0, b: 0)
+        val doubled = w.f + w.f
+
+        step("Compare against the absolute expected sum, not against the field itself")
+        expect(doubled > 4.99).to_equal(true)
+        expect(doubled < 5.01).to_equal(true)
+
+    it "produces identical field reads under the interpreter and the cranelift JIT":
+        step("Sweep every declared width through both store paths in a subprocess")
+        val interp = run_width_sweep("interpreter")
+        val jit = run_width_sweep("jit")
+
+        step("Every expected value appears in both engines' output")
+        for line in EXPECTED_LINES:
+            expect(interp).to_contain(line)
+            expect(jit).to_contain(line)
+
+        step("Neither engine may emit the low-half truncation signature")
+        expect(jit.contains("-0.00000000000000000000")).to_equal(false)
+        expect(interp.contains("-0.00000000000000000000")).to_equal(false)

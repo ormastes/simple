@@ -1,0 +1,115 @@
+# f32 Struct Field Round-Trip — Reproducing Spec
+#
+# Reproduces doc/08_tracking/bug/f32_struct_field_reads_as_zero_2026-08-17.md.
+#
+# An `f32` struct field read back `0.0` no matter what was stored, because the
+# STORE and the LOAD disagreed about the slot's width. `compile_field_get`
+# loads a field at its DECLARED cranelift width (4 bytes for `f32`), while both
+# store sites wrote the value at whatever width the source happened to carry
+# (8 bytes of f64 for a float literal). Reading the low 32 bits of an f64 bit
+# pattern is a bit TRUNCATION, not a numeric conversion:
+#
+#   2.5f64 = 0x4004000000000000 -> low 32 bits are zero  -> reads back 0.0
+#   0.1f64 = 0x3FB999999999999A -> low 32 bits 0x9999999A -> reads back -1.588e-23
+#
+# The 0.1 case is the discriminating oracle: a plain "field is zero" check
+# cannot tell a truncation apart from an uninitialised slot, but only a
+# low-half reinterpretation produces that exact negative denormal.
+#
+# ENGINES DIVERGE. The interpreter was always CORRECT; only the cranelift JIT
+# was wrong. Spec files fall back to the interpreter, so the in-process
+# examples below could never have been red — they guard the interpreter and
+# any future native port. The subprocess example is the one that reproduced
+# the defect, and it pins BOTH engines against the same absolute values.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run}
+
+struct F32Holder:
+    a: f32
+    b: f64
+
+struct F32Outer:
+    inner: F32Holder
+
+val REPRO_SOURCE: text = "struct S:\n" +
+    "    a: f32\n" +
+    "    b: f64\n" +
+    "\n" +
+    "struct O:\n" +
+    "    i: S\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val s = S(a: 2.5, b: 3.5)\n" +
+    "    print s.a\n" +
+    "    print s.b\n" +
+    "    var t = S(a: 0.0, b: 0.0)\n" +
+    "    t.a = 7.5\n" +
+    "    print t.a\n" +
+    "    val o = O(i: S(a: 1.25, b: 0.0))\n" +
+    "    print o.i.a\n" +
+    "    val tiny = S(a: 0.1, b: 0.0)\n" +
+    "    print tiny.a\n"
+
+fn run_repro_in_mode(mode: text) -> text:
+    val path = "build/test-artifacts/f32_struct_field_repro.spl"
+    file_write(path, REPRO_SOURCE)
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " bin/simple run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "f32 struct field round-trip":
+    it "reads a constructor-initialised f32 field back as the value that was stored":
+        step("Construct a struct with an f32 field and an f64 field")
+        val s = F32Holder(a: 2.5, b: 3.5)
+
+        step("Read the f32 field back and compare against the absolute stored value")
+        expect(s.a == 2.5).to_equal(true)
+
+        step("The neighbouring f64 field was never affected and must stay correct")
+        expect(s.b == 3.5).to_equal(true)
+
+    it "reads an assigned f32 field back as the value that was assigned":
+        step("Construct, then assign a new value through the field-set path")
+        var t = F32Holder(a: 0.0, b: 0.0)
+        t.a = 7.5
+
+        step("The assignment path stores at the slot's declared width")
+        expect(t.a == 7.5).to_equal(true)
+
+    it "reads a nested struct's f32 field back without truncation":
+        step("Nest a struct carrying an f32 field one level down")
+        val o = F32Outer(inner: F32Holder(a: 1.25, b: 0.0))
+
+        step("A nested read is the same field read one level down")
+        expect(o.inner.a == 1.25).to_equal(true)
+
+    it "keeps a value whose f64 low half is non-zero from becoming a denormal":
+        step("Store 0.1, whose f64 bit pattern has a non-zero low 32 bits")
+        val s = F32Holder(a: 0.1, b: 0.0)
+
+        step("Truncation would yield -1.588e-23; a real demote yields 0.1f32")
+        expect(s.a > 0.09).to_equal(true)
+        expect(s.a < 0.11).to_equal(true)
+
+    it "agrees between the interpreter and the cranelift JIT on every f32 field read":
+        step("Write the bug report's minimal repro to a temporary source file")
+        step("Run it under SIMPLE_EXECUTION_MODE=interpreter — the engine that was always correct")
+        val interp = run_repro_in_mode("interpreter")
+
+        step("Run the same file under SIMPLE_EXECUTION_MODE=jit — the engine that was wrong")
+        val jit = run_repro_in_mode("jit")
+
+        step("Both engines must produce the same output, and it must be the correct one")
+        expect(interp).to_contain("2.5")
+        expect(interp).to_contain("3.5")
+        expect(interp).to_contain("7.5")
+        expect(interp).to_contain("1.25")
+        expect(jit).to_contain("2.5")
+        expect(jit).to_contain("3.5")
+        expect(jit).to_contain("7.5")
+        expect(jit).to_contain("1.25")
+
+        step("The truncation signature must appear in neither engine's output")
+        expect(jit.contains("-0.0000000000000000000000158")).to_equal(false)
+        expect(interp.contains("-0.0000000000000000000000158")).to_equal(false)
