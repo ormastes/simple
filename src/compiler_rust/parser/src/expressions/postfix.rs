@@ -836,8 +836,44 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    /// True when `e` is spelled like a TYPE in element position of an array
+    /// literal that is immediately called: a bare name (`i64`, `Point`) or a
+    /// nested array type (`[i64]`). See `is_typed_empty_array_ctor`.
+    fn is_array_element_type_expr(e: &Expr) -> bool {
+        match e {
+            Expr::Identifier(_) => true,
+            Expr::Array(elems) => elems.len() == 1 && Self::is_array_element_type_expr(&elems[0]),
+            _ => false,
+        }
+    }
+
+    /// `[T]()` is the typed empty-array constructor, e.g. `val a: [i64] = [i64]()`.
+    ///
+    /// Without this, `[i64]` parses as an ordinary array literal whose element
+    /// `i64` is then resolved as a VARIABLE, and the whole thing is CALLED --
+    /// which failed everywhere with `variable \`i64\` not found` (interpreter)
+    /// or `GlobalLoad: unresolved identifier 'i64'` (JIT). Recognising the form
+    /// here, in the parser, fixes every downstream lane at once.
+    ///
+    /// Only a ZERO-argument call on a SINGLE-element array literal whose element
+    /// is spelled like a type is intercepted; calling an array value is not a
+    /// legal operation in any other spelling, so nothing valid is swallowed.
+    /// doc/08_tracking/bug/typed_empty_array_constructor_rejected_2026-08-10.md
+    fn is_typed_empty_array_ctor(callee: &Expr, args: &[Argument]) -> bool {
+        if !args.is_empty() {
+            return false;
+        }
+        match callee {
+            Expr::Array(elems) => elems.len() == 1 && Self::is_array_element_type_expr(&elems[0]),
+            _ => false,
+        }
+    }
+
     pub(crate) fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
         let mut args = self.parse_arguments()?;
+        if !self.check(&TokenKind::Backslash) && Self::is_typed_empty_array_ctor(&callee, &args) {
+            return Ok(Expr::Array(Vec::new()));
+        }
         self.transform_placeholder_args_for_call(&callee, &mut args);
         // Check for trailing block: func(args) \x: body
         if self.check(&TokenKind::Backslash) {
