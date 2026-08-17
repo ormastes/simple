@@ -106,3 +106,44 @@ the logic, not just patch the instance), this class needs:
 - Related but distinct compiler workaround:
   `fontrenderconfig_entry_closure_receiver_binding_miscompile_2026-07-18.md`
   (method receiver-binding, not Option unwrap).
+
+## 2026-08-17 CRIT-C4: reproduced as a HOST-ENGINE divergence (interp vs JIT), rc=0 both sides
+
+The class is NOT baremetal-only. Reproduced on the deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes, mtime
+2026-08-16 22:59) with a plain `bin/simple run` probe, exit 0 on BOTH engines,
+no diagnostic on either:
+
+```
+fn ret_some(v: i64) -> i64?: Some(v)
+if val u = ret_some(42):
+    print (u == 42).to_text()     # interpreter: true   JIT: false
+    print (u + 1).to_text()       # interpreter: 43     JIT: 2.35e-320 (denormal)
+match ret_some(42):
+    case Some(m): print (m == 42).to_text()   # interpreter: true  JIT: true
+val w = ret_some(42) ?? 0
+print (w == 42).to_text()         # interpreter: true   JIT: false
+```
+
+`match` unwraps correctly; `if val` and `??` do NOT — on the JIT the bound name
+holds the whole Option HANDLE, not the payload. `to_text()` hides it (it renders
+the payload), so only value comparison and arithmetic expose it; `u + 1` shows the
+classic low-3-bit tag misread (handle word & 7 == 2 -> inline-float tag).
+A struct payload turns the same defect LOUD: `if val p = mk(5): p.x` gives
+`runtime error: invalid field receiver` on the JIT and works interpreted.
+
+ROOT CAUSE (source-read, high confidence, NOT patched):
+`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:1165-1176` —
+`build_pattern_binding_stmts`, the `Pattern::Identifier | Pattern::MutIdentifier`
+arm, emits `HirStmt::Let { local_index, ty: subject_ty, value:
+HirExprKind::Local(subject_idx) }`. That is a straight copy of the SUBJECT with
+the SUBJECT's type. When the subject is `T?` the binder must extract the Some
+payload (as the tree-walk interpreter does, and as
+`hir/lower/tests/control_flow_tests.rs:577`
+`test_if_val_exists_check_binds_unwrapped_option_value` asserts for the
+`.?`/ExistsCheck form). The plain `if val u = f()` form has no such unwrap.
+The `??` Some-arm exhibits the same symptom but was not pinned to a line.
+
+NOT PATCHED DELIBERATELY: this is the Rust seed, a bootstrap is live, and every
+`if val` in the compiler goes through this arm. Reproduction + localization only.
+Probe: scratchpad `p_opt3.spl` (see CRIT C4 report).

@@ -40,3 +40,20 @@ never `const 0`.
 Related: text.from_char_code static-call gap
 (text_static_method_hir_lowering_2026-07-23.md) — same
 "static call on type name" family.
+
+## 2026-08-17 CRIT-C4 partial close (SOURCE READING, no execution)
+
+The "Any unresolved call must be a loud compile error, never `const 0`" half of
+the Fix direction IS now implemented in
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`: `:3176`
+`self.error(...)`, `:3185` a WARNING print, and `:3208` an `rt_panic` emitted
+ahead of the retained const-0 placeholder — fail closed. The C4 TSV evidence
+column ("no loud-error-on-unresolved-call guard found") is therefore stale.
+The static-call RESOLUTION half also has an implementation now: the Unresolved
+arm (`:2660-2692`) resolves `static::{recv}::{method}` via `struct_method_syms`,
+then `symbols.lookup_method_in_type`, then
+`symbols.lookup_unique_static_method(method)`.
+STILL UNVERIFIED: whether class CONSTRUCTOR bodies are now emitted (the
+"`declare i64 @Repro2Options(...)`, never defined" half). That needs an
+entry-closure native build, which was not achievable on this host (load 66-90,
+a native check script produced no output in 25 minutes).
