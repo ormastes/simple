@@ -1,6 +1,7 @@
 # Stage 4 bootstrap aborted because Rust inputs changed
 
-**Status:** blocked before Simple source discovery. **Observed:** 2026-08-15.
+**Status:** RESOLVED AS INTENDED FAIL-CLOSED AUTHORITY REJECTION.
+**Observed:** 2026-08-15. **Audited:** 2026-08-17.
 
 The canonical `bootstrap-from-scratch.sh --full-bootstrap --deploy` attempt
 aborted while preparing the Rust seed with:
@@ -62,3 +63,29 @@ change detection can be re-measured without actually entering the stage.
 
 Status unchanged. Recorded so future sweeps skip this in O(1) instead of
 re-deriving the same blocker.
+
+## 2026-08-17 closure audit
+
+The abort was the required safety behavior, not a missing Stage-4 compiler
+fix. The current Rust-authority transaction fingerprints inputs before Cargo,
+after Cargo, and again while holding publication authority immediately before
+commit. The fingerprint covers all non-target files under `src/compiler_rust`,
+discovered Cargo path dependencies inside the checkout, hosted runtime inputs,
+`Cargo.lock`, `VERSION`, selected platform/backend/features, LLVM authority,
+the resolved `rustc` and `cargo` binaries plus version output, target C tools,
+and all four exact Cargo build recipes. Symlinked inputs and dependencies
+escaping the checkout are rejected. A mismatch at either post-build boundary
+aborts before authority publication, which is exactly what protected the
+2026-08-15 run from publishing a stale seed.
+
+The adjacent failure path is also fail-closed: fingerprint helper errors retain
+the phase, status, private scratch directory, and stderr manifest; a later
+successful fingerprint removes stale error evidence. Focused bounded evidence:
+
+`sh test/01_unit/scripts/bootstrap_fingerprint_tmp_contract_test.shs`
+
+passed once with `bootstrap fingerprint tmp contract: PASS`, including the
+simulated ENOSPC rejection and recovery case. No admitted bounded continuation
+artifact was present, so no full bootstrap was started. A future retry only
+needs a stable ownership window for the already-enforced input set; weakening
+or bypassing the mismatch gate would reintroduce the defect.
