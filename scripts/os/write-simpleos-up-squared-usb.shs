@@ -1,0 +1,255 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+IMAGE_DEFAULT="$ROOT_DIR/build/os/up-squared-apollo-lake/usb/board-usb.img"
+ARTIFACT_ROOT="$ROOT_DIR/build/test-artifacts/03_system/os/x86_64/up_squared_apl_simpleos"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+ARTIFACT_DIR="$ARTIFACT_ROOT/$RUN_ID"
+RECEIPT="$ARTIFACT_DIR/usb-write-receipt.env"
+
+MODE="dry-run"
+DEVICE=""
+BY_ID=""
+CONFIRM=""
+ALLOW_DESTRUCTIVE=0
+EXPECTED_SERIAL=""
+EXPECTED_MODEL=""
+EXPECTED_CAPACITY_BYTES=""
+IMAGE="${UP2_USB_IMAGE:-$IMAGE_DEFAULT}"
+
+usage() {
+  cat <<'EOF'
+Usage: sh scripts/os/write-simpleos-up-squared-usb.shs --mode <dry-run|write> --by-id <id>|--device <path> [options]
+
+Required:
+  --by-id <id>   identify target by /dev/disk/by-id entry
+  OR
+  --device <path>  explicit /dev/sdX style block path
+
+Options:
+  --mode <dry-run|write>     default dry-run
+  --serial <serial>          expected device serial
+  --model <model>            expected device model string
+  --min-capacity-bytes <n>   device must be >= n bytes
+  --confirm <token>          required when --mode write
+  --allow-destructive         explicit user acknowledgment for writes
+
+Dry-run prints a confirmation token but performs no writes.
+Write mode requires --allow-destructive and --confirm that matches the token.
+EOF
+}
+
+require_uint() {
+  case "$1" in
+    *[!0-9]* | "") echo "error: invalid integer: $1" >&2; exit 1;;
+  esac
+}
+
+blocked() {
+  echo "up2_usb_write_status=blocked"
+  echo "up2_usb_write_reason=$1"
+  [ -n "${2:-}" ] && echo "up2_usb_write_detail=$2"
+  exit 2
+}
+
+fail() {
+  echo "up2_usb_write_status=fail"
+  echo "up2_usb_write_reason=$1"
+  [ -n "${2:-}" ] && echo "up2_usb_write_detail=$2"
+  exit 1
+}
+
+pass() {
+  echo "up2_usb_write_status=pass"
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || blocked "missing-tool" "$1"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --mode)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-mode"
+      MODE="$1"
+      ;;
+    --by-id)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-by-id"
+      BY_ID="$1"
+      ;;
+    --device)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-device"
+      DEVICE="$1"
+      ;;
+    --confirm)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-confirm"
+      CONFIRM="$1"
+      ;;
+    --allow-destructive)
+      ALLOW_DESTRUCTIVE=1
+      ;;
+    --serial)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-serial"
+      EXPECTED_SERIAL="$1"
+      ;;
+    --model)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-model"
+      EXPECTED_MODEL="$1"
+      ;;
+    --min-capacity-bytes)
+      shift
+      [ "$#" -gt 0 ] || blocked "missing-capacity"
+      EXPECTED_CAPACITY_BYTES="$1"
+      require_uint "$EXPECTED_CAPACITY_BYTES"
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      blocked "unknown-argument" "$1"
+      ;;
+  esac
+  shift
+done
+
+case "$MODE" in
+  dry-run|write) ;;
+  *) blocked "invalid-mode" "$MODE" ;;
+esac
+
+case "$MODE" in
+  write)
+    [ "$ALLOW_DESTRUCTIVE" = 1 ] || blocked "destructive-not-acknowledged" "pass --allow-destructive to proceed"
+    ;;
+esac
+
+require dd
+require sha256sum
+require lsblk
+require blockdev
+require stty
+require findmnt
+require head
+
+test -s "$IMAGE" || blocked "missing-image" "$IMAGE"
+IMAGE_SIZE_BYTES=$(wc -c < "$IMAGE")
+IMAGE_SHA=$(sha256sum "$IMAGE" | awk '{print $1}')
+[ "$IMAGE_SIZE_BYTES" -gt 0 ] || blocked "empty-image"
+[ -f "$IMAGE" ] || blocked "image-not-regular" "$IMAGE"
+
+if [ -n "$BY_ID" ]; then
+  BY_ID_PATH="/dev/disk/by-id/$BY_ID"
+  test -L "$BY_ID_PATH" || blocked "invalid-by-id" "$BY_ID_PATH"
+  DEVICE="$(readlink -f "$BY_ID_PATH")"
+fi
+
+if [ -z "$DEVICE" ]; then
+  blocked "target-not-specified"
+fi
+
+test -b "$DEVICE" || blocked "not-a-block-device" "$DEVICE"
+
+DEV_PATH="$DEVICE"
+PARTITIONED_COUNT="$(lsblk -dnr -o MOUNTPOINT "$DEV_PATH" 2>/dev/null | wc -w | awk '{print $1}')"
+TEST_DEVICE_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_DEVICE_DIR"' EXIT
+
+DEVICE_TYPE="$(lsblk -dnro TYPE "$DEV_PATH" || true)"
+[ "$DEVICE_TYPE" = disk ] || blocked "not-a-disk" "$DEVICE_TYPE"
+DEVICE_SIZE_BYTES="$(blockdev --getsize64 "$DEV_PATH" 2>/dev/null || echo 0)"
+[ "$DEVICE_SIZE_BYTES" -gt 0 ] || blocked "invalid-device-size" "$DEVICE_SIZE_BYTES"
+[ "$DEVICE_SIZE_BYTES" -ge "$IMAGE_SIZE_BYTES" ] || blocked "insufficient-capacity" "$DEVICE_SIZE_BYTES"
+[ "$DEVICE_SIZE_BYTES" -ge "${EXPECTED_CAPACITY_BYTES:-0}" ] || blocked "below-required-capacity" "$DEVICE_SIZE_BYTES"
+[ "$(lsblk -dnro RM "$DEV_PATH" || echo 0)" = "1" ] || blocked "non-removable-device"
+if [ "$(lsblk -dnro RO "$DEV_PATH" || echo 1)" != "0" ]; then
+  blocked "readonly-device"
+fi
+TRANSPORT="$(lsblk -dnro TRAN "$DEV_PATH" || true)"
+[ -n "$TRANSPORT" ] || blocked "unknown-transport"
+
+DEVICE_SERIAL="$(lsblk -dnro SERIAL "$DEV_PATH" || true)"
+DEVICE_MODEL="$(lsblk -dnro MODEL "$DEV_PATH" | awk '{$1=$1; print $0}')"
+[ -n "$DEVICE_MODEL" ] || DEVICE_MODEL="unknown"
+
+if [ -n "$EXPECTED_SERIAL" ] && [ "$DEVICE_SERIAL" != "$EXPECTED_SERIAL" ]; then
+  blocked "serial-mismatch" "$DEVICE_SERIAL"
+fi
+if [ -n "$EXPECTED_MODEL" ] && [ "$DEVICE_MODEL" != "$EXPECTED_MODEL" ]; then
+  blocked "model-mismatch" "$DEVICE_MODEL"
+fi
+
+for p in $(lsblk -nr -o NAME "$DEV_PATH"); do
+  [ "$p" = "" ] && continue
+  target="/dev/$p"
+  if findmnt -nr -o TARGET "$target" >/dev/null 2>&1; then
+    blocked "mounted-target" "$target"
+  fi
+done
+
+CHALLENGE="$(printf '%s|%s|%s|%s|%s' "$IMAGE" "$DEV_PATH" "$DEVICE_SERIAL" "$IMAGE_SHA" "$IMAGE_SIZE_BYTES" | sha256sum | awk '{print $1}')"
+
+mkdir -p "$ARTIFACT_DIR"
+{
+  echo "schema=up2-usb-write-receipt-v1"
+  echo "run_id=$RUN_ID"
+  echo "mode=$MODE"
+  echo "image=$IMAGE"
+  echo "image_size_bytes=$IMAGE_SIZE_BYTES"
+  echo "image_sha256=$IMAGE_SHA"
+  echo "expected_confirmation=$CHALLENGE"
+  echo "device=$DEV_PATH"
+  echo "device_by_id=$BY_ID"
+  echo "device_size_bytes=$DEVICE_SIZE_BYTES"
+  echo "device_model=$DEVICE_MODEL"
+  echo "device_serial=$DEVICE_SERIAL"
+  echo "device_transport=$TRANSPORT"
+  echo "device_removable=$(lsblk -dnro RM "$DEV_PATH" || echo 0)"
+  echo "device_read_only=$(lsblk -dnro RO "$DEV_PATH" || echo 1)"
+} > "$RECEIPT"
+
+if [ "$MODE" = "dry-run" ]; then
+  echo "up2_usb_write_status=blocked"
+  echo "up2_usb_write_reason=write-not-acknowledged"
+  echo "up2_usb_write_confirmation=$CHALLENGE"
+  echo "up2_usb_write_receipt=$RECEIPT"
+  echo "up2_usb_write_recommendation=rerun with --mode write --allow-destructive --confirm $CHALLENGE"
+  exit 0
+fi
+
+if [ -z "$CONFIRM" ]; then
+  blocked "confirm-missing" "$CHALLENGE"
+fi
+[ "$CONFIRM" = "$CHALLENGE" ] || blocked "confirm-mismatch" "$CONFIRM"
+
+dd if="$IMAGE" of="$DEV_PATH" bs=4M status=progress conv=fsync || fail "dd-write-failed"
+sync
+
+READBACK_TMP="$ARTIFACT_DIR/readback.bin"
+head -c "$IMAGE_SIZE_BYTES" "$DEV_PATH" > "$READBACK_TMP" || fail "readback-read-failed"
+READBACK_SIZE_BYTES="$(wc -c < "$READBACK_TMP")"
+[ "$READBACK_SIZE_BYTES" -eq "$IMAGE_SIZE_BYTES" ] || fail "readback-size-mismatch"
+READBACK_HASH="$(sha256sum "$READBACK_TMP" | awk '{print $1}')"
+[ "$READBACK_HASH" = "$IMAGE_SHA" ] || fail "sha256-mismatch"
+
+{
+  echo "write_status=pass"
+  echo "write_of=$DEV_PATH"
+  echo "write_confirmed=true"
+  echo "readback_status=pass"
+  echo "readback_size_bytes=$READBACK_SIZE_BYTES"
+  echo "readback_sha256=$READBACK_HASH"
+  echo "write_completed_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} >> "$RECEIPT"
+
+echo "up2_usb_write_status=pass"
+echo "up2_usb_write_confirmation=$CHALLENGE"
+echo "up2_usb_write_reason=write-and-readback-verified"
+echo "up2_usb_write_receipt=$RECEIPT"

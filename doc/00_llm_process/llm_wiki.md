@@ -59,6 +59,11 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   stages and hashes the image on UP2, admits one stable by-id/serial/capacity,
   rejects root/swap/mounted/internal media, writes locally, syncs, rechecks the
   identity, and hashes the exact image-length readback. Never pipe SSH to `dd`.
+- **Remote write admission path (if the stick cannot stay on writer host):**
+  authenticate an in-band UP2 Linux shell first, stage image on UP2, verify
+  `/dev/disk/by-id` identity (model/serial/capacity), and only then write
+  with readback compare + identity recheck. Never accept `dd` over SSH from
+  an untrusted path; retain the same evidence artifacts as first-light.
 - **Not upload paths:** UEFI Shell launches files already on accessible media;
   UART has no assumed XMODEM protocol; Micro-B OTG needs a proven Linux UDC and
   gadget configuration; PXE needs an isolated DHCP/TFTP network. None is
@@ -76,6 +81,11 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Current build blocker:** the UP2 wrapper omits the canonical x86
   freestanding `simple-core` runtime-capsule binding; target-name retries do not
   resolve the missing runtime/serial symbols.
+- **Canonical live checker:** run `sh scripts/check/check-simpleos-up-squared-apollo-lake.shs`
+  in `--contract`, `--self-test`, then `--live` (with `UP2_UART_LOG` or explicit
+  board UART path). A `--live` result must return `up2_status=pass` plus
+  ordered `UP2` markers, correlated `ls` block containing `/bin`, `/etc`,
+  `/README.txt`, and matching image hash from `build/os/up-squared-apollo-lake/simpleos.elf.receipt`.
 
 ## StarFive JH7110 software reset over Tigard JTAG
 
@@ -100,7 +110,9 @@ When asked to software-reset or reboot a StarFive JH7110 through Tigard, use
 the SBI SRST helper and capture UART concurrently. Do not substitute OpenOCD
 `reset run`, a direct PC write, or hardware-reset claims. If the expected fresh
 firmware sequence is absent, report reset as failed or blocked rather than
-PASS.
+PASS. On a hart-examined failure, permit one bounded `ndmreset` verification
+attempt only if explicitly provisioned; if no fresh boot markers reappear, mark
+`BLOCKED` and require physical power-cycle.
 
 ## StarFive VisionFive 2 NVMe storage
 

@@ -179,6 +179,18 @@ CPLD/BIOS-update connector, not a proven Apollo Lake CPU JTAG port, so do not
 drive it with Tigard/OpenOCD. The retained handoff is
 `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`; its offline image and
 partial source state are not physical boot or `ls` evidence.
+
+Pass-fidelity oracle is `scripts/check/check-simpleos-up-squared-apollo-lake.shs`:
+`--contract` and `--self-test` must pass without hardware, then `--live` consumes a
+stateful transcript and must observe ordered markers
+`UP2 entry` -> `UP2 console-ready` -> `UP2 filesystem-ready` -> `UP2 shell-ready`
+and command-correlated VFS `ls` between `UP2 ls-begin ...` / `UP2 ls-end status=pass`.
+Missing marker/order/readback is PASS-failure.
+
+Safe disk admission is `scripts/os/write-simpleos-up-squared-usb.shs`:
+resolve one stable `/dev/disk/by-id`, confirm serial/model/capacity, require explicit
+allow-destructive + confirmation token, write only after write-path identity lock, then
+readback-and-hash exactly the image length before boot.
 Media attached to UP2 is not addressable by the build host merely because the
 board has a Micro-B OTG port. Prefer moving the stick to the writer host. A
 remote write is admissible only when UP2 already runs a trusted Linux/SSH or
@@ -188,6 +200,14 @@ explicit serial/capacity confirmation, write locally, sync, recheck identity,
 and hash the exact image-length readback. Never stream SSH directly into a raw
 device. UEFI Shell, UART, USB OTG gadget mode, and PXE availability must each be
 proven rather than inferred; firmware flashing is a separate forbidden lane.
+
+For StarFive VisionFive 2 resets through Tigard, prefer SW reset via
+`scripts/os/starfive-jtag-sbi-reset.shs` (reviewed SBI trampoline path) and capture
+UART through the same live run. Do not claim reset from OpenOCD `reset run` or raw
+PC writes. If the hart is unexamined after SRST path, run one bounded `ndmreset`
+fallback attempt only if explicitly allowed by the same host flow, then require visible
+firmware-restart evidence. An unverified fallback must be BLOCKED and never treated
+as PASS.
 
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo

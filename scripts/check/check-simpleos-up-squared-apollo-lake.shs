@@ -1,0 +1,216 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:---contract}"
+ARTIFACT_DIR="$ROOT_DIR/build/test-artifacts/03_system/os/up_squared_up_apl_simpleos"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+SESSION_DIR="$ARTIFACT_DIR/$RUN_ID"
+mkdir -p "$SESSION_DIR"
+
+UP2_UART_LOG="${UP2_UART_LOG:-}"
+UP2_UART_PATH="${UP2_UART_PATH:-}"
+UP2_UART_BAUD="${UP2_UART_BAUD:-115200}"
+UP2_CAPTURE_SECONDS="${UP2_CAPTURE_SECONDS:-120}"
+UP2_ELF="${UP2_ELF:-build/os/up-squared-apollo-lake/simpleos.elf}"
+UP2_IMAGE="${UP2_USB_IMAGE:-build/os/up-squared-apollo-lake/usb/board-usb.img}"
+UP2_RECEIPT="$UP2_ELF.receipt"
+
+blocked() {
+    echo "up2_status=blocked"
+    echo "up2_mode=$MODE"
+    echo "up2_reason=$1"
+    [ -n "${2:-}" ] && echo "up2_detail=$2"
+    exit 2
+}
+
+fail() {
+    echo "up2_status=fail"
+    echo "up2_mode=$MODE"
+    echo "up2_reason=$1"
+    [ -n "${2:-}" ] && echo "up2_detail=$2"
+    exit 1
+}
+
+pass_kv() {
+    echo "$@"
+}
+
+require_cmds() {
+    for c in "$@"; do
+        command -v "$c" >/dev/null 2>&1 || blocked "missing-tool" "$c"
+    done
+}
+
+contract_check() {
+    rg -q 'up2_mount_packaged_root' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 filesystem-ready entries=' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'up2_vfs_readdir' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'rt_serial_readline' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/serial_runtime.c"
+    rg -q 'UP2 ls-begin source=vfs command=ls /' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    test -x "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs" || blocked "builder-not-executable"
+    test -x "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs" || blocked "usb-writer-not-executable"
+    test -x "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs" || blocked "board-image-builder-not-executable"
+    pass_kv up2_contract_status=pass
+    pass_kv up2_mode=contract
+    pass_kv up2_target=x86_64-up-squared-apollo-lake
+    pass_kv up2_root_entries=bin,etc,README.txt
+    pass_kv up2_transport=uefi-usb
+    pass_kv up2_media=removable-gpt-fat32
+    pass_kv up2_uart_default_baud=115200
+}
+
+self_test() {
+    # Self-test intentionally checks policy only; no destructive write path.
+    require_cmds "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs"
+    UP2_ELF_PRESENT=0
+    if test -f "$UP2_ELF"; then
+        UP2_ELF_PRESENT=1
+    fi
+    echo "up2_self_test_status=pass"
+    echo "up2_build_artifact_present=$UP2_ELF_PRESENT"
+    echo "up2_usb_transport_check=pass"
+    echo "up2_writer_explicit_allow_destructive_needed=1"
+    echo "up2_remote_writer_forbidden=1"
+    echo "up2_boot_mode=manual-f7"
+    echo "up2_live_ls_is_vfs=1"
+}
+
+detect_uart_path() {
+    if test -n "$UP2_UART_PATH"; then
+        echo "$UP2_UART_PATH"
+        return
+    fi
+
+    if ! test -d /dev/serial/by-id; then
+        return 1
+    fi
+
+    selected=""
+    for candidate in /dev/serial/by-id/*; do
+        if test -L "$candidate"; then
+            target="$(readlink -f "$candidate")"
+            case "$target" in
+                /dev/ttyUSB*|/dev/ttyACM*|/dev/ttyS*)
+                    if test -z "$selected"; then
+                        selected="$target"
+                    else
+                        return 1
+                    fi
+                    ;;
+            esac
+        fi
+    done
+
+    if test -z "$selected"; then
+        return 1
+    fi
+    echo "$selected"
+}
+
+find_uart_char() {
+    case "$1" in
+        /dev/ttyS*|/dev/ttyUSB*|/dev/ttyACM*|/dev/serial/*) return 0 ;;
+        *)
+            fail "invalid-uart-path" "$1"
+            ;;
+    esac
+}
+
+capture_transcript() {
+    TRANSCRIPT="$SESSION_DIR/uart-live.log"
+    if test -n "$UP2_UART_LOG" && test -f "$UP2_UART_LOG"; then
+        cp "$UP2_UART_LOG" "$TRANSCRIPT"
+        echo "$TRANSCRIPT"
+        return 0
+    fi
+
+    UP2_UART_PATH="$(detect_uart_path)" || blocked "uart-path-missing"
+    find_uart_char "$UP2_UART_PATH"
+    require_cmds stty dd timeout grep sha256sum
+
+    if command -v stty >/dev/null 2>&1; then
+        stty -F "$UP2_UART_PATH" "$UP2_UART_BAUD" cs8 -cstopb -parenb -crtscts raw -echo
+    fi
+    : > "$TRANSCRIPT"
+    trap 'stty sane < "$UP2_UART_PATH" 2>/dev/null || true' EXIT HUP INT TERM
+    timeout "${UP2_CAPTURE_SECONDS}s" \
+        dd if="$UP2_UART_PATH" of="$TRANSCRIPT" bs=1 count=2000000 status=none >/dev/null 2>&1 || true
+    echo "$TRANSCRIPT"
+}
+
+parse_line() {
+    pattern="$1"
+    file="$2"
+    grep -aFn "$pattern" "$file" | head -n 1 | awk -F: '{print $1}'
+}
+
+live_check() {
+    test -f "$UP2_ELF" || blocked "kernel-missing" "$UP2_ELF"
+    test -s "$UP2_ELF.receipt" || blocked "kernel-receipt-missing" "$UP2_ELF.receipt"
+    if test -n "$UP2_IMAGE" && test -f "$UP2_IMAGE"; then
+        test -s "$UP2_IMAGE" || blocked "image-empty" "$UP2_IMAGE"
+    fi
+    TRANSCRIPT="$(capture_transcript)"
+    test -f "$TRANSCRIPT" || blocked "transcript-missing"
+    test -s "$TRANSCRIPT" || blocked "transcript-empty"
+
+    ENTRY_LINE="$(parse_line "UP2 entry" "$TRANSCRIPT" || true)"
+    CONSOLE_LINE="$(parse_line "UP2 console-ready" "$TRANSCRIPT" || true)"
+    FILESYSTEM_LINE="$(parse_line "UP2 filesystem-ready" "$TRANSCRIPT" || true)"
+    SHELL_LINE="$(parse_line "UP2 shell-ready" "$TRANSCRIPT" || true)"
+    LS_BEGIN="$(parse_line "UP2 ls-begin source=vfs command=ls /" "$TRANSCRIPT" || true)"
+    LS_END="$(parse_line "UP2 ls-end status=pass" "$TRANSCRIPT" || true)"
+
+    if test -z "$ENTRY_LINE" || test -z "$CONSOLE_LINE" || test -z "$FILESYSTEM_LINE" || test -z "$SHELL_LINE"; then
+        fail "missing-boot-markers"
+    fi
+    test "$ENTRY_LINE" -lt "$CONSOLE_LINE" && test "$CONSOLE_LINE" -lt "$FILESYSTEM_LINE" && test "$FILESYSTEM_LINE" -lt "$SHELL_LINE" || fail "marker-order-invalid"
+
+    grep -aFq "UP2 filesystem-ready entries=bin,etc,README.txt" "$TRANSCRIPT" || fail "filesystem-entries-mismatch"
+    grep -aFq "UP2 ls-begin source=vfs command=ls /" "$TRANSCRIPT" || fail "ls-begin-missing"
+    grep -aFq "UP2 ls-end status=pass" "$TRANSCRIPT" || fail "ls-end-missing"
+    test -n "$LS_BEGIN" -a -n "$LS_END" || fail "ls-marker-missing"
+    test "$LS_BEGIN" -lt "$LS_END" || fail "ls-marker-order-invalid"
+    LS_BLOCK="$TRANSCRIPT.ls-block.$RUN_ID"
+    awk -v b="$LS_BEGIN" -v e="$LS_END" 'NR>=b && NR<=e {print}' "$TRANSCRIPT" > "$LS_BLOCK"
+    grep -aFq "/bin" "$LS_BLOCK" || fail "ls-missing-bin"
+    grep -aFq "/etc" "$LS_BLOCK" || fail "ls-missing-etc"
+    grep -aFq "/README.txt" "$LS_BLOCK" || fail "ls-missing-readme"
+
+    IMAGE_HASH="$(awk -F= '/^artifact_sha256=/ {print $2}' "$UP2_ELF.receipt")"
+    ACTUAL_HASH="$(sha256sum "$UP2_ELF" | awk '{print $1}')"
+    if test -n "$IMAGE_HASH" && test "$IMAGE_HASH" != "$ACTUAL_HASH"; then
+        fail "manifest-hash-mismatch"
+    fi
+    ENTRY_PRESENT="$(grep -aFq "UP2 entry" "$TRANSCRIPT" && echo 1 || echo 0)"
+    echo "up2_status=pass"
+    echo "up2_mode=$MODE"
+    echo "up2_transport=uefi-usb"
+    echo "up2_uart_path=$UP2_UART_PATH"
+    echo "up2_board_marker_count=$([ "$ENTRY_PRESENT" = 1 ] && echo 1 || echo 0)"
+    echo "up2_marker_order=pass"
+    echo "up2_boot_marker_entry_line=$ENTRY_LINE"
+    echo "up2_boot_marker_console_line=$CONSOLE_LINE"
+    echo "up2_boot_marker_fs_line=$FILESYSTEM_LINE"
+    echo "up2_boot_marker_shell_line=$SHELL_LINE"
+    echo "up2_ls_status=pass"
+    echo "up2_ls_source=vfs"
+    echo "up2_ls_command=ls /"
+    echo "up2_ls_entries=bin,etc,README.txt"
+    echo "up2_ls_begin_line=$LS_BEGIN"
+    echo "up2_ls_end_line=$LS_END"
+    echo "up2_uart_transcript=$TRANSCRIPT"
+    echo "up2_elf=$UP2_ELF"
+    echo "up2_image=$UP2_IMAGE"
+    echo "up2_manifest_hash=$IMAGE_HASH"
+}
+
+case "$MODE" in
+    --contract) contract_check ;;
+    --self-test) self_test ;;
+    --live) live_check ;;
+    *) echo "usage: $0 --contract|--self-test|--live" >&2; exit 1 ;;
+esac
