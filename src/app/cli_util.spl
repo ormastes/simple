@@ -7,38 +7,68 @@ use std.log.{error}
 export get_cli_args, find_manifest_path, parse_csv_fields
 export load_manifest_or_exit, parse_dependency_entry
 export args_after_named_command
+export arg_is_entry_script, strip_entry_script
 
-fn get_cli_args() -> [str]:
+fn arg_is_entry_script(arg: text, entry_rel: text) -> bool:
     """
-    Extract command-line arguments, skipping program name and script path.
+    True only when `arg` names the caller's OWN entry script.
 
-    This helper eliminates the boilerplate pattern used across all CLI commands:
-    - Gets raw args from runtime
-    - Skips program name (args[0])
-    - Skips script path if present (args[1] ending in main.spl)
-    - Returns clean argument list for command processing
+    `entry_rel` is the repo-relative entry path without the `src/` prefix,
+    e.g. "app/check_dbs/main.spl". Accepted forms are the bare path, the
+    `src/`-prefixed path, and any absolute path ending in that exact path
+    component chain.
+
+    A bare filename-suffix test on `main.spl` is NOT equivalent: under a compiled
+    application a legitimate user argument such as "build/h_main.spl" or
+    "other/main.spl" matches the suffix and is silently swallowed, misrouting
+    the command. Matching the full entry path cannot do that.
+    """
+    if arg == entry_rel:
+        return true
+    if arg == "src/" + entry_rel:
+        return true
+    if arg.ends_with("/" + entry_rel):
+        return true
+    false
+
+fn strip_entry_script(raw: [text], entry_rel: text) -> [text]:
+    """
+    Drop the program name and, when present, the caller's own entry script.
+
+    Pure over `raw` so the routing decision is testable without a process.
+
+    Example:
+        strip_entry_script(["simple", "src/app/add/main.spl", "--help"],
+            "app/add/main.spl")
+        Returns: ["--help"]
+
+        strip_entry_script(["add", "build/h_main.spl"], "app/add/main.spl")
+        Returns: ["build/h_main.spl"]     # NOT swallowed
+    """
+    var start_idx = 1
+    if raw.len() > 1 and arg_is_entry_script(raw[1], entry_rel):
+        start_idx = 2
+
+    var args: [text] = []
+    var i = start_idx
+    while i < raw.len():
+        args = args.push(raw[i])
+        i = i + 1
+    args
+
+fn get_cli_args(entry_rel: text) -> [text]:
+    """
+    Extract command-line arguments, skipping program name and entry script.
+
+    Each caller names its own entry script (`entry_rel`, e.g.
+    "app/check_dbs/main.spl") so that interpreted and compiled invocations
+    agree and no user argument is mistaken for the entry script.
 
     Example:
         Raw args: ["simple_runtime", "src/app/add/main.spl", "--help", "package"]
-        Returns:  ["--help", "package"]
+        get_cli_args("app/add/main.spl") -> ["--help", "package"]
     """
-    val all_args = cli_get_args()
-
-    # Skip program name and script path
-    var args: [str] = []
-    var start_idx = 1
-
-    # If second arg is the script path (ends with main.spl), skip it too
-    if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
-        start_idx = 2
-
-    # Collect remaining arguments
-    var i = start_idx
-    while i < all_args.len():
-        args = args.push(all_args[i])
-        i = i + 1
-
-    args
+    strip_entry_script(cli_get_args(), entry_rel)
 
 fn find_manifest_path() -> text:
     """

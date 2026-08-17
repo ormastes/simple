@@ -1,0 +1,45 @@
+# @cover src/app/cli_util.spl
+"""
+# Precise entry-script detection in app.cli_util
+
+`app.cli_util.get_cli_args` used to decide whether argv[1] was the interpreted
+entry script with a bare `ends_with("main.spl")` test. A compiled application
+whose own first argument legitimately ends in `main.spl` (for example
+`simple check-dbs build/h_main.spl`) had that argument silently swallowed.
+
+The precise form takes the application's own entry path and matches it exactly
+(bare, `src/`-prefixed, or as a trailing path component), so an unrelated user
+argument ending in `main.spl` is never mistaken for the entry script.
+"""
+
+describe "cli_util precise entry-script predicate":
+    extern fn rt_file_read_text(path: text) -> text
+
+    fn cli_util_source() -> text:
+        rt_file_read_text("src/app/cli_util.spl") ?? ""
+
+    it "no longer decides entry-script-ness by a bare main.spl suffix":
+        val source = cli_util_source()
+        assert_false(source.contains("ends_with(\"main.spl\")"))
+
+    it "exposes a path-parameterised entry-script predicate":
+        val source = cli_util_source()
+        expect(source).to_contain("fn arg_is_entry_script(arg: text, entry_rel: text) -> bool")
+        expect(source).to_contain("export arg_is_entry_script, strip_entry_script")
+
+    it "exposes a pure, testable argument-stripping helper":
+        val source = cli_util_source()
+        expect(source).to_contain("fn strip_entry_script(raw: [text], entry_rel: text) -> [text]")
+        expect(source).to_contain("export arg_is_entry_script, strip_entry_script")
+
+    it "requires each caller to name its own entry script":
+        val source = cli_util_source()
+        expect(source).to_contain("fn get_cli_args(entry_rel: text) -> [text]")
+
+    it "keeps the live consumers passing their own entry path":
+        val check_dbs = rt_file_read_text("src/app/check_dbs/main.spl") ?? ""
+        expect(check_dbs).to_contain("get_cli_args(\"app/check_dbs/main.spl\")")
+        # ffi_gen/test_all_mods.spl imported get_cli_args but never called it;
+        # the unused import is gone rather than carried through the signature change.
+        val ffi_gen = rt_file_read_text("src/app/ffi_gen/test_all_mods.spl") ?? ""
+        assert_false(ffi_gen.contains("get_cli_args"))

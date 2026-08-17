@@ -1,0 +1,63 @@
+# @cover src/app/cli_util.spl
+"""
+# Defect class: argv entry-script detection by bare filename suffix
+
+The recurring defect is not one call site. It is the PATTERN of deciding
+"argv[1] is the interpreted entry script" from a bare filename suffix such as
+`ends_with("main.spl")`. Under a compiled application any user argument that
+happens to end in that suffix is swallowed and the command misroutes.
+
+This spec scans owned application source for the pattern so a reintroduction
+anywhere fails, not merely a regression at the one site that was fixed.
+Precise predicates match a full entry path (`arg_is_cli_entry_script`,
+`arg_is_entry_script`) and are unaffected.
+"""
+
+describe "defect class: argv entry-script suffix heuristic":
+    extern fn rt_file_read_text(path: text) -> text
+
+    fn source_of(path: text) -> text:
+        rt_file_read_text(path) ?? ""
+
+    # A defect is the suffix test used as a ROUTING CONDITION. Prose that
+    # merely names the anti-pattern (comments, docstrings) is not a defect,
+    # so `#` comment lines are skipped and a bare `if` is required.
+    fn detects(s: text) -> bool:
+        for line in s.split("\n"):
+            val t = line.trim()
+            if t.starts_with("#"):
+                continue
+            if t.contains("if ") and t.contains("ends_with(\"main.spl\")"):
+                return true
+        false
+
+    fn has_bare_suffix_heuristic(path: text) -> bool:
+        val s = source_of(path)
+        if s == "":
+            return false
+        detects(s)
+
+    it "control: the detector fires on the defective shape and not on prose":
+        # Without this, a clean sweep could mean the detector is broken.
+        assert_true(detects("    if all_args[1].ends_with(\"main.spl\"):"))
+        assert_false(detects("    # if arg.ends_with(\"main.spl\") is the anti-pattern"))
+        assert_false(detects("    if arg.ends_with(\"/app/cli/main.spl\"):"))
+
+    it "control: the scan can see the files it claims to scan":
+        # Guards against an absence check that silently scanned nothing.
+        expect(source_of("src/app/cli_util.spl")).to_contain("fn get_cli_args")
+        expect(source_of("src/app/cli/_CliMain/args_and_os_commands.spl")).to_contain("arg_is_cli_entry_script")
+
+    it "app.cli_util does not detect the entry script by bare suffix":
+        assert_false(has_bare_suffix_heuristic("src/app/cli_util.spl"))
+
+    it "the CLI entry does not detect the entry script by bare suffix":
+        assert_false(has_bare_suffix_heuristic("src/app/cli/_CliMain/args_and_os_commands.spl"))
+
+    it "the live cli_util consumers do not re-roll the heuristic themselves":
+        assert_false(has_bare_suffix_heuristic("src/app/check_dbs/main.spl"))
+        assert_false(has_bare_suffix_heuristic("src/app/ffi_gen/test_all_mods.spl"))
+
+    it "the precise predicates match a full entry path, not a filename":
+        val cli = source_of("src/app/cli/_CliMain/args_and_os_commands.spl")
+        expect(cli).to_contain("ends_with(\"/app/cli/main.spl\")")
