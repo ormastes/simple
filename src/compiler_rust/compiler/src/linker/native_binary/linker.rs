@@ -70,6 +70,37 @@ impl NativeBinaryBuilder {
             .unwrap_or(true)
     }
 
+    /// Does this entry object genuinely reference the sqlite runtime surface?
+    ///
+    /// Mirrors `native_project::linker`'s `is_sqlite_runtime_symbol`
+    /// (`rt_sqlite_*` / `sqlite3_*`) — the project pipeline has had this test
+    /// for a while; the single-file `--native` path never did, which is why a
+    /// source calling `sqlite_open` failed with
+    /// `codegen: undefined symbol: rt_sqlite_open`.
+    ///
+    /// Reads UNDEFINED symbols only, so a binary that merely links the runtime
+    /// does not acquire a `libsqlite3` dependency it never asked for.
+    pub(super) fn object_requires_sqlite(&self, obj_path: &Path) -> bool {
+        let data = match std::fs::read(obj_path) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let obj = match object::File::parse(&*data) {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        obj.symbols().any(|sym| {
+            sym.is_undefined()
+                && sym
+                    .name()
+                    .map(|name| {
+                        let name = name.strip_prefix('_').unwrap_or(name);
+                        name.starts_with("rt_sqlite_") || name.starts_with("sqlite3_")
+                    })
+                    .unwrap_or(false)
+        })
+    }
+
     fn runtime_free_libraries(&self) -> Vec<String> {
         match self.options.target.os {
             TargetOS::Linux | TargetOS::FreeBSD => vec!["c".to_string()],
@@ -210,6 +241,23 @@ impl NativeBinaryBuilder {
         for lib in libraries {
             builder = builder.library(lib);
         }
+
+        // Sqlite is an on-demand runtime surface for the single-file `--native`
+        // path: `build_core_c_runtime_library` omits `runtime_sqlite.c`, and the
+        // platform default library list carries no `-lsqlite3`. Supply both here
+        // — and ONLY here — when the entry object actually references it.
+        if !runtime_free_object
+            && !self.options.libraries.iter().any(|lib| lib == "sqlite3")
+            && self.object_requires_sqlite(obj_path)
+        {
+            if let Some(sqlite_obj) =
+                crate::pipeline::native_project::build_sqlite_runtime_object(Path::new("build/simple-sqlite"))
+            {
+                builder = builder.object(&sqlite_obj);
+                builder = builder.library("sqlite3");
+            }
+        }
+
         let runtime_free_library_paths;
         let library_paths = if runtime_free_object && !self.options.shared {
             runtime_free_library_paths = self

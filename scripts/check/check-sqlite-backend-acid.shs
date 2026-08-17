@@ -39,15 +39,30 @@ fi
 RUN_LOG="$WORK/run.log"
 "$OUT" >"$RUN_LOG" 2>&1
 strip_ansi <"$RUN_LOG"
-ROLLBACK=$(strip_ansi <"$RUN_LOG" | sed -n 's/^after_rollback_count=//p' | head -1)
-DUP=$(strip_ansi <"$RUN_LOG" | sed -n 's/^dup_insert_ok=//p' | head -1)
-if [ -z "$ROLLBACK" ] || [ -z "$DUP" ]; then
+# Presence is read as TEXT, not via sqlite_count -- see the probe's header for
+# why the count helper cannot carry this evidence today.
+field() { strip_ansi <"$RUN_LOG" | sed -n "s/^$1=//p" | head -1; }
+IN_TX=$(field in_tx_row1)
+ROLLBACK=$(field after_rollback_row1)
+DUP=$(field dup_insert_ok)
+COMMITTED=$(field committed_row2)
+REJECTED=$(field rejected_row3)
+if [ -z "$ROLLBACK" ] || [ -z "$DUP" ] || [ -z "$COMMITTED" ]; then
   echo "BLOCKED — probe produced no verdict fields"
   exit 2
 fi
-if [ "$ROLLBACK" = "0" ] && [ "$DUP" = "false" ]; then
+
+# Non-vacuity first: a backend where NOTHING is ever written would satisfy
+# "rollback removed the row" and "dup rejected" for free. Demand positive
+# evidence that writes and reads work at all before believing either.
+if [ "$IN_TX" != "[alpha]" ] || [ "$COMMITTED" != "[beta]" ]; then
+  echo "BLOCKED — probe is vacuous: in_tx_row1=$IN_TX committed_row2=$COMMITTED (expected [alpha] / [beta]); writes or reads are not working, so the ACID fields prove nothing"
+  exit 2
+fi
+
+if [ "$ROLLBACK" = "[]" ] && [ "$DUP" = "false" ] && [ "$REJECTED" = "[]" ]; then
   echo "ACID — rollback removed the row, UNIQUE violation rejected"
   exit 0
 fi
-echo "NONACID — after_rollback_count=$ROLLBACK dup_insert_ok=$DUP (expected 0 / false)"
+echo "NONACID — after_rollback_row1=$ROLLBACK dup_insert_ok=$DUP rejected_row3=$REJECTED (expected [] / false / [])"
 exit 1

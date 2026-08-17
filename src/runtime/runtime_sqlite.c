@@ -26,8 +26,28 @@
 
 typedef int64_t RtValue;
 
-static inline RtValue from_int(int64_t v) { return (uint64_t)v << 3; }
-static inline int64_t as_int(RtValue v) { return v >> 3; }
+/*
+ * Integers cross this boundary RAW, not tagged (measured 2026-08-17, the first
+ * time any lane actually linked this file into an AOT `--native` binary).
+ *
+ * `sqlite_sffi.spl` declares these entry points as `extern fn ... -> i64` /
+ * `(idx: i64)`, and the native codegen passes and receives plain machine
+ * integers for such a declaration -- it applies no tagging to a declared
+ * extern's scalar arguments or return value. The original `v << 3` / `v >> 3`
+ * helpers therefore corrupted every integer in both directions, e.g.
+ * `rt_sqlite_column_count` returning 1 was read by Simple as 8 and
+ * `rt_sqlite_query_next` returning SPECIAL_TRUE was read as 11 rather than 1,
+ * so `while has_row == 1` never entered and every query returned zero rows.
+ * This was invisible until now because the interpreter's `rt_sqlite_*`
+ * emulation (interpreter_extern/sffi_db.rs) is untagged and never ran this C.
+ *
+ * Pointer and string values are NOT affected and keep their tagging: those
+ * cross as heap handles (`from_ptr`/`make_string`) whose representation the
+ * runtime and Simple already agree on -- `rt_sqlite_column_text` was returning
+ * correct text throughout.
+ */
+static inline RtValue from_int(int64_t v) { return v; }
+static inline int64_t as_int(RtValue v) { return v; }
 static inline RtValue from_ptr(void *p) { return (RtValue)((uintptr_t)p | TAG_HEAP); }
 static inline void *as_ptr(RtValue v) { return (void *)((uintptr_t)v & ~TAG_MASK); }
 static inline int is_nil(RtValue v) { return v == (RtValue)SPECIAL_NIL; }
@@ -121,10 +141,12 @@ RtValue rt_sqlite_query(RtValue conn, RtValue sql) {
 }
 
 RtValue rt_sqlite_query_next(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return (RtValue)SPECIAL_FALSE;
+    /* `sqlite_query_all` tests `has_row == 1`, so this returns a raw 1/0 rather
+       than SPECIAL_TRUE/SPECIAL_FALSE (11/19). See the from_int note above. */
+    if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_step(stmt);
-    return (rc == SQLITE_ROW) ? (RtValue)SPECIAL_TRUE : (RtValue)SPECIAL_FALSE;
+    return from_int(rc == SQLITE_ROW ? 1 : 0);
 }
 
 void rt_sqlite_query_done(RtValue stmt_val) {

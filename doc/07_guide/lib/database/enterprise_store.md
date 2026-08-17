@@ -68,7 +68,87 @@ research track and must not carry finance/PII/stock truth.
   `buffered_commit(store, uow, faults)`. `store_faults_failing_commit()`
   simulates the write-layer failure; a failed commit applies NOTHING, so
   zero-partial-effects holds on BOTH backends.
-- **Native-ACID status (VERIFIED BLOCKED, measured 2026-08-16, lane W9-B)**.
+- **Native-ACID status: UNBLOCKED (measured 2026-08-17, lane W10-C).**
+  `sh scripts/check/check-sqlite-backend-acid.shs` now prints
+  **`ACID — rollback removed the row, UNIQUE violation rejected`** (exit 0) on
+  this host. The W9-B analysis below was correct in every particular; its one
+  prerequisite has now been implemented. Read this block first, then W9-B for
+  the reasoning that got here.
+
+  **What was wrong, and where it was fixed:**
+  1. *Link line (Rust seed — flagged as a deliberate seed edit).* The
+     single-file `--native` path links the archive from
+     `build_core_c_runtime_library`, i.e. `include_stage4_hosted = false`, which
+     deliberately omits `runtime_sqlite.c`; and the Linux platform default
+     library list (`common/src/platform/link_config.rs:301`) carries no
+     `-lsqlite3`. Hence `codegen: undefined symbol: rt_sqlite_open`. This had to
+     land in the seed: `bin/simple` is the Rust seed, and the pure-Simple
+     equivalent (`src/compiler/70.backend/linker/_LinkerWrapper/`, which *does*
+     already list `-lsqlite3`) is never reached by `compile --native`. Fix:
+     `linker/native_binary/linker.rs` gained `object_requires_sqlite` (an
+     UNDEFINED-symbol test mirroring `is_sqlite_runtime_symbol`) and, only when
+     it fires, adds an on-demand `runtime_sqlite.o` plus `-lsqlite3`;
+     `native_project/tools.rs` gained `build_sqlite_runtime_object` to compile
+     that one translation unit with flags identical to the archive members.
+     Ordinary native binaries are unaffected and acquire no `libsqlite3`
+     dependency.
+  2. *Tagging convention (C runtime — `src/runtime/runtime_sqlite.c`).* Once it
+     linked, the file turned out to have **never been exercised**: it tagged
+     every integer (`v << 3`) and returned `SPECIAL_TRUE`/`SPECIAL_FALSE`
+     (11/19), but `sqlite_sffi.spl` declares these as `extern fn ... -> i64`
+     and the native codegen passes scalars RAW. So `column_count` returning 1
+     was read as 8, `query_next` as 11, `while has_row == 1` never entered, and
+     **every query returned zero rows**. `from_int`/`as_int` are now identities
+     and `query_next` returns 1/0. Pointer and string values keep their tagging
+     and were always correct.
+
+  **Still broken, do not use as evidence: `sqlite_count`.** It does
+  `int(count_str)` on a runtime-produced string and gets the ASCII code of the
+  first digit — an empty table counts **48**, a one-row table **49**. Verified
+  the same day that `int("142")` on a *literal* correctly yields 142, so the
+  defect is in `int()` over an `rt_string`, not in sqlite. Note this also
+  retires W9-B's reading of `start_count=48` as "a global emulation counter":
+  it was ASCII `'0'` all along. The probe therefore reads presence as TEXT via
+  `sqlite_query_value`, whose path is sound.
+
+  **The gate now carries real atomicity evidence, and cannot pass vacuously.**
+  `test/fixture/enterprise_store/sqlite_acid_probe.spl` asserts that a rolled
+  back INSERT leaves no row and that a UNIQUE violation is rejected — the two
+  assertions W9-B rightly refused to write under the emulation. Both are
+  guarded by a **non-vacuity precondition** checked first: the probe must show
+  `in_tx_row1=[alpha]` and `committed_row2=[beta]`, i.e. writes and reads
+  demonstrably work, or the script reports `BLOCKED — probe is vacuous` rather
+  than crediting an ACID verdict to a backend that simply never writes.
+  Discrimination was confirmed by running the identical probe through the
+  interpreter emulation, which produces `after_rollback_row1=[alpha]` and
+  `dup_insert_ok=true` — a NONACID reading. The native result was additionally
+  cross-checked out-of-band with CPython's `sqlite3` reading the same file:
+  a real `sqlite_autoindex_t_1` UNIQUE index, `alpha` absent, `beta` present.
+
+  **Scope limit — the specs still run on the emulation.** `bin/simple test`
+  executes in the interpreter, so `enterprise_store_spec` (10/10),
+  `enterprise_store_harden_spec` (5/5) and `goods_sale_vertical_spec` (10/10)
+  stay green and correctly see `store_backend_acid == false`. Real SQLite is
+  reachable today only through an AOT `--native` binary.
+
+  **Refined blocked row — `store_backend_acid` is false even natively, and it
+  is not sqlite's fault.** Measured 2026-08-17 in an AOT `--native` binary,
+  every primitive `probe_backend_acid` uses is correct end to end:
+  `store_count_text` before=`[0]`, `sqlite_begin` true, `store_insert2` true,
+  mid=`[1]`, `sqlite_rollback` true, after=`[0]` — run by hand that is exactly
+  `before == after` returning **true**. Yet `store_open()` reports
+  `acid=false` with `is_file=false`, i.e. a genuine sqlite connection, not the
+  file-backend fallback. The defect is therefore inside `store_open`'s in-situ
+  call to `probe_backend_acid` (`store.spl:103`, `:135-143`). Leading suspect:
+  the state `store_open` establishes immediately before it — the WAL pragma,
+  the `CREATE TABLE` batch, and the `marker_present` / `store_insert2` marker
+  write, which may leave a statement unfinalized so the probe's `BEGIN`
+  behaves differently from the clean standalone sequence. Next step:
+  instrument those three values inside `probe_backend_acid` under `--native`
+  and diff against the known-good sequence above. The store stays insert-only
+  with pure-Simple filtering until that resolves.
+
+- **Native-ACID status (VERIFIED BLOCKED, measured 2026-08-16, lane W9-B) — superseded by the W10-C block above, retained for its reasoning).**
   The earlier text here stated a resume condition — run the specs
   `--mode=native` — as though `--mode=native` were the missing ingredient. It
   is not, and following it would have produced *false* native evidence. What

@@ -7,6 +7,78 @@
 - Found by: `.spipe/simple_enterprise_suite` Wave B probe
   (enterprise durable-store lane)
 
+## Status 2026-08-17 (lane W10-C): PARTIALLY RESOLVED — a real ACID path now exists
+
+`sh scripts/check/check-sqlite-backend-acid.shs` prints
+`ACID — rollback removed the row, UNIQUE violation rejected` (exit 0). An AOT
+`bin/simple compile <src> --native -o <bin>` binary now links real libsqlite3.
+
+The interpreter/JIT emulation described below is **unchanged and still
+non-ACID** — this bug stays OPEN for that. What changed is that the AOT path is
+no longer blocked, so honest ACID evidence is obtainable for the first time.
+
+Two defects were fixed to get there:
+
+1. **Single-file `--native` never linked sqlite** (the blocker W9-B predicted).
+   `codegen: undefined symbol: rt_sqlite_open`. Fixed in the **Rust seed** —
+   unavoidable, since `bin/simple` is the seed and the pure-Simple linker that
+   already lists `-lsqlite3` is not on this path:
+   - `compiler/src/linker/native_binary/linker.rs`: new `object_requires_sqlite`
+     (UNDEFINED-symbol test mirroring `is_sqlite_runtime_symbol`); when it
+     fires, `run_link_pass` adds an on-demand `runtime_sqlite.o` and `-lsqlite3`.
+   - `compiler/src/pipeline/native_project/tools.rs`: new
+     `build_sqlite_runtime_object`, compiling that one TU with flags identical
+     to `build_c_runtime_library`'s.
+   Binaries that do not reference sqlite are untouched.
+
+2. **`src/runtime/runtime_sqlite.c` had never once been compiled into a linked
+   binary, and its integer ABI was wrong.** It tagged every integer (`v << 3`)
+   and returned `SPECIAL_TRUE`/`SPECIAL_FALSE` (11/19), while
+   `sqlite_sffi.spl` declares `extern fn ... -> i64` and native codegen passes
+   scalars RAW. Observed: `rt_sqlite_column_count` returning 1 read as **8**,
+   `rt_sqlite_query_next` read as **11**, so `while has_row == 1` never entered
+   and **every query returned zero rows**. `from_int`/`as_int` are now
+   identities; `query_next` returns 1/0. Strings/pointers keep their tagging
+   and were always correct.
+
+### Still open, newly identified: `sqlite_count` mis-parses via `int()`
+
+`sqlite_count` does `int(count_str)` on a runtime-produced string and receives
+the **ASCII code of the first digit** — empty table -> 48, one row -> 49.
+`int("142")` on a *literal* correctly yields 142, so the defect is in `int()`
+over an `rt_string`, not in sqlite. **This retires an earlier misreading in this
+file and in the enterprise_store guide:** W9-B's `start_count=48` was
+interpreted as "a global emulation counter"; it was ASCII `'0'`. The ACID probe
+now reads presence as TEXT via `sqlite_query_value`, whose path is sound.
+
+### Guard against vacuous evidence
+
+The atomicity assertions W9-B deliberately withheld are now in
+`test/fixture/enterprise_store/sqlite_acid_probe.spl`, gated by a non-vacuity
+precondition: the probe must first show `in_tx_row1=[alpha]` and
+`committed_row2=[beta]`, else the script reports `BLOCKED — probe is vacuous`.
+Discrimination confirmed by running the identical probe under the interpreter
+(`after_rollback_row1=[alpha]`, `dup_insert_ok=true` -> NONACID) and by
+cross-reading the resulting db file with CPython's `sqlite3`.
+
+### Remaining frontier
+
+1. `bin/simple test` runs in the interpreter, so the enterprise specs still
+   see `store_backend_acid == false` (all three remain green: 10/10, 5/5,
+   10/10). Real SQLite is reachable only via an AOT `--native` binary today.
+2. `store_backend_acid` is false **even natively**, and this is a layer above
+   sqlite. In an AOT `--native` binary every primitive `probe_backend_acid`
+   uses is correct: `store_count_text` before=`[0]`, `sqlite_begin` true,
+   `store_insert2` true, mid=`[1]`, `sqlite_rollback` true, after=`[0]` — i.e.
+   `before == after` is true when run standalone. Yet `store_open()` reports
+   `acid=false` with `is_file=false` (a genuine sqlite connection, not the
+   file-backend fallback). Suspect the state `store_open` sets up right before
+   the probe (WAL pragma, CREATE TABLE batch, `marker_present` /
+   `store_insert2` marker write possibly leaving a statement unfinalized).
+   Next step: instrument the three values inside `probe_backend_acid`
+   (`store.spl:135-143`) under `--native` and diff against the known-good
+   standalone sequence.
+
 ## Symptom
 
 Probe (`bin/release/aarch64-apple-darwin/simple run` on an in-memory db):

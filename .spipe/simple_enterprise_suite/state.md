@@ -639,3 +639,48 @@ New acceptance criteria (extends AC-1..AC-12 above):
   doc/07_guide/app/enterprise/*.md and enterprise_store.md resolved against
   the sources) — ZERO drift, no edits needed; store_app.md already documents
   all 41 routes. find doc/06_spec -name '*_spec.spl' | wc -l = 0.
+- NATIVE-ACID UNBLOCKED IN SOURCE, NOT YET IN THE DEPLOYED BINARY (2026-08-17,
+  lane W10-C). The gate prints `ACID — rollback removed the row, UNIQUE
+  violation rejected` (exit 0) ONLY when driven by a LOCALLY REBUILT seed.
+  ORCHESTRATOR VERIFICATION in the main tree with the DEPLOYED bin/simple:
+  after clearing the stale archive (rm -rf build/simple-core) the gate reaches
+  exactly the error the seed edit fixes — `BLOCKED — AOT native build failed:
+  error: codegen: undefined symbol: rt_sqlite_open`. So: the source fix is
+  landed and correct, the capability requires a seed rebuild + redeploy
+  (scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy), and
+  until then this row stays BLOCKED for anyone using the deployed binary. Do
+  NOT cite the ACID verdict as current repo state without naming the rebuilt
+  binary that produced it.
+  RULE EXCEPTION, EXPLICITLY FLAGGED: this required editing the RUST SEED
+  (linker/native_binary/linker.rs gains object_requires_sqlite, an
+  UNDEFINED-symbol test mirroring is_sqlite_runtime_symbol, adding on-demand
+  runtime_sqlite.o + -lsqlite3; native_project/tools.rs gains
+  build_sqlite_runtime_object) and the C RUNTIME. Justification recorded:
+  bin/simple IS the seed, and the pure-Simple linker that already lists
+  -lsqlite3 is never reached by `compile --native`, so there is no
+  pure-Simple path to the capability. Non-sqlite binaries are unaffected.
+  FINDING: src/runtime/runtime_sqlite.c had NEVER ONCE been compiled into a
+  linked binary — it tagged integers (v<<3) and returned SPECIAL_TRUE/FALSE
+  while sqlite_sffi.spl declares `extern fn -> i64` and codegen passes scalars
+  raw. from_int/as_int are now identities; c-runtime-compiles PASS (120 files).
+  DISCRIMINATION PROVEN TWICE (the probe is not vacuous): the same probe under
+  the interpreter still shows after_rollback_row1=[alpha] and
+  dup_insert_ok=true, and CPython's sqlite3 independently confirms a real
+  sqlite_autoindex_t_1 with alpha absent and beta present. The script demands
+  in_tx_row1=[alpha]/committed_row2=[beta] first and otherwise reports
+  `BLOCKED — probe is vacuous`.
+  TRAP RECORDED: on the stale-archive failure the compiler SILENTLY FALLS BACK
+  TO THE INTERPRETER and still produces output — the lane mistook emulation
+  output for native results once. Clear build/simple-core before trusting any
+  native run.
+  RETRACTION: W9-B read `start_count=48` as evidence of a global emulation
+  counter. It was ASCII '0' — sqlite_count does int(count_str) on a RUNTIME
+  string and returns the ASCII of the first digit (0->48, 1->49), while
+  int("142") on a literal is correct. That reading is withdrawn; the
+  underlying non-ACID conclusion stands on the other evidence.
+  REFINED BLOCKED ROW (next frontier): store_backend_acid returns false EVEN
+  NATIVELY, one layer above sqlite. Standalone every primitive is right
+  (before=[0], begin, insert, mid=[1], rollback, after=[0]) yet store_open()
+  reports acid=false with is_file=false. Suspect the pragma/CREATE/marker-write
+  state established just before the in-situ probe. Next diagnostic spelled out
+  in the guide and bug doc.

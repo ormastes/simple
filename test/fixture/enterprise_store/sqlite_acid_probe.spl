@@ -1,18 +1,38 @@
 use std.nogc_sync_mut.io.sqlite_sffi
 
+# ACID probe for the AOT `--native` path -- the ONLY path that links real
+# libsqlite3 (see doc/07_guide/lib/database/enterprise_store.md § Native-ACID).
+#
+# Presence is probed with `sqlite_query_value`, a TEXT-valued read, not with
+# `sqlite_count`. `sqlite_count` is currently unusable as evidence: it does
+# `int(count_str)` on a runtime-produced string, and on the real backend that
+# yields the ASCII code of the first digit (0 -> 48, 1 -> 49) rather than the
+# value. Verified 2026-08-17: `int("142")` on a *literal* correctly gives 142,
+# so the defect is in int() over a runtime rt_string, not in sqlite. Filed in
+# doc/08_tracking/bug/interpreter_sqlite_externs_nonacid_emulation_2026-08-14.md.
+# The text read path is sound -- rt_sqlite_column_text returns correct values.
+
+fn row_name(conn: SqliteConnection, id: text) -> text:
+    sqlite_query_value(conn, "SELECT name FROM t WHERE id = {id}")
+
 fn main():
     var path = "/tmp/acidprobe/p1.db"
     var conn = sqlite_open(path)
     sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)")
     sqlite_execute(conn, "DELETE FROM t")
-    print("start_count=" + sqlite_count(conn, "t").to_text())
+    print("start_row1=[" + row_name(conn, "1") + "]")
+
+    # Atomicity: a rolled-back INSERT must leave no row behind.
     sqlite_begin(conn)
     sqlite_execute(conn, "INSERT INTO t (id, name) VALUES (1, 'alpha')")
-    print("in_tx_count=" + sqlite_count(conn, "t").to_text())
+    print("in_tx_row1=[" + row_name(conn, "1") + "]")
     sqlite_rollback(conn)
-    print("after_rollback_count=" + sqlite_count(conn, "t").to_text())
+    print("after_rollback_row1=[" + row_name(conn, "1") + "]")
+
+    # Consistency: the UNIQUE constraint must reject the duplicate name.
     sqlite_execute(conn, "INSERT INTO t (id, name) VALUES (2, 'beta')")
     var dup_ok = sqlite_execute(conn, "INSERT INTO t (id, name) VALUES (3, 'beta')")
     print("dup_insert_ok=" + dup_ok.to_text())
-    print("final_count=" + sqlite_count(conn, "t").to_text())
+    print("committed_row2=[" + row_name(conn, "2") + "]")
+    print("rejected_row3=[" + row_name(conn, "3") + "]")
     sqlite_close(conn)
