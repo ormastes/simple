@@ -1,7 +1,7 @@
 # =====================================================================
 # DELIBERATE FIXTURE — NOT A PRODUCT DEFECT.
 # Lane: unstable_test_mode (lane C, test/fixtures/unstable_mode/**).
-# This spec CRASHES ON PURPOSE (stack overflow -> SIGSEGV) so that the
+# This spec CRASHES ON PURPOSE (kills its own PID by signal) so that the
 # test runner's CRASHED outcome class has something honest to detect.
 # Do not "fix" it. Deleting it removes the only proof unstable mode works.
 #
@@ -18,10 +18,18 @@
 use std.spec.*
 use std.fs.*
 
-fn blow_the_stack(n: i64) -> i64:
-    1 + blow_the_stack(n + 1)
+# Kill this very process by signal. Two rejected alternatives, recorded so
+# nobody re-tries them:
+#   - unbounded recursion: the tree-walk interpreter guards it at depth 1000
+#     and reports an ordinary assertion failure ("stack overflow: recursion
+#     depth 1000 exceeded") — exactly the outcome this fixture must NOT give;
+#   - `extern fn abort()`: rejected with `semantic: unknown extern function:
+#     abort` — the interpreter only resolves the runtime's `rt_*` exports.
+extern fn rt_getpid() -> i64
+extern fn rt_process_kill(pid: i64) -> bool
 
 describe "unstable mode crash fixture":
-    it "writes a sentinel and then segfaults deliberately":
-        file_write_text("build/unstable_mode_crash_sentinel.txt", "deliberate crash fixture: about to segfault")
-        expect(blow_the_stack(0)).to_equal(0)
+    it "writes a sentinel and then kills itself by signal":
+        file_write_text("build/unstable_mode_crash_sentinel.txt", "deliberate crash fixture: about to die by signal")
+        rt_process_kill(rt_getpid())
+        expect(1).to_equal(1)
