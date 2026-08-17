@@ -295,3 +295,106 @@ with `src/lib/m.spl` containing any bare `asm """..."""` block that mentions
 `{name}`.
 
 Full run: `/home/ormastes/dev/simple-s3red/run_stage3.shs <worktree> <tag>`.
+
+---
+
+## Re-verification 2026-08-17 (W4 bug-fixing wave) — root cause C is FIXED in the pure-Simple compiler and STRUCTURALLY IMPOSSIBLE in the Rust seed
+
+Root cause C ("`out(reg)` bindings compile and are then SILENTLY DROPPED") has
+two independent implementations behind it, and they are in opposite states.
+
+### Pure-Simple compiler (the self-hosting path): FIXED
+
+Both halves of the writeback now exist in source:
+
+- `src/compiler/50.mir/_MirLowering/function_lowering.spl:1084-1093` emits an
+  explicit `MirInstKind.Copy(output_destinations[i], output_results[i])` after
+  the `InlineAsm` instruction, with the comment "Inline asm defines fresh SSA
+  result locals. Explicit copies perform the source-level output writeback".
+  Landed by `8eef2f17338d` (2026-08-14) — **seven days after this doc was
+  filed**, which is why the doc still lists C as open.
+- `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:548-624`
+  (`translate_inline_asm`) builds the full constraint string from `outputs` /
+  `inputs` / `clobbers` / `clobber_abis`, handles `InOut` as an output plus a
+  numeric tied input, captures a single output directly into the operand's SSA
+  name and multiple outputs via a `{ i64, i64, ... }` struct return plus
+  per-index `extractvalue`, and rewrites the template through
+  `llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)`.
+
+Nothing on this path discards the operand list.
+
+### Rust seed: cannot bind operands at all, by construction
+
+`src/compiler_rust/compiler/src/mir/inst_enum.rs:100`:
+
+```rust
+InlineAsm { instructions: Vec<String>, volatile: bool },
+```
+
+The seed's MIR `InlineAsm` variant **has no operand fields** — no `inputs`, no
+`outputs`, no `clobbers`. The operand list is therefore discarded at HIR→MIR
+lowering, before codegen is reached. Consistently, the seed's LLVM emitter
+matches with `..` and hard-codes an empty constraint string and a void return
+(`src/compiler_rust/compiler/src/codegen/llvm/functions.rs:983-995`):
+
+```rust
+MirInst::InlineAsm { instructions, .. } => {
+    let fn_type = self.context_ref().void_type().fn_type(&[], false);
+    let asm = self.context_ref().create_inline_asm(
+        fn_type, instructions.join("\n"), String::new(), /* constraints */
+        true, false, Some(InlineAsmDialect::ATT), false);
+    builder.build_indirect_call(fn_type, asm, &[], "")
+```
+
+So on the seed, `out(reg)` is not "dropped by a bug" — there is nowhere for it to
+be carried. Any measurement of root cause C taken through `bin/simple` (which is
+the seed, and says so in its own `--version` banner) is measuring the seed's
+absent feature, not the pure-Simple compiler's behaviour. This distinction is not
+made anywhere above and is the reason the two roots must be tracked separately.
+
+**Ownership:** repairing the seed requires adding operand fields to
+`src/compiler_rust/compiler/src/mir/inst_enum.rs` plus its `inst_effects.rs` /
+`inst_helpers.rs` match arms and the HIR→MIR asm lowering. Those files are
+outside this wave's `codegen/llvm/**` + `pipeline/native_project/**` scope, so
+the seed half is left filed rather than half-changed.
+
+### New, separate, reproducible defect found while probing: duplicate SSA name in the emitted `.ll`
+
+The bound form does not reach a "silent zero" through the seed today — it fails
+`llc` outright. Probe (`asm_probe.spl`, exactly this doc's two fixtures):
+
+```
+fn asm_const() -> i64:
+    var dst: i64 = 0
+    asm volatile("movq $$42, $0", dst = out(reg) dst)
+    dst
+
+fn asm_copy(src: i64) -> i64:
+    var dst: i64 = 0
+    asm volatile("movq $1, $0", dst = out(reg) dst, src = in(reg) src)
+    dst
+```
+
+```
+$ bin/simple native-build asm_probe.spl -o asm_probe      # bin/simple = Rust seed
+[NATIVE] OK=0 ERROR=1
+  AOT compile error: Compile error in backend (llvm): llc failed (exit 1):
+  /usr/bin/llc-20: /mnt/data/tmp/simple_llvm_1229394.ll:68:3:
+      error: multiple definition of local value named 'l2'
+rc=1   (no binary produced)
+```
+
+This is fail-closed, which is better than the silent zero the doc describes, but
+it is a distinct defect from C: an SSA local is emitted twice in the same
+function. It is filed here rather than closed because the emitting site was not
+isolated (the temporary `.ll` is unlinked on failure and no keep-flag was found),
+and because the same probe is the natural regression fixture once the seed's
+operand plumbing exists.
+
+### Status of this row
+
+Root cause A (bare-template placeholders) and B (`@cfg("target_arch")` inert)
+are untouched by the above and remain open as filed. Root cause C is **retired
+for the pure-Simple compiler** and **re-scoped to a seed MIR gap** (cross-owner).
+The `timer.spl` / `topology.spl` conversion is still correctly blocked: it is the
+seed that builds the SimpleOS lanes, and the seed still cannot bind operands.
