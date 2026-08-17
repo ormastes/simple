@@ -1,0 +1,106 @@
+# Reproducing + detection spec for the missing P-256 field layer.
+#
+# REPRODUCER: `src/os/crypto/p256.spl:21` and `src/os/crypto/ecdh_p256.spl:46`
+# both `use std.common.math.field.fe_p256`, a module that existed nowhere in
+# the tree, so every P-256 / ECDH entry point was unloadable behind a public
+# API that advertised it. Merely importing this module was the reproducer.
+#
+# DETECTION (generalizes past the reproducer): the field layer is the part
+# whose *correctness* the point layer cannot check, so this file pins the
+# arithmetic against independently-known values — the curve's own generator
+# coordinates satisfying the curve equation, and inverse/round-trip
+# identities — rather than only proving the module loads. A stub that made
+# the import succeed passes the import check and fails everything below it.
+
+use std.common.math.field.fe_p256.{
+    FeP256,
+    fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_inv,
+    fe_from_bytes, fe_to_bytes, fe_eq, fe_cond_select, fe_neg
+}
+
+val GX_BYTES: [u8] =
+    [
+        0x6Bu8, 0x17u8, 0xD1u8, 0xF2u8, 0xE1u8, 0x2Cu8, 0x42u8, 0x47u8,
+        0xF8u8, 0xBCu8, 0xE6u8, 0xE5u8, 0x63u8, 0xA4u8, 0x40u8, 0xF2u8,
+        0x77u8, 0x03u8, 0x7Du8, 0x81u8, 0x2Du8, 0xEBu8, 0x33u8, 0xA0u8,
+        0xF4u8, 0xA1u8, 0x39u8, 0x45u8, 0xD8u8, 0x98u8, 0xC2u8, 0x96u8
+    ]
+
+val GY_BYTES: [u8] =
+    [
+        0x4Fu8, 0xE3u8, 0x42u8, 0xE2u8, 0xFEu8, 0x1Au8, 0x7Fu8, 0x9Bu8,
+        0x8Eu8, 0xE7u8, 0xEBu8, 0x4Au8, 0x7Cu8, 0x0Fu8, 0x9Eu8, 0x16u8,
+        0x2Bu8, 0xCEu8, 0x33u8, 0x57u8, 0x6Bu8, 0x31u8, 0x5Eu8, 0xCEu8,
+        0xCBu8, 0xB6u8, 0x40u8, 0x68u8, 0x37u8, 0xBFu8, 0x51u8, 0xF5u8
+    ]
+
+# b = 5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+val B_BYTES: [u8] =
+    [
+        0x5Au8, 0xC6u8, 0x35u8, 0xD8u8, 0xAAu8, 0x3Au8, 0x93u8, 0xE7u8,
+        0xB3u8, 0xEBu8, 0xBDu8, 0x55u8, 0x76u8, 0x98u8, 0x86u8, 0xBCu8,
+        0x65u8, 0x1Du8, 0x06u8, 0xB0u8, 0xCCu8, 0x53u8, 0xB0u8, 0xF6u8,
+        0x3Bu8, 0xCEu8, 0x3Cu8, 0x3Eu8, 0x27u8, 0xD2u8, 0x60u8, 0x4Bu8
+    ]
+
+fn _small(n: u64) -> FeP256:
+    FeP256(l0: n, l1: 0u64, l2: 0u64, l3: 0u64)
+
+describe("fe_p256 field arithmetic (P-256)"):
+
+    it("the module named by p256.spl and ecdh_p256.spl actually loads"):
+        # The original P1: this import resolved to nothing.
+        expect(fe_eq(fe_one(), fe_one())).to_be(true)
+        expect(fe_eq(fe_zero(), fe_one())).to_be(false)
+
+    it("round-trips a 32-byte big-endian value through from/to bytes"):
+        val gx = fe_from_bytes(GX_BYTES)
+        val out = fe_to_bytes(gx)
+        expect(out.len()).to_equal(32u64)
+        var i: u64 = 0
+        var same = true
+        while i < 32:
+            if out[i] != GX_BYTES[i]:
+                same = false
+            i = i + 1
+        expect(same).to_be(true)
+
+    it("add and sub are inverse, and a - a is zero"):
+        val gx = fe_from_bytes(GX_BYTES)
+        val gy = fe_from_bytes(GY_BYTES)
+        expect(fe_eq(fe_sub(fe_add(gx, gy), gy), gx)).to_be(true)
+        expect(fe_eq(fe_sub(gx, gx), fe_zero())).to_be(true)
+        expect(fe_eq(fe_add(gx, fe_sub(fe_zero(), gx)), fe_zero())).to_be(true)
+
+    it("small-value multiplication agrees with plain integers"):
+        # 7 * 9 = 63, well below p so no reduction is involved.
+        expect(fe_eq(fe_mul(_small(7u64), _small(9u64)), _small(63u64))).to_be(true)
+        expect(fe_eq(fe_sq(_small(65535u64)), _small(4294836225u64))).to_be(true)
+        expect(fe_eq(fe_mul(_small(1u64), _small(0u64)), fe_zero())).to_be(true)
+
+    it("multiplication really reduces: (p-1)^2 == 1 mod p"):
+        val p_minus_1 = fe_sub(fe_zero(), fe_one())
+        expect(fe_eq(fe_sq(p_minus_1), fe_one())).to_be(true)
+
+    it("the generator satisfies the curve equation y^2 = x^3 - 3x + b"):
+        # This is the strongest available check on fe_mul's reduction: it is
+        # an identity over the full 256-bit range that only holds if the
+        # Solinas reduction is exactly right.
+        val x = fe_from_bytes(GX_BYTES)
+        val y = fe_from_bytes(GY_BYTES)
+        val b = fe_from_bytes(B_BYTES)
+        val lhs = fe_sq(y)
+        val three_x = fe_add(fe_add(x, x), x)
+        val rhs = fe_add(fe_sub(fe_mul(fe_sq(x), x), three_x), b)
+        expect(fe_eq(lhs, rhs)).to_be(true)
+
+    it("fe_inv returns a true modular inverse"):
+        val x = fe_from_bytes(GX_BYTES)
+        expect(fe_eq(fe_mul(x, fe_inv(x)), fe_one())).to_be(true)
+        expect(fe_eq(fe_mul(_small(2u64), fe_inv(_small(2u64))), fe_one())).to_be(true)
+
+    it("fe_cond_select picks by the mask bit without branching on values"):
+        val a = _small(11u64)
+        val b = _small(22u64)
+        expect(fe_eq(fe_cond_select(a, b, 0u64), a)).to_be(true)
+        expect(fe_eq(fe_cond_select(a, b, 1u64), b)).to_be(true)
