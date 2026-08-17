@@ -19,3 +19,31 @@ declarations.
 ## Unblock condition
 Decision on (a) vs (b); if (a), one doc line closes this. Workaround: any other
 name.
+
+---
+
+## RESOLVED 2026-08-17 — option (a) taken, documented
+
+Decision: `pub` stays a reserved word (it is a visibility modifier token in the
+lexer keyword table at `src/compiler_rust/parser/src/lexer/identifiers.rs:172`,
+`"pub" => TokenKind::Pub`); the gap was purely documentation.
+
+Fix: `doc/07_guide/quick_reference/syntax_quick_reference.md` now carries a
+**Reserved Words** section listing all 124 lexer keywords verbatim, extracted
+mechanically from that table, plus an explicit call-out of the non-obvious
+entries (`pub`, `move`, `examples`, `result`, `style`, `grid`, `city`, `music`,
+`common`, `context`, `schema`, `slice`, `vec`, `outline`, `handle_pool`,
+`feature`, `given`, `to`, `by`, `on`, `in`, `is`, `new`, `gen`) and the
+"error surfaces at the use site, not the declaration" explanation that made
+this read as a parser bug.
+
+Also recorded there: the `See also` link to
+`doc/06_spec/app/compiler/modules/grammar/keyword_reference.md` was dangling —
+that generated file does not exist in the tree — so the new section is the
+authoritative list until the generator is re-run.
+
+This note also documents the same-family records
+`move_identifier_rejected_as_expression_2026-08-15.md` and
+`examples_identifier_rejected_in_named_argument_position_2026-08-10.md`; those
+remain OPEN as *behaviour* requests (make the tokens contextual), but the
+"undocumented" half of all three is now closed.
