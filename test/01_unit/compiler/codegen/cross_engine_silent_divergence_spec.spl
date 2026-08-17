@@ -1,0 +1,88 @@
+# Cross-engine SILENT divergence — REPRODUCING spec (3 live rows)
+#
+# Each example below is RED today. Each pins the engine that is actually wrong,
+# which for two of the three rows is NOT the engine the bug doc blames.
+#
+#   jit_if_nil_takes_true_branch_2026-08-04.md
+#     JIT wrong, interpreter correct. Doc attribution is right.
+#   match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md
+#     INTERPRETER wrong, JIT correct. Doc blames MIR lowering — INVERTED.
+#   mutate_through_index_loses_write_2026-07-31.md
+#     INTERPRETER wrong, JIT correct. Doc says "JIT/native unverified" — now
+#     verified, and the JIT is the arm that behaves.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER. An in-process example therefore cannot go red on a JIT defect at
+# all, and cannot distinguish the two engines for the interpreter defects
+# either. The oracle is the sibling run-path probe
+# `probe_cross_engine_silent_divergence.spl`, executed as a subprocess under
+# BOTH engines; every check inside it compares against an absolute literal, not
+# against the other engine.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_cross_engine_silent_divergence.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "cross-engine silent divergence":
+    it "runs the probe at all — guards against a vacuous green":
+        step("A probe that never executed would let every other example pass by absence")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("mutate_through_nested_array")
+        expect(interp).to_contain("CROSS_ENGINE_DIVERGENCE PROBE:")
+
+        step("Control arm: array-of-array indexing already yields a mutable reference on both engines")
+        expect(interp).to_contain("PASS mutate_through_nested_array")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS mutate_through_nested_array")
+
+    it "treats a nil condition as FALSY under the JIT (jit_if_nil_takes_true_branch)":
+        step("RT_NIL is the non-zero word 3, so branching on the raw value is unconditionally true")
+        val jit = run_probe_in_mode("jit")
+
+        step("A bare `if nil:` must take the false branch")
+        expect(jit).to_contain("PASS cond_nil_literal_bare")
+
+        step("nil passed into a `bool` parameter must also read as false")
+        expect(jit).to_contain("PASS cond_nil_through_bool_param")
+
+    it "treats a nil condition as FALSY under the interpreter (control arm — already correct)":
+        step("The interpreter was correct in this row; a red here means the probe regressed, not the engine")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS cond_nil_literal_bare")
+        expect(interp).to_contain("PASS cond_nil_through_bool_param")
+
+    it "selects the variant arm when matching an Option<enum> under the INTERPRETER":
+        step("RE-ATTRIBUTION: the interpreter takes the wildcard here; the JIT is correct. This is NOT a 50.mir defect.")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS match_option_enum_variant")
+
+    it "selects the variant arm when matching an Option<enum> under the JIT (control arm)":
+        step("The JIT already reaches Ev.Action — pinned so a fix to the interpreter cannot regress it")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS match_option_enum_variant")
+
+    it "persists a mutation reached through an index under the INTERPRETER":
+        step("RE-ATTRIBUTION: `c[k].push(x)` and `a[0].1.push(x)` lose the write on the interpreter; the JIT keeps it")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Dict value: c[\"k\"].push(2) must leave len 2, not 1")
+        expect(interp).to_contain("PASS mutate_through_dict_value")
+
+        step("Tuple field: a[0].1.push(2) must leave len 2, not 1")
+        expect(interp).to_contain("PASS mutate_through_tuple_field")
+
+    it "persists a mutation reached through an index under the JIT (control arm)":
+        step("The JIT already persists both shapes — pinned so an interpreter fix cannot regress it")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS mutate_through_dict_value")
+        expect(jit).to_contain("PASS mutate_through_tuple_field")

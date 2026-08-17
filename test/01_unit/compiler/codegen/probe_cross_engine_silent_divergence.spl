@@ -1,0 +1,98 @@
+# Run-path probe: cross-engine SILENT divergence (JIT vs tree-walk interpreter).
+#
+# Executed as a SUBPROCESS by cross_engine_silent_divergence_spec.spl under both
+# SIMPLE_EXECUTION_MODE=interpreter and =jit. A spec body runs interpreted, so a
+# JIT-only defect can never go red from a spec body alone.
+#
+# Every oracle below is an ABSOLUTE literal this probe did not itself compute.
+# It is deliberately NOT "the two engines agree" — that would pass while both
+# engines are wrong in the same way.
+#
+# Rows covered (doc/08_tracking/bug/):
+#   jit_if_nil_takes_true_branch_2026-08-04.md
+#   match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md
+#   mutate_through_index_loses_write_2026-07-31.md
+
+enum Ev:
+    Action(name: text)
+    Other
+
+fn mk_ev() -> Ev?:
+    return Ev.Action(name: "go")
+
+fn takes_bool(b: bool) -> text:
+    if b:
+        return "TRUE"
+    return "FALSE"
+
+fn main() -> i64:
+    var fails = 0
+
+    # --- nil in CONDITION position must be FALSY on every engine.
+    # RT_NIL is the non-zero word 3, so branching on it raw is unconditionally
+    # true. The interpreter is correct; the JIT is the defect arm.
+    val r_nil_param = takes_bool(nil)
+    if r_nil_param == "FALSE":
+        print("PASS cond_nil_through_bool_param")
+    else:
+        print("FAIL cond_nil_through_bool_param expected=FALSE got={r_nil_param}")
+        fails = fails + 1
+
+    var bare = "FALSY"
+    if nil:
+        bare = "TRUTHY"
+    if bare == "FALSY":
+        print("PASS cond_nil_literal_bare")
+    else:
+        print("FAIL cond_nil_literal_bare expected=FALSY got={bare}")
+        fails = fails + 1
+
+    # --- match on an Option<enum> must reach the VARIANT arm, not the wildcard.
+    var arm = "NONE"
+    match mk_ev():
+        Ev.Action(n):
+            arm = "ACTION"
+        _:
+            arm = "WILDCARD"
+    if arm == "ACTION":
+        print("PASS match_option_enum_variant")
+    else:
+        print("FAIL match_option_enum_variant expected=ACTION got={arm}")
+        fails = fails + 1
+
+    # --- a mutation reached THROUGH an index must not be discarded.
+    var c: Dict<text, [i64]> = {}
+    c["k"] = [1]
+    c["k"].push(2)
+    val dict_len = c["k"].len()
+    if dict_len == 2:
+        print("PASS mutate_through_dict_value")
+    else:
+        print("FAIL mutate_through_dict_value expected=2 got={dict_len}")
+        fails = fails + 1
+
+    var a: [(i64, [i64])] = [(0, [1])]
+    a[0].1.push(2)
+    val tup_len = a[0].1.len()
+    if tup_len == 2:
+        print("PASS mutate_through_tuple_field")
+    else:
+        print("FAIL mutate_through_tuple_field expected=2 got={tup_len}")
+        fails = fails + 1
+
+    # Control arm: nested array-of-array indexing already returns a mutable
+    # reference on both engines. A red here means the probe itself is broken.
+    var b: [[i64]] = [[1]]
+    b[0].push(2)
+    val arr_len = b[0].len()
+    if arr_len == 2:
+        print("PASS mutate_through_nested_array")
+    else:
+        print("FAIL mutate_through_nested_array expected=2 got={arr_len}")
+        fails = fails + 1
+
+    if fails == 0:
+        print("CROSS_ENGINE_DIVERGENCE PROBE: ALL PASS")
+    else:
+        print("CROSS_ENGINE_DIVERGENCE PROBE: {fails} FAIL")
+    return 0

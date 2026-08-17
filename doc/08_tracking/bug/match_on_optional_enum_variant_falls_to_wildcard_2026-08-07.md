@@ -1,5 +1,36 @@
 # `match` on an `Option<enum>` value falls through to the wildcard arm
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
+## RE-ATTRIBUTION (2026-08-17) — this is an INTERPRETER defect, not a MIR one
+
+This row was triaged into the `src/compiler/50.mir/**` lane against
+`_MirLoweringExpr/switch_operators_calls.spl`. That attribution is **wrong** and
+sent the row to the wrong owner. Measured today by running the same program
+under both engines (`bin/simple` is the Rust seed, mtime 2026-08-16 22:59):
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run probe.spl   ->  ARM-ACTION     (correct)
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run probe.spl   ->  ARM-WILDCARD   (wrong)
+```
+
+on `enum Ev: Action(name: text) / Other`, `fn mk() -> Ev?` returning
+`Ev.Action(name: "go")`, matched with an `Ev.Action(n)` arm and a `_` arm.
+
+So the JIT — the engine 50.mir lowering feeds — selects the variant arm
+correctly, and the **tree-walk interpreter** is the arm that falls to the
+wildcard. The defect lives in the interpreter's match/pattern path, not in MIR
+lowering. Fixing 50.mir would change nothing here.
+
+Reproducing spec (RED today):
+`test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl`
+with run-path probe `probe_cross_engine_silent_divergence.spl`.
+Note the spec asserts the INTERPRETER selects the variant arm, and pins the JIT
+as a control arm so a fix cannot regress it.
+
+---
+
 **Found:** 2026-08-07, while implementing Simple Lab UI (Stream L, task L2 of
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`).
 **Binary:** `bin/simple` (currently the Rust-built bootstrap seed at

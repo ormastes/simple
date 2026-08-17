@@ -1,7 +1,41 @@
 # JIT: `if nil:` takes the TRUE branch — a nil condition is truthy under Cranelift, falsy under the interpreter (2026-08-04)
 
-**Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-09, still reproduces)
+**Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-17, still reproduces, and
+the class is WIDER than this title says)
 **Found:** 2026-08-04
+
+## Re-verification + WIDENED SCOPE (2026-08-17)
+
+Still reproduces exactly as filed. But sweeping the defect *class* rather than
+the single `if nil:` literal found two things this row does not record, both
+measured under `bin/simple` (Rust seed, mtime 2026-08-16 22:59):
+
+**1. Under the JIT it is EVERY condition form, not just `if nil:`.** All seven
+forms probed take the wrong branch: bare `if nil:`, `not nil` (inverts), 
+`nil and true`, `true and nil`, `nil or false`, a call returning a nil `text?`,
+and `while nil:` (which spins until its break guard, 4 iterations). A fix
+validated on the bare literal alone would leave six of the seven live.
+
+**2. It is NOT JIT-only.** A **call** returning a nil `text?` used directly in
+condition position reads TRUTHY on the **interpreter** as well:
+
+```
+FAIL condA_call_returning_nil expected=FALSY got=TRUTHY   # interpreter
+```
+
+The claim above that "the interpreter is still correct" holds only for a bare
+`nil` literal and for the operator forms. So the interpreter needs a fix too.
+
+**Why the existing 50.mir guard does not cover this.**
+`src/compiler/50.mir/mir_lowering_stmts.spl:1886` rewrites a condition to
+`rt_is_some` only when `find_local_hir_type(cond_local.id)` reports
+`HirTypeKind.Optional(_)`. A bare `nil` literal and a call result are not
+locals carrying an Optional annotation, so both walk past the guard and branch
+on the raw non-zero `RT_NIL` (3). That predicate is the blind spot.
+
+Specs (RED today):
+- reproducing: `test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl`
+- prevention (all seven forms): `test/01_unit/compiler/codegen/cross_engine_divergence_prevention_spec.spl`
 
 ## Re-verification (2026-08-09)
 

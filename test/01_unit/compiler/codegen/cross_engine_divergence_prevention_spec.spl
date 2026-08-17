@@ -1,0 +1,114 @@
+# SIMILAR-BUG PREVENTION spec for two silent-divergence defect CLASSES.
+#
+# This generalizes past the three filed reproducers, and doing so already paid:
+# running the probe surfaced three facts none of the filed rows record.
+#
+#   1. The nil-condition defect is NOT JIT-only. A CALL returning a nil `text?`
+#      in condition position reads TRUTHY on the INTERPRETER as well
+#      (`condA_call_returning_nil`). The filed row
+#      jit_if_nil_takes_true_branch_2026-08-04.md says the interpreter is
+#      correct; that holds only for a bare `nil` literal.
+#   2. Under the JIT the defect covers EVERY condition form, not just `if nil:`
+#      — `not nil` inverts, `nil and true` / `true and nil` / `nil or false` all
+#      take the true branch, and `while nil:` spins until its break guard.
+#      A fix validated on `if nil:` alone would leave six live.
+#   3. The filed rule for the index-mutation row ("indexing a dict yields a
+#      copy") is too broad. `Dict<i64, [text]>` PERSISTS the push while
+#      `Dict<text, [i64]>` loses it, and both struct-field shapes
+#      (`[Bag]`, `Dict<text, Bag>`) persist. The discriminator is narrower than
+#      the container kind, and the matrix here is what pins it.
+#
+# WHY A SUBPROCESS. Spec bodies run on the tree-walk INTERPRETER, so a JIT
+# defect cannot go red in-process. The oracle is the run-path probe
+# `probe_cross_engine_divergence_prevention.spl`, run under both engines, every
+# check against an absolute literal.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_cross_engine_divergence_prevention.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode +
+        " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "nil-valued conditions that are not statically Optional":
+    it "executed the probe — guards against a vacuous green":
+        step("An unreachable or mis-pathed probe would let every example below pass by absence")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("DIVERGENCE_PREVENTION PROBE:")
+        expect(interp).to_contain("condA_bare_nil_literal")
+        expect(interp).to_contain("mutB_dict_explicit_writeback")
+
+    it "branches falsy for every condition form under the JIT":
+        step("The 50.mir:1886 guard only rewrites conditions whose local has an Optional HIR type; these forms all bypass it")
+        val jit = run_probe_in_mode("jit")
+
+        step("Bare literal — the one form the filed reproducer covers")
+        expect(jit).to_contain("PASS condA_bare_nil_literal")
+
+        step("Negation must invert a falsy nil, not a truthy one")
+        expect(jit).to_contain("PASS condA_not_nil")
+
+        step("Short-circuit operands funnel back through the same condition path")
+        expect(jit).to_contain("PASS condA_nil_and_true")
+        expect(jit).to_contain("PASS condA_true_and_nil")
+        expect(jit).to_contain("PASS condA_nil_or_false")
+
+        step("A call result is nil at runtime but is not a local carrying an Optional annotation")
+        expect(jit).to_contain("PASS condA_call_returning_nil")
+
+        step("`while` shares lower_cond_expr with `if` — a truthy nil spins the loop")
+        expect(jit).to_contain("PASS condA_while_nil")
+
+    it "branches falsy for every condition form under the interpreter":
+        step("The interpreter is correct for the bare literal and the operator forms")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS condA_bare_nil_literal")
+        expect(interp).to_contain("PASS condA_not_nil")
+        expect(interp).to_contain("PASS condA_nil_and_true")
+        expect(interp).to_contain("PASS condA_true_and_nil")
+        expect(interp).to_contain("PASS condA_nil_or_false")
+        expect(interp).to_contain("PASS condA_while_nil")
+
+        step("NEW — not in any filed row: a call returning nil reads TRUTHY here too, so this class is not JIT-only")
+        expect(interp).to_contain("PASS condA_call_returning_nil")
+
+describe "mutation reached through an index":
+    it "persists the write for every container/element combination under the interpreter":
+        val interp = run_probe_in_mode("interpreter")
+
+        step("Nested arrays — already correct, pinned against regression by a fix elsewhere")
+        expect(interp).to_contain("PASS mutB_array_of_array")
+        expect(interp).to_contain("PASS mutB_array_of_array_of_array")
+
+        step("Dict with an array value — text key loses the write, int key does not")
+        expect(interp).to_contain("PASS mutB_dict_text_key_array_value")
+        expect(interp).to_contain("PASS mutB_dict_int_key_text_array_value")
+
+        step("Tuple field reached through an array index")
+        expect(interp).to_contain("PASS mutB_array_of_tuple_field")
+
+        step("Struct fields — both persist today; they bound the defect from the passing side")
+        expect(interp).to_contain("PASS mutB_array_of_struct_field")
+        expect(interp).to_contain("PASS mutB_dict_of_struct_field")
+
+        step("The documented write-back workaround must keep working — it is the only escape hatch for this class")
+        expect(interp).to_contain("PASS mutB_dict_explicit_writeback")
+
+    it "persists the write for every container/element combination under the JIT":
+        step("The JIT passes the whole matrix today — pinned so an interpreter fix cannot regress it")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PASS mutB_array_of_array")
+        expect(jit).to_contain("PASS mutB_dict_text_key_array_value")
+        expect(jit).to_contain("PASS mutB_dict_int_key_text_array_value")
+        expect(jit).to_contain("PASS mutB_array_of_tuple_field")
+        expect(jit).to_contain("PASS mutB_array_of_struct_field")
+        expect(jit).to_contain("PASS mutB_dict_of_struct_field")
+        expect(jit).to_contain("PASS mutB_array_of_array_of_array")
+        expect(jit).to_contain("PASS mutB_dict_explicit_writeback")

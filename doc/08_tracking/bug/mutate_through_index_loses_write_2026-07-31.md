@@ -1,8 +1,46 @@
 # `container[key].push(x)` silently loses the write for dict values and tuple/struct fields
 
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
+
 **Date:** 2026-07-31
 **Engine tested:** tree-walk interpreter (`bin/simple test`) — JIT/native unverified
 **Severity:** silent wrong results, no error or warning
+
+## RE-ATTRIBUTION + NARROWED RULE (2026-08-17)
+
+Two corrections, both measured today under `bin/simple` (Rust seed, mtime
+2026-08-16 22:59) by running one program under both engines.
+
+**1. The JIT is now verified, and it is CORRECT.** The "JIT/native unverified"
+note above is resolved: every shape in the table below persists the write under
+`SIMPLE_EXECUTION_MODE=jit` and only the tree-walk **interpreter** loses it. So
+this is an interpreter defect. It was triaged into the `src/compiler/50.mir/**`
+lane against `_MirLoweringExpr/method_calls_literals.spl`; that is the wrong
+owner — MIR lowering feeds the engine that already behaves.
+
+**2. "Indexing a dict yields a copy" is too broad.** Sweeping the class as a
+container x element MATRIX (rather than the four filed anecdotes) shows the
+discriminator is narrower than the container kind. Interpreter results:
+
+| shape | result |
+|---|---|
+| `Dict<text, [i64]>` — `c["k"].push(x)` | **write lost** |
+| `Dict<i64, [text]>` — `c[7].push(x)` | persists |
+| `[(i64, [i64])]` — `a[0].1.push(x)` | **write lost** |
+| `[Bag]` where `Bag.items: [i64]` — `b[0].items.push(x)` | persists |
+| `Dict<text, Bag>` — `d["g"].items.push(x)` | persists |
+| `[[i64]]` / `[[[i64]]]` | persists |
+| explicit write-back `d[k] = d[k].push(x)` | persists |
+
+So the filed claim that **struct** fields lose the write does not reproduce —
+both struct-field shapes persist — and dict behaviour depends on the key/element
+types, not on it being a dict. Whoever fixes this should treat the matrix, not
+the container kind, as the specification.
+
+Specs (RED today):
+- reproducing: `test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl`
+- prevention (the matrix above): `test/01_unit/compiler/codegen/cross_engine_divergence_prevention_spec.spl`
 
 ## The rule
 
