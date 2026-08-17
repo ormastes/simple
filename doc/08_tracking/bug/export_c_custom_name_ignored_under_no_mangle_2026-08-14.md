@@ -1,6 +1,37 @@
 # `@export("C", name: ...)` ignored under `--no-mangle`
 
-Status: provider workaround applied; compiler export-name fix remains open.
+Status: **RESOLVED 2026-08-17** (compiler export-name fix landed; the earlier
+provider workaround is no longer load-bearing).
+
+## RESOLVED — root cause and fix
+
+Root cause: the pure-Simple LLVM backend chose symbol names in
+`MirToLlvm.llvm_function_symbol_name`
+(`src/compiler/70.backend/backend/_MirToLlvm/class_def.spl`), which handled the
+`main` entry contract, `no_mangle`, and runtime-owned-name collisions — but
+**never consulted `MirFunction.export_name`**. The `name:` argument was parsed
+(`00.common/_Attributes/decl_attrs.spl:parse_export_attrs`), lowered onto HIR
+and carried all the way through MIR, and then simply never read on the LLVM
+path; only the C backend's `derive_export_name` used it. Under `--no-mangle`
+the function returned the bare MIR name, so `nm -D` showed
+`pure_simple_provider_query_v1` instead of the requested
+`simple_provider_query_v1`.
+
+Fix: `translate_module` (`_MirToLlvm/core_codegen.spl`) records every
+non-empty `MirFunction.export_name` into a new
+`MirToLlvm.export_symbol_names` map, in the same pre-pass that already records
+runtime-owned-name collisions (it must run before any function is emitted,
+since a call site can be translated before its callee's definition).
+`llvm_function_symbol_name` then treats a requested name as **authoritative in
+both mangling modes**, with the single exception of the `main` entry-point
+symbol contract, which still wins.
+
+Specs (repro + generalization, mirror-synced into `test/unit/`):
+- `test/01_unit/compiler/backend/export_c_custom_name_spec.spl` — the exact
+  incident pair under `no_mangle`, plus non-exported passthrough.
+- `test/01_unit/compiler/backend/export_c_custom_name_general_spec.spl` —
+  requested name honoured in default mangle mode, applied per-function with
+  siblings untouched, and the `main` contract not overridden.
 
 The admitted Stage 2 compiler successfully built the Pure Simple provider
 archive, but `nm -D` on the linked shared object exposed
