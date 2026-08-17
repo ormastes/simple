@@ -7,9 +7,33 @@
 #
 # ## Overview
 # Tests for SecurityHeaders middleware configuration and header value building.
-# Validates default CSP, X-Content-Type-Options, and X-Frame-Options settings.
+# Validates default CSP, X-Content-Type-Options, X-Frame-Options and HSTS.
+#
+# ## API note (2026-08-17, lane W11-A)
+# This spec previously imported `default_security_headers_config` and
+# `build_security_header_value`. `git log -S default_security_headers_config
+# -- src/` returns ZERO commits: those free functions never existed in the
+# implementation. The module (added together with this spec in cfe0506e336b)
+# has always exposed a class-based API — `SecurityHeadersConfig.default()`
+# plus `collect_security_headers` / `build_hsts_value` / `apply_security_headers`
+# — so the spec is repointed at the API that actually ships, and now asserts
+# on the emitted header pairs (the response-layer path) rather than on config
+# fields alone.
 
-use std.http_server.security_headers.{SecurityHeadersConfig, default_security_headers_config, build_security_header_value}
+use std.spec.*
+use std.http_server.security_headers.{
+    SecurityHeadersConfig,
+    collect_security_headers,
+    build_hsts_value,
+    apply_security_headers
+}
+
+fn header_value(headers: [(text, text)], name: text) -> text:
+    """Look up a header value by exact name; empty string if absent."""
+    for h in headers:
+        if h.0 == name:
+            return h.1
+    ""
 
 # ============================================================================
 # Test Group 1: Default security headers configuration
@@ -17,34 +41,59 @@ use std.http_server.security_headers.{SecurityHeadersConfig, default_security_he
 
 describe "SecurityHeaders middleware":
     it "adds CSP header by default":
-        val config = default_security_headers_config()
+        val config = SecurityHeadersConfig.default()
         expect(config.enable_csp).to_equal(true)
+        val headers = collect_security_headers(config)
+        expect(header_value(headers, "Content-Security-Policy")).to_equal(config.csp_value)
 
     it "adds X-Content-Type-Options header":
-        val config = default_security_headers_config()
-        expect(config.enable_nosniff).to_equal(true)
+        val config = SecurityHeadersConfig.default()
+        expect(config.enable_content_type_options).to_equal(true)
+        val headers = collect_security_headers(config)
+        expect(header_value(headers, "X-Content-Type-Options")).to_equal("nosniff")
 
     it "adds X-Frame-Options header":
-        val config = default_security_headers_config()
-        expect(config.enable_frame_deny).to_equal(true)
+        val config = SecurityHeadersConfig.default()
+        expect(config.enable_frame_options).to_equal(true)
+        val headers = collect_security_headers(config)
+        expect(header_value(headers, "X-Frame-Options")).to_equal("DENY")
 
     it "default CSP contains self":
-        val config = default_security_headers_config()
-        expect(config.csp_policy).to_contain("default-src 'self'")
+        val config = SecurityHeadersConfig.default()
+        expect(config.csp_value).to_contain("default-src 'self'")
 
 # ============================================================================
 # Test Group 2: Header value building
 # ============================================================================
 
-describe "build_security_header_value":
+describe "security header value building":
     it "builds nosniff header value":
-        val value = build_security_header_value("nosniff")
-        expect(value).to_equal("nosniff")
+        val headers = collect_security_headers(SecurityHeadersConfig.default())
+        expect(header_value(headers, "X-Content-Type-Options")).to_equal("nosniff")
 
     it "builds DENY frame option value":
-        val value = build_security_header_value("frame-deny")
-        expect(value).to_equal("DENY")
+        expect(SecurityHeadersConfig.default().frame_options_value).to_equal("DENY")
 
     it "builds HSTS header value":
-        val value = build_security_header_value("hsts")
-        expect(value).to_contain("max-age=")
+        val config = SecurityHeadersConfig.default()
+        val hsts = build_hsts_value(config.hsts_max_age, config.hsts_include_subdomains)
+        expect(hsts).to_contain("max-age=")
+        val headers = collect_security_headers(config)
+        expect(header_value(headers, "Strict-Transport-Security")).to_equal(hsts)
+
+# ============================================================================
+# Test Group 3: Toggles and response-layer application
+# ============================================================================
+
+describe "security header toggles":
+    it "omits disabled headers from the emitted set":
+        val relaxed = SecurityHeadersConfig.relaxed()
+        val headers = collect_security_headers(relaxed)
+        expect(header_value(headers, "X-Frame-Options")).to_equal("")
+        expect(header_value(headers, "Strict-Transport-Security")).to_equal("")
+
+    it "appends security headers to existing response headers":
+        val existing: [(text, text)] = [("Content-Type", "text/html")]
+        val final_headers = apply_security_headers(existing, SecurityHeadersConfig.default())
+        expect(header_value(final_headers, "Content-Type")).to_equal("text/html")
+        expect(header_value(final_headers, "X-Content-Type-Options")).to_equal("nosniff")

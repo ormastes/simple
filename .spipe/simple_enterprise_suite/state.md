@@ -780,3 +780,36 @@ New acceptance criteria (extends AC-1..AC-12 above):
   parity spec, and the rejection-site file:line. Verdicts: parity 14/14,
   enterprise_store 10/10, harden 5/5, cross-OS PASS (8 probes), docgen 0 stubs.
   Merged-tree reruns: parity 14/14, enterprise_store 10/10.
+- THREE "ORPHANED" SPECS RESOLVED — THEY WERE NEVER-RUN MIS-AUTHORED SPECS,
+  NOT ORPHANS (2026-08-17, lane W11-A). Determination (B) for all three, on
+  decisive evidence: `git log -S default_security_headers_config -- src/`
+  returns ZERO commits (same for default_rate_limit_config,
+  validate_request_path, default_max_uri_length). The commits mentioning those
+  names touch ONLY the spec files, and cfe0506e336b added each spec AND its
+  implementation module IN THE SAME COMMIT — the impl shipped a CLASS-based
+  API while the spec was written against a FREE-FUNCTION API that was never
+  written. So nothing was removed; these specs never ran and never could.
+  Implementing the named symbols would have been exactly the trap
+  (inventing an API to satisfy a test, then stubbing config to clear a load
+  error). NO src/lib CHANGE WAS NEEDED OR MADE — the implementations were
+  correct all along; only the specs were wrong.
+  Repointed to the real API: security_headers -> SecurityHeadersConfig
+  .default()/.relaxed(), collect_security_headers, build_hsts_value,
+  apply_security_headers (9/9); rate_limit -> RateLimitConfig.default()
+  (field requests_per_window, NOT max_requests), RateLimitStore.new(),
+  rate_limit_handler (7/7); request_validation -> request_validation_handler,
+  contains_null_byte, MAX_URI_SIZE (12/12). Examples now drive the real server
+  path — emitted (name,value) header pairs, PreRead Error(429) on bucket
+  exhaustion, Read-phase Error(400) on traversal/null-byte/oversize URI —
+  rather than asserting on config fields. RateLimitConfig has no `enabled`
+  field, so that claim was re-expressed as "default config has no exempt paths
+  and no trusted proxies -> the limiter applies to every request and cannot be
+  bypassed via X-Forwarded-For".
+  Sabotage proof: X-Content-Type-Options emitting "sniff" -> 3/9 red;
+  `available <= 0` weakened to `< 0` -> 1/7 red; is_path_traversal branch
+  disabled -> 3/12 red; all restored to green.
+  Note: these specs import bare std.http_server.*, which resolves to
+  nogc_async_mut/http_server (NOT the sync tier the brief assumed). The
+  test/unit/ mirrors were byte-identical, so both trees were updated in
+  lockstep and the test-tree divergence baseline is unchanged.
+  Merged-tree reruns: 9/9, 7/7, 12/12.
