@@ -77,7 +77,7 @@ The gaps are elsewhere — see below.
 | B | `test_executor_parsing.spl`, `test_runner_output.spl` | uncommitted WIP present |
 | C | `test/fixtures/unstable_mode/**` (new files only) | pending |
 | D | `test_runner_main.spl` | pending |
-| E | requirement doc + LLM wiki | pending |
+| E | requirement doc + LLM wiki | DONE `32a5d018082` |
 
 ## Log
 
@@ -93,3 +93,11 @@ The gaps are elsewhere — see below.
   - `test_runner_args.spl` contains **no help/usage text at all**. The
     user-visible flag help lives in some other file and is still UNDOCUMENTED
     for `--unstable`. Open follow-up.
+- 2026-08-17 — Lane E landed `32a5d018082`: requirement doc + both wiki
+  entries. Feature slug chosen was `mission_critical_robustness` (no
+  test-runner feature_expert slug exists; `modern_sspec` is scoped to spec
+  AUTHORING, not runner execution — no new slug created). Side finding worth
+  keeping: the layer_expert/test_runner doc's "Owned source" points at
+  `src/app/test_runner_new/`, but the files this lane actually changes live
+  under `src/lib/nogc_sync_mut/test_runner/`. That mismatch is a real trap for
+  the next agent and is now noted in the layer doc.
