@@ -1,0 +1,72 @@
+# Regression spec for
+# doc/08_tracking/bug/interp_u64_high_bit_option_unwrap_corruption_2026-07-11.md
+#
+# REPRODUCING half. The doc filed this as "u64 struct field >= 2^63 corrupts on
+# Option unwrap": `if val f = find_valid(big, "a")` failed to narrow, and the
+# reported symptom was `undefined field: unknown property or method 'checksum'
+# on Option`. That diagnosis was wrong. `Option` was never involved and the
+# stored value was never corrupted -- `to_text()` on the same field always
+# printed the correct unsigned digits.
+#
+# The actual defect: the interpreter's ORDERING operators were signed. Every
+# `<` / `>` / `<=` / `>=` arm in interpreter/expr/ops.rs ended at
+# `left_val.as_int()? OP right_val.as_int()?`, reinterpreting a `u64` as `i64`,
+# so any value at or above 2^63 compared as NEGATIVE. In the doc's reproducer
+# the guard `frame.checksum > 0u64` therefore evaluated to `false`, `found` was
+# never assigned, and the function correctly returned nil -- the narrowing
+# "failure" was a downstream consequence of a wrong comparison, not an Option
+# defect. The JIT lane compared unsigned and disagreed on identical source.
+#
+# Fixed by `unsigned_ordering` in
+# src/compiler_rust/compiler/src/interpreter/expr/ops.rs, consulted first in
+# all four ordering arms.
+
+fn find_valid(frames: [Frame], target_id: text) -> Frame?:
+    var found: Frame? = nil
+    var matching_count = 0
+    for frame in frames:
+        if frame.id == target_id:
+            matching_count = matching_count + 1
+            val valid = frame.checksum > 0u64
+            if valid:
+                found = frame
+    if matching_count == 1:
+        return found
+    nil
+
+struct Frame:
+    id: text
+    checksum: u64
+
+describe "u64 values at or above 2^63 under the interpreter's ordering operators":
+
+    it "compares a high-bit u64 as unsigned, not as a negative i64":
+        # 2^63 exactly -- the threshold the bug doc pinned.
+        val big: u64 = 9223372036854775808u64
+        expect(big > 0u64).to_equal(true)
+
+    it "still compares a below-threshold u64 correctly (negative control)":
+        val small: u64 = 9223372036854775807u64
+        expect(small > 0u64).to_equal(true)
+
+    it "orders a high-bit u64 above a below-threshold one":
+        val small: u64 = 9223372036854775807u64
+        val big: u64 = 9223372036854775808u64
+        expect(big > small).to_equal(true)
+        expect(big < small).to_equal(false)
+
+    it "preserves the stored high-bit value through to_text (never was corrupt)":
+        val big: u64 = 9223372036854775808u64
+        expect(big.to_text()).to_equal("9223372036854775808")
+
+    it "narrows the Option returned past a high-bit u64 guard (doc reproducer)":
+        # This is the doc's original observation site. It fails only because the
+        # `frame.checksum > 0u64` guard inside `find_valid` mis-compares.
+        val big = [Frame(id: "a", checksum: 9223372036854775808u64)]
+        val got = find_valid(big, "a")
+        expect(got != nil).to_equal(true)
+
+    it "narrows for a below-threshold checksum (negative control)":
+        val small = [Frame(id: "a", checksum: 9223372036854775807u64)]
+        val got = find_valid(small, "a")
+        expect(got != nil).to_equal(true)

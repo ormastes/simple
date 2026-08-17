@@ -1,7 +1,8 @@
 # Bug: instance method reads a stale module-level array through a free-function helper (interpreter)
 
 - **Date:** 2026-07-29
-- **Status:** open (worked around in `src/lib/nogc_async_mut/async/cancellation.spl`; root
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   cause is in the interpreter, not fixable from pure Simple stdlib code)
 - **Severity:** CRITICAL — silently wrong results, no error, on the default test engine
 - **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics audit)
@@ -170,3 +171,21 @@ instead: the 2026-07-29 update section of
 `doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`.
 Still not fixable from pure-Simple stdlib source; still belongs to the
 interpreter/compiler team.
+
+## Re-verification 2026-08-17 — DOES NOT REPRODUCE
+
+Ran the doc's verbatim reproducer (module-level `var _flags: [bool]`, `alloc()`,
+the `_read(id)` free-function indirection, `Thing.mark()` / `Thing.check()`) on
+the deployed seed under `SIMPLE_EXECUTION_MODE=interpreter`. Both paths agree:
+
+    via_helper=true  inline=true
+
+This doc records `via_helper` returning the STALE `false` while the inline read
+returned `true`. That divergence is gone. Very likely closed together with
+`module_global_write_lost_on_frame_pop_2026-07-28.md`, whose
+`sync_owned_captured_globals()` return-direction clobber is the same mechanism
+seen from a different angle — a module-global write dying on frame pop is
+exactly what makes a read through an extra call hop look stale.
+
+Not proven: the "2nd call to a receiver-less fn mints a colliding id" broader
+form from the 2026-07-29 update was not separately exercised.

@@ -221,6 +221,48 @@ fn try_dunder_unaryop(
 }
 use super::super::coverage_helpers::record_condition_coverage;
 
+/// Ordering for comparisons where at least one side is an UNSIGNED integer
+/// (`Value::UInt`), returning `None` when neither side is unsigned so the
+/// caller falls through to its existing arms.
+///
+/// Without this, every ordering arm (`<`, `>`, `<=`, `>=`) ended at
+/// `left_val.as_int()? OP right_val.as_int()?`, which reinterprets a `u64`
+/// as `i64`. Any `u64` at or above `2^63` therefore compared as a NEGATIVE
+/// number, so `0x8000_0000_0000_0000u64 > 0u64` evaluated to `false` while
+/// the JIT and native lanes said `true` — identical source, opposite result
+/// per engine. Storage and `to_text()` were always correct; only the
+/// comparison was signed, which is why the corruption looked like it lived
+/// somewhere else entirely (it was originally filed as a `u64` field being
+/// destroyed by `Option` unwrapping: the failed narrowing in
+/// `if val f = find_valid(...)` was a downstream CONSEQUENCE of the guard
+/// `frame.checksum > 0u64` wrongly evaluating to `false`, not a defect in
+/// `Option` at all).
+/// See `doc/08_tracking/bug/interp_u64_high_bit_option_unwrap_corruption_2026-07-11.md`.
+///
+/// Mixed `UInt`/`Int` is well-defined rather than delegated: a negative
+/// signed value is less than every unsigned value (it cannot be represented
+/// as one), and a non-negative signed value compares as its `u64` widening.
+/// Deferring to Rust's own `u64`/`i64` mixed comparison is not possible —
+/// there isn't one — and casting either way reintroduces the exact wrap this
+/// function exists to prevent.
+fn unsigned_ordering(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (Value::UInt { value: a, .. }, Value::UInt { value: b, .. }) => Some(a.cmp(b)),
+        (Value::UInt { value: a, .. }, Value::Int(b)) => Some(if *b < 0 {
+            Ordering::Greater
+        } else {
+            a.cmp(&(*b as u64))
+        }),
+        (Value::Int(a), Value::UInt { value: b, .. }) => Some(if *a < 0 {
+            Ordering::Less
+        } else {
+            (*a as u64).cmp(b)
+        }),
+        _ => None,
+    }
+}
+
 /// Check if a variable name refers to an immutable binding
 fn is_variable_immutable(name: &str) -> bool {
     CONST_NAMES.with(|cell| cell.borrow().contains(name)) || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name))
@@ -940,7 +982,9 @@ pub(super) fn eval_op_expr(
                         // nil/`Option::None` check above bridges absence.
                         // Unwrapping only here (not before `__eq__`) keeps a
                         // user enum's operator overload seeing the enum itself.
-                        Ok(Value::Bool(left_val.unwrap_option_payload() == right_val.unwrap_option_payload()))
+                        Ok(Value::Bool(
+                            left_val.unwrap_option_payload() == right_val.unwrap_option_payload(),
+                        ))
                     }
                 }
                 BinOp::NotEq => {
@@ -960,14 +1004,21 @@ pub(super) fn eval_op_expr(
                         result
                     } else {
                         // See BinOp::Eq above: also bridge Some(payload) vs payload.
-                        Ok(Value::Bool(left_val.unwrap_option_payload() != right_val.unwrap_option_payload()))
+                        Ok(Value::Bool(
+                            left_val.unwrap_option_payload() != right_val.unwrap_option_payload(),
+                        ))
                     }
                 }
+                // NOTE: `unsigned_ordering` (defined below) must be consulted
+                // FIRST in every ordering arm — see its doc comment.
                 BinOp::Lt => match (&left_val, &right_val) {
+                    _ if unsigned_ordering(&left_val, &right_val).is_some() => Ok(Value::Bool(
+                        unsigned_ordering(&left_val, &right_val).unwrap() == std::cmp::Ordering::Less,
+                    )),
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
-                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
-                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) < b.text_bytes_view().unwrap_or(&[])))
-                    }
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => Ok(
+                        Value::Bool(a.text_bytes_view().unwrap_or(&[]) < b.text_bytes_view().unwrap_or(&[])),
+                    ),
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -996,10 +1047,13 @@ pub(super) fn eval_op_expr(
                     }
                 },
                 BinOp::Gt => match (&left_val, &right_val) {
+                    _ if unsigned_ordering(&left_val, &right_val).is_some() => Ok(Value::Bool(
+                        unsigned_ordering(&left_val, &right_val).unwrap() == std::cmp::Ordering::Greater,
+                    )),
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
-                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
-                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) > b.text_bytes_view().unwrap_or(&[])))
-                    }
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => Ok(
+                        Value::Bool(a.text_bytes_view().unwrap_or(&[]) > b.text_bytes_view().unwrap_or(&[])),
+                    ),
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -1028,10 +1082,13 @@ pub(super) fn eval_op_expr(
                     }
                 },
                 BinOp::LtEq => match (&left_val, &right_val) {
+                    _ if unsigned_ordering(&left_val, &right_val).is_some() => Ok(Value::Bool(
+                        unsigned_ordering(&left_val, &right_val).unwrap() != std::cmp::Ordering::Greater,
+                    )),
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
-                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
-                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) <= b.text_bytes_view().unwrap_or(&[])))
-                    }
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => Ok(
+                        Value::Bool(a.text_bytes_view().unwrap_or(&[]) <= b.text_bytes_view().unwrap_or(&[])),
+                    ),
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -1060,10 +1117,13 @@ pub(super) fn eval_op_expr(
                     }
                 },
                 BinOp::GtEq => match (&left_val, &right_val) {
+                    _ if unsigned_ordering(&left_val, &right_val).is_some() => Ok(Value::Bool(
+                        unsigned_ordering(&left_val, &right_val).unwrap() != std::cmp::Ordering::Less,
+                    )),
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
-                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
-                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) >= b.text_bytes_view().unwrap_or(&[])))
-                    }
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => Ok(
+                        Value::Bool(a.text_bytes_view().unwrap_or(&[]) >= b.text_bytes_view().unwrap_or(&[])),
+                    ),
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)

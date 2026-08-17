@@ -1,0 +1,88 @@
+# SIMILAR-PROBLEM DETECTION spec for the signedness class behind
+# doc/08_tracking/bug/interp_u64_high_bit_option_unwrap_corruption_2026-07-11.md
+#
+# The reproducing spec (u64_high_bit_ordering_comparison_spec.spl) pins the one
+# shape the bug doc happened to observe: `u64 > u64` at exactly 2^63, reached
+# through an Option-returning helper. That shape passing does NOT prove the
+# class is closed, because the defect was one shared expression --
+# `as_int()` -- reached from FOUR separate operator arms, through THREE
+# operand-type pairings, at every width that can set the high bit.
+#
+# A fix applied to only the arm the reporter exercised would leave the other
+# three silently wrong while the reproducer went green. So this spec walks the
+# axes the reproducer does not:
+#
+#   axis 1  operator:      <   >   <=   >=          (all four arms)
+#   axis 2  operand pair:  u64/u64, u64/i64, i64/u64 (mixed signedness)
+#   axis 3  boundary:      2^63-1, 2^63, 2^64-1      (below, at, max)
+#   axis 4  reflexivity:   a<b and b>a must agree    (no arm disagrees)
+#
+# Axis 2 matters most and is the one most likely to be missed: a fix that only
+# handles UInt-vs-UInt still mis-compares `some_u64 > 0` (an UNSUFFIXED zero
+# parses as a signed Int), which is by far the more common way this is written
+# in real code than the doc's suffixed `> 0u64`.
+
+describe "unsigned ordering is signedness-correct across the whole operator class":
+
+    it "handles all four ordering operators at the 2^63 boundary":
+        val big: u64 = 9223372036854775808u64
+        val zero: u64 = 0u64
+        expect(big > zero).to_equal(true)
+        expect(big >= zero).to_equal(true)
+        expect(big < zero).to_equal(false)
+        expect(big <= zero).to_equal(false)
+
+    it "handles a high-bit u64 against an UNSUFFIXED signed literal":
+        # `0` here is a signed Int, not a u64 -- the mixed pairing. A UInt/UInt
+        # only fix leaves this arm reinterpreting the u64 as negative.
+        val big: u64 = 9223372036854775808u64
+        expect(big > 0).to_equal(true)
+        expect(big >= 1).to_equal(true)
+        expect(big < 0).to_equal(false)
+        expect(big <= 1).to_equal(false)
+
+    it "handles the signed literal on the LEFT (operand order is not symmetric in code)":
+        val big: u64 = 9223372036854775808u64
+        expect(0 < big).to_equal(true)
+        expect(0 <= big).to_equal(true)
+        expect(0 > big).to_equal(false)
+        expect(0 >= big).to_equal(false)
+
+    it "orders correctly at u64 MAX, not just at the 2^63 threshold":
+        val maxv: u64 = 18446744073709551615u64
+        val big: u64 = 9223372036854775808u64
+        expect(maxv > big).to_equal(true)
+        expect(maxv >= maxv).to_equal(true)
+        expect(maxv < big).to_equal(false)
+
+    it "keeps a strictly increasing high-bit sequence ordered":
+        # Signed reinterpretation wraps this sequence into DEcreasing order,
+        # so a single monotonicity walk catches any arm that still casts.
+        val a: u64 = 9223372036854775807u64
+        val b: u64 = 9223372036854775808u64
+        val c: u64 = 18446744073709551615u64
+        expect(a < b).to_equal(true)
+        expect(b < c).to_equal(true)
+        expect(a < c).to_equal(true)
+
+    it "keeps < and > mutually consistent for every high-bit pair":
+        val a: u64 = 9223372036854775807u64
+        val c: u64 = 18446744073709551615u64
+        # If any one arm were still signed, these two would BOTH report true.
+        expect(a < c).to_equal(true)
+        expect(c < a).to_equal(false)
+        expect(c > a).to_equal(true)
+        expect(a > c).to_equal(false)
+
+    it "leaves ordinary signed comparison, including negatives, untouched":
+        # Guards the fix against over-reach: it must not capture Int/Int.
+        expect(-5 < 3).to_equal(true)
+        expect(-5 > 3).to_equal(false)
+        expect(3 >= 3).to_equal(true)
+
+    it "orders a negative signed value below any unsigned value":
+        # The one pairing with no Rust-native answer, so it is hand-written and
+        # therefore the most likely to be got wrong.
+        val big: u64 = 9223372036854775808u64
+        expect(-1 < big).to_equal(true)
+        expect(big > -1).to_equal(true)

@@ -3,7 +3,8 @@
 - **Id:** module_global_write_lost_on_frame_pop_2026-07-28
 - **Found:** 2026-07-28, while root-causing `bin/simple lint` reporting
   "all files clean" on files that do not parse (fixed in `f4adc39bf39d`).
-- **Status:** FIX IMPLEMENTED 2026-07-28 — Stage-4 admission pending Retry 11.
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
   JIT (cranelift) was already correct.
 - **Sibling:** `module_global_write_invisible_to_callee_2026-07-27.md` is the
   *downward* half of the same place-model defect (a write is invisible to a
@@ -501,3 +502,24 @@ lambda frame-lifecycle work; this focused pass alone is not Stage 4 admission.
   symptom this defect was found under.
 - `.claude/memory` interpreter place-model / "two-hop loss, write-back is
   load-bearing" notes — same defect class.
+
+## Re-verification 2026-08-17 — DOES NOT REPRODUCE
+
+Rebuilt the doc's three-module fixture (`amod.spl` / `bmod.spl` / `main.spl`,
+RESET and NO-RESET variable groups, cross-module `a_set()` reached via
+`b_body()` -> `b_deep()`) and ran it with `SIMPLE_EXECUTION_MODE=interpreter`
+on the deployed seed. All three probe points now report the written values:
+
+    P2 inner  RESET bool=true i64=1 text=[SET] arr=1 || NORESET bool=true i64=1
+    P3 caller RESET bool=true i64=1 text=[SET] arr=1 || NORESET bool=true i64=1
+    P4 main   RESET bool=true i64=1 text=[SET] arr=1 || NORESET bool=true i64=1
+
+This matches the JIT lane exactly. The doc's signature failure — the RESET group
+reverting to its initial values at P3/P4 while the NO-RESET group survived — does
+not occur. The implemented fix to the `sync_owned_captured_globals()` return
+direction is behaving.
+
+Not proven: this exercises the reduced fixture only. The doc's Stage-4 admission
+(Retry 11/12) is a separate bootstrap question and was NOT run — a bootstrap was
+live on this host. The named production sites (`parser.spl:76` `par_had_error`,
+`parser.spl:78` `par_diagnostic_emit_count`) were not re-exercised.

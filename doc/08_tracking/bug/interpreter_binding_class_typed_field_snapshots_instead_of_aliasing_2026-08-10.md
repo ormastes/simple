@@ -1,6 +1,7 @@
 # Binding a class-typed FIELD to a local snapshots it — interpreter only
 
-- **Status:** OPEN — engine divergence (interpreter vs JIT)
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Filed:** 2026-08-10
 - **Blocks:** `test/{02_integration,integration}/app/sj_daemon_mutual_exclusion_spec.spl`
   example *"sees the lease through SjClient -> fallback_exec -> handle_cli_args"*,
@@ -157,3 +158,20 @@ severs that provenance — `mid` is a fresh root with no record that it came fro
 Root-caused with file:line, not fixed. The blocked example in
 `sj_daemon_mutual_exclusion_spec.spl` therefore **remains RED**, correctly, and
 was not touched or softened.
+
+## Re-verification 2026-08-17 — DOES NOT REPRODUCE
+
+Ran the doc's probe-P6 shape (`class Counter`/`Inner`/`Outer`; `val mid =
+o.inner; mid.c.bump()`, then a chained `o.inner.c.bump()`, then read
+`o.inner.c.n`) on the deployed seed under `SIMPLE_EXECUTION_MODE=interpreter`.
+Bind-then-mutate is visible through the root: intermediate read after the bound
+mutation is `1`, final is `2`. `back_through_root` is now 1, not the 0 this doc
+records; the interpreter agrees with the JIT.
+
+Most likely already closed by `merge_shared_collection_fields`
+(`interpreter_call/core/function_exec.rs:975`), which carries Array/Dict/
+ByteArray fields back across a by-value receiver and recurses through nested
+structs — landed after this doc was filed.
+
+Caveat on this verdict: verified only for the bind-then-mutate shape this doc
+names. Not swept across every container/receiver combination.

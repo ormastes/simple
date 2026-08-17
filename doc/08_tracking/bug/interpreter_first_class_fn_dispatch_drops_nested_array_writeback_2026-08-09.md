@@ -1,6 +1,7 @@
 # Interpreter: two mutating `me` calls inside one first-class-function-dispatched invocation drop the first write
 
-**Status:** OPEN — root-caused with a minimal, sockets-free repro; not fixed
+Status: OPEN (P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 (compiler/interpreter internals, out of scope for the application-level task
 that found it).
 **Engine:** tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`) —
@@ -226,3 +227,27 @@ consistent with the original investigation's conclusion not to attempt a
 partial/wrong fix. Status unchanged: **OPEN — ARCHITECTURAL (Rust seed
 interpreter, no pure-Simple first-class-fn dispatch implementation exists to
 fix instead, verified 2026-08-10)**.
+
+## Re-verification 2026-08-17 — DOES NOT REPRODUCE
+
+Ran the doc's verbatim reproducer — `struct Item`/`class State`, module-global
+`var S`, `dispatch(route_create)` then `dispatch(route_execute)` at TOP LEVEL
+(not wrapped in `main`, matching the doc exactly) — with
+`SIMPLE_EXECUTION_MODE=interpreter` on the deployed seed:
+
+    items_len=1 events_len=2
+
+Expected `events_len=2`; the doc records `1`. Both the nested-array writeback and
+the broader `items.len()==0` variant behave. The same shape wrapped inside
+`fn main()` also passes, so the top-level-statement form is not a distinguishing
+factor either.
+
+Most likely closed by `merge_shared_collection_fields`
+(`interpreter_call/core/function_exec.rs:975`): the previous
+`is_value_type_struct` gate excluded EVERY value-type struct from
+`write_back_mutable_arguments`, which is exactly why a container field nested in
+a struct lost its write when the frame popped.
+
+Not proven: the "scalar `me inc()` via dispatch reads back 0" variant from the
+second pass was not separately exercised, and
+`src/lib/nogc_sync_mut/http_server/router.spl:76` was not re-checked.
