@@ -2,7 +2,25 @@
 
 - **ID:** rv64_core_no_c_extension_opensbi_stall
 - **Date:** 2026-07-22
-- **Status:** OPEN
+- **Status:** STALE as filed — the stated root cause is fixed in current source (2026-08-17 content triage)
+
+> **2026-08-17 re-triage (by content, not by commit ancestry).** The premise of
+> this doc — "rv64gc RTL core has no RV64C compressed decode" — is **no longer
+> true**. `src/lib/hardware/rv64gc_rtl/decode.spl:143` now implements a full
+> `rvc_expand` (16-bit parcel -> 32-bit equivalent) covering quadrants Q0/Q1/Q2,
+> with every expansion cross-checked against `riscv64-linux-gnu-gcc -march=rv64gc`
+> + objdump, and reserved/unsupported patterns setting `legal=false` so the core
+> raises illegal-instruction (cause 2) fail-closed rather than silently NOP-ing.
+> `core.spl` consumes it: `rvc_expand` at lines 77 and 330, `pc_incr = if
+> exp.compressed: 2 else: 4` at line 79, and compressed-aware illegal-instruction
+> `tval` at line 334.
+>
+> **Not closed**, because the *observable* in this doc is an OpenSBI boot stall,
+> which was NOT re-run — that requires the `opensbi_boot_probe` long simulation.
+> The remaining OpenSBI symptom, if it still reproduces, overlaps
+> `rv64_opensbi_wfi_park_before_banner_2026-07-23.md` (libfdt `/cpus` walk) and
+> should be re-filed against that cause rather than against missing C-extension
+> decode. Re-verify the boot before closing.
 - **Severity:** high (blocks booting any C-compiled RV64 firmware on soc_top_64)
 - **Component:** `src/lib/hardware/rv64gc_rtl/core.spl`, `.../decode.spl` (RTL core datapath)
 
