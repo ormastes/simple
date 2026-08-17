@@ -6,6 +6,9 @@
 `src/lib/common/crypto/x25519_mlkem768/matrix_receipt.spl` (and every module
 importing them) fail to parse
 **Found by:** `src/lib/**` parse sweep (7780 files, complete)
+**Severity:** MEDIUM — `src/lib/hardware/rv64gc_rtl/imac_protected_core.spl`
+(and every module importing it) fails to parse
+**Found by:** `src/lib/**` parse sweep (7780 files)
 **Binary:** `/mnt/data/cgtw2/release/simple` (freshly built Rust seed) — also
 fails on the stale deployed binary, so this is not a fresh-build regression
 
