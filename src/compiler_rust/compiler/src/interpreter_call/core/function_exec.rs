@@ -954,6 +954,58 @@ fn is_value_type_struct(v: &Value, classes: &HashMap<String, Arc<ClassDef>>) -> 
     matches!(v, Value::Object { class, .. } if classes.get(class).is_some_and(|cd| cd.is_value_type))
 }
 
+/// Collection fields of a value-type `struct` are SHARED HANDLES, not copied
+/// storage (the "shallow struct copy" resolution, option B of
+/// `doc/08_tracking/bug/struct_dict_field_mutation_engine_divergence_2026-08-10.md`).
+///
+/// Before this, `fn f(self: S, ...)` doing `self.values[k] = v` on a `Dict`/array
+/// field was a SILENT NO-OP in the interpreter while the JIT and native/AOT lanes
+/// made the write visible — identical source producing opposite state depending
+/// on the lane, invisible to any positive assertion. The interpreter models
+/// dicts/arrays as `Arc<..>` with copy-on-write, so a callee mutation forks the
+/// Arc and dies with the frame unless it is explicitly propagated.
+///
+/// The propagation is deliberately field-kind-scoped, NOT a whole-struct
+/// write-back: scalar and nested-struct fields keep strict value semantics (a
+/// callee writing `self.count = 1` still cannot reach the caller), which is what
+/// "struct is a value type" means and what task #91 established. Only
+/// container-valued fields — the ones the compiled lanes back with a real heap
+/// handle — are carried back, which is exactly what makes the three engines
+/// agree.
+fn merge_shared_collection_fields(caller_val: &mut Value, callee_val: &Value) {
+    let (Value::Object { fields: caller_fields, .. }, Value::Object { fields: callee_fields, .. }) =
+        (&mut *caller_val, callee_val)
+    else {
+        return;
+    };
+    let mut updates: Vec<(String, Value)> = Vec::new();
+    for (name, new_field) in callee_fields.iter() {
+        if !matches!(
+            new_field,
+            Value::Array(_) | Value::Dict(_) | Value::ByteArray(_)
+        ) {
+            continue;
+        }
+        match caller_fields.get(name) {
+            // Same kind on both sides and actually changed — carry it back.
+            Some(old_field)
+                if std::mem::discriminant(old_field) == std::mem::discriminant(new_field)
+                    && old_field != new_field =>
+            {
+                updates.push((name.clone(), new_field.clone()));
+            }
+            _ => {}
+        }
+    }
+    if updates.is_empty() {
+        return;
+    }
+    let slots = Arc::make_mut(caller_fields);
+    for (name, value) in updates {
+        slots.insert(name, value);
+    }
+}
+
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
 //
 // When a function is called with a simple identifier argument (e.g., `f(a)`)
@@ -1071,6 +1123,17 @@ fn write_back_mutable_arguments(
                     {
                         let new_val = callee_val.clone();
                         outer_env.insert(caller_name, new_val);
+                    } else if is_value_type_struct(callee_val, classes) {
+                        // Value-type struct: fields stay value-copied, but its
+                        // container-valued fields are shared handles. See
+                        // merge_shared_collection_fields.
+                        if let Some(mut caller_val) = outer_env.get(&caller_name).cloned() {
+                            let before = caller_val.clone();
+                            merge_shared_collection_fields(&mut caller_val, callee_val);
+                            if caller_val != before {
+                                outer_env.insert(caller_name, caller_val);
+                            }
+                        }
                     }
                 }
             }
