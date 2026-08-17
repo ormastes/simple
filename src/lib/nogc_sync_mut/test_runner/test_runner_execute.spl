@@ -53,13 +53,26 @@ use std.test_runner.test_executor_composite.{
     find_baremetal_elf, qemu_binary_for_arch, qemu_machine_for_arch
 }
 
+# A limit breach that KILLED the child from outside says nothing about the code
+# under test -- it is UNVERIFIED, never a failure. Only a limit the test itself
+# exhausted (fds, procs) is a real defect. This matters concretely here:
+# earlyoom SIGTERMs `simple` at 10% memory on a zero-swap host, so counting a
+# memory/cpu/timeout kill as a failure manufactures REDs that no code change can
+# fix. See .spipe/unstable_test_mode/state.md.
+fn limit_is_unverified(limit_type: text) -> bool:
+    limit_type == "timeout" or limit_type == "memory" or limit_type == "cpu"
+
 fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
+    # Prefixed with the contract's outcome class so the summary derivation in
+    # test_runner_output.spl can classify it. Without the prefix these breaches
+    # reach the summary as anonymous failures -- the exact defect that had a
+    # 60s timeout counting inside `3 failed`.
     match result.limit_type:
-        case "memory": "Memory limit exceeded ({options.max_mem_gb}GB)"
+        case "memory": "TERMINATED: Memory limit exceeded ({options.max_mem_gb}GB) (unverified)"
         case "procs": "Process limit exceeded (max {options.max_procs} procs; note RLIMIT_NPROC is per-UID)"
-        case "cpu": "CPU time limit exceeded"
+        case "cpu": "TERMINATED: CPU time limit exceeded (unverified)"
         case "fds": "File descriptor limit exceeded"
-        case "timeout": "Timed out under resource limits"
+        case "timeout": "TIMEOUT: Timed out under resource limits (unverified)"
         case _: "Resource limit exceeded ({result.limit_type})"
 
 # =========================================================================
@@ -167,7 +180,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
                     duration_ms: dur, setup_ms: setup_ms, error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false)
             if evidence_path != "" and file_exists(evidence_path):
                 file_delete(evidence_path)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: setup_ms, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
     else:
         val (out, err, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
@@ -269,7 +282,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             if result.limit_exceeded:
                 val end2 = time_now_unix_micros()
                 val dur = (end2 - start) / 1000
-                return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
                     duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
         else:
             val (out, err, code) = process_run_bounded(binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
@@ -788,7 +801,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             val end2 = time_now_unix_micros()
             val dur = (end2 - start) / 1000
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(result.limit_type): 0 else: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: result.limit_type.contains("timeout"), cached: false)
     else:
         val (out, err, code) = process_run_bounded(run_binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
