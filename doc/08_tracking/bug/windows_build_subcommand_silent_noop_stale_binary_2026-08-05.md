@@ -5,7 +5,9 @@ Status: OPEN — architectural (needs a native-Windows or WSL environment to
 redeploy/cross-build; this Linux dev environment has neither a Windows host
 nor `bin/release/x86_64-pc-windows-msvc/simple.exe` present at all, so the
 binary-staleness claim cannot be independently re-run here; re-confirmed
-2026-08-10)
+2026-08-10; re-triaged again 2026-08-17 — see "2026-08-17 re-triage" below:
+still UNREPRODUCIBLE on this host, now fenced by a platform-agnostic detection
+spec so the same silence cannot recur unnoticed on any host)
 Area: bootstrap / deploy / CLI surface (Windows)
 
 ## Symptom
@@ -290,3 +292,48 @@ current dispatch logic looks correct; the doc's own most-likely explanation
 (stale compiled-in `simple.exe` predates current source) cannot be confirmed
 or refuted without a Windows/WSL redeploy. No source changes made; Status
 remains OPEN — architectural.
+
+## 2026-08-17 re-triage (triage shard) — UNREPRODUCIBLE here, spec fence added
+
+Environment check first, since every claim in this doc is binary-specific:
+
+- `uname -s -m` = `Linux x86_64`. No Windows host, no WSL guest used.
+- `ls bin/release/x86_64-pc-windows-msvc` -> **No such file or directory**. The
+  April `simple.exe` this row is about is not in the tree at all, so its
+  staleness cannot be probed, confirmed, or refuted here.
+- Binary actually under test: `readlink -f bin/simple` =
+  `bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes, mtime
+  2026-08-16 22:59:37 — a **Rust seed** (prints the seed banner).
+
+Linux control, same command family the row says is dead on Windows:
+
+```
+$ bin/simple build ; echo rc=$?
+rc=0
+867 bytes of output, beginning:
+  WARNING: this Rust-built Simple binary is a bootstrap seed only; ...
+  Simple Build System
+```
+
+867 bytes, not 0. So the `build` dispatch path is not silent in current source
+on this platform; nothing here contradicts the row's own "most likely a stale
+Windows binary" hypothesis, and nothing here confirms it either. **Left OPEN as
+environmental** — it genuinely needs a native-Windows or WSL host, which this
+shard does not have and must not fabricate.
+
+### What was added instead of a fake verdict
+
+`test/01_unit/app/cli/build_subcommand_not_silent_spec.spl` —
+`Results: 4 total, 4 passed, 0 failed`.
+
+It pins the platform-agnostic invariant the incident violated: `simple build`
+and `simple build --help` must each emit **more than 100 bytes** of combined
+stdout+stderr and the banner text `Simple Build System`. It deliberately does
+**not** assert `exit code == 0`, because exit 0 is precisely what made the
+Windows failure invisible. Run on Windows, this spec fails on exactly the
+reported signature (zero bytes) instead of reporting a green.
+
+**Ablation (causation proved):** repointing the spec's `BINARY` at `/bin/true`
+— a binary that exits 0 with zero output, i.e. the incident's exact shape —
+gives `Results: 4 total, 2 passed, 2 failed`, both failures on the
+output-length/content oracles. Restoring `bin/simple` returns it to 4/4.

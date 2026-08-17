@@ -1,0 +1,46 @@
+# @cover src/app/cli/_CliMain/main_and_help.spl 5%
+#
+# DETECTION spec for the class behind
+# doc/08_tracking/bug/windows_build_subcommand_silent_noop_stale_binary_2026-08-05.md
+#
+# That row reports `bin/simple build` (and `build bootstrap`, `build --help`)
+# exiting **0 with zero bytes** of stdout and stderr on native Windows — a
+# documented command that says nothing and does nothing, indistinguishable from
+# success. The original claim cannot be re-run on this Linux host (there is no
+# `bin/release/x86_64-pc-windows-msvc/simple.exe` in the tree and no Windows
+# host available), so this spec pins the platform-agnostic invariant instead:
+#
+#   `simple build` must PRODUCE OBSERVABLE OUTPUT, on whatever host runs it.
+#
+# Deliberately NOT `exit code == 0`: exit 0 was exactly the misleading signal in
+# the incident. The oracle is the artifact — bytes on the wire — plus a content
+# anchor, so a silent no-op fails here on any platform, including the one that
+# originally broke.
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+val BINARY = "bin/simple"
+
+describe "the build subcommand is never a silent no-op":
+    it "the binary under test actually exists (non-vacuity)":
+        expect(rt_file_exists(BINARY)).to_equal(true)
+
+    it "`simple build` emits a non-trivial banner rather than zero bytes":
+        val (out, err, _rc) = rt_process_run_timeout(BINARY, ["build"], 120000)
+        val combined = "{out}{err}"
+        # The incident's signature was exactly len == 0.
+        expect(combined.len() > 100).to_equal(true)
+        expect(combined).to_contain("Simple Build System")
+
+    it "`simple build --help` also emits output rather than zero bytes":
+        val (out, err, _rc) = rt_process_run_timeout(BINARY, ["build", "--help"], 120000)
+        val combined = "{out}{err}"
+        expect(combined.len() > 100).to_equal(true)
+
+    it "the build command is statically dispatched, not left to a stale table":
+        val source = rt_file_read_text("src/app/cli/_CliMain/main_and_help.spl") ?? ""
+        expect(source.len() > 0).to_equal(true)
+        expect(source).to_contain("handle_build")
+
+extern fn rt_file_read_text(path: text) -> text?
