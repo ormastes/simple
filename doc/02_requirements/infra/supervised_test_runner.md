@@ -34,6 +34,48 @@ its own process; the suite continues; the final report names every crashed spec
    (`src/runtime/runtime_fork.c`) exits its read loop early, truncating captured
    test output repo-wide — so per-spec capture must be verified, not assumed.
 
+## Unstable mode — the frozen contract (2026-08-17)
+
+"Unstable mode" is the name of the delivered shape of this request:
+
+- **Per-unit SEPARATE PROCESS for build and for test.** One child per source
+  file on the build side, one child per spec on the test side.
+- **Run to the END of the source list and the END of the test list.** No early
+  exit on a dead unit, on either side.
+- **Classified outcomes:** `OK` · `ERROR` · `CRASHED` · `TERMINATED` ·
+  `TIMEOUT` · `NOT_RUN`. **`TERMINATED` (rc 143, SIGTERM) and `TIMEOUT` are
+  UNVERIFIED and are NEVER failures** — they say the host interfered, not that
+  the code is wrong. `NOT_RUN` is likewise not a pass.
+- **Default ON for the bootstrap path, OFF for interactive runs**, with an
+  explicit `--unstable` / `--no-unstable` flag overriding in either direction.
+- **The session daemon stays.** Daemon-served execution remains valid for
+  ordinary interactive use; it is not the problem this request solves.
+
+Frozen field/flag names (other lanes depend on them verbatim):
+`TestOptions.unstable_mode: bool` (`test_runner_types.spl`); error-text
+prefixes on `TestFileResult.error` — `CRASHED:` / `TERMINATED:` / `TIMEOUT:` /
+`NOT EXECUTED:`.
+
+### D1 correction — read this before touching `run_all`
+
+**`run_all` is a FILE-SELECTION flag, not a keep-going flag.** It is set by
+`--all` / `--whole` (`test_runner_args.spl:299,301`) and `--ci` (`:383`), and
+read at exactly three places, all file selection:
+`test_runner_files.spl:328,407,468`. Nothing else consumes it.
+
+The keep-going control is **`fail_fast`**, default `false`
+(`test_runner_args.spl:184`), whose only effect is the break at
+`test_runner_main.spl:448`. And each spec is **already** its own process on the
+interpreter lane — `process_run_bounded(...)`, `test_runner_execute.spl:172`.
+
+So "continue past a crash" was already true. The real gaps are: the missing
+explicit flag, the collapsed outcome classes (`exit_code == -1` is one
+sentinel for both timeout and death-by-signal), the entirely unaddressed BUILD
+side, and the absence of any crash fixture.
+
+Layer detail and the earlyoom evidence hazard:
+`doc/00_llm_process/layer_expert/test_runner/skill.md`.
+
 ## Requirements
 
 ### R1 — Per-spec isolation

@@ -164,6 +164,41 @@ three push guards default to a jj/HEAD-relative range that is wrong for a
 plumbing commit — invoke them with an explicit `BASE..NEWCOMMIT` range. Full
 detail: `.claude/skills/spipe.md` §"Shared working tree: blob-first landing".
 
+## Unstable mode + the `run_all` misreading (2026-08-17)
+
+Contract, rationale and acceptance:
+`doc/02_requirements/infra/supervised_test_runner.md` § "Unstable mode".
+Per-unit separate process for build AND test, run to the end of both lists,
+outcomes `OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN`, default ON for
+bootstrap / OFF for interactive with `--unstable` / `--no-unstable`. The
+session daemon is not the problem and stays.
+
+**Correction the next agent will otherwise get wrong.** `run_all` is a FILE
+SELECTION flag — set by `--all`/`--whole` (`test_runner_args.spl:299,301`) and
+`--ci` (`:383`), consumed only at `test_runner_files.spl:328,407,468`. It has
+nothing to do with keeping going. Keep-going is `fail_fast`, default `false`
+(`test_runner_args.spl:184`), sole effect the break at
+`test_runner_main.spl:448`. Each spec is already its own process via
+`process_run_bounded` (`test_runner_execute.spl:172`), so "continue past a
+crash" was already true on the interpreter lane. The genuine gaps were: no
+explicit flag, collapsed outcome classes (`exit_code == -1` is one sentinel for
+BOTH timeout and death-by-signal), an unaddressed BUILD side, and no crash
+fixture. (Files are under `src/lib/nogc_sync_mut/test_runner/`, not this
+layer's `src/app/test_runner_new/`.)
+
+### earlyoom hazard — rc 143/144 is UNVERIFIED, never failed
+
+This host runs earlyoom, which fires at **10% memory with zero swap** and
+targets processes named `simple`. A spec killed that way exits 143 (SIGTERM) or
+144, indistinguishable at the exit code from a real defect. Rule: **any test
+result that cannot rule earlyoom out is INCONCLUSIVE** — not a failure and not
+a pass. Disambiguation without a runtime change: the crash fixture writes a
+sentinel file immediately before self-crashing; sentinel present + died by
+signal = `CRASHED`, sentinel absent = `TERMINATED`/UNVERIFIED. Pairs with the
+already-open silent-green defect
+(`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`):
+never accept exit 0 without an explicit `Results:` line.
+
 ## Feature experts depending on this layer
 
 - [gpu_offload_check](../../feature_expert/gpu_offload_check/skill.md) — seven

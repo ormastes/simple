@@ -210,3 +210,21 @@ two different things depending on how it got set — `true` from a family-prefix
 row (`RUNTIME_FAMILY_MANIFEST`) OR from this per-function direct-alloc
 derivation — both correct, but conflating "which path fired" in a future
 diagnostic message would be a regression in clarity, not correctness.
+
+## Toolchain robustness: unstable test/build mode (2026-08-17)
+
+The robustness claim extends to the toolchain that produces the evidence. A
+build or test run that stops at the first dead unit, or that reports a
+host-inflicted kill as a failure, cannot back a mission-critical claim.
+
+Unstable mode = per-unit separate process for build and for test, run to the
+END of the source list and the END of the test list, with classified outcomes
+`OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN`. `TERMINATED` (rc 143, SIGTERM)
+and `TIMEOUT` are UNVERIFIED — never failures, never passes. Default ON for the
+bootstrap path, OFF for interactive, explicit `--unstable`/`--no-unstable`
+either way. The session daemon stays and is not the problem being solved.
+
+- Contract + acceptance: `doc/02_requirements/infra/supervised_test_runner.md`
+- Layer mechanics, the `run_all`-is-file-selection correction, and the earlyoom
+  rc=143/144 evidence hazard:
+  [test_runner layer](../../layer_expert/test_runner/skill.md)
