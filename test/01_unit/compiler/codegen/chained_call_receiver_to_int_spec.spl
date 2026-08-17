@@ -1,0 +1,69 @@
+# Reproducing spec — bug jit_substring_chained_to_int_returns_pointer (2026-08-17)
+#
+# Measured on the deployed Rust seed, exit 0, no diagnostic:
+#   JIT   `t.substring(2).to_int()`                 -> 2586350522657 (a raw POINTER)
+#   JIT   `val s = t.substring(2); s.to_int()`      -> 1234          (correct)
+#   interp, both forms                              -> 1234          (correct)
+#
+# Root cause: codegen/instr/body.rs's vreg-type pre-pass had no entry for
+# `MirInst::Call { Pure("rt_slice") }` — the shape `.substring()` is lowered to
+# — so the chained receiver vreg was UNTYPED. The numeric-cast block in
+# codegen/instr/closures_structs.rs:1497 defaults a missing receiver type to
+# `TypeId::I64` (`unwrap_or(TypeId::I64)`), so `to_int` skipped the
+# `from_ty == TypeId::STRING` branch that routes to `rt_string_to_int` and fell
+# into the generic raw-register conversion, handing back the intermediate
+# string's heap pointer as a "successful" integer.
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which is correct here — an in-process example can never go red on
+# this defect. The oracle is the sibling probe, run as a subprocess under BOTH
+# engines, self-checking absolute literals.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_chained_call_receiver_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "chained substring().to_int() under the JIT":
+    it "gives 1234 in the interpreter (control arm)":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was always correct; a red here means the probe is broken, not the engine")
+        expect(interp).to_contain("PASS substring_to_int_chained")
+        expect(interp).to_contain("PASS substring_to_int_stepped")
+
+    it "gives 1234 in the JIT for the CHAINED form, not a heap pointer":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the bug lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The filed row: `\"ab1234\".substring(2).to_int()` must be 1234")
+        expect(jit).to_contain("PASS substring_to_int_chained")
+
+        step("The bound-intermediate sibling was already correct and must stay correct")
+        expect(jit).to_contain("PASS substring_to_int_stepped")
+
+        step("No check may have failed, and the aggregate verdict is authoritative")
+        expect_not(jit.contains("FAIL "))
+        expect(jit).to_contain("CHAINED_CALL_RECEIVER PROBE: ALL PASS")
+
+    it "does not return a pointer-shaped integer from a to_int on either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("The defect's signature is a 13-digit pointer where a 4-digit number belongs")
+        expect_not(jit.contains("actual=25"))
+        expect_not(jit.contains("expected=1234 actual=1234"))
+        expect(interp).to_contain("CHAINED_CALL_RECEIVER PROBE: ALL PASS")

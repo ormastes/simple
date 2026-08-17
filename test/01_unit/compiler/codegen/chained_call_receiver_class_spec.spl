@@ -1,0 +1,101 @@
+# Similar-problem detection spec (defect CLASS): a CALL RESULT used as a RECEIVER
+#
+# The filed row (jit_substring_chained_to_int_returns_pointer) was one instance
+# of a general shape: the JIT's vreg-type pre-pass
+# (src/compiler_rust/compiler/src/codegen/instr/body.rs) types method results by
+# an explicit NAME TABLE. Any producer missing from that table leaves its dest
+# vreg untyped, and every downstream consumer that defaults a missing type
+# (`unwrap_or(TypeId::I64)` in codegen/instr/closures_structs.rs:1497) then
+# treats a heap pointer as an integer. Binding the intermediate to a `val`
+# always hid it, because a local reload is a typed `Load`.
+#
+# The same file already carries three separately-filed instances of this exact
+# class, each found one at a time by a human noticing a wrong number:
+#   - `s.trim().to_i64()`      (chained trim, 2026-07-30)
+#   - `arr.len().to_i64()`     (SSH kernel KEX signature failure)
+#   - `s.to_float().to_string()` (lane FLOATBOX, 2026-07-29)
+# and the `builtin_method_result_type` helper added for the MethodCallStatic
+# half of the family did not cover the `MirInst::Call` half, which is where
+# `.substring()` / `.slice()` land after MIR lowering.
+#
+# This spec generalises rather than pinning the single row: it sweeps chained
+# receivers across string producers (substring, slice, trim, to_upper, concat),
+# chained-into-chained nesting, and — critically — ARRAY receivers, which share
+# the receiver-polymorphic runtime symbols (`rt_slice`, `rt_take`, `rt_reverse`)
+# with strings and must NOT be typed String. A fix that over-reaches breaks
+# those rows here rather than in a downstream lane.
+#
+# WHY A SUBPROCESS: spec bodies execute on the tree-walk INTERPRETER, which is
+# correct for this whole class, so an in-process example cannot go red. The
+# oracle is the sibling probe run as a subprocess under BOTH engines, checking
+# absolute literals — never "the two engines agree", which would pass while both
+# are wrong in the same way.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_chained_call_receiver_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a call result used as a receiver, across every producer":
+    it "resolves every chained-receiver form in the interpreter (control arm)":
+        step("Run the probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter carries real values, not typed vregs, so it is the control")
+        expect(interp).to_contain("CHAINED_CALL_RECEIVER PROBE: ALL PASS")
+        expect_not(interp.contains("FAIL "))
+
+    it "types every STRING-producing call result under the JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("substring() as a producer, into each numeric and text consumer")
+        expect(jit).to_contain("PASS substring_to_int_chained")
+        expect(jit).to_contain("PASS substring_to_i64_chained")
+        expect(jit).to_contain("PASS substring_to_float_chained")
+        expect(jit).to_contain("PASS substring_to_upper_chained")
+        expect(jit).to_contain("PASS substring_len_chained")
+
+        step("The other string producers that lower to the same MirInst::Call shape")
+        expect(jit).to_contain("PASS slice_to_int_chained")
+        expect(jit).to_contain("PASS trim_to_int_chained")
+        expect(jit).to_contain("PASS to_upper_to_lower_chained")
+        expect(jit).to_contain("PASS concat_to_int_chained")
+
+        step("Nesting: a chained result feeding another chained call")
+        expect(jit).to_contain("PASS substring_substring_chained")
+
+    it "leaves ARRAY receivers of the shared runtime symbols alone":
+        step("Run the probe under the JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("rt_slice/rt_take/rt_reverse serve BOTH String and Array receivers; typing their result String unconditionally would corrupt these")
+        expect(jit).to_contain("PASS array_slice_len_chained")
+        expect(jit).to_contain("PASS array_slice_index_chained")
+
+    it "shows no pointer-as-integer signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("A never-decoded heap word leaks as `<value:0x..>` or an invalid-heap render")
+        expect_not(jit.contains("<value:0x"))
+        expect_not(jit.contains("<invalid-heap:"))
+        expect_not(interp.contains("<value:0x"))
+
+        step("No check may have failed under either engine")
+        expect_not(jit.contains("FAIL "))
+        expect_not(interp.contains("FAIL "))
+
+        step("Both aggregate verdicts must be green")
+        expect(jit).to_contain("CHAINED_CALL_RECEIVER PROBE: ALL PASS")
+        expect(interp).to_contain("CHAINED_CALL_RECEIVER PROBE: ALL PASS")

@@ -337,7 +337,10 @@ pub(super) fn build_vreg_types(
                 }
                 MirInst::MethodCallStatic { .. } => {}
                 MirInst::Call {
-                    dest: Some(d), target, ..
+                    dest: Some(d),
+                    target,
+                    args,
+                    ..
                 } => {
                     if let Some(&ty) = function_return_types.get(target.name()) {
                         types_map.insert(*d, ty);
@@ -390,8 +393,53 @@ pub(super) fn build_vreg_types(
                         | "rt_typed_words_u64_data_at"
                         | "rt_typed_words_u64_data_at_checked"
                         | "rt_typed_words_u64_raw_data_at" => Some(TypeId::U64),
+                        // Text-in/text-out runtime helpers. These names are
+                        // string-only (no array overload), so the result is a
+                        // String regardless of what typed the receiver.
+                        "rt_string_concat"
+                        | "rt_string_trim"
+                        | "rt_string_trim_start"
+                        | "rt_string_trim_end"
+                        | "rt_string_replace"
+                        | "rt_string_to_upper"
+                        | "rt_string_to_lower"
+                        | "rt_string_substr"
+                        | "rt_string_substr_from" => Some(TypeId::STRING),
                         _ => None,
                     };
+                    // RECEIVER-POLYMORPHIC runtime helpers: one symbol serves
+                    // both String and Array receivers, so the result type is
+                    // only knowable by PROPAGATING the receiver's type from
+                    // arg 0. Without this, a CHAINED call off one of them
+                    // (`t.substring(2).to_int()`, no intermediate `val`) left
+                    // the receiver vreg untyped, and the numeric-cast block in
+                    // codegen/instr/closures_structs.rs:1497 defaults a missing
+                    // type to `TypeId::I64` (`unwrap_or(TypeId::I64)`) — so
+                    // `to_int` skipped the `from_ty == TypeId::STRING` branch
+                    // that routes to `rt_string_to_int` and fell into the
+                    // generic raw-register conversion, returning the
+                    // intermediate string's HEAP POINTER as a "successful"
+                    // integer. Exit 0, no diagnostic, plausible-looking number
+                    // (`"ab1234".substring(2).to_int()` -> 2791233887617 under
+                    // the JIT, 1234 in the interpreter and in the
+                    // bound-intermediate form, whose reload is a typed `Load`).
+                    //
+                    // This is the same defect class the `builtin_method_result_type`
+                    // helper in closures_structs.rs was added for, but that fix
+                    // only covers receivers produced by `MethodCallStatic`.
+                    // `.substring()`/`.slice()` are expanded to a direct
+                    // `MirInst::Call { Pure("rt_slice") }` during MIR lowering,
+                    // so they never reach that helper — this arm is where the
+                    // Call-shaped half of the family must be typed.
+                    let ty = ty.or_else(|| match base {
+                        "rt_slice" | "rt_take" | "rt_drop" | "rt_reverse" | "rt_concat" => {
+                            match args.first().and_then(|a| types_map.get(a).copied()) {
+                                Some(TypeId::STRING) => Some(TypeId::STRING),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    });
                     if let Some(ty) = ty {
                         types_map.insert(*d, ty);
                     }
