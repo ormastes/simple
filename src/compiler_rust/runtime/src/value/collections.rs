@@ -3190,7 +3190,25 @@ pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
     }
 }
 
-/// `clear`: empty an ARRAY in place, or return the empty text.
+/// `clear`: empty an ARRAY or a DICT in place, or return the empty text.
+///
+/// THE DICT BRANCH IS LOAD-BEARING FOR THE SELF-HOST. The dispatch tables in
+/// `codegen/instr/{calls,closures_structs}.rs` route `.clear()` here by NAME
+/// with no receiver type, so `Dict.clear()` lands in this function. Until
+/// 2026-08-17 there was no Dict arm at all: a dict receiver fell straight
+/// through to `refuse_non_text_receiver`, and before that refusal was added it
+/// was a SILENT no-op. Either way `SymbolTable.reset_module()`
+/// (`src/compiler/20.hir/hir_types.spl:242`) — which is eight `Dict.clear()`
+/// calls plus two scalar resets — cleared nothing while `next_symbol_id = 0`
+/// and `next_scope_id = 1` still took effect. Symbol NAMES from every
+/// previously-lowered module therefore survived into the next module while
+/// symbol IDS restarted at 0, so `lookup_or_invalid(name)` returned a stale id
+/// that the new module had already reused for an unrelated symbol. That is the
+/// whole "enum payload dependency ... resolved to non-type binding" family in
+/// the Stage 3 log, and it is why the trace showed a STABLE key->id map
+/// against ~9.5 different symbol records per id: the id was stale, not the
+/// fetch. The `d[k]` bracket read on a class-field `Dict<i64, HirSymbol>` is
+/// NOT implicated — it measures correct natively.
 ///
 /// Receiver-dispatched. `rt_array_clear` fails closed to `false` on a text
 /// receiver, and `clear` also sat in the LLVM `in_place` set that substitutes
@@ -3207,6 +3225,10 @@ pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_clear(receiver: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         rt_array_clear(receiver);
+        return receiver;
+    }
+    if get_typed_ptr::<crate::value::dict::RuntimeDict>(receiver, HeapObjectType::Dict).is_some() {
+        crate::value::dict::rt_dict_clear(receiver);
         return receiver;
     }
     if string_as_str(receiver).is_some() {

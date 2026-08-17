@@ -7864,10 +7864,27 @@ int64_t rt_pop(int64_t receiver) {
  * success. Returning that 1 from rt_clear would be decoded as a heap-tagged
  * pointer to address 0 (RT_VALUE_TAG_HEAP | 0) and segfault on first use --
  * a link-clean, corrupt-later bug. */
+/* The DICT branch below is load-bearing for the Stage 3 self-host. The codegen
+ * dispatch tables route `.clear()` here by NAME with no receiver type, so
+ * `Dict.clear()` lands in this function; until 2026-08-17 there was no dict arm
+ * and a dict receiver fell through to rt_refuse_non_text_receiver (and, before
+ * that refusal existed, to a SILENT no-op). Either way
+ * SymbolTable.reset_module() (src/compiler/20.hir/hir_types.spl:242) cleared
+ * none of its eight dicts while its scalar resets (next_symbol_id = 0) still
+ * took effect, so stale symbol NAMES from earlier modules pointed at ids the
+ * next module had already reused. See the matching comment on rt_clear in
+ * src/compiler_rust/runtime/src/value/collections.rs. rt_index_get, directly
+ * below, is the three-way receiver-dispatch pattern this now follows. */
+int8_t rt_dict_clear(int64_t dict);
+
 int64_t rt_clear(int64_t receiver) {
     SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
     if (arr) {
         rt_array_clear(arr);
+        return receiver;
+    }
+    if (rt_core_as_dict(receiver)) {
+        rt_dict_clear(receiver);
         return receiver;
     }
     if (!rt_core_as_string(receiver)) rt_refuse_non_text_receiver("clear", receiver);

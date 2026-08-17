@@ -1,0 +1,236 @@
+#!/bin/sh
+# check-dict-clear-receiver-dispatch.shs
+#
+# Behavioural guard for
+# doc/08_tracking/bug/stage3_dict_clear_no_dict_branch_in_rt_clear_2026-08-17.md
+#
+# THE DEFECT: `rt_clear` -- the single symbol the native codegen dispatch tables
+# route EVERY `.clear()` to, by method NAME with no receiver type -- was
+# receiver-dispatched for Array and text only. It had NO Dict branch, so a dict
+# receiver fell through to `rt_refuse_non_text_receiver` (exit 70), and before
+# that loud refusal was added, to a SILENT no-op.
+#
+# WHY IT DECIDED SYMBOL RESOLUTION COMPILER-WIDE:
+# `SymbolTable.reset_module()` (src/compiler/20.hir/hir_types.spl:242) is the
+# per-module reset and is built out of eight `Dict.clear()` calls plus two
+# scalar resets (`next_symbol_id = 0`, `next_scope_id = 1`). Under native the
+# dict clears did nothing while the scalar resets took effect. Symbol NAMES from
+# every previously-lowered module therefore survived into the next module while
+# symbol IDS restarted at 0, so `lookup_or_invalid(name)` returned a STALE id
+# that the new module had already reused for an unrelated symbol -- the whole
+# Stage 3 "enum payload dependency ... resolved to non-type binding" family.
+# The `d[k]` bracket read on a class-field `Dict<i64, HirSymbol>` is NOT
+# implicated: it measures correct natively (see the bug record).
+#
+# WHY THIS IS A .shs AND NOT A `bin/simple test` SPEC: `bin/simple test`
+# hard-defaults to the tree-walk interpreter (.claude/rules/testing.md), whose
+# `clear` arm is a separate implementation that was always correct. No
+# spec-suite example can observe this. This guard links the real
+# runtime_native.c and calls the primitive.
+#
+# Verdict line is always the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> case(s) checked, ...        exit 0
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked             exit 2
+#
+# `--selftest` runs before every scan and is FATAL: it deletes the Dict branch
+# and requires the harness to FAIL. A control that cannot fail is a broken test.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RUNTIME_C="$ROOT/src/runtime/runtime_native.c"
+RUST_COLLECTIONS="$ROOT/src/compiler_rust/runtime/src/value/collections.rs"
+
+# The exact Dict arm this guard defends, in each of the two parallel runtimes.
+C_DICT_ARM='if (rt_core_as_dict(receiver)) {'
+RUST_DICT_ARM='crate::value::dict::rt_dict_clear(receiver);'
+
+WORK=${TMPDIR:-/tmp}/dict_clear_gate.$$
+mkdir -p "$WORK" || { echo "ERROR — nothing was checked"; exit 2; }
+cleanup() { [ "${KEEP_BUILD_DIR:-0}" = "1" ] || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+# --- locate a C compiler. Absence of a compiler is absence of evidence. ------
+CC_BIN=""
+for c in ${CC:-} clang cc gcc; do
+    if command -v "$c" >/dev/null 2>&1; then CC_BIN="$c"; break; fi
+done
+if [ -z "$CC_BIN" ]; then
+    echo "no C compiler (clang/cc/gcc) available -- cannot execute the runtime primitive"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+[ -f "$RUNTIME_C" ] || { echo "missing $RUNTIME_C"; echo "ERROR — nothing was checked"; exit 2; }
+
+# --- the harness ------------------------------------------------------------
+cat > "$WORK/harness.c" <<'HARNESS_EOF'
+#include <stdio.h>
+#include <stdint.h>
+extern int64_t rt_dict_new(int64_t cap_hint);
+extern int8_t  rt_dict_set(int64_t dict, int64_t key, int64_t value);
+extern int64_t rt_dict_len(int64_t dict);
+extern int8_t  rt_dict_contains(int64_t dict, int64_t key);
+extern int64_t rt_clear(int64_t receiver);
+extern int64_t rt_array_new(int64_t cap);
+extern int8_t  rt_array_push(int64_t arr, int64_t value);
+extern int64_t rt_len(int64_t v);
+extern int64_t rt_value_int(int64_t v);
+
+int main(void) {
+    int rc = 0;
+
+    /* CASE 1 -- the defect. A dict receiver reaching rt_clear must be emptied
+     * in place and the SAME handle returned. Pre-fix this exited 70 inside
+     * rt_refuse_non_text_receiver, so reaching the printf at all is signal. */
+    int64_t d  = rt_dict_new(8);
+    int64_t k1 = rt_value_int(11);
+    int64_t k2 = rt_value_int(22);
+    rt_dict_set(d, k1, rt_value_int(111));
+    rt_dict_set(d, k2, rt_value_int(222));
+    int64_t len_before = rt_dict_len(d);
+    printf("case1 dict: len_before=%lld\n", (long long)len_before);
+    if (len_before != 2) {
+        printf("case1 VERDICT: FAIL - fixture did not populate the dict\n");
+        return 4;
+    }
+    int64_t ret = rt_clear(d);
+    int64_t len_after = rt_dict_len(d);
+    int c1 = (int)rt_dict_contains(d, k1);
+    printf("case1 dict: len_after=%lld same_handle=%d contains_k1=%d\n",
+           (long long)len_after, (int)(ret == d), c1);
+    if (len_after == 0 && ret == d && c1 == 0) {
+        printf("case1 VERDICT: PASS - dict emptied in place, receiver handle returned\n");
+    } else {
+        printf("case1 VERDICT: FAIL - Dict.clear() did not empty the dict (defect reproduced)\n");
+        rc = 1;
+    }
+
+    /* CASE 2 -- the control. The ARRAY branch must still work, so "clear
+     * everything unconditionally" cannot pass case 1 vacuously. */
+    int64_t a = rt_array_new(4);
+    rt_array_push(a, rt_value_int(1));
+    rt_array_push(a, rt_value_int(2));
+    int64_t aret = rt_clear(a);
+    printf("case2 array: len_after=%lld same_handle=%d\n",
+           (long long)rt_len(a), (int)(aret == a));
+    if (rt_len(a) == 0 && aret == a) {
+        printf("case2 VERDICT: PASS - array branch still empties in place\n");
+    } else {
+        printf("case2 VERDICT: FAIL - array clear regressed\n");
+        rc = 2;
+    }
+    return rc;
+}
+HARNESS_EOF
+
+# Build <out_binary> from <runtime_source>. Stubs every unrelated symbol with an
+# aborting body, so an accidental dependency is LOUD rather than silently wrong.
+build_arm() {
+    _src="$1"; _out="$2"; _obj="$WORK/$(basename "$_out").o"
+    "$CC_BIN" -c -O0 -w -I "$ROOT/src/runtime" -o "$_obj" "$_src" 2> "$WORK/cc.err"
+    _rc=$?
+    if [ $_rc -ne 0 ]; then echo "compile failed for $_src:"; tail -5 "$WORK/cc.err"; return 9; fi
+    "$CC_BIN" -O0 -w -o "$_out" "$WORK/harness.c" "$_obj" -lm -lpthread -ldl 2> "$WORK/ld1.err"
+    if [ $? -ne 0 ]; then
+        sed -n "s/.*undefined reference to .\([a-zA-Z0-9_]*\).*/\1/p" "$WORK/ld1.err" | sort -u > "$WORK/undef.txt"
+        {   echo '#include <stdint.h>'; echo '#include <stdlib.h>'; echo '#include <stdio.h>'
+            while read -r s; do
+                [ -n "$s" ] || continue
+                printf 'int64_t %s(void); int64_t %s(void) { fprintf(stderr, "STUB-CALLED %s\\n"); abort(); }\n' "$s" "$s" "$s"
+            done < "$WORK/undef.txt"
+        } > "$WORK/stubs.c"
+        "$CC_BIN" -c -O0 -w -o "$WORK/stubs.o" "$WORK/stubs.c" 2>/dev/null || return 9
+        "$CC_BIN" -O0 -w -o "$_out" "$WORK/harness.c" "$_obj" "$WORK/stubs.o" -lm -lpthread -ldl 2> "$WORK/ld2.err"
+        _rc=$?
+        if [ $_rc -ne 0 ]; then echo "link failed for $_src:"; tail -5 "$WORK/ld2.err"; return 9; fi
+    fi
+    return 0
+}
+
+# --- selftest: the ablation. FATAL. -----------------------------------------
+# Delete the Dict arm's guard condition so a dict receiver falls through to the
+# text path exactly as it did pre-fix, and require the harness to FAIL.
+selftest() {
+    echo "[selftest] ablating the fix (removing rt_clear's Dict branch)"
+    if ! grep -qF "    $C_DICT_ARM" "$RUNTIME_C"; then
+        echo "[selftest] could not ablate: the Dict arm was not found verbatim in"
+        echo "[selftest] $RUNTIME_C -- the guard cannot prove anything about a branch it"
+        echo "[selftest] cannot locate. Update C_DICT_ARM if the code was refactored."
+        return 1
+    fi
+    # Neutralise the predicate rather than deleting lines: keeps the brace
+    # structure valid and reproduces the pre-fix control flow exactly.
+    sed "s|$C_DICT_ARM|if (0) {|" "$RUNTIME_C" > "$WORK/ablated.c"
+    grep -qF 'if (0) {' "$WORK/ablated.c" || { echo "[selftest] ablation produced no change"; return 1; }
+    build_arm "$WORK/ablated.c" "$WORK/bin_red" || { echo "[selftest] ablated build failed"; return 1; }
+    "$WORK/bin_red" > "$WORK/red.out" 2>&1
+    _red_rc=$?
+    sed 's/^/[selftest][RED] /' "$WORK/red.out"
+    echo "[selftest][RED] rc=$_red_rc"
+    if [ $_red_rc -eq 0 ]; then
+        echo "[selftest] CONTROL FAILED TO FAIL: rt_clear without a Dict branch passed."
+        echo "[selftest] The test is broken, not the code."
+        return 1
+    fi
+    # Pre-fix, the dict receiver reaches rt_refuse_non_text_receiver (exit 70).
+    # Accept either that, or an explicit case1 FAIL if the refusal is ever
+    # replaced by a silent no-op again -- both are the defect.
+    if ! grep -q "code-generation dispatch gap" "$WORK/red.out" \
+       && ! grep -q "defect reproduced" "$WORK/red.out"; then
+        echo "[selftest] ablated arm failed for the WRONG reason (neither the non-text"
+        echo "[selftest] receiver refusal nor a case1 defect line appeared)."
+        return 1
+    fi
+    echo "[selftest] OK — ablated arm reproduces the defect (rc=$_red_rc), fixed arm checked below"
+    return 0
+}
+
+echo "guard: rt_clear must receiver-dispatch a Dict to rt_dict_clear"
+echo "compiler: $CC_BIN"
+selftest || { echo "FAIL — selftest failed; guard is not trustworthy"; exit 1; }
+
+CHECKED=0
+
+# --- static half: the Rust runtime is a parallel implementation of the same
+# primitive (it backs the JIT and the Rust native-all lane) and must carry the
+# same branch. It is not linked by this C harness, so it is checked by source.
+if [ -f "$RUST_COLLECTIONS" ]; then
+    if grep -qF "$RUST_DICT_ARM" "$RUST_COLLECTIONS"; then
+        echo "collections.rs: rt_clear Dict branch present"
+        CHECKED=$((CHECKED + 1))
+    else
+        echo "collections.rs: MISSING rt_clear's Dict branch ($RUST_DICT_ARM)"
+        echo "FAIL — src/compiler_rust/runtime/src/value/collections.rs lost rt_clear's Dict branch"
+        exit 1
+    fi
+else
+    echo "FAIL — missing $RUST_COLLECTIONS"
+    exit 1
+fi
+
+# --- behavioural half: build the C runtime AS IT IS IN THE TREE and run it. --
+build_arm "$RUNTIME_C" "$WORK/bin_green" || { echo "FAIL — could not build the current runtime"; exit 1; }
+"$WORK/bin_green" > "$WORK/green.out" 2>&1
+GREEN_RC=$?
+sed 's/^/[GREEN] /' "$WORK/green.out"
+echo "[GREEN] rc=$GREEN_RC"
+
+if grep -q "STUB-CALLED" "$WORK/green.out"; then
+    echo "FAIL — the clear path reached a stubbed symbol; result is not trustworthy"
+    exit 1
+fi
+CHECKED=$((CHECKED + 2))   # case1 dict + case2 array control
+
+if [ $GREEN_RC -ne 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, rt_clear does not empty a Dict receiver (rc=$GREEN_RC)"
+    exit 1
+fi
+if [ $CHECKED -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+echo "PASS — $CHECKED case(s) checked, Dict.clear() empties the dict and the array control still holds"
+exit 0
