@@ -149,6 +149,57 @@ an environment where `SIMPLE_BINARY` points at a genuinely different compiler
 binary and the delegation marker is not inherited. Specs stay RED per
 testing.md — assertions are correct and must not be weakened.
 
+### ROOT CAUSE FOUND (2026-08-17) — a public-symbol collision, not a facade choice
+
+The diagnosis above asked why the spec's `check_file` "resolves to" the
+external facade even though it explicitly imports
+`compiler.driver.driver_api_compile_single` — which is the genuine **in-process**
+driver (`compiler_driver_create` / `compiler_driver_run_compile`, no subprocess
+anywhere). It is not a resolution *preference*; it is a **duplicate-definition
+collision**.
+
+Six names were defined twice, with byte-identical signatures:
+
+| name | in-process definition | external delegator definition |
+|---|---|---|
+| `compile_file`, `compile_files`, `compile_to_smf`, `jit_file`, `check_file`, `parse_sdn_file` | `driver_api_compile_single.spl` | `driver_public_compile_process.spl` |
+
+Both were also publicly re-exported by two parallel aggregators —
+`driver_api_core.spl` (in-process) and `driver_api.spl` -> `driver_public_compile.spl`
+(external). Under co-compilation each name therefore had **two definitions**, and
+the cross-module collision resolver dispatches an ambiguous call to the **last**
+definition (the same mechanism behind the
+`compiler_cross_module_private_symbol_collision` warnings, and the family
+tracked in `cross_module_public_symbol_collisions_2026-08-16.md`). So the
+explicit Tier-2 import silently landed on the delegator, which spawns the
+resolved `simple` CLI — which under `bin/simple test` is the CLI already
+running. Every call then re-entered `check_compile_delegation_guard`.
+
+Two distinct symptoms came from this one cause:
+1. **Deterministic guard errors** when the guard recognised the re-entry (the 10
+   failures diagnosed above).
+2. **A silent non-terminating run** when it did not: `find_simple_binary()`
+   prefers `bin/release/simple`, which is a *shell wrapper* (`file` reports
+   "Bourne-Again shell script") that execs `bin/release/<triple>/simple`. The
+   guard's textual same-path test did not equate wrapper with target, so the
+   facade spawned it and re-entered at a full CLI startup per hop, producing no
+   error and no `Results:` line at all.
+
+**Fix (landed):**
+- `driver_public_compile_process.spl` now defines its entry points as
+  `external_*`; `driver_public_compile.spl` aliases them back to the short
+  public names, so the compatibility surface is unchanged and no name has two
+  definitions. Dispatch is deterministic and Tier-2 importers reach the real
+  in-process driver.
+- `driver_public_shared.is_release_wrapper_self_delegation` teaches the guard
+  the wrapper/target shape, so the un-guarded variant fails deterministically
+  instead of spinning.
+
+Regression + generalization coverage:
+`test/01_unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl`
+(mirror-synced to `test/unit/...`) pins the wrapper shape, the
+no-facade-shadows-the-driver invariant, and the alias surface.
+
 ---
 
 ## mdsoc cluster (`test/01_unit/compiler/mdsoc/`) — 2026-08-16
