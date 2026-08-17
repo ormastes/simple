@@ -41,9 +41,35 @@ states apart. A silent `exit 1` collapses two of them:
 
 **Measured consequence:** a coordinating lane obtained a *user authorisation to
 bypass* on the stated premise that this guard was blocking a push. It never
-fired — it had exited before checking anything, and `origin` is not red on it.
-A guard's silence became the evidence for a decision that only a human was
-allowed to make. Absence of evidence was consumed as evidence.
+fired — it had exited before checking anything. A guard's silence became the
+evidence for a decision that only a human was allowed to make. Absence of
+evidence was consumed as evidence.
+
+### The inference to retract, stated plainly
+
+The same silent run also produced the conclusion **"origin is NOT red on this
+guard"**, which was relayed onward as fact to at least one other lane. That
+conclusion is unsupported by the run that produced it, and the general rule is
+worth stating in one line because it is the entire reason the verdict convention
+exists:
+
+> **A guard that checked nothing cannot certify green any more than it can
+> certify red.** A silent `exit 1` is not evidence of failure, and it is not
+> evidence of success either. It is the absence of a measurement, and the only
+> honest reading of it is `ERROR — nothing was checked`.
+
+Both directions of the mistake were made from the same 0-byte output within one
+session: first "this guard is blocking my push" (it was not running), then "origin
+is clean on this guard" (nothing had been measured). **Anyone who received the
+"origin is not red" claim should treat it as withdrawn.**
+
+And in this case the reassuring half was also substantively wrong. Where
+`bin/simple` is present the guard *does* run, and it FAILs on real content:
+`MIR lowering error: unresolved method call: bump` — a general multi-module
+`native-build` defect filed as
+`doc/08_tracking/bug/native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.md`.
+So the bypass premise was wrong twice over: the guard did not fire for that lane,
+**and** the content it gates is genuinely broken.
 
 This is the same family as
 `doc/08_tracking/bug/guards_hardcode_stale_seed_binary_census_2026-08-17.md`

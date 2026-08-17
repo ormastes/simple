@@ -61,3 +61,37 @@ still get the absolute band; `--expect-files` still honoured and recorded.
 silently broken unless the flag is written first. The two defects compound:
 the guard wrongly says no, and the documented way to say "I checked, this growth
 is real" quietly does nothing.
+
+## FIXED 2026-08-17 — and the residual limit, stated rather than papered over
+
+Implemented: the **relative band only** now references `<rev>^1` (first parent;
+first parent for merges). No parent => `REF_FILES=-1`, a `NOTE:` on stderr saying
+the narrowing out loud, absolute band and all structural checks still applied.
+`--expect-files` is now explicitly **tip-only** — the flag states an expected
+POST-count, and applying it to intermediate commits would band each against a
+number never true of it, which could hide a mid-range wipe.
+
+Selftest 16 -> 24 fixtures, including `growth-tip-vs-fixed-base` which pins the
+incident directly (the same tip FAILs against a fixed base, PASSes against its
+parents) and `wipe-inside-long-range`.
+
+Verified NOT blind — the two real historical wipes are still caught:
+
+| range | verdict |
+|---|---|
+| `118c636ead8^..118c636ead8` (109530 -> 2 files) | FAIL, 1 structurally wrong |
+| `6f86ff32a7d^..6f86ff32a7d` (113030 -> 3 files) | FAIL, 1 structurally wrong |
+| `118c636ead8~12..118c636ead8` | FAIL, 1 of 12 wrong, naming the wipe; 11 healthy siblings pass |
+
+Effect on the reported incident: `origin/main~250..origin/main` (414 commits) went
+from **355 of 414** commits out of band to **4**.
+
+**RESIDUAL, still open:** those 4 are all MERGE commits whose first-parent delta
+is legitimately +223..+256 files, because merging a divergent branch adds that
+branch's files relative to the first parent alone. So a long range containing
+merges can still FAIL with zero structural faults. No merge exemption was added —
+that would be a broadening beyond the diagnosed defect. The principled options
+are to reference the LARGEST parent, or to make the merge band one-sided (flag
+large DROPS, which is what a wipe is, and not growth). Both need their own
+fixtures before anyone trusts them. Until then, a range containing merges needs
+`--expect-files <tip-count>`, which is now honoured and recorded.

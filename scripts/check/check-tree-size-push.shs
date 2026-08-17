@@ -108,7 +108,7 @@
 #     the two have silently disagreed.
 #
 # NON-VACUITY: --selftest runs automatically before every scan and is FATAL. It
-# builds 16 throwaway fixtures in a temp repo — truncated tree, duplicate entry
+# builds 24 throwaway fixtures in a temp repo — truncated tree, duplicate entry
 # (same-sha AND differing-sha), missing src/runtime, shrunken src/, oversize,
 # inherited-wipe, band-jump, and healthy controls — and asserts each verdict.
 # A guard that cannot fail on its
@@ -384,10 +384,86 @@ evaluate_commit() {
     return "$ev_bad"
 }
 
+# ---------------------------------------------------------------------------
+# reference_for_rev <repo> <rev> <tip_rev|''> <expect_files|-1>
+#   Chooses the reference count the RELATIVE band (check 1b) is measured
+#   against for ONE commit. Sets REF_FILES (>=0, or -1 meaning "no relative
+#   band available") and REF_SOURCE. Returns 0, or 2 with IC_ERR set when a
+#   parent tree could not be measured.
+#
+# WHY PER-PARENT, NOT PER-RANGE-BASE (fixed 2026-08-17)
+#   The band used to compare EVERY commit in the range against a single count
+#   measured once at the range's left endpoint. The band answers "did this one
+#   commit replace a tree of size N with something wildly different" — but
+#   comparing commit #247 against the tree from before commit #1 asks a
+#   different question, and legitimate CUMULATIVE growth fails it: a real
+#   landing lane measured FAIL at 336 files of growth across 247 commits with
+#   ZERO structural faults. Banding each commit against its OWN parent is not
+#   a weakening: for the first commit in a range the two are identical, and
+#   for every later commit the per-parent band is STRICTLY TIGHTER than a
+#   per-base band that has already been widened by intervening drift. A single
+#   wiping commit anywhere in a long range is still caught, and is caught
+#   against the tree it actually replaced.
+#
+# WHERE --expect-files APPLIES: THE TIP ONLY.
+#   The flag exists to state the expected POST-count of the push, which is a
+#   property of the final tree, so it overrides the reference for the tip
+#   commit and nothing else. Applying it to every commit would silently band
+#   each intermediate commit against a number that was never true of it, which
+#   is how a stated expectation could hide a mid-range wipe. Intermediate
+#   commits keep their own parents as reference. The stated number is still
+#   RECORDED in the verdict line, which is the flag's whole purpose.
+#
+# MERGES: first parent (`<rev>^1`) — the mainline the commit advances.
+# ROOT COMMITS: no parent, so no relative band exists. REF_FILES is -1 and the
+#   caller SAYS SO on stderr; the absolute band, duplicate-entry check, src/
+#   entry band and load-bearing path floors all still apply unchanged.
+# ---------------------------------------------------------------------------
+reference_for_rev() {
+    rf_repo=$1
+    rf_rev=$2
+    rf_tip=$3
+    rf_expect=$4
+    REF_FILES=-1
+    REF_SOURCE=""
+
+    if [ "$rf_expect" -ge 0 ] && [ -n "$rf_tip" ] && [ "$rf_rev" = "$rf_tip" ]; then
+        REF_FILES=$rf_expect
+        REF_SOURCE="stated via --expect-files (tip)"
+        return 0
+    fi
+
+    rf_parent=$(git -C "$rf_repo" rev-parse --verify --quiet "$rf_rev^1^{commit}" 2>/dev/null) \
+        || rf_parent=""
+    if [ -z "$rf_parent" ]; then
+        REF_SOURCE="root commit, no parent"
+        return 0
+    fi
+
+    inspect_commit "$rf_repo" "$rf_parent" || return 2
+    REF_FILES=$IC_FILES
+    REF_SOURCE="first parent $rf_parent"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# evaluate_rev_banded <repo> <rev> <tip_rev|''> <expect_files|-1>
+#   evaluate_commit with the reference chosen by reference_for_rev. Same return
+#   convention: 0 clean, 1 violated, 2 could-not-determine.
+# ---------------------------------------------------------------------------
+evaluate_rev_banded() {
+    reference_for_rev "$1" "$2" "$3" "$4" || return 2
+    if [ "$REF_FILES" -lt 0 ]; then
+        # Not fail-open-in-silence: the narrowing is stated on stderr every time.
+        echo "  - NOTE: $2 is a $REF_SOURCE; no relative band available, absolute band and all structural checks still applied" >&2
+    fi
+    evaluate_commit "$1" "$2" "$REF_FILES"
+}
+
 # ===========================================================================
-# SELFTEST — runs before every scan, FATAL. 14 fixtures.
+# SELFTEST — runs before every scan, FATAL. 24 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=16
+SELFTEST_EXPECTED=24
 
 # --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
 # Every git call that BUILDS a fixture must go through st_git/st_git_init.
@@ -480,6 +556,36 @@ st_mktree() {
         <"$TMPROOT/mktree.in" >/dev/null || return 1
     st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
     st_git "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
+}
+
+st_mktree_spec() {
+    # st_mktree_spec <repo> <parent|-> <dir:count>...  -> echoes a commit sha
+    # Same fixture shape as st_mktree, but with PER-DIRECTORY counts and a real
+    # PARENT, which is what the per-parent band fixtures need: a chain where
+    # every step is small yet the cumulative growth is large.
+    sp_repo=$1; sp_parent=$2
+    shift 2
+    sp_idx="$TMPROOT/st.spec.index"
+    rm -f "$sp_idx"
+    sp_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$sp_repo" hash-object -w --stdin) || return 1
+    : >"$TMPROOT/mktree.spec.in"
+    for sp_s in "$@"; do
+        sp_d=${sp_s%%:*}
+        sp_n=${sp_s##*:}
+        sp_i=0
+        while [ "$sp_i" -lt "$sp_n" ]; do
+            printf '100644 %s\t%s/f%s.txt\n' "$sp_blob" "$sp_d" "$sp_i" >>"$TMPROOT/mktree.spec.in"
+            sp_i=$(( sp_i + 1 ))
+        done
+    done
+    ST_INDEX="$sp_idx" st_git "$sp_repo" update-index --add --index-info \
+        <"$TMPROOT/mktree.spec.in" >/dev/null || return 1
+    sp_tree=$(ST_INDEX="$sp_idx" st_git "$sp_repo" write-tree) || return 1
+    if [ "$sp_parent" = "-" ]; then
+        st_git "$sp_repo" commit-tree "$sp_tree" -m specfixture </dev/null
+    else
+        st_git "$sp_repo" commit-tree "$sp_tree" -p "$sp_parent" -m specfixture </dev/null
+    fi
 }
 
 st_mkdirtree() {
@@ -580,6 +686,21 @@ selftest() {
         fi
     }
 
+    st_assert_banded() {
+        # st_assert_banded <name> <commit> <tip|''> <expect|-1> <want 0|1>
+        # Exercises the SCAN-LOOP seam (reference chosen per commit), not just
+        # evaluate_commit with a hand-supplied base.
+        sb_name=$1; sb_commit=$2; sb_tip=$3; sb_exp=$4; sb_want=$5
+        evaluate_rev_banded "$st_dir" "$sb_commit" "$sb_tip" "$sb_exp" 2>"$TMPROOT/st.err"
+        sb_got=$?
+        st_ran=$(( st_ran + 1 ))
+        if [ "$sb_got" -ne "$sb_want" ]; then
+            echo "SELFTEST FAIL: fixture '$sb_name' expected verdict $sb_want, got $sb_got" >&2
+            cat "$TMPROOT/st.err" >&2
+            st_fail=1
+        fi
+    }
+
     # healthy: 200 files, src/ has 4 entries, runtime and os hold 40 each
     st_healthy=$(st_mktree "$st_dir" 40 src/runtime src/os src/lib src/std doc) || return 1
     # truncated: the wipe case — 4 files total
@@ -642,7 +763,38 @@ selftest() {
     st_toptree2=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.top2") || return 1
     st_dupdiff=$(st_git "$st_dir" commit-tree "$st_toptree2" -m dupdiff </dev/null) || return 1
 
-    # --- 12 fixtures that MUST FAIL ---------------------------------------
+    # --- per-parent band fixtures (2026-08-17) -----------------------------
+    # A CHAIN with legitimate cumulative growth: 5 steps of +2 files each on a
+    # 200-file base. Fixture tolerance is 1.5% => +-3, so every individual step
+    # is inside the band while the total (+10) is far outside it. This is the
+    # exact incident being fixed (336 files across 247 commits, no faults).
+    st_c0=$(st_mktree_spec "$st_dir" - src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:40) || return 1
+    st_c1=$(st_mktree_spec "$st_dir" "$st_c0" src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:42) || return 1
+    st_c2=$(st_mktree_spec "$st_dir" "$st_c1" src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:44) || return 1
+    st_c3=$(st_mktree_spec "$st_dir" "$st_c2" src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:46) || return 1
+    st_c4=$(st_mktree_spec "$st_dir" "$st_c3" src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:48) || return 1
+    st_c5=$(st_mktree_spec "$st_dir" "$st_c4" src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:50) || return 1
+    # a WIPE committed as a child of a healthy chain commit: 4 files total
+    st_wipe_child=$(st_mktree_spec "$st_dir" "$st_c2" src/runtime:1 src/os:1 src/lib:1 src/std:1) || return 1
+    # a tip that jumps +20 in ONE commit: only a stated expectation makes it legal
+    st_jump=$(st_mktree_spec "$st_dir" "$st_c5" src/runtime:40 src/os:40 src/lib:40 src/std:40 doc:70) || return 1
+
+    st_assert_banded growth-step-mid       "$st_c3"          ''         -1  0
+    st_assert_banded growth-chain-tip      "$st_c5"          ''         -1  0
+    # ... and the SAME tip against the fixed range base is exactly the false
+    # FAIL this change removes. Pins the incident so a revert is visible.
+    st_assert       growth-tip-vs-fixed-base "$st_c5"        200            1
+    # a wipe anywhere in a long range is still caught, banded against ITS parent
+    st_assert_banded wipe-inside-long-range "$st_wipe_child" ''         -1  1
+    # root commits: no parent => absolute band only, must not crash either way
+    st_assert_banded root-healthy-no-parent "$st_c0"         ''         -1  0
+    st_assert_banded root-wipe-no-parent    "$st_trunc"      ''         -1  1
+    # --expect-files is honoured for the TIP ...
+    st_assert_banded expect-files-tip       "$st_jump"       "$st_jump" 230 0
+    # ... and NOT applied to a non-tip commit, which keeps its own parent
+    st_assert_banded expect-files-not-nontip "$st_jump"      "$st_c5"   230 1
+
+    # --- 16 fixtures that MUST FAIL ---------------------------------------
     st_assert truncated-tree      "$st_trunc"   -1  1   # the wipe, no base
     st_assert truncated-vs-base   "$st_trunc"   200 1   # the wipe, healthy base
     st_assert inherited-wipe      "$st_trunc"   4   1   # base ALSO wiped: delta 0
@@ -656,7 +808,7 @@ selftest() {
     st_assert oversize-vs-base    "$st_over"    200 1
     st_assert band-jump           "$st_healthy" 160 1   # +40 vs tolerance 2
 
-    # --- 3 fixtures that MUST PASS ----------------------------------------
+    # --- 7 fixtures that MUST PASS ----------------------------------------
     st_assert healthy-no-base     "$st_healthy" -1  0
     st_assert healthy-exact-base  "$st_healthy" 200 0
     st_assert healthy-small-churn "$st_healthy" 198 0   # delta 2 == tolerance 2
@@ -681,7 +833,7 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (12 must-fail, 3 must-pass, 1 env-isolation)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (16 must-fail, 7 must-pass, 1 env-isolation)"
     return 0
 }
 
@@ -848,13 +1000,14 @@ if [ "$rawmode" -eq 0 ]; then
     base_rev="$left"
 fi
 
-# --- 5. establish the reference count for the relative band -----------------
-# Normally the base is the range's left endpoint: exactly the tree the push
-# replaces. `--expect-files` overrides it with a STATED number, which is printed
-# in the verdict so the expectation is on the record. In raw rev-list mode (a
-# brand-new ref) there is no base; the relative band is then unavailable and the
-# verdict SAYS SO. The absolute band still applies, and that is the check which
-# catches a wipe, so this is a narrowing rather than a fail-open.
+# --- 5. measure the range base, for the VERDICT LINE ------------------------
+# Each commit is banded against its OWN first parent (see reference_for_rev), so
+# this number is no longer the band's reference for every commit — for the
+# OLDEST commit in the range the two are the same thing, since its parent IS the
+# left endpoint. It is still measured, and still fail-closed, because the verdict
+# line reports the size of the tree the push replaces. `--expect-files`, when
+# stated, is recorded in the verdict and applies to the TIP's band.
+# In raw rev-list mode (a brand-new ref) there is no base and the verdict SAYS SO.
 base_files=-1
 base_source=""
 if [ "$expect_files" -ge 0 ]; then
@@ -905,8 +1058,12 @@ fi
 # --- 7. the actual check ----------------------------------------------------
 found=0
 checked=0
+# The tip is the FIRST rev git rev-list prints (reverse-chronological order).
+# It is the only commit `--expect-files` applies to — see reference_for_rev.
+tip_rev=""
+for rev in $revs; do tip_rev=$rev; break; done
 for rev in $revs; do
-    evaluate_commit "$toplevel" "$rev" "$base_files"
+    evaluate_rev_banded "$toplevel" "$rev" "$tip_rev" "$expect_files"
     st=$?
     if [ "$st" -eq 2 ]; then
         die 2 "cannot verify commit $rev: ${IC_ERR:-unknown git failure}"
@@ -944,9 +1101,11 @@ EOF
 fi
 
 VERDICT_EMITTED=1
-if [ "$base_files" -ge 0 ]; then
-    echo "$SELF: PASS — $checked commit(s) checked in $range, reference $base_files file(s) ($base_source), 0 structural faults (repo $toplevel)"
+if [ "$expect_files" -ge 0 ]; then
+    echo "$SELF: PASS — $checked commit(s) checked in $range, each banded against its own first parent, tip expectation $expect_files file(s) ($base_source), 0 structural faults (repo $toplevel)"
+elif [ "$base_files" -ge 0 ]; then
+    echo "$SELF: PASS — $checked commit(s) checked in $range, each banded against its own first parent, range base $base_files file(s) ($base_source), 0 structural faults (repo $toplevel)"
 else
-    echo "$SELF: PASS — $checked commit(s) checked in $range, no reference count available so absolute band only, 0 structural faults (repo $toplevel)"
+    echo "$SELF: PASS — $checked commit(s) checked in $range, each banded against its own first parent, no range base available, 0 structural faults (repo $toplevel)"
 fi
 exit 0
