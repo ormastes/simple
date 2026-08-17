@@ -26,6 +26,22 @@ since a call site can be translated before its callee's definition).
 both mangling modes**, with the single exception of the `main` entry-point
 symbol contract, which still wins.
 
+### Verification (2026-08-17)
+
+The fix is pure-Simple source, which `bin/simple` reads on every run, so no
+rebuild was needed. A direct probe exercising exactly the two specs' assertions
+via `bin/simple run` reports **6 of 6 PASS**: the incident pair resolves to
+`simple_provider_query_v1` under `no_mangle`, a non-exported name passes through
+unchanged, the requested name also wins in default mangle mode, siblings are
+untouched, and `main` still resolves to `__simple_main`. Before the fix the
+`export_symbol_names` field did not exist at all, so both specs were red on
+their first line.
+
+`bin/simple test` was not usable as evidence for these two specs — it was killed
+by the CPU monitor (rc=143) and, on the run that completed, emitted no results
+line (the known silent-green defect). Per `.claude/rules/testing.md` that is
+INCONCLUSIVE, hence the direct `run` repro above.
+
 Specs (repro + generalization, mirror-synced into `test/unit/`):
 - `test/01_unit/compiler/backend/export_c_custom_name_spec.spl` — the exact
   incident pair under `no_mangle`, plus non-exported passthrough.

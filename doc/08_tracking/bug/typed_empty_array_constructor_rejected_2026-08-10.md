@@ -73,6 +73,30 @@ Specs (repro + generalization, mirror-synced into `test/unit/`):
   user-defined class element type, and a negative case proving a single-element
   VALUE array literal is not intercepted.
 
+### Verification (2026-08-17, controlled A/B in one tree)
+
+Same probe, same tree, only the binary toggled. BEFORE = the deployed
+pre-fix seed at `bin/release/x86_64-unknown-linux-gnu/simple`; AFTER = the same
+sources built with the parser fix into an isolated `CARGO_TARGET_DIR`
+(`cargo build --release --bin simple`, rc=0).
+
+- BEFORE: `rc=1`, `error: semantic: variable \`i64\` not found`, preceded by the
+  Cranelift JIT bailing out on the same identifier — zero assertions reached.
+- AFTER: `rc=0`, **11 of 11 PASS**, and no JIT-failure line at all (so the JIT
+  lane compiles the form now, it does not merely fall back). Cases: the `[i64]()`
+  repro, push/read-back, `[]`-spelling equivalence, `f64`/`str`/`bool` element
+  types, nested `[[i64]]()`, a user-defined class element type with field
+  read-back, and the negative case (`[21]` still a value array literal).
+- `sh scripts/check/check-jit-unresolved-symbol-guard.shs` with the rebuilt
+  binary: `PASS — 6 lane-cases checked`, confirming the repointed fixture below
+  still diagnoses on both lanes.
+- `cargo check --release --bin simple`: clean (3 pre-existing warnings, 0 errors).
+
+Note that `bin/simple test` was **not** usable as evidence here: on this spec it
+exhibits the known silent-green defect (~1900 warning lines, no results line) or
+is killed by the CPU monitor. Per `.claude/rules/testing.md`, that is
+INCONCLUSIVE, so the behaviour was confirmed by direct `run` repro instead.
+
 Fixture note: `test/fixtures/jit_unresolved_symbol_guard/typed_ctor.spl`
 previously used `[i64]()` as deliberate BAD INPUT. That form is now valid, so
 the fixture would have failed open (rc=0, `SHOULD_NOT_PRINT`). It was repointed
