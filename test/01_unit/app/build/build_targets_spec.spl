@@ -29,7 +29,12 @@ fn _setup() -> bool:
     val c = file_write(FIXTURE_ROOT + "/src/util.spl", "fn util(): 0\n")
     a and b and c
 
-fn _has(errors: [text], needle: text) -> bool:
+# Named `_has_error`, not `_has`: `app.build.targets.change_classifier` defines
+# `fn _has(values: [text], value: text) -> bool` with an identical signature but
+# EQUALITY semantics, and the interpreter resolves free functions by NAME across
+# co-compiled modules — so a plain `_has` here silently became the equality one
+# and every substring assertion below returned false.
+fn _has_error(errors: [text], needle: text) -> bool:
     var i = 0
     while i < errors.len():
         if errors[i].contains(needle):
@@ -74,25 +79,25 @@ describe "build targets: fail-closed validation":
         expect(_setup()).to_equal(true)
         val src = "target a:\n    kind: library\n    entry: src/lib.spl\n\ntarget a:\n    kind: binary\n    entry: src/main.spl\n"
         val errs = validate_targets(parse_targets_text(src), FIXTURE_ROOT)
-        expect(_has(errs, "duplicate-name: a")).to_equal(true)
+        expect(_has_error(errs, "duplicate-name: a")).to_equal(true)
 
     it "reports a missing entry file":
         expect(_setup()).to_equal(true)
         val src = "target a:\n    kind: binary\n    entry: src/nope.spl\n"
         val errs = validate_targets(parse_targets_text(src), FIXTURE_ROOT)
-        expect(_has(errs, "missing-entry: a: src/nope.spl")).to_equal(true)
+        expect(_has_error(errs, "missing-entry: a: src/nope.spl")).to_equal(true)
 
     it "reports an unknown dependency name":
         expect(_setup()).to_equal(true)
         val src = "target a:\n    kind: binary\n    entry: src/main.spl\n    depends: ghost\n"
         val errs = validate_targets(parse_targets_text(src), FIXTURE_ROOT)
-        expect(_has(errs, "unknown-dep: a -> ghost")).to_equal(true)
+        expect(_has_error(errs, "unknown-dep: a -> ghost")).to_equal(true)
 
     it "reports a dependency cycle":
         expect(_setup()).to_equal(true)
         val src = "target a:\n    kind: library\n    entry: src/lib.spl\n    depends: b\n\ntarget b:\n    kind: library\n    entry: src/util.spl\n    depends: a\n"
         val errs = validate_targets(parse_targets_text(src), FIXTURE_ROOT)
-        expect(_has(errs, "dependency-cycle:")).to_equal(true)
+        expect(_has_error(errs, "dependency-cycle:")).to_equal(true)
 
     it "detects an indirect three-node cycle":
         val src = "target a:\n    kind: library\n    entry: src/lib.spl\n    depends: b\n\ntarget b:\n    kind: library\n    entry: src/util.spl\n    depends: c\n\ntarget c:\n    kind: library\n    entry: src/main.spl\n    depends: a\n"
@@ -239,8 +244,8 @@ describe "build targets: scoped actions":
     it "rejects absolute and parent-traversing output declarations":
         val absolute = "target a:\n    kind: binary\n    entry: src/main.spl\n    output: /tmp/a\n"
         val traversal = "target a:\n    kind: binary\n    entry: src/main.spl\n    output: build/../a\n"
-        expect(_has(validate_targets(parse_targets_text(absolute), FIXTURE_ROOT), "unsafe-output: a")).to_equal(true)
-        expect(_has(validate_targets(parse_targets_text(traversal), FIXTURE_ROOT), "unsafe-output: a")).to_equal(true)
+        expect(_has_error(validate_targets(parse_targets_text(absolute), FIXTURE_ROOT), "unsafe-output: a")).to_equal(true)
+        expect(_has_error(validate_targets(parse_targets_text(traversal), FIXTURE_ROOT), "unsafe-output: a")).to_equal(true)
 
     it "plans canonical-label dependencies in deterministic order":
         val src = "target //config:configc:\n    kind: binary\n    entry: src/main.spl\n    output: build/configc\n\ntarget //provider:provider_cli:\n    kind: binary\n    entry: src/util.spl\n    output: build/provider_cli\n    depends: //config:configc\n"
