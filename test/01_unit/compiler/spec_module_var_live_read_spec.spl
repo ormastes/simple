@@ -1,0 +1,60 @@
+# Reproducing spec — `it` body must read the LIVE value of a module-level `var`.
+#
+# doc/08_tracking/bug/spec_it_block_reads_stale_module_var_2026-08-04.md
+#
+# RED before the fix, GREEN after. Measured RED on the deployed seed
+# (bin/simple, mtime 2026-08-16 22:59):
+#   Results: 2 total, 0 passed, 2 failed
+#   ✗ expected init to equal written
+#   ✗ expected 0 to equal 2
+#
+# Mechanism: the spec runner executes every `it` body in `env.clone()`
+# (interpreter_call/bdd.rs:778). A helper that writes a module-level `var`
+# syncs MODULE_GLOBALS (interpreter/place.rs `sync_module_global`) but cannot
+# reach that private copy. The identifier read
+# (interpreter/expr/literals.rs:278) returned the stale `env` binding, and the
+# MODULE_GLOBALS fallback further down was never reached — so the body saw the
+# value the var held BEFORE the helper ran, with no diagnostic.
+#
+# The original report's truth table is preserved below as the four cases: only
+# case B (helper-write -> direct read) ever failed, and A/C/D are kept because
+# they are what prove the write itself landed. A regression that fixes B by
+# breaking A or D must not read as a pass.
+
+use std.spec.*
+
+var counter: i64 = 0
+var log_text: text = "init"
+
+fn bump():
+    counter = counter + 1
+    log_text = "written"
+
+fn read_counter() -> i64:
+    counter
+
+describe "an it body reads module-level state live, not as a registration-time snapshot":
+    it "case A: helper-write then helper-read sees the new value":
+        step("bump() writes both module vars")
+        bump()
+
+        step("A helper reading the same var is the control arm — it always worked, and proves the write landed in MODULE_GLOBALS")
+        expect(read_counter()).to_equal(1)
+
+    it "case B: helper-write then DIRECT read in the it body sees the new value":
+        step("counter is 1 from case A; bump() makes it 2 and sets log_text")
+        bump()
+
+        step("This is the defect: the direct read returned the stale pre-helper value (0 / init)")
+        expect(counter).to_equal(2)
+        expect(log_text).to_equal("written")
+
+    it "case C: direct-write then direct-read in the same body":
+        step("A write performed inside the body must be visible to that same body")
+        counter = 17
+        expect(counter).to_equal(17)
+
+    it "case D: direct-write then helper-read":
+        step("A write performed inside the body must also reach the global store a helper reads")
+        counter = 18
+        expect(read_counter()).to_equal(18)

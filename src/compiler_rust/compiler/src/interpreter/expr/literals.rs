@@ -285,6 +285,24 @@ pub(super) fn eval_literal_expr(
                         }
                     }
                 }
+                // Same-file module-level `var`s have no owner provenance, so the
+                // refresh above skips them: they sit in `env` as a NON-local
+                // binding while MODULE_GLOBALS holds the live value. A callee
+                // that writes one syncs MODULE_GLOBALS (place.rs
+                // `sync_module_global`) but cannot reach a caller frame that
+                // holds a COPY of `env` — notably the spec runner, which runs
+                // every `it` body in `env.clone()` (interpreter_call/bdd.rs).
+                // Reading through the stale copy returned the value the var had
+                // BEFORE the helper ran, silently and with no diagnostic:
+                // doc/08_tracking/bug/spec_it_block_reads_stale_module_var_2026-08-04.md.
+                // MODULE_GLOBALS is authoritative for these names (a direct
+                // write in the body syncs there too), so prefer it on read.
+                if !env.is_local(name) {
+                    let live = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned());
+                    if let Some(live) = live {
+                        return Ok(Some(live));
+                    }
+                }
                 return Ok(Some(val.clone()));
             }
             // Then check functions for top-level function definitions

@@ -1,6 +1,59 @@
 # `it` block reads a STALE module-level `var` after a helper writes it
 
-**Status:** OPEN (ARCHITECTURAL — Rust seed spec-runner registration; not pure-Simple fixable)
+**Status:** ROOT CAUSE PINNED + FIX LANDED 2026-08-17 (seed fix; redeploy pending)
+
+## 2026-08-17 — the previously-unpinned site, and the fix
+
+The "Not yet pinned" note below is now closed. It is not the `rt_bdd_*`
+intrinsics and not capture-by-value at registration time. It is two lines:
+
+1. `interpreter_call/bdd.rs:778` — `let mut test_env = env.clone();`. Every `it`
+   body executes against a private COPY of the caller env, dropped after the
+   body (deliberate, for per-example memory isolation).
+2. `interpreter/expr/literals.rs:278` — the `Identifier` read returns that copy.
+   The refresh immediately above it fires only for **imported** globals
+   (`!env.is_local(name) && env.is_refreshed_global(name)`, keyed on owner
+   provenance). A **same-file** module `var` has no owner provenance, so it is
+   skipped, and the `MODULE_GLOBALS` fallback further down (`:312`) — which is
+   where a callee's write actually lands via `place.rs sync_module_global` — is
+   never reached, because the stale `env` binding already returned.
+
+This also explains the original truth table exactly: A/D pass because the helper
+reads `MODULE_GLOBALS` directly; C passes because the body's own write goes into
+the same copy it then reads; only B crosses the two stores.
+
+**Fix:** `literals.rs` — for an env binding that is NOT local, prefer
+`MODULE_GLOBALS`, which is authoritative for these names (C/D passing proves a
+direct write already syncs there).
+
+**Blast radius is wider than this report recorded.** The class spec below found
+two shapes not listed here:
+- a module-level **container** mutated in place by a helper loses the writes
+  entirely, degrading from a wrong value to a hard error
+  (`array index out of bounds: index is 0 but length is 0`);
+- a write performed by a **`before_each` hook** is invisible in the body — a
+  common spec idiom that silently does nothing.
+
+**Evidence.** RED on deployed seed (`bin/simple`, mtime 2026-08-16 22:59):
+`Results: 8 total, 1 passed, 7 failed` (class spec) and `2 total, 0 passed, 2
+failed` (ad-hoc repro of cases A/B). GREEN on a seed rebuilt with the fix
+(`CARGO_TARGET_DIR=/mnt/data/b3-target`): `Results: 4 total, 4 passed, 0 failed`
+and `Results: 8 total, 8 passed, 0 failed`.
+
+**Not proven:** an ablation build (fix removed, same tree) was attempted and did
+NOT execute — it aborted with `pure-Simple tool 'test' unavailable; refusing
+Rust fallback`, so its exit 1 is a refusal, not a spec failure. The pre-fix RED
+therefore comes from the deployed seed, a different build, not from an ablated
+build of this tree. The causal chain is established by source reading, not by
+ablation. Re-run the ablation before treating this as closed.
+
+Specs: `test/01_unit/compiler/spec_module_var_live_read_spec.spl` (reproducer),
+`test/01_unit/compiler/module_global_stale_shadow_class_spec.spl` (defect class:
+payload type x writer depth x read position).
+
+---
+
+**Previous status:** OPEN (ARCHITECTURAL — Rust seed spec-runner registration; not pure-Simple fixable)
 **Found:** 2026-08-04
 **Re-verified:** 2026-08-10 — reproduced fresh via
 `test/03_system/feature/baremetal/modvar2_spec.spl` (regression coverage added,

@@ -1,0 +1,98 @@
+# Similar-problem detection spec — the defect CLASS is:
+#
+#   a mutable binding has TWO stores (a frame-local `env` copy and the
+#   authoritative global store), the writer updates one, the reader consults
+#   the other, and the mismatch is returned as a plausible value instead of an
+#   error.
+#
+# The filed instance was ONE shape of it: a module `var` of scalar type,
+# written by a plain free function, read directly in an `it` body
+# (doc/08_tracking/bug/spec_it_block_reads_stale_module_var_2026-08-04.md,
+# reproducer: spec_module_var_live_read_spec.spl).
+#
+# That reproducer is not sufficient on its own. The read path it exercises is
+# a single `Identifier` arm; the same stale-shadow hazard exists for every
+# other way a module-level binding can be written and every payload type it
+# can hold. This spec sweeps those axes so that a fix which repairs only the
+# i64-written-by-a-free-function case fails HERE rather than shipping.
+#
+# Axes covered:
+#   payload type   — i64, text, bool, array, dict
+#   writer         — free fn, nested fn (write two frames down), before_each
+#                    hook, a fn that mutates a container in place
+#   read position  — directly in the it body, and across example boundaries
+#
+# Every oracle is an absolute literal. Nothing here asserts merely that two
+# reads agree with each other, which would pass while both are stale.
+
+use std.spec.*
+
+var g_int: i64 = -999
+var g_text: text = "unset"
+var g_bool: bool = false
+var g_list: [i64] = []
+var g_hook_witness: i64 = 0
+
+fn set_int(v: i64):
+    g_int = v
+
+fn set_text(v: text):
+    g_text = v
+
+fn set_bool(v: bool):
+    g_bool = v
+
+fn append_int(v: i64):
+    g_list.push(v)
+
+fn set_int_nested(v: i64):
+    # Writes two frames below the it body, not one. A fix that only syncs the
+    # immediate callee's frame passes the reproducer and fails here.
+    set_int(v)
+
+describe "module-level state is read live regardless of payload type or writer depth":
+    before_each:
+        g_hook_witness = 42
+
+    it "an i64 written by a free function is read live":
+        step("Write through a one-frame-deep helper")
+        set_int(7)
+
+        step("The direct read must observe 7, not the -999 initialiser")
+        expect(g_int).to_equal(7)
+
+    it "an i64 written TWO frames deep is read live":
+        step("set_int_nested delegates to set_int, so the write happens two frames below this body")
+        set_int_nested(1234)
+        expect(g_int).to_equal(1234)
+
+    it "a text payload written by a helper is read live":
+        set_text("live")
+        expect(g_text).to_equal("live")
+
+    it "a bool payload written by a helper is read live":
+        step("bool is the type most likely to read as a plausible-but-wrong value, since both states are legal")
+        set_bool(true)
+        expect(g_bool).to_equal(true)
+
+    it "a container mutated in place by a helper is read live":
+        step("The array case differs from the scalar case: the handle may be shared while the contents are not")
+        append_int(5)
+        append_int(6)
+        expect(g_list.len()).to_equal(2)
+        expect(g_list[0]).to_equal(5)
+        expect(g_list[1]).to_equal(6)
+
+    it "a write performed by a before_each hook is visible in the body":
+        step("The hook runs in the same frame the body does; a stale copy taken before hooks ran would show 0")
+        expect(g_hook_witness).to_equal(42)
+
+    it "writes made in earlier examples are still visible in later ones":
+        step("g_int was last set to 1234 by the two-frames-deep example; the container still holds both pushes")
+        expect(g_int).to_equal(1234)
+        expect(g_list.len()).to_equal(2)
+
+    it "a write made directly in the body is visible to a later helper read":
+        step("The reverse direction of the same two-store hazard: body writes env, helper reads the global store")
+        g_int = 55
+        expect(g_int).to_equal(55)
