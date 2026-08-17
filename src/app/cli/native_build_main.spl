@@ -5,6 +5,7 @@ use app.io.process_ops.{process_run_timeout, process_run_timeout_live}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_getpid() -> i64
 
 # Absolute path of the current bootstrap-stage compiler.
@@ -218,6 +219,15 @@ fn eprint_bounded(output: text):
     # and we make the truncation itself impossible to overlook.
     val omitted = output.len() - OUTPUT_LIMIT
     eprint "!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!"
+    # Truncation must never make evidence UNRECOVERABLE. Spill the FULL stream
+    # to a file first and name the path, so a head+tail print is a convenience
+    # view rather than the only surviving copy. Best-effort: a failed spill is
+    # stated, never silent.
+    val spill_path = "{env_get("TMPDIR") ?? "/tmp"}/native-build-stderr-{rt_getpid()}.log"
+    if rt_file_write_text(spill_path, output):
+        eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
+    else:
+        eprint "[native-build] WARNING: could not save full stderr to {spill_path}; only the excerpt below survives."
     eprint "[native-build] TRUNCATED: {omitted} of {output.len()} bytes of worker stderr were dropped from the MIDDLE."
     eprint "[native-build] Raw head+tail below is INCOMPLETE -- counting over it is unreliable."
     val diags = native_build_collect_diagnostics(output)

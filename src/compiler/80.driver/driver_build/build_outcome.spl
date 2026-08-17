@@ -274,7 +274,36 @@ impl BuildOutcomeSet:
                 out = out + "{tag}: {paths.len()} unit(s)\n"
                 for path in paths:
                     out = out + "  - {path}\n"
+                    # A unit reported as non-OK MUST carry its reason HERE.
+                    # Until 2026-08-17 this loop printed the path alone, so an
+                    # `ERROR=1` summary was structurally incapable of saying
+                    # WHY -- the producer had already stored the compiler's own
+                    # message in `diagnostics` (see
+                    # driver_native_record_module_failure) and nothing ever
+                    # read it back out. That made every native-build failure
+                    # unattributable, and it was misread as stderr truncation
+                    # eating the message; the message was never printed at all.
+                    # See doc/08_tracking/bug/
+                    # native_compile_fails_with_no_diagnostic_stderr_truncated_from_middle_2026-08-17.md
+                    out = out + self.reason_block_for(path)
         out + "===== end build outcome summary =====\n"
+
+    # The indented `reason:` block for one non-OK path. Never empty: a missing
+    # diagnostic is STATED as a producer bug rather than rendered as silence,
+    # because silence is indistinguishable from "no failure" to every reader.
+    fn reason_block_for(source_path: text) -> text:
+        for outcome in self.records:
+            if outcome.source_path == source_path:
+                if outcome.diagnostics == "":
+                    return "      reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)\n"
+                var block = ""
+                for line in outcome.diagnostics.split("\n"):
+                    if line != "":
+                        block = block + "      reason: {line}\n"
+                if block == "":
+                    return "      reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)\n"
+                return block
+        "      reason: (no record found for this path — BUG in the accumulator)\n"
 
 # ============================================================================
 # Small local helpers

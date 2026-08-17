@@ -1,0 +1,196 @@
+#!/bin/sh
+# check-build-outcome-reason-attribution.shs
+#
+# Guards the invariant: a unit reported non-OK by the build outcome summary MUST
+# carry a printed reason.
+#
+# Why this exists
+# ---------------
+# 2026-08-17, doc/08_tracking/bug/
+# native_compile_fails_with_no_diagnostic_stderr_truncated_from_middle_2026-08-17.md:
+# a native_compile failure printed `ERROR=1` naming the unit and NOTHING about
+# why. That was read as stderr truncation ("55780 of 67780 bytes dropped from
+# the MIDDLE") eating the message. It was not. The producer
+# (`driver_native_record_module_failure` in driver_aot_native_output.spl) had
+# already stored the compiler's own message in `BuildUnitOutcome.diagnostics`,
+# and `BuildOutcomeSet.summary()` printed only `  - <path>` -- the field was
+# never read back out by anything. The message was never emitted, so no
+# retention policy could have preserved it. Truncation was incidental.
+#
+# How it checks
+# -------------
+# build_outcome.spl has ZERO `use` lines by design ("Local rather than imported
+# to keep this module free of dependencies the bootstrap stages might not have
+# loaded yet"), so it can be copied into a scratch dir and driven by a probe
+# next to it. No native build, no bootstrap, seconds not minutes.
+#
+# --selftest is FATAL and runs on EVERY invocation. It is a real ablation: the
+# same probe is run against the pre-fix `build_outcome.spl` from git history and
+# MUST fail to show the reason. A control that fails to fail means the test is
+# broken, not the code.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> ... checked            exit 0
+#   FAIL  — ...                        exit 1
+#   ERROR — nothing was checked        exit 2
+# A run that checked 0 things is ERROR, never a pass.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SRC="$REPO_ROOT/src/compiler/80.driver/driver_build/build_outcome.spl"
+SIMPLE="$REPO_ROOT/bin/simple"
+
+# A distinctive needle: it must not occur anywhere in build_outcome.spl itself,
+# so a match can only come from the diagnostics field being rendered.
+NEEDLE="undefined variable WidgetProbeSentinel at alpha.spl:12"
+MISSING_MARK="none recorded"
+
+CHECKED=0
+
+fail() {
+    printf 'FAIL — %s\n' "$1"
+    exit 1
+}
+
+err() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+# Build a scratch dir holding one build_outcome.spl plus the probe.
+# $1 = dir, $2 = path to the build_outcome.spl content to install
+make_probe_dir() {
+    _d="$1"
+    rm -rf "$_d"
+    mkdir -p "$_d" || return 1
+    cp "$2" "$_d/build_outcome.spl" || return 1
+    cat > "$_d/probe.spl" <<EOF
+use build_outcome.{BuildOutcomeSet, BuildUnitOutcome, BuildOutcomeKind}
+
+fn main():
+    var s = BuildOutcomeSet.empty()
+    s.record(BuildUnitOutcome(unit_id: 1, source_path: "mod.alpha",
+        kind: BuildOutcomeKind.ERROR, status: 1, signal_num: 0,
+        wall_ms: 0, peak_rss_kb: 0,
+        diagnostics: "$NEEDLE"))
+    s.record(BuildUnitOutcome(unit_id: 2, source_path: "mod.beta",
+        kind: BuildOutcomeKind.ERROR, status: 1, signal_num: 0,
+        wall_ms: 0, peak_rss_kb: 0, diagnostics: ""))
+    print s.summary()
+EOF
+    return 0
+}
+
+# Run the probe in $1, capture combined output to $1/out.txt.
+# rc is read into a variable on the line AFTER the command, never through a
+# pipe -- `cmd | tail` yields tail's status and has produced false greens here.
+run_probe() {
+    _d="$1"
+    ( cd "$_d" && "$SIMPLE" run probe.spl ) > "$_d/out.txt" 2>&1
+    PROBE_RC=$?
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Preconditions
+# ---------------------------------------------------------------------------
+[ -f "$SRC" ] || err "source not found: $SRC"
+[ -x "$SIMPLE" ] || err "no runnable compiler at $SIMPLE"
+
+WORK="${TMPDIR:-/tmp}/check-build-outcome-reason-$$"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+mkdir -p "$WORK" || err "cannot create scratch dir $WORK"
+
+# ---------------------------------------------------------------------------
+# --selftest (fatal, always runs): ABLATION against the pre-fix source.
+#
+# The control is the newest committed revision of build_outcome.spl whose
+# summary() does NOT emit a reason block. Found by walking history rather than
+# hardcoding a sha, so the guard survives rebases.
+# ---------------------------------------------------------------------------
+selftest() {
+    _ctrl="$WORK/control_build_outcome.spl"
+    _found=""
+    for _rev in $(cd "$REPO_ROOT" && git log --format=%H -n 60 -- \
+                  src/compiler/80.driver/driver_build/build_outcome.spl 2>/dev/null); do
+        ( cd "$REPO_ROOT" && git show "$_rev:src/compiler/80.driver/driver_build/build_outcome.spl" ) \
+            > "$_ctrl" 2>/dev/null
+        [ -s "$_ctrl" ] || continue
+        if ! grep -q 'reason_block_for' "$_ctrl"; then
+            _found="$_rev"
+            break
+        fi
+    done
+
+    if [ -z "$_found" ]; then
+        # No pre-fix revision reachable (shallow clone, or the fix predates all
+        # 60 revisions walked). The ablation cannot be performed, and an
+        # unablated guard must not claim to have checked anything.
+        err "selftest could not locate a pre-fix revision of build_outcome.spl to ablate against"
+    fi
+
+    make_probe_dir "$WORK/control" "$_ctrl" || err "selftest could not stage the control probe"
+    run_probe "$WORK/control"
+    if [ "$PROBE_RC" = "143" ] || [ "$PROBE_RC" = "137" ]; then
+        err "selftest control probe rc=$PROBE_RC (SIGTERM/SIGKILL) — UNVERIFIED, relaunch unwrapped"
+    fi
+    if [ "$PROBE_RC" != "0" ]; then
+        err "selftest control probe did not run (rc=$PROBE_RC): $(tail -n 3 "$WORK/control/out.txt" 2>/dev/null | tr '\n' ' ')"
+    fi
+    # The control MUST still print the summary (proving the probe is wired up)
+    # and MUST NOT print the reason (proving the fix is what supplies it).
+    grep -q 'end build outcome summary' "$WORK/control/out.txt" || \
+        err "selftest control probe produced no summary — the probe is broken, not the code"
+    if grep -qF "$NEEDLE" "$WORK/control/out.txt"; then
+        fail "selftest ABLATION BROKEN: the pre-fix source at $_found already prints the reason, so this guard cannot detect the defect it exists for"
+    fi
+    SELFTEST_REV="$_found"
+    return 0
+}
+
+selftest
+CHECKED=$((CHECKED + 1))   # ablation control arm
+
+# ---------------------------------------------------------------------------
+# The real check: the CURRENT working-tree source must print the reason.
+# ---------------------------------------------------------------------------
+make_probe_dir "$WORK/live" "$SRC" || err "could not stage the live probe"
+run_probe "$WORK/live"
+if [ "$PROBE_RC" = "143" ] || [ "$PROBE_RC" = "137" ]; then
+    err "live probe rc=$PROBE_RC (SIGTERM/SIGKILL) — UNVERIFIED, relaunch unwrapped"
+fi
+if [ "$PROBE_RC" != "0" ]; then
+    err "live probe did not run (rc=$PROBE_RC): $(tail -n 5 "$WORK/live/out.txt" 2>/dev/null | tr '\n' ' ')"
+fi
+
+grep -q 'end build outcome summary' "$WORK/live/out.txt" || \
+    err "live probe produced no summary"
+
+# Invariant 1: a non-OK unit WITH a recorded diagnostic prints it.
+grep -qF "$NEEDLE" "$WORK/live/out.txt" || \
+    fail "a unit reported ERROR did not print its recorded diagnostic; summary() is structurally unable to say why a unit failed (see doc/08_tracking/bug/native_compile_fails_with_no_diagnostic_stderr_truncated_from_middle_2026-08-17.md)"
+CHECKED=$((CHECKED + 1))
+
+# Invariant 2: a non-OK unit WITHOUT a recorded diagnostic says so explicitly.
+# Silence is indistinguishable from "no failure" to every reader, so the absence
+# must be STATED as a producer bug rather than rendered as nothing.
+grep -q "$MISSING_MARK" "$WORK/live/out.txt" || \
+    fail "a unit reported ERROR with an empty diagnostic printed no reason line at all; a missing diagnostic must be stated, never silent"
+CHECKED=$((CHECKED + 1))
+
+# Invariant 3: every non-OK path line is followed by a reason line. Positional,
+# so a future change that prints a reason for only the first offender is caught.
+_paths=$(grep -c '^  - ' "$WORK/live/out.txt")
+_reasons=$(grep -c '^      reason: ' "$WORK/live/out.txt")
+if [ "$_paths" -eq 0 ]; then
+    err "live probe listed no non-OK paths — fixture is not exercising the summary"
+fi
+if [ "$_reasons" -lt "$_paths" ]; then
+    fail "$_paths non-OK unit(s) listed but only $_reasons reason line(s) printed"
+fi
+CHECKED=$((CHECKED + 1))
+
+printf 'PASS — %d invariant(s) checked, non-OK units carry printed reasons (ablated against pre-fix rev %s: control printed the path with no reason)\n' \
+    "$CHECKED" "$(echo "$SELFTEST_REV" | cut -c1-11)"
+exit 0
