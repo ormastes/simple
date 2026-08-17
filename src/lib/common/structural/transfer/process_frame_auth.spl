@@ -1,0 +1,36 @@
+# Cryptographic authentication for process-transfer frames.
+#
+# FNV-1a remains the V1 corruption checksum. This boundary adds an HMAC over
+# the complete canonical wire plus parent-issued session coordinates before a
+# frame is eligible for replay/session admission.
+
+use std.common.crypto.hmac.{hmac_sha256}
+use std.common.structural.wire.{wire_to_hex}
+
+val PROCESS_TRANSFER_AUTH_V2: text = "SPRF-AUTH-2"
+
+fn process_transfer_auth_material(session_id: text, generation: i64,
+                                  wire: [u8]) -> text:
+    PROCESS_TRANSFER_AUTH_V2 + "|" + session_id + "|" + "{generation}" + "|" + wire_to_hex(wire)
+
+fn process_transfer_auth_tag(key: text, session_id: text, generation: i64,
+                             wire: [u8]) -> text:
+    "" if key == "" or session_id == "" else hmac_sha256(
+        key, process_transfer_auth_material(session_id, generation, wire))
+
+fn process_transfer_auth_tag_matches(expected: text, supplied: text) -> bool:
+    # Walk the complete tag so a mismatch does not return at its byte position.
+    if expected.len() != 64 or supplied.len() != expected.len():
+        return false
+    var difference = 0
+    var i = 0
+    while i < expected.len():
+        difference = difference | (expected.char_code_at(i) ^ supplied.char_code_at(i))
+        i = i + 1
+    difference == 0
+
+fn process_transfer_frame_authenticated(key: text, session_id: text,
+                                        generation: i64, wire: [u8],
+                                        tag: text) -> bool:
+    val expected = process_transfer_auth_tag(key, session_id, generation, wire)
+    process_transfer_auth_tag_matches(expected, tag)

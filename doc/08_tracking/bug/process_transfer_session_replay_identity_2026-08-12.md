@@ -1,4 +1,28 @@
-## Triage 2026-08-17 — OPEN, design work not re-verifiable by inspection
+## Closure 2026-08-17 — source-fixed
+
+Status: source-fixed
+
+The missing host-side authority is now implemented in pure Simple. The V2
+boundary authenticates the complete canonical V1 wire plus session ID and
+generation with HMAC-SHA256 before the existing typed decoder and bounded
+replay inbox can admit it. Parent-issued session IDs bind an authority epoch,
+process namespace, child PID, and generation; PID reuse cannot make a stale
+tag valid in a replacement namespace or parent epoch. Cancellation revokes the
+inbox and destroys accepted-but-uncommitted frames.
+
+Focused regression evidence is
+`test/01_unit/lib/nogc_async_mut/parent_commit_authenticated_session_spec.spl`:
+wire mutation, wrong-key authentication, exact replay, PID/namespace reuse,
+parent restart, and cancellation all fail closed. The existing
+`parent_commit_piped_result_spec.spl` remains the bounded exec-isolated child
+and cleanup evidence; the cryptographic admission owner is transport-neutral.
+
+Owned source:
+
+- `src/lib/common/structural/transfer/process_frame_auth.spl`
+- `src/lib/nogc_async_mut/parent_commit_authenticated_session.spl`
+
+## Triage 2026-08-17 — superseded by source closure above
 
 Not stale: the 2026-08-14 partial mitigation (`ParentCommitFrameInboxV1`,
 `ParentCommitPipedProcessSessionV1`) covers the bounded-session half only. The
@@ -9,7 +33,7 @@ pass because it needs the admitted crypto wire-hash contract first.
 
 # Process transfer session and replay identity
 
-Status: open
+Status: source-fixed
 
 The native transfer allocator packs the low 31 PID bits and a 32-bit local
 sequence into a positive `i64` RegionId. This prevents duplicated atomic-counter

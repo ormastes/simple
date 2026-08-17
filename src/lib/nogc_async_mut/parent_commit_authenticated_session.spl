@@ -1,0 +1,64 @@
+# Parent-issued, authenticated process-result session boundary.
+
+use std.common.crypto.hmac.{hmac_sha256}
+use std.common.structural.transfer.process_frame_auth.{
+    process_transfer_frame_authenticated
+}
+use std.nogc_async_mut.parent_commit_inbox.{
+    ParentCommitFrameInboxV1,
+    parent_commit_frame_inbox_v1_for_generation
+}
+
+struct ParentProcessSessionIdentityV2:
+    session_id: text
+    generation: i64
+    authority_epoch: text
+    process_namespace: text
+    child_pid: i64
+
+fn parent_process_session_identity_v2(authority_secret: text,
+                                      authority_epoch: text,
+                                      process_namespace: text,
+                                      child_pid: i64,
+                                      generation: i64) -> ParentProcessSessionIdentityV2:
+    val material = "SPRF-SESSION-2|" + authority_epoch + "|" + process_namespace
+        + "|{child_pid}|{generation}"
+    val session_id = if authority_secret == "" or authority_epoch == "":
+        ""
+    else:
+        hmac_sha256(authority_secret, material)
+    ParentProcessSessionIdentityV2(session_id: session_id,
+        generation: generation, authority_epoch: authority_epoch,
+        process_namespace: process_namespace, child_pid: child_pid)
+
+class ParentCommitAuthenticatedSessionV2:
+    identity: ParentProcessSessionIdentityV2
+    auth_key: text
+    inbox: ParentCommitFrameInboxV1
+    revoked: bool
+
+impl ParentCommitAuthenticatedSessionV2:
+    static fn create(capacity: i64, auth_key: text,
+                     identity: ParentProcessSessionIdentityV2) -> ParentCommitAuthenticatedSessionV2:
+        ParentCommitAuthenticatedSessionV2(identity: identity, auth_key: auth_key,
+            inbox: parent_commit_frame_inbox_v1_for_generation(
+                capacity, identity.generation), revoked: false)
+
+    me offer_authenticated_process_result_frame(wire: [u8], tag: text) -> bool:
+        if self.revoked or self.auth_key == "" or self.identity.session_id == "":
+            return false
+        if not process_transfer_frame_authenticated(self.auth_key,
+                self.identity.session_id, self.identity.generation, wire, tag):
+            return false
+        self.inbox.offer_process_result_frame(wire)
+
+    me revoke():
+        self.revoked = true
+        self.inbox.revoke()
+
+fn parent_commit_authenticated_session_v2(
+    capacity: i64,
+    auth_key: text,
+    identity: ParentProcessSessionIdentityV2
+) -> ParentCommitAuthenticatedSessionV2:
+    ParentCommitAuthenticatedSessionV2.create(capacity, auth_key, identity)
