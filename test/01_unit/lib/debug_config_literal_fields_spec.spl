@@ -1,0 +1,51 @@
+extern fn rt_file_read_text(path: text) -> text
+
+# @req REQ-JIT-FIELD-INFER-001
+#
+# Regression + generalization guard for
+# doc/08_tracking/bug/test_runner_jit_fallback_functionoutline_type_params_2026-08-17.md
+#
+# A struct/class literal that names a field the declaration does not have is a
+# HIR-lowering hard error (`Cannot infer field type: struct 'X' field 'f'`,
+# raised by src/compiler_rust/compiler/src/hir/lower/expr/collections.rs). The
+# JIT reacts by dropping the ENTIRE module to the tree-walk interpreter, so a
+# single bad literal anywhere in the import closure of
+# src/app/test_runner_new/main.spl slowed every test in the fleet ~100-1000x.
+#
+# Concrete instance found 2026-08-17: five `DebugConfig(...)` literals passed
+# `args:`, `debugger:` and `remote:`, none of which exist on ANY of the four
+# `class DebugConfig` declarations in the tree.
+
+fn src_of(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "DebugConfig literals only name declared fields":
+    it "no DebugConfig declaration in the tree carries args/debugger/remote":
+        val decls = [
+            src_of("src/app/debug/remote/types.spl"),
+            src_of("src/lib/nogc_sync_mut/debug/remote/types.spl"),
+            src_of("src/lib/nogc_async_mut/debug/remote/types.spl"),
+            src_of("src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl")
+        ]
+        for decl in decls:
+            assert_true(decl.len() > 0)
+            expect(decl).to_contain("class DebugConfig")
+            expect(decl).to_contain("    host: text")
+            expect(decl).to_contain("    program: text")
+            assert_false(decl.contains("\n    args:"))
+            assert_false(decl.contains("\n    debugger:"))
+            assert_false(decl.contains("\n    remote:"))
+
+    it "the trace32 construction sites no longer pass undeclared fields":
+        val power = src_of("src/lib/nogc_sync_mut/terminal/power/t32_power.spl")
+        val hw = src_of("src/app/test_daemon/adapters/hardware_adapter.spl")
+        assert_true(power.len() > 0)
+        assert_true(hw.len() > 0)
+        assert_false(power.contains("debugger: \"t32\""))
+        assert_false(power.contains("remote: true"))
+        assert_false(hw.contains("debugger: \"t32\""))
+        assert_false(hw.contains("remote: true"))
+
+    it "the trace32 sites use the declared-field constructor helper":
+        expect(src_of("src/lib/nogc_sync_mut/terminal/power/t32_power.spl")).to_contain("DebugConfig.for_trace32(")
+        expect(src_of("src/app/test_daemon/adapters/hardware_adapter.spl")).to_contain("DebugConfig.for_trace32(")
