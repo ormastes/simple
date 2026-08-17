@@ -2,8 +2,102 @@
 
 **Date:** 2026-07-17
 **Severity:** high (four tooling lanes dead on the host; masked by the seed-stopgap deploy)
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: **MOSTLY RESOLVED 2026-08-17** (lint / fmt / test retired as already
+fixed; doc-coverage root-caused and FIXED in source — see the 2026-08-17
+re-measurement below). Residual OPEN item: `depgraph` has no entry point on
+disk. The earlier line "Status re-verified 2026-08-17 by source inspection" was
+NOT trustworthy — three of this doc's four headline claims do not reproduce.
+
+## 2026-08-17 re-measurement (triage shard, each claim re-run)
+
+Binary identity for every number below:
+`readlink -f bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`,
+59536728 bytes, mtime 2026-08-16 22:59:37 — a **Rust seed** (it prints the seed
+banner), NOT the Jul-11 stopgap this doc was written against. Numbers therefore
+describe that binary plus current `src/**` source (read as source every run).
+
+| claim | 2026-07-17 | 2026-08-17 re-run | verdict |
+|---|---|---|---|
+| `lint <file>` dies `unknown extern function: rt_cli_arg_count` | RED | `Lint passed: all files clean`, rc 0 | **RETIRED** |
+| `fmt --check <file>` same extern error / `rt_cli_run_fmt not supported` | RED | `OK <file> is formatted`, rc 0 | **RETIRED** |
+| `test <spec>` same extern error / parse blowup | RED | `Results: 7 total, 7 passed, 0 failed`, rc 0 (`test/01_unit/compiler/regression/short_circuit_semantics_spec.spl`, `--no-session-daemon`) | **RETIRED** |
+| `doc-coverage`: `file not found: doc-coverage` + usage dump | RED | different failure, still RED (below) | **root-caused + FIXED** |
+
+The seed no longer misreads an unknown subcommand as a script path; it
+recognises `doc-coverage` and fails closed:
+
+```
+error: pure-Simple tool 'doc-coverage' unavailable; refusing Rust fallback
+```
+(exit 1, no report produced). So the original "seed front-end treats
+subcommands it does not know as script paths" diagnosis is stale, and the
+conclusion "not a defect in the .spl tooling itself" was wrong.
+
+### Real root cause (two independent wiring defects, both in current source)
+
+1. `src/app/cli/doc_coverage_command.spl` declared and exported
+   `handle_doc_coverage_command` but had **no top-level `main`**. The driver
+   dispatches a `CommandEntry.app_path` by RUNNING that file as a script, so the
+   run loaded the module, executed nothing, and produced no report — a textbook
+   silent no-op (`bin/simple run src/app/cli/doc_coverage_command.spl` exited
+   **0** with zero report lines).
+2. `dispatch_to_simple_app` (`src/compiler_rust/driver/src/main.rs`) gates on an
+   explicit allowlist of dispatchable `app_path`s. `doc_coverage_command.spl`
+   was absent, so dispatch returned `None` *before loading the app at all*, and
+   the `pure_simple_tool` branch turned that into the hard failure above.
+
+### The same defect killed three more documented commands
+
+`command_is_pure_simple_tool` forbids a Rust fallback, so any pure-Simple-only
+command whose `app_path` is off the allowlist is guaranteed dead. Measured
+2026-08-17, all four reproduced identically (`rc=1`, one
+`unavailable; refusing Rust fallback` line each):
+
+```
+== stats:     rc=1   == coverage: rc=1   == depgraph: rc=1   == dap: rc=1
+```
+
+`bin/simple stats` is a CLAUDE.md-documented command. None of the four had a spec.
+
+### Fix
+
+- `src/app/cli/doc_coverage_command.spl`: added the missing top-level
+  `fn main() -> i64` (mirrors the `stats_entry.spl` convention: slice
+  `cli_get_args()` from index 2 so the subcommand token leads, then call
+  `handle_doc_coverage_command`).
+- `src/compiler_rust/driver/src/main.rs`: added `doc_coverage_command.spl`,
+  `cli/stats_entry.spl`, `coverage/main.spl` and `dap/main.spl` to the
+  `dispatch_to_simple_app` allowlist.
+
+Note the allowlist half is Rust and needs a rebuilt seed to take effect at
+runtime; per this shard's constraints `bin/simple` was **not** rebuilt or
+redeployed, so the runtime proof is limited to the pre-fix RED above plus the
+source-level specs and their ablation.
+
+### Specs
+
+- `test/01_unit/app/cli/doc_coverage_dispatch_wiring_spec.spl` (reproducer) —
+  `Results: 4 total, 4 passed, 0 failed`.
+- `test/01_unit/app/cli/pure_simple_tool_dispatch_reachability_spec.spl`
+  (class detection) — scans every `command_is_pure_simple_tool` name and
+  asserts its `app_path` **exists on disk and is on the dispatch allowlist**,
+  with explicit non-vacuity floors (>50 table entries parsed, >10 tools
+  checked) so a broken scan fails instead of passing. `Results: 4 total,
+  4 passed, 0 failed`.
+
+**Ablation (causation proved):** deleting the four allowlist lines and re-running
+the detection spec gives `Results: 4 total, 3 passed, 1 failed` naming exactly
+`doc-coverage->…:NOT_DISPATCHABLE stats->…:NOT_DISPATCHABLE
+coverage->…:NOT_DISPATCHABLE dap->…:NOT_DISPATCHABLE`. Restoring the lines
+returns it to 4/4.
+
+### Residual OPEN
+
+`depgraph`'s `CommandEntry.app_path` is `src/app/depgraph/main.spl`, which **does
+not exist** (that directory holds only `render_adapter.spl` and ad-hoc
+`test_*.spl` files). That is a missing-app defect, not a wiring one, and is left
+open; the detection spec baselines it by name and carries a stale-baseline guard
+that fails once the file lands.
 
 ## Symptom
 

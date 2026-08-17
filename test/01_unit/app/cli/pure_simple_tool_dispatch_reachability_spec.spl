@@ -1,0 +1,128 @@
+# @cover src/compiler_rust/driver/src/main.rs 5%
+#
+# SIMILAR-PROBLEM DETECTION spec for the defect class behind
+# doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md
+#
+# Class: "a documented CLI tool is structurally unreachable, so it can only
+# ever fail-closed (or worse, silently no-op) instead of producing its
+# artifact." The concrete instance was `doc-coverage`, but the same wiring
+# defect independently killed `stats`, `coverage` and `dap` — four dead
+# documented commands, none of which had a spec.
+#
+# The driver has two INDEPENDENT tables that must agree:
+#   * the `CommandEntry` table       — maps a command name to an `app_path`
+#   * `dispatch_to_simple_app`'s allowlist — the set of app_paths that may
+#                                      actually be loaded and run
+# and a third, `command_is_pure_simple_tool`, which makes a dispatch miss
+# FATAL (no Rust fallback is permitted). Any name in that third set whose
+# app_path is missing from the allowlist, or missing from disk, is a
+# guaranteed-dead command. That is what this spec scans for exhaustively,
+# rather than asserting that one command exited 0.
+#
+# Known, deliberately baselined exception (do NOT widen this list without a
+# bug record): `depgraph` has no entry point on disk at all
+# (src/app/depgraph/main.spl does not exist — the directory holds only
+# render_adapter.spl and ad-hoc test_*.spl files), so it is a missing-app
+# defect rather than a wiring defect and is out of this shard's scope.
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_exists(path: text) -> bool
+
+val DRIVER = "src/compiler_rust/driver/src/main.rs"
+val BASELINED_MISSING_APP = "depgraph"
+
+fn driver_source() -> text:
+    rt_file_read_text(DRIVER) ?? ""
+
+fn pure_simple_block(source: text) -> text:
+    """The `matches!(name, ...)` body of command_is_pure_simple_tool."""
+    val start: i64 = source.find("fn command_is_pure_simple_tool")
+    if start < 0:
+        return ""
+    val rest = source[start:]
+    val stop: i64 = rest.find("fn run_rust_handler")
+    if stop < 0:
+        return rest
+    rest[0:stop]
+
+fn dispatch_block(source: text) -> text:
+    """The allowlist guard body of dispatch_to_simple_app."""
+    val start: i64 = source.find("fn dispatch_to_simple_app")
+    if start < 0:
+        return ""
+    val rest = source[start:]
+    val stop: i64 = rest.find("let path = resolve_app_path")
+    if stop < 0:
+        return rest
+    rest[0:stop]
+
+fn collect_name_app_pairs(source: text) -> [(text, text)]:
+    """Every CommandEntry `name:`/`app_path:` pair, in table order."""
+    var pairs: [(text, text)] = []
+    var rest = source
+    while true:
+        val n_at: i64 = rest.find("name: \"")
+        if n_at < 0:
+            break
+        var tail = rest[(n_at + 7):]
+        val n_end: i64 = tail.find("\"")
+        if n_end < 0:
+            break
+        val name = tail[0:n_end]
+        tail = tail[n_end:]
+        val a_at: i64 = tail.find("app_path: \"")
+        # Guard against running past the next entry's name.
+        val next_name: i64 = tail.find("name: \"")
+        if a_at >= 0 and (next_name < 0 or a_at < next_name):
+            var atail = tail[(a_at + 11):]
+            val a_end: i64 = atail.find("\"")
+            if a_end >= 0:
+                pairs = pairs.push((name, atail[0:a_end]))
+        rest = tail
+    pairs
+
+describe "pure-Simple-only CLI tools are structurally reachable":
+    it "the three driver tables were actually parsed (non-vacuity)":
+        val source = driver_source()
+        expect(source.len() > 1000).to_equal(true)
+        expect(pure_simple_block(source).len() > 100).to_equal(true)
+        expect(dispatch_block(source).len() > 100).to_equal(true)
+        val pairs = collect_name_app_pairs(source)
+        # 73 app_path entries at the time of writing; a parse regression that
+        # silently collected nothing must fail here, not pass vacuously.
+        expect(pairs.len() > 50).to_equal(true)
+
+    it "every pure-Simple-only command has an app that exists and is dispatchable":
+        val source = driver_source()
+        val ps = pure_simple_block(source)
+        val allow_list = dispatch_block(source)
+        val pairs = collect_name_app_pairs(source)
+        var checked = 0
+        var offenders = ""
+        for pair in pairs:
+            val name = pair.0
+            val app = pair.1
+            if app == "":
+                continue
+            if not ps.contains("\"{name}\""):
+                continue
+            if name == BASELINED_MISSING_APP:
+                continue
+            checked = checked + 1
+            if not rt_file_exists(app):
+                offenders = "{offenders} {name}->{app}:NO_FILE"
+            if not allow_list.contains("app_relative_path != \"{app}\""):
+                offenders = "{offenders} {name}->{app}:NOT_DISPATCHABLE"
+        # A scan that examined nothing is a failure, not a pass.
+        expect(checked > 10).to_equal(true)
+        expect(offenders).to_equal("")
+
+    it "the baselined exception is still genuinely missing (stale-baseline guard)":
+        # If depgraph's app ever lands, delete BASELINED_MISSING_APP and the
+        # `continue` above instead of leaving a dead exemption behind.
+        expect(rt_file_exists("src/app/depgraph/main.spl")).to_equal(false)
+
+    it "a dispatch miss on a pure-Simple tool fails closed rather than silently":
+        val source = driver_source()
+        expect(source).to_contain("refusing Rust fallback")
+        expect(source).to_contain("let pure_simple_tool = command_is_pure_simple_tool(entry.name);")

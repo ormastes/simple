@@ -1,0 +1,60 @@
+# @cover src/app/cli/doc_coverage_command.spl 40%
+#
+# REPRODUCER for
+# doc/08_tracking/bug/host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md
+#
+# `bin/simple doc-coverage` printed
+#   error: pure-Simple tool 'doc-coverage' unavailable; refusing Rust fallback
+# and exited 1, producing NO coverage report. Two independent wiring defects:
+#
+#   1. `src/app/cli/doc_coverage_command.spl` declared and exported
+#      `handle_doc_coverage_command` but had no top-level `main`, so RUNNING
+#      the file as a script (which is how the driver dispatches an app_path)
+#      did nothing and exited without a report.
+#   2. `dispatch_to_simple_app` in src/compiler_rust/driver/src/main.rs carries
+#      an explicit allowlist of dispatchable app_paths; doc_coverage_command.spl
+#      was absent from it, so dispatch returned None before ever loading the
+#      app, and the `pure_simple_tool` branch turned that into a hard failure.
+#
+# This spec asserts the WIRING, i.e. the artifact-producing preconditions —
+# not that some command exited 0.
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val APP = "src/app/cli/doc_coverage_command.spl"
+val DRIVER = "src/compiler_rust/driver/src/main.rs"
+
+fn app_source() -> text:
+    rt_file_read_text(APP) ?? ""
+
+fn driver_source() -> text:
+    rt_file_read_text(DRIVER) ?? ""
+
+describe "doc-coverage CLI dispatch wiring":
+    it "the doc-coverage app is a runnable script, not a bare library module":
+        val source = app_source()
+        expect(source.len() > 0).to_equal(true)
+        expect(source).to_contain("fn handle_doc_coverage_command(args: [text]) -> i64:")
+        # The defect: no top-level entry point at all.
+        expect(source).to_contain("fn main() -> i64:")
+        expect(source).to_contain("handle_doc_coverage_command(cmd_args)")
+        expect(source).to_contain("cli_get_args")
+
+    it "the driver's dispatch allowlist names the doc-coverage app_path":
+        val source = driver_source()
+        expect(source.len() > 0).to_equal(true)
+        # The CommandEntry has always pointed here...
+        expect(source).to_contain("app_path: \"src/app/cli/doc_coverage_command.spl\"")
+        # ...but dispatch_to_simple_app must also admit it, or it returns None.
+        expect(source).to_contain("app_relative_path != \"src/app/cli/doc_coverage_command.spl\"")
+
+    it "the same-family pure-Simple tools stats/coverage/dap are admitted too":
+        val source = driver_source()
+        expect(source).to_contain("app_relative_path != \"src/app/cli/stats_entry.spl\"")
+        expect(source).to_contain("app_relative_path != \"src/app/coverage/main.spl\"")
+        expect(source).to_contain("app_relative_path != \"src/app/dap/main.spl\"")
+
+    it "refusing the Rust fallback is still fail-closed, never a silent success":
+        val source = driver_source()
+        expect(source).to_contain("refusing Rust fallback")
+        expect(source).to_contain("if pure_simple_tool {")

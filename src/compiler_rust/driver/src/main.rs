@@ -1389,6 +1389,19 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/test_daemon/main.spl"
         && app_relative_path != "src/app/test_daemon/light_daemon.spl"
         && app_relative_path != "src/app/deps/main.spl"
+        // `doc-coverage` had a CommandEntry pointing here but was missing from
+        // this allowlist, so dispatch returned None and the driver reported
+        // `pure-Simple tool 'doc-coverage' unavailable` even though the app
+        // exists. See doc/08_tracking/bug/
+        // host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17.md
+        && app_relative_path != "src/app/cli/doc_coverage_command.spl"
+        // Same defect, same family: `stats`, `coverage` and `dap` are all
+        // `command_is_pure_simple_tool` names whose CommandEntry app_path
+        // exists on disk with a top-level `main` but was absent here, so each
+        // one failed closed as "unavailable" rather than running.
+        && app_relative_path != "src/app/cli/stats_entry.spl"
+        && app_relative_path != "src/app/coverage/main.spl"
+        && app_relative_path != "src/app/dap/main.spl"
     {
         return None;
     }
