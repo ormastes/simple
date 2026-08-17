@@ -1,4 +1,29 @@
-## Re-verified 2026-08-17 — STILL OPEN
+## FIXED 2026-08-17
+
+Root cause, both in the Rust seed parser:
+`expressions/binary.rs` `parse_unary` matched `TokenKind::Move` unconditionally
+and consumed the next token as the move operand — so `move + 1u32` tried to
+parse `+` as an expression. `expressions/primary/mod.rs` additionally routed a
+bare `Move` into `parse_primary_lambda`, which demands a following `\`.
+`primary/identifiers.rs:152` had ALREADY handled `Move` as an identifier; it was
+simply unreachable.
+
+Both sites now check the following token first (`move_is_keyword_prefix` in
+`parser_helpers.rs`: lambda introducer, identifier, or `me`). A bare `move`
+falls through to `parse_primary_identifier`. A census over `src/`, `test/` and
+`examples/` found **zero** real unary-move or move-closure uses, so the
+contextual rule is conservative.
+
+Evidence: the pre-fix binary fails the minimal repro with the exact
+`expected expression, found Plus`; the rebuilt seed prints `N=2`. Spec
+`test/01_unit/compiler/parser_move_contextual_keyword_spec.spl` 4/4 (including a
+scenario proving `move \x: x + 1` still parses as a move-closure).
+`cargo test -p simple-parser` 281+ tests, 0 failed.
+
+The workaround rename in `draw_ir_packed_generation_store_v3.spl` is left as-is
+(cosmetic; `shift` is the better name).
+
+## Re-verified 2026-08-17 — STILL OPEN (superseded by the note above)
 
 Minimal repro (`var move = 3u32` then `while move + 1u32 < 10u32:`) still fails:
 ```
