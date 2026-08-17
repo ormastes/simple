@@ -1,7 +1,8 @@
 # M2 guard-page trap has no owner-attribution report on either backend
 
 **Date:** 2026-08-05
-**Status:** OPEN — filed rather than implemented (see "Why this is filed, not
+Status: OPEN (P3)
+Status re-verified 2026-08-17 by source inspection (triage shard 02).
 fixed" below).
 **Severity:** Medium. Not a false-safety claim like the guard-row bug this
 follows (`mem_infra_guard_row_false_on_native_backends_2026-07-31.md`) — the
@@ -122,3 +123,26 @@ the repo's rules warn against. No code changed; doc left OPEN.
   the dead `owner` field.
 - `src/runtime/runtime_memory_guard.h` — the native-C guard slot struct with
   no owner field at all.
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — STILL LIVE (confirmed by source)
+
+Classified by CONTENT (per session CORRECTIONS #1).
+
+`src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs` stores the owner
+id but never consumes it. The struct field at :56-57 is literally annotated as
+unread:
+
+```
+#[allow(dead_code)] // read by future owner-report consumers (M2 fault report is optional here)
+owner: u32,
+```
+
+`guard_alloc_sampled(size, owner)` (:98) records `owner` into the guard record at
+:137, and that is the only use. There is no SIGSEGV trap handler that reads it
+back and no report emitter anywhere in the file.
+
+**Status: OPEN, confirmed live.** This is a missing-feature gap (attribution
+report never implemented), not a silent-wrong-result defect — a guard-page
+SIGSEGV is loud, it just lands without owner attribution. Correctly scoped as P3.
+Implementing it requires a trap handler outside the interpreter scope, so it was
+not attempted in this lane.

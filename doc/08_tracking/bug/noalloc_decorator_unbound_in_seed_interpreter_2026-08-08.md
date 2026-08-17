@@ -111,3 +111,21 @@ the same change as, or after, a redeploy carrying the interpreter fix.
 - `simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md` —
   `find_simple_binary()`'s `/proc/self/exe` step did not hold; a rebuilt seed
   silently delegated to the stale deployed binary.
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — FIXED IN SOURCE (deploy lag only)
+
+Classified by CONTENT (per session CORRECTIONS #1).
+
+`src/compiler_rust/compiler/src/interpreter_eval.rs:710-729` now lists
+`"noalloc"` in the set of decorator names that are skipped rather than resolved
+as runtime bindings, alongside `extern`/`deprecated`/`hardware`/`clocked`/
+`generic`/`flatten_struct_output`, and additionally `alloc`, `no_alloc`,
+`no_mangle`, `gpu`. The code carries an explicit back-reference to THIS doc at
+:718 and restates the mechanism ("invisible via `bin/simple run` — the JIT path
+never evaluates decorator expressions").
+
+This confirms the doc's own "FIXED IN SOURCE, NOT YET DEPLOYED" status. The
+residual is purely a redeploy of `bin/simple`, not a source defect.
+
+**Status: RESOLVED in source.** Close once the seed in `bin/release/` is
+rebuilt; nothing further to change in the interpreter.

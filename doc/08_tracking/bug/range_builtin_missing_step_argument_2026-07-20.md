@@ -60,3 +60,30 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/loops_spec.s
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter (the path `bin/simple test` exercises on
 this host) was probed.
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — ALREADY FIXED IN SOURCE
+
+Classified by CONTENT (per session CORRECTIONS #1).
+
+`src/compiler_rust/compiler/src/interpreter_call/builtins.rs` now reads a third
+argument and, when it is an `Int`, treats it as a STEP, not an inclusivity flag.
+The code carries a comment naming this exact defect (builtins.rs:124-131):
+
+```
+let third = eval_arg(args, 2, Value::Bool(false), ...)?;
+// range(start, end, step): an INTEGER third argument is a step, not an
+// inclusivity flag. Previously any truthy third argument was read as
+// `inclusive`, so `range(0, 10, 2)` silently yielded every integer 0..=10
+// and `range(5, 0, -1)` silently yielded nothing.
+if let Value::Int(step) = third {
+    if step == 0 { return Err(... "range() step argument must not be zero") }
+```
+
+Both directions are implemented (`step > 0` walks `cur < end`, `step < 0` walks
+`cur > end`), with `checked_add` overflow guards, and a zero step is now a hard
+runtime error rather than an infinite loop.
+
+The triage row's evidence ("Read builtins.rs:82-112: ... no step is read") read a
+window that ENDS at line 112; the step handling begins at line 124.
+
+**Status: RESOLVED (stale doc).**

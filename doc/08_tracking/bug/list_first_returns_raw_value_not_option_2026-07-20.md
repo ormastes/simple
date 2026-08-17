@@ -1,7 +1,8 @@
 # Bug: `List<T>.first` (bare or `()`) returns a raw nilable value, not `Option<T>` as the guide documents
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/generics_spec.spl`)
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** `src/compiler_rust/compiler/src/interpreter_method/collections.rs`
   (`"first"` arm, array method dispatch, line ~57), deployed seed at
   `bin/release/x86_64-unknown-linux-gnu/simple`
@@ -75,3 +76,50 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/generics_spe
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — LIVE, but do NOT "fix" it as filed
+
+Classified by CONTENT (per session CORRECTIONS #1).
+
+The reported line is confirmed unchanged —
+`src/compiler_rust/compiler/src/interpreter_method/collections.rs:139`:
+
+```
+"first" => arr.first().cloned().unwrap_or(Value::Nil),
+"last"  => arr.last().cloned().unwrap_or(Value::Nil),
+```
+
+No `Option` wrap, exactly as filed. **But changing it would be a silent
+breaking change, not a fix.** Two things were measured before touching it:
+
+**1. The raw-or-nil contract is deliberate and is contrasted in-source with a
+real Option arm.** The `at` arm a few lines below (collections.rs:145+) carries a
+comment stating that array `at` was added specifically to provide
+`Value::some(elem)` / `Value::none()` bounds-checked access, i.e. the codebase
+already made the "return a real Option" decision for a DIFFERENT method and left
+`first`/`last` raw on purpose.
+
+**2. The actual builtin-array callers in the tree depend on the RAW contract.**
+Of 23 `.first()` sites under `src/`, the ones hitting this builtin arm use
+nilable/coalescing forms that an `Option` return would break:
+
+- `src/compiler/99.loader/module_loader.spl:19` — `base.split(".").first() ?? base`
+- `src/compiler/99.loader/module_loader.spl:21` — `stem.split("_").first() ?? stem`
+- `src/compiler/40.mono/monomorphize/util.spl:112` — `if val first = elems.first():`
+- `src/lib/{nogc_async_mut,gc_async_mut}/security/sanitize.spl:53` — interpolated directly
+
+`?? base` against an `Option` would coalesce a `Some(...)` wrapper rather than
+the value, turning a correct path into a silent wrong result — the exact defect
+class this campaign is hunting. The sites that DO use `.unwrap()` / `.is_some()`
+/ `.?` (`core_nogc_immut/static_vec.spl:258`,
+`src/app/interpreter/collections/persistent_vec_spec.spl:104,112,250`) are
+methods on user-defined `StaticVec`/`PersistentVec` types, not this builtin arm,
+so they are unaffected either way.
+
+**Status: reclassified from "interpreter bug" to "documentation mismatch".** The
+implementation is the intended one; the doc/`array_ops.spl:308` docstring
+(`Array.of([1, 2, 3]).first()  # → Some(&1)`) is what is wrong. Recommended
+resolution: correct the documentation to state `first`/`last` return `T?`
+(nilable) and point readers at `at(i)` for a real `Option`. If an Option-returning
+variant is genuinely wanted, add it additively (e.g. `first_opt`) — do not change
+this arm. No interpreter change was made by this lane.

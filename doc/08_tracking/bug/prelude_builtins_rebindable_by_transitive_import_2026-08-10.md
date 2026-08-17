@@ -507,3 +507,32 @@ that is **measured correct for i64** (`min(3,9)=3`, `max(3,9)=9`, `abs(-5)=5`,
 table above), so the value-equivalence precondition for deleting them holds for
 integer callers. Deleting them must also remove the names from that `export`
 line, or the facade exports an undefined symbol.
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — MITIGATED, no longer silent
+
+Classified by CONTENT (per session CORRECTIONS #1).
+
+`src/compiler_rust/compiler/src/interpreter_call/mod.rs` now has
+`warn_prelude_shadow_once` (:373) driven by
+`interpreter_eval::is_user_facing_prelude` (:449). The dispatch comment at
+:438-479 states the current contract explicitly:
+
+- `exit` is FENCED — the builtin wins and the shadowing is reported as ignored;
+- **every other** user-facing prelude name that is shadowed now WARNS ONCE,
+  naming the builtin and the shadowing definition's line
+  (`"WARNING: \`fn {name}\` at {where_} shadows the prelude builtin ..."`), with
+  a `BDD_`-style once-per-name set so a shadowed builtin called in a loop does
+  not warn per call.
+
+The comment also corrects a previously FALSE claim in that same file ("so
+builtins can't be shadowed") and records the measured scope: 50 of 51
+user-facing prelude names were rebindable.
+
+So the SILENT half of this bug — the property that made it a P2
+silent-wrong-result — is closed: shadowing is now always diagnosed. The
+remaining shadowability of the other 50 names is documented in-source as
+**by design**, not as an unnoticed defect.
+
+**Status: downgrade from OPEN(P2) to a design note.** If full fencing is still
+wanted, that is a language-design decision, not a bug fix, and should be re-filed
+as a feature request naming the 50 affected identifiers.

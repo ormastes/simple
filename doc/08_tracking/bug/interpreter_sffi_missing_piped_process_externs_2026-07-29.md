@@ -1,7 +1,8 @@
 # Bug: `rt_process_spawn_piped` family not registered in the interpreter's extern dispatch table
 
 - **Date:** 2026-07-29
-- **Status:** open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** medium (blocks real execution of a real, already-used stdlib facade under `bin/simple test`/`bin/simple run` on the current Rust seed; does not affect correctness of any landed logic)
 - **Found by:** lane DS6 `gdb-transport` (mission-critical robustness campaign), while writing a system spec that spawns real `gdb --interpreter=mi3` through `std.nogc_sync_mut.io.process_spawn_piped`
 - **Related:** `src/app/debug/remote/protocol/gdb_mi.spl`, `src/lib/nogc_sync_mut/io/process_ops.spl`, `src/runtime/runtime_process.c`, `src/lib/editor/services/debug_session_dap.spl`, `src/app/editor/debug_process_runtime.spl`, `test/03_system/gui/editor_debug_session_spec.spl`
@@ -90,3 +91,30 @@ the Rust seed's `interpreter_sffi` extern dispatch table, wired to the
 existing native implementations in `runtime_process.c`. Out of scope for
 this lane (Rust seed change + rebuild; project rule is "fix .spl not Rust"
 and "no bootstrap unless essential").
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — ALREADY FIXED IN SOURCE
+
+Classified by CONTENT, not by commit ancestry (per session CORRECTIONS #1).
+
+The whole piped-process family IS registered in the interpreter extern dispatch
+table. `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` carries an
+explicit back-reference to THIS doc at line 1624, immediately above the
+registrations:
+
+```
+1624:    // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+1625:    insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
+...
+1629:    insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
+```
+
+The implementations live in `interpreter_extern/system.rs:1094-1190`
+(`rt_process_spawn_piped` at :1131, with a `PipedChildren` registry at :1115).
+
+The triage row's evidence ("git grep rt_process_spawn_piped under
+interpreter_extern/ returns zero hits") is **wrong** — it returns 12 hits across
+`system.rs` and `mod.rs`.
+
+**Status: RESOLVED (stale doc).** Note the deployed `bin/simple` seed predates
+this and may still exhibit the symptom until redeployed; that is a deployment
+lag, not a source defect.

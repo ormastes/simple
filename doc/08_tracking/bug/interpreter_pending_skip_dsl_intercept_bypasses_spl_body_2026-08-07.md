@@ -1,6 +1,7 @@
 # Rust seed interpreter intercepts `pending`/`skip_it`/`skip` calls before `.spl` body runs
 
-- Status: open
+- Status: OPEN (P2)
+- Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - Found: 2026-08-07, while landing WP-9 (skip governance,
   `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`)
 - Files:
@@ -90,3 +91,26 @@ begin with). Options: (a) accept as a known seed-only gap now that
 intercepted names, or (b) have `bdd.rs`'s `pending`/`skip_it`/`skip` arms call
 into the compiled `.spl` implementation instead of reimplementing BDD
 bookkeeping in Rust, closing the divergence class entirely.
+
+## 2026-08-17 re-verification (lane m1_rust_interp) — STILL LIVE, but semantically benign
+
+Classified by CONTENT (per session CORRECTIONS #1).
+
+The intercept is still there and is unconditional:
+`src/compiler_rust/compiler/src/interpreter_call/bdd.rs:902` handles
+`"pending" | "pending_it"` entirely in Rust — it prints the `○ <name> (skipped)`
+line itself, pushes the name into `BDD_IGNORED_TESTS`, calls
+`record_test_result(desc_path, name, true, true)`, bumps `BDD_COUNTS`, and
+returns `Value::Nil`. Control never reaches the `.spl` definition in
+`src/lib/nogc_sync_mut/spec.spl`.
+
+**Assessment:** the intercept produces the SAME observable outcome the `.spl`
+body is meant to produce (skipped, counted, passed=true/skipped=true), so this is
+not a silent-wrong-result. The real cost is divergence risk: any future change to
+the `.spl` `pending` implementation will be silently ignored under the seed. That
+is a maintainability defect, not a correctness one.
+
+**Status: OPEN, correctly P2-or-lower.** Recommended resolution is to delete the
+Rust arm once the self-hosted binary is the default tool (the intercept exists
+only because the seed cannot rely on the stdlib spec DSL loading), not to patch
+it now.
