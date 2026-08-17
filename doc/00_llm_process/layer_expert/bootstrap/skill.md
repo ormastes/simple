@@ -406,3 +406,35 @@ After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill
 with new wall status, fixed issue links, and concrete gotchas.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## Per-phase run-to-end loop (2026-08-17)
+
+Doctrine for every bootstrap generation, per phase:
+
+1. **Run the phase to the end.** Never stop at the first error where the
+   tooling can keep going — collect a FULL error census for the phase. One
+   error per run is the slowest possible way to learn what is broken.
+2. **Snapshot the phase binary immutably** the moment it lands, with lineage
+   naming (phase + generation + source sha), so later timing/verification
+   claims name an artifact that cannot be swapped underneath them. The
+   symlink `bin/simple` is replaced by other sessions mid-session — a
+   snapshot is the only stable referent.
+3. **Verify completely, in a parallel niced lane**: attempt ALL tool builds
+   even when some fail (another full census, not a first-failure abort), plus
+   the test suites run with that exact snapshot.
+4. **Start the next phase on the NEWEST available binary.** If a rebuild is
+   in flight, wait for it rather than starting on a stale one.
+5. Repeat the whole cycle per generation.
+
+**Memory priority.** The phase compiler build owns CPU and memory; test lanes
+throttle to 1 concurrent process when free RAM is low. Measured 2026-08-17
+(session-measured, unfiled): earlyoom killed `jobs=8` stage workers while ~14
+test lanes ran, forcing the build down to `jobs=2`. Verification lanes are
+subordinate to the build, never co-equal.
+
+**Silent-green hazard (HIGH).** `bin/simple test <spec>` has been measured
+emitting ~1897 warning lines, ZERO pass/fail lines, and exit 0 —
+`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+Never accept exit 0 as proof of pass in a phase verification lane: require an
+explicit results/count line, otherwise mark the lane INCONCLUSIVE and confirm
+with a direct `bin/simple run` repro.

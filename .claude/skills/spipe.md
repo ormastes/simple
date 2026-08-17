@@ -2472,3 +2472,34 @@ scratch address allowlisted, reject arbitrary payloads/addresses, and preserve
 the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
+
+## 2026-08-17 — run-to-end phases, silent green, reserved words
+
+**Per-phase run-to-end loop.** Each bootstrap phase runs to completion and
+produces a FULL error census — never stop at the first error where the tooling
+can continue. When a phase binary lands, snapshot it immutably with lineage
+naming, then run the COMPLETE verification for that phase in a parallel niced
+lane: all tool builds attempted even when some fail, plus the test suites run
+with that snapshot. The next phase starts on the NEWEST available binary,
+waiting if a rebuild is in flight. Repeat per generation.
+
+**Memory priority.** The phase compiler build owns CPU/memory; test lanes
+throttle to 1 concurrent process when free RAM is low. 2026-08-17
+(session-measured, unfiled): earlyoom killed `jobs=8` stage workers and the
+build was forced to `jobs=2` while ~14 test lanes ran.
+
+**Silent green (HIGH).** `bin/simple test <spec>` can emit ~1897 warning lines,
+ZERO pass/fail lines, and exit 0 —
+`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+Never accept exit 0 as proof of pass: require an explicit results/count line,
+else mark INCONCLUSIVE and verify with a direct `bin/simple run` repro. Also
+recorded in `.claude/rules/testing.md`.
+
+**Reserved words.** `doc/07_guide/quick_reference/syntax_quick_reference.md`
+now lists all 124 lexer keywords, extracted from
+`src/compiler_rust/parser/src/lexer/identifiers.rs`. The `pub` / `move` /
+`examples` family is ONE defect class — a reserved token rejected at the USE
+site. Its documentation half is closed
+(`doc/08_tracking/bug/pub_reserved_identifier_undocumented_2026-08-10.md`); the
+behavioural half (make the tokens contextual) stays OPEN. The previously-linked
+generated `keyword_reference.md` never existed — do not cite it as a source.
