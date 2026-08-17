@@ -1,0 +1,263 @@
+# Versioned signer-policy parsing and authority binding for verified release.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use app.io.mod.{file_exists, file_is_regular_no_follow, file_read}
+use compiler.common.assurance.verified_release_gate.{ApprovedReleaseSignerV1}
+use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV2,
+    assurance_policy_authority_hash_v3}
+
+const FV2_RELEASE_SIGNERS_SCHEMA_V2 = "simple.formal.release-signers.v2"
+const FV2_RELEASE_SIGNERS_SCHEMA_V3 = "simple.formal.release-signers.v3"
+const FV2_APPROVED_RELEASE_SIGNERS_PATH =
+    "config/formal/verified_release_signers.sdn"
+
+# Retained for compatibility parsing only. APOLV2 must not grant authority.
+pub struct ApprovedReleaseSignerPolicyV2:
+    policy_hash: text
+    signers: [ApprovedReleaseSignerV1]
+
+# V3 keeps APOLV2 for migration auditing while binding both the full resolved
+# policy/flight-rule set and the canonical sorted signer allow-list by SHA-256.
+pub struct ApprovedReleaseSignerPolicyV3:
+    policy_hash_v2: text
+    policy_authority_sha256: text
+    signer_allow_list_sha256: text
+    signers: [ApprovedReleaseSignerV1]
+
+fn signer_allow_list_frame_v3(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+pub fn release_signer_allow_list_hash_v3(
+    signers: [ApprovedReleaseSignerV1]
+) -> text:
+    var rows: [text] = []
+    for signer in signers:
+        rows.push(signer_allow_list_frame_v3(signer.signer_id) +
+            signer_allow_list_frame_v3(signer.public_key_hash))
+    rows.sort()
+    var framed_rows: [text] = []
+    for row in rows: framed_rows.push(signer_allow_list_frame_v3(row))
+    sha256_text("ApprovedReleaseSignerAllowList-v3" +
+        signer_allow_list_frame_v3(rows.len().to_string()) +
+        framed_rows.join(""))
+
+fn signer_allow_list_valid_v3(signers: [ApprovedReleaseSignerV1]) -> bool:
+    if signers.is_empty(): return false
+    var signer_ids: [text] = []
+    var public_key_hashes: [text] = []
+    for signer in signers:
+        if signer.signer_id == "" or
+                not sha256_lower_hex_valid(signer.public_key_hash) or
+                signer_ids.contains(signer.signer_id) or
+                public_key_hashes.contains(signer.public_key_hash):
+            return false
+        signer_ids.push(signer.signer_id)
+        public_key_hashes.push(signer.public_key_hash)
+    true
+
+fn signer_policy_dict(
+    value: SdnValue,
+    expected_keys: [text],
+    context: text
+) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case Dict(fields):
+            for key in fields.keys():
+                if not expected_keys.contains(key):
+                    return Err("FV2-E-RELEASE-SCHEMA: unknown " + context +
+                        " field '" + key + "'")
+            for key in expected_keys:
+                if not fields.contains_key(key):
+                    return Err("FV2-E-RELEASE-SCHEMA: missing " + context +
+                        " field '" + key + "'")
+            Ok(fields)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + " must be a dictionary")
+
+fn signer_policy_text(
+    fields: Dict<text, SdnValue>,
+    key: text,
+    context: text
+) -> Result<text, text>:
+    match fields[key]:
+        case String(value):
+            if value == "":
+                Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                    " must not be empty")
+            else:
+                Ok(value)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                " must be text")
+
+fn policy_hash_v2_valid(value: text) -> bool:
+    if not value.starts_with("APOLV2-") or value.len() == "APOLV2-".len():
+        return false
+    for index in "APOLV2-".len()..value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57: return false
+    true
+
+fn parse_signers(
+    value: SdnValue,
+    version: text
+) -> Result<[ApprovedReleaseSignerV1], text>:
+    match value:
+        case Array(values):
+            if values.is_empty():
+                return Err("FV2-E-RELEASE-POLICY-" + version +
+                    ": signer policy is empty")
+            var signers: [ApprovedReleaseSignerV1] = []
+            for value in values:
+                val context = if version == "V2": "signer_v2" else: "signer_v3"
+                val fields = signer_policy_dict(value,
+                    ["signer_id", "public_key_hash"], context)?
+                val signer_id = signer_policy_text(fields, "signer_id",
+                    context)?
+                val public_hash = signer_policy_text(fields,
+                    "public_key_hash", context)?
+                if not sha256_lower_hex_valid(public_hash):
+                    return Err("FV2-E-RELEASE-POLICY-" + version +
+                        ": signer public_key_hash must be canonical SHA-256")
+                for existing in signers:
+                    if existing.signer_id == signer_id or
+                            existing.public_key_hash == public_hash:
+                        return Err("FV2-E-RELEASE-POLICY-" + version +
+                            ": signer identity and public key identity must both be unique")
+                signers.push(ApprovedReleaseSignerV1(signer_id, public_hash))
+            Ok(signers)
+        case _:
+            Err("FV2-E-RELEASE-POLICY-" + version +
+                ": signers must be an array")
+
+pub fn parse_release_signers_sdn_v2(
+    source: text
+) -> Result<ApprovedReleaseSignerPolicyV2, text>:
+    match parse_with_issues(source):
+        case Err(message): Err("FV2-E-RELEASE-POLICY-PARSE-V2: " + message)
+        case Ok((value, issues)):
+            if not issues.is_empty():
+                return Err("FV2-E-RELEASE-POLICY-V2: duplicate fields are forbidden")
+            val fields = signer_policy_dict(value,
+                ["schema", "policy_hash", "signers"], "policy_v2")?
+            val schema = signer_policy_text(fields, "schema", "policy_v2")?
+            if schema != FV2_RELEASE_SIGNERS_SCHEMA_V2:
+                return Err("FV2-E-RELEASE-POLICY-V2: unsupported signer policy schema")
+            val policy_hash = signer_policy_text(fields, "policy_hash",
+                "policy_v2")?
+            if not policy_hash_v2_valid(policy_hash):
+                return Err("FV2-E-RELEASE-POLICY-V2: policy_hash must be canonical APOLV2 identity")
+            Ok(ApprovedReleaseSignerPolicyV2(policy_hash,
+                parse_signers(fields["signers"], "V2")?))
+
+pub fn parse_release_signers_sdn_v3(
+    source: text
+) -> Result<ApprovedReleaseSignerPolicyV3, text>:
+    match parse_with_issues(source):
+        case Err(message): Err("FV2-E-RELEASE-POLICY-PARSE-V3: " + message)
+        case Ok((value, issues)):
+            if not issues.is_empty():
+                return Err("FV2-E-RELEASE-POLICY-V3: duplicate fields are forbidden")
+            val root = match value:
+                case Dict(fields): fields
+                case _:
+                    return Err("FV2-E-RELEASE-POLICY-V3: policy_v3 must be a dictionary")
+            val schema_hint = if root.contains_key("schema"):
+                match root["schema"]:
+                    case String(schema): schema
+                    case _: ""
+            else:
+                ""
+            if schema_hint == FV2_RELEASE_SIGNERS_SCHEMA_V2:
+                return Err("FV2-E-RELEASE-POLICY-STALE-V2: legacy APOLV2 signer policy cannot authorize V2 release; migrate to simple.formal.release-signers.v3")
+            val fields = signer_policy_dict(value,
+                ["schema", "policy_hash_v2", "policy_authority_sha256",
+                    "signer_allow_list_sha256", "signers"], "policy_v3")?
+            val schema = signer_policy_text(fields, "schema", "policy_v3")?
+            if schema != FV2_RELEASE_SIGNERS_SCHEMA_V3:
+                return Err("FV2-E-RELEASE-POLICY-V3: unsupported signer policy schema")
+            val policy_hash_v2 = signer_policy_text(fields, "policy_hash_v2",
+                "policy_v3")?
+            if not policy_hash_v2_valid(policy_hash_v2):
+                return Err("FV2-E-RELEASE-POLICY-V3: policy_hash_v2 must be canonical APOLV2 identity")
+            val authority = signer_policy_text(fields,
+                "policy_authority_sha256", "policy_v3")?
+            if not sha256_lower_hex_valid(authority):
+                return Err("FV2-E-RELEASE-POLICY-V3: policy_authority_sha256 must be canonical lowercase SHA-256")
+            val signer_allow_list_sha256 = signer_policy_text(fields,
+                "signer_allow_list_sha256", "policy_v3")?
+            if not sha256_lower_hex_valid(signer_allow_list_sha256):
+                return Err("FV2-E-RELEASE-POLICY-V3: signer_allow_list_sha256 must be canonical lowercase SHA-256")
+            val signers = parse_signers(fields["signers"], "V3")?
+            if signer_allow_list_sha256 != release_signer_allow_list_hash_v3(
+                    signers):
+                return Err("FV2-E-RELEASE-POLICY-SIGNER-ALLOW-LIST-V3: signer allow-list identity does not match the canonical sorted signer rows")
+            Ok(ApprovedReleaseSignerPolicyV3(policy_hash_v2, authority,
+                signer_allow_list_sha256, signers))
+
+pub fn release_signer_policy_authority_diagnostic_v3(
+    policy: ResolvedAssurancePolicyV2,
+    signer_policy: ApprovedReleaseSignerPolicyV3
+) -> text:
+    if signer_policy.policy_hash_v2 != policy.policy_hash():
+        return "FV2-E-RELEASE-BUNDLE-POLICY-V3: legacy policy identity does not match the exact V2 assurance policy"
+    if signer_policy.policy_authority_sha256 !=
+            assurance_policy_authority_hash_v3(policy):
+        return "FV2-E-RELEASE-BUNDLE-POLICY-AUTHORITY-V3: signer policy is not bound to the canonical SHA-256 V2 policy authority"
+    if not signer_allow_list_valid_v3(signer_policy.signers) or
+            not sha256_lower_hex_valid(signer_policy.signer_allow_list_sha256) or
+            signer_policy.signer_allow_list_sha256 !=
+            release_signer_allow_list_hash_v3(signer_policy.signers):
+        return "FV2-E-RELEASE-BUNDLE-SIGNER-ALLOW-LIST-V3: signer policy is not bound to the canonical sorted signer allow-list"
+    ""
+
+pub fn repository_release_signer_policy_path_v3() -> text:
+    FV2_APPROVED_RELEASE_SIGNERS_PATH
+
+# This fact-only helper is public for direct negative-path tests. It grants no
+# authority and never returns policy material.
+pub fn release_signer_policy_fixed_path_diagnostic_v3(
+    observed_path: text,
+    exists: bool,
+    regular_no_follow: bool
+) -> text:
+    if observed_path != FV2_APPROVED_RELEASE_SIGNERS_PATH:
+        return "FV2-E-RELEASE-POLICY-FIXED-PATH-V3: signer policy must use the repository fixed path"
+    if not exists:
+        return "FV2-E-RELEASE-POLICY-MISSING-V3: repository signer policy is missing"
+    if not regular_no_follow:
+        return "FV2-E-RELEASE-POLICY-NONREGULAR-V3: repository signer policy is non-regular or a symlink"
+    ""
+
+pub fn release_signer_policy_root_authority_diagnostic_v3() -> text:
+    "FV2-E-RELEASE-POLICY-ROOT-AUTHORITY-V3: runtime lacks a trusted executable/install-root plus atomic no-follow snapshot resolver; cwd-relative check/read signer policy cannot authorize release"
+
+pub fn release_signer_policy_legacy_v1_execution_diagnostic() -> text:
+    "FV2-E-RELEASE-POLICY-LEGACY-V1-ROOT-EXECUTION-AUTHORITY: production V1 signer-policy admission has no trusted root or atomic snapshot execution authority; migrate to resolver-owned V3"
+
+# Resolver-owned execution boundary. The current runtime can validate the
+# fixed spelling and no-follow file type, parse V3, and bind full policy and
+# signer-set SHA identities. It cannot yet anchor that relative spelling to a
+# trusted executable/install root or atomically read the checked no-follow
+# file. Consequently it returns no policy authority, even for structurally
+# valid input. Add both resolver-owned primitives before introducing an Ok path.
+pub fn resolve_repository_release_signer_policy_v3(
+    policy: ResolvedAssurancePolicyV2
+) -> Result<ApprovedReleaseSignerPolicyV3, text>:
+    val path = repository_release_signer_policy_path_v3()
+    val path_diagnostic = release_signer_policy_fixed_path_diagnostic_v3(path,
+        file_exists(path), file_is_regular_no_follow(path))
+    if path_diagnostic != "":
+        return Err(path_diagnostic)
+    val source = file_read(path)
+    if source == "":
+        return Err("FV2-E-RELEASE-POLICY-EMPTY-V3: repository signer policy is empty")
+    val signer_policy = parse_release_signers_sdn_v3(source)?
+    val authority_diagnostic = release_signer_policy_authority_diagnostic_v3(
+        policy, signer_policy)
+    if authority_diagnostic != "":
+        return Err(authority_diagnostic)
+    Err(release_signer_policy_root_authority_diagnostic_v3())
