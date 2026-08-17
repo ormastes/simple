@@ -64,8 +64,9 @@ Expected `v=42`. The negated `pow` proves the JIT arm actually compiled. Both
 arms rc=0 — a wrong value, not a crash, so NOT an rc=143/137/144 UNVERIFIED.
 The JIT arm prints the integer payload 42 reinterpreted as an f64 denormal
 (2e-322 ≈ raw bits 42), i.e. the correct value is present and only the
-tag/type recovery on the generic `T?` return is wrong — the same
-"value-is-there, unboxing-is-missing" shape as the other rows in this family.
+tag/type recovery on the generic `T?` return is wrong. NOT ASSERTED: a shared
+root cause with the other reopened rows — this row is recorded on its own
+measurement only.
 
 ## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
 
