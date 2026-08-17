@@ -68,3 +68,51 @@ fixture over real `.spl` modules waits on Gap 1.
 `doc/08_tracking/bug/rt_process_wait_discards_signal_number_2026-08-17.md` — the
 runtime folds every signal death to -1; the supervisor works around it with a
 shell interposition that costs one extra fork+exec per unit.
+
+## Why Gap 1 is not a one-line wiring change (investigated 2026-08-17)
+
+Appended by the `driver_aot_native_output.spl` owner after attempting the wiring.
+The branch itself is trivial — `if config.unstable: build_supervised(...)` — but
+`build_supervised` requires `spawn_fn(path) -> pid`, **a child process that
+compiles ONE module**, and no such entrypoint exists.
+
+What exists instead:
+
+- `src/app/cli/native_build_worker.spl`, spawned by
+  `run_native_build_worker` (`native_build_main.spl:246`), is a worker for the
+  **whole build**, not per module. There is no `--module` / `compile-one`
+  surface anywhere in the native-build CLI (grepped: no `compile-one`,
+  `compile_one_module`, `single-module`, or per-module `--module` flag).
+- The in-process compile the driver actually calls,
+  `_compile_frozen_module_capsule(capsules, ...)`, works from
+  `FrozenNativeModuleCapsuleBatchV1` — **in-process state**. It is frozen for
+  identity checking, not serialized for transport, so a child cannot be handed
+  one.
+
+So a per-module child would today have to re-load the entire compiler graph
+before compiling its single module. On the ~600-module bootstrap that is a
+per-unit cost measured in minutes (a cold fixture build of THREE trivial modules
+spends ~5 minutes in `load_sources` alone under the interpreter), i.e. the naive
+wiring is not merely slow but unusable.
+
+The real prerequisite is therefore one of:
+
+1. a `compile-one-module` entrypoint whose child can reconstruct just the state
+   that module needs — which is what a persisted capsule (`.smf`-style) would
+   buy, and note `SmfManifest` is written but never verified on load; or
+2. `fork()` after the frontend completes, so each child inherits the already-built
+   module graph and pays no reload. This fits the existing shape best — the
+   driver reaches codegen with everything in memory — but needs a fork surface
+   the runtime does not currently expose.
+
+Until one of those lands, `build_supervised` is correct, unit-proven, and
+unreachable from a real build. **Do not "fix" this by having the driver call
+`build_supervised` with a `spawn_fn` that re-runs a full build per module** —
+that trades a crash-safety gap for a runtime blowup and would look green in a
+3-module fixture while being unusable on the bootstrap.
+
+What IS wired and verified today: outcome accumulation and record-and-continue
+in `driver_aot_native_output.spl` (`0c9d671fcd59`), so an in-process build now
+reaches the end of the module list and names every bad module in one run. That
+covers a compiler ERROR; it does not survive a worker SIGSEGV, which is exactly
+what Gap 1 still owes.
