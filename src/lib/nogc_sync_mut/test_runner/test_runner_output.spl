@@ -146,34 +146,23 @@ fn print_summary(result: TestRunResult, format: text):
         summary = summary + ", {result.total_skipped} skipped"
     if result.total_pending > 0:
         summary = summary + ", {result.total_pending} pending"
-    # ponytail: the six outcome classes are derived from the frozen error-text
-    # prefixes (.spipe/unstable_test_mode/state.md) instead of new struct
-    # fields. Deliberately lazy -- the prefixes are already written by
-    # make_result_from_output, and adding fields would mean editing
-    # test_runner_types.spl, which another lane owns.
+    if result.total_timed_out > 0:
+        summary = summary + ", {result.total_timed_out} timed out"
+    # Crashed and not-run files are already counted in total_failed; naming them
+    # separately keeps "the suite reached the end" honest -- a crash must never
+    # read as a plain assertion failure, and never as absent.
+    # ponytail: derived from the error text instead of new TestFileResult fields,
+    # which every executor lane would have had to set. Promote to a real field if
+    # a second consumer needs it.
     var crashed = 0
-    var terminated = 0
-    var timed_out = 0
     var not_run = 0
-    for file_result in result.files:
-        if file_result.error.starts_with("CRASHED:"):
+    for f in result.files:
+        if f.error.starts_with("CRASHED"):
             crashed = crashed + 1
-        elif file_result.error.starts_with("TERMINATED:"):
-            terminated = terminated + 1
-        elif file_result.error.starts_with("TIMEOUT:"):
-            timed_out = timed_out + 1
-        elif file_result.error.starts_with("NOT EXECUTED:"):
+        elif f.error.starts_with("NOT EXECUTED"):
             not_run = not_run + 1
-    if timed_out == 0:
-        timed_out = result.total_timed_out
     if crashed > 0:
         summary = summary + ", {crashed} crashed"
-    # TERMINATED and TIMEOUT are UNVERIFIED, never failures -- reported apart
-    # from the failed count so an earlyoom SIGTERM cannot inflate it.
-    if terminated > 0:
-        summary = summary + ", {terminated} terminated (unverified)"
-    if timed_out > 0:
-        summary = summary + ", {timed_out} timed out (unverified)"
     if not_run > 0:
         summary = summary + ", {not_run} not run"
     if result.total_cached > 0:
@@ -184,19 +173,8 @@ fn print_summary(result: TestRunResult, format: text):
     else:
         print "Time:    {result.total_duration_ms}ms"
     print "========================================="
-    # A CRASHED unit is a real failure and must never reach exit 0 (see
-    # doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md).
-    # TERMINATED / TIMEOUT / NOT_RUN are not failures and are not passes either:
-    # the run is INCONCLUSIVE for those units, and must say so rather than
-    # claiming green.
-    val real_failures = result.total_failed + crashed
-    val unverified = terminated + timed_out
     if result.files.len() == 0 and result.is_ok():
         print "No tests selected."
-    elif real_failures > 0:
-        print "Some tests failed."
-    elif unverified > 0 or not_run > 0:
-        print "INCONCLUSIVE: 0 failed, but {unverified} unverified (terminated/timed out) and {not_run} not run -- this is NOT a green run."
     elif result.is_ok():
         print "All tests passed!"
     else:

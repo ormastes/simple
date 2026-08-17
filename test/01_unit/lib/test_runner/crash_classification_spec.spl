@@ -1,0 +1,24 @@
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{make_result_from_output}
+
+describe "crashed specs are classified separately from failures and timeouts":
+    it "reports a signal death (no exit code) as CRASHED, not a plain failure":
+        # Reproducing case: the runtime maps death-by-signal onto exit_code -1,
+        # the same sentinel as a timeout. Without the CRASHED branch this read
+        # as "Process exited with code -1".
+        val r = make_result_from_output("x_spec.spl", "", "fatal runtime error: stack overflow, aborting", -1, 10, 60)
+        expect(r.error.starts_with("CRASHED")).to_equal(true)
+        expect(r.timed_out).to_equal(false)
+        expect(r.failed).to_equal(1)
+        expect(r.passed).to_equal(0)
+
+    it "still reports a timeout as timed out, not as a crash":
+        # Similar-problem detection: the two share the -1 sentinel, so a
+        # classification bug in either direction shows up here.
+        val r = make_result_from_output("y_spec.spl", "", "TIMEOUT", -1, 10, 60)
+        expect(r.timed_out).to_equal(true)
+        expect(r.error.starts_with("CRASHED")).to_equal(false)
+
+    it "leaves an ordinary non-zero exit as an ordinary failure":
+        val r = make_result_from_output("z_spec.spl", "1 example, 1 failure", "", 1, 10, 60)
+        expect(r.error.starts_with("CRASHED")).to_equal(false)
+        expect(r.failed).to_equal(1)
