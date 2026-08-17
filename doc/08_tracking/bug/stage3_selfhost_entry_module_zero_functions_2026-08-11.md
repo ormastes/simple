@@ -1,7 +1,26 @@
 # Stage 3 self-host fails: entry module lowers 0 functions (ret-0 stub)
 
 - **Date:** 2026-08-11
-- **Status:** RED — reproduced end-to-end, root cause localized, not yet fixed
+- **Status:** LIKELY FIXED IN CURRENT SOURCE — awaiting a stage-3 run to confirm.
+  Re-checked 2026-08-17 (W1) by reading current source, not SHA ancestry. Both
+  candidate faults named below are addressed at the sole call site:
+  `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:1928` now reads
+  `val flat_functions: [HirFunction] = lowered_module.functions.values()` — taken
+  from the freshly returned `HirModule`, with an in-source comment stating that
+  reconstructing this array through the global bootstrap accumulator "loses the
+  entry's functions under the bootstrap ABI", i.e. exactly this row's symptom;
+  and `:1936-1938` now derives the registry name for the entry from
+  `hir_module_logical_name_from_path(self.module_filename)` rather than
+  `module.name`, which is the sibling row
+  `stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10`.
+  NOT re-reproduced: this row needs a full `--full-bootstrap` stage-3 run
+  (~35 min) and a live bootstrap was already occupying the box, so no
+  before/after `Results:`/verdict line was captured. Leave OPEN until a stage-3
+  run prints a non-zero `[bootstrap-flat-entry] ... functions=`.
+  Residual, unfixed and separate: `_bootstrap_hir_entry_index` is still
+  last-flag-wins (`lowering_helpers.spl:68-69`) with no "already flagged" guard —
+  harmless while exactly one module is flagged, silent misdirection if ever two are.
+- **Status (historical):** RED — reproduced end-to-end, root cause localized, not yet fixed
 - **Severity:** BLOCKER — Stage 4 (full CLI) is unreachable; no genuine self-hosted `bin/simple` can be produced
 - **Repro commit:** `7731b4c1394` (last commit whose Rust seed builds; see "Seed buildability" below)
 

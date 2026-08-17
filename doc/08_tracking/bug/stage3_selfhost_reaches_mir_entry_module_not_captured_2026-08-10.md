@@ -1,7 +1,22 @@
 # Stage-3 self-host reaches MIR lowering for the first time — new blocker: entry HIR module not captured in the flat accumulator
 
 - **ID:** stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10
-- **Status:** FIX CANDIDATE PUSHED, VALIDATION PENDING. Milestone: after landing
+- **Status (2026-08-17, W1 source re-check):** the fix is PRESENT in current
+  source; validation still pending. The entry module is no longer registered
+  under `module.name` (a physical path such as `src/app/cli/bootstrap_main.spl`,
+  which is why a `contains("bootstrap_main")` scan over the 572 captured names
+  found the *file* absent under its *logical* name): at
+  `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl:1936-1938`
+  `registry_module_name` is now
+  `hir_module_logical_name_from_path(self.module_filename)` when `is_entry`, and
+  `module.name` otherwise — so the captured key is spelled the same way as the
+  `entry_module_name` that `bootstrap_lower_flat_hir_modules_to_mir_for_target`
+  compares against. Same call site also fixes the sibling row
+  `stage3_selfhost_entry_module_zero_functions_2026-08-11` (functions now come
+  from `lowered_module.functions.values()`); treat the two as ONE defect family:
+  "the entry module's identity and body are both lost when rebuilt through the
+  global flat accumulator". Not re-reproduced here — needs a full stage-3 run.
+- **Status (historical):** FIX CANDIDATE PUSHED, VALIDATION PENDING. Milestone: after landing
   `17a55168a11`, `7dd296f2ef6`, `1f81b2b4f0b`, `67055c4d3f1` (this session) plus
   a large flurry of peer-session fixes tonight (`6834081f503` through
   `b1c1bb1045b` — HIR diagnostic isolation/preservation, layout dedup, etc.),

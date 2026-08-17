@@ -6,6 +6,35 @@ The prior `OPEN (P1)` header contradicted this file's own final section
 ("Root cause confirmed in the next session"), which already recorded the fix.
 The `re-verified by source inspection` stamp was wrong.
 
+Independently corroborated 2026-08-17 (W1), by reading current source rather
+than SHA ancestry: `src/compiler/20.hir/hir_lowering/module_surface.spl:1836-1849`
+— `module_surfaces_from_modules`, the exact function the GDB session trapped in
+at `+582` on source index 6 of 800 — now nil-checks BOTH boundary values before
+any field access (`if source == nil: return Err("invalid source entry at index:
+...")`, `if module == nil: return Err("invalid parsed module for source: ...")`),
+so the `field access on nil receiver` + SIGILL/132 outcome is converted to a
+clean, identity-preserving `Err`. Note what is NOT covered by this retirement:
+line 1843 still returns `missing parsed module for source: {module_name}` when no
+parsed alias exists for a physical source (the cycle-1 failure), and the
+placeholder population lives in the driver's `parse_all_impl`
+(`src/compiler/80.driver/**`) — a stage-3 run that fails with THAT message is a
+different defect, not a regression of this row.
+
+Separate cost finding in the same function (NOT this row's defect, recorded here
+so it is not lost): the alias loop at `module_surface.spl:1864-1890` scans every
+`builder.surfaces` entry for each alias that misses both `index_by_name` and
+`index_by_path`, calling `module_surface_declaration_matches` — a nine-cardinality
+comparison that allocates `.keys()` arrays on both sides — and deliberately does
+NOT break on first match (it needs the ambiguity check). That is O(N^2) heavy
+comparisons at N ~ 800 modules, CPU-bound with near-flat RSS. A provably
+behaviour-preserving prefilter exists: `matches()` requires all nine cardinalities
+to be equal, so bucketing surfaces by those nine counts cannot change any verdict,
+including the `ambiguous parsed module alias` and `parsed module has no source
+surface` outcomes. Not applied: it sits on the stage-3 critical path and cannot be
+verified without a stage-3 run, and this phase is NOT the phase where the live
+stall was measured (`phase=parse`, see
+`stage3_parse_stalls_at_tail_43_files_2026-08-17.md`).
+
 ## Status
 
 RESOLVED. Verified by CONTENT grep of current source, not SHA ancestry:

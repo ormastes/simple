@@ -32,6 +32,27 @@ proven to fire on an all-stub (0-instruction) module. The build now fails
 *loudly* at a deeper, still-unfinished layer (MIR→LLVM lowering, see Remaining
 Work) rather than silently shipping an empty binary.
 
+## 2026-08-17 (W1) — chain link 1 confirmed still fixed in current source
+
+Checked by reading current source, not SHA ancestry, because the
+`re-verified 2026-08-17 by source inspection` stamp on this file is untrustworthy
+(it was proven wrong on 37% of the rows it touched).
+`flat_is_bootstrap_entry_path` (`src/compiler/10.frontend/_FlatAstBridge/
+convert_nodes.spl:62-86`) now (a) returns `true` unconditionally when
+`SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE == "1"`, so every module in the entry closure
+is really assembled rather than routed to `flat_empty_module()`, and (b) matches
+the entry by `path == native_entry or path.ends_with("/" + native_entry)`, which
+covers the driver's `src/app/cli/bootstrap_main.spl` spelling that the original
+`/src/...` / `./src/...` patterns missed. Both branches carry comments naming
+this bug id. This row shares a defect FAMILY with
+`stage3_selfhost_entry_module_zero_functions_2026-08-11` and
+`stage3_selfhost_reaches_mir_entry_module_not_captured_2026-08-10`: in all three
+the entry module's identity or body is lost while being rebuilt through a global
+flat accumulator instead of being read from its owning value. Not re-reproduced
+(needs a full bootstrap; the box was already running one), so no before/after
+verdict line — the remaining MIR→LLVM layer in "Remaining Work" is untouched by
+this note.
+
 ## Root-cause chain (all verified by rebuild + LLVM IR inspection)
 
 The bootstrap self-hosting frontend was stubbed at five independent points; each
