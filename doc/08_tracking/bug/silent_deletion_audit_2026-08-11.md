@@ -1,9 +1,102 @@
-## Row #3 re-verified 2026-08-17 — RESTORED, close this row
+# CLOSED 2026-08-17 — all 12 rows re-verified; 0 genuine deletions outstanding
 
-`src/compiler_rust/runtime/src/value/collections.rs` is back at **6148 lines /
-210 `fn rt_*`** (audit recorded 4211/198 as still-missing). `rt_array_reduce`
-and `rt_array_free_deep` are present. No double-restore needed; the "STILL
-MISSING" verdict for `6e2f613d302` is stale.
+**Nothing is missing. No restoration was required.** Every row was re-checked
+against both the working tree and a freshly-fetched `origin/main`
+(`ff4534c0dc1`). Full evidence in "Re-verification" below.
+
+**But this audit was wrong twice, in opposite directions, and the reason is one
+mechanical defect worth more than the audit itself — see "What the methodology
+got wrong". In short: it analysed 1.2% of its own dataset and reported
+completeness.**
+
+## Re-verification 2026-08-17 (every row)
+
+| row | claim | verdict now | evidence |
+|---|---|---|---|
+| 1,2 | 427-file sweep `7731b4c1394`, reverted by `ad2b5d5307f` | **TRUE, resolved** | `scripts/check/directory_fanout_baseline.txt` present at exactly 1009 lines (the audit's own max-deletion figure) |
+| 3 | collections.rs "STILL MISSING", 70 fns absent | **FALSE ALARM** | 6199 lines / 210 `fn rt_*` in worktree, 6122 on origin. All 8 symbols the audit named as absent are present: `rt_array_free_deep`, `rt_array_reduce`, `rt_push`, `rt_pop`, `rt_drop`, `rt_find`, `deep_free_classify`, `collection_provider_cache` |
+| 4,5,9,10,11,12 | INTENTIONAL spec rewrites | **TRUE** | all named specs present on origin/main |
+| 6 | `cipher_sha256_provider.spl` deleted 226→0, restored later | **TRUE, resolved** | present at exactly 226 lines, `src/lib/nogc_sync_mut/spec/evidence/counterpart/` |
+| 7 | `simd_phase9c.spl` deleted with archive copies | **TRUE** | archive present at `doc/05_design/compiler/phases/simd_phase9c.spl` |
+| 8 | dead CSS lane removed, superseded by `dom_color.spl` | **TRUE** | `src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl` present |
+
+Current tree health: 114,815 files; `src/` 16 entries (guard band 13..25);
+`src/runtime` 218 files (canary floor 150). All green.
+
+## What the methodology got wrong
+
+### Defect 1 — it analysed 1.2% of its own dataset and called it complete
+The audit states it pulled diffstat "in one pass (`git log --numstat`, **2714
+file-change rows**)". Re-running that same scan over the same window yields
+**229,025 rows**. The audit saw **1.2%** of its data and concluded
+*"No new, still-unaddressed silent deletions were found."*
+
+The `2714` figure is the fingerprint of the failure: output was truncated
+(capped tool output, or a `head`/pipe limit) and the truncated slice was treated
+as the whole. This is the same error family as reading exit 0 with no verdict
+line as green — **absence of data mistaken for absence of findings**. An audit
+must assert its own input size before drawing a negative conclusion.
+
+### Defect 2 — the consequence: it MISSED the largest deletion in its own window
+`6f86ff32a7dbd54e4f2f933a6d6c327be9b04884` "docs(todo): track remaining Stage 4
+gates" (2026-08-11 07:17:15) is an ancestor of `origin/main`, sits squarely
+inside the audit's window, and:
+
+- reduced the tree from **113,030 files to 3**;
+- deleted **113,027 files / 40,222,376 lines**;
+- has a single-file deletion of **635,236 lines** — **335× larger** than the
+  next-biggest in the window (1,896) and the #1 entry by every threshold the
+  audit declared (≥300 total, ≥200 single-file, ≥40 files).
+
+It is not among the 12 flagged commits. It is not a merge (1 parent), and plain
+`git log --numstat` *does* emit its 113,027 rows — so the audit's method would
+have caught it had the data not been truncated. This is the fourth tree wipe,
+tracked separately in
+`fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md`.
+
+The surviving 3 files were two bug docs and `todo_db.sdn`.
+
+### Defect 3 — a known-in-flight race recorded as a settled verdict
+Row 3 was written as **"STILL MISSING"** and ranked #1 under "Still-missing
+content requiring restoration", while the same row says *"Another agent is
+already restoring this one."* The real history:
+
+```
+6e2f613d302  08-10 06:40  5998 -> 4211   the clobber
+ad2b5d5307f  08-11 06:00  4211           the "revert" did NOT restore this file
+6f86ff32a7d  08-11 07:17  -> 0           tree wipe (audit missed this entirely)
+ae55a746719  08-11 07:22  4211           wipe undone, still clobbered
+64a4364d36a  08-11 08:14  6012           the ACTUAL restore
+```
+
+The audit's observation was true when taken and stale within hours. A
+point-in-time measurement of a contested file must carry the commit it was
+measured at, or it becomes a false alarm the moment the race resolves — which
+is exactly what happened, costing a later reader a full re-verification pass.
+
+### Rules for the next audit
+1. **Assert input size before concluding.** Print the row/commit count you
+   actually processed and sanity-check it against an independent count. A
+   negative finding from an unverified-size dataset is not a finding.
+2. **Rank by magnitude and eyeball the top entry.** The largest deletion in the
+   window should be row #1 by construction; if the biggest thing in your table
+   is 1,896 lines in a repo that wipes 600k, your scan is incomplete.
+3. **Timestamp and pin volatile rows.** Record the exact SHA measured at, and
+   never write "STILL MISSING" for a file another agent is actively restoring —
+   use "in flight, owned by X, re-check at <SHA>".
+
+## No new guard added — the existing one already covers this class
+A mass `rt_*` deletion is already gated by
+`scripts/check/check-runtime-api-regression-push.shs` (fails at ≥5 removed
+symbols, and unconditionally when a removed symbol is still `pub use`-exported
+in `lib.rs`). The `rt_*` export surface in `runtime/src/lib.rs` currently
+carries 471 references and is healthy. Adding a second export-surface assertion
+would duplicate an existing, already-wired guard.
+
+---
+*Original audit text below, retained unedited for the record. Its Row 3 verdict,
+its 2714-row basis, and its "no new deletions found" summary are all superseded
+by the re-verification above.*
 
 # Silent Mass-Deletion Audit — commits landed 2026-08-10 12:00 .. 2026-08-11 (origin/main)
 
