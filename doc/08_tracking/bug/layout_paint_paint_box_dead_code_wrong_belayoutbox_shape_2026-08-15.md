@@ -1,20 +1,7 @@
 # layout_paint.spl `_paint_box` is latent dead code built against the wrong BeLayoutBox shape
 
 - **Date:** 2026-08-15
-- **Status:** RESOLVED 2026-08-16 (deleted) — `_paint_box` was removed from
-  `layout_paint.spl` along with the imports only it used (BeLayoutBox, BeDomNode,
-  dom_accessors, render_scene). Rationale: it had never run (semantic error at
-  the first `box.node` access), nothing imported the module except the coverage
-  spec, and porting it would require a `node_id -> BeDomNode` resolution no
-  pipeline provides — deletion is the mandated non-over-engineering choice.
-  `_apply_opacity` is kept and remains fully covered by
-  `test/01_unit/browser_engine/layout_paint_coverage_closure_spec.spl`.
-  Previously: OPEN — re-triaged 2026-08-15 during the layout_core port
-  (see `layout_core_incompatible_with_committed_belayoutbox_2026-08-15.md`,
-  now RESOLVED): `_paint_box` is NOT trivially fixable by that port, because
-  it needs a `node_id -> BeDomNode` resolution (or style data carried on the
-  box) that no current pipeline provides. Left as-is; deletion remains the
-  ponytail choice.
+- **Status:** RESOLVED (2026-08-17, deleted dead code — see RESOLVED section)
 - **Component:** `src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl`
 - **Severity:** low (dead code), but a semantic landmine
 
@@ -47,3 +34,31 @@ Either delete `_paint_box` (and any helpers only it uses), or port it to
 the real `BeLayoutBox` contract: resolve the DOM node via `node_id`
 where needed, and call `content_x()` etc. as methods. Deletion is the
 ponytail choice unless a paint pipeline is about to consume it.
+
+## RESOLVED (2026-08-17)
+
+Fixed by deletion, per this record's suggested ponytail fix. `_paint_box`
+was doubly stale: wrong BeLayoutBox shape (fields vs methods, `box.node`
+vs `node_id`) AND wrong dom_accessors contracts (`.value` reads on plain
+`f64`/`text` returns — verified against `dom_accessors.spl:524-531`). It
+had zero callers; the live painters are `layout.spl:paint_box` and
+`browser_renderer.spl:_browser_paint_boxes`. `_apply_opacity` (the only
+used export) is kept.
+
+Evidence and specs:
+- Change: `src/lib/gc_async_mut/gpu/browser_engine/layout_paint.spl`
+  (function removed, header NOTE added).
+- Repro-class / recurrence spec (pins the real BeLayoutBox contract the
+  dead code violated — `node_id` field, `content_*()` as methods — plus
+  `_apply_opacity` adjacent cases):
+  `test/01_unit/browser_engine/layout_paint_contract_pin_spec.spl`
+  (mirrored at `test/unit/browser_engine/layout_paint_contract_pin_spec.spl`),
+  run 2026-08-17: 6 executed, 6 passed, 0 failed.
+- Surviving-surface spec stays green:
+  `test/01_unit/browser_engine/layout_paint_coverage_closure_spec.spl`
+  (docstring refreshed).
+
+Note on "fails before, passes after": no spec could fail before this fix —
+the defect was uncallable dead code, only diagnosable at call time; any
+spec calling `_paint_box` fails both before (semantic error) and after
+(symbol gone). The contract-pin spec is the recurrence guard instead.

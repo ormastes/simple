@@ -6,6 +6,8 @@ A concise reference for the canonical public Simple syntax. Legacy or parser-com
 
 **See also:** [Grammar keyword reference](../../06_spec/app/compiler/modules/grammar/keyword_reference.md) — keyword/status tables generated from the grammar registry.
 
+**Reserved keywords that cannot be used as identifiers:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`, `examples`, `and_then`, and `pub` — `pub` lexes as a keyword token everywhere, so `val pub = ...` fails with `expected pattern, found Pub`; pick another name.
+
 ---
 
 ## Table of Contents

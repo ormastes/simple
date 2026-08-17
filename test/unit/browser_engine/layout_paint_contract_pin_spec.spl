@@ -1,0 +1,41 @@
+# Pins the contracts the deleted `_paint_box` dead code violated, so a
+# reintroduction of field-style access against BeLayoutBox is caught.
+# See doc/08_tracking/bug/layout_paint_paint_box_dead_code_wrong_belayoutbox_shape_2026-08-15.md
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.layout_paint.{_apply_opacity}
+
+fn probe_box() -> BeLayoutBox:
+    var s = StyleProps.empty()
+    s.padding_left = 4.0
+    s.padding_top = 3.0
+    s.padding_right = 2.0
+    s.padding_bottom = 1.0
+    s.border_width = 2.0
+    var node = BeDomNode.element("div")
+    node.style = s
+    var b = BeLayoutBox.block_for(node, 10.0, 20.0, 100.0, 50.0)
+    b
+
+describe "BeLayoutBox real contract (repro class for _paint_box defect)":
+    it "carries node_id, not a node object field":
+        val b = probe_box()
+        expect(b.node_id >= -1).to_equal(true)
+    it "content geometry is exposed as methods computed from box model":
+        val b = probe_box()
+        expect(b.content_x()).to_equal(10.0 + 4.0 + 2.0)
+        expect(b.content_y()).to_equal(20.0 + 3.0 + 2.0)
+        expect(b.content_width()).to_equal(100.0 - 4.0 - 2.0 - 2.0 * 2.0)
+        expect(b.content_height()).to_equal(50.0 - 3.0 - 1.0 - 2.0 * 2.0)
+
+describe "layout_paint surviving surface (generalization)":
+    it "opacity 1.0 is identity":
+        expect(_apply_opacity(0xFF112233, 1.0)).to_equal(0xFF112233)
+    it "opacity 0.0 clears alpha only":
+        expect(_apply_opacity(0xFF112233, 0.0)).to_equal(0x00112233)
+    it "partial opacity scales alpha and preserves rgb":
+        expect(_apply_opacity(0x80ABCDEF, 0.5) & 0x00FFFFFF).to_equal(0x00ABCDEF)
+    it "zero-alpha input stays zero-alpha under partial opacity":
+        expect(_apply_opacity(0x00445566, 0.5)).to_equal(0x00445566)

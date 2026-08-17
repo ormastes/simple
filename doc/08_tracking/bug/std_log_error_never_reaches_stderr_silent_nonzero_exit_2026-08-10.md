@@ -56,3 +56,17 @@ Run under `systemd-run --user --scope -p TasksMax=12`.
 ## Related
 
 - `doc/08_tracking/bug/simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md`
+
+## RESOLVED — residual also fixed (verified 2026-08-17)
+
+The § Residual item (`src/lib/nogc_sync_mut/log.spl` `_parse_log_level()`
+defaulting to LOG_OFF) is now fixed in source: `_DEFAULT_LOG_LEVEL = 2`
+(LOG_ERROR) with `SIMPLE_LOG=off` as the deliberate opt-out, and the main fix
+(`log_dispatch_text` writing ERROR/FATAL to stderr via `rt_stderr_write`) is
+present in `src/lib/log.spl` lines 652-674. Nothing left open in this doc.
+
+Spec coverage (2026-08-17): repro + generalization spec
+`test/01_unit/lib/nogc_sync_mut/log_default_level_error_visible_spec.spl`
+(mirrored in `test/unit/lib/nogc_sync_mut/`): pins the unset-SIMPLE_LOG default
+to >= LOG_ERROR (pre-fix it was LOG_OFF), the severity ordering, and that
+error()/fatal() execute the emission path. Green: 3 examples, 0 failures.

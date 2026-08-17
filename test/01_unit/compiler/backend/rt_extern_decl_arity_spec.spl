@@ -1,0 +1,33 @@
+# Regression spec for doc/08_tracking/bug/rt_dir_list_platform_header_collides_with_extern_2026-08-10.md
+# (extern-ABI divergence family) and the rt_file_open 3-vs-4 arity defect fixed 2026-08-17.
+#
+# Repro: both pure-Simple LLVM backends declared `rt_file_open` with 3 params
+# (ptr, i64, i32) while the compiler emits calls with the 4-arg (path_ptr,
+# path_len, mode_ptr, mode_len) text ABI (runtime_sffi.rs:1880). Before the fix
+# the first two `it` blocks below FAIL; after the fix they PASS.
+extern fn rt_file_read_text(path: text) -> text
+
+fn source_of(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "rt_file_open extern declaration arity (repro)":
+    it "llvm_backend.spl declares rt_file_open with the 4-arg (ptr,len,ptr,len) ABI":
+        val src = source_of("src/compiler/70.backend/backend/llvm_backend.spl")
+        expect(src).to_contain("declare i32 @rt_file_open(ptr, i64, ptr, i64)")
+
+    it "llvm_lib_translate.spl declares rt_file_open with the 4-arg (ptr,len,ptr,len) ABI":
+        val src = source_of("src/compiler/70.backend/backend/llvm_lib_translate.spl")
+        expect(src).to_contain("\"rt_file_open\", llvm_function_type(i32_ty, [ptr_ty, i64_ty, ptr_ty, i64_ty], false)")
+
+describe "adjacent extern declarations do not regress to the 3-arg form (generalization)":
+    it "neither backend carries the old 3-arg rt_file_open declaration":
+        val a = source_of("src/compiler/70.backend/backend/llvm_backend.spl")
+        val b = source_of("src/compiler/70.backend/backend/llvm_lib_translate.spl")
+        assert_false(a.contains("@rt_file_open(ptr, i64, i32)"))
+        assert_false(b.contains("\"rt_file_open\", llvm_function_type(i32_ty, [ptr_ty, i64_ty, i32_ty]"))
+
+    it "both backends actually declare rt_file_open (the checks above are not vacuous)":
+        val a = source_of("src/compiler/70.backend/backend/llvm_backend.spl")
+        val b = source_of("src/compiler/70.backend/backend/llvm_lib_translate.spl")
+        assert_true(a.contains("rt_file_open"))
+        assert_true(b.contains("rt_file_open"))

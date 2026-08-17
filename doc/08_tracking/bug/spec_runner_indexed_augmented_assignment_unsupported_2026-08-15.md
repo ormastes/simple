@@ -71,3 +71,16 @@ damage_tiles 15/16 decisions).
 The spec-runner execution path's assignment lowering should desugar
 `target[i] op= v` to `target[i] = target[i] op v` (or support the indexed
 lvalue directly), matching the `run` path's behavior.
+
+## Triage update (2026-08-17)
+
+Re-verified still RED with the minimal repro (2 examples, 2 failures,
+`semantic: invalid assignment: unsupported augmented assignment target`).
+Root cause located: the spec-runner interpreter's augmented-assignment
+executor in the Rust seed
+(`src/compiler_rust/compiler/src/interpreter/node_exec.rs:2285`) handles
+plain-variable and field targets but has no indexed-lvalue arm, so
+`arr[i] += v` / `self.field[i] += v` fall to the catch-all error. Fixing
+it requires a Rust seed change plus rebuild/redeploy, which this session
+is prohibited from performing (bootstrap in flight). DEFERRED with fix
+location pinned; still OPEN.
