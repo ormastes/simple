@@ -27,7 +27,8 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --target=simpleos-*|--target=freebsd-*) bootstrap_strategy_bypass=1 ;;
     esac
   done
-  if [ "${bootstrap_strategy_bypass}" -eq 0 ]; then
+  if [ "${bootstrap_strategy_bypass}" -eq 0 ] &&
+     [ -x "${bootstrap_strategy_entry}/bootstrap-strategy.sh" ]; then
     exec "${bootstrap_strategy_entry}/bootstrap-strategy.sh" \
       --strategy="${bootstrap_strategy_arg}" \
       --output="${bootstrap_strategy_output}" -- "$@"
