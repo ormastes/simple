@@ -217,6 +217,17 @@ fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
         case SymbolKind.Const: "const"
         case _: ""
 
+fn hir_payload_kind_is_type(kind: text) -> bool:
+    """True only for terminal kinds that actually name a TYPE.
+
+    `hir_symbol_terminal_kind` maps functions/methods to "callable" and
+    constants to "const" -- both non-empty -- so an emptiness test cannot
+    separate types from non-types. Enumerate the type kinds positively so a
+    new non-type kind defaults to "not a type" rather than silently being
+    treated as a competing type owner.
+    """
+    kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "type_alias"
+
 fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
     val canonical_module = hir_pkg_canonical_module_name(module_name)
     val canonical_item_owner = if canonical_module == "compiler.tools.lint._LintMain.config_and_model" and (item_name == "LintLevel" or item_name == "LintCategory"):
@@ -1332,8 +1343,19 @@ impl HirLowering:
                 val existing_kind = hir_symbol_terminal_kind(symbol.kind)
                 val existing_owner = symbol.defining_module ?? ""
                 val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
-                if existing_kind == "":
-                    self.error("enum payload dependency `{local_name}` conflicts with non-type binding `{symbol.name}`", import_span)
+                # Only a TYPE symbol can contest ownership of a payload type
+                # name. Keying this on `existing_kind == ""` was the wrong
+                # test: `hir_symbol_terminal_kind` returns a NON-empty string
+                # for functions and methods ("callable") and for constants
+                # ("const"), so that check could never fire for exactly the
+                # symbols that reach here in practice, and control fell
+                # through to the conflict below. That misreported a function
+                # as a competing type owner -- all 78 unique "enum payload
+                # dependency conflicts" in the Stage 3 log were of this
+                # shape, and in 0 of the 78 did the two sides even share a
+                # name (73 `callable`, 3 `struct`, 2 `class`).
+                if not hir_payload_kind_is_type(existing_kind):
+                    self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
                     return false
                 if existing != wanted:
                     self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
