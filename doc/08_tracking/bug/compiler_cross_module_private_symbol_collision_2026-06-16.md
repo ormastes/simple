@@ -358,3 +358,113 @@ single tier:
 (`interp_env_get_name_collision_nil_root_2026-07-26`); this diagnostic now shows it
 is one member of a ~15-name family with the same shape. That family is the natural
 next batch and is a `src/lib/nogc_sync_mut/**` lane, not a crypto lane.
+
+---
+
+## Re-measured 2026-08-17 (CRITICAL lane, slice C1b) — CONFIRMED LIVE, and BROADER than filed
+
+Verdict rests on **EXECUTION**, not source reading. Reproduced with `bin/simple run`
+(Rust seed, the currently deployed binary) on purpose-built two-module fixtures.
+
+### The title understates the defect on three axes
+
+**1. Not specific to `_`-prefixed private functions.** A public `fn who() -> text`
+defined in two co-compiled modules collides identically:
+
+```
+$ bin/simple run pmain.spl     # use pa.{call_a}; use pb.{call_b}
+from_A
+from_A                          # <- call_b(), defined in pb.spl, ran pa.spl's who()
+```
+
+Swapping the two `use` lines flips both to `from_B`. First-import-wins.
+
+**2. The in-module call is NOT protected.** `call_b()` lives *inside* the module that
+defines its own `who()`. It still reaches the other module's body. This directly
+contradicts the resolution-policy comment that stood at
+`src/compiler_rust/compiler/src/pipeline/module_loader.rs:1406-1411`, which claimed the
+owner tag keeps `b.call_b()` reaching `b.who` "in either import order" — using this
+exact `who()` example. That bullet has been retracted in-source with the measurement.
+
+**3. Differing signatures collapse too, discarding arguments without an arity error.**
+A's `shared_arity()` takes no parameters; B's takes one. B's own wrapper calls
+`shared_arity(7)`:
+
+```
+PASS a_arity                    # A_arity0, correct
+FAIL b_arity expected=B_arity1 actual=A_arity0
+```
+
+The argument `7` is silently dropped and the zero-parameter body runs. No type error,
+no arity error, exit 0.
+
+### Mechanism — the fix does not belong in `select_overload`
+
+`FUNCTION_OVERLOADS` and `FUNCTION_MODULE_OWNER` are populated per-definition, and
+`select_overload` (`interpreter_call/mod.rs:177`) already has an owner-tag tie-break.
+**It is never reached.** Under `SIMPLE_DEBUG_OVERLOAD_SELECT=1` the probe emitted no
+`[module-tie]` line at all, so by dispatch time `FUNCTION_OVERLOADS[name]` holds fewer
+than two candidates.
+
+Meanwhile `warn_duplicate_private_signatures` (`module_loader.rs:1519`) *does* see both
+definitions in `module.items` and warns about them. So the second definition is lost
+**between the flattening pass and interpreter registration**. Repairing the tie-break
+cannot fix this; the registry must retain both definitions (owner-scoped keys, or
+name mangling).
+
+### Detection is inverted: the most dangerous shape is the quietest
+
+Default run of the probe warned about `shared_arity` (differing signatures) only.
+`_shared_helper` and `shared_public` — same-signature collisions that produced wrong
+answers **in the very same run** — drew no warning, because that arm sits behind
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION`, default-off (`module_loader.rs:1509`). The
+comment above that arm (`:1592-1607`) argues at length that the same-signature shape is
+the one no other tool can detect, and then leaves it disabled. With the env var set the
+warning fires correctly, so the detector works — only the default is wrong.
+
+Flipping that default was deliberately NOT done in this lane: the repo-wide collision
+census is large and a live bootstrap was running. It needs its own scoped change with a
+measured noise count.
+
+### Regression coverage added (currently RED by design — no fix landed)
+
+- `test/01_unit/compiler/pipeline/fixtures/xmod_collision_a.spl`
+- `test/01_unit/compiler/pipeline/fixtures/xmod_collision_b.spl`
+- `test/01_unit/compiler/pipeline/fixtures/probe_xmod_collision.spl` — run-path probe,
+  absolute-literal oracles, subprocess-driven. Current output:
+  `PASS a_private / FAIL b_private / PASS a_public / FAIL b_public / PASS a_arity /
+  FAIL b_arity` → `XMOD_COLLISION PROBE: FAILURES`
+- `test/01_unit/compiler/pipeline/cross_module_symbol_collision_spec.spl` — reproducing
+  spec, shells out under both `interpreter` and `jit`.
+- `test/01_unit/compiler/pipeline/cross_module_collision_detection_spec.spl` — detection
+  spec for the defect CLASS: every collision shape must be named on stderr under
+  DEFAULT settings, and a wrong-answer collision must not be suppressible by an env var.
+
+### Not proven in this lane
+
+- Native (`compile --native`) behaviour was not re-measured; only interpreter and JIT.
+- The exact pass that drops the second definition between flattening and registration
+  was not isolated to a line.
+- The noise cost of enabling `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION` by default is
+  unmeasured.
+
+### Spec budget note + one assertion deliberately dropped
+
+The first version of `cross_module_collision_detection_spec.spl` made THREE compiler
+launches and timed out at the 900s test-daemon budget:
+
+```
+SPEC FILE VERDICT: ... executed=1 passed=0 failed=1 dropped=0 timeout=1
+  reason=daemon-no-response budget_ms=900000
+```
+
+That is an UNVERIFIED result, not a red. The spec is now capped at one shell-out
+launch per example (two total).
+
+Dropping the third launch removed one assertion worth restoring when the budget
+allows, recorded here so it is not silently lost:
+
+> **A collision that produced a wrong answer must not be suppressible by an env var.**
+> Running the probe with `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=0` should still report
+> `_shared_helper`. Today it does not — the flag silences a warning about a
+> demonstrably wrong result.

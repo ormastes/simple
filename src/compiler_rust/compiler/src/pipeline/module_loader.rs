@@ -1403,12 +1403,42 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
 /// Neither clause survives a two-module experiment (`a.spl` and `b.spl` each defining
 /// `fn who() -> text`, plus a third file importing both):
 ///
-/// - The **interpreter does not resolve by bare name alone.** A call made from
+/// - ~~The **interpreter does not resolve by bare name alone.** A call made from
 ///   *inside* a defining module is resolved against that module's owner tag (see
 ///   `FLATTEN_MODULE_OWNER_ATTR_PREFIX` and `FUNCTION_MODULE_OWNER`), so `a.call_a()`
 ///   keeps reaching `a.who` and `b.call_b()` keeps reaching `b.who`, in either import
 ///   order. It is only the bare-name *fallback* — a call from a third module that
-///   defines neither — that collapses.
+///   defines neither — that collapses.~~
+///
+///   **RETRACTED 2026-08-17 — this bullet is FALSE, and it is the dangerous kind of
+///   false: it tells a maintainer that in-module calls are already safe.** Re-run of
+///   the very experiment it describes (`a.spl`/`b.spl` each defining `fn who() -> text`,
+///   a third file importing both, `bin/simple run`): `call_a()` AND `call_b()` both
+///   printed `from_A`. Swapping the two `use` lines made both print `from_B`. The
+///   interpreter is first-import-wins for the in-module call too, exactly like the
+///   third-module fallback — the owner tag does not rescue it.
+///
+///   Three further measurements pin the mechanism:
+///   * It is **not** specific to the `_` private-helper convention — a public `who()`
+///     collides identically (the bullet above used a public name and still got it wrong).
+///   * It is **not** limited to identical signatures. With A's `shared_arity()` taking
+///     no parameters and B's taking one, B's own wrapper calls `shared_arity(7)` and
+///     reaches A's zero-parameter body: the argument is silently DISCARDED and **no
+///     arity error fires**.
+///   * The owner-tag tie-break in `select_overload` (`interpreter_call/mod.rs:177`) is
+///     **never reached**. Under `SIMPLE_DEBUG_OVERLOAD_SELECT=1` the probe printed no
+///     `[module-tie]` line at all, so `FUNCTION_OVERLOADS[name]` holds fewer than two
+///     candidates by dispatch time — only one definition survives into the registry and
+///     there is nothing for the tie-break to choose between. Note this diagnostic
+///     (`warn_duplicate_private_signatures`) still sees BOTH definitions in
+///     `module.items` and warns about them, so the loss happens between this pass and
+///     interpreter registration. Fixing `select_overload` alone cannot help; the
+///     registry must keep both definitions (owner-scoped keys or mangling).
+///
+///   Regression fixtures + specs, all currently RED by design:
+///   `test/01_unit/compiler/pipeline/cross_module_symbol_collision_spec.spl`,
+///   `test/01_unit/compiler/pipeline/cross_module_collision_detection_spec.spl`,
+///   `test/01_unit/compiler/pipeline/fixtures/probe_xmod_collision.spl`.
 /// - **Codegen is first-import-wins, not last-write-wins.** Flip the two `use` lines
 ///   and the surviving definition flips with them, under both the Cranelift JIT and
 ///   `compile --native` (the two native artifacts differ byte-wise, so the winner is

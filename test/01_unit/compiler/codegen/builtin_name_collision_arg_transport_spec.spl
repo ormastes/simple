@@ -1,0 +1,86 @@
+# Similar-problem DETECTION spec (defect CLASS).
+#
+# Class: MIR/codegen special-cases a builtin collection or string method BY NAME
+# and rewrites the call's argument transport (tag-box an int, box a float,
+# substitute an `rt_*` symbol) WITHOUT first checking the receiver is really that
+# builtin type. A same-named user method on an ordinary struct then receives a
+# rewritten argument, or loses the call entirely. Compiles clean, exits 0, wrong
+# answer.
+#
+# The instance that motivated this spec was `push`/`append`
+# (`is_array_append_method`, `lowering_expr_method.rs`), which multiplied the
+# first i64 argument by 8. The sibling `index_of` rewrite in the SAME function
+# was already correctly gated on `receiver_is_array`; nothing enforced that the
+# gate exists, so the next name added to a name-only list silently reintroduces
+# the bug. This spec pins the whole name surface instead of the one instance.
+#
+# WHY A SUBPROCESS: spec bodies run INTERPRETED, and the interpreter is correct
+# for this whole class. Only `bin/simple run` (JIT) exhibits it.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_builtin_name_collision_arg_transport_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "user methods named after builtins keep their own argument transport":
+    it "round-trips an integer argument through every special-cased method name on the JIT":
+        step("Run the class probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("Array mutator names — `push`/`append` are the confirmed instance (42 arrived as 336)")
+        expect(jit).to_contain("PASS push")
+        expect(jit).to_contain("PASS append")
+        expect(jit).to_contain("PASS insert")
+        expect(jit).to_contain("PASS extend")
+        expect(jit).to_contain("PASS remove")
+        expect(jit).to_contain("PASS write_span")
+
+        step("Search and accessor names that share the same rewrite machinery")
+        expect(jit).to_contain("PASS index_of")
+        expect(jit).to_contain("PASS contains")
+        expect(jit).to_contain("PASS at")
+        expect(jit).to_contain("PASS char_at")
+        expect(jit).to_contain("PASS byte_at")
+
+        step("Dict and text names")
+        expect(jit).to_contain("PASS get")
+        expect(jit).to_contain("PASS set")
+        expect(jit).to_contain("PASS merge")
+        expect(jit).to_contain("PASS concat")
+        expect(jit).to_contain("PASS join")
+        expect(jit).to_contain("PASS split")
+        expect(jit).to_contain("PASS replace")
+        expect(jit).to_contain("PASS repeat")
+
+        step("Floats travel a different boxing path (BoxFloat) and must be gated identically")
+        expect(jit).to_contain("PASS push_f64")
+        expect(jit).to_contain("PASS append_f64")
+
+        step("Control arm — the genuine builtins must still round-trip after any gate is added")
+        expect(jit).to_contain("PASS builtin_array_push_roundtrip")
+        expect(jit).to_contain("PASS builtin_array_push_f64_roundtrip")
+        expect(jit).to_contain("PASS builtin_array_index_of")
+        expect(jit).to_contain("PASS builtin_text_index_of")
+
+        step("The aggregate verdict line is authoritative")
+        expect(jit).to_contain("BUILTIN_NAME_COLLISION PROBE: ALL PASS")
+        expect(jit.contains("FAIL ")).to_equal(false)
+
+    it "reports exactly the known-open sibling defect and no more":
+        step("`char_code_at` on a struct receiver is stolen outright by rt_string_char_code_at (returns 0). That is codegen suffix resolution, a separate root cause, filed separately — it is counted on its own line so it can neither be silently dropped nor mask a new regression.")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("BUILTIN_NAME_COLLISION KNOWN-OPEN COUNT: 1")
+
+    it "is correct on the tree-walk interpreter, the control engine":
+        step("The interpreter never exhibited this class; a red here means the probe is broken, not the engine")
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("BUILTIN_NAME_COLLISION PROBE: ALL PASS")

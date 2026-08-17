@@ -1,8 +1,8 @@
 # Bug: interpreter binds the first param of *some* multi-param `me` methods to value×8
 
 **Filed:** 2026-06-29
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: FIXED 2026-08-17 (P1) — root-caused, patched, and verified by EXECUTION.
+See the '2026-08-17 ROOT CAUSE + FIX' section at the bottom.
 **Affects:** `bin/simple run` = the **JIT/native lane**, NOT the tree-walk interpreter. The
 `interp_` prefix in this filename and the word "interpreter" throughout the original text are
 a **misnomer** — kept only so links don't rot. **Conditional** — does not reproduce in isolation.
@@ -200,3 +200,135 @@ the trigger condition itself is still unproven.
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. The x8 symptom is `<< 3`, the int-boxing shift -- this was one face of the unguarded 61-bit box, not a distinct parameter-binding defect. `src/compiler_rust/runtime/src/value/tags.rs` is now 14 lines of pure constants (`TAG_MASK 0b111`, `TAG_INT/HEAP/FLOAT/SPECIAL`) with no shift/boxing logic, so no double-shift is reachable from it; the shift now lives in `runtime/src/value/core.rs` `from_int` and is range-guarded. The `_p0` dummy-first-param workaround is GONE: `/usr/bin/grep -rn "_p0"` over `compiler/src` and `runtime/src` returns zero hits. COLLAPSES into the same root cause as jit_i64_boundary_constant_wraps_to_negative_2026-08-09.
+
+
+---
+
+# 2026-08-17 — ROOT CAUSE + FIX (verified by EXECUTION, CRITICAL lane)
+
+## Reproduced first
+
+Binary `bin/release/x86_64-unknown-linux-gnu/simple` (59,536,728 bytes, mtime
+2026-08-16 22:59, Rust seed). A copy of `examples/09_embedded/simpleos_nvme_fw/fw`
+was taken under scratch, the `_p0` workaround removed from `me append`, and the
+7 call sites updated. `ftl_journal_selftest()`:
+
+```
+=== default:            FAIL record_lba(0) -- expected 100 got 800
+                        FAIL record_lba(2) -- expected 102 got 816
+                        FAIL recovered WAL append stores lba -- expected 199 got 1592
+                        FAIL surviving record lba -- expected 102 got 816
+                        FAILS=4
+=== SIMPLE_EXECUTION_MODE=interpreter:  FAILS=0
+=== SIMPLE_EXECUTION_MODE=jit:          FAILS=4   (identical to default)
+```
+
+Confirms the doc's later note: this is the **JIT lane**, not the tree-walk
+interpreter. A `print` as the first statement of `append` showed
+`ENTRY map_lba=800 old=10`, so the corruption is at parameter binding, before
+any use.
+
+## The doc's framing was wrong on two counts
+
+Reduced to a 10-line single-file repro (the doc claimed minimal repros do not
+reproduce — they do, once you keep the *method name*):
+
+```
+struct J:
+    c: i64
+
+impl J:
+    me append(p1: i64, p2: i64) -> i64:
+        print("E " + p1.to_text())
+        me.c
+
+fn main():
+    var j: J = J(c: 0)
+    j.append(100, 10)        # prints "E 800"
+```
+
+- Renaming `append` -> `appendZZ` makes it correct. Renaming the *parameter*
+  does not. `me push(...)` reproduces identically; `me insert(...)`/`me zzz(...)`
+  do not.
+- **Single-parameter `me` methods ARE affected** — `me append(p1: i64)` prints
+  `800`. The doc's "single-param `me` methods never trip the bug" claim is false;
+  it only looked true because no single-param method in that tree was named
+  `append`/`push`.
+- A `text` first parameter is unaffected — it is integer boxing specifically.
+- A free function `fn append(p1, p2)` is unaffected — receiver-method path only.
+
+So this is **not** a call-frame/arg-slot layout defect and **not** conditional on
+method count or `impl` order. It is a **method-name collision** with the builtin
+array mutators.
+
+## Root cause
+
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs`
+
+```rust
+let is_array_append_method = method == "push" || method == "append";   // :1541 — NAME ONLY
+...
+if is_array_append_method && !args.is_empty() {                        // :1606 — NO receiver gate
+    // BoxInt (v << 3) the first integer argument so rt_array_push sees a tagged element
+```
+
+The boxing block exists so genuine `arr.push(x)` stores a tag-boxed element
+matching `IndexGet`'s `UnboxInt`. But its guard is the method NAME alone. With a
+struct receiver the call still dispatches to the user's own method
+(`SIMPLE_DEBUG_METHOD_DISPATCH=1` confirms `func_name='J.append' args=2`), which
+reads the parameter raw — so it arrives as `v << 3`, i.e. `value * 8`. The `* 8`
+in the title is exactly the boxed-int tag shift, as the 2026-08-01 triage
+suspected.
+
+The sibling `index_of` boxing block **20 lines below in the same function** was
+already correctly gated on `self.receiver_is_array(receiver, receiver_local_ty)`.
+The append/push block simply never got that gate.
+
+## Fix
+
+Added the same gate at `lowering_expr_method.rs:1606`:
+
+```rust
+if is_array_append_method && !args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+```
+
+## Verified by EXECUTION after the fix
+
+Rebuilt seed at `/mnt/data/cargo-target-c1b-a/release/simple` (`cargo build
+--release --bin simple`, exit 0, 16m19s).
+
+| probe | before | after |
+|---|---|---|
+| `ftl_journal_selftest()` with `_p0` removed, JIT | `FAILS=4` | `FAILS=0` |
+| `probe_user_method_builtin_name_append_jit.spl`, JIT | `5 FAILURES` | `ALL PASS` |
+| `probe_builtin_name_collision_arg_transport_jit.spl`, JIT | `3 FAILURES` | `ALL PASS` (1 known-open, see below) |
+| `probe_scalar_slot_roundtrip_jit.spl` (regression control), JIT | `ALL PASS` | `ALL PASS` |
+
+Genuine `arr.push(7)` / `arr.append(9)` / `[f64].push(2.5)` / `arr.index_of()`
+still round-trip — the gate does not disable real array element boxing.
+
+## Specs
+
+- Reproducing: `test/01_unit/compiler/codegen/user_method_named_append_arg_boxing_spec.spl`
+  (+ probe `probe_user_method_builtin_name_append_jit.spl`)
+- Class detection: `test/01_unit/compiler/codegen/builtin_name_collision_arg_transport_spec.spl`
+  (+ probe `probe_builtin_name_collision_arg_transport_jit.spl`) — defines a user
+  method for every builtin name the lowering/codegen tables special-case and
+  round-trips an int and an f64 through each.
+
+## Found by the class-detection probe: a separate, still-open sibling
+
+`c.char_code_at(42)` on a struct receiver returns **0** — the call is stolen
+outright, not merely rewritten. Different root cause (codegen qualified-name
+suffix resolution), filed as
+`doc/08_tracking/bug/codegen_user_method_stolen_by_builtin_name_suffix_2026-08-17.md`.
+It is reported on its own verdict line in the probe so it can neither be dropped
+nor mask a new regression.
+
+## Follow-up NOT done here (outside this lane's file slice)
+
+`examples/09_embedded/simpleos_nvme_fw/fw/ftl_journal.spl` still carries the
+`_p0: i64` dummy-parameter workaround and the `NOTE(interp bug)` comment at
+:90-94, plus the note in `fw/CONVENTIONS.md`. Both can now be removed — verified
+by executing the de-workaround-ed copy above — but the file is owned by another
+lane in this wave.
