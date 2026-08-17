@@ -142,8 +142,19 @@ and 9 of the matrix above. What remains:
    applies to rather than fixing it: gating the booking and restaurant reads
    made the app CONSISTENT, not finer-grained. Concretely, no role can be
    granted "read the open bill" without also being granted "open a table".
-3. **No CSRF token and no cookie flow.** The app is bearer-token only, which
-   sidesteps CSRF; introducing cookies would require this to be revisited.
+3. **CSRF — CLOSED for the cookie flow by W14-C.** The app is bearer-token
+   only, which genuinely sidesteps CSRF, but the dispatcher no longer *assumes*
+   that: `main.store_app_handle` now runs a double-submit CSRF check
+   (`enterprise_store_app/csrf.spl`) BEFORE any route/command. A state-changing
+   request (`POST`/`PUT`/`PATCH`/`DELETE`) that carries an ambient `Cookie`
+   credential — the only shape a browser can be tricked into forging
+   cross-site — MUST echo the session's per-session token
+   (`csrf_token(session)`, bound to the session secret, never equal to the
+   bearer) in `X-CSRF-Token`, or it is rejected 403. Bearer-only calls (no
+   `Cookie` header) stay exempt, so no API client regresses. Remaining: if a
+   real cookie-session issuance path is added, the token must be minted and
+   set at login rather than derived on demand. Fence:
+   `test/03_system/app/enterprise/store_web_request_gating_spec.spl`.
 4. **The throttle is bounded but still a linear scan of the live window.**
    `throttle_count` walks the whole retained set rather than an index. The
    set is now bounded by the live window instead of by all traffic ever, so
@@ -162,12 +173,22 @@ and 9 of the matrix above. What remains:
    and fenced it, so the remainder is purely the mojibake/normalisation gap:
    no route compares business identifiers after Unicode normalisation today,
    but a future field that does would need recombination added deliberately.
-7. **Nothing role-gates a WRITE at the route.** Writes are gated inside the
-   guarded commands (rung order in `guarded_command_contract.md`), which is
-   where the authority actually lives; the route-level checks added by W12-B
-   cover reads only. This is by design — two gates for one decision is how
-   they drift — but it means a route added without a guarded command behind
-   it inherits no authorization at all.
+7. **Route-level write gating — ADDED as defense in depth by W14-C.** Writes
+   are still gated inside the guarded commands (rung order in
+   `guarded_command_contract.md`), which remains where the authority lives —
+   that check is UNCHANGED and still fires. On top of it, the dispatcher now
+   pre-checks the mutating routes it knows (`write_gate_action` in `main.spl`:
+   `POST /store/order` -> `sale.order.place`, `POST /store/pay` ->
+   `sale.order.pay`, `POST /fin/period/close` -> `finance.period.close`)
+   against the SAME `role_allows` policy the command re-enforces, and rejects
+   an unauthorized role 403 BEFORE the handler runs (denial detail
+   `write-gate:<action>` makes the dispatch-level rejection observable). The
+   two gates use one identical policy value, so the dispatcher gate can only
+   reject what the command would also reject — it cannot widen access or drift.
+   It does NOT close the deeper gap (a NEW route with no guarded command behind
+   it and not listed in `write_gate_action` still inherits no authorization);
+   the durable fix is the registry-driven RBAC noted in residual 2. Fence:
+   `test/03_system/app/enterprise/store_web_request_gating_spec.spl`.
 
 ## W14-A — output-escaping + security-header completeness audit (2026-08-17)
 

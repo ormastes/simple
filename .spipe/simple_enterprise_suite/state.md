@@ -1054,3 +1054,44 @@ backend (the interpreter rt_sqlite emulation is non-persistent/non-ACID);
 Regression (unchanged, all green): harden 6/6, enterprise_store 10/10,
 file_backend 6/6. Files: store.spl (+store_audit_chain_error, wired into
 store_verify, exported); 2 new specs. No fix needed for #2.
+
+## W14-C — web request-gating hardening (CSRF + route-level write gate) — 2026-08-17
+
+Runner: Rust seed bin/simple (interpreter-mode), interpreter evidence,
+SIMPLE_TIMEOUT_SECONDS=900, one spec at a time, ANSI-stripped, verdict line read
+(never tail -1).
+
+Real gap found: the dispatcher (main.store_app_handle) authenticated the
+session but did ZERO role/method authorization and NO CSRF. Write authorization
+lived only inside each guarded command (frozen session->rbac->validation->
+idempotency) — correct, but the dispatcher offered no defense-in-depth and no
+CSRF at all. Scope kept to main.spl + new csrf.spl; no *_routes render fn edited.
+
+(1) Route-level write gate (defense in depth): added write_gate_action(method,
+path) mapping the mutating routes the dispatcher owns (POST /store/order ->
+sale.order.place, /store/pay -> sale.order.pay, /fin/period/close ->
+finance.period.close) and a dispatcher pre-check against the SAME role_allows
+policy the command re-enforces, rejecting 403 with detail write-gate:<action>
+BEFORE the handler. In-command rbac UNCHANGED (both gates hold). Red-first: a
+booking-role session POST /fin/period/close was rejected only inside the
+command (detail "forbidden: 0"); the write-gate: assertion FAILED red, PASSES
+403 after.
+
+(2) CSRF double-submit (csrf.spl): a state-changing request carrying an ambient
+Cookie must echo csrf_token(session) in X-CSRF-Token, else 403 at dispatch;
+bearer-only calls (no Cookie) exempt so no API client regresses. Red-first: an
+admin cookie-borne close WITHOUT a token reached the command and returned 200
+(forgery succeeded) — now 403 without/with-wrong token, 200 with the session's
+token.
+
+Evidence: store_web_request_gating_spec RED 3/6 (writegate, csrf-missing,
+csrf-wrong) -> GREEN 6/6 after fix. Regression: enterprise_security_audit 13/13
+(includes clerk POST /fin/period/close still 403), back_office_web 7/7 (admin
+close still 200). Posture doc: residual 3 (CSRF) and residual 7 (route write
+gate) rewritten from OPEN to CLOSED-for-cookie-flow / defense-in-depth-added,
+each pointing at the fence spec.
+
+Files: src/app/enterprise_store_app/csrf.spl (new),
+src/app/enterprise_store_app/main.spl (imports + write_gate_action + 2 gates),
+test/03_system/app/enterprise/store_web_request_gating_spec.spl (new),
+doc/07_guide/app/enterprise/security_posture.md.
