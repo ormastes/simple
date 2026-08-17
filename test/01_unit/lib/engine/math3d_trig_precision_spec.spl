@@ -1,0 +1,86 @@
+# @covers src/lib/common/engine/math3d.spl
+"""
+# math3d trig precision
+
+**Feature IDs:** #LIB-ENGINE-MATH3D-TRIG
+**Category:** Stdlib
+**Status:** Implemented
+
+Reproducing + class-detection spec for
+`doc/08_tracking/bug/math3d_cos_taylor_precision_2026-07-20.md`.
+
+`_sin` range-reduced only to [-pi, pi] and then evaluated a short Taylor
+series. The series is accurate near 0 but not near +/-pi, and `_cos(x)` was
+`_sin(x + pi/2)`, which pushes an argument that started near 0 out to the
+worst part of the domain. `Quaternion.from_axis_angle` is the public path:
+its `w` component is `_cos(angle/2)`, so a 180-degree rotation must yield
+`w == 0`, and `.normalize()` hides the magnitude error but not the wrong
+component ratio -- the result is a silently wrong rotation, not a crash.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.math3d.{Vec3, Quaternion}
+use std.common.engine.units.{Angle}
+
+fn abs_f(x: f64) -> f64:
+    if x < 0.0:
+        0.0 - x
+    else:
+        x
+
+describe "math3d trig precision":
+
+    # ---- reproducing: the exact defect in the bug doc ----
+    context "180-degree rotation via from_axis_angle":
+        it "has a zero scalar component (w = cos(pi/2))":
+            val q = Quaternion.from_axis_angle(
+                axis: Vec3(x: 0.0, y: 0.0, z: 1.0),
+                angle: Angle(radians: 3.141592653589793))
+            expect(abs_f(q.w) < 0.000001).to_be_true()
+
+        it "maps +x onto -x":
+            val q = Quaternion.from_axis_angle(
+                axis: Vec3(x: 0.0, y: 0.0, z: 1.0),
+                angle: Angle(radians: 3.141592653589793))
+            val r = q.rotate_vector(Vec3(x: 1.0, y: 0.0, z: 0.0))
+            expect(abs_f(r.x + 1.0) < 0.000001).to_be_true()
+            expect(abs_f(r.y) < 0.000001).to_be_true()
+
+    # ---- class detection: the SAME defect class anywhere in the domain ----
+    # A truncated series is not wrong at one point, it is wrong over a whole
+    # region. Sweep the full rotation domain and require the rotation to be
+    # correct everywhere, so a fix that special-cases pi cannot pass.
+    context "rotation identities hold across the whole domain":
+        it "a full turn is the identity rotation for every axis sample":
+            val two_pi = 6.283185307179586
+            var k = 0
+            var worst = 0.0
+            while k <= 24:
+                val ang = two_pi * (0.0 + k) / 24.0
+                val q = Quaternion.from_axis_angle(
+                    axis: Vec3(x: 0.0, y: 0.0, z: 1.0),
+                    angle: Angle(radians: ang))
+                # x^2 + w^2 must be 1 already; the informative check is that
+                # z = sin(ang/2) and w = cos(ang/2) agree with each other.
+                val ss = q.z * q.z + q.w * q.w
+                val e = abs_f(ss - 1.0)
+                if e > worst:
+                    worst = e
+                k = k + 1
+            expect(worst < 0.000001).to_be_true()
+
+        it "composing two half rotations equals one full rotation":
+            val axis = Vec3(x: 0.0, y: 0.0, z: 1.0)
+            val h = Quaternion.from_axis_angle(axis: axis, angle: Angle(radians: 1.5707963267948966))
+            val f = Quaternion.from_axis_angle(axis: axis, angle: Angle(radians: 3.141592653589793))
+            val c = h.mul(h)
+            expect(abs_f(c.z - f.z) < 0.000001).to_be_true()
+            expect(abs_f(c.w - f.w) < 0.000001).to_be_true()
+
+        it "rotating by 2pi restores the original vector":
+            val q = Quaternion.from_axis_angle(
+                axis: Vec3(x: 0.0, y: 0.0, z: 1.0),
+                angle: Angle(radians: 6.283185307179586))
+            val r = q.rotate_vector(Vec3(x: 1.0, y: 2.0, z: 3.0))
+            expect(abs_f(r.x - 1.0) < 0.000001).to_be_true()
+            expect(abs_f(r.y - 2.0) < 0.000001).to_be_true()

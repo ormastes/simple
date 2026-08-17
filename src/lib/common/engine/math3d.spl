@@ -16,17 +16,50 @@ fn _sqrt(x: f64) -> f64:
     rt_math_sqrt(x)
 
 fn _sin(x: f64) -> f64:
+    """Sine of x in radians.
+
+    Two-stage range reduction, then an 8-term Taylor series.
+
+    The first stage folds x into [-pi, pi]; the second uses sin(x) = sin(pi - x)
+    to fold it further into [-pi/2, pi/2], where the series converges fast.
+    Without the second stage the series was evaluated at arguments up to pi,
+    where an 8-term truncation is still worth ~1e-1 -- `Quaternion.from_axis_angle`
+    for a 180-degree turn returned w = -0.075 instead of 0 and rotated
+    (1, 0, 0) to (-0.989, -0.150, 0). `.normalize()` hid the magnitude error
+    but not the wrong component ratio, so the result was a silently wrong
+    rotation rather than a failure. See
+    doc/08_tracking/bug/math3d_cos_taylor_precision_2026-07-20.md
+    """
     val pi = 3.141592653589793
+    val half_pi = pi / 2.0
     val two_pi = pi * 2.0
     var a = x
     while a > pi:
         a = a - two_pi
     while a < 0.0 - pi:
         a = a + two_pi
+    # sin(a) == sin(pi - a) and sin(a) == sin(-pi - a): fold into [-pi/2, pi/2].
+    if a > half_pi:
+        a = pi - a
+    elif a < 0.0 - half_pi:
+        a = (0.0 - pi) - a
     val x2 = a * a
-    a * (1.0 - x2 / 6.0 + x2 * x2 / 120.0 - x2 * x2 * x2 / 5040.0)
+    var t = 1.0 / 1307674368000.0
+    t = 1.0 / 6227020800.0 - x2 * t
+    t = 1.0 / 39916800.0 - x2 * t
+    t = 1.0 / 362880.0 - x2 * t
+    t = 1.0 / 5040.0 - x2 * t
+    t = 1.0 / 120.0 - x2 * t
+    t = 1.0 / 6.0 - x2 * t
+    a * (1.0 - x2 * t)
 
 fn _cos(x: f64) -> f64:
+    """Cosine of x in radians.
+
+    Safe as a shift of `_sin` only because `_sin` now range-reduces properly:
+    the shift pushes an argument that started near 0 out towards pi, which is
+    exactly where the old unreduced series was least accurate.
+    """
     _sin(x + 3.141592653589793 / 2.0)
 
 fn _tan(x: f64) -> f64:

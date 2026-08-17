@@ -1,0 +1,78 @@
+# Run-path probe for the `rt_io_file_*` family backing std.nogc_sync_mut.io.file.
+#
+# Executed as a SUBPROCESS by rt_io_file_family_real_disk_spec.spl so the
+# engine under test is chosen by SIMPLE_EXECUTION_MODE, not by the spec
+# runner (spec bodies always run interpreted).
+#
+# Every oracle here is an ABSOLUTE fact about the real filesystem, cross-checked
+# against the independently-implemented `rt_file_*` family as a positive
+# control. "Both families agree" is never accepted as a pass on its own.
+#
+# See doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
+
+extern fn rt_io_file_open(path: text, mode: i64) -> i64
+extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
+extern fn rt_io_file_close(fd: i64) -> bool
+extern fn rt_io_file_exists(path: text) -> bool
+extern fn rt_io_file_delete(path: text) -> bool
+extern fn rt_io_file_meta_size(fd: i64) -> i64
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val PROBE_PATH: text = "/tmp/probe_rt_io_file_family.txt"
+
+fn report(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS " + name)
+        return 0
+    print("FAIL " + name)
+    return 1
+
+fn main() -> i64:
+    var fails = 0
+
+    # --- Positive control: the sibling rt_file_* family on the same path ---
+    rt_file_delete(PROBE_PATH)
+    val ctl_written = rt_file_write_text(PROBE_PATH, "CONTROL")
+    fails = fails + report("control_rt_file_write_text", ctl_written)
+    fails = fails + report("control_rt_file_exists_true", rt_file_exists(PROBE_PATH))
+    fails = fails + report("control_rt_file_read_text", rt_file_read_text(PROBE_PATH) == "CONTROL")
+
+    # --- Class check 1: a path-taking rt_io_file_* predicate must agree with
+    # the control family about a file that demonstrably exists on disk. A
+    # fabricated zero-returning stub, or a mismarshalled (ptr,len) text
+    # argument, both surface here as `false`.
+    fails = fails + report("rt_io_file_exists_agrees_with_control", rt_io_file_exists(PROBE_PATH))
+
+    # --- Class check 2: write through rt_io_file_*, read back through the
+    # control family. An in-process fake cannot satisfy this: the bytes must
+    # really be on disk for rt_file_read_text to see them.
+    rt_file_delete(PROBE_PATH)
+    val fd = rt_io_file_open(PROBE_PATH, 1)
+    fails = fails + report("rt_io_file_open_returns_nonnegative_fd", fd >= 0)
+    if fd >= 0:
+        fails = fails + report("rt_io_file_write_all_reports_ok", rt_io_file_write_all(fd, [65, 66, 67]))
+        fails = fails + report("rt_io_file_meta_size_is_three", rt_io_file_meta_size(fd) == 3)
+        fails = fails + report("rt_io_file_close_reports_ok", rt_io_file_close(fd))
+        fails = fails + report("written_bytes_visible_to_control_family", rt_file_read_text(PROBE_PATH) == "ABC")
+    else:
+        fails = fails + report("rt_io_file_write_all_reports_ok", false)
+        fails = fails + report("rt_io_file_meta_size_is_three", false)
+        fails = fails + report("rt_io_file_close_reports_ok", false)
+        fails = fails + report("written_bytes_visible_to_control_family", false)
+
+    # --- Class check 3: a mutating path-taking rt_io_file_* call must have a
+    # real effect observable from outside the family.
+    rt_file_write_text(PROBE_PATH, "TO-DELETE")
+    rt_io_file_delete(PROBE_PATH)
+    fails = fails + report("rt_io_file_delete_really_removes_file", not rt_file_exists(PROBE_PATH))
+
+    rt_file_delete(PROBE_PATH)
+    if fails == 0:
+        print("RT_IO_FILE PROBE: ALL PASS")
+        return 0
+    print("RT_IO_FILE PROBE: FAILURES")
+    return 1

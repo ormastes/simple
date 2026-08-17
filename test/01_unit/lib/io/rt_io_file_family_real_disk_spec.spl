@@ -1,0 +1,76 @@
+# `rt_io_file_*` must move real bytes — reproducing + class-detection spec.
+#
+# Bug: doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
+# The public `FileHandle`/`File` API in src/lib/nogc_sync_mut/io/file.spl calls
+# 16 `rt_io_file_*` externs. When those resolve to fabricated zero-returning
+# stubs (native link `RT_KEEP` allowlist) or are mismarshalled on the extern
+# boundary, `File.write` returns Ok, writes nothing, and exit status is 0.
+#
+# WHY A SUBPROCESS. A spec body executes on the tree-walk INTERPRETER. To make
+# an engine-divergent extern-dispatch defect visible at all, the oracle is the
+# sibling run-path probe `probe_rt_io_file_family.spl`, executed as a
+# subprocess under each engine.
+#
+# NOT VACUOUS: the probe carries a positive control (the independently
+# implemented `rt_file_*` family) on the same path, so an infrastructure
+# failure (probe never ran, wrong binary) is distinguishable from the defect.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/lib/io/probe_rt_io_file_family.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "rt_io_file_* family moves real bytes on a real filesystem":
+    it "runs the probe at all and the control family works":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The rt_file_* control family must pass — otherwise this spec is measuring broken infrastructure, not the bug")
+        expect(interp).to_contain("PASS control_rt_file_write_text")
+        expect(interp).to_contain("PASS control_rt_file_exists_true")
+        expect(interp).to_contain("PASS control_rt_file_read_text")
+
+    it "reproduces the silent data loss: writes through rt_io_file_* reach the disk (interpreter)":
+        step("Run the probe under the interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("open must hand back a real descriptor, not a stubbed zero/-1")
+        expect(interp).to_contain("PASS rt_io_file_open_returns_nonnegative_fd")
+
+        step("the bytes written must be readable by a DIFFERENT family — an in-process fake cannot satisfy this")
+        expect(interp).to_contain("PASS written_bytes_visible_to_control_family")
+
+    it "detects the class: every path-taking rt_io_file_* call has a real filesystem effect (interpreter)":
+        step("Run the probe under the interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("a predicate must agree with the control family about a file that demonstrably exists")
+        expect(interp).to_contain("PASS rt_io_file_exists_agrees_with_control")
+
+        step("a metadata read must return the true size, not a fabricated zero")
+        expect(interp).to_contain("PASS rt_io_file_meta_size_is_three")
+
+        step("a mutating call must really mutate, observed from outside the family")
+        expect(interp).to_contain("PASS rt_io_file_delete_really_removes_file")
+
+        step("no individual check may have failed")
+        expect(interp).to_contain("RT_IO_FILE PROBE: ALL PASS")
+
+    it "detects the class under the JIT, where the stub substitution actually lives":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+
+        step("the control family must still work under the JIT, or this arm is measuring infrastructure")
+        expect(jit).to_contain("PASS control_rt_file_write_text")
+
+        step("the rt_io_file_* family must behave identically to the control family under the JIT")
+        expect(jit).to_contain("RT_IO_FILE PROBE: ALL PASS")

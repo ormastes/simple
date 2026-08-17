@@ -1,0 +1,57 @@
+# @covers src/lib/common/text_advanced.spl
+"""
+# text_advanced escape_json aliased-import regression
+
+**Feature IDs:** #LIB-TEXT-ADV-ESCAPE-JSON
+**Category:** Stdlib
+**Status:** Implemented
+
+`src/lib/common/text_advanced.spl` delegated `escape_json` to
+`use std.text.{escape_json as _shared_escape_json}`. The aliased binding is
+dropped when the module is reached through a wildcard re-export chain
+(`use app.cli.query_visibility.*`), so the whole CLI died with
+`error[E1002]: function `_shared_escape_json` not found` (rc=1, empty stdout).
+Direct imports of the module resolved fine, which is why it stayed hidden.
+
+Doc: doc/08_tracking/bug/text_advanced_aliased_import_dropped_escape_json_2026-08-17.md
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.text_advanced.{escape_json}
+use std.io_runtime.{shell}
+
+describe "text_advanced.escape_json":
+
+    # ---- reproducing: the module must resolve and produce correct output ----
+    context "the function resolves and escapes correctly":
+        it "escapes a double quote":
+            expect(escape_json("a\"b")).to_equal("a\\\"b")
+
+        it "escapes a backslash":
+            expect(escape_json("a\\b")).to_equal("a\\\\b")
+
+        it "escapes newline, carriage return and tab":
+            expect(escape_json("a\nb")).to_equal("a\\nb")
+            expect(escape_json("a\rb")).to_equal("a\\rb")
+            expect(escape_json("a\tb")).to_equal("a\\tb")
+
+        it "leaves a clean string untouched":
+            expect(escape_json("plain text")).to_equal("plain text")
+
+    # ---- class detection ----
+    # A spec body runs INTERPRETED and imports the module DIRECTLY, which is
+    # exactly the path that never reproduced the defect. The failure only
+    # appears in a full multi-module compilation reached through a wildcard
+    # re-export, so shell out to a real subprocess and assert the resolver
+    # emits no unresolved-symbol error for ANY module in that graph.
+    context "the CLI module graph resolves every symbol":
+        it "query_visibility runs without an unresolved-function error":
+            val r = shell("bin/simple run src/app/cli/query_visibility.spl symbols src/lib/common/text.spl --requester src/lib/common/text.spl 2>&1")
+            expect(r.stdout.contains("E1002")).to_be_false()
+            expect(r.stdout.contains("not found")).to_be_false()
+
+        it "no owned stdlib module keeps an unusable aliased self-import":
+            # Generalises the defect class: any `use ... as NAME` in a module
+            # that also declares the un-aliased name is the shape that broke.
+            val r = shell("/usr/bin/grep -rn 'escape_json as ' src/lib/ 2>&1; true")
+            expect(r.stdout.contains("escape_json as ")).to_be_false()

@@ -23,7 +23,16 @@
 use std.string_core.{char_code, char_from_code, is_whitespace_char, str_capitalize}
 use std.format_utils.{wrap_text}
 use common.string_builder.{StringBuilder}
-use std.text.{escape_json as _shared_escape_json}
+# NOTE (2026-08-17): this module used to import the shared implementation as
+# `use std.text.{escape_json as _shared_escape_json}` and delegate to it. The
+# aliased binding is dropped in large module graphs that reach this module
+# through a wildcard re-export chain (`use app.cli.query_visibility.*`), and
+# the call below then failed with `error[E1002]: function
+# `_shared_escape_json` not found` -- reproduced with
+# `bin/simple run src/app/cli/query_visibility.spl symbols ...` (rc=1).
+# Until the resolver keeps `as` aliases across that path, the implementation is
+# kept local. See
+# doc/08_tracking/bug/text_advanced_aliased_import_dropped_escape_json_2026-08-17.md
 
 # Inlined character helpers (originally from text.spl) to break circular dep
 fn _is_alpha(ch: text) -> bool:
@@ -658,7 +667,42 @@ fn escape_json(s: text) -> text:
     Example:
         escape_json("Hello\\n\\\"World\\\"") -> "Hello\\\\n\\\\\\\"World\\\\\\\""
     """
-    _shared_escape_json(s)
+    val cs = s.chars()
+    val n = cs.len()
+    val hex = "0123456789abcdef"
+    var parts = []
+    var run_start = 0
+    var bo = 0
+    var i = 0
+    while i < n:
+        val ch = cs[i]
+        val code = ch.char_code_at(0)
+        if code < 32 or ch == "\"" or ch == "\\":
+            if bo > run_start:
+                parts.push(s.substring(run_start, bo))
+            if ch == "\"":
+                parts.push("\\\"")
+            elif ch == "\\":
+                parts.push("\\\\")
+            elif code == 8:
+                parts.push("\\b")
+            elif code == 12:
+                parts.push("\\f")
+            elif ch == "\n":
+                parts.push("\\n")
+            elif ch == "\r":
+                parts.push("\\r")
+            elif ch == "\t":
+                parts.push("\\t")
+            else:
+                parts.push("\\u00" + hex.char_at(code / 16) + hex.char_at(code % 16))
+            run_start = bo + ch.len()
+        bo = bo + ch.len()
+        i = i + 1
+    if parts.len() == 0: return s
+    if bo > run_start:
+        parts.push(s.substring(run_start, bo))
+    parts.join("")
 
 # ============================================================================
 # Word Splitting (shared helper for case conversions)
