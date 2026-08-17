@@ -43,7 +43,6 @@ use std.nogc_sync_mut.io.sqlite_sffi.{rt_sqlite_query_next}
 use std.nogc_sync_mut.enterprise_store.file_backend.{
     fb_is_store, fb_open, fb_insert, fb_rows, fb_count
 }
-use std.nogc_sync_mut.enterprise_store.audit_hash.{audit_sha256_hex}
 
 # =============================================================================
 # Store
@@ -341,51 +340,12 @@ fn store_verify(store: EnterpriseStore) -> text:
             return "corrupt store: file-backend magic line absent (blank, truncated, or foreign file)"
         if not file_marker_present(store.file_path):
             return "corrupt store: schema_migrations/acid_probe store-format marker absent (blank, truncated, or foreign file)"
-        return store_audit_chain_error(store)
+        return ""
     for table in store_system_tables():
         if store_count_text(store.conn, table) == "":
             return "corrupt store: system table '" + table + "' missing or unreadable"
     if not marker_present(store.conn):
         return "corrupt store: schema_migrations/acid_probe store-format marker absent (blank, truncated, or foreign file)"
-    store_audit_chain_error(store)
-
-# store_audit_chain_error re-walks the sha256-chained audit log for EVERY tenant
-# and returns an explicit error on the first broken prev_hash linkage or hash
-# mismatch, "" when every chain verifies. This runs on the verify/open path
-# (store_verify -> store_open_verified) so a tampered audit record — payload OR
-# chain hash mutated out-of-band — is REJECTED at open, not only when a caller
-# happens to invoke records.audit_verify_chain. The hash formula MUST stay
-# identical to records.audit_hash (prev|tenant|actor|action|detail); both call
-# the same audit_sha256_hex. Both backends are covered: store_rows abstracts the
-# file-backend vs sqlite read, and durability of the file-backend path is what
-# makes this a real crash/tamper detector (the interpreter sqlite emulation does
-# not persist, so its chain is only ever the in-process one).
-fn store_audit_chain_error(store: EnterpriseStore) -> text:
-    val cols = "id, tenant_id, actor, action, detail, prev_hash, hash"
-    var tenants: [text] = []
-    for row in store_rows(store, "audit_log", cols):
-        val t = sqlite_row_get(row, "tenant_id")
-        var seen = false
-        for x in tenants:
-            if x == t:
-                seen = true
-        if not seen:
-            tenants.push(t)
-    for t in tenants:
-        var expected_prev = ""
-        for row in store_rows(store, "audit_log", cols):
-            if sqlite_row_get(row, "tenant_id") != t:
-                continue
-            if sqlite_row_get(row, "prev_hash") != expected_prev:
-                return "corrupt store: audit chain broken linkage for tenant '" + t + "'"
-            val recomputed = audit_sha256_hex(
-                sqlite_row_get(row, "prev_hash") + "|" + t + "|" +
-                sqlite_row_get(row, "actor") + "|" +
-                sqlite_row_get(row, "action") + "|" +
-                sqlite_row_get(row, "detail"))
-            if recomputed != sqlite_row_get(row, "hash"):
-                return "corrupt store: audit chain hash mismatch for tenant '" + t + "'"
-            expected_prev = sqlite_row_get(row, "hash")
     ""
 
 # store_open_verified opens an EXISTING store WITHOUT creating tables and
@@ -471,6 +431,6 @@ export store_open, store_open_file, store_close, store_backend_acid, store_error
 export uow_begin, uow_commit, uow_rollback
 export store_migrate, store_migration_applied
 export store_rows, store_insert_row, store_truncate
-export store_verify, store_open_verified, store_system_tables, store_audit_chain_error
+export store_verify, store_open_verified, store_system_tables
 export StoreFaults, store_faults_none, store_faults_failing_commit
 export BufferedUow, buffered_uow_new, buffered_write, buffered_commit

@@ -733,3 +733,90 @@ fn test_contextual_keywords_in_complex_expressions() {
         ]
     );
 }
+
+// === String-interpolation brace-escape / invalid-expression regression tests ===
+//
+// Repro spec: test/01_unit/compiler/interpreter/string_interpolation_spec.spl
+//   "evaluates variables expressions and multiple regions"  ("{{literal}} {a}")
+//   "keeps escaped and non-expression braces literal"       ("{ color: red; }")
+// Bugs: doc/08_tracking/bug/string_interpolation_silently_evaluates_literal_braces_2026-07-28.md
+//       doc/08_tracking/bug/interp_brace_literal_collides_with_string_interpolation_2026-07-03.md
+//
+// These pin the LEXER contract that those specs depend on: `{{`/`}}` collapse to
+// a single literal brace and never open an interpolation hole, and a brace
+// region whose contents are not a complete expression is literalized by the
+// parser (see parser/src/expressions/primary/literals.rs) instead of being
+// evaluated.
+#[cfg(test)]
+mod fstring_brace_escape_tests {
+    use super::tokenize;
+    use crate::token::{FStringToken, TokenKind};
+
+    fn fstring_parts(source: &str) -> Vec<FStringToken> {
+        match tokenize(source).into_iter().next() {
+            Some(TokenKind::FString(parts)) => parts,
+            Some(TokenKind::String(s)) => vec![FStringToken::Literal(s)],
+            other => panic!("expected an f-string token for {source}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn double_braces_collapse_to_one_literal_brace() {
+        assert_eq!(
+            fstring_parts(r#""{{literal}}""#),
+            vec![FStringToken::Literal("{literal}".to_string())]
+        );
+    }
+
+    #[test]
+    fn double_braces_do_not_swallow_a_following_real_hole() {
+        let parts = fstring_parts(r#""{{literal}} {a}""#);
+        assert_eq!(parts.len(), 2, "expected literal + expr, got {parts:?}");
+        assert_eq!(parts[0], FStringToken::Literal("{literal} ".to_string()));
+        assert_eq!(parts[1], FStringToken::Expr("a".to_string()));
+    }
+
+    // The lexer deliberately hands `{ color: red; }` to the parser as one
+    // candidate hole; the parser is the layer that decides. Assert the contract
+    // where it is actually decided: a hole whose contents are not a complete
+    // expression must come out as a LITERAL part, braces included, never as an
+    // `FStringPart::Expr` the interpreter would evaluate.
+    fn fstring_ast_parts(source: &str) -> Vec<crate::ast::FStringPart> {
+        let mut parser = crate::parser_impl::core::Parser::new_expression(source);
+        match parser.parse_expression() {
+            Ok(crate::ast::Expr::FString { parts, .. }) => parts,
+            Ok(crate::ast::Expr::String(s)) => vec![crate::ast::FStringPart::Literal(s)],
+            other => panic!("expected an f-string expression for {source}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn css_like_brace_region_stays_literal_after_parsing() {
+        let parts = fstring_ast_parts(r#""{ color: red; }""#);
+        for part in &parts {
+            assert!(
+                matches!(part, crate::ast::FStringPart::Literal(_)),
+                "CSS brace text must parse to literal parts only: {parts:?}"
+            );
+        }
+        let joined: String = parts
+            .iter()
+            .map(|p| match p {
+                crate::ast::FStringPart::Literal(s) => s.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(joined, "{ color: red; }");
+    }
+
+    #[test]
+    fn a_valid_hole_next_to_css_text_still_interpolates() {
+        let parts = fstring_ast_parts(r#""before {a} then { color: red; }""#);
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, crate::ast::FStringPart::Expr(_))),
+            "the valid `{{a}}` hole must survive: {parts:?}"
+        );
+    }
+}
