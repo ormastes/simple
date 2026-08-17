@@ -594,3 +594,43 @@ Strictly worse than today's loud SIGSEGV.
 
 **Scope of what is actually missing:** run-to-end and outcome classification
 ALREADY work in-process on the build side. Only crash CONTAINMENT is blocked.
+
+## 2026-08-17 — build-side outcome contract now SPECCED (91f4147088a, 4213a69da10, f927cb0d4de)
+
+`test/01_unit/compiler/driver/build_unit_outcome_from_status_contract_spec.spl`
+— 19 examples, `Results: 19 total, 19 passed, 0 failed`, rc=0.
+Sabotage green->red->green: 19/0 -> sabotage SIGTERM(143) class to CRASHED ->
+`19 total, 18 passed, 1 failed` (`expected TERMINATED to equal CRASHED`) ->
+restored -> 19/0. **The spec bites.**
+
+### CORRECTION TO THIS LANE'S OWN BRIEF — 137 is NOT TERMINATED
+
+My spec brief asserted SIGKILL(137) -> TERMINATED/not-a-failure. **That was
+wrong and the code is right.** `build_outcome.spl` classifies ONLY SIGTERM(15)
+as TERMINATED; an unbudgeted SIGKILL(137) is **CRASHED, a failure**. The lane
+caught it honestly on first run (`19 total, 18 passed, 1 failed`) and pinned the
+IMPLEMENTATION rather than the brief.
+
+The reasoning is sound and worth preserving: **earlyoom sends SIGTERM**, which is
+the never-a-failure path. A raw SIGKILL is indistinguishable from the compiler
+dying, so treating it as unverified would suppress real crashes. A
+budget-killed 137 is TIMEOUT via the `timed_out` flag, not via the signal.
+
+### The artifact rule lives in the SUPERVISOR, not the classifier
+`from_status` sees only a wait status. `build_supervised` (parallel.spl
+~816-828) does the `artifact_fn` + `rt_file_exists` join and substitutes status 1
+with `"exit 0 but declared artifact is missing"`. Both halves pinned.
+
+### No duplication
+`build_outcome_classification_spec.spl` already covers the free function
+`build_outcome_classify_status` + summary determinism. This spec covers the
+record constructor callers actually use, the aggregate arithmetic, and the
+artifact join.
+
+### NEW TREE HAZARD — history rewrite under running lanes
+Commit `73b8d9005b3` was silently DROPPED from the file's history by a
+concurrent lane's history rewrite between two runs; `git checkout --` then
+restored PRE-correction content. Recovered from the orphaned blob, re-landed as
+`4213a69da10`. **This tree rewrites HISTORY under running lanes, not just wipes
+uncommitted work.** Verify a landed commit is still an ancestor before trusting
+it.
