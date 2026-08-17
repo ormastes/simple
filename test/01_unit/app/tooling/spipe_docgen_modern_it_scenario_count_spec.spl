@@ -1,0 +1,55 @@
+# Reproducing spec for
+# doc/08_tracking/bug/spipe_docgen_stale_syntax_detection_2026-07-19.md
+#
+# `validate_spec` counted scenarios only via the legacy bare form `it "name":`,
+# so a modern SSpec written with the call form `it("name"):` validated as
+# having ZERO scenarios and rendered as a documentation-less stub.
+
+use std.spec.{describe, it, expect}
+use app.spipe_docgen.parser.{validate_spec, is_scenario_line}
+use app.spipe_docgen.common.{SspecDoc, FeatureMetadata}
+
+fn _doc(content: text) -> SspecDoc:
+    SspecDoc(
+        file_path: "mem://spec.spl",
+        raw_content: content,
+        doc_blocks: [],
+        feature_title: "",
+        feature_ids: [],
+        metadata: FeatureMetadata.empty()
+    )
+
+describe "validate_spec scenario counting":
+
+    it "counts modern call-form scenarios":
+        val src = "describe \"D\":\n" +
+            "    it(\"does the thing\"):\n" +
+            "        expect(1).to_equal(1)\n" +
+            "    it(\"does the other thing\"):\n" +
+            "        expect(2).to_equal(2)\n"
+        val result = validate_spec(_doc(src))
+        expect(result.docs_present).to_equal(true)
+        expect(result.doc_lines > 0).to_equal(true)
+
+    it "still counts legacy bare-form scenarios":
+        val src = "describe \"D\":\n" +
+            "    it \"does the thing\":\n" +
+            "        expect(1).to_equal(1)\n"
+        val result = validate_spec(_doc(src))
+        expect(result.docs_present).to_equal(true)
+
+    it "control: a spec with no scenarios and no doc blocks is not docs_present":
+        val src = "fn helper() -> i64:\n    1\n"
+        val result = validate_spec(_doc(src))
+        expect(result.docs_present).to_equal(false)
+
+describe "is_scenario_line":
+
+    it "recognises the modern call form":
+        expect(is_scenario_line("it(\"x\"):")).to_equal(true)
+
+    it "recognises the legacy bare form":
+        expect(is_scenario_line("it \"x\":")).to_equal(true)
+
+    it "rejects a line that is not a scenario":
+        expect(is_scenario_line("val it = 3")).to_equal(false)

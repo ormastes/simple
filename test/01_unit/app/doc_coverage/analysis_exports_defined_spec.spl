@@ -1,0 +1,43 @@
+# Class-detection spec for the bug family
+# "module re-exports a symbol that is defined nowhere"
+# (doc/08_tracking/bug/sdoctest_coverage_loader_never_implemented_2026-07-28.md).
+#
+# The original defect was not a wrong result but a DANGLING re-export:
+# src/app/doc_coverage/analysis/mod.spl listed `export load_sdoctest_blocks`
+# and `export compute_sdoctest_coverage` while neither name had a definition
+# anywhere in the analysis package. This spec detects the whole class: every
+# bare `export NAME` in that mod.spl must have a matching declaration
+# (fn/struct/class/enum) in some sibling .spl file.
+
+use std.spec.{describe, it, expect}
+use app.io.mod (shell)
+
+fn _analysis_dir() -> text:
+    "src/app/doc_coverage/analysis"
+
+fn _exported_names() -> [text]:
+    val res = shell("awk '/^export [A-Za-z_][A-Za-z0-9_]*$/ {print $2}' {_analysis_dir()}/mod.spl")
+    var names: [text] = []
+    for line in res.stdout.trim().split("\n"):
+        val n = line.trim()
+        if n != "":
+            names.push(n)
+    names
+
+fn _is_defined(name: text) -> bool:
+    val cmd = "grep -rE '^(pub )?(fn|struct|class|enum) {name}\\b' {_analysis_dir()} | head -1"
+    shell(cmd).stdout.trim() != ""
+
+describe "analysis/mod.spl re-exports":
+    it "lists at least one export (control: the scan is not vacuous)":
+        expect(_exported_names().len() > 0).to_equal(true)
+
+    it "defines every re-exported symbol somewhere in the analysis package":
+        var dangling: [text] = []
+        for name in _exported_names():
+            if not _is_defined(name):
+                dangling.push(name)
+        expect(dangling.join(",")).to_equal("")
+
+    it "control: a name that was never exported is reported undefined":
+        expect(_is_defined("definitely_not_a_real_symbol_xyz")).to_equal(false)

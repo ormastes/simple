@@ -1,6 +1,6 @@
 # `load_sdoctest_blocks` / `compute_sdoctest_coverage` are re-exported and called but never defined
 
-**Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
+**Date:** 2026-07-28 · **Status:** fixed · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
 to `src/app/cli/**`.
 
@@ -85,3 +85,33 @@ Needs an owner to either implement the two functions in
 `analysis/sdoctest_coverage.spl` (matching the zero-arg + result-object shape
 the four call sites assume), or remove the two `export` lines from
 `analysis/mod.spl` and rework the four call sites. Not guessed at here.
+
+## Resolution 2026-08-17 — FIXED
+
+Root cause: `src/app/doc_coverage/analysis/sdoctest_coverage.spl` never defined
+`load_sdoctest_blocks` or `compute_sdoctest_coverage`, while
+`analysis/mod.spl:13,16` re-exported them and
+`src/app/cli/doc_coverage_command.spl:9` / `src/app/doc_coverage/compiler_warnings.spl:10`
+imported them.
+
+Fix: both functions implemented in `sdoctest_coverage.spl`.
+`load_sdoctest_blocks() -> ([text], [text])` walks `doc/**/*.md` + `README.md`
+via `extract_sdoctest_blocks` and returns parallel (provenance, code) arrays —
+matching every existing call site (`.0` names, `.1` codes).
+`compute_sdoctest_coverage(items, blocks) -> CoverageReport` aggregates
+documented / sdoctest-covered counts per file and in total.
+
+Evidence (seed `bin/simple`, 2026-08-17):
+- `bin/simple run test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl`
+  -> `6 examples, 0 failures`, rc=0. Live load reports 139803 markdown blocks.
+- Ablation (rename both defs): the class-detection spec
+  `test/01_unit/app/doc_coverage/analysis_exports_defined_spec.spl` goes RED with
+  `expected load_sdoctest_blocks,compute_sdoctest_coverage to equal ` — exactly the
+  two symbols named in the original dangling-reference output. Restored -> GREEN.
+
+Specs added:
+- `test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl` (reproducing)
+- `test/01_unit/app/doc_coverage/analysis_exports_defined_spec.spl` (class detection:
+  every bare `export NAME` in `analysis/mod.spl` must have a definition in the package)
+
+Status: fixed.

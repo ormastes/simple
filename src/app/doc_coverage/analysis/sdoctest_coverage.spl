@@ -1,5 +1,36 @@
 # SDoctest coverage helpers.
 
+use app.io.mod (shell)
+use app.doc_coverage.types.doc_item.{DocItem}
+use app.doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
+use std.test_runner.sdoctest.extractor (extract_sdoctest_blocks)
+
+# Markdown roots scanned for embedded `simple` code blocks. README.md is
+# included explicitly because it sits outside doc/.
+fn _sdoctest_markdown_files() -> [text]:
+    var files: [text] = []
+    val result = shell("find doc README.md -name '*.md' -type f 2>/dev/null || true")
+    val trimmed = result.stdout.trim()
+    if trimmed == "":
+        return files
+    for line in trimmed.split("\n"):
+        val path = line.trim()
+        if path != "":
+            files.push(path)
+    files
+
+# Load every SDoctest code block reachable from the repository's markdown.
+# Returns (source_paths, code_bodies) — parallel arrays, one entry per block.
+# Callers index `.0` for provenance and `.1` for the code itself.
+fn load_sdoctest_blocks() -> ([text], [text]):
+    var names: [text] = []
+    var codes: [text] = []
+    for path in _sdoctest_markdown_files():
+        for block in extract_sdoctest_blocks(path):
+            names.push(path)
+            codes.push(block.code)
+    (names, codes)
+
 fn validate_tag_format(tag: text) -> bool:
     val parts = tag.split(":")
     if parts.len() != 2:
@@ -78,3 +109,59 @@ fn match_functions_to_sdoctest(public_funcs: [text], blocks: [text]) -> ([text],
         else:
             missing.push(func)
     (matched, missing)
+
+# Aggregate documentation + sdoctest coverage over already-scanned items.
+# `blocks` is the code-body array from `load_sdoctest_blocks().1`.
+fn compute_sdoctest_coverage(items: [DocItem], blocks: [text]) -> CoverageReport:
+    var block_names: [text] = []
+    for block in blocks:
+        for name in extract_function_names_from_code(block):
+            block_names.push(name)
+
+    var report = CoverageReport.create()
+    var files: [FileCoverage] = []
+    var paths: [text] = []
+
+    for item in items:
+        var covered = false
+        for name in block_names:
+            if name == item.name:
+                covered = true
+        val documented = item.has_docstring or item.has_inline_comment
+
+        var idx = -1
+        var i = 0
+        while i < paths.len():
+            if paths[i] == item.file_path:
+                idx = i
+            i = i + 1
+        if idx < 0:
+            paths.push(item.file_path)
+            files.push(FileCoverage.create(item.file_path))
+            idx = paths.len() - 1
+
+        var fc = files[idx]
+        fc.total_items = fc.total_items + 1
+        if documented:
+            fc.documented_items = fc.documented_items + 1
+        else:
+            fc.missing_docs = fc.missing_docs + 1
+        if covered:
+            fc.has_sdoctest = fc.has_sdoctest + 1
+        else:
+            fc.missing_sdoctest = fc.missing_sdoctest + 1
+        fc.items.push(item)
+        files[idx] = fc
+
+        report.total_items = report.total_items + 1
+        if documented:
+            report.documented_items = report.documented_items + 1
+        else:
+            report.missing_docs = report.missing_docs + 1
+        if covered:
+            report.sdoctest_coverage = report.sdoctest_coverage + 1
+        else:
+            report.missing_sdoctest = report.missing_sdoctest + 1
+
+    report.files = files
+    report

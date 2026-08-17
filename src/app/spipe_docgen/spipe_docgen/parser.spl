@@ -6,7 +6,7 @@
 # - Validation: validate_spec
 # - Test Structure: extract_quoted_name, extract_inline_docstring, extract_test_structure
 
-use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists}
+use app.spipe_docgen.spipe_docgen.common.{DocBlock, FeatureMetadata, SspecDoc, ValidationResult, spipe_dbg, native_fs_read_string, native_fs_exists, spec_kw_line}
 use std.math_repr.{to_text, render_latex_raw}
 
 # ============================================================================
@@ -369,7 +369,11 @@ fn validate_spec(doc: SspecDoc) -> ValidationResult:
     var scenario_count = 0
     for line in doc.raw_content.split("\n"):
         val trimmed = line.trim()
-        if trimmed.starts_with("it \""):
+        # Single source of truth for what a scenario line looks like — the
+        # legacy bare form `it "name":` AND the modern call form `it("name"):`.
+        # Counting only the legacy one made every modern SSpec render as
+        # having zero scenarios.
+        if is_scenario_line(trimmed):
             scenario_count = scenario_count + 1
     val docs_present = doc.doc_blocks.len() > 0 or scenario_count > 0
 
@@ -985,9 +989,12 @@ fn scenario_prev_title(lines: [text], scenario_index: i64) -> text:
 fn is_scenario_line(trimmed: text) -> bool:
     if not trimmed.contains("\""):
         return false
-    trimmed.starts_with("it ") or trimmed.starts_with("slow_it ") or
-        trimmed.starts_with("pending ") or trimmed.starts_with("skip_it ") or
-        trimmed.starts_with("skip it ")
+    # Both spellings are live: the legacy bare form (`it "name":`) and the
+    # modern call form (`it("name"):`). Recognising only the bare form made
+    # every modern SSpec look like it declared zero scenarios.
+    spec_kw_line(trimmed, "it") or spec_kw_line(trimmed, "slow_it") or
+        spec_kw_line(trimmed, "pending") or spec_kw_line(trimmed, "skip_it") or
+        spec_kw_line(trimmed, "skip it")
 
 fn scenario_title_at(lines: [text], scenario_index: i64) -> text:
     if scenario_index < 0 or scenario_index >= lines.len():
@@ -1853,7 +1860,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             continue
 
         # describe block -> H3
-        if trimmed.starts_with("describe ") and trimmed.contains("\""):
+        if spec_kw_line(trimmed, "describe"):
             val name = extract_quoted_name(trimmed)
             result_parts.push("### {name}\n")
 
@@ -1888,7 +1895,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             result_parts.push("\n")
 
         # skip it / skip_it -> skipped scenario
-        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
+        elif (spec_kw_line(trimmed, "skip it") or spec_kw_line(trimmed, "skip_it")):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1902,7 +1909,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             i = next_index - 1
 
         # pending -> pending bullet
-        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
+        elif spec_kw_line(trimmed, "pending"):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1916,7 +1923,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             i = next_index - 1
 
         # slow it -> slow bullet
-        elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
+        elif spec_kw_line(trimmed, "slow_it"):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)
@@ -1933,7 +1940,7 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             i = next_index - 1
 
         # regular it -> check bullet
-        elif trimmed.starts_with("it ") and trimmed.contains("\""):
+        elif spec_kw_line(trimmed, "it"):
             val name = extract_quoted_name(trimmed)
             val next_index = find_scenario_body_end(lines, i + 1, count_leading_indent(line))
             val body = collect_scenario_body(lines, i + 1, next_index)

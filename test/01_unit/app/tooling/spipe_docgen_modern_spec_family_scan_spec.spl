@@ -1,0 +1,49 @@
+# Class-detection spec for the bug family
+# "spipe-docgen recognises only legacy SSpec syntax"
+# (doc/08_tracking/bug/spipe_docgen_stale_syntax_detection_2026-07-19.md).
+#
+# The single-case fix proves `it("name"):` is counted. This spec detects the
+# CLASS: sweep real, modern, call-form spec files in the tree and assert none
+# of them validates as scenario-less. A future syntax addition that docgen
+# does not learn about will fail here even if the unit spec still passes.
+
+use std.spec.{describe, it, expect}
+use app.spipe_docgen.parser.{validate_spec}
+use app.spipe_docgen.common.{SspecDoc, FeatureMetadata}
+use app.io.mod (shell, file_exists)
+use std.io_runtime.{read_file}
+
+fn _doc(path: text, content: text) -> SspecDoc:
+    SspecDoc(
+        file_path: path,
+        raw_content: content,
+        doc_blocks: [],
+        feature_title: "",
+        feature_ids: [],
+        metadata: FeatureMetadata.empty()
+    )
+
+# Real spec files in the tree that use the modern call form exclusively.
+fn _modern_spec_files() -> [text]:
+    val cmd = "grep -rlE '^[[:space:]]+it\\(\"' src/lib/hardware/nand_emu/test 2>/dev/null | head -5"
+    var files: [text] = []
+    for line in shell(cmd).stdout.trim().split("\n"):
+        val p = line.trim()
+        if p != "" and file_exists(p):
+            files.push(p)
+    files
+
+describe "spipe-docgen modern-syntax family scan":
+
+    it "control: the sweep finds at least one modern spec file":
+        expect(_modern_spec_files().len() > 0).to_equal(true)
+
+    it "reports no modern spec file as scenario-less":
+        var offenders: [text] = []
+        for path in _modern_spec_files():
+            val content = read_file(path) ?? ""
+            if content != "":
+                val result = validate_spec(_doc(path, content))
+                if not result.docs_present:
+                    offenders.push(path)
+        expect(offenders.join(",")).to_equal("")
