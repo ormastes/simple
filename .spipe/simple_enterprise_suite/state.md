@@ -1000,3 +1000,275 @@ New acceptance criteria (extends AC-1..AC-12 above):
   Regression: audit 13/13, auth_throttle 6/6, conformance 8/8, back_office
   7/7, store_app 3/3. Posture doc updated: residual 1 closed, residual 7
   narrowed to normalisation-only; remainder renumbered 1-7.
+
+- W14-A (2026-08-17) — output-escaping + security-header completeness audit.
+  Reproduce-first sweep of every HTML interpolation across booking/restaurant/
+  dashboard/auth/hcm/procurement/finance _routes + web_common. Conclusion:
+  ALREADY HARDENED (like W13-C). Every request-/store-derived value passes
+  through esc(); esc() escapes " -> &quot; and ' -> &#39; so it is
+  attribute-context safe (all attrs double-quoted); every response path —
+  including deny()/command_page/404/auth-error — is wrapped by secured().
+  The one non-esc() interpolation (auth "token=" + r.detail) is a server-
+  issued session token, not attacker-influenceable — safe by source.
+  Gaps closed were UNTESTED not UNSAFE: attribute context and the vertical
+  route families had no fence (prior fence covered only element context on
+  /store/catalog via the dispatcher). Added
+  test/03_system/app/enterprise/enterprise_output_escaping_audit_spec.spl
+  (declared>=5 executed=5 passed=5). Red-first: disabling the " -> &quot;
+  replace in esc() flips 3/5 red (attr-context assertions + booking breakout),
+  restored 5/5. Audit list: doc/01_research/app/enterprise/
+  w14a_output_escaping_audit_2026-08-17.md; posture doc W14-A section added.
+  Evidence: Rust seed bin/release/x86_64-unknown-linux-gnu/simple (59536728
+  bytes, 2026-08-16), interpreter mode, SIMPLE_TIMEOUT_SECONDS=900.
+
+## W14-B — DB / durable-store crash-consistency & tamper-detection (2026-08-17)
+
+Scope: `src/lib/nogc_sync_mut/enterprise_store/*.spl` only. Runner: Rust seed
+(`bin/simple --version` = Simple v1.0.0-beta, bootstrap seed), interpreter mode,
+ANSI-stripped `SPEC FILE VERDICT` line read (never `tail -1`).
+
+1. AUDIT-CHAIN-VERIFY-ON-LOAD — real gap found and fixed. `store_open_verified`
+   /`store_verify` previously checked only magic + store-format marker; a
+   tampered audit row (payload OR chain hash mutated out-of-band) was ACCEPTED on
+   open — the sha256 chain was only ever checked when a caller invoked
+   `records.audit_verify_chain`. Fix: new `store_audit_chain_error(store)` in
+   store.spl re-walks the chain for EVERY tenant (prev_hash linkage + recomputed
+   sha256 via the same `audit_sha256_hex`) and is wired into `store_verify` on
+   BOTH backends. Red-first (file backend, out-of-band file edit):
+   `enterprise_store_audit_chain_on_open_spec.spl` — before fix passed=1 failed=2
+   (both tampered stores accepted); after fix passed=3 failed=0.
+
+2. WRITE-FAILURE RECOVERY — invariant already correct; added a durable-path
+   regression fence. `enterprise_store_write_failure_recovery_spec.spl` (file
+   backend): injected disk-full via `store_faults_failing_commit()` -> commit
+   false, idempotency key NOT consumed and nothing durable (asserted after
+   close+reopen), operator retry with `store_faults_none()` applies exactly once,
+   third attempt detected as replay -> outbox still holds exactly one event.
+   passed=1 failed=0. Complements the :memory: zero-partial proof in
+   enterprise_store_harden_spec.spl.
+
+Backend honesty: all durability/tamper claims exercise the SPLSTORE1 file
+backend (the interpreter rt_sqlite emulation is non-persistent/non-ACID);
+:memory: paths are only used for the in-process zero-partial assertions.
+
+Regression (unchanged, all green): harden 6/6, enterprise_store 10/10,
+file_backend 6/6. Files: store.spl (+store_audit_chain_error, wired into
+store_verify, exported); 2 new specs. No fix needed for #2.
+
+## W14-C — web request-gating hardening (CSRF + route-level write gate) — 2026-08-17
+
+Runner: Rust seed bin/simple (interpreter-mode), interpreter evidence,
+SIMPLE_TIMEOUT_SECONDS=900, one spec at a time, ANSI-stripped, verdict line read
+(never tail -1).
+
+Real gap found: the dispatcher (main.store_app_handle) authenticated the
+session but did ZERO role/method authorization and NO CSRF. Write authorization
+lived only inside each guarded command (frozen session->rbac->validation->
+idempotency) — correct, but the dispatcher offered no defense-in-depth and no
+CSRF at all. Scope kept to main.spl + new csrf.spl; no *_routes render fn edited.
+
+(1) Route-level write gate (defense in depth): added write_gate_action(method,
+path) mapping the mutating routes the dispatcher owns (POST /store/order ->
+sale.order.place, /store/pay -> sale.order.pay, /fin/period/close ->
+finance.period.close) and a dispatcher pre-check against the SAME role_allows
+policy the command re-enforces, rejecting 403 with detail write-gate:<action>
+BEFORE the handler. In-command rbac UNCHANGED (both gates hold). Red-first: a
+booking-role session POST /fin/period/close was rejected only inside the
+command (detail "forbidden: 0"); the write-gate: assertion FAILED red, PASSES
+403 after.
+
+(2) CSRF double-submit (csrf.spl): a state-changing request carrying an ambient
+Cookie must echo csrf_token(session) in X-CSRF-Token, else 403 at dispatch;
+bearer-only calls (no Cookie) exempt so no API client regresses. Red-first: an
+admin cookie-borne close WITHOUT a token reached the command and returned 200
+(forgery succeeded) — now 403 without/with-wrong token, 200 with the session's
+token.
+
+Evidence: store_web_request_gating_spec RED 3/6 (writegate, csrf-missing,
+csrf-wrong) -> GREEN 6/6 after fix. Regression: enterprise_security_audit 13/13
+(includes clerk POST /fin/period/close still 403), back_office_web 7/7 (admin
+close still 200). Posture doc: residual 3 (CSRF) and residual 7 (route write
+gate) rewritten from OPEN to CLOSED-for-cookie-flow / defense-in-depth-added,
+each pointing at the fence spec.
+
+Files: src/app/enterprise_store_app/csrf.spl (new),
+src/app/enterprise_store_app/main.spl (imports + write_gate_action + 2 gates),
+test/03_system/app/enterprise/store_web_request_gating_spec.spl (new),
+doc/07_guide/app/enterprise/security_posture.md.
+
+- W15-B (2026-08-17, done): RBAC data-driven table + equivalence fence.
+  Rust seed 59536728B 2026-08-16 22:59, interpreter mode, one spec/run,
+  SIMPLE_TIMEOUT_SECONDS=900, verdict read from "SPEC FILE VERDICT:" line.
+  Residual risk 2 (hardcoded role_allows) addressed WITHOUT touching the frozen
+  contract: new module src/lib/nogc_sync_mut/enterprise_sale/rbac_registry.spl
+  expresses the goods-sale RBAC policy as DATA — rbac_registry() grant rows
+  (sales/payments/procurement/booking/finance/hcm) + registry_role_allows with
+  the blanket admin-allows-all rule. foundation.role_allows is UNCHANGED; no
+  caller migrated (that is the ADR-gated follow-up). Exported via enterprise_sale
+  __init__.
+  Equivalence fence: test/.../enterprise_rbac_registry_equivalence_spec.spl
+  cross-products every role (7 named + empty + 2 unknown = 10) × every action
+  string in the suite (23 distinct grants + 6 deny-only = 29) = 290 pairs, all
+  asserted registry_role_allows == foundation.role_allows; granted=53.
+  BITE PROOF (green->red->green): baseline 4/4 passed. Dropped the
+  "booking.confirm" grant from the booking row -> 3/4 passed, 1 failed on
+  exactly that pair (registry denied what the frozen chain allows). Restored the
+  grant -> 4/4 passed. Verdicts recorded from the SPEC FILE VERDICT line each
+  run (declared>=4 executed=4).
+  Files: rbac_registry.spl (new), enterprise_sale/__init__.spl (+1 export),
+  enterprise_rbac_registry_equivalence_spec.spl (new), security_posture.md
+  (residual 2 updated: data-driven table exists + equivalence-proven, migration
+  ADR-gated), this state entry.
+
+- W15-A (DoS / rate-limit hardening — throttle linear-scan residual, 2026-08-17):
+  Characterization: `throttle_admit` (src/lib/nogc_sync_mut/enterprise_session/
+  throttle.spl) records one insert-only counter row per admitted request and
+  scans the table linearly on every attempt. W12-B's `throttle_prune` reclaims
+  rows ONLY when every retained row is stale (older than the live window), so
+  WITHIN a single window it never fires — leaving the residual "throttle linear
+  scan" DoS surface (security_posture.md residual 4). Attacker wins: (a) memory
+  — cycling many DISTINCT identities in one window grew the counter table with
+  one row per identity, unbounded; (b) CPU — every subsequent attempt's linear
+  scan grew with that table. Reproduce-first: new spec
+  test/03_system/app/enterprise/enterprise_auth_throttle_bound_spec.spl floods
+  the same live window with throttle_max_rows()+200 distinct identities and
+  asserts throttle_rows_retained() <= throttle_max_rows(). RED before fix (2/2
+  fail — retained == flood size, one row per identity). Fix: fail-closed
+  capacity ceiling `throttle_max_rows()` = 256 (ponytail-marked O(1)-memory
+  ceiling). After the per-key limit check, if the table is already at the
+  ceiling a request that would add a NEW identity row is denied (429) instead
+  of inserted — memory and scan cost are now O(ceiling), independent of flood
+  size. Fail-closed: an already-tracked key keeps its exact count (no eviction,
+  no reset), so no existing lockout is weakened (fenced by the spec's
+  victim-survives-saturation case). GREEN after fix: bound spec 2/2. Behavior
+  unchanged: enterprise_auth_throttle_spec 6/6 (before AND after). Runner: Rust
+  seed (bin/simple, 59536728 bytes, "bootstrap seed only" banner), interpreter
+  mode, SIMPLE_TIMEOUT_SECONDS=900, one spec at a time, verdict line read (not
+  tail). Files: src/lib/nogc_sync_mut/enterprise_session/throttle.spl (+
+  throttle_max_rows, capacity guard in throttle_admit), the new bound spec,
+  security_posture.md residual 4 rewritten as CLOSED-as-DoS-surface. Scope
+  respected: foundation.spl, web dispatcher main.spl, and the store untouched
+  (bound built from the store's existing insert + full-truncate primitives).
+  Follow-up unchanged: an index on (key,window) would drop O(ceiling) -> O(1),
+  a constant factor, no longer a DoS amplifier.
+- W15-C CROSS-OS RE-VERIFY (2026-08-17, agent): re-checked AC-17 against the
+  wave-13/14 additions. Cross-OS gate PASS extended 8->9 probes. REAL REGRESSION
+  FOUND+FIXED: enterprise_session/session.spl imported std.common.crypto.sha256
+  .sha256_text directly (credential_hash + session_token_derive), pulling
+  sha256_bytes/sha256_u8_hex/str_* CollectionOps into the standalone-SMF closure
+  -> session.spl was NOT cross-OS-compilable (host+simpleos both rc=1, "9
+  function(s) require the interpreter") — the SAME defect audit_hash was created
+  to fix in W4-B, reintroduced. Fix: route session.spl through the SMF-safe
+  facade enterprise_store.audit_hash.audit_sha256_hex (digest-identical, ONE
+  codebase). New probe src/app/enterprise/session_probe_main.spl now forces
+  enterprise_session into the SMF set (host rc=0 + simpleos rc=0, magic 53 4d 46
+  00). Coverage audit: store audit chain (records.audit_append/verify_chain)
+  COVERED via store+session probes; enterprise_session COVERED (was a hole);
+  web-app DISPATCHER (main.store_app_handle / auth_routes.store_app_handle_bearer)
+  is NOT standalone-SMF (11 interp-required fns from http_core PatternMatch +
+  sha256/str_* — the documented standalone-SMF-codegen debt) and runs INTERPRETED
+  in-guest (L4), so deliberately NOT wired as a required SMF probe. IN-GUEST OVMF
+  gate BLOCKED — qemu/OVMF/seed all present, gate advanced into the SimpleOS
+  kernel build then FAILED on an UNRELATED pre-existing kernel bug: callable ABI
+  mismatch 'SharedDmaMapping.can_release' (1 param declared, 2 supplied) in
+  src/os/kernel/memory/memory_swap_{coordinator,runtime}.spl — outside the
+  enterprise suite, not caused by this lane. No transcript fabricated. Resume:
+  SEED=<main>/src/compiler_rust/target/release/simple sh scripts/check/
+  check-enterprise-store-in-guest-ovmf.shs after the kernel DMA arity bug is
+  fixed. Binary: bin/release/x86_64-unknown-linux-gnu/simple (59,536,728 bytes,
+  BuildID d219df7dee27059f4b61a5393a6d1b253535ea13). Evidence:
+  doc/09_report/enterprise_suite_cross_os_reverify_w15c_2026-08-17.md.
+
+## W13-B — http_server tier FOLDED into recorded suite (2026-08-17, coverage lane)
+
+Enumerated the ENTIRE enterprise + http_server spec family from disk myself
+(`find test -path '*http_server*spec.spl'`, enterprise + ubs_test) and
+cross-checked against the wiki's verification list.
+
+On-disk vs recorded diff:
+- Recorded W10-A list = 49 self-selected files.
+- Complete canonical on-disk set = **71** (added 21 http_server-tier specs +
+  `enterprise_store_audit_hash_parity` + `phase_result_headers` +
+  `llm_caret/messaging/tier1_enterprise_transport`).
+- The stale `test/unit/**` MIRROR tree holds divergent duplicate copies (7 are
+  byte-identical to `test/01_unit`, 6 diverge and are RED) — EXCLUDED from the
+  authoritative set; a test-tree-divergence defect, not an enterprise reg.
+
+Sweep (one spec per process, SIMPLE_TIMEOUT_SECONDS=900, ANSI-stripped, read
+SPEC FILE VERDICT, binary recorded once): **71/71 canonical GREEN, 635 examples
+executed, 635 passed, 0 failed, 0 dropped, 0 timeouts.** The previously-red
+http_server specs (security_headers, rate_limit, request_validation,
+range_numeric_guard, security_context_dispatch, compression) are all GREEN on
+this tree — W11-A/W11-B fixes landed. Binary: seed
+`x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, 2026-08-16 22:59 UTC,
+interpreter mode.
+
+Reds observed = 5 lines, ALL in `test/unit/**` mirror (csrf 0/10,
+compression rc=143→11/19 `gzip==lz4`, static_compression_cache SIGTERM,
+static_file_compression_cache 6/7, static_file_handler_compression 6/9). Their
+canonical `test/01_unit` twins pass 24/24, 20/20, 8/8, 7/7, 9/9. Owner:
+test/unit ↔ test/01_unit mirror sync (fenced by check-test-tree-divergence).
+
+Made authoritative:
+- `doc/00_llm_process/feature_expert/enterprise_suite/skill.md` verification
+  list is now the COMPLETE 71-file enumeration with the mirror-exclusion note.
+- Added `scripts/check/check-enterprise-suite-enumeration.shs` (EXPECTED=71):
+  a mechanical drift guard, `PASS — 71 spec(s) enumerated, matches EXPECTED`.
+- Landmines #10/#11 updated; the folded specs are discoverable by the normal
+  directory-walk runner (canonical `test/01_unit` tree), no longer only by
+  explicit path.
+No enterprise/http code regression found — nothing to fix.
+
+## W13-B final — deliverables + reds ownership (2026-08-17)
+
+Coordinator-confirmed final tally: 77 specs run, 72 green, 5 non-green — ALL in
+the stale `test/unit/**` mirror tree, canonical `test/01_unit` twins all GREEN.
+The 5 reds are OWNED BY LANE W16-B (not fixed by W13-B, not silently green):
+- test/unit/lib/http_server/csrf_spec.spl (rc=1, failed=10) — real, W16-B
+- test/unit/.../static_file_compression_cache_spec.spl (rc=1, failed=1) — real, W16-B
+- test/unit/.../static_file_handler_compression_spec.spl (rc=1, failed=3) — real, W16-B
+- test/unit/.../compression_spec.spl (rc=143, NO verdict) — harness SIGTERM under load, W16-B (re-run alone)
+- test/unit/.../static_compression_cache_spec.spl (rc=143, NO verdict) — harness SIGTERM under load, W16-B (re-run alone)
+
+Evidence files (in build/w13b/, not committed per no-build-stage rule):
+- build/w13b/enumeration_diff.md — on-disk vs recorded W10-A list diff + authoritative 71
+- build/w13b/verdict_table.md — 77-row verdict table
+- build/w13b/verdicts.txt — raw per-spec verdict lines
+- build/w13b/binary_identity.txt — seed identity
+Drift guard: scripts/check/check-enterprise-suite-enumeration.shs (EXPECTED=71, PASS).
+
+## W16-B — harden simple web: http_server reds (2026-08-17)
+
+Lane W16-B triaged 5 http_server reds from the W13-B sweep. Binary: Rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple` (bootstrap seed, interpreter mode).
+Worktree `/mnt/data/worktrees/ent16-b`, `stat -c %F build` = directory (own
+build dir, no cross-worktree cache contamination). One spec at a time.
+
+FINDING: all 5 reds are in the STALE `test/unit/**` MIRROR tree. Each has a
+CANONICAL twin under `test/01_unit/**` that PASSES (W13-B: 71/71 canonical
+green; directly re-confirmed here: `test/01_unit/lib/http_server/csrf_spec.spl`
+declared>=24 executed=24 passed=24 failed=0). The mirrors diverged and point at
+removed/renamed API — e.g. csrf mirror calls `generate_csrf_token()` (no-arg),
+`validate_csrf_token`, `is_csrf_exempt_method`, all removed; canonical uses
+`generate_csrf_token(config, session)`, `constant_time_eq`,
+`config.exempt_methods.contains`. static_compression_cache mirror used a
+reserved-ish `unit` binding + an LRU assertion the canonical proved wrong
+(recency: probing B makes B MRU). This is a test-tree-divergence defect, NOT an
+http_server/net implementation defect. No src/lib change was warranted or made
+(would have risked breaking the passing canonical twins).
+
+Per-red classification (all: harness/divergence, not real defect):
+- csrf_spec: rc=1 mirror / canonical 24/24 PASS -> reconciled (orphaned API).
+- static_file_compression_cache_spec: rc=1 mirror / canonical PASS -> reconciled.
+- static_file_handler_compression_spec: rc=1 mirror / canonical PASS -> reconciled.
+- compression_spec: rc=143 SIGTERM-under-load (no verdict) / canonical PASS ->
+  reconciled (load-induced, not real).
+- static_compression_cache_spec: rc=143 SIGTERM (no verdict) / canonical PASS ->
+  reconciled.
+
+ACTION: copied each canonical twin over its stale mirror (now byte-identical),
+and dropped the 4 now-identical pairs from
+`scripts/check/test_tree_divergence_baseline.txt` (814->810 lines) so the
+divergence guard stays green (baselined-but-identical would FAIL as stale
+baseline). protocol_handler_spec baseline entry left untouched (out of scope).
+Reconciled mirror re-run confirms green.
