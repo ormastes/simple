@@ -583,3 +583,34 @@ arms with no behavior change and no debug output, landed in the same commit.
 verifying the fast repros. See
 `scripts/check/check-rt-io-file-native-jit-stub.shs` for the current
 tracked outcome of that run.
+
+---
+
+## Note 2026-08-17 (io lane) — the fixture is blocked by an EARLIER defect
+
+`test/fixtures/rt_io_file_roundtrip/main.spl`, this doc's repro vehicle, cannot
+currently measure anything: it fails at its FIRST step under a plain
+interpreted run on the deployed binary, before any native-build lowering is
+involved.
+
+```
+$ rm -f /tmp/rt_io_file_roundtrip_probe.txt
+$ bin/simple run test/fixtures/rt_io_file_roundtrip/main.spl ; echo rc=$?
+VERDICT: FAIL open WriteOnly failed
+rc=1
+$ ls -l /tmp/rt_io_file_roundtrip_probe.txt
+ls: cannot access '/tmp/rt_io_file_roundtrip_probe.txt': No such file or directory
+```
+
+Cause: the whole `rt_io_file_*` extern family is non-functional on the deployed
+binary in interpret mode — `rt_io_file_open` returns `-1` and
+`rt_io_file_exists("/etc/hostname")` returns `false`. Evidence and a controlled
+probe are in
+`doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md`
+(re-verification section, 2026-08-17).
+
+Implication: fix the extern-dispatch defect first, or this doc's native-build
+measurements will keep reproducing that bug instead of the payload-struct-name
+collision. The collision itself was NOT re-measured by this lane — its root
+cause is in `src/compiler/50.mir/**`, claimed by another lane. Status left OPEN
+unchanged.

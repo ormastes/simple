@@ -269,3 +269,18 @@ grep -cE 'tcp_|connect|bind|listen'     test/02_integration/app/ui.web/ws_e2e_sp
 comm -12 <(cd test/unit && find . -name '*_spec.spl'|sort) \
          <(cd test/01_unit && find . -name '*_spec.spl'|sort) | wc -l                    # 5005
 ```
+
+---
+
+## Re-verification 2026-08-17 (io lane) — no code defect in `src/lib/nogc_sync_mut/io/tcp.spl`
+
+Re-read against current source. This remains a measurement/characterization
+record, not a localized defect, and in particular it does **not** describe a bug
+in `tcp.spl`: the doc's own evidence (bash `/dev/tcp` client against a Simple
+server, matching peer ports) proves that socket path genuinely moves bytes. The
+defect is in the *specs* that claim to cover it — they assert on source-text
+substrings — plus the duplicated spec tree.
+
+No change made here. The remedy is a spec-tree project (rewrite or delete the
+substring-asserting "e2e" specs, deduplicate `test/unit` vs `test/01_unit`), not
+an edit to `src/lib/nogc_sync_mut/io/**`. Left OPEN as characterized.

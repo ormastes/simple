@@ -110,3 +110,43 @@ EXIT=0   WALL=59.48s   MAXRSS=1051900kB
 
 No `[jit-fallback]` line on stdout or stderr, real verdict line, exit 0. With the
 deployed stale seed the same module de-JITs before it starts.
+
+---
+
+## Re-verification 2026-08-17 (io lane) — BOTH defects now GREEN by content
+
+Classified by CONTENT (grep of current source), not by commit ancestry.
+
+**Defect B (dual ABI) — FIXED.** The incompatible NUL-terminated `const char*`
+copy is gone from `src/runtime/runtime_native_gpu_stub.c`; that file now carries
+only a comment at lines 24-35 explaining the removal and forbidding its return.
+The two surviving C definitions agree with the Rust canonical one on the
+two-argument `(ptr, len)` form:
+- `src/runtime/runtime.c:1172` — `int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len)`
+- `src/runtime/runtime_native.c:8520` — same signature
+- `src/runtime/runtime.h:833` — same prototype
+- `src/compiler_rust/runtime/src/value/sffi/file_io/metadata.rs:275` — `pub unsafe extern "C" fn rt_file_is_char_device(path_ptr: *const u8, path_len: u64) -> bool`
+
+**Defect A (whole-repo de-JIT) — no longer reproduces on the DEPLOYED binary.**
+`rt_file_is_char_device` is present in
+`src/compiler_rust/common/src/runtime_symbols.rs` (1 occurrence), and the
+deployed seed (`bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes,
+mtime 2026-08-16 22:59:37) no longer drops to the interpreter on an
+`std.io_runtime` import:
+
+```
+$ cat /tmp/probe3.spl
+use std.io_runtime.{file_exists}
+fn main() -> i64:
+    print(file_exists("/etc/hostname"))
+    return 0
+$ SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=jit bin/simple run /tmp/probe3.spl
+true
+```
+
+No `[jit-fallback] unresolved external symbol 'rt_file_is_char_device'` line on
+stdout or stderr, and the answer is correct. The 2026-08-10 staleness window has
+been closed by the newer deployed seed.
+
+Recommend: close. No change was needed in `src/lib/nogc_sync_mut/io_runtime.spl`
+— its declaration at line 52 was always the correct one.

@@ -149,3 +149,62 @@ A recursive `/usr/bin/grep` from the repo root walks `build/`, `.git/`, and
 returns empty output, which reads as "no declarations, all clean"**. The guard
 spec therefore names its four scan roots explicitly and carries a comment
 forbidding a widening to `.` without re-checking wall time.
+
+---
+
+## Re-verification 2026-08-17 (io lane) — STILL LIVE; 4 distinct return types remain
+
+Content classification (`/usr/bin/grep -rn "rt_file_read_bytes" src/ --include=*.spl`,
+declaration sites only). The divergence is smaller than the filed six but is
+not closed:
+
+| return type | sites (examples) |
+|---|---|
+| `-> [u8]`   | `src/lib/nogc_sync_mut/io_runtime.spl:26`, `ffi/io.spl:40`, `sffi/io.spl:40`, `sffi/package.spl:7`, `archive/zip_{reader,writer}.spl:17`, `common/encoding/font_registry.spl:20`, `compiler/70.backend/linker/smf_source.spl:7`, `compiler/80.driver/shb/shb_reader.spl:415`, `compiler_rust/lib/std/src/infra/file_io.spl:78` (+ ~15 more in `src/os`, `src/app`) |
+| `-> [u8]?`  | `src/lib/nogc_sync_mut/fs.spl:625`, `nogc_async_mut/fs.spl:625`, `gc_async_mut/gpu/browser_engine/browser_file_ops.spl:4`, `os/port/sqlite/sqlite_vfs_impl.spl:71`, `app/startup/launch_meta_check.spl:33`, `app/editor/editor_controller.spl:47`, `app/editor/mcp_tools_helpers.spl:15` |
+| `-> [i64]`  | `src/lib/nogc_sync_mut/io/file_ops.spl:7` |
+| `-> [i64]?` | `src/lib/nogc_sync_mut/sfm/container.spl:15`, `src/lib/nogc_sync_mut/io/telnet_serial_bridge.spl:31` |
+
+The authoritative signature is `[u8]` — stated at
+`src/compiler_rust/lib/std/src/infra/file_io.spl:70-78` and backed by the C
+runtime; `src/runtime/simple_core/core_fs.spl:154` returns a raw `i64` handle.
+
+**Not fixed by this lane, and deliberately so.** The convergence is tractable but
+it is NOT confined to `src/lib/nogc_sync_mut/io/**`: only 2 of the 4 non-`[u8]`
+declaration sites (`io/file_ops.spl`, `io/telnet_serial_bridge.spl`) fall inside
+this lane's file scope, and `io/file_ops.spl:146` `file_read_bytes() -> [i64]` is
+a public helper whose callers live outside it. Converging 2 of 4 sites would
+leave the ABI split intact while breaking typed callers — strictly worse than
+the status quo. This needs a single cross-cutting change with the whole caller
+set in scope.
+
+Guard spec `test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl`
+remains correctly RED.
+
+### Corroboration 2026-08-17 — the COMPILER ITSELF now warns about this
+
+An unrelated spec run in this lane surfaced the divergence as a first-class
+compiler diagnostic, which is stronger evidence than the grep census above
+because it proves the two signatures are genuinely co-compiled into one closure
+and that dispatch between them is resolved heuristically:
+
+```
+warning: public function `file_read_bytes` has 2 co-compiled definitions with 2
+differing signatures ((text)->[i64] vs (text)->[u8]); JIT call sites resolve by
+exact arg-type match (mangled `$dupN` variants), falling back to the last
+definition when types are ambiguous — a fallback hit may still dispatch to the
+wrong one. Rename the conflicting helper(s) to a unique name.
+[compiler_cross_module_private_symbol_collision]
+```
+
+Note the failure mode named in the diagnostic: **an ambiguous call site falls
+back to "the last definition"**, i.e. lowering order decides which ABI a caller
+gets. That is a silent-wrong-result mechanism, not merely a tidiness issue, and
+it is the same shape as the `enum_payload_struct_names` last-one-wins collision
+described in
+`native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md`.
+
+Two sibling collisions were reported in the same run and are likely the same
+class of defect, filed here only as a pointer:
+- `dir_remove_all` — 2 definitions, `(text)->bool` vs `(text)->i32`
+- `shell` — 3 definitions, `(text)->ProcessResult` vs `(text)->ShellResult`
