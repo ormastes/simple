@@ -14,6 +14,7 @@ use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpa
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.cell.{Cell, CellStyle, CellValue, CellRef, cell_display_text, col_to_letter, cell_ref_to_string, parse_cell_ref, default_style}
 use app.office.sheets.formula.{evaluate_formula, evaluate_formula_array, set_formula_origin, reset_let_bindings}
+use app.office.sheets.cell_ref.{parse_range, expand_range_refs}
 use common.office.number.{office_parse_signed_decimal_f64}
 
 # =========================================================================
@@ -480,6 +481,148 @@ fn _write_spill(sheet: Sheet, origin_key: text, expr: text, agrid: [[text]], sty
         i = i + 1
     work
 
+fn _ff_is_alpha(c: text) -> bool:
+    """Whether a single character is an ASCII letter."""
+    (c >= "A" and c <= "Z") or (c >= "a" and c <= "z")
+
+fn _ff_is_digit_ch(c: text) -> bool:
+    """Whether a single character is an ASCII digit."""
+    c >= "0" and c <= "9"
+
+fn _ff_strip_dollars(s: text) -> text:
+    """Drop `$` absolute-reference markers so `$A$1` scans as `A1`."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c != "$":
+            out = out + c
+        i = i + 1
+    out
+
+fn _ff_formula_ref_tokens(expr: text) -> [text]:
+    """Every A1-style cell reference a formula expression mentions directly,
+    with `A1:C3` ranges expanded to their member cells.
+
+    This is a lexical scan, not a parse: text inside double quotes is skipped,
+    and a letters+digits run immediately followed by `(` is a function name
+    (LOG10(...), T1(...)) rather than a reference. Over-detection is harmless
+    for the only caller — `_ff_circular_cells` keeps an edge only when the
+    named cell actually exists AND holds a formula."""
+    val src = _ff_strip_dollars(expr)
+    val n = src.len()
+    var out: [text] = []
+    var in_str = false
+    var i = 0
+    while i < n:
+        val c = src.slice(i, i + 1)
+        if c == "\"":
+            in_str = not in_str
+            i = i + 1
+        elif in_str:
+            i = i + 1
+        elif _ff_is_alpha(c):
+            var j = i
+            while j < n and _ff_is_alpha(src.slice(j, j + 1)):
+                j = j + 1
+            var k = j
+            while k < n and _ff_is_digit_ch(src.slice(k, k + 1)):
+                k = k + 1
+            var next_i = k
+            if k > j:
+                val prev_is_body = i > 0 and (_ff_is_alpha(src.slice(i - 1, i)) or _ff_is_digit_ch(src.slice(i - 1, i)))
+                val is_call = k < n and src.slice(k, k + 1) == "("
+                if not prev_is_body and not is_call:
+                    val first_ref = src.slice(i, k).upper()
+                    var handled_range = false
+                    if k < n and src.slice(k, k + 1) == ":":
+                        var p = k + 1
+                        while p < n and _ff_is_alpha(src.slice(p, p + 1)):
+                            p = p + 1
+                        var q = p
+                        while q < n and _ff_is_digit_ch(src.slice(q, q + 1)):
+                            q = q + 1
+                        if p > k + 1 and q > p:
+                            val second_ref = src.slice(k + 1, q).upper()
+                            val rng = parse_range("{first_ref}:{second_ref}")
+                            if rng != nil:
+                                for member in expand_range_refs(rng):
+                                    out.push(member)
+                                handled_range = true
+                                next_i = q
+                    if not handled_range:
+                        out.push(first_ref)
+            i = next_i
+        else:
+            i = i + 1
+    out
+
+fn _ff_circular_cells(sheet: Sheet, keys: [text]) -> [text]:
+    """Keys of the formula cells that sit on — or transitively depend on — a
+    circular reference.
+
+    Depth-bounded recursive evaluation (`formula._resolve_cell_value`) makes a
+    cycle TERMINATE, but it terminates by returning 0.0 sixty-four frames down,
+    so `A1 = B1+1` / `B1 = A1+1` silently cached `33` instead of reporting the
+    cycle. Resolving the dependency graph up front is what turns that into a
+    real `#CIRC!`.
+
+    Method is Kahn peeling on the *outgoing* edges: a formula cell whose every
+    formula dependency is already resolved is itself resolvable, repeated to a
+    fixpoint. Whatever never resolves is exactly the set of cells in a cycle
+    plus the cells that reach one — which is also what Excel errors out."""
+    var fkeys: [text] = []
+    for key in keys:
+        match sheet.get_cell(key).value:
+            CellValue.FormulaVal(expr, cached_display):
+                fkeys.push(key)
+            _:
+                pass_do_nothing("only formula cells can take part in a cycle")
+
+    var deps: [[i32]] = []
+    for key in fkeys:
+        var edges: [i32] = []
+        match sheet.get_cell(key).value:
+            CellValue.FormulaVal(expr, cached_display):
+                for ref_str in _ff_formula_ref_tokens(expr):
+                    var t = 0
+                    while t < fkeys.len():
+                        if fkeys[t] == ref_str:
+                            edges.push(t)
+                        t = t + 1
+            _:
+                pass_do_nothing("non-formula cells were filtered out above")
+        deps.push(edges)
+
+    var resolved: [bool] = []
+    var r = 0
+    while r < fkeys.len():
+        resolved.push(false)
+        r = r + 1
+
+    var changed = true
+    while changed:
+        changed = false
+        var i = 0
+        while i < fkeys.len():
+            if not resolved[i]:
+                var all_ready = true
+                for d in deps[i]:
+                    if not resolved[d]:
+                        all_ready = false
+                if all_ready:
+                    resolved[i] = true
+                    changed = true
+            i = i + 1
+
+    var bad: [text] = []
+    var b = 0
+    while b < fkeys.len():
+        if not resolved[b]:
+            bad.push(fkeys[b])
+        b = b + 1
+    bad
+
 fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
     """Recalculate every formula cell, caching its display value, so `=A1+B1`
     shows its computed result instead of the raw formula text. Returns the
@@ -495,11 +638,19 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
     nothing spills. Blockage is decided against the sheet as it stands before
     any spills are written in this pass, so overlapping spills and the
     intended-value rule together keep a second recalculation identical to the
-    first (idempotent)."""
+    first (idempotent).
+
+    Cells on (or depending on) a circular reference are found up front by
+    `_ff_circular_cells` and cache `#CIRC!` without being evaluated at all —
+    depth-bounded evaluation alone terminated but produced a silent bogus
+    number."""
     var work = sheet
     var keys: [text] = []
     for key in work.cells.keys():
         keys.push(key)
+
+    # Phase 0: dependency-graph circular-reference detection.
+    val circular = _ff_circular_cells(work, keys)
 
     # Phase 1: compute array grids and blockage against the pre-spill sheet.
     var specs: [SpillSpec] = []
@@ -507,12 +658,13 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
         val cell = work.get_cell(key)
         match cell.value:
             CellValue.FormulaVal(expr, cached_display):
-                set_formula_origin(key)
-                reset_let_bindings()
-                val agrid = evaluate_formula_array(expr, work)
-                if agrid.len() > 0 and agrid[0].len() > 0:
-                    val is_blocked = _spill_blocked(work, key, agrid)
-                    specs.push(SpillSpec(origin: key, agrid: agrid, blocked: is_blocked))
+                if not circular.contains(key):
+                    set_formula_origin(key)
+                    reset_let_bindings()
+                    val agrid = evaluate_formula_array(expr, work)
+                    if agrid.len() > 0 and agrid[0].len() > 0:
+                        val is_blocked = _spill_blocked(work, key, agrid)
+                        specs.push(SpillSpec(origin: key, agrid: agrid, blocked: is_blocked))
             _:
                 pass_do_nothing("non-formula cells are not array origins")
 
@@ -521,29 +673,35 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
         val cell = work.get_cell(key)
         match cell.value:
             CellValue.FormulaVal(expr, cached_display):
-                var spec_idx = -1
-                var si = 0
-                while si < specs.len():
-                    if specs[si].origin == key:
-                        spec_idx = si
-                    si = si + 1
-                if spec_idx >= 0:
-                    val spec = specs[spec_idx]
-                    if spec.blocked:
-                        work.set_cell(key, Cell(
-                            value: CellValue.FormulaVal(expr: expr, cached_display: "#SPILL!"),
-                            style: cell.style
-                        ))
-                    else:
-                        work = _write_spill(work, key, expr, spec.agrid, cell.style)
-                else:
-                    set_formula_origin(key)
-                    reset_let_bindings()
-                    val result = evaluate_formula(expr, work)
+                if circular.contains(key):
                     work.set_cell(key, Cell(
-                        value: CellValue.FormulaVal(expr: expr, cached_display: _scalar_display(result)),
+                        value: CellValue.FormulaVal(expr: expr, cached_display: "#CIRC!"),
                         style: cell.style
                     ))
+                else:
+                    var spec_idx = -1
+                    var si = 0
+                    while si < specs.len():
+                        if specs[si].origin == key:
+                            spec_idx = si
+                        si = si + 1
+                    if spec_idx >= 0:
+                        val spec = specs[spec_idx]
+                        if spec.blocked:
+                            work.set_cell(key, Cell(
+                                value: CellValue.FormulaVal(expr: expr, cached_display: "#SPILL!"),
+                                style: cell.style
+                            ))
+                        else:
+                            work = _write_spill(work, key, expr, spec.agrid, cell.style)
+                    else:
+                        set_formula_origin(key)
+                        reset_let_bindings()
+                        val result = evaluate_formula(expr, work)
+                        work.set_cell(key, Cell(
+                            value: CellValue.FormulaVal(expr: expr, cached_display: _scalar_display(result)),
+                            style: cell.style
+                        ))
             _:
                 pass_do_nothing("non-formula cells keep their value")
     set_formula_origin("")

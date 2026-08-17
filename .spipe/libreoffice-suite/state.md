@@ -91,8 +91,30 @@ possible so they are runner-verifiable.
    Spec `test/01_unit/app/office/slides/html_render_spec.spl` 4/4. Follow-up:
    wire `slides/render.spl` WidgetNode path + `slides/design.spl` once the
    ui/style parser bug is fixed.
-5. TODO — **Excel deeper**: dependency-graph recalc, cell-ref numeric path
-   (gated on the f64 blocker), more functions (COUNTA/VLOOKUP/text fns).
+5. MOSTLY DONE — **Excel deeper**. This entry was badly stale; verified by
+   content 2026-08-17:
+   - "more functions (COUNTA/VLOOKUP/text fns)": DONE long ago and far beyond
+     the original scope. `src/app/office/sheets/formula.spl` is now 9,846 lines
+     with COUNTA/VLOOKUP/CONCATENATE, LET/LAMBDA, dynamic-array spills, a
+     function registry, and statistical/financial/engineering families, backed
+     by 60+ `test/01_unit/app/office/sheets/formula_*_spec.spl` files.
+   - "cell-ref numeric path (gated on the f64 blocker)": DONE.
+     `formula._resolve_cell_value` returns f64 and recursively evaluates
+     formula-valued referents, so recalc order does not affect correctness.
+   - "dependency-graph recalc": the CORRECTNESS half is now DONE. Depth-bounded
+     recursion made cycles terminate but return 0.0 sixty-four frames down, so
+     `A1=B1+1` / `B1=A1+1` silently cached `33` (measured on the seed) despite
+     formula.spl's header claiming "circular references resolve to an error".
+     `file_formats.recalculate_formula_cells` now runs a Phase 0
+     `_ff_circular_cells` graph pass (Kahn peeling on outgoing edges) and caches
+     `#CIRC!` for every formula cell on — or transitively depending on — a
+     cycle, without evaluating it. Spec
+     `test/01_unit/app/office/sheets/formula_circular_recalc_spec.spl` 6/6.
+   - STILL OPEN: the PERFORMANCE half of dependency-graph recalc. Evaluation is
+     still done in Dict-key order with recursive resolution, so a deep chain
+     re-evaluates its ancestors once per dependent. Topological ordering of
+     Phase 2 would fix that; it is a pure perf change with no observable
+     value delta, so it needs a benchmark, not a value spec.
 6. DONE (landed origin d4323508) — **Plugin split**: `app.office.plugins`
    registers office-word/office-ppt/office-excel as three separate `PluginEntry`
    manifests over the shared md/CSS substrate, via the project's plugin registry
@@ -147,3 +169,22 @@ possible so they are runner-verifiable.
   it + word/ppt/excel as separate registered plugins. Remaining: slice 3 (IDE
   WYSIWYG view), 5 (deeper Excel, f64-blocked), 7 (db/draw/math), 8 (game
   connect), 9 (rename to LibreOffice, last/minimal).
+- 2026-08-17 dev: Resumed slice 5. Re-verified the whole lane BY CONTENT rather
+  than by these notes, and found this file materially over-pessimistic about
+  slice 5 (see the rewritten entry above) — the functions and numeric-ref work
+  it lists as TODO had already landed. The one real, user-visible defect left in
+  that slice was silent-wrong-number on circular references; fixed with a
+  dependency-graph pass in `recalculate_formula_cells` plus
+  `formula_circular_recalc_spec` (6/6). Regression-checked green:
+  `formula_spill_origin_spec` 6/6, `formula_arrays_spec` 10/10,
+  `formula_ref2_spec` 27/27, `formula_lookup_spec` 3/3, `formula_harden_spec`
+  3/3. Committed locally only — pushes are tree-wide blocked by a RED
+  `check-native-trailing-default-param.shs` owned by another agent.
+  NOT done: the perf half of dependency-graph recalc (topological ordering).
+- 2026-08-17 hygiene finding (not fixed, needs an owner): eight editor/backup
+  artifacts are TRACKED in git under `src/app/office/` —
+  `mod.spl.pre-erp`, `erp_bridge.spl.pre-erp`, `office_api.spl.pre-erp`,
+  `file_formats.spl.pre-comments`, `odf_ooxml.spl.pre-comments`,
+  `odf_ooxml.spl.pre-styles`, `word/html_render.spl.pre-comments`, and
+  `slides/deck_format.spl.tmp.3421194.9f60920de537`. They are stale copies that
+  shadow the real modules in any grep-based audit.
