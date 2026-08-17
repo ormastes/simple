@@ -196,11 +196,64 @@ describe "Office Render Adapter Routing":
             expect(len > 0).to_equal(true)
 
         it "word adapter text output contains app name":
+            # Naming convention (decided 2026-08-17, see
+            # office_render_adapter_unknown_name_and_naming_drift_2026-07-20.md
+            # Finding 2): the LibreOffice-branded name is the canonical app
+            # display name suite-wide; "word" is only the internal routing key,
+            # which text_output already carries as the "(word, ...)" tag.
             var cfg = RenderConfig.default()
             cfg.adapter_name = "word"
 
             val result = office_render(cfg)
-            expect(result.text_output).to_contain("Word")
+            expect(result.text_output).to_contain("Writer")
+            expect(result.text_output).to_contain("(word,")
+            expect(result.warnings.len()).to_equal(0)
+
+
+describe "office_render adapter-name validation (defect class)":
+    # Class: an adapter name that _normalize_surface does not recognise used to
+    # be relabelled "suite" and rendered silently, so a caller typo was
+    # indistinguishable from a deliberate suite-index request. Every accepted
+    # alias must stay silent; every unrecognised name must be reported.
+    it "every documented alias routes without a warning":
+        val aliases = ["word", "writer", "calc", "excel", "sheets", "impress",
+            "ppt", "slides", "mail", "planner", "draw", "base", "db", "math"]
+        for name in aliases:
+            var cfg = RenderConfig.default()
+            cfg.adapter_name = name
+            val result = office_render(cfg)
+            expect(result.warnings.len()).to_equal(0)
+            expect(result.text_output).to_contain("Office render:")
+            expect(result.text_output.contains("Unknown")).to_equal(false)
+            expect(result.html_output.len() > 0).to_equal(true)
+
+    it "every unrecognised name is reported, not silently accepted":
+        val bogus = ["nonexistent_app", "wrod", "spreadsheet", "powerpoint", "zzz"]
+        for name in bogus:
+            var cfg = RenderConfig.default()
+            cfg.adapter_name = name
+            val result = office_render(cfg)
+            expect(result.warnings.len() > 0).to_equal(true)
+            expect(result.text_output).to_contain("Unknown")
+            expect(result.text_output).to_contain(name)
+            # still renders the suite index rather than failing outright
+            expect(result.html_output.len() > 0).to_equal(true)
+
+    it "an empty adapter name is a deliberate suite-index request, not an error":
+        var cfg = RenderConfig.default()
+        cfg.adapter_name = ""
+        val result = office_render(cfg)
+        expect(result.warnings.len()).to_equal(0)
+        expect(result.text_output.contains("Unknown")).to_equal(false)
+        expect(result.html_output.len() > 0).to_equal(true)
+
+    it "alias casing does not change whether a name is accepted":
+        for name in ["WORD", "Writer", "CaLc"]:
+            var cfg = RenderConfig.default()
+            cfg.adapter_name = name
+            val result = office_render(cfg)
+            expect(result.warnings.len()).to_equal(0)
+            expect(result.text_output.contains("Unknown")).to_equal(false)
 
 
 # ============================================================================
