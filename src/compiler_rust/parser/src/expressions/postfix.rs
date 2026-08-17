@@ -1161,7 +1161,7 @@ impl<'a> Parser<'a> {
     ///
     /// The parsed type args are discarded in the seed; the caller's `expr` (Identifier) is
     /// unchanged so that the postfix loop can continue with `.bar()` or `::bar()`.
-    pub(super) fn try_skip_ident_generic_args(&mut self) {
+    pub(super) fn try_skip_ident_generic_args(&mut self) -> Result<(), ParseError> {
         // Save state for backtracking
         let saved_current = self.current.clone();
         let saved_previous = self.previous.clone();
@@ -1172,6 +1172,15 @@ impl<'a> Parser<'a> {
 
         let mut depth: u32 = 1;
         let mut ok = false;
+        // A numeric literal in generic-argument position is a CONST GENERIC
+        // argument (`Tensor<i64, 2>`). Simple has no const generic parameters,
+        // so it is not a type and `parse_type` rejects it. Without this flag the
+        // whole list silently backtracks into a comparison chain and dies later
+        // on the `,` with "expected expression, found Comma" — a diagnostic that
+        // names neither the construct nor the limitation. Record the span so a
+        // confirmed generic-argument shape (`... > (`) can be reported exactly.
+        // See doc/08_tracking/bug/const_generic_argument_rejected_in_constructor_call_2026-08-17.md
+        let mut const_arg_span: Option<crate::token::Span> = None;
 
         // Consume the generic arg list, tracking nesting depth to handle `Foo<Bar<T>>`.
         // We use `parse_type` calls (with backtrack-on-error) to validate the contents —
@@ -1244,6 +1253,24 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // A bare integer literal here is a const-generic argument. Consume it
+            // like a type arg so the list can still reach its closing `>`; the
+            // recorded span turns into a precise diagnostic below once the shape
+            // is confirmed to be a generic argument list and not a comparison.
+            if matches!(
+                self.current.kind,
+                TokenKind::Integer(_) | TokenKind::TypedInteger(_, _)
+            ) {
+                if const_arg_span.is_none() {
+                    const_arg_span = Some(self.current.span);
+                }
+                self.advance();
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                }
+                continue;
+            }
+
             // Try to parse a type arg; if that fails this is not a valid generic list
             match self.parse_type() {
                 Ok(_) => {}
@@ -1263,7 +1290,22 @@ impl<'a> Parser<'a> {
             self.previous = saved_previous;
             self.pending_tokens = saved_pending;
             self.lexer = saved_lexer;
+            return Ok(());
         }
-        // If ok: the generic args were consumed and discarded; caller's expr is unchanged.
+        // The shape is confirmed: a closed `<...>` followed by `(`, `.`, `::` or
+        // `{`. If one of the arguments was a numeric literal, this is a const
+        // generic argument, which the language does not have. Say so, instead of
+        // backtracking into a comparison and blaming a later comma.
+        if let Some(span) = const_arg_span {
+            return Err(ParseError::unexpected_token(
+                "a type in generic argument position (Simple has no const generic parameters, so a \
+                 numeric literal such as `Tensor<i64, 2>` is not a valid generic argument; drop the \
+                 explicit generic arguments and let them be inferred, e.g. `Tensor(...)`)",
+                "integer literal".to_string(),
+                span,
+            ));
+        }
+        // Otherwise the generic args were consumed and discarded; caller's expr is unchanged.
+        Ok(())
     }
 }
