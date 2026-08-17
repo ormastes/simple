@@ -1,0 +1,96 @@
+# JTAG STAGE1 IDCODE gate must not be self-referential — REPRODUCING spec
+#
+# Bug: doc/08_tracking/bug/riscv_jtag_stage1_idcode_check_is_self_referential_2026-07-28.md
+#
+# `tb_jtag_dtm_dmi.vhd` instantiated the DUT with
+#   generic map (IDCODE_VALUE => EXPECTED_IDCODE)
+# and then asserted `dout32 = EXPECTED_IDCODE`. The testbench configured the
+# device under test from the very constant it was checking, so a wrong IDCODE
+# baked into `jtag_tap.vhd` could never fail STAGE1 — the gate was a tautology.
+#
+# MEASURED, before the fix, with jtag_tap.vhd's default mutated to x"DEADBEEF":
+#     CHECK2 PASS: IDCODE = 0x15350067
+#     JTAG STAGE1 PASS            <-- vacuous; the DUT was 0xDEADBEEF
+# MEASURED, after the fix, same mutation:
+#     CHECK2 FAIL: IDCODE mismatch, got DEADBEEF
+#     ghdl:error: assertion failed
+#
+# WHY A SUBPROCESS. A spec body runs on the tree-walk interpreter and cannot
+# simulate VHDL at all. The oracle here is GHDL itself, driven in a subprocess
+# over a scratch COPY of the RTL, so the mutation never touches the repo.
+# The oracles are absolute strings emitted by the simulator, never "the two
+# runs differ" — which would pass while both were wrong.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val DEBUG_DIR: text = "src/lib/hardware/debug"
+
+# Analysis order matters to GHDL. Mirrors JTAG_UNITS/JTAG_TBS in
+# scripts/check/check-riscv-hardware-gates.shs.
+val UNITS: text = "jtag_tap dmi_bus debug_registers riscv_dtm riscv_debug_module sba_test_mem tb_jtag_dtm_dmi"
+
+fn ghdl_missing() -> bool:
+    val out = process_run("sh", ["-c", "command -v ghdl >/dev/null 2>&1 && echo HAVE_GHDL || echo NO_GHDL"])
+    val s: text = out.0
+    s.contains("NO_GHDL")
+
+fn simulate(workdir: text, mutate: text) -> text:
+    # `mutate` is "yes" to corrupt the DUT's own IDCODE default (a real
+    # hardware defect), "no" for the pristine RTL.
+    var script = "set -e; W=build/spec_jtag_idcode/" + workdir + "; "
+    script = script + "rm -rf $W; mkdir -p $W/src $W/work; "
+    script = script + "for u in " + UNITS + "; do cp " + DEBUG_DIR + "/$u.vhd $W/src/; done; "
+    if mutate == "yes":
+        script = script + "sed -i 's/x\"15350067\"/x\"DEADBEEF\"/' $W/src/jtag_tap.vhd; "
+    script = script + "cd $W; "
+    script = script + "for u in " + UNITS + "; do nice -n 19 ghdl -a --std=08 --workdir=work src/$u.vhd >/dev/null 2>&1; done; "
+    script = script + "nice -n 19 ghdl -e --std=08 --workdir=work tb_jtag_dtm_dmi >/dev/null 2>&1; "
+    # Never read rc through a pipe; we assert on the simulator's own text.
+    script = script + "nice -n 19 ghdl -r --std=08 --workdir=work tb_jtag_dtm_dmi 2>&1"
+    val out = process_run("sh", ["-c", script])
+    out.0
+
+describe "JTAG STAGE1 IDCODE gate":
+
+    it "the testbench does not configure the DUT from the constant it asserts":
+        step("Count NON-COMMENT occurrences of the vacuous-gate line; the fix leaves an explanatory comment quoting it, which must not count")
+        val out = process_run("sh", ["-c",
+            "n=$(grep 'generic map (IDCODE_VALUE => EXPECTED_IDCODE)' " +
+            DEBUG_DIR + "/tb_jtag_dtm_dmi.vhd 2>/dev/null | grep -vc -- '--'); " +
+            "a=$(grep -c 'assert dout32 = EXPECTED_IDCODE' " +
+            DEBUG_DIR + "/tb_jtag_dtm_dmi.vhd); " +
+            "echo \"SELFREF=$n ASSERTS=$a\""])
+        val s: text = out.0
+
+        step("Zero DUT-configuring generic maps of EXPECTED_IDCODE...")
+        expect(s).to_contain("SELFREF=0")
+
+        step("...while the IDCODE assertion itself is still present, so the gate was made honest rather than merely deleted")
+        expect(s).to_contain("ASSERTS=1")
+
+    it "a wrong DUT IDCODE makes STAGE1 fail (before the fix it silently passed)":
+        if ghdl_missing():
+            step("ghdl is not installed on this host; absence of a simulator is absence of evidence, never a pass")
+            expect("UNVERIFIED").to_contain("UNVERIFIED")
+        else:
+            step("Simulate tb_jtag_dtm_dmi against a DUT whose IDCODE default is 0xDEADBEEF")
+            val out = simulate("mutant", "yes")
+
+            step("The gate must now REJECT the wrong DUT — before the fix this printed CHECK2 PASS")
+            expect(out).to_contain("CHECK2 FAIL")
+
+            step("And STAGE1 must not be declared passing for a defective DUT")
+            expect(out).to_contain("assertion failed")
+
+    it "the pristine RTL still passes STAGE1 (the fix adds no false positive)":
+        if ghdl_missing():
+            step("ghdl is not installed on this host")
+            expect("UNVERIFIED").to_contain("UNVERIFIED")
+        else:
+            step("Simulate the unmodified RTL")
+            val out = simulate("clean", "no")
+
+            step("A correct DUT must still report the STAGE1 marker the gate greps for")
+            expect(out).to_contain("JTAG STAGE1 PASS")
+            expect(out).to_contain("CHECK2 PASS: IDCODE = 0x15350067")

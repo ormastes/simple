@@ -59,8 +59,12 @@ architecture sim of tb_jtag_dtm_dmi is
 
 begin
 
+  -- NOTE: deliberately NO `generic map (IDCODE_VALUE => EXPECTED_IDCODE)`.
+  -- Driving the DUT from the same constant the checks assert against made
+  -- CHECK2 self-referential: a wrong IDCODE in jtag_tap.vhd could not fail.
+  -- The DUT must use its own default so EXPECTED_IDCODE stays an independent
+  -- spec-mandated literal.
   u_tap : entity work.jtag_tap
-    generic map (IDCODE_VALUE => EXPECTED_IDCODE)
     port map (
       tck => tck, tms => tms, tdi => tdi, trst_n => trst_n, tdo => tdo,
       tlr_o => tlr_o,
