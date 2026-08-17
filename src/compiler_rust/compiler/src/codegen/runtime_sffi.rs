@@ -1886,6 +1886,19 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // File Descriptor Operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I64, I64], &[I32]), // path, mode -> fd
+    // rt_io_file_open/_exists/_delete are the only three members of the
+    // rt_io_file_* family that take a `text`. Without a spec here they never
+    // enter the `ctx.runtime_funcs` branch in codegen/instr/calls.rs, so the
+    // text-arg expansion table is never consulted for them and the JIT passed
+    // the RuntimeString handle as `path_ptr` with the next register as
+    // `path_len`: exists() returned false for files that exist and open()
+    // returned -1, silently, at exit 0, while interpret mode was correct.
+    // Signatures are the runtime's, post-expansion:
+    // runtime/src/value/sffi/file_io/io_file.rs:82,331,340.
+    // The other 13 members are i64/bool-only and already correct.
+    RuntimeFuncSpec::new("rt_io_file_open", &[I64, I64, I64], &[I64]), // path_ptr, path_len, mode -> fd
+    RuntimeFuncSpec::new("rt_io_file_exists", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
+    RuntimeFuncSpec::new("rt_io_file_delete", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),            // fd -> size
     RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]),                // fd -> bool
     // =========================================================================

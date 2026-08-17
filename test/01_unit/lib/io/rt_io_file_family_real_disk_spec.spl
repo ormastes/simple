@@ -14,6 +14,13 @@
 # NOT VACUOUS: the probe carries a positive control (the independently
 # implemented `rt_file_*` family) on the same path, so an infrastructure
 # failure (probe never ran, wrong binary) is distinguishable from the defect.
+#
+# BUDGET. Each subprocess pays the ~300s fixed session setup, so this file
+# spawns exactly TWO — one per engine — and asserts everything it needs from
+# those two captures. An earlier four-example version exceeded the 900s test
+# daemon budget and reported `timeout=1 reason=daemon-no-response` with no
+# `Results:` line at all, which is indistinguishable from the silent-green
+# class this spec exists to catch. Do not add a third subprocess run.
 
 use std.spec.*
 use std.io_runtime.{process_run, env_get}
@@ -30,47 +37,39 @@ fn run_probe_in_mode(mode: text) -> text:
     out.0
 
 describe "rt_io_file_* family moves real bytes on a real filesystem":
-    it "runs the probe at all and the control family works":
-        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+    it "reproduces the defect and detects its class under the interpreter":
+        step("Run the run-path probe once under SIMPLE_EXECUTION_MODE=interpreter")
         val interp = run_probe_in_mode("interpreter")
 
-        step("The rt_file_* control family must pass — otherwise this spec is measuring broken infrastructure, not the bug")
+        step("Infrastructure check: the rt_file_* control family must pass, or this example is measuring a broken probe rather than the bug")
         expect(interp).to_contain("PASS control_rt_file_write_text")
         expect(interp).to_contain("PASS control_rt_file_exists_true")
         expect(interp).to_contain("PASS control_rt_file_read_text")
 
-    it "reproduces the silent data loss: writes through rt_io_file_* reach the disk (interpreter)":
-        step("Run the probe under the interpreter")
-        val interp = run_probe_in_mode("interpreter")
-
-        step("open must hand back a real descriptor, not a stubbed zero/-1")
+        step("Reproducer: open must hand back a real descriptor, not a stubbed zero/-1")
         expect(interp).to_contain("PASS rt_io_file_open_returns_nonnegative_fd")
 
-        step("the bytes written must be readable by a DIFFERENT family — an in-process fake cannot satisfy this")
+        step("Reproducer: bytes written must be readable by a DIFFERENT family — an in-process fake cannot satisfy this")
         expect(interp).to_contain("PASS written_bytes_visible_to_control_family")
 
-    it "detects the class: every path-taking rt_io_file_* call has a real filesystem effect (interpreter)":
-        step("Run the probe under the interpreter")
-        val interp = run_probe_in_mode("interpreter")
-
-        step("a predicate must agree with the control family about a file that demonstrably exists")
+        step("Class: a predicate must agree with the control family about a file that demonstrably exists")
         expect(interp).to_contain("PASS rt_io_file_exists_agrees_with_control")
 
-        step("a metadata read must return the true size, not a fabricated zero")
+        step("Class: a metadata read must return the true size, not a fabricated zero")
         expect(interp).to_contain("PASS rt_io_file_meta_size_is_three")
 
-        step("a mutating call must really mutate, observed from outside the family")
+        step("Class: a mutating call must really mutate, observed from outside the family")
         expect(interp).to_contain("PASS rt_io_file_delete_really_removes_file")
 
-        step("no individual check may have failed")
+        step("No individual check may have failed")
         expect(interp).to_contain("RT_IO_FILE PROBE: ALL PASS")
 
     it "detects the class under the JIT, where the stub substitution actually lives":
-        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        step("Run the same probe once under SIMPLE_EXECUTION_MODE=jit")
         val jit = run_probe_in_mode("jit")
 
-        step("the control family must still work under the JIT, or this arm is measuring infrastructure")
+        step("Infrastructure check: the control family must still work under the JIT")
         expect(jit).to_contain("PASS control_rt_file_write_text")
 
-        step("the rt_io_file_* family must behave identically to the control family under the JIT")
+        step("The rt_io_file_* family must behave identically to the control family under the JIT")
         expect(jit).to_contain("RT_IO_FILE PROBE: ALL PASS")

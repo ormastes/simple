@@ -2630,6 +2630,18 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_open" => Some(&[0]),
         // rt_process_run_with_limits: cmd is (ptr, len) — env_process.rs:1269.
         "rt_process_run_with_limits" => Some(&[0]),
+        // rt_io_file_open/exists/delete take (path_ptr, path_len[, mode]) —
+        // runtime/src/value/sffi/file_io/io_file.rs:82,331,340. They were absent
+        // from every text-arg table, so JIT/native passed the RuntimeString
+        // handle as `path_ptr` and whatever sat in the next register as
+        // `path_len`: `rt_io_file_exists` returned false for files that exist
+        // and `rt_io_file_open` returned -1, silently, at exit 0 — while the
+        // interpreter path (interpreter_extern/io_file.rs) was correct, so the
+        // whole `FileHandle`/`File` API of src/lib/nogc_sync_mut/io/file.spl
+        // was engine-dependent. Same class as the rt_file_write_text and
+        // rt_dir_create fixes above. See doc/08_tracking/bug/
+        // rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
+        "rt_io_file_open" | "rt_io_file_exists" | "rt_io_file_delete" => Some(&[0]),
 
         // Directory operations
         "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir"

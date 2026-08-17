@@ -1,0 +1,86 @@
+# `rt_io_file_*` under the JIT: the defect is TEXT-ARGUMENT MARSHALLING, not
+# the family — reproducing spec, with the discriminator that proves it.
+#
+# Bug: doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md
+#
+# ROOT CAUSE. A Simple `text` lowers to one RuntimeString handle. A runtime
+# symbol declaring `(path_ptr: *const u8, path_len: u64)` needs that single
+# argument EXPANDED into two machine words at the call site, and which symbols
+# get that treatment is a hand-maintained allowlist:
+# `text_arg_indices()` in src/compiler_rust/compiler/src/codegen/instr/calls.rs
+# (cranelift/JIT) and codegen/llvm/functions/calls.rs (LLVM/AOT).
+# `rt_io_file_open` / `_exists` / `_delete` appear in NEITHER, so the JIT passes
+# the handle as `path_ptr` and the next register's contents as `path_len`:
+# `exists` returns false for a file that exists, `open` returns -1, quietly, at
+# exit 0. The interpreter path (interpreter_extern/io_file.rs) is correct, so
+# the whole `FileHandle`/`File` API is engine-dependent.
+#
+# WHY A SUBPROCESS. A spec body executes on the tree-walk INTERPRETER, where
+# this defect does not exist at all. The engine under test must be selected by
+# `SIMPLE_EXECUTION_MODE` in a child process.
+#
+# WHY TWO PROBES. `probe_rt_io_file_family.spl` shows 7 JIT failures, but 4 of
+# them are COLLATERAL: they sit inside its `fd >= 0` branch and fail only
+# because `open` returned -1. `probe_rt_io_file_fd_only.spl` takes its fd from
+# the control family instead, so the fd-taking members are exercised on a real
+# descriptor. Together they localise the defect to exactly the text-taking
+# members rather than inheriting "the whole family is broken".
+#
+# NOT VACUOUS: both probes carry a positive control (the independently
+# implemented `rt_file_*` family) on the same path in the same process, so
+# "the probe never ran" is distinguishable from "the defect fired".
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val FAMILY_PROBE: text = "test/01_unit/lib/io/probe_rt_io_file_family.spl"
+val FD_PROBE: text = "test/01_unit/lib/io/probe_rt_io_file_fd_only.spl"
+
+fn run_probe(path: text, mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "rt_io_file_* text arguments must be marshalled as (ptr, len) under the JIT":
+    it "is not measuring broken infrastructure: the control family works under the JIT":
+        step("Run the family probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe(FAMILY_PROBE, "jit")
+
+        step("the independently implemented rt_file_* control family must pass under the JIT")
+        expect(jit).to_contain("PASS control_rt_file_write_text")
+        expect(jit).to_contain("PASS control_rt_file_exists_true")
+        expect(jit).to_contain("PASS control_rt_file_read_text")
+
+    it "reproduces it: the three text-taking members must work under the JIT":
+        step("Run the family probe under the JIT")
+        val jit = run_probe(FAMILY_PROBE, "jit")
+
+        step("rt_io_file_exists(path) must agree with the control family about a file that demonstrably exists")
+        expect(jit).to_contain("PASS rt_io_file_exists_agrees_with_control")
+
+        step("rt_io_file_open(path, mode) must hand back a real descriptor, not -1")
+        expect(jit).to_contain("PASS rt_io_file_open_returns_nonnegative_fd")
+
+        step("rt_io_file_delete(path) must really unlink the file, observed from outside the family")
+        expect(jit).to_contain("PASS rt_io_file_delete_really_removes_file")
+
+    it "discriminates: the fd-taking members are ALREADY correct under the JIT, so the defect is the text argument":
+        step("Run the fd-only probe, whose descriptor comes from the control family, under the JIT")
+        val jit = run_probe(FD_PROBE, "jit")
+
+        step("seek/meta/flush/close take only i64 — no text expansion is involved and they must pass")
+        expect(jit).to_contain("PASS meta_size_is_ten")
+        expect(jit).to_contain("PASS seek_end_minus_1")
+        expect(jit).to_contain("PASS close_ok")
+        expect(jit).to_contain("RT_IO_FILE FD PROBE: ALL PASS")
+
+    it "keeps the interpreter arm honest: the same family is correct there and must stay correct":
+        step("Run the family probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe(FAMILY_PROBE, "interpreter")
+
+        step("interpret mode dispatches through interpreter_extern/io_file.rs and never touches the text-arg table")
+        expect(interp).to_contain("RT_IO_FILE PROBE: ALL PASS")
