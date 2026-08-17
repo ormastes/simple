@@ -77,3 +77,12 @@ board arrives before host access does, capture directly on the board per
 `.claude/rules/board-runnable.md`. Do not substitute a hand-authored stream
 for a real capture in either case — extend the synthetic fixture's role only
 as a schema exemplar.
+
+---
+
+## Triage classification 2026-08-17 — DEFERRED: requires hardware (Intel GPU) not present
+
+Reviewed in the second-pass backlog sweep. Not actionable from this session:
+the record's own title states the capture host has no Intel GPU; the evidence this bug needs cannot be produced here by any code change. No code change is possible without that, so no
+speculative fix was attempted. Classification recorded here so future sweeps
+skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.

@@ -71,3 +71,12 @@ the exact benchmark and `/usr/bin/time` processes were terminated, leaving an
 empty timing receipt. This is host-concurrency/build-capacity evidence, not a
 rendering failure or pass. Do not retry until the host can compile the fixture
 without competing high-memory builds.
+
+---
+
+## Triage classification 2026-08-17 — DEFERRED: requires Vulkan-capable GPU + QEMU/8K render lane
+
+Reviewed in the second-pass backlog sweep. Not actionable from this session:
+the crash is in a JIT-compiled Vulkan sample needing a working Vulkan device and the 8K render harness. No code change is possible without that, so no
+speculative fix was attempted. Classification recorded here so future sweeps
+skip it in O(1) instead of re-deriving the blocker. Status remains OPEN.
