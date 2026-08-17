@@ -15,18 +15,18 @@ usable" (Stage 4) are distinct milestones — a Stage-3-only binary answers
 `compile`/`native-build` but has no `run`/`test`/`duplicate-check`, by design.
 This layer also owns the JIT Cranelift backend stability track (stage2 uses
 LLVM llc by default; JIT is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var).
-Tracks redeploy gate (`scripts/bootstrap/redeploy_gate.sh`), smoke-matrix
+Tracks redeploy gate (`scripts/check/cert/redeploy_gate/redeploy_gate.shs`), smoke-matrix
 verification, and all bootstrap-blocking regressions.
 
 ## Pipeline Links
 
-- [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [verify skill](../../../../.claude/skills/verify.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Layer Links
 
 - Driver: [src/compiler/80.driver/driver_bootstrap.spl](../../../../src/compiler/80.driver/driver_bootstrap.spl)
-- Gate: [scripts/bootstrap/redeploy_gate.sh](../../../../scripts/bootstrap/redeploy_gate.sh)
+- Gate: [redeploy_gate.shs](../../../../scripts/check/cert/redeploy_gate/redeploy_gate.shs)
   (smoke-matrix fixture verification before any forward push).
 - Bootstrap stages plan:
   [doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md](../../../../doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md).
@@ -45,16 +45,6 @@ its absolute path, hash, stage, provenance, and supported commands; isolate
 output/cache and fail closed. Such evidence proves only the named stage and
 command. It is not Stage 4, general SPipe/docgen/test, release, convergence,
 DDC, or cross-host evidence, and it must never hide a Rust-seed fallback.
-
-For the minimal-bootstrap composition/provider lane, do not infer a native
-dispatch PASS from the existence of `simple_provider_query_v1`,
-`simple_cli_command_invoke_v1`, or a built provider archive. The host loader,
-query/invoke bridge, provider wire, and `app.simple_core.provider_dispatch`
-source have landed, but the full runner must execute after all of those changes
-with the recorded admitted Stage-2 identity. Keep SMF, deployed-root routing,
-and general SPipe evidence blocked. The authoritative requirement ledger and
-exact deferred non-seed commands are in
-`doc/03_plan/sys_test/minimal_bootstrap_configuration_composed_dynamic_architecture.md`.
 
 **Cranelift Path Working:** `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift` completes stages 2–3 reliably. Full-CLI requires `--full-bootstrap` to avoid driver stale-backfill rejection. See [doc/07_guide/compiler/build.md § Cranelift Bootstrap Path](../../../../doc/07_guide/compiler/build.md).
 
@@ -172,7 +162,7 @@ the env var points to the correct seed target.
    `SIMPLE_BOOTSTRAP=1` without `SIMPLE_BOOTSTRAP_REAL_LLVM`). Cranelift gate
    tests are manual. Do not force JIT as default without smoke-matrix sign-off.
 2. **Redeploy gate enforces smoke matrix:** any forward push must pass
-   `scripts/bootstrap/redeploy_gate.sh` (compiler lint/fmt/check + bootstrap
+   `scripts/check/cert/redeploy_gate/redeploy_gate.shs` (compiler lint/fmt/check + bootstrap
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
@@ -284,6 +274,17 @@ warning banner). Use it, not `bin/simple`, when asking "what is the correct
 behaviour?" during bootstrap work.
 
 ## 2026-08-06 Stage 3 blocker family — several fixed, one still OPEN
+
+### Cached render carrier handoff (2026-08-14)
+
+Follow `doc/07_guide/ui/rendering/cached_render_entry_closure.md`. A purported
+non-seed artifact under `release/` returns `missing command` for direct source
+execution and exit 0/no output for native-build, while current source owns
+fail-closed output checks. This is a blocker and possible stale/miscompiled
+dispatcher, not proof of root cause or deployed Stage 4 lineage. Require exact
+candidate, essential-smoke, provenance, deploy, and rollback receipts before
+the render carrier build. Bug:
+`doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
 A dense sequence of Stage-3 self-host blockers were root-caused and fixed this
 session (chronological, each superseding the previous hypothesis where noted):
@@ -405,89 +406,32 @@ After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill
 with new wall status, fixed issue links, and concrete gotchas.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
-## Folded-constant Stage 3 failures
 
-When Stage 3 reports that it cannot derive a folded module-constant type,
-freeze the compiler/source identity before editing. If scalar folding already
-succeeded, prefer the originating HIR expression as the type authority instead
-of reclassifying the transported folded enum. Apply the owner fix to constant
-and static lowering together. A direct parser→HIR→MIR matrix is useful
-Integration evidence, but admission still requires an exact-source Stage 3
-candidate followed by Stage 4 provenance, convergence, and essential-tool
-smoke; a Rust-seed PASS is diagnostic only.
+## Phase snapshots + resource policy (2026-08-17)
 
-## Exact-source Stage 2 compile-worker stacks
+**Phase-snapshot convention** — `build/phase_snapshots/README.md`. Immutable,
+lineage-named per-phase binaries: `phase1_<t1>/`, `phase1_<t1>_phase2_<t2>/`,
+`..._phase3_<t3>/`, each holding `simple` (+ `.a` if needed). A snapshot is
+copied ONCE at phase completion and never overwritten; phase N+1 (and every
+side-lane task) runs against an explicit snapshot path — never `bin/simple`,
+never the in-place stage output, both of which get replaced mid-flight. A
+mid-bootstrap fix landing = a NEW generation (new t1); in-flight phase2/3
+tasks keep their old lineage until done. The bootstrap script has its own
+sibling mechanism: `src/compiler_rust/target/bootstrap.generations`
+(`scripts/bootstrap/bootstrap-from-scratch.sh:1067`).
 
-Rust native-build creates explicitly sized per-source compiler threads, so
-`RUST_MIN_STACK` cannot enlarge them. Keep the ordinary worker default small,
-but pass a larger, overflow-checked stack policy explicitly for the canonical
-Stage 2 entry-closure build. Bind that option into both the provenance command
-hash and the executed command transcript. Verify the production thread builder
-with its OS-reported stack size; source-text assertions alone do not prove the
-worker received the requested stack.
+**Resource policy during bootstrap** — the phase compiler build OWNS
+CPU/memory. Test/tool lanes run beside it `nice`d, capped at <=2 concurrent
+test processes. earlyoom kills `simple` first under pressure: a 3.1 GB test
+worker was killed at 9.97% free memory this session — an OOM-killed lane looks
+like a crash, so check `dmesg`/earlyoom logs before debugging the binary.
 
-## Do not hand-roll the stage build (learned 2026-08-17)
-
-**Symptom that sends you down this path:** stage 1 appears to hang for 15+
-minutes at 100% CPU and never reaches codegen, then dies with
-`error: native-build worker timed out after 14400s before producing a binary`.
-
-Three distinct traps produce that picture. All three were hit in one session.
-
-### 1. `bin/simple build bootstrap` is the legacy slow path, not the builder
-The seed driver's stage invocation (`misc_commands.rs`, both the
-`is_rust_driver` and non-rust branches) hardcodes **`--threads 1`** and passes
-**no `--cache-dir`, no `--low-memory`, no `--runtime-bundle`, no `--mode`**. Every
-run is therefore a cold, single-threaded, uncached recompile of the whole
-compiler + LLVM import graph. Passing `--bootstrap-reason=` /
-`--bootstrap-receipt=` to it does **not** switch paths — it still runs the old
-stages and still fails the same way.
-
-The builder of record is `scripts/bootstrap/bootstrap-from-scratch.sh`
-(`bootstrap_native_build_main`), which passes what actually makes it finish:
-
-    --cache-dir <native_cache_dir>     # persistent native-build cache — the speed
-    --low-memory                       # single worker; the OOM guard, see §2
-    --mode one-binary
-    --runtime-bundle core-c-bootstrap
-    --target <PLATFORM> --backend <backend>
-    --source src/compiler --source src/app --source src/lib --source examples/10_tooling
-
-Omitting `--cache-dir` is the single biggest cause of "bootstrap takes forever":
-there is nothing to reuse, so every attempt pays full cold cost. Without
-`--full-bootstrap` the script reuses the existing Rust seed and never runs
-cargo, which is what you want when the seed is already good.
-
-### 2. "timed out after 14400s" is a LIE when the box is under memory pressure
-`earlyoom` runs here with `--prefer ^(simple|rustc|cc1|...)`, i.e. it kills
-`simple` **first**, and fires at ~10% free. Real log from the incident:
-
-    earlyoom: mem avail: 12830 of 128683 MiB (9.97%), swap free: 0
-    earlyoom: sending SIGTERM to process 1550884 uid 1000 "simple": badness 982, VmRSS 3132 MiB
-
-The parent then reported a 14400s timeout **7 minutes** into the run. Before
-believing any native-build timeout, check `journalctl -u earlyoom` for the
-window. Treating an OOM as a timeout sends you to raise `--timeout`, which
-cannot help.
-
-### 3. Bootstrap and a wide test fleet cannot share this machine
-A single `bin/simple test <spec>` process peaks around **3 GB RSS**, and the
-stage worker holds **~2.9 GB**. 25 concurrent spec processes measured 46 GB;
-add the worker and a 128 GB box walks into earlyoom's kill zone. Bootstrap and
-broad test sweeps must **alternate**, not overlap. Culling `simple test`
-processes took free memory 13 GB -> 55 GB immediately.
-
-### Shape of a healthy stage-1 run
-The parent `native-build` process legitimately sits in `futex_wait` doing
-nothing — it spawns `native_build_worker.spl` under a `timeout` wrapper, and the
-**grandchild** does the compiling. Measure the grandchild: healthy looks like
-elapsed == CPU time (a full core) with RSS ~2.9 GB. Measuring the parent and
-concluding "starved" is a misread; that mistake was made in this session too.
-
-### Never deploy stage 3 over `bin/simple`
-Stage 3 only proves the stage-2 binary can recompile the minimal bootstrap
-entry. It answers `compile`/`native-build` and has **no `run`/`test`** — copying
-it to `bin/release/<triple>/simple` breaks all tooling. The full CLI is Stage 4
-(`--full-cli`), built from `main.spl`. Equally, do not `cargo build` and copy
-the result there: that is a fresh **seed** wearing a current mtime, which is
-exactly how the "is bin/simple self-hosted?" question keeps getting re-muddied.
+**Parallel find-and-fix fleet** — sweep per-DIRECTORY under `timeout`,
+dropping to per-FILE on a crash, so one crashing file never stops the sweep.
+Land fixes in the SOURCE tree: later stages compile them in for free. Land via
+scoped plumbing commits (only your paths) through all 7 pre-push guards
+(`.claude/rules/vcs.md`). Fixes cross-linked from this round: seed sqlite
+emulation (`208f11786f8`: DELETE WHERE fail-closed, real BEGIN/ROLLBACK
+snapshots, UNIQUE), argv publish for delegated subcommands (`bdafd9d5b5a`,
+`rt_set_args_vec`), `rt_file_atomic_write` in the Rust staticlib
+(`src/compiler_rust/native_all/src/lib.rs:1155`).

@@ -106,37 +106,30 @@ this skill with new open-bug links and concrete gotchas.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 
-## Flags that decide whether a build finishes (2026-08-17)
+## Cached render entry closure blocker (2026-08-14)
 
-`native-build` is fast or effectively unbounded depending on four flags. The
-canonical set lives in `scripts/bootstrap/bootstrap-from-scratch.sh`
-(`bootstrap_native_build_main`); copy it rather than composing your own.
+The sparse DrawIR 8K carrier uses the admission-gated
+`CachedRenderEntryClosureV1` workflow in
+`doc/07_guide/ui/rendering/cached_render_entry_closure.md`. Keep Stage 4
+candidate construction, candidate admission, deployment, deployed hash lineage,
+carrier build, and carrier execution separate. An exit-0 native-build with no
+fresh artifact is failure, even when current source contains a missing-output
+guard. The unadmitted `release/.../simple` artifact currently exhibits that
+failure; do not call it deployed pure-Simple without provenance, essential-smoke,
+and deploy receipts. Open bug:
+`doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
-| Flag | Omitting it costs |
-|---|---|
-| `--cache-dir <dir>` | **Everything.** No cache to reuse → full cold recompile of the compiler + LLVM import graph on every attempt. The #1 cause of "bootstrap never finishes". |
-| `--low-memory` | Single-worker enforcement. Without it, workers each own a full LLVM Context/optimizer and the host OOMs (see below). |
-| `--mode one-binary` | Wrong artifact shape for a stage build (default is `dynload`). |
-| `--runtime-bundle core-c-bootstrap` | Runtime resolution falls back and can fail late. |
+## Phase snapshots for side-lane native builds (2026-08-17)
 
-`--threads` note from the built-in help: default is all CPUs, but the **llvm
-backend clamps to at most 4** because each worker owns a full LLVM
-Context/optimizer, so unclamped parallelism balloons memory. `--low-memory`
-overrides `--threads` to a single worker. Raising `--threads` does not speed up
-the module-loading phase at all — that phase is serial, so a stage that looks
-stuck at 100% of one core with no codegen output is normal, not hung.
-
-## Reading a stalled build correctly
-
-`native-build` (parent) → `timeout` wrapper → `native_build_worker.spl`
-(grandchild). The parent **sleeps in `futex_wait` by design**. Always measure
-the grandchild: healthy is elapsed ≈ CPU time with RSS ~2.9 GB. Measuring the
-parent shows ~0% CPU and reads as "CPU-starved", which is a misdiagnosis.
-
-## `timed out after Ns` may be an OOM kill
-
-`earlyoom` on this host runs `--prefer ^(simple|rustc|cc1|...)` — it targets
-`simple` first, at ~10% free memory. When it SIGTERMs the worker, the parent
-reports `native-build worker timed out after 14400s before producing a binary`
-regardless of actual elapsed time (observed at 7 minutes of a 4-hour budget).
-Always cross-check `journalctl -u earlyoom` before raising `--timeout`.
+Never build or test against `bin/simple` or an in-place stage output while a
+bootstrap is running — both get replaced under you. Pin to an immutable
+lineage-named snapshot under `build/phase_snapshots/`
+(`phase1_<t1>_phase2_<t2>/simple`; see its README). New fix landed = new
+generation; in-flight tasks finish on their pinned lineage. The bootstrap
+build owns CPU/memory: run native-build side lanes `nice`d with <=2 concurrent
+test processes — earlyoom kills `simple` first (a 3.1 GB worker died at 9.97%
+free), so an OOM kill can masquerade as a codegen crash. For sweep-style
+find-and-fix, go per-directory under `timeout` and drop to per-file on crash;
+fixes landed in the source tree get compiled into later stages for free.
+Runtime parity note: `rt_file_atomic_write` now exists in the Rust staticlib
+(`src/compiler_rust/native_all/src/lib.rs:1155`).

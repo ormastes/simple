@@ -91,3 +91,13 @@ When database/SQL research, requirements, architecture, design, tests,
 implementation, verification, or release artifacts change, update this skill with
 the new links and current handoff notes — and re-check the owner map above, since
 its whole purpose is to stop the next session re-deriving "SQLite is blocked".
+
+## Seed sqlite-emulation fixes (2026-08-17)
+
+`208f11786f8` fixed three seed-emulation gaps: `DELETE ... WHERE` now honors
+the predicate (fail-closed instead of deleting all rows), `BEGIN`/`ROLLBACK`
+take real snapshots, and `UNIQUE` constraints are enforced. Related runtime
+fixes: SQL strings are NUL-terminated before reaching sqlite (`8d04ee87582`),
+and real sqlite is linked for AOT native builds (`1f4121930a8`). If a spec
+passed only because emulation ignored WHERE or UNIQUE, it may go red now —
+that is the fix working, not a regression.
