@@ -74,7 +74,7 @@ The gaps are elsewhere — see below.
 | lane | owns | status |
 |---|---|---|
 | A | `test_runner_args.spl`, `test_runner_types.spl` | DONE `a3738dd8d0c` |
-| B | `test_executor_parsing.spl`, `test_runner_output.spl` | uncommitted WIP present |
+| B | `test_executor_parsing.spl`, `test_runner_output.spl` | DONE `882fb6e31ea` |
 | C | `test/fixtures/unstable_mode/**` (new files only) | pending |
 | D | `test_runner_main.spl` | pending |
 | E | requirement doc + LLM wiki | DONE `32a5d018082` |
@@ -101,3 +101,32 @@ The gaps are elsewhere — see below.
   `src/app/test_runner_new/`, but the files this lane actually changes live
   under `src/lib/nogc_sync_mut/test_runner/`. That mismatch is a real trap for
   the next agent and is now noted in the layer doc.
+- 2026-08-17 — **The Lane A/B WIP recorded above was DESTROYED, not landed.**
+  It was read directly from the working copy earlier this session (CRASHED
+  classification at `test_executor_parsing.spl:397-401`, the `ponytail:`
+  summary derivation at `test_runner_output.spl:150-167`, both showing ` M` in
+  `git status`). By the time Lane B started, both files were CLEAN — empty
+  `git diff`, empty `git status --porcelain`, and `git log -S "CRASHED:" --all`
+  finds nothing on those paths. Lost to the tree wipe repaired by
+  `ae55a7467197 fix(vcs): restore tree wiped by 6f86ff32a7d`.
+  **Lesson: uncommitted work in this shared tree does not survive. Commit on
+  write.**
+- 2026-08-17 — Lane B landed `882fb6e31ea` (rewritten from scratch). Verified
+  by CONTENT, not commit success: the three prefixes are present in
+  `test_executor_parsing.spl`, INCONCLUSIVE verdict at
+  `test_runner_output.spl:199`.
+  - **rc 143 never reaches Simple as a plain exit code from a directly
+    signalled child.** `finish_child_output_bounded` (`env_process.rs:508`)
+    does `status.code().unwrap_or(-1)`; the timeout branch (`:535`) returns a
+    hard-coded `-1` too — so signal-death and timeout are genuinely
+    indistinguishable at that boundary. 143 CAN arrive as a plain code via the
+    shell guard wrapper's `die(){ exit 143; }` (`:806`). Both forms handled;
+    the sentinel file covers the rest.
+  - Unverified classes carry `failed: 0` (kept out of the failed count) but a
+    non-empty `error` (so `is_ok()` stays false) — they cannot collapse into
+    exit 0.
+  - Sentinel path `<spec_path>.crashed`, deleted on read so a stale sentinel
+    cannot mislabel a later run.
+  - **`total_timed_out` aggregation in `test_runner_modes.spl:261-374` is
+    COMMENTED OUT**, so those totals are unreliable — an independent reason the
+    error-prefix derivation is right here rather than merely lazy.
