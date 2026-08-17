@@ -4,6 +4,7 @@
 Status: RESOLVED 2026-08-17 — all three cursor paths are hidden-row aware.
 History: OPEN -> PARTIALLY FIXED 2026-08-17 (`ff66bac92f85`, TUI) -> RESOLVED
 2026-08-17 (`10da1bf0f786`, `SheetsApp.navigate_to`).
+2026-08-17 (this commit, `SheetsApp.navigate_to`).
 
 ## Resolution 2026-08-17
 
