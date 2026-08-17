@@ -1,12 +1,53 @@
 # Bootstrap Stage 3 module-surface placeholder nil trap (2026-08-01)
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: RESOLVED (2026-08-17) — retired as already-fixed in current source.
+
+The prior `OPEN (P1)` header contradicted this file's own final section
+("Root cause confirmed in the next session"), which already recorded the fix.
+The `re-verified by source inspection` stamp was wrong.
 
 ## Status
 
-Open. Stage 4 is blocked because a fresh admitted Stage 3 compiler cannot yet
-be produced from the main working copy.
+RESOLVED. Verified by CONTENT grep of current source, not SHA ancestry:
+
+- `src/compiler/80.driver/driver_source_pipeline_parsing.spl:228` sizes the
+  parsed-module index as `unique_entry_sources.len() * 2 + 1`;
+  lines `283-289` insert via linear probing over the parallel
+  `parsed_entry_index_keys: [text]` / `parsed_entry_index_values: [i64]`
+  arrays, and lines `321-327` look up the same way, returning a fail-closed
+  sentinel on miss.
+- The selector is `_driver_text_bucket_index`
+  (`src/compiler/80.driver/driver_source_loading.spl:99`), FNV-1a via
+  `hm_hash_text` with negative-modulo correction.
+- **No `Dict<text, i64>` physical-path cache remains** in `parse_all_impl` —
+  that Dict, whose staged-native bracket lookup returned an incorrect index,
+  was the confirmed root cause and is gone.
+
+Engine cross-check (stale Rust seed `bin/simple`, mtime 2026-08-16 22:59):
+an open-addressing round-trip probe reported `mismatches=0` under BOTH
+`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`, so the replacement selector
+does not diverge by engine.
+
+The residual 135 HIR semantic diagnostics noted at the end of this file are a
+DIFFERENT frontier (Stage-3 closure/import surface) and do not reopen this row.
+Stage 4 admission remains tracked there, not here.
+
+## Regression specs (added 2026-08-17)
+
+`test/01_unit/bugs/driver_parsed_module_index_selector_spec.spl` — reproducer
+(Group 1: the exact Stage 3 source set, `hir_definitions.spl` at index 6, the
+`compiler.hir.hir_definitions` alias missing fail-closed with `-1`, and the
+`2n+1` capacity rule) plus a similar-problem detection group generalizing to
+the defect CLASS "a text-keyed selector returns an index that is not the one
+inserted" (Group 2: 40-key collision pressure at minimum capacity, index-range
+containment, long shared-prefix paths, in-place re-insert, and a
+`Dict<text, i64>`-vs-array-oracle cross-check — the precise comparison the
+pre-fix code failed).
+
+- After: `Results: 10 total, 10 passed, 0 failed`
+- Ablation (return the neighbour slot's value, i.e. the original
+  wrong-index signature): `Results: 10 total, 2 passed, 8 failed` — both
+  groups detect it, so the specs are not vacuous.
 
 ## Reproduction authority
 

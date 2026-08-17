@@ -1,0 +1,270 @@
+"""
+# Driver parsed-module index selector Specification
+
+**Feature IDs:** #DRV-PARSED-MODULE-INDEX-001
+**Category:** Compiler / Driver
+**Difficulty:** 4/5
+**Status:** Complete
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/bootstrap_stage3_module_surface_placeholder_nil_2026-08-01.md
+
+## Overview
+
+Bootstrap Stage 3 used to die with `runtime error: field access on nil
+receiver` (SIGILL, exit 132) inside `module_surfaces_from_modules` at source
+index 6 of 800, while resolving `compiler.hir.hir_definitions`. The root cause
+was NOT in surface extraction: `parse_all_impl`'s optimized physical-path cache
+was a `Dict<text, i64>`, and the staged-native bracket lookup on it returned an
+INCORRECT index. The wrong index selected the wrong (or no) parsed module, and
+the next consumer dereferenced nil.
+
+The fix replaced that Dict with open addressing over parallel `[text]` /
+`[i64]` arrays sized `2 * unique_sources + 1`, keyed through
+`_driver_text_bucket_index`
+(`src/compiler/80.driver/driver_source_loading.spl:99`, used at
+`driver_source_pipeline_parsing.spl:283` for insert and `:321` for lookup).
+
+This spec pins the DEFECT CLASS — "a text-keyed selector returns an index that
+is not the one that was inserted" — rather than only the one crashing source.
+Group 1 is the reproducer over the exact key shapes that trapped. Group 2
+generalizes: adversarial collision pressure, absent-key handling, and a
+cross-check of a `Dict<text, i64>` against the array oracle, which is the
+precise comparison the original defect would have failed.
+
+Full-bootstrap Stage 2/3 execution is not reachable from a spec, so these
+examples exercise the selector algorithm itself, which is where the wrong
+index came from.
+"""
+
+use std.spec
+
+
+# ---------------------------------------------------------------------------
+# Faithful replica of the driver selector under test.
+#
+# `_hash_text` is FNV-1a over all UTF-8 bytes, identical to `hm_hash_text`
+# (src/compiler/10.frontend/core/interpreter/hashmap.spl:24), which
+# `_driver_text_bucket_index` calls. `_bucket_index` mirrors that helper's
+# negative-modulo correction.
+# ---------------------------------------------------------------------------
+
+fn _hash_text(s: text) -> i64:
+    val bytes = s.bytes()
+    val slen = bytes.len()
+    if slen == 0: return 0
+    var h: i64 = -3750763034362895579
+    var i: i64 = 0
+    while i < slen:
+        h = h xor (bytes[i] as i64)
+        h = h * 1099511628211
+        i = i + 1
+    if h < 0: return 0 - h
+    h
+
+fn _bucket_index(key: text, bucket_count: i64) -> i64:
+    val raw = _hash_text(key) % bucket_count
+    if raw < 0:
+        raw + bucket_count
+    else:
+        raw
+
+# Capacity rule from parse_all_impl: 2 * unique_sources + 1, which guarantees
+# at least one empty slot so both probe loops terminate.
+fn _capacity_for(unique_sources: i64) -> i64:
+    unique_sources * 2 + 1
+
+# Insert loop, driver_source_pipeline_parsing.spl:283-289.
+fn _index_build(keys: [text], cap: i64) -> ([text], [i64]):
+    var ks: [text] = []
+    var vs: [i64] = []
+    while ks.len() < cap:
+        ks = ks.push("")
+        vs = vs.push(-1)
+    var i = 0
+    while i < keys.len():
+        var slot = _bucket_index(keys[i], cap)
+        while ks[slot] != "" and ks[slot] != keys[i]:
+            slot = (slot + 1) % cap
+        ks[slot] = keys[i]
+        vs[slot] = i
+        i = i + 1
+    (ks, vs)
+
+# Lookup loop, driver_source_pipeline_parsing.spl:321-327. Returns -1 on miss,
+# which is the fail-closed sentinel that produces `missing parsed module`
+# instead of a nil dereference.
+fn _index_lookup(ks: [text], vs: [i64], key: text, cap: i64) -> i64:
+    var slot = _bucket_index(key, cap)
+    while ks[slot] != "":
+        if ks[slot] == key:
+            return vs[slot]
+        slot = (slot + 1) % cap
+    -1
+
+
+# ============================================================================
+# Test Group 1: reproducer — the Stage 3 source set that trapped
+# ============================================================================
+
+describe "parsed-module index over the Stage 3 physical sources":
+
+    context "the hir_definitions key that trapped at source index 6":
+        it "returns the index that was inserted for hir_definitions":
+            # Index 6 of the source list is where Stage 3 read a nil payload.
+            val keys = ["src/compiler/20.hir/hir.spl",
+                        "src/compiler/20.hir/hir_types.spl",
+                        "src/compiler/20.hir/hir_expr.spl",
+                        "src/compiler/20.hir/hir_stmt.spl",
+                        "src/compiler/20.hir/hir_items.spl",
+                        "src/compiler/20.hir/hir_lowering/module_surface.spl",
+                        "src/compiler/20.hir/hir_definitions.spl",
+                        "src/compiler/80.driver/driver_source_loading.spl"]
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            expect(_index_lookup(ks, vs, "src/compiler/20.hir/hir_definitions.spl", cap)).to_equal(6)
+
+        it "returns the inserted index for every source in the set":
+            val keys = ["src/compiler/20.hir/hir.spl",
+                        "src/compiler/20.hir/hir_types.spl",
+                        "src/compiler/20.hir/hir_expr.spl",
+                        "src/compiler/20.hir/hir_stmt.spl",
+                        "src/compiler/20.hir/hir_items.spl",
+                        "src/compiler/20.hir/hir_lowering/module_surface.spl",
+                        "src/compiler/20.hir/hir_definitions.spl",
+                        "src/compiler/80.driver/driver_source_loading.spl"]
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            var mismatches = 0
+            var i = 0
+            while i < keys.len():
+                if _index_lookup(ks, vs, keys[i], cap) != i:
+                    mismatches = mismatches + 1
+                i = i + 1
+            expect(mismatches).to_equal(0)
+
+    context "the module-name alias that produced `missing parsed module`":
+        it "misses fail-closed with -1 rather than a wrong index":
+            # `compiler.hir.hir_definitions` is a MODULE NAME, never a physical
+            # source key. A selector that invents an index here is exactly how
+            # a nil parsed module reached the surface extractor.
+            val keys = ["src/compiler/20.hir/hir_definitions.spl",
+                        "src/compiler/20.hir/hir.spl"]
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            expect(_index_lookup(ks, vs, "compiler.hir.hir_definitions", cap)).to_equal(-1)
+
+    context "capacity rule":
+        it "sizes the table to 2n+1 so a free slot always remains":
+            expect(_capacity_for(8)).to_equal(17)
+            expect(_capacity_for(800)).to_equal(1601)
+
+
+# ============================================================================
+# Test Group 2: similar-problem detection — the selector defect CLASS
+# ============================================================================
+
+describe "text-keyed index selectors must return the inserted index":
+
+    context "adversarial collision pressure":
+        it "keeps every key's index correct at minimum capacity":
+            # cap = 2n+1 with n = 40 keeps load at ~0.49, so most keys probe
+            # past at least one occupied slot. A selector that mishandles the
+            # linear-probe walk returns a NEIGHBOUR's index — the original
+            # bug's signature — and this count goes non-zero.
+            var keys: [text] = []
+            var g = 0
+            while g < 40:
+                keys = keys.push("src/compiler/gen/module_{g}.spl")
+                g = g + 1
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            var mismatches = 0
+            var i = 0
+            while i < keys.len():
+                if _index_lookup(ks, vs, keys[i], cap) != i:
+                    mismatches = mismatches + 1
+                i = i + 1
+            expect(mismatches).to_equal(0)
+
+        it "never reports an index outside the inserted range":
+            var keys: [text] = []
+            var g = 0
+            while g < 40:
+                keys = keys.push("src/compiler/gen/module_{g}.spl")
+                g = g + 1
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            var out_of_range = 0
+            var i = 0
+            while i < keys.len():
+                val got = _index_lookup(ks, vs, keys[i], cap)
+                if got < 0 or got >= keys.len():
+                    out_of_range = out_of_range + 1
+                i = i + 1
+            expect(out_of_range).to_equal(0)
+
+    context "long shared-prefix keys (the real physical-path shape)":
+        it "distinguishes paths that differ only in the last component":
+            # Compiler source paths share long prefixes; a truncating or
+            # prefix-only hash collapses them onto one index.
+            val keys = ["src/compiler/20.hir/hir_lowering/_Items/a.spl",
+                        "src/compiler/20.hir/hir_lowering/_Items/b.spl",
+                        "src/compiler/20.hir/hir_lowering/_Items/c.spl",
+                        "src/compiler/20.hir/hir_lowering/_Items/d.spl"]
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            expect(_index_lookup(ks, vs, keys[0], cap)).to_equal(0)
+            expect(_index_lookup(ks, vs, keys[1], cap)).to_equal(1)
+            expect(_index_lookup(ks, vs, keys[2], cap)).to_equal(2)
+            expect(_index_lookup(ks, vs, keys[3], cap)).to_equal(3)
+
+    context "re-inserting a key updates in place":
+        it "does not leak a stale duplicate slot":
+            # An alias re-registering the same physical source must overwrite,
+            # not append a second slot that a later lookup could reach first.
+            val keys = ["a.spl", "b.spl", "a.spl"]
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            expect(_index_lookup(ks, vs, "a.spl", cap)).to_equal(2)
+            expect(_index_lookup(ks, vs, "b.spl", cap)).to_equal(1)
+
+    context "cross-check against Dict<text, i64>":
+        it "agrees with the array selector on every key":
+            # This is the exact comparison the pre-fix code failed: the Dict
+            # answered with an incorrect index while the parallel-array
+            # selector was right. Any engine on which text-keyed Dict lookup
+            # disagrees with the oracle reds here.
+            var keys: [text] = []
+            var g = 0
+            while g < 24:
+                keys = keys.push("src/compiler/gen/dictcheck_{g}.spl")
+                g = g + 1
+            val cap = _capacity_for(keys.len())
+            val (ks, vs) = _index_build(keys, cap)
+            var d: Dict<text, i64> = {}
+            var i = 0
+            while i < keys.len():
+                d[keys[i]] = i
+                i = i + 1
+            var disagreements = 0
+            i = 0
+            while i < keys.len():
+                if d.get(keys[i]) != _index_lookup(ks, vs, keys[i], cap):
+                    disagreements = disagreements + 1
+                i = i + 1
+            expect(disagreements).to_equal(0)
+
+
+# ============================================================================
+# Test Group 3: vacuity probe
+# ============================================================================
+
+describe "parsed-module index spec vacuity guard":
+
+    context "vacuity probe":
+        it "executes assertions in this file":
+            val cap = _capacity_for(1)
+            val (ks, vs) = _index_build(["vacuity.spl"], cap)
+            expect(_index_lookup(ks, vs, "vacuity.spl", cap)).to_equal(0)
