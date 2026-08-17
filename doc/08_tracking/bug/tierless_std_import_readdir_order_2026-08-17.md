@@ -69,6 +69,18 @@ The detection half exists because a fix that merely sorted alphabetically, or
 that filtered the listing down to known tiers, would satisfy the reproducer
 and be wrong.
 
+**THE SPEC HAS NEVER PRODUCED A VERDICT. Do not treat this fix as verified.**
+Three runs were started; all three were **killed (exit 144)** before reaching
+their `Results:` line, on a box under a live 16-job bootstrap at load 120-185.
+This is a kill, not a slow run — re-running it is the outstanding action:
+
+```
+bin/simple test test/01_unit/compiler/module_resolver/tierless_std_import_order_spec.spl --timeout 1200
+```
+
+Note for whoever picks this up: an `OK` from `check-test-verdict-not-silent.shs`
+does not settle it either. Only a `Results: N total, N passed` line does.
+
 ## Not proven
 
 - No end-to-end test demonstrates a real `use std.X` binding the wrong module
