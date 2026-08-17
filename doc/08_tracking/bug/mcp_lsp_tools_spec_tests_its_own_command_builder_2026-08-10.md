@@ -1,3 +1,50 @@
+## RESOLVED 2026-08-17 — spec rewritten against the real product
+
+`test/01_unit/app/mcp_unit/mcp_lsp_tools_spec.spl` and its `test/unit/` mirror
+(`diff -q` identical) now call the live product instead of asserting on strings
+they built themselves. 578 lines / 78 self-referential examples replaced by 18
+real ones.
+
+**Requests go through the real dispatcher**, `dispatch_tool` in
+`src/lib/nogc_async_mut/mcp/main_lazy.spl:187` — the same entry the MCP server
+uses for a `tools/call` — so the spec proves the tool NAME -> HANDLER wiring as
+well as handler behaviour. Unwiring a dispatch arm now fails the spec.
+
+Structure: 11 repro examples (one per tool + the `new_name` case) pinning the
+invalid-params contract; 4 generalization examples asserting the same invariant
+over the whole tool list at once (no tool accepts an empty body; every tool
+names its missing parameter; every tool echoes its request id; all 10 still
+wired) so a tool added later without validation fails without needing its own
+example; and 3 success-path examples that supply full parameters and assert on
+output only obtainable by actually invoking the query bridge.
+
+### Evidence — three numbers, per sabotage discipline
+
+```
+green      SPEC FILE VERDICT: ... declared>=18 executed=18 passed=18 failed=0 dropped=0
+           Results: 18 total, 18 passed, 0 failed
+sabotaged  (workspace_symbols' `if query == ""` guard changed to a never-matching literal)
+           x simple_workspace_symbols reports the missing query parameter
+           x no Tier 4 tool accepts an empty request body
+reverted   SPEC FILE VERDICT: ... declared>=18 executed=18 passed=18 failed=0 dropped=0
+```
+
+The sabotage bit on both the targeted example AND the generalization invariant.
+Product file restored byte-for-byte (blob `44861b58a46c` before and after).
+
+### Two findings recorded along the way
+
+1. **The success envelope has no `isError` key at all.** `make_tool_result`
+   (`main_lazy_json.spl:271`) emits `rawText`/`inferredType`/`shape`; only
+   `make_tool_error` sets `"isError":true`. An initial draft asserting
+   `"isError":false` failed 2/18 — the assertion was wrong, not the product.
+   The spec now asserts `rawText` present and `"isError":true` absent.
+2. **`src/app/mcp/main_lazy_query_tools.spl` is a divergent sibling copy
+   containing NONE of the ten Tier 4 handlers** (874-line diff against the
+   `std.nogc_async_mut` version). The sibling `mcp_analysis_tools_spec` imports
+   the `app.mcp.*` path; this spec must import `std.nogc_async_mut.mcp.*`, which
+   is the only implementation of these ten tools.
+
 ## Re-verified 2026-08-17 — STILL OPEN, unchanged
 
 `test/01_unit/app/mcp_unit/mcp_lsp_tools_spec.spl` still builds the shell command

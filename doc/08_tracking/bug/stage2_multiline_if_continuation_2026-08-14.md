@@ -67,3 +67,30 @@ invokes it, so a spec written here would exercise the seed parser (already
 green) and would silently prove nothing about the Stage 2 parser that is
 actually under suspicion. Writing one would manufacture a false green, so none
 was added.
+
+## RESOLVED 2026-08-17 — fixed in current source; the report was seed staleness
+
+The self-hosted lexer at tip GLUES the continuation. Driving
+`core.lexer.lex_init`/`lex_next` (i.e. `src/compiler/10.frontend/core/
+lexer_struct.spl`) over the reproducer emits NO `Newline` token between the
+condition operand and the leading `and`:
+
+```
+... 40(if) 6 80(==) 1 55(and) 6 80 1 161(:) 180 181 ...
+```
+
+`CoreLexer.leading_op_continues` (`lexer_struct.spl:325`) plus
+`line_starts_binary_op`'s word-operator arms (`:303-306`) implement it, with
+guard 1 `token_can_end_expr` and guard 2 strictly-deeper-indent as the two
+negative controls. `typed_storage_view_producer.spl:98-99` already carries the
+unparenthesized form; no workaround remains to remove.
+
+Regression spec (drives the SELF-HOSTED lexer, which the pre-existing
+`test/01_unit/compiler/parser_leading_operator_continuation_spec.spl` cannot,
+since a spec's own source is lexed by the Rust seed that executes it):
+`test/01_unit/compiler/frontend/lexer_if_condition_leading_and_continuation_spec.spl`
+
+```
+Results: 4 total, 4 passed, 0 failed
+SPEC FILE VERDICT: ... declared>=4 executed=4 passed=4 failed=0 dropped=0
+```

@@ -1,8 +1,53 @@
 # yaml parse: single-quoted scalars and nested block mappings
 
-**Status:** FIXED — found 2026-08-01 while fixing
-`common_encoding_yaml_broken_cross_submodule_import_2026-07-20`, fixed
-2026-08-01 in `src/lib/common/yaml/parse.spl`.
+**Status:** FIXED (parser) 2026-08-01 in `src/lib/common/yaml/parse.spl`;
+**spec coverage was vacuous until 2026-08-17** — see "Spec never executed" below.
+Found 2026-08-01 while fixing
+`common_encoding_yaml_broken_cross_submodule_import_2026-07-20`.
+
+## Spec never executed (2026-08-17)
+
+An audit flagged this doc as a regression: it read `FIXED`, yet
+`test/01_unit/lib/common/encoding/yaml_spec.spl` reported
+`Results: 1 total, 0 passed, 1 failed`.
+
+**The parser fix was never lost.** Both fixes described below are intact in
+`src/lib/common/yaml/parse.spl` and were confirmed correct on re-run. There is
+no clobbering commit.
+
+What was actually wrong is that the covering spec had **never run at all**. Its
+line 9 read `use std.common.yaml.{...}`, but `src/lib/common/yaml/` is a plain
+directory with no `mod.spl` — the bare package form does not resolve there, and
+never did (no `mod.spl` was ever deleted; git shows none). The runner reported:
+
+```
+error: runtime: Module "std.common" does not export 'yaml'
+error: test-runner: no examples executed
+error: test-runner: spec executed nothing (zero-examples)
+SPEC FILE VERDICT: ... declared>=27 executed=0 passed=0 failed=1 dropped=1 reason=zero-examples
+Results: 1 total, 0 passed, 1 failed
+```
+
+The one and only working import style in the tree is the concrete submodule
+form that `src/lib/common/encoding/yaml.spl` already uses
+(`use std.common.yaml.parse.{...}`). Repointing line 9 to
+`std.common.yaml.types.{...}` — where all six imported symbols are defined —
+makes the spec load. It then passes in full:
+
+```
+SPEC FILE VERDICT: ... declared>=27 executed=27 passed=27 failed=0 dropped=0
+Results: 27 total, 27 passed, 0 failed
+```
+
+So the original 2026-08-01 evidence (a `run`-based oracle, `pass=27 fail=0`) was
+accurate about the parser — but because it deliberately avoided `simple test`,
+nobody noticed the spec itself could not load. **The 27/27 above is the first
+time the spec runner has ever executed this file.** The lesson is the one
+already in `.claude/rules/testing.md`: a spec that exits without an explicit
+executed-count line has not passed, and an oracle that bypasses the runner does
+not prove the runner's copy works.
+
+Fix commit: `b4c7d89d9c1`.
 
 Two pre-existing defects in `src/lib/common/yaml/parse.spl`, distinct from the
 import/tag bug and left unfixed there on purpose: they are in a different file
