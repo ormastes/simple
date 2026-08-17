@@ -473,6 +473,10 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        // Computed before the match: the guard needs `&mut self` to peek, which the
+        // match's borrow of `self.current.kind` would otherwise forbid.
+        let move_prefixes_operand =
+            matches!(self.current.kind, TokenKind::Move) && self.move_is_keyword_prefix();
         match &self.current.kind {
             TokenKind::Minus => {
                 self.advance();
@@ -532,7 +536,9 @@ impl<'a> Parser<'a> {
                     operand: Box::new(operand),
                 })
             }
-            TokenKind::Move => {
+            // `move` only prefixes an operand when an operand actually follows;
+            // otherwise it is an ordinary identifier and falls through to postfix.
+            TokenKind::Move if move_prefixes_operand => {
                 self.advance();
                 let operand = self.parse_unary()?;
                 Ok(Expr::Unary {
@@ -597,11 +603,15 @@ mod comparison_continuation_tests {
         );
         for op in ["<", ">", "<=", ">="] {
             assert!(
-                parses(&format!("fn f(a: i64, b: i64) -> bool:\n    val x = a {op}\n       b\n    x\n")),
+                parses(&format!(
+                    "fn f(a: i64, b: i64) -> bool:\n    val x = a {op}\n       b\n    x\n"
+                )),
                 "binding continuation after `{op}` must parse"
             );
             assert!(
-                parses(&format!("fn f(a: i64, b: i64) -> bool:\n    if a {op}\n       b:\n        return true\n    false\n")),
+                parses(&format!(
+                    "fn f(a: i64, b: i64) -> bool:\n    if a {op}\n       b:\n        return true\n    false\n"
+                )),
                 "if-condition continuation after `{op}` must parse"
             );
         }
@@ -611,11 +621,15 @@ mod comparison_continuation_tests {
     fn equality_operator_line_continuation_parses() {
         for op in ["==", "!="] {
             assert!(
-                parses(&format!("fn f(a: i64, b: i64) -> bool:\n    val x = a {op}\n       b\n    x\n")),
+                parses(&format!(
+                    "fn f(a: i64, b: i64) -> bool:\n    val x = a {op}\n       b\n    x\n"
+                )),
                 "binding continuation after `{op}` must parse"
             );
             assert!(
-                parses(&format!("fn f(a: i64, b: i64) -> bool:\n    if a {op}\n       b:\n        return true\n    false\n")),
+                parses(&format!(
+                    "fn f(a: i64, b: i64) -> bool:\n    if a {op}\n       b:\n        return true\n    false\n"
+                )),
                 "if-condition continuation after `{op}` must parse"
             );
         }
@@ -633,9 +647,15 @@ mod comparison_continuation_tests {
     /// a future refactor of the macro cannot silently regress them.
     #[test]
     fn arithmetic_and_logical_continuation_still_parse() {
-        assert!(parses("fn g(a: i64, b: i64) -> i64:\n    val x = a +\n       b\n    x\n"));
-        assert!(parses("fn h(a: bool, b: bool) -> bool:\n    if a and\n       b:\n        return true\n    false\n"));
-        assert!(parses("fn i(a: bool, b: bool) -> bool:\n    if a or\n       b:\n        return true\n    false\n"));
+        assert!(parses(
+            "fn g(a: i64, b: i64) -> i64:\n    val x = a +\n       b\n    x\n"
+        ));
+        assert!(parses(
+            "fn h(a: bool, b: bool) -> bool:\n    if a and\n       b:\n        return true\n    false\n"
+        ));
+        assert!(parses(
+            "fn i(a: bool, b: bool) -> bool:\n    if a or\n       b:\n        return true\n    false\n"
+        ));
     }
 
     /// Keep the bootstrap parser aligned with the pure-Simple G27b leading

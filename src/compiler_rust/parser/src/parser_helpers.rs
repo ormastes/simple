@@ -120,10 +120,12 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        self.pending_tokens
-            .get(n - 1)
-            .cloned()
-            .unwrap_or_else(|| self.pending_tokens.back().cloned().unwrap_or_else(|| self.current.clone()))
+        self.pending_tokens.get(n - 1).cloned().unwrap_or_else(|| {
+            self.pending_tokens
+                .back()
+                .cloned()
+                .unwrap_or_else(|| self.current.clone())
+        })
     }
 
     /// True when `detect_common_mistake` reported the TypeScript arrow-function
@@ -192,6 +194,23 @@ impl<'a> Parser<'a> {
         self.previous = saved_previous;
 
         result
+    }
+
+    /// `move` is a contextual keyword: it introduces a move-closure (`move \x: ...`,
+    /// `move |x| ...`) or a unary move (`move value`), but it is also a perfectly
+    /// ordinary identifier (`var move = 3` / `while move + 1 < n`). Decide which by
+    /// looking at the token AFTER `move`: only a lambda introducer or the start of a
+    /// fresh operand makes it the keyword. Anything else (an operator, a delimiter,
+    /// a line end, `=`, `.`, ...) means the `move` token is the expression itself.
+    /// See doc/08_tracking/bug/move_identifier_rejected_as_expression_2026-08-15.md
+    pub(crate) fn move_is_keyword_prefix(&mut self) -> bool {
+        matches!(
+            self.peek_next().kind,
+            TokenKind::Backslash
+                | TokenKind::Pipe
+                | TokenKind::Identifier { .. }
+                | TokenKind::Me
+        )
     }
 
     /// Check whether a visibility-prefixed declaration targets one of the provided kinds.

@@ -63,6 +63,30 @@ fn frame_content_length_of(line: text) -> i64:
         return -1
     frame_parse_decimal(stripped.replace("Content-Length:", "").trim())
 
+# Canonical header-part policy (LSP 3.17 / MCP stdio): scan the header lines of
+# ONE message and return the declared body length, or -1 when no Content-Length
+# was present. Unrecognized header fields -- Content-Type, vendor extensions --
+# are SKIPPED, never treated as payload and never fatal. An empty line ends the
+# header part; anything after it is body and is not scanned.
+#
+# This is the behaviour every stdio server's read loop must implement. The loops
+# themselves cannot share code (they differ in their read primitive: `input()`
+# vs `stdin_read_char()`), so this function is the specified oracle they are
+# checked against. See
+# doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md
+fn frame_scan_headers(lines: [text]) -> i64:
+    var declared: i64 = -1
+    var i = 0
+    while i < lines.len():
+        val stripped = frame_strip_line_end(lines[i])
+        if stripped == "":
+            return declared
+        val n = frame_content_length_of(lines[i])
+        if n >= 0:
+            declared = n
+        i = i + 1
+    declared
+
 # Encode a body as a complete Content-Length framed message.
 fn frame_encode(body: text) -> text:
     "Content-Length: " + str(body.len()) + "\r\n\r\n" + body

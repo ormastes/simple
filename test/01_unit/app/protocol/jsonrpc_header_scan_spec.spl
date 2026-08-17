@@ -1,0 +1,98 @@
+# @cover src/app/protocol/framing.spl 90%
+# @req REQ-JSONRPC-FRAMING-002
+"""
+# JSON-RPC header part: unknown fields are skipped, never payload
+
+**Category:** Infrastructure
+**Status:** Regression guard
+
+## Purpose and Audience
+
+LSP 3.17 and the MCP stdio transport both define the message header as a
+sequence of header FIELDS terminated by a blank line. `Content-Type` is a
+defined field, vendor extensions are permitted, and a reader is required to
+skip any field it does not recognise.
+
+Two of this repo's stdio servers disagreed with that, in opposite directions:
+
+- `src/app/t32_lsp_mcp/protocol.spl` treated any unrecognised header line as
+  bare JSON-lines input and returned it as the message body. A client sending
+  `Content-Type: application/vscode-jsonrpc; charset=utf-8` — which real VS
+  Code does — had its header handed to the JSON parser as if it were a request.
+- `src/app/lsp_mcp/main.spl` had no header loop at all: it read one line, then
+  blindly consumed two more. An extra header dropped the message, and any body
+  containing a newline was truncated.
+
+This spec fixes the shared policy those loops must implement, as
+`frame_scan_headers`.
+
+The audience is anyone writing or reviewing a stdio read loop.
+
+## Scope and Preconditions
+
+Pure functions in `src/app/protocol/framing.spl` only; the per-server read
+primitives (`input()` vs `stdin_read_char()`) are out of scope and are why the
+loops cannot literally share code.
+
+See doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md
+"""
+
+use std.spec.*
+use app.protocol.framing.{frame_scan_headers, frame_content_length_of, frame_encode}
+
+describe "JSON-RPC header part scanning":
+
+    it "reads the declared length from a minimal header":
+        step("A host sends only Content-Length, then the blank line")
+        val declared = frame_scan_headers(["Content-Length: 42\r\n", "\r\n"])
+        expect(declared).to_equal(42)
+
+    it "skips a Content-Type header instead of treating it as payload":
+        step("Real VS Code sends Content-Type after Content-Length")
+        val lines = [
+            "Content-Length: 17\r\n",
+            "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n",
+            "\r\n",
+        ]
+
+        step("The unknown field is skipped and the declared length survives")
+        expect(frame_scan_headers(lines)).to_equal(17)
+
+    it "skips a header that arrives BEFORE Content-Length":
+        step("Field order is not fixed by the spec")
+        val lines = [
+            "Content-Type: application/vscode-jsonrpc\r\n",
+            "X-Vendor-Trace: abc123\r\n",
+            "Content-Length: 9\r\n",
+            "\r\n",
+        ]
+        expect(frame_scan_headers(lines)).to_equal(9)
+
+    it "reports -1 when no Content-Length field was present":
+        step("A header block with only unknown fields declares no body")
+        expect(frame_scan_headers(["Content-Type: text/plain\r\n", "\r\n"])).to_equal(-1)
+
+    it "stops at the blank line and never scans the body":
+        step("A body line that happens to look like a header must not be read")
+        val lines = [
+            "Content-Length: 5\r\n",
+            "\r\n",
+            "Content-Length: 99999\r\n",
+        ]
+
+        step("The declared length is the header's 5, not the body's 99999")
+        expect(frame_scan_headers(lines)).to_equal(5)
+
+    it "accepts bare LF line endings as well as CRLF":
+        step("Some hosts emit LF-only headers")
+        expect(frame_scan_headers(["Content-Length: 8\n", "\n"])).to_equal(8)
+
+    it "declares the body length in BYTES, not characters":
+        step("A non-ASCII body has more bytes than characters")
+        val body = "{\"m\":\"héllo\"}"
+
+        step("The encoder's declared length matches what a byte reader must consume")
+        val framed = frame_encode(body)
+        val declared = frame_content_length_of(framed.split("\r\n")[0])
+        expect(declared).to_equal(body.len())
+        expect(declared).to_be_greater_than(0)

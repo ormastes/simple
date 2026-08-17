@@ -1,3 +1,42 @@
+## FIXED 2026-08-17
+
+**The bug doc named the wrong file.** `bin/simple lint`'s live `primitive_api`
+rule is NOT `src/compiler/35.semantics/lint/primitive_api.spl` (an AST rule with
+no live caller) — it is
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl`
+(`check_primitive_api`), reached from
+`src/compiler/90.tools/lint/_LintMain/lint_checks.spl:23`. That rule is a plain
+line scanner over raw source, which makes text-level suppression small rather
+than the "new plumbing from `semantic_api/checker.spl`" the Resume plan assumed.
+
+Implemented as shared machinery in
+`src/compiler/90.tools/fix/rules/impl_/lint_allow.spl`:
+`#![allow(RULE)]` (file scope, header block only), `@allow(RULE)` /
+`# @allow(RULE)` / `#[allow(RULE)]` (item scope, the contiguous comment run
+directly above a declaration), comma-separated rule lists. `check_primitive_api`
+now consults both. Other text-scanning rules (`raw_unit`) can adopt the same two
+calls.
+
+**Honest scope limit, asserted in the spec rather than glossed:** item scope
+reaches exactly one contiguous comment block upward. Function-body and
+module-item scope still require the AST rule and are NOT claimed.
+
+Spec: `test/01_unit/compiler/lint_allow_attribute_spec.spl` — 6/6 green;
+sabotaging both wiring points (`if false and ...`) took it to 4/6, revert
+`diff -q` identical.
+
+The Resume-plan step 2 (decide per file whether to keep the annotation or
+introduce typed wrappers for `src/lib/common/spec/evidence/model.spl`) and the
+"Secondary finding" pre-existing debt are unchanged and still open — this fixes
+the missing mechanism, not the debt it was hiding.
+
+## Re-verified 2026-08-17 — STILL OPEN, unchanged (superseded by the note above)
+
+`/usr/bin/grep -rn "allow_attr\|is_allowed\|allow_attribute" src/compiler/35.semantics/lint/*.spl`
+returns **zero** lines. No suppression machinery exists; the `@allow(primitive_api)` /
+`#[allow(raw_unit)]` headers already in `src/lib/nogc_sync_mut/engine/physics/*.spl`
+are still inert. Unchanged from the original filing.
+
 # `@allow(primitive_api)` / `#[allow(raw_unit)]` suppression is documented but never implemented
 
 **Status:** OPEN
