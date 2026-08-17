@@ -1,7 +1,8 @@
 # Calculator canned WM content missing `[canned]` marker
 
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- Status: RESOLVED (P3) — retired 2026-08-17
+- Re-verified independently 2026-08-17 by SOURCE INSPECTION ONLY (no spec run: a
+  compiler deploy was mid-flight, so no test/run/build/lint was permitted).
 - **Filed:** 2026-07-14
 - **Area:** gui / wm-compositor / anti-fake-evidence
 - **Severity:** minor (honesty-invariant violation, not a crash)
@@ -62,3 +63,33 @@ a full WM capture render, ~30-50 CPU-min interpreted, not run under the
 bootstrap-priority constraint). Only the emitting source is verified.
 
 Status: CLOSED — already fixed (stale doc).
+
+## Independent re-verification 2026-08-17 (source inspection only)
+
+Re-grepped `/usr/bin/grep -rn "canned demo" src/lib/common/ui/window_scene_draw_ir.spl`
+(unwrapped grep; the wrapped one honours .gitignore and under-reports). Six hits,
+all `_shared_wm_scene_content_line(..., "[canned demo — no live content]", ...)`:
+
+| line | branch (`title ==`) | symbol |
+|---|---|---|
+| 1500 | `Terminal` | `_shared_wm_scene_content_line` |
+| 1506 | `Editor` / `Hello World` | `_shared_wm_scene_content_line` |
+| 1513 | `File Manager` / `Finder` | `_shared_wm_scene_content_line` |
+| **1520** | **`Calculator`** | `_shared_wm_scene_content_line` |
+| 1526 | `Browser` / `Simple Browser` | `_shared_wm_scene_content_line` |
+| 1528 | fallthrough (no title match) | `_shared_wm_scene_content_line` |
+
+The Calculator branch (1516-1521) emits its 4 canned lines `"0"`, `"7 8 9 /"`,
+`"4 5 6 *"`, `"1 2 3 -"` at rows 0-3 and then the marker at row 4 — structurally
+identical to the File Manager branch above it. The reported gap does not exist.
+(Earlier stamp on this doc cited lines 1525/1527 for the last two hits; the
+current file has them at 1526/1528. Line drift only, same calls.)
+
+**Evidence is the CODE, not a commit.** `git log -S '[canned demo — no live
+content]'` surfaces no isolating fix commit — only tree-wipe/restore commits
+touch the string — so no commit sha is cited here rather than substantiating the
+closure with one that cannot be shown to be the fix.
+
+Still not proven (unchanged): that the marker survives into a captured
+framebuffer. That needs a full WM capture render and was not run.
+
