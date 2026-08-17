@@ -1,0 +1,96 @@
+# @req REQ-LANG-OPTIONAL-UNWRAP-001
+"""
+# Optional unwrap (`!`) on variables, member chains, and call arguments
+
+**Category:** Language
+**Status:** Implemented (interpreter) / DEFECTIVE (JIT)
+
+## Purpose and Audience
+
+Anyone writing Simple code that stores an optional (`i64?`, `text?`) in a
+variable and later unwraps it with `!`. This spec pins the values that unwrap
+must produce, so the closure of
+`doc/08_tracking/bug/interpreter_bang_unwrap_member_access_2026-05-08.md`
+stops being evidence-free.
+
+## Scope and Preconditions
+
+`bin/simple test` executes specs on the tree-walk INTERPRETER, which is the
+engine this file can assert against. The same expressions are corrupt on the
+Cranelift JIT that `bin/simple run` uses — see
+`doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`.
+This spec therefore proves the interpreter half only, and deliberately says so
+rather than implying whole-language coverage.
+
+## Primary Workflow
+
+An optional is bound, inspected, unwrapped with `!`, and nil-coalesced. Each
+step asserts the exact payload value, never merely that the expression parsed.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `!` unwrap | Yields the payload of a non-nil optional |
+| `??` coalesce | Yields the payload when non-nil, the default only on nil |
+
+## Related Specifications
+
+- `doc/08_tracking/bug/interpreter_bang_unwrap_member_access_2026-05-08.md` — the closure this covers
+"""
+
+use std.spec.*
+
+fn give_int() -> i64?:
+    return 7
+
+fn give_text() -> text?:
+    return "ok"
+
+fn give_nil() -> i64?:
+    return nil
+
+describe "Optional unwrap with the ! operator":
+
+    it "yields the stored payload when unwrapping a variable":
+        step("Bind an i64 optional to a known value")
+        val x: i64? = 42
+
+        step("Read the optional without unwrapping")
+        # The original defect rendered this as a denormal float, so assert the
+        # exact integer text rather than merely that it is non-empty.
+        expect(x.to_string()).to_equal("42")
+
+        step("Unwrap the variable with !")
+        expect(x!).to_equal(42)
+
+    it "yields the payload of an optional returned from a function":
+        step("Call a function declared to return i64?")
+        val g = give_int()
+
+        step("The value renders as its integer payload, not a raw handle")
+        expect(g.to_string()).to_equal("7")
+
+        step("Unwrapping it produces the payload")
+        expect(g!).to_equal(7)
+
+    it "unwraps a text optional to its exact contents":
+        step("Call a function declared to return text?")
+        val t = give_text()
+
+        step("Unwrapping yields the original string")
+        expect(t!).to_equal("ok")
+
+    it "returns the payload from ?? and the default only on nil":
+        step("Coalesce a present optional -- the default must NOT be taken")
+        val x: i64? = 42
+        expect(x ?? 99).to_equal(42)
+
+        step("Coalesce an absent optional -- the default IS taken")
+        val n = give_nil()
+        expect(n ?? 99).to_equal(99)
+
+    it "treats an absent optional as nil":
+        step("A function returning nil produces a nil optional")
+        val n = give_nil()
+        expect(n).to_be_nil()

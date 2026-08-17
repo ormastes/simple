@@ -1,6 +1,28 @@
 # Bug — Interpreter rejects `!` (unwrap) operator on variables and in non-terminal positions
 
-Status: FIXED 2026-05-10 -- verified by interpreter repro (all Cases A/B/C pass)
+Status: FIXED (interpreter) 2026-05-10 -- PARTIAL, see re-audit below
+
+## Re-audit 2026-08-17 — closure confirmed for the parse errors, but only on one engine
+
+The parse errors this doc reports are genuinely gone: Cases A/B/C all parse and
+evaluate correctly under the interpreter today. That half of the closure holds.
+
+Two gaps found while re-verifying it:
+
+1. **The cited spec file no longer exists**, so nothing had re-checked this
+   closure since 2026-05-10. Now covered by
+   `test/01_unit/compiler/interpreter/optional_unwrap_bang_spec.spl`
+   (`Results: 5 total, 5 passed, 0 failed`, sabotage-proved).
+2. **The fix is interpreter-only.** On the Cranelift JIT that `bin/simple run`
+   uses, `val x: i64? = 42` renders as a denormal f64, `x!` yields `nil`, and
+   `x ?? 99` returns the corrupt payload instead of the default. Filed as
+   `doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md`
+   with a deliberately-RED run-path probe
+   (`test/01_unit/compiler/interpreter/probe_optional_unwrap_jit.spl`).
+
+"Verified by interpreter repro" was an accurate description of what was done —
+it just was not the whole language. Keep this doc closed for the parse defect;
+the payload defect lives in the new doc.
 
 **Filed:** 2026-05-08 (debug format library test failures)
 **Status:** FIXED 2026-05-10 -- verified by interpreter repro (all Cases A/B/C pass)
