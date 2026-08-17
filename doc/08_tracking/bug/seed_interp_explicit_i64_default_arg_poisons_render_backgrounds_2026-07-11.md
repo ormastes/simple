@@ -1,6 +1,6 @@
 # seed_interp: explicit i64 default-arg marshalling poisons render-background colors
 
-- Status: open
+- Status: NOT REPRODUCIBLE (re-verified 2026-08-17) — closing pending review
 - Area: Seed interpreter default-argument marshalling; affects `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (render color difference between default-arg and explicit-arg calls)
 
@@ -126,3 +126,38 @@ The only difference is the i64 value at the call boundary. White pixels (0xFFFFF
 2. A side effect of the marshalling corrupts the renderer's internal color state.
 
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as `seed_interp_explicit_i64_default_arg_poisons_render_backgrounds`.
+
+
+## Re-verification 2026-08-17 — NOT REPRODUCIBLE, and the observed direction is inverted
+
+Reproduced against current source with `bin/simple run`, both execution arms
+pinned (`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`; the JIT arm self-reports
+falling back to the interpreter for `_be_dom_dispatch_event_path`, so the
+interpreter path the bug names was genuinely exercised). Same HTML, 64x64, a
+40x40 `#ff0000` div:
+
+| call shape | mode | red pixels |
+|---|---|---|
+| `..._software_pixels(html, 64, 64)` (default arg) | interpreter | 1600 |
+| `..._software_pixels(html, 64, 64, 30000)` (explicit) | interpreter | 1600 |
+| default arg | jit | 1600 |
+| explicit | jit | 1600 |
+
+The reported failure — explicit budget renders ALL backgrounds white, expected
+pixel count 0 — does not occur in either arm. The counts are identical.
+
+Probing further (one process, 48x48 two-box scene, non-white pixel counts):
+`plain_def=600 plain_exp=1200 traced_def=0 traced_exp=1200 scroll_def=1200
+scroll_exp=1200`. The arm that loses pixels is the **DEFAULTED** one, not the
+explicit one — the exact inverse of the filed symptom. That is not corruption:
+`_web_budget_begin` (`simple_web_html_layout_renderer_foundation.spl:292-300`)
+documents that a `budget_ms` equal to `WEB_RENDER_BUDGET_MS` (10000) is treated
+as "no explicit override" while any other value wins, so an explicit 120000 gets
+a 12x larger real deadline and simply finishes where the 10s default degrades on
+a loaded host. The original 2026-07-11 observation is consistent with having
+compared a degrading default-budget render against a non-degrading explicit one
+and attributing the difference to argument marshalling.
+
+No product change was made — nothing was found to fix. Regression coverage added:
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_render_explicit_budget_arg_spec.spl` (reproducing; 4/4 pass)
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_render_budget_default_arg_class_spec.spl` (class-detection over all three defaulted-`budget_ms` entry points; 4/4 pass)

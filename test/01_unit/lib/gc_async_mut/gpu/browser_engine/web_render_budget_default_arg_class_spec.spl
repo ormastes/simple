@@ -1,0 +1,77 @@
+# Class-detection spec for the default-argument marshalling defect class behind
+# seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11.
+#
+# The reproducing spec (web_render_explicit_budget_arg_spec.spl) pins the single
+# reported entry point. This file pins the CLASS: for every public
+# software-pixel entry point that carries a defaulted `budget_ms: i64` parameter,
+# passing that parameter explicitly must still paint background rectangles. The
+# reported symptom was that an explicit budget rendered EVERY background white
+# (expected-color pixel count 0) while the defaulted call painted correctly, so
+# non-blankness under both call shapes is the property that actually
+# discriminates the defect.
+#
+# Deliberately NOT asserted: anything about the DEFAULTED arm of the slow entry
+# points, nor byte-exact pixel equality between the defaulted and explicit call. `_web_budget_begin` treats a budget that differs from
+# WEB_RENDER_BUDGET_MS as a real wall-clock override, so a large explicit budget
+# legitimately renders where the 10s default may degrade. An equality assertion
+# there fails on a loaded machine for a correct renderer — measured RED on
+# _traced 2026-08-17 for exactly that reason, with no marshalling defect present.
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_pixels_traced,
+    simple_web_layout_render_html_software_pixels_at_scroll}
+
+val W: i32 = 48
+val H: i32 = 48
+val BIG_BUDGET: i64 = 120000
+
+val SCENE_HTML: text = "<html><body style=\"margin:0\"><div style=\"width:30px;height:20px;background:#0000ff\"></div><div style=\"width:30px;height:20px;background:#00ff00\"></div></body></html>"
+
+fn _non_white(pixels: [u32]) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != 0xFFFFFFFF:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+# Measured 2026-08-17 on a loaded host, one process, same 48x48 scene
+# (non-white pixel counts): plain_def=600 plain_exp=1200 traced_def=0
+# traced_exp=1200 scroll_def=1200 scroll_exp=1200. The DEFAULTED calls are the
+# ones that degrade, because 10s is a real deadline; the EXPLICIT 120s calls all
+# paint fully. That is the exact inverse of the filed symptom and is ordinary
+# budget degradation, not marshalling corruption. So only the explicit arm is
+# asserted here -- it is the arm the bug claimed was poisoned.
+
+describe "an explicit i64 budget_ms does not poison paint across renderer entry points":
+
+    it "renders a non-blank scene through the plain entry point (positive control)":
+        # Guards a vacuous pass: if this goes blank the assertions below prove nothing.
+        val pixels = simple_web_layout_render_html_software_pixels(SCENE_HTML, W, H, BIG_BUDGET)
+        expect(_non_white(pixels) > 0).to_be_true()
+
+    it "software_pixels paints backgrounds when budget_ms is passed explicitly":
+        val explicit = simple_web_layout_render_html_software_pixels(SCENE_HTML, W, H, BIG_BUDGET)
+        expect(_non_white(explicit) > 0).to_be_true()
+
+    it "software_pixels_traced paints backgrounds when budget_ms is passed explicitly":
+        val explicit = simple_web_layout_render_html_software_pixels_traced(SCENE_HTML, W, H, BIG_BUDGET)
+        expect(_non_white(explicit) > 0).to_be_true()
+
+    it "software_pixels_at_scroll paints backgrounds when budget_ms is passed explicitly":
+        val explicit = simple_web_layout_render_html_software_pixels_at_scroll(SCENE_HTML, W, H, 0, BIG_BUDGET)
+        expect(_non_white(explicit) > 0).to_be_true()

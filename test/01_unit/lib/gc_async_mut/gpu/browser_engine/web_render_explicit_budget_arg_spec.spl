@@ -1,0 +1,54 @@
+# Regression spec for bug seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11
+# and seed_run_trim_recursion_overflow_browser_engine_2026-07-19.
+#
+# The first bug reported that passing the i64 `budget_ms` argument EXPLICITLY to
+# simple_web_layout_render_html_software_pixels rendered all background rectangles
+# white (expected-color pixel count 0), while omitting the argument (using the
+# default WEB_RENDER_BUDGET_MS) painted them correctly. The second reported that
+# merely importing the browser_engine module graph overflowed the seed
+# interpreter's stack inside `trim` at recursion depth 1000, so no program that
+# imports this module could run at all.
+#
+# This file reproduces both: importing the module at all covers the second, and
+# the default-vs-explicit equality assertions cover the first.
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels}
+
+val W: i32 = 64
+val H: i32 = 64
+val RED: u32 = 0xFFFF0000
+
+val RED_BOX_HTML: text = "<html><body style=\"margin:0\"><div style=\"width:40px;height:40px;background:#ff0000\"></div></body></html>"
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+describe "software-pixel renderer explicit i64 budget argument":
+
+    it "loads the browser_engine module graph without a trim recursion overflow":
+        # Reaching this line at all means the module graph loaded; the reported
+        # overflow happened during module-graph preprocessing, before user code.
+        val pixels = simple_web_layout_render_html_software_pixels(RED_BOX_HTML, W, H)
+        expect(pixels.len()).to_equal(W * H)
+
+    it "paints background rectangles when budget_ms is omitted":
+        val pixels = simple_web_layout_render_html_software_pixels(RED_BOX_HTML, W, H)
+        expect(_count_color(pixels, RED) > 0).to_be_true()
+
+    it "paints the same background rectangles when budget_ms is passed explicitly":
+        val pixels = simple_web_layout_render_html_software_pixels(RED_BOX_HTML, W, H, 30000)
+        expect(_count_color(pixels, RED) > 0).to_be_true()
+
+    it "produces an identical expected-color pixel count for default and explicit budget":
+        val defaulted = simple_web_layout_render_html_software_pixels(RED_BOX_HTML, W, H)
+        val explicit = simple_web_layout_render_html_software_pixels(RED_BOX_HTML, W, H, 30000)
+        expect(_count_color(explicit, RED)).to_equal(_count_color(defaulted, RED))
