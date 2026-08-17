@@ -1,5 +1,20 @@
 # Class-in-array mutation drop in interpret mode — characterization (task #112)
 
+> ## RETIRED 2026-08-17 by EXECUTION (worker W5)
+>
+> This doc's exact minimal repro (`class Counter`, `var arr = [Counter(val: 42)]`,
+> `var c = arr[0]`, `c.val = 777`) prints **777 under every mode** on the deployed
+> seed -- `SIMPLE_EXECUTION_MODE=interpret` (the spelling this doc used),
+> `=interpreter`, `=jit`, and the default. The doc's claim of `42` (mutation lost)
+> under `interpret` does not reproduce; class identity semantics are honoured.
+>
+> **FAMILY: collapsed with `struct_field_aliases_under_jit_2026-08-08`** -- see that
+> doc for the shared probe, the full four-shape table, and the positive control that
+> proves the engine switch is live rather than silently ignored.
+>
+> Regression guard: `test/01_unit/engine_divergence/check-engine-divergence-probes.shs`.
+
+
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Discovered:** 2026-07-04 (task #112, following up on #108's discriminator work and #35's

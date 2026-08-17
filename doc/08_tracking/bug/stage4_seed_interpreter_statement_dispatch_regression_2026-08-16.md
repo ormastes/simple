@@ -1,5 +1,36 @@
 # HANDOFF: Stage-4 seed interpreter statement/assignment dispatch regression
 
+> ## RETIRED 2026-08-17 by EXECUTION on the seed itself (worker W5)
+>
+> `bin/simple` IS the Rust seed this row is about, so it is the correct instrument.
+> A standalone JS-engine probe (no spec runner, no 120s budget) exercising all four
+> documented symptoms is GREEN on the deployed seed:
+>
+> ```
+> $ env SIMPLE_EXECUTION_MODE=interpreter bin/simple run \
+>     test/01_unit/engine_divergence/probes/js_engine_assign_dispatch_probe.spl
+> J1_for_accum=num:3.0        # doc said 0 (accumulator never accumulated)
+> J2_nested_obj=num:42.0      # doc said "variable `a` not found"
+> J3_simple_assign=num:7.0    # doc said "ReferenceError: x is not defined"
+> J4_typeof_undef=str:undefined  # doc said typeof-undefined mis-exec
+> ```
+>
+> The `env.remove(obj_name)` -> mutate -> re-insert hunk named as the suspect is
+> STILL PRESENT (`interpreter/node_exec.rs:786`, `:960`, `:1897`), so this is NOT a
+> "the code changed" retirement -- the pattern is there and is nevertheless correct
+> now: every match arm re-inserts, making the remove/re-insert total as the doc's
+> required action #1 demanded.
+>
+> **Separately: the doc's spec-based repro command is not a usable instrument.**
+> `bin/simple test test/03_system/feature/js/interpreter_vars_spec.spl` returns
+> `Results: 1 total, 0 passed, 1 failed` with `reason=child-timeout budget_ms=120000`
+> -- it exceeds the runner's own per-file budget and never reaches the assertions.
+> That is a COST problem in the spec, not evidence of this defect; a timeout is
+> UNVERIFIED, never a failure. Retirement rests on the probe, not on that spec.
+>
+> Regression guard: `test/01_unit/engine_divergence/check-engine-divergence-probes.shs`.
+
+
 **Status:** OPEN — handoff to seed owner
 **OWNER:** Stage-4 / seed-bootstrap owner — the session that rebuilds and
 redeploys `bin/release/<triple>/simple`. This is a Rust-seed defect; it can only

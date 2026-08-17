@@ -1,5 +1,40 @@
 # A `struct` stored in a class field ALIASES under the JIT (value semantics violated)
 
+> ## RETIRED 2026-08-17 -- independently re-confirmed, and COLLAPSED with the class row (worker W5)
+>
+> Confirms the existing DID-NOT-REPRODUCE note above by execution on the DEPLOYED
+> seed, with a validated control (see below). All four aliasing shapes hold the
+> `struct` = value / `class` = identity contract under `interpreter` AND `jit`:
+>
+> ```
+> A_class_in_array=777   # class: identity semantics preserved (correct)
+> B_struct_from_field=0   # struct out of a class field: value-copied (correct)
+> C_struct_local_copy=0   # struct local copy: value-copied (correct)
+> D_struct_in_array=0     # struct out of an array: value-copied (correct)
+> ```
+>
+> **FAMILY: this row and `jit_class_mutation_drop_characterization_2026-07-04` are ONE
+> aliasing-of-boxed-object question measured by ONE probe** (case A is that row, cases
+> B-D are this row). They are retired together; both directions of the F1 contract
+> hold simultaneously, which is the thing neither doc could show alone.
+>
+> **Why this is not a false green:** an all-modes-agree result is exactly what an
+> IGNORED `SIMPLE_EXECUTION_MODE` would also produce. The guard therefore carries a
+> positive control -- a 61-bit boxed-int probe that MUST diverge -- and it does
+> (`1152921504606846976` interpreter vs `-1152921504606846976` jit). The mode switch
+> is provably live, so the agreement above is real.
+>
+> Regression guard: `test/01_unit/engine_divergence/check-engine-divergence-probes.shs`.
+
+
+> **DID NOT REPRODUCE 2026-08-17 — closeable.** Probe on a seed built from current HEAD,
+> three aliasing shapes, both engines: a struct read out of a class field
+> (`copy = h.p; copy.x = 99` -> `h.p.x` = 0), a plain local copy (`b = a; b.x = 5` ->
+> `a.x` = 0), and an array element (`e = arr[0]; e.x = 7` -> `arr[0].x` = 0). Value
+> semantics hold in every case under `jit` and `interpreter` alike. Classified by
+> execution, not by SHA ancestry.
+
+
 - **Filed:** 2026-08-08
 - **Status:** Open, not fixed. Root cause localized to the Rust seed (out of scope for a
   pure-Simple fix); no bounded, sabotage-verifiable fix location exists in this tree today.

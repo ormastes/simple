@@ -1,0 +1,168 @@
+#!/bin/sh
+# Engine-crossing divergence guard (interpreter vs JIT).
+#
+# WHY THIS IS NOT A SPEC: `bin/simple test` is the tree-walk INTERPRETER, while
+# `bin/simple run` is the Cranelift JIT. A spec body therefore cannot observe a
+# JIT-only defect at all -- every row this guard covers is an ENGINE-DIVERGENCE
+# row, so the only instrument that can see it is a subprocess probe that runs
+# the same source under `SIMPLE_EXECUTION_MODE=interpreter` and `=jit` and
+# diffs the two. Probe runs are also ~50x cheaper than the spec runner, whose
+# own 120s per-file budget times out on the JS-engine suite for reasons
+# unrelated to any defect here.
+#
+# Covers the following bug rows (see doc/08_tracking/bug/):
+#   alias_value_semantics_probe   -> struct_field_aliases_under_jit_2026-08-08
+#                                    jit_class_mutation_drop_characterization_2026-07-04
+#   f64_call_result_probe         -> f64_self_hosted_call_result_codegen_2026-06-21
+#   if_expr_dead_branch_probe     -> if_expression_dead_branch_binds_empty_list_2026-08-06
+#   js_engine_assign_dispatch     -> stage4_seed_interpreter_statement_dispatch_regression_2026-08-16
+#   boxed_int_61bit_probe         -> the 61-bit boxed-int truncation family
+#                                    (CONTROL: this one is EXPECTED to diverge;
+#                                     it proves the mode switch is actually live,
+#                                     so an all-green run cannot be a false green
+#                                     produced by an ignored env var)
+#
+# Env vars must be passed with `env VAR=... bin/simple ...` directly:
+# scripts/resource/test-slot.shs does NOT propagate env to the child and has
+# produced a false green here before.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  -- <n> probe(s) checked, ...        exit 0
+#   FAIL  -- ...                             exit 1
+#   ERROR -- nothing was checked             exit 2   (never a pass)
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+SIMPLE="$ROOT/bin/simple"
+DIR="$ROOT/test/01_unit/engine_divergence/probes"
+CHECKED=0
+FAILED=""
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked (no $SIMPLE)"
+    exit 2
+fi
+
+# Run one probe under one mode; echo only the probe's marker lines.
+run_probe() {
+    _file="$1"
+    _mode="$2"
+    # rc is read on its own line, never through a pipe.
+    _out=$(timeout 300 env SIMPLE_EXECUTION_MODE="$_mode" "$SIMPLE" run "$_file" 2>/dev/null)
+    _rc=$?
+    if [ "$_rc" = 137 ] || [ "$_rc" = 143 ] || [ "$_rc" = 144 ]; then
+        # earlyoom kills `simple` first on this host. Not a failure: unverified.
+        echo "__OOM__"
+        return 0
+    fi
+    echo "$_out" | grep -E '^[A-Z][0-9A-Za-z_]*=' | sort
+}
+
+# expect_same <probe> <expected-marker-lines>
+# Asserts both engines agree AND that they agree on the CORRECT value.
+expect_same() {
+    _name="$1"
+    _expected="$2"
+    _f="$DIR/$_name.spl"
+    if [ ! -f "$_f" ]; then
+        FAILED="$FAILED $_name(missing)"
+        return
+    fi
+    _i=$(run_probe "$_f" interpreter)
+    _j=$(run_probe "$_f" jit)
+    CHECKED=$((CHECKED + 1))
+    case "$_i$_j" in
+        *__OOM__*)
+            echo "  $_name: SKIP (earlyoom, unverified)"
+            CHECKED=$((CHECKED - 1))
+            return
+            ;;
+    esac
+    if [ "$_i" != "$_j" ]; then
+        echo "  $_name: DIVERGED interpreter/jit"
+        echo "$_i" | sed 's/^/    i: /'
+        echo "$_j" | sed 's/^/    j: /'
+        FAILED="$FAILED $_name(diverged)"
+        return
+    fi
+    if [ "$_i" != "$_expected" ]; then
+        echo "  $_name: engines AGREE but value is WRONG"
+        echo "$_i" | sed 's/^/    got:  /'
+        echo "$_expected" | sed 's/^/    want: /'
+        FAILED="$FAILED $_name(wrong)"
+        return
+    fi
+    echo "  $_name: OK (both engines, correct values)"
+}
+
+# expect_diverge <probe> -- the control. A run where this AGREES means the
+# SIMPLE_EXECUTION_MODE switch was ignored, which would make every other
+# result in this file a false green. That is a FAIL, not a pass.
+expect_diverge() {
+    _name="$1"
+    _f="$DIR/$_name.spl"
+    if [ ! -f "$_f" ]; then
+        FAILED="$FAILED $_name(missing)"
+        return
+    fi
+    _i=$(run_probe "$_f" interpreter)
+    _j=$(run_probe "$_f" jit)
+    CHECKED=$((CHECKED + 1))
+    case "$_i$_j" in
+        *__OOM__*)
+            echo "  $_name: SKIP (earlyoom, unverified)"
+            CHECKED=$((CHECKED - 1))
+            return
+            ;;
+    esac
+    if [ "$_i" = "$_j" ]; then
+        echo "  $_name: CONTROL BROKEN — engines agree, so the mode switch is"
+        echo "    not taking effect and no other result in this file is trustworthy."
+        FAILED="$FAILED $_name(control-broken)"
+        return
+    fi
+    echo "  $_name: OK (control diverges as expected — mode switch is live)"
+}
+
+echo "engine-divergence probes (binary: $(readlink -f "$SIMPLE"))"
+
+# struct = value semantics, class = identity semantics, under BOTH engines.
+expect_same alias_value_semantics_probe \
+"A_class_in_array=777
+B_struct_from_field=0
+C_struct_local_copy=0
+D_struct_in_array=0"
+
+expect_same f64_call_result_probe \
+"F1=21.5
+F2=43.0
+F3=21.5
+F4=21.5"
+
+expect_same if_expr_dead_branch_probe \
+"I1_len=3
+I2_len=3
+I3_len=3"
+
+expect_same js_engine_assign_dispatch_probe \
+"J1_for_accum=num:3.0
+J2_nested_obj=num:42.0
+J3_simple_assign=num:7.0
+J4_typeof_undef=str:undefined"
+
+# CONTROL — must diverge (61-bit boxed-int truncation under JIT).
+expect_diverge boxed_int_61bit_probe
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -n "$FAILED" ]; then
+    echo "FAIL — $CHECKED probe(s) checked, offending:$FAILED"
+    exit 1
+fi
+
+echo "PASS — $CHECKED probe(s) checked across 2 engine(s) (interpreter, jit), 0 divergences"
+exit 0
