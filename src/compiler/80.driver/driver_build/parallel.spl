@@ -391,6 +391,19 @@ impl ParallelBuilder:
         # `graph.units` is a Dict; Dict.len() returns -1 natively. Units are only
         # ever added (never removed), so `next_id` is the exact unit count.
         val total = self.graph.next_id
+        # `build()` compiles IN-PROCESS: `compile_fn` closes over the caller's
+        # in-memory frozen MIR capsules, which a child process cannot receive.
+        # So this path cannot honour unstable mode however the config was set.
+        # Say so instead of running a non-isolated build under a name that
+        # promises isolation -- a silent downgrade here is the same defect class
+        # as a crashed spec reported as a pass. `build_supervised()` is the real
+        # implementation; wiring it needs a one-module compile CLI so `spawn_fn`
+        # has something to launch. See doc/03_plan/infra/unstable_mode_build_side.md.
+        if self.config.unstable:
+            print "[build] unstable mode REQUESTED but NOT ACTIVE on this path: "
+                + "build() is in-process (MIR capsules cannot cross a process "
+                + "boundary). A unit that segfaults or is OOM-killed still takes "
+                + "the whole build down. No per-unit isolation is in effect."
         self.stats = BuildStats(total_units: total, completed: 0, failed: 0,
                                 skipped: 0, parallel_batches: 0)
         var errors: [(text, text)] = []
