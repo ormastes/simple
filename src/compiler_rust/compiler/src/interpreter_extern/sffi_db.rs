@@ -96,6 +96,8 @@ struct SqlTable {
     columns: Vec<String>,
     rows: Vec<Vec<SqlValue>>,
     next_id: i64,
+    /// Columns declared UNIQUE or PRIMARY KEY in CREATE TABLE (enforced on insert).
+    unique_cols: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -110,6 +112,8 @@ struct SqlConn {
     last_insert_rowid: i64,
     changes: i64,
     error: String,
+    /// Snapshot of `db` taken at BEGIN; restored on ROLLBACK, dropped on COMMIT.
+    tx_snapshot: Option<SqlDatabase>,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +258,7 @@ fn sqlite_load_file(path: &str) -> Option<SqlDatabase> {
                     columns,
                     rows: Vec::new(),
                     next_id,
+                    unique_cols: Vec::new(),
                 },
             );
         } else if parts[0] == "row" && parts.len() >= 4 {
@@ -940,7 +945,7 @@ fn sqlite_unquote_literal(value: &str) -> String {
     trimmed.to_string()
 }
 
-fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>)> {
+fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>, Vec<String>)> {
     let lower = sql.to_ascii_lowercase();
     if !lower.starts_with("create table") {
         return None;
@@ -949,13 +954,21 @@ fn sqlite_parse_create(sql: &str) -> Option<(String, Vec<String>)> {
     let close = sql.rfind(')')?;
     let before = sql[..open].trim();
     let table = before.split_whitespace().last()?.trim_matches('"').to_string();
-    let columns = sql[open + 1..close]
-        .split(',')
-        .filter_map(|part| part.split_whitespace().next())
-        .map(|name| name.trim_matches('"').to_string())
-        .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>();
-    Some((table, columns))
+    let mut columns = Vec::new();
+    let mut unique_cols = Vec::new();
+    for part in sql[open + 1..close].split(',') {
+        let Some(name) = part.split_whitespace().next() else { continue };
+        let name = name.trim_matches('"').to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let part_lower = part.to_ascii_lowercase();
+        if part_lower.contains("unique") || part_lower.contains("primary key") {
+            unique_cols.push(name.clone());
+        }
+        columns.push(name);
+    }
+    Some((table, columns, unique_cols))
 }
 
 fn sqlite_parse_insert(sql: &str) -> Option<(String, Vec<String>)> {
@@ -990,24 +1003,130 @@ fn sqlite_like(value: &str, pattern: &str) -> bool {
     }
 }
 
+/// Parse a WHERE clause of the exact form `lhs = rhs` (one equality, no
+/// AND/OR/other operators). Returns None for anything more complex.
+fn sqlite_parse_eq_predicate(clause: &str) -> Option<(String, String)> {
+    let lower = clause.to_ascii_lowercase();
+    if lower.contains(" and ") || lower.contains(" or ") || lower.contains(" not ")
+        || clause.contains('<') || clause.contains('>') || clause.contains("!=")
+        || lower.contains(" like ") || lower.contains(" in ") || clause.contains('(')
+    {
+        return None;
+    }
+    let mut parts = clause.splitn(2, '=');
+    let lhs = parts.next()?.trim();
+    let rhs = parts.next()?.trim();
+    if lhs.is_empty() || rhs.is_empty() {
+        return None;
+    }
+    Some((lhs.to_string(), rhs.to_string()))
+}
+
+/// Resolve an operand (column name or literal) against a row as text.
+fn sqlite_operand_text(columns: &[String], row: &[SqlValue], operand: &str) -> String {
+    let bare = operand.trim().trim_matches('"');
+    if let Some(idx) = columns.iter().position(|name| name.eq_ignore_ascii_case(bare)) {
+        return row.get(idx).map(SqlValue::as_text).unwrap_or_default();
+    }
+    sqlite_unquote_literal(operand)
+}
+
+fn sqlite_eq_operands(columns: &[String], row: &[SqlValue], lhs: &str, rhs: &str) -> bool {
+    let a = sqlite_operand_text(columns, row, lhs);
+    let b = sqlite_operand_text(columns, row, rhs);
+    if let (Ok(x), Ok(y)) = (a.parse::<f64>(), b.parse::<f64>()) {
+        return x == y;
+    }
+    a == b
+}
+
+fn sqlite_tx_begin(conn: &mut SqlConn) -> i64 {
+    if conn.tx_snapshot.is_some() {
+        return sqlite_set_error(conn, "cannot start a transaction within a transaction");
+    }
+    conn.tx_snapshot = Some(conn.db.clone());
+    conn.changes = 0;
+    conn.error.clear();
+    1
+}
+
+fn sqlite_tx_commit(conn: &mut SqlConn) -> i64 {
+    if conn.tx_snapshot.take().is_none() {
+        return sqlite_set_error(conn, "cannot commit - no transaction is active");
+    }
+    conn.changes = 0;
+    conn.error.clear();
+    1
+}
+
+fn sqlite_tx_rollback(conn: &mut SqlConn) -> i64 {
+    match conn.tx_snapshot.take() {
+        Some(snapshot) => {
+            conn.db = snapshot;
+            conn.changes = 0;
+            conn.error.clear();
+            1
+        }
+        None => sqlite_set_error(conn, "cannot rollback - no transaction is active"),
+    }
+}
+
 fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
     let lower = sql.to_ascii_lowercase();
     conn.error.clear();
-    if let Some((table_name, columns)) = sqlite_parse_create(sql) {
+    if let Some((table_name, columns, unique_cols)) = sqlite_parse_create(sql) {
         conn.db.tables.entry(table_name.clone()).or_insert(SqlTable {
             columns,
             rows: Vec::new(),
             next_id: 1,
+            unique_cols,
         });
         conn.changes = 0;
         return 1;
     }
+    let trimmed_lower = lower.trim();
+    if trimmed_lower == "begin" || trimmed_lower.starts_with("begin ") {
+        return sqlite_tx_begin(conn);
+    }
+    if trimmed_lower == "commit" || trimmed_lower == "end" {
+        return sqlite_tx_commit(conn);
+    }
+    if trimmed_lower == "rollback" {
+        return sqlite_tx_rollback(conn);
+    }
     if lower.starts_with("delete from ") {
-        let table_name = sql["DELETE FROM ".len()..].split_whitespace().next().unwrap_or("");
-        if let Some(table) = conn.db.tables.get_mut(table_name) {
-            conn.changes = table.rows.len() as i64;
-            table.rows.clear();
-            table.next_id = 1;
+        let table_name = sql["DELETE FROM ".len()..].split_whitespace().next().unwrap_or("").to_string();
+        let where_clause = lower
+            .find(" where ")
+            .map(|idx| sql[idx + " where ".len()..].trim().to_string());
+        // Only a single `lhs = rhs` equality predicate is supported.
+        // Anything else FAILS CLOSED rather than widening the delete.
+        let predicate = match &where_clause {
+            None => None,
+            Some(clause) => match sqlite_parse_eq_predicate(clause) {
+                Some(p) => Some(p),
+                None => {
+                    return sqlite_set_error(
+                        conn,
+                        format!("unsupported DELETE WHERE clause (emulation): {clause}"),
+                    );
+                }
+            },
+        };
+        if let Some(table) = conn.db.tables.get_mut(&table_name) {
+            match predicate {
+                None => {
+                    conn.changes = table.rows.len() as i64;
+                    table.rows.clear();
+                    table.next_id = 1;
+                }
+                Some((lhs, rhs)) => {
+                    let before = table.rows.len();
+                    let columns = table.columns.clone();
+                    table.rows.retain(|row| !sqlite_eq_operands(&columns, row, &lhs, &rhs));
+                    conn.changes = (before - table.rows.len()) as i64;
+                }
+            }
             return 1;
         }
         return sqlite_set_error(conn, format!("table not found: {table_name}"));
@@ -1029,23 +1148,51 @@ fn sqlite_execute_statement(conn: &mut SqlConn, sql: &str) -> i64 {
 }
 
 fn sqlite_insert_row(conn: &mut SqlConn, table_name: &str, columns: &[String], values: &[SqlValue]) -> i64 {
-    let table = match conn.db.tables.get_mut(table_name) {
-        Some(table) => table,
-        None => {
-            conn.error = format!("table not found: {table_name}");
-            conn.changes = 0;
-            return 0;
+    if !conn.db.tables.contains_key(table_name) {
+        conn.error = format!("table not found: {table_name}");
+        conn.changes = 0;
+        return 0;
+    }
+    let (row, violation) = {
+        let table = conn.db.tables.get(table_name).expect("checked above");
+        let mut row = vec![SqlValue::Null; table.columns.len()];
+        if let Some(id_idx) = table.columns.iter().position(|name| name == "id") {
+            row[id_idx] = SqlValue::Int(table.next_id);
         }
+        for (idx, column) in columns.iter().enumerate() {
+            if let Some(col_idx) = table.columns.iter().position(|name| name == column) {
+                row[col_idx] = values.get(idx).cloned().unwrap_or(SqlValue::Null);
+            }
+        }
+        // UNIQUE / PRIMARY KEY enforcement (NULLs are exempt, as in SQLite).
+        let mut violation = None;
+        for unique_col in &table.unique_cols {
+            let Some(col_idx) = table.columns.iter().position(|name| name == unique_col) else {
+                continue;
+            };
+            let candidate = &row[col_idx];
+            if matches!(candidate, SqlValue::Null) {
+                continue;
+            }
+            let candidate_text = candidate.as_text();
+            if table.rows.iter().any(|existing| {
+                existing
+                    .get(col_idx)
+                    .is_some_and(|v| !matches!(v, SqlValue::Null) && v.as_text() == candidate_text)
+            }) {
+                violation = Some(unique_col.clone());
+                break;
+            }
+        }
+        (row, violation)
     };
-    let mut row = vec![SqlValue::Null; table.columns.len()];
-    if let Some(id_idx) = table.columns.iter().position(|name| name == "id") {
-        row[id_idx] = SqlValue::Int(table.next_id);
+    if let Some(unique_col) = violation {
+        return sqlite_set_error(
+            conn,
+            format!("UNIQUE constraint failed: {table_name}.{unique_col}"),
+        );
     }
-    for (idx, column) in columns.iter().enumerate() {
-        if let Some(col_idx) = table.columns.iter().position(|name| name == column) {
-            row[col_idx] = values.get(idx).cloned().unwrap_or(SqlValue::Null);
-        }
-    }
+    let table = conn.db.tables.get_mut(table_name).expect("checked above");
     conn.last_insert_rowid = table.next_id;
     table.next_id += 1;
     table.rows.push(row);
@@ -1132,6 +1279,7 @@ pub fn rt_sqlite_open_fn(args: &[Value]) -> Result<Value, CompileError> {
         last_insert_rowid: 0,
         changes: 0,
         error: String::new(),
+        tx_snapshot: None,
     })))
 }
 
@@ -1142,6 +1290,7 @@ pub fn rt_sqlite_open_memory_fn(_args: &[Value]) -> Result<Value, CompileError> 
         last_insert_rowid: 0,
         changes: 0,
         error: String::new(),
+        tx_snapshot: None,
     })))
 }
 
@@ -1442,16 +1591,31 @@ pub fn rt_sqlite_finalize_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
-pub fn rt_sqlite_begin_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(1))
+fn sqlite_with_conn(
+    args: &[Value],
+    fn_name: &str,
+    op: impl FnOnce(&mut SqlConn) -> i64,
+) -> Result<Value, CompileError> {
+    let Some(idx) = sqlite_handle_to_index(arg_int(args, 0, fn_name)?) else {
+        return Ok(Value::Int(0));
+    };
+    let mut conns = SQLITE_CONNS.lock().unwrap();
+    let Some(Some(conn)) = conns.get_mut(idx) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(op(conn)))
 }
 
-pub fn rt_sqlite_commit_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(1))
+pub fn rt_sqlite_begin_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_with_conn(args, "rt_sqlite_begin", sqlite_tx_begin)
 }
 
-pub fn rt_sqlite_rollback_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(1))
+pub fn rt_sqlite_commit_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_with_conn(args, "rt_sqlite_commit", sqlite_tx_commit)
+}
+
+pub fn rt_sqlite_rollback_fn(args: &[Value]) -> Result<Value, CompileError> {
+    sqlite_with_conn(args, "rt_sqlite_rollback", sqlite_tx_rollback)
 }
 
 pub fn rt_sqlite_last_insert_rowid_fn(args: &[Value]) -> Result<Value, CompileError> {

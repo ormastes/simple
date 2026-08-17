@@ -318,6 +318,15 @@ pub fn run_file(path: &Path, gc_log: bool, gc_off: bool) -> i32 {
 
 /// Run a source file (.spl) with command-line arguments
 pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<String>) -> i32 {
+    // Publish argv into the runtime CLI-args storage backing rt_cli_get_args()
+    // / rt_cli_arg_count(). Delegated subcommand routes (e.g. `spipe-docgen`)
+    // reach this entry without any other publisher, so without this the
+    // interpreted app observed argc=0 while the `run` route saw full argv.
+    // See doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md.
+    if !args.is_empty() {
+        simple_runtime::value::rt_set_args_vec(&args);
+    }
+
     if let Some(code) = run_isolated_example_file(path, gc_log, gc_off, &args) {
         return code;
     }
