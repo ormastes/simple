@@ -1,0 +1,38 @@
+# Run-path probe for `Dict.clear()` under NATIVE codegen.
+#
+# WHY A SEPARATE FILE: a spec body runs on the tree-walk INTERPRETER, where
+# `Dict.clear()` was always correct. The defect was in MIR method-call
+# lowering, which only the native (and JIT) path reaches. This file is
+# native-built as a standalone entry by `dict_clear_native_dispatch_spec.spl`.
+#
+# WHY NOT EMBEDDED AS A STRING IN THE SPEC: the dict literal needs `{...}`,
+# and a `{` inside a spec's own string literal is resolved by the SPEC's
+# lexer, killing the file with `zero-examples` before any example runs.
+#
+# THE DEFECT (fixed 3c31fc3aa8b): MIR method-call lowering dispatches on the
+# method NAME only, with no receiver type. `clear` was missing from
+# `is_dict_method_name`
+# (src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1367), so a
+# Dict receiver fell through to the str.clear arm and hit the shared runtime
+# guard `rt_refuse_non_text_receiver` (src/runtime/runtime_native.c ~4626),
+# which prints "str.clear was called on a receiver that is not text" and
+# exit(70)s. `rt_dict_clear` existed in the runtime and was declared in
+# llvm_lib_translate.spl:447 but had ZERO MIR call sites.
+#
+# Oracles are absolute literals, never "before and after agree".
+
+fn main():
+    var d = {"a": 1, "b": 2, "c": 3}
+    print("BEFORE=")
+    print(d.len())
+    d.clear()
+    print(" AFTER=")
+    print(d.len())
+    # The dict must be genuinely empty, not merely report zero.
+    print(" HAS_A=")
+    print(d.has("a"))
+    # And it must still be usable after the clear.
+    d.set("z", 9)
+    print(" REFILL=")
+    print(d.len())
+    print(" PROBE-DONE")

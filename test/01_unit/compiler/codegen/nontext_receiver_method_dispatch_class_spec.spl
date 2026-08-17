@@ -1,0 +1,161 @@
+"""
+# Name-keyed method dispatch with no receiver type — the defect CLASS
+
+**Category:** Codegen / MIR method-call dispatch (similar-problem detection)
+**Member already fixed:** `Dict.clear()` — commit 3c31fc3aa8b, pinned by
+`dict_clear_native_dispatch_spec.spl`
+
+## Overview
+
+MIR method-call lowering keys on the method NAME alone; the receiver's TYPE is
+not part of the dispatch decision. When a name is not recognised as belonging
+to the receiver's builtin family, lowering falls through to the `str.<name>`
+arm. `src/runtime/runtime_native.c` (~line 4626) then hits the shared guard
+
+    rt_refuse_non_text_receiver(method, receiver)
+
+which prints
+
+    Runtime error: str.<m> was called on a receiver that is not text. This
+    method has no compiled implementation for that receiver type -- a
+    code-generation dispatch gap, not a program error.
+
+and `exit(70)`s.
+
+That guard is wired to **exactly seven** names:
+
+    clear, drop, pop, rev, reverse, sorted, take
+
+Every one of them is also a legitimate Dict or Array method. `Dict.clear()` was
+found the hard way — a program died in production-shaped code. The other six
+were never checked. This spec sweeps the whole guarded set instead of waiting
+for each to be discovered individually.
+
+| name | non-text receiver exercised |
+|---|---|
+| `clear` | Dict **and** Array (two distinct lowering families) |
+| `pop` | Array |
+| `rev` | Array |
+| `reverse` | Array |
+| `sorted` | Array |
+| `take` | Array |
+| `drop` | Array |
+
+## Why one probe file per name
+
+A guard hit is `exit(70)`; a codegen gap can also be a hard PANIC. Either
+aborts the process. A combined probe would therefore report only the FIRST
+broken name and silently hide every later one — measured: a single combined
+fixture reported `array_clear` and nothing after it. Each name is consequently
+its own `probe_nontext_receiver_*.spl`, natively built and run in isolation.
+
+## Why this spec shells out
+
+A spec body runs on the tree-walk INTERPRETER, which has no such dispatch gap.
+**No in-process example can go red on this class at all.** The only oracle with
+teeth is a native build executed as a subprocess.
+
+## The gap has two exit shapes, and both are asserted absent
+
+The runtime guard's `exit(70)` is only one of them. Reverting the `Dict.clear`
+fix and native-building the reproducer's probe produces instead:
+
+    PANIC: unresolved method call: clear
+
+with `exit 1` — the lowering never reached the `str.clear` arm at all, it
+simply found no arm. Measured 2026-08-17 on the real revert. Both shapes are
+the same defect from a caller's point of view (the program dies on a method
+the language says exists), so this spec asserts both are absent, plus a
+positive `END` marker so the absence checks cannot pass vacuously on an
+aborted process.
+
+## Attribution control (measured 2026-08-17)
+
+A natively built fixture using the SAME array shapes but NO guarded method name
+(`val a = [1, 2, 3]` then `a[0]` and `a.len()`) prints `CTL idx=1 len=3 END`
+and exits 0. Array literals, indexing and `len` are therefore healthy under
+native codegen, and the aborts the array probes below produce are attributable
+to the guarded method names, not to the surrounding fixture.
+
+## This spec is allowed to be RED
+
+The assertion is deliberately not weakened to accommodate names that are still
+broken. A red here names a real, unfixed member of the class and should be
+filed, not papered over.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+fn native_build_and_run(label: text) -> text:
+    val probe = "test/01_unit/compiler/codegen/probe_nontext_receiver_" + label + ".spl"
+    val dir = "build/test-artifacts/nontext_receiver_dispatch/" + label
+    val src = dir + "/probe.spl"
+    val bin_out = dir + "/probe.bin"
+    # bin/release/simple is NOT the compiler — it is a production-guard wrapper
+    # that refuses the deployed seed, exits 1 and prints nothing, producing a
+    # compiler-shaped false RED. Use bin/simple.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out +
+        " && cp " + probe + " " + src])
+    val build_cmd = ("SIMPLE_BOOTSTRAP=1 nice -n 19 " + bin +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure -o " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val out = process_run("sh", ["-c", build_cmd])
+    out.0
+
+# NOTE: not `fn check(...)` — `check` collides with another co-compiled
+# definition and the runner warns about ambiguous dispatch. And no `@step`
+# decorator with a `{label}` placeholder: the spec's own lexer resolves `{...}`
+# in the decorator string, which failed with `variable label not found` and
+# killed the whole file with `zero-examples` before any example ran.
+fn check_dispatch(label: text, expected: text):
+    step("Native-build a probe that calls this method on a non-text receiver")
+    val out = native_build_and_run(label)
+
+    # Refuse to pass on a build that produced nothing: BUILD-FAILED would
+    # satisfy every `not contains` assertion below and go vacuously green.
+    expect(out.contains("BUILD-FAILED")).to_equal(false)
+
+    # The class signature: name-keyed fallthrough into the str.<m> arm.
+    expect(out.contains("was called on a receiver that is not text")).to_equal(false)
+    expect(out.contains("code-generation dispatch gap")).to_equal(false)
+
+    # A codegen gap can also abort as a hard runtime panic rather than the
+    # guard's clean exit(70). Both are the same defect from a caller's view.
+    expect(out.contains("PANIC")).to_equal(false)
+    expect(out.contains("unresolved method call")).to_equal(false)
+
+    # The probe must actually have reached its own print — an aborted process
+    # produces no END marker, so this is what makes the checks above non-vacuous.
+    expect(out).to_contain(" END")
+    expect(out).to_contain(expected)
+
+describe "every guard-refused method name works on a non-text receiver":
+
+    it "clears a Dict — the already-fixed member, kept as the control arm":
+        check_dispatch("dict_clear", "PROBE dict_clear len=0")
+
+    it "clears an Array":
+        check_dispatch("array_clear", "PROBE array_clear len=0")
+
+    it "pops from an Array":
+        check_dispatch("array_pop", "PROBE array_pop popped=3")
+
+    it "reverses an Array via rev":
+        check_dispatch("array_rev", "PROBE array_rev first=3")
+
+    it "reverses an Array via reverse":
+        check_dispatch("array_reverse", "PROBE array_reverse first=3")
+
+    it "sorts an Array":
+        check_dispatch("array_sorted", "PROBE array_sorted first=1")
+
+    it "takes a prefix of an Array":
+        check_dispatch("array_take", "PROBE array_take len=2")
+
+    it "drops a prefix of an Array":
+        check_dispatch("array_drop", "PROBE array_drop len=2")
