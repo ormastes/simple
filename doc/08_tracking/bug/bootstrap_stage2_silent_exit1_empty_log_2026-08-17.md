@@ -1,7 +1,7 @@
 # Bootstrap stage2: silent exit-1 with a 0-byte stage2-native-build.log
 
 - **Date:** 2026-08-17
-- **Status:** MITIGATED (diagnostic added); root output-buffering defect still open
+- **Status:** PARTIALLY FIXED 2026-08-17 (diagnosis path landed for real - the earlier MITIGATED claim was false, see the correction below); root output-buffering defect still open
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh`, `native-build` output behavior
 
 ## Symptom
