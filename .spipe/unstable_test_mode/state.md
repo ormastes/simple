@@ -192,3 +192,15 @@ The gaps are elsewhere — see below.
   - `/mnt/data/wt-ablate` needs `git worktree remove`.
   - `rc` is unusable for this suite: correct summary at ~63s, then ~55min hang
     in post-run work. The `Results:` line is the only authoritative verdict.
+- 2026-08-17 — Lane C closed out. Ablation worktree `/mnt/data/wt-ablate`
+  REMOVED and confirmed gone (`ls` ENOENT, 0 rows in `git worktree list`);
+  main tree's copy of `test_executor_parsing.spl` verified untouched.
+  Housekeeping item closed.
+  - Fixture discovery requires BOTH markers: `--only-skipped` selects on the
+    literal `tag: "skip"`, NOT on `# @skip`. With `# @skip` alone the run
+    reports `Results: 0 total`, exit 4 — a vacuous run that reads like a clean
+    one. Both markers are now in each fixture header.
+  - Lane C's finding 3 ("`(unverified)`/`INCONCLUSIVE` absent from the tree")
+    is REFUTED — 7 matches in both WT and HEAD. Its underlying observation
+    (TIMEOUT counted as a failure) was correct and is what Lane F's
+    `530fa623afa` addresses; that fix is still UNMEASURED.
