@@ -1,5 +1,17 @@
 # Enum collection payload is copied at the function-return boundary
 
+> **REPRODUCED 2026-08-17**, and root-caused. `test/01_unit/lib/common/sdn_coverage_spec.spl`
+> fails exactly the example this doc names as its discovery case:
+> `✗ get by key from dict — expected true to equal false`;
+> `Results: 71 total, 70 passed, 1 failed` (executed=71, dropped=0).
+> Shared root cause with `struct_dict_field_mutation_engine_divergence_2026-08-10`:
+> the interpreter merges shared collections on the ARGUMENT boundary only, never
+> on the RETURN boundary — `function_exec.rs:1203` is the sole call site. See
+> `interpreter_return_boundary_never_merges_shared_collections_2026-08-17.md`.
+> NOTE: BRIEF correction #2 calls this family already-fixed. That holds only for
+> the argument boundary; this row is live.
+
+
 - **Date:** 2026-07-28
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).

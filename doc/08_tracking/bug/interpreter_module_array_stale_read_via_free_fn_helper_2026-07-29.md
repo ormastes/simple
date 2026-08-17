@@ -1,5 +1,12 @@
 # Bug: instance method reads a stale module-level array through a free-function helper (interpreter)
 
+> **DID NOT REPRODUCE 2026-08-17.** `test/01_unit/lib/nogc_async_mut/async_spec.spl`:
+> `SPEC FILE VERDICT: declared>=10 executed=10 passed=10 failed=0 dropped=0` /
+> `Results: 10 total, 10 passed, 0 failed`. Not vacuous — 10 examples executed.
+> Binary `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+> 2026-08-16 22:59:37. Candidate for close.
+
+
 - **Date:** 2026-07-29
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).

@@ -1,5 +1,12 @@
 # A capability handle stops aliasing its target unless the acquisition is a function's TAIL expression
 
+> **DID NOT REPRODUCE 2026-08-17.** `test/01_unit/lib/debug/debug_target_ref_spec.spl`:
+> `SPEC FILE VERDICT: declared>=71 executed=71 passed=71 failed=0 dropped=0` /
+> `Results: 71 total, 71 passed, 0 failed`. Not vacuous — 71 examples executed.
+> Binary `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+> 2026-08-16 22:59:37. Candidate for close.
+
+
 - **Filed:** 2026-08-09 (stream P10, Lab debug/profile endpoints)
 - **Status:** OPEN — worked around in `src/app/simple_lab/lab_debug.spl`
 - **Severity:** high. Silent, partial, and produces wrong answers with no diagnostic.

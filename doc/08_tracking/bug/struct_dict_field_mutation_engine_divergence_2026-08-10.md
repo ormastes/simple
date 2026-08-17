@@ -1,5 +1,16 @@
 # Dict-in-struct field mutation through a by-value receiver DIVERGES BY ENGINE
 
+> **REPRODUCED 2026-08-17**, and root-caused. `test/01_unit/compiler/interpreter/self_field_assign_spec.spl`:
+> `✗ preserves self.field mutations passed through free functions — expected 1 to equal 11`
+> `✗ preserves struct dictionary-field mutations through returning free functions`
+> `Results: 13 total, 11 passed, 2 failed` (executed=13, dropped=0).
+> The controlled pair: the ARGUMENT-boundary sibling
+> `✓ preserves dictionary-field mutations through free functions` passes while the
+> RETURN-boundary case fails. Shared cause with
+> `enum_payload_dict_copied_on_function_return_2026-07-28`; see
+> `interpreter_return_boundary_never_merges_shared_collections_2026-08-17.md`.
+
+
 - **Status:** OPEN — engine divergence (defect) + undocumented language semantics (design question)
 - **Filed:** 2026-08-10
 - **Supersedes the framing of:** `struct_field_dict_mutation_through_free_function_is_a_noop_2026-08-10.md`
