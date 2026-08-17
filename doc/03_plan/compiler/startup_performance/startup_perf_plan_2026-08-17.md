@@ -336,20 +336,15 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
   brace-escape fix `685b42f53a3` / deployed `1f9c3650f91`.
 - [x] DONE — Phase-D startup check: seed `cleanup_old_logs` dominates, no
   .spl-side cost `606b2b7f08c` (`doc/10_metrics/startup/startup_perf_check_2026-08-17.md`).
-- [x] DONE (2026-08-18) — `interface_digest_of` first callers landed at
-  `1310d879046` (also `22563ab581b`): `smf_manifest.spl` imports
-  `interface_digest_of_source`, additive `iface_digest` manifest column,
-  level-gated verify (`SIMPLE_IFACE_DIGEST_LOG`). Verified present in
-  origin/main committed content (`smf_manifest.spl:19,178`).
-- [~] PARTIAL — `test/05_perf/startup/` now exists (`budgets.sdn`,
-  `hello_fixture.spl`, `README.md`); per-lane >=5-sample p50/p95 admission
-  reports still not institutionalized — see
-  `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
-- [x] DONE — seed env-cache landed and deployed (2026-08-18 06:12 seed
-  redeploy, see `.claude/rules/commands.md` dated note); ExecIR slice
-  adopted (tier-0.5, arena). Remaining IN-FLIGHT: parser hop reduction;
-  segment-loader O(segments) proof; seed log tests — tracked in
-  `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+- [ ] NOT-STARTED — `interface_digest_of` cache-key wiring: still ZERO
+  callers (`action_key.spl:199` definition only; `compile_interface.spl`
+  references the idea in a comment, not a call). SmfManifest load-verify
+  also unwired.
+- [ ] NOT-STARTED — `test/05_perf/startup/` harness lanes (dir absent);
+  per-lane >=5-sample p50/p95 admission reports not institutionalized.
+- [ ] IN-FLIGHT — seed env-cache; parser hop reduction; ExecIR slice;
+  segment-loader slice (`segment_load_plan.spl` exists, loader O(segments)
+  proof pending); seed log tests.
 
 ### Phase E — coupling/cohesion gates
 - [x] DONE — `deps` command exists (`src/app/deps/{main,scanner,deep_report}.spl`,
@@ -359,22 +354,16 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
 - [x] DONE — SCC breaks measured by it: cross-layer mega-SCC 36 -> 13
   `5f37845f640`; backend_api SCC 45 -> 24 `b3e53994db4` -> 8 `0fa9744d4f4`.
 - [ ] REMAINING — per-phase before/after snapshot spec with growth band not
-  found; snapshots are one baseline, not a bracketing series. Tracked:
-  `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
+  found; snapshots are one baseline, not a bracketing series.
 
 ### Honest remaining list
 1. **Self-hosted deploy as default tooling** — `bin/simple` is still the
    Rust seed (CLAUDE.md rule unmet); the dominant startup cost found in
-   Phase D lives in the seed. Blocked on bootstrap succeeding (stage-1 RSS
-   blowup, see `66125e94a6b`). Tracked:
-   `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
-2. ~~`interface_digest_of` + SmfManifest verification wiring~~ — DONE,
-   first callers landed at `1310d879046` (see Phase D row above).
-3. `test/05_perf/startup/` perf-lane harness + admission discipline
-   (dir now seeded; admission reports open — same tracking doc).
+   Phase D lives in the seed.
+2. `interface_digest_of` + SmfManifest verification wiring (dependency-aware
+   incremental build) — designed, zero callers.
+3. `test/05_perf/startup/` perf-lane harness + admission discipline.
 4. Phase B fold-on-full-rebuild bootstrap proof; component-descriptor
    contract as specced (or plan amendment blessing the dynsmf-path shape).
-   Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
 5. Phase C help/completion generation + hardcoded-option migration report.
-   Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
 6. Per-phase E re-measure snapshots with a growth-band spec.
