@@ -75,6 +75,64 @@ bootstrap_stage3_args_sha256() {
     done | bootstrap_stage3_hash_stream
 }
 
+# Emit the Stage 3 diagnostic pass-through environment, one NAME=1 assignment
+# per line, in a fixed lexical order.
+#
+# WHY THIS EXISTS.  Stage 3 executes under `env -i` with an explicit allowlist
+# (see bootstrap_stage3_run_transcribed).  Every env-gated diagnostic probe
+# inside the compiler therefore reads EMPTY during Stage 3 and stays silent,
+# even when it was compiled into the admitted Stage 2 binary.  Measured
+# 2026-08-17: SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE's literal is present in the
+# admitted Stage 2 binary (`strings`) yet emitted zero lines in Stage 3.  About
+# ten probes on the Stage 3 compile path were unreachable for the same reason.
+# See doc/08_tracking/bug/stage3_env_gated_probes_unreachable_2026-08-17.md.
+#
+# WHY IT CANNOT WEAKEN THE PROVENANCE GATE.
+#  1. NAME allowlist.  Only the fixed names below are considered; there is no
+#     prefix rule, no wildcard, and no "pass everything" escape.  Each was
+#     read and confirmed to be a pure `if env == "1": print ...` gate on the
+#     Stage 3 compile path.  Deliberately EXCLUDED: any path- or level-valued
+#     knob (SIMPLE_DIAG_FILE, SIMPLE_MEM_DUMP_PATH, SIMPLE_KEEP_LLVM_IR,
+#     SIMPLE_DEBUG_INFO_LEVEL, SIMPLE_OBJDUMP) -- those write files, run tools,
+#     or change debug info in the emitted object, i.e. they can alter what
+#     Stage 3 BUILDS rather than only what it PRINTS.
+#  2. VALUE is constrained to the single literal `1`.  Any other value
+#     (including `0`, `2`, a path, or the empty string) is dropped.  A
+#     pass-through var therefore cannot carry a payload into the compiler; it
+#     can only flip a print gate on.  This also makes the emitted list safe for
+#     unquoted word splitting by construction.
+#  3. The emitted assignments are appended to the SAME explicit-env vector that
+#     both bootstrap_stage3_args_sha256 and the recorded command transcript
+#     consume, so the args hash and the transcript keep describing the real
+#     invocation.  Turning a probe on DOES change stage3_build_args_sha256 --
+#     that is correct and intended: a hash that omitted part of the environment
+#     would be the weaker gate.
+#  4. With no allowlisted var set to 1 this emits nothing, so the explicit-env
+#     vector, the transcript bytes, and the args hash are unchanged.
+#
+# Note the seed-delegation gate greps the Stage 3 log for `^Build complete: N
+# compiled` / `^Linked: ... via clang` and FAILS on their presence.  A probe can
+# only ADD lines, so this pass-through can make that gate fail closed but can
+# never make it falsely pass.
+bootstrap_stage3_diagnostic_env() {
+    for bootstrap_stage3_diag_name in \
+        SIMPLE_BOOTSTRAP_DIAG \
+        SIMPLE_COMPILER_TRACE \
+        SIMPLE_HIR_EXPORT_ORIGIN_TRACE \
+        SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE \
+        SIMPLE_HIR_SIBLING_TRACE \
+        SIMPLE_MIRB_TRACE \
+        SIMPLE_MIR_DEFAULT_PAD_TRACE \
+        SIMPLE_MIR_FIELD_TRACE \
+        SIMPLE_MIR_RET_TRACE; do
+        bootstrap_stage3_diag_value=$(
+            eval "printf '%s' \"\${${bootstrap_stage3_diag_name}-}\""
+        ) || return 1
+        [ "$bootstrap_stage3_diag_value" = 1 ] || continue
+        printf '%s=1\n' "$bootstrap_stage3_diag_name"
+    done
+}
+
 # Return one canonical absolute path and reject a symlinked leaf.  pwd -P
 # resolves every parent component, so comparing a recorded path with this value
 # also rejects aliases through symlinked directories.

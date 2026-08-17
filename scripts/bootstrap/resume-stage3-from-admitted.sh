@@ -219,6 +219,11 @@ evidence_run_id="stage3-${platform}-$$"
 [ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
 [ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
 
+# See bootstrap_stage3_diagnostic_env in
+# scripts/check/lib/bootstrap-stage3/authority.shs.  Computed once, word-split
+# into both the args hash and the real invocation so they cannot diverge; empty
+# unless an allowlisted print-only probe var is set to exactly 1.
+stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -234,6 +239,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=1" \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
+  ${stage3_diagnostic_env} \
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
@@ -253,7 +259,8 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS=1 \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \
-  SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" -- \
+  SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
+  ${stage3_diagnostic_env} -- \
   "$admitted" native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \

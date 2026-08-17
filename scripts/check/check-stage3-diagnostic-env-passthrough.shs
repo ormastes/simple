@@ -1,0 +1,241 @@
+#!/bin/sh
+# Fail-closed gate for the Stage 3 diagnostic env pass-through.
+#
+# Proves the three arms of the ablation for
+# doc/08_tracking/bug/stage3_env_gated_probes_unreachable_2026-08-17.md, plus
+# the two provenance invariants the pass-through must not weaken.
+#
+# It exercises the REAL production code path: it sources the real
+# scripts/check/lib/bootstrap-stage3/authority.shs and command-snapshot.shs and
+# drives the real bootstrap_stage3_run_transcribed, substituting only the
+# executable at the end of the argv for a stub that reports which SIMPLE_*
+# variables its process actually received.  That is exactly the property under
+# test -- what survives `env -i` and reaches the Stage 3 process -- so the stub
+# is a faithful stand-in for the compiler and does not need to compile anything.
+#
+# Verdict line is always the LAST line of stdout:
+#   PASS — <n> arm(s)/invariant(s) checked, ...     exit 0
+#   FAIL — ...                                     exit 1
+#   ERROR — nothing was checked                    exit 2
+# A run that checked 0 arms is an ERROR, never a pass.
+#
+# Every command's exit status is read into a variable on the line AFTER the
+# command, never through a pipe: a pipeline's $? is the LAST element's status
+# and has produced false greens in this repo before.
+
+set -u
+
+EV_CHECKED=0
+EV_FAILURES=
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || {
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+lib="$repo_root/scripts/check/lib/bootstrap-stage3"
+
+for f in "$lib/authority.shs" "$lib/command-snapshot.shs"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+done
+
+# shellcheck source=/dev/null
+. "$lib/authority.shs"
+# shellcheck source=/dev/null
+. "$lib/command-snapshot.shs"
+
+if ! command -v bootstrap_stage3_run_transcribed >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if ! command -v bootstrap_stage3_diagnostic_env >/dev/null 2>&1; then
+    echo "FAIL — bootstrap_stage3_diagnostic_env is not defined in authority.shs"
+    exit 1
+fi
+
+work=$(mktemp -d) || {
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+trap 'rm -rf "$work"' EXIT INT TERM
+
+run_home="$work/home"
+run_tmp="$work/tmp"
+mkdir -p "$run_home" "$run_tmp" || {
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+run_home=$(CDPATH= cd -- "$run_home" && pwd -P)
+run_tmp=$(CDPATH= cd -- "$run_tmp" && pwd -P)
+
+# The stub stands in for the Stage 2 compiler.  It reports only which probe
+# variables its own process received, which is the property under test.
+stub="$work/probe-stub"
+cat >"$stub" <<'STUB'
+#!/bin/sh
+for name in SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_BOOTSTRAP_DIAG \
+    SIMPLE_MIR_FIELD_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
+    SIMPLE_DEBUG_INFO_LEVEL; do
+    eval "value=\${$name-<unset>}"
+    printf 'HIR-PAYLOAD-LOOKUP probe-visible %s=%s\n' "$name" "$value"
+done
+exit 0
+STUB
+chmod 0755 "$stub" || {
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+
+path_dir="$work/bin"
+mkdir -p "$path_dir"
+path_dir=$(CDPATH= cd -- "$path_dir" && pwd -P)
+run_path="$path_dir:/usr/bin:/bin"
+
+# The fixed baseline explicit-env vector, standing in for Stage 3's.
+baseline_env='SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1'
+
+# arm <label> <diagnostic-env-words>
+# Echoes the stub's observed value for SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE.
+arm() {
+    arm_label=$1
+    arm_diag=$2
+    arm_log="$work/$arm_label.log"
+    arm_transcript="$work/$arm_label.transcript"
+    # shellcheck disable=SC2086
+    bootstrap_stage3_run_transcribed "$arm_transcript" "$repo_root" \
+        "$arm_log" "$run_home" "$run_tmp" "$run_path" \
+        $baseline_env $arm_diag -- "$stub"
+    arm_status=$?
+    if [ "$arm_status" -ne 0 ]; then
+        EV_FAILURES="$EV_FAILURES $arm_label:run-status=$arm_status"
+        return 1
+    fi
+    grep -c '^HIR-PAYLOAD-LOOKUP probe-visible SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1$' \
+        "$arm_log" >"$work/$arm_label.count" 2>/dev/null
+    return 0
+}
+
+count_of() {
+    tr -d ' \n' <"$work/$1.count"
+}
+
+note_fail() {
+    EV_FAILURES="$EV_FAILURES $1"
+}
+
+# ---------------------------------------------------------------- arm 1 -----
+# WITH the fix and the var set: the trace variable reaches the process.
+echo "=== arm 1: with fix, SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1 ==="
+SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+arm1_diag=$(bootstrap_stage3_diagnostic_env)
+arm1_diag_status=$?
+if [ "$arm1_diag_status" -ne 0 ]; then
+    note_fail "arm1:diagnostic-env-status=$arm1_diag_status"
+fi
+printf 'diagnostic env emitted: [%s]\n' "$(printf '%s' "$arm1_diag" | tr '\n' ' ')"
+arm "arm1" "$arm1_diag"
+arm1_run=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$arm1_run" -eq 0 ]; then
+    arm1_count=$(count_of arm1)
+    echo "trace-var-visible lines: $arm1_count"
+    sed -n '1p' "$work/arm1.log"
+    [ "$arm1_count" -ge 1 ] || note_fail "arm1:expected>=1-got-$arm1_count"
+fi
+
+# ---------------------------------------------------------------- arm 2 -----
+# WITH the fix and the var UNSET: nothing passes through, and the explicit-env
+# vector is byte-identical to the pre-fix one.
+echo "=== arm 2: with fix, variable unset ==="
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+arm2_diag=$(bootstrap_stage3_diagnostic_env)
+printf 'diagnostic env emitted: [%s]\n' "$(printf '%s' "$arm2_diag" | tr '\n' ' ')"
+arm "arm2" "$arm2_diag"
+arm2_run=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$arm2_run" -eq 0 ]; then
+    arm2_count=$(count_of arm2)
+    echo "trace-var-visible lines: $arm2_count"
+    sed -n '1p' "$work/arm2.log"
+    [ "$arm2_count" -eq 0 ] || note_fail "arm2:expected-0-got-$arm2_count"
+fi
+[ -z "$arm2_diag" ] || note_fail "arm2:diagnostic-env-not-empty"
+
+# ---------------------------------------------------------------- arm 3 -----
+# WITHOUT the fix and the var SET: the defect reproduced.  "Without the fix" is
+# modelled by omitting the pass-through words from the invocation, which is
+# exactly what the pre-fix call sites did.  A control that fails to fail means
+# the test is broken, not the code.
+echo "=== arm 3: control -- without fix, SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1 ==="
+SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+arm "arm3" ""
+arm3_run=$?
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ "$arm3_run" -eq 0 ]; then
+    arm3_count=$(count_of arm3)
+    echo "trace-var-visible lines: $arm3_count"
+    sed -n '1p' "$work/arm3.log"
+    [ "$arm3_count" -eq 0 ] ||
+        note_fail "arm3:control-did-not-reproduce-defect-got-$arm3_count"
+fi
+
+# --------------------------------------------------- invariant: hash ----
+# Default behaviour is byte-identical: with nothing set, the args hash equals
+# the hash of the vector with no pass-through words at all.
+echo "=== invariant 1: args hash unchanged by default ==="
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+inv_empty=$(bootstrap_stage3_diagnostic_env)
+# shellcheck disable=SC2086
+hash_with=$(bootstrap_stage3_args_sha256 $baseline_env $inv_empty -- stub)
+# shellcheck disable=SC2086
+hash_without=$(bootstrap_stage3_args_sha256 $baseline_env -- stub)
+EV_CHECKED=$((EV_CHECKED + 1))
+echo "default-with-passthrough: $hash_with"
+echo "pre-fix-baseline:         $hash_without"
+[ "$hash_with" = "$hash_without" ] || note_fail "invariant1:default-hash-changed"
+
+# A var that IS passed through MUST change the hash -- a hash that omitted part
+# of the environment would be the weaker gate.
+echo "=== invariant 2: an enabled probe changes the args hash ==="
+SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
+inv_set=$(bootstrap_stage3_diagnostic_env)
+# shellcheck disable=SC2086
+hash_diag=$(bootstrap_stage3_args_sha256 $baseline_env $inv_set -- stub)
+EV_CHECKED=$((EV_CHECKED + 1))
+echo "with-probe-enabled:       $hash_diag"
+[ "$hash_diag" != "$hash_without" ] ||
+    note_fail "invariant2:enabled-probe-did-not-change-hash"
+
+# ------------------------------------------- invariant: value/name scope ----
+# Only the literal value 1 is accepted, and only allowlisted names.  A
+# path-valued or codegen-affecting knob must never appear.
+echo "=== invariant 3: value and name scope ==="
+EV_CHECKED=$((EV_CHECKED + 1))
+SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=/etc/passwd
+SIMPLE_DIAG_FILE=/tmp/evil
+SIMPLE_KEEP_LLVM_IR=1
+SIMPLE_DEBUG_INFO_LEVEL=2
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
+    SIMPLE_DEBUG_INFO_LEVEL
+scope=$(bootstrap_stage3_diagnostic_env)
+printf 'emitted with hostile values: [%s]\n' "$(printf '%s' "$scope" | tr '\n' ' ')"
+[ -z "$scope" ] || note_fail "invariant3:emitted-non-allowlisted-or-non-1-value"
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
+    SIMPLE_DEBUG_INFO_LEVEL
+
+# ------------------------------------------------------------- verdict ------
+if [ "$EV_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "$EV_FAILURES" ]; then
+    echo "FAIL — $EV_CHECKED arm(s)/invariant(s) checked, failures:$EV_FAILURES"
+    exit 1
+fi
+echo "PASS — $EV_CHECKED arm(s)/invariant(s) checked, 3 ablation arms behaved as specified, default args hash unchanged, enabled probe changes hash, non-allowlisted and non-1 values rejected"
+exit 0

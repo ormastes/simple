@@ -2010,6 +2010,13 @@ else
   stage3_evidence_run_id="stage3-${PLATFORM}-$$"
   stage3_memory_snapshot="${stage3_provenance_dir}/memory-snapshot-v1.events"
   stage3_phase_profile="${stage3_provenance_dir}/phase-profile-v1.events"
+  # Narrowly-scoped diagnostic pass-through for Stage 3.  Computed ONCE here and
+  # word-split into both the args-hash vector below and the real invocation, so
+  # the two can never disagree.  Values are constrained to the literal `1` and
+  # names to a fixed print-only allowlist by bootstrap_stage3_diagnostic_env, so
+  # unquoted expansion is safe and no glob character can occur.  Empty by
+  # default => both uses are byte-identical to before this existed.
+  stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -2032,6 +2039,7 @@ else
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
+      ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       --threads "${selfhost_jobs}" \
@@ -2307,7 +2315,8 @@ else
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
     SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
     SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
-    SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
+    SIMPLE_BINARY="${stage2_admitted_absolute}" \
+    ${stage3_diagnostic_env} -- \
     "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
