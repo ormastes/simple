@@ -85,3 +85,42 @@ not `.?`) was not root-caused further; out of scope for this triage pass
 
 Left the 3 spec files unmodified — they are correct as written and
 correctly detect this defect; nothing to fix on the test side.
+
+## Re-verification 2026-08-17 (lane m5a_app_cli) — DOES NOT REPRODUCE; superseded by a different blocker
+
+Ran the doc's own minimal repro verbatim against the deployed `bin/simple`
+(Rust seed) in `/mnt/data/worktrees/simple-main`:
+
+```
+bin/simple run src/app/cli/query_visibility.spl symbols \
+  src/compiler/10.frontend/testdata/visibility_query_fixture.spl \
+  --requester src/compiler/35.semantics/testdata/visibility_query_fixture.spl
+rc=1
+```
+
+stdout empty (as documented), **but stderr no longer contains the
+match-exhausted error** — `grep -c exhausted` on the captured stderr is 0.
+The run now dies with a completely different, earlier failure:
+
+```
+error[E1002]: function `_shared_escape_json` not found
+  = help: check the function name or import the module that defines it
+```
+
+So the `Option<i64>` match-exhausted defect is **not reproducible by content
+or by execution**: `src/app/cli/_QueryVisibility/symbol_resolution.spl` contains
+no `Option<i64>` match at all (grep for `Option`, `Some(`, `match ` returns
+only unrelated lines). Classified **already-fixed / stale** for the documented
+symptom.
+
+**New blocker surfaced (out of this lane's scope — `src/lib`, not
+`src/app/cli`):** `src/lib/common/text_advanced.spl:26` does
+`use std.text.{escape_json as _shared_escape_json}` while the *same module*
+also declares `fn escape_json` at line 651, whose body calls
+`_shared_escape_json(s)`. The aliased import is not resolvable at that call
+site — a self-shadowing / import-alias resolution defect. Both `escape_json`
+definitions exist (`src/lib/common/text.spl:29`, `text_advanced.spl:651`).
+Until that is fixed, every `query_visibility` subcommand still exits 1 with
+empty stdout, so the CLI remains user-visibly broken for a *different* reason.
+The three cited integration specs will therefore still be RED, and must not be
+read as evidence for the Option<i64> defect.
