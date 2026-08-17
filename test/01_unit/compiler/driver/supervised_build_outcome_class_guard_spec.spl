@@ -1,0 +1,112 @@
+# Class-level guard for the supervised-build defect FAMILY.
+#
+# The sibling spec (supervised_build_survives_worker_death_spec.spl) reproduces
+# the concrete defect with real dying children. This one fences the CLASS around
+# it — the recurring ways a build path lies about what happened:
+#
+#   1. an UNVERIFIED outcome (external SIGTERM, timeout) counted as a failure,
+#      which is how a contended host manufactures phantom compiler bugs;
+#   2. a unit that vanishes from the report instead of being named NOT_RUN;
+#   3. a second, drifting 128+N decoding hand-rolled next to the canonical one;
+#   4. the isolation flag silently defaulting the same way on every path, so
+#      "unstable mode" is either always on or unreachable.
+#
+# Requirement: doc/02_requirements/compiler/supervised_builder.md (R2, R3, R6, R8)
+
+use std.spec.*
+use compiler.driver.driver_build.parallel.{
+    ParallelBuilder, ParallelBuildConfig, parallel_supervised_argv,
+    parallel_supervised_cmd}
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+
+describe "supervised build outcome class guard":
+    it "never counts an UNVERIFIED outcome as a failure":
+        # 143 is SIGTERM. earlyoom on this host is configured `--prefer
+        # ^(simple|...)` and fires against `simple` in practice, so this is the
+        # single most likely status a real build sees on a loaded box.
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.from_status(0, "terminated.spl", 143, false, 5, 0, ""))
+        set.record(BuildUnitOutcome.from_status(1, "slow.spl", 137, true, 5, 0, ""))
+        set.record(BuildUnitOutcome.from_status(2, "crashed.spl", 139, false, 5, 0, ""))
+        set.record(BuildUnitOutcome.from_status(3, "bad.spl", 1, false, 5, 0, "syntax"))
+
+        expect(set.count_of(BuildOutcomeKind.TERMINATED)).to_equal(1)
+        expect(set.count_of(BuildOutcomeKind.TIMEOUT)).to_equal(1)
+        expect(set.count_of(BuildOutcomeKind.CRASHED)).to_equal(1)
+        expect(set.count_of(BuildOutcomeKind.ERROR)).to_equal(1)
+        # The whole point: 4 non-OK units, but only 2 are FAILURES.
+        expect(set.unverified_count()).to_equal(2)
+        expect(set.failure_count()).to_equal(2)
+        # A 137 that the supervisor itself caused by enforcing the budget is a
+        # TIMEOUT, not a CRASHED — the budget is the fact that matters.
+        expect(set.paths_in(BuildOutcomeKind.TIMEOUT)).to_contain("slow.spl")
+        expect(set.paths_in(BuildOutcomeKind.CRASHED)).to_not_contain("slow.spl")
+
+    it "states NOT_RUN explicitly rather than letting a unit vanish":
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.ok(0, "done.spl", 1, 0))
+        set.record(BuildUnitOutcome.not_run(1, "never_reached.spl"))
+
+        expect(set.not_run_count()).to_equal(1)
+        expect(set.all_ok()).to_be_false()
+        # Silent absence is forbidden: the path must appear by name in both the
+        # human summary and the fail-closed verdict.
+        expect(set.summary()).to_contain("never_reached.spl")
+        expect(set.summary()).to_contain("NOT_RUN")
+        expect(set.verdict()).to_contain("never_reached.spl")
+
+    it "emits exactly one record per unit, so no unit can go unreported":
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(0))
+        builder.add_unit("a.spl", [])
+        builder.add_unit("b.spl", [])
+        builder.add_unit("c.spl", [])
+        builder.add_unit("d.spl", [])
+
+        val outcomes = builder.build_supervised(
+            \path: rt_process_spawn_async(
+                parallel_supervised_cmd(),
+                parallel_supervised_argv(
+                    if path == "b.spl": "/bin/sh -c 'kill -SEGV $$'" else: "true")),
+            \path: "")
+
+        # Four units in, four records out — even though one of them died.
+        expect(outcomes.len()).to_equal(4)
+        expect(outcomes.has_path("a.spl")).to_be_true()
+        expect(outcomes.has_path("b.spl")).to_be_true()
+        expect(outcomes.has_path("c.spl")).to_be_true()
+        expect(outcomes.has_path("d.spl")).to_be_true()
+        expect(outcomes.count_of(BuildOutcomeKind.NOT_RUN)).to_equal(0)
+
+    it "defaults the unstable flag per front end, and lets a human force it":
+        # OFF for ordinary interactive runs...
+        expect(ParallelBuildConfig.default().unstable).to_be_false()
+        expect(ParallelBuildConfig.single_threaded().unstable).to_be_false()
+        # ...ON for the bootstrap path, where a single death has repeatedly
+        # discarded a 26-minute run.
+        expect(ParallelBuildConfig.bootstrap().unstable).to_be_true()
+        # A per-unit budget exists on the bootstrap path; 0 would mean unbounded.
+        expect(ParallelBuildConfig.bootstrap().unit_timeout_ms > 0).to_be_true()
+
+    it "keeps one canonical 128+N decoding instead of a competing copy":
+        val src = rt_file_read_text(
+            "src/compiler/80.driver/driver_build/parallel.spl") ?? ""
+
+        # Classification is delegated, never re-implemented.
+        expect(src).to_contain("BuildUnitOutcome.from_status")
+        # No hand-rolled signal arithmetic living alongside the canonical one.
+        expect(src).to_not_contain("status - 128")
+        expect(src).to_not_contain("status == 139")
+        expect(src).to_not_contain("status == 143")
+
+        # The wait status is bound DIRECTLY to a variable. A pipeline here yields
+        # the LAST stage's status, which has produced false greens in this repo.
+        expect(src).to_contain("var status = rt_process_wait(pid, 1)")
+
+        # The signal-preserving wrapper must survive: rt_process_wait folds a
+        # signal death to -1, so without `sh -c '<cmd>; exit $?'` the CRASHED /
+        # TERMINATED distinction is destroyed before Simple ever sees it.
+        expect(src).to_contain("exit $?")
