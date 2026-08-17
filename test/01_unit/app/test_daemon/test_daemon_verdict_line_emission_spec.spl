@@ -1,5 +1,5 @@
 use std.spec
-use app.test_daemon.light_protocol.{unrun_reason, unrun_verdict_line, ran_verdict_line, is_load_failure, has_verdict_line, timeout_verdict_line}
+use app.test_daemon.light_protocol.{unrun_reason, unrun_verdict_line, ran_verdict_line, is_load_failure, has_verdict_line, timeout_verdict_line, no_response_verdict_line}
 
 # @req REQ-TESTRUNNER-VERDICT-LINE
 describe "every spec file a test run touches reports a machine-readable verdict":
@@ -114,3 +114,24 @@ describe "every spec file a test run touches reports a machine-readable verdict"
         assert_contains(unrun, "unrun=1")
         assert_false(ran.contains("unrun=1"))
         assert_false(ran.contains("timeout=1"))
+
+    it "reports daemon no-response as inconclusive without fabricating a failed example":
+        step("Render the verdict for a request whose daemon never answered")
+        val line = no_response_verdict_line("test/slow_spec.spl", 840000)
+
+        step("Keep the infrastructure timeout visible without claiming execution or failure")
+        assert_true(has_verdict_line(line))
+        assert_contains(line, "executed=0")
+        assert_contains(line, "passed=0")
+        assert_contains(line, "failed=0")
+        assert_contains(line, "dropped=1")
+        assert_contains(line, "timeout=1")
+        assert_contains(line, "inconclusive=1")
+        assert_contains(line, "reason=daemon-no-response")
+        assert_contains(line, "budget_ms=840000")
+
+        step("Keep a real worker timeout red and distinguishable")
+        val worker = timeout_verdict_line("test/slow_spec.spl", "daemon-worker-timeout", 840000)
+        assert_contains(worker, "executed=1")
+        assert_contains(worker, "failed=1")
+        assert_false(worker.contains("inconclusive=1"))
