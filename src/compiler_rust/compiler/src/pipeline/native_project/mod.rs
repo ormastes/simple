@@ -596,11 +596,17 @@ impl NativeProjectBuilder {
     pub(crate) fn cache_dir(&self) -> PathBuf {
         let base = self.cache_base_dir();
         let target = effective_target();
-        if target.is_host() {
+        let targeted = if target.is_host() {
             base
         } else {
             base.join(target.triple_str())
-        }
+        };
+        // Per-lane private cache: entries are reachable only inside their own
+        // (compiler identity, lane) scope, so a phase-2 lane's objects can never
+        // be named — let alone hit — by a phase-3 lane sharing --cache-dir.
+        let scoped = targeted.join(cache_scope_segment());
+        write_cache_scope_marker(&scoped);
+        scoped
     }
 
     pub(crate) fn effective_source_root_for(&self, path: &Path) -> PathBuf {
@@ -1424,6 +1430,43 @@ fn compiler_fingerprint() -> u64 {
     })
 }
 
+/// Declared private-cache lane for this process (`SIMPLE_CACHE_SCOPE`).
+///
+/// Concurrent bootstrap lanes (phase-1 seed, phase-2 stage, phase-3 self-host,
+/// phase-4 full CLI, census, tool builds) may run DIFFERENT compiler binaries
+/// over the SAME source tree while sharing one `--cache-dir`. `compiler_fingerprint`
+/// separates different binaries, but two lanes can legitimately share a binary
+/// and still must not share entries — and a lane must be able to DECLARE its
+/// cache private rather than depend on a fingerprint a mid-run redeploy changes
+/// underneath it.
+///
+/// Unset means `default`, which reproduces the previous single-lane behaviour.
+/// See `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`.
+pub fn cache_lane() -> String {
+    match std::env::var("SIMPLE_CACHE_SCOPE") {
+        Ok(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => "default".to_string(),
+    }
+}
+
+/// Directory segment that makes a cache entry reachable ONLY within its own
+/// (compiler identity, lane) scope. Cross-scope lookups cannot name an
+/// out-of-scope entry at all, so the MISS is structural, not a hash comparison.
+pub fn cache_scope_segment() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cache_lane().hash(&mut hasher);
+    compiler_fingerprint().hash(&mut hasher);
+    format!("scope-{:016x}", hasher.finish())
+}
+
+/// Record the lane that owns a cache directory so a SCRIPT can check ownership
+/// without running a compiler (`scripts/check/check-cache-scope-ownership.shs`).
+fn write_cache_scope_marker(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(".cache_scope"), format!("lane={}\n", cache_lane()));
+}
+
 /// Compute the object cache key for a module.
 ///
 /// The generated object is not determined by source text alone: entry modules
@@ -1474,6 +1517,9 @@ pub(crate) fn object_cache_key(
     std::env::var("SIMPLE_NATIVE_CPU").unwrap_or_default().hash(&mut hasher);
     active_simd_tier_name().hash(&mut hasher);
     compiler_fingerprint().hash(&mut hasher);
+    // Belt-and-braces with the scope DIRECTORY partition: even a cache dir
+    // hand-pointed at by two lanes yields different keys per lane.
+    cache_lane().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1628,7 +1674,12 @@ impl GlobalBuildFingerprint {
     pub(crate) fn to_manifest_line(&self) -> String {
         format!(
             "producer={:016x};opt={:016x};ec={:016x};t={:016x};ls={:016x};layout={:016x};instr={:016x}",
-            self.producer, self.opt_level, self.entry_closure, self.target, self.linker_script, self.layout,
+            self.producer,
+            self.opt_level,
+            self.entry_closure,
+            self.target,
+            self.linker_script,
+            self.layout,
             self.instrumentation
         )
     }

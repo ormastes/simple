@@ -481,6 +481,23 @@ fn widen_struct_field_value(
     field_type: TypeId,
 ) -> cranelift_codegen::ir::Value {
     let actual_ty = builder.func.dfg.value_type(value);
+    // Float fields: convert to the field's DECLARED width, because
+    // `compile_field_get` loads each slot with `type_id_to_cranelift(field_type)`.
+    // Storing an f64 into an `f32` slot and then loading 4 bytes back is a bit
+    // TRUNCATION, not a numeric conversion: `2.5f64` is `0x4004000000000000`,
+    // whose low 32 bits are zero, so `s.a` read back as `0.0`; `0.1f64` read
+    // back as `-1.588e-23`. Demote/promote so store width == load width.
+    if actual_ty.is_float() {
+        let storage_ty = type_id_to_cranelift(field_type);
+        if storage_ty.is_float() && storage_ty != actual_ty {
+            return if storage_ty.bits() < actual_ty.bits() {
+                builder.ins().fdemote(storage_ty, value)
+            } else {
+                builder.ins().fpromote(storage_ty, value)
+            };
+        }
+        return value;
+    }
     if actual_ty == types::I64 || !actual_ty.is_int() {
         return value;
     }
@@ -1236,7 +1253,10 @@ mod tests {
         );
 
         // --- closures_structs.rs -------------------------------------------
-        assert!(closures.contains("\"find\" => \"rt_find\""), "bare `find` must reach rt_find");
+        assert!(
+            closures.contains("\"find\" => \"rt_find\""),
+            "bare `find` must reach rt_find"
+        );
         assert!(
             !closures.contains("\"find\" => \"rt_string_find\""),
             "the text-only route made every array find answer -1"
@@ -1268,7 +1288,10 @@ mod tests {
             !calls.contains("\"sort\" => Some(\"rt_array_sort\")"),
             "rt_array_sort mutates in place and returns a bool"
         );
-        assert!(closures.contains("\"sort\" => \"rt_sort\""), "bare `sort` must reach rt_sort");
+        assert!(
+            closures.contains("\"sort\" => \"rt_sort\""),
+            "bare `sort` must reach rt_sort"
+        );
         assert!(!closures.contains("\"sort\" => \"rt_array_sort\""));
 
         // --- push / pop / clear ----------------------------------------------

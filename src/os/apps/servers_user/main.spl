@@ -165,27 +165,56 @@ fn wipe_credential_bytes(bytes: [u8]):
         bytes[index] = 0u8
         index = index + 1u64
 
+fn credential_byte_is_space(b: u8) -> bool:
+    # The exact set `text.trim()` strips, matched on bytes so the credential
+    # never has to become a `text` to be trimmed.
+    b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8 or b == 11u8 or b == 12u8
+
+# Byte-domain equivalent of `bytes_to_string(bytes).trim()`, returning a fresh
+# MUTABLE buffer the caller can wipe.  Building a `text` here instead would
+# create immutable copies with no zeroization surface that outlive every wipe.
+fn trim_credential_bytes(bytes: [u8]) -> [u8]:
+    val total = bytes.len() as i64
+    var start = 0
+    while start < total and credential_byte_is_space(bytes[start as u64]):
+        start = start + 1
+    var end = total
+    while end > start and credential_byte_is_space(bytes[(end - 1) as u64]):
+        end = end - 1
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(bytes[i as u64])
+        i = i + 1
+    out
+
 fn load_server_policy() -> CapabilityTable?:
-    # Keep the file material in a mutable byte buffer.  The only immutable
-    # credential view is scoped to verifier setup; only its SHA-256 digest is
-    # retained by CapabilityTable.  Wipe the mutable source on every path.
+    # The credential exists ONLY as mutable byte buffers, from the file read
+    # through digest registration.  Nothing here builds a `text` from it: an
+    # immutable `text` cannot be zeroized, so every copy would survive for the
+    # process lifetime and could reach a core dump or a retained acceptance
+    # image.  Only the SHA-256 digest is retained, by CapabilityTable.  Both
+    # buffers are wiped on every path, including the rejection paths.
+    # doc/08_tracking/bug/simpleos_server_credential_zeroization_gap_2026-08-14.md
     match read_file_bytes_direct(DB_CREDENTIAL_PATH, MAX_DB_CREDENTIAL_BYTES + 1u64):
         Err(_): nil
         Ok(loaded_bytes):
             var bytes = loaded_bytes
-            if bytes.len() == 0 or bytes.len() > MAX_DB_CREDENTIAL_BYTES:
+            if bytes.len() == 0u64 or bytes.len() > MAX_DB_CREDENTIAL_BYTES:
                 wipe_credential_bytes(bytes)
                 nil
             else:
-                val credential = bytes_to_string(bytes).trim()
-                if credential == "" or credential.len() > MAX_DB_CREDENTIAL_BYTES as i64:
+                var credential = trim_credential_bytes(bytes)
+                if credential.len() == 0u64 or credential.len() > MAX_DB_CREDENTIAL_BYTES:
+                    wipe_credential_bytes(credential)
                     wipe_credential_bytes(bytes)
                     nil
                 else:
                     var policy = CapabilityTable.new()
-                    policy.register_authenticated(capability_with("operator", [
+                    policy.register_authenticated_bytes(capability_with("operator", [
                         grant_key("records", "read"), grant_key("records", "write")
                     ]), credential)
+                    wipe_credential_bytes(credential)
                     wipe_credential_bytes(bytes)
                     Some(policy)
 

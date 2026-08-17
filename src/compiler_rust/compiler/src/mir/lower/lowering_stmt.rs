@@ -25,7 +25,10 @@ impl<'a> MirLowerer<'a> {
     fn hir_expr_is_place(kind: &HirExprKind) -> bool {
         matches!(
             kind,
-            HirExprKind::Local(_) | HirExprKind::Global(_) | HirExprKind::FieldAccess { .. } | HirExprKind::Index { .. }
+            HirExprKind::Local(_)
+                | HirExprKind::Global(_)
+                | HirExprKind::FieldAccess { .. }
+                | HirExprKind::Index { .. }
         )
     }
 
@@ -493,7 +496,19 @@ impl<'a> MirLowerer<'a> {
                                     owner_name,
                                     owner_has_vtable,
                                     byte_offset,
-                                    field_type: ty,
+                                    // The SLOT's declared type, not the RHS's.
+                                    // `MirInst::FieldGet` is emitted with the
+                                    // field-access expression's type
+                                    // (`lowering_expr_struct.rs`, `field_type:
+                                    // expr_ty`) and the backend loads the slot at
+                                    // exactly that width, so a store typed from
+                                    // the right-hand side disagreed with the load
+                                    // whenever the two differ: `s.a = 7.5` on an
+                                    // `a: f32` field stored 8 bytes of f64 that a
+                                    // 4-byte F32 load then read back as 0.0.
+                                    // `target` here IS the `obj.field` expression,
+                                    // so `target.ty` is the same type FieldGet uses.
+                                    field_type: if target.ty == TypeId::ANY { ty } else { target.ty },
                                     value: val_reg,
                                 });
                             })?;
@@ -1232,7 +1247,9 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::While { condition, body, span, .. } => {
+            HirStmt::While {
+                condition, body, span, ..
+            } => {
                 let bound_proof = self
                     .loop_len_bound_proof(condition)
                     .filter(|proof| !Self::body_may_mutate_or_escape_array(body, proof.array_local_index));
@@ -1474,7 +1491,11 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::Assert { condition, message, span } => {
+            HirStmt::Assert {
+                condition,
+                message,
+                span,
+            } => {
                 // Lower the assertion condition
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
@@ -1562,9 +1583,7 @@ impl<'a> MirLowerer<'a> {
                     .and_then(|registry| registry.get(iterable.ty))
                     .is_some_and(|ty| match ty {
                         HirType::String => true,
-                        HirType::Struct { name, .. } => {
-                            name == "String" || name == "text" || name == "str"
-                        }
+                        HirType::Struct { name, .. } => name == "String" || name == "text" || name == "str",
                         _ => false,
                     });
 
@@ -1916,7 +1935,11 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::Assume { condition, message, span } => {
+            HirStmt::Assume {
+                condition,
+                message,
+                span,
+            } => {
                 // Assume is a verification statement similar to assert
                 // At runtime, we treat it as an assertion
                 let saved_decision_span = self.current_decision_span;

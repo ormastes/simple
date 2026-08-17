@@ -177,6 +177,24 @@ fn native_build_compiler_identity() -> text:
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
+pub fn native_build_cache_lane() -> text:
+    """Declared private-cache lane for this process.
+
+    Concurrent bootstrap lanes (phase-1 seed, phase-2 stage, phase-3 self-host,
+    phase-4 full CLI, census, tool builds) may run DIFFERENT compiler binaries
+    over the SAME source tree. Compiler identity alone is not enough: two lanes
+    can legitimately share a binary and still must not share cache entries, and
+    a lane must be able to DECLARE its cache private rather than depend on a
+    fingerprint that a mid-run redeploy changes underneath it.
+
+    Unset means `default`, which reproduces the previous single-lane behaviour
+    exactly. See doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+    """
+    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    if lane == "":
+        return "default"
+    lane
+
 fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_features: [text], optimization: i32, compiler_identity: text) -> text:
     val backend_text = match backend:
         case Some(name): name
@@ -185,7 +203,8 @@ fn native_build_cache_scope_key(backend: text?, target_cpu: text?, target_featur
         case Some(cpu): cpu
         case nil: "native"
     val feature_text = target_features.join(",")
-    "backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity}"
+    val lane = native_build_cache_lane()
+    "lane={lane};backend={backend_text};cpu={cpu_text};features={feature_text};opt={optimization};compiler={compiler_identity}"
 
 fn incremental_mkdir_p(path: text) -> bool:
     rt_dir_create_all(path)
@@ -767,4 +786,4 @@ fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
 
 export FileFingerprint, DependencyEntry, ChangeKind, IncrChangeSet
 export BuildCache, IncrementalCompiler
-export merge_mir, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash, native_build_producer_identity
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash, native_build_producer_identity

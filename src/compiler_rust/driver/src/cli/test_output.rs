@@ -39,7 +39,20 @@ fn print_summary_text(result: &TestRunResult) {
     println!("Duration: {}ms", result.total_duration_ms);
     println!();
 
-    if result.success() {
+    if result.executed_nothing() {
+        println!(
+            "\x1b[31mERROR — nothing was checked: 0 examples executed across {} file(s)\x1b[0m",
+            result.files.len()
+        );
+        println!("A run that executes no example proves nothing and is never green.");
+        for file in &result.files {
+            if let Some(ref err) = file.error {
+                println!("  - {}: {}", file.path.display(), err.lines().next().unwrap_or(""));
+            } else {
+                println!("  - {}: loaded but yielded no example", file.path.display());
+            }
+        }
+    } else if result.success() {
         println!("\x1b[32m✓ All tests passed!\x1b[0m");
     } else {
         println!("\x1b[31m✗ Some tests failed\x1b[0m");
@@ -74,6 +87,7 @@ fn print_summary_json(result: &TestRunResult) {
     // Build JSON manually to avoid serde dependency
     println!("{{");
     println!("  \"success\": {},", result.success());
+    println!("  \"executed_nothing\": {},", result.executed_nothing());
     println!("  \"total_listed\": {},", result.total_listed);
     println!("  \"total_passed\": {},", result.total_passed);
     println!("  \"total_failed\": {},", result.total_failed);
@@ -157,7 +171,13 @@ fn print_summary_doc(result: &TestRunResult) {
     println!("─────────────────────────────────────────────────────────────────");
 
     // Summary line
-    if result.total_listed > 0 && result.total_passed == 0 && result.total_failed == 0 {
+    if result.executed_nothing() {
+        println!(
+            "\x1b[31mERROR — nothing was checked: 0 examples executed across {} file(s)\x1b[0m ({}ms)",
+            result.files.len(),
+            result.total_duration_ms
+        );
+    } else if result.total_listed > 0 && result.total_passed == 0 && result.total_failed == 0 {
         println!("{} listed ({}ms)", result.total_listed, result.total_duration_ms);
     } else if result.success() {
         println!(

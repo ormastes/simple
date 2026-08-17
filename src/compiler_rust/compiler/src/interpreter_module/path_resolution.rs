@@ -300,6 +300,45 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
         }
     }
 
+    // Strategy 5: Try a dotted directory formed by joining 2+ *pending* segments
+    // with a literal dot, longest match first.
+    //
+    // Strategy 4 above only ever joins the current directory's OWN name with one
+    // segment, so from current=src/app and pending [package, registry, config] it
+    // probes src/app.package/ and never src/app/package.registry/ — which is where
+    // `app.package.registry.config` actually lives. Dotted directory names are a
+    // repo-wide convention (~20 dirs: app/package.registry/, app/ui.browser/,
+    // app/game.breakout/, ...) that the pure-Simple driver handles via the rewrite
+    // table at src/compiler/80.driver/driver_source_loading.spl:801. This makes the
+    // seed agree with that driver for ALL dotted dirs rather than a hardcoded list.
+    //
+    // The window may consume ALL remaining segments, in which case the dotted
+    // directory IS the module being imported and resolves through its
+    // __init__.spl -- `use app.ui.chromium.acid2.{...}` names the package
+    // `src/app/ui.chromium.acid2/`, with no segment left over to be a file.
+    // Bounding the window at parts.len() - 1 instead would silently miss that
+    // whole shape.
+    let remaining = parts.len() - depth;
+    if remaining >= 2 {
+        for window in (2..=remaining).rev() {
+            let dotted = parts[depth..depth + window].join(".");
+            let dotted_dir = current.join(&dotted);
+            if !dotted_dir.is_dir() {
+                continue;
+            }
+            if depth + window == parts.len() {
+                let init_path = dotted_dir.join("__init__.spl");
+                if init_path.is_file() {
+                    return Some(init_path);
+                }
+            } else if let Some(found) =
+                resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + window)
+            {
+                return Some(found);
+            }
+        }
+    }
+
     None
 }
 
@@ -1027,10 +1066,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir,
-        resolve_module_path,
-    };
+    use super::{compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, resolve_module_path};
     use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1480,11 +1516,19 @@ mod tests {
         let root = temp.path();
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::create_dir_all(root.join("src/lib")).unwrap();
-        fs::write(root.join("src/lib/scope_probe.spl"), "fn marker() -> text:\n    \"real\"\n").unwrap();
+        fs::write(
+            root.join("src/lib/scope_probe.spl"),
+            "fn marker() -> text:\n    \"real\"\n",
+        )
+        .unwrap();
 
         let importer_dir = root.join("pkg");
         fs::create_dir_all(importer_dir.join("std")).unwrap();
-        fs::write(importer_dir.join("std/scope_probe.spl"), "fn marker() -> text:\n    \"stray\"\n").unwrap();
+        fs::write(
+            importer_dir.join("std/scope_probe.spl"),
+            "fn marker() -> text:\n    \"stray\"\n",
+        )
+        .unwrap();
 
         let parts = vec!["std".to_string(), "scope_probe".to_string()];
         let resolved = resolve_module_path(&parts, &importer_dir).unwrap();

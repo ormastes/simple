@@ -222,6 +222,19 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     return 1;
                 }
             }
+            // Declare this lane's private cache scope. Entries produced under one
+            // scope are unreachable from another, so concurrent bootstrap lanes
+            // sharing a --cache-dir cannot poison each other.
+            // doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+            "--cache-scope" => {
+                if i + 1 < args.len() {
+                    std::env::set_var("SIMPLE_CACHE_SCOPE", &args[i + 1]);
+                    i += 2;
+                } else {
+                    eprintln!("error: --cache-scope requires a scope name");
+                    return 1;
+                }
+            }
             "--no-mangle" => {
                 no_mangle = true;
                 i += 1;
@@ -307,7 +320,9 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     runtime_bundle = args[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu)");
+                    eprintln!(
+                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu)"
+                    );
                     return 1;
                 }
             }
@@ -735,6 +750,7 @@ fn print_help() {
     println!("  --no-incremental    Disable incremental compilation");
     println!("  --clean             Force clean rebuild (delete cache)");
     println!("  --cache-dir <dir>   Cache directory for incremental builds");
+    println!("  --cache-scope <name> Private cache lane (env: SIMPLE_CACHE_SCOPE, default: default)");
     println!("  --no-mangle         Disable name mangling (enabled by default)");
     println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
