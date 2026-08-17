@@ -347,3 +347,34 @@ causes were conflated:
    `|` and no field-default in that file, so it is a THIRD pattern — not the
    `verification_semantic_coverage.spl` cause named in the fence notice, which
    is fixed and at origin (`010c878e208`).
+
+## 2026-08-17 — single-spec path FIXED and proven (d03b800c7d6)
+
+The largest gap is closed. `test_runner_single.spl` now calls the SHARED
+classifier — `use std.test_runner.test_executor_parsing.{make_result_from_output}`
+(line 37). No import cycle; zero classification logic duplicated (a second copy
+would have drifted, as the duplicated composite-grammar parsers already did).
+The old `code == -1 and stderr.contains("TIMEOUT")` branch became
+`if code == 143 or code == 144 or code == -1:` handing off to the shared path.
+
+Ablation bites exactly on the axis under test:
+- with the change:  `reason=child-died-by-signal` + `error: test-runner: CRASHED: child died by signal after writing its crash sentinel`
+- ablated:          `reason=zero-examples` + `error: test-runner: no examples executed`
+
+A crash that read as "ran nothing" now reads as CRASHED.
+
+**Exit-code design worth keeping:** TERMINATED/TIMEOUT return `failed: 0`, which
+would have fallen into the existing `failed == 0 -> return 0` and produced a
+SILENT GREEN on a killed spec. That lane added `unverified_error` returning
+**exit 2** — not a failure, never a green. `print_summary`'s `Results:` line is
+untouched and still emitted on every path.
+
+**Blast radius confirmed:** every `bin/simple test <one_file.spl>` and every
+`--no-session-daemon` run — the interactive path AND the path agents use to
+verify their own fixes — previously had NO abnormal-termination classification
+at all.
+
+**Confounded-run discipline worth copying:** that lane's FIRST ablation attempt
+died on the concurrent `test_runner_types.spl` parse breakage with no `Results:`
+line, and it DISCARDED the attempt rather than concluding from it. The clean
+retry is what is reported above.
