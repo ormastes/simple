@@ -58,6 +58,39 @@ diverged; a new `1 unallowlisted` mirror-only row appeared). None of it comes
 from this range. Baseline refresh and the unallowlisted mirror-only row remain
 owned by the sessions that landed them.
 
+---
+
+## Third landing: 2026-08-17 (http_server suite-enumeration drift closure)
+
+Range `06dc5f66b179..18018caf7c93` — four files: one spec mirror
+(`test/unit/lib/http_server/csrf_spec.spl`), one guard script, one verify
+report, one wiki edit. Scoped-delta escape re-run per vcs.md:
+
+```
+check-test-tree-divergence-delta: pre-existing red is identical at BASE and NEW;
+  this range introduces nothing
+check-test-tree-divergence-delta: PASS — 19 pre-existing offender(s),
+  0 introduced by this range
+base verdict: FAIL — 829 diverged vs 813 baselined (17 new,
+  1 fixed-but-still-baselined); 3 mirror-only (1 unallowlisted, 0 stale-allowlist)
+```
+
+Identical pre-existing red to the 2026-08-17 landing recorded above (19
+offenders, 829 diverged, the same `1 unallowlisted` mirror-only row). Nothing
+in it comes from this range; baseline refresh remains owned by the sessions
+that landed those pairs.
+
+This range DOES touch a `test/` path, unlike the second landing, so the
+base-independence argument below does not apply to it and the delta guard was
+the actual gate. The touched pair is deliberate and load-bearing:
+`unit:lib/http_server/csrf_spec.spl` is **baselined line 618 as divergent**,
+and the mirror was rewritten as a compact 13-example subset that keeps it
+divergent. Converging the pair would have tripped the guard's
+stale-baseline check — the sibling lane was explicitly redirected off the
+"apply identical edits to both trees" default for this one file because of it.
+The `security_headers` pair, which is NOT baselined, was left byte-identical,
+which is that pair's required end state.
+
 Note on SHAs: origin advanced repeatedly during this landing (parallel sessions
 push every few minutes), so the pushed range's base differs from the base the
 delta guard was run against. The result is base-independent by construction:

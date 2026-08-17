@@ -83,12 +83,14 @@ The spec list is:
 ```bash
 # unit
 bin/simple test test/01_unit/lib/common/net/http_core_spec.spl
-bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_parser_limits_spec.spl
-bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl
-bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_dynamic_dispatch_spec.spl
-bin/simple test test/01_unit/lib/http_server/chunked_rejection_spec.spl
-bin/simple test test/01_unit/lib/http_server/parser_limits_spec.spl
-bin/simple test test/01_unit/lib/http_server/path_safety_spec.spl
+# http_server tier — DISCOVERY-BASED, do not hand-list (lane W14-C, 2026-08-17).
+# The suite IS the glob: any new */http_server/*_spec.spl file is in the suite
+# the moment it lands. `test/unit/**` is the legacy mirror and is excluded.
+# Enforced by scripts/check/check-http-server-suite-enumeration.shs.
+# This SUPERSEDES the 49/49-green count above for the http_server tier: the
+# current enumerated sweep is 21/26 green (275 examples, 255 passed, 20 failed).
+# Evidence: doc/09_report/verify/http_server_suite_enumeration_2026-08-17.md
+for s in $(find test -path '*http_server*' -name '*_spec.spl' -not -path 'test/unit/*' | sort); do bin/simple test "$s"; done
 bin/simple test test/01_unit/lib/nogc_async_mut/http/http_hardening_spec.spl
 bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_spec.spl
 bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_harden_spec.spl
