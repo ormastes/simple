@@ -36,6 +36,21 @@
 # Only the DECLARED DEFAULT is asserted, never a specific wrong value --
 # uninitialized memory is garbage, not a consistent misbinding, so asserting
 # a particular garbage value would be flaky in either direction.
+#
+# VERDICT CONTRACT (project convention: the verdict is the LAST line of stdout)
+#   PASS  — <n> call shape(s) checked ...            exit 0   (n is always > 0)
+#   FAIL  — ...                                      exit 1
+#   ERROR — nothing was checked: ...                 exit 2
+# A run that could not check anything (no compiler, missing fixture, the build
+# or the compiled binary killed by a signal) is ERROR, never a pass and never a
+# silent exit. Absence of a compiler is absence of evidence.
+#
+# Regression history: until 2026-08-17 this script did `set -eu` plus a bare
+# `test -x bin/simple`, so from a worktree with no built compiler it exited 1
+# with ZERO bytes of output. That silent exit got the guard mis-diagnosed twice
+# in one day while it was in fact blocking every push. Fixed by reporting, NOT
+# by weakening: with a compiler present a genuine native-build failure still
+# FAILs loudly. See the fail-open guard class notes in .claude/rules/vcs.md.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -43,15 +58,179 @@ cd "$ROOT_DIR"
 
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 WORK_DIR="${WORK_DIR:-/tmp/check-native-trailing-default-param.$$}"
-FIXTURE="test/fixtures/native_trailing_default_param/main.spl"
+FIXTURE="${FIXTURE:-test/fixtures/native_trailing_default_param/main.spl}"
 EXPECTED="local a=1 s=false t=12
 local a=1 s=true t=12
 cross tag=41 flag=false computed=7 expr=16
 bump step=1 loud=false extra=99
 stat a=2 b=55 c=false
 greet name=Bob loud=false times=1"
+# Number of distinct call shapes the fixture asserts -- reported in the PASS
+# verdict so a vacuous run cannot masquerade as a real one.
+SHAPES_CHECKED="$(printf '%s\n' "$EXPECTED" | wc -l | tr -d ' ')"
 
-test -x "$SIMPLE_BINARY"
+# ---------------------------------------------------------------------------
+# --selftest: class detection for every failure mode this guard must report.
+# Fatal, and run BEFORE the real scan.
+# ---------------------------------------------------------------------------
+selftest_case() {
+    # $1 case name, $2 expected verdict word, $3 expected exit code, rest: env
+    _name="$1"; _want_word="$2"; _want_rc="$3"; shift 3
+    # rc is read on the line AFTER the command, never through a pipe -- a
+    # pipeline's $? is the LAST stage's and has produced false greens here.
+    _tmp="$SELFTEST_DIR/out.$_name"
+    set +e
+    env "$@" SELFTEST_CHILD=1 sh "$0" >"$_tmp" 2>&1
+    _rc=$?
+    set -e
+    _out="$(tail -n 1 "$_tmp")"
+    case "$_out" in
+        "$_want_word"*) ;;
+        *)
+            echo "ERROR — nothing was checked: selftest case '$_name' expected verdict '$_want_word', got: $_out"
+            exit 2
+            ;;
+    esac
+    if [ "$_rc" -ne "$_want_rc" ]; then
+        echo "ERROR — nothing was checked: selftest case '$_name' expected exit $_want_rc, got $_rc"
+        exit 2
+    fi
+    SELFTEST_RAN=$((SELFTEST_RAN + 1))
+}
+
+make_stub() {
+    # $1 = path, $2 = mode (ok|wrong|buildfail|signal|runfail)
+    cat >"$1" <<STUB
+#!/bin/sh
+out=""
+while [ \$# -gt 0 ]; do
+    if [ "\$1" = "--output" ]; then out="\$2"; shift; fi
+    shift
+done
+case "$2" in
+    buildfail) echo "stub: deliberate build failure" >&2; exit 1 ;;
+    signal)    kill -9 \$\$ ;;
+esac
+cat >"\$out" <<'INNER'
+#!/bin/sh
+case "\$STUB_RUN_MODE" in
+    wrong)   echo "totally different output" ;;
+    runfail) exit 3 ;;
+    *)       printf '%s\n' "\$STUB_EXPECTED" ;;
+esac
+INNER
+chmod +x "\$out"
+exit 0
+STUB
+    chmod +x "$1"
+}
+
+run_selftest() {
+    SELFTEST_RAN=0
+    SELFTEST_DIR="$(mktemp -d "/tmp/check-native-trailing-default-param.selftest.XXXXXX")"
+    trap 'rm -rf "$SELFTEST_DIR"' EXIT HUP INT TERM
+
+    make_stub "$SELFTEST_DIR/ok"        ok
+    make_stub "$SELFTEST_DIR/buildfail" buildfail
+    make_stub "$SELFTEST_DIR/signal"    signal
+
+    # 1. no compiler at all -> ERROR, never a silent exit (the 2026-08-17 bug)
+    selftest_case no-compiler ERROR 2 SIMPLE_BINARY="$SELFTEST_DIR/does-not-exist"
+    # 2. compiler present but fixture missing -> ERROR
+    selftest_case no-fixture ERROR 2 SIMPLE_BINARY="$SELFTEST_DIR/ok" \
+        FIXTURE="test/fixtures/native_trailing_default_param/does-not-exist.spl"
+    # 3. genuine build failure -> still FAILs loudly (fix must not weaken this)
+    selftest_case build-fails FAIL 1 SIMPLE_BINARY="$SELFTEST_DIR/buildfail"
+    # 4. build killed by a signal (earlyoom prefers `simple`) -> UNVERIFIED
+    selftest_case build-signalled ERROR 2 SIMPLE_BINARY="$SELFTEST_DIR/signal"
+    # 5. compiled binary produces wrong output -> FAIL
+    selftest_case wrong-output FAIL 1 SIMPLE_BINARY="$SELFTEST_DIR/ok" \
+        STUB_RUN_MODE=wrong STUB_EXPECTED="$EXPECTED"
+    # 6. compiled binary exits non-zero -> FAIL
+    selftest_case run-fails FAIL 1 SIMPLE_BINARY="$SELFTEST_DIR/ok" \
+        STUB_RUN_MODE=runfail STUB_EXPECTED="$EXPECTED"
+    # 7. everything correct -> PASS with a non-zero count
+    selftest_case all-good PASS 0 SIMPLE_BINARY="$SELFTEST_DIR/ok" \
+        STUB_RUN_MODE=ok STUB_EXPECTED="$EXPECTED"
+
+    # 8. an inherited FIXTURE override must reach the real fixture check and be
+    #    reported as a missing fixture -- NOT swallowed as "selftest failed".
+    #    This proves the env scrub on the selftest recursion above.
+    #    The child re-runs the selftest for real (that is the point -- the scrub
+    #    lives on that recursion), so SELFTEST_SKIP_LEAK_CASE stops it spawning
+    #    a grandchild here and recursing without bound.
+    if [ "${SELFTEST_SKIP_LEAK_CASE:-0}" = "1" ]; then
+        rm -rf "$SELFTEST_DIR"
+        trap - EXIT HUP INT TERM
+        echo "PASS — $SELFTEST_RAN selftest case(s) checked, all verdicts as expected"
+        exit 0
+    fi
+    _tmp8="$SELFTEST_DIR/out.fixture-leak"
+    set +e
+    env SELFTEST_SKIP_LEAK_CASE=1 SIMPLE_BINARY="$SELFTEST_DIR/ok" \
+        FIXTURE="test/fixtures/native_trailing_default_param/does-not-exist.spl" \
+        sh "$0" >"$_tmp8" 2>&1
+    _rc8=$?
+    set -e
+    _out8="$(tail -n 1 "$_tmp8")"
+    case "$_out8" in
+        "ERROR — nothing was checked: fixture "*) ;;
+        *)
+            echo "ERROR — nothing was checked: selftest case 'fixture-leak' expected a missing-fixture ERROR, got: $_out8"
+            exit 2
+            ;;
+    esac
+    if [ "$_rc8" -ne 2 ]; then
+        echo "ERROR — nothing was checked: selftest case 'fixture-leak' expected exit 2, got $_rc8"
+        exit 2
+    fi
+    SELFTEST_RAN=$((SELFTEST_RAN + 1))
+
+    if [ "$SELFTEST_RAN" -eq 0 ]; then
+        echo "ERROR — nothing was checked: selftest executed 0 cases"
+        exit 2
+    fi
+    rm -rf "$SELFTEST_DIR"
+    trap - EXIT HUP INT TERM
+    echo "PASS — $SELFTEST_RAN selftest case(s) checked, all verdicts as expected"
+    exit 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    run_selftest
+fi
+
+# Child invocations from the selftest must not recurse into the selftest.
+if [ "${SELFTEST_CHILD:-0}" != "1" ]; then
+    # Scrub the caller's overrides before recursing: the selftest supplies its
+    # OWN SIMPLE_BINARY/FIXTURE per case, and an inherited one from the real
+    # invocation would make unrelated cases report the wrong verdict. Measured
+    # 2026-08-17: `FIXTURE=missing.spl <guard>` used to abort with "selftest
+    # failed" instead of reaching the real fixture check.
+    set +e
+    selftest_out="$(env -u FIXTURE -u SIMPLE_BINARY -u WORK_DIR \
+        -u STUB_RUN_MODE -u STUB_EXPECTED sh "$0" --selftest 2>&1)"
+    selftest_rc=$?
+    set -e
+    if [ "$selftest_rc" -ne 0 ]; then
+        printf '%s\n' "$selftest_out" | sed 's/^/    /'
+        echo "ERROR — nothing was checked: --selftest failed (exit $selftest_rc); the guard cannot be trusted"
+        exit 2
+    fi
+fi
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "    Build one (scripts/setup/setup.shs && bin/simple build bootstrap) or set SIMPLE_BINARY."
+    echo "    Absence of a compiler is absence of evidence, not a pass and not a failure."
+    echo "ERROR — nothing was checked: no executable compiler at '$SIMPLE_BINARY'"
+    exit 2
+fi
+
+if [ ! -f "$FIXTURE" ]; then
+    echo "ERROR — nothing was checked: fixture '$FIXTURE' does not exist"
+    exit 2
+fi
+
 mkdir -p "$WORK_DIR"
 KEPT_LOG="/tmp/check-native-trailing-default-param.last.log"
 trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
@@ -67,10 +246,18 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
 build_rc=$?
 set -e
 
+if [ "$build_rc" -ge 128 ]; then
+    # Killed by a signal. earlyoom on this host prefers `simple` by name, so a
+    # signal death is UNVERIFIED, never a failure of the code under test.
+    cp "$log" "$KEPT_LOG" 2>/dev/null || true
+    echo "ERROR — nothing was checked: native-build was killed by a signal (exit $build_rc; log saved to $KEPT_LOG)"
+    exit 2
+fi
+
 if [ "$build_rc" -ne 0 ]; then
     cp "$log" "$KEPT_LOG" 2>/dev/null || true
-    echo "FAIL — native-build failed to compile the fixture (exit $build_rc, log saved to $KEPT_LOG)"
     tail -n 60 "$log" | sed 's/^/    /'
+    echo "FAIL — native-build failed to compile the fixture (exit $build_rc, log saved to $KEPT_LOG)"
     exit 1
 fi
 
@@ -79,21 +266,32 @@ out="$(timeout 60 "$binary" 2>>"$log")"
 run_rc=$?
 set -e
 
+if [ "$run_rc" -ge 124 ] && [ "$run_rc" -ne 127 ]; then
+    cp "$log" "$KEPT_LOG" 2>/dev/null || true
+    echo "ERROR — nothing was checked: compiled binary timed out or was killed by a signal (exit $run_rc; log saved to $KEPT_LOG)"
+    exit 2
+fi
+
 if [ "$run_rc" -ne 0 ]; then
     cp "$log" "$KEPT_LOG" 2>/dev/null || true
-    echo "FAIL — compiled binary exited $run_rc (log saved to $KEPT_LOG)"
     tail -n 60 "$log" | sed 's/^/    /'
+    echo "FAIL — compiled binary exited $run_rc (log saved to $KEPT_LOG)"
     exit 1
 fi
 
 if [ "$out" != "$EXPECTED" ]; then
     cp "$log" "$KEPT_LOG" 2>/dev/null || true
-    echo "FAIL — native-build omitted-trailing-default-parameter regression (log saved to $KEPT_LOG)"
     echo "  expected:"
     echo "$EXPECTED" | sed 's/^/    /'
     echo "  actual:"
     echo "$out" | sed 's/^/    /'
+    echo "FAIL — native-build omitted-trailing-default-parameter regression across $SHAPES_CHECKED call shape(s) (log saved to $KEPT_LOG)"
     exit 1
 fi
 
-echo "PASS — native-build omitted trailing default parameters: free/cross-module/instance-method/static-method/trait-method all bind the declared default"
+if [ "$SHAPES_CHECKED" -le 0 ]; then
+    echo "ERROR — nothing was checked: expectation set is empty"
+    exit 2
+fi
+
+echo "PASS — $SHAPES_CHECKED call shape(s) checked, native-build omitted trailing default parameters bind the declared default (free/cross-module/instance-method/static-method/trait-method)"
