@@ -302,3 +302,48 @@ limitation documented in the header per (c).
 
 AFTER-measurement UNVERIFIED — blocked by the parse breakage above, not by
 anything in the fork lane's own file.
+
+## 2026-08-17 — D4 PROVEN. Timeout fix verified by ablation.
+
+| arm | verbatim `Results:` |
+|---|---|
+| pre-fix | `5 total, 2 passed, 3 failed, 1 timed out, 1 crashed` |
+| post-fix | `4 total, 2 passed, 2 failed, 1 crashed, 1 timed out (unverified)` |
+| ablated (`530fa623afa~1`) | `5 total, 2 passed, 3 failed, 1 crashed, 1 timed out (unverified)` |
+
+2+2=4 post-fix — the timeout contributes to neither bucket. Ablated returns
+byte-identical counts to pre-fix. The `TIMEOUT:` prefix VANISHES when ablated,
+so the classification path is what was restored, not merely a counter.
+`CRASHED:` and the real assertion failure are unchanged in both arms — the
+ablation is correctly scoped to the limit-exceeded path.
+
+Method note worth keeping: the ablation worktree got a BYTE-IDENTICAL COPY of
+the binary, not a symlink — a symlink resolves back into the main tree's
+`src/lib` and would have silently defeated the ablation.
+
+**Startup cost was ~10x the recorded figure today:** `discover` 269s +
+`Session setup` ~286s ~= 550s before the test loop even starts. A run at
+`timeout 400` died after one spec with ZERO `Results:` lines — an INCONCLUSIVE
+that reads as a failure if rc is trusted. **Budget >= 1200s for this suite.**
+
+### OPEN — second accounting path still contradicts the summary
+`SPEC FILE VERDICT: ... timeout_spec.spl ... passed=0 failed=1 ... timeout=1
+reason=aggregate-lane-timeout` — `failed=1` there while the summary says
+`failed: 0`, same run. Any consumer parsing `SPEC FILE VERDICT` still sees a
+timeout as a failure. Emitter is OUTSIDE `test_runner_execute.spl`. Needs a
+follow-up lane.
+
+### OPEN — push still blocked, cause now identified
+`check-native-trailing-default-param.shs` blocks the pre-push hook. Two distinct
+causes were conflated:
+1. A fresh `git worktree` has NO `bin/simple` (gitignored symlink), so the guard
+   failed closed with ZERO output. Fixed by symlinking the existing binary — no
+   rebuild. **A fail-closed gate that prints nothing is itself a defect**: it
+   should report `ERROR — nothing was checked` per repo convention.
+2. With a binary present the guard reports a REAL failure on committed content:
+   `parse: in src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:
+   Unexpected token: ...` (guard truncates its own stderr; a direct
+   `simple check` on the 4483-line file hit rc=124 before printing). No trailing
+   `|` and no field-default in that file, so it is a THIRD pattern — not the
+   `verification_semantic_coverage.spl` cause named in the fence notice, which
+   is fixed and at origin (`010c878e208`).
