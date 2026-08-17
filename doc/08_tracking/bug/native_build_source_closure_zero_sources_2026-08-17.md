@@ -107,6 +107,63 @@ emitted **instead of** the real diagnostic. Fixed at the call site; the
 underlying grammar defect is filed at
 `doc/08_tracking/bug/fstring_nested_quoted_literal_in_interpolation_misparsed_2026-08-17.md`.
 
+## Guard state after the reporting fix — new reason, and a confound in the method
+
+Three of the four native-build guards were re-run and all three FAIL with rc=1 and
+a **new** reason. Verdict lines verbatim:
+
+```
+FAIL — cold native-build of the 3-module fixture did not succeed
+FAIL — native-build of src/compiler/00.common failed
+FAIL — in-process native-build exited non-zero; log: /tmp/check-native-inprocess-positional.3148348/inprocess-positional.log
+```
+
+The fourth guard finished later with rc=**2**, which is neither a pass nor a fail:
+
+```
+ERROR — nothing was checked: native-build was killed by a signal (exit 255; log saved to /tmp/check-native-trailing-default-param.3148332.log)
+```
+
+`ERROR — nothing was checked` means the check could not determine anything, so
+`check-native-trailing-default-param` has **no verdict** here and must not be
+reported as either outcome.
+
+**This strongly corroborates caveat 2 below.** That guard's own source comments
+note that earlyoom on this host prefers `simple` by name, so a signal death is
+UNVERIFIED rather than a failure of the code under test. A worker killed by a
+signal under heavy concurrent load is the expected signature of resource
+contention — which is exactly the condition these runs were conducted under.
+
+What changed: all three logs contain **zero** compile errors. Counted per log —
+`TMPDIR`=0, `not found on type`=0, `source_closure 0/0`=0,
+`expected Fn, found Assign`=0. The single error in each is:
+
+```
+error: native-build worker timed out after 7200s before producing a binary.
+```
+
+So ``method `compile` not found on type `object` `` no longer appears in any guard
+log, consistent with the refutation above.
+
+**Two honest caveats, because this is weaker evidence than it looks:**
+
+1. **The `7200s` figure is not the elapsed time.** The guards were launched at
+   roughly 13:1x UTC and the log mtime is 13:28:31 UTC — about 15-20 minutes, not
+   two hours. `grep 7200` finds nothing in the guard script, so the number comes
+   from the worker's own message. Either the deadline is inherited from elsewhere
+   or the message reports a configured cap rather than measured elapsed time; a
+   timeout diagnostic that misstates how long it waited is worth fixing on its own.
+2. **The timeouts may be an artifact of how they were run.** All four guards were
+   launched **concurrently**, after an earlier concurrent batch, on a shared box
+   already carrying heavy load. Each spawns native-build workers, so the
+   contention plausibly caused the slowness. **These timeouts should not be read
+   as a property of the tree until reproduced by running the guards ONE AT A TIME
+   on an idle box.** Nothing here establishes that the guards would time out
+   serially.
+
+The `source_closure 0/0` measurement earlier in this row is *not* subject to that
+confound — it came from single, direct `native-build` invocations.
+
 ## Next step for whoever picks this up
 
 Find why the source-closure walk returns 0 for `--source test/fixtures
