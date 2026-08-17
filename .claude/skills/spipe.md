@@ -1840,6 +1840,16 @@ reader may discard or fail to expose such bytes on a tty; use a byte-streaming
 captures data but the wrapper reports silence, fail the wrapper and fix it
 before attributing the result to board wiring.
 
+For original Apollo Lake UP Squared first light, use an x64 UEFI removable
+image at `EFI/BOOT/BOOTX64.EFI`, selected once with F7. A stick attached to the
+UP2 is not remotely writable unless the board already provides a trusted
+Linux/SSH or RAM/PXE writer environment. Such a writer must stage+hash first,
+admit exactly one stable by-id/serial/capacity, reject root/swap/mounted or
+internal media, sync, recheck identity, and verify an exact-length readback.
+Do not treat Micro-B OTG, UEFI Shell, UART, or PXE as an uploader without live
+capability evidence. CN16 is 3.3 V TTL UART; CN22 is 1.8 V CPLD/BIOS update,
+not an Apollo Lake CPU JTAG port. BIOS/SPI flashing is outside first light.
+
 ## GPU / notebook remote lanes (planned, 2026-08-07)
 
 `cuda` and `vulkan` are planned composite remote backends at the same grammar depth as

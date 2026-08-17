@@ -179,6 +179,15 @@ CPLD/BIOS-update connector, not a proven Apollo Lake CPU JTAG port, so do not
 drive it with Tigard/OpenOCD. The retained handoff is
 `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`; its offline image and
 partial source state are not physical boot or `ls` evidence.
+Media attached to UP2 is not addressable by the build host merely because the
+board has a Micro-B OTG port. Prefer moving the stick to the writer host. A
+remote write is admissible only when UP2 already runs a trusted Linux/SSH or
+RAM/PXE environment: stage and hash the image on UP2, resolve one stable
+`/dev/disk/by-id` identity, reject root/swap/mounted/internal media, bind an
+explicit serial/capacity confirmation, write locally, sync, recheck identity,
+and hash the exact image-length readback. Never stream SSH directly into a raw
+device. UEFI Shell, UART, USB OTG gadget mode, and PXE availability must each be
+proven rather than inferred; firmware flashing is a separate forbidden lane.
 
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo

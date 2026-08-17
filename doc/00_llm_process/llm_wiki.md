@@ -53,6 +53,19 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
 - **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
   `EFI/BOOT/BOOTX64.EFI`, selected once with F7.
+- **Board-attached media:** it is invisible to the build host unless UP2
+  already runs a trusted Linux/SSH service or a PXE-booted RAM environment.
+  Preferred first light is to move the stick to the writer host. Remote mode
+  stages and hashes the image on UP2, admits one stable by-id/serial/capacity,
+  rejects root/swap/mounted/internal media, writes locally, syncs, rechecks the
+  identity, and hashes the exact image-length readback. Never pipe SSH to `dd`.
+- **Not upload paths:** UEFI Shell launches files already on accessible media;
+  UART has no assumed XMODEM protocol; Micro-B OTG needs a proven Linux UDC and
+  gadget configuration; PXE needs an isolated DHCP/TFTP network. None is
+  inferred from connector presence.
+- **Original-board storage:** eMMC and SATA/mSATA are internal; the M.2 2230
+  E-key is not a generic M-key NVMe slot. A USB NVMe enclosure normally appears
+  through USB/SCSI, so admit identity, not node spelling.
 - **Debug:** CN16 3.3 V TTL UART. Do not use CN22 as CPU JTAG; it is documented
   as a 1.8 V CPLD/BIOS-update connector.
 - **Never write:** host system disk, UP2 internal eMMC/NVMe, BIOS/SPI, or UEFI
@@ -60,6 +73,9 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Verdict rule:** offline image structure, Tigard enumeration, or retained
   partial source is not live board evidence. PASS requires ordered UART boot
   markers and a command-correlated VFS-backed `ls /` response.
+- **Current build blocker:** the UP2 wrapper omits the canonical x86
+  freestanding `simple-core` runtime-capsule binding; target-name retries do not
+  resolve the missing runtime/serial symbols.
 
 ## StarFive JH7110 software reset over Tigard JTAG
 

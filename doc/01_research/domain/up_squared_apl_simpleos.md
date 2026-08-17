@@ -35,6 +35,28 @@ debug chain. Tigard/OpenOCD must therefore not be attached or driven as a CPU
 debugger on CN22. First bring-up uses UART logs and UEFI removable media;
 hardware reset remains the physical power/reset path.
 
+## Board-attached media and remote upload
+
+The Type-A connectors are USB host ports; the Micro-B connector is OTG.
+Connector presence does not make a Type-A-attached stick visible to another
+computer. Prefer preparing the stick on the build host and returning it to
+UP2. If UP2 already boots Linux from other media, SSH/SFTP may stage the image
+on UP2, followed by a board-local, identity-gated write and exact-length
+readback. Stage first; never stream SSH directly into a raw device.
+
+The original firmware also supports Ethernet PXE. A small x64 UEFI Linux
+environment can be loaded into RAM over an isolated DHCP/TFTP network and used
+as the same board-local writer. This is a fallback, not proof that the current
+firmware, NIC, DHCP, or SimpleOS network path is ready. UEFI Shell launches an
+EFI application already on FAT media; it is not a general remote transfer
+service. UART/XMODEM is not supplied by PC UEFI, and Linux USB gadget mode
+requires a live UDC plus explicit gadget configuration.
+
+The original board has soldered eMMC, SATA/mSATA, and an M.2 2230 E-key rather
+than a general M-key NVMe socket. An NVMe SSD in a USB enclosure is exposed via
+USB mass-storage/UAS-to-SCSI and must be identified by transport, stable
+identity, serial, and capacity—not by assuming `/dev/nvme*`.
+
 ## Primary sources
 
 - UP Squared UPS-APL User Manual, fifth edition:
@@ -47,3 +69,11 @@ hardware reset remains the physical power/reset path.
   https://uefi.org/specs/UEFI/2.9_A/03_Boot_Manager.html
 - UP Squared UEFI BIOS download instructions:
   https://downloads.up-community.org/download/up-squared-uefi-bios-v5-2/
+- Original specifications: https://up-board.org/upsquared/specifications/
+- OpenSSH `scp`: https://man.openbsd.org/scp.1
+- GNU `dd`: https://www.gnu.org/software/coreutils/manual/html_node/dd-invocation.html
+- Linux `lsblk`: https://man7.org/linux/man-pages/man8/lsblk.8.html
+- UEFI PXE:
+  https://uefi.org/specs/UEFI/2.11/24_Network_Protocols_SNP_PXE_BIS.html
+- Linux USB gadget/UDC:
+  https://www.kernel.org/doc/html/latest/driver-api/usb/gadget.html

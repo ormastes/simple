@@ -1,7 +1,7 @@
 # UP Squared Apollo Lake SimpleOS handoff
 
 Updated: 2026-08-17
-Status: RESUMED — removable-media admission pending
+Status: RESUMED — runtime capsule and board-side media transport pending
 
 ## Objective retained
 
@@ -50,7 +50,10 @@ USB `Smart KM Link` read-only optical-class device (`sr0`). No removable USB
 mass-storage disk or stable USB disk by-id path was present. Never reinterpret
 that `sr0` device or the host NVMe as the requested install target. If the stick
 was inserted into the UP2 rather than this build host, move it to the build
-host for image installation, then return it to the UP2 for F7 boot.
+host for image installation, then return it to the UP2 for F7 boot. If that is
+impractical, first prove UP2 boots trusted Linux/SSH from other media, or PXE a
+RAM Linux environment on an isolated network; only then use a board-local
+identity-gated writer. Do not infer remote access from Micro-B OTG or UART.
 
 ## Resume sequence
 
@@ -59,8 +62,10 @@ host for image installation, then return it to the UP2 for F7 boot.
    bundle/C+ASM providers without fabricated stubs.
 3. Add the dedicated catalog/hardening row and focused contract tests.
 4. Build the ELF and exact UEFI image; retain compiler/image receipts.
-5. Admit a stable removable `/dev/disk/by-id` target, write only that device,
-   and verify full-image SHA-256 readback.
+5. Choose physical-move, existing Linux/SSH, or isolated PXE RAM Linux. On the
+   actual writer host, admit one stable by-id plus serial/capacity; reject
+   root/swap/mounted/internal media; stage+hash, write locally, sync, recheck
+   identity, and verify exact-length SHA-256 readback.
 6. Use F7 for one-time UEFI boot and retain one stateful UART transcript.
 7. Inject `ls /`; require output between `ls-begin` and `ls-end` from public
    VFS `readdir`.

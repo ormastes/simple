@@ -53,3 +53,17 @@ Date: 2026-08-16
 - No UART bytes have yet identified the UP Squared board or firmware mapping.
 - The exact Apollo Lake SKU/RAM and firmware console-redirection setting are
   not yet observed from live evidence.
+
+## 2026-08-17 continuation audit
+
+The USB stick is attached to UP2, so its absence from this build host is
+expected. No repository helper currently deploys through board-side SSH/PXE,
+and no evidence establishes a USB gadget endpoint. The image builder still
+prints a generic `/dev/sdX` recipe; production needs a separate fail-closed
+by-id writer and receipt.
+
+The UP2 wrapper also bypasses the proven x86 runtime capsule in
+`scripts/os/simpleos-native-build.shs`: it does not prepare the `simple-core`
+sysroot/runtime-native archives or pass the runtime bundle. This matches the
+unresolved runtime and serial symbols. Adapt that capsule while preserving the
+freestanding linker contract; do not retry target-name variables.
