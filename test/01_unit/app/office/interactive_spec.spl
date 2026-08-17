@@ -94,3 +94,62 @@ describe "interactive editor: command core":
         expect(quit_step.quit).to_be(true)
         val eof_step = editor_apply(sh, "")
         expect(eof_step.quit).to_be(true)
+
+describe "interactive editor: hidden-row cursor awareness":
+    # Regression: _tui_move stepped by a raw +/-1 and ignored Sheet.hidden_rows,
+    # so the terminal cursor could land ON a hidden row -- while the GUI session
+    # (_sheet_gui_move_within_bounds) skipped it. Same sheet, same keys, two
+    # different cursors.
+    it "down-arrow skips a hidden row instead of landing on it":
+        var sh = Sheet.new("h")
+        sh.hide_row(2)
+        var s = tui_new_state(sh)
+        s = tui_apply_key(s, 27)   # ESC
+        s = tui_apply_key(s, 91)   # [
+        s = tui_apply_key(s, 66)   # B -> down
+        expect(s.cur.row).to_equal(2)   # row index 2 == 1-based row 3
+
+    it "up-arrow skips a hidden row instead of landing on it":
+        var sh = Sheet.new("h")
+        sh.hide_row(2)
+        var s = tui_new_state(sh)
+        s = tui_apply_key(s, 27)
+        s = tui_apply_key(s, 91)
+        s = tui_apply_key(s, 66)   # down -> row 2
+        s = tui_apply_key(s, 27)
+        s = tui_apply_key(s, 91)
+        s = tui_apply_key(s, 65)   # A -> up, must return to row 0
+        expect(s.cur.row).to_equal(0)
+
+    it "skips a run of consecutive hidden rows in one keypress":
+        var sh = Sheet.new("h")
+        sh.hide_row(2)
+        sh.hide_row(3)
+        sh.hide_row(4)
+        var s = tui_new_state(sh)
+        s = tui_apply_key(s, 27)
+        s = tui_apply_key(s, 91)
+        s = tui_apply_key(s, 66)
+        expect(s.cur.row).to_equal(4)   # 1-based row 5
+
+    it "stays put when every row below the cursor is hidden":
+        var sh = Sheet.new("h")
+        var r = 2
+        while r <= 100:
+            sh.hide_row(r.to_i64())
+            r = r + 1
+        var s = tui_new_state(sh)
+        s = tui_apply_key(s, 27)
+        s = tui_apply_key(s, 91)
+        s = tui_apply_key(s, 66)
+        expect(s.cur.row).to_equal(0)
+
+    it "leaves horizontal movement untouched by hidden rows":
+        var sh = Sheet.new("h")
+        sh.hide_row(2)
+        var s = tui_new_state(sh)
+        s = tui_apply_key(s, 27)
+        s = tui_apply_key(s, 91)
+        s = tui_apply_key(s, 67)   # C -> right
+        expect(s.cur.col).to_equal(1)
+        expect(s.cur.row).to_equal(0)
