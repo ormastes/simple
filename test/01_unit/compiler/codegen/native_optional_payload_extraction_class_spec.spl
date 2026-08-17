@@ -1,0 +1,121 @@
+# Optional payload extraction — reproducing + similar-problem-detection spec
+#
+# ROW 1 (reproducing half):
+#   doc/08_tracking/bug/native_optional_tuple_payload_extraction_broken_2026-07-29.md
+#   A natively/JIT-compiled `T?`-returning function produces the optional in the
+#   "raw migration form" (bare payload, not a boxed Some enum). The BINDING side
+#   in `build_pattern_binding_stmts`
+#   (src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:1396) used
+#   `rt_enum_payload` unconditionally, which returns NIL for a non-heap-enum
+#   value; NIL is TAG_SPECIAL = 0b011 = 3, so every payload field read 3.
+#   Measured FIXED in current source (the rt_enum_id >= 0 runtime branch is
+#   present at stmt_lowering.rs:1396-1429 and again at ~1521); this spec is the
+#   regression fence that keeps it fixed.
+#
+# CLASS-DETECTION half:
+#   The defect class is "an optional's payload is consumed through a lowering
+#   path that does not discriminate the boxed vs raw representation". The tuple
+#   case was one member. This spec sweeps the OTHER members that the reproducing
+#   case alone never touches: every scalar payload type, and — critically —
+#   every CONSUMPTION SPELLING, because they lower through different code:
+#
+#     `match x: Some(v)`      -> build_pattern_binding_stmts  (stmt_lowering.rs)
+#     `if val Some(v) = x`    -> build_pattern_binding_stmts  (stmt_lowering.rs)
+#     `if val v = x`  (sugar) -> expr/control.rs rt_unwrap_or_self
+#     `x ?? d`                -> expr/control.rs rt_unwrap_or_self
+#
+#   The generalisation earned its keep immediately: on 2026-08-17 the two
+#   pattern spellings were correct while the two SUGAR spellings were wrong on
+#   the JIT lane (`Some(99)` bound the raw enum pointer, and `?? ` yielded
+#   792 = 99<<3 — an un-unboxed BoxInt, exactly the failure mode the row-1 bug
+#   doc predicted for "a different builtin alone"). Filed as
+#   doc/08_tracking/bug/jit_optional_unwrap_sugar_boxed_some_not_unboxed_2026-08-17.md
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER, which is correct for every case here. An in-process example can
+# therefore NEVER go red on this defect. The oracle is the sibling run-path
+# probe `probe_optional_payload_extraction_jit.spl`, run as a subprocess under
+# both engines; it self-checks against ABSOLUTE literals it did not compute and
+# prints one verdict line.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_optional_payload_extraction_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "optional payload extraction across representation, type and spelling":
+    it "extracts every optional payload correctly on the interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter was never affected by this family — a red here means the probe itself is broken, not the engine")
+        expect(interp).to_contain("OPTIONAL_PAYLOAD PROBE: ALL PASS")
+
+        step("Confirm the probe actually executed rather than exiting early")
+        expect(interp).to_contain("PASS ifval_pair_i64_f0")
+        expect(interp).to_contain("PASS boxed_ifval_sugar")
+
+    it "extracts raw-form tuple payloads on the JIT lane (the filed regression)":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the lane the bug lived on")
+        val jit = run_probe_in_mode("jit")
+
+        step("Both fields of a raw-form (i64,i64)? bound via `if val Some(p)` — these read the nil sentinel 3 before the fix")
+        expect(jit).to_contain("PASS ifval_pair_i64_f0")
+        expect(jit).to_contain("PASS ifval_pair_i64_f1")
+
+        step("A mixed (text,i64)? tuple, and the match-arm spelling of the same extraction")
+        expect(jit).to_contain("PASS ifval_pair_mixed_f0")
+        expect(jit).to_contain("PASS match_pair_i64_f0")
+        expect(jit).to_contain("PASS match_pair_i64_f1")
+
+        step("nil detection must still work — it was already correct and must not regress")
+        expect(jit).to_contain("PASS nil_pair_none_arm")
+        expect(jit).to_contain("PASS nil_scalar_none_arm")
+
+    it "generalises to every scalar payload type, not just tuples":
+        step("The raw migration form is not tuple-specific: any payload type hits the same extraction path")
+        val jit = run_probe_in_mode("jit")
+
+        expect(jit).to_contain("PASS ifval_scalar_i64")
+        expect(jit).to_contain("PASS ifval_scalar_text")
+        expect(jit).to_contain("PASS ifval_scalar_bool")
+        expect(jit).to_contain("PASS ifval_scalar_f64")
+        expect(jit).to_contain("PASS match_scalar_i64")
+
+    it "generalises to every consumption spelling, boxed representation included":
+        step("A literal Some(99) is a real heap enum — the boxed arm must stay byte-identical to the legacy path")
+        val jit = run_probe_in_mode("jit")
+
+        step("Pattern spellings, lowered by build_pattern_binding_stmts")
+        expect(jit).to_contain("PASS boxed_match_some")
+        expect(jit).to_contain("PASS boxed_ifval_some_pattern")
+
+        step("Sugar spellings, lowered by expr/control.rs — these are the members the tuple reproducer never reached")
+        expect(jit).to_contain("PASS boxed_ifval_sugar")
+        expect(jit).to_contain("PASS boxed_coalesce")
+
+    it "shows no representation-confusion signature under either engine":
+        step("Collect both engines' output")
+        val interp = run_probe_in_mode("interpreter")
+        val jit = run_probe_in_mode("jit")
+
+        step("An enum handle that leaked instead of its payload renders as `<enum@0x..`")
+        expect(jit.contains("<enum@0x")).to_equal(false)
+        expect(interp.contains("<enum@0x")).to_equal(false)
+
+        step("A payload read through the nil sentinel renders as the bare integer 3 — the probe reports it as a FAIL line")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)
+
+        step("The aggregate verdict line is the authoritative result for both engines")
+        expect(jit).to_contain("OPTIONAL_PAYLOAD PROBE: ALL PASS")
+        expect(interp).to_contain("OPTIONAL_PAYLOAD PROBE: ALL PASS")

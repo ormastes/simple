@@ -69,3 +69,7 @@ env SIMPLE_BOOT_MINIMAL=1 src/compiler_rust/target/debug/simple native-build \
 - riscv32 builds green only with the LLVM-backed driver (cranelift blocks rv32).
 - Multiarch lane status + dedup plan: `doc/03_plan/os/multiarch_qemu_systest/`
   and `doc/05_design/os/multiarch_qemu_systest/duplication_analysis.md`.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.

@@ -1578,3 +1578,7 @@ mount surfaces the FS-trait sentinel above (black screen), so the skip stays in
 place until that is fixed. The `#UD`-treated-as-recoverable fault-handler bug
 (flagged in C8-FIX item 3) remains open and is why both C8 and this new sentinel
 present as wild-jump storms instead of a clean trap.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.

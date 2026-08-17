@@ -1,6 +1,46 @@
 # Seed JIT: unresolved symbols SIGSEGV or silently pass instead of diagnosing
 
-**Status:** OPEN — seed-owned; the fix must land in `src/compiler_rust` (out of
+**Status: CLOSED — FIXED, verified by execution 2026-08-17.**
+
+Classified by CONTENT of current source, not commit ancestry. The JIT's
+`GlobalLoad` lowering now REFUSES an unresolved identifier instead of
+materialising a garbage/default value —
+`src/compiler_rust/compiler/src/codegen/instr/mod.rs:499`:
+`"GlobalLoad: unresolved identifier '{}' (not a global, function, const-data
+name, or import)"`. Body compilation fails, stub emission is refused unless
+`SIMPLE_ALLOW_STUB_FALLBACK` is set, the lane falls back, and the shared
+semantic diagnostic is emitted. That single guard closes BOTH regressed rows:
+the fail-open never happens, so the non-callable value that produced the
+SIGSEGV is never constructed.
+
+The fence this doc filed is now GREEN:
+
+```
+$ sh scripts/check/check-jit-unresolved-symbol-guard.shs
+PASS — 6 lane-cases checked: unresolved symbols diagnose on both interpreter and JIT lanes
+```
+
+Both regressed rows re-checked directly on `bin/simple run` (rc read on the line
+after the command, never through a pipe):
+
+```
+=== ctor  rc=1   (was rc=139 SIGSEGV)
+error: semantic: variable `i64` not found
+=== undef rc=1   (was rc=0 SILENT PASS)
+error: semantic: variable `undefined_var_xyz` not found
+```
+
+**Regression coverage:**
+`test/01_unit/compiler/codegen/jit_unresolved_symbol_diagnosis_class_spec.spl`
+— subprocess-driven (spec bodies run interpreted and can never observe this
+lane), one subprocess per case so no single construct can demote the program
+off the JIT, and it asserts the general invariant "the JIT's verdict matches
+the interpreter's for EVERY unresolved-name shape" rather than only the three
+inputs originally filed. Includes a non-vacuity control that must succeed.
+
+---
+
+**Original status:** OPEN — seed-owned; the fix must land in `src/compiler_rust` (out of
 scope for pure-Simple sessions per "Fix .spl not Rust"). Fence lands RED on the
 roster so the gap stays visible.
 **Found:** 2026-08-10, seed at `f74a76ae240` (`bin/release/x86_64-unknown-linux-gnu/simple`, Rust seed).

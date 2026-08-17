@@ -858,3 +858,12 @@ with the locus named rather than attempted from a pattern-lowering lane.
 Row f is a second, separate finding: the INTERPRETER gets `val x: i64? = 4`
 wrong (answers `_`) while the JIT gets it right. That is §13's defect, now
 confirmed to be independent of the value 3.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+LIVE, re-reproduced. Bare `val n = 6` then `n.unwrap_or(-99)`, deployed seed, verbatim:
+```
+jit:         uo=<value:0x6>
+interpreter: uo=6
+```
+Neither is an error, and the two engines still disagree — exactly the reported defect. (Control in the same program: `Option<bool> == true` prints `p1=true` on both engines, so real Option equality is fine on the hosted engines; the defect is the missing type check on a NON-Option scrutinee.)

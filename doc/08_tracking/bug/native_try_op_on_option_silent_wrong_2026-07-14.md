@@ -176,3 +176,7 @@ lowering. Typed lets, assignments, fields, parameters, direct/function-value
 calls, returns, control-flow merges, Option methods, and early `?` absence now
 route through `ensure_option_handle`; the runtime recognizes only enum id 1 /
 None ordinal 1 plus the raw-nil migration fallback. Execution remains pending.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+LIVE by content. `lower_try_expr` at src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2816 still contains NO `option`/`optional`/`is_none` branch anywhere in its body (grep over the function returns zero hits) — the `?` base is still handled as a Result unconditionally. The tagged-Option ABI the doc says the fix requires is likewise absent. Not executed (native-build lanes are claimed by other sessions).

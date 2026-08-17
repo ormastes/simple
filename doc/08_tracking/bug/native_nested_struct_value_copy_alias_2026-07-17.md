@@ -35,3 +35,7 @@ their hosted matrix, and FreeBSD selects it under both LLVM and Cranelift.
 
 Execution remains pending under the current no-runtime/no-compiler-command
 restriction.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+ALREADY-FIXED (source). Content: `maybe_copy_struct_value` (src/compiler/50.mir/mir_lowering_stmts.spl:393-427) no longer emits one GetField/Aggregate layer — it resolves the struct SymbolId and delegates to `copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])`, and still returns nil (no copy) for `class_type_names`, preserving class-field sharing as required. Not executed natively by this lane (native-build lanes are claimed); the doc's own 'execution pending' caveat stands.

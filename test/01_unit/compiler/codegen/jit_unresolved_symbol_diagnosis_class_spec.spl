@@ -1,0 +1,111 @@
+# JIT unresolved-symbol diagnosis — reproducing + similar-problem-detection spec
+#
+# ROW 2 (reproducing half):
+#   doc/08_tracking/bug/seed_jit_unresolved_symbol_segfault_and_silent_pass_2026-08-10.md
+#   Bad input the interpreter rejected with a clean semantic error either
+#   SIGSEGV'd (rc=139) or silently succeeded (rc=0) on the default JIT lane:
+#     `var x = [i64]()`         -> CRASH rc=139
+#     `var y = undefined_var_xyz` -> SILENT PASS rc=0, body executed
+#   Measured FIXED in current source: the JIT's GlobalLoad lowering now refuses
+#   an unresolved identifier instead of materialising a garbage value —
+#   src/compiler_rust/compiler/src/codegen/instr/mod.rs:499
+#   ("GlobalLoad: unresolved identifier '{}' (not a global, function,
+#   const-data name, or import)"). Body compilation fails, the lane falls back,
+#   and the shared semantic diagnostic is emitted with rc=1 on BOTH inputs.
+#
+# CLASS-DETECTION half:
+#   The class is "a lane materialises an unresolved name as a value instead of
+#   diagnosing it" — a fail-OPEN, which is worse than the crash because it is
+#   silent. Two engines implement the same semantic check independently, so the
+#   invariant that matters is not "the JIT rejects these three inputs" but
+#   "for EVERY unresolved-name shape, the JIT lane's verdict matches the
+#   interpreter's". This spec asserts that equivalence across the shapes, so a
+#   NEW drift in either duplicate fails here rather than shipping.
+#
+# WHY A SUBPROCESS. Spec bodies run on the tree-walk interpreter, which was
+# CORRECT for every row of this bug. An in-process example can never observe
+# the JIT lane at all. Each case is driven as its own subprocess so that one
+# unsupported construct cannot demote the whole program off the JIT.
+#
+# Exit codes are captured from the command under test, never through a pipe.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+fn bin_path() -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+# Returns "rc=<n>|<stdout+stderr>". `rc` is assigned on the line AFTER the
+# command so it is the compiler's status, not a pipeline member's.
+fn run_case(mode: text, src: text) -> text:
+    val f = "/tmp/jit_unresolved_case.spl"
+    val write_cmd = "cat > " + f + " <<'SPLEOF'\n" + src + "\nSPLEOF"
+    process_run("sh", ["-c", write_cmd])
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin_path() + " run " + f + " > /tmp/jit_unresolved_case.out 2>&1\n" +
+        "rc=$?\n" +
+        "printf 'rc=%s|' \"$rc\"\n" +
+        "cat /tmp/jit_unresolved_case.out"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+val CONTROL: text = "fn main():\n    var x: [i64] = []\n    print \"OK\""
+val TYPED_CTOR: text = "fn main():\n    var x = [i64]()\n    print \"OK\""
+val UNDEF_VAR: text = "fn main():\n    var y = undefined_var_xyz\n    print \"OK\""
+val UNDEF_FN: text = "fn main():\n    undefined_fn_xyz()"
+val UNDEF_TYPE: text = "fn main():\n    var z = UndefinedTypeXyz()"
+
+describe "unresolved symbols are diagnosed identically on both execution lanes":
+    it "runs valid code on both lanes (non-vacuity control)":
+        step("A well-formed program must succeed on both lanes, proving the harness drives real execution")
+        expect(run_case("interpreter", CONTROL)).to_contain("rc=0|")
+        expect(run_case("jit", CONTROL)).to_contain("rc=0|")
+        expect(run_case("jit", CONTROL)).to_contain("OK")
+
+    it "refuses a called list-type constructor instead of crashing":
+        step("`[i64]()` calls a list literal as a function — the JIT SIGSEGV'd with rc=139 here")
+        val jit = run_case("jit", TYPED_CTOR)
+
+        step("rc=139 is signal death; the correct verdict is the interpreter's semantic diagnostic")
+        expect(jit.contains("rc=139|")).to_equal(false)
+        expect(jit).to_contain("rc=1|")
+        expect(jit).to_contain("variable `i64` not found")
+
+        step("The interpreter is the reference verdict")
+        expect(run_case("interpreter", TYPED_CTOR)).to_contain("variable `i64` not found")
+
+    it "refuses a read of an undefined variable instead of failing open":
+        step("This is the silent member of the class: the JIT executed the body and exited 0")
+        val jit = run_case("jit", UNDEF_VAR)
+
+        step("A fail-open is a wrong ANSWER, not a wrong error message — rc must not be 0 and the body must not have run")
+        expect(jit.contains("rc=0|")).to_equal(false)
+        expect(jit).to_contain("rc=1|")
+        expect(jit).to_contain("variable `undefined_var_xyz` not found")
+
+        step("An unresolved name must never be materialised as a value")
+        expect(jit.contains("OK")).to_equal(false)
+
+    it "generalises across every unresolved-name shape, matching the interpreter":
+        step("Undefined function call — was already correct and must stay correct")
+        expect(run_case("jit", UNDEF_FN)).to_contain("rc=1|")
+        expect(run_case("interpreter", UNDEF_FN)).to_contain("rc=1|")
+
+        step("Undefined type construction")
+        expect(run_case("jit", UNDEF_TYPE)).to_contain("rc=1|")
+        expect(run_case("interpreter", UNDEF_TYPE)).to_contain("rc=1|")
+
+        step("No shape may produce a signal death on either lane")
+        expect(run_case("jit", UNDEF_FN).contains("rc=139|")).to_equal(false)
+        expect(run_case("jit", UNDEF_TYPE).contains("rc=139|")).to_equal(false)
+
+    it "never emits an unsafe stub for a body that failed to compile":
+        step("The stub-fallback path would emit an empty function and silently misbehave — it must stay opt-in")
+        val jit = run_case("jit", UNDEF_VAR)
+
+        step("Compilation failure must end in a diagnostic, not in an executed empty stub")
+        expect(jit).to_contain("not found")
+        expect(jit.contains("rc=0|")).to_equal(false)

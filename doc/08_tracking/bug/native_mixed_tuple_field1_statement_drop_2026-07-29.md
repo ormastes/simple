@@ -92,3 +92,15 @@ statements in the enclosing block rather than an error.
 - Do not conflate with the optional-extraction bug (fixed) or the
   kafka <<3 tag-box family; this one is specific to heterogeneous tuple
   field access.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+ALREADY-FIXED. Content: `lower_tuple_index` (src/compiler_rust/compiler/src/hir/lower/expr/access.rs:822-865) now computes a PER-INDEX element type from `HirType::Tuple`/`LabeledTuple` (through one `Pointer` level) before falling back to `get_index_element_type`, and cites this doc by name. Repro re-run on the deployed seed, verbatim, identical on both engines (jit and SIMPLE_EXECUTION_MODE=interpreter):
+```
+A
+LOCAL1: 7
+B
+RET1: 8
+C
+```
+No statement drop, no 56=7<<3. Bare-`print` variant identical.

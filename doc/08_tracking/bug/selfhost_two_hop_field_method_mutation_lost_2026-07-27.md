@@ -393,3 +393,11 @@ unobservable. Replaced with absolute `id == 0`, `generation == 1`,
 | clock_service | 6 | 0 |
 | pm_service | 8 | 3 (unrelated class) |
 | pipefs / procfs / rs / sched | 1 / 1 / 0 / 1 | 0 / 0 / 0 / 0 |
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+ALREADY-FIXED (interpreter/JIT). Content: `merge_shared_collection_fields` exists at src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975 and is called from the write-back path (:1140), propagating Array/Dict/ByteArray fields callee->caller while keeping scalars/nested structs value-typed. Repro (THREE hops, `self.world.output.bufs.insert("k",5)` inside a `me`), verbatim on the deployed seed:
+```
+len=1
+```
+identical under jit and SIMPLE_EXECUTION_MODE=interpreter. The mutation persists; the extract-mutate-writeback workaround is no longer required.

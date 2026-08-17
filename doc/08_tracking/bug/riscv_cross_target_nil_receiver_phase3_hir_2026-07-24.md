@@ -44,3 +44,7 @@ green. Workaround: `NVME_RV32_BUILD_TIMEOUT_SECS=600`.
 1. riscv32 + riscv64 `-unknown-none` repro compiles clean.
 2. `NVME_RV32_BUILD_TIMEOUT_SECS=600 sh scripts/check/check-nvme-rv32-minimal-live.shs` → `ALL RV32 NVME FW CHECKS PASS`.
 3. Regression test to add: minimal cross-target compile smoke (rv32+rv64 `-unknown-none`) in the pre-deploy smoke matrix — this class (representation/decode soundness) has recurred; type-checked ≠ sound when enum/struct decode regresses.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.

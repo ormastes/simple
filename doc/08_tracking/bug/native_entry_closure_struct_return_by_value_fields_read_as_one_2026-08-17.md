@@ -132,3 +132,7 @@ The first draft embedded the fixture with `{inline_v.length}` interpolation.
 That is resolved by the SPEC's lexer, not the fixture's: the file died with
 `semantic: variable \`inline_v\` not found` and `executed=0 reason=zero-examples`
 before any example ran. Embedded fixture sources must avoid `{...}` entirely.
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+LIVE by content — and NOT ours to fix: `hir/lower/expr/access.rs` is a lane explicitly claimed by another concurrent session. The guessed field index is still there: src/compiler_rust/compiler/src/hir/lower/expr/access.rs:286-291, `self.get_field_info(recv_hir.ty, field).ok().map(|(field_index,_)| field_index).or_else(|| self.try_resolve_global_field_index_by_name(...)).unwrap_or(0)` — a failed resolution still silently yields field 0, which is the documented 'every field reads as field 0' mechanism. Handed to the access.rs owner unmodified.

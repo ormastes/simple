@@ -141,3 +141,7 @@ reports the p1/p2/p3-equivalent rows as `KNOWN-OPEN` with the expected-
 correct value stated, so a future fix announces itself instead of needing to
 be rediscovered. Sabotage-verified: mutating a hard-assert fixture line flips
 the script to FAIL (exit 1); restoring returns it to PASS (exit 0).
+
+## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+
+UNPROVEN by this lane (native-only). The hosted half of the matrix re-checks clean on the deployed seed: `make(true) == true` where `make` returns `bool?` by implicit coercion prints `p1=true` under BOTH jit and SIMPLE_EXECUTION_MODE=interpreter, matching rows p1's interp/jit columns. The wrong-answer columns are native-build only, and native-build/`pipeline/native_project/**` is claimed by another lane, so the native leg was not re-run here. Ownership stays with the native-option-return-representation effort as the doc states.
