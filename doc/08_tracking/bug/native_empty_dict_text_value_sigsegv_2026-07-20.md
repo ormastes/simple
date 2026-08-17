@@ -50,3 +50,42 @@ into erased-element-type containers; root-cause properly before patching.
   i64, and mixed f64/int through the identical path all pass rc 30.
 - See `seed_f64_array_element_precision_mask_2026-07-19.md` (hardening-sweep
   banner) for the sibling f64 fix this was found alongside.
+
+## REPRODUCED 2026-08-17 — but the filed symptom is WRONG, and the real one is worse
+
+The native build completed (`BUILD_RC=0`, ~50 min for a 7-line program). **It does
+not SIGSEGV.** It returns a silently wrong value — which puts this row in the
+silently-wrong-results class, where a crash-titled doc will never be recognised.
+
+| arm | `got=` | `eq=` | `len=` |
+|---|---|---|---|
+| `interpret` | `hello` | true | 1 |
+| `jit` | `hello` | true | 1 |
+| **native-build** | **`109691254279185`** | **true** | **1** |
+
+The wrong value decodes cleanly: `109691254279185` = `0x63C37C3F0C11`, a Linux
+heap address whose low 3 bits are `001` — a **correctly tagged**
+`RT_VALUE_TAG_HEAP` text pointer. With `eq=true` and `len=1`, that proves the dict
+**stored and retrieved the text correctly**. Nothing is null and nothing is
+corrupt, so the doc's "null struct deref / SIGSEGV on read or compare" root cause
+is not what happens.
+
+What breaks is `"got=" + v`: the native `+` lowering rendered a tagged pointer as
+a **decimal integer** instead of concatenating it as text. That is a static-type
+decision, not a runtime one — `expr_dispatch.spl bin_is_str_concat` chooses
+between `rt_strcat_tagged` and integer add, and `runtime_native.c:5847-5862`
+documents that contract. A dict read yields `any`, so the static test appears to
+fall through to the integer arm.
+
+**Not yet asserted.** A four-arm discriminating build was still running: plain
+text (positive control), non-empty dict literal, empty dict literal, plus
+`eq`/`len`. If plain text ALSO renders as a pointer, the dict is entirely
+innocent and this row is misfiled against the wrong subsystem; if only the dict
+arms break, it is dict-read type-loss as described.
+
+**Scope:** if that holds, the root cause is in `src/compiler/70.backend/**`, not
+`src/os` or `src/runtime` — diagnosis and hand-off, not a patch from this lane.
+
+**Recommended retitle** once the discriminator lands: this is a native-only
+wrong-value defect on text concatenation of an `any`-typed value, not a dict
+SIGSEGV.
