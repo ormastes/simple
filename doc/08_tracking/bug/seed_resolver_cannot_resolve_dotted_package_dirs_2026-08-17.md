@@ -1,13 +1,53 @@
-## Re-verified 2026-08-17 — STILL OPEN
+## FIXED 2026-08-17 (seed-side; see Verification status below)
 
-`bin/simple info` still exits with:
+Fix option 1 (the preferred one) is implemented in
+`src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs` as
+"Strategy 5" in `resolve_with_numbered_dirs_recursive`: when the plain
+per-segment join and the existing one-level dotted join both miss, join 2+
+*pending* segments with a literal `.` against the current directory, longest
+window first, bounded by `parts.len() - 1` so at least one segment remains for
+the module itself. Because each strategy only returns on success, the walk
+backtracks naturally out of prefixes that exist but lead nowhere.
+
+This makes the seed agree with the pure-Simple driver for **all** dotted
+directories rather than the four hardcoded in
+`driver_source_loading.spl:801` — a rewrite table was explicitly rejected as
+fix option 2 because two hand-maintained lists are how this drifted.
+
+Commit: `61502d60632`.
+
+### Repro before the fix (2026-08-17, seed
+`bin/release/x86_64-unknown-linux-gnu/simple`)
+
 ```
+$ bin/simple info
 error: semantic: Cannot resolve module: app.package.registry.config
+EXIT=1
 ```
-Blocker: fix lives in `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`
-(accumulate a pending dotted prefix instead of the one-level, current-dir-anchored
-join at :292-295). Verification requires a seed rebuild + redeploy, which this
-lane may not perform.
+
+### Verification status — HONEST
+
+The change is Rust, in the seed. It is **not provable from a spec run against
+the currently deployed `bin/simple`**, which is the pre-fix seed. It is proven
+only after a seed rebuild and redeploy. Do not read a green run of the specs
+below on the old binary as evidence; on the old binary they fail to resolve
+their own imports and the examples never execute.
+
+Two additional facts found while verifying, both worth knowing:
+
+- `src/app/ui.chromium.acid2/` is a **three-segment** dotted directory
+  (two dots). Any fix that joins only two pending segments still misses it, so
+  it is the sharper regression case and is covered by the prevention spec.
+- The seed tree was independently unbuildable at the time of this fix
+  (borrow-check errors in `parser/src/expressions/binary.rs` from a concurrent
+  lane, since repaired in the working tree) — worth noting because it blocks
+  anyone trying to reproduce this verification.
+
+### Specs
+
+- repro: `test/01_unit/compiler/module_resolution/dotted_package_dir_resolution_spec.spl`
+- prevention: `test/01_unit/compiler/module_resolution/dotted_package_dir_convention_prevention_spec.spl`
+- both mirrored identically under `test/unit/compiler/module_resolution/`
 
 # Rust seed resolver cannot resolve dotted package directories; `simple info` is dead in seed mode
 
