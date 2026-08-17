@@ -3,7 +3,8 @@
 - **Filed:** 2026-08-09
 - **Lane:** G4
 - **Severity:** High (silent wrong values; hides entire defect classes)
-- **Status:** Open — NOT fixed here. The fix is not small or contained; see below.
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Discovered via:** `dotq_tail_position_in_bool_returning_fns_2026-08-09.md`
 
 ## Symptom
@@ -78,3 +79,81 @@ Turning on return-type checking is not a contained edit:
 3. Repair the census, then promote to error.
 
 Do not promote to error before step 2 reports a number.
+
+
+## Re-measurement 2026-08-17 (P0-core silent-wrong lane) — REPRODUCED, and worse
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
+2026-08-16 22:59:37 UTC (Rust seed).
+
+```
+fn wrong_ret() -> i64:
+    "notanint"
+
+fn main():
+    val v = wrong_ret()
+    print v
+```
+
+| engine | output |
+|---|---|
+| `SIMPLE_EXECUTION_MODE=interpreter` | `notanint` |
+| `SIMPLE_EXECUTION_MODE=jit`         | `2910620488929` |
+
+Exit 0 on both; no diagnostic from any phase.
+
+The doc records this as "declared return types are not enforced by any engine",
+which is true but understates the consequence. Two things this measurement adds:
+
+1. **The two engines do not merely both fail to check — they produce DIFFERENT
+   wrong answers.** The interpreter keeps the string, so `v` is a `text` in an
+   `i64` binding and downstream arithmetic will fail somewhere else entirely,
+   far from the cause. The JIT keeps the raw slot and prints it as an integer.
+2. **The JIT's number is a heap address, not a value.** `2910620488929` is
+   `0x2A5_5B0F_8FE1`-scale — the tagged heap pointer to the string, printed as
+   an `i64` because the binding said `i64`. So an unenforced return type does
+   not just yield a wrong number; it **leaks a live heap pointer into integer
+   arithmetic**, where it can be added, compared, indexed with, or written to a
+   file. That is a materially different severity argument from "the type is not
+   checked", and it belongs in the case for prioritising the fix that this doc's
+   "Why it is not fixed in this change" section defers.
+
+No fix attempted here. The doc's own assessment that the fix is neither small
+nor contained is not disputed by this measurement.
+
+## Re-reproduced 2026-08-17 (batch_00) — still live, and the divergence widened
+
+Confirmed on the deployed seed (`bin/simple`, mtime 2026-08-16 22:59). Fixture:
+
+```simple
+fn ret_text() -> bool:
+    "not-a-bool"
+
+fn main():
+    val v = ret_text()
+    print("ret_text => " + v.to_text())
+```
+
+| engine | exit | output |
+|---|---|---|
+| jit (default)                       | 0 | `ret_text => true` |
+| `SIMPLE_EXECUTION_MODE=interpreter` | 0 | `ret_text => not-a-bool` |
+
+Two changes since the 2026-08-09 filing, both making this *worse*, not better:
+
+1. The JIT value drifted from `<special:129>` to **`true`**. The original garbage
+   value at least looked wrong on sight; `true` is a plausible bool and will not
+   attract a second glance. The defect is unchanged — a `text` literal is still
+   being returned from a `-> bool` signature with no check — but its symptom is
+   now camouflaged.
+2. The interpreter no longer errors on this shape. On 2026-08-09 it happened to
+   fail downstream (`method to_text not found on type array`). Here it exits **0**
+   and prints the raw text straight through a `-> bool` signature. Both engines
+   now exit 0 with different answers, so the incidental diagnostic that used to
+   catch this case is gone.
+
+Not fixed here, for the reason the original filing gives: enforcement belongs in
+`30.types/type_system/checker.spl` / `35.semantics` and will fail loud across an
+unrepaired corpus (42 known `-> bool` violations alone). This entry records only
+that the bug is **live and re-confirmed**, and that the "already fixed?" question
+is settled in the negative.
