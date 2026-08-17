@@ -134,3 +134,18 @@ collision diagnostic was NOT weakened; the fix was deduplication. (c) No specs
 added: this row is retired as a content-close, not a fix, so the two-spec rule
 does not attach. (d) The `evidence` column for this row remains FALSE (it cites
 line 737, a function signature, as a declaration) — do not re-triage from it.
+
+### Third-lane census widening 2026-08-17 (worker W7) — retirement holds
+
+Both stamps above scoped their census to two directories. Widened to the whole
+owned source tree, `.spl` only, GNU grep, anchored to a declaration:
+
+```
+$ /usr/bin/grep -rn --include=*.spl -E "^[[:space:]]*(pub )?enum (LintCategory|LintLevel)\b" \
+    src/compiler src/lib src/app src/os
+src/lib/nogc_sync_mut/tooling/easy_fix/types.spl:8:pub enum LintLevel:
+src/lib/nogc_sync_mut/tooling/easy_fix/types.spl:13:pub enum LintCategory:
+```
+
+Two hits, one module — no third terminal exists anywhere in `src/` to collide
+with. Retirement confirmed on a strictly larger scan than either prior stamp.
