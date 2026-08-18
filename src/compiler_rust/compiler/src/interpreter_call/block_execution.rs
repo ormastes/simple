@@ -13,7 +13,7 @@ use crate::interpreter::{
     MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node};
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -979,6 +979,80 @@ pub(super) fn exec_block_closure_into(
                     }
                 }
 
+                last_value = Value::Nil;
+            }
+            // A `use` written inside a function body or block. Without this arm
+            // the statement parses fine, matches nothing here, and is silently
+            // dropped: the imported symbol never enters scope, and the call site
+            // later fails with a "function not found" that names the CALLEE
+            // rather than the import, which reads as a missing or unexported
+            // function. Module-scope `use` was always handled (interpreter_eval);
+            // only the block-scoped position was missing, which left real stdlib
+            // code (e.g. std.crypto.sha1) unable to resolve its own imports.
+            // See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
+            Node::UseStmt(use_stmt) => {
+                let current_file = crate::interpreter::get_current_file();
+                // `enums` is borrowed immutably in this signature; enum imports
+                // reach the interpreter through GLOBAL_ENUMS rather than this
+                // map, so a local copy satisfies the loader without dropping
+                // them.
+                let mut merged_enums = enums.clone();
+                let loaded = crate::interpreter::interpreter_module::load_and_merge_module(
+                    use_stmt,
+                    current_file.as_deref(),
+                    functions,
+                    classes,
+                    &mut merged_enums,
+                )?;
+                if let Value::Dict(exports) = &loaded {
+                    // Mirrors the module-scope unpack rules in interpreter_eval:
+                    // Group imports bind only the named items, Glob binds all,
+                    // Single/Aliased bind the module dict only and unpack nothing.
+                    let mut bind_one = |name: &str, value: &Value| {
+                        if let Value::Function { def, .. } = value {
+                            functions.insert(name.to_string(), Arc::clone(def));
+                        }
+                        local_env.insert(name.to_string(), value.clone());
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(name.to_string(), value.clone());
+                        });
+                    };
+                    match &use_stmt.target {
+                        ImportTarget::Group(items) => {
+                            for item_target in items {
+                                match item_target {
+                                    ImportTarget::Single(name) => {
+                                        if let Some(v) = exports.get(name) {
+                                            bind_one(name, v);
+                                        }
+                                    }
+                                    ImportTarget::Aliased { name, alias } => {
+                                        if let Some(v) = exports.get(name) {
+                                            bind_one(alias, v);
+                                        }
+                                    }
+                                    // Nested groups are not supported at module
+                                    // scope either; stay consistent.
+                                    _ => {}
+                                }
+                            }
+                        }
+                        ImportTarget::Glob => {
+                            for (name, value) in exports.iter() {
+                                // Never glob-import `main`: it would be picked up
+                                // by the entry-point fallback and run instead of
+                                // the script's own main. Same guard as module
+                                // scope. A NAMED import of `main` is an explicit
+                                // opt-in and is not filtered.
+                                if matches!(value, Value::Function { .. }) && name == "main" {
+                                    continue;
+                                }
+                                bind_one(name, value);
+                            }
+                        }
+                        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+                    }
+                }
                 last_value = Value::Nil;
             }
             Node::Const(const_stmt) => {

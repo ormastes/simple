@@ -1,0 +1,44 @@
+# Regression: a `use <path>.{name}` written inside a FUNCTION BODY (or any
+# block) was a silent no-op for symbol resolution. It parsed, matched no arm in
+# exec_node, fell into the catch-all `_ => Ok(Control::Next)`, and registered
+# nothing -- so the call site later failed with
+#   error[E1002]: function `<callee>` not found
+# which names the CALLEE rather than the import and reads as a missing or
+# unexported function. It misdiagnosed this bug three times.
+#
+# This was not merely latent: std.crypto.sha1 writes its imports in exactly this
+# form, so sha1_hex could never resolve bytes_to_hex and the shipped stdlib
+# function could not run at all.
+#
+# Root cause and minimal repro:
+# doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
+use std.spec.*
+use std.crypto.sha1.{sha1_hex}
+
+describe "block-scoped use resolves imported functions":
+
+    it "resolves a function imported inside a function body":
+        """A `use` in a function body must bring the named function into scope,
+        exactly as the same import written at module scope does."""
+
+        step("Call a function whose only import is body-scoped")
+        # rotr32 is imported inside this function body, not at module scope.
+        use std.crypto.types.{rotr32}
+        expect(rotr32(16, 4)).to_be(1)
+
+    it "runs a stdlib function that relies on body-scoped imports":
+        """std.crypto.sha1.sha1_hex imports text_to_bytes and bytes_to_hex in
+        its own function body. Before the fix this raised E1002 for
+        bytes_to_hex, making the shipped function unusable."""
+
+        step("Hash a known input and compare against the published SHA-1 vector")
+        # FIPS 180-1 test vector: SHA-1("abc").
+        expect(sha1_hex("abc")).to_be("a9993e364706816aba3e25717850c26c9cd0d89d")
+
+    it "binds an aliased body-scoped import under its alias":
+        """The Group-with-alias form must bind the alias, not the original
+        name -- the same rule module scope applies."""
+
+        step("Import under an alias inside the body and call through it")
+        use std.crypto.types.{rotr32 as rotate_right}
+        expect(rotate_right(16, 4)).to_be(1)
