@@ -469,13 +469,6 @@ int64_t rt_counterpart_open(const uint8_t *path_ptr, uint64_t path_len,
     return result;
 }
 
-int64_t rt_counterpart_open_value(int64_t path_value, int64_t config_value) {
-    const char *path = rt_interp_cstr(path_value);
-    const char *config = rt_interp_cstr(config_value);
-    if (!path) return SCF_RT_ERR_BAD_ARG;
-    return simple_counterpart_open(path, config ? config : "", NULL);
-}
-
 /* Returns the manifest as boxed text; empty text on any failure, which the
  * Simple wrapper treats as rejected_manifest rather than as an empty pass. */
 int64_t rt_counterpart_manifest_text(int64_t handle) {
@@ -531,16 +524,6 @@ int64_t rt_counterpart_invoke(int64_t handle,
     return SCF_RT_OK;
 }
 
-int64_t rt_counterpart_invoke_value(int64_t handle, int64_t component_value, int64_t request_value) {
-    const char *component = rt_interp_cstr(component_value);
-    const char *request = rt_interp_cstr(request_value);
-    if (!component) return SCF_RT_ERR_BAD_ARG;
-    return rt_counterpart_invoke(handle,
-                                 (const uint8_t *)component, (uint64_t)strlen(component),
-                                 request ? (const uint8_t *)request : NULL,
-                                 request ? (uint64_t)strlen(request) : 0u);
-}
-
 int64_t rt_counterpart_response_text(int64_t handle) {
     scf_slot *slot = scf_slot_for(handle);
     if (!slot) return scf_box((const uint8_t *)"", 0u);
@@ -594,10 +577,4 @@ int64_t rt_counterpart_probe_abi(const uint8_t *path_ptr, uint64_t path_len, int
     scf_dlclose(library);
     if (!api) return 0;
     return 1;
-}
-
-int64_t rt_counterpart_probe_abi_value(int64_t path_value, int64_t requested_abi) {
-    const char *path = rt_interp_cstr(path_value);
-    if (!path) return SCF_RT_ERR_BAD_ARG;
-    return rt_counterpart_probe_abi((const uint8_t *)path, (uint64_t)strlen(path), requested_abi);
 }

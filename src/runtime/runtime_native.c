@@ -492,18 +492,6 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_sdl2_create_window(const char* title,
     (void)title; (void)width; (void)height;
     return 0;
 }
-SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_clear(int64_t handle, int64_t color) {
-    (void)handle; (void)color;
-}
-SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_fill_rect(int64_t handle, int64_t x,
-                                                    int64_t y, int64_t width,
-                                                    int64_t height, int64_t color) {
-    (void)handle; (void)x; (void)y; (void)width; (void)height; (void)color;
-}
-SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_present(int64_t handle) {
-    (void)handle;
-}
-
 #if defined(SIMPLE_CORE_C_STANDALONE)
 bool rt_is_interpreter_runtime(void) {
     return false;
@@ -814,8 +802,6 @@ int64_t rt_host_gpu_queue_last_device_time_us(void) { return rt_host_gpu_queue_l
 int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_last_payload_size_value; }
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
 /* Raw form, for in-C callers. */
-const char* rt_host_gpu_queue_last_payload_text_cstr(void) { return rt_host_gpu_queue_last_payload_text_value; }
-
 /* Both Simple declarations spell this `-> text` and RuntimeFuncSpec
  * (runtime_sffi.rs:1058) spells it `&[I64]` -- a RuntimeValue. Returning the
  * static `char*` handed the caller an UNTAGGED word. MEASURED 2026-08-10 as
@@ -9690,19 +9676,6 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
 void* rt_file_open_stream(const char* path, const char* mode) {
     if (!path || !mode) return NULL;
     return (void*)fopen(path, mode);
-}
-
-/* NOTE (2026-08-10, rt_extern_abi_divergence_family, Q35): renamed from
- * rt_file_close for the same reason its partner rt_file_open became
- * rt_file_open_stream. The compiler declares `i8 rt_file_close(i32 fd)` and
- * the canonical implementation is descriptor.rs:98, which closes a FILE
- * DESCRIPTOR. This copy takes a stdio FILE*. Under `-z muldefs` whichever
- * copy won the link decided whether `rt_file_close(3)` closed fd 3 or called
- * fclose() on the address 0x3 -- the second is undefined behaviour, not a
- * failed close. Same arity, so no arity gate could ever have seen it. Do not
- * rename it back. */
-void rt_file_close_stream(void* handle) {
-    if (handle) fclose((FILE*)handle);
 }
 
 /* Two `text` arguments -> FOUR machine words; runtime_sffi.rs:1881 declares

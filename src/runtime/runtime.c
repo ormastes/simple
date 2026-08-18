@@ -3414,10 +3414,6 @@ typedef struct {
     int64_t  cap;
 } rt_byte_buf;
 
-static rt_byte_buf* rt_byte_buf_from_handle(int64_t handle) {
-    return (rt_byte_buf*)(uintptr_t)handle;
-}
-
 /* rt_text_to_bytes: create byte array handle from text string */
 int64_t rt_text_to_bytes(const char* text) {
     if (!text) text = "";

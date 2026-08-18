@@ -124,6 +124,67 @@ trio) carry a specific note where a non-grep-visible dispatch mechanism is
 plausible. Treat this list as **candidates requiring one more check per
 symbol**, not confirmed-dead.
 
+## 2026-08-18 follow-up: caveats closed, reclassification, deletions
+
+All 23 caveats were closed by additionally grepping `scripts/**/*.shs`,
+`test/**` (including `.c`/`.spl` fixtures, not just spec assertions), quoted
+string literals repo-wide, and — the one gap the original sweep's own method
+section did not cover — **`src/compiler_rust/runtime/src/**` (the Rust
+*runtime* crate), distinct from `src/compiler_rust/compiler/src` (the Rust
+*compiler* crate) that the original `rust_refs` grep was scoped to.** That gap
+turned out to be load-bearing: 7 of the 23 are genuinely live, called only
+from the runtime crate via `extern "C"` blocks.
+
+| symbol | reclassification | evidence |
+|---|---|---|
+| `rt_transient_raw_promote` | **LIVE (rust_seed_called)** | `src/compiler_rust/runtime/src/value/collections.rs:1739,1902` — `extern "C" fn rt_transient_raw_promote(ptr: usize) -> i32;` + real call site |
+| `rt_transient_raw_scope_begin` | **LIVE** | `collections.rs:1735,1749` |
+| `rt_transient_raw_scope_end` | **LIVE** | `collections.rs:1737,1920` |
+| `rt_transient_raw_scope_pause` | **LIVE** | `collections.rs:1736,1767` |
+| `rt_transient_raw_words` | **LIVE** | `collections.rs:1738,1861,1880` |
+| `rt_pool_worker_block_begin` | **LIVE** | `src/compiler_rust/runtime/src/executor.rs:35,912` |
+| `rt_pool_worker_block_end` | **LIVE** | `executor.rs:36,914` |
+| `rt_file_preload_pages` | **LIVE (native_lane_called via .shs)** | `scripts/check/check-startup-size-performance-audit.shs:285,298` — `extern fn` + call |
+| `rt_file_read_all_text` | **LIVE (native_lane_called via .spl)** | `test/perf/bench/http_server/bench_raw_tcp_static.spl:21,29` (and `test/05_perf/...` mirror) — `extern fn` + call |
+| `rt_net_http_plain_local_probe` | **LIVE (via .shs)** | `scripts/check/check-startup-size-performance-audit.shs:321,324` |
+| `rt_net_tcp_connect_local_discard` | **LIVE (via .shs)** | same file:305,308 |
+| `rt_net_udp_send_local_discard` | **LIVE (via .shs)** | same file:313,316 |
+| `rt_opencl_probe_stage` | **STILL_UNCERTAIN — retained, not deleted** | `test/01_unit/runtime/opencl_honesty_spec.spl:88-106` asserts directly on this function's C source text (stage macros, branch shape) as its test oracle; the spec's header also claims direct native-build execution evidence outside this tree. Not a call site by the audit's own rule, but deleting it turns a passing spec RED — out of scope for a dead-code sweep. Left in place. |
+| `rt_browser_renderer_preinit_active_for_test` | **STILL_UNCERTAIN — retained, not deleted (originally misclassified)** | `test/01_unit/runtime/process_piped_write_test.c:85,89` — under `__linux__` this is a real `extern` declaration and call from a C test binary that links the runtime; the file's `#else` branch merely shadows the name for other platforms. This is a genuine caller the original per-symbol `test/` count found (test=1) but whose nature (real cross-TU linkage, not self-contained) wasn't verified before deletion was attempted; verified now and reverted. |
+| `rt_byte_buf_from_handle` | **CONFIRMED_DEAD — DELETED** | zero refs in `.c/.h`, `.spl`, compiler-crate `.rs`, runtime-crate `.rs`, `.shs`, `test/`; only doc mentions |
+| `rt_counterpart_invoke_value` | **CONFIRMED_DEAD — DELETED** | same channels checked, zero refs; no string-keyed dispatch table found in `counterpart_abi_runtime.c` (only a `"counterpart open: function table has null entries"` error string, unrelated) |
+| `rt_counterpart_open_value` | **CONFIRMED_DEAD — DELETED** | same |
+| `rt_counterpart_probe_abi_value` | **CONFIRMED_DEAD — DELETED** | same |
+| `rt_file_close_stream` | **CONFIRMED_DEAD — DELETED** | zero refs in all channels; only a doc mention in `rt_dir_list_platform_header_collides_with_extern_2026-08-10.md`; its `.h`-less sibling `rt_file_open_stream` is untouched and still used elsewhere |
+| `rt_host_gpu_queue_last_payload_text_cstr` | **CONFIRMED_DEAD — DELETED** | zero refs in all channels; only a doc mention |
+| `rt_sdl2_clear` | **CONFIRMED_DEAD — DELETED** | zero refs; `test/01_unit/os/compositor/hosted_backend_sdl2_spec.spl:31` comment confirms in past tense: "`clear`/`fill_rect`/`present` used to call rt_sdl2_clear/rt_sdl2_fill_rect/rt_sdl2_present, none of which exist in runtime_sdl2.c" — the compositor was migrated to a CPU-buffer + whole-frame `rt_sdl2_present_rgba` model; these three weak stubs are confirmed superseded dead scaffolding |
+| `rt_sdl2_fill_rect` | **CONFIRMED_DEAD — DELETED** | same |
+| `rt_sdl2_present` | **CONFIRMED_DEAD — DELETED** | same |
+
+**Deleted (8 of 23):** `rt_byte_buf_from_handle` (`runtime.c`),
+`rt_counterpart_invoke_value`/`rt_counterpart_open_value`/`rt_counterpart_probe_abi_value`
+(`counterpart_abi_runtime.c`), `rt_file_close_stream`,
+`rt_host_gpu_queue_last_payload_text_cstr`, `rt_sdl2_clear`,
+`rt_sdl2_fill_rect`, `rt_sdl2_present` (`runtime_native.c`). None had a `.h`
+prototype, so no header/`RuntimeFuncSpec`/roster row referenced them either.
+Verified post-delete: `sh scripts/check/check-c-runtime-compiles-push.shs`
+still reports the same pre-existing unrelated FAIL on
+`src/runtime/test/rt_browser_renderer_namespace_selfcheck.c` (confirmed
+identical with the deletions stashed out, i.e. not caused by this change);
+103 files compiled clean both before and after, including all 3 edited
+files. No `.rs` files were touched, so `cargo check` was not required.
+
+**Retained (2):** `rt_opencl_probe_stage` and
+`rt_browser_renderer_preinit_active_for_test` — both were attempted for
+deletion and reverted after discovering a real consumer (a source-text-based
+spec oracle and a genuine cross-TU C `extern` call respectively). Neither
+counts against the audit's own DEAD definition once the fuller channel set is
+considered, so both are reclassified STILL_UNCERTAIN rather than DEAD.
+
+**Live (13):** reclassified out of DEAD entirely — 7 via the
+previously-unswept `src/compiler_rust/runtime/src/**` Rust runtime crate, 6
+via `.shs`/`.spl` real call sites the original per-symbol table undercounted.
+
 ## Summary
 
 - 1458 owned `rt_*` C definitions swept; 1901 registered in
