@@ -1,0 +1,200 @@
+# @req REQ-SSPEC-BINARY-EMBEDDED-DOMAINS
+#
+# Goal-4 embedded-domain instances of the binary SSpec infra (design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md). This is
+# SPEC/EVIDENCE-LAYER WORK ONLY — no hardware, no QEMU. It exercises the same
+# mask-aware comparator (`compare_word`) and stacked word-table renderer
+# (`stacked_rows` / `stacked_compare_rows`) against register-word bit-tables,
+# the domain where bit-table comparison matters most: reserved bits,
+# read-only status bits, and write-only self-clearing (W1C-style) control
+# bits. Evidence produced here is consumed later by board/QEMU lanes; this
+# spec never touches a board or an emulator.
+#
+# Ground truth for both register layouts is the 16550-compatible UART driver
+# already in this repo, not an invented layout:
+#   src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl
+#     - LSR bit field values: LSR_DATA_READY=0x01, LSR_OVERRUN_ERROR=0x02,
+#       LSR_PARITY_ERROR=0x04, LSR_FRAMING_ERROR=0x08,
+#       LSR_BREAK_INTERRUPT=0x10, LSR_THR_EMPTY=0x20,
+#       LSR_TRANSMITTER_EMPTY=0x40 (`UART_LSR` register at offset 0x14)
+#     - FCR (FIFO Control Register, offset 0x08) written as 0x07 in
+#       `uart_init`: FIFO-enable | RCVR-FIFO-reset | XMIT-FIFO-reset, where
+#       the reset bits are self-clearing per the 16550 spec (hardware drops
+#       them back to 0 once the reset completes, so a readback of the same
+#       word never equals the written word on those two bits).
+# Also referenced: `src/lib/nogc_async_mut_noalloc/baremetal/x86/semihost.spl`
+# (COM1_LCR programmed 0x80 for DLAB then 0x03 for 8N1) and the raw
+# `COM1_LSR` / `LSR_THRE` constants in the qemu semihost test fixtures
+# (`.../baremetal/test/qemu_semihost_test.S`), which corroborate the same
+# LSR bit-0x20 (THR empty) meaning used below.
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field,
+    ComparePolicy, policy_dont_care,
+    compare_word, WordDiff, stacked_rows, stacked_compare_rows
+}
+
+# ---------------------------------------------------------------------------
+# 1. UART Line Status Register (LSR) — 16550-compatible, offset 0x14.
+# Bits 0-6 are named per `syscall.spl`'s LSR_* constants; bit 7 (the FIFO
+# error indicator on a real 16550) is not decoded anywhere in this repo, so
+# it is modeled as reserved rather than invented.
+# ---------------------------------------------------------------------------
+fn lsr_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "uart16550_lsr",
+        total_bits: 8,
+        byte_order: ByteOrder.little,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("data_ready", 0, 1, "LSR_DATA_READY 0x01"),
+            binary_field("overrun_error", 1, 1, "LSR_OVERRUN_ERROR 0x02"),
+            binary_field("parity_error", 2, 1, "LSR_PARITY_ERROR 0x04"),
+            binary_field("framing_error", 3, 1, "LSR_FRAMING_ERROR 0x08"),
+            binary_field("break_interrupt", 4, 1, "LSR_BREAK_INTERRUPT 0x10"),
+            binary_field("thr_empty", 5, 1, "LSR_THR_EMPTY 0x20"),
+            binary_field("tx_empty", 6, 1, "LSR_TRANSMITTER_EMPTY 0x40"),
+            reserved_field("reserved_fifo_err", 7, 1)
+        ],
+        source_ref: "src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl"
+    )
+
+describe "binary embedded — UART LSR (16550)":
+    it "matches expected 'idle, THR+TX empty' word (dont_care on modem/read bits not present in this layout)":
+        # data_ready=0, thr_empty=1, tx_empty=1 -> 0x60. Nothing in the LSR
+        # is a "modem bit" (that lives in MSR); here the dont_care case is
+        # the byte's error/status bits the poller in uart_wait_lsr never
+        # inspects (overrun/parity/framing/break) — still checked exactly
+        # by default, so this passes because they are genuinely 0 both
+        # sides, demonstrating exact-by-default is the safe baseline.
+        val d = compare_word(0x60, 0x60, lsr_layout(), [])
+        assert_equal(d.status, "pass")
+
+    it "FAILS when the reserved FIFO-error bit is set on actual — actively checked, never gray":
+        # actual has bit 7 set even though caller marks it dont_care: the
+        # reserved contract in compare_word overrides dont_care for
+        # `reserved`-flagged fields.
+        val pols = [policy_dont_care("reserved_fifo_err")]
+        val d = compare_word(0x60, 0xE0, lsr_layout(), pols)
+        assert_equal(d.status, "fail")
+        var found = false
+        for n in d.failing_fields:
+            if n == "reserved_fifo_err":
+                found = true
+        assert_true(found)
+
+    it "renders a corrupted LSR readback via stacked_compare_rows":
+        # expected: idle+THR/TX empty (0x60); actual: a framing error crept
+        # in (0x68) — a corrupted-line-status capture, the kind of evidence
+        # a UART soak test records.
+        val ok = compare_word(0x60, 0x60, lsr_layout(), [])
+        val bad = compare_word(0x60, 0x68, lsr_layout(), [])
+        val rows = stacked_compare_rows([ok, bad], lsr_layout(), "LSR", 0)
+        assert_true(rows[0].contains("ok"))
+        var joined = ""
+        for r in rows:
+            joined = joined + r + "\n"
+        assert_true(joined.contains("FAIL"))
+        assert_true(joined.contains("framing_error"))
+
+# ---------------------------------------------------------------------------
+# 2. UART FIFO Control Register (FCR) — write/readback suite. FCR is
+# write-only on real 16550 hardware; `uart_init` writes 0x07 (fifo_enable=1,
+# rcvr_reset=1, xmit_reset=1). The two reset bits are self-clearing: the
+# 16550 spec (and every derivative, e.g. PL011's equivalent FIFO-reset
+# semantics) drops them back to 0 once the reset completes, so a byte-exact
+# readback comparison against the written word is simply wrong — this is
+# exactly why ComparePolicy's per-field mask exists.
+# ---------------------------------------------------------------------------
+fn fcr_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "uart16550_fcr",
+        total_bits: 8,
+        byte_order: ByteOrder.little,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("fifo_enable", 0, 1, "enable RX/TX FIFOs"),
+            binary_field("rcvr_reset", 1, 1, "reset RCVR FIFO (self-clearing)"),
+            binary_field("xmit_reset", 2, 1, "reset XMIT FIFO (self-clearing)"),
+            binary_field("dma_mode", 3, 1, "DMA mode select"),
+            reserved_field("reserved_low", 4, 2),
+            binary_field("rx_trigger", 6, 2, "RCVR FIFO trigger level")
+        ],
+        source_ref: "src/lib/nogc_async_mut_noalloc/baremetal/syscall.spl (uart_init FCR write 0x07)"
+    )
+
+describe "binary embedded — UART FCR write/readback (self-clearing bits)":
+    it "a full-word equality check FAILS on a genuine self-clearing readback":
+        val written = 0x07   # fifo_enable | rcvr_reset | xmit_reset
+        val readback = 0x01  # hardware auto-cleared the two reset bits
+        val exact = compare_word(written, readback, fcr_layout(), [])
+        assert_equal(exact.status, "fail")
+        var has_rcvr = false
+        var has_xmit = false
+        for n in exact.failing_fields:
+            if n == "rcvr_reset":
+                has_rcvr = true
+            if n == "xmit_reset":
+                has_xmit = true
+        assert_true(has_rcvr)
+        assert_true(has_xmit)
+
+    it "masking the self-clearing bits dont_care makes the SAME readback PASS":
+        # This is the demonstration of why the mask policy exists: the
+        # value bits (fifo_enable, dma_mode, rx_trigger — none of which
+        # changed) still compare exactly, while the two self-clearing
+        # write-only bits are excluded from compare_mask entirely.
+        val pols = [policy_dont_care("rcvr_reset"), policy_dont_care("xmit_reset")]
+        val written = 0x07
+        val readback = 0x01
+        val masked = compare_word(written, readback, fcr_layout(), pols)
+        assert_equal(masked.status, "pass")
+        assert_equal(masked.delta, 0)
+
+    it "value bits still fail under the mask when they genuinely diverge":
+        # fifo_enable itself flips (0 vs written 1) — must still fail even
+        # with the self-clearing bits masked out.
+        val pols = [policy_dont_care("rcvr_reset"), policy_dont_care("xmit_reset")]
+        val written = 0x07
+        val bad_readback = 0x00  # fifo_enable also dropped — real defect
+        val d = compare_word(written, bad_readback, fcr_layout(), pols)
+        assert_equal(d.status, "fail")
+        var found = false
+        for n in d.failing_fields:
+            if n == "fifo_enable":
+                found = true
+        assert_true(found)
+
+    it "reserved_low still fails even under the same dont_care policy list":
+        val pols = [policy_dont_care("rcvr_reset"), policy_dont_care("xmit_reset")]
+        val d = compare_word(0x07, 0x17, fcr_layout(), pols)  # bit4 (reserved) set on actual
+        assert_equal(d.status, "fail")
+        var found = false
+        for n in d.failing_fields:
+            if n == "reserved_low":
+                found = true
+        assert_true(found)
+
+# ---------------------------------------------------------------------------
+# 3. Multi-register block dump: RBR/THR (0x00), IER (0x04), FCR (0x08),
+# LCR (0x0C) as 4 consecutive one-byte registers, viewed as stacked rows —
+# the stacked format doubling as a register-dump diff. Values mirror
+# `uart_init`: LCR ends at 0x03 (8N1), FCR write is 0x07.
+# ---------------------------------------------------------------------------
+describe "binary embedded — multi-register block dump (stacked_rows)":
+    it "renders 4 consecutive UART registers as one stacked block view":
+        val rbr_thr = 0x00
+        val ier = 0x00
+        val fcr = 0x07
+        val lcr = 0x03
+        val rows = stacked_rows([rbr_thr, ier, fcr, lcr], "REG", 0)
+        assert_equal(rows.len(), 4)
+        assert_true(rows[0].starts_with("REG0"))
+        assert_true(rows[1].starts_with("REG1"))
+        assert_true(rows[2].starts_with("REG2"))
+        assert_true(rows[3].starts_with("REG3"))
+        # FCR row (index 2) carries the 0x07 write value
+        assert_true(rows[2].contains("0x07"))
+        # LCR row (index 3) carries the 8N1 value 0x03
+        assert_true(rows[3].contains("0x03"))
