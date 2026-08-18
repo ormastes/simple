@@ -1,6 +1,101 @@
 # `bin/simple test` double-executes unbound expression-statements inside `it` bodies (2026-08-18) — CONFIRMED, narrower than reported
 
-## Update 2026-08-18: site localized (Rust seed), fix BLOCKED-ON-DEPLOY
+## Update 2026-08-18 (later probe): does NOT reproduce now — root-cause question MOOT, status downgraded
+
+**One targeted probe run.** Instrumented `exec_block_closure_into` in
+`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs` (the
+`for node in nodes` loop, ~line 260) to print, per iteration, the loop index,
+`nodes.len()`, and `std::mem::discriminant(node)` — exactly the index+len
+data the prior update flagged as missing to distinguish "slice built with a
+duplicate entry" from "loop re-enters the same index".
+
+Built a debug seed with `CARGO_TARGET_DIR=/mnt/data/tmp/probe2_cargo_target
+cargo build --release --bin simple` (foreground, exit status read directly,
+not through a pipe: `EXIT:0`) from the **actual current working tree**
+(HEAD `bc6f2599c59` plus the other in-flight uncommitted changes already
+present in this shared worktree — see caveat below). Ran the exact minimal
+repro from this doc (unbound `rt_file_append_text` call + `print` +
+`expect(1).to_equal(1)` inside one `it`) three times against the instrumented
+binary via `SIMPLE_BOOTSTRAP=1 <probe-binary> test <repro>.spl`.
+
+**Raw trace (identical across 3 runs):**
+```
+PROBE2 idx=0 len=1 disc=Discriminant(64)   # describe-block's single stmt: the `it "...": <block>` call
+PROBE2 idx=0 len=3 disc=Discriminant(64)   # it-body stmt 0: print "MARKER_PRINT"
+PROBE2 idx=1 len=3 disc=Discriminant(64)   # it-body stmt 1: rt_file_append_text(...) — the previously-doubled call
+PROBE2 idx=2 len=3 disc=Discriminant(64)   # it-body stmt 2: expect(1).to_equal(1)
+```
+`nodes.len()` is `3` for the `it` body and each of indices `0,1,2` appears
+**exactly once** — no repeated index (refutes hypothesis (b), loop
+re-entry) and no `len` larger than the source's 3 statements (refutes
+hypothesis (a), a duplicated slice entry). Sidecar file
+(`rt_file_append_text` target): **1 line** (`MARKER_APPEND` once) on every
+one of 3 runs, not 2. `grep -c MARKER_PRINT`: **1**, not the original
+`Results:`-line-consistent-but-doubled-sidecar pattern this doc opened with.
+
+**Cross-check against the actually-deployed binary (no debug seed, no
+instrumentation):** re-ran the identical repro through
+`bin/release/x86_64-unknown-linux-gnu/simple` (`bin/simple`, the binary every
+`bin/simple test` invocation in this environment actually uses) with a fresh
+sidecar path. Same result: sidecar file **1 line**, `MARKER_PRINT` count
+**1**, `Results: 1 total, 1 passed, 0 failed`. **The bug does not currently
+reproduce on the deployed binary either.**
+
+**Caveat — HEAD alone does not compile.** `git worktree add --detach
+<scratch> HEAD` (HEAD = `60f3188fdd3`) plus the identical instrumentation
+failed to build on its own: 4 errors (`E0432` unresolved import
+`module_globals_generation`, `E0425` missing `report_globals_census`, `E0308`
+type mismatch in `module_evaluator.rs:147`, `E0599` trait-bound failure in
+`interpreter_sffi.rs:125`). This means `origin/main`'s current tip is
+presently unbuildable from a clean checkout — a real, separate finding
+(flagged below, not fixed here, out of this investigation's scope). The only
+build that succeeded and that this probe's evidence rests on used the shared
+worktree's actual current state: HEAD plus other sessions' in-flight
+uncommitted fixes to `src/compiler_rust/compiler/src/interpreter/node_exec.rs`,
+`interpreter/block_exec.rs`, `interpreter_helpers/patterns.rs`, and others
+(pre-existing in this worktree before this investigation started, not
+authored by this probe). Diffed the relevant hunks: the `node_exec.rs` change
+is an unrelated `MODULE_GLOBALS` reentrant-borrow fix
+(`cell.borrow_mut()` nested inside `cell.borrow_mut()` -> split into a
+`.borrow()` check then a separate `.borrow_mut()`), not a double-execution
+fix, and does not touch `exec_block_closure_into` or
+`handle_method_call_with_self_update`'s call structure in a way that would
+plausibly explain the non-reproduction. The **deployed `bin/simple` cross-check
+above is independent of this caveat** (it did not use the debug seed or any
+worktree at all), and it also failed to reproduce — so the non-reproduction is
+not solely an artifact of building against a dirty tree.
+
+**Verdict: neither hypothesis (a) nor (b) can be confirmed — the defect is
+not currently observable to test against.** Either (i) it was already fixed by
+one of the many other changes that have landed on `src/compiler_rust` since
+this doc's original evidence was gathered earlier on 2026-08-18, or (ii) it is
+sensitive to a precondition (build flags, execution mode, a specific prior
+statement shape, timing) not captured by this repro and the earlier one. This
+probe cannot distinguish (i) from (ii) — it only establishes that the exact
+documented repro, run 4 times total across 2 independently-built binaries
+(1 debug-instrumented, 1 the actual deployed production binary), produced the
+**correct, non-doubled** result every time.
+
+**New, separate, out-of-scope finding:** `origin/main` at `60f3188fdd3` fails
+`cargo build`/`cargo check` on `src/compiler_rust` with 4 real compile errors
+(see above) when built from a clean worktree with no other session's
+uncommitted fixes applied. This contradicts the "seed must still compile"
+pre-push guard's premise and should be filed/investigated separately — not
+addressed here per this task's BLOCKED-ON-DEPLOY / investigation-only scope.
+
+**Status downgraded:** CONFIRMED (as of the original 2026-08-18 evidence) ->
+**NOT CURRENTLY REPRODUCIBLE** (as of this later probe, same day). Kept as
+BLOCKED-ON-DEPLOY / open rather than closed, because non-reproduction under
+one repro run is not proof of absence, and the original evidence (8-line
+trace showing back-to-back re-entry) was concrete and specific enough to not
+dismiss as an artifact. Whoever picks this up next should: (1) rerun the
+exact original evidence-gathering steps verbatim before assuming a fix, (2)
+if still non-reproducing, downgrade this doc's status further with a note
+that it could not be reproduced twice, and (3) separately file the
+`origin/main` HEAD compile-failure finding above, which is real and current
+regardless of this bug's status.
+
+## Update 2026-08-18 (earlier): site localized (Rust seed), fix BLOCKED-ON-DEPLOY
 
 **Site:** `src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`,
 function `exec_block_closure_into`, the `Node::Expression(expr)` match arm
@@ -81,7 +176,10 @@ is empty.
 
 ## Status
 
-CONFIRMED, not fixed. Confirms the claim made in passing by
+NOT CURRENTLY REPRODUCIBLE (see "Update 2026-08-18 (later probe)" above — 4/4
+runs across the debug seed and the deployed binary showed correct,
+non-doubled execution). Originally CONFIRMED, not fixed, confirming the claim
+made in passing by
 `doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md` ("the
 test-runner path executed the spec file's `it` bodies twice within one
 invocation"), but the mechanism is **narrower** than "the whole `it` body runs
