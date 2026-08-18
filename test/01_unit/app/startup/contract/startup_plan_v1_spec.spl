@@ -1,0 +1,83 @@
+# StartupPlanV1 reproducing spec (WP-02s, research §6.4/§6.5): a request
+# produces a deterministic plan, the plan round-trips through its SDN form,
+# and its plan_hash is stable across encode/decode.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.contract.startup_plan_v1.{
+    StartupRequestV1,
+    startup_entry_kind_artifact,
+    startup_entry_kind_command,
+    startup_entry_kind_root,
+    startup_entry_kind_script,
+    startup_plan_decode,
+    startup_plan_encode,
+    startup_plan_from_request,
+    startup_plan_hash,
+    startup_request_v1
+}
+
+fn command_request() -> StartupRequestV1:
+    startup_request_v1("simple", "build", 3, 0,
+        startup_entry_kind_command(), 1, 2, 2)
+
+describe "StartupRequestV1 -> StartupPlanV1":
+    it "routes a command request to a sealed command plan":
+        val plan = startup_plan_from_request(command_request())
+        assert_eq(plan.route_kind, "command")
+        assert_eq(plan.command_id, "build")
+        assert_eq(plan.profile_id, 3)
+        assert_eq(plan.program_arg_start, 2)
+        assert_eq(plan.entry_path, "")
+        assert_true(plan.plan_hash != "")
+
+    it "routes script and artifact requests through entry_path":
+        val s = startup_plan_from_request(startup_request_v1(
+            "simple", "a.spl", 0, 0, startup_entry_kind_script(), 0, 0, 1))
+        assert_eq(s.route_kind, "script")
+        assert_eq(s.entry_path, "a.spl")
+        assert_eq(s.command_id, "")
+        val a = startup_plan_from_request(startup_request_v1(
+            "simple", "a.smf", 0, 0, startup_entry_kind_artifact(), 0, 0, 1))
+        assert_eq(a.route_kind, "artifact")
+        assert_eq(a.entry_path, "a.smf")
+
+    it "routes a bare invocation to the root plan":
+        val r = startup_plan_from_request(startup_request_v1(
+            "simple", "", 0, 0, startup_entry_kind_root(), 0, 0, 1))
+        assert_eq(r.route_kind, "root")
+
+    it "is deterministic: the same request yields an identical plan":
+        val a = startup_plan_from_request(command_request())
+        val b = startup_plan_from_request(command_request())
+        assert_eq(startup_plan_encode(a), startup_plan_encode(b))
+        assert_eq(a.plan_hash, b.plan_hash)
+
+describe "StartupPlanV1 SDN round-trip":
+    it "encodes to SDN key: value lines, version first and hash last":
+        val text = startup_plan_encode(startup_plan_from_request(
+            command_request()))
+        assert_true(text.starts_with("startup_plan: v1\n"))
+        assert_true(text.contains("\nroute_kind: command\n"))
+        assert_true(text.contains("\nplan_hash: "))
+        assert_false(text.contains("{"))
+
+    it "round-trips every field":
+        val plan = startup_plan_from_request(command_request())
+        val d = startup_plan_decode(startup_plan_encode(plan))
+        assert_true(d.ok)
+        assert_eq(d.error, "")
+        assert_eq(d.plan.route_kind, plan.route_kind)
+        assert_eq(d.plan.command_id, plan.command_id)
+        assert_eq(d.plan.profile_id, plan.profile_id)
+        assert_eq(d.plan.execution_mode, plan.execution_mode)
+        assert_eq(d.plan.program_arg_start, plan.program_arg_start)
+        assert_eq(d.plan.load_policy, plan.load_policy)
+        assert_eq(d.plan.cache_policy, plan.cache_policy)
+        assert_eq(d.plan.strictness, plan.strictness)
+
+    it "keeps plan_hash stable across encode/decode":
+        val plan = startup_plan_from_request(command_request())
+        val d = startup_plan_decode(startup_plan_encode(plan))
+        assert_true(d.ok)
+        assert_eq(d.plan.plan_hash, plan.plan_hash)
+        assert_eq(startup_plan_hash(d.plan), plan.plan_hash)

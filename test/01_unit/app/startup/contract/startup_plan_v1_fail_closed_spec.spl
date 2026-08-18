@@ -1,0 +1,140 @@
+# StartupPlanV1 defect-class spec (WP-02s acceptance/sabotage): every
+# truncation vector, a wrong-version record, a reordered/mis-keyed record
+# and a tampered body must be REJECTED with a typed error and a zero plan.
+#
+# POSITIVE CONTROL: the same spec decodes a valid plan and asserts the hash
+# DISCRIMINATES, so the decoder cannot pass by rejecting everything.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.contract.startup_plan_v1.{
+    StartupRequestV1,
+    startup_entry_kind_command,
+    startup_entry_kind_script,
+    startup_plan_decode,
+    startup_plan_encode,
+    startup_plan_error_hash,
+    startup_plan_error_malformed,
+    startup_plan_error_truncated,
+    startup_plan_error_version,
+    startup_plan_from_request,
+    startup_request_v1
+}
+
+fn valid_text() -> text:
+    startup_plan_encode(startup_plan_from_request(startup_request_v1(
+        "simple", "build", 3, 0, startup_entry_kind_command(), 1, 2, 2)))
+
+fn drop_line(content: text, key: text) -> text:
+    var out = ""
+    for line in content.split("\n"):
+        if line != "" and not line.starts_with(key + ":"):
+            out = out + line + "\n"
+    out
+
+describe "truncation vectors fail closed":
+    it "rejects an empty record":
+        val d = startup_plan_decode("")
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+        assert_eq(d.plan.route_kind, "")
+
+    it "rejects a record cut to the version line only":
+        val d = startup_plan_decode("startup_plan: v1\n")
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+
+    it "rejects a record cut mid-field":
+        val full = valid_text()
+        val d = startup_plan_decode(full.substring(0, 40))
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+
+    it "rejects a record whose hash value is cut short":
+        val full = valid_text()
+        val d = startup_plan_decode(full.substring(0, full.len() - 2))
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_hash())
+
+    it "rejects a record missing the plan_hash line":
+        val d = startup_plan_decode(drop_line(valid_text(), "plan_hash"))
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+
+    it "rejects a record whose last key is itself truncated":
+        val d = startup_plan_decode(
+            drop_line(valid_text(), "plan_hash") + "plan_h\n")
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+
+    it "rejects a record missing an interior field":
+        val d = startup_plan_decode(drop_line(valid_text(), "load_policy"))
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+
+    it "rejects a record missing the version header":
+        val d = startup_plan_decode(drop_line(valid_text(), "startup_plan"))
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_truncated())
+
+describe "malformed and wrong-version records fail closed":
+    it "rejects a wrong-version record":
+        val bad = valid_text().replace("startup_plan: v1",
+            "startup_plan: v2")
+        val d = startup_plan_decode(bad)
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_version())
+        assert_eq(d.plan.command_id, "")
+
+    it "rejects an unknown key in a frozen slot":
+        val bad = valid_text().replace("target_id:", "target_ident:")
+        val d = startup_plan_decode(bad)
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_malformed())
+
+    it "rejects trailing content after plan_hash":
+        val d = startup_plan_decode(valid_text() + "extra: 1\n")
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_malformed())
+
+    it "rejects a non-numeric profile_id":
+        val bad = valid_text().replace("profile_id: 3", "profile_id: three")
+        val d = startup_plan_decode(bad)
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_malformed())
+
+    it "rejects a tampered body whose hash was not recomputed":
+        val bad = valid_text().replace("command_id: build",
+            "command_id: publish")
+        val d = startup_plan_decode(bad)
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_hash())
+
+    it "rejects a tampered plan_hash over an untouched body":
+        val good = valid_text()
+        val bad = drop_line(good, "plan_hash") +
+            "plan_hash: 0000000000000000\n"
+        val d = startup_plan_decode(bad)
+        assert_false(d.ok)
+        assert_eq(d.error_kind, startup_plan_error_hash())
+
+describe "positive control — the decoder is not rejecting everything":
+    it "still accepts a valid plan in the same spec":
+        val d = startup_plan_decode(valid_text())
+        assert_true(d.ok)
+        assert_eq(d.error_kind, "")
+        assert_eq(d.plan.command_id, "build")
+        assert_eq(d.plan.profile_id, 3)
+
+    it "proves the hash discriminates: different plans, different hashes":
+        val a = startup_plan_from_request(startup_request_v1(
+            "simple", "build", 3, 0, startup_entry_kind_command(), 1, 2, 2))
+        val b = startup_plan_from_request(startup_request_v1(
+            "simple", "test", 3, 0, startup_entry_kind_command(), 1, 2, 2))
+        val c = startup_plan_from_request(startup_request_v1(
+            "simple", "build", 4, 0, startup_entry_kind_command(), 1, 2, 2))
+        val e = startup_plan_from_request(startup_request_v1(
+            "simple", "build", 3, 0, startup_entry_kind_script(), 1, 2, 2))
+        assert_true(a.plan_hash != b.plan_hash)
+        assert_true(a.plan_hash != c.plan_hash)
+        assert_true(a.plan_hash != e.plan_hash)
+        assert_true(b.plan_hash != c.plan_hash)
