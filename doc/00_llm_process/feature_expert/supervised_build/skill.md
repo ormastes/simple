@@ -95,6 +95,71 @@ Landed unit coverage:
 `bin/simple test test/01_unit/compiler/driver/build_outcome_classification_spec.spl`
 (read the `Results:` line, not the exit code).
 
+## Build-side process isolation is BLOCKED (2026-08-17, `082200ce8af`)
+
+Established by reading code, with file:line evidence — do not retry without
+clearing a precondition below.
+
+- **Run-to-end already works.** `parallel.spl:455-462` records failures into
+  `errors` and falls through; a failed dependency is a `continue` (`:414-421`);
+  the only `break` is work-exhaustion (`:472`). Caller iterates all errors
+  (`driver_aot_native_output.spl:690-693`). This lane's Gap "build side is
+  unaddressed" was WRONG.
+- **What is missing is crash CONTAINMENT only.** `parallel.spl:424` calls
+  `compile_fn(...)` IN-PROCESS, so one SIGSEGV/OOM kills the whole build, and
+  the classifier is only reachable from an unwired path. `build_supervised()`
+  exists at `parallel.spl:680` with a signal-preserving wrapper
+  (`:72-73`, SEGV→139 / TERM→143 / KILL→137) and has **zero callers**.
+- **A child cannot compile one module from its source path alone.** Field
+  offsets are a whole-program function: one shared `MirLowering`
+  (`driver_pipeline_lowering.spl:202,255`) plus a whole-program struct-layout
+  PREPASS (`:209-215,262-263`) that exists precisely because
+  `resolve_field_index` otherwise defaulted to 0 — a cross-module SEGV. A
+  source-only child would emit objects with WRONG FIELD OFFSETS, silently.
+  Two more whole-program passes mutate `mir_modules` after lowering (async
+  state machines, AOP rewrites).
+- **MIR serialization does not exist.** Zero `deserialize` hits for MIR;
+  `mir_serialization.spl:13` is a lossy functions-only shape;
+  `FrozenStorageModuleSnapshotV1` has no serializer.
+- **Rejected shortcut, recorded so nobody retries it:** passing
+  `capsule_identity` on argv so a child writes a conforming
+  `.capsule-receipt` would let a WRONG-OFFSET object be promoted into the cache
+  as AUTHENTICATED — a green build producing a miscompiled program. Strictly
+  worse than today's loud SIGSEGV.
+- **Precondition to unblock, one of:** (1) a round-trippable MIR +
+  storage-snapshot format WITH a reader, gated by a
+  `serialize → deserialize → native_capsule_mir_identity_v1` identity test; or
+  (2) source-derivable stable field ordering for imported structs — i.e. the
+  still-zero-caller `interface_digest_of` (`cache/action_key.spl:199`).
+
+Because of this, the build path now **PRINTS that unstable mode was requested
+but is not active there**, rather than silently dropping the intent.
+
+## Outcome contract is specced (2026-08-17)
+
+`test/01_unit/compiler/driver/build_unit_outcome_from_status_contract_spec.spl`
+— 19 examples, `Results: 19 total, 19 passed, 0 failed`, rc=0
+(`91f4147088a`, `4213a69da10`, `f927cb0d4de`). Proven to bite by a
+green→red→green sabotage (reclassifying SIGTERM as CRASHED gives
+`19 total, 18 passed, 1 failed`).
+
+**Correction to the brief, not to the code: 137 is NOT TERMINATED.**
+`build_outcome.spl` classifies only SIGTERM(15) as TERMINATED; an unbudgeted
+SIGKILL(137) is **CRASHED, a failure**. earlyoom sends SIGTERM, which is the
+never-a-failure path; a raw SIGKILL is indistinguishable from the compiler
+dying, so treating it as unverified would suppress real crashes. A
+budget-killed 137 is TIMEOUT via the `timed_out` flag, not via the signal.
+
+The artifact rule lives in the SUPERVISOR, not the classifier: `from_status`
+sees only a wait status, while `build_supervised` (`parallel.spl` ~816-828)
+does the `artifact_fn` + `rt_file_exists` join and substitutes status 1 with
+`"exit 0 but declared artifact is missing"`.
+
+Test-side counterpart of the same contract:
+[mission_critical_robustness](../mission_critical_robustness/skill.md) and
+[test_runner layer](../../layer_expert/test_runner/skill.md). Lane record:
+`.spipe/unstable_test_mode/state.md`.
+
 ## Update Rule
 
 When research, requirements, architecture, design, tests, implementation,

@@ -228,3 +228,50 @@ either way. The session daemon stays and is not the problem being solved.
 - Layer mechanics, the `run_all`-is-file-selection correction, and the earlyoom
   rc=143/144 evidence hazard:
   [test_runner layer](../../layer_expert/test_runner/skill.md)
+- Build-side half of the same contract:
+  [supervised_build feature expert](../supervised_build/skill.md)
+- Lane record (authoritative, read-only for other lanes):
+  `.spipe/unstable_test_mode/state.md`
+
+### What actually landed (2026-08-17)
+
+Test side, by lane, each verified by CONTENT rather than by commit success:
+
+| lane | commit | what |
+|---|---|---|
+| A | `a3738dd8d0c` | `TestOptions.unstable_mode` / `unstable_mode_set`; `--unstable` / `--no-unstable` parsed |
+| B | `882fb6e31ea` | `CRASHED:` / `TERMINATED:` / `TIMEOUT:` / `NOT EXECUTED:` prefixes + `INCONCLUSIVE` verdict |
+| D | `e37cc015713` | bootstrap default via `SIMPLE_BOOTSTRAP == "1"`; mode line; `fail_fast=false` set explicitly when ON |
+| F | `530fa623afa` | limit-exceeded early returns no longer hardcode `failed: 1` for timeout/memory/cpu |
+| fork | `cafcc59ccef` | real signal numbers (139/134/137) classified; fork mode was falling through unclassified |
+| single | `d03b800c7d6` | `test_runner_single.spl` routed through the shared classifier; **not at origin** as of the last check |
+
+Ablation-proven (not merely asserted): with `530fa623afa~1` swapped into an
+isolated worktree the `TIMEOUT:` prefix vanishes and the timeout returns to the
+failed bucket; with the single-spec fix ablated a crash degrades from
+`reason=child-died-by-signal` to `reason=zero-examples`.
+
+### Corrections this campaign must not re-derive
+
+- **`run_all` is FILE SELECTION, not keep-going.** `fail_fast` (default false)
+  is the keep-going control. The original brief had this backwards.
+- **An unbudgeted SIGKILL(137) is CRASHED, a failure.** Only SIGTERM(143) is
+  TERMINATED/unverified, because earlyoom sends SIGTERM; a raw SIGKILL is
+  indistinguishable from the compiler dying, so treating it as unverified would
+  suppress real crashes. A budget-killed 137 is TIMEOUT via the `timed_out`
+  flag, not via the signal.
+- **Build-side per-unit process isolation is genuinely BLOCKED** — see the
+  supervised_build entry. Run-to-end and classification already work in-process
+  there; only crash CONTAINMENT is blocked. The code now PRINTS that unstable
+  mode was requested but is not active on the build path rather than silently
+  dropping the intent.
+
+### Still open
+
+- The `--unstable` help text and the `SPEC FILE VERDICT` line that still prints
+  `failed=1` for a timed-out spec both live in the **Rust seed**
+  (`driver/src/cli/help.rs`, `driver/src/cli/basic.rs:169`) and cannot be fixed
+  by any `.spl` edit. Both close after the next seed redeploy:
+  `bin/simple help test | grep unstable`, then re-run the five fixtures.
+- Acceptance against the fixture set is being measured by another lane —
+  **do not record a verdict here until that lane reports.**
