@@ -394,10 +394,18 @@ fn execir_run_result(program: ExecIrProgram) -> (i64?, InterpError?):
 
 class ExecIrModule:
     """Flat multi-function program. Frame sizes are baked into each CALL
-    record; only the entry frame size is needed up front."""
+    record; only the entry frame size is needed up front.
+
+    Slice 3 (arena): total_arena_slots is the worst-case register-slot
+    demand of any run, computed at ENCODE time — the longest static frame
+    chain over the call DAG, or entry_frame + depth_cap * max_frame when
+    the encoded call graph is recursive (recursion_possible)."""
     code: [i64]
     entry_pc: i64
     entry_frame: i64
+    total_arena_slots: i64
+    max_frame: i64
+    recursion_possible: bool
 
 class ExecIrFnPlan:
     """Per-function encoding plan (internal to execir_encode_call)."""
@@ -669,7 +677,43 @@ fn execir_encode_call(func: MirFunction, table: {text: MirFunction}) -> ExecIrMo
         for slot in fcode:
             code.push(slot)
         pi = pi + 1
-    Some(ExecIrModule(code: code, entry_pc: 0, entry_frame: plans[0].frame_size))
+    # Arena plan (slice 3): all run-time space is computed HERE, at encode
+    # time. Longest-chain DP over the call graph (Bellman-Ford style: a DAG
+    # stabilizes within plans.len() relaxation passes; still changing after
+    # that means a cycle => recursion_possible, bound by the depth cap).
+    var sizes: [i64] = []
+    var max_frame = 0
+    pi = 0
+    while pi < plans.len():
+        sizes.push(plans[pi].frame_size)
+        if plans[pi].frame_size > max_frame:
+            max_frame = plans[pi].frame_size
+        pi = pi + 1
+    var best: [i64] = []
+    pi = 0
+    while pi < plans.len():
+        best.push(sizes[pi])
+        pi = pi + 1
+    var pass_n = 0
+    var changed = true
+    while changed and pass_n <= plans.len():
+        changed = false
+        pi = 0
+        while pi < plans.len():
+            for cname in plans[pi].callees:
+                val ci = plan_idx[cname] ?? -1
+                if ci >= 0:
+                    val cand = sizes[pi] + best[ci]
+                    if cand > best[pi]:
+                        best[pi] = cand
+                        changed = true
+            pi = pi + 1
+        pass_n = pass_n + 1
+    val recursive = changed
+    val total = if recursive: sizes[0] + execir_depth_cap() * max_frame else: best[0]
+    Some(ExecIrModule(code: code, entry_pc: 0, entry_frame: plans[0].frame_size,
+                      total_arena_slots: total, max_frame: max_frame,
+                      recursion_possible: recursive))
 
 fn execir_dummy_plan(func: MirFunction) -> ExecIrFnPlan:
     """Unreachable ??-arm filler; never executed."""
@@ -788,3 +832,188 @@ fn execir_run_module(m: ExecIrModule) -> (i64?, InterpError?):
             return (nil, Some(InterpError.RuntimeError(message: "ExecIR: unknown opcode {op}")))
         pc = pc + 4
     (nil, Some(InterpError.RuntimeError(message: "ExecIR: fell off module")))
+
+# ============================================================================
+# Slice 3 — pre-sized arena execution (zero allocation per run)
+# ============================================================================
+#
+# ALL run-time space is computed at encode time (ExecIrModule.total_arena_slots)
+# and allocated ONCE in ExecIrArenaCtx.create: one flat i64 register arena,
+# fixed-size frame-metadata arrays (return pc / frame base / dest, depth cap
+# entries each), and the fixed 8-slot pending-arg staging array. run() performs
+# ZERO allocations: no push, no dict insert, no array growth — frames are
+# base-offset windows [fb, tp) into the arena; CALL claims the next window and
+# zeroes it (writes into pre-allocated slots, never growth); RET releases it by
+# moving tp back. Depth overflow and arena exhaustion are clean InterpErrors.
+#
+# Reuse contract: a ctx is created once per module and REUSED across runs —
+# alloc_count stays 1 forever. State-bleed policy (documented choice): windows
+# are zeroed when claimed — the entry window at the top of every run, every
+# callee window at its CALL — so no slot is ever read with a prior run's value.
+
+fn execir_depth_cap() -> i64:
+    """Max call depth (frames beyond the entry frame). Shared by the slice-2
+    frame-stack path (literal 200 there) and the slice-3 arena bound."""
+    200
+
+fn module_arena_slots(m: ExecIrModule) -> i64:
+    """Encode-time worst-case arena demand of m, in i64 register slots."""
+    m.total_arena_slots
+
+class ExecIrArenaCtx:
+    """Reusable run context for one ExecIrModule. All storage is allocated
+    exactly once, in create(); run() never allocates. Storage lives in class
+    fields (not locals passed to helpers) so mutation is never lost to
+    value-parameter semantics."""
+    regs: [i64]      # flat register arena, total_arena_slots slots
+    mret: [i64]      # per-frame return pc, depth_cap slots
+    mfb: [i64]       # per-frame saved frame base, depth_cap slots
+    mdest: [i64]     # per-frame caller dest reg (-1 none), depth_cap slots
+    pend: [i64]      # fixed 8-slot pending-arg staging window
+    slots: i64
+    entry_frame: i64
+    alloc_count: i64  # times backing storage was allocated; stays 1
+
+impl ExecIrArenaCtx:
+    static fn create(m: ExecIrModule) -> ExecIrArenaCtx:
+        var regs: [i64] = []
+        var i = 0
+        while i < m.total_arena_slots:
+            regs.push(0)
+            i = i + 1
+        var mret: [i64] = []
+        var mfb: [i64] = []
+        var mdest: [i64] = []
+        i = 0
+        while i < execir_depth_cap():
+            mret.push(0)
+            mfb.push(0)
+            mdest.push(0)
+            i = i + 1
+        ExecIrArenaCtx(regs: regs, mret: mret, mfb: mfb, mdest: mdest,
+                       pend: [0, 0, 0, 0, 0, 0, 0, 0],
+                       slots: m.total_arena_slots, entry_frame: m.entry_frame,
+                       alloc_count: 1)
+
+    me arena_len() -> i64:
+        """Identity/size accessor for reuse assertions."""
+        self.regs.len()
+
+    me run(m: ExecIrModule) -> (i64?, InterpError?):
+        """Execute m in the pre-allocated arena. Zero allocations here:
+        frames are [fb, tp) windows; sp indexes the metadata arrays."""
+        # Reset only the entry window (callee windows are zeroed at CALL).
+        var z = 0
+        while z < self.entry_frame:
+            self.regs[z] = 0
+            z = z + 1
+        var fb = 0
+        var tp = self.entry_frame
+        var sp = 0
+        val cap = execir_depth_cap()
+        val slots = self.slots
+        val code = m.code
+        var pc = m.entry_pc
+        while true:
+            val op = code[pc]
+            val a = code[pc + 1]
+            val b = code[pc + 2]
+            if op == 10:
+                self.regs[fb + a] = self.regs[fb + b] + self.regs[fb + code[pc + 3]]
+            elif op == 17:
+                self.regs[fb + a] = if self.regs[fb + b] < self.regs[fb + code[pc + 3]]: 1 else: 0
+            elif op == 4:
+                pc = if self.regs[fb + a] != 0: b else: code[pc + 3]
+                continue
+            elif op == 3:
+                pc = a
+                continue
+            elif op == 5:
+                val v = self.regs[fb + a]
+                if sp == 0:
+                    return (Some(v), nil)
+                # Pop frame: release window, restore caller, deliver result.
+                sp = sp - 1
+                tp = fb
+                fb = self.mfb[sp]
+                val dest = self.mdest[sp]
+                if dest >= 0:
+                    self.regs[fb + dest] = v
+                pc = self.mret[sp] + 4
+                continue
+            elif op == 40:
+                if sp >= cap:
+                    return (nil, Some(InterpError.RuntimeError(message: "ExecIR: call depth exceeded")))
+                val fsize = code[pc + 3]
+                if tp + fsize > slots:
+                    return (nil, Some(InterpError.RuntimeError(message: "ExecIR: arena exhausted")))
+                self.mret[sp] = pc
+                self.mfb[sp] = fb
+                self.mdest[sp] = a
+                sp = sp + 1
+                fb = tp
+                tp = tp + fsize
+                var n = fb
+                while n < tp:
+                    self.regs[n] = 0
+                    n = n + 1
+                pc = b
+                continue
+            elif op == 41:
+                self.pend[a] = self.regs[fb + b]
+            elif op == 42:
+                self.regs[fb + a] = self.pend[b]
+            elif op == 1:
+                self.regs[fb + a] = b
+            elif op == 2:
+                self.regs[fb + a] = self.regs[fb + b]
+            elif op == 11:
+                self.regs[fb + a] = self.regs[fb + b] - self.regs[fb + code[pc + 3]]
+            elif op == 12:
+                self.regs[fb + a] = self.regs[fb + b] * self.regs[fb + code[pc + 3]]
+            elif op == 13:
+                val r = self.regs[fb + code[pc + 3]]
+                if r == 0:
+                    return (nil, Some(InterpError.DivisionByZero(message: "Integer division")))
+                self.regs[fb + a] = self.regs[fb + b] / r
+            elif op == 14:
+                val r = self.regs[fb + code[pc + 3]]
+                if r == 0:
+                    return (nil, Some(InterpError.DivisionByZero(message: "Integer modulo")))
+                self.regs[fb + a] = self.regs[fb + b] % r
+            elif op == 15:
+                self.regs[fb + a] = if self.regs[fb + b] == self.regs[fb + code[pc + 3]]: 1 else: 0
+            elif op == 16:
+                self.regs[fb + a] = if self.regs[fb + b] != self.regs[fb + code[pc + 3]]: 1 else: 0
+            elif op == 18:
+                self.regs[fb + a] = if self.regs[fb + b] <= self.regs[fb + code[pc + 3]]: 1 else: 0
+            elif op == 19:
+                self.regs[fb + a] = if self.regs[fb + b] > self.regs[fb + code[pc + 3]]: 1 else: 0
+            elif op == 20:
+                self.regs[fb + a] = if self.regs[fb + b] >= self.regs[fb + code[pc + 3]]: 1 else: 0
+            elif op == 21:
+                self.regs[fb + a] = self.regs[fb + b] & self.regs[fb + code[pc + 3]]
+            elif op == 22:
+                self.regs[fb + a] = self.regs[fb + b] | self.regs[fb + code[pc + 3]]
+            elif op == 23:
+                self.regs[fb + a] = self.regs[fb + b] xor self.regs[fb + code[pc + 3]]
+            elif op == 24:
+                self.regs[fb + a] = self.regs[fb + b] << (self.regs[fb + code[pc + 3]] & 63)
+            elif op == 25:
+                self.regs[fb + a] = self.regs[fb + b] >> (self.regs[fb + code[pc + 3]] & 63)
+            elif op == 30:
+                self.regs[fb + a] = 0 - self.regs[fb + b]
+            elif op == 31:
+                self.regs[fb + a] = if self.regs[fb + b] == 0: 1 else: 0
+            elif op == 32:
+                self.regs[fb + a] = -1 - self.regs[fb + b]
+            else:
+                return (nil, Some(InterpError.RuntimeError(message: "ExecIR: unknown opcode {op}")))
+            pc = pc + 4
+        (nil, Some(InterpError.RuntimeError(message: "ExecIR: fell off module")))
+
+fn execir_run_module_arena(m: ExecIrModule) -> (i64?, InterpError?):
+    """One-shot convenience: create a ctx and run once. For repeated runs
+    hold an ExecIrArenaCtx and call ctx.run(m) — that path never re-allocates."""
+    var ctx = ExecIrArenaCtx.create(m)
+    ctx.run(m)

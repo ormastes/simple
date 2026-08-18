@@ -1,0 +1,231 @@
+# ExecIR slice 3 spec (startup-perf Phase E) — pre-sized arena execution.
+#
+# Proves the draw-IR-efficiency contract: all run-time space is computed at
+# ENCODE time (module_arena_slots — exact expected values for known fixtures,
+# DAG longest chain vs recursion cap), allocated ONCE in ExecIrArenaCtx.create,
+# and REUSED across runs (alloc_count / arena_len unchanged, results identical
+# across repeated runs — no state bleed: windows are zeroed when claimed).
+# Depth overflow at the bound is a clean InterpError, never growth. Includes a
+# differential re-run of the call loop under the arena path and a bench vs the
+# slice-2 frame-stack path.
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter, InterpError}
+use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_run_module, execir_run_module_arena, module_arena_slots, execir_depth_cap}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+extern fn rt_time_ms() -> i64
+
+fn x3_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn x3_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.new(0),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: nil
+    )
+
+fn x3_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn x3_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: insts, terminator: term)
+
+fn x3_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn x3_callee_name(s: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(s), MirType.i64()))
+
+# fn add1(x) = x + 1        frame: 2 locals + const pool {1}  = 3 slots
+fn x3_add1_fn() -> MirFunction:
+    val locals = [x3_local(0, LocalKind.Arg(0)), x3_local(1, LocalKind.Temp)]
+    val b0 = x3_blk(0, [
+        x3_inst(MirInstKind.BinOp(x3_lid(1), MirBinOp.Add, mir_operand_copy(x3_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(x3_lid(1)))))
+    x3_fn("add1", locals, [b0])
+
+# fn caller() = add1(41)    frame: 1 local + const pool {41} = 2 slots
+fn x3_caller_fn() -> MirFunction:
+    val locals = [x3_local(0, LocalKind.Var)]
+    val b0 = x3_blk(0, [
+        x3_inst(MirInstKind.Call(Some(x3_lid(0)), x3_callee_name("add1"), [mir_operand_const_int(41)]))
+    ], MirTerminator.Ret(Some(mir_operand_copy(x3_lid(0)))))
+    x3_fn("caller", locals, [b0])
+
+# fn call_loop(n) = sum add1(i), i in 0..n-1
+# frame: 4 locals + const pool {n, 1} = 6 slots (the 0s are Const
+# INSTRUCTIONS — immediates, not pooled operand consts)
+fn x3_call_loop_fn(n: i64) -> MirFunction:
+    val locals = [x3_local(0, LocalKind.Var), x3_local(1, LocalKind.Var),
+                  x3_local(2, LocalKind.Temp), x3_local(3, LocalKind.Temp)]
+    val b0 = x3_blk(0, [
+        x3_inst(MirInstKind.Const(x3_lid(0), MirConstValue.Int(0), MirType.i64())),
+        x3_inst(MirInstKind.Const(x3_lid(1), MirConstValue.Int(0), MirType.i64()))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b1 = x3_blk(1, [
+        x3_inst(MirInstKind.BinOp(x3_lid(2), MirBinOp.Lt, mir_operand_copy(x3_lid(0)), mir_operand_const_int(n)))
+    ], MirTerminator.If(mir_operand_copy(x3_lid(2)), BlockId.new(2), BlockId.new(3)))
+    val b2 = x3_blk(2, [
+        x3_inst(MirInstKind.Call(Some(x3_lid(3)), x3_callee_name("add1"), [mir_operand_copy(x3_lid(0))])),
+        x3_inst(MirInstKind.BinOp(x3_lid(1), MirBinOp.Add, mir_operand_copy(x3_lid(1)), mir_operand_copy(x3_lid(3)))),
+        x3_inst(MirInstKind.BinOp(x3_lid(0), MirBinOp.Add, mir_operand_copy(x3_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b3 = x3_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(x3_lid(1)))))
+    x3_fn("call_loop", locals, [b0, b1, b2, b3])
+
+# fn rec(n) = if n > 0: n + rec(n - 1) else: 0
+# frame: 5 locals + const pool {0, 1} = 7 slots
+fn x3_rec_fn() -> MirFunction:
+    val locals = [x3_local(0, LocalKind.Arg(0)), x3_local(1, LocalKind.Temp),
+                  x3_local(2, LocalKind.Temp), x3_local(3, LocalKind.Temp),
+                  x3_local(4, LocalKind.Temp)]
+    val b0 = x3_blk(0, [
+        x3_inst(MirInstKind.BinOp(x3_lid(1), MirBinOp.Gt, mir_operand_copy(x3_lid(0)), mir_operand_const_int(0)))
+    ], MirTerminator.If(mir_operand_copy(x3_lid(1)), BlockId.new(1), BlockId.new(2)))
+    val b1 = x3_blk(1, [
+        x3_inst(MirInstKind.BinOp(x3_lid(2), MirBinOp.Sub, mir_operand_copy(x3_lid(0)), mir_operand_const_int(1))),
+        x3_inst(MirInstKind.Call(Some(x3_lid(3)), x3_callee_name("rec"), [mir_operand_copy(x3_lid(2))])),
+        x3_inst(MirInstKind.BinOp(x3_lid(4), MirBinOp.Add, mir_operand_copy(x3_lid(0)), mir_operand_copy(x3_lid(3))))
+    ], MirTerminator.Ret(Some(mir_operand_copy(x3_lid(4)))))
+    val b2 = x3_blk(2, [], MirTerminator.Ret(Some(mir_operand_const_int(0))))
+    x3_fn("rec", locals, [b0, b1, b2])
+
+# fn rec_entry(k) = rec(k)  frame: 1 local + const pool {k} = 2 slots
+fn x3_rec_entry_fn(k: i64) -> MirFunction:
+    val locals = [x3_local(0, LocalKind.Var)]
+    val b0 = x3_blk(0, [
+        x3_inst(MirInstKind.Call(Some(x3_lid(0)), x3_callee_name("rec"), [mir_operand_const_int(k)]))
+    ], MirTerminator.Ret(Some(mir_operand_copy(x3_lid(0)))))
+    x3_fn("rec_entry", locals, [b0])
+
+fn x3_encode(entry: MirFunction, table: {text: MirFunction}) -> ExecIrModule:
+    val m0 = execir_encode_call(entry, table)
+    assert_true(m0 != nil)
+    m0 ?? ExecIrModule(code: [], entry_pc: 0, entry_frame: 0,
+                       total_arena_slots: 0, max_frame: 0, recursion_possible: false)
+
+describe "ExecIR slice 3 (pre-sized arena)":
+    it "exact encode-time arena sizes: caller->add1 chain = 2 + 3 = 5 slots":
+        val m = x3_encode(x3_caller_fn(), {"add1": x3_add1_fn()})
+        expect(module_arena_slots(m)).to_equal(5)
+        assert_false(m.recursion_possible)
+        expect(m.max_frame).to_equal(3)
+
+    it "exact encode-time arena sizes: call_loop(3)+add1 = 6 + 3 = 9 slots (DAG longest chain)":
+        val m = x3_encode(x3_call_loop_fn(3), {"add1": x3_add1_fn()})
+        expect(module_arena_slots(m)).to_equal(9)
+        assert_false(m.recursion_possible)
+
+    it "recursive module: cap-bounded arena = entry 2 + 200 * 7 = 1402 slots, recursion_possible":
+        val m = x3_encode(x3_rec_entry_fn(2), {"rec": x3_rec_fn()})
+        assert_true(m.recursion_possible)
+        expect(m.max_frame).to_equal(7)
+        expect(module_arena_slots(m)).to_equal(2 + execir_depth_cap() * 7)
+        expect(module_arena_slots(m)).to_equal(1402)
+
+    it "differential: call_loop(200) under arena path == 20100 == interpreter":
+        val table = {"add1": x3_add1_fn()}
+        val f = x3_call_loop_fn(200)
+        val er = execir_run_module_arena(x3_encode(f, table))
+        var interp = MirInterpreter.create()
+        interp.set_function_table(table)
+        val ir = interp.execute_function(f)
+        expect(er[0] ?? -1).to_equal(20100)
+        expect(er[0] ?? -1).to_equal(ir[0] ?? -2)
+        assert_true(er[1] == nil)
+
+    it "recursion correctness under arena: rec(2) == 3":
+        val m = x3_encode(x3_rec_entry_fn(2), {"rec": x3_rec_fn()})
+        val er = execir_run_module_arena(m)
+        expect(er[0] ?? -1).to_equal(3)
+
+    it "reuse: 3 repeated runs on ONE ctx — identical results, arena identity unchanged, alloc_count stays 1":
+        val table = {"add1": x3_add1_fn()}
+        val m = x3_encode(x3_call_loop_fn(200), table)
+        var ctx = ExecIrArenaCtx.create(m)
+        expect(ctx.alloc_count).to_equal(1)
+        val len0 = ctx.arena_len()
+        expect(len0).to_equal(module_arena_slots(m))
+        val r1 = ctx.run(m)
+        val r2 = ctx.run(m)
+        val r3 = ctx.run(m)
+        expect(r1[0] ?? -1).to_equal(20100)
+        expect(r2[0] ?? -2).to_equal(r1[0] ?? -1)
+        expect(r3[0] ?? -3).to_equal(r1[0] ?? -1)
+        expect(ctx.arena_len()).to_equal(len0)
+        expect(ctx.alloc_count).to_equal(1)
+
+    it "no state bleed across module runs on a shared ctx sized for the larger module":
+        # Run the recursive module (dirties deep windows), then caller->add1
+        # on a fresh ctx of its own; both repeat-clean.
+        val mrec = x3_encode(x3_rec_entry_fn(5), {"rec": x3_rec_fn()})
+        var ctx = ExecIrArenaCtx.create(mrec)
+        expect((ctx.run(mrec))[0] ?? -1).to_equal(15)
+        expect((ctx.run(mrec))[0] ?? -1).to_equal(15)
+        expect(ctx.alloc_count).to_equal(1)
+
+    it "deep recursion at the bound: rec(300) -> clean depth error, no growth":
+        val m = x3_encode(x3_rec_entry_fn(300), {"rec": x3_rec_fn()})
+        var ctx = ExecIrArenaCtx.create(m)
+        val er = ctx.run(m)
+        assert_true(er[0] == nil)
+        assert_true(er[1].?)
+        expect(er[1].unwrap().message()).to_contain("call depth exceeded")
+        # ctx still reusable after the error, and still the same arena.
+        expect(ctx.alloc_count).to_equal(1)
+        val ok = ctx.run(x3_encode(x3_rec_entry_fn(2), {"rec": x3_rec_fn()}))
+        expect(ok[0] ?? -1).to_equal(3)
+
+    it "microbench: arena path vs slice-2 frame-stack path on call_loop(200)":
+        val table = {"add1": x3_add1_fn()}
+        val m = x3_encode(x3_call_loop_fn(200), table)
+        var ctx = ExecIrArenaCtx.create(m)
+        val w = ctx.run(m)  # warm
+        expect(w[0] ?? -1).to_equal(20100)
+        val t0 = rt_time_ms()
+        var i = 0
+        var acc = 0
+        while i < 20:
+            acc = (ctx.run(m))[0] ?? -1
+            i = i + 1
+        val t1 = rt_time_ms()
+        i = 0
+        var acc2 = 0
+        while i < 20:
+            acc2 = (execir_run_module(m))[0] ?? -1
+            i = i + 1
+        val t2 = rt_time_ms()
+        expect(acc).to_equal(20100)
+        expect(acc2).to_equal(20100)
+        print "BENCH arena ctx.run x20 call_loop(200) ms: " + str(t1 - t0)
+        print "BENCH frame-stack execir_run_module x20 call_loop(200) ms: " + str(t2 - t1)
