@@ -73,13 +73,15 @@ fn sync_module_global(target: ModuleGlobalTarget, local_name: &str, env: &mut En
     match target {
         ModuleGlobalTarget::Owned { owner, name } => {
             if let Some(value) = env.get(local_name).cloned() {
-                MODULE_GLOBALS_BY_OWNER.with(|cell| {
-                    if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
-                        if globals.contains_key(&name) {
+                let present = MODULE_GLOBALS_BY_OWNER
+                    .with(|cell| cell.borrow().get(&owner).is_some_and(|globals| globals.contains_key(&name)));
+                if present {
+                    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                        if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
                             globals.insert(name, value);
                         }
-                    }
-                });
+                    });
+                }
             }
         }
         ModuleGlobalTarget::Legacy => {

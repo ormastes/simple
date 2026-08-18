@@ -7,7 +7,8 @@ use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
     FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, visit_pattern_binding_names,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, module_globals_generation,
+    visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -44,6 +45,52 @@ fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
         })
 }
 
+// Per-owner cache of the fully-built call environment TEMPLATE (base map +
+// global bindings), valid while the module-globals generation is unchanged.
+// `GenTrackedCell` (interpreter_state.rs) bumps the generation on every
+// `borrow_mut()` of any module-global store, so a hit can never observe a
+// stale global value or binding structure. Cloning a template is
+// O(bindings-map) — the shared `base` is an Arc — versus the previous
+// per-call rebuild that cloned the owner's whole module env and re-resolved
+// every imported binding (~1.38ms vs ~µs on real parser hops; see
+// doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md).
+//
+// Kill switch: SIMPLE_INTERP_ENV_CACHE=0 disables the cache entirely.
+thread_local! {
+    static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<Arc<str>, (u64, Env)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+static INTERP_ENV_CACHE_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("SIMPLE_INTERP_ENV_CACHE").map_or(true, |v| v != "0"));
+
+// Diagnostics: SIMPLE_INTERP_ENV_CACHE_STATS=1 prints hit/miss/skip counts to
+// stderr every 100k lookups (level-gated, default off).
+static INTERP_ENV_CACHE_STATS: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("SIMPLE_INTERP_ENV_CACHE_STATS").is_ok_and(|v| v == "1"));
+
+thread_local! {
+    static ENV_CACHE_COUNTS: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+fn env_cache_count(kind: usize) {
+    if !*INTERP_ENV_CACHE_STATS {
+        return;
+    }
+    ENV_CACHE_COUNTS.with(|c| {
+        let (mut h, mut m, mut s) = c.get();
+        match kind {
+            0 => h += 1,
+            1 => m += 1,
+            _ => s += 1,
+        }
+        c.set((h, m, s));
+        if (h + m + s) % 100_000 == 0 {
+            eprintln!("[env-cache] hits={h} misses={m} skips={s}");
+        }
+    });
+}
+
 pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env {
     let Some(owner) = function_module_owner(func) else {
         let mut initial_env = captured_env.clone();
@@ -63,14 +110,38 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
         return initial_env;
     };
 
-    let initial_owner_globals =
-        MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().get(&owner).cloned().unwrap_or_default());
-    let owner_globals = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        cell.borrow_mut()
-            .entry(Arc::clone(&owner))
-            .or_insert(initial_owner_globals)
-            .clone()
-    });
+    let cache_ok = *INTERP_ENV_CACHE_ENABLED && captured_env.is_empty();
+    if cache_ok {
+        let generation = module_globals_generation();
+        let cached = OWNED_ENV_TEMPLATE_CACHE.with(|cell| {
+            cell.borrow()
+                .get(&owner)
+                .and_then(|(cached_gen, template)| (*cached_gen == generation).then(|| template.clone()))
+        });
+        if let Some(env) = cached {
+            env_cache_count(0);
+            return env;
+        }
+        env_cache_count(1);
+    } else {
+        env_cache_count(2);
+    }
+
+    // Seed the owner's live-globals map on first use WITHOUT taking a write
+    // borrow on the already-seeded path — a `borrow_mut()` on the tracked
+    // cell bumps the generation and would defeat the cache above.
+    let owner_globals = MODULE_GLOBALS_BY_OWNER
+        .with(|cell| cell.borrow().get(&owner).cloned())
+        .unwrap_or_else(|| {
+            let initial_owner_globals =
+                MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow().get(&owner).cloned().unwrap_or_default());
+            MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                cell.borrow_mut()
+                    .entry(Arc::clone(&owner))
+                    .or_insert(initial_owner_globals)
+                    .clone()
+            })
+        });
     let mut base = if captured_env.is_empty() {
         MODULE_ENV_BY_OWNER
             .with(|cell| cell.borrow().get(&owner).cloned())
@@ -116,6 +187,14 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
     }
     for (name, _) in owner_globals {
         env.bind_global(name.clone(), Arc::clone(&owner), name);
+    }
+    if cache_ok {
+        // Read the generation AFTER building: the first-use seeding above may
+        // have bumped it, and the template must be stamped with the state it
+        // actually reflects.
+        let generation = module_globals_generation();
+        OWNED_ENV_TEMPLATE_CACHE
+            .with(|cell| cell.borrow_mut().insert(Arc::clone(&owner), (generation, env.clone())));
     }
     env
 }
@@ -212,8 +291,11 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
     let Some(owner) = function_module_owner(func).or_else(|| caller_owner.clone()) else {
         return;
     };
+    // Read-only pass first: taking a write borrow on the tracked cell bumps
+    // the env-cache generation, so it is deferred until `changed` is known
+    // non-empty below.
     let (changed, live_for_caller) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
-        let mut globals_by_owner = cell.borrow_mut();
+        let globals_by_owner = cell.borrow();
         if !globals_by_owner.contains_key(&owner) {
             return (Vec::new(), Vec::new());
         }
@@ -242,13 +324,18 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
                 live_for_caller.push(entry);
             }
         }
-        for (target_owner, target_name, value) in &changed {
-            if let Some(globals) = globals_by_owner.get_mut(target_owner) {
-                globals.insert(target_name.clone(), value.clone());
-            }
-        }
         (changed, live_for_caller)
     });
+    if !changed.is_empty() {
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            let mut globals_by_owner = cell.borrow_mut();
+            for (target_owner, target_name, value) in &changed {
+                if let Some(globals) = globals_by_owner.get_mut(target_owner) {
+                    globals.insert(target_name.clone(), value.clone());
+                }
+            }
+        });
+    }
     // Mirror mutated owned globals into the shared flat MODULE_GLOBALS. Deferred
     // lazy imports keep each module's globals in MODULE_GLOBALS_BY_OWNER, but a
     // cross-module read of an *imported/exported* global (e.g. the AST arena
