@@ -197,3 +197,41 @@ Verification (foreground):
 - `test/01_unit/compiler/backend/lean_backend_spec.spl` — Results: 10 total, 8 passed, 2 failed
   (baseline-identical: temp-restored the 4 files to HEAD and reran — same
   2 failures, "preserves signedness…" and "rejects binary operators…", 8/10)
+
+## Delta 2026-08-18 — backend_api wildcard audit (24 → 8)
+
+Per-file wildcard audit of the remaining 24-node backend SCC, as prescribed by
+the previous Delta. A symbol scan showed that **no** importer of
+`use compiler.backend.backend_api.*` actually used anything backend_api defines
+(`CompilerBackend`) or re-imports from `backend_helpers`/`codegen_factory`/
+`codegen_types` — every used name came from `backend.backend_types`
+(`CompileError`, `BackendKind`, `CodegenTarget`, `BackendCompileOptions`).
+Replaced the wildcard in 14 files with narrowed
+`use compiler.backend.backend.backend_types.{…}` imports (or deleted it
+outright where nothing was used: `vhdl_validation`, and all four
+`_MirToLlvm/*` part-files, whose part-facade `mir_to_llvm.*` wildcard remains).
+
+Files: `backend/{llvm_target,vulkan_backend,vhdl_backend,vhdl_expr,
+vhdl_validation,vhdl_codegen_helpers,vhdl_entity_compile}.spl`,
+`backend/vhdl/vhdl_call_lowering.spl`, `backend/_VhdlProcess/{process_codegen,
+terminator_codegen}.spl`, `backend/_MirToLlvm/{core_codegen,class_def,
+aggregate_intrinsics,asm_constraints_helpers}.spl`.
+
+| metric (backend-only SCCs, 70.backend closure) | before | after |
+|---|---|---|
+| largest all-backend SCC | **24** | **8** |
+| backend files-in-cycles | 59 | **51** |
+| closure files-in-cycles | 169 | 161 |
+
+Remaining 8-node SCC is the genuine `vhdl_backend ↔ vhdl_{expr,validation,
+codegen_helpers,entity_compile} ↔ vhdl_process ↔ _VhdlProcess/*` part-file
+cluster (mutual by design); next-largest are 5-node clusters
+(`mir_to_llvm ↔ _MirToLlvm/*`, `backend_api ↔ backend_helpers ↔
+codegen_factory ↔ llvm/interpreter adapters`).
+
+Verification (foreground, `--no-session-daemon`):
+- `test/feature/usage/llvm_backend_spec.spl` — Results: 16 total, 1 passed, 15 failed
+  (baseline-identical: temp-restored all 14 files to HEAD, reran — Results: 16 total, 1 passed, 15 failed)
+- `test/03_system/compiler/vhdl_backend_system_spec.spl` — Results: 10 total, 10 passed, 0 failed
+- `test/03_system/compiler/vhdl_mir_backend_call_port_map_spec.spl` — Results: 1 total, 0 passed, 1 failed
+  (baseline-identical: same temp-restore — Results: 1 total, 0 passed, 1 failed)
