@@ -185,3 +185,70 @@ dir, passes both:
 The patch was reverted from the worktree immediately after the measurement
 (`src/compiler_rust/compiler/src/value.rs` is clean); the fix must be landed and
 deployed by whoever owns the seed lane.
+
+## Resolution (2026-08-18, lane `lane-test-fix`)
+
+**Fix applied: option (a) — `Value::aggregate` builds `Value::Object`
+unconditionally** (`src/compiler_rust/compiler/src/value.rs`). The rest of
+`981c88435e0` (struct zero-fill, the nested-call `ClassInstance` arm in
+`interpreter_helpers/method_dispatch.rs`) is untouched; that arm simply becomes
+dead for freshly constructed values.
+
+**Why (a) and not (b):** grepped every non-vendor consumer of `ClassInstance` —
+only six files (`interpreter/node_exec.rs`, `value_impl.rs`, `value_bridge.rs`,
+`interpreter_helpers/method_dispatch.rs`,
+`interpreter_call/core/class_instantiation.rs`, `value_pointers.rs`), and every
+one of them handles `Value::Object` and `Value::ClassInstance` as parallel arms
+rather than depending on reference-class identity. Nothing is load-bearing on
+the split, so completing the port buys no behaviour today while requiring an
+audit of hundreds of `Value::Object` pattern matches. Restoring correctness on a
+severe `main` regression outweighs finishing the refactor in the same change.
+
+**Follow-up (re-land, not dropped):** a `TODO(class-instance)` is recorded at the
+`Value::aggregate` definition. Re-landing reference-class identity requires, in
+one change: `Value::ClassInstance` arms in BOTH primary resolution paths
+(field access `interpreter/expr/calls.rs:359`, method dispatch
+`interpreter_method/mod.rs:1242`), routed through `aggregate_class()` /
+`aggregate_field()`, plus an audit of the remaining `Value::Object` matches in
+the interpreter.
+
+**Regression guards shipped** (both reproduce on the unfixed seed, both green on
+the fixed build):
+
+- `test/01_unit/compiler/interpreter/class_instance_field_method_regression_spec.spl`
+  — the minimal reproduction (class field read, class method call) with the
+  byte-identical `struct` as positive control.
+- `test/01_unit/compiler/interpreter/class_instance_resolution_class_spec.spl`
+  — the defect class: static constructor, mutating `me` method, trait-`impl`
+  block method, class held in a collection, cross-module class
+  (`common.ui.ui_frame_clock.FixedStepClock`), plus struct and
+  primitive/collection positive controls.
+
+### Verification numbers (private seed build, `bin/simple` never touched)
+
+Built with `CARGO_TARGET_DIR=/mnt/data/tmp/classfix`; GREEN runs used a symlink
+shadow root (`/mnt/data/tmp/shadow`) so specs resolving `$REPO/bin/simple` picked
+up the fixed binary without replacing the shared symlink.
+
+| target | RED (shared seed) | GREEN (fixed) |
+|---|---|---|
+| `test/01_unit/hardware` | `Results: 386 total, 221 passed, 165 failed, 132 skipped` | `Results: 386 total, 268 passed, 118 failed, 85 skipped` |
+| `test/01_unit/lib/common/ui/ui_frame_clock_spec.spl` | `Results: 5 total, 0 passed, 5 failed` | `Results: 5 total, 5 passed, 0 failed` |
+| `test/shared/core/math_spec.spl` (positive control) | `Results: 34 total, 34 passed, 0 failed` | `Results: 34 total, 34 passed, 0 failed` |
+| `class_instance_field_method_regression_spec.spl` | `Results: 4 total, 2 passed, 2 failed` | `Results: 4 total, 4 passed, 0 failed` |
+| `class_instance_resolution_class_spec.spl` | `Results: 7 total, 2 passed, 5 failed` | `Results: 7 total, 7 passed, 0 failed` |
+
+`test/01_unit/browser_engine` RED completed at `Results: 769 total, 249 passed,
+520 failed, 519 skipped`. **The GREEN run is INCONCLUSIVE — no `Results:` line.**
+Two independent attempts both hung: the runner completed a first pass, restarted
+into a fresh `[setup] discover: begin`, and then sat with a static log for over
+an hour at ~0 CPU (1h52m elapsed, 1m49s CPU, gaining ~1s per 30s of wall clock).
+Directionally the partial output moved the right way — the first attempt's
+per-file tally was 9 PASS / 10 FAIL files where RED was 7 PASS / 50 FAIL — but a
+run with no `Results:` line is not a pass and is not reported as one.
+
+**Follow-up (open):** determine why `test/01_unit/browser_engine` hangs on the
+fixed binary. The most likely explanation is that specs which previously aborted
+immediately on the `object` error now execute for real and one of them does not
+terminate; that would be a pre-existing defect unmasked by this fix rather than
+caused by it, but it has NOT been proven either way and must not be assumed.

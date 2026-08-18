@@ -1,0 +1,114 @@
+"""
+# Defect-class spec: every shape of `class` field/method resolution
+
+## Overview
+
+The `981c88435e0` defect (doc/08_tracking/bug/method_field_not_found_on_object_2026-08-18.md)
+was unconditional for reference-type aggregates: `Value::aggregate` routed
+every `class` to `Value::ClassInstance`, a variant neither primary resolution
+path (field access in `interpreter/expr/calls.rs`, method dispatch in
+`interpreter_method/mod.rs`) had an arm for. This spec covers the whole defect
+CLASS rather than the single reproduction: static constructor, mutating `me`
+method, trait-`impl`-block method, a class stored in a collection, and a
+cross-module class imported from the stdlib -- each of which fails
+independently if any resolution path loses its `Value::Object` arm again.
+
+Positive controls: a `struct` exercising the same shapes, plus primitive and
+collection assertions that never depended on aggregate resolution at all, so a
+wholesale harness failure is distinguishable from this specific regression.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** N/A
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+`Counter.new()` builds via a static constructor; `bump()` mutates through
+`self`; `label()` comes from a trait `impl` block, not the class body; a
+`Counter` read back out of an array must still resolve its field and method;
+and `FixedStepClock` from `common.ui.ui_frame_clock` proves the cross-module
+case.
+"""
+
+use std.spec.*
+use common.ui.ui_frame_clock.{FixedStepClock}
+
+trait Labelled:
+    fn label() -> i64
+
+class Counter:
+    var count: i64
+
+    static fn new() -> Counter:
+        Counter(count: 0)
+
+    me bump():
+        self.count = self.count + 1
+
+impl Labelled for Counter:
+    me label() -> i64:
+        self.count * 10
+
+struct PlainPoint:
+    var x: i64
+    me doubled() -> i64:
+        self.x * 2
+
+describe "Class field and method resolution -- defect class":
+
+    it "resolves a field on an instance built by a static constructor":
+        step("Static constructors return the same aggregate shape as a literal call")
+        var c = Counter.new()
+        expect(c.count).to_equal(0)
+
+    it "dispatches a mutating `me` method that writes through self":
+        step("Two bumps must be observable in the field afterwards")
+        var c = Counter.new()
+        c.bump()
+        c.bump()
+        expect(c.count).to_equal(2)
+
+    it "dispatches a method declared in a trait impl block, not the class body":
+        step("impl-block methods resolve through a different path than class-body methods")
+        var c = Counter(count: 4)
+        expect(c.label()).to_equal(40)
+
+    it "resolves fields and methods on a class read back out of a collection":
+        step("Storing and retrieving must not degrade the receiver")
+        var items = [Counter(count: 7)]
+        expect(items[0].count).to_equal(7)
+        expect(items[0].label()).to_equal(70)
+
+    it "resolves fields and methods on a class imported from another module":
+        step("Cross-module classes take the same construction path")
+        var clock = FixedStepClock.new(1000)
+        expect(clock.current_us).to_equal(0)
+        expect(clock.now_micros()).to_equal(0)
+        clock.advance(250)
+        expect(clock.now_micros()).to_equal(250)
+
+describe "Positive controls":
+
+    it "struct (value type) resolves its field and method":
+        step("struct was never affected and must stay green")
+        var p = PlainPoint(x: 5)
+        expect(p.x).to_equal(5)
+        expect(p.doubled()).to_equal(10)
+
+    it "primitives and collections resolve without any aggregate involved":
+        step("Distinguishes this regression from a wholesale harness failure")
+        val nums = [1, 2, 3]
+        expect(nums.len()).to_equal(3)
+        expect(1 + 1).to_equal(2)

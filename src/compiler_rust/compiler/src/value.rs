@@ -1336,14 +1336,25 @@ impl Clone for NativeFunction {
 }
 
 impl Value {
-    pub fn aggregate(class: String, fields: HashMap<String, Value>, is_value_type: bool) -> Self {
-        if is_value_type {
-            Value::Object {
-                class,
-                fields: Arc::new(fields),
-            }
-        } else {
-            Value::ClassInstance(Arc::new(ClassInstance::new(class, fields)))
+    /// Construct an aggregate (`struct` or `class`) instance value.
+    ///
+    /// Both value types (`struct`) and reference types (`class`) currently build
+    /// `Value::Object`. `981c88435e0` routed `is_value_type == false` to
+    /// `Value::ClassInstance`, but neither primary resolution path has a
+    /// `ClassInstance` arm — field access (`interpreter/expr/calls.rs`) and method
+    /// dispatch (`interpreter_method/mod.rs`) both only match `Value::Object` —
+    /// so every interpreted `class` field read and method call failed with
+    /// "not found on type `object`".
+    ///
+    /// TODO(class-instance): re-land reference-class identity via
+    /// `Value::ClassInstance` only together with `ClassInstance` arms in BOTH
+    /// primary resolution paths plus an audit of the remaining `Value::Object`
+    /// pattern matches in the interpreter. See
+    /// `doc/08_tracking/bug/method_field_not_found_on_object_2026-08-18.md`.
+    pub fn aggregate(class: String, fields: HashMap<String, Value>, _is_value_type: bool) -> Self {
+        Value::Object {
+            class,
+            fields: Arc::new(fields),
         }
     }
 
