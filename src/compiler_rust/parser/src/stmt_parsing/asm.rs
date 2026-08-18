@@ -62,7 +62,7 @@ impl<'a> Parser<'a> {
             }
         } else if self.check(&TokenKind::Newline) {
             let block = self.parse_block()?;
-            Self::extract_asm_block_strings(&block, &mut instructions);
+            Self::extract_asm_block_strings(&block, &mut instructions, start_span)?;
         } else {
             return Err(ParseError::syntax_error_with_span(
                 "expected string literal or indented block after 'asm:'".to_string(),
@@ -406,7 +406,28 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn extract_asm_block_strings(block: &Block, instructions: &mut Vec<String>) {
+    /// Render one `{...}` placeholder of an inline-asm template as an assembler
+    /// token. Only literal-shaped operands have an unambiguous assembler
+    /// spelling; anything else must be rejected loudly, because Debug-formatting
+    /// it used to leak `Identifier("stack_top")` straight into emitted assembly
+    /// (see `doc/08_tracking/bug/inline_asm_placeholder_debug_formatted_2026-08-17.md`).
+    fn render_asm_placeholder(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Identifier(name) => Some(name.clone()),
+            Expr::Path(segments) => Some(segments.join("::")),
+            Expr::Integer(v) => Some(v.to_string()),
+            Expr::TypedInteger(v, _) => Some(v.to_string()),
+            Expr::String(s) => Some(s.clone()),
+            Expr::Bool(b) => Some(if *b { "1".to_string() } else { "0".to_string() }),
+            _ => None,
+        }
+    }
+
+    fn extract_asm_block_strings(
+        block: &Block,
+        instructions: &mut Vec<String>,
+        span: Span,
+    ) -> Result<(), ParseError> {
         for stmt in &block.statements {
             match stmt {
                 Node::Expression(Expr::String(s)) => instructions.push(s.clone()),
@@ -415,8 +436,21 @@ impl<'a> Parser<'a> {
                     for part in parts {
                         match part {
                             FStringPart::Literal(s) => text.push_str(s),
-                            FStringPart::Expr(e) => text.push_str(&format!("{:?}", e)),
-                            FStringPart::ExprWithFormat(e, spec) => text.push_str(&format!("{:?}:{}", e, spec)),
+                            FStringPart::Expr(e) | FStringPart::ExprWithFormat(e, _) => {
+                                match Self::render_asm_placeholder(e) {
+                                    Some(rendered) => text.push_str(&rendered),
+                                    None => {
+                                        return Err(ParseError::syntax_error_with_span(
+                                            format!(
+                                                "unsupported operand in inline asm template placeholder: \
+                                                 only identifiers, paths, integer/string/bool literals are \
+                                                 allowed, got `{e:?}`"
+                                            ),
+                                            span,
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                     instructions.push(text);
@@ -424,6 +458,7 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     fn parse_asm_match(&mut self, start_span: Span) -> Result<Node, ParseError> {
@@ -567,6 +602,38 @@ mod tests {
             panic!("expected inline asm");
         };
         asm_stmt.clone()
+    }
+
+    /// Regression: an inline-asm template placeholder used to be rendered with
+    /// Rust's Debug formatting, so `"ldr r0, ={stack_top}"` emitted
+    /// `ldr r0, =Identifier("stack_top")` into the assembler, which fails with
+    /// `unknown token in expression`.
+    #[test]
+    fn test_asm_template_placeholder_renders_bare_identifier() {
+        let asm = parse_first_asm("fn test():\n    asm volatile:\n        \"ldr r0, ={stack_top}\"\n");
+        assert_eq!(asm.instructions.len(), 1);
+        let instr = &asm.instructions[0];
+        assert!(instr.contains("=stack_top"), "expected bare identifier, got {instr:?}");
+        assert!(!instr.contains("Identifier("), "Debug-formatted AST leaked into asm: {instr:?}");
+    }
+
+    #[test]
+    fn test_asm_template_placeholder_renders_integer_literal() {
+        let asm = parse_first_asm("fn test():\n    asm volatile:\n        \"mov r0, #{7}\"\n");
+        assert_eq!(asm.instructions, vec!["mov r0, #7".to_string()]);
+    }
+
+    /// A placeholder the assembler has no spelling for must be a loud parse
+    /// error, never silently-emitted garbage.
+    #[test]
+    fn test_asm_template_placeholder_rejects_unsupported_operand() {
+        let mut parser = crate::Parser::new("fn test():\n    asm volatile:\n        \"mov r0, {a + b}\"\n");
+        let err = parser.parse().err().expect("expected parse error for unsupported asm placeholder");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unsupported operand in inline asm template placeholder"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
