@@ -83,3 +83,38 @@ FIXED 2026-06-14 — interpreter `==`/`!=`/`is` now bridge the `nil` literal and
 ## 2026-08-17 CORE-P1 triage: UNPROVEN -- fix present in source, could not be executed
 
 Same status and same evidence as `interp_crossmod_local_slot_aliasing_2026-06-15.md` -- these two are the same COW-write-back family. The fix (`merge_shared_collection_fields`, `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975`, called :1140, from `d8951833a74` + `fb065e87ab5`) is present in current source and carries Array/Dict/ByteArray fields callee->caller, recursing through nested `Value::Object`.\n\nNOT VERIFIED. The deployed `bin/simple` is a Rust seed from 2026-08-16 22:59, predating that fix, so any RED it produces is a stale-binary artifact; an isolated cargo rebuild did not finish under a host load average of 302-361. **Already-fixed CANDIDATE, UNPROVEN.** Note the doc also records that the compiled path already worked, so what is being closed is an interpreter-only divergence -- which is exactly what this fix addresses.
+
+
+### 2026-08-18 update: DID NOT REPRODUCE against a binary containing the fix
+
+The UNPROVEN status recorded above is now resolved. An isolated `cargo build
+--release --bin simple` (own CARGO_TARGET_DIR) completed with rc 0 against a tree
+containing `fb065e87ab5`, and the cross-module fixture was re-run A/B:
+
+```
+helper.spl:  struct Box: items: [i64]   /  fn fill(b: Box): b.items.push(7)
+main.spl:    val b = helper.Box(items: []); helper.fill(b); print len of b.items
+```
+
+| binary | result |
+|---|---|
+| deployed seed (mtime 2026-08-16 22:59, predates fix) | rc 0, `len=1` |
+| fresh build containing `fb065e87ab5` | rc 0, `len=1` |
+
+Both are CORRECT (`len=1`), so the row does not reproduce. Engine was verified
+rather than assumed: both runs print `[INFO] JIT compilation failed, falling back
+to interpreter`, so the INTERPRETER executed the fixture -- which is precisely the
+lane this bug is about. A green here is therefore not a JIT-covered false pass.
+
+TWO HONEST CAVEATS, because the evidence is weaker than a clean A/B looks:
+
+1. The very first run of this same fixture against the same deployed seed printed
+   `len=0`; a later run of the same binary on the same fixture printed `len=1`.
+   The old-seed RED was NOT reproducible run-to-run, and that flip is unexplained
+   (HEAD moved deac32e -> 82cd8ee under the session while ~8 peer lanes landed,
+   but this fixture exercises the Rust interpreter, not live `.spl` source, so
+   that does not obviously account for it). Treat the original RED as unreliable.
+2. Because the pre-fix binary also passes, this A/B does NOT isolate
+   `merge_shared_collection_fields` as the thing that fixed it. What is
+   established is only that the reported defect is absent from current HEAD, not
+   which change removed it.
