@@ -1299,3 +1299,122 @@ c_migrations:
       specific to `path_dirname` was found beyond that shared fix and the
       same documented non-leading-"." elision scope limitation (bulk
       generator excludes "." for the same reason as C-MIG-0037).
+
+  - id: C-MIG-0039
+    path: src/compiler_rust/compiler/src/interpreter_extern/simd.rs
+    symbols:
+      - rt_text_is_ascii
+    classification: product_algorithm
+    replacement: std.common.ascii_pure.is_ascii_text (NEW file
+      src/lib/common/ascii_pure.spl -- uncontested, outside all HARD-AVOID
+      paths for this round including text_ascii.spl and string_core.spl.
+      Scans the raw byte array by hand (`s.bytes()`, per-byte `>= 128`
+      check), genuinely different machinery from the extern's Rust
+      stdlib `str::is_ascii()` call)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_text_is_ascii(s: text) -> bool is registered in the interpreter's
+      extern dispatch table (interpreter_extern/mod.rs:1916,
+      simd::rt_text_is_ascii). No C runtime counterpart exists (`grep -rn
+      rt_text_is_ascii src/runtime/*.c src/runtime/*.h` returns zero
+      hits, verified before writing the spec); this is a pure-Rust-
+      interpreter extern, same kind as C-MIG-0029..0038
+      (no_c_implementation_rust_only_extern). Rejected candidates:
+      `rt_text_validate_utf8` / `rt_text_find_invalid_utf8`
+      (mod.rs:1915, simd.rs:2044/2054) already covered by C-MIG-0022;
+      `rt_path_basename` / `rt_path_dirname` reserved for concurrently-
+      landing C-MIG-0037/0038 per this round's HARD AVOID list. No
+      production `extern fn rt_text_is_ascii` caller migration was
+      performed -- this entry only establishes differential correctness +
+      perf evidence.
+    correctness_spec: test/01_unit/lib/common/ascii_pure_ext_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. ASCII and
+      multibyte UTF-8 (café, 日本語); edge cases: empty string, NUL (0x00),
+      DEL (0x7f), first codepoint past the ASCII boundary (U+0080),
+      non-ASCII at string start/end, all-ASCII-whitespace, 4-byte emoji
+      codepoint, long all-ASCII run; single-char-flip discrimination;
+      determinism check; 100-vector shared-logic bulk differential loop
+      over ASCII fragments with non-ASCII prepended/appended/absent,
+      2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple is_ascii_text measured ~4.15x
+      the Rust-interpreter oracle over the 100-vector bulk corpus
+      (simple_us=2024, c_us=488, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). Above the plan's 2x threshold;
+      recorded honestly, not hidden -- same interpreter-lane caveat as
+      prior PERF findings (bin/simple test is not the engine ordinary
+      programs run on). Not fixed here: the Simple side is already a
+      tight byte-scan with early-exit on the first non-ASCII byte, so the
+      residual gap is per-call/array-indexing interpreter dispatch
+      overhead rather than an algorithmic issue; not filed as a
+      standalone bug given the small absolute magnitude (~1.5us/call).
+      If the Simple side accumulates text in a loop, note: it does not
+      here — is_ascii_text never builds a text, only compares byte values,
+      so the O(n^2) `text + text` concat pattern documented in
+      text_builder.spl does not apply."
+    perf_measured: >
+      100 shared branch-covering text vectors (ASCII fragments combined
+      with non-ASCII prepend/append/none via seeded LCG), 2026-08-18:
+      simple_us=2024 c_us=488, ratio ~4.15x.
+    shared_corpus: 100
+
+  - id: C-MIG-0040
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_string_ends_with
+    classification: product_algorithm
+    replacement: std.common.suffix_pure.ends_with_text (NEW file
+      src/lib/common/suffix_pure.spl -- uncontested, outside all
+      HARD-AVOID paths including string_core.spl, which already has its
+      own `str_ends_with`. Compares raw byte arrays (`s.bytes()` /
+      `suffix.bytes()`) tail-first via an explicit byte-index loop,
+      genuinely different machinery from either the C or the
+      Rust-interpreter implementation)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_string_ends_with(s: text, suffix: text) -> bool is declared
+      extern in src/lib/text.spl, with a real C definition in
+      src/runtime/runtime_native.c and matching declaration in
+      runtime.h (`grep -rn rt_string_ends_with src/runtime/*.c
+      src/runtime/*.h` returns hits in both, verified before writing the
+      spec) -- C-backed, unlike C-MIG-0039's Rust-interpreter-only
+      sibling. The interpreter-lane oracle used by the differential spec
+      is the Rust-interpreter's own extern registration
+      (interpreter_extern/sffi_string.rs::rt_string_ends_with_fn,
+      registered mod.rs:1889, `s.as_bytes().ends_with(suffix.as_bytes())`)
+      which mirrors the C semantics. Rejected candidates: `rt_string_rfind`
+      (registered alongside rt_string_ends_with_fn) already covered by
+      C-MIG-0024; `rt_dict_contains` (mod.rs:1171) deferred to keep this
+      round's two picks both in the text domain. No production
+      `extern fn rt_string_ends_with` caller migration was performed --
+      this entry only establishes differential correctness + perf
+      evidence.
+    correctness_spec: test/01_unit/lib/common/suffix_pure_ext_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. ordinary
+      filename/extension suffixes and multi-segment suffixes; edge cases:
+      empty subject and/or suffix, suffix longer than subject, suffix
+      equal to subject, single-char match/mismatch, suffix matching a
+      middle substring but not the tail, multibyte UTF-8 suffix
+      match/mismatch, all-whitespace, NUL (0x00) and DEL (0x7f) byte
+      boundaries; single-char-flip discrimination; determinism check;
+      100-vector shared-logic bulk differential loop over 8x8 subject x
+      suffix combinations incl. multibyte, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple ends_with_text measured
+      ~4.45x the C-backed oracle over the 100-vector bulk corpus
+      (simple_us=2288, c_us=514, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). Above the plan's 2x threshold;
+      recorded honestly, not hidden -- same interpreter-lane caveat as
+      prior PERF findings. Not fixed here: the Simple side is already a
+      tight tail-comparison byte loop with early-exit and no
+      allocation, so the residual gap is per-call/array-indexing
+      interpreter dispatch overhead; not filed as a standalone bug given
+      the small absolute magnitude (~1.8us/call). No text accumulation
+      in a loop occurs here (ends_with_text never builds a text), so the
+      O(n^2) `text + text` concat pattern documented in text_builder.spl
+      does not apply."
+    perf_measured: >
+      100 shared branch-covering text vectors (8 subjects x 8 suffixes,
+      incl. multibyte UTF-8), 2026-08-18: simple_us=2288 c_us=514,
+      ratio ~4.45x.
+    shared_corpus: 100

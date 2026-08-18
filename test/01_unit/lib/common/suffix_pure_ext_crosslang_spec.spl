@@ -1,0 +1,140 @@
+# @req REQ-C-MIG-SUFFIX-ENDS-WITH
+#
+# C-MIG-0040: pure-Simple byte-wise suffix check
+# (`std.common.suffix_pure.ends_with_text`) vs the C-backed extern
+# `rt_string_ends_with` (declared `src/lib/text.spl`; C definition
+# `src/runtime/runtime_native.c`; interpreter-lane oracle used here is
+# `src/compiler_rust/compiler/src/interpreter_extern/sffi_string.rs::
+# rt_string_ends_with_fn`, registered in the extern dispatch table at
+# interpreter_extern/mod.rs:1889).
+#
+# Classification: C-backed. `grep -rn rt_string_ends_with
+# src/runtime/*.c src/runtime/*.h` returns hits in both runtime.h and
+# runtime_native.c (verified before writing this spec) -- unlike
+# C-MIG-0039's `rt_text_is_ascii`, this symbol has a real C
+# implementation; the interpreter path used as the oracle here is the
+# Rust-interpreter's own extern registration, which mirrors the C
+# semantics (`ends_with` on raw bytes) via `str::ends_with(bytes)`.
+#
+# Rejected candidates considered first:
+# - `rt_string_rfind` (sffi_string.rs, registered alongside
+#   rt_string_ends_with_fn): registered and legitimate, but already
+#   covered by C-MIG-0024 (`str_last_index_of` crosslang spec) -- picking
+#   `ends_with` instead avoids duplicating that target.
+# - `rt_dict_contains` (sffi_dict.rs, mod.rs:1171): registered and a
+#   plausible dict-primitive pick, but deferred to keep this round's two
+#   picks (0039, 0040) both in the text domain for a tighter comparison
+#   of Rust-only vs C-backed externs -- left for a future migration.
+#
+# `ends_with_text` is a NEW pure-Simple implementation in a NEW file,
+# src/lib/common/suffix_pure.spl (uncontested: not present before this
+# change, and outside all HARD-AVOID paths incl. string_core.spl, which
+# already has its own `str_ends_with`). It compares the raw byte arrays
+# (`s.bytes()` / `suffix.bytes()`) tail-first by hand, an explicit
+# byte-index loop, not a re-wrap of either the C or Rust-interpreter
+# implementation.
+#
+# No defect found: the bulk loop below (100 shared branch-covering
+# vectors, incl. empty suffix, suffix longer than subject, multibyte
+# UTF-8 suffixes, and exact-length match) matched the oracle on every
+# vector on the first pass.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.suffix_pure.{ends_with_text}
+
+# C-backed extern (test-only declaration; never production-linked from
+# Simple product code here). Interpreter lane resolves this through
+# rt_string_ends_with_fn (sffi_string.rs); the C definition lives in
+# runtime_native.c and is exercised on the native/codegen lane.
+extern fn rt_string_ends_with(s: text, suffix: text) -> bool
+
+describe "ends_with_text — pure-Simple vs C-backed oracle (rt_string_ends_with)":
+    it "matches the oracle on ordinary KATs":
+        assert_equal(ends_with_text("hello.txt", ".txt"), true)
+        assert_equal(ends_with_text("hello.txt", ".txt"), rt_string_ends_with("hello.txt", ".txt"))
+        assert_equal(ends_with_text("hello.txt", ".md"), false)
+        assert_equal(ends_with_text("hello.txt", ".md"), rt_string_ends_with("hello.txt", ".md"))
+        assert_equal(ends_with_text("archive.tar.gz", "tar.gz"), true)
+        assert_equal(ends_with_text("archive.tar.gz", "tar.gz"), rt_string_ends_with("archive.tar.gz", "tar.gz"))
+
+    it "matches the oracle on edge cases":
+        # Empty subject, empty suffix.
+        assert_equal(ends_with_text("", ""), true)
+        assert_equal(ends_with_text("", ""), rt_string_ends_with("", ""))
+
+        # Empty suffix against non-empty subject: always matches.
+        assert_equal(ends_with_text("abc", ""), true)
+        assert_equal(ends_with_text("abc", ""), rt_string_ends_with("abc", ""))
+
+        # Empty subject, non-empty suffix: never matches.
+        assert_equal(ends_with_text("", "abc"), false)
+        assert_equal(ends_with_text("", "abc"), rt_string_ends_with("", "abc"))
+
+        # Suffix longer than subject.
+        assert_equal(ends_with_text("ab", "abcdef"), false)
+        assert_equal(ends_with_text("ab", "abcdef"), rt_string_ends_with("ab", "abcdef"))
+
+        # Suffix exactly equal to subject.
+        assert_equal(ends_with_text("abc", "abc"), true)
+        assert_equal(ends_with_text("abc", "abc"), rt_string_ends_with("abc", "abc"))
+
+        # Single-char subject, single-char suffix, match and mismatch.
+        assert_equal(ends_with_text("a", "a"), true)
+        assert_equal(ends_with_text("a", "a"), rt_string_ends_with("a", "a"))
+        assert_equal(ends_with_text("a", "b"), false)
+        assert_equal(ends_with_text("a", "b"), rt_string_ends_with("a", "b"))
+
+        # Suffix matches a substring in the middle but not the tail.
+        assert_equal(ends_with_text("abcabc", "abc"), true)
+        assert_equal(ends_with_text("abcabc", "abc"), rt_string_ends_with("abcabc", "abc"))
+        assert_equal(ends_with_text("abcabd", "abc"), false)
+        assert_equal(ends_with_text("abcabd", "abc"), rt_string_ends_with("abcabd", "abc"))
+
+        # Multibyte UTF-8 suffix, matching and not matching.
+        assert_equal(ends_with_text("caf\u{e9}", "\u{e9}"), true)
+        assert_equal(ends_with_text("caf\u{e9}", "\u{e9}"), rt_string_ends_with("caf\u{e9}", "\u{e9}"))
+        assert_equal(ends_with_text("hello", "\u{e9}"), false)
+        assert_equal(ends_with_text("hello", "\u{e9}"), rt_string_ends_with("hello", "\u{e9}"))
+
+        # All-whitespace subject and suffix.
+        assert_equal(ends_with_text("   ", " "), true)
+        assert_equal(ends_with_text("   ", " "), rt_string_ends_with("   ", " "))
+
+        # Byte-class boundary: NUL (0x00) and DEL (0x7f) chars in subject.
+        assert_equal(ends_with_text("x\u{0}", "\u{0}"), true)
+        assert_equal(ends_with_text("x\u{0}", "\u{0}"), rt_string_ends_with("x\u{0}", "\u{0}"))
+        assert_equal(ends_with_text("x\u{7f}", "\u{7f}"), true)
+        assert_equal(ends_with_text("x\u{7f}", "\u{7f}"), rt_string_ends_with("x\u{7f}", "\u{7f}"))
+
+    it "single-char input change flips the result (discrimination)":
+        assert_true(ends_with_text("hello.txt", ".txt") != ends_with_text("hello.tst", ".txt"))
+        assert_true(rt_string_ends_with("hello.txt", ".txt") != rt_string_ends_with("hello.tst", ".txt"))
+
+    it "is deterministic on both sides":
+        assert_equal(ends_with_text("a/b/c.spl", ".spl"), ends_with_text("a/b/c.spl", ".spl"))
+        assert_equal(rt_string_ends_with("a/b/c.spl", ".spl"), rt_string_ends_with("a/b/c.spl", ".spl"))
+
+    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
+        use std.io_runtime.{time_now_unix_micros}
+        val subjects = ["hello.txt", "archive.tar.gz", "readme", "", "a", "日本語.txt", "abcabc", "x"]
+        val suffixes = [".txt", "gz", "", "hello", "z", "\u{6587}", "abc", "xyz"]
+        var simple_us = 0
+        var c_us = 0
+        var i = 0
+        while i < 100:
+            var seed = (i * 2654435761 + 12345) % 4294967296
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            val subj = subjects[seed % 8]
+            val suf = suffixes[(seed / 8) % 8]
+
+            val t0 = time_now_unix_micros()
+            val sr = ends_with_text(subj, suf)
+            val t1 = time_now_unix_micros()
+            val cr = rt_string_ends_with(subj, suf)
+            val t2 = time_now_unix_micros()
+            simple_us = simple_us + (t1 - t0)
+            c_us = c_us + (t2 - t1)
+            assert_equal(sr, cr)
+            i = i + 1
+        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
+        assert_true(simple_us >= 0 and c_us >= 0)
