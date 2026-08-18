@@ -166,6 +166,54 @@ run, since none exists as precedent today; (ii) for the test-spec pairs,
 decide the intended coverage semantics (shared spec vs. per-tree spec)
 before treating them as a dedup target at all.
 
+## Precedent established (2026-08-18, goal 7)
+
+`amqp_utils.spl` is now the first landed whole-file cross-tree dedup: content
+moved to `src/lib/common/amqp_utils.spl` (744 lines, unchanged), and each of
+the 3 tree copies (`nogc_sync_mut/`, `nogc_async_mut/`, `gc_async_mut/`)
+replaced with a 5-line delegator:
+
+```
+# AMQP (Advanced Message Queuing Protocol) 0-9-1 Utilities
+# Delegator: real implementation lives in src/lib/common/amqp_utils.spl
+# ...
+pub use std.common.amqp_utils*
+```
+
+Protocol followed, fail-closed at every step:
+- Re-verified byte-identical via `md5sum` (all 3 still matched).
+- Confirmed zero `use`/`mod` lines in the source file.
+- Collision-checked all 161 top-level `fn`/`struct`/`enum`/`val` names
+  (95 `fn`, rest `val` protocol constants) against every definition in
+  `src/lib/common/` — **0 collisions**, so the
+  `import_triggered_cross_module_symbol_misdispatch_2026-08-18.md` hazard
+  (duplicate public symbol + added import flips resolution) does not apply
+  here.
+- Callers: `grep -rn amqp_utils src/ test/ --include='*.spl'` found **zero**
+  real importers anywhere in the tree (only a doc concatenation file
+  mentions the old path) — this file was dead code with no import-graph
+  exposure, which is why it was the safest possible first case.
+- Verification: no existing spec touches `amqp_utils` (`grep -rl amqp
+  test/` empty), so a throwaway spec per tree
+  (`use std.amqp_utils.{FRAME_METHOD, CLASS_BASIC}`,
+  `use std.nogc_async_mut.amqp_utils...`,
+  `use std.gc_async_mut.amqp_utils...`) was written under `test/01_unit/`,
+  run via `bin/simple test`, confirmed `Results: 1 total, 1 passed, 0
+  failed` for all three delegator paths, then deleted (throwaway, not
+  committed).
+
+Net line delta: -2187 (three 744-line duplicates removed) + 744 (common
+owner) + 15 (three 5-line delegators) = **-1428 lines**, zero behavior
+change, zero regression.
+
+This establishes the "move whole file to `src/lib/common/`, thin
+`pub use module*` delegator per tree" shape as real precedent — the shape
+described but never before landed (see "Tranche 1 execution attempt"
+above). Still open for a future tranche: this file's zero-caller,
+zero-collision profile is unusually favorable and should not be assumed to
+generalize — every other tranche-1 candidate still needs its own full
+collision check before being moved the same way.
+
 ## Raw data
 
 Full per-file classification (2,207 rows: class, path, diff metric, tree-set)
