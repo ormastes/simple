@@ -19,16 +19,64 @@
 # See doc/08_tracking/bug/origin_main_unbuildable_rust_seed_2026-08-11.md.
 #
 # ---------------------------------------------------------------------------
+# THE 2026-08-18 FAIL-OPEN GAP (and why the fast path changed shape)
+# ---------------------------------------------------------------------------
+# Incident 2026-08-18: origin/main was AGAIN unbuildable -- E0432 at
+# compiler/src/interpreter_call/core/function_exec.rs:10 (importing
+# module_globals_generation, which existed nowhere at origin) and E0599 at
+# compiler/src/interpreter_sffi.rs:125 -- and pushes over it kept reporting
+# PASS. Cause: this guard validated a RANGE, not the resulting TREE. Origin's
+# tip commits were docs-only, so the old PATH FILTER short-circuited to
+# `PASS — n file(s) checked, no compiler/runtime changes in range` without
+# compiling anything, for hours.
+# doc/08_tracking/bug/origin_main_unbuildable_missing_half_1e40de916bb_2026-08-18.md
+#
+# The path filter's inference was "the range didn't touch the seed, so the
+# seed's buildable-ness cannot have REGRESSED in this push". That is true and
+# entirely beside the point: it presumes the BASE was green. Nothing ever
+# established that, so a broken base laundered every subsequent docs-only push
+# into a green verdict. Same class of fail-open that
+# check-c-runtime-compiles-push.shs closed by being TREE-scoped ("a push that
+# edits only a header can break a .c it never touched, so a changed-files-only
+# scan would be fail-open").
+#
+# DESIGN CHOSEN, and why not the other one.
+#   (a) Pure tree scope -- always `cargo check` the resulting tree. Correct,
+#       and it is what the C-runtime guard does. But that guard's whole scan is
+#       `clang -fsyntax-only` over ~96 files, seconds. A warm `cargo check
+#       --release` of the seed is 1-2 MINUTES on this host (1m08s measured in
+#       the incident write-up; cold is far worse), and this guard runs on EVERY
+#       push. Charging every docs-only push 1-2 minutes is a real cost, and a
+#       guard people route around with --no-verify protects nothing.
+#   (b) Keep a fast path, but only when the base is KNOWN-GREEN. Chosen, in a
+#       strengthened form: rather than a per-COMMIT green marker (shas churn
+#       constantly under rebase, so that cache would almost always miss), the
+#       marker is keyed on a digest of the SEED'S OWN CONTENT -- the git tree
+#       object ids of src/compiler_rust and src/runtime plus Cargo.lock. Any
+#       tip whose seed content is byte-identical to a tree this guard already
+#       compiled green is green, whatever its sha or history.
+# The result is strictly stronger than the old behaviour and pays (a)'s cost
+# only on a cache miss: a SKIP now rests on "this exact seed content was
+# compiled and it passed", a positive proof, instead of "nobody touched it", an
+# absence. Steady state is as cheap as before; a docs-only push over a seed
+# NOBODY has ever compiled now pays the 1-2 minutes and, as in the incident,
+# FAILS instead of lying. Markers are written ONLY after a genuine green run of
+# this script, into $SEED_GREEN_MARKER_DIR (override to isolate; deleting it is
+# always safe -- it only forces recompilation).
+#
+# ---------------------------------------------------------------------------
 # MECHANISM
 # ---------------------------------------------------------------------------
 # 1. Resolve the outgoing range the same way the sibling guards do:
 #    main@origin..@- by default (via jj), or an explicit '<base>..<new>'.
-# 2. PATH FILTER (cost control): if the range touches no file under
-#    src/compiler_rust/ or src/runtime/, the seed's buildable-ness cannot
-#    have regressed in this push -- PASS immediately, reporting the file
-#    count actually examined (non-vacuous: the count is "files changed in
-#    range", not "compiler files touched", so a docs-only push still PASSes
-#    with n > 0 rather than 0).
+# 2. SEED-CONTENT FAST PATH (cost control) -- REPLACED THE PATH FILTER on
+#    2026-08-18 because the path filter was FAIL-OPEN. See "THE 2026-08-18
+#    FAIL-OPEN GAP" below. The guard now reasons about the resulting TREE:
+#    it digests the seed's own content at the NEW tip (the git tree object
+#    ids of src/compiler_rust and src/runtime, plus Cargo.lock), and skips
+#    compiling ONLY when that exact seed content has already been PROVEN
+#    green by a previous run of this guard (a recorded marker). "The range
+#    didn't touch it" is no longer accepted as evidence of anything.
 # 3. Otherwise, materialise the NEW tip's content into an isolated git
 #    worktree (`git worktree add --detach`), never the shared working copy
 #    -- the WC is contested by parallel sessions and proves nothing about
@@ -77,8 +125,8 @@
 # ---------------------------------------------------------------------------
 # VERDICT CONTRACT (matches the five sibling guards)
 # ---------------------------------------------------------------------------
-#   PASS — <n> file(s) checked, seed builds cleanly (or: no compiler/runtime
-#          changes in range)                                    exit 0
+#   PASS — <n> file(s) checked, seed builds cleanly (or: seed content
+#          <digest> already proven green by a previous run)      exit 0
 #   FAIL — cargo check failed in <sha>: <first error line(s)>    exit 1
 #   ERROR — nothing was checked                                 exit 2
 # A run that checks 0 files (empty/vacuous range) is ALWAYS an ERROR.
@@ -91,6 +139,7 @@
 #   check-seed-builds-push.shs '<base>..<new>'   # explicit range
 #   check-seed-builds-push.shs --selftest        # fixtures only, no scan
 #   KEEP_BUILD_DIR=1 check-seed-builds-push.shs  # keep the worktree+target dir for debugging
+#   SEED_GREEN_MARKER_DIR=... check-seed-builds-push.shs  # isolate/clear the green cache
 #
 # Exit 0 = safe to push, 1 = seed does not build, 2 = could not determine.
 
@@ -103,6 +152,7 @@ GREP=grep
 
 CARGO_TARGET_ROOT=${CARGO_TARGET_ROOT:-/mnt/data/cargo-target-seed-build-guard}
 KEEP_BUILD_DIR=${KEEP_BUILD_DIR:-0}
+SEED_GREEN_MARKER_DIR=${SEED_GREEN_MARKER_DIR:-/mnt/data/.seed-build-guard-green}
 
 TMPROOT=""
 WORKTREE=""
@@ -148,19 +198,46 @@ die() {
 }
 
 # ---------------------------------------------------------------------------
-# touches_compiler_or_runtime <repo> <base> <new>
-#   Returns 0 (true) if any changed path is under src/compiler_rust/ or
-#   src/runtime/. Prints the changed-file count to fd 4.
+# count_changed_files <repo> <base> <new>
+#   Prints the changed-file count on stdout. Used ONLY for the non-vacuity
+#   report in the verdict line -- NEVER to decide whether to compile. That
+#   inversion (path filter as authority) is exactly the 2026-08-18 fail-open.
 # ---------------------------------------------------------------------------
-touches_compiler_or_runtime() {
-    tc_repo=$1; tc_base=$2; tc_new=$3
-    tc_files="$TMPROOT/changed.out"
-    git -C "$tc_repo" diff --name-only "$tc_base" "$tc_new" -- >"$tc_files" 2>"$TMPROOT/diff.err"
-    tc_st=$?
-    [ "$tc_st" -eq 0 ] || return 2
-    tc_n=$(wc -l <"$tc_files" | tr -d ' ')
-    echo "$tc_n" >&4
-    $GREP -qE '^src/(compiler_rust|runtime)/' "$tc_files" 2>/dev/null
+count_changed_files() {
+    cf_repo=$1; cf_base=$2; cf_new=$3
+    git -C "$cf_repo" diff --name-only "$cf_base" "$cf_new" -- \
+        >"$TMPROOT/changed.out" 2>"$TMPROOT/diff.err"
+    cf_st=$?
+    [ "$cf_st" -eq 0 ] || return 2
+    wc -l <"$TMPROOT/changed.out" | tr -d ' '
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# seed_content_digest <repo> <rev>
+#   Prints a digest of the SEED'S OWN CONTENT at <rev>: the git tree object
+#   ids of src/compiler_rust and src/runtime, plus the Cargo.lock blob id.
+#   Tree object ids are recursive content hashes, so two revs share a digest
+#   iff their seed sources are byte-identical. Empty output = could not
+#   determine (caller must treat that as "must compile", never as green).
+# ---------------------------------------------------------------------------
+seed_content_digest() {
+    sd_repo=$1; sd_rev=$2
+    sd_ct=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust" 2>/dev/null) || sd_ct=""
+    [ -n "$sd_ct" ] || return 1
+    sd_rt=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
+    sd_lk=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
+    printf 'seed/v1 %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
+        | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-40
+    return 0
+}
+
+green_marker_path() { echo "$SEED_GREEN_MARKER_DIR/$1"; }
+
+# Written ONLY after a genuine green compile in this script.
+record_green_marker() {
+    mkdir -p "$SEED_GREEN_MARKER_DIR" 2>/dev/null || return 1
+    date -u '+%Y-%m-%dT%H:%M:%SZ' >"$(green_marker_path "$1")" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -234,7 +311,7 @@ run_cargo_check() {
 # (E0432 unresolved import, E0599 missing enum variant / no method) and
 # that a clean fixture passes. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=4
+SELFTEST_EXPECTED=5
 
 selftest() {
     st_dir="$TMPROOT/selftest-crate"
@@ -376,6 +453,101 @@ EOF
         st_fail=1
     fi
 
+    # --- Fixture E: REPLAY OF THE 2026-08-18 FAIL-OPEN --------------------
+    # A tree that is broken in a file THE RANGE DOES NOT TOUCH must not be
+    # able to reach a PASS. Fixture shape is the incident's exactly: commit 1
+    # carries a seed with an E0432 unresolved import; commit 2 changes only a
+    # docs file. The old path filter looked at the range, saw no
+    # src/compiler_rust path, and PASSed without compiling. The proof has four
+    # parts, because each is separately load-bearing:
+    #   E1 the range really is docs-only (else the fixture is not the incident)
+    #   E2 with a FRESH marker store, the tree's seed digest has no recorded
+    #      green -- so the guard is obliged to compile
+    #   E3 compiling that tree genuinely FAILS with the incident's E0432 shape
+    #   E4 the marker mechanism is not dead: after a recorded green, the same
+    #      digest is recognised (otherwise E2 would pass vacuously forever)
+    st_repo="$TMPROOT/selftest-incident-repo"
+    rm -rf "$st_repo"
+    mkdir -p "$st_repo/src/compiler_rust/src" "$st_repo/doc" || return 1
+    cat >"$st_repo/src/compiler_rust/Cargo.toml" <<'EOF'
+[package]
+name = "seed-guard-incident-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "simple"
+path = "src/main.rs"
+EOF
+    cat >"$st_repo/src/compiler_rust/src/main.rs" <<'EOF'
+// The incident's first error, verbatim in shape: an import of an item that
+// exists nowhere in this tree (module_globals_generation at origin/main).
+use crate::interpreter::module_globals_generation;
+
+fn main() { let _ = module_globals_generation(); }
+EOF
+    echo "before" >"$st_repo/doc/notes.md"
+    (
+        cd "$st_repo" &&
+        git init -q . &&
+        git config user.email guard@selftest &&
+        git config user.name guard &&
+        git add -A &&
+        git commit -q -m "seed (already broken) + docs" &&
+        echo "after" >doc/notes.md &&
+        git add -A &&
+        git commit -q -m "docs(tracking): docs-only tip, touches no seed file"
+    ) >"$TMPROOT/st_e_setup.out" 2>&1
+    st_setup=$?
+    st_ran=$((st_ran + 1))
+    if [ "$st_setup" -ne 0 ]; then
+        echo "SELFTEST FAIL: incident-replay fixture repo setup failed" >&2
+        cat "$TMPROOT/st_e_setup.out" >&2
+        st_fail=1
+    else
+        st_e_base=$(git -C "$st_repo" rev-parse HEAD~1)
+        st_e_tip=$(git -C "$st_repo" rev-parse HEAD)
+        # E1 -- the range is docs-only
+        git -C "$st_repo" diff --name-only "$st_e_base" "$st_e_tip" -- >"$TMPROOT/st_e_changed.out" 2>&1
+        if $GREP -qE '^src/(compiler_rust|runtime)/' "$TMPROOT/st_e_changed.out"; then
+            echo "SELFTEST FAIL: incident-replay range touches the seed -- fixture does not reproduce the fail-open" >&2
+            st_fail=1
+        fi
+        # E2 -- fresh marker store must NOT excuse compiling this tree
+        st_e_markers="$TMPROOT/st_e_markers"
+        rm -rf "$st_e_markers"; mkdir -p "$st_e_markers"
+        st_e_digest=$(seed_content_digest "$st_repo" "$st_e_tip") || st_e_digest=""
+        if [ -z "$st_e_digest" ]; then
+            echo "SELFTEST FAIL: incident-replay tree yielded no seed digest" >&2
+            st_fail=1
+        elif [ -f "$st_e_markers/$st_e_digest" ]; then
+            echo "SELFTEST FAIL: a fresh marker store already claims this seed is green" >&2
+            st_fail=1
+        fi
+        # E3 -- and compiling it really does fail, with the incident's shape
+        ( cd "$st_repo/src/compiler_rust" && CARGO_TARGET_DIR="$TMPROOT/st_e_target" cargo check --bin simple 2>&1 ) >"$TMPROOT/st_e_cargo.out"
+        st_got=$?
+        if [ "$st_got" -eq 0 ]; then
+            echo "SELFTEST FAIL: incident-replay tree was expected NOT to compile, cargo check exited 0" >&2
+            st_fail=1
+        elif ! $GREP -qE 'E0432|unresolved import|failed to resolve' "$TMPROOT/st_e_cargo.out"; then
+            echo "SELFTEST FAIL: incident-replay tree failed but not with the E0432 shape" >&2
+            cat "$TMPROOT/st_e_cargo.out" >&2
+            st_fail=1
+        fi
+        # E4 -- marker recognition is live, not dead code
+        if [ -n "$st_e_digest" ]; then
+            st_e_saved_dir="$SEED_GREEN_MARKER_DIR"
+            SEED_GREEN_MARKER_DIR="$st_e_markers"
+            record_green_marker "$st_e_digest"
+            if [ ! -f "$(green_marker_path "$st_e_digest")" ]; then
+                echo "SELFTEST FAIL: green marker was not recorded -- the fast path could never be taken" >&2
+                st_fail=1
+            fi
+            SEED_GREEN_MARKER_DIR="$st_e_saved_dir"
+        fi
+    fi
+
     # --- Fixture C: empty range must be treated as vacuous/ERROR ----------
     # (exercised via the path-filter contract, not cargo: 0 changed files
     # must never report PASS with n=0.)
@@ -392,7 +564,7 @@ EOF
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, vacuous-range contract)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract)"
     return 0
 }
 
@@ -455,19 +627,27 @@ for ep in "$base" "$tip"; do
         || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel."
 done
 
-exec 4>"$TMPROOT/nfiles.out"
-touches_compiler_or_runtime "$toplevel" "$base" "$tip"
-touches=$?
-exec 4>&-
-nfiles=$(cat "$TMPROOT/nfiles.out" 2>/dev/null); nfiles=${nfiles:-0}
+nfiles=$(count_changed_files "$toplevel" "$base" "$tip")
+cf_rc=$?
+[ "$cf_rc" -eq 0 ] || die 2 "cannot diff range '$range': $(tail -n 3 "$TMPROOT/diff.err" 2>/dev/null)"
+nfiles=${nfiles:-0}
 
 if [ "$nfiles" -eq 0 ]; then
     die 2 "0 files changed in range '$range' -- nothing to check. If the range is genuinely empty, do not call this guard."
 fi
 
-if [ "$touches" -ne 0 ]; then
+# --- TREE-SCOPED DECISION (2026-08-18) --------------------------------------
+# The question is never "did this range touch the seed" -- it is "does the
+# resulting TREE build". The only licence to skip compiling is a recorded
+# green for this exact seed CONTENT. Anything else compiles.
+seed_digest=$(seed_content_digest "$toplevel" "$tip") || seed_digest=""
+if [ -z "$seed_digest" ]; then
+    die 2 "cannot resolve src/compiler_rust in the tree at '$tip' -- the seed's buildability is undetermined, which is never a pass."
+fi
+
+if [ -f "$(green_marker_path "$seed_digest")" ]; then
     VERDICT_EMITTED=1
-    echo "$SELF: PASS — $nfiles file(s) checked, no compiler/runtime changes in range (seed build not re-verified)"
+    echo "$SELF: PASS — $nfiles file(s) checked, seed content $seed_digest at $tip byte-identical to a tree this guard already compiled green ($(cat "$(green_marker_path "$seed_digest")" 2>/dev/null))"
     exit 0
 fi
 
@@ -545,6 +725,8 @@ if [ "$ca_st" -ne 0 ]; then
     tail -n 20 "$TMPROOT/cargo_all.out" >&2
 fi
 
+record_green_marker "$seed_digest"
+
 VERDICT_EMITTED=1
-echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test targets compile cleanly at $tip (link NOT verified: cargo check does not link)$advisory"
+echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test targets compile cleanly at $tip (seed content $seed_digest recorded green; link NOT verified: cargo check does not link)$advisory"
 exit 0
