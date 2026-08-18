@@ -530,3 +530,59 @@ c_migrations:
       i % 13 == 0 and forced i64::MIN at i % 23 == 0), 2026-08-18:
       simple_us=6086 c_us=2647, ratio ~2.3x.
     shared_corpus: 100
+
+  - id: C-MIG-0027
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_char_from_code
+    classification: product_algorithm
+    replacement: std.common.string_core.char_from_code (already implemented
+      in src/lib/common/string_core.spl:399-400, delegating to
+      char_from_code_inline:204-235 — an ASCII/control-code lookup table plus
+      inline UTF-8 byte math for everything else, deliberately independent of
+      the `rt_char_from_code` extern per that file's own header comment
+      citing doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_char_from_code(code: i64) -> text is registered in the
+      interpreter's extern dispatch table
+      (interpreter_extern/conversion.rs::rt_char_from_code_fn) via
+      `char::from_u32` + `.to_string()` — not the C source directly when
+      running under `bin/simple test` (tree-walk interpreter). Both the
+      interpreter shim and the C source at runtime_native.c:3683-3699
+      implement the identical contract (a valid Unicode scalar 0..0x10FFFF,
+      excluding the UTF-16 surrogate range 0xD800..0xDFFF, encodes to UTF-8;
+      anything else collapses to empty text — the C runtime's own comment
+      documents this as deliberate, since the ABI layer has no exception
+      mechanism), so this spec differentially compares against whichever is
+      actually reached by the extern call. A previously-documented concern
+      in string_core.spl about the `rt_bytes_to_text` extern (used inside
+      char_from_code_inline's non-ASCII path) silently returning "" under
+      the SSpec `bin/simple test` evaluator was probed live 2026-08-18
+      (codepoint 233 -> "\u{e9}" on both sides) and does not reproduce on
+      the current binary.
+    correctness_spec: test/01_unit/lib/common/string_core_char_from_code_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. ASCII
+      letters/digits/control chars, multibyte UTF-8 across all four
+      encoding-length classes (1/2/3/4-byte), invalid-codepoint edge cases
+      incl. negative/above-U+10FFFF/surrogate-range collapsing to empty on
+      both sides, surrogate-boundary discrimination, single-codepoint
+      corruption discrimination, determinism check, 100-vector shared-logic
+      bulk differential loop covering every encoding-length class plus every
+      rejection branch, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple char_from_code measured ~3.5x
+      the C oracle (interpreter dispatch to `char::from_u32`) over the
+      100-vector bulk corpus (simple_us=9939, c_us=2811, single run,
+      tree-walk interpreter via `bin/simple test`, 2026-08-18), above the
+      plan's 2x threshold. Recorded honestly, not hidden — same
+      interpreter-lane caveat as prior PERF findings (bin/simple test
+      hard-defaults to the interpreter, not the JIT/native engine ordinary
+      programs run on)."
+    perf_measured: >
+      100 shared branch-covering codepoints (seeded LCG cycling through all
+      four UTF-8 encoding-length classes plus forced invalid-scalar classes
+      at fixed moduli: negative at i % 13 == 0, above-U+10FFFF at
+      i % 11 == 0, surrogate-range at i % 7 == 0), 2026-08-18:
+      simple_us=9939 c_us=2811, ratio ~3.5x.
+    shared_corpus: 100
