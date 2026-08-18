@@ -285,3 +285,85 @@ binding and D's descriptor gating. E brackets everything. Each phase exits
 through its acceptance list; the parallel-agent breakdown and higher-model
 review gate live in
 `doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md`.
+
+---
+
+## Status 2026-08-18 (audit against origin/main tree + git log)
+
+Legend: DONE = landed with commit evidence; IN-FLIGHT = active work, not
+complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
+--oneline` shas on main.
+
+### Phase A — load_policy
+- [x] DONE — A1/A2 enum + alias decode + launch-metadata field:
+  `e5b58f7efc3` (public load_policy axis replaces mmap-named policy);
+  `src/app/startup/launch_metadata.spl` carries `load_policy_is_valid` /
+  `load_policy_from_mmap_hint`.
+- [x] DONE — wiring adapter for loading decisions: `63f19a30473`
+  (`src/app/startup/load_policy_wiring.spl`). Note: landed as
+  `load_policy_wiring.spl`, not the planned standalone `load_policy.spl`.
+
+### Phase B — config-driven dynload axes
+- [x] DONE — presence/placement/activation axes with fail-closed resolution:
+  `a663c1145b1` (dynsmf); SDN + env config loading: `281d8adde3b`.
+- [x] DONE — optimizer dynload hardening: nil PassKind fails closed
+  `25a48297651`; entry_symbol registry routing `e985aceeacf`.
+- [ ] NOT-STARTED — planned `src/lib/common/structural/component/`
+  (`ComponentDescriptorV1`, `resolve_component`) does not exist; the landed
+  implementation lives on the dynsmf path instead. Fold-static-on-full-
+  rebuild (placement=auto) bootstrap proof not evidenced.
+
+### Phase C — dynamic CLI args without core rebuild
+- [x] DONE — SCI option-route records + `--x<ns>-<key>[=<val>]` grammar:
+  `131721fb924` (`composition/cli_option_route.spl`).
+- [x] DONE — SDN config-driven `--x` extension-namespace registry:
+  `0927c2e6ec7` (`cli_extension_config.spl`).
+- [ ] REMAINING — C4 help/completion generator from SCI + migration report
+  of hardcoded options; zero-rebuild sha256 proof not recorded here.
+
+### Phase D — compiler/loader/interpreter optimization
+- [x] DONE — lazy JIT engine creation `9840ded67e5`; lazy loader services /
+  module_loader split `a9352c55a79`, compat rename `38ba78d9287`, dead
+  extension-module deletion `7f2b6dbee21`; mir_interpreter split
+  `decf0f12387`.
+- [x] DONE — interpreter hot path: debug-facade gating, dict-lookup hoist,
+  callee cache `d0dbcccb116`; real complex-constant execution `a51a86220cd`
+  (+ coverage `c1ce06f647c`).
+- [x] DONE — Go-style cooperative sleep `4116381bb51`; runtime timer
+  integration `6f4857487bc`.
+- [x] DONE — lint text-tier perf `ea444740e9b`; parse-cost root cause via
+  PARSEPROF `3b14c394d92` (verdict: interpreted frontend, `ed091c23d44`);
+  brace-escape fix `685b42f53a3` / deployed `1f9c3650f91`.
+- [x] DONE — Phase-D startup check: seed `cleanup_old_logs` dominates, no
+  .spl-side cost `606b2b7f08c` (`doc/10_metrics/startup/startup_perf_check_2026-08-17.md`).
+- [ ] NOT-STARTED — `interface_digest_of` cache-key wiring: still ZERO
+  callers (`action_key.spl:199` definition only; `compile_interface.spl`
+  references the idea in a comment, not a call). SmfManifest load-verify
+  also unwired.
+- [ ] NOT-STARTED — `test/05_perf/startup/` harness lanes (dir absent);
+  per-lane >=5-sample p50/p95 admission reports not institutionalized.
+- [ ] IN-FLIGHT — seed env-cache; parser hop reduction; ExecIR slice;
+  segment-loader slice (`segment_load_plan.spl` exists, loader O(segments)
+  proof pending); seed log tests.
+
+### Phase E — coupling/cohesion gates
+- [x] DONE — `deps` command exists (`src/app/deps/{main,scanner,deep_report}.spl`,
+  dispatch `table.spl:504`); baseline recorded at
+  `doc/10_metrics/startup/coupling_cohesion_baseline_2026-08-17.md`
+  (note: `startup/`, not the planned `startup_perf/` dir).
+- [x] DONE — SCC breaks measured by it: cross-layer mega-SCC 36 -> 13
+  `5f37845f640`; backend_api SCC 45 -> 24 `b3e53994db4` -> 8 `0fa9744d4f4`.
+- [ ] REMAINING — per-phase before/after snapshot spec with growth band not
+  found; snapshots are one baseline, not a bracketing series.
+
+### Honest remaining list
+1. **Self-hosted deploy as default tooling** — `bin/simple` is still the
+   Rust seed (CLAUDE.md rule unmet); the dominant startup cost found in
+   Phase D lives in the seed.
+2. `interface_digest_of` + SmfManifest verification wiring (dependency-aware
+   incremental build) — designed, zero callers.
+3. `test/05_perf/startup/` perf-lane harness + admission discipline.
+4. Phase B fold-on-full-rebuild bootstrap proof; component-descriptor
+   contract as specced (or plan amendment blessing the dynsmf-path shape).
+5. Phase C help/completion generation + hardcoded-option migration report.
+6. Per-phase E re-measure snapshots with a growth-band spec.

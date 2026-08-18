@@ -4868,3 +4868,20 @@ Each current-code claim in this document was re-verified against the working tre
 8. **dynSMF default manifest entries are on-demand, not autoloaded — CONFIRMED.** `src/os/smf/dynsmf_session.spl:69-88` — every entry in `dynsmf_default_manifest()` has `default_autoload: false` (comment at `:78-80` states toolchain entries are "on-demand only"); `src/app/startup/dynsmf_autoload.spl:59-67` only queues missing background compiles and runs `dynsmf_session_autoload_checked` without spawning compiler children at startup.
 
 No inline corrections were required: all eight claims matched current source.
+
+---
+
+## Status addendum 2026-08-18 (claims re-verified; history above unchanged)
+
+- Claim 6 (optimizer nil `PassKind` passes without executing) — **FIXED**:
+  `25a48297651` makes nil PassKind fail closed in the plugin adapters;
+  `e985aceeacf` adds entry_symbol registry routing (also fail-closed).
+- Claim 8 (dynSMF default manifest on-demand / autoload consumption) —
+  **superseded by config**: `a663c1145b1` + `281d8adde3b` land the
+  presence/placement/activation dynload axes with SDN+env config and
+  fail-closed resolution.
+- §0/§5 load_policy and CLI option-route recommendations — landed
+  (`e5b58f7efc3`, `63f19a30473`, `131721fb924`, `0927c2e6ec7`).
+- Still open from §10/§14: `interface_digest_of` remains zero-caller;
+  SmfManifest is still unverified on load; `test/05_perf/startup/` lanes
+  do not exist. See the plan doc's "Status 2026-08-18" for the full table.
