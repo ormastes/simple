@@ -169,14 +169,15 @@ impl<'a> super::Lexer<'a> {
         use crate::token::FStringToken;
         let mut parts: Vec<FStringToken> = Vec::new();
         let mut current_literal = String::new();
-        // Uncollapsed mirror of `current_literal`: every push to
-        // `current_literal` is mirrored here EXCEPT the `{{`->`{` and
-        // `}}`->`}` collapses, where the raw (doubled) form is kept
-        // instead. If the whole literal turns out to contain no real
-        // `{expr}` interpolation, `{{`/`}}` collapsing is Python-fstring
-        // escape syntax that has no reason to apply -- the string is used
-        // verbatim, so the doubled braces are preserved. See bug
-        // string_literal_double_brace_collapse_2026-06-16.
+        // Uncollapsed mirror of `current_literal`, kept only so a failed
+        // interpolation-expression scan can backtrack to the exact raw text.
+        // The documented language contract (regression: doc/08_tracking/bug/
+        // runtime_surface_spec_brace_escape_contains_red_2026-08-17.md, pinned
+        // by lexer_tests_literals.rs::double_braces_collapse_to_one_literal_brace)
+        // is that `{{`/`}}` collapse to a single literal brace in EVERY
+        // double-quoted text literal, interpolated or not — a briefly-landed
+        // "keep raw when no interpolation" variant broke `.contains()` against
+        // single-brace text and was reverted here.
         let mut current_literal_raw = String::new();
         let mut has_interpolation = false;
 
@@ -189,7 +190,8 @@ impl<'a> super::Lexer<'a> {
                         self.advance(); // First "
                         self.advance(); // Second "
                         self.advance(); // Third "
-                        let literal_text = if has_interpolation { current_literal } else { current_literal_raw };
+                        let _ = &current_literal_raw;
+                        let literal_text = current_literal;
                         if !literal_text.is_empty() {
                             parts.push(FStringToken::Literal(literal_text));
                         }
@@ -203,12 +205,9 @@ impl<'a> super::Lexer<'a> {
                 } else {
                     // End of single-quoted f-string
                     self.advance();
-                    // No real interpolation happened anywhere in this
-                    // literal: use the uncollapsed raw text so a plain
-                    // `"..."` string with no `{expr}` keeps `{{`/`}}`
-                    // verbatim instead of collapsing them as if they were
-                    // f-string escapes.
-                    let literal_text = if has_interpolation { current_literal } else { current_literal_raw };
+                    // `{{`/`}}` collapse applies uniformly, with or without
+                    // interpolation (see comment at `current_literal_raw`).
+                    let literal_text = current_literal;
                     if !literal_text.is_empty() {
                         parts.push(FStringToken::Literal(literal_text.clone()));
                     }
@@ -554,7 +553,9 @@ impl<'a> super::Lexer<'a> {
             return false;
         }
         // Binary / logical operator => an operand must follow.
-        for op in ["==", "!=", "<=", ">="] {
+        // Null-coalescing `??` — its RHS is an operand position, so a string
+        // literal may legitimately open there (`{x ?? "d"}`).
+        for op in ["==", "!=", "<=", ">=", "??"] {
             if trimmed.ends_with(op) {
                 return true;
             }
