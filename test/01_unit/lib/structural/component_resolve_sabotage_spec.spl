@@ -1,0 +1,58 @@
+# @cover src/lib/common/structural/component/descriptor.spl 80%
+"""
+# Component Resolution Fail-Closed (sabotage + positive control)
+
+## Overview
+
+Defect-class spec for resolve_component's fail-closed contract: an unknown
+component id, a malformed descriptor (bad axis value), a duplicate id, an
+unsupported schema version, and a missing impl digest on placement=auto each
+produce the explicit typed error — never a silent default. Every sabotage
+scenario carries a POSITIVE CONTROL: a valid sibling in the same scenario
+still resolves, so the implementation cannot pass by rejecting everything.
+
+**Plan:** doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md (Phase B sabotage requirement)
+"""
+
+use std.spec
+use std.common.structural.component.descriptor.{
+    component_v1_make,
+    resolve_component_verdict,
+    ComponentDescriptorV1
+}
+
+describe "resolve_component fails closed":
+
+    it "rejects an unknown component id while the valid sibling resolves":
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(component_v1_make(1, "compiler.frontend", "1", "auto", "static", "first_use"))
+        expect(resolve_component_verdict(cat, "no.such.component", "h", "h")).to_equal("err:unknown_component")
+        # POSITIVE CONTROL: same catalog, valid id, still resolves.
+        expect(resolve_component_verdict(cat, "compiler.frontend", "h", "h")).to_equal("ok:static:first_use:presence=auto,placement=static,activation=first_use")
+
+    it "rejects a malformed descriptor (unknown axis value) explicitly":
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(component_v1_make(1, "optimizer.broken", "1", "auto", "sideways", "first_use"))
+        expect(resolve_component_verdict(cat, "optimizer.broken", "h", "h")).to_equal("err:malformed_descriptor")
+        # POSITIVE CONTROL: a valid sibling catalog resolves fine.
+        var ok_cat: [ComponentDescriptorV1] = []
+        ok_cat.push(component_v1_make(1, "optimizer.basic", "1", "auto", "static", "command"))
+        expect(resolve_component_verdict(ok_cat, "optimizer.basic", "h", "h")).to_equal("ok:static:command:presence=auto,placement=static,activation=command")
+
+    it "rejects duplicate ids as malformed, never picks one silently":
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(component_v1_make(1, "dup.id", "1", "auto", "static", "manual"))
+        cat.push(component_v1_make(1, "dup.id", "2", "auto", "static", "manual"))
+        expect(resolve_component_verdict(cat, "dup.id", "h", "h")).to_equal("err:malformed_descriptor")
+
+    it "rejects an unsupported schema version explicitly":
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(component_v1_make(2, "future.component", "1", "auto", "static", "manual"))
+        expect(resolve_component_verdict(cat, "future.component", "h", "h")).to_equal("err:unsupported_schema_version")
+
+    it "rejects a missing impl digest on placement=auto instead of guessing":
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(component_v1_make(1, "optimizer.basic", "1", "auto", "auto", "command"))
+        expect(resolve_component_verdict(cat, "optimizer.basic", "", "h")).to_equal("err:missing_impl_digest")
+        # POSITIVE CONTROL: with real digests the same descriptor resolves.
+        expect(resolve_component_verdict(cat, "optimizer.basic", "h", "h")).to_equal("ok:static:command:presence=auto,placement=auto,activation=command")

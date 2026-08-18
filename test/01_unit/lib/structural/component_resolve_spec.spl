@@ -1,0 +1,74 @@
+# @cover src/lib/common/structural/component/descriptor.spl 80%
+"""
+# Component Resolution (ComponentDescriptorV1 / resolve_component)
+
+## Overview
+
+End-to-end resolution: an SDN-subset catalog is parsed into versioned
+ComponentDescriptorV1 records and resolved via resolve_component to a
+concrete choice on the Phase B §5.3 decision table: presence=off is ABSENT,
+placement=dynamic never folds, placement=auto folds static only on a
+verified digest match and picks dynamic when the static copy is stale.
+
+Specs read text verdicts from module-side accessors
+(component_parse_status / resolve_component_verdict) because the current
+seed erases class-typed values crossing into spec files; the accessors are
+pure projections over resolve_component's Result.
+
+## Examples
+
+A three-component catalog resolves optimizer.basic to static on a matching
+digest, to dynamic on a stale digest, loader.zstd (placement=dynamic) to
+dynamic even with matching digests, and aspect.log_debug (presence=off) to
+absent.
+
+**Plan:** doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md (Phase B)
+"""
+
+use std.spec
+use std.common.structural.component.descriptor.{
+    component_parse_status,
+    component_catalog_v1_parse,
+    resolve_component_verdict
+}
+
+fn catalog_source() -> text:
+    "component:\n" +
+    "  id: optimizer.basic\n" +
+    "  version: 1\n" +
+    "  presence: auto\n" +
+    "  placement: auto\n" +
+    "  activation: command\n" +
+    "component:\n" +
+    "  id: loader.zstd\n" +
+    "  version: 2\n" +
+    "  presence: on\n" +
+    "  placement: dynamic\n" +
+    "  activation: first_use\n" +
+    "component:\n" +
+    "  id: aspect.log_debug\n" +
+    "  version: 1\n" +
+    "  presence: off\n" +
+    "  placement: auto\n" +
+    "  activation: manual\n"
+
+describe "resolve_component end to end":
+
+    it "parses the SDN catalog cleanly":
+        expect(component_parse_status(catalog_source())).to_equal("ok:3")
+
+    it "folds placement=auto static on a matching digest":
+        val v = resolve_component_verdict(component_catalog_v1_parse(catalog_source()), "optimizer.basic", "h123", "h123")
+        expect(v).to_equal("ok:static:command:presence=auto,placement=auto,activation=command")
+
+    it "picks dynamic when the static copy is stale (digest mismatch)":
+        val v = resolve_component_verdict(component_catalog_v1_parse(catalog_source()), "optimizer.basic", "h123", "h999")
+        expect(v).to_equal("ok:dynamic:command:presence=auto,placement=auto,activation=command")
+
+    it "never folds placement=dynamic even on matching digests":
+        val v = resolve_component_verdict(component_catalog_v1_parse(catalog_source()), "loader.zstd", "same", "same")
+        expect(v).to_equal("ok:dynamic:first_use:presence=on,placement=dynamic,activation=first_use")
+
+    it "resolves presence=off to absent":
+        val v = resolve_component_verdict(component_catalog_v1_parse(catalog_source()), "aspect.log_debug", "a", "a")
+        expect(v).to_equal("ok:absent:manual:presence=off,placement=auto,activation=manual")

@@ -12,7 +12,7 @@
 #
 # Research: doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md
 
-class ComponentDescriptor:
+struct ComponentDescriptor:
     id: text
     version: text
     presence: text
@@ -21,12 +21,12 @@ class ComponentDescriptor:
     provides: [text]
     dependencies: [text]
 
-class ComponentParseOutcome:
+struct ComponentParseOutcome:
     ok: bool
     reason: text
     descriptors: [ComponentDescriptor]
 
-class ComponentValidation:
+struct ComponentValidation:
     ok: bool
     errors: [text]
 
@@ -171,3 +171,132 @@ fn component_catalog_validate(descriptors: [ComponentDescriptor]) -> ComponentVa
 # the comma key=value grammar dynsmf_dynload_setting_parse accepts.
 fn component_effective_dynload_setting(d: ComponentDescriptor) -> text:
     "presence=" + d.presence + ",placement=" + d.placement + ",activation=" + d.activation
+
+# --- Versioned descriptor + fail-closed resolution (Phase B, plan §B1) ---
+#
+# ComponentDescriptorV1 wraps the parsed descriptor with an explicit schema
+# version (composition, no inheritance). resolve_component implements the
+# §5.3 decision table for one component and FAILS CLOSED: unknown component,
+# unsupported schema version, malformed descriptor, ambiguous (duplicate)
+# match, and a missing/mismatched-empty impl digest on placement=auto are
+# all explicit typed errors — never a silent default.
+
+struct ComponentDescriptorV1:
+    schema_version: i64
+    body: ComponentDescriptor
+
+struct ComponentResolveError:
+    code: text
+    detail: text
+
+# The concrete choice: mode is "absent" | "static" | "dynamic".
+struct ComponentChoice:
+    id: text
+    version: text
+    mode: text
+    activation: text
+    dynload_setting: text
+
+fn component_descriptor_v1(body: ComponentDescriptor) -> ComponentDescriptorV1:
+    ComponentDescriptorV1(schema_version: 1, body: body)
+
+# Resolve one component id from a versioned catalog to a concrete choice.
+# embedded_impl_hash / configured_impl_hash drive the placement=auto fold:
+# matching non-empty hashes fold static; a stale static (hash mismatch)
+# picks dynamic; placement=dynamic never folds; presence=off is ABSENT.
+# Any empty digest on the placement=auto path is an explicit error.
+fn resolve_component(catalog: [ComponentDescriptorV1], id: text, embedded_impl_hash: text, configured_impl_hash: text) -> Result<ComponentChoice, ComponentResolveError>:
+    var bodies: [ComponentDescriptor] = []
+    var idx = 0
+    while idx < catalog.len():
+        val entry = catalog[idx]
+        if entry.schema_version != 1:
+            return Err(ComponentResolveError(code: "unsupported_schema_version", detail: entry.body.id + ":" + entry.schema_version.to_text()))
+        bodies.push(entry.body)
+        idx = idx + 1
+    val validation = component_catalog_validate(bodies)
+    if not validation.ok:
+        var detail = ""
+        var eidx = 0
+        while eidx < validation.errors.len():
+            if detail != "":
+                detail = detail + ";"
+            detail = detail + validation.errors[eidx]
+            eidx = eidx + 1
+        return Err(ComponentResolveError(code: "malformed_descriptor", detail: detail))
+    var found = component_descriptor_default("", "")
+    var matches = 0
+    idx = 0
+    while idx < bodies.len():
+        if bodies[idx].id == id:
+            found = bodies[idx]
+            matches = matches + 1
+        idx = idx + 1
+    if matches == 0:
+        return Err(ComponentResolveError(code: "unknown_component", detail: id))
+    if matches > 1:
+        return Err(ComponentResolveError(code: "ambiguous_component", detail: id))
+    var mode = ""
+    if found.presence == "off":
+        mode = "absent"
+    elif found.placement == "static":
+        mode = "static"
+    elif found.placement == "dynamic":
+        # placement=dynamic never folds, regardless of digests.
+        mode = "dynamic"
+    else:
+        # placement=auto: fold static only on a verified digest match.
+        if embedded_impl_hash == "" or configured_impl_hash == "":
+            return Err(ComponentResolveError(code: "missing_impl_digest", detail: id))
+        if embedded_impl_hash == configured_impl_hash:
+            mode = "static"
+        else:
+            mode = "dynamic"
+    Ok(ComponentChoice(id: found.id, version: found.version, mode: mode, activation: found.activation, dynload_setting: component_effective_dynload_setting(found)))
+
+# --- Spec-facing accessor helpers ---
+#
+# The 2026-08-18 shared seed erases class-typed values crossing the
+# module boundary into spec files ("undefined field ... on value of type
+# 'object'"), so specs cannot read fields on returned records directly.
+# These helpers keep every field access inside this module and hand specs
+# plain text/bool/i64 verdicts. They add no policy: resolve_component
+# above remains the single fail-closed decision point.
+
+# "ok:<count>" on success, otherwise the parse failure reason.
+fn component_parse_status(source: text) -> text:
+    val outcome = component_descriptor_parse_sdn(source)
+    if outcome.ok:
+        "ok:" + outcome.descriptors.len().to_text()
+    else:
+        outcome.reason
+
+# Build a versioned catalog from SDN source; parse failure yields an
+# empty catalog (resolve_component then fails closed with unknown_component,
+# and specs check component_parse_status first).
+fn component_catalog_v1_parse(source: text) -> [ComponentDescriptorV1]:
+    val outcome = component_descriptor_parse_sdn(source)
+    var cat: [ComponentDescriptorV1] = []
+    if not outcome.ok:
+        return cat
+    var idx = 0
+    while idx < outcome.descriptors.len():
+        cat.push(component_descriptor_v1(outcome.descriptors[idx]))
+        idx = idx + 1
+    cat
+
+# Explicit constructor for spec fixtures, schema_version included so
+# version sabotage is expressible.
+fn component_v1_make(schema_version: i64, id: text, version: text, presence: text, placement: text, activation: text) -> ComponentDescriptorV1:
+    var d = component_descriptor_default(id, version)
+    d.presence = presence
+    d.placement = placement
+    d.activation = activation
+    ComponentDescriptorV1(schema_version: schema_version, body: d)
+
+# Text verdict over resolve_component: "ok:<mode>:<activation>:<dynload_setting>"
+# or "err:<code>". Pure projection — no fallback, no defaulting.
+fn resolve_component_verdict(catalog: [ComponentDescriptorV1], id: text, embedded_impl_hash: text, configured_impl_hash: text) -> text:
+    match resolve_component(catalog, id, embedded_impl_hash, configured_impl_hash):
+        Ok(choice) -> "ok:" + choice.mode + ":" + choice.activation + ":" + choice.dynload_setting
+        Err(e) -> "err:" + e.code
