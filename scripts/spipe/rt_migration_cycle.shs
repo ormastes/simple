@@ -58,31 +58,39 @@ awk 'NR==FNR {m[$1]=$2; next} {d[$1]=$2} END {for (s in d) if (m[s]==d[s]) print
 comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.txt"
 
 # --- Track B: mechanical call-site rewrite to a std.* wrapper -------------
-# Class: rt_time_now_unix_micros -> std.io_runtime.time_now_unix_micros.
-# Same signature, drop-in provider wrapper (src/lib/nogc_sync_mut/io_runtime.spl).
-# Scope: files under src/lib/nogc_sync_mut and src/app that DECLARE the extern
+# Table of rt_symbol -> identical-signature provider wrapper, all exported by
+# src/lib/nogc_sync_mut/io_runtime.spl (thin passthroughs, verified). Scope:
+# files under src/lib/nogc_sync_mut and src/app that DECLARE the extern
 # in-file (the decl line becomes the use line, so import placement is exact),
-# do not already mention the wrapper name, and are not the provider itself.
-# Same-family imports only — async families are left for a layering-aware pass.
+# do not already mention the bare wrapper name (collision guard), do not
+# re-export the extern (dangling-export guard), and are not the provider.
+# Async families are left for a layering-aware pass.
+TB_TABLE="rt_time_now_unix_micros time_now_unix_micros
+rt_file_exists file_exists
+rt_file_delete file_delete
+rt_env_get env_get
+rt_getpid getpid"
+
 track_b() {
   tb_done=0
   : > "$WORK/tb_touched.txt"
-  for f in $(/usr/bin/grep -rlE '^extern fn rt_time_now_unix_micros\(' src/lib/nogc_sync_mut src/app --include='*.spl' 2>/dev/null); do
-    case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
-    # skip re-export provider modules: their extern feeds an `export` line,
-    # and deleting the decl would dangle the export (daemon_sdk/types.spl).
-    grep -qE '^export .*\brt_time_now_unix_micros\b' "$f" && continue
-    # skip if the bare wrapper name already appears (collision risk):
-    # count mentions of time_now_unix_micros that are NOT the rt_ form
-    bare=$(grep -oE '[a-z_]*time_now_unix_micros' "$f" | grep -cv '^rt_time_now_unix_micros$')
-    [ "$bare" -gt 0 ] && continue
-    sed -i 's/^extern fn rt_time_now_unix_micros() -> i64$/use std.io_runtime.{time_now_unix_micros}/' "$f"
-    sed -i 's/\brt_time_now_unix_micros(/time_now_unix_micros(/g' "$f"
-    echo "$f" >> "$WORK/tb_touched.txt"
-    tb_done=$((tb_done + 1))
-    [ "$tb_done" -ge "$MAX" ] && break
+  : > "$WORK/tb_pairs.txt"
+  printf '%s\n' "$TB_TABLE" | while IFS=' ' read -r sym wrap; do
+    [ -n "$sym" ] || continue
+    for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src/lib/nogc_sync_mut src/app --include='*.spl' 2>/dev/null); do
+      case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
+      grep -qE "^export .*\b${sym}\b" "$f" && continue
+      bare=$(grep -oE "[a-z_]*${wrap}" "$f" | grep -cv "^${sym}\$")
+      [ "$bare" -gt 0 ] && continue
+      sed -i "s/^extern fn ${sym}(.*\$/use std.io_runtime.{${wrap}}/" "$f"
+      sed -i "s/\b${sym}(/${wrap}(/g" "$f"
+      echo "$f" >> "$WORK/tb_touched.txt"
+      echo "$f $sym" >> "$WORK/tb_pairs.txt"
+    done
   done
-  echo "$tb_done"
+  sort -u "$WORK/tb_touched.txt" > "$WORK/tb_touched_u.txt"
+  mv "$WORK/tb_touched_u.txt" "$WORK/tb_touched.txt"
+  wc -l < "$WORK/tb_touched.txt"
 }
 
 n_candidates=$(wc -l < "$WORK/uncalled.txt")
@@ -98,11 +106,17 @@ if [ "$n_candidates" -eq 0 ]; then
     echo "NOOP — nothing safely migratable this cycle (tracks A and B converged)"
     exit 0
   fi
-  # residual check: no rewritten file may still reference the rt_ form in
-  # call position (comment-only lines excluded, same rule as the gate).
-  left=$(xargs grep -lE '^[^#]*\brt_time_now_unix_micros\b' < "$WORK/tb_touched.txt" 2>/dev/null | wc -l)
+  # residual check: for each (file, symbol) pair actually rewritten, the
+  # CALL form of that symbol must be gone from that file. Other table symbols
+  # left in the file (their own pass legitimately skipped it) and prose
+  # mentions without parens are not residue.
+  left=0
+  while IFS=' ' read -r rf rsym; do
+    c=$(grep -cE "^[^#]*\b${rsym}\(" "$rf" 2>/dev/null)
+    left=$((left + c))
+  done < "$WORK/tb_pairs.txt"
   if [ "$left" -ne 0 ]; then
-    echo "FAIL — $left file(s) still reference rt_time_now_unix_micros after rewrite; NOT committing"
+    echo "FAIL — $left file(s) still reference a track-B rt_ symbol after rewrite; NOT committing"
     exit 1
   fi
   out=$(sh scripts/check/check-no-direct-rt.shs)
@@ -112,7 +126,7 @@ if [ "$n_candidates" -eq 0 ]; then
   [ $gate -ne 0 ] && { echo "FAIL — gate did not pass after track B rewrite"; exit 1; }
   xargs git add < "$WORK/tb_touched.txt"
   git add scripts/check/no_direct_rt_baseline.txt
-  git commit -q -m "refactor(rt): spipe cycle track B — rt_time_now_unix_micros -> std.io_runtime wrapper in $nb file(s)
+  git commit -q -m "refactor(rt): spipe cycle track B — rt_ externs -> std.io_runtime wrappers in $nb file(s)
 
 Automated by scripts/spipe/rt_migration_cycle.shs track B: in-file extern
 declaration replaced by the use-import at the same position; call sites
