@@ -203,9 +203,33 @@ pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV
         expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
     (rt_file_read_text(receipt_path) ?? "") == expected
 
+# Dependency source paths for a module's cache entry (Phase D interface-digest
+# wiring): each parsed import that maps to a UNIQUE on-disk source contributes
+# its path; the entry's deps_iface fold is then computed over their interface
+# digests by BuildCache.update_entry. Imports with no unique file backing
+# (synthetic modules, alias-ambiguous paths — the same fail-closed rule
+# driver_native_module_cache_source applies to the module itself) contribute
+# nothing.
+fn driver_native_module_dep_sources(ctx: CompileContext, module_name: text) -> [text]:
+    var deps: [text] = []
+    if not ctx.modules.has(module_name):
+        return deps
+    val own_path = driver_native_module_cache_source(ctx, module_name)
+    for imp in ctx.modules[module_name].imports:
+        val dep_path = driver_native_module_cache_source(ctx, imp.module)
+        if dep_path == "" or dep_path == own_path:
+            continue
+        var seen = false
+        for existing in deps:
+            if existing == dep_path:
+                seen = true
+        if not seen:
+            deps.push(dep_path)
+    deps
+
 pub fn driver_native_collect_capsule_result_v1(
-    batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
-    module_name: text, object_path: text
+    ctx: CompileContext, batch: FrozenNativeModuleCapsuleBatchV1,
+    build_cache: BuildCache, module_name: text, object_path: text
 ) -> text:
     """Owner-only authenticated cache checkpoint for one completed capsule."""
     val capsule = batch.find(module_name)
@@ -216,7 +240,8 @@ pub fn driver_native_collect_capsule_result_v1(
     if capsule.cache_source == "": return ""
     val source_fp = FileFingerprint.from_file(capsule.cache_source)
     if val source_fp_val = source_fp:
-        build_cache.update_entry(capsule.cache_source, source_fp_val, [], [object_path])
+        val dep_sources = driver_native_module_dep_sources(ctx, module_name)
+        build_cache.update_entry(capsule.cache_source, source_fp_val, dep_sources, [object_path])
         build_cache.save()
         return ""
     "native-capsule-fingerprint-failed:{module_name}"
@@ -801,7 +826,7 @@ impl CompilerDriver:
                 match direct_result:
                     case Ok(obj_path):
                         val collect_error = driver_native_collect_capsule_result_v1(
-                            capsules, build_cache, name, obj_path)
+                            ctx, capsules, build_cache, name, obj_path)
                         if collect_error != "":
                             module_unit_id = module_unit_id + 1
                             driver_native_record_module_failure(module_outcomes,
@@ -829,7 +854,7 @@ impl CompilerDriver:
                 )
                 var builder = ParallelBuilder.create(parallel_cfg)
                 builder.set_owner_collect(driver_native_collect_capsule_result_v1(
-                    capsules, build_cache, _1, _2))
+                    ctx, capsules, build_cache, _1, _2))
 
                 for name in uncached_names:
                     builder.add_unit(name, [])

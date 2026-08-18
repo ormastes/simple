@@ -11,6 +11,7 @@ use compiler.driver.cache.integration.shadow_mode.{
     shadow_on_compile_done, shadow_report
 }
 use std.io_runtime.{dir_create_all, dir_list}
+use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
 
 # ============================================================================
 # File Fingerprinting
@@ -268,12 +269,29 @@ impl FileFingerprint:
 # Dependency Tracking
 # ============================================================================
 
+# Fail-closed fold of the dependencies' INTERFACE digests (Phase D wiring,
+# 2026-08-18). Returns nil when any dependency source is missing/unreadable —
+# the caller must treat nil as "cannot validate, recompile", never as
+# "unchanged". A dependency's body-only edit leaves the fold unchanged; a
+# signature edit changes it.
+fn incremental_dependency_interface_fold(dep_paths: [text]) -> text?:
+    var entries: [text] = []
+    for p in dep_paths:
+        if not incremental_file_exists(p):
+            return nil
+        val src = rt_file_read_text(p)
+        if src == "":
+            return nil
+        entries.push("{p}={interface_digest_of_source(src)}")
+    Some(dependency_interface_fold(entries))
+
 struct DependencyEntry:
     """Tracks what a file depends on."""
     source: text            # Source file path
     fingerprint: FileFingerprint
     dependencies: [text]    # Files this source imports/uses
     outputs: [text]         # Generated artifact paths
+    deps_iface: text        # dependency_interface_fold at compile time; "" = unknown (fail closed)
 
 impl DependencyEntry:
     fn needs_recompile(current: FileFingerprint, dep_cache: {text: FileFingerprint}) -> bool:
@@ -473,9 +491,20 @@ impl BuildCache:
                                         if val out_text = os:
                                             outs = outs.push(out_text)
 
+                            # deps_iface: absent in pre-2026-08-18 rows -> ""
+                            # -> the entry fails closed in has_cached_object.
+                            var deps_iface = ""
+                            val di_val = item.get("deps_iface")
+                            if val di_raw = di_val:
+                                val di: SdnValue = di_raw
+                                val di_str = di.as_str()
+                                if val di_text = di_str:
+                                    deps_iface = di_text
+
                             val entry = DependencyEntry(
                                 source: source, fingerprint: fp,
-                                dependencies: deps, outputs: outs)
+                                dependencies: deps, outputs: outs,
+                                deps_iface: deps_iface)
                             entries[source] = entry
                             fingerprints[source] = fp
 
@@ -489,32 +518,18 @@ impl BuildCache:
 
     me save():
         """Persist cache to disk."""
-        val dir = incremental_parent_dir(self.cache_path)
-        if dir != "":
-            incremental_mkdir_p(dir)
-        var lines: [text] = [
-            "version: {self.version + 1}",
-            "entries: ["
-        ]
-        for source in self.entries.keys():
-            val entry = self.entries[source]
-            val fp = entry.fingerprint
-            val source_text = incremental_sdn_escape(entry.source)
-            val hash_text = incremental_sdn_escape(fp.content_hash)
-            val deps_text = incremental_sdn_text_array(entry.dependencies)
-            val outputs_text = incremental_sdn_text_array(entry.outputs)
-            val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
-            lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + " " + "}")
-        lines = lines.push("]")
-        incremental_file_write_text(self.cache_path, lines.join("\n"))
+        build_cache_persist(self)
 
     me update_entry(source: text, fingerprint: FileFingerprint,
                     dependencies: [text], outputs: [text]):
-        """Update or create a cache entry."""
-        self.fingerprints[source] = fingerprint
-        self.entries[source] = DependencyEntry(
-            source: source, fingerprint: fingerprint,
-            dependencies: dependencies, outputs: outputs)
+        """Update or create a cache entry.
+
+        deps_iface is computed HERE, at record time, so the entry's validity is
+        pinned to the dependencies' interfaces as they were when the artifact
+        was produced. If any dependency is unreadable the fold is nil and ""
+        is stored — has_cached_object then fails closed on this entry."""
+        build_cache_record_entry_with_fp(self, source, fingerprint,
+            dependencies, outputs)
 
     me remove_entry(source: text):
         self.entries.remove(source)
@@ -530,19 +545,7 @@ impl BuildCache:
         # method call on the struct-FIELD receiver
         # (entry.fingerprint.is_stale(..)) hits the stage4 receiver-transport
         # defect.
-        if not self.entries.contains_key(source):
-            return false
-        val entry = self.entries[source]
-        val fresh = FileFingerprint.from_file(source)
-        if val fingerprint = fresh:
-            if entry.fingerprint.content_hash != fingerprint.content_hash:
-                return false
-            # Check all output files still exist on disk
-            for out in entry.outputs:
-                if not incremental_file_exists(out):
-                    return false
-            return true
-        false
+        build_cache_entry_is_valid(self, source)
 
     fn get_cached_outputs(source: text) -> [text]?:
         """Return cached output paths if entry is fresh, else nil."""
@@ -785,4 +788,118 @@ fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
 
 export FileFingerprint, DependencyEntry, ChangeKind, IncrChangeSet
 export BuildCache, IncrementalCompiler
+# Free-function facade over BuildCache for cross-module callers. The current
+# self-hosted child binary erases class receivers across module boundaries
+# ("method not found on type `object`"), so specs and out-of-module tooling go
+# through these; inside this module the receiver type is concrete.
+# The interface-digest gate as plain-data functions (text in, bool out) —
+# the exact pair the BuildCache paths below call, exposed separately so it
+# can be exercised from specs (class values are erased across module
+# boundaries by the current self-hosted child binary).
+pub fn dep_iface_gate_record(dep_paths: [text]) -> text:
+    """Fold to record at compile time; "" when any dep is unreadable (the
+    stored "" then fails closed at validation)."""
+    incremental_dependency_interface_fold(dep_paths) ?? ""
+
+pub fn dep_iface_gate_valid(recorded: text, dep_paths: [text]) -> bool:
+    """Fail-closed validation: "" recorded, or any currently unreadable
+    dependency, is never valid; otherwise valid iff the recomputed fold is
+    byte-identical to the recorded one."""
+    if recorded == "":
+        return false
+    val fold = incremental_dependency_interface_fold(dep_paths)
+    if val fresh_fold = fold:
+        return recorded == fresh_fold
+    false
+
+pub fn build_cache_open(cache_path: text) -> BuildCache:
+    BuildCache.load(cache_path)
+
+pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
+                                        fingerprint: FileFingerprint,
+                                        dependencies: [text], outputs: [text]):
+    """Record/update one entry. deps_iface is computed HERE, at record time,
+    so the entry's validity is pinned to the dependencies' interfaces as they
+    were when the artifact was produced. If any dependency is unreadable the
+    fold is nil and "" is stored — build_cache_entry_is_valid then fails
+    closed on this entry."""
+    val deps_iface = dep_iface_gate_record(dependencies)
+    cache.fingerprints[source] = fingerprint
+    cache.entries[source] = DependencyEntry(
+        source: source, fingerprint: fingerprint,
+        dependencies: dependencies, outputs: outputs,
+        deps_iface: deps_iface)
+
+pub fn build_cache_record_entry(cache: BuildCache, source: text,
+                                dependencies: [text], outputs: [text]) -> bool:
+    val fp = FileFingerprint.from_file(source)
+    if val fp_val = fp:
+        build_cache_record_entry_with_fp(cache, source, fp_val, dependencies, outputs)
+        return true
+    false
+
+pub fn build_cache_entry_is_valid(cache: BuildCache, source: text) -> bool:
+    """Entry freshness: own source hash, outputs on disk, and the
+    interface-digest gate (Phase D): the entry is only valid while its
+    dependencies' INTERFACES are byte-identical to what they were at compile
+    time. Body-only dependency edits leave the fold unchanged (still a hit);
+    a signature edit changes it (miss). Fail closed: a legacy/corrupt entry
+    ("" recorded) or a currently unreadable dependency (nil fold) is never a
+    hit."""
+    if not cache.entries.contains_key(source):
+        return false
+    val entry = cache.entries[source]
+    val fresh = FileFingerprint.from_file(source)
+    if val fingerprint = fresh:
+        if entry.fingerprint.content_hash != fingerprint.content_hash:
+            return false
+        for out in entry.outputs:
+            if not incremental_file_exists(out):
+                return false
+        return dep_iface_gate_valid(entry.deps_iface, entry.dependencies)
+    false
+
+pub fn build_cache_persist(cache: BuildCache):
+    """Persist cache to disk."""
+    val dir = incremental_parent_dir(cache.cache_path)
+    if dir != "":
+        incremental_mkdir_p(dir)
+    var lines: [text] = [
+        "version: {cache.version + 1}",
+        "entries: ["
+    ]
+    for source in cache.entries.keys():
+        val entry = cache.entries[source]
+        val fp = entry.fingerprint
+        val source_text = incremental_sdn_escape(entry.source)
+        val hash_text = incremental_sdn_escape(fp.content_hash)
+        val deps_text = incremental_sdn_text_array(entry.dependencies)
+        val outputs_text = incremental_sdn_text_array(entry.outputs)
+        val deps_iface_text = incremental_sdn_escape(entry.deps_iface)
+        val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
+        lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\" " + "}")
+    lines = lines.push("]")
+    incremental_file_write_text(cache.cache_path, lines.join("\n"))
+
+
+
 export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash, native_build_producer_identity
+# Path-based entry points: the BuildCache instance never crosses a module
+# boundary (the current self-hosted child binary erases class values that do,
+# losing both methods and fields). All parameters and results are plain data.
+pub fn build_cache_record_entry_at(cache_path: text, source: text,
+                                   dependencies: [text], outputs: [text]) -> bool:
+    val cache = BuildCache.load(cache_path)
+    val fp = FileFingerprint.from_file(source)
+    if val fp_val = fp:
+        build_cache_record_entry_with_fp(cache, source, fp_val, dependencies, outputs)
+        build_cache_persist(cache)
+        return true
+    false
+
+pub fn build_cache_entry_is_valid_at(cache_path: text, source: text) -> bool:
+    build_cache_entry_is_valid(BuildCache.load(cache_path), source)
+
+export build_cache_open, build_cache_record_entry, build_cache_entry_is_valid, build_cache_persist, incremental_dependency_interface_fold
+export build_cache_record_entry_at, build_cache_entry_is_valid_at
+export dep_iface_gate_record, dep_iface_gate_valid

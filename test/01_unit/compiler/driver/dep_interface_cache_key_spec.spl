@@ -1,0 +1,99 @@
+"""
+# Dependency Interface Digest in Cache Keys
+
+**Category:** Infrastructure
+**Wires:** cache.action_key.dependency_interface_fold into the BuildCache
+entry lifecycle (Phase D,
+doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md):
+`build_cache_record_entry_with_fp` records `dep_iface_gate_record(deps)` into
+`DependencyEntry.deps_iface`; `build_cache_entry_is_valid` (the body of
+`BuildCache.has_cached_object`) requires `dep_iface_gate_valid`.
+
+## Overview
+
+The gate is exercised here through its plain-data pair
+(`dep_iface_gate_record` / `dep_iface_gate_valid`) — the EXACT functions the
+BuildCache record/validate paths call — because the current self-hosted child
+test binary erases class values across module boundaries ("method/field not
+found on type `object`"; native_capsule_result_receipt_spec is red at HEAD
+for the same reason), so a BuildCache instance cannot be driven end-to-end
+from a spec. See
+doc/08_tracking/bug/selfhosted_child_erases_class_values_cross_module_2026-08-18.md.
+
+Contract:
+- a dependency's SIGNATURE edit changes the fold -> gate invalid;
+- a dependency's BODY-only edit leaves the fold unchanged -> gate still
+  valid (positive control: the gate cannot pass by invalidating everything);
+- a missing/unreadable dependency, or an absent/corrupted recorded digest,
+  fails CLOSED (never valid).
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.io.{file_write, file_delete}
+use compiler.driver.cache.action_key.{dependency_interface_fold}
+use compiler.driver.driver_build.incremental.{
+    dep_iface_gate_record, dep_iface_gate_valid
+}
+
+val DEP_PATH: text = "/tmp/simple-dep-iface-dep.spl"
+val DEP2_PATH: text = "/tmp/simple-dep-iface-dep2.spl"
+
+val DEP_V1: text = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+# Same signature, different BODY only.
+val DEP_BODY_EDIT: text = "fn add(a: i64, b: i64) -> i64:\n    val t = a\n    t + b\n"
+# Signature change: return type differs.
+val DEP_SIG_EDIT: text = "fn add(a: i64, b: i64) -> f64:\n    a + b\n"
+
+fn record_v1() -> text:
+    """Write dep fixtures and record the fold, as update_entry does at
+    compile time. Returns the recorded digest."""
+    _ = file_write(DEP_PATH, DEP_V1)
+    _ = file_write(DEP2_PATH, "fn helper() -> i64:\n    7\n")
+    val recorded = dep_iface_gate_record([DEP_PATH, DEP2_PATH])
+    assert_true(recorded != "")
+    recorded
+
+describe "dependency_interface_fold (pure)":
+    it "is deterministic and order-insensitive":
+        val a = dependency_interface_fold(["p1=d1", "p2=d2"])
+        val b = dependency_interface_fold(["p2=d2", "p1=d1"])
+        assert_equal(a, b)
+
+    it "changes when any dependency digest changes":
+        val a = dependency_interface_fold(["p1=d1", "p2=d2"])
+        val c = dependency_interface_fold(["p1=d1", "p2=OTHER"])
+        assert_true(a != c)
+
+describe "interface-digest cache gate (record at compile, validate at reuse)":
+    it "is valid when nothing changed since record time":
+        val recorded = record_v1()
+        assert_true(dep_iface_gate_valid(recorded, [DEP_PATH, DEP2_PATH]))
+
+    it "stays valid after a dependency BODY-only edit (positive control)":
+        val recorded = record_v1()
+        _ = file_write(DEP_PATH, DEP_BODY_EDIT)
+        assert_true(dep_iface_gate_valid(recorded, [DEP_PATH, DEP2_PATH]))
+
+    it "invalidates after a dependency INTERFACE edit":
+        val recorded = record_v1()
+        _ = file_write(DEP_PATH, DEP_SIG_EDIT)
+        assert_false(dep_iface_gate_valid(recorded, [DEP_PATH, DEP2_PATH]))
+
+    it "fails closed when a dependency source is missing at validation":
+        val recorded = record_v1()
+        _ = file_delete(DEP_PATH)
+        assert_false(dep_iface_gate_valid(recorded, [DEP_PATH, DEP2_PATH]))
+
+    it "fails closed on an absent/corrupted recorded digest":
+        val recorded = record_v1()
+        # Sabotage: the recorded digest is blanked (legacy/corrupt entry
+        # shape) while every dependency is pristine on disk. Must NEVER
+        # validate — absent is not "unchanged".
+        assert_true(recorded != "")
+        assert_false(dep_iface_gate_valid("", [DEP_PATH, DEP2_PATH]))
+
+    it "records \"\" (fail-closed sentinel) when a dependency is unreadable":
+        _ = file_delete(DEP_PATH)
+        val recorded = dep_iface_gate_record([DEP_PATH, DEP2_PATH])
+        assert_equal(recorded, "")
+        assert_false(dep_iface_gate_valid(recorded, [DEP_PATH, DEP2_PATH]))
