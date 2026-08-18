@@ -29,24 +29,60 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
   the not-yet-landed `reference Type` / `.to_binary()` authoring sugar in the
   design doc above.
 
-## Landed so far (2026-08-18)
+## Landed so far (2026-08-18, updated end of session)
 - Gate: `scripts/check/check-no-direct-rt.shs` — ratchet mode (baseline
-  `no_direct_rt_baseline.txt`, only goes down) + `--critical`/`SIMPLE_RT_CRITICAL=1`
-  phase-A error mode (any forbidden site fails); FAIL prints fix-it guidance.
-  Current state: 14793 files scanned, 14241 forbidden sites (baseline
-  14251), with 6697 allowed provider references.
+  `scripts/check/no_direct_rt_baseline.txt` = **12821**, only goes down) +
+  `--critical`/`SIMPLE_RT_CRITICAL=1` phase-A error mode (any forbidden site
+  fails); FAIL prints fix-it guidance. Wired into
+  `scripts/check/pre-push-conflict-tree-guard.shs` (line 837, "direct rt_*
+  call-site ratchet"). Re-measured 2026-08-18 end of session: 14799 files
+  scanned, 12829 forbidden product sites — **8 over the 12821 baseline,
+  currently FAILING** — with 7817 allowed provider references (live numbers,
+  reproduce with `sh scripts/check/check-no-direct-rt.shs`; do not trust a
+  stale count here without re-running it).
 - Comparator: `binary_layout.spl` `compare_word` (8/8 spec green,
   `binary_compare_spec.spl`).
+- **Binary SSpec is now COMPLETE across domains** (goal 4/6): protocol
+  (TCP/UDP/IPv4 — `binary_domains_spec.spl` +
+  `binary_protocol_domains_spec.spl`), algorithm (SHA-256/CRC32 —
+  `binary_algorithm_domains_spec.spl`), embedded (UART register bit-tables —
+  `binary_embedded_domains_spec.spl`), and cipher/compress (pre-existing in
+  `binary_domains_spec.spl`) — all under
+  `test/01_unit/lib/common/spec/evidence/`. Plus a new DECLARATIVE generation
+  layer, `src/lib/common/spec/evidence/format/layout_schema.spl`: a
+  `WordLayout` declared once derives words/masks/labeled diffs instead of
+  hand-building a `BinaryLayout` beside a separate policy list, with an SDN
+  round-trip (`layout_to_sdn`/`layout_from_sdn`); proven parity-equal to the
+  hand-built TCP fixture in
+  `test/01_unit/lib/common/spec/evidence/binary_layout_schema_spec.spl`.
+  Usage guide extended with a "Declarative layouts" section and the
+  algorithm-domain `reserved_field`-vs-`dont_care` pitfall:
+  `doc/07_guide/infra/sspec/binary_sspec_usage.md`.
+- `gzip_validate` now verifies **CRC32 + ISIZE** trailer fields (fail-closed),
+  closing the structural-only gap recorded in
+  `doc/08_tracking/bug/gzip_validate_structural_only_no_crc_2026-08-18.md` —
+  see `20bbf622e88 fix(gzip): verify CRC32 + ISIZE trailer in validation`.
 - C-MIG-0001 (crc32_text): differential 5/5, regression 35/35, perf spec
   `test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl` (interpreter-lane
-  ceiling only; native parity pending). C-MIG inventory: 19 entries
-  (2 done, 8 planned, 8 assess, 1 verified). Registry:
-  `doc/08_tracking/c_migration/c_migration_inventory.sdn` + bug list
-  `c_replaceable_bug_list.md` (C-MIG-0001..0020).
-- Track B (parallel-agent wave): 11 symbol→wrapper rows in rt_migration_cycle.shs
-  TB_TABLE (time_now_unix_micros, file_exists, file_delete, env_get, getpid,
-  process_run, file_copy, thread_sleep, get_args, file_write); Track C
-  (rt_file_read_text coalesced), Track D (text/bytes signature-exact).
+  ceiling only; native parity pending). **C-MIG registry now runs through
+  C-MIG-0027** (`char_from_code`, differential 6/6) — 588-line registry
+  `doc/08_tracking/c_migration/c_migration_inventory.sdn`; C-MIG-0013 was
+  deleted from the registry. See also the dispatch-dead C function audit
+  (`9980d16801e docs(c-mig): dispatch-dead C function audit — 23 dead / 343
+  live-other-lane`) and codegen-lane perf re-measures: base64url
+  array-accumulator 44.7x -> **35.05x codegen lane, still OPEN**
+  (C-MIG-0023), utf8 batched-ASCII fast path 16.6x -> **8.27x codegen lane,
+  still OPEN** (C-MIG-0022), and the time-utils 3.18x anomaly **resolved as
+  an ARTIFACT** of per-call clock-probe overhead, not a real JIT regression
+  (`48500ace49d`). New Fix-test standard and C-migration test standard:
+  `doc/03_plan/infra/binary_runtime_hardening/plan.md`.
+- Track B (parallel-agent wave): rt_migration_cycle.shs `TB_TABLE` now has
+  **20 symbol→wrapper rows** (time_now_unix_micros, file_exists,
+  file_delete, env_get, getpid, process_run, file_copy, thread_sleep/
+  sleep_ms, get_args, file_write/file_write_bytes, env_set, dir_exists,
+  dir_create_all, file_append_text, process_is_running, dir_list, dir_walk,
+  platform_name, hash_text); Track C (rt_file_read_text coalesced), Track D
+  (text/bytes signature-exact).
 - Compiler fixes proving the alias lane: strict-JIT fail-open closed;
   bare-assignment locals minted correctly (both in `src/compiler_rust`,
   deployed binary still needs rebuild+deploy to pick up the second).

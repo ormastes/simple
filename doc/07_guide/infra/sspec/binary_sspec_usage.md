@@ -166,6 +166,37 @@ plain reference-only form (no expected/actual, no diff) — one line per word,
   directory — check that directory listing for newly landed files before
   assuming a specific path exists.
 
+## Declarative layouts (`layout_schema.spl`)
+
+`src/lib/common/spec/evidence/format/layout_schema.spl` is the GENERATION half
+added alongside the domain suites: declare a `WordLayout` (named fields with
+global bit offsets/widths and a per-field `compare`/`dont_care`/`reserved`
+policy) **once**, and derive the expected words, compare masks, and labeled
+diff rows from it — instead of hand-building a `BinaryLayout` word array next
+to a separate `[ComparePolicy]` list that can drift apart. Key functions:
+`compare_field`/`dont_care_field_spec`/`reserved_field_spec` (field
+constructors), `layout_words`/`layout_masks` (derive the `BinaryLayout` word
+table + policy list), `layout_compare`/`layout_render` (drive `compare_word`/
+`stacked_compare_rows` directly from the `WordLayout`), and
+`layout_to_sdn`/`layout_from_sdn` for an SDN round-trip.
+
+5-line field-list example, the same TCP header fixture as the "Domain
+recipes" section above but declared through the schema
+(`test/01_unit/lib/common/spec/evidence/binary_layout_schema_spec.spl:36-39`,
+`tcp_schema_layout()`):
+
+```
+compare_field("window", 0, 16, 0x1000, "receive window"),
+compare_field("flags", 16, 6, 0x02, "TCP flags"),
+reserved_field_spec("reserved", 22, 6),
+compare_field("data_offset", 28, 4, 5, "header length in words")
+```
+
+The spec asserts this declarative fixture generates the exact same expected
+word and compare mask as the hand-built `tcp_word_layout()` in
+`binary_domains_spec.spl` — proving the declarative path is a projection of
+the same model, not a second, independently-drifting one.
+
 ## Pitfalls (verified against source, not assumed)
 
 - **Word width is fixed at 64 bits for the hex/binary renderers.**
@@ -198,6 +229,13 @@ plain reference-only form (no expected/actual, no diff) — one line per word,
   `reserved: true` field) — see precedence rule step 2 above. If a field is
   sometimes legitimately nonzero, it must not be declared `reserved` in the
   layout; make it an ordinary `binary_field` with an explicit policy per call.
+  This is exactly the algorithm-domain agent's finding while building the
+  CRC-32 truncated-checksum fixture: `reserved_field` "always checks
+  reserved_zero (overriding dont_care), so an intentionally-ignored high half
+  — as opposed to bits that must genuinely be zero — is modeled" as a plain
+  `binary_field` paired with `policy_dont_care` at compare time, not
+  `reserved_field` (`test/01_unit/lib/common/spec/evidence/binary_algorithm_domains_spec.spl:138-150`,
+  `crc32_low_half_layout()`'s `hi_ignored` field).
 - **`ignored` status requires `compare_mask == 0` across the WHOLE word**,
   not per-field — a word with one `dont_care` field and one `exact` field
   that happens to match still reports `"pass"`, not `"ignored"`
