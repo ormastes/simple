@@ -15,7 +15,12 @@ use app.io.*
 
 # ✅ CORRECT - Import from submodule
 use lib.database.core.{StringInterner, SdnTable}
+```
 
+The two forms below are shown so you can recognise them; they are **not**
+runnable, so this block is deliberately not a `simple` fence:
+
+```text
 # ❌ WRONG - Bare module import (functions not accessible!)
 use app.io  # Loads module but functions unusable!
 
