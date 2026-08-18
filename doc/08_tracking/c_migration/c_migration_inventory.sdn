@@ -218,3 +218,52 @@ c_migrations:
       a JIT/native-codegen re-measurement, since `bin/simple test` hard-defaults
       to the interpreter (see .claude/rules/testing.md run-vs-test divergence
       note) and is not the engine ordinary programs run on."
+
+  - id: C-MIG-0023
+    path: src/runtime/runtime.c
+    symbols:
+      - rt_base64url_encode
+      - rt_base64url_decode
+    classification: product_algorithm
+    replacement: std.common.base_encoding.base64.{base64url_encode,
+      base64url_decode} (already implemented in
+      src/lib/common/base_encoding/base64.spl — RFC 4648 section 5 url-safe
+      alphabet, no padding; the module's own header comment already states
+      it is "the pure-Simple replacement for the C extern
+      rt_base64url_decode used in id_token.spl")
+    simple_callers_migrated: []
+    caller_note: >
+      rt_base64url_encode(input: text, len: i64) -> text and
+      rt_base64url_decode(encoded: text) -> text are registered in the
+      interpreter's extern dispatch table
+      (interpreter_extern/crypto.rs::rt_base64url_encode /
+      rt_base64url_decode, interpreter_extern/mod.rs:665-666), backed by the
+      `base64` crate's URL_SAFE_NO_PAD engine rather than the C source
+      itself when reached through `bin/simple test`'s tree-walk
+      interpreter — same RFC 4648 section 5 semantics as
+      src/runtime/runtime.c:2552-2610, so the differential spec treats
+      whichever the extern call reaches as the oracle and documents the
+      distinction. No production `extern fn rt_base64url_encode/decode`
+      caller migration was performed in this pass — this entry only
+      establishes differential correctness + perf evidence for the
+      existing base64.spl implementation as a base64url twin; migrating
+      remaining extern-declared callers is left for a follow-up.
+    correctness_spec: test/01_unit/lib/common/base_encoding/base64/base64url_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (RFC 4648 §10 KAT vectors re-expressed url-safe, C-oracle differential round-trip incl. UTF-8 multibyte, url-safe-alphabet-no-padding assertion, single-char-corruption discrimination, determinism check, 100-vector shared-logic bulk differential loop over length 0..99 with UTF-8 multibyte every 7th char, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple base64url_encode measured ~44.1x
+      slower than the C oracle (interpreter dispatch to the `base64` crate's
+      URL_SAFE_NO_PAD engine) over the 100-vector bulk corpus
+      (simple_us=169643, c_us=3847, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). The pure-Simple base64_encode builds
+      its output via repeated `text + text` concatenation in a scalar loop,
+      while the C/Rust side is a tight byte-indexed table lookup; ratio
+      recorded per the mandatory perf-regression rule, not hidden. Not yet
+      filed as a standalone bug — same inconclusive-fast-path caveat as
+      C-MIG-0022 (bin/simple test hard-defaults to the interpreter, not the
+      engine ordinary programs run on)."
+    perf_measured: >
+      100 shared branch-covering text vectors (length 0..99, ASCII plus a
+      2-byte UTF-8 codepoint every 7th char via seeded LCG), 2026-08-18:
+      simple_us=169643 c_us=3847, ratio ~44.1x.
+    shared_corpus: 100

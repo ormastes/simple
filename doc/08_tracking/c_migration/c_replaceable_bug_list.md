@@ -25,7 +25,7 @@ tranches · `assess` = needs per-symbol caller analysis before commitment.
 | C-MIG-0010 | openssl/tls glue (3 files) | 968 | third-party wrapper | facade stays; owned handshake state tracking to Simple; KAT + interop corpus mandatory | assess |
 | C-MIG-0011 | time/timestamp (2 files) | 265 | runtime primitive | provider alias (clock syscall is the boundary) | planned |
 | C-MIG-0012 | bootstrap/startup (6 files) | 327 | bootstrap stage | staged self-hosting plan; not general-migration scope | planned |
-| C-MIG-0013 | mcp shim | 136 | CORRECTED: 2 of 3 exports dead; rt_stdin_read_mcp_message_text LIVE via rt-forward cache mapping | partial delete staged; migrate stdio read first | assess |
+| C-MIG-0013 | mcp shim | 0 (deleted 2026-08-18) | DELETED: forward-cache row mapped a symbol (mcp_stdio_read_message) that existed nowhere; pure-Simple read_stdin_message is the real implementation | runtime_mcp_core.c + decls + 4 link/roster refs + forward-cache row removed; smoke test retargeted | done |
 | C-MIG-0014 | wasm shim (scv_wasm_shim.c) | 459 | platform ABI shim | retain; external SDK boundary (guard SKIPs it already) | assess |
 | C-MIG-0015 | media wrappers (sdl2/sdl3/glfw/audio/font, 23 files) | 5,409 | third-party wrapper | facades retained; owned pixel/format conversion helpers to Simple | assess |
 | C-MIG-0016 | src/runtime/test/** (27 files) | 3,870 | conformance oracle | test-only, VERIFIED never production-linked (capsule selfcheck binaries only) | **verified** |
@@ -34,6 +34,7 @@ tranches · `assess` = needs per-symbol caller analysis before commitment.
 | C-MIG-0020 | runtime_native.c:rt_hash_text + runtime_legacy_core.c:rt_str_hash | ~15 | product algorithm | std.hash text.hash() / rt_hash_text ABI bridge (already implemented, proven equivalent) | **done** (7/7 differential incl. KAT + UTF-8 + boundary lengths, C retained as oracle) |
 | C-MIG-0021 | runtime_native.c:rt_string_to_int | ~10 | product algorithm | std.common.text.parse_i64 (text.spl, already implemented, proven equivalent on well-formed input) | **done** (7/7 differential incl. KAT + 100-vector shared branch-covering bulk loop with perf evidence, C retained as oracle; failure-sentinel divergence 0-vs--1 on malformed/empty input documented not asserted-equal; perf ratio ~1.59x, under 2x threshold) |
 | C-MIG-0022 | runtime_simd_utf8.c:rt_text_validate_utf8 | ~5 | product algorithm | pure-Simple validated_utf8_bytes_to_text_linear (base_encoding/utilities.spl, already implemented, proven equivalent) | **done** (4/4 differential incl. KAT + malformed-byte discrimination + 88-vector bulk loop, C retained as oracle; PERF FINDING: Simple ~32.9x slower under interpreter, recorded not hidden) |
+| C-MIG-0023 | runtime.c:rt_base64url_encode/rt_base64url_decode | ~60 | product algorithm | std.common.base_encoding.base64.{base64url_encode,base64url_decode} (base64.spl, already implemented, proven equivalent) | **done** (6/6 differential incl. RFC 4648 §10 KAT + 100-vector shared branch-covering bulk loop with UTF-8, C retained as oracle; PERF FINDING: Simple ~44.1x slower under interpreter, recorded not hidden) |
 
 Every `assess` entry must be resolved to a concrete class before Wave-4 work
 on it starts (unclassified = critical failure per release gates §18). New
