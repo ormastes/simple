@@ -597,4 +597,113 @@ Files touched (absolute paths):
 - `/mnt/data/worktrees/simple-main/src/lib/common/diagram/__init__.spl` (new)
 - `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/diagram/__init__.spl` (delegator)
 - `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/diagram/__init__.spl` (delegator)
+
+## Tranche 5 (goal 7, 2026-08-18) — `debug/formats/test/macho_roundtrip_spec.spl` and `debug/formats/test/golden_elf_dwarf_spec.spl` merged
+
+Selection: fresh md5sum across all 4 trees for `net/telnet.spl` (previously
+flagged mergeable-candidate) and the two paired test-fixture families named
+in the "Recommended next tranche" list above.
+
+**Rejected this pass, with evidence:**
+
+- `net/telnet.spl` (`604fcfe0...` sync=async=gc_async identical, gc_sync
+  `19a3bd81...` divergent) — imports `use std.net.tcp.{TcpStream}`. `tcp.spl`
+  itself has **zero** `use`/`import` lines and is byte-identical across all 3
+  matching trees, so on the surface it looks like a clean leaf — but
+  `net/tcp.spl` is one of the paths this task was explicitly told not to
+  re-attempt (already known blocked). Since telnet.spl's only import is
+  exactly that blocked module, telnet.spl is transitively blocked too: moving
+  it to `common` without also resolving why `tcp.spl` is blocked would just
+  relocate the same unverified hazard one hop away. SKIP, deferred pending
+  whatever closer read eventually clears `net/tcp.spl`.
+- The `.spipe_matchers_*` generated-matcher siblings of both spec files
+  (`.spipe_matchers_macho_roundtrip_spec.spl` /
+  `.spipe_matchers_golden_elf_dwarf_spec.spl`) were **not** delegated, per
+  the map's own top-20 verdict ("generated, regen not merge") — only the
+  real spec files were moved. The matcher files stay as two identical
+  per-tree copies, untouched.
+
+### Accepted: `debug/formats/test/macho_roundtrip_spec.spl` (649 lines, sync+async only)
+
+- md5sum: `nogc_sync_mut` = `nogc_async_mut` = `9c0b256d70c9ccf0d23a284e7d8e1525`.
+  Not present in `gc_async_mut` or `gc_sync_mut` (2-tree duplication).
+- Import audit: `use std.debug.formats.dwarf_parser.{...}`,
+  `use std.debug.formats.debug_types.{...}` and 3 more `debug/formats`
+  siblings — none of those sibling modules were moved; verified each is
+  itself byte-identical between `nogc_sync_mut` and `nogc_async_mut`
+  (`debug_types`, `debug_provider`, `dwarf_constants`, `dwarf_abbrev`,
+  `dwarf_line_program` all matched pairwise), so resolving `use` from either
+  tree's runtime context yields identical content — safe by symmetry, same
+  reasoning class as the other merged specs' leaf imports.
+- Collision check: 27 top-level helper symbols (constants + fns) grepped
+  against every `fn`/`struct`/`enum`/`class`/`val`/`trait` definition under
+  `src/lib/common/` — 3 name-only hits (`read_u32_le`/`write_u32_le`/
+  `write_u64_le` also defined in `src/lib/common/compress/zstd_types.spl`
+  and `compress/utilities.spl`), but those are private per-file helpers in
+  an unrelated module path (`compress/*`, not `debug/formats/test/*`) — no
+  actual namespace collision at the destination module path. 0 real
+  collisions.
+- Moved to `src/lib/common/debug/formats/test/macho_roundtrip_spec.spl`
+  (649 lines, unchanged). The 2 identical tree copies (`nogc_sync_mut`,
+  `nogc_async_mut`) replaced with a 5-line
+  `pub use std.common.debug.formats.test.macho_roundtrip_spec*` delegator,
+  same comment style as precedent. `gc_async_mut`/`gc_sync_mut` never had
+  this file.
+- Callers: `grep -rln macho_roundtrip` across `test/` and `src/app` found
+  **zero** hits — this spec is only ever run directly by path
+  (`bin/simple test src/lib/<tree>/debug/formats/test/macho_roundtrip_spec.spl`),
+  not imported anywhere else.
+- Verification:
+  - `bin/simple test src/lib/nogc_sync_mut/debug/formats/test/macho_roundtrip_spec.spl`
+    -> `Results: 65 total, 64 passed, 1 failed`.
+  - `bin/simple test src/lib/nogc_async_mut/debug/formats/test/macho_roundtrip_spec.spl`
+    -> `Results: 65 total, 64 passed, 1 failed` (delegator path, identical).
+  - Baseline check: `git stash` (reverting to pre-merge HEAD content) then
+    re-ran the sync-tree spec -> `Results: 65 total, 64 passed, 1 failed`,
+    identical to post-merge — the 1 failure is pre-existing and unaffected
+    by this change. `git stash pop` restored the merge.
+
+Net line delta: -649*2 (two 649-line duplicates removed) + 649 (common
+owner) + 5*2 (two 5-line delegators) = **-639 lines**.
+
+### Accepted: `debug/formats/test/golden_elf_dwarf_spec.spl` (516 lines, sync+async only)
+
+- md5sum: `nogc_sync_mut` = `nogc_async_mut` = `e909a63ab9d5d778501b00539a06a070`.
+  Not present in `gc_async_mut` or `gc_sync_mut` (2-tree duplication).
+- Import audit: `use std.debug.formats.dwarf_parser.{DwarfParser, DwarfSections}`,
+  `use std.debug.formats.debug_types.{...}` — same sibling-symmetry
+  reasoning as macho_roundtrip_spec.spl above (both siblings confirmed
+  byte-identical sync/async).
+- Collision check: 6 top-level helper symbols (`push_u16_le`, `push_u32_le`,
+  `push_u64_le`, `push_string`, `build_golden_parser`,
+  `build_multi_cu_parser`) grepped against every definition under
+  `src/lib/common/` — **0 collisions**.
+- Moved to `src/lib/common/debug/formats/test/golden_elf_dwarf_spec.spl`
+  (516 lines, unchanged). The 2 identical tree copies replaced with a
+  5-line `pub use std.common.debug.formats.test.golden_elf_dwarf_spec*`
+  delegator. `gc_async_mut`/`gc_sync_mut` never had this file.
+- Callers: `grep -rln golden_elf_dwarf` across `test/` and `src/app` found
+  zero hits — same direct-by-path-only usage pattern as macho_roundtrip_spec.spl.
+- Verification:
+  - `bin/simple test src/lib/nogc_sync_mut/debug/formats/test/golden_elf_dwarf_spec.spl`
+    -> `Results: 42 total, 42 passed, 0 failed`.
+  - `bin/simple test src/lib/nogc_async_mut/debug/formats/test/golden_elf_dwarf_spec.spl`
+    -> `Results: 42 total, 42 passed, 0 failed`.
+  - Baseline check: `git stash` / re-run sync-tree spec pre-merge ->
+    `Results: 42 total, 42 passed, 0 failed`, identical to post-merge (this
+    file has no pre-existing failures either way). `git stash pop` restored
+    the merge.
+
+Net line delta: -516*2 + 516 + 5*2 = **-506 lines**.
+
+**Tranche 5 total net line delta: -639 + -506 = -1,145 lines** across the 2
+merged targets.
+
+Files touched (absolute paths):
+- `/mnt/data/worktrees/simple-main/src/lib/common/debug/formats/test/macho_roundtrip_spec.spl` (new)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/debug/formats/test/macho_roundtrip_spec.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/debug/formats/test/macho_roundtrip_spec.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/common/debug/formats/test/golden_elf_dwarf_spec.spl` (new)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/debug/formats/test/golden_elf_dwarf_spec.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/debug/formats/test/golden_elf_dwarf_spec.spl` (delegator)
 - `/mnt/data/worktrees/simple-main/doc/08_tracking/dedup/cross_tree_duplication_map_2026-08-18.md` (this section)
