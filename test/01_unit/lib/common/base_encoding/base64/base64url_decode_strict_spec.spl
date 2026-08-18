@@ -1,0 +1,114 @@
+# @req REQ-C-MIG-BASE64URL
+#
+# Strict unpadded base64url decoding (RFC 4648 section 3.3 / section 5).
+#
+# Companion to base64url_crosslang_spec.spl, whose CHARACTERIZATION examples
+# pin the LENIENT `base64url_decode` behaviour (invalid bytes silently
+# skipped). That function is deliberately unchanged; this spec covers the new
+# strict sibling `base64url_decode_strict`, which REJECTS instead.
+#   -> doc/08_tracking/bug/base64url_decode_accepts_invalid_alphabet_2026-08-18.md
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode, base64url_decode_strict}
+
+describe "base64url_decode_strict — rejects out-of-alphabet input (RFC 4648 s3.3)":
+
+    it "POSITIVE CONTROL: the strict decoder under test is really loaded":
+        # If the import silently resolved to nothing, every `is_ok() == false`
+        # assertion below could pass for the wrong reason. This example fails
+        # RED on a wrong/missing import, because it demands a SUCCESSFUL
+        # decode with an exact payload, which no absent/sentinel value gives.
+        val r = base64url_decode_strict("U2ltcGxl")
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), "Simple")
+        assert_equal(base64url_encode("Simple"), "U2ltcGxl")
+
+    # ---- REPRODUCING: the exact measured inputs from the bug doc ----------
+
+    it "REPRODUCING: all-invalid groups are rejected (lenient one returns empty)":
+        # Lenient measured behaviour: "!!!!" / "%%" / "...." -> "" — a caller
+        # cannot distinguish that from a legitimately empty payload.
+        for v in ["!!!!", "%%", "...."]:
+            assert_equal(base64url_decode(v), "")          # lenient: no signal
+            assert_equal(base64url_decode_strict(v).is_ok(), false)
+
+    it "REPRODUCING: mixed valid/invalid is rejected, not partially decoded":
+        # Lenient measured behaviour: the invalid symbol is DROPPED and the
+        # valid remainder decoded, so a malformed segment looks well-formed.
+        assert_equal(base64url_decode("ab*d").len(), 2)    # lenient
+        assert_equal(base64url_decode_strict("ab*d").is_ok(), false)
+
+        assert_equal(base64url_decode("a b c").len(), 2)   # lenient
+        assert_equal(base64url_decode_strict("a b c").is_ok(), false)
+
+    it "REPRODUCING: standard-alphabet '+' and '/' are rejected":
+        # Lenient measured behaviour: "a+b/c" -> 3 chars. '+' and '/' are the
+        # STANDARD alphabet's chars 62/63; base64url uses '-' and '_'.
+        assert_equal(base64url_decode("a+b/c").len(), 3)   # lenient
+        assert_equal(base64url_decode_strict("a+b/c").is_ok(), false)
+        assert_equal(base64url_decode_strict("a+bc").is_ok(), false)
+        assert_equal(base64url_decode_strict("ab/c").is_ok(), false)
+
+    # ---- DEFECT CLASS: neighbouring shapes the same class hits ------------
+
+    it "DEFECT CLASS: every valid unpadded base64url of length 0..99 round-trips":
+        # The strict decoder must ACCEPT all well-formed input — a rejector
+        # that rejects too much is the same defect with the sign flipped.
+        # Payload lengths 0..99 cover every mod-3 residue, hence every valid
+        # encoded-length residue (0, 2, 3 mod 4), at many sizes.
+        var accepted = 0
+        var k = 0
+        while k < 100:
+            var payload = ""
+            var j = 0
+            while j < k:
+                payload = payload + "abcdefghijklmnopqrstuvwxyz0123456789".char_at(j % 36)
+                j = j + 1
+            val enc = base64url_encode(payload)
+            assert_true(enc.bytes().len() % 4 != 1)
+            val r = base64url_decode_strict(enc)
+            assert_equal(r.is_ok(), true)
+            assert_equal(r.unwrap(), payload)
+            # Same bytes as the lenient decoder on valid input: strict changes
+            # only the invalid path, never the well-formed one.
+            assert_equal(r.unwrap(), base64url_decode(enc))
+            accepted = accepted + 1
+            k = k + 1
+        assert_equal(accepted, 100)
+
+    it "DEFECT CLASS: the empty string is VALID base64url and decodes to empty":
+        # Documented decision: zero bytes encode to zero characters, residue
+        # 0 mod 4, so "" is well-formed and must be Ok(""), NOT an error.
+        val r = base64url_decode_strict("")
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), "")
+
+    it "DEFECT CLASS: length residue 1 mod 4 is impossible and is rejected":
+        # No byte sequence encodes to a length of 1 mod 4, so such a tail is
+        # always truncation — even when every character is in the alphabet.
+        for v in ["a", "abcde", "abcdefffi"]:
+            assert_true(v.bytes().len() % 4 == 1)
+            assert_equal(base64url_decode_strict(v).is_ok(), false)
+
+    it "DEFECT CLASS: padding, whitespace and control bytes are rejected":
+        # '=' is valid in PADDED base64 but not in the unpadded url form;
+        # whitespace is skipped by the lenient decoder and must not be here.
+        for v in ["ab==", "abc=", "ab\tc", "ab\nc", "ab c", "a\rbc"]:
+            assert_equal(base64url_decode_strict(v).is_ok(), false)
+
+    it "DEFECT CLASS: a single invalid byte anywhere in a long valid string is caught":
+        # Guards against a validator that only inspects a prefix or a tail.
+        val good = base64url_encode("the quick brown fox jumps over the lazy dog")
+        assert_equal(base64url_decode_strict(good).is_ok(), true)
+        val n = good.bytes().len()
+        for pos in [0, 1, n / 2, n - 1]:
+            val broken = good.substring(0, pos) + "*" + good.substring(pos + 1, n)
+            assert_equal(broken.bytes().len(), n)
+            assert_equal(base64url_decode_strict(broken).is_ok(), false)
+
+    it "DEFECT CLASS: '-' and '_' (the url-safe chars 62/63) are ACCEPTED":
+        # The mirror of the '+'/'/' rejection above: rejecting these instead
+        # would break every real JWT.
+        val r = base64url_decode_strict("-_-_")
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), base64url_decode("-_-_"))

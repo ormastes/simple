@@ -9,7 +9,8 @@
 #   base64_encode(data: text) -> text
 #   base64_decode(encoded: text) -> text
 #   base64url_encode(data: text) -> text
-#   base64url_decode(encoded: text) -> text
+#   base64url_decode(encoded: text) -> text                       (lenient)
+#   base64url_decode_strict(encoded: text) -> Result<text, Base64UrlError>
 
 # ============================================================================
 # Encoding table (RFC 4648 §4)
@@ -240,6 +241,63 @@ pub fn base64url_decode(encoded: text) -> text:
         out_bytes = out_bytes.push(61u8)
 
     base64_decode(_bytes_to_text(out_bytes))
+
+# ============================================================================
+# Strict base64url decode (RFC 4648 §3.3 — reject, do not repair)
+# ============================================================================
+
+enum Base64UrlError:
+    """Why a string is not valid unpadded base64url (RFC 4648 §5).
+
+    Variants:
+      InvalidChar(i64)   — byte offset of the first byte outside [A-Za-z0-9-_].
+                           '+', '/' and '=' are invalid here: they belong to
+                           the STANDARD alphabet / padded form, not base64url.
+      InvalidLength(i64) — the input length, whose mod-4 residue is 1. No
+                           sequence of bytes encodes to such a length, so a
+                           1-char tail is always truncation or corruption.
+    """
+    InvalidChar(i64)
+    InvalidLength(i64)
+
+pub fn base64url_decode_strict(encoded: text) -> Result<text, Base64UrlError>:
+    """Decode unpadded URL-safe base64 (RFC 4648 §5), REJECTING invalid input.
+
+    Strict sibling of `base64url_decode`, which is lenient (it silently skips
+    out-of-alphabet bytes and so cannot tell a malformed segment from a
+    well-formed one — see
+    doc/08_tracking/bug/base64url_decode_accepts_invalid_alphabet_2026-08-18.md).
+    Security-sensitive callers that decode untrusted input (JWT segments,
+    password-reset tokens) should use THIS function.
+
+    The lenient function's behaviour is deliberately unchanged; existing
+    callers keep working.
+
+    Contract:
+      - Ok(text) for every valid unpadded base64url string, byte-identical to
+        what `base64url_decode` returns for that same valid input.
+      - Err(InvalidChar(i)) for any byte outside [A-Za-z0-9-_], including
+        whitespace, '=' padding, and the standard-alphabet '+' and '/'.
+      - Err(InvalidLength(n)) when n % 4 == 1.
+      - Ok("") for the empty string: zero bytes encode to zero characters,
+        residue 0, so empty IS valid base64url.
+    """
+    val enc_bytes = encoded.bytes()
+    val n = enc_bytes.len()
+    if n % 4 == 1:
+        return Err(Base64UrlError.InvalidLength(n))
+    var i = 0
+    while i < n:
+        val b = enc_bytes[i] as i64
+        val ok = ((b >= 65 and b <= 90)      # A-Z
+            or (b >= 97 and b <= 122)        # a-z
+            or (b >= 48 and b <= 57)         # 0-9
+            or b == 45                       # '-'
+            or b == 95)                      # '_'
+        if not ok:
+            return Err(Base64UrlError.InvalidChar(i))
+        i = i + 1
+    Ok(base64url_decode(encoded))
 
 # ============================================================================
 # Internal: convert a raw byte array to text (UTF-8 interpretation)
