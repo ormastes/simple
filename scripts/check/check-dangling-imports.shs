@@ -1,0 +1,210 @@
+#!/bin/sh
+# Resolution-based dangling-import oracle.
+#
+# WHY THIS EXISTS
+# ---------------
+# doc/09_report/dangling_import_census_2026-08-18.md reported 307 module-level
+# and 444 symbol-level dangling `use` edges from a TEXT SCAN, and honestly
+# self-reported a ~93% false-positive rate (14 of 15 hand-checked hits were not
+# defects). A detector with a 93% FP rate is worse than none: it trains readers
+# to ignore it.
+#
+# The two FP generators the text scanner could not follow were named by its own
+# author and are both legitimate, widespread Simple idioms:
+#   (1) `pub use <BareName>` -- re-exports a LOCAL binding, not a module path.
+#   (2) plain whole-module `use <module>` -- the re-exported symbol universe is
+#       unknowable to a text scanner.
+# Neither is fixable with more regex: both require real name resolution.
+#
+# THE FIX: stop scanning text, ask the compiler.
+# `bin/simple run <file>` performs full module + symbol resolution and emits
+#   [use-warning] 'SYM' is named in `use M.{...}` but module 'PATH' does not
+#                 provide it (imported from 'IMPORTER')
+#   error: semantic: Cannot resolve module: M
+# Those two diagnostics ARE a working dangling-import checker. Because they come
+# from the resolver rather than a scanner, both FP classes above are structurally
+# impossible: the resolver follows `pub use <BareName>` and whole-module
+# re-exports natively. The census's own systemic verdict said as much -- the
+# defect is only that a dangling SYMBOL is a non-fatal warning on an rc=0 run,
+# so it accumulates silently until someone reads the log. This script reads the
+# log.
+#
+# ORACLE SURFACE -- measured 2026-08-18, and it is `run`, ONLY `run`:
+#   bin/simple run <f>      -> emits [use-warning]   (3 on
+#                              src/lib/nogc_sync_mut/platform_measurement_observer.spl)
+#   bin/simple compile <f>  -> emits 0 use-warnings on the SAME file (rc=1 for
+#                              an unrelated reason). NOT an oracle.
+#   bin/simple check <f>    -> rc=0, 0 use-warnings, style lint only. NOT an oracle.
+#   bin/simple symbols / ast-query -> `error: file not found: <name>`; these
+#                              subcommands do not exist in the seed.
+# So `run` it is, with a timeout and </dev/null, accepting that `run` executes
+# top-level code. rc is captured on the line AFTER the command, never through a
+# pipe.
+#
+# USAGE
+#   sh scripts/check/check-dangling-imports.shs --selftest
+#   sh scripts/check/check-dangling-imports.shs [--files LIST] [--sample N]
+#                                               [--jobs N] [--out TSV] [ROOT...]
+#
+# OUTPUT: TSV of resolver-confirmed edges, one per line:
+#   KIND<TAB>IMPORTER<TAB>MODULE<TAB>SYMBOL
+# where KIND is `module` (hard error, rc=1) or `symbol` (warning, rc=0).
+#
+# VERDICT (last line of stdout, same convention as the other check-*.shs):
+#   PASS  -- <n> file(s) resolved, 0 dangling edge(s)          exit 0
+#   FAIL  -- <n> file(s) resolved, <k> dangling edge(s): ...   exit 1
+#   ERROR -- nothing was checked                               exit 2
+# A run that fed 0 files to the compiler is ERROR, never a pass. Absence of a
+# usable `bin/simple` is ERROR, never a pass: absence of a compiler is absence
+# of evidence.
+
+set -u
+
+ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="$ROOT_DIR/bin/simple"
+JOBS=6
+SAMPLE=0
+FILELIST=""
+OUT=""
+SEED=0
+TIMEOUT=60
+SELFTEST=0
+ONEFILE=""
+ROOTS=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --resolve-one) ONEFILE="$2"; shift ;;
+    --selftest) SELFTEST=1 ;;
+    --files) FILELIST="$2"; shift ;;
+    --sample) SAMPLE="$2"; shift ;;
+    --seed) SEED="$2"; shift ;;
+    --jobs) JOBS="$2"; shift ;;
+    --out) OUT="$2"; shift ;;
+    --timeout) TIMEOUT="$2"; shift ;;
+    -*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) ROOTS="$ROOTS $1" ;;
+  esac
+  shift
+done
+
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked (no executable $SIMPLE)"; exit 2; }
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# resolve_one FILE -> appends TSV edges for FILE to stdout
+resolve_one() {
+  f="$1"
+  out="$WORK/o.$$"
+  timeout "$TIMEOUT" "$SIMPLE" run "$f" </dev/null >"$out" 2>&1
+  rc=$?
+  # rc 124 = our timeout, 143/144 = host earlyoom. All three are UNVERIFIED,
+  # not evidence of cleanliness, and are reported on stderr rather than folded
+  # into the clean count.
+  if [ "$rc" = 124 ] || [ "$rc" = 143 ] || [ "$rc" = 144 ]; then
+    echo "UNVERIFIED	$f	rc=$rc" >&2
+    rm -f "$out"; return 0
+  fi
+  # module-level: TWO distinct hard-error forms exist, and a harvester that
+  # knows only one is fail-open. Measured 2026-08-18 on the same fixture:
+  #   interpreter/semantic path -> `error: semantic: Cannot resolve module: M`
+  #   JIT/HIR-lowering path     -> "cannot resolve import `M`: ... code E1034"
+  # The real defect src/lib/nogc_sync_mut/mcp/jj/helpers.spl emits the first;
+  # a fresh out-of-tree fixture emits the second. Both are harvested.
+  #
+  # awk, not sed: the importer path is interpolated into the OUTPUT, and a path
+  # containing `/` silently breaks an `s/.../.../` delimiter -- which it did,
+  # producing `unknown option to \`s'` on every file and therefore ZERO edges,
+  # i.e. a fail-open scanner that reported everything clean. The selftest caught
+  # exactly this.
+  awk -v f="$f" '
+    match($0, /Cannot resolve module: [A-Za-z0-9_.]+/) {
+      m = substr($0, RSTART+23, RLENGTH-23)
+      print "module\t" f "\t" m "\t-"; next
+    }
+    match($0, /cannot resolve import `[A-Za-z0-9_.]+`/) {
+      m = substr($0, RSTART+23, RLENGTH-24)
+      print "module\t" f "\t" m "\t-"; next
+    }
+    /^\[use-warning\]/ {
+      # [use-warning] '"'"'SYM'"'"' is named in `use MODULE.{...}` but module ...
+      if (match($0, /'"'"'[^'"'"']+'"'"'/)) {
+        sym = substr($0, RSTART+1, RLENGTH-2)
+        if (match($0, /`use [A-Za-z0-9_.]+/)) {
+          mod = substr($0, RSTART+5, RLENGTH-5)
+          sub(/\.$/, "", mod)
+          print "symbol\t" f "\t" mod "\t" sym
+        }
+      }
+    }
+  ' "$out"
+  rm -f "$out"
+}
+
+if [ -n "$ONEFILE" ]; then
+  resolve_one "$ONEFILE"
+  exit 0
+fi
+
+if [ "$SELFTEST" = 1 ]; then
+  # Fixture 1: a file importing a module that provably does not exist must
+  # produce a `module` edge. Fixture 2: a clean file must produce none.
+  FX="$WORK/fx"; mkdir -p "$FX"
+  printf 'use app.definitely_not_a_real_module_xyz.thing\n\nfn main():\n    print("hi")\n' > "$FX/bad.spl"
+  printf 'fn main():\n    print("hi")\n' > "$FX/good.spl"
+  nbad=$(resolve_one "$FX/bad.spl" 2>/dev/null | wc -l)
+  ngood=$(resolve_one "$FX/good.spl" 2>/dev/null | wc -l)
+  fail=0
+  [ "$nbad" -ge 1 ] || { echo "SELFTEST FAIL: unresolvable-module fixture produced $nbad edges, expected >=1"; fail=1; }
+  [ "$ngood" -eq 0 ] || { echo "SELFTEST FAIL: clean fixture produced $ngood edges, expected 0"; fail=1; }
+  [ "$fail" = 0 ] || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+  echo "selftest: 2 fixture(s) OK"
+fi
+
+# ---- build the file list -----------------------------------------------
+LIST="$WORK/list"
+if [ -n "$FILELIST" ]; then
+  cp "$FILELIST" "$LIST"
+else
+  [ -n "$ROOTS" ] || ROOTS="src/lib src/app src/compiler src/os"
+  : > "$LIST"
+  for r in $ROOTS; do
+    [ -d "$ROOT_DIR/$r" ] || continue
+    # -L follows symlinked package roots; plain find misses 14 of them under
+    # src/compiler alone (census Resolution rule 1).
+    find -L "$ROOT_DIR/$r" -name '*.spl' -type f 2>/dev/null >> "$LIST"
+  done
+  # Owned-Code Scope per CLAUDE.md.
+  grep -v '/vendor/\|/target/\|\.vscode-test/' "$LIST" | sort -u > "$LIST.2" && mv "$LIST.2" "$LIST"
+fi
+
+if [ "$SAMPLE" -gt 0 ]; then
+  awk -v s="$SEED" 'BEGIN{srand(s)}{printf "%.9f\t%s\n", rand(), $0}' "$LIST" \
+    | sort -k1,1 | head -n "$SAMPLE" | cut -f2- > "$LIST.s" && mv "$LIST.s" "$LIST"
+fi
+
+NFILES=$(wc -l < "$LIST" | tr -d ' ')
+if [ "$NFILES" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 files in scope)"; exit 2
+fi
+
+# ---- resolve ------------------------------------------------------------
+# xargs -P for parallelism: each child re-enters this script in --resolve-one
+# mode, so the harvesting logic has exactly one definition and dash needs no
+# `wait -n` (unavailable in POSIX sh).
+EDGES="$WORK/edges"
+xargs -a "$LIST" -d '\n' -n 1 -P "$JOBS" -I{} sh "$0" --resolve-one {} \
+  --timeout "$TIMEOUT" 2>"$WORK/unverified" | sort -u > "$EDGES"
+NUNV=$(wc -l < "$WORK/unverified" | tr -d ' ')
+
+NEDGES=$(wc -l < "$EDGES" | tr -d ' ')
+if [ -n "$OUT" ]; then cp "$EDGES" "$OUT"; echo "edges written to $OUT"; fi
+cat "$EDGES"
+
+if [ "$NEDGES" -eq 0 ]; then
+  echo "PASS — $NFILES file(s) resolved ($NUNV unverified: timeout/OOM), 0 dangling edge(s)"
+  exit 0
+fi
+echo "FAIL — $NFILES file(s) resolved ($NUNV unverified: timeout/OOM), $NEDGES dangling edge(s)"
+exit 1
