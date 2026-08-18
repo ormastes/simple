@@ -112,6 +112,60 @@ content read, not just import-line read), `message_transfer.spl` (imports
 implies memory-tier sensitivity despite zero external imports — verify
 no inline tier-conditional logic before treating as mergeable).
 
+## Tranche 1 execution attempt (2026-08-18)
+
+Re-verified byte-identity for all 5 recommended tranche-1 targets — all
+confirmed still `IDENTICAL` across every tree that holds them (md5sum, all
+copies match):
+
+- `debug/formats/test/macho_roundtrip_spec.spl` (sync+async) — identical.
+- `debug/formats/test/.spipe_matchers_macho_roundtrip_spec.spl` (sync+async) — identical.
+- `debug/formats/test/golden_elf_dwarf_spec.spl` (sync+async) — identical.
+- `debug/formats/test/.spipe_matchers_golden_elf_dwarf_spec.spl` (sync+async) — identical.
+- `amqp_utils.spl` (all 3 trees) — identical, 95 top-level `fn` (all
+  `create_*`/`frame_*`-prefixed AMQP 0-9-1 frame builders).
+- `net/telnet.spl` (all 3 trees) — identical.
+- `src/testing/mock/verification.spl` (all 3 trees) — identical.
+
+**No source was moved or merged in this pass.** Searched the tree for the
+merge shape the map's own "Constraint" section pointed at
+(`grep -rl "goal-7 dedup"`): the only prior goal-7 dedup landing found is
+`http/url.spl`, and it is **not** a whole-file move-to-`common`-plus-thin-
+delegate. Each of the 3 `http/url.spl` copies is still a full, independent
+259-line file; only two small leaf helpers (`to_hex`/`from_hex`) were
+factored out to call `std.common.binary_inspect.{percent_hex_encode_byte,
+percent_hex_decode_pair}` in-place. There is **no existing precedent
+anywhere in the tree** for the "move whole file to `src/lib/common/`, make
+each tree copy a thin delegating module" shape this tranche's instructions
+describe as "whatever the established pattern is" — that pattern does not
+exist yet, so choosing it here would be inventing new import-graph shape,
+not following one, directly against the caution in
+`doc/08_tracking/bug/import_triggered_cross_module_symbol_misdispatch_2026-08-18.md`.
+
+Given that:
+1. A full per-symbol collision grep against everything importable from
+   `src/lib/common/` (95 functions for `amqp_utils.spl` alone, plus
+   `net/telnet.spl` and `verification.spl`) was not completed this pass —
+   each name needs a tree-wide grep before a move can be called safe, and
+   that work was not finished.
+2. The test-spec pairs (items 1-2) are not really "mergeable" in the sense
+   the rest of tranche 1 is: they are duplicate test suites that each
+   exercise their OWN tree's (identically duplicated but separately owned)
+   `debug/formats/dwarf_parser.spl` / macho fixtures. Collapsing the spec
+   files to one location without also collapsing the module under test
+   would either drop coverage of one tree's copy silently or require the
+   test runner to resolve a spec against multiple trees, which is outside
+   this tranche's scope (`dwarf_parser.spl` was NOT one of the 5 targets).
+
+**Status: all 5 targets DEFERRED, not merged.** No regression risk was
+introduced (zero files changed). Re-verified-identical is recorded above so
+a future pass does not need to redo step (a). Recommended before attempting
+an actual merge: (i) establish and document a real "thin delegate" shape by
+doing ONE whole-file case end-to-end with full collision-check + 3-tree spec
+run, since none exists as precedent today; (ii) for the test-spec pairs,
+decide the intended coverage semantics (shared spec vs. per-tree spec)
+before treating them as a dedup target at all.
+
 ## Raw data
 
 Full per-file classification (2,207 rows: class, path, diff metric, tree-set)
