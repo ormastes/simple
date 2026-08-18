@@ -43,11 +43,12 @@ use app.editor.editor_controller_types.*
 
 use std.io_runtime.{file_exists}
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.io_runtime.{read_file_text}
+use std.io_runtime.{file_write}
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_walk(path: text) -> [text]
+use std.io_runtime.{file_write_bytes}
+use std.io_runtime.{dir_create_all}
+use std.io_runtime.{dir_walk}
 
 struct EditorAction:
     redraw: bool
@@ -617,7 +618,7 @@ impl EditorController:
         val config = md_wiki_daily_note_config_with_title(folder, title_format, _editor_payload_part(payload, 4), template_body)
         val path = md_wiki_daily_note_path(config, date)
         val content = md_wiki_daily_note_content(config, date)
-        if not rt_file_write_text(path, content):
+        if not file_write(path, content):
             me.status_msg = "failed to create daily note"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         var session_daily = me.session
@@ -651,10 +652,10 @@ impl EditorController:
         if template_path == "" or target_path == "":
             me.status_msg = "missing template or target path"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val rendered = _editor_apply_template_text(rt_file_read_text(template_path) ?? "", title, date)
-        val existing = rt_file_read_text(target_path) ?? ""
+        val rendered = _editor_apply_template_text(read_file_text(template_path), title, date)
+        val existing = read_file_text(target_path)
         val sep = if existing == "" or existing.ends_with("\n") then "" else: "\n"
-        if not rt_file_write_text(target_path, existing + sep + rendered):
+        if not file_write(target_path, existing + sep + rendered):
             me.status_msg = "failed to insert template"
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.status_msg = "inserted template: " + template_path
@@ -1021,7 +1022,7 @@ impl EditorController:
         if launch_path == "":
             me.status_msg = "debug compound source not found: " + editor_debug_launch_config_name(compound_config)
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
-        val content = rt_file_read_text(launch_path) ?? ""
+        val content = read_file_text(launch_path)
         val workspace = _editor_workspace_dir_from_launch_json(launch_path)
         val doc = me.session.active_document()
         val program = if doc == nil then "" else: doc.path()
@@ -1628,14 +1629,14 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         val checked = mode == "done" or mode == "checked" or mode == "complete" or mode == "completed"
         var changed_count = 0
-        val files = rt_dir_walk(root)
+        val files = dir_walk(root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing = read_file_text(file)
             val next = md_tasks_set_checked(existing, checked)
             if next != existing:
-                if rt_file_write_text(file, next):
+                if file_write(file, next):
                     changed_count = changed_count + 1
                     me._refresh_open_document_from_disk_batch(file, next)
         val index = md_wiki_index_documents(_editor_markdown_vault_documents(root))
@@ -1686,16 +1687,16 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.wiki_property_vault_root = parsed.root
         var changed_count = 0
-        val files = rt_dir_walk(parsed.root)
+        val files = dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing = read_file_text(file)
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
-                if rt_file_write_text(file, next):
+                if file_write(file, next):
                     changed_count = changed_count + 1
                     me._refresh_open_document_from_disk_batch(file, next)
         val index = md_wiki_index_documents(_editor_markdown_vault_documents(parsed.root))
@@ -1711,13 +1712,13 @@ impl EditorController:
             return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
         me.wiki_property_vault_root = parsed.root
         var rows: [WikiPanelRow] = []
-        val files = rt_dir_walk(parsed.root)
+        val files = dir_walk(parsed.root)
         for file in files:
             if not _editor_is_markdown_path(file):
                 continue
             if not _editor_vault_property_path_selected(file, parsed.selected_paths):
                 continue
-            val existing = rt_file_read_text(file) ?? ""
+            val existing = read_file_text(file)
             val next = _editor_markdown_property_content(existing, parsed.key, parsed.value)
             if next != existing:
                 rows.push(WikiPanelRow(icon: "review", label: _editor_path_basename(file), detail: parsed.key + " -> " + parsed.value, path: file, line: 0))
@@ -2376,7 +2377,7 @@ impl EditorController:
         if should_create:
             val heading = if title == "" then md_wiki_title_from_path(path) else: title
             val note_content = "# " + heading + "\n\n"
-            val written = rt_file_write_text(path, note_content)
+            val written = file_write(path, note_content)
             if not written:
                 me.status_msg = "failed to create note: " + path
                 return EditorAction(redraw: true, quit: false, status_msg: me.status_msg)
@@ -2648,7 +2649,7 @@ impl EditorController:
             return LspResponse(id: 0, ok: false, result_json: "", error_text: "no active language server")
 
     me _notify_lsp_file_changed(path: text, change_type: i64) -> EditorAction:
-        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, rt_file_read_text(path) ?? "", change_type)
+        me.vault_search_index = md_vault_search_index_apply_file_change(me.vault_search_index, path, read_file_text(path), change_type)
         var notified = false
         if me.md_lsp_state.running:
             me.md_lsp_state = md_lsp_notify_watched_file(me.md_lsp_state, path, change_type)
@@ -2886,7 +2887,7 @@ impl EditorController:
         while i < events.len():
             val event = events[i]
             val path = event.path
-            val content = rt_file_read_text(path) ?? ""
+            val content = read_file_text(path)
             if event.change_type != 3:
                 me._refresh_open_document_from_disk_batch(path, content)
             me._notify_lsp_file_changed(path, event.change_type)
