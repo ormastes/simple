@@ -540,27 +540,38 @@ fn make_module_init_dynamic_name(module_name: &str) -> String {
     }
 }
 
-fn find_dynamic_init_func_id(
+fn find_dynamic_init_func_ids(
     func_ids: &BTreeMap<String, cranelift_module::FuncId>,
     module_name: &Option<String>,
-) -> Option<cranelift_module::FuncId> {
-    let names = module_name.as_ref().map(|name| make_module_init_dynamic_name(name));
-    names.and_then(|name| func_ids.get(&name).copied()).or_else(|| {
-        // Compatibility with older plain-name emission.
-        if let Some(id) = func_ids.get("__module_init_dynamic").copied() {
-            return Some(id);
+) -> Vec<cranelift_module::FuncId> {
+    // ALL modules' dynamic inits must run, not one. This used to return the
+    // single id matching `module_name` (or the FIRST match as a fallback), so
+    // in a flattened multi-module unit every OTHER module's function-call
+    // initialized globals were never stored — the typed GlobalLoad then read
+    // an uninitialized slot and produced silently wrong values (measured:
+    // gzip/crc.spl's fn-initialized _CRC32_TABLE failing the CRC-32 KAT under
+    // SIMPLE_JIT_STRICT=1; see doc/08_tracking/bug/
+    // jit_module_val_array_indexing_15x_slow_2026-08-18.md "SEVERITY UPGRADE").
+    // Order: the entry module's init first (preserves the old single-module
+    // behavior for intra-module ordering), then the rest in name order
+    // (BTreeMap iteration — deterministic).
+    let mut ids: Vec<cranelift_module::FuncId> = Vec::new();
+    if let Some(name) = module_name.as_ref().map(|name| make_module_init_dynamic_name(name)) {
+        if let Some(id) = func_ids.get(&name).copied() {
+            ids.push(id);
         }
-
-        // Fallback search: when module naming is unavailable, pick the first
-        // matching dynamic init function for this build step.
-        func_ids.iter().find_map(|(name, id)| {
-            if name.starts_with("__module_init_") && name.ends_with("_dynamic") {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-    })
+    }
+    if let Some(id) = func_ids.get("__module_init_dynamic").copied() {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    for (name, id) in func_ids.iter() {
+        if name.starts_with("__module_init_") && name.ends_with("_dynamic") && !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+    ids
 }
 
 pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
@@ -2253,19 +2264,19 @@ impl<M: Module> CodegenBackend<M> {
         // body); the only wiring generate_module_init does is call it, so it
         // runs automatically wherever __module_init already does (JIT's
         // run_module_init_once, and the native binary's startup code).
-        let dynamic_init_func_id = find_dynamic_init_func_id(&self.func_ids, &mir.name);
+        let dynamic_init_func_ids = find_dynamic_init_func_ids(&self.func_ids, &mir.name);
         if !mir.global_init_strings.is_empty()
             || !mir.global_init_arrays.is_empty()
             || !mir.global_init_functions.is_empty()
             || !mir.global_init_structs.is_empty()
-            || dynamic_init_func_id.is_some()
+            || !dynamic_init_func_ids.is_empty()
         {
             self.generate_module_init(
                 &mir.global_init_strings,
                 &mir.global_init_arrays,
                 &mir.global_init_functions,
                 &mir.global_init_structs,
-                dynamic_init_func_id,
+                &dynamic_init_func_ids,
             )?;
         }
 
@@ -2286,7 +2297,7 @@ impl<M: Module> CodegenBackend<M> {
         init_arrays: &std::collections::HashMap<String, crate::hir::HirGlobalArrayInit>,
         init_functions: &std::collections::HashMap<String, String>,
         init_structs: &std::collections::HashMap<String, crate::hir::HirGlobalStructInit>,
-        dynamic_init_func_id: Option<cranelift_module::FuncId>,
+        dynamic_init_func_ids: &[cranelift_module::FuncId],
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
@@ -2746,8 +2757,8 @@ impl<M: Module> CodegenBackend<M> {
         // initializers), if the HIR lowering pass synthesized one. It was
         // already declared/compiled as an ordinary function above, so this is
         // just an inter-function call, identical to any other call site here.
-        if let Some(dyn_func_id) = dynamic_init_func_id {
-            let dyn_func_ref = self.module.declare_func_in_func(dyn_func_id, builder.func);
+        for dyn_func_id in dynamic_init_func_ids {
+            let dyn_func_ref = self.module.declare_func_in_func(*dyn_func_id, builder.func);
             builder.ins().call(dyn_func_ref, &[]);
         }
 
