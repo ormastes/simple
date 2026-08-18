@@ -86,3 +86,29 @@ reroutes (that file has concurrent uncommitted edits by another session).
 `qemu_test_runner`, `test_runner_main.spl`) still eagerly imports
 `test_executor_composite` → GPU/JIT executors. Cutting that needs the
 structural lane-registry / subprocess split described above — unchanged.
+
+## 2026-08-18: split-commit INCONCLUSIVE resolved — baseline-identical-red
+
+The `a120359d8a5` caveat ("multi-mode composite spec timed out >570s, not
+proven red") is resolved by a foreground A/B on
+`test/01_unit/multi_mode_test_runner_spec.spl`:
+
+- **Current tree (post-split):** `SIMPLE_TIMEOUT_SECONDS=900 timeout 880
+  bin/simple test ... --no-session-daemon` → rc=1,
+  `Results: 34 total, 0 passed, 34 failed`, duration 135ms. All failures are
+  `semantic: function/variable ... not found` (`parse_mode_str`,
+  `TestFileResult`, `TestRunResult`, `TestModeResult`, `parse_test_args`,
+  `TestExecutionMode`, ...) — the spec has only `use std.spec` and relies on
+  symbol injection that does not resolve.
+- **Pre-split baseline:** temp-restored the four pre-existing files from
+  `a120359d8a5~1` (test_runner_main, qemu_test_runner, test_executor_parsing,
+  test_runner_execute), same command → rc=1,
+  `Results: 34 total, 0 passed, 34 failed`, 186ms, same `not found` class
+  (incl. `TestExecutionMode`). Temp files restored; `git diff` on those paths
+  empty afterward.
+
+**Verdict: baseline-identical-red.** The lanes split did not break this spec —
+it fails identically before and after, fast (no timeout under load 33). The
+original >570s observation was box-load, not the spec. The red itself is a
+pre-existing missing-import/injection defect in the spec, independent of the
+split; track separately if the spec is meant to be green.
