@@ -1505,6 +1505,26 @@ pub fn compile_instruction<M: Module>(
                 builder.ins().iconst(types::I64, 0)
             });
             let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_as_float", val);
+            // NIL-PRESERVING UNBOX. `rt_value_as_float(NIL)` is 0.0, which is a
+            // perfectly ordinary stored float — so a `Dict<_, f64>` MISS decoded
+            // to 0.0 and `?? default` never fired, while the downstream nil test
+            // (`x == nil`) compared the unboxed f64 against the *numeric* nil
+            // sentinel 3, making a legitimately stored 3.0 read as nil. Both
+            // directions are the same root cause: after this unbox there is no
+            // longer any f64 bit pattern that means "absent".
+            //
+            // Carry nil through as the f64 whose BITS are the nil word (3, i.e.
+            // the denormal 1.5e-323) instead of collapsing it to 0.0. The nil
+            // COMPARISON is retargeted onto the same constant in
+            // mir/lower/lowering_expr_ops.rs (`lower_binary_expr`, float-vs-Nil
+            // arm), so miss and a stored 3.0 are now distinct. Non-nil inputs are
+            // untouched: only the exact word 3 selects the sentinel.
+            // Bug: doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md
+            let is_nil = builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
+            let nil_f = builder.ins().f64const(f64::from_bits(3));
+            let unboxed = builder.ins().select(is_nil, nil_f, unboxed);
             ctx.vreg_values.insert(*dest, unboxed);
         }
     }

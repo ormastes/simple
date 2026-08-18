@@ -57,6 +57,39 @@ impl<'a> MirLowerer<'a> {
             // logic-corruption bug when the RHS has side effects (native-build
             // entry-closure defect C3).
             self.lower_short_circuit_logical(op, left, right)
+        } else if matches!(op, BinOp::Eq | BinOp::NotEq)
+            && ((matches!(right.kind, HirExprKind::Nil) && matches!(left.ty, TypeId::F32 | TypeId::F64))
+                || (matches!(left.kind, HirExprKind::Nil) && matches!(right.ty, TypeId::F32 | TypeId::F64)))
+        {
+            // FLOAT-VS-NIL COMPARISON. `Nil` lowers to the integer nil word 3
+            // (lowering_expr_literal.rs `lower_nil_expr`), and codegen's binary
+            // arm coerces a mixed int/float pair to float — so `x == nil` on an
+            // f64 became `fcmp x, 3.0`, and a legitimately stored 3.0 in a
+            // `Dict<_, f64>` reported itself as nil while a genuine miss (which
+            // decoded to 0.0) reported itself as present.
+            //
+            // The float representation of "absent" is the f64 whose BITS are the
+            // nil word (see codegen/instr/mod.rs `MirInst::UnboxFloat`); compare
+            // against exactly that constant instead of against the numeric 3.
+            // Bug: doc/08_tracking/bug/native_dict_f64_get_nil_sentinel_collides_with_stored_3_2026-08-17.md
+            let (value_expr, _) = if matches!(right.kind, HirExprKind::Nil) {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            let value_reg = self.lower_expr(value_expr)?;
+            let sentinel_reg = self.lower_float_expr(f64::from_bits(3))?;
+            self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BinOp {
+                    dest,
+                    op,
+                    left: value_reg,
+                    right: sentinel_reg,
+                });
+                dest
+            })
         } else {
             // `is` against a qualified enum variant (e.g. `a is E.A` or `a is E::A`):
             // The RHS is either Global("E::A") (bare field access, no args) or

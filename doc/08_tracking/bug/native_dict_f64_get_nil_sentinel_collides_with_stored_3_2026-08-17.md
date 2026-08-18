@@ -1,6 +1,6 @@
 # Native/JIT `Dict<_, f64>.get()` conflates nil with a stored `3.0`
 
-- **Status:** OPEN — re-verified 2026-08-17 on the 12:58 seed; seed-side site located (see the end of this record)
+- **Status:** RESOLVED 2026-08-18 — fixed in the seed MIR lowering + Cranelift codegen; `check-dict-engine-differential.shs` PASSes 13/13
 - **Detected by:** `sh scripts/check/check-dict-engine-differential.shs` — case `text_f64_local`
 - **Severity:** silent wrong answer, both directions, no diagnostic
 - **Related:** `doc/07_guide/language/dict_native_pitfalls.md` truth table, row
@@ -167,3 +167,85 @@ tests for nil, and the collision happens at the later comparison.
 `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (the pure-Simple
 `guardable_value_type` / `dict_get_preserve_flat_nil`) was NOT executed by this
 run and is not implicated by it — unchanged from the scope note above.
+
+## RESOLVED 2026-08-18
+
+### Root cause (confirmed, both directions, one representation gap)
+
+After `d.get(k)` on a `Dict<_, f64>` is unboxed there is **no f64 bit pattern
+that means "absent"**, and the surviving nil test compares against the *numeric*
+sentinel:
+
+1. `MirInst::UnboxFloat` lowers to `rt_value_as_float(v)`, which maps the NIL
+   word `3` to a perfectly ordinary `0.0`. A genuine miss therefore decodes to
+   `0.0` and `?? default` never fires.
+2. `HirExprKind::Nil` lowers to `ConstInt 3`
+   (`mir/lower/lowering_expr_literal.rs::lower_nil_expr`), and
+   `coerce_binop_operands` (`codegen/instr/core.rs`) coerces a mixed int/float
+   pair to float — so `x == nil` on an f64 became `fcmp x, 3.0`, and a
+   legitimately **stored** `3.0` reported itself as nil.
+
+`d[k]` was correct only because the guard's bracket case is a hit with no nil
+test on it — the same MIR path is used for both reads.
+
+### Fix (smallest correct encoding change, no Option redesign)
+
+The float representation of "absent" is now the f64 whose **bits** are the nil
+word, `f64::from_bits(3)` (the denormal `1.5e-323`), rather than `0.0`:
+
+- `src/compiler_rust/compiler/src/codegen/instr/mod.rs`, `MirInst::UnboxFloat`:
+  after `rt_value_as_float`, a `select` on `raw == 3` yields `f64::from_bits(3)`.
+  Only the exact word `3` selects the sentinel; every non-nil input is untouched.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`,
+  `lower_binary_expr`: an `Eq`/`NotEq` whose one side is `HirExprKind::Nil` and
+  whose other side is `F32`/`F64` now compares against `ConstFloat(f64::from_bits(3))`
+  instead of the integer `3`, so `3.0` and "absent" are distinct constants.
+
+Both halves are **Rust seed** code, as localised above. The Rust runtime
+(`runtime/src/value/`) and the C runtime (`src/runtime/`) were evaluated
+separately and **neither was changed** — `rt_value_as_float` keeps its existing
+total behaviour for every other caller; the nil discrimination is added in the
+compiler, where the static type that makes it decidable is available.
+
+### Evidence — both arms, verbatim last stdout line
+
+Reverted arm (unmodified sources, the shared session binary
+`bin/release/x86_64-unknown-linux-gnu/simple`, `59621024`):
+
+```
+FAIL — 13 case(s) checked, 1 diverged from the interpreter oracle: text_f64_local
+```
+
+Fixed arm (private build of the same tree plus the two hunks above,
+`/mnt/data/tmp/dictf64-target/release/simple`, `59581064 2026-08-18 00:26:22`):
+
+```
+PASS — 13 case(s) checked, every Dict operation agrees with the interpreter oracle
+```
+
+`text_f64_local` moved `AGREE`; the other 12 cases stayed `AGREE`. The guard's
+own `--selftest` (comparator/witness/normalizer ablation) passed in the same run,
+and the JIT arm carried its `[jit-addr] probe` engine witness under
+`SIMPLE_JIT_STRICT=1`, so this is a real JIT result and not an interpreter
+fallback.
+
+No perf regression:
+
+```
+PASS — 2 check(s) checked, Dict lookup is sub-quadratic (6.10x for 4x input) and the hot lookup kept its O(1) shape
+```
+
+### Build scope — the shared binary was NOT touched
+
+`cargo check --release --bin simple` returned RC=0 (read from a variable on the
+next line, not through a pipe) and the demonstration binary was built into a
+**private** `CARGO_TARGET_DIR=/mnt/data/tmp/dictf64-target`. `bin/simple`,
+`bin/release/**` and the symlink were left exactly as other lanes found them; the
+guard was pointed at the private build via `SIMPLE_BIN`. No bootstrap was run.
+
+### Still open, deliberately
+
+The pure-Simple self-hosted lowering
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`) is unchanged and was
+not exercised by this run — the scope note above still applies. The guard will
+answer that question with no edit once `bin/simple` is a self-hosted binary.
