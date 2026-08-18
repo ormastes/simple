@@ -91,6 +91,33 @@ real time, so state both explicitly in any such prompt:
   `use this.module.{foo}`, and that is the shape of
   `import_triggered_cross_module_symbol_misdispatch_2026-08-18.md`.
 
+## Wrapper migrations must update the std shim (2026-08-18)
+
+`src/lib/io_runtime.spl` is a SHIM: it re-exports an EXPLICIT, hand-listed set
+of names from `nogc_sync_mut.io_runtime` (comment in the file: the binary can't
+search `lib/*/` subdirs in interpreter mode). `src/std` is a symlink to `lib`,
+so ordinary product code's `use std.io_runtime.{foo}` resolves through that
+list — NOT through the implementation module.
+
+Adding a wrapper to `nogc_sync_mut/io_runtime.spl` alone therefore migrates
+call sites onto a name that resolves to NOTHING. This happened on 2026-08-18
+for five wrappers (`hash_text`, `file_rename`, `time_now_monotonic_ms`,
+`shell_exec`, `process_run_timeout`) and neither gate caught it:
+
+- `check-no-direct-rt.shs` counts `rt_*` CALL SITES — they really did go away,
+  so it reported progress.
+- The wrapper spec imports `nogc_sync_mut.io_runtime` DIRECTLY, bypassing the
+  shim, so it passed 10/10.
+
+It surfaced only as `[use-warning] 'hash_text' is named in
+`use std.io_runtime.{...}` but module '.../src/std/io_runtime.spl' does not
+provide it` inside an unrelated guard's output.
+
+**Rule: every new io_runtime wrapper is added in TWO places** — the
+implementation module and the shim's export list — and the sanity spec should
+import through `std.io_runtime` (the path product code uses), not the
+implementation module.
+
 ## Measuring perf: two corrections learned the hard way (2026-08-18)
 
 1. **`SIMPLE_JIT_STRICT=1` does NOT select an engine.** Bare `bin/simple run`
