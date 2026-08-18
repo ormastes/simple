@@ -1,0 +1,229 @@
+#!/bin/sh
+# check-kill-monitor-health.shs — a guard reporting "active (running)" while
+# incapable of firing must be detectable.
+#
+# WHY THIS EXISTS
+# ---------------
+# For a full day the CPU guard was structurally dead. Under `set -e` a missing
+# `|| true` meant the monitor died on the FIRST pid it ever sampled, before it
+# could write that pid's first sample file. systemd respawned the corpse every
+# ~15s -- restart counter 3735 -- and `systemctl --user status` said
+# `active (running)` the entire time. Every human-visible signal was green.
+# Nothing asserted the mechanism still worked, so nothing noticed.
+#
+# The lesson is not "add a heartbeat" (that landed already); it is that
+# LIVENESS AND CAPABILITY ARE DIFFERENT PROPERTIES and only the first was ever
+# checked. This script checks the second. In particular a restart counter in the
+# thousands is itself an alarm: a healthy daemon of this kind restarts ~never,
+# so a high NRestarts means it is crash-looping regardless of what ActiveState
+# says at the instant you look.
+#
+# Checks (all fail-closed; a check that cannot be evaluated is an ERROR, never
+# a pass):
+#   1. unit is active
+#   2. NRestarts below RESTART_ALARM (default 20) -- the crash-loop alarm
+#   3. a HEARTBEAT was logged within HEARTBEAT_STALE_SECS (default 900)
+#   4. the startup selftest line is present for the CURRENT main pid, i.e. the
+#      running process actually asserted its state dir before entering the loop
+#   5. the CPU guard is SAMPLING: if any non-protected `simple run|test` process
+#      is alive, the state dir must contain at least one sample file. This is
+#      the check that would have caught the dead guard.
+#   6. threshold coherence: the generic RSS cap must sit BELOW the point at
+#      which earlyoom would fire, otherwise the "nice" guard never gets to act
+#      first and the kernel backstop kills something arbitrary instead.
+#   7. the unit's normal threshold mechanism is not shadowed: an
+#      ExecStart=/usr/bin/env VAR=.. silently overrides Environment=VAR=.., which
+#      makes the documented knob inert.
+#
+# Verdict (grep for the pattern; it is the last line but do not rely on that):
+#   PASS  — <n> check(s) performed, monitor healthy      exit 0
+#   FAIL  — <n> check(s) performed: <details>            exit 1
+#   ERROR — nothing was checked                          exit 2
+#
+# Usage:
+#   sh scripts/check/check-kill-monitor-health.shs
+#   sh scripts/check/check-kill-monitor-health.shs --selftest   # fixtures only
+
+set -u
+
+UNIT="${KILL_MONITOR_UNIT:-kill-simple-monitor.service}"
+LOG="${KILL_SIMPLE_LOG:-/tmp/kill_simple_monitor.log}"
+RESTART_ALARM="${KILL_MONITOR_RESTART_ALARM:-20}"
+HEARTBEAT_STALE_SECS="${KILL_MONITOR_HEARTBEAT_STALE_SECS:-900}"
+
+CHECKED=0
+FAILURES=""
+fail() { FAILURES="$FAILURES
+  - $1"; }
+ck() { CHECKED=$(( CHECKED + 1 )); }
+
+# ------------------------------------------------------------------ selftest
+# Fixtures for the pure predicates, so the alarm logic is proven independently
+# of whatever the live daemon happens to be doing right now.
+restart_count_is_alarming() { [ "$1" -ge "$2" ] 2>/dev/null; }
+heartbeat_is_stale() { [ "$1" -gt "$2" ] 2>/dev/null; }
+
+selftest() {
+    _n=0 _bad=""
+    restart_count_is_alarming 3735 20 || _bad="$_bad restart-3735-should-alarm"
+    _n=$((_n+1))
+    restart_count_is_alarming 0 20 && _bad="$_bad restart-0-should-not-alarm"
+    _n=$((_n+1))
+    restart_count_is_alarming 20 20 || _bad="$_bad restart-at-threshold-should-alarm"
+    _n=$((_n+1))
+    heartbeat_is_stale 1000 900 || _bad="$_bad heartbeat-1000s-should-be-stale"
+    _n=$((_n+1))
+    heartbeat_is_stale 10 900 && _bad="$_bad heartbeat-10s-should-be-fresh"
+    _n=$((_n+1))
+    if [ -n "$_bad" ]; then
+        echo "FAIL — selftest: $_n fixture(s) run, broken predicates:$_bad"
+        return 1
+    fi
+    echo "[selftest] ok ($_n predicate fixtures)"
+    return 0
+}
+
+selftest || exit 1
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 5 check(s) performed, selftest fixtures only (live monitor NOT inspected)"
+    exit 0
+fi
+
+command -v systemctl >/dev/null 2>&1 || {
+    echo "systemctl not available; cannot evaluate unit health" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+
+# ---- 1. active -------------------------------------------------------------
+STATE=$(systemctl --user show -p ActiveState --value "$UNIT" 2>/dev/null) || STATE=""
+if [ -z "$STATE" ]; then
+    echo "cannot read ActiveState for $UNIT" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+ck
+[ "$STATE" = "active" ] || fail "unit $UNIT is '$STATE', not active"
+
+# ---- 2. crash-loop alarm ---------------------------------------------------
+NRESTARTS=$(systemctl --user show -p NRestarts --value "$UNIT" 2>/dev/null) || NRESTARTS=""
+case "$NRESTARTS" in
+    ''|*[!0-9]*)
+        echo "cannot read NRestarts for $UNIT (got '$NRESTARTS')" >&2
+        echo "ERROR — nothing was checked"
+        exit 2
+        ;;
+esac
+ck
+if restart_count_is_alarming "$NRESTARTS" "$RESTART_ALARM"; then
+    fail "CRASH LOOP: NRestarts=$NRESTARTS >= $RESTART_ALARM. The unit reports '$STATE' but is respawning a dying process; a guard that cannot complete startup cannot fire. Read the tail of $LOG and 'systemctl --user status $UNIT'."
+fi
+
+MAINPID=$(systemctl --user show -p MainPID --value "$UNIT" 2>/dev/null) || MAINPID=""
+
+# ---- 3. heartbeat freshness ------------------------------------------------
+ck
+if [ ! -r "$LOG" ]; then
+    fail "log $LOG is not readable; heartbeat freshness cannot be established (treated as unhealthy, not as a pass)"
+else
+    HB=$(grep 'HEARTBEAT' "$LOG" 2>/dev/null | tail -n 1) || HB=""
+    if [ -z "$HB" ]; then
+        fail "no HEARTBEAT line in $LOG: the poll loop has never reported being alive"
+    else
+        HB_TS=${HB%% *}
+        HB_EPOCH=$(date -d "$HB_TS" +%s 2>/dev/null) || HB_EPOCH=""
+        NOW=$(date +%s)
+        if [ -z "$HB_EPOCH" ]; then
+            fail "could not parse heartbeat timestamp '$HB_TS'"
+        else
+            AGE=$(( NOW - HB_EPOCH ))
+            if heartbeat_is_stale "$AGE" "$HEARTBEAT_STALE_SECS"; then
+                fail "STALE HEARTBEAT: last one was ${AGE}s ago (> ${HEARTBEAT_STALE_SECS}s). The unit reports '$STATE' but the poll loop is not running."
+            fi
+        fi
+    fi
+fi
+
+# ---- 4. the RUNNING process completed its startup selftest -----------------
+ck
+if [ -r "$LOG" ] && [ -n "$MAINPID" ] && [ "$MAINPID" != "0" ]; then
+    if grep -q "START pid=$MAINPID .*selftest=ok" "$LOG" 2>/dev/null; then
+        :
+    else
+        fail "no 'START pid=$MAINPID ... selftest=ok' line in $LOG: the currently running process never asserted its CPU-guard state dir, so the CPU guard may be dead"
+    fi
+else
+    fail "cannot correlate the running MainPID ('$MAINPID') with a startup selftest line in $LOG"
+fi
+
+# ---- 5. the CPU guard is actually SAMPLING ---------------------------------
+# The decisive capability check. If simple run/test processes exist, the state
+# dir must have samples. Empty state + live victims == the dead-guard signature.
+ck
+STATE_DIR="${KILL_SIMPLE_CPU_STATE_DIR:-/tmp/.kill_monitor_cpu_$(id -u)}"
+LIVE=$(ps -eo uid,args --no-headers 2>/dev/null | awk -v u="$(id -u)" '$1==u' \
+        | grep -E '/simple (run|test) ' \
+        | grep -vE 'claude|codex|mcp|tmux|daemon' | wc -l) || LIVE=0
+SAMPLES=0
+if [ -d "$STATE_DIR" ]; then
+    for _f in "$STATE_DIR"/*; do
+        [ -e "$_f" ] || continue
+        SAMPLES=$(( SAMPLES + 1 ))
+    done
+fi
+if [ "$LIVE" -gt 0 ] && [ "$SAMPLES" -eq 0 ]; then
+    fail "DEAD CPU GUARD: $LIVE 'simple run|test' process(es) are alive but the sample dir $STATE_DIR is EMPTY. The guard is not sampling and cannot fire. This is the exact 2026-08-18 signature."
+fi
+
+# ---- 6. threshold coherence across the THREE locations ---------------------
+# earlyoom's 10%-free trigger, this script's defaults, and the unit's
+# Environment=/ExecStart overrides are separate numbers that must be reasoned
+# about together. The nice guard must fire BELOW the kernel backstop, or it
+# never gets a turn and a victim dies to earlyoom's max-badness pick instead.
+ck
+TOTAL_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null) || TOTAL_MB=""
+EFF_GENERIC=""
+if [ -n "$MAINPID" ] && [ "$MAINPID" != "0" ] && [ -r "/proc/$MAINPID/environ" ]; then
+    EFF_GENERIC=$(tr '\0' '\n' < "/proc/$MAINPID/environ" 2>/dev/null \
+        | sed -n 's/^KILL_ANY_MEM_MB=//p' | head -n 1) || EFF_GENERIC=""
+fi
+[ -n "$EFF_GENERIC" ] || EFF_GENERIC=64000
+if [ -n "$TOTAL_MB" ]; then
+    # earlyoom default here fires at 10% free => roughly 90% of MemTotal used.
+    EARLYOOM_MB=$(( TOTAL_MB * 90 / 100 ))
+    echo "[thresholds] MemTotal=${TOTAL_MB}MB  monitor.KILL_ANY_MEM_MB=${EFF_GENERIC}MB  earlyoom~=${EARLYOOM_MB}MB used"
+    if [ "$EFF_GENERIC" -ge "$EARLYOOM_MB" ] 2>/dev/null; then
+        fail "INCOHERENT THRESHOLDS: KILL_ANY_MEM_MB=${EFF_GENERIC}MB is at or above the ~${EARLYOOM_MB}MB point where earlyoom fires on this ${TOTAL_MB}MB host. The monitor can never act first, so kills will come from earlyoom's max-badness pick with no per-guard diagnostic."
+    fi
+else
+    fail "cannot read MemTotal; threshold coherence not evaluable"
+fi
+
+# ---- 7. the unit's normal threshold mechanism is not shadowed --------------
+# An `ExecStart=/usr/bin/env VAR=...` silently OVERRIDES `Environment=VAR=...`,
+# so editing Environment= appears to do nothing. That is precisely how the 90GB
+# ceiling stayed invisible and how the "Environment= doesn't reach the process"
+# misdiagnosis survived. A knob that silently doesn't work is worse than no knob.
+ck
+EXECSTART=$(systemctl --user show -p ExecStart --value "$UNIT" 2>/dev/null) || EXECSTART=""
+if [ -z "$EXECSTART" ]; then
+    fail "cannot read ExecStart for $UNIT; cannot rule out a shadowed Environment="
+else
+    case "$EXECSTART" in
+        *"/env "*=*|*"env KILL_"*)
+            fail "SHADOWED KNOB: ExecStart injects environment variables on the command line ($EXECSTART). Those WIN over Environment=, so the unit's normal threshold mechanism is silently inert. Move the values into Environment= and drop the env injection."
+            ;;
+    esac
+fi
+
+# ------------------------------------------------------------------ verdict
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ -n "$FAILURES" ]; then
+    echo "FAIL — $CHECKED check(s) performed:$FAILURES"
+    exit 1
+fi
+echo "PASS — $CHECKED check(s) performed, monitor healthy (pid=$MAINPID NRestarts=$NRESTARTS samples=$SAMPLES live_simple=$LIVE)"
+exit 0

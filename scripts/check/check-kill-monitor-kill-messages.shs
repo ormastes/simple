@@ -1,0 +1,409 @@
+#!/bin/sh
+# check-kill-monitor-kill-messages.shs — every kill names its OWN guard.
+#
+# WHY THIS EXISTS
+# ---------------
+# kill_simple_monitor.shs used to print ONE message for every reason:
+#     error: TIMEOUT: killed by kill_simple_monitor (generic rss=93065MB>=90000MB: ...)
+#     ... Raise the limit with SIMPLE_TIMEOUT_SECONDS=<secs> (0 disables the CPU guard)
+# On 2026-08-17 a Stage-3 bootstrap died against that RSS ceiling. Nothing timed
+# out, and SIMPLE_TIMEOUT_SECONDS governs only the CPU guard, so the advice was
+# inert: following it changes nothing and the next run dies identically. That
+# cost hours. A victim must be able to tell from ONE line which guard killed it,
+# what was measured, what the limit was, and which env var moves THAT limit.
+#
+# SAFETY -- READ BEFORE EDITING
+# -----------------------------
+# This harness starts a REAL monitor daemon with deliberately tiny thresholds.
+# A sibling lane once ran a guard test with a global KILL_SIMPLE_MEM_MB=0 and
+# killed five other sessions' processes. That must be structurally impossible
+# here, not merely unlikely. Three independent containments, all fail-closed:
+#   1. KILL_SIMPLE_ONLY_PIDS is ALWAYS set to this run's own victim pids.
+#      kill_hard() consults pid_allowed() before doing anything, so no pid
+#      outside that list can be signalled at any threshold.
+#   2. assert_scoped() below refuses to start a monitor when the allowlist is
+#      empty or contains a pid this harness did not itself spawn.
+#   3. Every path the daemon writes (pidfile, lockdir, cpu state, log, warn
+#      markers) is redirected into a private $TD, so the live daemon's
+#      single-instance lock and pidfile are never touched and this monitor
+#      cannot be mistaken for, or displace, the production one.
+# Victims are plain `sh` scripts under a private dir. That dir must not contain
+# the substrings 'claude', 'codex', 'node', 'npm', 'tmux' or 'daemon', which
+# is_protected() matches anywhere in the cmdline -- a victim under such a path
+# would be spared and the test would silently pass for the wrong reason. That
+# is asserted, not assumed (guard_tmpdir).
+#
+# Verdict is printed as the LAST line but callers should grep for the
+# PASS/FAIL/ERROR pattern rather than tailing.
+#   PASS  — <n> case(s) checked, all correct                       exit 0
+#   FAIL  — <details>                                              exit 1
+#   ERROR — nothing was checked                                    exit 2
+#
+# Usage:
+#   sh scripts/check/check-kill-monitor-kill-messages.shs            # test current script
+#   sh scripts/check/check-kill-monitor-kill-messages.shs --negative-control
+#       Runs the same cases against the PRE-FIX script (reconstructed: the
+#       generic one-message-for-everything kill_hard). The message cases MUST
+#       fail there; if they pass, this harness is not actually testing anything.
+
+set -u
+
+HERE=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) || HERE=""
+MONITOR="${KILL_MONITOR_SCRIPT:-$HERE/resource/kill_simple_monitor.shs}"
+NEGATIVE=0
+[ "${1:-}" = "--negative-control" ] && NEGATIVE=1
+
+CHECKED=0
+FAILURES=""
+
+fail() { FAILURES="$FAILURES
+  - $1"; }
+
+die_error() {
+    echo "$1" >&2
+    echo "ERROR — nothing was checked"
+    exit 2
+}
+
+[ -f "$MONITOR" ] || die_error "monitor script not found: $MONITOR"
+
+# ---------------------------------------------------------------- private dir
+# Deliberately NOT under $TMPDIR: this session's TMPDIR contains 'claude', which
+# is_protected() matches, which would spare every victim.
+TD=$(mktemp -d /tmp/kmtest.XXXXXX) || die_error "cannot mktemp"
+
+guard_tmpdir() {
+    case "$TD" in
+        *claude*|*codex*|*node*|*npm*|*tmux*|*daemon*|*mcp*)
+            die_error "refusing to run: victim dir '$TD' matches an is_protected() pattern; victims would be spared and every case would pass vacuously"
+            ;;
+    esac
+}
+guard_tmpdir
+
+MON_PID=""
+VICTIMS=""
+
+cleanup() {
+    [ -n "$MON_PID" ] && kill "$MON_PID" 2>/dev/null
+    for _v in $VICTIMS; do kill -9 "$_v" 2>/dev/null; done
+    rm -rf "$TD" 2>/dev/null
+}
+trap cleanup EXIT INT TERM
+
+# ------------------------------------------------------------------ selftest
+# Proves the containment itself works before any real threshold is lowered.
+# Fatal: a broken allowlist must stop the run, not degrade it.
+selftest() {
+    _n=0
+    # pid_allowed semantics: an EMPTY allowlist means unrestricted (production),
+    # which is exactly what this harness must never run with.
+    # assert_scoped must reject an empty list.
+    if ( assert_scoped "" ) 2>/dev/null; then
+        echo "[selftest] FATAL assert_scoped accepted an empty allowlist" >&2
+        return 1
+    fi
+    _n=$((_n+1))
+    # assert_scoped must reject a pid this harness did not spawn (use pid 1).
+    if ( assert_scoped "1" ) 2>/dev/null; then
+        echo "[selftest] FATAL assert_scoped accepted a foreign pid" >&2
+        return 1
+    fi
+    _n=$((_n+1))
+    # guard_tmpdir must reject a protected-substring path.
+    if ( TD=/tmp/claude-x; guard_tmpdir ) >/dev/null 2>&1; then
+        echo "[selftest] FATAL guard_tmpdir accepted a protected path" >&2
+        return 1
+    fi
+    _n=$((_n+1))
+    echo "[selftest] ok ($_n containment assertions)"
+    return 0
+}
+
+# Refuse to police anything this harness did not spawn.
+assert_scoped() {
+    _list="$1"
+    [ -n "$_list" ] || { echo "assert_scoped: empty allowlist" >&2; return 1; }
+    for _p in $_list; do
+        case " $VICTIMS " in
+            *" $_p "*) ;;
+            *) echo "assert_scoped: pid $_p was not spawned by this harness" >&2; return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# ------------------------------------------------------------- victim helpers
+# A memory hog. $1 = approximate MB to hold resident. Writes its own stderr to
+# $2 so notify_victim's message (delivered via /proc/<pid>/fd/2) is capturable.
+make_hog() {
+    _path="$1"; _mb="$2"
+    cat > "$_path" <<EOF
+#!/bin/sh
+v=\$(head -c $(( _mb * 1000000 )) /dev/zero | tr '\\0' 'a')
+echo ready
+sleep 120
+echo "\$v" > /dev/null
+EOF
+    chmod +x "$_path"
+}
+
+# A CPU spinner that stays small.
+make_spinner() {
+    cat > "$1" <<'EOF'
+#!/bin/sh
+echo ready
+while :; do :; done
+EOF
+    chmod +x "$1"
+}
+
+start_monitor() {
+    # All state private. Caller passes thresholds as VAR=VAL prefixes in $*.
+    assert_scoped "$ONLY" || die_error "containment assertion failed; refusing to start a monitor"
+    mkdir -p "$TD/state" "$TD/markers"
+    rm -rf "$TD/lock"
+    # NOTE: exported, i.e. INHERITED by the monitor -- the same mechanism
+    # systemd's Environment= uses. Case 6 depends on this being the real path.
+    env \
+        KILL_SIMPLE_ONLY_PIDS="$ONLY" \
+        KILL_SIMPLE_PIDFILE="$TD/monitor.pid" \
+        KILL_SIMPLE_MARKER_DIR="$TD/markers" \
+        KILL_SIMPLE_CPU_STATE_DIR="$TD/state" \
+        KILL_SIMPLE_LOCKDIR="$TD/lock" \
+        KILL_SIMPLE_LOG="$TD/monitor.log" \
+        KILL_SIMPLE_INTERVAL=2 \
+        KILL_SIMPLE_HEARTBEAT_SECS=1 \
+        "$@" \
+        sh "$MONITOR" >"$TD/monitor.err" 2>&1 &
+    MON_PID=$!
+}
+
+stop_monitor() {
+    [ -n "$MON_PID" ] && kill "$MON_PID" 2>/dev/null
+    wait "$MON_PID" 2>/dev/null
+    MON_PID=""
+}
+
+# Wait up to $1 seconds for pid $2 to die. Returns 0 if it died.
+wait_dead() {
+    _t=0
+    while [ "$_t" -lt "$1" ]; do
+        kill -0 "$2" 2>/dev/null || return 0
+        sleep 1
+        _t=$(( _t + 1 ))
+    done
+    return 1
+}
+
+# ================================================================= test cases
+
+selftest || die_error "containment selftest failed"
+
+# ---- Case 1 (REPRODUCER): generic RSS kill must NOT say TIMEOUT -------------
+case1() {
+    make_hog "$TD/hog.sh" 300
+    _err="$TD/c1.err"
+    sh "$TD/hog.sh" >"$_err" 2>&1 &
+    _p=$!
+    VICTIMS="$VICTIMS $_p"
+    ONLY="$_p"
+    sleep 3
+    start_monitor KILL_ANY_MEM_MB=100 KILL_SIMPLE_WARN_MB=999999
+    if wait_dead 25 "$_p"; then
+        _msg=$(cat "$_err" 2>/dev/null)
+        case "$_msg" in
+            *"MEMORY LIMIT"*) ;;
+            *) fail "case1 generic-RSS: victim message lacks 'MEMORY LIMIT': $_msg" ;;
+        esac
+        case "$_msg" in
+            *"KILL_ANY_MEM_MB"*) ;;
+            *) fail "case1 generic-RSS: message does not name the governing var KILL_ANY_MEM_MB: $_msg" ;;
+        esac
+        case "$_msg" in
+            *"error: TIMEOUT:"*) fail "case1 generic-RSS: message still uses the generic 'error: TIMEOUT:' prefix (this is the bug): $_msg" ;;
+        esac
+    else
+        fail "case1 generic-RSS: victim was never killed (threshold not reached?)"
+    fi
+    stop_monitor
+    CHECKED=$(( CHECKED + 1 ))
+}
+
+# ---- Case 2: bin/simple RSS kill names KILL_SIMPLE_MEM_MB ------------------
+case2() {
+    make_hog "$TD/simple" 300
+    _err="$TD/c2.err"
+    sh "$TD/simple" run "$TD/x.spl" >"$_err" 2>&1 &
+    _p=$!
+    VICTIMS="$VICTIMS $_p"
+    ONLY="$_p"
+    sleep 3
+    start_monitor KILL_SIMPLE_MEM_MB=100 KILL_ANY_MEM_MB=999999 KILL_SIMPLE_WARN_MB=999999
+    if wait_dead 25 "$_p"; then
+        _msg=$(cat "$_err" 2>/dev/null)
+        case "$_msg" in
+            *"MEMORY LIMIT"*"bin/simple run/test"*) ;;
+            *) fail "case2 simple-RSS: message not RSS-specific: $_msg" ;;
+        esac
+        case "$_msg" in
+            *"KILL_SIMPLE_MEM_MB"*) ;;
+            *) fail "case2 simple-RSS: message does not name KILL_SIMPLE_MEM_MB: $_msg" ;;
+        esac
+        case "$_msg" in
+            *"error: TIMEOUT:"*) fail "case2 simple-RSS: message still uses the generic 'error: TIMEOUT:' prefix: $_msg" ;;
+        esac
+    else
+        fail "case2 simple-RSS: victim was never killed"
+    fi
+    stop_monitor
+    CHECKED=$(( CHECKED + 1 ))
+}
+
+# ---- Case 3 (SIMILAR): CPU kill prints a CPU-specific message --------------
+case3() {
+    make_spinner "$TD/simple"
+    _err="$TD/c3.err"
+    sh "$TD/simple" run "$TD/spin.spl" >"$_err" 2>&1 &
+    _p=$!
+    VICTIMS="$VICTIMS $_p"
+    ONLY="$_p"
+    sleep 3
+    start_monitor KILL_SIMPLE_CPU_PCT=50 KILL_SIMPLE_SPIN_SAMPLES=1 \
+                  KILL_SIMPLE_MIN_AGE_SECS=1 KILL_SIMPLE_MEM_MB=999999 \
+                  KILL_ANY_MEM_MB=999999 KILL_SIMPLE_WARN_MB=999999
+    if wait_dead 30 "$_p"; then
+        _msg=$(cat "$_err" 2>/dev/null)
+        case "$_msg" in
+            *"CPU TIMEOUT"*|*"CPU-spin guard"*) ;;
+            *) fail "case3 CPU: message not CPU-specific: $_msg" ;;
+        esac
+        case "$_msg" in
+            *"SIMPLE_TIMEOUT_SECONDS"*) ;;
+            *) fail "case3 CPU: message does not name SIMPLE_TIMEOUT_SECONDS: $_msg" ;;
+        esac
+        case "$_msg" in
+            *"MEMORY LIMIT"*) fail "case3 CPU: message wrongly claims a memory limit: $_msg" ;;
+        esac
+    else
+        fail "case3 CPU: spinner was never killed"
+    fi
+    stop_monitor
+    CHECKED=$(( CHECKED + 1 ))
+}
+
+# ---- Case 4 (SIMILAR): a process under BOTH limits is spared ---------------
+case4() {
+    make_hog "$TD/simple" 50
+    _err="$TD/c4.err"
+    sh "$TD/simple" run "$TD/small.spl" >"$_err" 2>&1 &
+    _p=$!
+    VICTIMS="$VICTIMS $_p"
+    ONLY="$_p"
+    sleep 3
+    start_monitor KILL_SIMPLE_MEM_MB=4000 KILL_ANY_MEM_MB=4000 \
+                  KILL_SIMPLE_MIN_AGE_SECS=99999 KILL_SIMPLE_WARN_MB=999999
+    sleep 12
+    if kill -0 "$_p" 2>/dev/null; then
+        :
+    else
+        fail "case4 under-limits: a process below every threshold was killed anyway: $(cat "$_err" 2>/dev/null)"
+    fi
+    stop_monitor
+    kill -9 "$_p" 2>/dev/null
+    CHECKED=$(( CHECKED + 1 ))
+}
+
+# ---- Case 5 (SIMILAR): an allowlisted-out process is spared ----------------
+# This is also the containment proof: the same over-limit hog that dies in
+# case 1 must survive when it is not in KILL_SIMPLE_ONLY_PIDS.
+case5() {
+    make_hog "$TD/hog5.sh" 300
+    _err="$TD/c5.err"
+    sh "$TD/hog5.sh" >"$_err" 2>&1 &
+    _p=$!
+    VICTIMS="$VICTIMS $_p"
+    # Decoy: allowlist a DIFFERENT pid we own, so the list is non-empty and
+    # assert_scoped is satisfied, but the hog is outside it.
+    sleep 300 &
+    _decoy=$!
+    VICTIMS="$VICTIMS $_decoy"
+    ONLY="$_decoy"
+    sleep 3
+    start_monitor KILL_ANY_MEM_MB=100 KILL_SIMPLE_WARN_MB=999999
+    sleep 12
+    if kill -0 "$_p" 2>/dev/null; then
+        :
+    else
+        fail "case5 allowlist: an over-limit process OUTSIDE KILL_SIMPLE_ONLY_PIDS was killed; the containment used by this harness is broken"
+    fi
+    stop_monitor
+    kill -9 "$_p" "$_decoy" 2>/dev/null
+    CHECKED=$(( CHECKED + 1 ))
+}
+
+# ---- Case 6 (SIMILAR): a threshold set the NORMAL way takes effect ---------
+# systemd's Environment= works by putting the variable in the daemon's INHERITED
+# environment. This asserts the script honours exactly that, with no
+# ExecStart=/usr/bin/env argv injection involved. The 2026-08-17 conclusion that
+# "Environment= did not reach the process" was a misdiagnosis; this case pins
+# the real behaviour so the question cannot be reopened by guesswork.
+case6() {
+    _out=$(KILL_ANY_MEM_MB=77777 KILL_SIMPLE_MEM_MB=12345 sh "$MONITOR" --limits 2>&1)
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        fail "case6 env-threshold: --limits exited $_rc (pre-fix script has no --limits): $_out"
+    else
+        case "$_out" in
+            *77777*) ;;
+            *) fail "case6 env-threshold: KILL_ANY_MEM_MB from the inherited environment did not take effect: $_out" ;;
+        esac
+        case "$_out" in
+            *12345*) ;;
+            *) fail "case6 env-threshold: KILL_SIMPLE_MEM_MB from the inherited environment did not take effect: $_out" ;;
+        esac
+    fi
+    CHECKED=$(( CHECKED + 1 ))
+
+    # And the shadowing rule that actually caused the confusion: an
+    # ExecStart='/usr/bin/env VAR=x' wins over an inherited (Environment=) VAR.
+    _shadow=$(KILL_ANY_MEM_MB=11111 /usr/bin/env KILL_ANY_MEM_MB=22222 sh -c 'echo $KILL_ANY_MEM_MB' 2>&1)
+    if [ "$_shadow" != "22222" ]; then
+        fail "case6b shadowing: expected env-injected 22222 to win, got '$_shadow'"
+    fi
+    CHECKED=$(( CHECKED + 1 ))
+}
+
+case1
+case2
+case3
+case4
+case5
+case6
+
+# ================================================================== verdict
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$NEGATIVE" -eq 1 ]; then
+    # Under --negative-control the caller has pointed KILL_MONITOR_SCRIPT at the
+    # pre-fix script. The message cases MUST have failed. A clean run here means
+    # the harness is not discriminating and is therefore worthless.
+    if [ -z "$FAILURES" ]; then
+        echo "FAIL — negative control passed against the pre-fix script: this harness does not actually detect the bug"
+        exit 1
+    fi
+    echo "PASS — $CHECKED case(s) checked, pre-fix script correctly FAILED:$FAILURES"
+    exit 0
+fi
+
+if [ -n "$FAILURES" ]; then
+    echo "FAIL — $CHECKED case(s) checked:$FAILURES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED case(s) checked, all correct"
+exit 0
