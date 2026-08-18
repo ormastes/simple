@@ -256,6 +256,37 @@ pub(crate) fn handle_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
+    let out = handle_method_call_with_self_update_inner(value_expr, env, functions, classes, enums, impl_methods)?;
+    // A mutating method call on a MODULE-GLOBAL receiver (`g.push(x)`) only ever
+    // produced a `(name, new_value)` update for the caller to write into `env`.
+    // But identifier READS of a non-local name prefer MODULE_GLOBALS over `env`
+    // (interpreter/expr/literals.rs), so the mutation was invisible to every
+    // later read — notably a `while g.len() < n:` condition, which then never
+    // terminated and grew the vec by doubling until the allocator aborted.
+    // Assignment (`g = v`) and indexed store (`g[i] = x`) never had this
+    // problem because they sync through `place.rs::sync_module_global`; this
+    // gives the method-call path the same write-through, at one thread-local
+    // `contains_key` per actual mutation (no cost on the read path).
+    // doc/08_tracking/bug/native_build_worker_oom_global_array_len_stale_in_while_2026-08-18.md
+    if let (_, Some((ref name, ref new_value))) = out {
+        crate::interpreter::MODULE_GLOBALS.with(|cell| {
+            let mut globals = cell.borrow_mut();
+            if globals.contains_key(name.as_str()) {
+                globals.insert(name.clone(), new_value.clone());
+            }
+        });
+    }
+    Ok(out)
+}
+
+fn handle_method_call_with_self_update_inner(
+    value_expr: &Expr,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Value, Option<(String, Value)>), CompileError> {
     if let Expr::MethodCall {
         receiver, method, args, ..
     } = value_expr

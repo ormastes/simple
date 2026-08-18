@@ -3,7 +3,10 @@
 - **Filed:** 2026-08-18
 - **Status:** ROOT-CAUSED and WORKED AROUND (compiler-source fix landed in
   `src/compiler/10.frontend/desugar/placeholder_lambda.spl`); the underlying
-  INTERPRETER defect (stale global read in loop conditions) remains OPEN.
+  INTERPRETER defect FIXED 2026-08-18: it was a missing WRITE-BACK, not a
+  stale read. The method-call self-update sites wrote only `env`, never
+  `MODULE_GLOBALS`, which is the store the non-local read path prefers. Fixed
+  in interpreter_helpers/patterns.rs; see the Resolution section.
 - **Predecessor rows:** `native_build_interpreted_worker_rss_blowup_2026-08-18.md`
   (term-2 creep, 2^31 datum), `native_build_source_closure_zero_sources_2026-08-17.md`.
   The task-orders row `prepush_hook_unpassable_native_build_oom_2026-08-17.md`
@@ -135,7 +138,60 @@ of even a 3-line entry).
 
 ## Not done / open
 
-- Interpreter fix for the stale global read in while conditions — OPEN, above.
+- Interpreter fix — DONE. Root cause was a missing write-back from the
+  method-call self-update path into MODULE_GLOBALS, not a stale read; the push
+  was written to a store nobody reads. Regression spec:
+  test/01_unit/compiler/interpreter/global_array_push_visible_to_len_spec.spl
 - `run3.log` incidentally shows `.str()` is not a method on `i64` under the
   seed interpreter (`method 'str' not found on type 'i64'`) — pre-existing gap,
   noted only.
+
+## Resolution (2026-08-18) — missing write-back, not a stale read
+
+The framing in this record ("stale global read in loop conditions") was
+wrong in a way worth recording: nothing was stale and nothing was lost.
+The push was written to a store nobody reads.
+
+- READ path, `interpreter/expr/literals.rs:298-304`: for any NON-LOCAL
+  name, `MODULE_GLOBALS` is deliberately preferred over `env` and
+  returned early.
+- WRITE paths diverged. `Node::Assignment`
+  (`interpreter_call/block_execution.rs:326`) calls `sync_module_global`,
+  and indexed stores sync via `interpreter/place.rs:249,261` — which is
+  exactly why whole-assign and `g[i] = x` always worked. But the
+  method-call self-update sites (`interpreter/node_exec.rs:383`,
+  `interpreter/block_exec.rs:279`,
+  `interpreter_call/block_execution.rs:283`, and 8 more) did only
+  `env.insert(name, new_self)` and never touched `MODULE_GLOBALS`.
+
+So `g.push()` wrote `env` while `g.len()` read `MODULE_GLOBALS`.
+
+Three plausible hypotheses were checked and are all WRONG: it is not an
+Arc-cloned copy being mutated, not a cached binding in the loop-condition
+path, and not a snapshot.
+
+Fix: `interpreter_helpers/patterns.rs` — the body became
+`handle_method_call_with_self_update_inner` and the public function is now
+a wrapper that mirrors any produced update into `MODULE_GLOBALS`, guarded
+on the key already existing (the same guard `place.rs::sync_module_global`
+uses). One choke point covers all 12 call sites.
+
+Cost: no measurable regression. One thread-local borrow plus a
+`contains_key` per MUTATING METHOD CALL, and nothing at all on the read
+path. Paired alternating native-build-worker runs on the same box and
+directory: base 96.38s / fixed 96.26s, base 86.63s / fixed 86.53s
+(<=0.15%, within noise).
+
+Verification: regression spec
+`test/01_unit/compiler/interpreter/global_array_push_visible_to_len_spec.spl`
+is RED on the deployed seed (`memory allocation of 536870912 bytes
+failed`, rc=134) and GREEN on the fixed binary (4 examples, 0 failures).
+It also pins the two forms that already worked, so a future change cannot
+regress them. Native-build worker unregressed: rc=0, full 6/6 pipeline,
+binary produced, MAXRSS 2.845-2.880 GB against the 2.97 GB baseline.
+
+Note for whoever runs it: on the RED side `bin/simple test` hits the 600s
+wall with no verdict line, because it hangs inside the loop; `bin/simple
+run` gives the bounded verdict. The `.spl` workaround in
+`placeholder_lambda.spl` is deliberately left in place — it is valid
+defensively and independent of this fix.

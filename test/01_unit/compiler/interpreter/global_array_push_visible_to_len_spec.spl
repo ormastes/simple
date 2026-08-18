@@ -1,0 +1,96 @@
+# Module-global array push/len writeback regression spec
+#
+# Bug: doc/08_tracking/bug/native_build_worker_oom_global_array_len_stale_in_while_2026-08-18.md
+#
+# Under the seed interpreter, a mutating method call on a MODULE-GLOBAL receiver
+# (`g.push(x)`) only wrote the caller's `env`, while an identifier READ of a
+# non-local name prefers MODULE_GLOBALS. So `.len()` in a `while` CONDITION kept
+# seeing the value the global had before the loop started: the loop never
+# terminated and the vec doubled 256 MB -> ... -> 16 GiB until the allocator
+# aborted (rc=134). This took down the native-build worker on a 3-line entry.
+#
+# Whole-array assignment (`g = local`) and indexed store (`g[i] = x`) always
+# worked, because those paths sync through place.rs::sync_module_global. The
+# fix gives the method-call path the same write-through, so this spec pins BOTH:
+# the previously-fatal push-then-len loop, and the two forms that already worked
+# (a fix must not regress them).
+#
+# NOTE: module globals mutated inside functions read stale when inspected
+# DIRECTLY from an `it` block, so every assertion below goes through an
+# accessor function, never a bare read of `pushed`/`assigned`.
+
+use std.spec.*
+
+var pushed: [bool] = []
+var assigned: [i64] = []
+
+# --- push-then-len in a while condition (the OOM repro) -----------------------
+
+fn fill_by_push(n: i64):
+    while pushed.len() < n:
+        pushed.push(false)
+
+fn pushed_len() -> i64:
+    pushed.len()
+
+fn reset_pushed():
+    pushed = []
+
+# --- forms that already worked, pinned so the fix cannot regress them ---------
+
+fn fill_by_whole_assign(n: i64):
+    var local: [i64] = []
+    var i = 0
+    while i < n:
+        local.push(i)
+        i += 1
+    assigned = local
+
+fn store_at(idx: i64, value: i64):
+    assigned[idx] = value
+
+fn assigned_len() -> i64:
+    assigned.len()
+
+fn assigned_at(idx: i64) -> i64:
+    assigned[idx]
+
+describe "module-global array mutation is visible to later reads":
+
+    it "push in a while body terminates the loop that reads len in its condition":
+        step("Fill a module-global array by pushing until its len() reaches 3")
+        reset_pushed()
+        fill_by_push(3)
+
+        step("The loop terminated and the global holds exactly 3 elements")
+        expect(pushed_len()).to_equal(3)
+
+    it "an already-full global is left alone (the condition is false on entry)":
+        step("Refill to 4, then ask for only 2 more")
+        reset_pushed()
+        fill_by_push(4)
+        fill_by_push(2)
+
+        step("No further pushes happened; the length stays 4")
+        expect(pushed_len()).to_equal(4)
+
+    it "whole-array assignment to a global still propagates":
+        step("Build the values in a local vec and assign the global once")
+        fill_by_whole_assign(5)
+
+        step("The global reports the assigned length")
+        expect(assigned_len()).to_equal(5)
+
+        step("And the assigned contents are intact")
+        expect(assigned_at(0)).to_equal(0)
+        expect(assigned_at(4)).to_equal(4)
+
+    it "indexed store into a global still propagates":
+        step("Assign a 5-element global, then overwrite one slot in place")
+        fill_by_whole_assign(5)
+        store_at(2, 99)
+
+        step("The indexed write is visible and nothing else moved")
+        expect(assigned_at(2)).to_equal(99)
+        expect(assigned_at(3)).to_equal(3)
+        expect(assigned_len()).to_equal(5)
