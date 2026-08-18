@@ -208,3 +208,43 @@ disguise.
 
 No compiler source change was made. This is a measurement + bug-filing pass
 only, per the task's explicit constraint not to fix the compiler.
+
+## Addendum 2026-08-18: C-MIG-0029/0030 sqrt_f64/cbrt_f64 — algorithmic fix applied, interpreter-tax gap remains
+
+Separate from the time_utils/base64url/utf8 investigation above, but same
+family (a >2x ratio against the C/Rust oracle that survives after the known
+fixable cause is addressed). `sqrt_f64` (special.spl `_sqrt_f64`, C-MIG-0029)
+and `cbrt_f64` (cbrt.spl `_cbrt_pos`, C-MIG-0030) were fixed-iteration-count
+(40 / 80) Newton loops with a poor initial guess — a genuine algorithmic
+defect, not an interpreter tax. Both were rewritten to: (1) range-reduce the
+input into a bounded window ([1,4) for sqrt via divide/multiply-by-4, [1,8)
+for cbrt via divide/multiply-by-8, tracking the reduction count, then scaling
+the reduced root back by 2^count), giving a bounded-ratio starting guess for
+every input magnitude, and (2) a relative-epsilon convergence test
+(`|delta| <= 1e-15 * |result|`) capped at 8 iterations instead of a fixed
+40/80.
+
+Results (100-vector shared bulk corpus, `bin/simple test`, tree-walk
+interpreter, single run each):
+
+| kernel | before | after | old ratio | new ratio |
+|---|---|---|---|---|
+| sqrt_f64 | simple_us=8109 c_us=457 | simple_us=5969 c_us=488 | ~17.7x | ~12.2x |
+| cbrt_f64 | simple_us=17390 c_us=498 | simple_us=6320 c_us=467 | ~34.9x | ~13.5x |
+
+Both crosslang differential specs stay green (`cbrt_crosslang_spec.spl`:
+7 examples, 0 failures; `special_sqrt_crosslang_spec.spl`: 8 examples, 0
+failures), with new stress cases added for 1e300/1e-300 magnitudes and
+values straddling the reduction window boundary (0.999999/1.000001) to
+exercise the new range-reduction path specifically.
+
+**Remaining gap, stated plainly:** both ratios are still >2x. The iteration
+count is no longer the driver — it dropped from a fixed 40/80 to a
+data-dependent 1-8 (typically 5-6 to converge from the bounded-ratio start).
+The residual ~12-13x is dominated by per-iteration/per-call interpreter
+dispatch overhead (the same tree-walk-interpreter tax documented throughout
+this file for other kernels), not by a further algorithmic defect in either
+kernel. Closing it further requires the JIT/native codegen lane, not another
+algorithm change to these two functions. C-MIG-0029/0030 registry entries
+updated in `doc/08_tracking/c_migration/c_migration_inventory.sdn` with both
+before/after measurements.

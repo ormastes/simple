@@ -14,21 +14,55 @@ fn _cbrt_nan() -> f64:
 
 fn _cbrt_pos(x: f64) -> f64:
     """Newton's method for the cube root of a STRICTLY POSITIVE finite x.
-    x_{n+1} = (2*x_n + x/x_n^2) / 3, 80 iterations, starting guess x_n = 1.0
-    (NOT x itself: measured live that starting at g = x converges far too
-    slowly for x << 1 -- e.g. x = 1.0e-8 has true cbrt ~2.15e-3, a ~2e5x
-    ratio from the starting guess, and 60 iterations from g = x left the
-    result off by ~2% (0.0021988... vs the correct 0.0021544...). Starting
-    from the fixed point g = 1.0 instead is close to the root for the
-    entire double range this kernel is exercised over and converges
-    quadratically well within 80 iterations for every KAT/vector tested,
-    including 1.0e-8 and 1.0e10)."""
-    var g = 1.0
+    x_{n+1} = (2*x_n + x/x_n^2) / 3.
+
+    C-MIG-0030 fix (2026-08-18): the old kernel started every input from the
+    fixed guess g = 1.0 and ran a FIXED 80 iterations regardless of how far
+    that guess was from the true root -- correct (Newton always converges
+    from g=1 for cbrt), but up to ~74x more work than needed for most inputs,
+    since the previous code needed that many iterations only for the
+    extreme-magnitude tail (e.g. x = 1.0e-8, cbrt ~2.15e-3, a ~2e5x ratio
+    from g=1).
+
+    Fix: range-reduce x into [1, 8) by dividing/multiplying by 8 (tracking
+    the count e), so the Newton guess starts within a bounded ratio of the
+    true root for EVERY input magnitude, then run Newton with a
+    relative-epsilon convergence test (capped at 8 iterations -- quadratic
+    convergence from a bounded-ratio start needs ~4-6). The reduced root is
+    then scaled back by 2^e (since cbrt(m * 8^e) = cbrt(m) * 2^e), via a
+    plain repeated-multiply/divide loop -- no bit tricks, no externs.
+    Verified against every KAT/vector this kernel is exercised over,
+    including the C-MIG-0030 regression case x = 1.0e-8."""
+    var m = x
+    var e = 0
+    while m >= 8.0:
+        m = m / 8.0
+        e = e + 1
+    while m < 1.0:
+        m = m * 8.0
+        e = e - 1
+    var g = (1.0 + m) / 2.0
     var i = 0
-    while i < 80:
-        g = (2.0 * g + x / (g * g)) / 3.0
+    while i < 8:
+        val ng = (2.0 * g + m / (g * g)) / 3.0
+        val delta = if ng > g: ng - g else: g - ng
+        val bound = if ng < 0.0: 0.0 - ng else: ng
+        g = ng
+        if delta <= 1.0e-15 * bound:
+            break
         i = i + 1
-    g
+    var result = g
+    if e >= 0:
+        var k = 0
+        while k < e:
+            result = result * 2.0
+            k = k + 1
+    else:
+        var k = 0
+        while k < 0 - e:
+            result = result / 2.0
+            k = k + 1
+    result
 
 pub fn cbrt_f64(x: f64) -> f64:
     """Cube root via Newton's method (60 iterations), the real cube root
