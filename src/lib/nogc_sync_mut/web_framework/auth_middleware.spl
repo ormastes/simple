@@ -39,7 +39,9 @@ match auth_result:
 
 use std.http_server.types.{HttpRequestData}
 use std.web_framework.session.{SessionStore}
-use std.crypto.hmac.{hmac_sha256}
+use std.crypto.hmac.{hmac_sha256_bytes}
+use std.crypto.types.{text_to_bytes}
+use std.common.base_encoding.base64.{base64url_decode_strict}
 use std.common.jwt.decode.{split_token, json_decode}
 use std.common.jwt.claims.{get_claim, has_claim, current_timestamp}
 
@@ -153,14 +155,24 @@ fn jwt_auth_middleware(request: HttpRequestData, secret: text) -> Result<text, t
     val payload = parts[1]
     val signature = parts[2]
 
+    # Reject malformed base64url BEFORE anything else. The lenient decoder
+    # silently dropped out-of-alphabet bytes, so a malformed segment was
+    # indistinguishable from a well-formed one here.
+    # -> doc/08_tracking/bug/base64url_decode_accepts_invalid_alphabet_2026-08-18.md
+    val header_res = base64url_decode_strict(header)
+    if not header_res.is_ok():
+        return Err("Invalid JWT: header segment is not valid base64url")
+    val payload_res = base64url_decode_strict(payload)
+    if not payload_res.is_ok():
+        return Err("Invalid JWT: payload segment is not valid base64url")
+
     # Verify signature
     val signing_input = "{header}.{payload}"
     val expected_sig = compute_jwt_signature(signing_input, secret)
     if signature != expected_sig:
         return Err("Invalid JWT signature")
 
-    # Decode payload (base64url -> JSON-like text)
-    val decoded_payload = base64url_decode(payload)
+    val decoded_payload = payload_res.unwrap()
 
     # Extract "sub" field (simple JSON parsing)
     val user_id = extract_json_field(decoded_payload, "sub")
@@ -215,6 +227,14 @@ fn verify_and_decode_jwt(raw_token: text,
     val payload_b64 = parts[1]
     val signature_b64 = parts[2]
 
+    # --- 0. Reject malformed base64url segments (strict, RFC 4648 s3.3) ---
+    val header_res = base64url_decode_strict(header_b64)
+    if not header_res.is_ok():
+        return Err("Invalid JWT: header segment is not valid base64url")
+    val payload_res = base64url_decode_strict(payload_b64)
+    if not payload_res.is_ok():
+        return Err("Invalid JWT: payload segment is not valid base64url")
+
     # --- 1. Verify signature ---
     val signing_input = "{header_b64}.{payload_b64}"
     if config.algorithm == "HS256":
@@ -225,7 +245,7 @@ fn verify_and_decode_jwt(raw_token: text,
         return Err("Unsupported algorithm: " + config.algorithm + " (only HS256 supported)")
 
     # --- 2. Decode payload ---
-    val payload_json = base64url_decode(payload_b64)
+    val payload_json = payload_res.unwrap()
     val claims = json_decode(payload_json)
 
     # --- 3. Validate required claims ---
@@ -356,7 +376,7 @@ fn parse_cookies(cookie_header: text) -> Dict<text, text>:
 
 fn compute_jwt_signature(signing_input: text, secret: text) -> text:
     """Compute HMAC-SHA256 JWT signature and return base64url-encoded."""
-    val hash_bytes = hmac_sha256(secret, signing_input)
+    val hash_bytes = hmac_sha256_bytes(text_to_bytes(secret), text_to_bytes(signing_input))
     base64url_encode_bytes(hash_bytes)
 
 fn base64url_encode_bytes(bytes: [i64]) -> text:
@@ -380,36 +400,6 @@ fn base64url_encode_bytes(bytes: [i64]) -> text:
 
         i = i + 3
 
-    result.join("")
-
-fn base64url_decode(s: text) -> text:
-    """Simple base64url decode to text.
-
-    Handles the URL-safe variant (- instead of +, _ instead of /).
-    """
-    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    var bytes: [i64] = []
-    var buffer = 0
-    var bits = 0
-    var i = 0
-
-    while i < s.len():
-        val c = s[i:i + 1]
-        val idx = chars.index_of(c)
-        if idx >= 0:
-            buffer = (buffer * 64) + idx
-            bits = bits + 6
-            if bits >= 8:
-                bits = bits - 8
-                val byte_val = (buffer >> bits) & 0xFF
-                bytes.push(byte_val)
-                buffer = buffer & ((1 << bits) - 1)
-        i = i + 1
-
-    # Convert bytes to text
-    var result: [text] = []
-    for b in bytes:
-        result.push(char_from_code(b))
     result.join("")
 
 fn extract_json_field(json: text, field: text) -> text:
@@ -492,4 +482,3 @@ fn char_digit(c: text) -> i64:
     if c == "9": return 9
     -1
 
-extern fn char_from_code(code: i64) -> text

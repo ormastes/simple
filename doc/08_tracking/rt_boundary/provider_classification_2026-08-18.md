@@ -101,3 +101,86 @@ business logic.
   case as the two allowlisted files, but `engine2d` names an engine, and libtorch
   availability is optional-at-runtime; both need an owner to confirm they are
   binding-only before being sanctioned.
+
+---
+
+## Round 2 (2026-08-18) — the three "needs owner decision" files, decided
+
+Owner decision taken by lane-rt-bitstream. **Verdict: all three REFUSED. No
+allowlist line added. Measured forbidden-count delta = 0.**
+
+Path correction: the brief's `src/lib/common/torch/sffi.spl` does not exist; the
+file is `src/lib/nogc_sync_mut/torch/sffi.spl` (as round 1 recorded).
+
+### Measured (grep only; `check-no-direct-rt.shs` deliberately NOT run)
+
+`total` = `^[^#]*\brt_[a-z0-9_]*\(`; `extern` = `^\s*(pub )?extern fn rt_`;
+`shimdefs` = `^\s*(pub )?fn rt_[a-z0-9_]*\(` (Simple functions *named* `rt_*` —
+these are definitions, not calls, and are themselves a boundary violation: a
+public symbol must not carry an `rt_` name, design section 12).
+
+| file | total | extern | shimdefs | genuine calls |
+|---|---|---|---|---|
+| `src/lib/nogc_sync_mut/io/window_sffi.spl` | 157 | 66 | 12 | **79** |
+| `src/lib/nogc_sync_mut/torch/sffi.spl` | 137 | 133 | 2 | **2** |
+| `src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl` | 144 | 56 | 0 | **88** |
+
+Confirms the filed measurement defect: torch/sffi.spl's headline 137 is 97%
+declarations and it is in truth a 2-call-site file. It is one of the smallest
+offenders in the tree, not one of the largest.
+
+### `window_sffi.spl` — MUST MIGRATE (or split)
+
+`rt_sdl2_*` is a genuine external-library ABI, but only ~45 of the 79 calls are
+thin handle thunks. The rest is logic:
+- **Event decoding**, a hand-written SDL event-code state machine:
+  `window_sffi.spl:460-470` (`if window_event == 4: EventType.WindowMoved / == 5
+  or == 6: WindowResized / == 10: CursorEntered ...`) and `:520-526`
+  (`val vkey = parse_virtual_key(keysym)`, `val state = if event.handle == 2:
+  KeyState.Pressed else: KeyState.Released`, `sdl2_normalize_modifiers(...)`).
+  Mapping integer codes to Simple enums is pure Simple work.
+- **Pixel packing** — header `:7` "each i64 is packed as R*16777216 + G*65536 +
+  B*256 + A".
+- **A whole winit compatibility shim**, `:718-800`, twelve `fn rt_winit_*`
+  definitions that re-express SDL events as the retired winit API
+  (`fn rt_winit_event_keyboard_input(...)` at `:742`). That is a translation
+  layer wearing an `rt_` name — the exact anti-pattern section 12 forbids.
+Correct fix: split the ~66 `extern fn rt_sdl2_*` declarations plus their thin
+thunks into a provider module, and move decoding/packing/the winit shim into
+ordinary product code. Allowlisting the current file would sanction 34+ logic
+call sites.
+
+### `torch/sffi.spl` — MUST MIGRATE (deletion, not allowlist)
+
+Its own header, `:1-3`: *"torch SFFI Bindings (NoGC — Duplicated) / Duplicated
+from gc_async_mut/torch/ffi.spl to avoid cross-mode import warnings."* This is a
+copy-paste fork, the same disqualification round 1 applied to
+`src/app/io/window_*.spl`. Duplication is not a boundary. Its 2 real calls
+(`:57`, `:60`) are pass-throughs to `rt_ps_torch_*`. Allowlisting would sanctify
+the fork and hide a 2-site file; the real defect is the duplication and the
+cross-mode-import limitation that forced it.
+
+### `gpu/engine2d/sffi_vulkan.spl` — MUST MIGRATE (not a second Vulkan provider)
+
+Not a binding layer. Header `:1`: *"Vulkan SFFI Dispatch — Static/Dynamic
+Dual-Path ... supports both static (extern fn) and dynamic (DynLib) dispatch"* —
+i.e. the same dispatch-policy shape as `torch/dyn_sffi_ops.spl`, refused in
+round 1. The `case Static: rt_vulkan_*` arms (`:270-412`) are thin, but the file
+also carries:
+- **ABI-mode policy branching**: `if gpu_sffi_uses_interpreter_array_abi():`
+  at `:99`, `:117`, `:128` selecting between two call shapes.
+- **Buffer building / byte packing**: `_vulkan_read_buffer_strided_bytes_abi`
+  `:106-135` — bounds policy (`if row_count > 16384 or src_stride < row_bytes`),
+  an 8K-surface size cap, and a manual row-by-row `packed.push(bytes[i])` loop.
+- **Device-selection policy**: `vulkan_sffi_find_headless_device` `:790-800`
+  scanning devices for `dt == "cpu" or dt == "CpuOnly"` (lavapipe heuristic).
+It also re-declares `rt_vulkan_*` externs already owned by the allowlisted
+`src/lib/nogc_sync_mut/io/vulkan_sffi.spl`. There must be exactly one sanctioned
+provider per `rt_` family; a second one is a fork, not a boundary. This file
+should call that provider.
+
+### Net effect
+
+allowlist unchanged (still 2 files / 222 sites from round 1); forbidden count
+unchanged at the round-1 figure of **18566** by the regex above. 10 candidates
+examined across two rounds, 2 allowlisted, 8 refused.

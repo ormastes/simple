@@ -1,6 +1,6 @@
 # `check-no-direct-rt.shs` counts `extern fn rt_*` DECLARATIONS as "call sites"
 
-- **Status:** OPEN
+- **Status:** RESOLVED (scanner fixed 2026-08-18); baseline re-record still OPEN — see Resolution
 - **Date:** 2026-08-18
 - **Area:** `scripts/check/check-no-direct-rt.shs` (the `RT_RE` matcher)
 - **Severity:** Medium — the gate's headline number is inflated, and the
@@ -76,3 +76,62 @@ e.g.
 ```
 
 Keep both in the verdict so neither can be silently dropped.
+
+## Resolution (2026-08-18) — FIXED in the scanner, baseline NOT re-recorded
+
+`scripts/check/check-no-direct-rt.shs` now subtracts declaration lines
+(`DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('`) from
+the call-site count and reports them as their own structured line. Every
+pre-existing structured count line is retained, plus two new ones:
+
+```
+  forbidden_product: <n>
+  extern_declarations: <m>
+  match_total_incl_declarations: <direct_total + m>
+```
+
+`extern_decls=<m>` is also carried in every PASS/FAIL verdict line so the
+number cannot be silently dropped. FAIL-over-baseline (exit 1), ERROR on
+scanned==0 (exit 2), `--critical`, `--selftest-only`, `--update-baseline`
+(a default run still never writes the baseline), the verdict-is-last-stdout-line
+contract, and the fix-it guidance printed before the verdict are all unchanged.
+The fatal selftest grew from 5 to 8 fixtures: an `extern fn rt_x(...)` line must
+count as a declaration and NOT as forbidden; a real `y = rt_x(a)` must still
+count as forbidden and not as a declaration; a file containing both must split
+2 declarations / 1 call.
+
+### Both numbers, measured on the same tree (2026-08-18)
+
+| definition | scanned files | direct_total | allowed_provider | forbidden_product | extern_declarations |
+|---|---|---|---|---|---|
+| OLD (declarations counted as call sites) | 14828 | 21191 | 2625 | **18566** | not measured |
+| NEW (declarations excluded) | 14828 | 13675 | 1663 | **12012** | **7516** |
+
+`13675 + 7516 = 21191` — the new split reconciles exactly with the old total, so
+nothing was lost, only reclassified.
+
+**The 18566 -> 12012 drop is a MEASUREMENT-DEFINITION change, not migration
+progress. Zero call sites were removed by this change.** (The `allowed_provider`
+side falls 2625 -> 1663 for the same reason: allowlisted provider files also
+declare their externs.)
+
+### Baseline decision: left untouched, deliberately
+
+`scripts/check/no_direct_rt_baseline.txt` still reads **18788**, recorded under
+the OLD definition, and a default run continues to leave it unwritten
+(`git status --porcelain` on it is empty after a default run). It is left for
+the owner of the phase A/B/C ratchet in
+`doc/03_plan/infra/binary_runtime_hardening/plan.md` to re-record, because
+re-recording is what makes the new floor binding and that is a plan decision,
+not a scanner decision.
+
+**It should become 12012** (the new-definition measurement on this tree), via
+`sh scripts/check/check-no-direct-rt.shs --update-baseline`, and whoever does it
+must cite this note so the 6776 delta is never read as work done. Until then the
+gate is loose by ~6776 against the new definition — it will PASS on real
+regressions of up to that size, so re-record promptly. Note also that the
+allowlist is being edited in parallel, which moves `allowed_provider` /
+`forbidden_product` independently of this fix; re-measure immediately before
+recording.
+
+Status: **RESOLVED (scanner)** / baseline re-record OPEN.

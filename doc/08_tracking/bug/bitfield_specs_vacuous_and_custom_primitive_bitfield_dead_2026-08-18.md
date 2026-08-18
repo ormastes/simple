@@ -169,3 +169,53 @@ this proves the compiler's modules still load and the AC-5/AC-6 behaviour still
 works — not that a from-scratch self-hosted rebuild is unaffected. The module
 had zero importers and was absent from `50.mir/__init__.spl`, so a build-order
 effect is not expected, but it is not proven here.
+
+## 2026-08-18 — attempt to close the from-scratch-rebuild evidence gap: BLOCKED (gap stays OPEN)
+
+Goal: prove the deletion of `src/compiler/50.mir/custom_primitive_bitfield.spl`
+(commit `7ab0e2997f1`) is safe under a full self-compilation, not merely under
+module load + AC-5/AC-6 spec runs.
+
+`.claude/rules/bootstrap.md` mandates: "**Run `sh
+scripts/check/check-bootstrap-preflight.shs` before any bootstrap.**" That was
+run first, in worktree `lane-rt-bitstream`, and it FAILS:
+
+```
+check seed: WARNING: this Rust-built Simple binary is a bootstrap seed only; ...
+check cargo: FAIL — first error: error[E0592]: duplicate definitions with name `INLINE_INT_BITS`
+check probe: ok (ByteOrder lazy-import shape resolves under seed)
+check disk: ok (933 GiB free >= 20)
+check markers: ok
+FAIL — 5 check(s) run, failing: cargo-check (0 skipped)
+```
+
+Confirmed directly with `cargo check --release --bin simple` in
+`src/compiler_rust`:
+
+```
+error[E0592]: duplicate definitions with name `INLINE_INT_BITS`
+   --> runtime/src/value/core.rs:335:5
+error[E0592]: duplicate definitions with name `fits_inline_int`
+   --> runtime/src/value/core.rs:354:5
+error: could not compile `simple-runtime` (lib) due to 2 previous errors
+```
+
+**This breakage is PRE-EXISTING and UNRELATED to the deletion.** It is Rust seed
+source, not Simple source: `src/compiler_rust/runtime/src/value/core.rs` at
+HEAD defines `INLINE_INT_BITS` twice (lines 304 and 335), with a clean working
+tree (`git status --porcelain` on that path is empty), landed by
+`b8ca72d8c3b` / `4e265503e0c`. The deleted file touched neither the Rust seed
+nor `runtime/`. Equally, the deletion's safety is NOT established by this
+unrelated failure.
+
+No bootstrap was launched. Two further blockers were noted and not forced:
+`bin/simple` here is a symlink to the SHARED binary in `simple-main`
+(`bin/release/x86_64-unknown-linux-gnu/simple`) owned by other lanes, and this
+worktree has no `build/` at all (the documented worktree trap: cold cache, full
+rebuild).
+
+**Verdict: the from-scratch self-hosted rebuild evidence gap remains OPEN.** It
+cannot be closed in this lane until the Rust seed compiles again. The existing
+evidence (compiler modules still load; `custom_primitive_sffi_spec.spl` 20/20;
+`bitfield_mir_spec.spl` 14/14) stands unchanged and is still the limit of what
+has been proven.
