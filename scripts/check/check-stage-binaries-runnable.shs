@@ -1,0 +1,504 @@
+#!/bin/sh
+# Refuse to push a tracked stage binary that cannot actually run.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# Incident 2026-08-18 (doc/08_tracking/bug/
+# stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md):
+# the git-tracked binary `bootstrap/stage3/simple` SEGVs (rc=139) on a
+# three-line hello world, for BOTH of the commands it supports. `--version`
+# still answers -- which is exactly why it looks healthy -- because that path
+# never reaches the compiler.
+#
+# Every existing pre-push guard passed over it, because every one of them
+# checks TREES and RANGES and nothing else:
+#   * check-no-conflict-tree-push.shs      -- .jjconflict* tree entries
+#   * check-no-conflict-markers-push.shs   -- conflict-marker TEXT in blobs
+#   * check-tree-size-push.shs             -- file counts / entry bands
+#   * check-test-tree-divergence.shs       -- duplicate test-tree diffs
+#   * check-no-revert-push.shs             -- blob-vs-history comparison
+#   * check-runtime-api-regression-push.shs-- rt_* symbol-set deltas
+#   * check-c-runtime-compiles-push.shs    -- C that parses and type-checks
+# The last of those runs a compiler, but still only over SOURCE. NOTHING in
+# the repo EXECUTES a tracked artifact. A binary blob is opaque to all of
+# them: correctly sized, non-conflicted, forward-moving, symbol-preserving --
+# and stone dead when you run it. This guard is the missing axis: does the
+# shipped artifact do its job.
+#
+# ---------------------------------------------------------------------------
+# SCOPE: WHICH BINARIES, AND WHICH COMMANDS
+# ---------------------------------------------------------------------------
+# Binaries: every git-TRACKED file named `simple` under `bootstrap/` (as of
+# 2026-08-18: bootstrap/stage1/simple, bootstrap/stage2/simple,
+# bootstrap/stage3/simple, bootstrap/stage3/x86_64-unknown-linux-gnu/simple).
+# The set is discovered from `git ls-files`, never hardcoded, so a new stage
+# is covered the day it lands.
+#
+# Commands: `compile` and `native-build`, and NOTHING ELSE. These are the
+# bootstrap CLI (src/app/cli/bootstrap_main.spl), which deliberately exposes
+# exactly two commands; its dispatch is at bootstrap_main.spl:459-492. It has
+# no `run`, `test`, `lint`, `fmt` or `build`. Probing a stage binary for
+# those is a CATEGORY ERROR -- `unknown command` (exit 1) is the correct
+# answer, not evidence of a defect -- and that mistake already misled one
+# investigation (see the "Correction to a documented claim" section of the
+# bug record above). Do not add them here.
+#
+# `--version` is probed too, but only as a liveness precondition: if even
+# --version fails the binary is not a binary at all. A --version that
+# succeeds is explicitly NOT a pass; it is the exact thing that made the
+# incident invisible.
+#
+# ---------------------------------------------------------------------------
+# ALGORITHM
+# ---------------------------------------------------------------------------
+# 1. Enumerate tracked `bootstrap/**/simple` paths via `git ls-files`.
+# 2. Materialise the content to execute. By default the WORKING-TREE file is
+#    used when it exists (that is the artifact a developer actually has); a
+#    tracked path with no working-tree file is materialised from committed
+#    content via `git cat-file blob <rev>:<path>` so a locally-deleted
+#    artifact is still exercised rather than silently skipped. `--rev <r>`
+#    forces committed content for ALL paths, which is how a plumbing-built
+#    commit that was never checked out gets checked.
+# 3. For each binary, run each supported command on a three-line hello world
+#    in a private temp directory, under `timeout` when available.
+# 4. Take the exit status DIRECTLY into a variable on the line after the
+#    invocation. NEVER through a pipe: a pipeline's `$?` is the LAST
+#    command's status, and this repo has produced false greens exactly that
+#    way. Output goes to a temp file; the status comes from the process.
+# 5. Classify: rc 0 = OK. rc >= 128 = CRASH (killed by a signal; 139 = SEGV,
+#    134 = abort, 124 = the timeout tool's own "timed out"). Any other
+#    non-zero = FAIL. Crashes and failures are both offenders and both named
+#    in the verdict, distinguished so a reader knows which they are looking
+#    at.
+#
+# ---------------------------------------------------------------------------
+# NON-VACUITY
+# ---------------------------------------------------------------------------
+# A run that EXECUTED 0 binaries is an ERROR (exit 2), never a pass. So is a
+# run that found no tracked stage binary at all: absence of an artifact to
+# test is absence of evidence, not evidence of health. So is a tracked path
+# whose content cannot be materialised. The verdict always states how many
+# invocations actually happened, so a vacuous run cannot masquerade as a
+# real one.
+#
+# ---------------------------------------------------------------------------
+# VERDICT CONTRACT (matches the sibling guards)
+# ---------------------------------------------------------------------------
+#   PASS — <n> invocation(s) executed across <k> binary(ies), 0 crashes
+#                                                     exit 0, n > 0 always
+#   FAIL — <n> invocation(s) executed, <m> crashed/failed: <names>  exit 1
+#   ERROR — nothing was checked (<reason>)                          exit 2
+# The verdict is ALWAYS the last line of stdout.
+#
+# Usage:
+#   check-stage-binaries-runnable.shs              # working tree
+#   check-stage-binaries-runnable.shs --rev REV    # committed content at REV
+#   check-stage-binaries-runnable.shs --root DIR   # alternate repo root
+#   check-stage-binaries-runnable.shs --selftest   # fixtures only, no scan
+#   check-stage-binaries-runnable.shs --verbose    # per-invocation results
+#
+# NOTE ON RANGE: like check-c-runtime-compiles-push.shs and unlike the
+# range-based guards, this checks a TREE, not a BASE..NEW delta.
+# Runnability is a property of an artifact, not of a diff -- the incident
+# binary was untouched by the push that would have shipped it.
+
+set -u
+
+SELF_NAME='check-stage-binaries-runnable'
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+CFG_ROOT=''
+CFG_REV=''
+CFG_VERBOSE=0
+CFG_SELFTEST_ONLY=0
+CFG_MAX_NAMES=12
+CFG_TIMEOUT=180          # seconds per invocation
+
+# The ONLY commands the bootstrap CLI supports. See SCOPE above before
+# adding anything here.
+CFG_COMMANDS='compile native-build'
+
+# ---------------------------------------------------------------------------
+# Verdict helpers -- every exit goes through one of these, so it is
+# impossible to terminate without a verdict line.
+# ---------------------------------------------------------------------------
+verdict_pass() {
+    printf 'PASS — %s\n' "$1"
+    exit 0
+}
+verdict_fail() {
+    printf 'FAIL — %s\n' "$1"
+    exit 1
+}
+verdict_error() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+TMPROOT=''
+cleanup() {
+    [ -n "$TMPROOT" ] && [ -d "$TMPROOT" ] && rm -rf "$TMPROOT"
+}
+on_signal() {
+    cleanup
+    printf 'ERROR — nothing was checked (interrupted)\n'
+    exit 2
+}
+trap cleanup EXIT
+trap on_signal INT TERM HUP
+
+# ---------------------------------------------------------------------------
+# The hello-world fixture. Three lines, no imports, no stdlib surface beyond
+# `print` -- if this does not compile, nothing does.
+# ---------------------------------------------------------------------------
+write_hello() {
+    printf 'fn main() -> i64:\n    print "hi"\n    0\n' >"$1"
+}
+
+# `timeout` is not universal (absent on some BSD userlands). Use it when it
+# is there; run bare when it is not, rather than failing the guard over it.
+TIMEOUT_BIN=''
+detect_timeout() {
+    for t in timeout gtimeout; do
+        if command -v "$t" >/dev/null 2>&1; then
+            TIMEOUT_BIN="$t"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# run_probe <binary> <outfile> <arg...>
+# Sets PROBE_RC. No pipe anywhere: the status is read on the line directly
+# after the invocation.
+# ---------------------------------------------------------------------------
+run_probe() {
+    _bin="$1"; _out="$2"; shift 2
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" "$CFG_TIMEOUT" "$_bin" "$@" >"$_out" 2>&1
+        PROBE_RC=$?
+    else
+        "$_bin" "$@" >"$_out" 2>&1
+        PROBE_RC=$?
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# classify_rc <rc> -> prints 'ok' | 'crash' | 'fail'
+# ---------------------------------------------------------------------------
+classify_rc() {
+    if [ "$1" -eq 0 ]; then
+        printf 'ok'
+    elif [ "$1" -ge 128 ] || [ "$1" -eq 124 ]; then
+        printf 'crash'
+    else
+        printf 'fail'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# probe_binary <label> <path-to-executable> <workdir>
+# Runs --version plus every supported command. Returns 0 when every
+# invocation succeeded, 1 otherwise.
+# Accumulates into: PB_RUNS, PB_BAD, PB_BADNAMES
+# ---------------------------------------------------------------------------
+PB_RUNS=0
+PB_BAD=0
+PB_BADNAMES=''
+
+probe_binary() {
+    _label="$1"; _exe="$2"; _wd="$3"
+    _hello="$_wd/hello.spl"
+    _out="$_wd/out.txt"
+    write_hello "$_hello"
+    _local_bad=0
+
+    # Liveness precondition. A binary whose --version fails is not merely
+    # broken at its job, it is not running at all.
+    run_probe "$_exe" "$_out" --version
+    PB_RUNS=$((PB_RUNS + 1))
+    _cls=$(classify_rc "$PROBE_RC")
+    [ "$CFG_VERBOSE" -eq 1 ] && printf '%s:   %s --version -> rc=%s (%s)\n' \
+        "$SELF_NAME" "$_label" "$PROBE_RC" "$_cls"
+    if [ "$_cls" != 'ok' ]; then
+        _local_bad=1
+        PB_BAD=$((PB_BAD + 1))
+        PB_BADNAMES="$PB_BADNAMES $_label:--version($_cls,rc=$PROBE_RC)"
+    fi
+
+    for _cmd in $CFG_COMMANDS; do
+        case "$_cmd" in
+            compile)
+                run_probe "$_exe" "$_out" compile "$_hello" --format=smf \
+                    -o "$_wd/hello.smf"
+                ;;
+            native-build)
+                run_probe "$_exe" "$_out" native-build "$_hello" \
+                    -o "$_wd/hello.bin"
+                ;;
+            *)
+                # Unreachable by construction; fail loudly rather than skip.
+                verdict_error "unsupported command in CFG_COMMANDS: $_cmd"
+                ;;
+        esac
+        PB_RUNS=$((PB_RUNS + 1))
+        _cls=$(classify_rc "$PROBE_RC")
+        [ "$CFG_VERBOSE" -eq 1 ] && printf '%s:   %s %s -> rc=%s (%s)\n' \
+            "$SELF_NAME" "$_label" "$_cmd" "$PROBE_RC" "$_cls"
+        if [ "$_cls" != 'ok' ]; then
+            _local_bad=1
+            PB_BAD=$((PB_BAD + 1))
+            PB_BADNAMES="$PB_BADNAMES $_label:$_cmd($_cls,rc=$PROBE_RC)"
+        fi
+    done
+
+    return "$_local_bad"
+}
+
+# ---------------------------------------------------------------------------
+# list_stage_binaries <root> -- tracked `simple` files under bootstrap/
+# ---------------------------------------------------------------------------
+list_stage_binaries() {
+    git -C "$1" ls-files -- 'bootstrap/*/simple' 'bootstrap/*/*/simple' \
+        'bootstrap/*/*/*/simple' 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# scan_tree <root> -- probes every stage binary.
+# Sets: SCAN_BINS (binaries executed), SCAN_RUNS (invocations),
+#       SCAN_BAD, SCAN_BADNAMES, SCAN_ERR (non-empty => ERROR reason)
+# ---------------------------------------------------------------------------
+SCAN_BINS=0
+SCAN_RUNS=0
+SCAN_BAD=0
+SCAN_BADNAMES=''
+SCAN_ERR=''
+
+scan_tree() {
+    _root="$1"
+    SCAN_BINS=0; SCAN_RUNS=0; SCAN_BAD=0; SCAN_BADNAMES=''; SCAN_ERR=''
+    PB_RUNS=0; PB_BAD=0; PB_BADNAMES=''
+
+    _paths=$(list_stage_binaries "$_root")
+    if [ -z "$_paths" ]; then
+        SCAN_ERR="no tracked bootstrap stage binary found under $_root/bootstrap"
+        return 0
+    fi
+
+    _n=0
+    for _p in $_paths; do
+        _n=$((_n + 1))
+        _wd="$TMPROOT/probe.$_n"
+        mkdir -p "$_wd" || { SCAN_ERR="could not create $_wd"; return 0; }
+        _exe=''
+
+        if [ -z "$CFG_REV" ] && [ -f "$_root/$_p" ]; then
+            _exe="$_root/$_p"
+        else
+            # Materialise committed content: either --rev was given, or the
+            # tracked path has no working-tree file. Never skip.
+            _rev="${CFG_REV:-HEAD}"
+            _exe="$_wd/$(basename "$_p")"
+            git -C "$_root" cat-file blob "$_rev:$_p" >"$_exe" 2>/dev/null
+            _catrc=$?
+            if [ "$_catrc" -ne 0 ] || [ ! -s "$_exe" ]; then
+                SCAN_ERR="tracked $_p has no content at $_rev and no working-tree file"
+                return 0
+            fi
+            chmod +x "$_exe" 2>/dev/null
+        fi
+
+        if [ ! -x "$_exe" ]; then
+            SCAN_BAD=$((SCAN_BAD + 1))
+            SCAN_BADNAMES="$SCAN_BADNAMES $_p:not-executable"
+            continue
+        fi
+
+        printf '%s: probing %s\n' "$SELF_NAME" "$_p"
+        probe_binary "$_p" "$_exe" "$_wd"
+        SCAN_BINS=$((SCAN_BINS + 1))
+    done
+
+    SCAN_RUNS="$PB_RUNS"
+    SCAN_BAD=$((SCAN_BAD + PB_BAD))
+    SCAN_BADNAMES="$SCAN_BADNAMES$PB_BADNAMES"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- fatal, runs before every scan.
+#
+# Fixtures are real executables probed by the real probe_binary()/scan_tree(),
+# so the test exercises the actual classifier, not a reimplementation.
+#
+#  1 must-PASS : a fake `simple` that succeeds on every command
+#  2 must-FAIL : a fake that SEGVs on compile -- the incident's exact shape,
+#                including a --version that answers cleanly
+#  3 must-FAIL : a fake that exits 1 (non-zero without a signal)
+#  4 must-FAIL : a tracked-but-not-executable artifact
+#  5 non-vacuity: an empty set yields 0 executed, forcing the caller to ERROR
+#  6 must-FAIL : a fake whose --version itself crashes
+# ---------------------------------------------------------------------------
+make_fake_repo() { # <dir> <script-body>
+    _d="$1"; _body="$2"
+    mkdir -p "$_d/bootstrap/stage9"
+    ( cd "$_d" && git init -q . >/dev/null 2>&1 \
+        && git config user.email fx@example.invalid \
+        && git config user.name fx )
+    printf '%s' "$_body" >"$_d/bootstrap/stage9/simple"
+    chmod +x "$_d/bootstrap/stage9/simple"
+    ( cd "$_d" && git add -A >/dev/null 2>&1 )
+}
+
+selftest() {
+    _pass=0; _total=0; _bad=''
+
+    _good='#!/bin/sh
+exit 0
+'
+    _segv='#!/bin/sh
+case "$1" in
+  --version) echo "simple-bootstrap 1.0.0-beta"; exit 0 ;;
+esac
+kill -SEGV $$
+'
+    _exit1='#!/bin/sh
+case "$1" in
+  --version) exit 0 ;;
+esac
+exit 1
+'
+    _versegv='#!/bin/sh
+kill -SEGV $$
+'
+
+    _case() { # <name> <body> <want-bad-nonzero:0|1>
+        _total=$((_total + 1))
+        _d="$TMPROOT/fx_$1"
+        make_fake_repo "$_d" "$2"
+        scan_tree "$_d"
+        if [ -n "$SCAN_ERR" ]; then
+            _bad="$_bad $1(unexpected-ERROR:$SCAN_ERR)"
+            return 0
+        fi
+        if [ "$SCAN_RUNS" -le 0 ]; then
+            _bad="$_bad $1(no-invocations)"
+            return 0
+        fi
+        if [ "$3" -eq 0 ] && [ "$SCAN_BAD" -eq 0 ]; then
+            _pass=$((_pass + 1))
+        elif [ "$3" -eq 1 ] && [ "$SCAN_BAD" -gt 0 ]; then
+            _pass=$((_pass + 1))
+        else
+            _bad="$_bad $1(bad=$SCAN_BAD,runs=$SCAN_RUNS)"
+        fi
+    }
+
+    _case fixture1_working "$_good" 0
+    _case fixture2_segv_on_compile "$_segv" 1
+    _case fixture3_nonzero_exit "$_exit1" 1
+    _case fixture6_version_crashes "$_versegv" 1
+
+    # 4: tracked but not executable -> offender, never a skip.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_noexec"
+    make_fake_repo "$_d" "$_good"
+    chmod -x "$_d/bootstrap/stage9/simple"
+    scan_tree "$_d"
+    if [ -z "$SCAN_ERR" ] && [ "$SCAN_BAD" -gt 0 ]; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture4_not_executable(bad=$SCAN_BAD,err=$SCAN_ERR)"
+    fi
+
+    # 5: non-vacuity -- a repo with no stage binary must execute nothing, so
+    # the caller is forced into ERROR rather than a vacuous PASS.
+    _total=$((_total + 1))
+    _d="$TMPROOT/fx_empty"
+    mkdir -p "$_d"
+    ( cd "$_d" && git init -q . >/dev/null 2>&1 \
+        && git config user.email fx@example.invalid \
+        && git config user.name fx )
+    scan_tree "$_d"
+    if [ "$SCAN_RUNS" -eq 0 ] && [ "$SCAN_BINS" -eq 0 ] && [ -n "$SCAN_ERR" ]; then
+        _pass=$((_pass + 1))
+    else
+        _bad="$_bad fixture5_empty_is_vacuous(runs=$SCAN_RUNS,err=$SCAN_ERR)"
+    fi
+
+    printf '%s: selftest %s/%s fixtures correct\n' "$SELF_NAME" "$_pass" "$_total"
+    if [ "$_pass" -ne "$_total" ]; then
+        printf '%s: FAILING FIXTURES:%s\n' "$SELF_NAME" "$_bad"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) CFG_SELFTEST_ONLY=1; shift ;;
+        --verbose|-v) CFG_VERBOSE=1; shift ;;
+        --root) shift; [ $# -gt 0 ] || verdict_error "--root needs a value"; CFG_ROOT="$1"; shift ;;
+        --rev) shift; [ $# -gt 0 ] || verdict_error "--rev needs a value"; CFG_REV="$1"; shift ;;
+        --timeout) shift; [ $# -gt 0 ] || verdict_error "--timeout needs a value"; CFG_TIMEOUT="$1"; shift ;;
+        --help|-h)
+            sed -n '2,60p' "$0"
+            printf 'ERROR — nothing was checked (help requested)\n'
+            exit 2 ;;
+        *) verdict_error "unknown argument: $1" ;;
+    esac
+done
+
+command -v git >/dev/null 2>&1 || verdict_error "git not found"
+
+TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/$SELF_NAME.XXXXXX") || \
+    verdict_error "could not create a temporary directory"
+
+detect_timeout
+printf '%s: timeout tool = %s\n' "$SELF_NAME" "${TIMEOUT_BIN:-<none>}"
+
+if [ -z "$CFG_ROOT" ]; then
+    CFG_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || CFG_ROOT=''
+    [ -n "$CFG_ROOT" ] || verdict_error "not inside a git repository and no --root given"
+fi
+[ -d "$CFG_ROOT" ] || verdict_error "$CFG_ROOT does not exist"
+
+# ---------------------------------------------------------------------------
+# Selftest is FATAL and runs before every scan.
+# ---------------------------------------------------------------------------
+_saved_rev="$CFG_REV"
+CFG_REV=''                     # fixtures are always probed from the worktree
+if ! selftest; then
+    verdict_error "selftest failed -- the guard itself is not trustworthy"
+fi
+CFG_REV="$_saved_rev"
+if [ "$CFG_SELFTEST_ONLY" -eq 1 ]; then
+    verdict_pass "selftest only, no scan requested (6 fixture(s) correct)"
+fi
+
+printf '%s: scanning %s (rev=%s)\n' "$SELF_NAME" "$CFG_ROOT" "${CFG_REV:-<working tree>}"
+scan_tree "$CFG_ROOT"
+
+# ---------------------------------------------------------------------------
+# Verdict
+# ---------------------------------------------------------------------------
+[ -z "$SCAN_ERR" ] || verdict_error "$SCAN_ERR"
+
+if [ "$SCAN_RUNS" -eq 0 ]; then
+    verdict_error "0 stage binaries were executed under $CFG_ROOT/bootstrap"
+fi
+
+if [ "$SCAN_BAD" -gt 0 ]; then
+    _names=$(printf '%s' "$SCAN_BADNAMES" | tr ' ' '\n' | grep -v '^$' | head -"$CFG_MAX_NAMES" | tr '\n' ' ')
+    verdict_fail "$SCAN_RUNS invocation(s) executed across $SCAN_BINS binary(ies), $SCAN_BAD crashed/failed: $_names"
+fi
+
+verdict_pass "$SCAN_RUNS invocation(s) executed across $SCAN_BINS binary(ies), 0 crashes"
