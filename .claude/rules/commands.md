@@ -12,6 +12,7 @@ bin/simple build bootstrap          # 3-stage self-compilation verification
 bin/simple lint <changed .spl files> # Pure-Simple source linter
 bin/simple build fmt                # Rust formatter
 bin/simple build check              # Rust clippy + rustfmt check + Rust tests
+sh scripts/check/check-dual-run-shadow.shs # C/Simple dual-run shadow gate (goal 6, binary_runtime_hardening plan)
 
 # Documentation Coverage
 bin/simple stats                    # Doc coverage in stats

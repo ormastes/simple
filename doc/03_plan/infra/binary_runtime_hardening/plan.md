@@ -72,6 +72,7 @@ Every C-to-Simple migration MUST, before the C is retired:
 |---|---|---|
 | `scripts/check/check-no-direct-rt.shs` | direct `rt_*` ratchet, structured counts; wired into `pre-push-conflict-tree-guard.shs:837` | `PASS — 14800 file(s) scanned, forbidden=12794` |
 | `scripts/check/check-binary-sspec-evidence.shs` | binary-evidence suites run, are non-vacuous, and contain negative cases (reserved-violation + corruption render) | `PASS — 6 spec(s) checked, 54 example(s) total, 0 vacuous, negative cases present` |
+| `scripts/check/check-dual-run-shadow.shs` | goal 6 dual-run shadow harness (`test/01_unit/lib/common/spec/dual_run_shadow_spec.spl`) runs, is non-vacuous, 0 divergent | `PASS — 13 pair(s) checked, 15 case(s), 0 divergent` (2026-08-18) |
 
 Both have fatal `--selftest` fixtures and print measured counts — never a bare PASS.
 The evidence floor ratchets up (37 → 46 → 54 on 2026-08-18) as adversarial cases land.
