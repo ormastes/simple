@@ -1,0 +1,226 @@
+# @req REQ-SSPEC-BINARY-DOMAINS
+#
+# Goal-4 protocol-domain suites for the binary SSpec infra (design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md): UDP and IPv4
+# headers, using the SAME stacked-word comparator as
+# test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl (TCP-word
+# suite) — no per-protocol comparator logic, only layouts + fixtures.
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field,
+    compare_word, WordDiff, ComparePolicy, policy_exact, policy_dont_care,
+    policy_masked, stacked_rows, stacked_compare_rows
+}
+
+# ---------------------------------------------------------------------------
+# UDP header (RFC 768): 8 bytes = 2 32-bit words.
+#   word0: src_port (16, hi) | dst_port (16, lo)
+#   word1: length   (16, hi) | checksum (16, lo)
+# ---------------------------------------------------------------------------
+fn udp_word0_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "udp_w0_src_dst_port",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("dst_port", 0, 16, "destination port"),
+            binary_field("src_port", 16, 16, "source port")
+        ],
+        source_ref: "RFC 768"
+    )
+
+fn udp_word1_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "udp_w1_length_checksum",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("checksum", 0, 16, "UDP checksum"),
+            binary_field("length", 16, 16, "UDP length (header + data)")
+        ],
+        source_ref: "RFC 768"
+    )
+
+describe "binary protocol domains — UDP header":
+    it "matches a known datagram header word-for-word":
+        # src_port=53247 (0xCFFF), dst_port=53 (0x0035 DNS)
+        val w0_expected = (53247 << 16) | 53
+        val w0_actual = (53247 << 16) | 53
+        val d0 = compare_word(w0_expected, w0_actual, udp_word0_layout(), [])
+        assert_equal(d0.status, "pass")
+
+        # length=16 (8 header + 8 payload); checksum unverified in this
+        # fixture, so it is masked dont_care — captured but cannot fail.
+        val w1_expected = (16 << 16) | 0xBEEF
+        val w1_actual = (16 << 16) | 0x0000
+        val policies: [ComparePolicy] = [policy_dont_care("checksum")]
+        val d1 = compare_word(w1_expected, w1_actual, udp_word1_layout(), policies)
+        assert_equal(d1.status, "pass")
+        assert_equal(d1.compare_mask & 0x0000FFFF, 0)
+
+    it "renders the corrupted-word delta in the stacked comparison rows":
+        val w0_expected = (53247 << 16) | 53
+        val w0_corrupt = (53247 << 16) | 80  # dst_port flipped 53 -> 80
+        val d0 = compare_word(w0_expected, w0_corrupt, udp_word0_layout(), [])
+        assert_equal(d0.status, "fail")
+        assert_true(d0.failing_fields.len() > 0)
+        assert_equal(d0.failing_fields[0], "dst_port")
+
+        val rows = stacked_compare_rows([d0], udp_word0_layout(), "UDP_W", 0)
+        var joined = ""
+        for r in rows:
+            joined = joined + r + "\n"
+        assert_true(joined.contains("FAIL"))
+        assert_true(joined.contains("dst_port"))
+        assert_true(joined.contains("expected"))
+        assert_true(joined.contains("actual"))
+
+# ---------------------------------------------------------------------------
+# IPv4 header (RFC 791): minimal 5-word (20-byte, no-options) header.
+#   word0: version(4)|IHL(4)|TOS(8) | total_length(16)
+#   word1: identification(16) | flags(3)|frag_offset(13)
+#   word2: TTL(8)|protocol(8) | header_checksum(16)
+#   word3: src_addr(32)
+#   word4: dst_addr(32)
+# ---------------------------------------------------------------------------
+fn ipv4_word0_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "ipv4_w0_ver_ihl_tos_len",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("total_length", 0, 16, "total header+payload length"),
+            binary_field("tos", 16, 8, "type of service"),
+            binary_field("ihl", 24, 4, "internet header length (words)"),
+            binary_field("version", 28, 4, "IP version (4)")
+        ],
+        source_ref: "RFC 791 3.1"
+    )
+
+# flags(3) at lsb 13: bit0=reserved(MUST be 0), bit1=DF, bit2=MF (msb0 wire
+# order within the 3-bit group; modeled here as one 3-bit field plus a
+# separate 1-bit reserved field so the comparator actively checks it).
+fn ipv4_word1_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "ipv4_w1_id_flags_fragoff",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("frag_offset", 0, 13, "fragment offset (8-byte units)"),
+            binary_field("flags_df_mf", 13, 2, "DF/MF flags"),
+            reserved_field("flags_reserved", 15, 1),
+            binary_field("identification", 16, 16, "datagram identification")
+        ],
+        source_ref: "RFC 791 3.1"
+    )
+
+fn ipv4_word2_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "ipv4_w2_ttl_proto_csum",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("header_checksum", 0, 16, "header checksum"),
+            binary_field("protocol", 16, 8, "encapsulated protocol"),
+            binary_field("ttl", 24, 8, "time to live")
+        ],
+        source_ref: "RFC 791 3.1"
+    )
+
+fn ipv4_addr_layout(layout_id: text) -> BinaryLayout:
+    BinaryLayout(
+        layout_id: layout_id,
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [binary_field("addr", 0, 32, "IPv4 address")],
+        source_ref: "RFC 791 3.1"
+    )
+
+# RFC 791 3.1 header-checksum algorithm: 16-bit ones-complement sum of the
+# header's 16-bit words (checksum field itself treated as 0), then the
+# ones-complement of that sum.
+fn w0_word(hi: i64, lo: i64) -> i64:
+    (hi << 16) | lo
+
+fn ipv4_header_checksum(words16: [i64]) -> i64:
+    var sum: i64 = 0
+    for w in words16:
+        sum = sum + (w & 0xFFFF)
+    while (sum >> 16) != 0:
+        sum = (sum & 0xFFFF) + (sum >> 16)
+    (~sum) & 0xFFFF
+
+describe "binary protocol domains — IPv4 header":
+    it "matches version/IHL/TOS/total-length and a masked flags comparison":
+        val w0_expected = (4 << 28) | (5 << 24) | (0 << 16) | 60
+        val w0_actual = (4 << 28) | (5 << 24) | (0 << 16) | 60
+        val d0 = compare_word(w0_expected, w0_actual, ipv4_word0_layout(), [])
+        assert_equal(d0.status, "pass")
+
+        # DF set (flags_df_mf bits differ in MF but caller only cares about
+        # DF): mask just the DF bit (bit0 of the 2-bit field == lsb 13).
+        val w1_expected = (0x1234 << 16) | (0b10 << 13) | 0  # DF=1,MF=0
+        val w1_actual = (0x1234 << 16) | (0b11 << 13) | 0    # DF=1,MF=1 (masked out)
+        val policies: [ComparePolicy] = [policy_masked("flags_df_mf", 0b10)]
+        val d1 = compare_word(w1_expected, w1_actual, ipv4_word1_layout(), policies)
+        assert_equal(d1.status, "pass")
+
+    it "computes and verifies a real RFC 791 header checksum vector":
+        # Fixed 20-byte header, checksum field = 0 while computing.
+        val version_ihl_tos = 0x4500
+        val total_length = 0x0034
+        val identification = 0x1c46
+        val flags_frag = 0x4000  # DF=1, offset=0
+        val ttl_proto = 0x4006
+        val src = 0xac100a63
+        val dst = 0xac100a0c
+        val words16: [i64] = [
+            version_ihl_tos, total_length, identification, flags_frag,
+            ttl_proto, 0x0000,
+            (src >> 16) & 0xFFFF, src & 0xFFFF,
+            (dst >> 16) & 0xFFFF, dst & 0xFFFF
+        ]
+        val checksum = ipv4_header_checksum(words16)
+        assert_equal(checksum, 0xb1ee)
+
+        val w2_expected = (0x18 << 24) | (0x06 << 16) | checksum
+        val w2_actual = (0x18 << 24) | (0x06 << 16) | checksum
+        val d2 = compare_word(w2_expected, w2_actual, ipv4_word2_layout(), [])
+        assert_equal(d2.status, "pass")
+
+        val d3 = compare_word(src, src, ipv4_addr_layout("ipv4_src"), [])
+        val d4 = compare_word(dst, dst, ipv4_addr_layout("ipv4_dst"), [])
+        assert_equal(d3.status, "pass")
+        assert_equal(d4.status, "pass")
+
+        val rows = stacked_rows([w0_word(version_ihl_tos, total_length), 0, 0, src, dst], "IP_W", 0)
+        assert_equal(rows.len(), 5)
+
+    it "the reserved fragment flag bit is actively checked and FAILS even under a permissive mask policy":
+        # Reserved bit (lsb 15) set to 1 — a real defect the comparator must
+        # not let a "masked" policy on the sibling flags field paper over.
+        val w1_expected = (0x1234 << 16) | (0b10 << 13) | 0
+        val w1_actual_bad = (0x1234 << 16) | (0b10 << 13) | (1 << 15)
+        # Permissive policy: identification dont_care, flags_df_mf masked to
+        # nothing (mask=0) — neither policy touches flags_reserved, and the
+        # layout marks it `reserved`, so compare_word forces reserved_zero
+        # regardless of what any caller-supplied policy says.
+        val permissive: [ComparePolicy] = [
+            policy_dont_care("identification"),
+            policy_masked("flags_df_mf", 0)
+        ]
+        val d = compare_word(w1_expected, w1_actual_bad, ipv4_word1_layout(), permissive)
+        assert_equal(d.status, "fail")
+        assert_true(d.failing_fields.len() > 0)
+        var found = false
+        for f in d.failing_fields:
+            if f == "flags_reserved":
+                found = true
+        assert_true(found)
