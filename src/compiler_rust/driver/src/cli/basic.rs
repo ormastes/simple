@@ -88,6 +88,92 @@ fn bdd_failure_exit_code(module_exit_code: i32, results: &[(String, String, bool
 /// `DROPPED:` diagnostic, which no other failure prints.
 const SPEC_EXAMPLE_DROPPED_EXIT: i32 = 1;
 
+/// Exit status for a spec run that TIMED OUT.
+///
+/// Deliberately NOT `1`: `1` is the spec-example-failure status, and a timeout is
+/// UNVERIFIED, never a failure. `124` is the conventional timeout status (GNU
+/// `timeout(1)`), so an outer classifier that knows nothing about this file still
+/// reads it as "killed on time", not "the examples failed".
+const SPEC_TIMEOUT_EXIT: i32 = 124;
+
+/// The classified terminal outcome of running one spec file, as seen from INSIDE
+/// the process that ran it.
+///
+/// These are the same classes the `Results:` summary uses. Two notes on the ones
+/// that are absent here rather than unhandled:
+///
+/// * `TERMINATED` cannot be produced in-process. It means the process died on a
+///   signal (earlyoom's SIGTERM -> 143), so no code in this process runs
+///   afterwards to report it; the parent classifies it from the wait status. The
+///   variant exists so the mapping is total and so callers cannot silently
+///   collapse it into `Crashed`. Per the contract an unbudgeted SIGKILL(137) is
+///   `Crashed`, not `Terminated`.
+/// * `NotRun` is likewise assigned by the parent for a file it never launched.
+///
+/// `Timeout`, `Terminated` and `NotRun` are UNVERIFIED: they carry no verdict
+/// about the examples, and must never be counted as failures.
+// `Terminated` and `NotRun` are assigned by the PARENT process, never constructed
+// here; they exist so the class set is complete and cannot silently collapse into
+// a neighbouring class.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpecOutcome {
+    /// The module ran to completion. Its examples are a verdict.
+    Ok,
+    /// The run returned an error (compile/runtime error surfaced as `Err`).
+    Error,
+    /// The interpreter panicked, or the process died by an unbudgeted signal.
+    Crashed,
+    /// Killed on a signal by an external supervisor (SIGTERM/143). UNVERIFIED.
+    Terminated,
+    /// Killed by the examples watchdog. UNVERIFIED.
+    Timeout,
+    /// Never launched. UNVERIFIED.
+    NotRun,
+}
+
+impl SpecOutcome {
+    /// The token printed as `outcome=` on the verdict line.
+    fn as_str(self) -> &'static str {
+        match self {
+            SpecOutcome::Ok => "OK",
+            SpecOutcome::Error => "ERROR",
+            SpecOutcome::Crashed => "CRASHED",
+            SpecOutcome::Terminated => "TERMINATED",
+            SpecOutcome::Timeout => "TIMEOUT",
+            SpecOutcome::NotRun => "NOT_RUN",
+        }
+    }
+
+    /// Whether the run produced a verdict about the examples at all.
+    ///
+    /// `false` for the UNVERIFIED classes, whose partial tallies must not be
+    /// counted as failures or drops.
+    fn is_verified(self) -> bool {
+        matches!(
+            self,
+            SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed
+        )
+    }
+
+    /// Whether `executed < declared` is meaningful as a *silent drop* for this
+    /// outcome. Only a normally-completed run qualifies: every other class has an
+    /// independent reason for having executed fewer examples.
+    fn drop_check_applies(self) -> bool {
+        matches!(self, SpecOutcome::Ok)
+    }
+
+    /// The process status for this outcome, given the status the run itself
+    /// produced. Single source of truth, so the printed line and the exit code
+    /// are derived from the same value.
+    fn exit_code(self, module_exit_code: i32) -> i32 {
+        match self {
+            SpecOutcome::Timeout => SPEC_TIMEOUT_EXIT,
+            _ => module_exit_code,
+        }
+    }
+}
+
 /// Number of examples the run actually executed, including skipped ones.
 ///
 /// Skipped examples are still *executed* as far as registration goes — they are
@@ -141,8 +227,37 @@ fn bdd_executed_count(results: &[(String, String, bool, bool)]) -> usize {
 /// so a file that legitimately runs fewer, more, or a variable number of
 /// examples than another can never trip the check. Only `executed < floor` —
 /// which is arithmetically impossible without a drop — is reported.
+///
+/// # The contradiction this closes (2026-08-18)
+///
+/// The verdict line used to be emitted on ONE path only — the `Ok(code)` arm of
+/// `run_file_common` — while the run has three terminal shapes: normal return,
+/// `Err` (which includes the examples-watchdog TIMEOUT), and a caught panic
+/// (CRASHED). On a timeout the run printed `error: ... timed out ...` to stderr
+/// and exited **1**, the exact status of a spec-example failure, with **no**
+/// verdict line at all. Anything classifying by exit status therefore booked an
+/// UNVERIFIED timeout as a failure, contradicting the `Results:` contract in
+/// which TIMEOUT and TERMINATED are never failures — and `tail -1` of the log,
+/// which the line above promises is authoritative for the FILE, silently
+/// returned the last `describe`'s count instead. A caught panic had the same
+/// hole at status 101.
+///
+/// Two smaller divergences in the line itself:
+/// * `skipped` was computed and never printed, so `passed + failed` did not add
+///   up to `executed` for any file with a skipped example, and a reader
+///   reconciling the two numbers saw a phantom drop.
+/// * `dropped` was derived unconditionally, so an UNVERIFIED run — which by
+///   definition executed fewer examples than it declared — would have been
+///   reported as a silent drop, i.e. as a failure.
+///
+/// The fix is that every terminal shape routes through this one function with an
+/// explicit `SpecOutcome`, the line always carries `outcome=` and `skipped=`, and
+/// both the drop verdict and the failure counts are suppressed for the UNVERIFIED
+/// classes. The exit status is derived from the same outcome, so the line and the
+/// status cannot disagree.
 fn report_spec_file_verdict(
     path: &Path,
+    outcome: SpecOutcome,
     module_exit_code: i32,
     results: &[(String, String, bool, bool)],
 ) -> i32 {
@@ -163,17 +278,37 @@ fn report_spec_file_verdict(
     let (counted_total, failed) = bdd_example_counts(results);
     let passed = counted_total.saturating_sub(failed);
     let skipped = executed.saturating_sub(counted_total);
-    let dropped = declared.saturating_sub(executed);
+    // An UNVERIFIED run executed fewer examples than it declared BY DEFINITION —
+    // it was killed. That is not a silent drop and must never be reported as one.
+    // A CRASHED run also executes fewer examples than it declared, but the cause
+    // is the crash, not a registration drop; only a run that completed normally
+    // can be measured for silent drops.
+    let dropped = if outcome.drop_check_applies() {
+        declared.saturating_sub(executed)
+    } else {
+        0
+    };
+    // Likewise its partial per-example tally is not a verdict: a spec killed
+    // mid-example must not contribute failures to any accounting.
+    let failed = if outcome.is_verified() { failed } else { 0 };
 
     println!(
-        "SPEC FILE VERDICT: {} declared>={} executed={} passed={} failed={} dropped={}",
+        "SPEC FILE VERDICT: {} outcome={} declared>={} executed={} passed={} failed={} skipped={} dropped={}",
         path.display(),
+        outcome.as_str(),
         declared,
         executed,
         passed,
         failed,
+        skipped,
         dropped
     );
+
+    if !outcome.is_verified() {
+        // The status is derived from the outcome, not recomputed, so the line and
+        // the exit code can never disagree about which class this run was in.
+        return outcome.exit_code(module_exit_code);
+    }
 
     if dropped > 0 {
         eprintln!(
@@ -332,6 +467,9 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
     }
 
     let path = path.to_path_buf();
+    // Kept outside the closure so the panic arm can still name the file it was
+    // running when it crashed.
+    let path_for_panic = path.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let watchdog = ExamplesWatchdogGuard::for_path(&path);
         let runner = create_runner(gc_log, gc_off);
@@ -356,15 +494,21 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
                 // what makes `tail -1` on a spec log authoritative for the FILE
                 // instead of for its last `describe`.
                 let code = bdd_failure_exit_code(code, &results);
-                report_spec_file_verdict(&path, code, &results)
+                report_spec_file_verdict(&path, SpecOutcome::Ok, code, &results)
             }
             Err(e) => {
-                if watchdog.is_active() && is_timeout_error(&e) {
+                // The verdict line must exist on EVERY terminal path, and must
+                // classify the run. A timeout is UNVERIFIED and gets its own
+                // status; an ordinary error keeps the failure status 1.
+                let outcome = if watchdog.is_active() && is_timeout_error(&e) {
                     eprintln!("error: {}", timeout_error_message(&path, watchdog.timeout_secs()));
+                    SpecOutcome::Timeout
                 } else {
                     print_cli_error(&e);
-                }
-                1
+                    SpecOutcome::Error
+                };
+                let results = simple_compiler::interpreter::get_test_results();
+                report_spec_file_verdict(&path, outcome, outcome.exit_code(1), &results)
             }
         }
     }));
@@ -380,7 +524,16 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
             };
             eprintln!("fatal: interpreter crashed: {}", msg);
             eprintln!("This is a bug in the Simple compiler. Please report it.");
-            101
+            // A crashed spec must never be silently omitted from the accounting:
+            // emit the same authoritative line, classified CRASHED. Guarded by its
+            // own `catch_unwind` because we are already unwinding from one panic
+            // and a second one here would abort the process; if the verdict cannot
+            // be taken we still exit 101 rather than lose the crash.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let results = simple_compiler::interpreter::get_test_results();
+                report_spec_file_verdict(&path_for_panic, SpecOutcome::Crashed, 101, &results)
+            }))
+            .unwrap_or(101)
         }
     }
 }
@@ -692,7 +845,7 @@ mod tests {
             ex("gamma", "g1", true, false),
         ];
 
-        let code = report_spec_file_verdict(&path, 0, &executed);
+        let code = report_spec_file_verdict(&path, SpecOutcome::Ok, 0, &executed);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(code, SPEC_EXAMPLE_DROPPED_EXIT);
@@ -712,7 +865,7 @@ mod tests {
             ex("gamma", "g1", true, false),
         ];
 
-        let code = report_spec_file_verdict(&path, 0, &executed);
+        let code = report_spec_file_verdict(&path, SpecOutcome::Ok, 0, &executed);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(code, 0);
@@ -731,7 +884,7 @@ mod tests {
             ex("gamma", "g1", true, true),
         ];
 
-        let code = report_spec_file_verdict(&path, 0, &executed);
+        let code = report_spec_file_verdict(&path, SpecOutcome::Ok, 0, &executed);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(code, 0);
@@ -753,7 +906,7 @@ mod tests {
             executed.push(ex("gamma", &format!("shared {}", i), true, false));
         }
 
-        let code = report_spec_file_verdict(&path, 0, &executed);
+        let code = report_spec_file_verdict(&path, SpecOutcome::Ok, 0, &executed);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(code, 0);
@@ -765,8 +918,8 @@ mod tests {
     fn a_non_spec_program_keeps_its_own_exit_status() {
         let path = spec_fixture("plain", "fn main() -> i64:\n    return 3\n");
 
-        let zero = report_spec_file_verdict(&path, 0, &[]);
-        let seven = report_spec_file_verdict(&path, 7, &[]);
+        let zero = report_spec_file_verdict(&path, SpecOutcome::Ok, 0, &[]);
+        let seven = report_spec_file_verdict(&path, SpecOutcome::Ok, 7, &[]);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(zero, 0);
@@ -779,7 +932,7 @@ mod tests {
         let path = spec_fixture("errmask", DROPPING_SPEC);
         let executed = [ex("alpha", "a1", true, false)];
 
-        let code = report_spec_file_verdict(&path, 101, &executed);
+        let code = report_spec_file_verdict(&path, SpecOutcome::Ok, 101, &executed);
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(code, 101);
@@ -793,7 +946,7 @@ mod tests {
         let _ = std::fs::remove_file(&missing);
 
         assert_eq!(declared_example_floor(&missing), None);
-        assert_eq!(report_spec_file_verdict(&missing, 0, &[]), 0);
+        assert_eq!(report_spec_file_verdict(&missing, SpecOutcome::Ok, 0, &[]), 0);
     }
 
     #[test]
@@ -850,5 +1003,119 @@ mod tests {
         // so "examples failed" stays distinguishable from other failure modes.
         assert_eq!(bdd_failure_exit_code(101, &[ex("g", "n", false, false)]), 101);
         assert_eq!(bdd_failure_exit_code(2, &[ex("g", "n", true, false)]), 2);
+    }
+
+    // ---- the two-accounting-paths contradiction (2026-08-18) ----
+
+    /// A timeout is UNVERIFIED. It must not land on the spec-example-failure
+    /// status, because a consumer classifying by exit status would then book it
+    /// as a failure — the exact contradiction with the `Results:` contract.
+    #[test]
+    fn a_timeout_never_uses_the_spec_failure_status() {
+        assert_eq!(SpecOutcome::Timeout.exit_code(1), SPEC_TIMEOUT_EXIT);
+        assert_ne!(SPEC_TIMEOUT_EXIT, SPEC_EXAMPLE_FAILURE_EXIT);
+        assert_ne!(SPEC_TIMEOUT_EXIT, SPEC_EXAMPLE_DROPPED_EXIT);
+        assert_ne!(SPEC_TIMEOUT_EXIT, 0);
+    }
+
+    /// The UNVERIFIED classes are exactly TIMEOUT / TERMINATED / NOT_RUN, and the
+    /// verified ones exactly OK / ERROR / CRASHED. A SIGKILL is CRASHED, not
+    /// TERMINATED, so the two must never share a token.
+    #[test]
+    fn the_outcome_classes_do_not_collapse_into_each_other() {
+        for (outcome, token, verified) in [
+            (SpecOutcome::Ok, "OK", true),
+            (SpecOutcome::Error, "ERROR", true),
+            (SpecOutcome::Crashed, "CRASHED", true),
+            (SpecOutcome::Terminated, "TERMINATED", false),
+            (SpecOutcome::Timeout, "TIMEOUT", false),
+            (SpecOutcome::NotRun, "NOT_RUN", false),
+        ] {
+            assert_eq!(outcome.as_str(), token);
+            assert_eq!(outcome.is_verified(), verified, "{token}");
+        }
+        assert_ne!(SpecOutcome::Crashed, SpecOutcome::Terminated);
+        // Only a normally-completed run can be measured for silent drops.
+        assert!(SpecOutcome::Ok.drop_check_applies());
+        for outcome in [
+            SpecOutcome::Error,
+            SpecOutcome::Crashed,
+            SpecOutcome::Terminated,
+            SpecOutcome::Timeout,
+            SpecOutcome::NotRun,
+        ] {
+            assert!(!outcome.drop_check_applies(), "{}", outcome.as_str());
+        }
+    }
+
+    /// A spec killed by the watchdog after three of its five examples must NOT be
+    /// reported as having dropped two, and must not exit on the drop status.
+    #[test]
+    fn a_timed_out_spec_is_not_reported_as_dropping_examples() {
+        let path = spec_fixture("timeout", DROPPING_SPEC);
+        let partial = [
+            ex("alpha", "a1", true, false),
+            ex("alpha", "a2", true, false),
+            ex("beta", "b1", false, false),
+        ];
+
+        let code = report_spec_file_verdict(&path, SpecOutcome::Timeout, 1, &partial);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, SPEC_TIMEOUT_EXIT);
+        assert_ne!(code, SPEC_EXAMPLE_DROPPED_EXIT);
+    }
+
+    /// A crashed spec keeps its crash status and is never downgraded to a drop
+    /// report, but is also never silently omitted — it still gets a verdict line.
+    #[test]
+    fn a_crashed_spec_keeps_its_crash_status() {
+        let path = spec_fixture("crashed", DROPPING_SPEC);
+        let partial = [ex("alpha", "a1", true, false)];
+
+        let code = report_spec_file_verdict(&path, SpecOutcome::Crashed, 101, &partial);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(code, 101);
+        assert_ne!(code, 0);
+    }
+
+    /// `passed + failed + skipped == executed` must hold, or a reader reconciling
+    /// the line against the summary sees a phantom drop. This is what the missing
+    /// `skipped=` field cost.
+    #[test]
+    fn the_verdict_fields_reconcile_with_executed() {
+        let results = [
+            ex("alpha", "a1", true, false),
+            ex("alpha", "a2", false, false),
+            ex("beta", "b1", false, true),
+        ];
+        let executed = bdd_executed_count(&results);
+        let (counted, failed) = bdd_example_counts(&results);
+        let passed = counted - failed;
+        let skipped = executed - counted;
+
+        assert_eq!(passed + failed + skipped, executed);
+        assert_eq!((passed, failed, skipped, executed), (1, 1, 1, 3));
+    }
+
+    /// The line must stay outside the shape `test_runner_single.spl` sums, or
+    /// every count in the repo doubles.
+    #[test]
+    fn the_verdict_line_shape_cannot_be_summed_as_a_describe_line() {
+        let line = format!(
+            "SPEC FILE VERDICT: {} outcome={} declared>={} executed={} passed={} failed={} skipped={} dropped={}",
+            "x.spl",
+            SpecOutcome::Timeout.as_str(),
+            5,
+            3,
+            2,
+            0,
+            0,
+            0
+        );
+        assert!(!line.contains("examples, "));
+        assert!(!line.contains("failures"));
+        assert!(line.contains("outcome=TIMEOUT"));
     }
 }
