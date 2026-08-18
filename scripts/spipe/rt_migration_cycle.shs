@@ -57,10 +57,69 @@ awk 'NR==FNR {m[$1]=$2; next} {d[$1]=$2} END {for (s in d) if (m[s]==d[s]) print
   "$WORK/mentions.txt" "$WORK/decls.txt" | sort > "$WORK/uncalled_all.txt"
 comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.txt"
 
+# --- Track B: mechanical call-site rewrite to a std.* wrapper -------------
+# Class: rt_time_now_unix_micros -> std.io_runtime.time_now_unix_micros.
+# Same signature, drop-in provider wrapper (src/lib/nogc_sync_mut/io_runtime.spl).
+# Scope: files under src/lib/nogc_sync_mut and src/app that DECLARE the extern
+# in-file (the decl line becomes the use line, so import placement is exact),
+# do not already mention the wrapper name, and are not the provider itself.
+# Same-family imports only — async families are left for a layering-aware pass.
+track_b() {
+  tb_done=0
+  : > "$WORK/tb_touched.txt"
+  for f in $(/usr/bin/grep -rlE '^extern fn rt_time_now_unix_micros\(' src/lib/nogc_sync_mut src/app --include='*.spl' 2>/dev/null); do
+    case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
+    # skip re-export provider modules: their extern feeds an `export` line,
+    # and deleting the decl would dangle the export (daemon_sdk/types.spl).
+    grep -qE '^export .*\brt_time_now_unix_micros\b' "$f" && continue
+    # skip if the bare wrapper name already appears (collision risk):
+    # count mentions of time_now_unix_micros that are NOT the rt_ form
+    bare=$(grep -oE '[a-z_]*time_now_unix_micros' "$f" | grep -cv '^rt_time_now_unix_micros$')
+    [ "$bare" -gt 0 ] && continue
+    sed -i 's/^extern fn rt_time_now_unix_micros() -> i64$/use std.io_runtime.{time_now_unix_micros}/' "$f"
+    sed -i 's/\brt_time_now_unix_micros(/time_now_unix_micros(/g' "$f"
+    echo "$f" >> "$WORK/tb_touched.txt"
+    tb_done=$((tb_done + 1))
+    [ "$tb_done" -ge "$MAX" ] && break
+  done
+  echo "$tb_done"
+}
+
 n_candidates=$(wc -l < "$WORK/uncalled.txt")
 if [ "$n_candidates" -eq 0 ]; then
-  echo "cycle: scanned $(wc -l < "$WORK/libapp_declared.txt") declared symbol(s), 0 uncalled"
-  echo "NOOP — nothing safely deletable this cycle"
+  echo "cycle: scanned $(wc -l < "$WORK/libapp_declared.txt") declared symbol(s), 0 uncalled (track A converged)"
+  if [ $DRY -eq 1 ]; then
+    tbc=$(/usr/bin/grep -rlE '^extern fn rt_time_now_unix_micros\(' src/lib/nogc_sync_mut src/app --include='*.spl' 2>/dev/null | grep -v 'io_runtime.spl' | wc -l)
+    echo "PASS — dry-run, track B candidates: $tbc file(s)"
+    exit 0
+  fi
+  nb=$(track_b)
+  if [ "$nb" -eq 0 ]; then
+    echo "NOOP — nothing safely migratable this cycle (tracks A and B converged)"
+    exit 0
+  fi
+  # residual check: no rewritten file may still reference the rt_ form in
+  # call position (comment-only lines excluded, same rule as the gate).
+  left=$(xargs grep -lE '^[^#]*\brt_time_now_unix_micros\b' < "$WORK/tb_touched.txt" 2>/dev/null | wc -l)
+  if [ "$left" -ne 0 ]; then
+    echo "FAIL — $left file(s) still reference rt_time_now_unix_micros after rewrite; NOT committing"
+    exit 1
+  fi
+  out=$(sh scripts/check/check-no-direct-rt.shs)
+  gate=$?
+  verdict=$(printf '%s\n' "$out" | tail -1)
+  echo "$verdict"
+  [ $gate -ne 0 ] && { echo "FAIL — gate did not pass after track B rewrite"; exit 1; }
+  xargs git add < "$WORK/tb_touched.txt"
+  git add scripts/check/no_direct_rt_baseline.txt
+  git commit -q -m "refactor(rt): spipe cycle track B — rt_time_now_unix_micros -> std.io_runtime wrapper in $nb file(s)
+
+Automated by scripts/spipe/rt_migration_cycle.shs track B: in-file extern
+declaration replaced by the use-import at the same position; call sites
+renamed to the identical-signature provider wrapper. Gate: $verdict
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" || { echo "FAIL — commit failed"; exit 1; }
+  echo "PASS — track B rewrote $nb file(s), committed; $verdict"
   exit 0
 fi
 
