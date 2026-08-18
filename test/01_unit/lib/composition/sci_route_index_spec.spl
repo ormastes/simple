@@ -1,0 +1,75 @@
+use std.nogc_sync_mut.composition.sci_generator.{SciRouteSourceV1, sci_generate_route_section_v1, SCI_ROUTE_HEADER_SIZE_V1, SCI_ROUTE_INDEX_ENTRY_SIZE_V1, SCI_ROUTE_RECORD_SIZE_V1}
+use std.nogc_sync_mut.composition.sci_reader.{sci_open_route_section_v1, sci_lookup_route_v1, sci_verify_section_digest_v1}
+
+fn _routes() -> [SciRouteSourceV1]:
+    var out: [SciRouteSourceV1] = []
+    out.push(SciRouteSourceV1(key: "build", route_kind: 1, command_id: 11, target: "cmd.build", component_count: 2, flags: 0))
+    out.push(SciRouteSourceV1(key: "test", route_kind: 1, command_id: 12, target: "cmd.test", component_count: 3, flags: 1))
+    out.push(SciRouteSourceV1(key: "lint", route_kind: 1, command_id: 13, target: "cmd.lint", component_count: 1, flags: 0))
+    out.push(SciRouteSourceV1(key: "run", route_kind: 2, command_id: 14, target: "cmd.run", component_count: 4, flags: 2))
+    out.push(SciRouteSourceV1(key: "fmt", route_kind: 1, command_id: 15, target: "cmd.fmt", component_count: 1, flags: 0))
+    out.push(SciRouteSourceV1(key: "deps", route_kind: 3, command_id: 16, target: "cmd.deps", component_count: 5, flags: 4))
+    out
+
+describe "SCI route section generator and bounded indexed reader":
+    it "REQ-SCI-01 generates a section whose geometry matches the declared counts":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        expect(gen.ok).to_equal(true)
+        expect(gen.route_count).to_equal(6)
+        val handle = sci_open_route_section_v1(gen.bytes)
+        expect(handle.ok).to_equal(true)
+        expect(handle.schema_version).to_equal(1)
+        expect(handle.generation).to_equal(7)
+        expect(handle.route_count).to_equal(6)
+        expect(handle.index_offset).to_equal(SCI_ROUTE_HEADER_SIZE_V1)
+        expect(handle.record_offset).to_equal(SCI_ROUTE_HEADER_SIZE_V1 + 6 * SCI_ROUTE_INDEX_ENTRY_SIZE_V1)
+        expect(handle.string_offset).to_equal(handle.record_offset + 6 * SCI_ROUTE_RECORD_SIZE_V1)
+        expect(handle.section_size).to_equal(gen.bytes.len())
+        expect(sci_verify_section_digest_v1(gen.bytes, handle)).to_equal(true)
+
+    it "REQ-SCI-02 round-trips every generated record through indexed lookup":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        val handle = sci_open_route_section_v1(gen.bytes)
+        val src = _routes()
+        var i = 0
+        var hits = 0
+        while i < src.len():
+            val want = src[i]
+            val got = sci_lookup_route_v1(gen.bytes, handle, want.key)
+            expect(got.ok).to_equal(true)
+            expect(got.found).to_equal(true)
+            expect(got.route_kind).to_equal(want.route_kind)
+            expect(got.command_id).to_equal(want.command_id)
+            expect(got.target).to_equal(want.target)
+            expect(got.component_count).to_equal(want.component_count)
+            expect(got.flags).to_equal(want.flags)
+            hits = hits + 1
+            i = i + 1
+        expect(hits).to_equal(6)
+
+    it "REQ-SCI-03 resolves by indexed access, decoding exactly one record":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        val handle = sci_open_route_section_v1(gen.bytes)
+        val got = sci_lookup_route_v1(gen.bytes, handle, "deps")
+        expect(got.found).to_equal(true)
+        # exactly one record decoded out of six -> not a scan
+        expect(got.records_examined).to_equal(1)
+        # binary search over 6 entries: at most ceil(log2(6)) + 1 run probes
+        expect(got.index_probes <= 5).to_equal(true)
+
+    it "REQ-SCI-04 reports a clean miss without decoding any record":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        val handle = sci_open_route_section_v1(gen.bytes)
+        val got = sci_lookup_route_v1(gen.bytes, handle, "no-such-command")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(false)
+        expect(got.records_examined).to_equal(0)
+        expect(got.error_code).to_equal("")
+
+    it "REQ-SCI-05 fails closed on a duplicate route key at generation time":
+        var dup = _routes()
+        dup.push(SciRouteSourceV1(key: "build", route_kind: 1, command_id: 99, target: "cmd.dup", component_count: 1, flags: 0))
+        val gen = sci_generate_route_section_v1(dup, 7)
+        expect(gen.ok).to_equal(false)
+        expect(gen.error_code).to_equal("SCI_GEN_DUPLICATE_KEY")
+        expect(gen.bytes.len()).to_equal(0)

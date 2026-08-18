@@ -1,0 +1,244 @@
+# Bounded indexed SCI route-section reader (WP-13s, research §5.5).
+#
+# The reader NEVER scans records. Resolution is:
+#   1. validate the fixed header and the declared geometry (bounded, O(1)),
+#   2. binary-search the sorted index by key hash (O(log route_count) probes),
+#   3. compare key bytes for the few equal-hash entries,
+#   4. decode EXACTLY ONE record, the selected one, after verifying its own
+#      checksum.
+#
+# Consequences that the specs assert directly:
+#   * `records_examined` is 1 on a hit and 0 on a miss, whatever route_count is,
+#   * a CORRUPT record that was not selected is never read, so it cannot break
+#     an unrelated lookup,
+#   * a corrupt SELECTED record, a truncated section, a bad magic, or an
+#     unsupported schema version is an explicit typed error - never a default
+#     value and never a partial record.
+#
+# The body digest written by the generator is deliberately NOT verified during
+# lookup: whole-body verification is O(section_size) and would destroy the
+# boundedness guarantee. It is available as an explicit opt-in call for build
+# and audit paths.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.nogc_sync_mut.composition.sci_generator.{SCI_ROUTE_MAGIC_V1, SCI_ROUTE_SCHEMA_V1, SCI_ROUTE_HEADER_SIZE_V1, SCI_ROUTE_INDEX_ENTRY_SIZE_V1, SCI_ROUTE_RECORD_SIZE_V1, sci_key_hash_v1, sci_record_checksum_v1}
+
+struct SciSectionHandleV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    schema_version: i64
+    generation: i64
+    route_count: i64
+    index_offset: i64
+    record_offset: i64
+    string_offset: i64
+    string_bytes: i64
+    section_size: i64
+
+struct SciRouteLookupV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    key: text
+    route_kind: i64
+    command_id: i64
+    target: text
+    component_count: i64
+    flags: i64
+    index_probes: i64
+    records_examined: i64
+
+fn _open_error(code: text, message: text) -> SciSectionHandleV1:
+    SciSectionHandleV1(ok: false, error_code: code, error_message: message,
+        schema_version: 0, generation: 0, route_count: 0, index_offset: 0,
+        record_offset: 0, string_offset: 0, string_bytes: 0, section_size: 0)
+
+fn _lookup_error(code: text, message: text, probes: i64, examined: i64) -> SciRouteLookupV1:
+    SciRouteLookupV1(ok: false, found: false, error_code: code, error_message: message,
+        key: "", route_kind: 0, command_id: 0, target: "", component_count: 0, flags: 0,
+        index_probes: probes, records_examined: examined)
+
+fn _read_u16(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _read_u32(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 4:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _read_u64(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 8:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _read_text(data: [u8], offset: i64, length: i64) -> text:
+    var raw: [u8] = []
+    var i = 0
+    while i < length:
+        raw.push(data[offset + i])
+        i = i + 1
+    bytes_to_text(raw)
+
+# Validate header + geometry. Bounded: reads only the 96-byte header.
+fn sci_open_route_section_v1(data: [u8]) -> SciSectionHandleV1:
+    if data.len() < SCI_ROUTE_HEADER_SIZE_V1:
+        return _open_error("SCI_TRUNCATED_HEADER", "section shorter than the fixed header")
+    val magic = text_to_bytes(SCI_ROUTE_MAGIC_V1)
+    var i = 0
+    while i < 8:
+        if data[i] != magic[i]:
+            return _open_error("SCI_BAD_MAGIC", "section magic is not SIMPSCI1")
+        i = i + 1
+    val schema = _read_u16(data, 8)
+    if schema != SCI_ROUTE_SCHEMA_V1:
+        return _open_error("SCI_BAD_VERSION", "unsupported SCI route schema version")
+    val header_size = _read_u16(data, 10)
+    if header_size != SCI_ROUTE_HEADER_SIZE_V1:
+        return _open_error("SCI_BAD_HEADER_SIZE", "header_size does not match schema v1")
+    val generation = _read_u64(data, 16)
+    val route_count = _read_u32(data, 24)
+    val string_bytes = _read_u32(data, 28)
+    val index_offset = _read_u64(data, 32)
+    val record_offset = _read_u64(data, 40)
+    val string_offset = _read_u64(data, 48)
+    val section_size = _read_u64(data, 56)
+
+    if route_count < 0 or route_count > 1048576:
+        return _open_error("SCI_BAD_GEOMETRY", "unreasonable route_count")
+    if section_size > data.len():
+        return _open_error("SCI_TRUNCATED_SECTION", "declared section_size exceeds available bytes")
+    if index_offset != header_size:
+        return _open_error("SCI_BAD_GEOMETRY", "index does not start at header_size")
+    if record_offset != index_offset + route_count * SCI_ROUTE_INDEX_ENTRY_SIZE_V1:
+        return _open_error("SCI_BAD_GEOMETRY", "record area offset inconsistent with route_count")
+    if string_offset != record_offset + route_count * SCI_ROUTE_RECORD_SIZE_V1:
+        return _open_error("SCI_BAD_GEOMETRY", "string area offset inconsistent with route_count")
+    if string_offset + string_bytes != section_size:
+        return _open_error("SCI_BAD_GEOMETRY", "string area does not close the section")
+
+    SciSectionHandleV1(ok: true, error_code: "", error_message: "",
+        schema_version: schema, generation: generation, route_count: route_count,
+        index_offset: index_offset, record_offset: record_offset,
+        string_offset: string_offset, string_bytes: string_bytes,
+        section_size: section_size)
+
+fn _entry_hash(data: [u8], handle: SciSectionHandleV1, slot: i64) -> i64:
+    _read_u64(data, handle.index_offset + slot * SCI_ROUTE_INDEX_ENTRY_SIZE_V1)
+
+fn _entry_key_equals(data: [u8], handle: SciSectionHandleV1, slot: i64, key_raw: [u8]) -> bool:
+    val base = handle.index_offset + slot * SCI_ROUTE_INDEX_ENTRY_SIZE_V1
+    val key_off = _read_u32(data, base + 8)
+    val key_len = _read_u32(data, base + 12)
+    if key_len != key_raw.len():
+        return false
+    if key_off < 0 or key_off + key_len > handle.string_bytes:
+        return false
+    var i = 0
+    while i < key_len:
+        if data[handle.string_offset + key_off + i] != key_raw[i]:
+            return false
+        i = i + 1
+    true
+
+# Resolve one route by INDEXED ACCESS. Cost is O(log route_count) index probes
+# plus exactly one record decode; it does not grow with the number of records
+# and never touches a record other than the selected one.
+fn sci_lookup_route_v1(data: [u8], handle: SciSectionHandleV1, key: text) -> SciRouteLookupV1:
+    if not handle.ok:
+        return _lookup_error("SCI_BAD_HANDLE", "lookup on an unopened section", 0, 0)
+    val key_raw = text_to_bytes(key)
+    if key_raw.len() == 0:
+        return _lookup_error("SCI_EMPTY_KEY", "lookup key must not be empty", 0, 0)
+    val n = handle.route_count
+    var probes = 0
+    if n == 0:
+        return SciRouteLookupV1(ok: true, found: false, error_code: "", error_message: "",
+            key: key, route_kind: 0, command_id: 0, target: "", component_count: 0,
+            flags: 0, index_probes: 0, records_examined: 0)
+
+    val target_hash = sci_key_hash_v1(key_raw)
+
+    # binary search for the FIRST slot whose hash >= target_hash
+    var lo = 0
+    var hi = n
+    while lo < hi:
+        val mid = lo + ((hi - lo) / 2)
+        probes = probes + 1
+        if _entry_hash(data, handle, mid) < target_hash:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    # walk only the equal-hash run (one entry unless keys collide)
+    var slot = lo
+    var found_slot = -1
+    while slot < n and found_slot < 0:
+        probes = probes + 1
+        if _entry_hash(data, handle, slot) != target_hash:
+            slot = n
+        else:
+            if _entry_key_equals(data, handle, slot, key_raw):
+                found_slot = slot
+            else:
+                slot = slot + 1
+
+    if found_slot < 0:
+        return SciRouteLookupV1(ok: true, found: false, error_code: "", error_message: "",
+            key: key, route_kind: 0, command_id: 0, target: "", component_count: 0,
+            flags: 0, index_probes: probes, records_examined: 0)
+
+    # ---- decode EXACTLY the selected record --------------------------------
+    val base = handle.index_offset + found_slot * SCI_ROUTE_INDEX_ENTRY_SIZE_V1
+    val rec_off = _read_u64(data, base + 16)
+    val rec_len = _read_u32(data, base + 24)
+    val rec_crc = _read_u32(data, base + 28)
+    if rec_len != SCI_ROUTE_RECORD_SIZE_V1:
+        return _lookup_error("SCI_BAD_RECORD_SIZE", "index entry declares a wrong record size", probes, 0)
+    if rec_off < handle.record_offset or rec_off + rec_len > handle.string_offset:
+        return _lookup_error("SCI_BAD_RECORD_OFFSET", "record lies outside the record area", probes, 0)
+    if sci_record_checksum_v1(data, rec_off, rec_len) != rec_crc:
+        return _lookup_error("SCI_RECORD_CORRUPT", "selected record failed its checksum", probes, 1)
+
+    val route_kind = data[rec_off] as i64
+    val command_id = _read_u32(data, rec_off + 1)
+    val component_count = _read_u16(data, rec_off + 5)
+    val flags = _read_u16(data, rec_off + 7)
+    val target_off = _read_u32(data, rec_off + 9)
+    val target_len = _read_u32(data, rec_off + 13)
+    if target_off < 0 or target_len < 0 or target_off + target_len > handle.string_bytes:
+        return _lookup_error("SCI_BAD_STRING_SPAN", "record target span escapes the string area", probes, 1)
+    val target = _read_text(data, handle.string_offset + target_off, target_len)
+
+    SciRouteLookupV1(ok: true, found: true, error_code: "", error_message: "",
+        key: key, route_kind: route_kind, command_id: command_id, target: target,
+        component_count: component_count, flags: flags,
+        index_probes: probes, records_examined: 1)
+
+# Opt-in whole-body integrity check for build/audit paths. NOT on the startup
+# lookup path - it is O(section_size) by construction.
+fn sci_verify_section_digest_v1(data: [u8], handle: SciSectionHandleV1) -> bool:
+    if not handle.ok:
+        return false
+    var wide: [i64] = []
+    var i = SCI_ROUTE_HEADER_SIZE_V1
+    while i < handle.section_size:
+        wide.push(data[i] as i64)
+        i = i + 1
+    val raw = sha256_bytes(wide)
+    if raw.len() != 32:
+        return false
+    i = 0
+    while i < 32:
+        if (raw[i] as i64) != (data[64 + i] as i64):
+            return false
+        i = i + 1
+    true

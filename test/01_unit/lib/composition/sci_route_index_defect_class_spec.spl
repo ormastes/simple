@@ -1,0 +1,111 @@
+# Defect-class spec for the bounded indexed SCI reader (WP-13s sabotage probe).
+#
+# Primary probe: a valid route must resolve correctly even when an UNSELECTED
+# record earlier in the section is CORRUPT. A reader that scanned records would
+# trip over the corrupt one; an indexed reader never touches it.
+#
+# Positive control on the same fixture: the route whose OWN record is corrupt
+# must fail closed with a typed error, so the reader can neither scan nor
+# blanket-accept.
+
+use std.nogc_sync_mut.composition.sci_generator.{SciRouteSourceV1, sci_generate_route_section_v1}
+use std.nogc_sync_mut.composition.sci_reader.{sci_open_route_section_v1, sci_lookup_route_v1}
+
+fn _routes() -> [SciRouteSourceV1]:
+    var out: [SciRouteSourceV1] = []
+    out.push(SciRouteSourceV1(key: "build", route_kind: 1, command_id: 11, target: "cmd.build", component_count: 2, flags: 0))
+    out.push(SciRouteSourceV1(key: "test", route_kind: 1, command_id: 12, target: "cmd.test", component_count: 3, flags: 1))
+    out.push(SciRouteSourceV1(key: "lint", route_kind: 1, command_id: 13, target: "cmd.lint", component_count: 1, flags: 0))
+    out.push(SciRouteSourceV1(key: "run", route_kind: 2, command_id: 14, target: "cmd.run", component_count: 4, flags: 2))
+    out.push(SciRouteSourceV1(key: "fmt", route_kind: 1, command_id: 15, target: "cmd.fmt", component_count: 1, flags: 0))
+    out.push(SciRouteSourceV1(key: "deps", route_kind: 3, command_id: 16, target: "cmd.deps", component_count: 5, flags: 4))
+    out
+
+# Corrupt the FIRST record in the record area (index slot 0) in place.
+fn _corrupt_first_record(data: [u8], record_offset: i64):
+    data[record_offset] = ((data[record_offset] as i64) ^ 255) as u8
+    data[record_offset + 1] = ((data[record_offset + 1] as i64) ^ 255) as u8
+
+describe "SCI bounded reader defect class":
+    it "REQ-SCI-10 resolves valid routes past a corrupt UNSELECTED record and fails closed only on the selected one":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        expect(gen.ok).to_equal(true)
+        var data = gen.bytes
+        val clean = sci_open_route_section_v1(data)
+        expect(clean.ok).to_equal(true)
+        _corrupt_first_record(data, clean.record_offset)
+
+        val handle = sci_open_route_section_v1(data)
+        expect(handle.ok).to_equal(true)
+
+        val src = _routes()
+        var good = 0
+        var failed_closed = 0
+        var silent_bad = 0
+        var i = 0
+        while i < src.len():
+            val want = src[i]
+            val got = sci_lookup_route_v1(data, handle, want.key)
+            if got.ok and got.found:
+                # POSITIVE CONTROL: an untouched record must decode exactly,
+                # and must have cost exactly one record decode (no scanning).
+                if got.command_id == want.command_id and got.target == want.target and got.records_examined == 1:
+                    good = good + 1
+                else:
+                    silent_bad = silent_bad + 1
+            elif (not got.ok) and got.error_code == "SCI_RECORD_CORRUPT":
+                failed_closed = failed_closed + 1
+            else:
+                silent_bad = silent_bad + 1
+            i = i + 1
+
+        # exactly one record was corrupted -> exactly one typed failure,
+        # every other route still resolves by indexed access
+        expect(failed_closed).to_equal(1)
+        expect(good).to_equal(5)
+        expect(silent_bad).to_equal(0)
+
+    it "REQ-SCI-11 rejects a truncated section instead of returning a partial result":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        var short_head: [u8] = []
+        var i = 0
+        while i < 40:
+            short_head.push(gen.bytes[i])
+            i = i + 1
+        val h1 = sci_open_route_section_v1(short_head)
+        expect(h1.ok).to_equal(false)
+        expect(h1.error_code).to_equal("SCI_TRUNCATED_HEADER")
+
+        var short_body: [u8] = []
+        i = 0
+        while i < gen.bytes.len() - 8:
+            short_body.push(gen.bytes[i])
+            i = i + 1
+        val h2 = sci_open_route_section_v1(short_body)
+        expect(h2.ok).to_equal(false)
+        expect(h2.error_code).to_equal("SCI_TRUNCATED_SECTION")
+
+    it "REQ-SCI-12 rejects a wrong schema version and a wrong magic":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        var bad_version = gen.bytes
+        bad_version[8] = 9 as u8
+        val h1 = sci_open_route_section_v1(bad_version)
+        expect(h1.ok).to_equal(false)
+        expect(h1.error_code).to_equal("SCI_BAD_VERSION")
+
+        var bad_magic = gen.bytes
+        bad_magic[8] = 1 as u8
+        bad_magic[0] = 88 as u8
+        val h2 = sci_open_route_section_v1(bad_magic)
+        expect(h2.ok).to_equal(false)
+        expect(h2.error_code).to_equal("SCI_BAD_MAGIC")
+
+    it "REQ-SCI-13 rejects a lookup against an unopened section":
+        val gen = sci_generate_route_section_v1(_routes(), 7)
+        var empty: [u8] = []
+        val bad = sci_open_route_section_v1(empty)
+        expect(bad.ok).to_equal(false)
+        val got = sci_lookup_route_v1(gen.bytes, bad, "build")
+        expect(got.ok).to_equal(false)
+        expect(got.error_code).to_equal("SCI_BAD_HANDLE")
+        expect(got.records_examined).to_equal(0)
