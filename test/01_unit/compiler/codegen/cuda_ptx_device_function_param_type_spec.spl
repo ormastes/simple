@@ -1,0 +1,25 @@
+# @cover src/compiler/70.backend/backend/cuda/ptx_builder.spl 60%
+# @tag: unit, compiler, gpu, codegen, cuda
+#
+# Regression for the exact defect found on todo_db rows 610/611/621:
+# PtxBuilder passed `param.type_.kind` (a MirTypeKind) straight into
+# CudaTypeMapper.ptx_type(ty: PrimitiveType). MirTypeKind has no F16 variant, so
+# the mapper's unqualified `case F16:` arm became an irrefutable binding and the
+# whole match aborted with a semantic error instead of emitting PTX.
+
+use compiler.backend.cuda.ptx_builder.{ptx_mir_kind_to_primitive}
+use compiler.backend.cuda_type_mapper.{cuda_type_mapper_create_sm}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+
+describe "CUDA PTX device-function parameter typing":
+    it "maps a MirTypeKind parameter to its PTX suffix without an F16 binding abort":
+        val tm = cuda_type_mapper_create_sm(8, 6)
+        # positive control: the mapper module really loaded and computes.
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.U32))).to_equal(".u32")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.F32))).to_equal(".f32")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.I64))).to_equal(".s64")
+
+    it "maps pointer-shaped MIR parameter kinds to the 64-bit PTX address type":
+        val tm = cuda_type_mapper_create_sm(8, 6)
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.Ptr(MirType(kind: MirTypeKind.U32), true)))).to_equal(".u64")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.Ref(MirType(kind: MirTypeKind.U32), false)))).to_equal(".u64")

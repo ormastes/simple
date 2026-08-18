@@ -1,0 +1,45 @@
+# @cover src/compiler/70.backend/backend/cuda/ptx_builder.spl 60%
+# @tag: unit, compiler, gpu, codegen, cuda
+#
+# Defect-CLASS spec for the MirTypeKind-vs-PrimitiveType confusion behind
+# todo_db rows 610/611/621. The specific bug was one call site; the class is
+# "every MIR scalar kind that can reach the PTX type mapper must convert to a
+# PrimitiveType first, and must produce a real PTX suffix". A scanner that
+# silently mapped everything to a default would look green, so this file carries
+# a positive control that pins two DISTINCT suffixes before the sweep runs.
+
+use compiler.backend.cuda.ptx_builder.{ptx_mir_kind_to_primitive}
+use compiler.backend.cuda_type_mapper.{cuda_type_mapper_create_sm}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+
+describe "CUDA PTX MirTypeKind to PrimitiveType conversion class":
+    it "positive control: the mapper is loaded and distinguishes at least two kinds":
+        val tm = cuda_type_mapper_create_sm(8, 6)
+        val u8_suffix = tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.U8))
+        val f64_suffix = tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.F64))
+        expect(u8_suffix).to_equal(".u8")
+        expect(f64_suffix).to_equal(".f64")
+        expect(u8_suffix == f64_suffix).to_equal(false)
+
+    it "covers every signed and unsigned integer MIR scalar kind":
+        val tm = cuda_type_mapper_create_sm(8, 6)
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.I8))).to_equal(".s8")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.I16))).to_equal(".s16")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.I32))).to_equal(".s32")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.I64))).to_equal(".s64")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.U8))).to_equal(".u8")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.U16))).to_equal(".u16")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.U32))).to_equal(".u32")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.U64))).to_equal(".u64")
+
+    it "covers float, bool and unit MIR scalar kinds":
+        val tm = cuda_type_mapper_create_sm(8, 6)
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.F32))).to_equal(".f32")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.F64))).to_equal(".f64")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.Bool))).to_equal(".pred")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.Unit))).to_equal("")
+
+    it "covers pointer-shaped kinds, which PTX addresses as 64-bit":
+        val tm = cuda_type_mapper_create_sm(8, 6)
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.Ptr(MirType(kind: MirTypeKind.F32), true)))).to_equal(".u64")
+        expect(tm.ptx_type(ptx_mir_kind_to_primitive(MirTypeKind.Ref(MirType(kind: MirTypeKind.I32), true)))).to_equal(".u64")

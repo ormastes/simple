@@ -1,0 +1,77 @@
+# @cover src/compiler/70.backend/backend/vulkan_backend.spl 30%
+# @tag: unit, compiler, backend, gpu, vulkan, fail-closed
+#
+# Defect-CLASS spec for the Vulkan GEP index defects on todo_db rows 612/613.
+# The specific bug was "I64 index rejected"; the class is "the GEP index gate
+# must accept exactly the integer kinds SPIR-V can index with, and must report
+# the most specific reason first". A backend that simply stopped emitting
+# anything would make every negative case pass, so the first example is a
+# positive control pinning real emitted SPIR-V.
+
+use compiler.backend.backend.vulkan_backend.{VulkanCodegenBackend}
+use compiler.backend.backend.backend_types.{CompileError, compileoptions_default_options}
+use compiler.backend.gpu_codegen_types.{GpuCodegen}
+use compiler.mir.mir_data.*
+
+fn vk_u32() -> MirType: MirType(kind: MirTypeKind.U32)
+fn vk_i32() -> MirType: MirType(kind: MirTypeKind.I32)
+fn vk_i64() -> MirType: MirType(kind: MirTypeKind.I64)
+fn vk_ptr_u32() -> MirType: MirType.ptr(vk_u32(), true)
+fn vk_temp(id: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: ty, kind: LocalKind.Temp, is_ghost: false)
+fn vk_op(id: i64) -> MirOperand: MirOperand.copy(LocalId(id: id))
+fn vk_const(value: i64, ty: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), ty))
+fn vk_inst(kind: MirInstKind) -> MirInst: MirInst(kind: kind, span: nil)
+
+fn vk_compile(instructions: [MirInst], locals: [MirLocal]) -> Result<text, CompileError>:
+    VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options())
+        .compile_kernel(
+            "gep_index_class_kernel",
+            MirBody(
+                name: "gep_index_class_kernel",
+                blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions, terminator: MirTerminator.Ret(nil))],
+                locals: locals,
+                arg_count: 0,
+                return_ty: MirType.unit()
+            )
+        )
+
+fn vk_shared_gep(index: MirOperand, index_local: [MirLocal]) -> Result<text, CompileError>:
+    vk_compile(
+        [
+            vk_inst(MirInstKind.GpuSharedAlloc(LocalId(id: 0), vk_u32(), 16)),
+            vk_inst(MirInstKind.GetElementPtr(LocalId(id: 1), vk_op(0), [index]))
+        ],
+        [vk_temp(0, vk_ptr_u32()), vk_temp(1, vk_ptr_u32())] + index_local
+    )
+
+describe "Vulkan GEP index diagnostic class":
+    it "positive control: the backend really emits SPIR-V for a legal shared GEP":
+        val ok = vk_shared_gep(vk_const(3, vk_u32()), [])
+        expect(ok.is_ok()).to_equal(true)
+        val output = ok.unwrap()
+        expect(output).to_contain("OpEntryPoint")
+        expect(output).to_contain("OpAccessChain")
+
+    it "accepts both integer index kinds SPIR-V can index with":
+        expect(vk_shared_gep(vk_const(3, vk_u32()), []).is_ok()).to_equal(true)
+        expect(vk_shared_gep(vk_const(3, vk_i64()), []).is_ok()).to_equal(true)
+
+    it "rejects a non-U32/I64 index kind with the index-type diagnostic":
+        val bad = vk_shared_gep(vk_op(2), [vk_temp(2, vk_i32())])
+        expect(bad.is_err()).to_equal(true)
+        expect(bad.unwrap_err().message).to_contain("index must be U32")
+
+    it "reports the allocation-bound failure before any value-resolution failure":
+        # index 16 is a legal U32 constant but out of range for a 16-element
+        # allocation: the bound diagnostic must win.
+        val oob = vk_shared_gep(vk_const(16, vk_u32()), [])
+        expect(oob.is_err()).to_equal(true)
+        expect(oob.unwrap_err().message).to_contain("not proven within the allocation")
+
+        # an in-range-looking but unproven local index must report the same
+        # bound diagnostic, not an incidental "operand has no value".
+        val unproven = vk_shared_gep(vk_op(2), [vk_temp(2, vk_u32())])
+        expect(unproven.is_err()).to_equal(true)
+        expect(unproven.unwrap_err().message).to_contain("not proven within the allocation")

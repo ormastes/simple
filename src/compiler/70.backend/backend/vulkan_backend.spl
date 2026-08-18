@@ -667,7 +667,7 @@ class VulkanCodegenBackend:
                 index_upper_bounds.remove(dest.id)
                 val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
                 if ptr_id == 0 or self.local_int_type_id(func, dest.id, u32_type, i64_type) != u32_type:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V load currently requires a lowered U32 storage pointer and U32 destination"))
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V load currently requires a lowered U32 storage pointer or shared U32 element pointer and U32 destination"))
                 value_ids[dest.id] = builder.emit_load(u32_type, ptr_id)
 
             case Store(ptr, value):
@@ -693,17 +693,24 @@ class VulkanCodegenBackend:
                 if storage_base_id != 0 and self.local_is_u32_ptr(func, dest.id) and not self.operand_is_mutable_u32_pointer(func, base):
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan immutable StorageBuffer base cannot produce a mutable GEP destination"))
                 val index_type = self.operand_int_type_id(func, indices[0], u32_type, i64_type)
-                if index_type != u32_type:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP index must be U32"))
+                # i64_type is 0 when the module never declares OpTypeInt 64, so an
+                # unsupported index kind (also 0) must be rejected explicitly first.
+                if index_type == 0 or (index_type != u32_type and index_type != i64_type):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP index must be U32 or I64"))
+                # Prove the shared-memory bound BEFORE materializing the index value, so an
+                # unproven index reports the bound failure instead of an incidental
+                # "operand has no value" from constant resolution.
+                var allocation_size = 0
+                if storage_base_id == 0:
+                    allocation_size = self.shared_array_operand_size(base, shared_array_sizes)
+                    if not self.shared_index_is_proven_in_bounds(indices[0], allocation_size, index_upper_bounds):
+                        return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index is not proven within the allocation"))
                 val index_result = self.resolve_int_operand(builder, indices[0], index_type, value_ids, func, u32_type, i64_type)
                 if index_result.is_err():
                     return Err(index_result.unwrap_err())
                 if storage_base_id != 0:
                     pointer_ids[dest.id] = builder.emit_access_chain(storage_elem_ptr_type, storage_base_id, [storage_zero_index, index_result.unwrap()])
                 else:
-                    val allocation_size = self.shared_array_operand_size(base, shared_array_sizes)
-                    if not self.shared_index_is_proven_in_bounds(indices[0], allocation_size, index_upper_bounds):
-                        return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index is not proven within the allocation"))
                     pointer_ids[dest.id] = builder.emit_access_chain(shared_elem_ptr_type, base_id, [index_result.unwrap()])
 
             # GPU-specific instructions
@@ -1263,13 +1270,6 @@ impl GpuCodegen for VulkanCodegenBackend:
                     "Vulkan compute entry argument local is missing from its signature"
                 ))
             arg_index = arg_index + 1
-        for local in mir_body.locals:
-            val index = vulkan_arg_index(local.kind)
-            if index >= mir_body.arg_count:
-                return Err(compileerror_backend_error(
-                    BackendKind.Vulkan,
-                    "Vulkan compute entry argument locals require StorageBuffer interface lowering"
-                ))
         val vk_sig = MirSignature(params: params, return_type: mir_body.return_ty, is_variadic: false)
         val func = MirFunction(
             symbol: SymbolId(id: 0), name: func_name, signature: vk_sig,
