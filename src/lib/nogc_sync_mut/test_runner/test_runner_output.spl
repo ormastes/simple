@@ -3,6 +3,7 @@
 # Result printing and summary output functions.
 
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.test_runner.test_runner_types.{test_file_result_outcome_class}
 use std.test_runner.sdoctest.types.{SdoctestFileResult, SdoctestRunResult}
 use std.io.{path_basename}
 use common.text.{escape_json}
@@ -33,47 +34,26 @@ use common.text.{escape_json}
 #      was counted NOWHERE, and -- because TestRunResult.is_ok() only looks at
 #      total_failed/total_timed_out -- printed "All tests passed!".
 #
-# This function is now the only place a class is decided. It tokenises rather
-# than prefix-matches, so rewording the message cannot change a count, and it
-# is total: every TestFileResult maps to exactly one of the six classes
-# OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN, which therefore can
-# never collapse into one another and can never be silently absent.
+# The rule tokenises rather than prefix-matches, so rewording the message
+# cannot change a count, and it is total: every TestFileResult maps to exactly
+# one of the six classes OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN,
+# which therefore can never collapse into one another and can never be silently
+# absent.
 #
-# Deliberately NOT done here: re-deriving signal semantics (e.g. SIGKILL 137 =>
+# Deliberately NOT done: re-deriving signal semantics (e.g. SIGKILL 137 =>
 # CRASHED rather than TERMINATED) by sniffing the message text. That decision
 # belongs to the producer that saw the wait status; re-deriving it from prose
-# here would reintroduce exactly the coupling this function removes.
-fn outcome_class_token(err: text) -> text:
-    if err == "":
-        return ""
-    val colon = err.find(":")
-    val head = if colon > 0: err[0:colon] else: err
-    head.trim().upper().replace("_", " ")
-
+# here would reintroduce exactly the coupling the rule removes.
+#
+# The rule itself lives ONCE, in the lower module test_runner_types.spl, as
+# test_outcome_class_token() / test_file_result_outcome_class(). This is a thin
+# delegator kept only because it is the name callers here and in the sibling
+# specs already use; it must never grow a second copy of the rule. Two silent-
+# green defects (a crash double-counted as crashed AND timed-out-unverified, an
+# unrecognised token counted in no bucket at all) came from the copy that used
+# to live here.
 fn test_file_outcome_class(result: TestFileResult) -> text:
-    val token = outcome_class_token(result.error)
-    if token == "CRASHED":
-        return "CRASHED"
-    if token == "TERMINATED":
-        return "TERMINATED"
-    if token == "TIMEOUT":
-        return "TIMEOUT"
-    if token == "NOT EXECUTED" or token == "NOT RUN":
-        return "NOT_RUN"
-    if token != "":
-        # A non-empty error with an unrecognised class token is a REAL failure.
-        # It must never fall through to OK -- that is the silent-green shape.
-        return "ERROR"
-    if result.timed_out:
-        return "TIMEOUT"
-    if result.failed > 0:
-        return "ERROR"
-    val examples = result.passed + result.failed + result.skipped + result.pending
-    if examples == 0:
-        # No error and no examples of any kind: the child produced no verdict.
-        # Same rule as test_file_result_is_unverified() in test_runner_types.
-        return "NOT_RUN"
-    "OK"
+    test_file_result_outcome_class(result)
 
 # R6 attribution: the per-spec line must name the OUTCOME CLASS, not just
 # pass/fail. Before this, a CRASHED spec (failed: 1) and a TERMINATED or
