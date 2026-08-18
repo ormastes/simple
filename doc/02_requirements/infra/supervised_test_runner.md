@@ -2,7 +2,8 @@
 
 - **Filed:** 2026-08-17
 - **Status:** PARTIALLY DELIVERED — verified clause-by-clause 2026-08-18 (Lane
-  REQ), rows R2a/R2b corrected 2026-08-18 (Lane AUDITFIX). See § *Verification
+  REQ), rows R2a/R2b corrected 2026-08-18 (Lane AUDITFIX), mode scope redefined
+  and R1/R2b/R3/headline rows amended 2026-08-18 (Lane REDEFINE). See § *Verification
   status* for the per-clause table. Not done; not nothing.
 - **Domain:** infra / test runner
 - **Severity:** P1 — a crashed spec currently ends the suite, and a spec that
@@ -40,8 +41,24 @@ its own process; the suite continues; the final report names every crashed spec
 
 "Unstable mode" is the name of the delivered shape of this request:
 
-- **Per-unit SEPARATE PROCESS for build and for test.** One child per source
-  file on the build side, one child per spec on the test side.
+- **Scope of the MODE itself (REDEFINED 2026-08-18, Lane REDEFINE): classification
+  + run-to-end + the bootstrap-path default.** The mode does **not** "turn on
+  isolation" and never did. Its one behavioural effect in the whole tree is
+  `fail_fast = false` (`src/app/test_runner_new/test_runner_main.spl:205-207`)
+  — i.e. run to the END of the test list.
+- **Per-unit SEPARATE PROCESS for build and for test — a PRECONDITION, not a
+  mode feature.** On the test side this is **unconditional** and predates this
+  work: `run_test_file_interpreter` (`test_runner_execute.spl:186`), `_smf`
+  (`:288`) and `_native` (`:807`) each spawn a child on every path, gated on
+  nothing, and that file reads `unstable_mode` **nowhere** (its only textual
+  hits, `:85-95`, are the comment recording exactly this). Rationale, so nobody
+  later "fixes" it by adding a gate: CRASHED / TERMINATED / TIMEOUT are all
+  derived from a child's exit status, so gating isolation behind the flag would
+  make ordinary (non-unstable) runs strictly LESS able to report the truth — a
+  segfaulting spec would take the whole runner down — in exchange for an
+  unmeasured speed gain via an in-process path that does not exist. The genuine
+  gap is the BUILD half, which the old "isolation is what the mode buys you"
+  framing concealed.
 - **Run to the END of the source list and the END of the test list.** No early
   exit on a dead unit, on either side.
 - **Classified outcomes:** `OK` · `ERROR` · `CRASHED` · `TERMINATED` ·
@@ -135,11 +152,11 @@ etc. without a directory — read those as the `src/lib/...` copies.
 
 | Clause | Status | Evidence |
 |---|---|---|
-| R1 per-spec isolation | **SATISFIED, but not by unstable mode** | `process_run_bounded` at `test_runner_execute.spl:186,288,807` and `test_runner_single.spl:193`. It is **unconditional** — `unstable_mode` is never read there. This restates D1: per-spec isolation predates the flag. |
+| R1 per-spec isolation | **SATISFIED — unconditional, predates this work, and must STAY ungated** | `process_run_bounded` / `process_run_with_limits_bounded` at `test_runner_execute.spl:186,288,807` (re-read 2026-08-18, Lane REDEFINE: the limits variant is chosen when `max_mem_gb`/`max_procs` are set, the plain variant otherwise — both spawn a child, so no branch reaches an in-process path) and `test_runner_single.spl:193`. `unstable_mode` is read **nowhere** in `test_runner_execute.spl` — its only hits there are the `:85-95` comment stating this. Do not add a gate: isolation is a precondition of the outcome contract, not a mode feature. |
 | R2 non-collapsing categories | **SATISFIED** | Set at `test_executor_parsing.spl:442,446,448,449`, `test_runner_fork.spl:80,86,87,92`, `test_runner_execute.spl:71-75`. Counted and printed separately at `test_runner_output.spl:192-216` (`crashed` / `terminated (unverified)` / `timed out (unverified)` / `not run`). |
 | R2a `137` (SIGKILL) ⇒ CRASHED | **SATISFIED** (corrected 2026-08-18, Lane AUDITFIX — the earlier NOT SATISFIED row was a misreading) | `is_outside_kill` in `src/lib/nogc_sync_mut/test_runner/test_runner_fork.spl` returns `signo == 1 or signo == 2 or signo == 15`. **SIGKILL(9) is deliberately NOT in the set**, so 137 falls through to the CRASHED branch, exactly as this doc froze. The previous row cited "line 72 … `1 or 2 or 9 or 15`"; line 72 is **inside the docstring**, where the `9` appears in the prose sentence explaining why SIGKILL is excluded — comment text was read as implementation. The docstring further records that budgeted kills are already classified as TIMEOUT by the earlier `rt_fork_parent_timed_out()` branch in `classify_fork_exit`, so any SIGKILL reaching the predicate is unbudgeted, and states the known earlyoom-escalation tension explicitly, choosing to over-report a crash because under-reporting one is the silent-green defect. No code change is warranted here. |
-| R2b `137` in the subprocess lane | **PARTIAL — different mechanism, plus one real gap** (rewritten 2026-08-18, Lane AUDITFIX) | The subprocess lane classifies by *evidence*, not by signal number: `make_result_from_output` (`test_executor_parsing.spl`) branches on `-1 / 143 / 144`, then tries `take_crash_sentinel(file_path)` ⇒ CRASHED, then `has_crash_evidence(stdout+stderr)` (fault-runtime-error / SIGSEGV / SIGABRT / `panicked at` / stack-overflow / double-free markers) ⇒ CRASHED, falling back to TERMINATED/unverified only when neither exists. That is not a disagreement with the fork lane — it is the best available classification for a lane with less information, and it fails to the unverified side rather than to green. **The real gap:** `exit_status_to_code` (`src/compiler_rust/runtime/src/value/sffi/env_process.rs:22-34`) now returns `128 + signal` — the `-1` collapse was *fixed* — so a signalled child on this path arrives as **137/139/134**, and those values match none of the `-1/143/144` arms and fall through to the legacy stdout-scrape path. `-1` now means only *timeout* (`:539,563-567`, `timed_out=true`, `\nTIMEOUT\n` appended at `:1275`) or a spawn/reap failure. The in-source comment above `make_result_from_output` still describes the old always-`-1` behaviour and is **stale**. Fix belongs to the lane owning `test_executor_parsing.spl`: widen the arm to any `exit_code > 128` (or reuse the fork lane's `is_outside_kill`). |
-| R3 verdict mandatory | **SATISFIED** | Classification `test_runner_types.spl:202-221` → `Unverified` (`:215-216`) via `test_file_result_is_unverified` (`:226-236`); exit map `:237-245` (`Unverified` ⇒ 5, timeout ⇒ 124). Applied `test_runner_main.spl:1109,1141-1152`, returned `:1199`. Single-spec lane returns **2** for verdict-less at `test_runner_single.spl:1226-1231`. Guard spec: `test/01_unit/.../test_runner/no_verdict_is_unverified_spec.spl`. Note the two lanes use **different** unverified exit codes (2 vs 5) — undocumented. |
+| R2b `137` in the subprocess lane | **PARTIAL — different mechanism, plus one real gap** (rewritten 2026-08-18, Lane AUDITFIX) | The subprocess lane classifies by *evidence*, not by signal number: `make_result_from_output` (`test_executor_parsing.spl`) branches on `-1 / 143 / 144`, then tries `take_crash_sentinel(file_path)` ⇒ CRASHED, then `has_crash_evidence(stdout+stderr)` (fault-runtime-error / SIGSEGV / SIGABRT / `panicked at` / stack-overflow / double-free markers) ⇒ CRASHED, falling back to TERMINATED/unverified only when neither exists. That is not a disagreement with the fork lane — it is the best available classification for a lane with less information, and it fails to the unverified side rather than to green. **The real gap:** `exit_status_to_code` (`src/compiler_rust/runtime/src/value/sffi/env_process.rs:22-34`) now returns `128 + signal` — the `-1` collapse was *fixed* — so a signalled child on this path arrives as **137/139/134**, and those values match none of the `-1/143/144` arms and fall through to the legacy stdout-scrape path. `-1` now means only *timeout* (`:539,563-567`, `timed_out=true`, `\nTIMEOUT\n` appended at `:1275`) or a spawn/reap failure. The in-source comment above `make_result_from_output` still described the old always-`-1` behaviour and was **stale**. **Update 2026-08-18 (Lane REDEFINE, read not assumed):** the fix now appears in the WORKING TREE — `test_executor_parsing.spl:456-476` computes `signo = exit_code - 128` for `128 < exit_code < 192`, routes SIGILL/ABRT/BUS/FPE/KILL/SEGV (4/6/7/8/9/11 ⇒ 132/134/135/136/137/139) to CRASHED, and adds `signo > 0` to the unverified arm alongside `-1/143/144`, matching the fork lane. `git status` shows the file as ` M` (uncommitted, owned by a live lane), so this is **verified as present in the tree, NOT verified as landed on `main` and not executed** — re-check after that lane commits before marking SATISFIED. |
+| R3 verdict mandatory | **SATISFIED** | Classification `test_runner_types.spl:202-221` → `Unverified` (`:215-216`) via `test_file_result_is_unverified` (`:226-236`); exit map `:237-245` (`Unverified` ⇒ 5, timeout ⇒ 124). Applied `test_runner_main.spl:1109,1141-1152`, returned `:1199`. Guard spec: `test/01_unit/.../test_runner/no_verdict_is_unverified_spec.spl`. The single-spec lane's divergent `2` is **resolved to 5** — see § *Unverified exit code* below. |
 | R4 rc read directly | **SATISFIED (as a rule), NOT enforced by code** | The rule holds and `shell()`'s signal collapse — the mechanism that made it unenforceable — is **FIXED** (`doc/08_tracking/bug/shell_collapses_every_signal_death_to_minus_one_2026-08-17.md`). But no check prevents a future pipe; this is convention, not a gate. |
 | R5 no parallelism | **SATISFIED (unchanged)** | Nothing in the unstable-mode work introduced concurrency; the sequential constraint is untouched. |
 | R6 attribution: path, outcome, exit code | **SATISFIED** | Per-`TestFileResult` path/outcome/code; verdict lines at `test_runner_main.spl:986`. |
@@ -149,7 +166,7 @@ etc. without a directory — read those as the `src/lib/...` copies.
 | Contract: `--unstable` / `--no-unstable` | **SATISFIED** | `test_runner_args.spl:327-332`; passthrough allowlist `:156`; struct init `:629-630`. |
 | Contract: default ON for bootstrap, OFF interactive | **SATISFIED** | `test_runner_main.spl:192` reads `SIMPLE_BOOTSTRAP == "1"`; resolution `:194-200` (explicit flag wins either direction); announced `:203`. |
 | Contract: error-text prefixes | **PARTIAL** | `CRASHED:` / `TERMINATED:` / `TIMEOUT:` are produced by the classifier and consumed at `test_runner_output.spl:196-204`. `NOT EXECUTED:` is set at `test_runner_main.spl:949`. Verified as *emitted and counted*; **not** verified end-to-end on a real crashing child by this lane. |
-| **Unstable mode changes behaviour** | **NOT SATISFIED — this is the headline gap** | Grep over `src/` shows `unstable_mode` has exactly two consumers: `test_runner_main.spl:194-205` (resolve + print) and the unrelated `parallel.spl`. Its **only** behavioural effect is forcing `fail_fast = false` at `test_runner_main.spl:207`. Isolation and classification are unconditional. So on the test side the flag today is an announcement plus a keep-going toggle — the run-to-end guarantee is real, but nothing else is gated on it. |
+| **Unstable mode changes behaviour** | **SATISFIED against the REDEFINED scope** (redefined 2026-08-18, Lane REDEFINE; was "NOT SATISFIED — headline gap") | Exhaustive grep of `unstable_mode` over all of `src/**` (`.spl`+`.rs`), re-run by this lane: the only behavioural effect anywhere is `fail_fast = false` at `test_runner_main.spl:205-207`. Every other hit is a field decl (`test_runner_types.spl:94,95`), arg parsing (`test_runner_args.spl:156,225-226,328-332,629-630`), the effective-value resolution (`test_runner_main.spl:194-200`), a printed banner (`:201,204`), a Rust help unit test (`help.rs:351`), a comment (`test_runner_execute.spl:85-95`), or the UNRELATED same-named `ParallelBuildConfig.unstable_mode()` (`driver_build/parallel.spl:121`) whose consumer `build_supervised()` has zero callers. Under the redefined scope — classification + run-to-end + bootstrap default — that is the whole intended surface, not a gap. Isolation is deliberately not gated (see § *Unstable mode — the frozen contract*). |
 | BUILD-side per-unit isolation | **BLOCKED (genuine, and now honest)** | `parallel.spl:402-406` prints that unstable mode is REQUESTED but NOT ACTIVE, with the reason: `build()` is in-process because MIR capsules cannot cross a process boundary. `build_supervised()` is implemented and unit-verified but has **zero callers in `src/`** — `doc/08_tracking/bug/supervised_builder_unwired_and_no_peak_rss_2026-08-17.md` Gap 1. Blocked on a capsule-crossing design, not on effort. |
 | Acceptance: five-fixture run | **UNDER TEST BY LANE ACCEPT** | Fixtures exist: `test/fixtures/unstable_mode/{crash,timeout,fail,pass_a,pass_b}_spec.spl` (commit `af0f05f08c5c`). The one-run acceptance execution is owned by another lane; this lane did **not** run it and asserts nothing about its outcome. |
 | Acceptance: negative control | **NOT SATISFIED** | No reverted-change control run has been performed or recorded anywhere. |
@@ -158,9 +175,17 @@ etc. without a directory — read those as the `src/lib/...` copies.
 ### Honest overall verdict
 
 The **classification and verdict-accounting half of this request is real and
-landed** (R2, R3, R6-minus-RSS). The **isolation half is not delivered by this
-work**: on the test side it already existed and is not gated on the flag; on the
-build side it is blocked and now says so out loud instead of pretending.
+landed** (R2, R3, R6-minus-RSS), and with the mode redefined as *classification +
+run-to-end + bootstrap default* the test side is delivered as specified. The
+**isolation half is not something this work delivers**: on the test side it
+already existed, unconditionally and correctly, and is deliberately not gated on
+the flag; on the **build side it is BLOCKED, and that is the real outstanding
+gap** — `build_supervised()` is written but has zero callers, and `build()`
+stays in-process because MIR capsules cannot cross a process boundary. Still
+genuinely outstanding besides that: **peak RSS (NOT SATISFIED)**, the
+**negative control (NOT SATISFIED)**, defect 1 (**OPEN**), and the five-fixture
+acceptance run, which another lane is executing and whose outcome this doc
+asserts in neither direction.
 
 **Corrections applied 2026-08-18 (Lane AUDITFIX).** Two of the three "wrong in
 detail" items in the first pass of this table were themselves wrong:
@@ -173,10 +198,10 @@ detail" items in the first pass of this table were themselves wrong:
 2. **R2b was a mischaracterisation.** The two lanes use two mechanisms because
    they have two different amounts of information, not because they disagree.
 
-The one genuinely open item is the third: **two different unverified exit
-codes.**
+The third item, **two different unverified exit codes**, is now DECIDED (5) —
+see below.
 
-### Unverified exit code: standardise on 5
+### Unverified exit code: DECIDED — standardise on 5
 
 - `test_run_outcome_exit_code` (`test_runner_types.spl`) maps
   `Unverified ⇒ 5`, `UsageError ⇒ 2`, `InternalError ⇒ 3`,
@@ -193,8 +218,20 @@ script branching on either value for unverifiedness (callers currently test
 only `rc == 0`), so the change breaks no known consumer and the migration cost
 is one literal.
 
-**Not fixed here:** `src/app/test_runner_new/test_runner_single.spl:1226-1231`
-is owned by another lane. Filed as a precise pointer, not an edit.
+**DECIDED 2026-08-18: 5.** The reasoning is not a preference — `2` is already
+taken by `UsageError` in `test_run_outcome_exit_code`
+(`src/lib/nogc_sync_mut/test_runner/test_runner_types.spl:242`, `Unverified ⇒ 5`
+at `:246`), so a bare `2` makes "you passed a bad flag" and "the host killed
+your spec" the same code in the same runner.
+
+**Code change is another lane's, and is NOT claimed done.** Location (corrected
+2026-08-18 — the earlier `:1226-1231` citation was off by a few lines):
+`src/app/test_runner_new/test_runner_single.spl:1226-1238`. Lane REDEFINE read
+that file and found it now `return 5` at `:1238` with a comment giving exactly
+this reasoning — but `git status` reports the file as ` M` (uncommitted, live
+lane). So: **present in the working tree, NOT verified as committed or landed on
+`main`, and not executed.** Verify with `git log -1 --oneline -- <path>` plus a
+re-read before treating it as delivered.
 
 ### Other flagged items, re-verified by Lane AUDITFIX
 
