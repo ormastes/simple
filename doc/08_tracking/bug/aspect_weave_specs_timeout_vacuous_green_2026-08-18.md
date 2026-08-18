@@ -114,3 +114,74 @@ step-over protocol requires, in
 `aspect_weave_specs_timeout_vacuous_green_2026-08-18_divergence_offenders.txt`
 (875 lines). It is data, not prose, so it is kept out of this document rather
 than pasted into it.
+
+## 2026-08-18 (later, lane-aspect-dynload): PREMISE NO LONGER HOLDS — the
+## 30 GB blowup does not reproduce; both specs now fail in ~2 min for an
+## unrelated, non-aspect reason
+
+Binary at the time of this re-measurement (the shared seed was REDEPLOYED
+between the two measurements — this is a different binary from the one the
+original report used):
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ stat -c '%s %y' "$(readlink -f bin/simple)"
+59645008 2026-08-18 10:12:23.164167908 +0000     # report used 59546088 @ 07:53:39
+```
+
+Re-run of the exact command the kill message named, detached, RSS polled from
+`/proc/PID/status` every 10s: peak VmRSS **3932 kB**, finished in ~110s. No
+timeout, no memory growth:
+
+```
+$ bin/simple run test/01_unit/compiler/semantics/aspect_weave_spec.spl
+  semantic: undefined field 'level': cannot access field on value of type 'object'   (x5)
+5 examples, 5 failures
+SPEC FILE VERDICT: test/01_unit/compiler/semantics/aspect_weave_spec.spl outcome=OK declared>=5 executed=5 passed=0 failed=5 skipped=0 dropped=0
+
+$ bin/simple run test/01_unit/compiler/semantics/aspect_join_point_spec.spl
+  semantic: undefined field 'level': cannot access field on value of type 'object'   (x10)
+10 examples, 10 failures
+SPEC FILE VERDICT: .../aspect_join_point_spec.spl outcome=OK declared>=10 executed=10 passed=0 failed=10 skipped=0 dropped=0
+```
+
+Both are now red for the SAME cause, and it is not in the aspect code at all.
+The failing access is `frontend.spl:26` (`fn frontend_log_trace(log: Logger,
+...)` -> `if log.level >= 20:`), reached from `parse_full_frontend` — but the
+defect is upstream of even that. Minimal reproduction, 12 lines, importing
+NOTHING from `35.semantics`, `10.frontend/aspect_registry.spl`, or the weaver:
+
+```simple
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+
+fn probe_local(log: Logger) -> i64:
+    if log.level >= 20: 1 else: 0
+
+describe "logger probe":
+    it "reads level locally":
+        expect(probe_local(Logger(level: 0))).to_equal(0)
+    it "reads level directly":
+        val l = Logger(level: 3)
+        expect(l.level).to_equal(3)
+```
+
+Result: `2 examples, 2 failures`, both `undefined field 'level': cannot access
+field on value of type 'object'`. So a `class` instance (`Logger`,
+`src/compiler/00.common/config.spl:171`) constructed from an importing module
+is erased to a plain `object` by the current seed, and EVERY field read on it
+fails — including a direct `val l = Logger(level: 3); l.level`. Nothing about
+aspects, weaving, join-point enumeration, or the weave loop's `modules[
+module_key] = module` value-copy is involved.
+
+Consequences for the original report:
+* Defect 1 (30 GB in `weave_forward_advice`) is **not reproducible on the
+  current binary** and its suspected causes (unbounded weave loop, non-
+  terminating re-enumeration, failed idempotence guard) are unverified — the
+  specs never reach `weave_forward_advice` now; they die in `parse_full_frontend`.
+  Do not "fix" the weaver against this report without first re-reproducing on a
+  named binary.
+* Defect 2 (vacuous `Results: 0 total`) is untouched by this and still stands.
+* The blocking work is now the class-field erasure above, which belongs to the
+  seed/interpreter owners, not to the aspect lane.
