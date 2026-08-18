@@ -176,9 +176,15 @@ is empty.
 
 ## Status
 
-NOT CURRENTLY REPRODUCIBLE (see "Update 2026-08-18 (later probe)" above — 4/4
-runs across the debug seed and the deployed binary showed correct,
-non-doubled execution). Originally CONFIRMED, not fixed, confirming the claim
+**INTERMITTENT-CONFIRMED** (see "Update 2026-08-18 (frequency measurement)"
+below, the latest update on this doc) — measured 0/25 duplications in a
+dedicated sequential+concurrent repeat harness, against 1 verbatim-captured
+positive instance from an earlier session ("goal-4 evidence" update). Not
+reproducible on demand; not fixed (BLOCKED-ON-DEPLOY, Rust seed site).
+Superseded text below (NOT CURRENTLY REPRODUCIBLE, 4/4 non-doubled probe
+runs) kept for history — it was itself only a non-reproduction, not a
+resolution, per the "goal-4 evidence" update that came after it
+chronologically. Originally CONFIRMED, not fixed, confirming the claim
 made in passing by
 `doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md` ("the
 test-runner path executed the spec file's `it` bodies twice within one
@@ -366,3 +372,96 @@ the interpreter's expression-statement evaluation (or the `it`-body desugar)
 to print a call-site trace, rerun the minimal repro, and diff against the
 bound-`val` control to find exactly where the second evaluation is
 introduced.
+
+## Update 2026-08-18 (frequency measurement): INTERMITTENT-CONFIRMED, trigger not isolated in this session
+
+**Method.** Repeat harness against the exact suite that reproduced the
+duplication ("goal-4 evidence" update above),
+`test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl`: clear the
+`.evidence.sdn` sidecar, run `bin/simple test <spec>`, record
+`grep -c '^title=' <sidecar>` (4 = correct, 8 = duplicated), the `Results:`
+line, and a grep for `fallback|falling back|JIT compilation failed` in the
+captured stdout/stderr.
+
+- **20 sequential runs** (fresh sidecar each run, one `bin/simple test`
+  invocation at a time, ~2.7-2.9s each): **0/20 duplicated** — every run
+  `titles=4`, `Results: 6 total, 6 passed, 0 failed`.
+- **5 rounds x 4 concurrent `bin/simple test` invocations** (the target spec
+  plus its 3 sibling evidence specs launched together with `&`/`wait`, to
+  probe whether concurrent runner processes or shared-daemon contention is
+  the correlate): **0/5 duplicated** on the target spec — `titles=4` every
+  round.
+- **Combined this session: 0/25 duplications**, vs. the 1 confirmed
+  duplication captured verbatim in the "goal-4 evidence" update above (1 dup
+  observed out of an unknown, uncounted number of runs during that earlier
+  wiring session). Measured frequency this session: **0/25 (0%)**; the only
+  positive instance to date remains the single verbatim capture from the
+  earlier update — true frequency is therefore bounded above by roughly
+  "rare enough that 25 fresh single/low-concurrency runs did not catch it,"
+  not zero.
+
+**JIT-fallback hypothesis: NOT SUPPORTED, but not cleanly ruled out either.**
+Every one of the 20 sequential runs printed 13 lines matching
+`fallback|falling back` — but on inspection every match is the SAME static
+compile-time warning class,
+`[compiler_cross_module_private_symbol_collision]` ("N co-compiled
+definitions with differing signatures ... falling back to the last
+definition when types are ambiguous"), emitted identically on every run
+including all 20 non-duplicating ones. This is a symbol-resolution warning
+about ambiguous overloads at JIT compile time, **not** a
+"JIT compilation failed, falling back to the interpreter" engine-switch
+event — no such engine-fallback line was seen in any of the 25 runs. Because
+duplication never occurred in this batch, the hypothesis could not be tested
+against a positive case; it is downgraded from "strongest lead" to
+"unsupported by available evidence, still open" — the mechanism that
+produced the one confirmed duplication remains unidentified.
+
+**Ruled out by this session's evidence:**
+- Simple re-run of the identical command is **not** sufficient to trigger it
+  (0/20 sequential).
+- Contention from other concurrent `bin/simple test` processes on sibling
+  specs is **not** sufficient on its own (0/5 concurrent rounds), though this
+  only tested 4-way concurrency, not the fuller machine load that may have
+  been present during the original "wiring goal-4 evidence" session.
+- `SIMPLE_EXECUTION_MODE=interpreter|jit` forcing was **not** exercised this
+  session (deferred — `bin/simple test` already hard-defaults to the
+  tree-walk interpreter per `.claude/rules/testing.md`, so the JIT-vs-
+  interpreter engine switch this env var controls is likely not in play for
+  `test`, which weakens the fallback hypothesis further; this reasoning was
+  not independently confirmed by forcing the var and diffing behavior, and
+  should be if this bug is revisited).
+
+**No deterministic forcing recipe found.** The trigger remains unidentified;
+this session adds a measured false/negative rate (0/25) and downgrades the
+JIT-fallback hypothesis without being able to confirm or replace it.
+
+**Practical impact (restated, unchanged by this update):** because the
+mechanism is nondeterministic and not fixed (BLOCKED-ON-DEPLOY, seed-only
+site per the "site localized" update above), any `spipe-docgen`-generated
+manual built from a spec with unbound side-effecting statements in an `it`
+body can be nondeterministically corrupted (duplicate evidence blocks), and
+any spec whose `it` body performs a real side effect via a bare/unbound call
+(file/DB/socket writes, counters) is at nondeterministic risk of double-
+applying that side effect — impossible to catch by re-running once, since
+most runs are silently correct.
+
+**Proposed patch (unchanged, still not applied — BLOCKED-ON-DEPLOY):**
+`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`,
+`exec_block_closure_into`'s `Node::Expression` arm (~line 261-287): once the
+trigger is isolated, either de-duplicate the `nodes` slice at the site that
+builds an `it`-body `BlockClosure`, or guard the `Node::Expression` arm
+against re-invoking `handle_method_call_with_self_update` twice for the same
+loop iteration. This remains speculative — the original probe could not
+confirm (a) duplicate-slice-entry vs. (b) loop re-entry, and this update
+could not reproduce at all, so the patch target is still unconfirmed.
+
+**Status: INTERMITTENT-CONFIRMED.** Measured frequency 0/25 in a fresh
+sequential+low-concurrency batch this session, against 1 verbatim-captured
+positive instance from the prior "goal-4 evidence" session. Correlate not
+found; JIT-fallback hypothesis downgraded to unsupported. Next session should
+either (a) run a much larger batch (100+) under realistic concurrent load
+matching the original wiring session (multiple sibling specs + docgen
+running simultaneously), or (b) re-instrument
+`exec_block_closure_into` with the idx/len probe from the "later probe"
+update and leave it running across many iterations rather than 3-4, since
+point-probes have twice now missed the window.
