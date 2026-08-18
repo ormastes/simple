@@ -12,7 +12,7 @@ Read-only investigation. No source or spec file was modified.
 |---|---|
 | `.spl` files under `src/lib/` | 7789 |
 | no test file shares the module basename | 4252 |
-| stricter: **also** no exported `fn` name of the file appears anywhere in `test/**.spl` | **>=229** (scan of the 4252 was still in progress; this is a measured lower bound) |
+| stricter: **also** no exported `fn` name of the file appears anywhere in `test/**.spl` | **>=281** (scan of the 4252 was still in progress at time of writing; this is a measured lower bound, not a final count) |
 
 Method: (1) basename mirror match against every `test/**/*.spl`; (2) for the
 misses, extract each file's declared `fn` names and check whether *any* of them
