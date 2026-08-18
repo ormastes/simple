@@ -118,3 +118,13 @@ remain far below interpreted encode cost.
 Probes: scratchpad `execir_probe_spec.spl`, `jit_probe.spl` (session
 scratchpad, not committed). Related: `execir_slice_spec.spl`,
 `execir_slice2_spec.spl` (landed, source of the BENCH lines).
+
+## Decision (2026-08-18, user)
+
+**ExecIR integration is REJECTED — memory efficiency judged insufficient.**
+The tier-0.5 wiring into MirInterpreter was stopped mid-implementation and its
+partial edits reverted; the memory/predictability analysis lane was cancelled.
+The landed encode/run slices (1–3, incl. the arena) remain in
+`src/compiler/95.interp/execir.spl` as standalone, UNWIRED code with green
+specs — nothing in the interpreter or JIT paths calls them. Do not wire ExecIR
+into any execution path without a new decision reversing this one.
