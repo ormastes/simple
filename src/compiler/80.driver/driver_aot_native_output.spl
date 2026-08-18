@@ -30,7 +30,9 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBind
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult, parallel_unstable_enabled}
-use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
+    build_outcome_retain_diagnostics, build_outcome_count_diagnostic_lines,
+    build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -96,7 +98,13 @@ fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
         unit_id: unit_id, source_path: name,
         kind: driver_native_classify_module_failure_v1(detail),
         status: 0, signal_num: 0, wall_ms: 0, peak_rss_kb: 0,
-        diagnostics: detail))
+        # R9: bound the RETAINED text (the rest is spilled to the diagnostic log)
+        # while keeping the COUNT exact. This path is the one that was measured
+        # accumulating 2,926 errors at 124 of 619 files with RSS climbing ~1 GB /
+        # 30s -- unbounded retention here OOMs the very run doing the reporting.
+        diagnostics: build_outcome_retain_diagnostics(name, detail),
+        diagnostic_total: build_outcome_count_diagnostic_lines(detail),
+        diagnostic_retained: build_outcome_retained_diagnostic_count(detail)))
 
 # Deterministic end-of-build summary naming EVERY module in EVERY non-OK
 # category (R3), then the fail-closed verdict — "" when every module is OK.

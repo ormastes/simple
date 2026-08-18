@@ -116,6 +116,112 @@ fn build_outcome_classify_status(status: i64, timed_out: bool) -> BuildOutcomeKi
 # Per-unit record
 # ============================================================================
 
+# ============================================================================
+# Bounded accumulation (R9)
+# ============================================================================
+#
+# Collect-all must not kill the run it is reporting on. Measured 2026-08-17: at
+# 124 of 619 files a stage-3 build had accumulated 2,926 errors with RSS climbing
+# ~1 GB / 30s (8.0 -> 15.1 GB); linear extrapolation is ~14,500 errors and
+# +25-30 GB. `earlyoom` fires at 10% free on this host and had already killed a
+# bootstrap that day. Unbounded RETENTION of diagnostic text therefore converts a
+# complete error census into no census at all.
+#
+# The rules, and why each one is not negotiable:
+#
+#   * Cap RETAINED text per unit, not merely DISPLAYED text. The pre-existing
+#     `[hir-fatal-count] ... shown=10` cap bounded output only; the count kept
+#     rising while memory kept growing, which is precisely the measurement above.
+#   * NEVER cap the COUNT. `total=1948` stays exact even when 10 lines are kept.
+#     A truncated count lies about the SIZE of the problem; truncated text is
+#     merely less convenient.
+#   * Spill to the LOG, not the heap. The discarded text is appended to a file
+#     once and read later; nothing needs it in memory until the end of the build.
+#   * REPORT the policy in the summary, so a reader knows whether they are seeing
+#     everything (`shown=N retained=N total=M`). Silent truncation is the same
+#     defect class as a silent failure.
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+# Diagnostic lines kept verbatim per unit. Matches the existing display cap so
+# retained and shown are the same number and the summary can say so honestly.
+fn build_outcome_retained_line_cap() -> i64:
+    val override = rt_env_get("SIMPLE_BUILD_DIAG_RETAIN") ?? ""
+    if override != "":
+        # Hand-rolled rather than `text.to_i64()`: this tree has an open defect
+        # where a chained `.to_i64()` returns garbage under JIT (see the same
+        # note in 10.frontend/effect_registry.spl). A garbage cap here would
+        # silently change how much evidence a failing build keeps.
+        var parsed = 0
+        var ok = true
+        for ch in override:
+            val digit = ch.to_i64() - "0".to_i64()
+            if digit < 0 or digit > 9:
+                ok = false
+            else:
+                parsed = parsed * 10 + digit
+        if ok and parsed > 0:
+            return parsed
+    10
+
+# Where discarded diagnostic text goes. It is DISCARDED FROM MEMORY, not lost.
+fn build_outcome_spill_log_path() -> text:
+    val override = rt_env_get("SIMPLE_BUILD_DIAG_LOG") ?? ""
+    if override != "":
+        return override
+    "build/build_diagnostics.log"
+
+# Count the non-empty lines of a diagnostic blob. This is the EXACT total and is
+# never capped by anything below.
+fn build_outcome_count_diagnostic_lines(diagnostics: text) -> i64:
+    if diagnostics == "":
+        return 0
+    var count = 0
+    for line in diagnostics.split("\n"):
+        if line != "":
+            count = count + 1
+    count
+
+# Truncate to the retention cap, spilling the FULL text to the log first.
+# Returns the text to keep in memory. The caller records the exact total
+# separately, so nothing here can shrink a count.
+fn build_outcome_retain_diagnostics(source_path: text, diagnostics: text) -> text:
+    val cap = build_outcome_retained_line_cap()
+    val total = build_outcome_count_diagnostic_lines(diagnostics)
+    if total <= cap:
+        return diagnostics
+    # Spill BEFORE dropping. A failed append is not fatal -- losing the tail of a
+    # diagnostic must never abort the build that was reporting it -- but the
+    # retained text says so, so no reader mistakes a spill failure for silence.
+    val log_path = build_outcome_spill_log_path()
+    val spilled = rt_file_append_text(log_path,
+        "===== {source_path} ({total} diagnostic line(s)) =====\n{diagnostics}\n")
+    var kept = ""
+    var taken = 0
+    for line in diagnostics.split("\n"):
+        if line == "":
+            continue
+        if taken >= cap:
+            break
+        if kept != "":
+            kept = kept + "\n"
+        kept = kept + line
+        taken = taken + 1
+    val note = if spilled:
+        "(+{total - cap} more line(s) spilled to {log_path})"
+    else:
+        "(+{total - cap} more line(s) DISCARDED -- could not append to {log_path})"
+    kept + "\n" + note
+
+# How many lines `build_outcome_retain_diagnostics` keeps for this blob. Paired
+# with `build_outcome_count_diagnostic_lines` (the EXACT total) so a caller that
+# builds the record directly reports the same `shown=/total=` pair as
+# `from_status`.
+fn build_outcome_retained_diagnostic_count(diagnostics: text) -> i64:
+    val total = build_outcome_count_diagnostic_lines(diagnostics)
+    val cap = build_outcome_retained_line_cap()
+    if total > cap: cap else: total
+
 struct BuildUnitOutcome:
     unit_id: i64            # supervisor-assigned id, stable within one build
     source_path: text       # the file this unit was compiling
@@ -127,13 +233,20 @@ struct BuildUnitOutcome:
     wall_ms: i64
     peak_rss_kb: i64
     diagnostics: text       # non-empty for ERROR; the compiler's own message
+    # R9. `diagnostic_total` is the EXACT number of diagnostic lines this unit
+    # produced and is never capped by anything; `diagnostic_retained` is how many
+    # of them `diagnostics` still holds in memory. When they differ, the rest was
+    # spilled to `build_outcome_spill_log_path()` -- the summary states this.
+    diagnostic_total: i64
+    diagnostic_retained: i64
 
 impl BuildUnitOutcome:
     static fn ok(unit_id: i64, source_path: text, wall_ms: i64, peak_rss_kb: i64) -> BuildUnitOutcome:
         BuildUnitOutcome(unit_id: unit_id, source_path: source_path,
                          kind: BuildOutcomeKind.OK, status: 0, signal_num: 0,
                          wall_ms: wall_ms, peak_rss_kb: peak_rss_kb,
-                         diagnostics: "")
+                         diagnostics: "",
+                         diagnostic_total: 0, diagnostic_retained: 0)
 
     # A unit the build never got to. Stated explicitly — silent absence is
     # forbidden (R3).
@@ -141,7 +254,8 @@ impl BuildUnitOutcome:
         BuildUnitOutcome(unit_id: unit_id, source_path: source_path,
                          kind: BuildOutcomeKind.NOT_RUN, status: 0, signal_num: 0,
                          wall_ms: 0, peak_rss_kb: 0,
-                         diagnostics: "never started (build ended first)")
+                         diagnostics: "never started (build ended first)",
+                         diagnostic_total: 1, diagnostic_retained: 1)
 
     # Build a record from what the supervisor actually observed. This is the
     # normal constructor: classification lives in one place so no caller can
@@ -149,12 +263,20 @@ impl BuildUnitOutcome:
     static fn from_status(unit_id: i64, source_path: text, status: i64,
                           timed_out: bool, wall_ms: i64, peak_rss_kb: i64,
                           diagnostics: text) -> BuildUnitOutcome:
+        # R9: the COUNT is taken from the full text and kept exact; only the TEXT
+        # is bounded. Doing it in this order is the whole requirement -- capping
+        # first and counting after is how a truncated census starts lying.
+        val total = build_outcome_count_diagnostic_lines(diagnostics)
+        val cap = build_outcome_retained_line_cap()
+        val kept = build_outcome_retain_diagnostics(source_path, diagnostics)
+        val retained = if total > cap: cap else: total
         BuildUnitOutcome(unit_id: unit_id, source_path: source_path,
                          kind: build_outcome_classify_status(status, timed_out),
                          status: status,
                          signal_num: build_outcome_signal_of_status(status),
                          wall_ms: wall_ms, peak_rss_kb: peak_rss_kb,
-                         diagnostics: diagnostics)
+                         diagnostics: kept,
+                         diagnostic_total: total, diagnostic_retained: retained)
 
     fn label() -> text:
         build_outcome_kind_label(self.kind)
@@ -302,6 +424,11 @@ impl BuildOutcomeSet:
                         block = block + "      reason: {line}\n"
                 if block == "":
                     return "      reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)\n"
+                # R9: state the retention policy whenever text was dropped, so a
+                # reader can tell "10 problems" from "10 of 1948 problems". The
+                # count is always exact; only the text is bounded.
+                if outcome.diagnostic_total > outcome.diagnostic_retained:
+                    block = block + "      reason-retention: shown={outcome.diagnostic_retained} retained={outcome.diagnostic_retained} total={outcome.diagnostic_total} (full text in {build_outcome_spill_log_path()})\n"
                 return block
         "      reason: (no record found for this path — BUG in the accumulator)\n"
 
