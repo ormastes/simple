@@ -1,5 +1,5 @@
 # Query visibility — LSP query command entrypoints
-use app.cli.query_visibility.*
+use app.cli._QueryVisibility.symbol_resolution.*
 # Query CLI - LSP visibility JSON adapters
 #
 # Wraps the existing text-oriented query commands and enriches them with
@@ -715,3 +715,94 @@ fn package_name(file_path: text) -> text:
             return layer.substring(dot + 1)
         return layer
     parts[0]
+
+fn scan_semantic_tokens(file_path: text, start_line: i64, end_line: i64) -> [text]:
+    if not query_file_exists(file_path):
+        return []
+    val content = query_file_read_rich(file_path) ?? ""
+    val lines = content.split("\n")
+    var fn_names: [text] = []
+    var type_names: [text] = []
+    var param_names: [text] = []
+    val parsed = parse_symbols_in_file(file_path)
+    for sym in parsed:
+        if sym.kind == "fn" or sym.kind == "method":
+            fn_names = fn_names.push(sym.name)
+        elif sym.kind == "class" or sym.kind == "struct" or sym.kind == "enum" or sym.kind == "trait":
+            type_names = type_names.push(sym.name)
+    var results: [text] = []
+    var line_idx = 1
+    var last_line = end_line
+    if last_line <= 0 or last_line > lines.len():
+        last_line = lines.len()
+    for line in lines:
+        if line_idx < start_line and start_line > 0:
+            line_idx = line_idx + 1
+            continue
+        if line_idx > last_line:
+            break
+        val chars = text_chars(line)
+        var ci = 0
+        while ci < chars.len():
+            val ch = chars[ci]
+            if ch == " " or ch == "\t":
+                ci = ci + 1
+                continue
+            if ch == "#":
+                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(chars.len() - ci) + ":comment")
+                break
+            if ch == "\"":
+                var si = ci + 1
+                while si < chars.len():
+                    val current = chars[si]
+                    if current == "\"":
+                        si = si + 1
+                        break
+                    si = si + 1
+                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(si - ci) + ":string")
+                ci = si
+                continue
+            if ch >= "0" and ch <= "9":
+                var ni = ci + 1
+                while ni < chars.len():
+                    val current = chars[ni]
+                    if not ((current >= "0" and current <= "9") or current == "."):
+                        break
+                    ni = ni + 1
+                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(ni - ci) + ":number")
+                ci = ni
+                continue
+            if is_ident_char(ch):
+                var wi = ci + 1
+                while wi < chars.len():
+                    val current = chars[wi]
+                    if not is_ident_char(current):
+                        break
+                    wi = wi + 1
+                var word_parts: [text] = []
+                var wj = ci
+                while wj < wi:
+                    word_parts = word_parts.push(chars[wj])
+                    wj = wj + 1
+                val word = word_parts.join("")
+                var token_type = "variable"
+                if list_has_text(matching_keywords(word), word):
+                    token_type = "keyword"
+                elif list_has_text(fn_names, word):
+                    token_type = "function"
+                elif list_has_text(type_names, word):
+                    token_type = "type"
+                elif list_has_text(param_names, word):
+                    token_type = "parameter"
+                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(wi - ci) + ":" + token_type)
+                ci = wi
+                continue
+            if ci + 1 < chars.len():
+                val op = chars[ci] + chars[ci + 1]
+                if op == "->" or op == ":=" or op == "==" or op == "!=" or op == ">=" or op == "<=":
+                    results = results.push(str(line_idx) + ":" + str(ci) + ":2:operator")
+                    ci = ci + 2
+                    continue
+            ci = ci + 1
+        line_idx = line_idx + 1
+    results

@@ -112,3 +112,46 @@ bytes, mtime 2026-08-17 20:28:24 UTC; Rust seed).
 Verification (foreground, `--no-session-daemon`):
 - `test/01_unit/app/compile_targets_env_facade_source_spec.spl` → `Results: 2 total, 2 passed, 0 failed`
 - `test/01_unit/compiler/backend/runtime_timestamp_owner_source_spec.spl` → `Results: 3 total, 2 passed, 1 failed` both WITH and WITHOUT the change (stash-rerun) — the 1 failure is pre-existing and unrelated.
+
+## Delta 2026-08-18 — break the app/io and app/cli facade back-edge cycles
+
+Context correction first: the "45-file SCC fusing `src/app/cli/cli_commands.spl` /
+`cli_compile.spl` with `driver_hir_pipeline_*`" no longer exists — a prior lane's
+reroutes already broke it. The current largest SCC (still size 45) is entirely
+inside `src/compiler/70.backend/backend/**` (C/LLVM/VHDL/CUDA/Vulkan backends +
+`codegen_factory`), with zero edges into `app/cli`, `app/io`, or `80.driver` —
+out of this lane's allowed scope, so it was left alone.
+
+Within scope, two facade back-edge cycles remained (classic split-file pattern:
+helper imports its own facade wildcard):
+
+1. `src/app/io/cli_commands.spl` ↔ `src/app/io/_CliCommands/handler_commands.spl`
+   (2-cycle). `handler_commands` used only `cli_run_file` and `cli_not_implemented`
+   from the facade's other side. Fix: import
+   `app.io._CliCommands.run_commands.{cli_run_file, cli_not_implemented}` directly.
+2. `src/app/cli/query_visibility.spl` ↔ `_QueryVisibility/{query_commands,symbol_resolution}.spl`
+   (3-cycle). `symbol_resolution`'s only need from `query_commands` was
+   `parse_symbols_in_file` — used solely inside `scan_semantic_tokens`. Fix: moved
+   `scan_semantic_tokens` (verbatim, ~90 lines) into `query_commands.spl`, rerouted
+   `query_commands` onto `use app.cli._QueryVisibility.symbol_resolution.*`, and
+   dropped `symbol_resolution`'s facade import entirely. The facade still
+   `export use`-forwards both siblings, so the public API is unchanged.
+
+Method: same static resolver (`dep_baseline.py`, scratchpad), before measured by
+temp-restoring the 3 files to `HEAD` in place (shared tree; no stash), same session:
+
+| metric (CLI dir roots, 81 files) | before | after |
+|---|---|---|
+| closure (files) | 1406 | 1406 |
+| cycles (SCCs>1) | 34 | **32** |
+| files-in-cycles | 200 | **195** |
+| largest SCC | 45 (backend-only) | 45 (backend-only, out of scope) |
+
+Verification (foreground, `--no-session-daemon`):
+- `test/01_unit/app/cli/query_visibility_spec.spl` — Results: 3 total, 3 passed, 0 failed
+- `test/01_unit/app/cli/query_lsp_spec.spl` (semantic-tokens path through the moved fn) — Results: 32 total, 32 passed, 0 failed
+- `test/01_unit/app/cli_dispatch_unit_spec.spl` — Results: 57 total, 57 passed, 0 failed
+
+Remaining in-scope note: no `app/cli`/`app/io`/`80.driver` file participates in any
+SCC of the CLI closure anymore; further largest-SCC reduction requires touching
+`70.backend` (excluded for this lane).
