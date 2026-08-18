@@ -1,6 +1,6 @@
 # `class X with Trait` registers no vtable — native trait calls trap on `ud2`
 
-- **Status:** source-side fix landed for the Draw IR executor; compiler gap OPEN
+- **Status:** JIT half RESOLVED 2026-08-18 (same defect as `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02` — one defect, two rows). Native/AOT half STILL OPEN with a precise root cause, below.
 - **Found:** 2026-07-28, SimpleOS-WM showcase cell (guest render fault)
 - **Related:** `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02`
 
@@ -117,3 +117,57 @@ native builds and is tracked here.
 ## 2026-08-17 CORE-P1 triage: STILL PRESENT in current source
 
 Re-verified against CURRENT SOURCE during the crit_01 CORE-P1 sweep. Confirmed still present. A vtable is written only when `vtable_data_id` is present (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:351-355`, stored at object offset 0), and that is driven by a recorded `impl Trait for Type`; a bare `class X with Trait` declaration alone does not populate it. The call then hits `closures_structs.rs:2302`, whose own comment reads "duck-typed virtual method call (trait has no `impl Trait for ...` in unit; no vtable)", and lowers to `builder.ins().trap(...)` -- which is the `ud2` this doc decoded from `rip` (`0f 0b`). The trap is deliberate and fail-closed; the missing piece is real trait-receiver dispatch.\n\n**ROOT-CAUSE COLLAPSE: same single defect as `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`** -- same sentinel (`DUCK_DISPATCH_UNSUPPORTED_SLOT`, `mir/lower/lowering_core.rs:1137-1142`), same trap site. Two P1 docs, one fix.
+
+## RESOLVED 2026-08-18 (JIT) — duck-typed trait receiver now dispatches erased
+
+**Engine: Cranelift JIT** (`simple run`, `SIMPLE_EXECUTION_MODE=jit`). An
+interpreted spec cannot exercise this defect and never could — it is MIR
+lowering + codegen.
+
+Fix: `src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs`,
+`DispatchMode::Dynamic`. When `find_trait_for_method_on_receiver` returns
+`DUCK_DISPATCH_UNSUPPORTED_SLOT` (trait with no `impl Trait for ...` anywhere in
+the unit, so no object carries a vtable), the call is no longer lowered to
+`MethodCallVirtual` + trap. The receiver is a real object of a concrete class
+that HAS the method — exactly the erased (`Any`-receiver) shape the runtime
+already resolves by name — so lowering now emits `MethodCallStatic` with the
+**bare** method name. Bare is required: `func_name` had been qualified with the
+receiver's static type, which for a trait-typed receiver is the TRAIT
+(`Backend.label`), and no such function exists.
+
+The codegen trap at `codegen/instr/closures_structs.rs` is kept, unwidened, as
+fail-closed defence for any MIR that reaches it with the sentinel by another
+route.
+
+Gate: `scripts/check/check-duck-trait-dispatch-jit.shs` (verdict last line,
+PASS/FAIL/ERROR, non-vacuous). Fixtures:
+`test/01_unit/compiler/codegen/duck_trait_dispatch/`.
+
+| fixture | shape | before (old seed) | after |
+|---|---|---|---|
+| `impl_ful_trait_receiver.spl` | trait WITH impl (control) | PASS | PASS |
+| `erased_any_receiver.spl` | `Any` receiver (control) | PASS | PASS |
+| `duck_trait_receiver_single_method.spl` | impl-less trait, 1 method, no args | **rc 132 SIGILL, duck-dispatch diagnostic** | PASS |
+| `duck_trait_receiver_multi_method.spl` | impl-less trait, 3 methods (slot index matters), method with args, second trait sharing the method name, class implementing both | **rc 132 SIGILL** | PASS |
+
+Negative control (mandatory, performed): the same gate run against the
+pre-change binary `bin/release/x86_64-unknown-linux-gnu/simple` FAILs on both
+duck fixtures with rc 132 and the duck-dispatch diagnostic, while both controls
+still pass. `PASS — 4 fixture(s) checked` on the fixed build.
+
+**Title correction:** the old title said SIGSEGV. It has not segfaulted for some
+time — the sentinel path was already fail-closed, printing a named diagnostic
+and executing `trap` (SIGILL, rc 132). That was a large improvement over memory
+corruption; theremaining  defect was that the call did not work at all.
+
+## STILL OPEN — native/AOT (see row 17)
+
+Native/AOT does **not** benefit. Measured 2026-08-18 with the fixed compiler:
+`native-build` of the duck fixture fails at build time with
+`MIR lowering error: unresolved method call: scaled`. This is NOT caused by the
+fix: `erased_any_receiver.spl`, which contains no trait at all and is untouched
+by this change, fails the same way (5 × `unresolved method call`). **The native
+backend has no erased/bare-name method dispatch whatsoever.** That is the whole
+of the remaining work, and it is a separate, larger job: implement erased
+by-name method resolution in the native lowering path. Until then native is
+fail-closed at BUILD time (named error) rather than at runtime.

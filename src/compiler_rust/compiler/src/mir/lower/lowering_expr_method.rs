@@ -2003,9 +2003,58 @@ impl<'a> MirLowerer<'a> {
                 // concrete classes that merely share a method name with a trait
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
-                if let Some((vtable_slot, param_types, return_type)) =
-                    self.find_trait_for_method_on_receiver(method, recv_type_name)
+                let trait_lookup = self.find_trait_for_method_on_receiver(method, recv_type_name);
+                // Duck-typed trait (no `impl Trait for ...` anywhere in the
+                // unit, e.g. game2d's `App`/`GameBackend`): there is no vtable
+                // to dispatch through, so the old lowering emitted the
+                // DUCK_DISPATCH_UNSUPPORTED_SLOT sentinel and codegen turned
+                // the call into a diagnostic + trap — the call simply did not
+                // work (bugs jit_game2d_backend_method_dispatch_sigsegv_2026-07-02,
+                // native_with_trait_impl_no_vtable_duck_trap_2026-07-28).
+                //
+                // The receiver is nevertheless a real object of some concrete
+                // class that HAS the method, which is precisely the erased
+                // (`Any`-typed receiver) shape the runtime already resolves by
+                // name at the call site. So recover by lowering to a BARE-name
+                // static method call instead of trapping. The name must be
+                // bare: `func_name` was qualified with the receiver's static
+                // type, which here is the TRAIT (`Backend.label`), and no such
+                // function exists.
+                //
+                // Still-unsupported shapes deliberately left to the codegen
+                // trap: any site that reaches `compile_method_call_virtual`
+                // with the sentinel by another route. The trap stays
+                // fail-closed and names the shape; it is not widened.
+                // Native/AOT is NOT fixed by this: that backend has no erased
+                // by-name method dispatch at all (an `Any`-typed receiver with
+                // no trait involved fails there identically) — tracked in the
+                // two bug rows above.
+                if trait_lookup
+                    .as_ref()
+                    .is_some_and(|(slot, _, _)| *slot == crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT)
                 {
+                    let bare = method.to_string();
+                    if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
+                        eprintln!(
+                            "[MIR-METHOD-DISPATCH] '{}' on impl-less trait receiver: erased bare-name dispatch (was duck-dispatch trap)",
+                            method
+                        );
+                    }
+                    self.box_method_args_for_any_params(&bare, args, &mut arg_regs)?;
+                    let dest = self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::MethodCallStatic {
+                            dest: Some(dest),
+                            receiver: receiver_reg,
+                            func_name: bare,
+                            args: arg_regs,
+                        });
+                        dest
+                    })?;
+                    return Ok(dest);
+                }
+                if let Some((vtable_slot, param_types, return_type)) = trait_lookup {
                     if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                         eprintln!(
                             "[MIR-METHOD-DISPATCH] '{}' lowered as virtual trait call at slot {}",
