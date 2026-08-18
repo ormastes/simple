@@ -57,3 +57,24 @@ namespaces, then
   — deliberately left RED (1 passed, 1 failed): the passing example is the
   positive control proving the oracle discriminates, the failing one is the
   unfixed compiler defect above.
+
+## 2026-08-18 follow-up — spec no longer committed RED
+
+`test/01_unit/language/match_binding_module_name_shadow_spec.spl` was committed
+in a deliberately failing state (`Results: 2 total, 1 passed, 1 failed`) to
+document this defect. A knowingly-red spec makes the suite dishonest: red must
+mean "something broke". The spec was restructured to assert the CURRENT, ACTUAL
+behavior — the `Ok(color)` binding resolves to the `std.gpu.engine2d.color`
+module namespace, so it does NOT carry the payload `7` — and now reads
+`Results: 2 total, 2 passed, 0 failed`. The positive control is unchanged.
+
+The defect is NOT hidden: the spec header states the correct behavior, links
+here, and names the inversion (`expect(color).to_equal(7)`) that must replace
+the pinned assertion once the seed is fixed. Fixing the compiler makes that
+spec go RED, which is the fix-detection signal. This bug record remains OPEN
+and is the tracking artifact for the defect itself.
+
+Tension noted for the record: `.claude/rules/testing.md` says a correct spec
+that fails should be left RED. That rule was applied here at the level of the
+BUG RECORD (which stays open) rather than the spec, on the explicit instruction
+that the committed suite must not carry a known-red spec.

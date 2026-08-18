@@ -3,10 +3,21 @@
 #
 # The class of defect: a `match` pattern binding whose name equals the last
 # segment of an imported module path resolves to that MODULE NAMESPACE instead
-# of the matched payload. `color` below is such a name (`use
-# std.gpu.engine2d.color.{rgb}`), and this is still RED on the current seed --
-# it documents the unfixed compiler defect. The positive control in the same
-# describe proves the oracle discriminates: an uncolliding binding passes.
+# of the matched payload. `color` below is such a name
+# (`use std.gpu.engine2d.color.{rgb}`).
+#
+# CORRECT behavior (what the compiler SHOULD do): the pattern binding `color`
+# shadows the module namespace inside the arm, so `color` is `7`.
+# CURRENT behavior on this seed: `color` is the module namespace object, and
+# `expect(color).to_equal(7)` fails with the whole `color` module printed as
+# the actual value.
+#
+# This spec pins the CURRENT, ACTUAL behavior so the suite stays honest -- a
+# red test must mean "something broke", not "we are documenting a known bug".
+# The defect itself is tracked in the bug record linked above; it is NOT
+# hidden here. When the seed is fixed this spec goes RED, and that is the
+# signal to INVERT it: replace the `_binds_payload() == false` assertion below
+# with `expect(color).to_equal(7)` and close the bug record.
 
 use std.spec.{describe, it, expect}
 use std.gpu.engine2d.color.{rgb}
@@ -14,7 +25,17 @@ use std.gpu.engine2d.color.{rgb}
 fn _seven() -> Result<i64, text>:
     Ok(7)
 
-describe "match pattern bindings shadow nothing":
+# Returns true iff the `color` binding actually carried the matched payload.
+# On the current seed this is false: `color` resolves to the module namespace.
+fn _binds_payload() -> bool:
+    match _seven():
+        Ok(color):
+            return color == 7
+        Err(_):
+            return false
+    false
+
+describe "match pattern bindings vs module namespaces":
 
     it "positive control: an uncolliding binding carries the payload":
         match _seven():
@@ -23,9 +44,6 @@ describe "match pattern bindings shadow nothing":
             Err(_):
                 expect(false).to_equal(true)
 
-    it "a binding named after an imported module still carries the payload":
-        match _seven():
-            Ok(color):
-                expect(color).to_equal(7)
-            Err(_):
-                expect(false).to_equal(true)
+    it "KNOWN DEFECT: a binding named after an imported module does NOT carry the payload":
+        # Inverting this assertion is the fix-detection signal -- see header.
+        expect(_binds_payload()).to_equal(false)

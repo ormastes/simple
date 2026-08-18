@@ -97,6 +97,24 @@ committed (analysis tooling, not product code).
   was not reproduced on any existing spec in this lane. No rename was applied:
   the rule for this lane is that a `.spl` site is only edited on a verified
   RED->GREEN pair, and no RED could be produced for it.
+
+  **DOWNGRADED to NOT-A-COLLISION 2026-08-18 (follow-up lane).** Re-examined:
+  the hostile form requires the `report` MODULE NAMESPACE to be in scope *at
+  the loop site*, i.e. inside `src/app/sspec_maintain/report.spl` itself. That
+  file's only imports are `app.sspec_maintain.model.*`,
+  `app.sspec_maintain.rules.{...}` and `std.common.text_advanced.{...}` — a
+  `.*` form and two brace forms, all census-proven safe, and none of them binds
+  the name `report`. The `use report` at
+  `src/compiler_rust/lib/std/src/verification/__init__.spl:24` binds that
+  namespace inside the *verification* module only; it is not re-exported into
+  `app.sspec_maintain.report`, so co-loading the two programs cannot bring it
+  into scope at line 92. A direct regression spec exercising BOTH `for report
+  in reports:` loops (`render_json_reports`, `render_sarif_reports`) plus the
+  single-report path is GREEN:
+  `test/01_unit/app/sspec_maintain/report_multi_render_spec.spl` —
+  `Results: 3 total, 3 passed, 0 failed`. No rename applied: the binding is not
+  shadowed, and a prophylactic rename here would be churn without a defect.
+  Confirmed-class NEW unfixed Tier-A `for` sites is therefore **0**.
 - **SUSPECTED (collision real, form not currently biting):** the 152 `val`/`var`
   and 3 `match` Tier-A rows. Every probe shows these forms winning against the
   namespace binding on the current seed. They become live the moment the
