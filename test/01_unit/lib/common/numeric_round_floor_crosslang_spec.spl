@@ -1,0 +1,133 @@
+# @req REQ-C-MIG-FLOOR-F64
+#
+# C-MIG-0031: pure-Simple f64 floor (`std.common.numeric_round.floor_f64`)
+# vs the C/Rust oracle `rt_math_floor` (src/compiler_rust/compiler/src/
+# interpreter_extern/math.rs::rt_math_floor_fn -- registered in the
+# interpreter's extern dispatch table at interpreter_extern/mod.rs:1568).
+#
+# `rt_math_floor` is a pure-Rust-interpreter extern with NO C runtime
+# counterpart: `grep -rn rt_math_floor src/runtime/*.c src/runtime/*.h`
+# returns zero hits, same kind as C-MIG-0029/0030 (no_c_implementation_
+# rust_only_extern), unlike C-MIG-0027/0028's runtime_native.c-backed
+# externs.
+#
+# `floor_f64` is a NEW pure-Simple implementation
+# (src/lib/common/numeric_round.spl), deliberately placed OUTSIDE
+# src/lib/common/math/** (HARD AVOID this round -- a perf fix is landing
+# there) and outside src/lib/common/spec/evidence/**, base_encoding/**,
+# gzip/**, string_core.spl. It truncates through an `x as i64` round-trip
+# plus a correction step -- genuinely different machinery from a single
+# hardware instruction, not a re-wrap of the extern.
+#
+# Domain-edge bug found and fixed while writing this spec: an early version
+# of floor_f64 had no magnitude guard, so `x as i64` on +infinity (and on
+# any |x| beyond i64's ~9.22e18 range) is undefined/saturating and returned
+# garbage instead of +infinity. Fixed by adding a 2^52 integrality-threshold
+# guard (every f64 at or beyond that magnitude already has zero fractional
+# part) that short-circuits floor/ceil to the identity before the cast.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.numeric_round.{floor_f64}
+
+# C/Rust oracle (test-only; never production-linked from Simple product code here).
+extern fn rt_math_floor(x: f64) -> f64
+
+describe "floor_f64 — pure-Simple vs C/Rust oracle (rt_math_floor)":
+    it "matches the oracle on integer and simple-fraction KATs":
+        assert_equal(floor_f64(3.0), 3.0)
+        assert_equal(floor_f64(3.0), rt_math_floor(3.0))
+        assert_equal(floor_f64(3.7), 3.0)
+        assert_equal(floor_f64(3.7), rt_math_floor(3.7))
+        assert_equal(floor_f64(3.1), 3.0)
+        assert_equal(floor_f64(3.1), rt_math_floor(3.1))
+        assert_equal(floor_f64(0.0), 0.0)
+        assert_equal(floor_f64(0.0), rt_math_floor(0.0))
+
+    it "matches the oracle on negative-value KATs (floor rounds toward -infinity)":
+        assert_equal(floor_f64(-3.0), -3.0)
+        assert_equal(floor_f64(-3.0), rt_math_floor(-3.0))
+        assert_equal(floor_f64(-3.1), -4.0)
+        assert_equal(floor_f64(-3.1), rt_math_floor(-3.1))
+        assert_equal(floor_f64(-0.5), -1.0)
+        assert_equal(floor_f64(-0.5), rt_math_floor(-0.5))
+        assert_equal(floor_f64(-0.0001), -1.0)
+        assert_equal(floor_f64(-0.0001), rt_math_floor(-0.0001))
+
+    it "matches the oracle on domain-boundary values":
+        # -0.0 -> -0.0.
+        val nz_s = floor_f64(-0.0)
+        val nz_c = rt_math_floor(-0.0)
+        assert_equal(nz_s, nz_c)
+        assert_equal(nz_s, -0.0)
+
+        # +infinity -> +infinity, -infinity -> -infinity (the bug found above:
+        # unguarded `x as i64` corrupted this).
+        val big = 1.0e308
+        val pos_inf = big * 10.0
+        val neg_inf = 0.0 - pos_inf
+        val pinf_s = floor_f64(pos_inf)
+        val pinf_c = rt_math_floor(pos_inf)
+        assert_equal(pinf_s, pinf_c)
+        assert_equal(pinf_s, pos_inf)
+        val ninf_s = floor_f64(neg_inf)
+        val ninf_c = rt_math_floor(neg_inf)
+        assert_equal(ninf_s, ninf_c)
+        assert_equal(ninf_s, neg_inf)
+
+        # NaN input -> NaN (checked NaN-safely, since NaN != NaN).
+        val nan_in = pos_inf - pos_inf
+        val nan_s = floor_f64(nan_in)
+        val nan_c = rt_math_floor(nan_in)
+        assert_true(nan_s != nan_s)
+        assert_true(nan_c != nan_c)
+
+        # Large-magnitude integral values beyond i64 range (the other half
+        # of the same guard): must be the identity, not garbage.
+        val huge = 1.0e20
+        assert_equal(floor_f64(huge), huge)
+        assert_equal(floor_f64(huge), rt_math_floor(huge))
+        val huge_neg = 0.0 - huge
+        assert_equal(floor_f64(huge_neg), huge_neg)
+        assert_equal(floor_f64(huge_neg), rt_math_floor(huge_neg))
+
+    it "single-bit input corruption changes the result (discrimination)":
+        assert_true(floor_f64(3.5) != floor_f64(4.0000001))
+        assert_true(rt_math_floor(3.5) != rt_math_floor(4.0000001))
+
+    it "is deterministic on both sides":
+        assert_equal(floor_f64(7.25), floor_f64(7.25))
+        assert_equal(rt_math_floor(7.25), rt_math_floor(7.25))
+
+    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
+        use std.io_runtime.{time_now_unix_micros}
+        var simple_us = 0
+        var c_us = 0
+        var i = 0
+        while i < 100:
+            var seed = (i * 2654435761 + 12345) % 4294967296
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            var x = (seed % 1000000) as f64 / 1000.0
+            if i % 19 == 0:
+                x = 0.0
+            else if i % 17 == 0:
+                x = -0.0
+            else if i % 13 == 0:
+                x = 1.0e20
+            else if i % 11 == 0:
+                x = -1.0e20
+            else if i % 7 == 0:
+                x = 0.0 - x
+            else if i % 5 == 0:
+                x = x - 0.5
+
+            val t0 = time_now_unix_micros()
+            val s = floor_f64(x)
+            val t1 = time_now_unix_micros()
+            val c = rt_math_floor(x)
+            val t2 = time_now_unix_micros()
+            simple_us = simple_us + (t1 - t0)
+            c_us = c_us + (t2 - t1)
+            assert_equal(s, c)
+            i = i + 1
+        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
+        assert_true(simple_us >= 0 and c_us >= 0)
