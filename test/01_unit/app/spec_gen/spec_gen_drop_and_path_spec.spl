@@ -1,0 +1,46 @@
+"""spec-gen drop-and-path regression spec.
+
+Reproduces the two filed defects in bin/simple spec-gen
+(doc/08_tracking/bug/spec_gen_flattens_output_and_silently_drops_specs_2026-08-18.md):
+
+1. Paren-form it blocks -- and triple-quote doc-block openers that carry text on
+   the same line -- extracted nothing, and the file was skipped in silence.
+2. spec_relative_dir stripped the user-supplied search path, flattening output
+   into the doc/06_spec root instead of the test/ mirror path.
+"""
+
+use std.spec
+use app.spec_gen.main.{extract_spec_doc, spec_relative_dir}
+
+describe "spec-gen extraction covers the paren block form":
+    it "extracts it(\"...\") blocks":
+        val src = "describe(\"paren suite\"):\n    it(\"does a paren thing\"):\n        pass\n"
+        val doc = extract_spec_doc(src, "x_spec.spl")
+        expect(doc.contains("## paren suite")).to_equal(true)
+        expect(doc.contains("- does a paren thing")).to_equal(true)
+
+    it "still extracts the bare block form":
+        val src = "describe \"bare suite\":\n    it \"does a bare thing\":\n        pass\n"
+        val doc = extract_spec_doc(src, "x_spec.spl")
+        expect(doc.contains("## bare suite")).to_equal(true)
+        expect(doc.contains("- does a bare thing")).to_equal(true)
+
+    it "does not swallow the file when the doc block opener carries text":
+        val src = "\"\"\"Title line.\n\nMore prose.\n\"\"\"\n\ndescribe \"after doc block\":\n    it \"is still extracted\":\n        pass\n"
+        val doc = extract_spec_doc(src, "x_spec.spl")
+        expect(doc.trim() == "").to_equal(false)
+        expect(doc.contains("## after doc block")).to_equal(true)
+        expect(doc.contains("- is still extracted")).to_equal(true)
+
+describe "spec-gen mirrors test/ paths regardless of the scope argument":
+    it "keeps the full mirror path for a scoped file":
+        expect(spec_relative_dir("test/01_unit/app/office/sheets/validation_spec.spl"))
+            .to_equal("01_unit/app/office/sheets")
+
+    it "resolves the mirror path from the repo test/ root":
+        expect(spec_relative_dir("test/01_unit/app/office/calc_cli_spec.spl"))
+            .to_equal("01_unit/app/office")
+
+    it "handles an absolute path containing /test/":
+        expect(spec_relative_dir("/repo/test/01_unit/app/office/calc_cli_spec.spl"))
+            .to_equal("01_unit/app/office")

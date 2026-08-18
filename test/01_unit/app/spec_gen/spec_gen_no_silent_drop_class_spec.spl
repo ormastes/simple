@@ -1,0 +1,41 @@
+"""spec-gen defect-CLASS spec: a generator must never drop input in silence.
+
+The class of defect is "tool exits 0 having done part of its job". This spec
+sweeps every real spec file under a scoped test directory through the same
+extraction the CLI uses, and asserts that no file yields empty output. It opens
+with a POSITIVE CONTROL so a green sweep cannot come from a generator that
+emitted nothing at all.
+"""
+
+use std.spec
+use app.spec_gen.main.{extract_spec_doc, spec_relative_dir}
+use app.io.mod (file_read, dir_walk)
+
+describe "positive control - the generator really produces content":
+    it "emits headings and bullets for a known-good spec source":
+        val src = "describe \"control suite\":\n    it \"control case one\":\n        pass\n    it(\"control case two\"):\n        pass\n"
+        val doc = extract_spec_doc(src, "control_spec.spl")
+        expect(doc.contains("## control suite")).to_equal(true)
+        expect(doc.contains("- control case one")).to_equal(true)
+        expect(doc.contains("- control case two")).to_equal(true)
+
+    it "emits a non-root mirror directory for a real test path":
+        val rel = spec_relative_dir("test/01_unit/app/spec_gen/x_spec.spl")
+        expect(rel == "").to_equal(false)
+        expect(rel).to_equal("01_unit/app/spec_gen")
+
+describe "no spec file in a scoped sweep is dropped silently":
+    it "extracts content from every *_spec.spl under test/01_unit/app/office":
+        val files = dir_walk("test/01_unit/app/office")
+        var considered = 0
+        var empty: [text] = []
+        for f in files:
+            if not f.ends_with("_spec.spl"):
+                continue
+            considered = considered + 1
+            if extract_spec_doc(file_read(f), f).trim() == "":
+                empty.push(f)
+        # The sweep itself must not be vacuous - zero files considered would
+        # make the "nothing dropped" assertion below meaningless.
+        expect(considered > 0).to_equal(true)
+        expect(empty.len()).to_equal(0)
