@@ -10,9 +10,17 @@ set -u
 
 ROOT="$(pwd)"
 SELFTEST_ONLY=0
+# --critical (or SIMPLE_RT_CRITICAL=1): phase-A error mode — ANY forbidden
+# direct rt_* call site fails, the baseline ratchet does not apply. This is
+# the "warning becomes error" lane for critical/mission-critical builds; the
+# default mode stays a ratchet until the product count reaches zero (phase C
+# then promotes critical behavior everywhere).
+CRITICAL=0
+[ "${SIMPLE_RT_CRITICAL:-0}" != "0" ] && CRITICAL=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest-only) SELFTEST_ONLY=1 ;;
+    --critical) CRITICAL=1 ;;
     --root) shift; ROOT="$1" ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
@@ -130,6 +138,15 @@ echo "  forbidden_product: $forbidden"
 
 if [ "$scanned" -eq 0 ]; then rm -f "$OFF_FILE"; echo "ERROR — nothing was checked"; exit 2; fi
 if [ $((allowed + forbidden)) -ne "$direct_total" ]; then rm -f "$OFF_FILE"; echo "ERROR — count arithmetic does not balance"; exit 2; fi
+
+# ---- critical mode: phase-A error, no ratchet grace ----
+if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then
+  top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
+  rm -f "$OFF_FILE"
+  echo "fix: route through the std.* semantic API, or a sanctioned provider alias (see scripts/check/no_direct_rt_allowlist.txt)."
+  echo "FAIL — critical mode: $forbidden forbidden direct rt_* call site(s), 0 allowed; top offenders: $top"
+  exit 1
+fi
 
 # ---- baseline ratchet ----
 if [ ! -f "$BASELINE_FILE" ]; then

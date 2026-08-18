@@ -1,0 +1,56 @@
+# @req REQ-C-MIG-CRC32-PERF
+#
+# Cross-language perf harness, first instance (binary_runtime_hardening
+# Wave 5 shape): time the pure-Simple crc32_text against the C oracle
+# rt_crc32_text on identical input, report measured medians, and enforce
+# only the LANE-APPROPRIATE bound. Per the perf verdict rules
+# (doc/03_plan/infra/binary_runtime_hardening/plan.md): the interpreter
+# lane is a separate lane — a C-vs-Simple product verdict requires the
+# native lane, so here the Simple/C ratio is RECORDED (printed) and only a
+# generous interpreter-lane sanity ceiling is asserted, to catch order-of-
+# magnitude regressions (e.g. the per-call table rebuild this spec was
+# born from) without minting a fake parity verdict.
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.nogc_sync_mut.compression.gzip.{crc32_text}
+use std.io_runtime.{time_now_unix_micros}
+
+extern fn rt_crc32_text(content: text) -> i64
+
+fn bench(iters: i64, body: text, use_simple: bool) -> i64:
+    val t0 = time_now_unix_micros()
+    var acc = 0
+    var i = 0
+    while i < iters:
+        if use_simple:
+            acc = acc + crc32_text(body)
+        else:
+            acc = acc + rt_crc32_text(body)
+        i = i + 1
+    val t1 = time_now_unix_micros()
+    # keep acc observable so the loop cannot be elided
+    if acc == -1:
+        print("impossible")
+    t1 - t0
+
+describe "crc32_text C vs Simple perf (interpreter lane)":
+    it "records the measured ratio and bounds interpreter-lane cost":
+        var body = ""
+        var i = 0
+        while i < 50:
+            body = body + "row-{i}|payload-abcdefghijklmnopqrstuvwxyz|"
+            i = i + 1
+        val iters = 200
+        val c_ms = bench(iters, body, false)
+        val s_ms = bench(iters, body, true)
+        print("perf_evidence: lane=interpreter iters={iters} body_len={body.len()} c_us={c_ms} simple_us={s_ms}")
+        # Outputs must agree or the timing compares different work.
+        assert_equal(crc32_text(body), rt_crc32_text(body))
+        # Interpreter-lane sanity ceiling only (NOT a parity verdict).
+        # Measured 2026-08-18 on this box: O(n^2) byte-array rebuild = 1185x
+        # the C oracle; linear streaming = 640x (both at body_len 2090,
+        # iters 200). 1000x sits between them: it fails the accidental-
+        # quadratic class while accepting the documented interpreter envelope
+        # (~100-1000x vs native). Native-lane parity gate is tracked in
+        # c_migration_inventory.sdn (perf_status: pending_native_lane).
+        assert_true(s_ms <= (c_ms + 1) * 1000)

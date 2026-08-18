@@ -34,6 +34,10 @@ fn crc32_table():
         i = i + 1
     return table
 
+# Cached at module init — rebuilding the 256-entry table per call was the
+# dominant per-checksum cost (PERF bug recorded in C-MIG-0001, fixed 2026-08-18).
+val _CRC32_TABLE = crc32_table()
+
 # Calculate CRC32 checksum
 fn crc32_calculate(data: [u8]) -> i64:
     if data == nil:
@@ -41,7 +45,7 @@ fn crc32_calculate(data: [u8]) -> i64:
 
     var crc = 0xffffffff
     var i = 0
-    val table = crc32_table()
+    val table = _CRC32_TABLE
 
     loop:
         if i >= data.len():
@@ -62,7 +66,7 @@ fn crc32_update(crc, data: [u8]) -> i64:
 
     var current = crc
     var i = 0
-    val table = crc32_table()
+    val table = _CRC32_TABLE
 
     loop:
         if i >= data.len():
@@ -114,11 +118,17 @@ fn crc32_verify(data, expected):
 # C-oracle spec: test/01_unit/lib/nogc_sync_mut/compression/crc32_text_crosslang_spec.spl
 # (binary_runtime_hardening C-MIG tranche 1).
 fn crc32_text(s: text) -> i64:
+    # Streams over s.bytes() directly — the earlier [u8] rebuild was
+    # `data = data.push(b)` per byte, an O(n^2) copy that measured ~1185x
+    # slower than the C oracle on a 2KB body (perf spec
+    # test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl).
     val raw = s.bytes()
-    var data: [u8] = []
+    val table = _CRC32_TABLE
+    var crc = 0xffffffff
     var i = 0
     val n = raw.len()
     while i < n:
-        data = data.push(raw[i] as u8)
+        val index = (crc ^ (raw[i] & 0xff)) & 0xff
+        crc = (crc >> 8) ^ table[index]
         i = i + 1
-    crc32_calculate(data)
+    crc ^ 0xffffffff

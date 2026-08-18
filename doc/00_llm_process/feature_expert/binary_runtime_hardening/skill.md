@@ -18,3 +18,18 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
 
 ## Canonical registries
 `binary_reference_layouts.sdn`, `runtime_boundary_inventory.sdn`, `c_migration_inventory.sdn`, `cross_language_perf_results.sdn`, `binary_test_coverage.sdn` — one merge owner; Markdown lists are generated projections.
+
+## Landed so far (2026-08-18)
+- Gate: `scripts/check/check-no-direct-rt.shs` — ratchet mode (baseline
+  `no_direct_rt_baseline.txt`, only goes down) + `--critical`/`SIMPLE_RT_CRITICAL=1`
+  phase-A error mode (any forbidden site fails); FAIL prints fix-it guidance.
+- Comparator: `binary_layout.spl` `compare_word` (8/8 spec green,
+  `binary_compare_spec.spl`).
+- C-MIG-0001 (crc32_text): differential 5/5, regression 35/35, perf spec
+  `test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl` (interpreter-lane
+  ceiling only; native parity pending). Registry:
+  `doc/08_tracking/c_migration/c_migration_inventory.sdn` + bug list
+  `c_replaceable_bug_list.md` (C-MIG-0001..0018).
+- Compiler fixes proving the alias lane: strict-JIT fail-open closed;
+  bare-assignment locals minted correctly (both in `src/compiler_rust`,
+  deployed binary still needs rebuild+deploy to pick up the second).
