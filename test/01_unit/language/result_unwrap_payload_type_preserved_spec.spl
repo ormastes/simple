@@ -1,0 +1,45 @@
+# Regression spec for TODO 558 /
+# doc/08_tracking/bug/result_unwrap_receiver_type_erasure_2026-07-13.md
+#
+# Originally reported: an unannotated local produced by `Result<T, E>.unwrap()`
+# lost `T` before method resolution. When two types defined the same method
+# name, the call was rejected as ambiguous even though the Result payload type
+# was concrete. The bootstrap-critical instance was `aot_compile_to_bytes`:
+#
+#     val module = compiled.unwrap()      # compiled: Result<CompiledModule, _>
+#     module.emit_object(tmp_path)        # ambiguous with CraneliftCodegenState
+#
+# The bounded workaround was an explicit annotation on the receiver local.
+#
+# Re-verified 2026-08-18 on the interpreter lane: the exact defect shape no
+# longer reproduces -- `A` is selected over the colliding `B.emit_object`
+# with NO annotation on the receiver.
+
+struct UnwrapPayloadA:
+    x: i64
+    fn emit_object(self) -> i64:
+        return self.x + 100
+
+struct UnwrapPayloadB:
+    y: i64
+    fn emit_object(self) -> i64:
+        return self.y + 200
+
+fn make_payload_a() -> Result<UnwrapPayloadA, text>:
+    return Ok(UnwrapPayloadA(x: 11))
+
+describe "Result<T, E>.unwrap() payload type on an unannotated local":
+    it "resolves the method against T, not a same-named method on another type":
+        val compiled = make_payload_a()
+        val module = compiled.unwrap()
+        expect(module.emit_object()).to_equal(111)
+
+    it "still dispatches the colliding same-named method on the other type":
+        val other = UnwrapPayloadB(y: 5)
+        expect(other.emit_object()).to_equal(205)
+
+    it "agrees with the explicitly annotated receiver (the old workaround)":
+        val compiled = make_payload_a()
+        val annotated: UnwrapPayloadA = compiled.unwrap()
+        val inferred = make_payload_a().unwrap()
+        expect(inferred.emit_object()).to_equal(annotated.emit_object())

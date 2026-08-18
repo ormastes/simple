@@ -52,3 +52,37 @@ Tracked by TODO 558.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe03_result_unwrap_erasure_a.spl` (two structs `A`/`B` each defining `emit_object`, `make() -> Result<A, text>` returns `Ok(A(x:1))`, unannotated `val module = compiled.unwrap(); module.emit_object()`). Oracle: `bin/simple run` → `111`. Native: `native-build --entry --clean` exit 0, binary built, run → `111`. No ambiguous-method-call error; MIR retains declared return type through unannotated bindings and correctly disambiguates.
+
+## Independent re-verification (2026-08-18)
+
+Re-reproduced from scratch on the interpreter lane before touching anything.
+The defect shape does **not** reproduce: `struct A`/`struct B` both defining
+`emit_object`, `make() -> Result<A, text>` returning `Ok(A(x: 11))`, and an
+UNANNOTATED `val module = compiled.unwrap(); module.emit_object()` prints
+`111` (A selected) and the sibling `B(y: 5).emit_object()` prints `205`. No
+ambiguous-method-call diagnostic. Payload type `T` survives `unwrap()` into an
+unannotated local, so the TODO 558 premise is stale on this lane.
+
+Regression coverage added so this cannot silently regress:
+
+- `test/01_unit/language/result_unwrap_payload_type_preserved_spec.spl` —
+  exact defect shape. `Results: 3 total, 3 passed, 0 failed`.
+- `test/01_unit/language/unwrap_payload_type_erasure_class_spec.spl` —
+  defect-CLASS sweep over sibling payload-extraction shapes (Option.unwrap,
+  unwrap directly on a call expression, nested double unwrap, unwrapped value
+  passed as a typed argument, unwrapped value stored in an array), all against
+  the same colliding method name. Carries an explicit positive control
+  asserting both colliding `tagged()` methods load and compute distinct values
+  (1007 vs 2007), so a no-op scanner cannot report a false clean sweep.
+  `Results: 7 total, 7 passed, 0 failed`.
+
+**Native lane remains unproven on this host.** `bin/simple native-build --entry
+<fixture> --clean` did not produce a binary: the worker exited with
+`native-build worker timed out ... before producing a binary`. That is a host
+throughput limit (load average 22+, ~30 concurrent `simple` processes), not
+evidence about this defect — recorded as INCONCLUSIVE, not as a pass. The
+earlier native proof at origin tip `8932fcb3a148` (above) still stands as the
+native-lane evidence.
+
+TODO 558 is therefore left **open** rather than closed: the interpreter half is
+now proven and specced, the native re-proof on this host is not.
