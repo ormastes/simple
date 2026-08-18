@@ -1,0 +1,48 @@
+# Phase E per-phase coupling snapshot — REPRODUCING spec
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+# (Phase E "re-measure per phase"). Gap: the Phase E baseline landed but no
+# bracketing snapshot mechanism existed. This spec pins the acceptance bar:
+# `scripts/check/check-coupling-snapshot.shs` must produce a
+# `Results: N modules, E edges` line with N > 0 and E > 0, and a zero-module
+# snapshot must be an ERROR (exit 2), never a pass.
+#
+# WHY A SUBPROCESS: the oracle is the committed sh detector itself (which is
+# what CI and humans run); numeric checks are done in sh and asserted on
+# absolute echoed tokens, never through a pipe's exit status.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val CHECK: text = "scripts/check/check-coupling-snapshot.shs"
+
+describe "coupling closure snapshot (Phase E bracketing)":
+
+    it "produces a non-vacuous Results line: N modules, E edges, both > 0":
+        step("Run --check; parse the Results line; assert both counts are positive integers")
+        val out = process_run("sh", ["-c",
+            "o=$(sh " + CHECK + " --check); rc=$?; " +
+            "r=$(printf '%s\\n' \"$o\" | grep '^Results: '); " +
+            "m=$(printf '%s\\n' \"$r\" | sed 's/^Results: \\([0-9]*\\) modules, \\([0-9]*\\) edges.*/\\1/'); " +
+            "e=$(printf '%s\\n' \"$r\" | sed 's/^Results: \\([0-9]*\\) modules, \\([0-9]*\\) edges.*/\\2/'); " +
+            "ok=BAD; if [ -n \"$m\" ] && [ -n \"$e\" ] && [ \"$m\" -gt 0 ] && [ \"$e\" -gt 0 ]; then ok=NONZERO_OK; fi; " +
+            "echo \"RC=$rc COUNTS=$ok LINE=$r\""])
+        val s: text = out.0
+        step("Both module and edge counts are strictly positive")
+        expect(s).to_contain("COUNTS=NONZERO_OK")
+        step("The Results line itself is present verbatim")
+        expect(s).to_contain("LINE=Results: ")
+
+    it "a zero-module snapshot is an ERROR (exit 2), never a pass":
+        step("Feed a synthetic zero-module current snapshot into --compare")
+        val out = process_run("sh", ["-c",
+            "d=$(mktemp -d); " +
+            "printf 'modules 100\\nedges 200\\nlargest_scc 10\\n' > $d/prev; " +
+            "printf 'modules 0\\nedges 0\\nlargest_scc 0\\n' > $d/zero; " +
+            "o=$(sh " + CHECK + " --compare $d/prev $d/zero); rc=$?; " +
+            "rm -rf $d; " +
+            "last=$(printf '%s\\n' \"$o\" | tail -1); echo \"RC=$rc LAST=$last\""])
+        val s: text = out.0
+        step("Exit code is 2 and the verdict is ERROR — a vacuous measurement is never evidence")
+        expect(s).to_contain("RC=2")
+        expect(s).to_contain("LAST=ERROR")

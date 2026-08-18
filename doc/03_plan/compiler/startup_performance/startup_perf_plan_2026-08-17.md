@@ -353,8 +353,12 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
   (note: `startup/`, not the planned `startup_perf/` dir).
 - [x] DONE — SCC breaks measured by it: cross-layer mega-SCC 36 -> 13
   `5f37845f640`; backend_api SCC 45 -> 24 `b3e53994db4` -> 8 `0fa9744d4f4`.
-- [ ] REMAINING — per-phase before/after snapshot spec with growth band not
-  found; snapshots are one baseline, not a bracketing series.
+- [x] DONE 2026-08-18 — per-phase bracketing snapshot + growth band:
+  `scripts/check/check-coupling-snapshot.shs` (--write/--check/--compare, fatal
+  --selftest, +2% modules/edges band, 0% largest_scc), first snapshot
+  `doc/10_metrics/startup/coupling_closure_snapshot_2026-08-18.md`
+  (Results: 5641 modules, 12436 edges); specs
+  `test/01_unit/scripts/coupling_snapshot_{nonzero,growth_band}_spec.spl`.
 
 ### Honest remaining list
 1. **Self-hosted deploy as default tooling** — `bin/simple` is still the

@@ -1,0 +1,49 @@
+# Phase E coupling snapshot growth band — DEFECT-CLASS spec with POSITIVE CONTROL
+#
+# Defect class: a phase that regresses coupling (module/edge growth beyond the
+# band, or ANY largest-SCC growth) must be caught by
+# `scripts/check/check-coupling-snapshot.shs`. The positive control proves the
+# detector actually fires: a simulated out-of-band growth must FAIL (exit 1)
+# while an in-band change PASSes (exit 0). A detector that passes everything
+# would fail the first `it` here.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val CHECK: text = "scripts/check/check-coupling-snapshot.shs"
+
+fn compare_fixture(cur_metrics: text) -> text:
+    val out = process_run("sh", ["-c",
+        "d=$(mktemp -d); " +
+        "printf 'modules 1000\\nedges 2000\\nlargest_scc 13\\n' > $d/prev; " +
+        "printf '" + cur_metrics + "' > $d/cur; " +
+        "o=$(sh " + CHECK + " --compare $d/prev $d/cur); rc=$?; rm -rf $d; " +
+        "last=$(printf '%s\\n' \"$o\" | tail -1); echo \"RC=$rc LAST=$last\""])
+    out.0
+
+describe "coupling snapshot growth band":
+
+    it "POSITIVE CONTROL: growth beyond the +2% band FAILs (exit 1)":
+        step("Simulate 1000->1500 modules, 2000->3000 edges vs previous snapshot")
+        val s = compare_fixture("modules 1500\\nedges 3000\\nlargest_scc 13\\n")
+        expect(s).to_contain("RC=1")
+        expect(s).to_contain("LAST=FAIL")
+
+    it "an in-band change PASSes (exit 0)":
+        step("Simulate 1000->1010 modules, 2000->2020 edges — within the +2% band")
+        val s = compare_fixture("modules 1010\\nedges 2020\\nlargest_scc 13\\n")
+        expect(s).to_contain("RC=0")
+        expect(s).to_contain("LAST=PASS")
+
+    it "largest-SCC growth alone FAILs even with modules/edges flat":
+        step("Simulate largest_scc 13 -> 14 with no module/edge growth")
+        val s = compare_fixture("modules 1000\\nedges 2000\\nlargest_scc 14\\n")
+        expect(s).to_contain("RC=1")
+        expect(s).to_contain("LAST=FAIL")
+
+    it "the detector selftest itself is green (fatal fixtures incl. must-FAIL)":
+        val out = process_run("sh", ["-c",
+            "o=$(sh " + CHECK + " --selftest); rc=$?; last=$(printf '%s\\n' \"$o\" | tail -1); echo \"RC=$rc LAST=$last\""])
+        val s: text = out.0
+        expect(s).to_contain("RC=0")
+        expect(s).to_contain("LAST=PASS")
