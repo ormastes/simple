@@ -63,3 +63,28 @@ cfg-gated global-value filtering of any kind (no `cfg`+`global`/`dedup`/
 target-gated globals are not filtered before native symbol resolution — is at
 least still structurally true. That is a code-shape observation, **not** a
 reproduction of the AArch64 PCI/ECAM misselection.
+
+## Runs left INCONCLUSIVE by host throughput (not evidence)
+
+Three `bin/simple test` invocations were started detached and never produced a
+`Results:` line before this session ended. A run with no `Results:` line is
+inconclusive and is recorded as such, never as a pass:
+
+- `test/01_unit/compiler/hir/resolve_import_symbols_spec.spl` (row **597**'s own
+  named spec, started to test its "three functional cycles fail all six
+  examples" claim). Row 597 therefore stays open with its claim neither
+  confirmed nor refuted.
+- `test/01_unit/lib/std/shell/path_spec.spl` and
+  `test/01_unit/lib/nogc_async_mut_noalloc/path/baremetal_path_spec.spl`
+  — pre-existing coverage over the three modules the row-559 fix touched.
+
+Cause is host throughput, not the specs: a parallel lane was running a full
+`bin/simple test --no-cover-check` suite for the duration, with ~25 concurrent
+`simple` processes on the box. The processes were confirmed alive and
+progressing (per-spec timeout 900s) rather than killed.
+
+**Follow-up required:** re-run those two path specs on a quiet box to confirm the
+row-559 fix introduced no regression. The fix itself is independently evidenced
+(direct `bin/simple run` before/after, plus both new specs GREEN and the defect
+spec proven RED at `4 total, 1 passed, 3 failed` with the fix stashed), but that
+pre-existing-coverage check is a genuine open gap.
