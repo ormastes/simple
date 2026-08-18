@@ -66,6 +66,15 @@ Every C-to-Simple migration MUST, before the C is retired:
    invalid/reserved encodings, UTF-8 multibyte.
 3. Published KATs stay alongside the bulk loop.
 
+## Gates (measured, fail-closed)
+
+| gate | what it proves | verdict measured 2026-08-18 |
+|---|---|---|
+| `scripts/check/check-no-direct-rt.shs` | direct `rt_*` ratchet, structured counts; wired into `pre-push-conflict-tree-guard.shs:837` | `PASS — 14800 file(s) scanned, forbidden=12794` |
+| `scripts/check/check-binary-sspec-evidence.shs` | binary-evidence suites run, are non-vacuous, and contain negative cases (reserved-violation + corruption render) | `PASS — 6 spec(s) checked, 37 example(s) total, 0 vacuous, negative cases present` |
+
+Both have fatal `--selftest` fixtures and print measured counts — never a bare PASS.
+
 ## Fix test standard (user directive, 2026-08-18)
 
 Every FIX (compiler, runtime, library, script) must land with:
