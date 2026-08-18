@@ -1180,3 +1180,122 @@ c_migrations:
       separators before locating the final component (a path that becomes
       fully empty after stripping, e.g. "/", still correctly yields "").
       Re-verified against the oracle for "a.b/", "dir/f.rs/", and "/".
+
+  - id: C-MIG-0037
+    path: src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+    symbols:
+      - rt_path_basename
+    classification: product_algorithm
+    replacement: std.common.path_pure.path_basename (extends the EXISTING
+      src/lib/common/path_pure.spl created by C-MIG-0036. Byte-consistent
+      left-to-right separator scan plus a "." / ".." check on the final
+      component, an explicit character-scan approach, not a re-wrap of
+      Rust's `Path` type machinery)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_path_basename(path: text) -> text is registered in the
+      interpreter's extern dispatch table (interpreter_extern/mod.rs:1605,
+      file_io::rt_path_basename) via Rust's `std::path::Path::file_name()`.
+      No C runtime counterpart exists (`grep -rn rt_path_basename
+      src/runtime/*.c src/runtime/*.h` returns zero hits); pure-Rust-
+      interpreter extern, same kind as C-MIG-0029..0036
+      (no_c_implementation_rust_only_extern). Pre-approved and
+      deprioritized by C-MIG-0036 in favor of `path_ext`; taken up this
+      round together with its sibling `rt_path_dirname` (C-MIG-0038). No
+      new rejects this round.
+    correctness_spec: test/01_unit/lib/common/path_pure_basename_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors; mandated edge
+      table: empty string, '/', '//', bare name, trailing separator(s),
+      repeated separators, leading '/', leading './'/'../',  bare '.'/'..',
+      multibyte UTF-8 segment, Windows-style backslash path;
+      single-char-flip discrimination; determinism check; 100-vector
+      shared-logic bulk differential loop over 7 base segment shapes x 3
+      separator styles with leading/trailing/bare variants, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple path_basename measured
+      ~14.6x the Rust `Path::file_name()` oracle over the 100-vector bulk
+      corpus (simple_us=7731, c_us=530, single run, tree-walk interpreter
+      via `bin/simple test`, 2026-08-18), above the plan's 2x threshold.
+      Recorded honestly, not hidden -- same interpreter-lane caveat as
+      C-MIG-0035/0036 and prior PERF findings."
+    perf_measured: >
+      100 shared branch-covering path strings, 2026-08-18: simple_us=7731
+      c_us=530, ratio ~14.6x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      REAL DEFECT FOUND AND FIXED via the multibyte-UTF-8 edge probe
+      (neither the hand-picked KATs nor the bulk loop's random seeding
+      alone hit this until a directed "café/x" / "dir/café" probe was
+      added): `text.len()`/`.substring()` are BYTE-indexed while
+      `.char_at()` is CODEPOINT-indexed, and the two are NOT
+      interchangeable. Scanning with `.char_at()` and then slicing the
+      SAME index with `.substring()` corrupts multibyte input -- for
+      "dir/café" (9 bytes, 8 codepoints), `.char_at()`-scanning finds "é"
+      at codepoint index 7, but `path.substring(4, 8)` (byte offsets) then
+      cuts the 2-byte "é" in half, yielding "caf<invalid-byte>" instead of
+      "café". Fixed by scanning and slicing `path_basename`/`path_dirname`
+      using ONLY byte-consistent operations throughout (`.len()` for the
+      bound, `.substring(i, i+1) == "/"` instead of `.char_at(i) == "/"`
+      for the separator test -- safe because "/" is single-byte ASCII).
+      SCOPE LIMITATION (documented, not a bug): a "." component that is
+      NOT the path's very first component is silently elided by Rust's
+      `Path::components()` (e.g. "dir/." basenames to "dir", not ""); this
+      implementation does not replicate that normalization and the bulk
+      loop's segment generator deliberately excludes "." to stay in-scope
+      (confirmed directly, see spec comment). `path_ext`'s pre-existing
+      `last_component` (C-MIG-0036) still has the byte/codepoint mixing
+      bug for multibyte input -- left as a follow-up, not modified here to
+      avoid touching a concurrently-edited shared file.
+
+  - id: C-MIG-0038
+    path: src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+    symbols:
+      - rt_path_dirname
+    classification: product_algorithm
+    replacement: std.common.path_pure.path_dirname (extends the EXISTING
+      src/lib/common/path_pure.spl, companion to C-MIG-0037's
+      path_basename in the same file/commit. Byte-consistent separator
+      scan producing the parent-component substring, an explicit
+      character-scan approach, not a re-wrap of Rust's `Path` type
+      machinery)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_path_dirname(path: text) -> text is registered in the
+      interpreter's extern dispatch table (interpreter_extern/mod.rs:1606,
+      file_io::rt_path_dirname) via Rust's `std::path::Path::parent()`. No
+      C runtime counterpart exists (`grep -rn rt_path_dirname
+      src/runtime/*.c src/runtime/*.h` returns zero hits); pure-Rust-
+      interpreter extern, same kind as C-MIG-0029..0037
+      (no_c_implementation_rust_only_extern). Pre-approved and
+      deprioritized by C-MIG-0036, taken up this round paired with
+      `rt_path_basename` (C-MIG-0037). No new rejects this round.
+    correctness_spec: test/01_unit/lib/common/path_pure_dirname_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors; mandated edge
+      table: empty string, '/', '//', bare name, trailing separator(s),
+      repeated separators, leading '/' (incl. repeated), leading
+      './'/'../', bare '.'/'..', multibyte UTF-8 segment, Windows-style
+      backslash path; single-char-flip discrimination; determinism check;
+      100-vector shared-logic bulk differential loop over 7 base segment
+      shapes x 3 separator styles with leading/trailing/bare variants,
+      2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple path_dirname measured ~14.8x
+      the Rust `Path::parent()` oracle over the 100-vector bulk corpus
+      (simple_us=8185, c_us=554, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), above the plan's 2x threshold.
+      Recorded honestly, not hidden -- same interpreter-lane caveat as
+      C-MIG-0035/0036/0037 and prior PERF findings."
+    perf_measured: >
+      100 shared branch-covering path strings, 2026-08-18: simple_us=8185
+      c_us=554, ratio ~14.8x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      Shares the byte-vs-codepoint-indexing defect fix with its
+      C-MIG-0037 companion `path_basename` (same commit, same
+      `is_sep_at` helper) -- see that entry's domain_bug_note for the
+      mechanism and the "café/x"/"dir/café" repro. No additional defect
+      specific to `path_dirname` was found beyond that shared fix and the
+      same documented non-leading-"." elision scope limitation (bulk
+      generator excludes "." for the same reason as C-MIG-0037).
