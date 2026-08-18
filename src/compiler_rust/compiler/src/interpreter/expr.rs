@@ -447,6 +447,11 @@ pub(crate) fn evaluate_expr(
                         }
                     }
                 }
+                // `nil` is the interpreter's representation of Option::None
+                // (see `try_unwrap_option_or_result`, which maps Value::Nil to
+                // "absent"). `return nil` from an `-> Option<T>` function must
+                // therefore propagate through `?` exactly like an explicit None.
+                Value::Nil => Err(CompileError::TryError(Box::new(Value::Nil))),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)
