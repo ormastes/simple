@@ -62,7 +62,10 @@ and cross-target lanes are out of scope here.
 use std.spec.*
 use std.io_runtime.{process_run}
 use compiler.driver.driver_aot_native_output.{driver_native_link_undefined_symbols,
-    driver_native_extern_decl_matches}
+    driver_native_extern_decl_matches, driver_native_extern_decl_site_in,
+    driver_native_link_failure_message}
+
+extern fn rt_file_read_text(path: text) -> text?
 
 # The build+run harness is a single `sh -c` script so that the build's own exit
 # status is read on the line after the command (never through a pipe — a pipe
@@ -188,3 +191,83 @@ describe "a missing symbol is mapped back to its extern fn declaration":
         expect(driver_native_extern_decl_matches("absolute()", "abs")).to_be(false)
         expect(driver_native_extern_decl_matches("other(x: i64)", "abs")).to_be(false)
         expect(driver_native_extern_decl_matches("", "abs")).to_be(false)
+
+# ---------------------------------------------------------------------------
+# The ASSEMBLED message. Until now only the two parsing halves were covered;
+# the message a user actually reads was reachable only through a real
+# pure-Simple native build, which OOMs on this host. The site lookup and the
+# message assembly are now split out as pure functions
+# (`driver_native_extern_decl_site_in`, `driver_native_link_failure_message`),
+# so the FULL pipeline -- linker stderr in, finished diagnostic out -- runs
+# under the interpreter with no linker and no toolchain. The only part not
+# covered here is the CompileContext source walk, which is I/O only.
+#
+# The source text is READ FROM THE REAL FIXTURE, so the asserted file:line is
+# the line a real build would report; if the fixture moves its declaration the
+# example fails rather than silently agreeing with a stale copy.
+# ---------------------------------------------------------------------------
+
+val NEGATIVE_FIXTURE_PATH = "test/fixtures/extern_unimplemented_weak_stub/negative/main.spl"
+
+fn assembled_message(source: text, path: text, err: text) -> text:
+    val names = driver_native_link_undefined_symbols(err)
+    var sites: [text] = []
+    for name in names:
+        sites = sites.push(driver_native_extern_decl_site_in(source, path, name))
+    driver_native_link_failure_message("LLVM native linking failed", err, names, sites)
+
+describe "the assembled link-failure diagnostic":
+    it "names the symbol, its declaration file:line, and keeps the raw linker text":
+        step("read the real negative fixture and find its declaration line")
+        val source = rt_file_read_text(NEGATIVE_FIXTURE_PATH) ?? ""
+        expect(source.contains("extern fn lane_definitely_absent_probe")).to_be(true)
+        var decl_line = 0
+        var n = 0
+        for line in source.split("\n"):
+            n = n + 1
+            if line.trim().starts_with("extern fn lane_definitely_absent_probe"):
+                decl_line = n
+        expect(decl_line > 0).to_be(true)
+
+        step("run the whole pipeline on real lld stderr against that source")
+        val raw = "Linking failed: cc linking failed:\n" +
+            "ld.lld: error: undefined symbol: lane_definitely_absent_probe\n" +
+            ">>> referenced by main.spl\n"
+        val msg = assembled_message(source, NEGATIVE_FIXTURE_PATH, raw)
+
+        step("the missing symbol is named")
+        expect(msg.contains("lane_definitely_absent_probe")).to_be(true)
+
+        step("the extern declaration file:line appears, and it is the real line")
+        expect(msg.contains(NEGATIVE_FIXTURE_PATH + ":" + decl_line.to_string())).to_be(true)
+
+        step("the line survives stderr truncation because it starts with `error:`")
+        expect(msg.contains(
+            "  error: extern fn lane_definitely_absent_probe is declared but not " +
+            "implemented anywhere -- declared at " +
+            NEGATIVE_FIXTURE_PATH + ":" + decl_line.to_string())).to_be(true)
+
+        step("and the raw linker output is preserved verbatim, not swallowed")
+        expect(msg.contains("raw linker output follows")).to_be(true)
+        expect(msg.contains(raw)).to_be(true)
+        expect(msg.ends_with(raw)).to_be(true)
+
+    # No-false-positive control: without it, a renderer that rewrote EVERY link
+    # failure into "unimplemented extern function(s)" would pass the example
+    # above while destroying the real cause of every other link error.
+    it "passes an unrelated link failure through unrewritten":
+        step("a missing library names no undefined symbol at all")
+        val raw = "/usr/bin/ld: cannot find -lfoo: No such file or directory\n" +
+            "clang: error: linker command failed with exit code 1\n"
+        val msg = assembled_message(rt_file_read_text(NEGATIVE_FIXTURE_PATH) ?? "",
+            NEGATIVE_FIXTURE_PATH, raw)
+        expect(msg.contains("unimplemented extern function(s)")).to_be(false)
+        expect(msg.contains("declared but not implemented")).to_be(false)
+        expect(msg).to_equal("LLVM native linking failed: " + raw)
+
+    it "does not claim a declaration site for an undefined symbol that is not an extern":
+        step("an undefined internal symbol maps to no `extern fn` in the source")
+        val raw = "ld.lld: error: undefined symbol: __some_internal_helper\n"
+        val msg = assembled_message(rt_file_read_text(NEGATIVE_FIXTURE_PATH) ?? "",
+            NEGATIVE_FIXTURE_PATH, raw)
+        expect(msg).to_equal("LLVM native linking failed: " + raw)

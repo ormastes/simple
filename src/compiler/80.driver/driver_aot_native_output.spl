@@ -487,6 +487,24 @@ pub fn driver_native_extern_decl_matches(rest: text, name: text) -> bool:
     val tail = rest.substring(name.len(), name.len() + 1)
     tail == "(" or tail == " " or tail == ":" or tail == "<"
 
+pub fn driver_native_extern_decl_site_in(content: text, shown_path: text, name: text) -> text:
+    """Locate `extern fn <name>` inside ONE source's text; "" when not found.
+
+    Pure: no I/O, no CompileContext. This is the whole `file:line` half of the
+    diagnostic, split out so it is reachable without a native build.
+    """
+    if content == "" or not content.contains("extern fn " + name):
+        return ""
+    var line_no = 0
+    for line in content.split("\n"):
+        line_no = line_no + 1
+        val trimmed = line.trim()
+        if not trimmed.starts_with("extern fn "):
+            continue
+        if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.len()), name):
+            return "{shown_path}:{line_no}"
+    ""
+
 fn driver_native_extern_decl_site(ctx: CompileContext, name: text) -> text:
     """Locate `extern fn <name>` in the loaded sources; "" when not found.
 
@@ -497,28 +515,36 @@ fn driver_native_extern_decl_site(ctx: CompileContext, name: text) -> text:
         var content = source.content
         if content == "" and source.path != "" and rt_file_exists(source.path):
             content = rt_file_read_text(source.path)
-        if content == "":
-            continue
-        if not content.contains("extern fn " + name):
-            continue
-        var line_no = 0
-        for line in content.split("\n"):
-            line_no = line_no + 1
-            val trimmed = line.trim()
-            if not trimmed.starts_with("extern fn "):
-                continue
-            if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.len()), name):
-                val shown = if source.authored_path != "": source.authored_path else: source.path
-                return "{shown}:{line_no}"
+        val shown = if source.authored_path != "": source.authored_path else: source.path
+        val site = driver_native_extern_decl_site_in(content, shown, name)
+        if site != "":
+            return site
     ""
 
 fn driver_native_link_failure_result(ctx: CompileContext, kind: text, err: text) -> CompileResult:
     """Render a link failure, upgrading undefined-symbol errors that name a
     declared `extern fn` into a compiler-level diagnostic. The original linker
     text is ALWAYS preserved verbatim at the end -- never swallowed."""
+    val names = driver_native_link_undefined_symbols(err)
+    var sites: [text] = []
+    for name in names:
+        sites = sites.push(driver_native_extern_decl_site(ctx, name))
+    CompileResult.CodegenError(driver_native_link_failure_message(kind, err, names, sites))
+
+pub fn driver_native_link_failure_message(kind: text, err: text, names: [text], sites: [text]) -> text:
+    """Assemble the link-failure diagnostic text. Pure.
+
+    `names[i]` is an undefined symbol from the linker output and `sites[i]` its
+    `extern fn` declaration site, or "" when the symbol is not a declared
+    extern. When NO name resolves to a declaration the raw linker text is
+    passed through unrewritten -- an unrelated link failure (`cannot find
+    -lfoo`) must never be reported as an extern problem. Otherwise the raw text
+    is still appended verbatim at the end, never swallowed."""
     var found: [text] = []
-    for name in driver_native_link_undefined_symbols(err):
-        val site = driver_native_extern_decl_site(ctx, name)
+    var i = 0
+    for name in names:
+        val site = if i < sites.len(): sites[i] else: ""
+        i = i + 1
         if site != "":
             # Keep the literal "error:" on THIS line: native_build_main's
             # eprint_bounded preserves only diagnostic-looking LINES through
@@ -526,14 +552,14 @@ fn driver_native_link_failure_result(ctx: CompileContext, kind: text, err: text)
             # first thing dropped -- taking the declaration site with it.
             found = found.push("  error: extern fn {name} is declared but not implemented anywhere -- declared at {site}")
     if found.len() == 0:
-        return CompileResult.CodegenError("{kind}: {err}")
+        return "{kind}: {err}"
     var out = "{kind}: unimplemented extern function(s)\n"
     for entry in found:
         out = out + entry + "\n"
     out = out + "  An `extern fn` needs a definition in something the link sees: the C/Rust\n"
     out = out + "  runtime, an external provider archive, or an implementation in this program.\n"
     out = out + "  raw linker output follows (preserved for debugging):\n"
-    CompileResult.CodegenError(out + err)
+    out + err
 
 pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Bootstrap-stable native output path.
