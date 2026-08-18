@@ -1,0 +1,49 @@
+"""
+# Aspect Instrumentation Readiness Ladder Specification
+
+Implements startup_perf_architecture_2026-08-17.md §7.4: a module declares
+one readiness level (none < boundary < full), and an aspect requiring a
+level of instrumentation is treated according to the module's VERIFIED
+level — never according to a bare assertion.
+"""
+
+use std.spec.{describe, it, expect}
+use std.aspect_readiness.{readiness_declare, readiness_promote, readiness_level, readiness_admits, readiness_absence, readiness_last_error}
+use std.aspect_readiness.{READINESS_NONE, READINESS_BOUNDARY, READINESS_FULL}
+use std.aspect_readiness.{READINESS_READY, READINESS_UNKNOWN_MODULE, READINESS_NEEDS_REBUILD, READINESS_NEEDS_INSTRUMENTED_BUILD}
+
+describe "Readiness ladder — each level treated per its meaning (§7.4)":
+    it "none: no instrumentation sites — every activation answer is needs_rebuild":
+        expect readiness_declare("stage0.loader", READINESS_NONE, 0, 0) == true
+        expect readiness_level("stage0.loader") == READINESS_NONE
+        expect readiness_admits("stage0.loader", READINESS_BOUNDARY) == false
+        expect readiness_absence("stage0.loader", READINESS_BOUNDARY) == READINESS_NEEDS_REBUILD
+        expect readiness_absence("stage0.loader", READINESS_FULL) == READINESS_NEEDS_REBUILD
+        # a none module still satisfies an aspect that needs no instrumentation
+        expect readiness_admits("stage0.loader", READINESS_NONE) == true
+
+    it "boundary: lifecycle slots admit boundary activation, full tracing is refused with needs_instrumented_build":
+        expect readiness_declare("interp.fast", READINESS_BOUNDARY, 12, 0) == true
+        expect readiness_admits("interp.fast", READINESS_BOUNDARY) == true
+        expect readiness_absence("interp.fast", READINESS_BOUNDARY) == READINESS_READY
+        expect readiness_admits("interp.fast", READINESS_FULL) == false
+        expect readiness_absence("interp.fast", READINESS_FULL) == READINESS_NEEDS_INSTRUMENTED_BUILD
+
+    it "full: instrumented build admits every level up to full tracing":
+        expect readiness_declare("interp.debug", READINESS_FULL, 12, 340) == true
+        expect readiness_admits("interp.debug", READINESS_NONE) == true
+        expect readiness_admits("interp.debug", READINESS_BOUNDARY) == true
+        expect readiness_admits("interp.debug", READINESS_FULL) == true
+        expect readiness_absence("interp.debug", READINESS_FULL) == READINESS_READY
+
+    it "unknown module is NOT ready — absence of a claim is never readiness":
+        expect readiness_admits("never.declared", READINESS_BOUNDARY) == false
+        expect readiness_absence("never.declared", READINESS_NONE) == READINESS_UNKNOWN_MODULE
+
+    it "moving up a rung requires evidence: promotion with sites is accepted and changes the verdict":
+        expect readiness_declare("svc.cache", READINESS_BOUNDARY, 4, 0) == true
+        expect readiness_admits("svc.cache", READINESS_FULL) == false
+        expect readiness_promote("svc.cache", READINESS_FULL, 4, 90) == true
+        expect readiness_level("svc.cache") == READINESS_FULL
+        expect readiness_admits("svc.cache", READINESS_FULL) == true
+        expect readiness_last_error() == ""

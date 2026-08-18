@@ -1,0 +1,58 @@
+"""
+# Readiness Ladder Discrimination Specification (defect class)
+
+Defect class: a readiness gate that admits everything (or nothing) passes a
+naive test while being useless. Every rejection here is paired with a
+POSITIVE CONTROL at the SAME bar, and discrimination is proven between
+ADJACENT rungs (none|boundary and boundary|full), not just top vs bottom.
+"""
+
+use std.spec.{describe, it, expect}
+use std.aspect_readiness.{readiness_declare, readiness_promote, readiness_level, readiness_admits, readiness_absence, readiness_last_error}
+use std.aspect_readiness.{READINESS_NONE, READINESS_BOUNDARY, READINESS_FULL}
+use std.aspect_readiness.{READINESS_READY, READINESS_NEEDS_REBUILD, READINESS_NEEDS_INSTRUMENTED_BUILD}
+
+describe "Overstated claims fail closed while evidenced claims are accepted":
+    it "adjacent rung none|boundary: a boundary claim with zero slots is REJECTED, the same claim with slots is ACCEPTED":
+        expect readiness_declare("d.mod_a", READINESS_BOUNDARY, 0, 0) == false
+        expect readiness_last_error() == "claim 'boundary' unsupported: no cold-boundary slots"
+        expect readiness_level("d.mod_a") == ""
+        # positive control at the same bar
+        expect readiness_declare("d.mod_a", READINESS_BOUNDARY, 3, 0) == true
+        expect readiness_level("d.mod_a") == READINESS_BOUNDARY
+
+    it "adjacent rung boundary|full: a full claim with slots but zero patchable sites is REJECTED, with sites it is ACCEPTED":
+        expect readiness_declare("d.mod_b", READINESS_FULL, 8, 0) == false
+        expect readiness_last_error() == "claim 'full' unsupported: needs boundary slots and patchable sites"
+        # positive control at the same bar
+        expect readiness_declare("d.mod_b", READINESS_FULL, 8, 55) == true
+        expect readiness_level("d.mod_b") == READINESS_FULL
+
+describe "The gate discriminates between adjacent rungs":
+    it "the SAME requirement (boundary) rejects a none module and accepts a boundary module":
+        expect readiness_declare("d.none_mod", READINESS_NONE, 0, 0) == true
+        expect readiness_declare("d.bnd_mod", READINESS_BOUNDARY, 2, 0) == true
+        expect readiness_admits("d.none_mod", READINESS_BOUNDARY) == false
+        expect readiness_absence("d.none_mod", READINESS_BOUNDARY) == READINESS_NEEDS_REBUILD
+        expect readiness_admits("d.bnd_mod", READINESS_BOUNDARY) == true
+
+    it "the SAME requirement (full) rejects a boundary module and accepts a full module — with distinct typed reasons per rung below":
+        expect readiness_declare("d.bnd2_mod", READINESS_BOUNDARY, 2, 0) == true
+        expect readiness_declare("d.full_mod", READINESS_FULL, 2, 40) == true
+        expect readiness_admits("d.bnd2_mod", READINESS_FULL) == false
+        expect readiness_absence("d.bnd2_mod", READINESS_FULL) == READINESS_NEEDS_INSTRUMENTED_BUILD
+        expect readiness_admits("d.full_mod", READINESS_FULL) == true
+        # the two rejection reasons below full are distinct claims, not one blob
+        expect readiness_declare("d.none2_mod", READINESS_NONE, 0, 0) == true
+        expect readiness_absence("d.none2_mod", READINESS_FULL) == READINESS_NEEDS_REBUILD
+
+describe "Promotion cannot pass on assertion alone":
+    it "an evidence-free promotion is REJECTED and the level is unchanged; the evidenced one is ACCEPTED":
+        expect readiness_declare("d.promo", READINESS_BOUNDARY, 5, 0) == true
+        expect readiness_promote("d.promo", READINESS_FULL, 5, 0) == false
+        expect readiness_last_error() == "promotion to 'full' unsupported: insufficient evidence"
+        expect readiness_level("d.promo") == READINESS_BOUNDARY
+        expect readiness_admits("d.promo", READINESS_FULL) == false
+        # positive control
+        expect readiness_promote("d.promo", READINESS_FULL, 5, 70) == true
+        expect readiness_admits("d.promo", READINESS_FULL) == true
