@@ -8,17 +8,28 @@ description: SPipe Loop — periodic check-and-implement plus daily-debug ingest
 `spipe_loop` runs SPipe orchestrator cycles. It supports two modes:
 
 1. **Default (continuous-check)** — periodic poll of in-flight tracks.
-   **NOT YET IMPLEMENTED.** Invoking `/spipe_loop` without `--daily-debug` must
-   print "spipe_loop: default continuous-check mode is not yet implemented.
-   Use /spipe_loop --daily-debug instead." and exit immediately. Do NOT
-   attempt to improvise behavior or loop.
+   **PARTIALLY IMPLEMENTED (2026-08-18):** the rt-migration track has a real
+   cycle driver — `scripts/spipe/rt_migration_cycle.shs`. Invoking
+   `/spipe_loop` without `--daily-debug` runs ONE rt-migration cycle:
+   `sh scripts/spipe/rt_migration_cycle.shs` (add `--dry-run` to report
+   only). One cycle: gate selftest → find rt_ symbols whose EVERY repo-wide
+   occurrence is an `extern fn` declaration (no callers anywhere) → delete
+   them → verify zero residue → run `check-no-direct-rt.shs` (baseline must
+   ratchet down or hold) → scoped commit of only the touched files.
+   Verdict is the last stdout line (`PASS`/`NOOP`/`FAIL`/`ERROR`). First
+   live cycle deleted 123 uncalled symbols across 30 files
+   (baseline 20612 → 20496). NOOP means converged for the current safe
+   class; wider classes (call-site rewrites to std.* APIs) stay manual per
+   `doc/03_plan/infra/binary_runtime_hardening/plan.md` Wave 3.
+   Other tracks of continuous-check mode remain unimplemented.
 2. **`--daily-debug`** — once-a-day ingest of the engineering bug-report
    inbox (this file). Drives the 7-step pipeline below.
 
 ## Usage
 
 ```
-/spipe_loop                  # NOT YET IMPLEMENTED — exits with message
+/spipe_loop                  # run ONE rt-migration cycle (see above)
+/spipe_loop --dry-run        # rt-migration cycle: report deletable set only
 /spipe_loop --daily-debug    # run the daily-debug pipeline once
 /spipe_loop --daily-debug --quiet     # suppress notify step
 /spipe_loop --daily-debug --dry-run   # plan only, no I/O writes

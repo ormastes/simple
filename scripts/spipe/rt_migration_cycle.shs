@@ -1,0 +1,122 @@
+#!/bin/sh
+# rt_migration_cycle.shs — one SPipe continuous-check cycle for the
+# binary_runtime_hardening rt_ migration track (goal: drive the
+# check-no-direct-rt baseline to zero mechanically and safely).
+#
+# One cycle:
+#   1. selftest the gate (fatal if broken)
+#   2. find UNCALLED rt_ symbols: every repo-wide occurrence of the symbol
+#      is an `extern fn` declaration line — no call site, no import, no
+#      re-export anywhere. Deleting every declaration of such a symbol
+#      cannot change behavior.
+#   3. delete them; verify a re-scan finds zero
+#   4. run the gate; the baseline must ratchet DOWN or stay equal
+#   5. commit only the touched files (never `git add -A` on this shared tree)
+#
+# Verdict is the last stdout line: PASS/NOOP exit 0, FAIL exit 1, ERROR exit 2.
+# Flags: --dry-run (report only, no deletion/commit), --max N (cap deletions).
+#
+# Invoked by /spipe_loop continuous mode for the rt-migration track.
+# Design: doc/03_plan/infra/binary_runtime_hardening/plan.md (Wave 3).
+
+set -u
+cd "$(dirname "$0")/../.." || { echo "ERROR — cannot cd to repo root"; exit 2; }
+
+DRY=0
+MAX=200
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1 ;;
+    --max) shift; MAX="$1" ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+sh scripts/check/check-no-direct-rt.shs --selftest-only >/dev/null 2>&1
+st=$?
+if [ $st -ne 0 ]; then echo "ERROR — gate selftest failed"; exit 2; fi
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# Step 2: candidate symbols — declared via `extern fn rt_*` somewhere under
+# src/lib or src/app, whose EVERY repo-wide occurrence is a declaration line.
+# Two whole-tree scans total (not per-symbol): one for all rt_ token mentions,
+# one for declaration lines; compare per-symbol counts. A comment mentioning a
+# symbol counts as a mention and keeps it alive — conservative by design.
+/usr/bin/grep -rhoE '\brt_[a-z0-9_]+' src --include='*.spl' 2>/dev/null \
+  | sort | uniq -c | awk '{print $2, $1}' > "$WORK/mentions.txt"
+/usr/bin/grep -rhE '^extern fn rt_[a-z0-9_]+\(' src --include='*.spl' 2>/dev/null \
+  | sed -E 's/^extern fn (rt_[a-z0-9_]+)\(.*/\1/' | sort | uniq -c | awk '{print $2, $1}' > "$WORK/decls.txt"
+# uncalled: mention count == decl count (every mention IS a declaration).
+# Restrict to symbols declared under src/lib or src/app.
+/usr/bin/grep -rhE '^extern fn rt_[a-z0-9_]+\(' src/lib src/app --include='*.spl' 2>/dev/null \
+  | sed -E 's/^extern fn (rt_[a-z0-9_]+)\(.*/\1/' | sort -u > "$WORK/libapp_declared.txt"
+awk 'NR==FNR {m[$1]=$2; next} {d[$1]=$2} END {for (s in d) if (m[s]==d[s]) print s}' \
+  "$WORK/mentions.txt" "$WORK/decls.txt" | sort > "$WORK/uncalled_all.txt"
+comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.txt"
+
+n_candidates=$(wc -l < "$WORK/uncalled.txt")
+if [ "$n_candidates" -eq 0 ]; then
+  echo "cycle: scanned $(wc -l < "$WORK/declared.txt") declared symbols, 0 uncalled"
+  echo "NOOP — nothing safely deletable this cycle"
+  exit 0
+fi
+
+head -"$MAX" "$WORK/uncalled.txt" > "$WORK/batch.txt"
+n_batch=$(wc -l < "$WORK/batch.txt")
+echo "cycle: $n_candidates uncalled symbol(s), deleting $n_batch this cycle"
+
+if [ $DRY -eq 1 ]; then
+  cat "$WORK/batch.txt"
+  echo "PASS — dry-run, $n_batch deletable symbol(s) reported"
+  exit 0
+fi
+
+# Step 3: delete every declaration of each batch symbol; record touched files.
+: > "$WORK/touched.txt"
+while IFS= read -r sym; do
+  /usr/bin/grep -rlE "^extern fn ${sym}\(" src --include='*.spl' >> "$WORK/touched.txt" 2>/dev/null
+  for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src --include='*.spl' 2>/dev/null); do
+    sed -i "/^extern fn ${sym}(/d" "$f"
+  done
+done < "$WORK/batch.txt"
+sort -u "$WORK/touched.txt" > "$WORK/touched_u.txt"
+
+# verify: none of the batch symbols remain anywhere
+left=0
+while IFS= read -r sym; do
+  c=$(/usr/bin/grep -rE "\b${sym}\b" src --include='*.spl' 2>/dev/null | wc -l)
+  left=$((left + c))
+done < "$WORK/batch.txt"
+if [ "$left" -ne 0 ]; then
+  echo "FAIL — $left residual reference(s) after deletion; NOT committing"
+  exit 1
+fi
+
+# Step 4: gate must ratchet down or hold.
+out=$(sh scripts/check/check-no-direct-rt.shs)
+gate=$?
+verdict=$(printf '%s\n' "$out" | tail -1)
+echo "$verdict"
+if [ $gate -ne 0 ]; then
+  echo "FAIL — gate did not pass after deletion"
+  exit 1
+fi
+
+# Step 5: scoped commit.
+n_files=$(wc -l < "$WORK/touched_u.txt")
+xargs git add < "$WORK/touched_u.txt"
+xargs git add scripts/check/no_direct_rt_baseline.txt < /dev/null
+git commit -q -m "refactor(rt): spipe cycle — delete $n_batch uncalled rt_ extern symbol(s) across $n_files file(s)
+
+Automated by scripts/spipe/rt_migration_cycle.shs: every occurrence of each
+symbol repo-wide was an extern declaration (no call sites, verified pre- and
+post-deletion). Gate: $verdict
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+ci=$?
+if [ $ci -ne 0 ]; then echo "FAIL — commit failed"; exit 1; fi
+echo "PASS — $n_batch symbol(s) deleted in $n_files file(s), committed; $verdict"
+exit 0
