@@ -1,0 +1,87 @@
+# The outcome-classification rule must exist ONCE, and must agree with itself.
+#
+# @req REQ-TESTRUNNER-R3
+#
+# test_runner_types.spl used to carry a THIRD, independent copy of the rule:
+# it matched `err.starts_with("TERMINATED:")` -- WITH a colon -- while the
+# output path matched the class token without one. Two spellings of one rule in
+# one runner is how a count silently diverges. These specs pin the unified
+# behaviour: both spellings classify identically, an unrecognised class token
+# can never land in the passed bucket, and a run containing a CRASHED / ERROR /
+# NOT_RUN unit can never report is_ok().
+
+use std.test_runner.test_runner_types.{
+    TestFileResult, TestRunResult,
+    test_outcome_class_token, test_file_result_outcome_class,
+    test_file_result_is_unverified, classify_test_run_result,
+    test_run_outcome_exit_code
+}
+
+fn mk(err: text, passed: i64, failed: i64, timed_out: bool) -> TestFileResult:
+    TestFileResult(
+        path: "spec.spl", passed: passed, failed: failed, skipped: 0, pending: 0,
+        duration_ms: 1, setup_ms: 0, error: err, timed_out: timed_out, cached: false
+    )
+
+fn run_of(file_result: TestFileResult, failed: i64, timed_out: i64) -> TestRunResult:
+    TestRunResult(
+        files: [file_result], total_passed: file_result.passed, total_failed: failed,
+        total_skipped: 0, total_pending: 0, total_timed_out: timed_out,
+        total_duration_ms: 1, total_setup_ms: 0, total_cached: 0
+    )
+
+describe "test_runner_types outcome classification is unified":
+
+    it "classifies the with-colon and without-colon spellings identically":
+        """The drift that motivated this lane: 'TERMINATED:' vs 'TERMINATED'."""
+        for pair in [["TERMINATED: killed by SIGTERM", "TERMINATED"],
+                     ["TIMEOUT: budget exceeded", "timeout"],
+                     ["NOT EXECUTED: never started", "not_executed"]]:
+            val with_colon = test_file_result_outcome_class(mk(pair[0], 0, 0, false))
+            val without = test_file_result_outcome_class(mk(pair[1], 0, 0, false))
+            assert_equal(with_colon, without)
+            assert_true(test_file_result_is_unverified(mk(pair[0], 0, 0, false)))
+            assert_true(test_file_result_is_unverified(mk(pair[1], 0, 0, false)))
+
+    it "tokenises the class head so underscores and case cannot change a count":
+        assert_equal(test_outcome_class_token("not_executed: nope"), "NOT EXECUTED")
+        assert_equal(test_outcome_class_token("  terminated : x"), "TERMINATED")
+        assert_equal(test_outcome_class_token(""), "")
+        assert_equal(test_file_result_outcome_class(mk("not_run: nope", 0, 0, false)), "NOT_RUN")
+
+    it "never puts an unrecognised class token in the passed bucket":
+        """A reworded producer message must fail loudly, not vanish."""
+        val odd = mk("WEDGED: some brand new producer message", 0, 0, false)
+        assert_equal(test_file_result_outcome_class(odd), "ERROR")
+        assert_false(odd.is_ok())
+        assert_false(test_file_result_is_unverified(odd))
+        assert_false(run_of(odd, 0, 0).is_ok())
+
+    it "keeps CRASHED a real failure and out of the unverified bucket":
+        val crashed = mk("CRASHED: child died by SIGSEGV", 0, 0, false)
+        assert_equal(test_file_result_outcome_class(crashed), "CRASHED")
+        assert_false(test_file_result_is_unverified(crashed))
+        assert_false(crashed.is_ok())
+        assert_false(run_of(crashed, 0, 0).is_ok())
+
+    it "treats a no-error no-example unit as NOT_RUN, never as a pass":
+        """Exit 0 with no Results: line is the silent-green shape."""
+        val silent = mk("", 0, 0, false)
+        assert_equal(test_file_result_outcome_class(silent), "NOT_RUN")
+        assert_false(silent.is_ok())
+        assert_true(test_file_result_is_unverified(silent))
+        assert_false(run_of(silent, 0, 0).is_ok())
+
+    it "still reports a genuine pass as ok":
+        val ok = mk("", 3, 0, false)
+        assert_equal(test_file_result_outcome_class(ok), "OK")
+        assert_true(ok.is_ok())
+        assert_true(run_of(ok, 0, 0).is_ok())
+
+    it "gives an unrecognised-token run a non-zero exit code":
+        """Unverified => 5 and UsageError => 2 per the exit-code table."""
+        val odd = run_of(mk("WEDGED: brand new message", 0, 0, false), 0, 0)
+        val code = test_run_outcome_exit_code(classify_test_run_result(odd, false))
+        assert_false(code == 0)
+        val unver = run_of(mk("TERMINATED: killed", 0, 0, false), 0, 0)
+        assert_equal(test_run_outcome_exit_code(classify_test_run_result(unver, false)), 5)

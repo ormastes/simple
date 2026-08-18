@@ -177,8 +177,12 @@ struct TestFileResult:
     cached: bool
 
 impl TestFileResult:
+    # Routed through the single classifier below rather than re-deriving the
+    # rule: OK is the ONLY class that is a pass. The old spelling
+    # (`failed == 0 and error == "" and not timed_out`) reported a run that
+    # produced no examples and no error -- the silent-green shape -- as a pass.
     fn is_ok() -> bool:
-        self.failed == 0 and self.error == "" and not self.timed_out
+        test_file_result_outcome_class(self) == "OK"
 
 # =========================================================================
 # Test Run Result
@@ -196,8 +200,18 @@ struct TestRunResult:
     total_cached: i64
 
 impl TestRunResult:
+    # The aggregate counters are NOT sufficient. A CRASHED / TERMINATED /
+    # NOT_RUN unit, or a unit whose error carries an unrecognised class token,
+    # can leave total_failed and total_timed_out both at 0 -- which is exactly
+    # how "All tests passed!" was printed over a run that never verified
+    # anything. Every file must classify OK.
     fn is_ok() -> bool:
-        self.total_failed == 0 and self.total_timed_out == 0
+        if self.total_failed != 0 or self.total_timed_out != 0:
+            return false
+        for file_result in self.files:
+            if test_file_result_outcome_class(file_result) != "OK":
+                return false
+        true
 
 fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> TestRunOutcome:
     if result.total_timed_out > 0:
@@ -220,20 +234,70 @@ fn classify_test_run_result(result: TestRunResult, empty_is_success: bool) -> Te
         return TestRunOutcome.AssertionOrChildFailure
     TestRunOutcome.Pass
 
+# =========================================================================
+# Outcome classification -- canonical implementation
+# =========================================================================
+#
+# This is the SAME rule test_runner_output.spl documents as "the single source
+# of truth", implemented here instead of there because the import edge runs
+# output -> types (test_runner_output.spl:5) and never the other way. Calling
+# the output copy from here would make that edge a cycle, so the classifier
+# lives in the LOWER module and output is expected to call down into it.
+#
+# Naming note: while test_runner_output.spl still carries its own copy, these
+# are named test_outcome_class_token / test_file_result_outcome_class rather
+# than reusing the output-side names, because src/lib/nogc_sync_mut/
+# test_runner/main.spl wildcard-imports BOTH modules and two exported symbols
+# with one name would collide. Once output.spl is changed to import from here
+# (an edit this lane does not own) the duplicate should be deleted outright.
+#
+# Only the CLASS token -- the text before the first colon -- is structural.
+# Tokenising (trim / upper / `_` -> space) rather than prefix-matching the
+# whole error string means the "TERMINATED:" (with colon) and "TERMINATED"
+# (without colon) spellings that had already drifted between these two files
+# classify identically, and rewording a human-readable message cannot silently
+# move a count.
+fn test_outcome_class_token(err: text) -> text:
+    if err == "":
+        return ""
+    val colon = err.find(":")
+    val head = if colon > 0: err[0:colon] else: err
+    head.trim().upper().replace("_", " ")
+
+# Total: every TestFileResult maps to exactly one of
+# OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN.
+fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
+    val token = test_outcome_class_token(file_result.error)
+    if token == "CRASHED":
+        return "CRASHED"
+    if token == "TERMINATED":
+        return "TERMINATED"
+    if token == "TIMEOUT":
+        return "TIMEOUT"
+    if token == "NOT EXECUTED" or token == "NOT RUN":
+        return "NOT_RUN"
+    if token != "":
+        # A non-empty error with an unrecognised class token is a REAL failure.
+        # It must never fall through to OK -- that is the silent-green shape.
+        return "ERROR"
+    if file_result.timed_out:
+        return "TIMEOUT"
+    if file_result.failed > 0:
+        return "ERROR"
+    val examples = (file_result.passed + file_result.failed +
+                    file_result.skipped + file_result.pending)
+    if examples == 0:
+        # No error and no examples of any kind: the child produced no verdict.
+        return "NOT_RUN"
+    "OK"
+
 # A file result carries no verdict when its child was killed / timed out / never
 # ran, or when it reported no examples of any kind with no error to explain it.
 # The latter is the silent-green shape: exit 0 with no `Results:` line.
 fn test_file_result_is_unverified(file_result: TestFileResult) -> bool:
-    val err = file_result.error
-    if (err.starts_with("TERMINATED:") or err.starts_with("TIMEOUT:") or
-        err.starts_with("NOT EXECUTED:")):
-        return true
-    if err != "":
-        # CRASHED: and other real errors are handled by the caller.
-        return false
-    val example_count = (file_result.passed + file_result.failed +
-                         file_result.skipped + file_result.pending)
-    example_count == 0
+    val cls = test_file_result_outcome_class(file_result)
+    # CRASHED and ERROR are real verdicts and are handled by the caller.
+    cls == "TERMINATED" or cls == "TIMEOUT" or cls == "NOT_RUN"
 
 fn test_run_outcome_exit_code(outcome: TestRunOutcome) -> i64:
     match outcome:
