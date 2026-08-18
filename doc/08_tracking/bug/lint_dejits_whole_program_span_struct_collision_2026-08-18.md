@@ -175,3 +175,83 @@ Do not "optimise" the parser's pass structure on the strength of the earlier
 superlinear framing. Do not delete the `LINTPROF` level-gated timers
 (`lint_prof_now`/`lint_prof_mark`, `src/compiler/90.tools/lint/_LintMain/lint_checks.spl:59`);
 they are default-off and free, and they are what localised this.
+
+---
+
+## 2026-08-18 follow-up lane: the gate is UNSOUND; the de-JIT is correct
+
+Binary identity: `bin/simple -> bin/release/x86_64-unknown-linux-gnu/simple`,
+size `59620392`. No rebuild, no redeploy. Engines are named per arm below;
+`SIMPLE_JIT_TRACE_ADDR=1` `[jit-addr]` counts are the JIT witness.
+
+### Result 1 — `SIMPLE_JIT_DUP_STRUCT_FEED=1` silently MISCOMPILES
+
+The gate was assumed to be conservatism left over from one graphics incident.
+It is not. Reduced to minimal fixtures
+(`test/01_unit/compiler/dup_struct_name/`), with the feed forced on the
+Cranelift JIT runs (3-5 `[jit-addr]` lines, no fallback) and returns **wrong
+values with no diagnostic**:
+
+| fixture | shape | interpreter | jit + feed | jit-addr | verdict |
+|---|---|---|---|---|---|
+| `case_two_variants` | 2 structs named `Span`, disjoint tail fields | `end_pos=9 length=5` | `end_pos=9 length=130433` | 3 | **MISCOMPILE** (garbage slot) |
+| `case_three_variants` | 3 structs named `Box` | `b=2 d=5 e=6` | `b=0 d=0 e=6` | 4 | **MISCOMPILE** |
+| `case_param_field_read` | field read inside a fn taking the struct | `g=11 o=42` | `g=10 o=42` | 5 | **MISCOMPILE** |
+| `case_class_vs_struct` | one `class`, one `struct`, same name | `r=2 w=9` | `r=2 w=9` | 3 | accidentally correct |
+| `case_identical_layout` | same name, identical fields | `a=2 b=3` | `a=2 b=3` | 3 | harmless — one layout, never a collision |
+
+Mechanism: `resolve_duplicate_global_field_variant` /
+`try_resolve_global_field_index_by_name` (`compiler/src/hir/lower/`) pick a
+field OFFSET by unanimity across *layout variants*, never consulting the
+receiver's actual type. When the receiver is a variant that does not carry the
+field, the offset is a guess and the load reads a foreign slot.
+
+**Therefore: do not un-gate, and do not delete the gate.** The whole-module
+de-JIT is correct fail-closed behaviour. Fix option 3 in the section above
+("Un-gate for non-graphics lanes") is **withdrawn** — lint has no widgets, and
+that is irrelevant; the defect is not graphical.
+
+### Result 2 — module-qualified resolution is not expressible on this lane
+
+`run_file_jit` lowers the output of `load_module_with_imports`, which flattens
+every imported module's items into ONE bare-name namespace. `simple_parser::token::Span`
+and `simple_common::diagnostic::Span` (the Rust AST spans) carry `start/end/line/column`
+and **no file**, so after flattening neither a definition nor a use site retains
+module identity. There is nothing to qualify against. Fixing this means giving
+the run/JIT lane a prefixed import-collection pass, i.e. `native_project/imports.rs`
+(~900 lines, `record_struct_fields` + `unique_struct_owners` + `prefix::Name` keys)
+plus a lowerer that keys struct registrations by qualified name — a lane-crossing
+change, not a local patch.
+
+### Result 3 — the native/AOT lane does not solve it either
+
+`bin/simple native-build` on `case_two_variants` **hard-fails**:
+`HIR lowering error: unresolved type: Span` (x2), `[hir-poisoned] errors=0->2`,
+rc 1. `imports.rs:829-830` puts every duplicate struct name into
+`ambiguous_type_owners` and refuses to resolve. So the three engines disagree
+three ways on the same source: interpreter is correct, JIT de-JITs (correct,
+slow), native refuses to compile. Copying native's design would convert lint's
+de-JIT into a build failure.
+
+### Result 4 — `CODEGEN-STUB-FALLBACK` is a DIFFERENT cause
+
+`path_separator` / `search_path` / `path_find_all` fall back with
+`GlobalLoad: unresolved identifier`, i.e. a missing GLOBAL binding, not a struct
+field-offset failure. Unrelated to the `Span` collision; it survives the feed
+arm because the feed only populates the duplicate-struct map.
+
+### Artefacts landed
+
+- `test/01_unit/compiler/dup_struct_name/case_*` — 5 fixtures, 16 files.
+- `scripts/check/check-dup-struct-name-jit-soundness.shs` — fences the gate.
+  `PASS — 5 case(s) checked, JIT never disagrees with the interpreter` (exit 0)
+  today; goes RED if the feed is ever defaulted on. `--selftest` forces the feed
+  and REQUIRES disagreement, so a vacuous guard is an ERROR — that is the
+  negative control: with the gate (the thing under test) flipped, every
+  collision fixture fails.
+
+### Still open
+
+Module-qualified struct resolution across all three engines. Until then the
+sanctioned remedy for a specific collision remains renaming one struct
+(fix option 1), which buys the measured **1.23x** on lint and nothing more.

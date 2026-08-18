@@ -1035,6 +1035,27 @@ impl ExecCore {
         // modules JIT, but on widget-heavy graphs the JIT'd output diverged
         // from the interpreter (2026-08-11: ui_showcase 2D render missing
         // widgets + lost clip groups). Default OFF keeps the safe de-JIT.
+        //
+        // 2026-08-18 — DO NOT UN-GATE. The 2026-08-11 divergence was not a
+        // graphics quirk; it is the general behaviour, reduced to 16 lines of
+        // fixture. The consensus fallback guesses a field OFFSET from agreement
+        // across layout variants instead of from the receiver's actual type, so
+        // it silently reads a wrong slot whenever the receiver is a variant that
+        // lacks the field. With the feed forced on, three of five minimal
+        // fixtures MISCOMPILE with no diagnostic (interpreter -> jit):
+        // `length=5` -> `length=130433` (uninitialised garbage),
+        // `b=2 d=5` -> `b=0 d=0`, `g=11` -> `g=10`.
+        // The whole-module de-JIT this gate preserves is therefore CORRECT
+        // fail-closed behaviour, not a missed optimisation. Fenced by
+        // `scripts/check/check-dup-struct-name-jit-soundness.shs` (fixtures in
+        // `test/01_unit/compiler/dup_struct_name/`), which is green while the
+        // gate is off and red the moment it is defaulted on.
+        //
+        // The real fix is module-qualified struct resolution, which this lane
+        // cannot express: `load_module_with_imports` flattens every import into
+        // one bare-name namespace and `simple_parser::token::Span` carries no
+        // file, so no definition or use site retains module identity. See
+        // doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md.
         let duplicate_structs = if std::env::var_os("SIMPLE_JIT_DUP_STRUCT_FEED").is_some() {
             simple_compiler::pipeline::module_loader::collect_duplicate_struct_defs(&ast)
         } else {
