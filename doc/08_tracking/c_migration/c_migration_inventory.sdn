@@ -715,6 +715,32 @@ c_migrations:
       ratio ~17.7x. 2026-08-18 (post seeded-guess+convergence-test fix):
       simple_us=5969 c_us=488, ratio ~12.2x.
     shared_corpus: 100
+    perf_codegen: "OPEN — codegen (Cranelift JIT) lane re-measured 2026-08-18,
+      binary bin/release/x86_64-unknown-linux-gnu/simple (59673480 bytes,
+      mtime 2026-08-18 06:12:48). Harness: bench_sqrt_f64_codegen.spl
+      (scratchpad, not committed), 100-vector pinned seeded corpus spanning
+      1e-300..1e300 (LCG-generated exponent+mantissa) plus exact-power/
+      boundary cases (0.0, 1.0, 4.0, 9.0, 16.0, 1e-300, 1e300, 0.999999,
+      1.000001, 1e6); KAT OK 100/100 on both engines before timing.
+      SIMPLE_EXECUTION_MODE=interpreter/jit selects the engine (SIMPLE_NO_JIT
+      and SIMPLE_JIT_STRICT under bare `bin/simple run` are no-ops here since
+      `run` already Cranelift-JITs by default -- confirmed by identical
+      numbers with/without SIMPLE_JIT_STRICT=1; see .claude/rules/testing.md).
+      200 reps x 100 vectors, batch-timed (one clock pair around the whole
+      loop): interpreter simple_us=9230087 c_us=59705 ratio=154.6x; JIT
+      simple_us=35653 c_us=577 ratio=61.8x. Per-call-probe (clock read around
+      every call, shown for probe-distortion comparison per the time_utils
+      precedent): interpreter ratio=106.9x; JIT ratio=36.0x. JIT is ~2.5x
+      faster than the interpreter in wall time (9.23M us -> 35.7K us for the
+      Simple side) and the ratio-vs-oracle improves accordingly (154.6x ->
+      61.8x), confirming the residual gap is partly interpreter dispatch tax
+      as hypothesized -- but codegen is still 61.8x the oracle, nowhere near
+      the <=2x threshold, so the claim that codegen alone would close the gap
+      is NOT supported. Remaining OPEN; the oracle call itself is ~0.03us/call
+      (hardware instruction), a bar this Newton-iteration kernel (needing
+      1-8 iterations of several f64 ops each) cannot approach even fully
+      JIT-compiled. See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
+      (addendum, 2026-08-18)."
 
   - id: C-MIG-0030
     path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
@@ -782,3 +808,242 @@ c_migrations:
       2026-08-18 (post seeded-guess+convergence-test fix): simple_us=6320
       c_us=467, ratio ~13.5x.
     shared_corpus: 100
+    perf_codegen: "OPEN — codegen (Cranelift JIT) lane re-measured 2026-08-18,
+      binary bin/release/x86_64-unknown-linux-gnu/simple (59673480 bytes,
+      mtime 2026-08-18 06:12:48). Harness: bench_cbrt_f64_codegen.spl
+      (scratchpad, not committed), same 100-vector pinned corpus generator as
+      C-MIG-0029's sqrt harness (1e-300..1e300 span plus exact-power/boundary
+      cases); KAT OK 100/100 on both engines before timing. Found and worked
+      around a genuine JIT correctness pitfall while writing this harness:
+      `if not _approx(f(x), g(x), tol):` with two function-call results passed
+      directly as call arguments produced a wrong boolean under
+      SIMPLE_EXECUTION_MODE=jit (false KAT failure on values that print
+      identically), while binding each call to a `val` first and passing the
+      locals resolved it -- not filed as a separate bug doc since it did not
+      block this measurement, but noted here since it would silently corrupt
+      any codegen-lane harness using the same call-nesting pattern.
+      SIMPLE_EXECUTION_MODE=interpreter/jit selects the engine (bare
+      `bin/simple run` already Cranelift-JITs by default; SIMPLE_JIT_STRICT=1
+      is a no-op on top of it here). 200 reps x 100 vectors, batch-timed:
+      interpreter simple_us=6688979 c_us=62860 ratio=106.4x; JIT
+      simple_us=24911 c_us=940 ratio=26.5x. Per-call-probe: interpreter
+      ratio=75.0x; JIT ratio=17.0x. JIT is ~2.5x faster than interpreter in
+      wall time (6.69M us -> 24.9K us) and the oracle ratio improves
+      accordingly (106.4x -> 26.5x) -- codegen IS materially better, as
+      hypothesized, but 26.5x is still far above the <=2x threshold, so the
+      claim that codegen alone closes the gap is NOT supported for cbrt_f64
+      either. Remaining OPEN. See
+      doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
+      (addendum, 2026-08-18)."
+
+  - id: C-MIG-0031
+    path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
+    symbols:
+      - rt_math_floor
+    classification: product_algorithm
+    replacement: std.common.numeric_round.floor_f64 (NEW file
+      src/lib/common/numeric_round.spl written this round -- deliberately
+      OUTSIDE src/lib/common/math/**, this round's HARD AVOID because
+      another session is landing a perf fix there, and outside
+      src/lib/common/spec/evidence/**, base_encoding/**, gzip/**,
+      string_core.spl. Truncates through an `x as i64` round-trip plus a
+      one-step correction, genuinely different machinery from a single
+      hardware floor instruction)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_math_floor(x: f64) -> f64 is registered in the interpreter's
+      extern dispatch table (interpreter_extern/mod.rs:1568,
+      math::rt_math_floor_fn) via Rust's hardware `f64::floor`. No C
+      runtime counterpart exists (`grep -rn rt_math_floor src/runtime/*.c
+      src/runtime/*.h` returns zero hits); this is a pure-Rust-interpreter
+      extern, same kind as C-MIG-0029/0030 (no_c_implementation_rust_only_
+      extern), unlike C-MIG-0027/0028's runtime_native.c-backed externs.
+    correctness_spec: test/01_unit/lib/common/numeric_round_floor_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. positive
+      AND negative fractions, zero, negative-zero preservation,
+      domain-boundary coverage (+-infinity, NaN, large-magnitude
+      1.0e20/-1.0e20 beyond i64 range), single-bit corruption
+      discrimination, determinism check, 100-vector shared-logic bulk
+      differential loop with forced zero/negative-zero/+-1.0e20/sign-flip/
+      half-offset boundary values at fixed moduli, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple floor_f64 measured ~2.65x the
+      Rust hardware-floor oracle over the 100-vector bulk corpus
+      (simple_us=1252, c_us=473, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), above the plan's 2x threshold.
+      Recorded honestly, not hidden -- same interpreter-lane caveat as
+      prior PERF findings (bin/simple test hard-defaults to the
+      interpreter, not the JIT/native engine ordinary programs run on)."
+    perf_measured: >
+      100 shared branch-covering x values (seeded LCG cycling through
+      0.0..1000.0 in 0.001 steps, plus forced boundary values at fixed
+      moduli: 0.0 at i % 19 == 0, -0.0 at i % 17 == 0, 1.0e20 at i % 13 ==
+      0, -1.0e20 at i % 11 == 0, sign-flip at i % 7 == 0, half-offset at
+      i % 5 == 0), 2026-08-18: simple_us=1252 c_us=473, ratio ~2.65x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      Bug found and fixed while writing this spec (not filed as a
+      standalone bug doc -- fixed inline before landing, per the
+      sqrt/cbrt precedent of catching domain bugs during spec writing):
+      an early unguarded version of floor_f64 used a bare `x as i64`
+      round-trip, which is undefined/saturating for magnitudes outside
+      i64's ~9.22e18 range and for +-infinity, corrupting those inputs
+      instead of returning them unchanged. Fixed by adding a 2^52
+      integrality-threshold guard (every f64 at or beyond that magnitude
+      already has zero fractional part) that short-circuits to the
+      identity before the cast; re-verified against the oracle across the
+      full KAT + domain-boundary + 100-vector bulk-loop suite above.
+
+  - id: C-MIG-0032
+    path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
+    symbols:
+      - rt_math_ceil
+    classification: product_algorithm
+    replacement: std.common.numeric_round.ceil_f64 (same NEW file as
+      C-MIG-0031's floor_f64, src/lib/common/numeric_round.spl -- same
+      truncate-through-i64-plus-correction kernel and the same 2^52
+      integrality-threshold guard)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_math_ceil(x: f64) -> f64 is registered in the interpreter's
+      extern dispatch table (interpreter_extern/mod.rs:1564,
+      math::rt_math_ceil_fn) via Rust's hardware `f64::ceil`. No C
+      runtime counterpart exists (`grep -rn rt_math_ceil src/runtime/*.c
+      src/runtime/*.h` returns zero hits); this is a pure-Rust-interpreter
+      extern, same kind as C-MIG-0029/0030/0031 (no_c_implementation_
+      rust_only_extern).
+    correctness_spec: test/01_unit/lib/common/numeric_round_ceil_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. positive
+      AND negative fractions, zero, negative-zero result on small-negative
+      input (-0.5 -> -0.0), domain-boundary coverage (+-infinity, NaN,
+      large-magnitude 1.0e20/-1.0e20 beyond i64 range), single-bit
+      corruption discrimination, determinism check, 100-vector
+      shared-logic bulk differential loop with the same forced-boundary
+      moduli as C-MIG-0031, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple ceil_f64 measured ~2.77x the
+      Rust hardware-ceil oracle over the 100-vector bulk corpus
+      (simple_us=1264, c_us=456, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), above the plan's 2x threshold.
+      Recorded honestly, not hidden -- same interpreter-lane caveat as
+      C-MIG-0031 and prior PERF findings."
+    perf_measured: >
+      100 shared branch-covering x values, same generator/moduli as
+      C-MIG-0031, 2026-08-18: simple_us=1264 c_us=456, ratio ~2.77x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      Shares the exact same guard (and the same underlying bug class) as
+      C-MIG-0031's floor_f64 -- see that entry's domain_bug_note. Verified
+      independently here against ceil's own KAT + domain-boundary +
+      100-vector bulk-loop suite.
+
+  - id: C-MIG-0033
+    path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
+    symbols:
+      - rt_math_is_nan
+    classification: product_algorithm
+    replacement: std.common.numeric_round.is_nan_f64 (same file as
+      C-MIG-0031/0032, src/lib/common/numeric_round.spl -- IEEE 754
+      self-inequality property `x != x`, a comparison trick rather than a
+      re-wrap of the extern's bit inspection)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_math_is_nan(x: f64) -> bool is registered in the interpreter's
+      extern dispatch table (interpreter_extern/mod.rs:1572,
+      math::rt_math_is_nan_fn) via Rust's hardware `f64::is_nan`. No C
+      runtime counterpart exists (`grep -rn rt_math_is_nan src/runtime/*.c
+      src/runtime/*.h` returns zero hits); this is a pure-Rust-interpreter
+      extern, same kind as C-MIG-0029..0032 (no_c_implementation_
+      rust_only_extern). Rejected candidates: rt_math_round/trunc/abs are
+      NOT registered in interpreter_extern (grep confirms zero hits) so
+      were out of scope; the transcendental externs (exp/log/sinh/etc.)
+      were deferred as not bit-exact-verifiable without a stated tolerance
+      contract.
+    correctness_spec: test/01_unit/lib/common/numeric_round_is_nan_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. finite
+      positive/negative/zero/negative-zero, domain-boundary coverage
+      (+-infinity, two independent NaN constructions, large-magnitude
+      1.0e20/-1.0e20, denormal 5.0e-324), single-bit corruption
+      discrimination, determinism check, 100-vector shared-logic bulk
+      differential loop with forced NaN/inf/sign-flip/negative-zero
+      boundary values at fixed moduli, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple is_nan_f64 measured ~1.9x the
+      Rust hardware is_nan oracle over the 100-vector bulk corpus
+      (simple_us=852, c_us=449, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), within the plan's 2x threshold
+      (not a PERF finding requiring a fix/file, recorded for completeness).
+      Same interpreter-lane caveat as prior findings (bin/simple test
+      hard-defaults to the interpreter, not the JIT/native engine ordinary
+      programs run on)."
+    perf_measured: >
+      100 shared branch-covering x values (seeded LCG plus forced NaN/
+      +-infinity/sign-flip/negative-zero boundary values at fixed moduli),
+      2026-08-18: simple_us=852 c_us=449, ratio ~1.9x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      is_nan_f64 itself has no domain-edge defect (`x != x` is exact for
+      every f64 bit pattern by IEEE 754 construction). A REAL divergence
+      was found in the interpreter's float `/` operator while writing this
+      spec's second NaN-construction path: `0.0 / 0.0` raises `semantic:
+      division by zero` instead of producing IEEE 754 NaN. Worked around
+      in the spec via `(0.0 - pos_inf) + pos_inf` (also canonically NaN,
+      does not hit the zero-divisor special case) and filed as a
+      standalone interpreter defect: doc/08_tracking/bug/
+      interpreter_float_division_by_zero_raises_instead_of_nan_2026-08-18.md
+
+  - id: C-MIG-0034
+    path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
+    symbols:
+      - rt_math_is_inf
+    classification: product_algorithm
+    replacement: std.common.numeric_round.is_inf_f64 (same file as
+      C-MIG-0031/0032/0033, src/lib/common/numeric_round.spl -- builds
+      +infinity locally via overflow (1.0e308 * 10.0) and compares both
+      signs, genuinely different machinery from the extern's bit
+      inspection)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_math_is_inf(x: f64) -> bool is registered in the interpreter's
+      extern dispatch table (interpreter_extern/mod.rs:1571,
+      math::rt_math_is_inf_fn) via Rust's hardware `f64::is_infinite`. No
+      C runtime counterpart exists (`grep -rn rt_math_is_inf
+      src/runtime/*.c src/runtime/*.h` returns zero hits); this is a
+      pure-Rust-interpreter extern, same kind as C-MIG-0029..0033
+      (no_c_implementation_rust_only_extern). Rejected candidates: same
+      unregistered round/trunc/abs as C-MIG-0033; rt_math_is_finite
+      (registered, mod.rs:1570) was a legitimate sibling but skipped to
+      keep this pair's two new kernels non-redundant with each other
+      (is_finite_f64 would just be `not (is_nan_f64(x) or is_inf_f64(x))`).
+    correctness_spec: test/01_unit/lib/common/numeric_round_is_inf_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. finite
+      positive/negative/zero/negative-zero, domain-boundary coverage
+      (+-infinity both signs, NaN, large-magnitude 1.0e20/-1.0e20, the
+      largest normal finite f64 1.0e308 adjacent-to-the-edge, denormal
+      5.0e-324), single-bit corruption discrimination, determinism check,
+      100-vector shared-logic bulk differential loop with forced inf/NaN/
+      largest-finite/sign-flip/negative-zero boundary values at fixed
+      moduli, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple is_inf_f64 measured ~2.56x the
+      Rust hardware is_infinite oracle over the 100-vector bulk corpus
+      (simple_us=1176, c_us=459, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), above the plan's 2x threshold.
+      Recorded honestly, not hidden -- same interpreter-lane caveat as
+      C-MIG-0031/0032 and prior PERF findings."
+    perf_measured: >
+      100 shared branch-covering x values, same generator style as
+      C-MIG-0033 with is_inf-specific forced boundary values, 2026-08-18:
+      simple_us=1176 c_us=459, ratio ~2.56x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      No domain-edge defect found: is_inf_f64 was deliberately written to
+      compare against BOTH pos_inf and neg_inf from the start (a
+      single-sided check was considered and rejected during design, never
+      shipped), and the domain-boundary + 100-vector suites confirm no gap
+      slipped through, including the largest-finite-vs-infinite boundary
+      (1.0e308 vs 1.0e308*10.0).
