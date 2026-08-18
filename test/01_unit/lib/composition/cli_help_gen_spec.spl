@@ -1,0 +1,75 @@
+# @cover src/lib/nogc_sync_mut/composition/cli_help_gen.spl 0%
+"""
+# SCI-driven help + completion generation (Phase C / C4)
+
+**Category:** Lib / Composition
+**Status:** Acceptance (reproducing)
+
+Help text and shell-completion candidates are GENERATED from option-route
+data — never hand-written. This spec builds route rows and asserts the real
+registered options (spellings, aliases, value forms, summaries) appear in the
+generated help index and completion output.
+
+Struct rows are used directly (not class records) per
+doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.composition.cli_help_gen.{
+    CliHelpRouteV1,
+    cli_help_route_v1, cli_help_index_render_v1, cli_help_usage_form_v1,
+    cli_completion_candidates_v1, cli_completion_render_v1,
+}
+use std.nogc_sync_mut.composition.cli_option_route.{
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED, CLI_VALUE_MODE_OPTIONAL,
+    CLI_SCOPE_GLOBAL, CLI_SCOPE_COMMAND,
+}
+
+fn sample_routes() -> [CliHelpRouteV1]:
+    [
+        cli_help_route_v1("--verbose", "-v", CLI_VALUE_MODE_FLAG, CLI_SCOPE_GLOBAL, "enable verbose output"),
+        cli_help_route_v1("--log-level", "", CLI_VALUE_MODE_REQUIRED, CLI_SCOPE_GLOBAL, "set log level"),
+        cli_help_route_v1("--color", "", CLI_VALUE_MODE_OPTIONAL, CLI_SCOPE_COMMAND, "colorize output"),
+    ]
+
+describe "SCI-driven help index generation":
+
+    it "renders every registered option with its summary":
+        step("Generate the help index from three route rows")
+        val help = cli_help_index_render_v1(sample_routes())
+        step("Every real spelling and its route-carried summary is present")
+        expect(help.contains("--verbose")).to_be(true)
+        expect(help.contains("enable verbose output")).to_be(true)
+        expect(help.contains("--log-level=<value>")).to_be(true)
+        expect(help.contains("set log level")).to_be(true)
+        expect(help.contains("--color[=<value>]")).to_be(true)
+
+    it "derives usage forms from value_mode, not from hand-written text":
+        expect(cli_help_usage_form_v1("--a", CLI_VALUE_MODE_FLAG) == "--a").to_be(true)
+        expect(cli_help_usage_form_v1("--a", CLI_VALUE_MODE_REQUIRED) == "--a=<value>").to_be(true)
+        expect(cli_help_usage_form_v1("--a", CLI_VALUE_MODE_OPTIONAL) == "--a[=<value>]").to_be(true)
+
+    it "renders aliases and scope labels from the route data":
+        val help = cli_help_index_render_v1(sample_routes())
+        expect(help.contains("(-v)")).to_be(true)
+        expect(help.contains("[global]")).to_be(true)
+        expect(help.contains("[command]")).to_be(true)
+
+describe "shell completion generation from the same source":
+
+    it "lists all spellings and aliases for the empty prefix":
+        val cands = cli_completion_candidates_v1(sample_routes(), "")
+        expect(cands.len() == 4).to_be(true)
+
+    it "filters candidates by prefix including aliases":
+        val dashdash = cli_completion_candidates_v1(sample_routes(), "--")
+        expect(dashdash.len() == 3).to_be(true)
+        val short = cli_completion_candidates_v1(sample_routes(), "-v")
+        expect(short.len() == 1).to_be(true)
+        expect(short[0] == "-v").to_be(true)
+
+    it "renders one candidate per line for compgen consumption":
+        val rendered = cli_completion_render_v1(sample_routes(), "--")
+        expect(rendered.contains("--verbose\n")).to_be(true)
+        expect(rendered.contains("--log-level\n")).to_be(true)
+        expect(rendered.contains("--color\n")).to_be(true)

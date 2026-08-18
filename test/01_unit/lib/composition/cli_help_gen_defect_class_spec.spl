@@ -1,0 +1,67 @@
+# @cover src/lib/nogc_sync_mut/composition/cli_help_gen.spl 0%
+"""
+# Help/completion generator cannot be a fixed string (positive control)
+
+**Category:** Lib / Composition
+**Status:** Defect-class guard
+
+The defect being removed is help text that drifts from the actual options. A
+generator that merely emits a hardcoded blob would pass a presence-only spec,
+so this spec is the positive control: ADDING a route must add its line to the
+help AND its word to the completions, and REMOVING a route must remove both.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.composition.cli_help_gen.{
+    CliHelpRouteV1,
+    cli_help_route_v1, cli_help_index_render_v1,
+    cli_completion_candidates_v1, cli_completion_render_v1,
+}
+use std.nogc_sync_mut.composition.cli_option_route.{
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED, CLI_SCOPE_GLOBAL,
+}
+
+fn base_routes() -> [CliHelpRouteV1]:
+    [
+        cli_help_route_v1("--verbose", "-v", CLI_VALUE_MODE_FLAG, CLI_SCOPE_GLOBAL, "enable verbose output"),
+    ]
+
+describe "positive control: route set drives help and completions":
+
+    it "adding a route adds it to help and completions":
+        step("Render help/completions WITHOUT the new route")
+        val before_help = cli_help_index_render_v1(base_routes())
+        val before_comp = cli_completion_render_v1(base_routes(), "")
+        expect(before_help.contains("--trace-startup")).to_be(false)
+        expect(before_comp.contains("--trace-startup")).to_be(false)
+
+        step("Add a route and re-render from the SAME generator")
+        var routes = base_routes()
+        routes.push(cli_help_route_v1("--trace-startup", "", CLI_VALUE_MODE_REQUIRED, CLI_SCOPE_GLOBAL, "trace startup phases"))
+        val after_help = cli_help_index_render_v1(routes)
+        val after_comp = cli_completion_render_v1(routes, "")
+
+        step("The new option appears in BOTH outputs, with its derived value form")
+        expect(after_help.contains("--trace-startup=<value>")).to_be(true)
+        expect(after_help.contains("trace startup phases")).to_be(true)
+        expect(after_comp.contains("--trace-startup\n")).to_be(true)
+
+    it "removing a route removes it from help and completions":
+        step("Render with two routes")
+        var routes = base_routes()
+        routes.push(cli_help_route_v1("--dry-run", "", CLI_VALUE_MODE_FLAG, CLI_SCOPE_GLOBAL, "no side effects"))
+        val full_help = cli_help_index_render_v1(routes)
+        expect(full_help.contains("--dry-run")).to_be(true)
+
+        step("Render with the route removed — only the base route survives")
+        val slim_help = cli_help_index_render_v1(base_routes())
+        val slim_comp = cli_completion_candidates_v1(base_routes(), "")
+        expect(slim_help.contains("--dry-run")).to_be(false)
+        expect(slim_help.contains("--verbose")).to_be(true)
+        expect(slim_comp.len() == 2).to_be(true)
+
+    it "empty route set renders no option lines at all":
+        val empty_help = cli_help_index_render_v1([])
+        expect(empty_help.contains("--")).to_be(false)
+        val empty_comp = cli_completion_candidates_v1([], "")
+        expect(empty_comp.len() == 0).to_be(true)
