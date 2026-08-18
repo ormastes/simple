@@ -301,29 +301,48 @@ fn par_prof_enabled() -> bool:
 
 fn parser_advance():
     if par_prof_enabled():
+        # Times the SAME batched path as the non-prof branch below.
         val t0 = rt_time_now_unix_micros()
-        val kind_p = lex_next()
+        val snap_p = lex_next_snapshot()
         val t1 = rt_time_now_unix_micros()
+        val kind_p: i64 = snap_p[0]
         par_kind_set(kind_p)
         val ta = rt_time_now_unix_micros()
-        val txt_p = parser_current_token_text(kind_p)
-        val tb = rt_time_now_unix_micros()
-        par_text_set(txt_p)
+        if kind_p == 180 or kind_p == 181 or kind_p == 182 or kind_p == 190:
+            par_text_set("")
+        else:
+            par_text_set(snap_p[3])
         val tc = rt_time_now_unix_micros()
-        par_line_set(lex_token_line())
-        par_col_set(lex_token_col())
+        par_line_set(snap_p[1])
+        par_col_set(snap_p[2])
         val t2 = rt_time_now_unix_micros()
-        print("PARSEPROF\ttok:lex_next\t{t1 - t0}")
+        print("PARSEPROF\ttok:lex_snapshot\t{t1 - t0}")
         print("PARSEPROF\ttok:kind_set\t{ta - t1}")
-        print("PARSEPROF\ttok:cur_text\t{tb - ta}")
-        print("PARSEPROF\ttok:text_set\t{tc - tb}")
+        print("PARSEPROF\ttok:text_set\t{tc - ta}")
         print("PARSEPROF\ttok:line_col\t{t2 - tc}")
         return
-    val kind = lex_next()
-    par_kind_set(kind)
-    par_text_set(parser_current_token_text(kind))
-    par_line_set(lex_token_line())
-    par_col_set(lex_token_col())
+    # Hot loop, minimized CALL COUNT: under the seed interpreter EVERY call
+    # (even same-module) costs milliseconds, measured via PARSEPROF —
+    # par_line_set+par_col_set alone were ~8.8ms/token. One batched lexer call
+    # replaces four (lex_next + text + line + col), and the four par_*_set
+    # wrappers are inlined as direct slot writes; the env-save mirror they
+    # guarded is preserved behind the same par_env_save_enabled() flag.
+    # Behavior identical (the kind mask is parser_current_token_text inlined).
+    # See doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md.
+    val snap = lex_next_snapshot()
+    val kind: i64 = snap[0]
+    par_kind_slot[0] = kind
+    if kind == 180 or kind == 181 or kind == 182 or kind == 190:
+        par_text_slot[0] = ""
+    else:
+        par_text_slot[0] = snap[3]
+    par_line_slot[0] = snap[1]
+    par_col_slot[0] = snap[2]
+    if par_env_save_enabled():
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_KIND", "{kind}")
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_TEXT", par_text_slot[0])
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_LINE", "{par_line_slot[0]}")
+        rt_env_set("SIMPLE_BOOTSTRAP_PAR_COL", "{par_col_slot[0]}")
 
 # ===== Token Checking =====
 

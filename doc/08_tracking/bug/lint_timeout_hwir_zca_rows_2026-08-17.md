@@ -324,3 +324,43 @@ Verified:
 - `lint_cli_duplicate_typed_args_contract_check.spl` FAILs identically at HEAD with the
   pre-change files restored (zero-examples / DTYP001 parity FAIL) — pre-existing, not
   introduced by this change; left as-is.
+
+## 2026-08-18 — Parser-side call-count mitigation (pure-Simple lane, landed)
+
+Files: `src/compiler/10.frontend/core/lexer.spl`, `src/compiler/10.frontend/core/parser.spl`.
+
+What changed in `parser_advance()` (behavior identical, verified by specs + lint):
+- **Batched lexer snapshot**: new `lex_next_snapshot()` in lexer.spl returns
+  `[kind, line, col, text]` in ONE cross-module call; parser_advance previously
+  made four (`lex_next` + `lex_token_text` + `lex_token_line` + `lex_token_col`).
+  The kind-mask (180/181/182/190 -> "") is `parser_current_token_text` inlined.
+- **Inlined slot setters**: `par_kind_set/par_text_set/par_line_set/par_col_set`
+  replaced with direct `par_*_slot[0] = ...` writes; the
+  `SIMPLE_BOOTSTRAP_PAR_*` env-save mirror is preserved behind a single
+  `par_env_save_enabled()` check (was checked 4x, once per setter).
+- PARSEPROF branch updated to time the same batched path
+  (`tok:lex_snapshot` replaces `tok:lex_next`+`tok:cur_text`).
+
+Key measurement that refines the 2026-08-18 cross-module model: PARSEPROF shows
+**same-module calls are also milliseconds each** under the seed interpreter —
+`par_line_set`+`par_col_set` (two same-module calls) cost ~8.8ms/token before
+inlining (`tok:line_col` 5.24s over 351 tokens -> 3.10s after removing the
+lexer hops; near-zero once the setters were inlined). So the fix axis is total
+CALL COUNT on the per-token path, not only cross-module hops. Net: ~7 calls
+removed per token (3 lexer hops + 4 setter calls incl. their 4
+`par_env_save_enabled` sub-calls collapsed to 1).
+
+Interleaved A/B on the shared box (base files restored vs new, CPU user time),
+`bin/simple lint` on scratchpad fixtures:
+- `fx_m5_c10.spl`: base 44.8/36.5/23.2s vs new 25.3/26.9/21.6s — new faster in
+  all 3 pairs, medians 36.5s -> 25.3s (~30% CPU).
+- `fx_m20_c10.spl`: pairs (79.2 vs 81.2), (111.1 vs 83.9), (83.2 vs 61.1) —
+  new faster 2 of 3 under heavy load spikes.
+
+Verified: lexer_brace_escape_spec 8/8, parser_contextual_keyword_named_arg_spec
+8/8, parser_move_contextual_keyword_spec 4/4, parser_describe_fn_literal_spec
+2/2; `bin/simple lint src/lib/common/base_encoding.spl` still "all files clean".
+
+Still open: the superlinear content-complexity term (this change shaves the
+linear per-token constant only), and the per-CALL millisecond cost itself,
+which is a seed-interpreter issue owned by the Rust lane.
