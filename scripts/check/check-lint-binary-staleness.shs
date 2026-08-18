@@ -131,10 +131,31 @@ run_probe() {
     if [ "$missing" -eq 0 ]; then
         echo "PASS — deployed binary at $bin_path contains $found fresh marker(s):$found_list"
         return 0
-    else
-        echo "FAIL — deployed binary at $bin_path is STALE: missing $missing of $((found + missing)) fresh marker(s):$missing_list (present:$found_list)"
-        return 1
     fi
+
+    # Diagnosis lines (printed BEFORE the verdict, which stays the last line
+    # of stdout). These change nothing about the pass/fail decision — they
+    # only tell the reader WHICH kind of staleness this is, so a lane cannot
+    # mistake a structurally-impossible RED for a redeploy it can fix, and
+    # cannot mistake a fixable RED for something to step over.
+    if [ -x "$bin_path" ]; then
+        provenance=$("$bin_path" --version 2>&1 | head -3)
+        case "$provenance" in
+            *"bootstrap seed"*)
+                echo "DIAGNOSIS — the deployed binary is the RUST BOOTSTRAP SEED (--version prints the seed banner)."
+                echo "DIAGNOSIS — $MARKER_MEXH006/$MARKER_WMCRES001 are pure-Simple-only diagnostics; a seed binary can NEVER contain them, no matter how it is rebuilt."
+                ;;
+            *)
+                echo "DIAGNOSIS — the deployed binary does not print the seed banner; this looks like a stale self-hosted build that a redeploy would refresh."
+                ;;
+        esac
+    fi
+    echo "REMEDY — redeploy a genuinely self-hosted binary (OWNER of the shared binary only; never from a feature lane):"
+    echo "REMEDY —   scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy"
+    echo "REMEDY — blocked as of 2026-08-17 by the Stage-3 self-host SIGSEGV: doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md"
+    echo "REMEDY — until then this guard is EXPECTED RED and \`bin/simple lint\` is NOT a trustworthy oracle for source-level lint claims. Do not silence it."
+    echo "FAIL — deployed binary at $bin_path is STALE: missing $missing of $((found + missing)) fresh marker(s):$missing_list (present:$found_list)"
+    return 1
 }
 
 if [ "${1:-}" = "--selftest" ]; then
