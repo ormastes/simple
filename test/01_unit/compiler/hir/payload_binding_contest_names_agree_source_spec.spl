@@ -1,0 +1,47 @@
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+# Pins the fix for the Stage 3 error flood
+# `enum payload dependency ... resolved to non-type binding ...`
+# (e.g. payload `TokenKind` reported as bound by `asm_arm_backend`, kind
+# `const`). `claim_materialized_payload_binding` reached an existing symbol
+# through two hops with known failure modes and then contested ownership
+# against a record that shared NO NAME with the payload spelling. That is
+# unsound by construction, so both contests are now gated on positive name
+# agreement.
+#
+# See doc/08_tracking/bug/stage3_register_imported_type_methods_infinite_recursion_2026-08-17.md
+
+describe "materialized payload binding contest requires name agreement":
+    it "declares a positive name-agreement predicate":
+        val modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        expect(modules).to_contain("fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool")
+        expect(modules).to_contain("symbol_name == local_name or symbol_name == origin_item_name")
+
+    it "gates the non-type contest on name agreement":
+        val modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        expect(modules).to_contain("val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)")
+        expect(modules).to_contain("if contestable and not hir_payload_kind_is_type(existing_kind):")
+        expect(modules).to_not_contain("if not hir_payload_kind_is_type(existing_kind):")
+
+    it "gates the identity conflict on name agreement too":
+        # A name mismatch invalidates the identity comparison exactly as much
+        # as it invalidates the kind comparison, so this contest is gated too.
+        val modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        expect(modules).to_contain("if contestable and existing != wanted:")
+
+    it "keeps the positive kind predicate rather than an emptiness test":
+        # Regression fence for 513cbb7b4: the old emptiness test never fired,
+        # because callables and constants map to non-empty kinds.
+        val modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        expect(modules).to_contain("fn hir_payload_kind_is_type(kind: text) -> bool")
+
+    it "keeps the re-entrancy breaker as a list, not a Dict":
+        # The breaker is a separate defect (stack exhaustion). Every breaker in
+        # this cycle that memoized on Dict membership has failed open once.
+        val modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        val types = rt_file_read_text("src/compiler/20.hir/hir_lowering/types.spl") ?? ""
+        expect(modules).to_contain("if self.imported_type_methods_in_progress_has(reentry_key):")
+        expect(modules).to_contain("self.register_imported_type_methods_inner(")
+        expect(types).to_contain("imported_type_methods_in_progress: [text]")

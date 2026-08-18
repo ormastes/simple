@@ -228,6 +228,32 @@ fn hir_payload_kind_is_type(kind: text) -> bool:
     """
     kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "type_alias"
 
+fn hir_payload_binding_names_agree(local_name: text, origin_item_name: text, symbol_name: text) -> bool:
+    """True only when a fetched symbol can actually BE the binding for `local_name`.
+
+    `claim_materialized_payload_binding` reaches an existing symbol via
+    `symbols.lookup_or_invalid(local_name)` and then a chained class-field
+    `Dict<i64, HirSymbol>` bracket read. Both hops have known failure modes
+    (a resolver id for a different name; a native-codegen bracket read that
+    returns a foreign record), and when either fires the fetched record shares
+    NO NAME with the payload spelling being claimed -- e.g. Stage 3 reporting
+    payload `TokenKind` as bound by `asm_arm_backend`, kind `const`, two
+    entities that are not even the same kind of thing.
+
+    Contesting ownership on such a record is unsound BY CONSTRUCTION: the code
+    never established that the fetched symbol is the binding for `local_name`,
+    so a "conflict" between them is a claim about two unrelated entities.
+    Require positive name agreement instead. The symbol may legitimately carry
+    either the local payload spelling or the terminal declared name, because
+    `register_materialized_payload_named_dependency` registers the terminal
+    item under the payload's local alias -- so both are accepted, and only a
+    record matching NEITHER is refused a vote.
+
+    This is deliberately a positive identity test, in the same spirit as
+    `hir_payload_kind_is_type`: an unrecognised record defaults to "cannot
+    contest" rather than "is a competing owner"."""
+    symbol_name == local_name or symbol_name == origin_item_name
+
 fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
     val canonical_module = hir_pkg_canonical_module_name(module_name)
     val canonical_item_owner = if canonical_module == "compiler.tools.lint._LintMain.config_and_model" and (item_name == "LintLevel" or item_name == "LintCategory"):
@@ -1354,7 +1380,14 @@ impl HirLowering:
                 # dependency conflicts" in the Stage 3 log were of this
                 # shape, and in 0 of the 78 did the two sides even share a
                 # name (73 `callable`, 3 `struct`, 2 `class`).
-                if not hir_payload_kind_is_type(existing_kind):
+                # A record that is not even NAMED like the binding being
+                # claimed cannot contest it -- see
+                # `hir_payload_binding_names_agree`. Both contests below are
+                # gated on this, not just the non-type one: a name mismatch
+                # invalidates the identity comparison exactly as much as it
+                # invalidates the kind comparison.
+                val contestable = hir_payload_binding_names_agree(local_name, origin.item_name, symbol.name)
+                if contestable and not hir_payload_kind_is_type(existing_kind):
                     # Level-gated probe (SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1, default
                     # OFF) that decides which of two layers is at fault, because
                     # the reported symbol shares NO NAME with the requested one:
@@ -1372,9 +1405,14 @@ impl HirLowering:
                         eprint("[HIR-PAYLOAD-LOOKUP] key=" + local_name + " id=" + int_to_str(existing_raw) + " sym_name=" + symbol.name + " kind=" + existing_kind + " owner=" + existing_owner)
                     self.error("enum payload dependency `{local_name}` resolved to non-type binding `{symbol.name}` (kind `{existing_kind}`) in `{existing_owner}`; expected the type `{wanted}`", import_span)
                     return false
-                if existing != wanted:
+                if contestable and existing != wanted:
                     self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
                     return false
+                if not contestable:
+                    # Keep the mismatch visible under the same probe gate; it
+                    # is a real resolver/fetch defect, just not a conflict.
+                    if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
+                        eprint("[HIR-PAYLOAD-LOOKUP] non-contestable key=" + local_name + " id=" + int_to_str(existing_raw) + " sym_name=" + symbol.name + " kind=" + existing_kind + " owner=" + existing_owner)
         self.materialized_payload_bindings[local_name] = wanted
         true
 
