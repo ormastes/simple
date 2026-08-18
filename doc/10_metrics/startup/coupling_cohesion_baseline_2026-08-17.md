@@ -155,3 +155,45 @@ Verification (foreground, `--no-session-daemon`):
 Remaining in-scope note: no `app/cli`/`app/io`/`80.driver` file participates in any
 SCC of the CLI closure anymore; further largest-SCC reduction requires touching
 `70.backend` (excluded for this lane).
+
+## Delta 2026-08-18 — backend SCC facade back-edges (45 → 24)
+
+Scope: `src/compiler/70.backend/backend/**` only. The 45-file SCC was glued by
+`use compiler.backend.backend_api.*` wildcard imports on files whose actual
+needs are defined in the leaf `backend_types.spl` (or nothing at all) —
+`backend_api.spl` is a facade that itself imports `backend_helpers` +
+`codegen_factory`, so any leaf importing the facade closes the cycle.
+
+Edges broken (all reroute-to-defining-module; zero behavior change):
+1. `common/type_mapper.spl` — dropped `use compiler.backend.backend_api.*`
+   entirely: every `Backend*` token in the file is in comments/docstrings; no
+   backend_api symbol is referenced. This alone cut the SCC 45 → 36.
+2. `llvm_passes.spl` — wildcard replaced with
+   `use compiler.backend.backend.backend_types.{OptimizationLevel}` (its only use).
+3. `lean_backend.spl` + `cuda_backend.spl` — wildcard dropped; the symbols
+   actually used (`BackendKind`, `CodegenTarget`, `CompileError`,
+   `BackendCompileOptions`, `compileoptions_default_options`) added to their
+   existing `backend_types` import lines. (`Backend` hits were comments only.)
+
+Measured (resolver probe, 70.backend roots, closure over src):
+
+| metric (70.backend closure) | before | after |
+|---|---|---|
+| cycles (SCCs>1) | 29 | 30 |
+| files-in-cycles | 186 | **169** |
+| largest all-backend SCC | **45** | **24** |
+
+(Cycle count +1 because the 45-node SCC split into a 24-node SCC plus smaller
+components; the largest SCC in the closure is now a 36-file 50.mir/_MirLowering
+component that contains zero 70.backend files.) Remaining 24-node backend SCC
+is held by `backend_api ↔ {backend_helpers, codegen_factory} ↔ concrete
+backends (llvm/vhdl/cuda/vulkan/lean/interpreter adapters)` — the concrete
+backends still import `backend_api.*` for `CompiledModule`/`Codegen`-adjacent
+symbols plus `_MirToLlvm`/`_VhdlProcess` part-files importing their facades;
+breaking those needs per-file symbol audits of the wildcards, same recipe.
+
+Verification (foreground):
+- `test/01_unit/compiler/backend/type_mapper_spec.spl` — Results: 4 total, 4 passed, 0 failed
+- `test/01_unit/compiler/backend/lean_backend_spec.spl` — Results: 10 total, 8 passed, 2 failed
+  (baseline-identical: temp-restored the 4 files to HEAD and reran — same
+  2 failures, "preserves signedness…" and "rejects binary operators…", 8/10)
