@@ -1,0 +1,199 @@
+# SIF — Simple Interface Format (v1).
+#
+# A versioned, canonical, deterministic serialization of a module's exported
+# INTERFACE, separable from its body, per
+# doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md §10.2.
+#
+# Purpose: make "did my dependency's interface change?" an exact query
+# instead of a source-hash guess. A body-only edit leaves a module's SIF
+# byte-identical; any signature/type/export change changes it.
+#
+# FORM: canonical TEXT, one record per line — chosen over a binary form
+# because (a) it composes directly with the existing length-prefixed
+# `canon_*` primitives in cache/action_key.spl for its content digest,
+# (b) it is human-diffable (an interface diff IS the SIF diff), and
+# (c) determinism is enforced structurally: every set-typed section (deps,
+# parts) is sorted with the same byte-wise ordering action_key uses, so the
+# same interface always serializes to the same bytes regardless of
+# declaration order or discovery order.
+#
+# Layout (exact line order; sections sorted; no trailing content):
+#   sif-version: 1
+#   module: <module_id>
+#   lang: <language semantics version>
+#   dep: <module_id>=<iface_digest>     (0+, sorted)
+#   part: <canonical interface part>    (0+, sorted)
+#   iface-digest: <interface_digest_of(parts)>
+#   content-digest: <sha256 over all preceding lines, domain-separated>
+#
+# The iface-digest field is EXACTLY action_key.interface_digest_of(parts)
+# ("simple/interface/v1"), so a SIF's digest can be dropped straight into
+# ActionDep.iface_digest / dependency_interface_fold without re-derivation.
+# The content-digest self-seals the file: truncation, tampering, or
+# reordering fails validation. Parsing FAILS CLOSED: wrong version, missing
+# fields, unsorted sections, digest mismatch, or trailing garbage all
+# invalidate the whole SIF; accessors on an invalid SIF return empty.
+#
+# API is primitive-returning (text / [text]) rather than class-returning to
+# stay usable across module boundaries under the known self-hosted child
+# class-erasure bug (see
+# doc/08_tracking/bug/selfhosted_child_erases_class_values_cross_module_2026-08-18.md).
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{
+    canon_str, canon_field, canon_seq,
+    action_key_sort_texts, action_key_text_le,
+    interface_digest_of, source_interface_parts
+}
+
+val SIF_VERSION_LINE: text = "sif-version: 1"
+val SIF_DOMAIN: text = "simple/sif/v1"
+
+# ============================================================================
+# Serialization
+# ============================================================================
+
+fn sif_content_digest_of_lines(lines: [text]) -> text:
+    """Domain-separated digest over the payload lines (everything before the
+    content-digest line). Length-prefixed encoding via canon primitives, so
+    no line content can forge another digest."""
+    var items: [text] = []
+    for line in lines:
+        items.push(canon_str(line))
+    sha256_text(canon_field(SIF_DOMAIN, canon_seq(items)))
+
+fn sif_serialize_parts(module_id: text, lang_version: text, dep_entries: [text], parts: [text]) -> text:
+    """Canonical SIF text from an explicit interface-part set. dep_entries
+    are "module_id=iface_digest" texts; deps and parts are SETS — sorted
+    here, so caller order can never change the bytes."""
+    var lines: [text] = []
+    lines.push(SIF_VERSION_LINE)
+    lines.push("module: " + module_id)
+    lines.push("lang: " + lang_version)
+    for d in action_key_sort_texts(dep_entries):
+        lines.push("dep: " + d)
+    val sorted_parts = action_key_sort_texts(parts)
+    for p in sorted_parts:
+        lines.push("part: " + p)
+    lines.push("iface-digest: " + interface_digest_of(sorted_parts))
+    lines.push("content-digest: " + sif_content_digest_of_lines(lines))
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn sif_of_source(module_id: text, lang_version: text, dep_entries: [text], source: text) -> text:
+    """Canonical SIF straight from raw module source. Interface extraction is
+    action_key.source_interface_parts (v1 textual extractor): body statements
+    are not headers, so a body-only edit yields byte-identical SIF text."""
+    sif_serialize_parts(module_id, lang_version, dep_entries, source_interface_parts(source))
+
+# ============================================================================
+# Validation (fail closed) — returns "" when valid, else an error text.
+# ============================================================================
+
+fn sif_line_value(line: text, key: text) -> text:
+    # Caller has already checked starts_with(key); strip the prefix.
+    line.substring(key.len(), line.len())
+
+fn sif_validate(sif_text: text) -> text:
+    if sif_text == "":
+        return "sif: empty input"
+    if not sif_text.ends_with("\n"):
+        return "sif: truncated (no trailing newline)"
+    # Split into lines; drop the final empty element from the trailing \n.
+    val raw = sif_text.split("\n")
+    var lines: [text] = []
+    var i = 0
+    while i < raw.len() - 1:
+        lines.push(raw[i])
+        i = i + 1
+    if lines.len() < 5:
+        return "sif: too few lines"
+    if lines[0] != SIF_VERSION_LINE:
+        return "sif: unsupported or missing version line"
+    if not lines[1].starts_with("module: "):
+        return "sif: missing module line"
+    if not lines[2].starts_with("lang: "):
+        return "sif: missing lang line"
+    val last = lines[lines.len() - 1]
+    if not last.starts_with("content-digest: "):
+        return "sif: missing content-digest line"
+    val iface_line = lines[lines.len() - 2]
+    if not iface_line.starts_with("iface-digest: "):
+        return "sif: missing iface-digest line"
+    # Middle section: deps then parts, each sorted, nothing else allowed.
+    var deps: [text] = []
+    var parts: [text] = []
+    var idx = 3
+    while idx < lines.len() - 2:
+        val line = lines[idx]
+        if line.starts_with("dep: "):
+            if parts.len() > 0:
+                return "sif: dep line after part section"
+            deps.push(sif_line_value(line, "dep: "))
+        elif line.starts_with("part: "):
+            parts.push(sif_line_value(line, "part: "))
+        else:
+            return "sif: unknown line kind"
+        idx = idx + 1
+    # Canonical order is part of validity — an unsorted SIF is not canonical.
+    var j = 1
+    while j < deps.len():
+        if not action_key_text_le(deps[j - 1], deps[j]):
+            return "sif: dep section not in canonical order"
+        j = j + 1
+    j = 1
+    while j < parts.len():
+        if not action_key_text_le(parts[j - 1], parts[j]):
+            return "sif: part section not in canonical order"
+        j = j + 1
+    # Recompute both digests; any mismatch (tamper/truncate/corrupt) fails.
+    val claimed_iface = sif_line_value(iface_line, "iface-digest: ")
+    if claimed_iface != interface_digest_of(parts):
+        return "sif: iface-digest mismatch"
+    var payload: [text] = []
+    var k = 0
+    while k < lines.len() - 1:
+        payload.push(lines[k])
+        k = k + 1
+    val claimed_content = sif_line_value(last, "content-digest: ")
+    if claimed_content != sif_content_digest_of_lines(payload):
+        return "sif: content-digest mismatch"
+    ""
+
+# ============================================================================
+# Accessors — fail closed: invalid SIF yields "" / [].
+# ============================================================================
+
+fn sif_field_lines(sif_text: text, key: text) -> [text]:
+    var out: [text] = []
+    if sif_validate(sif_text) != "":
+        return out
+    for line in sif_text.split("\n"):
+        if line.starts_with(key):
+            out.push(sif_line_value(line, key))
+    out
+
+fn sif_single_field(sif_text: text, key: text) -> text:
+    val vals = sif_field_lines(sif_text, key)
+    if vals.len() != 1:
+        return ""
+    vals[0]
+
+fn sif_module_id(sif_text: text) -> text:
+    sif_single_field(sif_text, "module: ")
+
+fn sif_lang_version(sif_text: text) -> text:
+    sif_single_field(sif_text, "lang: ")
+
+fn sif_dep_entries(sif_text: text) -> [text]:
+    sif_field_lines(sif_text, "dep: ")
+
+fn sif_parts(sif_text: text) -> [text]:
+    sif_field_lines(sif_text, "part: ")
+
+fn sif_iface_digest(sif_text: text) -> text:
+    """The module's interface digest, ready for ActionDep.iface_digest /
+    dependency_interface_fold. "" when the SIF is invalid (fail closed)."""
+    sif_single_field(sif_text, "iface-digest: ")

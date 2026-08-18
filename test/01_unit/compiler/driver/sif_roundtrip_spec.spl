@@ -1,0 +1,65 @@
+"""
+# SIF Round-Trip and Canonical Determinism
+
+**Category:** Infrastructure
+**Reproduces:** audit gap #19 — no Simple Interface Format existed
+(startup_perf_architecture_2026-08-17.md §10.2): incremental rebuild had no
+separable module-interface artifact to query.
+
+A SIF is a versioned, canonical, deterministic serialization of a module's
+exported interface (src/compiler/80.driver/sif/sif.spl). This spec proves:
+- a serialized SIF validates and round-trips through its accessors;
+- serialization is order-insensitive: any input ordering of parts and deps
+  produces BYTE-IDENTICAL text and an identical digest;
+- the embedded iface-digest is EXACTLY action_key.interface_digest_of over
+  the part set, so it composes with ActionDep.iface_digest /
+  dependency_interface_fold without re-derivation.
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use compiler.driver.sif.sif.{
+    sif_serialize_parts, sif_of_source, sif_validate,
+    sif_module_id, sif_lang_version, sif_dep_entries, sif_parts,
+    sif_iface_digest
+}
+use compiler.driver.cache.action_key.{interface_digest_of, dependency_interface_fold}
+
+val PARTS_A: [text] = ["fn add(a: i64, b: i64) -> i64:", "struct Point:", "fn mul(a: i64, b: i64) -> i64:"]
+val PARTS_A_REORDERED: [text] = ["struct Point:", "fn mul(a: i64, b: i64) -> i64:", "fn add(a: i64, b: i64) -> i64:"]
+val DEPS_A: [text] = ["mod.b=digestb", "mod.a=digesta"]
+val DEPS_A_REORDERED: [text] = ["mod.a=digesta", "mod.b=digestb"]
+
+describe "SIF round-trip":
+    it "serializes to a valid SIF and round-trips every field":
+        val s = sif_serialize_parts("demo.mod", "lang1", DEPS_A, PARTS_A)
+        assert_equal(sif_validate(s), "")
+        assert_equal(sif_module_id(s), "demo.mod")
+        assert_equal(sif_lang_version(s), "lang1")
+        val deps = sif_dep_entries(s)
+        assert_equal(deps.len(), 2)
+        assert_equal(deps[0], "mod.a=digesta")
+        assert_equal(deps[1], "mod.b=digestb")
+        val parts = sif_parts(s)
+        assert_equal(parts.len(), 3)
+        assert_true(sif_iface_digest(s) != "")
+
+    it "is byte-identical across part and dep reorderings":
+        val a = sif_serialize_parts("demo.mod", "lang1", DEPS_A, PARTS_A)
+        val b = sif_serialize_parts("demo.mod", "lang1", DEPS_A_REORDERED, PARTS_A_REORDERED)
+        assert_equal(a, b)
+        assert_equal(sif_iface_digest(a), sif_iface_digest(b))
+
+    it "embeds exactly interface_digest_of(parts) — composes with action_key":
+        val s = sif_serialize_parts("demo.mod", "lang1", DEPS_A, PARTS_A)
+        assert_equal(sif_iface_digest(s), interface_digest_of(PARTS_A))
+        # And that digest drops straight into the dependency fold.
+        val fold = dependency_interface_fold(["demo.mod=" + sif_iface_digest(s)])
+        assert_true(fold != "")
+
+    it "builds from raw source with declaration-order independence":
+        val src1 = "fn f() -> i64:\n    1\nfn g() -> i64:\n    2\n"
+        val src2 = "fn g() -> i64:\n    2\nfn f() -> i64:\n    1\n"
+        val a = sif_of_source("demo.src", "lang1", [], src1)
+        val b = sif_of_source("demo.src", "lang1", [], src2)
+        assert_equal(sif_validate(a), "")
+        assert_equal(a, b)

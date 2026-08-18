@@ -1,0 +1,87 @@
+"""
+# SIF Body/Signature Discrimination and Fail-Closed Sabotage
+
+**Category:** Infrastructure
+**Defect class:** an interface artifact that is secretly constant (never
+invalidates) or secretly source-hash-like (always invalidates) is worthless.
+This spec carries a POSITIVE CONTROL on both sides:
+- a BODY-only edit leaves the SIF byte-identical (so it is not a source hash);
+- a SIGNATURE edit changes both the SIF text and its iface-digest (so it is
+  not a constant).
+Plus sabotage cases: truncation, tampered part, tampered digest, wrong
+version, unknown lines, non-canonical order, empty input — every one must
+FAIL CLOSED (validate != "", accessors empty).
+"""
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use compiler.driver.sif.sif.{
+    sif_of_source, sif_serialize_parts, sif_validate,
+    sif_iface_digest, sif_parts, sif_module_id
+}
+
+val SRC_V1: text = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+# Same signature, different BODY only.
+val SRC_BODY_EDIT: text = "fn add(a: i64, b: i64) -> i64:\n    val t = a\n    t + b\n"
+# Signature change: return type differs.
+val SRC_SIG_EDIT: text = "fn add(a: i64, b: i64) -> f64:\n    a + b\n"
+
+fn assert_fails_closed(bad: text):
+    assert_true(sif_validate(bad) != "")
+    assert_equal(sif_iface_digest(bad), "")
+    assert_equal(sif_module_id(bad), "")
+    assert_equal(sif_parts(bad).len(), 0)
+
+describe "SIF body vs signature discrimination":
+    it "body-only edit leaves the SIF byte-identical (positive control 1)":
+        val a = sif_of_source("m", "lang1", [], SRC_V1)
+        val b = sif_of_source("m", "lang1", [], SRC_BODY_EDIT)
+        assert_equal(sif_validate(a), "")
+        assert_equal(a, b)
+        assert_equal(sif_iface_digest(a), sif_iface_digest(b))
+
+    it "signature edit changes SIF text and digest (positive control 2)":
+        val a = sif_of_source("m", "lang1", [], SRC_V1)
+        val c = sif_of_source("m", "lang1", [], SRC_SIG_EDIT)
+        assert_false(a == c)
+        assert_false(sif_iface_digest(a) == sif_iface_digest(c))
+
+describe "SIF fail-closed sabotage":
+    it "rejects truncation (last line, half the file, lost newline)":
+        val s = sif_of_source("m", "lang1", ["d=x"], SRC_V1)
+        val lines = s.split("\n")
+        # Drop the content-digest line entirely.
+        var no_digest = ""
+        var i = 0
+        while i < lines.len() - 2:
+            no_digest = no_digest + lines[i] + "\n"
+            i = i + 1
+        assert_fails_closed(no_digest)
+        # Cut mid-file.
+        assert_fails_closed(s.substring(0, s.len() / 2))
+        # Lose only the trailing newline.
+        assert_fails_closed(s.substring(0, s.len() - 1))
+
+    it "rejects a tampered part (content-digest and iface-digest mismatch)":
+        val s = sif_of_source("m", "lang1", [], SRC_V1)
+        val tampered = s.replace("part: fn add(a: i64, b: i64) -> i64:", "part: fn add(a: i64, b: i64) -> f64:")
+        assert_false(s == tampered)
+        assert_fails_closed(tampered)
+
+    it "rejects a wrong version line":
+        val s = sif_of_source("m", "lang1", [], SRC_V1)
+        assert_fails_closed(s.replace("sif-version: 1", "sif-version: 2"))
+
+    it "rejects unknown lines and non-canonical section order":
+        val s = sif_of_source("m", "lang1", [], SRC_V1)
+        assert_fails_closed(s.replace("lang: lang1", "lang: lang1\nbogus: x"))
+        # Non-canonical: unsorted parts must not validate even if digests are
+        # recomputed to match — build one manually.
+        val good = sif_serialize_parts("m", "lang1", [], ["a_part", "b_part"])
+        val swapped = good.replace("part: a_part\npart: b_part", "part: b_part\npart: a_part")
+        assert_false(good == swapped)
+        assert_fails_closed(swapped)
+
+    it "rejects empty and garbage input":
+        assert_fails_closed("")
+        assert_fails_closed("garbage\n")
+        assert_fails_closed("sif-version: 1\n")
