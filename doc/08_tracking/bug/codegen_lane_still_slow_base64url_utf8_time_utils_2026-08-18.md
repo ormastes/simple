@@ -248,3 +248,75 @@ kernel. Closing it further requires the JIT/native codegen lane, not another
 algorithm change to these two functions. C-MIG-0029/0030 registry entries
 updated in `doc/08_tracking/c_migration/c_migration_inventory.sdn` with both
 before/after measurements.
+
+## Addendum 2026-08-18 (goal 3 closure): C-MIG-0029/0030 codegen-lane verdict — JIT helps ~2.5x but does NOT close the gap
+
+**Binary:** `bin/release/x86_64-unknown-linux-gnu/simple`, 59673480 bytes,
+mtime 2026-08-18 06:12:48 (`readlink -f bin/simple` resolved to this path at
+measurement time, unchanged across the whole session).
+
+**Method correction, load-bearing for this addendum:** `SIMPLE_JIT_STRICT=1
+bin/simple run` is NOT an interpreter-vs-codegen A/B — bare `bin/simple run`
+already Cranelift-JITs by default (`.claude/rules/testing.md`: "`bin/simple
+run` uses the Cranelift JIT; `bin/simple test` hard-defaults to the tree-walk
+interpreter"). Confirmed directly: running the harnesses below with and
+without `SIMPLE_JIT_STRICT=1` under `bin/simple run` produced byte-identical
+timing (ratio 61.9x both times) — `SIMPLE_JIT_STRICT=1` only changes refusal
+behavior on a JIT failure, it does not select an engine. The actual knob is
+`SIMPLE_EXECUTION_MODE=interpreter|jit`, used for all numbers below.
+
+**Harnesses:** `bench_sqrt_f64_codegen.spl` / `bench_cbrt_f64_codegen.spl`
+(scratchpad, not committed). Each asserts 3 KATs first (perfect
+cube/square, an oracle-tolerance check at x=2.0, and one at x=1e300), then a
+pinned 100-vector seeded corpus (LCG-generated exponent in [-300,300] x
+mantissa in [1,10), plus exact-power/boundary cases: 0.0, 1.0, 4.0/8.0, 9.0,
+16.0, 1e-300, 1e300, 0.999999, 1.000001, 1e6) verified in full against the
+`rt_math_sqrt`/`rt_math_cbrt` oracle before any timing. Both harnesses printed
+`KAT OK: 100/100 vectors match` under both engines. 200 reps x 100 vectors;
+one clock pair around the whole double loop (batch-timed) plus a
+per-call-probe variant (clock read around every individual call) run
+separately, to make probe distortion visible per the time_utils finding above.
+
+**JIT correctness pitfall found while writing the cbrt harness (worked
+around, not filed separately — did not block this measurement):**
+`if not _approx(f(x), g(x), tol):` with two function-call results passed
+directly as nested call arguments returned a wrong boolean under
+`SIMPLE_EXECUTION_MODE=jit` (a false KAT failure on values that printed
+identically when read back separately); binding each call to a `val` first
+and passing the locals fixed it. Anyone writing a similar codegen-lane
+harness should bind call results to locals before passing them into a
+boolean-returning helper.
+
+**2x2 results (batch-timed vs. per-call-probe, interpreter vs. JIT):**
+
+| function | interpreter batch | interpreter probe | JIT batch | JIT probe |
+|---|---|---|---|---|
+| sqrt_f64 | simple_us=9230087 c_us=59705 **ratio=154.6x** | simple_us=9241880 c_us=86453 **ratio=106.9x** | simple_us=35653 c_us=577 **ratio=61.8x** | simple_us=36639 c_us=1018 **ratio=36.0x** |
+| cbrt_f64 | simple_us=6688979 c_us=62860 **ratio=106.4x** | simple_us=6711533 c_us=89511 **ratio=75.0x** | simple_us=24911 c_us=940 **ratio=26.5x** | simple_us=24832 c_us=1460 **ratio=17.0x** |
+
+(The batch-timed absolute interpreter/JIT wall times above are the more
+reliable evidence for the engine speedup claim; the oracle's `c_us` itself is
+only tens-of-microseconds to low-hundreds-of-microseconds over 20,000 calls
+— genuinely cheap hardware/library calls — so both batch and probe ratios
+against it are noisy in the same direction as the time_utils finding, though
+nowhere near enough to explain an over-60x gap.)
+
+**Verdict: the task's premise is half right and half wrong.** JIT genuinely
+helps — Simple-side wall time drops ~2.5x for both functions (sqrt:
+9.23M us -> 35.7K us; cbrt: 6.69M us -> 24.9K us), and the oracle ratio
+improves correspondingly (sqrt 154.6x -> 61.8x; cbrt 106.4x -> 26.5x), so the
+residual IS partly interpreter dispatch tax, exactly as hypothesized. But
+codegen does NOT bring either function anywhere near the plan's <=2x
+threshold: **sqrt_f64 remains OPEN at 61.8x (batch) / 36.0x (probe) under
+JIT**, and **cbrt_f64 remains OPEN at 26.5x (batch) / 17.0x (probe) under
+JIT**. Neither is RESOLVED. The claim "the codegen lane should be materially
+better" is confirmed directionally (both ~2.5x-4x better than interpreter
+depending on which pairing you compare) but not in magnitude — a Newton-
+iteration kernel doing several f64 arithmetic ops per iteration, 1-8
+iterations per call, plus Simple's function-call/argument-marshalling
+overhead, still cannot approach a single hardware sqrt/cbrt instruction's
+cost even fully JIT-compiled. Closing the remaining gap would require either
+inlining the kernel more aggressively at the JIT level or accepting that a
+software Newton fallback can never match a hardware FP instruction within 2x
+for this shape of workload. C-MIG-0029/0030 registry entries updated with
+`perf_codegen` fields recording this verdict in full.
