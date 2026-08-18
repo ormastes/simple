@@ -21,8 +21,9 @@
 - Date: 2026-08-17
 - Status: **OPEN (bounded, guarded)** — DUPLICATE of
   lint_single_file_superlinear_timeout_on_line_count_2026-08-06.md.
-  The superlinear term is **not yet located** (profiling blocked on this host);
-  optimisation still OPEN. The "not a hang / cost not deadlock" verdict, the
+  **2026-08-18: the dominant term IS located** — see the banner above — and it
+  is a de-JIT constant factor, not a superlinear term. Optimisation still OPEN
+  (the fix is a struct rename plus a driver-heuristic change, neither landed). The "not a hang / cost not deadlock" verdict, the
   guard, and the specs are all present and green.
 - **Re-verified 2026-08-17 (later pass), by execution, not inspection:**
   - `out=$(timeout 500 sh scripts/check/check-lint-cost-budget.shs); rc=$?`
@@ -78,11 +79,16 @@ are an upper envelope, not clean-room figures.
 1. **Declaration count is LINEAR.** 15 -> 90 tiny declarations leaves per-decl
    cost flat or slightly falling (6.6s -> 4.7s). Splitting a file into more
    functions buys nothing.
-2. **Content complexity dominates, and is superlinear in the file.** Two real
-   hwir row-builder functions cost ~99s each — 20x a trivial declaration. Going
-   from 182 to 443 lines *of the same file* multiplied wall time by more than
-   11x for 2.4x the lines. Extrapolating the full 1901-line, 30-function file
-   puts it far beyond any practical budget.
+2. **Content complexity dominates.** Two real hwir row-builder functions cost
+   ~99s each — 20x a trivial declaration. **Corrected 2026-08-18:** the
+   "superlinear in the file" claim attached to this point rested on the
+   182 -> 443 line comparison, and the 443-line arm is a **KILLED** run
+   (`>2400s`, no verdict). A kill is a lower bound, so no ratio and no exponent
+   may be computed from it, and "more than 11x for 2.4x the lines" is not a
+   measurement. Measured properly, in-process, the lexer is **linear** in token
+   count (exponent 1.09 across a 2.8x range). The reason `zca_rows.spl` exceeds
+   any practical budget is its size times a very large *constant* per token
+   (~21 ms), not a growth exponent.
 3. **Startup is ~12s**, and is *not* the ~310s fixed `Session setup` cost
    another lane measured in `bin/simple test`. Lint does not share that path;
    the two should not be conflated or double-fixed.
@@ -105,9 +111,24 @@ which under-predicts real compiler files by more than an order of magnitude and
 misled scheduling. That entry now carries the table above and states explicitly
 which variable dominates.
 
-## Still open: where the superlinearity lives
+## Where the superlinearity lives — SUPERSEDED 2026-08-18
 
-**Not located.** Attach-based profiling is unavailable on this host:
+**Located, and it is not superlinearity.** See the banner at the top of this
+file. The dominant term is a 100-1000x constant factor from running the
+compiler frontend interpreted, caused by two stacked de-JIT triggers. The
+candidate shapes listed below (per-declaration rescans, depth-quadratic
+expression work, per-expression symbol re-resolution) were **not** confirmed and
+none of them is the cause; they are kept only as a record of what was ruled out.
+The 8-function `>2400s` row in the table above remains a KILLED run — a lower
+bound, never a measurement — and must not be used to fit an exponent.
+
+The rest of this section is the historical account of why profiling was blocked.
+The blocker was real but the workaround was simpler than assumed: yama
+`ptrace_scope=1` forbids *attaching* to a non-descendant, but the actual
+localisation needed no profiler at all — a default-off `LINTPROF` timer plus an
+in-process cost curve was enough.
+
+Attach-based profiling is unavailable on this host:
 `/proc/sys/kernel/yama/ptrace_scope` = 1 and
 `/proc/sys/kernel/perf_event_paranoid` = 4, so both `perf record -p` (produced a
 0-byte `perf.data`) and `gdb -p` attach are refused without root. Profiling
@@ -252,3 +273,50 @@ Verified after instrumenting (probes off by default, no behavior change):
 - `parser_contextual_keyword_named_arg_spec.spl`: Results: 8 total, 8 passed, 0 failed.
 - `parser_move_contextual_keyword_spec.spl`: Results: 4 total, 4 passed, 0 failed.
 - `bin/simple lint src/lib/common/base_encoding.spl`: "Lint passed: all files clean".
+
+## Text tier (check_all_rules) — root-caused and fixed 2026-08-18
+
+The text-tier rule loop (separate from the parse cost above) was attributed with new
+per-rule `LINTPROF` probes (same env-gated idiom, default off) added to BOTH
+`check_all_rules` implementations:
+- `src/compiler/90.tools/fix/rules/registry.spl` (`rule:` labels) — instrumented, but
+  **the run resolves the STDLIB copy**, not this one;
+- `src/lib/nogc_sync_mut/tooling/easy_fix/rules.spl` (`std_rule:` labels) — this is the
+  one that executes (proven: only `std_rule:` lines appear in the profile).
+
+Profile on `fx_m5_c10.spl` (25 lines, load ~20-25):
+
+| mark | before (us) | after (us) |
+|---|---|---|
+| `std_rule:check_unnamed_duplicate_typed_args` | 671,034 | 40,896 |
+| — of which `dup_args:fix_loop` (call-site scan) | 646,775 | 32,982 |
+| `check_all_rules` (remainder) | 748,676 | 80,623 |
+| `TEXT_TIER_TOTAL` | 986,137 | 172,862 |
+
+(The originally reported ~12.4s check_all_rules was the same code under load 33-55;
+the ratio, not the absolute, is the signal: ~8x on check_all_rules, ~5x on the tier.)
+
+Root cause: `_collect_line_call_replacements` stepped **one character at a time**
+through every line for every duplicate-typed signature, calling interpreted
+`_matches_identifier_at` per character (O(sigs x chars) interpreted calls).
+`_short_find_text_from` had the same per-char interpreted loop.
+
+Fix (behavior-identical, `src/lib/nogc_sync_mut/tooling/easy_fix/rules.spl`):
+- fast-reject lines with `line.contains(sig.name)`;
+- on a failed identifier-boundary match, jump to the next occurrence with native
+  `.find()` instead of `i + 1` stepping (an occurrence that fails at `i` cannot
+  match at `i` again, and `.find()` from `i+1` yields exactly the next candidate);
+- `_short_find_text_from` rewritten onto native `.find()` (used by several rules).
+  Note: `slice(...).find(...)` must go through an intermediate typed `val` —
+  chained `.find` on the erased receiver fails (`method 'find' not found ... in
+  nested call context`), the known chained-methods-on-erased-receivers limit.
+
+Verified:
+- Lint stdout **byte-identical** before/after on 3 files (fixture + 
+  `src/lib/common/compute/placement_contracts/storage.spl` +
+  `src/lib/common/crypto/typed/__init__.spl`; 268/256/256 output lines, findings present).
+- `lint_profile_spec.spl`: Results: 17 total, 17 passed, 0 failed.
+- `collection_easy_fix_spec.spl`: Results: 4 total, 4 passed, 0 failed.
+- `lint_cli_duplicate_typed_args_contract_check.spl` FAILs identically at HEAD with the
+  pre-change files restored (zero-examples / DTYP001 parity FAIL) — pre-existing, not
+  introduced by this change; left as-is.

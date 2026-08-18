@@ -1,4 +1,5 @@
 @allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
 # EasyFix Shared Rules Module
 # Each rule: fn check_<rule>(source: String, file: String) -> [EasyFix]
 #
@@ -80,7 +81,9 @@ struct ShortGrammarPlaceholderCandidate:
 # ============================================================================
 
 fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
+    var _rt = _ez_prof_now()
     val signatures = _collect_duplicate_typed_arg_signatures(source: source)
+    _rt = _ez_prof_mark("dup_args:collect_signatures", _rt)
     var fixes: [EasyFix] = []
 
     for sig in signatures:
@@ -115,6 +118,7 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
                 fix.add_replacement(rep)
             fixes.push(fix)
 
+    _rt = _ez_prof_mark("dup_args:fix_loop", _rt)
     fixes
 
 fn _collect_duplicate_typed_arg_signatures(source: text) -> [DuplicateTypedArgSignature]:
@@ -240,10 +244,19 @@ fn _collect_call_replacements_for_signature(source: text, file: text, sig: Dupli
 
 fn _collect_line_call_replacements(line: text, file: text, sig: DuplicateTypedArgSignature, line_num: i64, byte_offset: i64) -> [Replacement]:
     var replacements: [Replacement] = []
+    # Fast reject: most lines never mention the signature name at all.
+    if not line.contains(sig.name):
+        return replacements
     var i = 0
     while i < line.len():
         if not _matches_identifier_at(line: line, start: i, name: sig.name):
-            i = i + 1
+            # Jump to the next occurrence natively instead of stepping one
+            # character at a time through an interpreted loop.
+            val _tail: text = line.slice(i + 1)
+            val rel = _tail.find(sig.name)
+            if rel < 0:
+                break
+            i = i + 1 + rel
             continue
         if _is_definition_context(line: line, token_start: i):
             i = i + sig.name.len()
@@ -971,12 +984,15 @@ fn _short_scan_simple_lambda_expr_end(line: text, start: i64) -> i64:
 fn _short_find_text_from(line: text, needle: text, search_from: i64) -> i64:
     if needle == "":
         return search_from
-    var i = search_from
-    while i + needle.len() <= line.len():
-        if line.slice(i, i + needle.len()) == needle:
-            return i
-        i = i + 1
-    -1
+    if search_from > line.len():
+        return -1
+    # Native substring search instead of a per-character interpreted loop —
+    # this helper is on the text-tier hot path for several rules.
+    val _sfx: text = line.slice(search_from)
+    val rel = _sfx.find(needle)
+    if rel < 0:
+        return -1
+    search_from + rel
 
 fn _short_placeholder_expr_is_safe(expr: text) -> bool:
     _short_placeholder_expr_has_binary_operator(expr)
@@ -1261,50 +1277,77 @@ fn _short_is_identifier_char(ch: text) -> bool:
 # Master: run all text-scanning rules
 # ============================================================================
 
+# Per-rule timing probe (level-gated, DEFAULT OFF) — same idiom as
+# lint_prof_now/mark in compiler.tools.lint._LintMain.lint_checks.
+# See doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md
+fn _ez_prof_now() -> i64:
+    if env_get("SIMPLE_LINT_PROFILE") == "":
+        return 0
+    time_now_unix_micros()
+
+fn _ez_prof_mark(label: text, t0: i64) -> i64:
+    if t0 == 0:
+        return 0
+    val now = time_now_unix_micros()
+    print("LINTPROF\tstd_rule:{label}\t{now - t0}")
+    now
+
 fn check_all_rules(source: String, file: String) -> [EasyFix]:
     var all_fixes: [EasyFix] = []
+    var _rt = _ez_prof_now()
 
     val fixes1 = check_print_in_test_spec(source: source, file: file)
+    _rt = _ez_prof_mark("check_print_in_test_spec", _rt)
     for f in fixes1:
         all_fixes.push(f)
 
     val fixes2 = check_unnamed_duplicate_typed_args(source: source, file: file)
+    _rt = _ez_prof_mark("check_unnamed_duplicate_typed_args", _rt)
     for f in fixes2:
         all_fixes.push(f)
 
     val fixes3 = check_resource_leak(source: source, file: file)
+    _rt = _ez_prof_mark("check_resource_leak", _rt)
     for f in fixes3:
         all_fixes.push(f)
 
     val fixes4 = check_spipe_missing_docstrings(source: source, file: file)
+    _rt = _ez_prof_mark("check_spipe_missing_docstrings", _rt)
     for f in fixes4:
         all_fixes.push(f)
 
     val fixes5 = check_spipe_manual_assertions(source: source, file: file)
+    _rt = _ez_prof_mark("check_spipe_manual_assertions", _rt)
     for f in fixes5:
         all_fixes.push(f)
 
     val fixes6 = check_non_exhaustive_match(source: source, file: file)
+    _rt = _ez_prof_mark("check_non_exhaustive_match", _rt)
     for f in fixes6:
         all_fixes.push(f)
 
     val fixes7 = check_parser_contextual_keyword(source: source, file: file)
+    _rt = _ez_prof_mark("check_parser_contextual_keyword", _rt)
     for f in fixes7:
         all_fixes.push(f)
 
     val fixes8 = check_deprecated_if_let(source: source, file: file)
+    _rt = _ez_prof_mark("check_deprecated_if_let", _rt)
     for f in fixes8:
         all_fixes.push(f)
 
     val fixes9 = check_stub_impl_text(source: source, file: file)
+    _rt = _ez_prof_mark("check_stub_impl_text", _rt)
     for f in fixes9:
         all_fixes.push(f)
 
     val fixes10 = check_short_grammar_refactor(source: source, file: file)
+    _rt = _ez_prof_mark("check_short_grammar_refactor", _rt)
     for f in fixes10:
         all_fixes.push(f)
 
     val fixes11 = check_field_access_refactor(source: source, file: file)
+    _rt = _ez_prof_mark("check_field_access_refactor", _rt)
     for f in fixes11:
         all_fixes.push(f)
 
