@@ -8,6 +8,26 @@ alwaysApply: false
 # Bootstrap & Binary Architecture
 
 ## KNOWN BLOCKER (2026-08-06, check before redeploying): Stage 3 self-host fails
+
+> **STATUS UPDATE 2026-08-18 — the ByteOrder blocker below is STALE
+> (RESOLVED).** Re-probed under the current deployed seed (rebuilt 2026-08-18
+> 06:12 with brace-escape + statx + env-cache fixes): the regression spec
+> `test/01_unit/compiler/hir/hir_lazy_import_registration_flag_regression_spec.spl`
+> is GREEN (`Results: 1 total, 1 passed, 0 failed`), and a minimal
+> `use std.binary_io.{ByteOrder}` lazy-import probe resolves and runs clean
+> under `bin/simple run` (see `scripts/check/check-bootstrap-preflight.shs`,
+> which fences it). The BGS1 fix (`module_lowering.spl:952-955`) and the
+> `Effect` facade collision fix are on main; a 2026-08-09 full bootstrap
+> compiled all 803 Stage-2 files with 0 failures (125 MB non-vacuous binary).
+> Per the bug doc's final update, the live bootstrap concern is no longer this
+> error but output *vacuity* — verify the deployed binary by symbol
+> count/banner, never exit code (see
+> `stage3_vacuous_binary_is_enum_discriminant_garbage_not_a_link_failure_2026-08-08.md`,
+> itself RESOLVED with fence
+> `scripts/check/check-native-inprocess-positional-nonvacuous.shs`).
+> **Run `sh scripts/check/check-bootstrap-preflight.shs` before any bootstrap.**
+> The historical text below is kept for context only.
+
 `bin/simple --version` right now prints the Rust-seed WARNING banner, and it
 will keep doing so until this is fixed. `scripts/bootstrap/bootstrap-from-scratch.sh
 --full-bootstrap --deploy` is the **correct, documented command** — it is not

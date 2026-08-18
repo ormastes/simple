@@ -474,3 +474,23 @@ Cross-referenced in
 `doc/08_tracking/bug/mir_unresolved_method_const0_fails_open_2026-07-28.md`,
 which also records the 3,629-substitution / 538-name census showing that
 `0 error: lines` is a fail-open reading in this lane.
+
+## 2026-08-18 RE-PROBE: still resolved under the freshly rebuilt seed
+
+The deployed seed was rebuilt 2026-08-18 06:12 (brace-escape + statx +
+env-cache fixes; the env-cache change touched interpreter-adjacent code, so
+this re-probe was genuinely informative, not ritual). T0 hosted-seed probes:
+
+1. Regression spec (foreground, `bin/simple test`):
+   `test/01_unit/compiler/hir/hir_lazy_import_registration_flag_regression_spec.spl`
+   → `SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0`
+   → `Results: 1 total, 1 passed, 0 failed` (PASS, exit 0).
+2. Minimal lazy-import probe (`use std.binary_io.{ByteOrder}` + match on
+   `ByteOrder.LittleEndian`, run via `bin/simple run`): prints
+   `PROBE_BYTEORDER=little`, exit 0. This probe is now permanently fenced as
+   check 3 of `scripts/check/check-bootstrap-preflight.shs` (fatal --selftest,
+   PASS/SKIP/FAIL/ERROR verdict per the detector standard).
+
+Conclusion: the `unresolved type: ByteOrder` defect remains RESOLVED; the
+stale KNOWN BLOCKER section in `.claude/rules/bootstrap.md` has been annotated
+accordingly (2026-08-18).
