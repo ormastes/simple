@@ -139,3 +139,16 @@ results/count line in the captured output. If there is none, the result is
 **INCONCLUSIVE** — not green — and must be confirmed by a direct
 `bin/simple run` repro of the behaviour under test before any claim is made.
 Same family as the already-listed `simple test <ABSOLUTE path>` no-op.
+
+## Detectors (guards, censuses, scans) — standard
+
+Anything that REPORTS defects follows `doc/07_guide/infra/detector/detector_standard.md`.
+Minimum before a detector is BLOCKING rather than advisory:
+- fatal `--selftest` with must-FAIL fixtures, not just must-PASS;
+- non-vacuity (`n > 0` or `ERROR — nothing was checked`, exit 2);
+- three-way PASS/SKIP/FAIL so "can't tell" is never a pass;
+- explicit recorded escapes (`--expect-files`/`--expect-removals` style), never silent thresholds;
+- a STATED, MEASURED false-positive rate on a named hand-adjudicated sample (N>=15),
+  as a `# FP-RATE: k/N (pct%) on <sample>, measured <date>` header line.
+Any number whose hits were not all adjudicated is an **UPPER BOUND**, and must be
+labelled that way in the verdict, doc, and commit message — never as a defect COUNT.
