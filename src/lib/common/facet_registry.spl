@@ -1,0 +1,228 @@
+# Facet model + typed AspectCatalog registry
+#
+# Vertical slice of doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# (sections 3, 5.1/5.2/5.5/5.9, 6.7). Implements:
+#   - facet interface identity (aspect + interface name -> stable key "<aspect>/<name>")
+#   - facet binding records (facet interface + implementation + target pointcut)
+#   - an in-memory AspectCatalog that routes a facet request to its owning
+#     aspect entry WITHOUT scanning directories (invariant 5.9)
+#   - try_facet-shaped optional acquisition: absence is a normal, TYPED
+#     answer (an explicit closed-set reason code), never a crash and never a
+#     silent default
+#
+# A resolved facet is an external witness (impl name + owning aspect +
+# generation) — a sidecar that never adds fields, vtable slots, or nominal
+# parents to the base type (invariant 5.2); composition, not inheritance.
+#
+# Implementation notes (deliberate, verified against the current toolchain):
+#   - The API passes ONLY primitives (i64 catalog handle, text, bool) across
+#     the module boundary. The self-hosted test-runner child binary degrades
+#     class-typed values imported cross-module to `object` (method dispatch
+#     and field access both fail), so no class crosses this API.
+#   - State lives in module-level columnar arrays keyed by the catalog
+#     handle (the id-handle pattern of src/lib/nogc_async_mut/async/cancellation.spl).
+#   - Each function is fully INLINE (no helper-function indirection): under
+#     the tree-walk interpreter a helper call can read a STALE snapshot of
+#     module arrays (doc/08_tracking/bug/interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md).
+#
+# Deliberately NOT implemented in this slice: surface syntax (`bind facet`,
+# `facet interface`, `pc{}` integration), SMF pack format / SMF_FLAG_ASPECT_PACK,
+# lazy I/O loading policies (design 6.7 `facet`/`require_facet` loading modes),
+# advice weaving, nominal static mode, ABI fingerprints, aspect packs.
+
+# Absence/presence reason codes returned by facet_absence (typed, closed set).
+val FACET_PRESENT = "present"
+val FACET_NOT_BOUND = "not_bound"
+val FACET_ASPECT_DORMANT = "aspect_dormant"
+
+# ---- module-global catalog state (columnar, keyed by catalog handle) ----
+var _cat_gen: [i64] = []
+var _cat_last_error: [text] = []
+
+# catalog entries: aspect -> pack routing (invariant 5.9: exact lookup only)
+var _e_cat: [i64] = []
+var _e_aspect: [text] = []
+var _e_pack: [text] = []
+var _e_loaded: [bool] = []
+
+# facet bindings
+var _b_cat: [i64] = []
+var _b_key: [text] = []       # "<aspect>/<facet interface name>"
+var _b_aspect: [text] = []    # owning aspect
+var _b_target: [text] = []    # matched base type (resolved pointcut target)
+var _b_pointcut: [text] = []  # source pointcut text (informational)
+var _b_impl: [text] = []      # facet implementation (witness factory) name
+var _b_multi: [bool] = []     # multi-provider binding (relaxes 5.5)
+
+fn catalog_new() -> i64:
+    """Create a new, empty, isolated aspect catalog. Returns its handle."""
+    val id = _cat_gen.len()
+    _cat_gen = _cat_gen.push(0)
+    _cat_last_error = _cat_last_error.push("")
+    id
+
+fn catalog_last_error(cat: i64) -> text:
+    """Explanation of the most recent failed catalog operation ("" after a
+    successful one)."""
+    _cat_last_error[cat]
+
+fn catalog_register_aspect(cat: i64, aspect: text, pack_path: text) -> bool:
+    """Register an aspect -> pack routing entry. Duplicate registration in
+    the same catalog fails closed."""
+    var i = 0
+    val n = _e_cat.len()
+    while i < n:
+        if _e_cat[i] == cat and _e_aspect[i] == aspect:
+            _cat_last_error[cat] = "aspect already registered: {aspect}"
+            return false
+        i = i + 1
+    _e_cat = _e_cat.push(cat)
+    _e_aspect = _e_aspect.push(aspect)
+    _e_pack = _e_pack.push(pack_path)
+    _e_loaded = _e_loaded.push(false)
+    _cat_last_error[cat] = ""
+    true
+
+fn catalog_bind_facet(cat: i64, aspect: text, facet_name: text, target_type: text, pointcut: text, impl_name: text, multi: bool) -> bool:
+    """Register a facet binding (design 3.4: facet interface -> implementation
+    for a pointcut target). Enforces binding uniqueness (invariant 5.5): two
+    default providers for the same (target, facet) pair are an error unless
+    the binding is declared multi. The owning aspect must already be
+    registered (fails closed otherwise)."""
+    var have_aspect = false
+    var i = 0
+    val ne = _e_cat.len()
+    while i < ne:
+        if _e_cat[i] == cat and _e_aspect[i] == aspect:
+            have_aspect = true
+        i = i + 1
+    if not have_aspect:
+        _cat_last_error[cat] = "unknown aspect: {aspect}"
+        return false
+    val key = "{aspect}/{facet_name}"
+    if not multi:
+        var j = 0
+        val nb = _b_cat.len()
+        while j < nb:
+            if _b_cat[j] == cat and _b_key[j] == key and _b_target[j] == target_type and not _b_multi[j]:
+                _cat_last_error[cat] = "duplicate default binding for ({target_type}, {key})"
+                return false
+            j = j + 1
+    _b_cat = _b_cat.push(cat)
+    _b_key = _b_key.push(key)
+    _b_aspect = _b_aspect.push(aspect)
+    _b_target = _b_target.push(target_type)
+    _b_pointcut = _b_pointcut.push(pointcut)
+    _b_impl = _b_impl.push(impl_name)
+    _b_multi = _b_multi.push(multi)
+    _cat_last_error[cat] = ""
+    true
+
+fn catalog_load_aspect(cat: i64, aspect: text) -> bool:
+    """Mark an aspect loaded (activation). Bumps the catalog generation."""
+    var found = false
+    var i = 0
+    val n = _e_cat.len()
+    while i < n:
+        if _e_cat[i] == cat and _e_aspect[i] == aspect:
+            _e_loaded[i] = true
+            found = true
+        i = i + 1
+    if not found:
+        _cat_last_error[cat] = "unknown aspect: {aspect}"
+        return false
+    _cat_gen[cat] = _cat_gen[cat] + 1
+    _cat_last_error[cat] = ""
+    true
+
+fn catalog_unload_aspect(cat: i64, aspect: text) -> bool:
+    """Mark an aspect unloaded (deactivation). Bumps the catalog generation."""
+    var found = false
+    var i = 0
+    val n = _e_cat.len()
+    while i < n:
+        if _e_cat[i] == cat and _e_aspect[i] == aspect:
+            _e_loaded[i] = false
+            found = true
+        i = i + 1
+    if not found:
+        _cat_last_error[cat] = "unknown aspect: {aspect}"
+        return false
+    _cat_gen[cat] = _cat_gen[cat] + 1
+    _cat_last_error[cat] = ""
+    true
+
+fn catalog_aspect_loaded(cat: i64, aspect: text) -> bool:
+    var found = false
+    var i = 0
+    val n = _e_cat.len()
+    while i < n:
+        if _e_cat[i] == cat and _e_aspect[i] == aspect and _e_loaded[i]:
+            found = true
+        i = i + 1
+    found
+
+fn facet_absence(cat: i64, base_type: text, aspect: text, facet_name: text) -> text:
+    """Optional acquisition, reason axis (design 6.7 try_facet). Never
+    performs I/O, never loads an aspect, never scans a directory. Returns
+    FACET_PRESENT, FACET_NOT_BOUND, or FACET_ASPECT_DORMANT — a normal typed
+    answer, never a crash and never a silent default."""
+    val key = "{aspect}/{facet_name}"
+    var bidx = -1
+    var i = 0
+    val nb = _b_cat.len()
+    while i < nb:
+        if _b_cat[i] == cat and _b_key[i] == key and _b_target[i] == base_type:
+            bidx = i
+        i = i + 1
+    if bidx < 0:
+        return FACET_NOT_BOUND
+    val owner = _b_aspect[bidx]
+    var loaded = false
+    var j = 0
+    val ne = _e_cat.len()
+    while j < ne:
+        if _e_cat[j] == cat and _e_aspect[j] == owner and _e_loaded[j]:
+            loaded = true
+        j = j + 1
+    if not loaded:
+        return FACET_ASPECT_DORMANT
+    FACET_PRESENT
+
+fn try_facet(cat: i64, base_type: text, aspect: text, facet_name: text) -> bool:
+    """Optional acquisition, presence axis: true iff the facet is bound for
+    this base type AND its owning aspect is loaded. Absence is a plain
+    `false`, never a crash."""
+    facet_absence(cat, base_type, aspect, facet_name) == FACET_PRESENT
+
+fn facet_witness_impl(cat: i64, base_type: text, aspect: text, facet_name: text) -> text:
+    """Witness lookup: the facet implementation name the request routes to,
+    or "" when the facet is absent (the caller distinguishes why via
+    facet_absence). The witness is external to the base object: reading it
+    mutates nothing (invariant 5.2)."""
+    val key = "{aspect}/{facet_name}"
+    var bidx = -1
+    var i = 0
+    val nb = _b_cat.len()
+    while i < nb:
+        if _b_cat[i] == cat and _b_key[i] == key and _b_target[i] == base_type:
+            bidx = i
+        i = i + 1
+    if bidx < 0:
+        return ""
+    val owner = _b_aspect[bidx]
+    var loaded = false
+    var j = 0
+    val ne = _e_cat.len()
+    while j < ne:
+        if _e_cat[j] == cat and _e_aspect[j] == owner and _e_loaded[j]:
+            loaded = true
+        j = j + 1
+    if not loaded:
+        return ""
+    _b_impl[bidx]
+
+fn facet_witness_generation(cat: i64) -> i64:
+    """Current catalog generation (bumped on every load/unload). A held
+    witness whose generation differs from the current one is stale."""
+    _cat_gen[cat]

@@ -1,0 +1,133 @@
+"""
+# Facet Registry / AspectCatalog Specification
+
+Vertical slice of the aspect-facet dynload design
+(doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md).
+
+Proves the non-negotiable invariant: an optional aspect that is absent (not
+loaded) leaves the core path fully working — a facet request answers with a
+TYPED absence reason (never a crash, never a silent default), and a present
+aspect actually resolves (positive control: the feature cannot pass by always
+answering "absent").
+"""
+
+use std.spec.{describe, it, expect}
+use std.facet_registry.{catalog_new, catalog_last_error, catalog_register_aspect, catalog_bind_facet}
+use std.facet_registry.{catalog_load_aspect, catalog_unload_aspect, catalog_aspect_loaded}
+use std.facet_registry.{try_facet, facet_absence, facet_witness_impl, facet_witness_generation}
+use std.facet_registry.{FACET_PRESENT, FACET_NOT_BOUND, FACET_ASPECT_DORMANT}
+
+describe "AspectCatalog facet binding and routing":
+    it "routes a bound facet on a loaded aspect to its implementation (present case)":
+        val cat = catalog_new()
+        expect catalog_register_aspect(cat, "debug", "packs/debug.smf") == true
+        expect catalog_bind_facet(cat, "debug", "Debuggable", "storage.cache.LruCache", "implements(Cache) & type(storage.cache.**)", "CacheDebug", false) == true
+        expect catalog_load_aspect(cat, "debug") == true
+        expect try_facet(cat, "storage.cache.LruCache", "debug", "Debuggable") == true
+        expect facet_absence(cat, "storage.cache.LruCache", "debug", "Debuggable") == FACET_PRESENT
+        expect facet_witness_impl(cat, "storage.cache.LruCache", "debug", "Debuggable") == "CacheDebug"
+
+    it "defect-class: routing is exact-key, not always-present — an unrelated base type stays absent while the bound one resolves":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "debug", "packs/debug.smf")
+        catalog_bind_facet(cat, "debug", "Debuggable", "storage.cache.LruCache", "type(storage.cache.**)", "CacheDebug", false)
+        catalog_load_aspect(cat, "debug")
+        # positive control: bound target resolves
+        expect try_facet(cat, "storage.cache.LruCache", "debug", "Debuggable") == true
+        # unrelated base type: typed absence, not a match and not a crash
+        expect try_facet(cat, "net.http.Server", "debug", "Debuggable") == false
+        expect facet_absence(cat, "net.http.Server", "debug", "Debuggable") == FACET_NOT_BOUND
+        expect facet_witness_impl(cat, "net.http.Server", "debug", "Debuggable") == ""
+
+describe "Optional acquisition — typed absence, never a crash":
+    it "answers a dormant (registered but unloaded) aspect with aspect_dormant":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "profile", "packs/profile.smf")
+        catalog_bind_facet(cat, "profile", "Profiled", "core.Order", "implements(Entity)", "OrderProfile", false)
+        expect try_facet(cat, "core.Order", "profile", "Profiled") == false
+        expect facet_absence(cat, "core.Order", "profile", "Profiled") == FACET_ASPECT_DORMANT
+        expect facet_witness_impl(cat, "core.Order", "profile", "Profiled") == ""
+
+    it "defect-class: absence is not the hardwired answer — loading the aspect flips the SAME query to present, unloading flips it back":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "profile", "packs/profile.smf")
+        catalog_bind_facet(cat, "profile", "Profiled", "core.Order", "implements(Entity)", "OrderProfile", false)
+        expect facet_absence(cat, "core.Order", "profile", "Profiled") == FACET_ASPECT_DORMANT
+        catalog_load_aspect(cat, "profile")
+        expect try_facet(cat, "core.Order", "profile", "Profiled") == true
+        expect facet_witness_impl(cat, "core.Order", "profile", "Profiled") == "OrderProfile"
+        catalog_unload_aspect(cat, "profile")
+        expect try_facet(cat, "core.Order", "profile", "Profiled") == false
+        expect facet_absence(cat, "core.Order", "profile", "Profiled") == FACET_ASPECT_DORMANT
+
+describe "Binding uniqueness (invariant 5.5)":
+    it "rejects a second default provider for the same (base type, facet) pair":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "debug", "packs/debug.smf")
+        # positive control: first default binding is accepted
+        expect catalog_bind_facet(cat, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebugA", false) == true
+        expect catalog_bind_facet(cat, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebugB", false) == false
+        expect catalog_last_error(cat).contains("duplicate default binding") == true
+
+    it "defect-class: uniqueness is scoped, not a blanket refusal — multi bindings and distinct targets are accepted":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "debug", "packs/debug.smf")
+        expect catalog_bind_facet(cat, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebug", false) == true
+        # different target type: fine
+        expect catalog_bind_facet(cat, "debug", "Debuggable", "core.Invoice", "type(core.**)", "InvoiceDebug", false) == true
+        # same target but declared multi: fine
+        expect catalog_bind_facet(cat, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebugExtra", true) == true
+
+describe "Core independence (invariant 5.1/5.2 slice)":
+    it "an absent aspect leaves the core value and its behaviour untouched (sidecar witness, no base mutation)":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "debug", "packs/debug.smf")
+        catalog_bind_facet(cat, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebug", false)
+        # core computation independent of aspect state
+        val core_value = 40 + 2
+        expect core_value == 42
+        # facet absent: typed absence, core path above already ran fine
+        expect try_facet(cat, "core.Order", "debug", "Debuggable") == false
+        catalog_load_aspect(cat, "debug")
+        # loading grants an external witness; the core value is untouched
+        expect try_facet(cat, "core.Order", "debug", "Debuggable") == true
+        expect core_value == 42
+
+    it "defect-class: binding against an unregistered aspect fails closed with a typed error, not a crash":
+        val cat = catalog_new()
+        expect catalog_bind_facet(cat, "ghost", "Phantom", "core.Order", "type(core.**)", "PhantomImpl", false) == false
+        expect catalog_last_error(cat).contains("unknown aspect") == true
+        # positive control: a registered aspect binds fine in the same catalog
+        catalog_register_aspect(cat, "real", "packs/real.smf")
+        expect catalog_bind_facet(cat, "real", "Live", "core.Order", "type(core.**)", "LiveImpl", false) == true
+
+describe "Catalog isolation and witness generation":
+    it "a second catalog does not see the first catalog's aspects or bindings":
+        val a = catalog_new()
+        val b = catalog_new()
+        catalog_register_aspect(a, "debug", "packs/debug.smf")
+        catalog_bind_facet(a, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebug", false)
+        catalog_load_aspect(a, "debug")
+        # positive control: catalog a resolves
+        expect try_facet(a, "core.Order", "debug", "Debuggable") == true
+        # catalog b: same query is a typed not_bound absence
+        expect try_facet(b, "core.Order", "debug", "Debuggable") == false
+        expect facet_absence(b, "core.Order", "debug", "Debuggable") == FACET_NOT_BOUND
+
+    it "defect-class: generation moves on load AND unload, so a held witness is detectably stale — and re-registering in a fresh catalog works":
+        val cat = catalog_new()
+        catalog_register_aspect(cat, "debug", "packs/debug.smf")
+        catalog_bind_facet(cat, "debug", "Debuggable", "core.Order", "type(core.**)", "OrderDebug", false)
+        val g0 = facet_witness_generation(cat)
+        catalog_load_aspect(cat, "debug")
+        val g1 = facet_witness_generation(cat)
+        expect (g1 > g0) == true
+        catalog_unload_aspect(cat, "debug")
+        val g2 = facet_witness_generation(cat)
+        expect (g2 > g1) == true
+        # duplicate registration fails closed; a fresh catalog accepts the same aspect
+        expect catalog_register_aspect(cat, "debug", "packs/debug.smf") == false
+        expect catalog_last_error(cat).contains("already registered") == true
+        val fresh = catalog_new()
+        expect catalog_register_aspect(fresh, "debug", "packs/debug.smf") == true
+        expect catalog_aspect_loaded(fresh, "debug") == false
