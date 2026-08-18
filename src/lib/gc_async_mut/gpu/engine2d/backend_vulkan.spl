@@ -397,6 +397,71 @@ fn vulkan_backend_retain_session(mut backend: VulkanBackend, session: VulkanSess
     backend.session = session
     backend.owns_session = true
 
+fn _vulkan_submission_is_proven(backend: VulkanBackend) -> bool:
+    """True only when this backend's last batch was proven done ON THE DEVICE.
+
+    Every clause is a fail-closed gate: a sticky CPU fallback, unknown
+    completion, an uninitialized surface, a batch that was never submitted, or
+    a submission whose fence has not been waited on all mean "not proven".
+    """
+    if backend.cpu_fallback_used: return false
+    if backend.completion_unknown: return false
+    if not backend.initialized: return false
+    if backend.observed_device_submit_count <= 0: return false
+    backend.observed_device_fence_count >= backend.observed_device_submit_count
+
+fn vulkan_submitted_framebuffer_handle(backend: VulkanBackend) -> i64:
+    """Framebuffer handle safe to present directly, or 0 when unproven."""
+    if not _vulkan_submission_is_proven(backend): return 0
+    backend.d_framebuffer
+
+fn vulkan_framebuffer_ownership_handle(backend: VulkanBackend) -> i64:
+    """Handle identifying the allocation this backend OWNS.
+
+    Unlike `vulkan_submitted_framebuffer_handle` this does not require a proven
+    submission -- ownership exists as soon as the device allocation does -- but
+    it is still 0 on CPU fallback or before initialization, because in those
+    cases there is no device allocation to own.
+    """
+    if backend.cpu_fallback_used: return 0
+    if not backend.initialized: return 0
+    backend.d_framebuffer
+
+fn vulkan_submitted_device_identity(backend: VulkanBackend) -> i64:
+    """Device that executed the proven submission, or 0 when unproven."""
+    if not _vulkan_submission_is_proven(backend): return 0
+    backend.session.device
+
+fn vulkan_submitted_generation(backend: VulkanBackend) -> i64:
+    """Monotonic proven-completion counter, or 0 when unproven.
+
+    This is the fence count, not the submit count: it only advances after an
+    explicit wait succeeded, so it can never name work still in flight.
+    """
+    if not _vulkan_submission_is_proven(backend): return 0
+    backend.observed_device_fence_count
+
+fn vulkan_cancel_submitted_present_source(
+    mut backend: VulkanBackend, framebuffer: i64, receipt: i64
+) -> bool:
+    """Withdraw a present source published by a proven submission.
+
+    Fail-closed and exact-match: the caller must name both the framebuffer
+    handle and the generation it was handed. A stale or mismatched pair
+    cancels nothing and returns false, so a late cancel cannot tear down a
+    newer frame's present source.
+    """
+    val handle = vulkan_submitted_framebuffer_handle(backend)
+    if handle == 0: return false
+    if framebuffer != handle: return false
+    if receipt != vulkan_submitted_generation(backend): return false
+    backend.frame_present_attempted = false
+    backend.frame_present_completed = false
+    backend.frame_device_present = false
+    backend.frame_present_mode = "cancelled"
+    backend.presentation_swapchain = 0
+    true
+
 impl RenderBackend for VulkanBackend:
 
     fn name() -> text:
