@@ -221,6 +221,76 @@ run, since none exists as precedent today; (ii) for the test-spec pairs,
 decide the intended coverage semantics (shared spec vs. per-tree spec)
 before treating them as a dedup target at all.
 
+## Tranche 2 correction (goal 7, 2026-08-18) — `testing/mock/builder.spl` merged; `net/tcp.spl` still blocked
+
+The tranche-2 SKIP on `src/testing/mock/verification.spl` was caused by
+`verification.spl`'s own `import testing.mock.builder: ...` line, not by
+`builder.spl` itself. **`builder.spl` has zero `use`/`mod`/`import` lines** —
+it never actually needed the deferral, and the earlier tranche-2 entry above
+should be read as "builder.spl's *dependent* is blocked", not "builder.spl is
+blocked". This pass re-audited `builder.spl` in isolation and merged it:
+
+- md5sum (re-confirmed, unchanged from tranche 2): `nogc_sync_mut` /
+  `nogc_async_mut` / `gc_async_mut` all `39179f9e...` (identical);
+  `gc_sync_mut` is `2e2e1802...` (**different — left untouched**, per the
+  4-tree correction below).
+- Import audit: zero `use`/`mod`/`import` lines in `builder.spl` itself — passes.
+- Collision check: 14 top-level public symbols (`CallRecord`, `MockFunction`,
+  `Expectation`, `VerificationResult`, `MockBuilder`, `RegistryEntry`,
+  `MockRegistry`, `create_mock`, `MockPolicy`, `mock_policy_init`,
+  `mock_policy_is_enabled`, `mock_policy_allow_in_layer`,
+  `mock_policy_disable`, `mock_policy_reset`) checked against every
+  `fn`/`struct`/`enum`/`class`/`val`/`trait` definition under
+  `src/lib/common/` — **0 collisions**.
+- Moved to `src/lib/common/testing/mock/builder.spl` (311 lines, unchanged;
+  `src/lib/common/` uses flat topic dirs with no `src/` prefix, so the mirror
+  drops the tree-side `src/` segment). The 3 identical tree copies
+  (`nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`) replaced with a 5-line
+  `pub use std.common.testing.mock.builder*` delegator, same comment style as
+  the `amqp_utils.spl` precedent (`ce7b330b911`). `gc_sync_mut`'s copy is
+  untouched — it already carries its own divergent content (a
+  `gc_async_mut`-forwarding compat facade), so it stays exactly as-is; no
+  normalization was applied to it.
+- Callers: `grep -rn 'mock\.builder\|mock/builder' src/ test/ --include='*.spl'`
+  found real importers only against the `nogc_sync_mut` tree path
+  (`use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}` in
+  `test/01_unit/lib/std/testing/prevention_mock_spec.spl`,
+  `test/01_unit/compiler/di/di_lock_spec.spl`,
+  `test/unit/compiler/di/di_lock_spec.spl`,
+  `test/01_unit/app/devhub/adapter_bitbucket_spec.spl`), plus same-tree
+  relative importers inside each of the 3 merged trees
+  (`mock/spy.spl`, `mock/prevention.spl`, `mock/verification.spl`,
+  `testing/mocking_core.spl`'s `mod mock.builder`) — none of those needed
+  edits, since the delegator file stays at the same per-tree path and
+  re-exports the same symbol names.
+- Verification: ran the 3 pre-existing real specs that exercise the
+  `nogc_sync_mut` delegator directly — `prevention_mock_spec.spl`
+  (`Results: 6 total, 6 passed, 0 failed`), `di_lock_spec.spl`
+  (`Results: 15 total, 15 passed, 0 failed`), `adapter_bitbucket_spec.spl`
+  (`Results: 65 total, 65 passed, 0 failed`) — all unchanged/green. No
+  pre-existing spec exercises the `nogc_async_mut` or `gc_async_mut`
+  delegators directly, so a throwaway spec
+  (`test/01_unit/lib/std/testing/mock_builder_delegator_throwaway_spec.spl`,
+  resolving `MockFunction` through each of those two tree paths) was written,
+  run (`Results: 2 total, 2 passed, 0 failed`), and deleted.
+
+Net line delta: -933 (three 311-line duplicates removed) + 311 (common owner)
++ 15 (three 5-line delegators) = **-607 lines**, zero behavior change on the
+3 merged trees, `gc_sync_mut` untouched, zero regression.
+
+**`net/tcp.spl` remains SKIPPED, unchanged from the tranche-2 entry above** —
+it has a genuine per-tree-only import (`std.net.tcp` has no
+`src/lib/common/` sibling for any of the 4 trees) and was explicitly out of
+scope for this pass (no further recursion attempted).
+
+**4-tree correction applied to the recommended list:** any future dedup pass
+over this doc's earlier "3 tree copies" language must read it as "3 of 4
+trees, `gc_sync_mut` excluded and checked separately" — `gc_sync_mut`
+frequently diverges (own content, or its own compat facade forwarding
+elsewhere) and must never be silently folded into a byte-identity claim or
+normalized into a shared delegator; only trees that are byte-identical are
+merged, and a diverging 4th copy is left exactly as it was.
+
 ## Precedent established (2026-08-18, goal 7)
 
 `amqp_utils.spl` is now the first landed whole-file cross-tree dedup: content
