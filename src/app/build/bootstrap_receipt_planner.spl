@@ -5,8 +5,22 @@
 use app.io.mod.{file_write}
 use app.build.targets.bootstrap_policy.{
     BOOTSTRAP_STAGE4_TARGET_V2, bootstrap_reason_from_name,
-    bootstrap_reason_is_explicit, bootstrap_authorization_receipt_v2
+    bootstrap_reason_is_explicit, bootstrap_authorization_receipt_v2,
+    bootstrap_sha256_is_canonical_v2
 }
+
+fn missing_admission_sha_flag(parent_sha: text, runtime_sha: text,
+        closure_sha: text, planner_sha: text) -> text:
+    """Name the first admission hash that is absent or not 64 lowercase hex."""
+    if not bootstrap_sha256_is_canonical_v2(parent_sha):
+        return "--parent-compiler-sha256"
+    if not bootstrap_sha256_is_canonical_v2(runtime_sha):
+        return "--runtime-snapshot-sha256"
+    if not bootstrap_sha256_is_canonical_v2(closure_sha):
+        return "--planner-source-closure-sha256"
+    if not bootstrap_sha256_is_canonical_v2(planner_sha):
+        return "--planner-sha256"
+    ""
 
 pub fn normalize_bootstrap_receipt_args(args: [text]) -> [text]:
     """Strip only the seed runner's bootstrap receipt entry path."""
@@ -54,10 +68,21 @@ pub fn plan_bootstrap_authorization(args: [text]) -> i64:
     if receipt_path.trim().len() == 0:
         print("bootstrap-policy-error: receipt-path-required; use --bootstrap-receipt=<path>")
         return 2
+    val missing_flag = missing_admission_sha_flag(
+        parent_sha, runtime_sha, closure_sha, planner_sha
+    )
+    if missing_flag.len() > 0:
+        print("bootstrap-policy-error: admission-hash-required: " + missing_flag +
+            "=<64 lowercase hex>")
+        return 2
     val receipt = bootstrap_authorization_receipt_v2(
         bootstrap_target, reason, parent_sha, runtime_sha, closure_sha, planner_sha
     )
-    if receipt.len() == 0 or not file_write(receipt_path, receipt + "\n"):
+    if receipt.len() == 0:
+        print("bootstrap-policy-error: reason-not-allowed-for-target: target=" +
+            bootstrap_target + " reason=" + reason_name)
+        return 2
+    if not file_write(receipt_path, receipt + "\n"):
         print("bootstrap-policy-error: receipt-write-failed: " + receipt_path)
         return 2
     print("bootstrap-plan: execution=not-attempted receipt=" + receipt_path + " reason=" + reason_name)
