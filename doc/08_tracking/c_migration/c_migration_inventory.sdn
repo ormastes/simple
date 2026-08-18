@@ -371,3 +371,53 @@ c_migrations:
       full-subject classes), 2026-08-18: simple_us=7324 c_us=1648, ratio
       ~4.4x.
     shared_corpus: 100
+
+  - id: C-MIG-0025
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_string_ends_with
+    classification: product_algorithm
+    replacement: std.common.string_core.str_ends_with (already implemented
+      in src/lib/common/string_core.spl:69-76 — a pure slice-based suffix
+      comparison, deliberately independent of the `rt_string_ends_with`
+      extern per that file's own header comment above `str_starts_with`)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_string_ends_with(s: text, suffix: text) -> bool is registered in
+      the interpreter's extern dispatch table
+      (interpreter_extern/sffi_string.rs::rt_string_ends_with_fn,
+      interpreter_extern/mod.rs:1889) via
+      `s.as_bytes().ends_with(suffix.as_bytes())` — not the C source
+      directly when running under `bin/simple test` (tree-walk
+      interpreter). Both the interpreter shim and the C source at
+      runtime_native.c:3670-3675 implement the identical contract (empty
+      suffix -> true; suffix longer than subject -> false; otherwise a
+      byte-wise tail comparison via memcmp/`.ends_with`), so this spec
+      differentially compares against whichever is actually reached by the
+      extern call, documenting that distinction rather than assuming the C
+      file itself executes. `text.ends_with` in src/lib/text.spl still
+      delegates to the extern directly (not migrated to str_ends_with
+      here) — this entry establishes differential correctness + perf
+      evidence for str_ends_with as an independent twin; migrating the
+      text.spl wrapper's callers is left for a follow-up.
+    correctness_spec: test/01_unit/lib/common/string_core_ends_with_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. empty
+      suffix/empty subject/no-match/suffix-longer-than-subject, multibyte
+      UTF-8 suffix incl. partial-codepoint-match rejection, full-match and
+      near-full-match edge cases, single-char-corruption discrimination,
+      determinism check, 100-vector shared-logic bulk differential loop
+      over subject length 0..99 with rotating suffix classes incl. empty
+      and too-long suffixes, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "No PERF finding — pure-Simple str_ends_with measured
+      ~1.8x the C oracle (interpreter dispatch to
+      `.as_bytes().ends_with()`) over the 100-vector bulk corpus
+      (simple_us=17415, c_us=9654, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), below the plan's 2x threshold."
+    perf_measured: >
+      100 shared branch-covering (subject, suffix) pairs (subject length
+      0..99 via seeded LCG with a repeated "zz" motif every 6th position;
+      suffix rotates through empty/too-long/"zz"/single-uppercase-char/
+      full-subject classes), 2026-08-18: simple_us=17415 c_us=9654, ratio
+      ~1.8x.
+    shared_corpus: 100
