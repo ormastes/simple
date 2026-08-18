@@ -37,3 +37,16 @@ Every `assess` entry must be resolved to a concrete class before Wave-4 work
 on it starts (unclassified = critical failure per release gates §18). New
 entries append here AND in `c_migration_inventory.sdn`; the SDN file is the
 authority.
+
+## Pointer: dispatch-dead audit (goal 2/6, 2026-08-18)
+
+See `doc/08_tracking/c_migration/dispatch_dead_c_audit_2026-08-18.md` — full
+sweep of 1458 owned `rt_*` C definitions vs. 1901 registered in
+`interpreter_extern/*.rs`: 710 unregistered from the interpreter's dispatch,
+of which 250 are native_lane_called (native/AOT codegen or `.spl extern fn`),
+93 rust_seed_called, 344 c_internal, and **23 DEAD** (deletion candidates,
+each needing one non-grep follow-up check, none deleted). All 8 symbols named
+in the originating finding (`rt_string_find`, `rt_string_replace`,
+`rt_wire_to_hex`, `rt_hex_to_wire`, string-case family) are live in the
+native/AOT lane except `rt_string_replace_first` (registered in the codegen
+`RuntimeFuncSpec` table but never emitted/called — linkable but unused).
