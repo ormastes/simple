@@ -104,3 +104,36 @@ describe "binary compare_word":
         val line = render_word_line("W0", d)
         assert_true(line.contains("FAIL"))
         assert_true(line.contains("payload"))
+
+    # --- Adversarial cases (goal 4 hardening) ---
+
+    it "all-bits-set actual vs all-bits-clear expected fails every field under exact policy":
+        # expected=0x0000, actual=0xFFFF: every non-reserved field mismatches,
+        # and the reserved field (forced reserved_zero regardless of policy)
+        # also fails because actual has bits set where reserved must be 0.
+        val d = compare_word(0x0000, 0xFFFF, toy_layout(), [])
+        assert_equal(d.status, "fail")
+        assert_true(d.failing_fields.contains("flag"))
+        assert_true(d.failing_fields.contains("mode"))
+        assert_true(d.failing_fields.contains("payload"))
+        assert_true(d.failing_fields.contains("reserved_mid"))
+
+    it "masked policy with mask=0 is a prove-nothing configuration: a differing word still passes":
+        # policy_masked with mask 0x00 contributes zero bits to compare_mask for
+        # that field, identical to dont_care — the field is captured but can
+        # never fail the assertion, even though the caller wrote "masked"
+        # rather than "dont_care". This is documented intentional behavior,
+        # not a bug: a zero mask always means "compare nothing".
+        val pols = [policy_masked("payload", 0x00)]
+        val d = compare_word(0x5A03, 0x0003, toy_layout(), pols)
+        assert_equal(d.status, "pass")
+        assert_false(d.failing_fields.contains("payload"))
+
+    it "expected's own reserved bits are ignored: only actual is checked against zero":
+        # expected has bit 5 (inside reserved_mid, 4..7) set to 1; effective
+        # expected forces the reserved range to 0 regardless of what the
+        # caller passed as `expected`. actual has the reserved range clear,
+        # so the comparison passes even though `expected` "claimed" a
+        # reserved bit was set — the reserved policy overrides both sides.
+        val d = compare_word(0x0020, 0x0000, toy_layout(), [])
+        assert_equal(d.status, "pass")
