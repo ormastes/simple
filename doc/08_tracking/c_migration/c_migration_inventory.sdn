@@ -131,3 +131,37 @@ c_migrations:
     correctness_result: "7 examples, 7 passed (FNV-1a KAT for empty string and \"abc\", C-oracle differential incl. UTF-8, boundary lengths, corruption-discrimination, 2026-08-18)"
     c_status: retained_as_test_oracle
     perf_status: not_hot_path
+
+  - id: C-MIG-0022
+    path: src/runtime/runtime_simd_utf8.c
+    symbols:
+      - rt_text_validate_utf8
+    classification: product_algorithm
+    replacement: pure-Simple validated_utf8_bytes_to_text_linear (already
+      implemented in src/lib/common/base_encoding/utilities.spl — strict
+      RFC 3629 byte-by-byte validator: rejects truncated/malformed
+      continuation sequences, overlong 2/3/4-byte encodings, and UTF-16
+      surrogate code points, same contract as the C
+      scalar/SSE2/AVX2/NEON-dispatched validator)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_text_validate_utf8(s: text) -> bool is declared with a clean
+      text-in/bool-out ABI in src/lib/common/encoding/simd_text_ffi.spl and
+      is the C oracle used by this spec. No caller migration performed —
+      this entry only establishes differential correctness + perf evidence
+      for validated_utf8_bytes_to_text_linear as a UTF-8 validation twin;
+      migrating existing extern-declared callers is left for a follow-up.
+    correctness_spec: test/01_unit/lib/common/base_encoding/utf8_validate_crosslang_spec.spl
+    correctness_result: "4 examples, 4 passed (KAT for empty string and ASCII, C-oracle differential incl. valid UTF-8 multi-byte/emoji, malformed-byte discrimination (lone continuation, truncated lead, overlong, surrogate, out-of-range), shared-logic bulk differential loop over 88 branch-covering vectors, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple validated_utf8_bytes_to_text_linear
+      measured ~32.9x slower than the C oracle over the 88-vector bulk corpus
+      (simple_micros=116329, c_micros=3536, single run, tree-walk interpreter
+      via `bin/simple test`, 2026-08-18). The C side is
+      SIMD-dispatched (SSE2/AVX2/NEON) while the Simple side is a scalar
+      byte-by-byte loop with per-position Result allocation; ratio recorded
+      here per the mandatory perf-regression rule, not hidden. Not yet filed
+      as a standalone bug — treat as inconclusive-fast-path evidence pending
+      a JIT/native-codegen re-measurement, since `bin/simple test` hard-defaults
+      to the interpreter (see .claude/rules/testing.md run-vs-test divergence
+      note) and is not the engine ordinary programs run on."
