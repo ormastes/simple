@@ -34,7 +34,7 @@ adm_fail() {
 }
 
 usage() {
-    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--runtime-dir=<path>] [--out=<path>]" >&2
     echo "       $0 --selftest" >&2
 }
 
@@ -44,7 +44,6 @@ adm_reason=''
 adm_parent=''
 adm_runtime=''
 adm_out=''
-adm_bootstrap_output=''
 adm_root=$root
 
 while [ "$#" -gt 0 ]; do
@@ -53,7 +52,6 @@ while [ "$#" -gt 0 ]; do
         --target=*) adm_target=${1#*=} ;;
         --reason=*) adm_reason=${1#*=} ;;
         --parent-compiler=*) adm_parent=${1#*=} ;;
-        --bootstrap-output=*) adm_bootstrap_output=${1#*=} ;;
         --runtime-dir=*) adm_runtime=${1#*=} ;;
         --out=*) adm_out=${1#*=} ;;
         --root=*) adm_root=${1#*=} ;;
@@ -73,14 +71,6 @@ fi
 adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
 bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
 
-if [ -z "$adm_bootstrap_output" ]; then adm_bootstrap_output="$adm_root/build/bootstrap"; fi
-case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$PWD/$adm_bootstrap_output" ;; esac
-adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-not-canonical
-case "$adm_bootstrap_output" in
-    "$adm_root/build"/*) ;;
-    *) adm_fail bootstrap-output-not-under-repository-build ;;
-esac
-
 case "$adm_parent" in /*) ;; *) adm_parent="$PWD/$adm_parent" ;; esac
 if [ -z "$adm_runtime" ]; then adm_runtime="$adm_root/src/runtime"; fi
 case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
@@ -90,10 +80,10 @@ case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
 # A Rust seed, a hand-placed binary, or a stage2 dir with no evidence is
 # refused: the whole point of v2 is that admission descends from an admitted
 # parent, so an unverifiable parent must not produce an authoritative receipt.
-stage2_root="$adm_bootstrap_output/stage2"
+stage2_root="$adm_root/build/bootstrap/stage2"
 case "$adm_parent" in
     "$stage2_root"/*) ;;
-    *) adm_fail parent-compiler-not-under-configured-bootstrap-stage2 ;;
+    *) adm_fail parent-compiler-not-under-build-bootstrap-stage2 ;;
 esac
 parent_file=$(bootstrap_planner_v2_canonical_file "$adm_parent") || adm_fail parent-compiler-missing-or-not-canonical
 parent_dir=$(dirname -- "$parent_file")
@@ -158,10 +148,23 @@ cp -- "$stage/git-state.txt" "$adm_dir/git-state.txt"
 git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
 
 # --- 4. build the planner with the parent compiler ---------------------------
-if ! SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" "$parent_file" \
+# --entry-closure: compile ONLY the modules reachable from the planner entry.
+# Without it the parent compiles the entire stdlib, including the baremetal boot
+# stubs under src/lib/nogc_async_mut_noalloc/baremetal/, whose inline-asm operand
+# placeholders the stale parent cannot lower -- an assembler error in code the
+# one-file planner never calls. The closure is exactly what the closure snapshot
+# already records, so narrowing the compile set does not narrow the receipt.
+#
+# The build runs with cwd = "$stage" (a fresh mktemp dir) so the parent resolves
+# its relative `build/simple-core/libsimple_runtime.a` inside the staging dir and
+# builds that archive from the runtime tree that was just snapshotted. The
+# repo-root archive is a shared artifact that a concurrent lane can leave stale
+# at any moment; admission must not depend on, or mutate, it.
+build_planner_out="$adm_dir/planner"
+if ! ( cd "$stage" && SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" "$parent_file" \
         native-build --source "$adm_root/src/app/cli" --source "$adm_root/src/lib" \
-        --entry-closure --entry "$planner_source" -o "$adm_dir/planner" \
-        >"$adm_dir/planner-build.log" 2>&1; then
+        --entry-closure \
+        --entry "$planner_source" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
     adm_fail planner-build-failed
 fi
 [ -x "$adm_dir/planner" ] || adm_fail planner-build-produced-no-executable
