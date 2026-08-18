@@ -1,5 +1,34 @@
 # Aspect weave/join-point specs time out, and the runner reports it as a vacuous green
 
+> ## CORRECTIONS (2026-08-18, later the same day)
+>
+> Three claims in the original text below were REFUTED by the agents sent to
+> act on them. They are left in place rather than edited away, because the
+> corrections are the useful part of the record.
+>
+> 1. **The 30 GB blowup does not reproduce.** The shared seed was replaced
+>    mid-session (`59546088` @ 07:53 -> `59645008` @ 10:12). On the current
+>    binary the spec peaks at **3932 kB** and finishes in ~110s. The original
+>    measurement describes a binary that no longer exists on this host.
+> 2. **The `exit 0` half is wrong.** `classify_test_run_result`
+>    (`test_runner_types.spl:217`) already returned `TimeoutResourceFailure`
+>    and the run exited 1. Only the aggregate `Results:` LINE was vacuous —
+>    the process-status contract was already fail-closed. Fixed in
+>    `1ec61a308ec`; the line now reads
+>    `Results: 1 total, 0 passed, 1 failed, 1 timed out (unverified)`.
+> 3. **`compiler__mir__mir_aop_injection__inject_after_error_advice` is not in
+>    the Stage 1 link failure.** A fresh reproduce shows 86 distinct undefined
+>    `rt_*` symbols and no aop-injection symbol at all; that name was an
+>    artifact of the pre-redeploy seed. Triage: `c297f7b62b2`.
+>
+> **Why both specs are actually red now:** a seed regression erasing `class`
+> values under `bin/simple test` — see
+> [`class_field_access_erased_under_test_runner_2026-08-18.md`](class_field_access_erased_under_test_runner_2026-08-18.md).
+> Both specs die in `parse_full_frontend` and never reach
+> `weave_forward_advice`, so every theory about the weaver in this document
+> is neither confirmed nor refuted. Do not "fix" the weaver against this
+> record without a fresh reproduce on a NAMED binary.
+
 **Date:** 2026-08-18
 **Lane:** aspect dynload + startup perf
 **Status:** OPEN — reproduced, not fixed

@@ -1,5 +1,15 @@
 # Class field access erased under `bin/simple test` (seed 2026-08-18 10:12)
 
+> **Same defect as [`selfhosted_child_erases_class_values_cross_module_2026-08-18.md`](selfhosted_child_erases_class_values_cross_module_2026-08-18.md)**,
+> filed independently the same day by another lane agent. Scope reconciled:
+> that record observed it only on values crossing a module boundary (and on
+> METHOD dispatch as well as fields); this record is the broader and correct
+> one — a fully self-contained spec with a local class fails identically, so
+> the boundary is not the trigger. Read both; four independent confirmations
+> exist (Logger in the compiler frontend, the component descriptor, the facet
+> registry, and the native capsule receipt).
+
+
 **Status:** OPEN — seed regression, worked around in std.common.structural.component
 **Binary:** /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
 (59645008 bytes, mtime 2026-08-18 10:12:23) — the shared seed replaced mid-session.

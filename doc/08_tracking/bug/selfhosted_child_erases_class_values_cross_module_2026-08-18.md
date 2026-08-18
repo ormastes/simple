@@ -1,5 +1,13 @@
 # Self-hosted child test binary erases class values across module boundaries
 
+> **Same defect as [`class_field_access_erased_under_test_runner_2026-08-18.md`](class_field_access_erased_under_test_runner_2026-08-18.md)**,
+> filed independently the same day by another lane agent. Scope correction:
+> the cross-module framing in THIS record is too narrow — a self-contained
+> spec with a purely local class fails identically, so a module boundary is
+> not required to trigger it. What this record adds and the other does not is
+> that METHOD dispatch is erased too, not only field access.
+
+
 **Date:** 2026-08-18
 **Status:** OPEN
 **Severity:** HIGH (blocks any spec that drives a class instance defined in another module)
