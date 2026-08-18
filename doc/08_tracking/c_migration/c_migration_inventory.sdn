@@ -267,3 +267,55 @@ c_migrations:
       2-byte UTF-8 codepoint every 7th char via seeded LCG), 2026-08-18:
       simple_us=169643 c_us=3847, ratio ~44.1x.
     shared_corpus: 100
+
+  - id: C-MIG-0024
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_string_rfind
+    classification: product_algorithm
+    replacement: std.common.string_core.str_last_index_of (already
+      implemented in src/lib/common/string_core.spl:92-104 — a pure
+      byte-slice-based reverse-search loop, deliberately independent of the
+      `rt_string_rfind` extern per that file's own header comment)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_string_rfind(s: text, needle: text) -> i64 is registered in the
+      interpreter's extern dispatch table
+      (interpreter_extern/sffi_string.rs::rt_string_rfind_fn,
+      interpreter_extern/mod.rs:1892) via
+      `.as_bytes().windows(needle.len()).rposition(...)` — not the C source
+      directly when running under `bin/simple test` (tree-walk interpreter).
+      Both the interpreter shim and the C source at
+      runtime_native.c:3733-3742 implement the identical contract (empty
+      needle -> subject's byte length; needle longer than subject -> -1;
+      otherwise the last byte offset of needle in subject), so this spec
+      differentially compares against whichever is actually reached by the
+      extern call, documenting that distinction rather than assuming the C
+      file itself executes. `text.last_index_of` in src/lib/text.spl still
+      delegates to the extern directly (not migrated to
+      str_last_index_of here) — this entry establishes differential
+      correctness + perf evidence for str_last_index_of as an independent
+      twin; migrating the text.spl wrapper's callers is left for a
+      follow-up.
+    correctness_spec: test/01_unit/lib/common/string_core_rfind_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. empty needle/empty haystack/no-match/needle-longer-than-subject, overlapping-needle and full-match edge cases, single-char-corruption discrimination, determinism check, 100-vector shared-logic bulk differential loop over subject length 0..99 with rotating needle classes incl. empty and too-long needles, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple str_last_index_of measured ~4.4x
+      slower than the C oracle (interpreter dispatch to
+      `.as_bytes().windows().rposition()`) over the 100-vector bulk corpus
+      (simple_us=7324, c_us=1648, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). The pure-Simple loop builds a fresh
+      slice `s[i:i+sublen]` and does a text equality compare at every
+      position, while the Rust/C sides use direct byte-window comparison;
+      ratio recorded per the mandatory perf-regression rule since it exceeds
+      the plan's 2x threshold, not hidden. Not yet filed as a standalone
+      bug — same inconclusive-fast-path caveat as C-MIG-0022/0023
+      (bin/simple test hard-defaults to the interpreter, not the engine
+      ordinary programs run on)."
+    perf_measured: >
+      100 shared branch-covering (subject, needle) pairs (subject length
+      0..99 via seeded LCG with a repeated "ab" motif every 5th position;
+      needle rotates through empty/too-long/"ab"/single-uppercase-char/
+      full-subject classes), 2026-08-18: simple_us=7324 c_us=1648, ratio
+      ~4.4x.
+    shared_corpus: 100
