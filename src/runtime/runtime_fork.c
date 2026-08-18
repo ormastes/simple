@@ -88,7 +88,8 @@ typedef struct {
 } ForkCapture;
 
 static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
-                              int stderr_fd, ForkCapture* stderr_capture);
+                              int stderr_fd, ForkCapture* stderr_capture,
+                              int* stdout_eof, int* stderr_eof);
 
 static void reverse_bytes(char* data, size_t len) {
     for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
@@ -129,6 +130,25 @@ static void capture_append(ForkCapture* capture, const char* bytes, size_t len) 
     memcpy(tail + write_at, bytes, first);
     memcpy(tail, bytes + first, len - first);
     capture->tail_len += len;
+}
+
+/* Append an explicit "this capture is incomplete" marker.
+ * R9: a bound is acceptable, silent truncation is not -- the reader must never
+ * believe a short capture is the whole of the child's output. */
+static size_t capture_note_incomplete(ForkCapture* capture, size_t result_len,
+                                      const char* reason) {
+    if (!reason) return result_len;
+    char marker[FORK_CAPTURE_MARKER_MAX];
+    int written = snprintf(marker, sizeof(marker),
+                           "\n[capture incomplete: %s; stream never reached EOF]\n",
+                           reason);
+    if (written <= 0) return result_len;
+    size_t marker_len = (size_t)written;
+    if (marker_len >= sizeof(marker)) marker_len = sizeof(marker) - 1U;
+    memcpy(capture->data + result_len, marker, marker_len);
+    result_len += marker_len;
+    capture->data[result_len] = '\0';
+    return result_len;
 }
 
 static size_t capture_finish(ForkCapture* capture) {
@@ -254,7 +274,7 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
     if (child_pid <= 0) {
         return -1;
     }
-    if (max_output_bytes > SIZE_MAX - FORK_CAPTURE_MARKER_MAX - 1U) return -1;
+    if (max_output_bytes > SIZE_MAX - 2U * FORK_CAPTURE_MARKER_MAX - 1U) return -1;
 
     /* Free any previous results */
     free_results();
@@ -268,8 +288,8 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
 
     size_t capture_limit = (size_t)max_output_bytes;
     /* Allocate bounded captures, plus marker and terminator space. */
-    char* out_buf = (char*)SPL_MALLOC(capture_limit + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
-    char* err_buf = (char*)SPL_MALLOC(capture_limit + FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
+    char* out_buf = (char*)SPL_MALLOC(capture_limit + 2U * FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
+    char* err_buf = (char*)SPL_MALLOC(capture_limit + 2U * FORK_CAPTURE_MARKER_MAX + 1U, "fork_buf");
     if (!out_buf || !err_buf) {
         if (out_buf) SPL_FREE(out_buf);
         if (err_buf) SPL_FREE(err_buf);
@@ -299,6 +319,8 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
     int child_status = 0;
     int cleanup_descendants = 0;
     int wait_failed = 0;
+    int stdout_read_error = 0;
+    int stderr_read_error = 0;
 
     /* Calculate deadline */
     struct timespec ts_start;
@@ -383,13 +405,16 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
                 /* Determine which bounded capture owns this pipe. */
                 ForkCapture* capture;
                 int* open_ptr;
+                int* err_ptr;
 
                 if (fds[i].fd == stdout_fd) {
                     capture = &out_capture;
                     open_ptr = &stdout_open;
+                    err_ptr = &stdout_read_error;
                 } else {
                     capture = &err_capture;
                     open_ptr = &stderr_open;
+                    err_ptr = &stderr_read_error;
                 }
 
                 /* Read available data */
@@ -405,14 +430,19 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
                     } else {
                         /* EAGAIN = no more data right now */
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        /* EINTR is NOT end of stream: a signal arriving before
+                         * any byte was transferred must not silently terminate
+                         * the capture (drain_capture_fds already retries). */
+                        if (errno == EINTR) continue;
+                        *err_ptr = 1;
                         *open_ptr = 0;
                         break;
                     }
                 }
             }
             if (fds[i].revents & (POLLERR | POLLNVAL)) {
-                if (fds[i].fd == stdout_fd) stdout_open = 0;
-                else stderr_open = 0;
+                if (fds[i].fd == stdout_fd) { stdout_open = 0; stdout_read_error = 1; }
+                else { stderr_open = 0; stderr_read_error = 1; }
             }
         }
         /* Do NOT break here just because child_exited: this poll cycle just
@@ -432,15 +462,34 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
             pid_t waited = waitpid_nointr((pid_t)child_pid, &child_status, 0);
             child_exited = waited == (pid_t)child_pid;
         }
-        drain_capture_fds(stdout_fd, &out_capture, stderr_fd, &err_capture);
+        /* The post-kill drain can only observe EOF because we killed the
+         * writer, so it is NOT evidence the stream ended naturally: leave
+         * stdout_open/stderr_open set so the incomplete marker is emitted. */
+        drain_capture_fds(stdout_fd, &out_capture, stderr_fd, &err_capture,
+                          NULL, NULL);
     }
 
     close(stdout_fd);
     close(stderr_fd);
 
+    /* Why the capture stopped, if it stopped before real EOF. Reported into
+     * the captured text itself so a truncated capture can never be mistaken
+     * for a complete one. */
+    const char* stop_reason = NULL;
+    if (timed_out) stop_reason = "timeout reached, child killed";
+    else if (wait_failed) stop_reason = "poll() failed on the capture pipes";
+    else if (cleanup_descendants) stop_reason =
+        "no output for the inherited-fd grace period after the child exited; descendants killed";
+
     /* Linearize retained head/tail data and insert truncation markers. */
-    (void)capture_finish(&out_capture);
-    (void)capture_finish(&err_capture);
+    size_t out_len = capture_finish(&out_capture);
+    size_t err_len = capture_finish(&err_capture);
+    (void)capture_note_incomplete(&out_capture, out_len,
+        stdout_read_error ? "read error on the stdout pipe"
+                          : (stdout_open ? stop_reason : NULL));
+    (void)capture_note_incomplete(&err_capture, err_len,
+        stderr_read_error ? "read error on the stderr pipe"
+                          : (stderr_open ? stop_reason : NULL));
 
     /* Store results for getter functions */
     s_result_stdout = out_buf;
@@ -468,7 +517,9 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
 }
 
 static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
-                              int stderr_fd, ForkCapture* stderr_capture) {
+                              int stderr_fd, ForkCapture* stderr_capture,
+                              int* stdout_eof, int* stderr_eof) {
+    int eof_seen[2] = {0, 0};
     struct pollfd fds[2] = {
         {stdout_fd, POLLIN | POLLHUP, 0},
         {stderr_fd, POLLIN | POLLHUP, 0},
@@ -502,6 +553,7 @@ static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
                 if (count > 0) {
                     capture_append(captures[index], chunk, (size_t)count);
                 } else if (count == 0) {
+                    eof_seen[index] = 1;
                     fds[index].fd = -1;
                     break;
                 } else if (errno == EINTR) {
@@ -514,6 +566,8 @@ static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
             fds[index].revents = 0;
         }
     }
+    if (stdout_eof) *stdout_eof = eof_seen[0];
+    if (stderr_eof) *stderr_eof = eof_seen[1];
 }
 
 int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
