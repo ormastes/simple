@@ -259,8 +259,35 @@ fn native_build_no_borrow_check_from_args(args: [text], i: i64) -> bool:
 # silently retries the seed.
 pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val removed_bundle = native_build_policy_action_from_args(args, 0)
-    if removed_bundle == "--help" or removed_bundle == "-h" or removed_bundle == "--list-optimizations":
+    # `--help`/`-h` used to be forwarded to the Rust seed extern
+    # rt_native_build. In the PURE-SIMPLE stage2/stage3 capsule that extern is
+    # only a backfilled stub (see llvm_native_link.spl's seed-owned-extern
+    # backfill), so `simple native-build --help` SEGFAULTED (exit 139) instead
+    # of printing anything. Usage text needs no seed, so answer it in-process.
+    # Note: native_build_help() cannot carry this text -- its body is hardcoded
+    # to `return 0` in bootstrap MIR lowering (module_lowering.spl), so edits to
+    # its .spl source are ignored in the capsule.
+    if removed_bundle == "--help" or removed_bundle == "-h":
+        print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
+        print ""
+        print "Options:"
+        print "  -o <output>                 Output executable path (default build/native/<stem>)"
+        print "  --backend=<llvm|cranelift>  Codegen backend (default auto)"
+        print "  --mode=<dynload|one-binary> Link mode"
+        print "  --no-borrow-check           Skip the borrow checker"
+        print "  --entry <file.spl>          Explicit entry module"
+        print "  --source <dir>              Bound the scanned source roots"
+        print "  --list-optimizations        List available MIR optimizations"
+        print "  -h, --help                  Show this help"
+        return 0
+    if removed_bundle == "--list-optimizations":
         return run_rt_native_build(args)
+    # Bare `native-build` with no arguments at all also reached the seed extern
+    # and segfaulted. There is nothing to build, so fail like `compile` does.
+    if args.len() < 3:
+        print "error: missing source file"
+        print "Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
+        return 1
     if removed_bundle != "":
         print "Error: runtime bundle '{removed_bundle}' was removed; use simple-core or core-c-bootstrap"
         return 1

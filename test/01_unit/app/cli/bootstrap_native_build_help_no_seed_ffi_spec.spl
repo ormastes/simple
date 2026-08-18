@@ -1,0 +1,56 @@
+extern fn rt_file_read_text(path: text) -> text
+use std.spec.{describe, it, expect}
+
+# Reproduce-first regression cover for:
+#   doc/08_tracking/bug/bootstrap_native_build_help_segfaults_pure_simple_2026-08-18.md
+#
+# Observed on the deployed pure-Simple capsule bootstrap/stage3/simple
+# (sha256 905ce036...):
+#   $ bootstrap/stage3/simple native-build --help   -> Segmentation fault (139)
+#   $ bootstrap/stage3/simple native-build          -> Segmentation fault (139)
+# because both shapes fell through to `run_rt_native_build`, whose only body is
+# the Rust seed extern `rt_native_build`. That extern is a backfilled STUB in
+# the pure-Simple capsule, so the call jumps into nothing.
+#
+# This is a SOURCE contract, deliberately: rebuilding the stage3 capsule needs a
+# full bootstrap, so the compiled binary cannot be asserted on in a unit lane.
+# What it pins is the routing decision -- the only thing the fix changed.
+#
+# FALSIFIED BY: an edit that re-routes `--help`/`-h`/no-arg `native-build` back
+# through run_rt_native_build (or any seed extern) in bootstrap_main.spl.
+
+fn bootstrap_main_source() -> text:
+    rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
+
+describe "bootstrap native-build help":
+    it "answers --help in-process instead of calling the seed extern":
+        val source = bootstrap_main_source()
+
+        expect(source).to_contain("if removed_bundle == \"--help\" or removed_bundle == \"-h\":")
+        expect(source).to_contain("print \"Usage: simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]\"")
+        # The pre-fix line bundled --help with --list-optimizations and sent all
+        # three into the seed FFI. It must be gone.
+        expect(source.contains("if removed_bundle == \"--help\" or removed_bundle == \"-h\" or removed_bundle == \"--list-optimizations\":")).to_equal(false)
+
+    it "rejects a bare native-build with no source instead of crashing":
+        val source = bootstrap_main_source()
+
+        expect(source).to_contain("if args.len() < 3:")
+        expect(source).to_contain("print \"error: missing source file\"")
+
+    it "keeps the seed extern reachable only for the real build lanes":
+        val source = bootstrap_main_source()
+
+        # --list-optimizations still needs the seed's optimization registry; it
+        # is knowingly left on the FFI route (tracked in the bug record).
+        expect(source).to_contain("if removed_bundle == \"--list-optimizations\":")
+        expect(source).to_contain("extern fn rt_native_build(args: [text]) -> i64")
+
+    it "documents why native_build_help cannot hold the text":
+        val source = bootstrap_main_source()
+        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+
+        # native_build_help()'s BODY is hardcoded in bootstrap MIR lowering, so
+        # editing its .spl source would be silently ignored in the capsule.
+        expect(lowering).to_contain("if name == \"native_build_help\":")
+        expect(source).to_contain("hardcoded")
