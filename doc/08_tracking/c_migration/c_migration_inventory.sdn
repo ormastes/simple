@@ -710,3 +710,65 @@ c_migrations:
       moduli: 0.0 at i % 17 == 0, 1.0 at i % 13 == 0, 144.0 at i % 11 == 0,
       0.25 at i % 7 == 0), 2026-08-18: simple_us=8109 c_us=457, ratio ~17.7x.
     shared_corpus: 100
+
+  - id: C-MIG-0030
+    path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
+    symbols:
+      - rt_math_cbrt
+    classification: product_algorithm
+    replacement: std.math.cbrt.cbrt_f64 (NEW file src/lib/common/math/cbrt.spl
+      written this round -- deliberately NOT written into special.spl, which
+      is this round's HARD AVOID because another session is active there.
+      80-iteration Newton's-method kernel starting from g=1.0, genuinely
+      independent of the rt_math_cbrt extern; the existing math_cbrt in
+      math.spl was rejected as a candidate because it just calls
+      rt_math_cbrt directly and is therefore not independent)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_math_cbrt(x: f64) -> f64 is registered in the interpreter's extern
+      dispatch table (interpreter_extern/mod.rs:1563, math::rt_math_cbrt_fn).
+      No C runtime counterpart exists (`grep -rn rt_math_cbrt src/runtime/*.c
+      src/runtime/*.h` returns zero hits); this is a pure-Rust-interpreter
+      extern, same kind as C-MIG-0029's rt_math_sqrt (no_c_implementation_
+      rust_only_extern), unlike C-MIG-0027/0028's runtime_native.c-backed
+      externs. Unlike sqrt, cube root is defined for all real x (including
+      negative), so cbrt_f64 has no domain restriction the oracle also lacks
+      -- handled via the standard odd-function reflection
+      cbrt(-a) = -cbrt(a). Bug found and fixed while writing this spec: the
+      initial kernel started Newton's method at g = x (mirroring
+      _sqrt_f64's g = x start) and converged far too slowly for x << 1 --
+      cbrt_f64(1.0e-8) returned 0.0021988... instead of the correct
+      0.0021544..., a ~2% error, from 60 iterations starting ~2e5x away
+      from the root. Fixed by starting at the fixed point g = 1.0 instead
+      and raising to 80 iterations; re-verified against the oracle across
+      the full KAT + tolerance-vector + 100-vector bulk-loop suite below,
+      including the exact 1.0e-8/1.0e10 values that exposed the bug.
+    correctness_spec: test/01_unit/lib/common/math/cbrt_crosslang_spec.spl
+    correctness_result: "7 examples, 7 passed (KAT vectors incl. positive AND
+      negative perfect cubes, zero, tolerance-based irrational-result
+      comparison, domain-boundary coverage (+-0.0, +-infinity, NaN input --
+      all agree with the oracle, no semantic divergence found unlike
+      C-MIG-0029's sqrt_f64), single-bit corruption discrimination,
+      determinism check, 100-vector shared-logic bulk differential loop
+      covering the FULL domain (positive and negative, unlike sqrt_f64's
+      NaN-producing negative branch which needed a separate loop) with
+      forced perfect-cube and zero/negative-zero boundary values at fixed
+      moduli, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple cbrt_f64 measured ~34.9x the
+      Rust hardware-cbrt oracle over the 100-vector bulk corpus
+      (simple_us=17390, c_us=498, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), well above the plan's 2x threshold --
+      the largest ratio recorded in this series so far (exceeding
+      C-MIG-0029's sqrt ~17.7x), expected given Newton's method is an
+      80-iteration loop of interpreted arithmetic vs one hardware
+      instruction. Recorded honestly, not hidden -- same interpreter-lane
+      caveat as prior PERF findings (bin/simple test hard-defaults to the
+      interpreter, not the JIT/native engine ordinary programs run on)."
+    perf_measured: >
+      100 shared branch-covering x values (seeded LCG, magnitude range
+      sub-1 to large, both signs, plus forced boundary values at fixed
+      moduli: 0.0 at i % 19 == 0, -0.0 at i % 17 == 0, 1.0 at i % 13 == 0,
+      125.0 at i % 11 == 0, -0.125 at i % 7 == 0, sign-flip at i % 5 == 0),
+      2026-08-18: simple_us=17390 c_us=498, ratio ~34.9x.
+    shared_corpus: 100

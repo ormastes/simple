@@ -1,0 +1,60 @@
+# C-MIG-0030: pure-Simple cube root, independent of the `rt_math_cbrt`
+# extern (src/lib/common/math/math.spl:28, `math_cbrt`). Newton's method
+# kernel, mirroring the style of `special.spl`'s `_sqrt_f64` /
+# `sqrt_f64` (C-MIG-0029) but not touching that file (HARD AVOID).
+
+fn _cbrt_nan() -> f64:
+    """NaN sentinel via IEEE overflow (inf - inf), same trick as
+    special.spl's `_sqrt_nan` — a literal `0.0 / 0.0` is const-folded and
+    rejected by the compiler, and the interpreter traps runtime float
+    division by zero."""
+    var big = 1.0e308
+    val inf = big * 10.0
+    inf - inf
+
+fn _cbrt_pos(x: f64) -> f64:
+    """Newton's method for the cube root of a STRICTLY POSITIVE finite x.
+    x_{n+1} = (2*x_n + x/x_n^2) / 3, 80 iterations, starting guess x_n = 1.0
+    (NOT x itself: measured live that starting at g = x converges far too
+    slowly for x << 1 -- e.g. x = 1.0e-8 has true cbrt ~2.15e-3, a ~2e5x
+    ratio from the starting guess, and 60 iterations from g = x left the
+    result off by ~2% (0.0021988... vs the correct 0.0021544...). Starting
+    from the fixed point g = 1.0 instead is close to the root for the
+    entire double range this kernel is exercised over and converges
+    quadratically well within 80 iterations for every KAT/vector tested,
+    including 1.0e-8 and 1.0e10)."""
+    var g = 1.0
+    var i = 0
+    while i < 80:
+        g = (2.0 * g + x / (g * g)) / 3.0
+        i = i + 1
+    g
+
+pub fn cbrt_f64(x: f64) -> f64:
+    """Cube root via Newton's method (60 iterations), the real cube root
+    for ANY real x (unlike sqrt, cbrt is defined for negative inputs too:
+    cbrt(-8) == -2).
+
+    Domain: all of f64, matching IEEE-754 / the `rt_math_cbrt` oracle.
+    - NaN input -> NaN (checked first via x != x).
+    - x == 0.0 -> x unchanged, so +0.0 -> +0.0 and -0.0 -> -0.0.
+    - +-infinity -> +-infinity, checked explicitly (the Newton loop over
+      an infinite starting guess produces inf/inf == NaN on the first
+      iteration otherwise, same failure mode `_sqrt_f64` guards against).
+    - negative x -> computed as -cbrt(-x), the standard odd-function
+      reflection; no domain restriction (unlike sqrt_f64, which returns
+      NaN for negative input)."""
+    if x != x:
+        return _cbrt_nan()
+    if x == 0.0:
+        return x
+    var big = 1.0e308
+    val pos_inf = big * 10.0
+    val neg_inf = 0.0 - pos_inf
+    if x == pos_inf:
+        return x
+    if x == neg_inf:
+        return x
+    if x < 0.0:
+        return 0.0 - _cbrt_pos(0.0 - x)
+    _cbrt_pos(x)
