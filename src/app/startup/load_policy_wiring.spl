@@ -1,0 +1,89 @@
+# load_policy wiring adapter (WP-A, startup_perf_plan_2026-08-17).
+#
+# Routes every startup/loading decision through
+# launch_metadata_effective_load_policy so load_policy — not the legacy
+# mmap_hint flag — is the single source of truth. mmap_hint stays
+# DERIVED/COMPAT.
+#
+# WIRING GAP (deliberate): the kernel-side loader consumer surface lives in
+# src/compiler/99.loader/loader/module_loader.spl / module_loader_compat.spl,
+# which are owned by other in-flight work and are NOT edited here. This
+# adapter is the module they (and host_startup's manifest preload producer)
+# should import; until they do, the plan-level path below is the wired part.
+
+use app.startup.launch_metadata.{
+    LOAD_POLICY_INVALID,
+    LOAD_POLICY_MAP_SELECTED_SEGMENTS,
+    LOAD_POLICY_READ_AHEAD_SELECTED,
+    LaunchMetadata,
+    StartupLaunchPlan,
+    launch_metadata_effective_load_policy,
+    load_policy_is_valid,
+    startup_plan_from_metadata
+}
+
+# Decision projection for loader/preload consumers: everything a loader needs
+# from the policy axis, with mechanism names kept for legacy readers.
+pub struct StartupLoadDecision:
+    load_policy: text
+    # DERIVED/COMPAT mechanism name ("mmap"/"simpleos_vfs_prewarm"/"normal_read")
+    cache_strategy: text
+    include_mmap_cache: bool
+    # Manifest preload mode for host_startup.startup_before_main:
+    # "map_read_only", "read_ahead", or "" (no preload requested).
+    preload_mode: text
+    supported: bool
+    error: text
+
+# Map an EFFECTIVE load_policy onto the manifest preload-mode vocabulary
+# consumed by host_startup.startup_before_main. Fail-closed: anything not
+# explicitly a mapping/read-ahead policy requests no preload.
+pub fn load_policy_preload_mode(effective_policy: text) -> text:
+    if effective_policy == LOAD_POLICY_MAP_SELECTED_SEGMENTS:
+        return "map_read_only"
+    if effective_policy == LOAD_POLICY_READ_AHEAD_SELECTED:
+        return "read_ahead"
+    ""
+
+# Single entry point for loading decisions. Delegates plan construction to
+# startup_plan_from_metadata (which already resolves the effective policy and
+# fails closed on unknown values), so behavior for legacy mmap_hint-only
+# metadata is exactly the pre-load_policy behavior.
+pub fn startup_load_decision(
+    metadata: LaunchMetadata,
+    host_mmap_supported: bool,
+    simpleos_cache_supported: bool
+) -> StartupLoadDecision:
+    val effective = launch_metadata_effective_load_policy(metadata)
+    if not load_policy_is_valid(effective):
+        # Fail closed, never silently: NORMAL-path mechanics, supported=false.
+        return StartupLoadDecision(
+            load_policy: LOAD_POLICY_INVALID,
+            cache_strategy: "normal_read",
+            include_mmap_cache: false,
+            preload_mode: "",
+            supported: false,
+            error: "unknown load_policy value"
+        )
+    val plan = startup_plan_from_metadata(
+        "", [], metadata, host_mmap_supported, simpleos_cache_supported)
+    StartupLoadDecision(
+        load_policy: plan.load_policy,
+        cache_strategy: plan.cache_strategy,
+        include_mmap_cache: plan.include_mmap_cache,
+        preload_mode: load_policy_preload_mode(plan.load_policy),
+        supported: plan.supported,
+        error: plan.error
+    )
+
+# Convenience for consumers that already built a plan: derive the loader-side
+# decision from it without re-reading mmap_hint anywhere.
+pub fn load_decision_from_plan(plan: StartupLaunchPlan) -> StartupLoadDecision:
+    StartupLoadDecision(
+        load_policy: plan.load_policy,
+        cache_strategy: plan.cache_strategy,
+        include_mmap_cache: plan.include_mmap_cache,
+        preload_mode: load_policy_preload_mode(plan.load_policy),
+        supported: plan.supported,
+        error: plan.error
+    )

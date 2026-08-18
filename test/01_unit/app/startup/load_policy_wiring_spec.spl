@@ -1,0 +1,104 @@
+# load_policy wiring spec (WP-A): legacy mmap_hint-only metadata keeps
+# identical decisions; explicit load_policy overrides; invalid fails closed.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.launch_metadata.{
+    LOAD_POLICY_INVALID,
+    LOAD_POLICY_MAP_SELECTED_SEGMENTS,
+    LOAD_POLICY_NORMAL,
+    LOAD_POLICY_READ_AHEAD_SELECTED,
+    LaunchMetadata,
+    launch_metadata_default,
+    startup_plan_from_metadata
+}
+use app.startup.load_policy_wiring.{
+    load_policy_preload_mode,
+    load_decision_from_plan,
+    startup_load_decision
+}
+
+fn legacy_metadata(kind: text, hint: bool) -> LaunchMetadata:
+    var m = launch_metadata_default(kind)
+    m.mmap_hint = hint
+    m.load_policy = ""
+    m
+
+fn declared_metadata(kind: text, hint: bool, policy: text) -> LaunchMetadata:
+    var m = legacy_metadata(kind, hint)
+    m.load_policy = policy
+    m
+
+describe "legacy metadata parity":
+    it "mmap_hint=true maps to map_selected_segments with mmap cache":
+        val d = startup_load_decision(legacy_metadata("smf", true), true, false)
+        assert_eq(d.load_policy, LOAD_POLICY_MAP_SELECTED_SEGMENTS)
+        assert_eq(d.cache_strategy, "mmap")
+        assert_true(d.include_mmap_cache)
+        assert_eq(d.preload_mode, "map_read_only")
+        assert_true(d.supported)
+
+    it "mmap_hint=false maps to normal with plain reads":
+        val d = startup_load_decision(legacy_metadata("native", false), true, false)
+        assert_eq(d.load_policy, LOAD_POLICY_NORMAL)
+        assert_eq(d.cache_strategy, "normal_read")
+        assert_false(d.include_mmap_cache)
+        assert_eq(d.preload_mode, "")
+        assert_true(d.supported)
+
+    it "mmap_hint=true without host mmap falls back to simpleos prewarm":
+        val d = startup_load_decision(legacy_metadata("smf", true), false, true)
+        assert_eq(d.cache_strategy, "simpleos_vfs_prewarm")
+        assert_true(d.include_mmap_cache)
+        assert_true(d.supported)
+
+    it "decision agrees with startup_plan_from_metadata for legacy metadata":
+        val m = legacy_metadata("script", true)
+        val plan = startup_plan_from_metadata("a.spl", [], m, true, false)
+        val d = startup_load_decision(m, true, false)
+        assert_eq(d.load_policy, plan.load_policy)
+        assert_eq(d.cache_strategy, plan.cache_strategy)
+        assert_eq(d.include_mmap_cache, plan.include_mmap_cache)
+        assert_eq(d.supported, plan.supported)
+
+describe "explicit load_policy overrides mmap_hint":
+    it "normal overrides mmap_hint=true":
+        val m = declared_metadata("smf", true, LOAD_POLICY_NORMAL)
+        val d = startup_load_decision(m, true, false)
+        assert_eq(d.load_policy, LOAD_POLICY_NORMAL)
+        assert_eq(d.cache_strategy, "normal_read")
+        assert_false(d.include_mmap_cache)
+        assert_eq(d.preload_mode, "")
+
+    it "read_ahead_selected overrides mmap_hint=false":
+        val m = declared_metadata("native", false, LOAD_POLICY_READ_AHEAD_SELECTED)
+        val d = startup_load_decision(m, true, false)
+        assert_eq(d.load_policy, LOAD_POLICY_READ_AHEAD_SELECTED)
+        assert_eq(d.cache_strategy, "mmap")
+        assert_true(d.include_mmap_cache)
+        assert_eq(d.preload_mode, "read_ahead")
+
+describe "invalid policy fails closed":
+    it "unknown declared policy yields unsupported normal-path decision":
+        val m = declared_metadata("smf", true, "turbo")
+        val d = startup_load_decision(m, true, true)
+        assert_eq(d.load_policy, LOAD_POLICY_INVALID)
+        assert_eq(d.cache_strategy, "normal_read")
+        assert_false(d.include_mmap_cache)
+        assert_eq(d.preload_mode, "")
+        assert_false(d.supported)
+        assert_true(d.error.len() > 0)
+
+describe "preload mode mapping":
+    it "maps only mapping and read-ahead policies":
+        assert_eq(load_policy_preload_mode(LOAD_POLICY_MAP_SELECTED_SEGMENTS), "map_read_only")
+        assert_eq(load_policy_preload_mode(LOAD_POLICY_READ_AHEAD_SELECTED), "read_ahead")
+        assert_eq(load_policy_preload_mode(LOAD_POLICY_NORMAL), "")
+        assert_eq(load_policy_preload_mode(LOAD_POLICY_INVALID), "")
+
+    it "derives the same decision from an existing plan":
+        val m = legacy_metadata("smf", true)
+        val plan = startup_plan_from_metadata("b.smf", [], m, true, false)
+        val d = load_decision_from_plan(plan)
+        assert_eq(d.load_policy, plan.load_policy)
+        assert_eq(d.preload_mode, "map_read_only")
+        assert_true(d.supported)
