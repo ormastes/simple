@@ -1,0 +1,513 @@
+#!/bin/sh
+# check-doctest-registration-coverage.shs
+#
+# QUESTION THIS TOOL ANSWERS
+#   "Are any comment-doctests or Markdown fence tests present in the tree but
+#    NOT registered/run by the test pipeline?"
+#
+# It must never SILENTLY miss one. Where it cannot decide, it says so in a
+# labelled bucket and refuses to call the run a pass.
+#
+# METHOD — differential, with an INDEPENDENT over-collecting side
+#   LEFT  (over-collecting, independent): a pure awk scan of every tracked
+#         `.md` and `.spl` file. It shares no code with the extractor, so the
+#         suspect is not auditing itself. It is deliberately permissive: any
+#         fence whose info-string begins `simple`/`spl`/`sdoctest` counts, in
+#         markdown body text AND inside `///` / `##` / `#` comments in `.spl`.
+#   RIGHT (authoritative): the REAL pipeline. An embedded probe calls
+#         `load_sdoctest_config` + `discover_sdoctest_files` +
+#         `extract_sdoctest_blocks` (markdown lane) and
+#         `discover_spl_doctest_files` (comment lane) from
+#         `src/lib/nogc_sync_mut/test_runner/**` and prints what they actually
+#         register. No pipeline semantics are reimplemented here.
+#   FINDING = LEFT minus RIGHT.
+#
+# ANTI-FALSE-POSITIVE DECISIONS (recorded per detector-standard rule 7, so they
+# can be re-read rather than re-litigated)
+#   * We do NOT scan for a bare `sdoctest:` token. Lane EXTRACT's permissive
+#     scan did, and measured 25.7% FP (9/35) — a struct FIELD named `sdoctest:`
+#     and doc prose are not doctests. Only real fences count here.
+#   * We do NOT treat `>>>` as a doctest signal on its own. `>>> BANNER <<<`
+#     ASCII headers are not tests. `>>>` is meaningful only INSIDE a
+#     ```sdoctest fence, which the pipeline itself also requires.
+#   * The markdown lane and the comment lane are counted SEPARATELY and never
+#     unioned — they are parallel pipelines with different roots and different
+#     exclusion rules, and unioning them would let one lane's coverage mask the
+#     other's gap.
+#   * Findings are reported BOTH as a raw block count (an UPPER BOUND) and as a
+#     count of DISTINCT CAUSES. The dominant cause today is a single scope
+#     gate, not thousands of independent defects; reporting only the raw number
+#     would be true but misleading.
+#
+# CLASSIFICATION IS THREE-WAY (rule 3). Every scanned block lands in exactly
+# one of: REGISTERED / UNREGISTERED / UNPARSEABLE / IGNORED. "Could not tell"
+# is UNPARSEABLE — its own printed bucket — and is never folded into a pass.
+#
+# IGNORE LIST — `scripts/check/doctest_registration_coverage.ignore`
+#   Format, one entry per line: `<glob><TAB><reason>`; `#` comments allowed.
+#   Non-negotiable properties, all enforced below:
+#     - An entry with NO reason string is a hard ERROR, not a silent skip.
+#     - A too-broad pattern (`*`, `**`, `*.md`, `*.spl`, `**/*`) is REFUSED —
+#       an ignore that can swallow the whole population defeats the tool.
+#     - The verdict REPORTS applied and STALE counts. A stale entry (matched
+#       nothing) is a FAIL: ignore lists silently widen over time otherwise.
+#
+# FP-RATE: see the FP-RATE line below. Until an FP rate is measured on the
+# CURRENT tree the tool stays ADVISORY and its numbers are labelled UPPER
+# BOUND (rules 8+9).
+# FP-RATE: 0/20 (0%) on "first 20 UNREGISTERED rows of the full finding list in
+#   file order", measured 2026-08-18, method: each row hand-opened and the
+#   quoted fence read; a row counts as a true positive only if the file really
+#   contains a ```simple/```spl/```sdoctest fence AND the pipeline probe really
+#   does not list that file. See the MEASUREMENT section at the end of this
+#   header for the adjudication record.
+#
+# MEASUREMENT RECORD (rule 8 adjudication; re-derivable, do not delete)
+#   Run 2026-08-18 on this tree, seed bin/simple:
+#     139,066 markdown fences + 309 comment fences scanned independently
+#     1,761 registered by the real pipeline
+#     137,344 UNREGISTERED (markdown lane) / 270 UNREGISTERED (comment lane)
+#     2 UNPARSEABLE / 5 distinct causes
+#   Independent control on the LEFT side: `git ls-files -- '*.md' | xargs grep
+#   -hE '^ *```(simple|spl|sdoctest)'` = 139,085 opening fences vs the scanner's
+#   139,066 well-formed + 1 unclosed + 1 near-miss. The residual is fences that
+#   appear INSIDE an already-open fence, which grep counts and a stateful
+#   scanner correctly does not. The control proves the scan is not silently
+#   scanning nothing.
+#   FP sample = first 20 UNREGISTERED rows in file order (.claude/agents/*.md,
+#   .claude/commands/*.md). Each was hand-opened with `sed -n "${l}p"`: all 20
+#   are literal ```simple opening fences. Each file was then checked against the
+#   probe's MD list: all 8 distinct files return 0 registered rows (the config
+#   lists `.claude/skills/`, not `.claude/agents/` or `.claude/commands/`).
+#   Adjudication: 20 true positives, 0 false positives -> 0/20 (0%).
+#   CAUTION, stated rather than buried: 137,343 of the 137,614 UNREGISTERED
+#   rows share ONE cause, `md-file-not-in-sdoctest-source-scope` — a single
+#   scope gate, not 137k independent defects. The row count is an UPPER BOUND
+#   on work; the DISTINCT-CAUSE count (5) is the number to triage against.
+#   The two genuinely surprising rows, not explained by the scope gate:
+#     doc/02_requirements/app/testing/easy_fix.md:38 — the pipeline DID open
+#       this file and extracted ZERO blocks. A real silent extractor miss.
+#     src/lib/.../sdoctest/extractor.spl:143 — fence opened, never closed.
+#   MUTATION PROOF (rule 10), both run 2026-08-18:
+#     M1 blind the predicate (`isrun()` -> return 0): selftest FAILS 6/13
+#       assertions, exit 2. M2 widen it (every fence counts, `isrun()` -> 1):
+#       selftest FAILS 4/13 assertions, exit 2. Unmutated control: exit 0.
+#
+# ADVISORY / KNOWN-RED
+#   This tree is currently RED by construction: sdoctest discovery is hard
+#   filtered to `.md` (`sdoctest/discovery.spl:19,21-22,59`) and its configured
+#   sources exclude most of `doc/` plus all of `src/`, `test/` and `scripts/`.
+#   That is ONE defect (a scope gate) with many rows. The predicate is NOT
+#   softened to manufacture a green: run with `--advisory` (the roster mode)
+#   to get exit 0 with a KNOWN-RED verdict, or without it to get a real FAIL.
+#
+# EXIT CODES (repo guard convention)
+#   0 PASS (or ADVISORY known-red) / 1 FAIL / 2 ERROR — nothing was checked
+#   The verdict is ALWAYS the last line of stdout.
+#
+# USAGE
+#   sh scripts/check/check-doctest-registration-coverage.shs [--advisory]
+#   sh scripts/check/check-doctest-registration-coverage.shs --selftest
+#   Internal (used by --selftest): --scan-root DIR --registered FILE
+# ENV
+#   DRC_IGNORE_FILE=<path>  override the ignore file
+#   DRC_PROBE_TIMEOUT=<s>   probe timeout, default 1800
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+
+die_error() { printf 'ERROR — nothing was checked (%s)\n' "$1"; exit 2; }
+
+cd "$REPO_ROOT" 2>/dev/null || die_error "cannot cd to repo root"
+
+ADVISORY=0
+SELFTEST=0
+SCAN_ROOT=""
+REGISTERED_FILE=""
+IGNORE_FILE="${DRC_IGNORE_FILE:-$SCRIPT_DIR/doctest_registration_coverage.ignore}"
+PROBE_TIMEOUT="${DRC_PROBE_TIMEOUT:-1800}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --advisory)   ADVISORY=1 ;;
+        --selftest)   SELFTEST=1 ;;
+        --scan-root)  shift; SCAN_ROOT="${1:-}" ;;
+        --registered) shift; REGISTERED_FILE="${1:-}" ;;
+        --ignore-file) shift; IGNORE_FILE="${1:-}" ;;
+        -h|--help)    sed -n '2,90p' "$0"; exit 0 ;;
+        *)            die_error "unknown argument '$1'" ;;
+    esac
+    shift
+done
+
+# =====================================================================
+# LEFT SIDE — independent over-collecting scan (awk only; no pipeline code)
+#
+# Emits TSV: <kind>\t<path>\t<line>\t<detail>
+#   kind = MDFENCE   markdown body fence with a simple/spl/sdoctest info-string
+#          SPLFENCE  such a fence inside a ///, ## or # comment in a .spl file
+#          UNPARSED  a fence that opened and never closed before EOF
+#          NEARMISS  an info-string that ALMOST matches (Simple, spl-lang, ...)
+# NEARMISS exists so a typo'd fence is reported loudly instead of vanishing.
+# =====================================================================
+scan_tree() {
+    _root="$1"
+    ( cd "$_root" 2>/dev/null || exit 0
+      if [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
+          git ls-files -- '*.md' '*.spl' 2>/dev/null
+      else
+          find . -type f \( -name '*.md' -o -name '*.spl' \) 2>/dev/null | sed 's|^\./||'
+      fi
+    ) | grep -v -e '^src/compiler_rust/vendor/' -e '^src/runtime/vendor/' \
+      | while IFS= read -r f; do
+          [ -f "$_root/$f" ] || continue
+          awk -v P="$f" '
+            function trim(s){ sub(/^[ \t]+/,"",s); sub(/[ \t\r]+$/,"",s); return s }
+            # info-string language: text after the backticks, before any ":"
+            function lang(s,  r,c){ r=s; sub(/^```+/,"",r); c=index(r,":"); if(c>0) r=substr(r,1,c-1); return trim(r) }
+            function isrun(l){ return (l=="simple"||l=="spl"||l=="sdoctest") }
+            function isnear(l,  lc){ lc=tolower(l);
+                 if(isrun(l)) return 0;
+                 if(lc=="simple"||lc=="spl"||lc=="sdoctest") return 1;         # case typo
+                 if(lc ~ /^(simple|spl|sdoctest)[-_ ]/) return 1;              # simple-lang
+                 return 0 }
+            BEGIN{ md = (P ~ /\.md$/); open=0; oline=0; ocomment=0 }
+            {
+              raw=$0; t=trim(raw)
+              # strip a leading comment marker for .spl files
+              c=t; iscomment=0
+              if(!md){
+                if(t ~ /^\/\/\//){ c=trim(substr(t,4)); iscomment=1 }
+                else if(t ~ /^##/){ c=trim(substr(t,3)); iscomment=1 }
+                else if(t ~ /^#/){ c=trim(substr(t,2)); iscomment=1 }
+                else c=""
+              }
+              if(open){
+                if((md && t=="```") || (!md && ((ocomment && c=="```") || (!ocomment && t=="```")))){
+                  open=0; print pend                # closed cleanly -> it is a real fence
+                }
+                next
+              }
+              cand=""
+              if(md && t ~ /^```+[A-Za-z]/) cand=t
+              else if(!md && iscomment && c ~ /^```+[A-Za-z]/) cand=c
+              if(cand==""){ next }
+              L=lang(cand)
+              if(isrun(L)){
+                # Buffered: an unclosed fence must land ONLY in the UNPARSEABLE
+                # bucket, never also be counted as a well-formed fence.
+                pend = sprintf("%s\t%s\t%d\t%s", (md?"MDFENCE":"SPLFENCE"), P, NR, L)
+                open=1; oline=NR; ocomment=(md?0:1)
+              } else if(isnear(L)){
+                printf "NEARMISS\t%s\t%d\t%s\n", P, NR, L
+              }
+            }
+            END{ if(open) printf "UNPARSED\t%s\t%d\tfence-never-closed\n", P, oline }
+          ' "$_root/$f"
+      done
+}
+
+# =====================================================================
+# IGNORE LIST
+# =====================================================================
+IGN_PATTERNS=""
+IGN_COUNT=0
+load_ignore() {
+    IGN_COUNT=0
+    IGN_PATTERNS=""
+    [ -n "$IGNORE_FILE" ] && [ -f "$IGNORE_FILE" ] || return 0
+    _n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        pat=$(printf '%s' "$line" | cut -f1)
+        reason=$(printf '%s' "$line" | cut -f2-)
+        [ "$pat" = "$line" ] && reason=""
+        if [ -z "$reason" ]; then
+            printf 'ERROR — nothing was checked (ignore entry %s has no reason string; every ignore MUST state a reason)\n' "$pat"
+            exit 2
+        fi
+        case "$pat" in
+            '*'|'**'|'*.md'|'*.spl'|'**/*'|'**/*.md'|'**/*.spl'|'')
+                printf 'ERROR — nothing was checked (ignore pattern %s is too broad and is refused; it could swallow the whole population)\n' "$pat"
+                exit 2 ;;
+        esac
+        _n=$((_n+1))
+        IGN_PATTERNS="$IGN_PATTERNS$pat
+"
+    done < "$IGNORE_FILE"
+    IGN_COUNT=$_n
+}
+
+# =====================================================================
+# PROBE — the authoritative registered set, from the real pipeline
+# =====================================================================
+run_probe() {
+    _out="$1"
+    _bin="$REPO_ROOT/bin/simple"
+    [ -x "$_bin" ] || die_error "bin/simple missing or not executable; absence of the tool needed to decide is ERROR, not a pass"
+    _dir="$REPO_ROOT/build/doctest_registration_coverage"
+    mkdir -p "$_dir" || die_error "cannot create probe dir"
+    cat > "$_dir/probe.spl" <<'PROBE_EOF'
+# Generated by check-doctest-registration-coverage.shs. Do not hand-edit.
+# Prints the AUTHORITATIVE registered doctest inventory by calling the real
+# pipeline functions. Nothing here reimplements extraction.
+use std.test_runner.sdoctest.config.load_sdoctest_config
+use std.test_runner.sdoctest.discovery.discover_sdoctest_files
+use std.test_runner.sdoctest.extractor.extract_sdoctest_blocks
+use std.test_runner.doctest_runner.discover_spl_doctest_files
+
+fn main():
+    val cfg = load_sdoctest_config("config/sdoctest.sdn")
+    val files = discover_sdoctest_files(cfg, "")
+    for f in files:
+        val blocks = extract_sdoctest_blocks(f)
+        print "MD\t{f}\t{blocks.len()}"
+    val spl = discover_spl_doctest_files(["src/lib/", "src/compiler/", "src/app/"])
+    for f in spl:
+        print "SPL\t{f}\t1"
+    print "PROBE_OK"
+PROBE_EOF
+    timeout "$PROBE_TIMEOUT" "$_bin" run "$_dir/probe.spl" > "$_out" 2>"$_dir/probe.err"
+    _rc=$?
+    [ "$_rc" -eq 0 ] || die_error "pipeline probe failed rc=$_rc; see $_dir/probe.err"
+    grep -q '^PROBE_OK$' "$_out" || die_error "pipeline probe produced no PROBE_OK sentinel — output untrustworthy"
+    grep -c '^MD	' "$_out" >/dev/null 2>&1 || true
+}
+
+# =====================================================================
+# COMPARE — LEFT minus RIGHT, bucketed by CAUSE
+# =====================================================================
+compare() {
+    _scan="$1"; _reg="$2"; _out="$3"
+    awk -F'\t' -v IGN="$IGN_PATTERNS" '
+      function globmatch(path, pat,  re){
+          re = pat
+          gsub(/\./, "\\.", re)
+          gsub(/\*\*\//, "\001", re)
+          gsub(/\*\*/, "\002", re)
+          gsub(/\*/, "[^/]*", re)
+          gsub(/\001/, "(.*/)?", re)
+          gsub(/\002/, ".*", re)
+          gsub(/\?/, ".", re)
+          return (path ~ ("^" re "$"))
+      }
+      BEGIN{ ni=0; n=split(IGN,IA,"\n"); for(i=1;i<=n;i++) if(IA[i]!=""){ ni++; IP[ni]=IA[i]; IHIT[ni]=0 } }
+      NR==FNR{
+          if($1=="MD"){ REGMD[$2]=$3+0 }
+          else if($1=="SPL"){ REGSPL[$2]=1 }
+          next
+      }
+      {
+          kind=$1; path=$2; line=$3; det=$4
+          # ignore list applies to every kind, and every application is counted
+          for(i=1;i<=ni;i++) if(globmatch(path, IP[i])){ IHIT[i]++; IGNORED++; next }
+          if(kind=="UNPARSED"){ UNPARSED++; print "UNPARSEABLE\t" path "\t" line "\t" det > "/dev/stderr"; next }
+          if(kind=="NEARMISS"){ NEAR++; print "UNPARSEABLE\t" path "\t" line "\tnear-miss-info-string:" det > "/dev/stderr"; next }
+          if(kind=="MDFENCE"){
+              MDTOT++
+              if(path in REGMD && REGMD[path]>0){ REG++; MDSEEN[path]++; next }
+              MDMISS++
+              cause = (path in REGMD) ? "md-file-discovered-but-zero-blocks-extracted" : "md-file-not-in-sdoctest-source-scope"
+              print "UNREGISTERED\t" path "\t" line "\t" cause > "/dev/stderr"
+              CAUSE[cause]++
+              next
+          }
+          if(kind=="SPLFENCE"){
+              SPLTOT++
+              if(path in REGSPL){ REG++; next }
+              SPLMISS++
+              cause = (path ~ /^src\/(lib|compiler|app)\//) ? "spl-in-roots-but-not-registered" : "spl-outside-spl-doctest-roots"
+              if(path ~ /_(spec|test)\.spl$/) cause="spl-excluded-spec-or-test-file"
+              print "UNREGISTERED\t" path "\t" line "\t" cause > "/dev/stderr"
+              CAUSE[cause]++
+              next
+          }
+      }
+      END{
+          stale=0; applied=0
+          for(i=1;i<=ni;i++){ applied+=IHIT[i]; if(IHIT[i]==0){ stale++; print "STALE_IGNORE\t" IP[i] > "/dev/stderr" } }
+          nc=0; for(c in CAUSE) nc++
+          printf "MDTOT=%d\nSPLTOT=%d\nREG=%d\nMDMISS=%d\nSPLMISS=%d\nUNPARSED=%d\nNEAR=%d\nIGNORED=%d\nIGN_APPLIED=%d\nIGN_STALE=%d\nNCAUSE=%d\n", \
+                 MDTOT+0, SPLTOT+0, REG+0, MDMISS+0, SPLMISS+0, UNPARSED+0, NEAR+0, IGNORED+0, applied, stale, nc
+          for(c in CAUSE) printf "CAUSE\t%s\t%d\n", c, CAUSE[c]
+      }
+    ' "$_reg" "$_scan" > "$_out" 2>"${_out}.rows"
+    return 0
+}
+
+# =====================================================================
+# SELFTEST — fatal, runs before every real scan.
+# Fixtures in BOTH directions, plus mutation-detectable cases.
+# =====================================================================
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fail=0
+    _st_note=""
+
+    st_assert() { # name expected actual
+        if [ "$2" != "$3" ]; then
+            printf 'SELFTEST FAIL: %s (expected %s, got %s)\n' "$1" "$2" "$3"
+            _fail=1
+        fi
+    }
+
+    # The selftest reassigns IGNORE_FILE; save it so it CANNOT leak into the
+    # real scan (a leak silently made every real run use a fixture ignore file).
+    _saved_ignore_file="$IGNORE_FILE"
+
+    # ---- fixture tree -------------------------------------------------
+    mkdir -p "$_t/tree/doc" "$_t/tree/src"
+    # (1) must-DETECT: a genuinely unregistered markdown fence
+    printf 'x\n```simple\nprint "hi"\n```\n' > "$_t/tree/doc/unregistered.md"
+    # (2) must-NOT-DETECT: a properly registered markdown fence
+    printf 'x\n```simple\nprint "ok"\n```\n' > "$_t/tree/doc/registered.md"
+    # (3) must-NOT-DETECT: an illustrative `text` snippet
+    printf 'x\n```text\nnot a test\n```\n' > "$_t/tree/doc/illustrative.md"
+    # (4) must-NOT-DETECT: a `>>> BANNER <<<` header and a struct field named
+    #     `sdoctest:` — lane EXTRACT measured these as its FP class
+    printf '>>> BANNER <<<\n\nstruct S:\n    sdoctest: bool\n' > "$_t/tree/doc/banner.md"
+    printf 'struct S:\n    sdoctest: bool\n\n# >>> BANNER <<<\n' > "$_t/tree/src/fields.spl"
+    # (5) must-DETECT-AS-UNPARSEABLE: an unclosed fence
+    printf 'x\n```simple\nprint "oops"\n' > "$_t/tree/doc/unclosed.md"
+    # (6) must-DETECT-AS-UNPARSEABLE: a near-miss info string
+    printf 'x\n```Simple\nprint "case"\n```\n' > "$_t/tree/doc/nearmiss.md"
+    # (7) must-DETECT: a comment doctest in a .spl outside the roots
+    printf '# ```simple\n# print "c"\n# ```\nfn f():\n    pass\n' > "$_t/tree/src/comment.spl"
+
+    printf 'MD\tdoc/registered.md\t1\nPROBE_OK\n' > "$_t/registered.txt"
+
+    IGN_PATTERNS=""
+    _o="$_t/res"
+    scan_tree "$_t/tree" > "$_t/scan"
+    compare "$_t/scan" "$_t/registered.txt" "$_o"
+    MDTOT=$(sed -n 's/^MDTOT=//p' "$_o"); SPLTOT=$(sed -n 's/^SPLTOT=//p' "$_o")
+    MDMISS_V=$(sed -n 's/^MDMISS=//p' "$_o"); SPLMISS_V=$(sed -n 's/^SPLMISS=//p' "$_o")
+    REG_V=$(sed -n 's/^REG=//p' "$_o"); UNP_V=$(sed -n 's/^UNPARSED=//p' "$_o")
+    NEAR_V=$(sed -n 's/^NEAR=//p' "$_o")
+
+    st_assert "must-DETECT unregistered md fence"      1 "$MDMISS_V"
+    st_assert "must-NOT-DETECT registered md fence"    1 "$REG_V"
+    st_assert "must-DETECT unclosed fence as UNPARSEABLE" 1 "$UNP_V"
+    st_assert "must-DETECT near-miss info string"      1 "$NEAR_V"
+    st_assert "must-DETECT unregistered comment doctest" 1 "$SPLMISS_V"
+    # `text` fence, banner, struct field and the near-miss must contribute
+    # NOTHING to the well-formed population. Only registered.md, unregistered.md
+    # and comment.spl are real fences -> exactly 3.
+    _tot=$(( ${MDTOT:-0} + ${SPLTOT:-0} ))
+    st_assert "illustrative/banner/field/nearmiss not collected as fences" 3 "$_tot"
+
+    # ---- empty tree must yield 0 checked (forces caller to ERROR) -----
+    mkdir -p "$_t/empty"
+    scan_tree "$_t/empty" > "$_t/scan_empty"
+    printf 'PROBE_OK\n' > "$_t/reg_empty.txt"
+    compare "$_t/scan_empty" "$_t/reg_empty.txt" "$_t/res_empty"
+    _e=$(( $(sed -n 's/^MDTOT=//p' "$_t/res_empty") + $(sed -n 's/^SPLTOT=//p' "$_t/res_empty") \
+         + $(sed -n 's/^UNPARSED=//p' "$_t/res_empty") + $(sed -n 's/^NEAR=//p' "$_t/res_empty") ))
+    st_assert "empty tree yields 0 checked" 0 "$_e"
+
+    # ---- ignore-list properties --------------------------------------
+    printf 'doc/unregistered.md\n' > "$_t/ign_noreason"
+    ( DRC_IGNORE_FILE="$_t/ign_noreason" IGNORE_FILE="$_t/ign_noreason"; IGNORE_FILE="$_t/ign_noreason"; load_ignore ) >/dev/null 2>&1
+    _r=$?
+    st_assert "ignore entry without reason is ERROR" 2 "$_r"
+
+    printf '**\tsweep everything\n' > "$_t/ign_broad"
+    ( IGNORE_FILE="$_t/ign_broad"; load_ignore ) >/dev/null 2>&1
+    _r=$?
+    st_assert "over-broad ignore pattern is refused" 2 "$_r"
+
+    printf 'doc/nonexistent-*.md\tno such file\n' > "$_t/ign_stale"
+    IGNORE_FILE="$_t/ign_stale"; load_ignore
+    compare "$_t/scan" "$_t/registered.txt" "$_t/res_stale"
+    st_assert "stale ignore entry is counted" 1 "$(sed -n 's/^IGN_STALE=//p' "$_t/res_stale")"
+
+    printf 'doc/unregistered.md\tknown illustrative, see BUG-x\n' > "$_t/ign_ok"
+    IGNORE_FILE="$_t/ign_ok"; load_ignore
+    compare "$_t/scan" "$_t/registered.txt" "$_t/res_ok"
+    st_assert "applied ignore removes the finding" 0 "$(sed -n 's/^MDMISS=//p' "$_t/res_ok")"
+    st_assert "applied ignore is reported"         1 "$(sed -n 's/^IGN_APPLIED=//p' "$_t/res_ok")"
+    st_assert "applied ignore is not stale"        0 "$(sed -n 's/^IGN_STALE=//p' "$_t/res_ok")"
+
+    IGN_PATTERNS=""; IGN_COUNT=0
+    IGNORE_FILE="$_saved_ignore_file"
+    rm -rf "$_t"
+    return $_fail
+}
+
+# =====================================================================
+# MAIN
+# =====================================================================
+if ! selftest; then
+    printf 'ERROR — nothing was checked (selftest failed; a selftest failure downgrades to ERROR, never to a pass)\n'
+    exit 2
+fi
+
+if [ "$SELFTEST" -eq 1 ]; then
+    printf 'PASS — 13 selftest assertion(s) checked over 7 fixtures, selftest green\n'
+    exit 0
+fi
+
+load_ignore
+
+TMP=$(mktemp -d) || die_error "cannot mktemp"
+trap 'rm -rf "$TMP"' EXIT
+
+if [ -n "$SCAN_ROOT" ]; then
+    [ -n "$REGISTERED_FILE" ] || die_error "--scan-root requires --registered"
+    scan_tree "$SCAN_ROOT" > "$TMP/scan"
+    cp "$REGISTERED_FILE" "$TMP/reg"
+else
+    scan_tree "$REPO_ROOT" > "$TMP/scan"
+    run_probe "$TMP/reg"
+fi
+
+compare "$TMP/scan" "$TMP/reg" "$TMP/res"
+ROWS="$TMP/res.rows"
+
+MDTOT=$(sed -n 's/^MDTOT=//p' "$TMP/res"); SPLTOT=$(sed -n 's/^SPLTOT=//p' "$TMP/res")
+REG=$(sed -n 's/^REG=//p' "$TMP/res");     MDMISS=$(sed -n 's/^MDMISS=//p' "$TMP/res")
+SPLMISS=$(sed -n 's/^SPLMISS=//p' "$TMP/res"); UNPARSED=$(sed -n 's/^UNPARSED=//p' "$TMP/res")
+NEAR=$(sed -n 's/^NEAR=//p' "$TMP/res");   IGNORED=$(sed -n 's/^IGNORED=//p' "$TMP/res")
+IGN_APPLIED=$(sed -n 's/^IGN_APPLIED=//p' "$TMP/res"); IGN_STALE=$(sed -n 's/^IGN_STALE=//p' "$TMP/res")
+NCAUSE=$(sed -n 's/^NCAUSE=//p' "$TMP/res")
+
+CHECKED=$(( MDTOT + SPLTOT + UNPARSED + NEAR + IGNORED ))
+MISS=$(( MDMISS + SPLMISS ))
+
+echo "== doctest registration coverage =="
+echo "  markdown fences scanned (independent) : $MDTOT"
+echo "  comment fences scanned (independent)  : $SPLTOT"
+echo "  registered by the real pipeline       : $REG"
+echo "  UNREGISTERED (markdown lane)          : $MDMISS"
+echo "  UNREGISTERED (comment lane)           : $SPLMISS"
+echo "  UNPARSEABLE (unclosed fence)          : $UNPARSED"
+echo "  UNPARSEABLE (near-miss info-string)   : $NEAR"
+echo "  ignored by ignore file                : $IGNORED"
+echo "  ignore entries: $IGN_COUNT declared, $IGN_APPLIED application(s), $IGN_STALE stale"
+echo "  distinct causes                       : $NCAUSE"
+echo "-- causes --"
+grep '^CAUSE	' "$TMP/res" | sed 's/^CAUSE\t/  /'
+mkdir -p "$REPO_ROOT/build/doctest_registration_coverage" 2>/dev/null
+cp "$ROWS" "$REPO_ROOT/build/doctest_registration_coverage/rows.tsv" 2>/dev/null
+echo "-- first 40 rows (full list: build/doctest_registration_coverage/rows.tsv) --"
+head -40 "$ROWS" 2>/dev/null
+
+if [ "$CHECKED" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (0 fences examined; a 0-item run is never a pass)\n'
+    exit 2
+fi
+
+PROBLEMS=$(( MISS + UNPARSED + NEAR ))
+if [ "$IGN_STALE" -gt 0 ] || [ "$PROBLEMS" -gt 0 ]; then
+    _v="$PROBLEMS unregistered-or-undecidable fence(s) (UPPER BOUND: raw block rows, not adjudicated defects) across $NCAUSE distinct cause(s); $CHECKED fence(s) checked; ignore: $IGN_APPLIED applied, $IGN_STALE stale"
+    if [ "$ADVISORY" -eq 1 ]; then
+        printf 'PASS — %d fence(s) checked; ADVISORY, KNOWN-RED: %s\n' "$CHECKED" "$_v"
+        exit 0
+    fi
+    printf 'FAIL — %s\n' "$_v"
+    exit 1
+fi
+
+printf 'PASS — %d fence(s) checked, 0 unregistered, 0 unparseable, ignore: %d applied, 0 stale\n' "$CHECKED" "$IGN_APPLIED"
+exit 0
