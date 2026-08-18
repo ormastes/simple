@@ -200,18 +200,41 @@ fn combined_test_run_json(
         "\"sdoctest\":" + sdoc_json + "}"
     )
 
+fn aggregate_failed_count(result: TestRunResult) -> i64:
+    """Failure figure for the aggregate `Results:` line -- fail-closed.
+
+    `result.total_failed` alone is NOT it. A TIMED-OUT or TERMINATED unit
+    carries `failed: 0` and contributes no examples, so a run built only from
+    total_passed/total_failed printed `Results: 0 total, 0 passed, 0 failed`
+    for a run whose own `SPEC FILE VERDICT:` line said `failed=1 timeout=1`
+    (bug: aspect_weave_specs_timeout_vacuous_green_2026-08-18). The two
+    designated evidence surfaces of the SAME run contradicted each other, and
+    the vacuous one is the one CI and agents grep.
+
+    Rule: every file that does not classify OK contributes at least 1. Adding
+    the class counters directly would DOUBLE COUNT -- an ordinary failing spec
+    classifies "ERROR" while already contributing to total_failed -- so the
+    increment applies only to bad files that contributed NOTHING
+    (`failed == 0`): exactly the TIMEOUT / TERMINATED / silent-NOT_RUN set. A
+    normally-passing run has no such file and its head is byte-identical to
+    before, which is what the positive control in the acceptance spec pins."""
+    var uncounted_bad = 0
+    for f in result.files:
+        if test_file_outcome_class(f) != "OK" and f.failed == 0:
+            uncounted_bad = uncounted_bad + 1
+    # Executors that report timeouts without producing per-file results at all:
+    # with no files to classify the loop above sees nothing, so fall back to the
+    # struct counter rather than reporting the run as zero-of-everything.
+    if result.files.len() == 0 and result.total_timed_out > uncounted_bad:
+        uncounted_bad = result.total_timed_out
+    result.total_failed + uncounted_bad
+
 fn print_summary(result: TestRunResult, format: text):
     if format == "json":
         print test_run_result_json(result)
         return
     print ""
     print "========================================="
-    val total = result.total_passed + result.total_failed
-    var summary = "Results: {total} total, {result.total_passed} passed, {result.total_failed} failed"
-    if result.total_skipped > 0:
-        summary = summary + ", {result.total_skipped} skipped"
-    if result.total_pending > 0:
-        summary = summary + ", {result.total_pending} pending"
     # The six outcome classes come from test_file_outcome_class() -- the single
     # classifier above, which tokenises the "<CLASS>:" head rather than
     # prefix-matching the whole error string, so rewording a message can no
@@ -250,6 +273,31 @@ fn print_summary(result: TestRunResult, format: text):
     # TIMEOUT that also moved them out of the failure verdict.
     if crashed == 0 and terminated == 0 and timed_out == 0 and not_run == 0:
         timed_out = result.total_timed_out
+    # FAIL-CLOSED `Results:` head (bug:
+    # aspect_weave_specs_timeout_vacuous_green_2026-08-18). A TIMED-OUT or
+    # TERMINATED unit carries `failed: 0` and contributes no examples, so the
+    # old head -- built purely from total_passed/total_failed -- printed
+    # "Results: 0 total, 0 passed, 0 failed" for a run whose own
+    # `SPEC FILE VERDICT:` line said `failed=1 timeout=1`. The two designated
+    # evidence surfaces of the SAME run contradicted each other, and the
+    # vacuous one is the one CI and agents grep. `Results:` is the repo's
+    # designated evidence line: it must never report a unit that produced no
+    # verdict as zero-of-everything.
+    #
+    # Rule: every file that does NOT classify OK contributes at least 1 to the
+    # head's failed figure. Adding the class counters directly would DOUBLE
+    # COUNT -- an ordinary failing spec classifies "ERROR" while already
+    # contributing to total_failed -- so the increment is applied only to bad
+    # files that contributed NOTHING (`failed == 0`), which is exactly the
+    # TIMEOUT / TERMINATED / silent-NOT_RUN set. A normally-passing run has no
+    # such file and its head is byte-identical to before (positive control).
+    val head_failed = aggregate_failed_count(result)
+    val total = result.total_passed + head_failed
+    var summary = "Results: {total} total, {result.total_passed} passed, {head_failed} failed"
+    if result.total_skipped > 0:
+        summary = summary + ", {result.total_skipped} skipped"
+    if result.total_pending > 0:
+        summary = summary + ", {result.total_pending} pending"
     if crashed > 0:
         summary = summary + ", {crashed} crashed"
     if terminated > 0:

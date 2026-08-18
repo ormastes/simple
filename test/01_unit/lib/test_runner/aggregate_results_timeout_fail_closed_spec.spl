@@ -1,0 +1,61 @@
+use std.nogc_sync_mut.test_runner.test_runner_output.{aggregate_failed_count}
+use std.nogc_sync_mut.test_runner.test_runner_types.{TestFileResult, TestRunResult, classify_test_run_result, test_run_outcome_exit_code}
+
+# REPRODUCING SPEC for
+# doc/08_tracking/bug/aspect_weave_specs_timeout_vacuous_green_2026-08-18.md.
+#
+# Measured RED (bin/simple test --timeout 15 on a deliberately spinning spec):
+#
+#   SPEC FILE VERDICT: .../timeout_repro_spec.spl declared>=1 executed=1
+#     passed=0 failed=1 dropped=0 timeout=1 reason=aggregate-lane-timeout
+#     budget_ms=15050
+#   Results: 0 total, 0 passed, 0 failed, 1 timed out (unverified)
+#
+# The two designated evidence surfaces of the SAME run contradicted each other:
+# the per-file verdict said failed=1, the aggregate `Results:` head -- the line
+# CI and agents grep -- said zero of everything, which reads as "nothing ran"
+# rather than "something failed". That is a fail-OPEN, and it hides EVERY
+# timing-out spec, not just the aspect ones.
+
+fn timed_out_file(path: text) -> TestFileResult:
+    # Exactly the shape the aggregate lane builds for a killed child: failed 0
+    # (a timeout is unverified, not an assertion failure) and no examples at
+    # all, so it contributes nothing to total_failed or total_passed.
+    TestFileResult(
+        path: path, passed: 0, failed: 0, skipped: 0, pending: 0,
+        duration_ms: 15050, setup_ms: 0,
+        error: "TIMEOUT: no result after 15s (unverified)",
+        timed_out: true, cached: false
+    )
+
+fn run_of(files: [TestFileResult], passed: i64, failed: i64, timed_out: i64) -> TestRunResult:
+    TestRunResult(
+        files: files, total_passed: passed, total_failed: failed,
+        total_skipped: 0, total_pending: 0, total_timed_out: timed_out,
+        total_duration_ms: 0, total_setup_ms: 0, total_cached: 0
+    )
+
+describe "aggregate Results: line fails closed on a timed-out spec":
+    it "does not report a timed-out unit as zero failures":
+        val result = run_of([timed_out_file("aspect_weave_spec.spl")], 0, 0, 1)
+        expect(aggregate_failed_count(result)).to_equal(1)
+
+    it "does not report a timed-out unit as zero total":
+        val result = run_of([timed_out_file("aspect_weave_spec.spl")], 0, 0, 1)
+        val total = result.total_passed + aggregate_failed_count(result)
+        expect(total).to_equal(1)
+
+    it "never exits 0 for a run containing a timed-out unit":
+        # Exit code is the other half of the evidence contract. It was already
+        # correct; this pins it so the reporting fix cannot be undone by a
+        # future change that makes the head honest and the status green.
+        val result = run_of([timed_out_file("aspect_weave_spec.spl")], 0, 0, 1)
+        val code = test_run_outcome_exit_code(classify_test_run_result(result, false))
+        expect(code == 0).to_equal(false)
+
+    it "still fails closed when the executor reports a timeout with no per-file result":
+        # Some executors set total_timed_out without producing any
+        # TestFileResult. With no file to classify, a files-only rule would
+        # print the same vacuous zero head.
+        val result = run_of([], 0, 0, 1)
+        expect(aggregate_failed_count(result)).to_equal(1)
