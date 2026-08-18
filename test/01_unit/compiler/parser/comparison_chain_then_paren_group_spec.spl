@@ -1,0 +1,70 @@
+"""
+# Defect Class: Comparison Chain Closed by a Parenthesised Group
+
+`try_skip_ident_generic_args` speculates a generic-argument list whenever an
+identifier is followed by `<`, and confirms it when a matching `>` is followed
+by `(`, `.`, `::` or `{`. Its scan accepted an unbounded run of arguments with
+NO separating commas, and `parse_type` accepts a bare keyword or identifier as
+a named type. So
+
+    if key_col < 0 or key_col > (max_col - min_col):
+
+scanned as `key_col` `<` [`0`, `or`, `key_col`] `>` `(` — a "confirmed" generic
+call — and hard-errored on the recorded const-generic span
+("expected a type in generic argument position ... found integer literal")
+instead of backtracking into the comparison chain. This is a HARD parse error,
+not a warning: every module importing the file failed to load, which is what
+took out `src/app/office/sheets/data_ops.spl` and, transitively, the whole
+`src/app/cli/main.spl` graph and its `*_log_modes_spec.spl` suites.
+
+A real generic-argument list is `T (, T)*`; the fix requires a comma between
+consecutive arguments. This spec walks the CLASS, not the one site:
+
+  - the `data_ops.spl:38` shape, `a < 0 or a > (b - c)`
+  - the same shape closed by `.` (method call) and by a `::` path
+  - `and`-chained and non-literal left operands
+  - positive control: real generic calls must still parse
+
+See doc/08_tracking/bug/parser_comparison_chain_misread_as_generic_args_2026-08-18.md
+"""
+
+class Limits:
+    fn big() -> i64:
+        9
+
+describe "Comparison chain closed by a parenthesised group (defect class)":
+
+    it "handles the `a < 0 or a > (b - c)` shape":
+        val a = 5
+        val b = 10
+        val c = 2
+        assert_false(a < 0 or a > (b - c))
+        assert_true(9 < 0 or 9 > (b - c))
+
+    it "handles the same shape with `and`":
+        val a = 5
+        val b = 10
+        val c = 2
+        assert_true(a > 0 and a < (b - c))
+        assert_false(a > 0 and a > (b - c))
+
+    it "handles a non-literal left operand":
+        val lo = 1
+        val a = 5
+        val b = 10
+        assert_true(a > lo and a < (b))
+
+    it "handles a comparison chain closed by a method call":
+        val a = 1
+        val words = ["ab", "cdef"]
+        assert_true(a < 0 or a < words[1].len())
+
+    it "handles a comparison chain closed by a `::` path":
+        val a = 5
+        assert_true(a < 0 or a < Limits::big())
+
+    it "positive control: a real generic call still parses":
+        val xs: [i64] = []
+        expect(xs.len()).to_equal(0)
+        val d: Dict<text, i64> = {}
+        expect(d.len()).to_equal(0)

@@ -1230,6 +1230,15 @@ impl<'a> Parser<'a> {
         // confirmed generic-argument shape (`... > (`) can be reported exactly.
         // See doc/08_tracking/bug/const_generic_argument_rejected_in_constructor_call_2026-08-17.md
         let mut const_arg_span: Option<crate::token::Span> = None;
+        // A real generic-argument list is `T (, T)*`: two arguments can never sit
+        // side by side without a separating comma. Comparison chains routinely
+        // produce that shape (`a < 0 or a > (b)` scans as `0`, `or`, `a` — three
+        // "arguments", no commas) and `parse_type` happily accepts a bare keyword
+        // or identifier as a named type, so without this ratchet the scan reaches
+        // `>` followed by `(`, declares the shape confirmed and hard-errors on the
+        // recorded const-generic span instead of backtracking into the comparison.
+        // See doc/08_tracking/bug/parser_comparison_chain_misread_as_generic_args_2026-08-18.md
+        let mut need_comma = false;
 
         // Consume the generic arg list, tracking nesting depth to handle `Foo<Bar<T>>`.
         // We use `parse_type` calls (with backtrack-on-error) to validate the contents —
@@ -1289,12 +1298,14 @@ impl<'a> Parser<'a> {
                         || (!self.no_brace_postfix && self.check(&TokenKind::LBrace));
                     break;
                 }
+                need_comma = true;
                 continue;
             }
 
             if self.check(&TokenKind::Lt) {
                 depth += 1;
                 self.advance();
+                need_comma = false;
                 continue;
             }
 
@@ -1310,12 +1321,18 @@ impl<'a> Parser<'a> {
                 self.current.kind,
                 TokenKind::Integer(_) | TokenKind::TypedInteger(_, _)
             ) {
+                if need_comma {
+                    break;
+                }
                 if const_arg_span.is_none() {
                     const_arg_span = Some(self.current.span);
                 }
                 self.advance();
                 if self.check(&TokenKind::Comma) {
                     self.advance();
+                    need_comma = false;
+                } else {
+                    need_comma = true;
                 }
                 continue;
             }
@@ -1326,6 +1343,7 @@ impl<'a> Parser<'a> {
             // cannot start on.
             if self.check(&TokenKind::Comma) {
                 self.advance();
+                need_comma = false;
                 continue;
             }
 
@@ -1336,8 +1354,15 @@ impl<'a> Parser<'a> {
             // const-generic argument (`Box2<Box2<i64, 4>, i32>`), losing both the
             // depth bookkeeping and the const-argument span.
             if matches!(self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Lt) {
+                if need_comma {
+                    break;
+                }
                 self.advance();
                 continue;
+            }
+
+            if need_comma {
+                break;
             }
 
             // Try to parse a type arg; if that fails this is not a valid generic list
@@ -1349,6 +1374,9 @@ impl<'a> Parser<'a> {
             // After a type arg expect comma or closing >
             if self.check(&TokenKind::Comma) {
                 self.advance();
+                need_comma = false;
+            } else {
+                need_comma = true;
             }
             // continue loop — next iteration checks for > or more types
         }
