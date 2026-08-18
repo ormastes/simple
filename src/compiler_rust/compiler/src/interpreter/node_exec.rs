@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, Node, Type};
+use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, ImportTarget, Node, Type};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{strict_mem_enabled, Env, Value};
 use super::core_types::{
@@ -562,6 +562,84 @@ pub(crate) fn exec_node(
                             captured_env: Arc::new(Env::new()),
                         },
                     );
+                }
+            }
+            Ok(Control::Next)
+        }
+        // A `use` written inside a function body or any block. Without this arm
+        // it falls into the catch-all below, which silently returns
+        // `Control::Next`: the statement parses, nothing is registered, and the
+        // imported symbol never enters scope. The call site then fails with a
+        // "function not found" naming the CALLEE rather than the import, which
+        // reads as a missing or unexported function and has misdiagnosed this
+        // bug repeatedly. Module-scope `use` was always handled (in
+        // interpreter_eval); only this block-scoped position was missing, which
+        // left real stdlib code (e.g. std.crypto.sha1, whose body-scoped
+        // imports never resolved) unable to run at all.
+        // See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
+        Node::UseStmt(use_stmt) => {
+            let current_file = super::get_current_file();
+            // `enums` is borrowed immutably in this signature; enum imports
+            // reach the interpreter through the GLOBAL_ENUMS thread-local
+            // rather than this map, so a local copy satisfies the loader
+            // without dropping them.
+            let mut merged_enums = enums.clone();
+            let loaded = crate::interpreter::interpreter_module::load_and_merge_module(
+                use_stmt,
+                current_file.as_deref(),
+                functions,
+                classes,
+                &mut merged_enums,
+            )?;
+            if let Value::Dict(exports) = &loaded {
+                // Same unpack rules as module scope: Group binds only the named
+                // items, Glob binds everything, Single/Aliased bind the module
+                // dict and unpack nothing.
+                let mut bindings: Vec<(String, Value)> = Vec::new();
+                match &use_stmt.target {
+                    ImportTarget::Group(items) => {
+                        for item_target in items {
+                            match item_target {
+                                ImportTarget::Single(name) => {
+                                    if let Some(v) = exports.get(name) {
+                                        bindings.push((name.clone(), v.clone()));
+                                    }
+                                }
+                                ImportTarget::Aliased { name, alias } => {
+                                    if let Some(v) = exports.get(name) {
+                                        bindings.push((alias.clone(), v.clone()));
+                                    }
+                                }
+                                // Nested groups are unsupported at module scope
+                                // too; stay consistent rather than inventing a
+                                // rule here.
+                                _ => {}
+                            }
+                        }
+                    }
+                    ImportTarget::Glob => {
+                        for (name, value) in exports.iter() {
+                            // Never glob-import `main`: it would be picked up by
+                            // the entry-point fallback and run instead of the
+                            // script's own main. Same guard as module scope. A
+                            // NAMED import of `main` is an explicit opt-in and
+                            // is deliberately not filtered.
+                            if matches!(value, Value::Function { .. }) && name == "main" {
+                                continue;
+                            }
+                            bindings.push((name.clone(), value.clone()));
+                        }
+                    }
+                    ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+                }
+                for (name, value) in bindings {
+                    if let Value::Function { def, .. } = &value {
+                        functions.insert(name.clone(), Arc::clone(def));
+                    }
+                    env.insert(name.clone(), value.clone());
+                    MODULE_GLOBALS.with(|cell| {
+                        cell.borrow_mut().insert(name, value);
+                    });
                 }
             }
             Ok(Control::Next)
