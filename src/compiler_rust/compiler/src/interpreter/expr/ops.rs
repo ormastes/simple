@@ -910,28 +910,15 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::Div => {
                     if use_f32 {
-                        let r = as_f32(&right_val)?;
-                        if r == 0.0 {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::DIVISION_BY_ZERO)
-                                .with_help("cannot divide by zero")
-                                .with_note("check that the divisor is not zero before division");
-                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
-                        } else {
-                            Ok(Value::Float32(as_f32(&left_val)? / r))
-                        }
+                        // IEEE 754: float division by zero is NOT an error —
+                        // it yields NaN (0.0/0.0) or signed infinity
+                        // (nonzero/0.0). Only integer division by zero raises.
+                        Ok(Value::Float32(as_f32(&left_val)? / as_f32(&right_val)?))
                     } else if use_float {
-                        let r = right_val.as_float()?;
-                        if r == 0.0 {
-                            // E3001 - Division By Zero
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::DIVISION_BY_ZERO)
-                                .with_help("cannot divide by zero")
-                                .with_note("check that the divisor is not zero before division");
-                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
-                        } else {
-                            Ok(Value::Float(left_val.as_float()? / r))
-                        }
+                        // IEEE 754: float division by zero is NOT an error —
+                        // it yields NaN (0.0/0.0) or signed infinity
+                        // (nonzero/0.0). Only integer division by zero raises.
+                        Ok(Value::Float(left_val.as_float()? / right_val.as_float()?))
                     } else if let Some(result) = try_object_binop_method(
                         "div_scalar",
                         &left_val,

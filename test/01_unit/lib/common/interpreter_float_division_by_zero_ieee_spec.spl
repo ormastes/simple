@@ -1,0 +1,70 @@
+# BLOCKED ON DEPLOY — requires a rebuilt compiler >= this fix
+#
+# Regression guard for
+# doc/08_tracking/bug/interpreter_float_division_by_zero_raises_instead_of_nan_2026-08-18.md.
+#
+# The deployed `bin/simple` (Rust seed at
+# bin/release/x86_64-unknown-linux-gnu/simple) predates the fix to
+# `src/compiler_rust/compiler/src/interpreter/expr/ops.rs` (BinOp::Div,
+# use_f32/use_float branches) that stops raising `semantic: division by
+# zero` for FLOAT operands and instead lets the division proceed to IEEE
+# 754 NaN/inf, same as hardware float division. Under the deployed seed
+# every example below FAILS with `error[E2001]: division by zero` instead
+# of asserting NaN/inf — verified by manual run before writing this file.
+# Do not weaken the assertions to make it pass early; re-run and commit
+# as-is once green under a rebuilt binary that includes the fix.
+#
+# Local proof (this session, CARGO_TARGET_DIR under /mnt/data, NOT the
+# deployed binary): before the fix, `0.0/0.0`, `1.0/0.0`, `-1.0/0.0`, and
+# `0.0/-0.0` all raised `semantic: division by zero`. After the fix they
+# printed `NaN`, `inf`, `-inf`, `NaN` respectively, and `5 / 0` (integer)
+# still raised `semantic: division by zero` unchanged.
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.numeric_round.{is_nan_f64}
+
+describe "interpreter float division by zero follows IEEE 754 (not a semantic error)":
+    it "0.0 / 0.0 is NaN":
+        val x = 0.0 / 0.0
+        assert_true(is_nan_f64(x))
+
+    it "1.0 / 0.0 is +infinity":
+        val x = 1.0 / 0.0
+        assert_true(x > 0.0)
+        assert_false(is_nan_f64(x))
+        assert_equal(x * 2.0, x)  # inf * 2 == inf, a cheap infinity fingerprint
+
+    it "-1.0 / 0.0 is -infinity":
+        val x = -1.0 / 0.0
+        assert_true(x < 0.0)
+        assert_false(is_nan_f64(x))
+        assert_equal(x * 2.0, x)  # -inf * 2 == -inf
+
+    it "0.0 / -0.0 is NaN":
+        val x = 0.0 / -0.0
+        assert_true(is_nan_f64(x))
+
+    it "float division by zero inside a branch still yields NaN, not a raise":
+        var n = 0.0
+        var d = 0.0
+        if true:
+            n = 0.0
+            d = 0.0
+        val x = n / d
+        assert_true(is_nan_f64(x))
+
+    it "float division by zero inside a loop still yields NaN across iterations":
+        var i = 0
+        var last = 1.0
+        while i < 3:
+            last = 0.0 / 0.0
+            i = i + 1
+        assert_true(is_nan_f64(last))
+
+# Integer division by zero still raising is verified manually, not in this
+# spec: Simple has no try/catch (Result<T, E> + `?` only, by design — see
+# .claude/rules/language.md), and the SSpec runner has no exception-capture
+# matcher. Manual repro (both before and after the fix, same as always):
+# `bin/simple run` on `val a = 5 / 0` prints `error[E2001]: division by
+# zero` and a nonzero exit code; this is unchanged by this fix, since the
+# fix only touches the use_f32/use_float branches of BinOp::Div.
