@@ -65,3 +65,14 @@ capability.
 - `strace`/openat counts for the no-aspect path were not captured; the §11.3
   release gate ("zero aspect payload maps") is argued by construction, not measured.
 - The remaining ~500 ms of `--help` is seed source-run interpretation, not dynSMF.
+
+## 2026-08-18 landed surface (startup-perf campaign)
+
+load_policy axis + wiring (`src/app/startup/load_policy_wiring.spl`) → segment
+plans (`segment_load_plan.spl`); dynload SDN/env config (`dynsmf_autoload.spl`)
++ component descriptors (`src/lib/common/structural/component/`); CLI `--x`
+registry/config/help/completion (`composition/cli_extension_config.spl`).
+Gates: `scripts/check/check-startup-perf-budget.shs`,
+`check-coupling-budget.shs`. Lint/parse cost root cause + mitigations:
+`doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`. Benchmarks:
+`doc/10_metrics/startup/cross_language_startup_benchmark_2026-08-18.md`.

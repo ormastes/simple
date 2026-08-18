@@ -118,58 +118,6 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   execution gate through `check-llvm-simd-row-native-arch.shs`; Rust cross-build
   success alone is not pure-Simple architecture evidence.
 
-## Per-phase verification umbrella
-
-`sh scripts/check/check-bootstrap-all-phases.shs` runs every bootstrap phase
-gate in bootstrap order and reports one combined verdict, so no phase can
-silently pass unverified. Standard contract, verdict last on stdout: `PASS — <n>
-gate(s) checked, ...` (n > 0) / `FAIL — ...` exit 1 / `ERROR — nothing was
-checked` exit 2. Fail-closed and non-vacuous — 0 gates evaluated is ERROR, and a
-registry entry whose gate script is **missing is ERROR, never a skip**.
-`--selftest` (8 fixtures: must-PASS, must-FAIL, vacuous, missing-gate,
-static-present, static-broken, mixed, malformed) runs before every scan and is
-fatal. Gates needing a built stage artifact are marked `static` and are verified
-to exist and parse (`sh -n`), reported as `PRESENT` and counted separately from
-executed gates — never presented as if they had run.
-
-**The phase→gate map, what each gate asserts, and the honest list of UNGATED
-phases live in `doc/07_guide/tooling/bootstrap_phase_verification.md`.** Read
-its gap list before claiming a bootstrap phase is verified: stage 1, the
-stage2→stage3 fixpoint, the deploy step, and the Windows lane have **no gate at
-all**, and every gate except `check-cache-scope-ownership.shs` lacks both a
-`--selftest` and the verdict contract.
-
-## Stage-3 self-verification gate
-
-`sh scripts/check/check-bootstrap-stage3-selfverify.shs` (exit 0 = safe) is the
-consumer-side gate for a Stage-3 output. It never starts a bootstrap: it reads
-`build/bootstrap/stage3/<platform>/provenance.env`, **rehashes the live Stage-2
-and Stage-3 binaries and prints their path/size/sha256 as a receipt** (success is
-never inferred from an exit code), asserts the self-host chain (the Stage-3
-command transcript's `executable:` must be `stage2_path`), asserts both stages
-compiled the same `--entry`, and then executes Stage 3: `--version` must succeed
-without a Rust-seed banner, `lint` must be **rejected** (Stage 3 is the minimal
-bootstrap entry and has no full CLI — asserting the refusal stops a green verdict
-being read as full-CLI evidence), and a trivial program must compile and run
-(`--no-deep` to skip).
-
-**Fixpoint:** stage2 and stage3 are emitted by *different* producers (Rust seed
-vs Stage-2 compiler), so byte-identity between them is not guaranteed and is not
-asserted; byte-*equality* would mean `cp stage2 stage3`, so the gate enforces
-inequality plus the producer chain. Strict fixpoint (stage3 recompiling its own
-entry reproduces stage3) is asserted only when the artifact is supplied via
-`--fixpoint-binary`. `--full-provenance` delegates to the existing
-`bootstrap_stage3_verify_manifest` authority rather than duplicating it.
-
-Same verdict convention as the pre-push guards: `PASS — <n> assertion(s)
-checked, ...` exit 0 / `FAIL — ...` exit 1 / `ERROR — nothing was checked` exit
-2; a run that checked 0 assertions, or a host with no Stage-3 artifact, is ERROR
-and never a pass. `--selftest` runs before every scan and is fatal (7 fixtures:
-healthy must-PASS; tampered-bytes, stage3-is-a-copy-of-stage2, dead binary,
-Rust-seed banner, and `lint`-accepted must-FAIL; empty fixture must force
-ERROR). Contract, verdict table, and overlap survey:
-`doc/07_guide/compiler/bootstrap_stage3_selfverify_gate.md`.
-
 ## Verification tiering — match the gate to the change
 
 The authoritative feature-development policy is
@@ -333,31 +281,14 @@ hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`)
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.
 
-## Building a stage: use the script, never a hand-rolled native-build (2026-08-17)
+## Seed-sibling refresh (2026-08-18) — distinct from a self-hosted redeploy
 
-`bin/simple build bootstrap` is the **legacy slow path**. Its stage invocation
-hardcodes `--threads 1` and passes no `--cache-dir`, no `--low-memory`, no
-`--runtime-bundle`, no `--mode` — a cold uncached single-threaded recompile
-every time. Adding `--bootstrap-reason=`/`--bootstrap-receipt=` does not switch
-it to the good path.
-
-Use `scripts/bootstrap/bootstrap-from-scratch.sh` (without `--full-bootstrap` it
-reuses the existing seed and never runs cargo). Its `bootstrap_native_build_main`
-passes the flags that make a stage finish — above all **`--cache-dir`**, absence
-of which is the #1 cause of "bootstrap takes forever", and **`--low-memory`**,
-absence of which OOMs the host.
-
-**A native-build "timeout" is often an OOM.** `earlyoom` runs here with
-`--prefer ^(simple|...)` and fires at ~10% free; the parent then misreports the
-killed child as `timed out after 14400s` — observed 7 minutes into a 4-hour
-budget. Check `journalctl -u earlyoom` before believing any timeout.
-
-**Budget memory before starting.** One `simple test` process peaks ~3 GB; the
-stage worker holds ~2.9 GB. Bootstrap and broad test sweeps must alternate — 25
-concurrent spec processes measured 46 GB and pushed a 128 GB box into the kill
-zone.
-
-**Healthy stage-1 shape:** the parent `native-build` sleeps in `futex_wait` by
-design; the spawned `native_build_worker` grandchild does the work. Measure the
-grandchild (elapsed ≈ CPU, RSS ~2.9 GB). Measuring the parent reads as "starved"
-and is a misdiagnosis.
+The "do not hand-roll `cargo build --release`" warning above is about faking a
+SELF-HOSTED redeploy. Refreshing the deployed RUST SEED binary with a seed-side
+fix is legitimate and was done twice on 2026-08-18 (brace-escape lexer fix,
+cleanup_old_logs statx fix): `cd src/compiler_rust && CARGO_TARGET_DIR=<warm>
+cargo build --release --bin simple`, verify the fix on the fresh binary, then
+deploy `cp <bin> bin/release/<triple>/simple.new && mv ... simple` (never plain
+cp — Text file busy). Always record binary identity (size/mtime) and rerun a
+spec proving the fix on the DEPLOYED path. This does not change that default
+tooling should ultimately be the pure-Simple self-hosted binary.
