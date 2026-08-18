@@ -10,12 +10,16 @@
 > for a second, independent reason: two structs named `Span`
 > (`00.common/diagnostics/span.spl` vs `10.frontend/core/lexer_types.spl`)
 > collide in HIR lowering's global by-bare-name struct resolution.
-> The documented cost of that state is 100-1000x.
+> The documented cost of that state is 100-1000x — but **measured, unblocking it
+> buys 1.23x**, not 100x (182-line fixture, 222.95s -> 181.37s user CPU). That
+> negative result matters as much as the finding: the de-JIT is real and worth
+> fixing, and it is still not the whole story.
 > Measured in-process, the lexer is **linear** in token count (exponent 1.09
 > over a 2.8x range) at ~21 ms/token — a constant factor, not a quadratic pass.
-> The "superlinear parser" framing below is therefore **not supported** and
-> should not drive optimisation work. Full evidence, all three arms, and the
-> fix options:
+> Whole-`lint` does still show ~1.33 across 49 -> 182 lines, so a *secondary*
+> superlinear term survives above the tokenizer; it is not the dominant one and
+> it is still unlocated. The "superlinear parser" framing below overstates it.
+> Full evidence, all arms, and the fix options:
 > `doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md`.
 
 - Date: 2026-08-17
