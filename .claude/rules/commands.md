@@ -174,6 +174,8 @@ bin/simple --version 2>&1 | head -2
   `scripts/check/check-pure-simple-lint-runnable.shs`. The real gap is that
   no FULL-CLI pure-Simple binary is deployed, not a missing lint port.
   `simple test` GREEN still does not prove self-hosted.
+- No pure-Simple binary can lint: `bootstrap/stage3/simple lint` is
+  `unknown command` (exit 1). `simple test` GREEN does not prove self-hosted.
 - Detail: `doc/07_guide/tooling/build_fast_path.md`
 
 ## Setup
