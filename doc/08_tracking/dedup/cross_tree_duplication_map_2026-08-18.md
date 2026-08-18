@@ -707,3 +707,92 @@ Files touched (absolute paths):
 - `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/debug/formats/test/golden_elf_dwarf_spec.spl` (delegator)
 - `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/debug/formats/test/golden_elf_dwarf_spec.spl` (delegator)
 - `/mnt/data/worktrees/simple-main/doc/08_tracking/dedup/cross_tree_duplication_map_2026-08-18.md` (this section)
+
+## Tranche 6 (goal 7, 2026-08-18) — `src/testing/mocking_async.spl` merged; 4 candidates rejected
+
+Fresh evidence gathered for the 5 open candidates named at task hand-off
+(`message_transfer.spl`, `lsp/handlers/completion.spl`,
+`lsp/handlers/verification.spl`, `file_system/utilities.spl`,
+`src/testing/mocking_async.spl`). md5sum across all 4 trees for each:
+
+| path | nogc_sync_mut | nogc_async_mut | gc_async_mut | gc_sync_mut |
+|---|---|---|---|---|
+| `message_transfer.spl` | `d9814988...` | match | match | `178b5893...` divergent |
+| `lsp/handlers/completion.spl` | `2e8f2ec6...` | match | match | `734d2dc6...` divergent |
+| `lsp/handlers/verification.spl` | `0528fa18...` | match | match | `bf4b8d46...` divergent |
+| `file_system/utilities.spl` | `5117d312...` | match | missing | missing |
+| `src/testing/mocking_async.spl` | `a4858b46...` | match | match | `a7aff8db...` divergent |
+
+**Rejected, with evidence:**
+
+- `message_transfer.spl` — unchanged from tranche-4 finding: imports
+  `memory.refc_binary` (only resolves under the 5th tree
+  `nogc_async_mut_noalloc`, not one of the 3 matching trees) and bare
+  `types` (missing from `nogc_sync_mut` entirely). Import graph does not
+  resolve cleanly inside the 3 matching trees. SKIP.
+- `lsp/handlers/completion.spl` and `lsp/handlers/verification.spl` — both
+  import `lsp.protocol` and `lsp.transport`. Checked directly this pass:
+  both are **4 genuinely separate per-tree files each**
+  (`src/lib/{nogc_sync_mut,nogc_async_mut,gc_async_mut,gc_sync_mut}/lsp/{protocol,transport}.spl`),
+  no `src/lib/common/lsp/` sibling exists — the same per-tree-only-import
+  hazard as `net/tcp.spl`/`net/sffi.spl` in tranches 2/4. `verification.spl`
+  additionally imports `compiler.treesitter` and `io.fs`, neither of which
+  resolves under `src/lib/common/` either (`find` for both returned
+  nothing there). SKIP both.
+- `file_system/utilities.spl` — is a re-export hub (`mod file_system.{types,
+  file_ops,dir_ops,path_ops,metadata}`), itself byte-identical
+  sync/async, but one of its 5 siblings, `file_ops.spl`, is **not**:
+  `nogc_sync_mut` = `7f1eb6f0...` vs `nogc_async_mut` = `30001aa3...`
+  (genuinely different content). Moving `utilities.spl` alone to `common`
+  would pin one tree's `file_ops` behavior for both trees' callers — a real
+  semantic hazard, not just an import-resolution one. SKIP (matches the
+  map's own "needs read" flag; the closer read found a real divergence).
+
+### Accepted: `src/testing/mocking_async.spl` (479 lines, sync+async+gc_async)
+
+- Import audit: zero `use`/`mod`/`import` lines — passes. Content-read the
+  file for tier-specific logic (the map's stated suspicion, since "async" in
+  the name could mean the `nogc_async_mut`/`gc_async_mut` runtime tier
+  rather than the async/await *feature* under test): grepped for
+  `gc_async|nogc_async|nogc_sync|gc_sync|actor|generator|async fn|await`
+  — the only hits are the file's own title/section comments ("Async/Await
+  Mocking"), no tier-conditional code. Confirms the map's own caveat that
+  "async" here names the mocked *feature* (promises/timing), not a runtime
+  tier — safe to treat as tier-neutral pure logic.
+- Collision check: 14 top-level public symbols (`AsyncCallRecord`,
+  `AsyncMock`, `PromiseReturn`, `PromiseSequence`, `TimingStats`, `AsyncSpy`,
+  `AsyncMethodMock`, `AsyncProtocolMock`, `AsyncMockEntry`,
+  `AsyncMockComposition`, `TimingMatchKind`, `AsyncTimingMatcher`,
+  `verify_async_timing`, `verify_call_timing`) grepped against every
+  `fn`/`struct`/`enum`/`class`/`val`/`trait` definition under
+  `src/lib/common/` — **0 collisions**.
+- Moved to `src/lib/common/testing/mocking_async.spl` (479 lines,
+  unchanged). The 3 identical tree copies (`nogc_sync_mut`,
+  `nogc_async_mut`, `gc_async_mut`) replaced with a 6-line
+  `pub use std.common.testing.mocking_async*` delegator, same comment
+  style as the `testing/mocking_advanced.spl` precedent (tranche 3).
+  `gc_sync_mut`'s copy (`a7aff8db...`) is untouched — genuinely divergent
+  content, no normalization applied.
+- Callers: `grep -rln mocking_async src/ test/ --include='*.spl'` found only
+  same-tree relative importers (`mod testing.mocking_async` in each tree's
+  own `src/testing/mocking.spl` and `src/testing/__init__.spl`), plus the
+  divergent `gc_sync_mut` copy itself. No test spec references it directly
+  (`grep -rln mocking_async test/` empty), so a throwaway spec
+  (`test/01_unit/lib/std/testing/mocking_async_delegator_throwaway_spec.spl`,
+  instantiating `AsyncMock.new("x")` through all 3 delegator paths via
+  `std.nogc_sync_mut.src.testing.mocking_async`,
+  `std.nogc_async_mut.src.testing.mocking_async`,
+  `std.gc_async_mut.src.testing.mocking_async`) was written, run
+  (`Results: 1 total, 1 passed, 0 failed`), and deleted (throwaway, not
+  committed).
+
+Net line delta: -1437 (three 479-line duplicates removed) + 479 (common
+owner) + 18 (three 6-line delegators) = **-940 lines**, zero behavior
+change, zero regression.
+
+Files touched (absolute paths):
+- `/mnt/data/worktrees/simple-main/src/lib/common/testing/mocking_async.spl` (new)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/src/testing/mocking_async.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/src/testing/mocking_async.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/gc_async_mut/src/testing/mocking_async.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/doc/08_tracking/dedup/cross_tree_duplication_map_2026-08-18.md` (this section)
