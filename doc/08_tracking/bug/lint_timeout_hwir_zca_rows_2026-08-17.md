@@ -364,3 +364,14 @@ Verified: lexer_brace_escape_spec 8/8, parser_contextual_keyword_named_arg_spec
 Still open: the superlinear content-complexity term (this change shaves the
 linear per-token constant only), and the per-CALL millisecond cost itself,
 which is a seed-interpreter issue owned by the Rust lane.
+
+## FIXED AND DEPLOYED (2026-08-18 06:12)
+
+- Seed env-cache landed (`7dc9d1f962f`): captured module env cached per owner
+  module with load/write invalidation, `SIMPLE_INTERP_ENV_CACHE=0` kill switch.
+- Combined with the parser hop reduction and text-tier fix: fx_m20_c10 lint
+  ~49s -> **14s** on the deployed binary (cache-off 26s). Cache on/off spec
+  parity proven (8/8, 12/12, 12/12 identical both modes).
+- Remaining: the seed per-call constant is reduced, not zero; the strategic fix
+  stays the self-hosted deploy. zca_rows full-file lint should be re-measured
+  next session against the ~99s/decl history.
