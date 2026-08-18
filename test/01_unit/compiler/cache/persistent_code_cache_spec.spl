@@ -1,0 +1,89 @@
+# Persistent warm-start code cache — reproducing spec (§9.17).
+#
+# Reproduces the warm-start claim: a cold start prepares the form and
+# persists it; a warm start with unchanged inputs reloads it from disk and
+# produces byte-identical results without re-preparing.
+#
+# Research: doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md §9.17
+#
+# **Category:** Infrastructure
+
+use std.spec.*
+use compiler.driver.cache.persistent_code_cache.{PccKey, PccLoad, pcc_key_new, pcc_key_digest, pcc_store, pcc_load, pcc_entry_path}
+use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn fresh_root() -> text:
+    "build/tmp/pcc_spec/{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+# Stand-in for "preparing the form": deterministic, source-derived word
+# stream. The cache stores whatever the prepare step produced; it neither
+# defines nor interprets it.
+fn prepare(source: text) -> [i64]:
+    var words: [i64] = []
+    words.push(source.len())
+    for line in source.split("\n"):
+        words.push(line.len())
+    words
+
+fn key_for(source: text) -> PccKey:
+    pcc_key_new("unit/demo", interface_digest_of_source(source), dependency_interface_fold([]))
+
+fn words_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+val SRC = "fn a() -> i64:\n    1\nfn b() -> i64:\n    2\n"
+
+describe "persistent code cache — warm start":
+    it "cold start misses on an empty cache root":
+        val root = fresh_root()
+        val load = pcc_load(root, key_for(SRC))
+        expect(load.hit).to_be(false)
+        expect(load.reason).to_be("absent")
+
+    it "warm start hits after a cold start stored the prepared form":
+        val root = fresh_root()
+        val key = key_for(SRC)
+        expect(pcc_store(root, key, prepare(SRC))).to_be(true)
+        val warm = pcc_load(root, key)
+        expect(warm.hit).to_be(true)
+        expect(warm.reason).to_be("")
+
+    it "warm-start words are identical to what the cold start prepared":
+        val root = fresh_root()
+        val key = key_for(SRC)
+        val cold = prepare(SRC)
+        pcc_store(root, key, cold)
+        val warm = pcc_load(root, key)
+        expect(words_equal(cold, warm.words)).to_be(true)
+        expect(warm.words.len()).to_be(cold.len())
+
+    it "round-trips an empty prepared form without confusing it with a miss":
+        val root = fresh_root()
+        val key = pcc_key_new("unit/empty", "h0", "d0")
+        pcc_store(root, key, [])
+        val warm = pcc_load(root, key)
+        expect(warm.hit).to_be(true)
+        expect(warm.words.len()).to_be(0)
+
+    it "round-trips negative and large words":
+        val root = fresh_root()
+        val key = pcc_key_new("unit/wide", "h1", "d0")
+        val w: [i64] = [0, -1, 42, -9007199254740991, 9007199254740991]
+        pcc_store(root, key, w)
+        val warm = pcc_load(root, key)
+        expect(words_equal(w, warm.words)).to_be(true)
+
+    it "keys the entry path by the digest so entries cannot collide":
+        val a = pcc_key_digest(key_for(SRC))
+        val root = fresh_root()
+        expect(pcc_entry_path(root, a).ends_with(a.substring(2, a.len()))).to_be(true)

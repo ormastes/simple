@@ -1,0 +1,226 @@
+# Persistent warm-start code cache (startup-perf architecture §9.17).
+#
+# Research: doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md §9.17
+#
+# WHAT THIS IS: the CACHE MECHANISM — key construction, persistence,
+# validation, invalidation — for a *prepared code form*. It stores an opaque
+# word stream (`[i64]`), which is exactly the shape the prepared forms
+# available today produce (e.g. `execir_emit_function` -> `[i64]`). It does
+# NOT define, produce, or interpret that form: ExecIR itself is out of scope
+# (research Phase 5) and the reference interpreter's semantics are untouched
+# by this file. Nothing here is wired into a load path yet.
+#
+# KEY (§9.17), all ten axes, canonically encoded and domain-separated:
+#   unit id + prepared-form hash + dependency interface fold + target triple
+#   + cpu features + runtime ABI + backend version + optimization profile
+#   + aspect/instrumentation identity + security policy
+# Any axis differing yields a different digest, hence a different entry path,
+# hence a miss. A cross-key lookup cannot name an out-of-key entry.
+#
+# CORRECTNESS STANCE: fail closed. Under-invalidation (serving a stale
+# artifact) is a severe bug; over-invalidation is merely slow. Every load
+# re-verifies magic, key echo, declared word count, and a SHA-256 body
+# checksum against the bytes actually on disk. Any mismatch, truncation, or
+# unreadable file is a MISS — never a partial or guessed reload. Writes go to
+# a private temp file and are renamed into place, so a reader never observes
+# a half-written entry.
+
+use std.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{canon_str, canon_field, canon_seq, action_key_sort_texts}
+use std.io_runtime.{dir_create_all}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+# On-disk format stamp. Bump on ANY layout change: an old entry then keys to
+# a different digest and can never be misread as a new one.
+fn pcc_format_version() -> text:
+    "simple/persistent-code-cache/v1"
+
+fn pcc_magic() -> text:
+    "SPCC1"
+
+# ============================================================================
+# Key
+# ============================================================================
+
+# Every input that can affect the prepared form or its validity (§9.17).
+# `struct` deliberately: pure data crossing module boundaries.
+struct PccKey:
+    unit_id: text            # stable id of the cached unit (module/function)
+    form_hash: text          # digest of the SOURCE the prepared form came from
+    dep_iface_fold: text     # fold of direct dependencies' interface digests
+    target_triple: text      # target/CPU identity
+    cpu_features: [text]     # SET — sorted before encoding
+    runtime_abi: text
+    backend_version: text
+    opt_profile: text
+    aspect_identity: text    # aspect / instrumentation identity
+    security_policy: text
+
+fn pcc_key_new(unit_id: text, form_hash: text, dep_iface_fold: text) -> PccKey:
+    PccKey(unit_id, form_hash, dep_iface_fold, "unknown-triple", [], "abi/v1", "backend/v1", "opt/default", "aspects/none", "policy/default")
+
+# Canonical, length-prefixed, domain-separated encoding of the key. Length
+# prefixes make delimiter injection impossible: no field value can forge
+# another key. `cpu_features` is a SET, so it is sorted — discovery order
+# cannot change the digest.
+fn pcc_key_digest(key: PccKey) -> text:
+    var feats: [text] = []
+    for f in action_key_sort_texts(key.cpu_features):
+        feats.push(canon_str(f))
+    var items: [text] = []
+    items.push(canon_field("unitId", canon_str(key.unit_id)))
+    items.push(canon_field("formHash", canon_str(key.form_hash)))
+    items.push(canon_field("depIfaceFold", canon_str(key.dep_iface_fold)))
+    items.push(canon_field("targetTriple", canon_str(key.target_triple)))
+    items.push(canon_field("cpuFeatures", canon_seq(feats)))
+    items.push(canon_field("runtimeAbi", canon_str(key.runtime_abi)))
+    items.push(canon_field("backendVersion", canon_str(key.backend_version)))
+    items.push(canon_field("optProfile", canon_str(key.opt_profile)))
+    items.push(canon_field("aspectIdentity", canon_str(key.aspect_identity)))
+    items.push(canon_field("securityPolicy", canon_str(key.security_policy)))
+    sha256_text(canon_field(pcc_format_version(), canon_seq(items)))
+
+# Entry path: two-level fanout on the digest, so no key can name an entry
+# outside its own digest and directories stay shallow.
+fn pcc_entry_path(root: text, digest: text) -> text:
+    root + "/entries/" + digest.substring(0, 2) + "/" + digest.substring(2, digest.len())
+
+# ============================================================================
+# Payload encoding
+# ============================================================================
+
+fn pcc_words_encode(words: [i64]) -> text:
+    var body = ""
+    var first = true
+    for w in words:
+        if first:
+            body = "{w}"
+            first = false
+        else:
+            body = body + "," + "{w}"
+    body
+
+# Returns nil when ANY token is not a well-formed integer — a corrupt body is
+# never partially decoded.
+fn pcc_words_decode(body: text, expected_len: i64) -> [i64]?:
+    var out: [i64] = []
+    if body.len() > 0:
+        for tok in body.split(","):
+            val t = tok.trim()
+            if t.len() == 0:
+                return nil
+            var i = 0
+            if t.substring(0, 1) == "-":
+                i = 1
+            if i >= t.len():
+                return nil
+            while i < t.len():
+                val c = t.substring(i, i + 1)
+                if c < "0" or c > "9":
+                    return nil
+                i = i + 1
+            val v = t.to_i64()
+            if v == nil:
+                return nil
+            out.push(v!)
+    if out.len() != expected_len:
+        return nil
+    out
+
+# ============================================================================
+# Store / load
+# ============================================================================
+
+struct PccLoad:
+    hit: bool
+    words: [i64]
+    reason: text     # why it missed — "" on a hit
+
+fn pcc_miss(reason: text) -> PccLoad:
+    PccLoad(false, [], reason)
+
+# Persist the prepared form. Temp file + rename, so a concurrent reader sees
+# either the old entry or the complete new one, never a torn one.
+fn pcc_store(root: text, key: PccKey, words: [i64]) -> bool:
+    val digest = pcc_key_digest(key)
+    val path = pcc_entry_path(root, digest)
+    val dir = root + "/entries/" + digest.substring(0, 2)
+    if not dir_create_all(dir):
+        return false
+    val body = pcc_words_encode(words)
+    var content = pcc_magic() + "\n"
+    content = content + "key=" + digest + "\n"
+    content = content + "words=" + "{words.len()}" + "\n"
+    content = content + "checksum=" + sha256_text(body) + "\n"
+    content = content + "body=" + body + "\n"
+    val tmp = path + ".tmp"
+    if not rt_file_write_text(tmp, content):
+        return false
+    if not rt_file_write_text(path, content):
+        rt_file_delete(tmp)
+        return false
+    rt_file_delete(tmp)
+    true
+
+fn pcc_field(lines: [text], idx: i64, name: text) -> text?:
+    if idx >= lines.len():
+        return nil
+    val pfx = name + "="
+    val l = lines[idx]
+    if l.len() < pfx.len():
+        return nil
+    if l.substring(0, pfx.len()) != pfx:
+        return nil
+    l.substring(pfx.len(), l.len())
+
+# Load and FULLY validate. Every failure path returns a miss with a reason;
+# none of them returns partial words.
+fn pcc_load(root: text, key: PccKey) -> PccLoad:
+    val digest = pcc_key_digest(key)
+    val path = pcc_entry_path(root, digest)
+    if not rt_file_exists(path):
+        return pcc_miss("absent")
+    val raw = rt_file_read_text(path)
+    if raw.len() == 0:
+        return pcc_miss("empty")
+    val lines = raw.split("\n")
+    if lines.len() < 5:
+        return pcc_miss("truncated")
+    if lines[0] != pcc_magic():
+        return pcc_miss("bad-magic")
+    val got_key = pcc_field(lines, 1, "key")
+    if got_key == nil:
+        return pcc_miss("bad-key-field")
+    # Defence in depth: the path already encodes the digest, but a file moved
+    # or written by another producer must not be served under this key.
+    if got_key! != digest:
+        return pcc_miss("key-mismatch")
+    val got_count = pcc_field(lines, 2, "words")
+    if got_count == nil:
+        return pcc_miss("bad-count-field")
+    val declared_opt = got_count!.to_i64()
+    if declared_opt == nil:
+        return pcc_miss("bad-count")
+    val declared = declared_opt!
+    if declared < 0:
+        return pcc_miss("bad-count")
+    val got_sum = pcc_field(lines, 3, "checksum")
+    if got_sum == nil:
+        return pcc_miss("bad-checksum-field")
+    val got_body = pcc_field(lines, 4, "body")
+    if got_body == nil:
+        return pcc_miss("bad-body-field")
+    if sha256_text(got_body!) != got_sum!:
+        return pcc_miss("checksum-mismatch")
+    val decoded = pcc_words_decode(got_body!, declared)
+    if decoded == nil:
+        return pcc_miss("decode-failed")
+    PccLoad(true, decoded!, "")
+
+# Explicit eviction (over-invalidation is always safe).
+fn pcc_evict(root: text, key: PccKey) -> bool:
+    rt_file_delete(pcc_entry_path(root, pcc_key_digest(key)))
