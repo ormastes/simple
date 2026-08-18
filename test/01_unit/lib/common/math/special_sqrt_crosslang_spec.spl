@@ -1,0 +1,116 @@
+# @req REQ-C-MIG-SQRT-F64
+#
+# C-MIG-0029: pure-Simple f64 square root (`std.math.special.sqrt_f64`) vs the
+# C/Rust oracle `rt_math_sqrt` (src/compiler_rust/compiler/src/
+# interpreter_extern/math.rs::rt_math_sqrt_fn, which calls Rust's hardware
+# `f64::sqrt` — a correctly-rounded IEEE-754 sqrt instruction).
+#
+# `sqrt_f64` (src/lib/common/math/special.spl:421, delegating to the private
+# kernel `_sqrt_f64` at line 73) is a pre-existing, independent pure-Simple
+# implementation: 40 iterations of Newton's method, deliberately NOT calling
+# any `rt_math_*` extern (per that module's own header comment: "the SFFI
+# math_exp/math_pow in math.spl" are avoided because they need a bootstrap
+# rebuild to resolve under the interpreter). No new lib file was written for
+# this migration unit — the existing kernel already satisfies the
+# "independent of the extern" bar the plan requires.
+#
+# KNOWN SEMANTIC DIVERGENCE (documented, not papered over): for x < 0 the
+# oracle returns NaN (correct IEEE-754 behavior — Rust's `f64::sqrt` of a
+# negative number is NaN by spec); `sqrt_f64`'s domain contract
+# (special.spl:421-427) states x >= 0 is required and negative input is "NOT
+# guarded" -- it does NOT converge to NaN, it returns finite garbage (Newton
+# iteration on a negative radicand does not diverge to NaN in this kernel).
+# Verified live: sqrt_f64(-4.0) == 6.070281514079917 (finite, wrong) while
+# rt_math_sqrt(-4.0) is NaN. This spec asserts that divergence explicitly
+# below rather than hiding it.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.math.special.{sqrt_f64}
+
+# C/Rust oracle (test-only; never production-linked from Simple product code here).
+extern fn rt_math_sqrt(x: f64) -> f64
+
+fn _approx(actual: f64, target: f64, tol: f64) -> bool:
+    var d = actual - target
+    if d < 0.0:
+        d = 0.0 - d
+    d < tol
+
+describe "sqrt_f64 — pure-Simple vs C/Rust oracle (rt_math_sqrt)":
+    it "matches the oracle on perfect-square KATs":
+        assert_equal(sqrt_f64(4.0), 2.0)
+        assert_equal(sqrt_f64(4.0), rt_math_sqrt(4.0))
+        assert_equal(sqrt_f64(9.0), 3.0)
+        assert_equal(sqrt_f64(9.0), rt_math_sqrt(9.0))
+        assert_equal(sqrt_f64(1.0), 1.0)
+        assert_equal(sqrt_f64(1.0), rt_math_sqrt(1.0))
+        assert_equal(sqrt_f64(0.0), 0.0)
+        assert_equal(sqrt_f64(0.0), rt_math_sqrt(0.0))
+
+    it "matches the oracle within tight tolerance on irrational-result vectors":
+        # Newton's method (40 iterations) vs hardware sqrt can disagree by a
+        # handful of ULPs on irrational results -- tolerance-based, not
+        # bit-exact, comparison is the correct oracle here (unlike the
+        # integer/text C-MIG-0027/0028 specs, which used exact equality).
+        assert_true(_approx(sqrt_f64(2.0), rt_math_sqrt(2.0), 1.0e-12))
+        assert_true(_approx(sqrt_f64(0.5), rt_math_sqrt(0.5), 1.0e-12))
+        assert_true(_approx(sqrt_f64(9999999.0), rt_math_sqrt(9999999.0), 1.0e-9))
+        assert_true(_approx(sqrt_f64(1.0e10), rt_math_sqrt(1.0e10), 1.0e-6))
+        assert_true(_approx(sqrt_f64(1.0e-8), rt_math_sqrt(1.0e-8), 1.0e-12))
+
+    it "diverges from the oracle on negative input (documented, not hidden)":
+        val oracle = rt_math_sqrt(-4.0)
+        val simple = sqrt_f64(-4.0)
+        # Oracle: correct IEEE-754 NaN for a negative radicand.
+        assert_true(oracle != oracle)
+        # Simple kernel: NOT guarded per its own docstring -- returns finite
+        # garbage instead of NaN. This is a real, filed divergence, not a
+        # test bug: the two sides genuinely disagree outside the documented
+        # domain (x >= 0).
+        assert_true(simple == simple)
+        assert_true(simple != oracle)
+
+    it "single-bit input corruption changes the result (discrimination)":
+        assert_true(sqrt_f64(4.0) != sqrt_f64(4.0000001))
+        assert_true(rt_math_sqrt(16.0) != rt_math_sqrt(16.0000001))
+
+    it "is deterministic on both sides":
+        assert_equal(sqrt_f64(7.0), sqrt_f64(7.0))
+        assert_equal(rt_math_sqrt(7.0), rt_math_sqrt(7.0))
+
+    it "matches the oracle on 100 shared branch-covering vectors, with perf evidence":
+        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
+        # deterministic generator feeds the SAME x value to BOTH sides inside
+        # this loop. Seeded LCG covers a wide magnitude range (sub-1, small
+        # integer, large) plus forced perfect-square boundary values at fixed
+        # moduli, restricted to the documented non-negative domain (the
+        # negative-input divergence is covered explicitly above instead, so
+        # it does not corrupt this loop's equality assertion).
+        use std.io_runtime.{time_now_unix_micros}
+        var simple_us = 0
+        var c_us = 0
+        var i = 0
+        while i < 100:
+            var seed = (i * 2654435761 + 12345) % 4294967296
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            var x = (seed % 1000000) as f64 / 1000.0
+            if i % 17 == 0:
+                x = 0.0
+            else if i % 13 == 0:
+                x = 1.0
+            else if i % 11 == 0:
+                x = 144.0
+            else if i % 7 == 0:
+                x = 0.25
+
+            val t0 = time_now_unix_micros()
+            val s = sqrt_f64(x)
+            val t1 = time_now_unix_micros()
+            val c = rt_math_sqrt(x)
+            val t2 = time_now_unix_micros()
+            simple_us = simple_us + (t1 - t0)
+            c_us = c_us + (t2 - t1)
+            assert_true(_approx(s, c, 1.0e-6))
+            i = i + 1
+        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
+        assert_true(simple_us >= 0 and c_us >= 0)

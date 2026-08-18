@@ -656,3 +656,57 @@ c_migrations:
       0x7F at i % 17 == 0, 0x80 at i % 13 == 0, 0x00 at i % 11 == 0,
       0xFF at i % 7 == 0), 2026-08-18: simple_us=4335 c_us=1731, ratio ~2.5x.
     shared_corpus: 100
+
+  - id: C-MIG-0029
+    path: src/compiler_rust/compiler/src/interpreter_extern/math.rs
+    symbols:
+      - rt_math_sqrt
+    classification: product_algorithm
+    replacement: std.math.special.sqrt_f64 (already implemented in
+      src/lib/common/math/special.spl:421-427, delegating to the private
+      Newton's-method kernel `_sqrt_f64` at special.spl:73-83 -- no new lib
+      file was written this round; the pre-existing kernel already satisfies
+      the "independent of the extern" bar, per that module's own header
+      comment stating it deliberately avoids the rt_math_* SFFI externs)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_math_sqrt(x: f64) -> f64 is registered in the interpreter's extern
+      dispatch table (interpreter_extern/mod.rs:1580,
+      math::rt_math_sqrt_fn) via Rust's hardware `f64::sqrt` -- a
+      correctly-rounded IEEE-754 sqrt instruction. No C runtime counterpart
+      exists (`grep -rn rt_math_sqrt src/runtime/*.c src/runtime/*.h`
+      returns zero hits); this is a pure-Rust-interpreter extern, unlike
+      C-MIG-0027/0028 which had a `runtime_native.c` implementation behind
+      the same-named extern. `sqrt_f64` (special.spl) is 40 iterations of
+      Newton's method against the same contract (x >= 0), genuinely
+      independent of the hardware instruction.
+    correctness_spec: test/01_unit/lib/common/math/special_sqrt_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. perfect
+      squares, zero, tolerance-based irrational-result comparison
+      (Newton's-method vs hardware sqrt can disagree by a few ULPs -- not
+      bit-exact, unlike the integer/text C-MIG-0027/0028 oracles), an
+      EXPLICIT SEMANTIC-DIVERGENCE assertion for negative input (oracle
+      correctly returns NaN per IEEE-754; sqrt_f64 is undocumented/unguarded
+      for x < 0 per its own docstring and returns finite garbage instead --
+      verified live: sqrt_f64(-4.0) == 6.070281514079917, NOT NaN), single-bit
+      corruption discrimination, determinism check, 100-vector shared-logic
+      bulk differential loop restricted to the documented non-negative
+      domain with forced perfect-square boundary values at fixed moduli,
+      2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple sqrt_f64 measured ~17.7x the
+      Rust hardware-sqrt oracle over the 100-vector bulk corpus
+      (simple_us=8109, c_us=457, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), well above the plan's 2x threshold --
+      the largest ratio recorded in this series so far, expected given
+      Newton's method is 40 loop iterations of interpreted arithmetic vs one
+      hardware instruction. Recorded honestly, not hidden -- same
+      interpreter-lane caveat as prior PERF findings (bin/simple test
+      hard-defaults to the interpreter, not the JIT/native engine ordinary
+      programs run on)."
+    perf_measured: >
+      100 shared branch-covering x values (seeded LCG cycling through
+      0.0..1000.0 in 0.001 steps, plus forced boundary values at fixed
+      moduli: 0.0 at i % 17 == 0, 1.0 at i % 13 == 0, 144.0 at i % 11 == 0,
+      0.25 at i % 7 == 0), 2026-08-18: simple_us=8109 c_us=457, ratio ~17.7x.
+    shared_corpus: 100
