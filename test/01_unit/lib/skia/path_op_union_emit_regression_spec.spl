@@ -1,0 +1,77 @@
+# @cover src/lib/skia/feature/path_op/boolean.spl 20%
+"""
+# Skia path_op Union emit regression
+
+**Feature IDs:** #SKI-PATHOP
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Reproducing spec for
+`doc/08_tracking/bug/skia_path_op_boolean_algorithm_2026-07-20.md`.
+
+`_path_op_rects` in `src/lib/skia/feature/path_op/boolean.spl` builds the
+result with `_emit_rect(result, ...)`, which is an IMMUTABLE builder: it
+returns a NEW `SkPath` and does not mutate its argument. Both Union branches
+(overlapping and disjoint) called it for the second rect as a bare
+expression statement, so the second rect was computed and thrown away. The
+Union result therefore only ever contained rect A.
+
+Symptom before the fix: the union bbox equalled A's bbox instead of the
+outer union bbox, and no point that lies only inside B was contained.
+"""
+
+use std.spipe.*
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.feature.path_op.{PathOp, path_op}
+
+fn _rect(l: f64, t: f64, r: f64, b: f64) -> SkPath:
+    val p1 = sk_path_new().move_to(l, t)
+    val p2 = p1.line_to(r, t)
+    val p3 = p2.line_to(r, b)
+    val p4 = p3.line_to(l, b)
+    val p5 = p4.line_to(l, t)
+    p5.close()
+
+describe "path_op union emit regression":
+    it "overlapping union keeps rect B: bbox spans both rects":
+        val a = _rect(0.0, 0.0, 10.0, 10.0)
+        val b = _rect(5.0, 5.0, 15.0, 15.0)
+        val u = path_op(a, b, PathOp.Union)
+        val bb = u.bounds()
+        # If B's emit were dropped these would be 10.0 / 10.0 (A's bbox).
+        expect(bb.right).to_equal(15.0)
+        expect(bb.bottom).to_equal(15.0)
+        expect(bb.left).to_equal(0.0)
+        expect(bb.top).to_equal(0.0)
+
+    it "overlapping union contains a B-only point":
+        val a = _rect(0.0, 0.0, 10.0, 10.0)
+        val b = _rect(5.0, 5.0, 15.0, 15.0)
+        val u = path_op(a, b, PathOp.Union)
+        # (12,12) is inside B only — the dropped-emit bug made this false.
+        expect(u.contains(12.0, 12.0)).to_equal(true)
+        expect(u.contains(2.0, 2.0)).to_equal(true)
+        expect(u.contains(7.0, 7.0)).to_equal(true)
+        expect(u.contains(20.0, 20.0)).to_equal(false)
+
+    it "disjoint union keeps rect B: both centres contained, gap excluded":
+        val a = _rect(0.0, 0.0, 4.0, 4.0)
+        val b = _rect(10.0, 10.0, 14.0, 14.0)
+        val u = path_op(a, b, PathOp.Union)
+        expect(u.contains(2.0, 2.0)).to_equal(true)
+        # B-only centre — false when the second emit is discarded.
+        expect(u.contains(12.0, 12.0)).to_equal(true)
+        expect(u.contains(7.0, 7.0)).to_equal(false)
+
+    it "disjoint union bbox spans both rects":
+        val a = _rect(0.0, 0.0, 4.0, 4.0)
+        val b = _rect(10.0, 10.0, 14.0, 14.0)
+        val u = path_op(a, b, PathOp.Union)
+        val bb = u.bounds()
+        expect(bb.left).to_equal(0.0)
+        expect(bb.top).to_equal(0.0)
+        expect(bb.right).to_equal(14.0)
+        expect(bb.bottom).to_equal(14.0)

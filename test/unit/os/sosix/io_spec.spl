@@ -7,6 +7,7 @@ compatibility wrappers over these APIs.
 """
 
 use std.spec
+use std.io_runtime.{read_file}
 use os.posix.errno.{EIO}
 use os.posix.fd_table.{FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_FREE}
 use os.sosix.io_state.{
@@ -51,3 +52,40 @@ describe "SOSIX async I/O request lifecycle":
     it "treats invalid request handles as completed EIO":
         expect(sosix_async_is_complete(SOSIX_MAX_ASYNC_REQUESTS)).to_equal(true)
         expect(sosix_async_get_result(SOSIX_MAX_ASYNC_REQUESTS)).to_equal(0 - EIO as i64)
+
+describe "SOSIX VFS copied request convergence":
+    it "uses the shared named VFS request owner rather than a fixed VFS port":
+        val primary = read_file("src/os/sosix/io.spl")
+        val compatibility = read_file("src/os/sosix/io_rw.spl")
+        expect(primary).to_contain("use os.userlib.fs.{vfs_ipc_request_bytes}")
+        expect(compatibility).to_contain("use os.userlib.fs.{vfs_ipc_request_bytes}")
+        expect(primary).to_contain("vfs_ipc_request_bytes(VFS_SEEK, seek_payload)")
+        expect(compatibility).to_contain("vfs_ipc_request_bytes(VFS_SEEK, seek_payload)")
+        expect(primary).to_contain("vfs_ipc_request_bytes(VFS_READ, payload)")
+        expect(compatibility).to_contain("vfs_ipc_request_bytes(VFS_WRITE, payload)")
+        expect(primary.contains("_VFS_PORT")).to_equal(false)
+        expect(compatibility.contains("_VFS_PORT")).to_equal(false)
+        expect(primary.contains("_SYS_IPC_SEND")).to_equal(false)
+        expect(compatibility.contains("_SYS_IPC_SEND")).to_equal(false)
+
+    it "uses current handle frames and bounded read/write payloads":
+        val primary = read_file("src/os/sosix/io.spl")
+        val compatibility = read_file("src/os/sosix/io_rw.spl")
+        expect(primary).to_contain("val _SOSIX_VFS_READ_MAX: u64 = 4092")
+        expect(primary).to_contain("val _SOSIX_VFS_WRITE_MAX: u64 = 4088")
+        expect(compatibility).to_contain("val _SOSIX_VFS_READ_MAX: u64 = 4092")
+        expect(compatibility).to_contain("val _SOSIX_VFS_WRITE_MAX: u64 = 4088")
+        expect(primary).to_contain("_sosix_async_push_u64(payload, vfs_handle)")
+        expect(compatibility).to_contain("_sosix_async_push_u64(payload, vfs_handle)")
+        expect(primary).to_contain("fd_get_backend_handle(fd)")
+        expect(primary.contains("fd_ports[idx]")).to_equal(false)
+        expect(primary).to_contain("fd_set_offset(fd, fd_get_offset(fd) + actual)")
+        expect(compatibility).to_contain("fd_set_offset(fd, fd_get_offset(fd) + actual)")
+
+    it "completes a valid zero-length request without backend traffic":
+        val primary = read_file("src/os/sosix/io.spl")
+        val compatibility = read_file("src/os/sosix/io_rw.spl")
+        expect(primary).to_contain("if count == 0:")
+        expect(primary).to_contain("sosix_req_results[req] = 0")
+        expect(compatibility).to_contain("if count == 0:")
+        expect(compatibility).to_contain("_sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, 0)")

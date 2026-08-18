@@ -6,26 +6,133 @@ use os.kernel.log.klog.{KernelLog}
 use os.kernel.types.syscall_types.{SyscallArgs}
 use os.kernel.types.task_types.{TaskId}
 
-fn rv64_args(id: u64, arg0: u64, arg1: u64, arg2: u64, arg4: u64) -> SyscallArgs:
-    SyscallArgs(id: id, arg0: arg0, arg1: arg1, arg2: arg2, arg3: 0, arg4: arg4, arg5: 0)
+val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+fn rv64_args(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: arg0, arg1: arg1, arg2: arg2, arg3: arg3, arg4: arg4, arg5: 0)
+
+extern fn unsafe_addr_of(ref: any) -> u64
+extern fn rt_copy_user_byte(addr: u64) -> u8
 
 describe "RV64 arch-local IPC syscalls":
+    it "routes SpawnBinary to the state-preserving production owner":
+        val state = rv64_syscall_handler_state(
+            rv64_args(13, 0, 0, 2, 0, 0),
+            Scheduler.new(), IpcManager.new(), KernelLog.new(8)
+        )
+        # Empty path is invalid, but must be handled by SpawnBinary rather than
+        # falling through to the arch-local ENOSYS result (-38).
+        expect(state.result.value).to_equal(-14)
+
     it "create/connect preserves IPC state without the common syscall stack":
         val scheduler = Scheduler.new()
         val ipc = IpcManager.new()
-        val created = rv64_syscall_handler_state(rv64_args(22, 0, 0, 0, 0), scheduler, ipc, KernelLog.new(8))
+        val port_name = "compositor"
+        val created = rv64_syscall_handler_state(rv64_args(22, unsafe_addr_of(port_name), port_name.len(), 0, 0, 0), scheduler, ipc, KernelLog.new(8))
         expect(created.result.value).to_be_greater_than(0)
 
-        val connected = rv64_syscall_handler_state(rv64_args(23, 0, 0, 0, 0), created.scheduler, created.ipc, KernelLog.new(8))
+        val connected = rv64_syscall_handler_state(rv64_args(23, unsafe_addr_of(port_name), port_name.len(), 0, 0, 0), created.scheduler, created.ipc, KernelLog.new(8))
         expect(connected.result.value).to_equal(created.result.value)
+
+    it "rejects a duplicate named service and keeps lookup unambiguous":
+        val scheduler = Scheduler.new()
+        val ipc = IpcManager.new()
+        val port_name = "compositor"
+        val first = rv64_syscall_handler_state(
+            rv64_args(22, unsafe_addr_of(port_name), port_name.len(), 0, 0, 0),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(first.result.value).to_be_greater_than(0)
+        val duplicate = rv64_syscall_handler_state(
+            rv64_args(22, unsafe_addr_of(port_name), port_name.len(), 0, 0, 0),
+            first.scheduler, first.ipc, KernelLog.new(8)
+        )
+        expect(duplicate.result.value).to_equal(-1)
+        val connected = rv64_syscall_handler_state(
+            rv64_args(23, unsafe_addr_of(port_name), port_name.len(), 0, 0, 0),
+            duplicate.scheduler, duplicate.ipc, KernelLog.new(8)
+        )
+        expect(connected.result.value).to_equal(first.result.value)
 
     it "send/recv delivers one message through returned IPC state":
         val scheduler = Scheduler.new()
         var ipc = IpcManager.new()
         val port = ipc.create_port(TaskId(id: 0), "rv64_ipc")
+        val source = ipc.create_port(TaskId(id: 0), "")
+        val message: [u8] = [7u8, 0u8, 0u8, 0u8, 42u8]
 
-        val sent = rv64_syscall_handler_state(rv64_args(20, port.id, 7, 0, 0), scheduler, ipc, KernelLog.new(8))
+        val sent = rv64_syscall_handler_state(rv64_args(20, port.id, source.id, unsafe_addr_of(message) + 16u64, message.len(), IPC_COPIED_SERVICE_TAG), scheduler, ipc, KernelLog.new(8))
         expect(sent.result.value).to_equal(0)
 
-        val received = rv64_syscall_handler_state(rv64_args(21, port.id, 0, 0, 0), sent.scheduler, sent.ipc, KernelLog.new(8))
+        val received = rv64_syscall_handler_state(rv64_args(21, port.id, 0, 0, 0, 0), sent.scheduler, sent.ipc, KernelLog.new(8))
+        expect(received.result.value).to_be_greater_than(0)
+        val received_addr = received.result.value.to_u64()
+        expect(rt_copy_user_byte(received_addr + 16u64)).to_equal(7u8)
+        expect(rt_copy_user_byte(received_addr + 24u64)).to_equal(1u8)
+        expect(rt_copy_user_byte(received_addr + 32u64)).to_equal(42u8)
+
+    it "preserves the legacy method/flags ABI":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val destination = ipc.create_port(TaskId(id: 0), "legacy")
+        val sent = rv64_syscall_handler_state(
+            rv64_args(20, destination.id, 7, 3, 0, 0),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(sent.result.value).to_equal(0)
+        val received = rv64_syscall_handler_state(
+            rv64_args(21, destination.id, 0, 0, 0, 0),
+            sent.scheduler, sent.ipc, KernelLog.new(8)
+        )
         expect(received.result.value).to_equal(0)
+
+    it "keeps raw reply bytes sent by a named service port":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val destination = ipc.create_port(TaskId(id: 0), "")
+        val service = ipc.create_port(TaskId(id: 0), "compositor")
+        val reply: [u8] = [0u8, 0u8, 0u8, 0u8, 9u8, 0u8, 0u8, 0u8]
+        val sent = rv64_syscall_handler_state(
+            rv64_args(20, destination.id, service.id, unsafe_addr_of(reply) + 16u64, reply.len(), IPC_COPIED_SERVICE_TAG),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(sent.result.value).to_equal(0)
+        var received_ipc = sent.ipc
+        val owned = received_ipc.recv_owned(TaskId(id: 0), destination)
+        expect(owned.payload.len()).to_equal(8)
+        expect(owned.payload[0]).to_equal(0)
+        expect(owned.payload[4]).to_equal(9)
+
+    it "rejects a claimed source port not owned by the sender task":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val destination = ipc.create_port(TaskId(id: 0), "destination")
+        val forged_source = ipc.create_port(TaskId(id: 99), "forged")
+        val message: [u8] = [7u8, 0u8, 0u8, 0u8]
+        val sent = rv64_syscall_handler_state(
+            rv64_args(20, destination.id, forged_source.id, unsafe_addr_of(message), message.len(), IPC_COPIED_SERVICE_TAG),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(sent.result.value).to_equal(-3)
+
+    it "rejects an oversized service message before reading user memory":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val destination = ipc.create_port(TaskId(id: 0), "bounded-destination")
+        val source = ipc.create_port(TaskId(id: 0), "bounded-source")
+        val sent = rv64_syscall_handler_state(
+            rv64_args(20, destination.id, source.id, 0, 4101, IPC_COPIED_SERVICE_TAG),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(sent.result.value).to_equal(-4)
+
+    it "rejects an oversized raw reply before reading user memory":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val destination = ipc.create_port(TaskId(id: 0), "bounded-destination")
+        val service = ipc.create_port(TaskId(id: 0), "compositor")
+        val sent = rv64_syscall_handler_state(
+            rv64_args(20, destination.id, service.id, 0, 4097, IPC_COPIED_SERVICE_TAG),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(sent.result.value).to_equal(-4)

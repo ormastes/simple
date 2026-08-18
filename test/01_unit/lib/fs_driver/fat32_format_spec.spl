@@ -1,0 +1,84 @@
+use std.spec.{describe, it, expect}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.fat32_format.{Fat32FormatAuthorization, fat32_format_plan, fat32_format}
+use std.fs_driver.fat32_core.{Fat32Core}
+
+fn _u16_le(data: [u8], off: i64) -> u32:
+    data[off].to_u32() | (data[off + 1].to_u32() << 8)
+
+fn _u32_le(data: [u8], off: i64) -> u32:
+    _u16_le(data, off) | (_u16_le(data, off + 2) << 16)
+
+describe "host-neutral authorized FAT32 formatting":
+    it "plans strict FAT32 geometry without touching media":
+        val plan = fat32_format_plan(512u32, 70000u64, 1u32).unwrap()
+        expect(plan.cluster_count).to_be_greater_than(65524u64)
+        expect(plan.reserved_sectors).to_equal(32u32)
+        expect(plan.fat_count).to_equal(2u32)
+        expect(plan.root_cluster).to_equal(2u32)
+
+    it "rejects small media and invalid cluster geometry":
+        expect(fat32_format_plan(512u32, 4096u64, 1u32).unwrap_err()).to_equal("fat32-format-not-fat32-cluster-count")
+        expect(fat32_format_plan(512u32, 70000u64, 3u32).unwrap_err()).to_equal("fat32-format-invalid-sectors-per-cluster")
+
+    it "requires identity-bound authorization before the first write":
+        val mem = MemBlockDevice.new(70000u64, 512u32)
+        val plan = fat32_format_plan(512u32, 70000u64, 1u32).unwrap()
+        val denied = Fat32FormatAuthorization(approved: false, identity_hash: "", challenge: "")
+        expect(fat32_format(mem, plan, denied, 1u32, "SIMPLEOS").unwrap_err()).to_equal("fat32-format-authorization-required")
+        val dev: BlockDevice = mem
+        val first = dev.read_sector(0u64).unwrap()
+        expect(first[510]).to_equal(0u8)
+        expect(first[511]).to_equal(0u8)
+
+    it "creates mirrored FAT32 metadata and an allocated empty root cluster":
+        val mem = MemBlockDevice.new(70000u64, 512u32)
+        val plan = fat32_format_plan(512u32, 70000u64, 1u32).unwrap()
+        val authority = Fat32FormatAuthorization(approved: true, identity_hash: "sha256:device", challenge: "exact-device-challenge")
+        expect(fat32_format(mem, plan, authority, 0x12345678u32, "SIMPLEOS").unwrap()).to_equal(true)
+        val dev: BlockDevice = mem
+        val boot = dev.read_sector(0u64).unwrap()
+        expect(_u16_le(boot, 11)).to_equal(512u32)
+        expect(boot[13]).to_equal(1u8)
+        expect(_u16_le(boot, 14)).to_equal(32u32)
+        expect(boot[16]).to_equal(2u8)
+        expect(_u32_le(boot, 36)).to_equal(plan.fat_sectors)
+        expect(_u32_le(boot, 44)).to_equal(2u32)
+        expect(boot[510]).to_equal(0x55u8)
+        expect(boot[511]).to_equal(0xaau8)
+        val backup_boot = dev.read_sector(6u64).unwrap()
+        expect(backup_boot).to_equal(boot)
+        val fsinfo = dev.read_sector(1u64).unwrap()
+        expect(_u32_le(fsinfo, 0)).to_equal(0x41615252u32)
+        expect(_u32_le(fsinfo, 484)).to_equal(0x61417272u32)
+        val fat0 = dev.read_sector(32u64).unwrap()
+        val fat1 = dev.read_sector(32u64 + plan.fat_sectors.to_u64()).unwrap()
+        expect(fat0).to_equal(fat1)
+        expect(_u32_le(fat0, 0)).to_equal(0x0ffffff8u32)
+        expect(_u32_le(fat0, 8)).to_equal(0x0fffffffu32)
+        val root = dev.read_sector(plan.data_start_lba).unwrap()
+        expect(root[0]).to_equal(0u8)
+
+    it "mounts, writes, unmounts, remounts, reads, and lists through the shared FAT32 core":
+        val mem = MemBlockDevice.new(70000u64, 512u32)
+        val plan = fat32_format_plan(512u32, 70000u64, 1u32).unwrap()
+        val authority = Fat32FormatAuthorization(approved: true, identity_hash: "sha256:device", challenge: "exact-device-challenge")
+        expect(fat32_format(mem, plan, authority, 0x12345678u32, "SIMPLEOS").is_ok()).to_equal(true)
+        var writer = Fat32Core.new(mem)
+        expect(writer.mount().is_ok()).to_equal(true)
+        val handle = writer.create_file("/proof.txt").unwrap()
+        val payload: [u8] = [115u8, 105u8, 109u8, 112u8, 108u8, 101u8, 111u8, 115u8]
+        expect(writer.write(handle, payload, payload.len()).unwrap()).to_equal(payload.len())
+        expect(writer.close(handle).is_ok()).to_equal(true)
+        expect(writer.unmount().is_ok()).to_equal(true)
+
+        var reader = Fat32Core.new(mem)
+        expect(reader.mount().is_ok()).to_equal(true)
+        val entries = reader.readdir("/").unwrap()
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].name).to_equal("proof.txt")
+        val read_handle = reader.open("/proof.txt").unwrap()
+        var readback: [u8] = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        expect(reader.read(read_handle, readback, readback.len()).unwrap()).to_equal(payload.len())
+        expect(readback).to_equal(payload)

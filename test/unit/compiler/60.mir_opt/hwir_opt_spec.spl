@@ -1,5 +1,13 @@
-# HWIR optimizer unit tests.
+# @req REQ-G2-001
+"""
+HWIR optimizer unit tests.
 
+Each scenario exercises one optimizer pass contract against the same minimal
+typed HWIR module.  The scope is optimizer planning and accounting only; it
+does not claim generated VHDL or target execution evidence.
+"""
+
+use std.spec.*
 use compiler.mir.hwir.types.{HwModule, HwCostModel, HwFsm}
 use compiler.mir_opt.hwir_opt.{
     HwirOptPassConfig,
@@ -10,9 +18,6 @@ use compiler.mir_opt.hwir_opt.{
     HwirMemoryPattern, hwir_memory_from_pattern, hwir_memory_inference_pass,
     HwirDspPattern, hwir_dsp_inference_pass
 }
-
-fn check(condition: bool):
-    expect condition == true
 
 fn test_cost() -> HwCostModel:
     HwCostModel(lut_count: 100, ff_count: 80, dsp_count: 4, bram_count: 1, latency_cycles: 3, fmax_mhz: 100)
@@ -32,72 +37,82 @@ fn test_module() -> HwModule:
     )
 
 describe "HWIR optimizer pass config":
-    it "allows all passes to be independently enabled":
+    it "should enable every pass for the speed profile":
+        step("Create an all-enabled speed pass configuration")
         val config = HwirOptPassConfig.all_enabled("speed")
-        check(config.width_narrowing)
-        check(config.structural_simplify)
-        check(config.resource_binding)
-        check(config.fsm_opt)
-        check(config.memory_inference)
-        check(config.dsp_inference)
-        expect config.profile == "speed"
+        expect(config.width_narrowing).to_be(true)
+        expect(config.structural_simplify).to_be(true)
+        expect(config.resource_binding).to_be(true)
+        expect(config.fsm_opt).to_be(true)
+        expect(config.memory_inference).to_be(true)
+        expect(config.dsp_inference).to_be(true)
+        expect(config.profile).to_equal("speed")
 
-    it "allows all passes to be independently disabled":
+    it "should disable every pass for the area profile":
+        step("Create a disabled area pass configuration")
         val config = HwirOptPassConfig.none("area")
-        check(not config.width_narrowing)
-        check(not config.structural_simplify)
-        check(not config.resource_binding)
-        check(not config.fsm_opt)
-        check(not config.memory_inference)
-        check(not config.dsp_inference)
-        expect config.profile == "area"
+        expect(config.width_narrowing).to_be(false)
+        expect(config.structural_simplify).to_be(false)
+        expect(config.resource_binding).to_be(false)
+        expect(config.fsm_opt).to_be(false)
+        expect(config.memory_inference).to_be(false)
+        expect(config.dsp_inference).to_be(false)
+        expect(config.profile).to_equal("area")
 
 describe "HWIR width narrowing":
-    it "reports narrowed bits from static ranges":
+    it "should report narrowed bits from a static range":
+        step("Narrow an eight-bit unsigned range whose maximum is seven")
         val range = HwirWidthRange(node_id: "n0", min_value: 0, max_value: 7, original_width: 8, signed_value: false)
         val result = hwir_width_narrowing_pass(test_module(), [range])
-        check(result.changed)
-        expect result.narrowed_bits == 4
+        expect(result.changed).to_be(true)
+        expect(result.narrowed_bits).to_equal(4)
 
 describe "HWIR structural simplification":
-    it "counts folded and removed nodes":
+    it "should count folded and removed nodes":
+        step("Simplify a module with foldable and dead structural nodes")
         val stats = HwirStructuralStats(constant_folds: 2, dead_signals: 3, dead_registers: 1, redundant_muxes: 1, cse_hits: 2)
         val result = hwir_structural_simplify_pass(test_module(), stats)
-        check(result.changed)
-        expect result.removed_nodes == 7
+        expect(result.changed).to_be(true)
+        expect(result.removed_nodes).to_equal(7)
 
 describe "HWIR resource binding":
-    it "shares resources for area profile":
+    it "should share multiplier resources for the area profile":
+        step("Bind an area-profile multiplier plan")
         val plan = HwirResourceBindingPlan(profile: "area", multiplier_count: 4, shared_multiplier_count: 2, divider_count: 1, pipeline_stage_count: 0)
         val binding = hwir_binding_for_profile("mul0", "multiplier", "area")
         val result = hwir_resource_binding_pass(test_module(), plan)
-        check(binding.is_shared())
-        check(result.changed)
-        expect result.shared_resources == 2
+        expect(binding.is_shared()).to_be(true)
+        expect(binding.latency_contract).to_equal("estimated")
+        expect(binding.latency_is_committed()).to_equal(false)
+        expect(result.changed).to_be(true)
+        expect(result.shared_resources).to_equal(2)
 
 describe "HWIR FSM optimization":
-    it "chooses one hot for speed and removes unreachable states":
+    it "should choose one-hot speed encoding and remove unreachable states":
+        step("Optimize an eight-state control FSM for speed")
         val fsm = HwFsm.create("ctrl", "state", 8)
         val encoding = hwir_choose_fsm_encoding(8, "speed")
         val plan = HwirFsmOptPlan(fsm: fsm, unreachable_states: 3, encoding: encoding)
         val result = hwir_fsm_opt_pass(test_module(), plan)
-        expect encoding == "one_hot"
-        check(result.changed)
-        expect result.removed_nodes == 3
+        expect(encoding).to_equal("one_hot")
+        expect(result.changed).to_be(true)
+        expect(result.removed_nodes).to_equal(3)
 
 describe "HWIR memory inference":
-    it "recognizes true dual port RAM patterns":
+    it "should recognize a true dual-port RAM pattern":
+        step("Infer memory from a two-read-port register-file pattern")
         val pattern = HwirMemoryPattern(name: "rf", element_width: 32, depth: 64, read_ports: 2, write_ports: 1, constant_contents: false, fifo_access: false)
         val memory = hwir_memory_from_pattern(pattern)
         val result = hwir_memory_inference_pass(test_module(), [pattern])
-        expect memory.template_kind == "true_dual_port_ram"
-        check(result.changed)
-        expect result.removed_nodes == 64
+        expect(memory.template_kind).to_equal("true_dual_port_ram")
+        expect(result.changed).to_be(true)
+        expect(result.removed_nodes).to_equal(64)
 
 describe "HWIR DSP inference":
-    it "binds wide arithmetic patterns to DSP resources":
+    it "should bind a multiply-accumulate pattern to DSP resources":
+        step("Infer DSP use for a sixteen-bit multiply-accumulate pattern")
         val pattern = HwirDspPattern(node_id: "mac0", pattern_kind: "mac", operand_width: 16, term_count: 2, prefer_lut: false)
         val result = hwir_dsp_inference_pass(test_module(), [pattern])
-        check(pattern.uses_dsp())
-        check(result.changed)
-        expect result.cost_after.dsp_count == 5
+        expect(pattern.uses_dsp()).to_be(true)
+        expect(result.changed).to_be(true)
+        expect(result.cost_after.dsp_count).to_equal(5)

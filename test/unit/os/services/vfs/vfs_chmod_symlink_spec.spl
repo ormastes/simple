@@ -11,6 +11,7 @@
 """
 
 use std.spipe.*
+use std.io_runtime.{read_file}
 
 # ============================================================================
 # MockFs — minimal Filesystem implementation for testing
@@ -66,6 +67,37 @@ impl Filesystem for MockFs:
         self.symlink_called = true
         Ok(true)
 
+class MutationArgumentFs:
+    """Filesystem that accepts only manager-translated mutation arguments."""
+
+impl MutationArgumentFs:
+    static fn new() -> MutationArgumentFs:
+        MutationArgumentFs()
+
+    fn fs_name() -> text: "mutation-arguments"
+    fn mount(device: text, options: text) -> Result<bool, text>: Ok(true)
+    fn unmount() -> Result<bool, text>: Ok(true)
+    fn open(path: text, flags: FileFlags) -> Result<u64, text>: Ok(0u64)
+    fn close(handle: u64) -> Result<bool, text>: Ok(true)
+    fn read(handle: u64, size: u64) -> Result<[u8], text>: Ok([])
+    fn write(handle: u64, data: [u8]) -> Result<u64, text>: Ok(0u64)
+    fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>: Ok(0u64)
+    fn stat(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(kind: FsNodeKind.File, size: 0, permissions: 0o644, name: path))
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        if path == "/etc/tool" and mode == 0o755:
+            return Ok(true)
+        Err("chmod received untransformed path or mode")
+    fn mkdir(path: text) -> Result<bool, text>: Ok(true)
+    fn rmdir(path: text) -> Result<bool, text>: Ok(true)
+    fn readdir(path: text) -> Result<[DirEntry], text>: Ok([])
+    fn unlink(path: text) -> Result<bool, text>: Ok(true)
+    fn rename(old_path: text, new_path: text) -> Result<bool, text>: Ok(true)
+    fn symlink(target: text, link_path: text) -> Result<bool, text>:
+        if target == "/usr/bin/sh" and link_path == "/sh":
+            return Ok(true)
+        Err("symlink argument order or link translation is wrong")
+
 # ============================================================================
 # Tests
 # ============================================================================
@@ -77,11 +109,15 @@ describe "VFS chmod routing":
         var mgr = VfsManager.new()
         val fs = MockFs.new()
         mgr.mount("/", "mock", "", false, fs)
-        # Verify chmod call through the trait succeeds (returns Ok)
-        # Interpreter does not support reading trait-object fields back,
-        # so we verify via the result code only.
-        val result = mgr.mounts[0].fs.chmod("/etc/foo", 0o755)
+        val result = mgr.chmod("/etc/foo", 0o755)
         expect(result.is_ok()).to_equal(true)
+
+    it "chmod on a read-only mount returns error":
+        var mgr = VfsManager.new()
+        val fs = MockFs.new()
+        mgr.mount("/", "mock", "", true, fs)
+        val result = mgr.chmod("/etc/foo", 0o755)
+        expect(result.is_err()).to_equal(true)
 
 describe "VFS symlink routing":
     it "symlink routes to filesystem":
@@ -97,3 +133,41 @@ describe "VFS symlink routing":
         mgr.mount("/", "mock", "", true, fs)
         val result = mgr.symlink("/usr/bin/sh", "/bin/sh")
         expect(result.is_err()).to_equal(true)
+
+describe "VFS mutation argument routing":
+    it "translates chmod paths beneath the selected mount":
+        var mgr = VfsManager.new()
+        mgr.mount("/containers/a", "mock", "", false, MutationArgumentFs.new())
+        val result = mgr.chmod("/containers/a/etc/tool", 0o755)
+        expect(result.is_ok()).to_equal(true)
+
+    it "preserves symlink target order while translating only its link path":
+        var mgr = VfsManager.new()
+        mgr.mount("/bin", "mock", "", false, MutationArgumentFs.new())
+        val result = mgr.symlink("/usr/bin/sh", "/bin/sh")
+        expect(result.is_ok()).to_equal(true)
+
+describe "VFS mutation service ownership":
+    it "delegates every mutation handler to the VfsManager":
+        val source = read_file("src/os/services/vfs/vfs_service.spl")
+        expect(source).to_contain("match self.vfs.unlink(path):")
+        expect(source).to_contain("match self.vfs.rmdir(path):")
+        expect(source).to_contain("match self.vfs.rename(old_path, new_path):")
+        expect(source).to_contain("match self.vfs.chmod(path, mode):")
+        expect(source).to_contain("match self.vfs.symlink(target, link_path):")
+
+describe "VFS rename mount boundaries":
+    it "rejects renames that cross mounted filesystems":
+        var mgr = VfsManager.new()
+        mgr.mount("/alpha", "mock", "", false, MockFs.new())
+        mgr.mount("/beta", "mock", "", false, MockFs.new())
+        val result = mgr.rename("/alpha/old", "/beta/new")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("cross-mount rename is not supported")
+
+    it "does not treat a sibling prefix as a mounted path":
+        var mgr = VfsManager.new()
+        mgr.mount("/alpha", "mock", "", false, MockFs.new())
+        val result = mgr.rename("/alphabet/old", "/alphabet/new")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("no filesystem mounted for path: /alphabet/old")

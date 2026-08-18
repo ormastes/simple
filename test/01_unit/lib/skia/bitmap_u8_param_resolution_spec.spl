@@ -1,0 +1,104 @@
+# @cover src/lib/skia/backend/cpu/raster_prims.spl 20%
+"""
+# Bitmap.zeros + narrow-integer-typed params: primitive type resolution
+
+**Feature IDs:** #SKI-RASTERPRIMS
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Regression + defect-class spec for
+`doc/08_tracking/bug/skia_bitmap_zeros_plus_u8_param_breaks_u8_resolution_2026-07-20.md`.
+
+The reported defect was a COMPILER symbol-resolution failure, not a library
+bug: a file that (1) imported `Bitmap` from
+`std.skia.backend.cpu.raster_prims`, (2) declared a function typed
+`(bmp: Bitmap, ..., a: u8)`, and (3) called `Bitmap.zeros(...)` anywhere in
+the file died at semantic analysis with `variable u8 not found` — even when
+the `u8`-typed function was never invoked.
+
+This spec pins the exact triggering combination so the resolution failure
+cannot come back silently, and generalizes it to the other narrow integer
+widths so a regression in any one of them is caught rather than just `u8`.
+Merely LOADING this file exercises the original defect: it failed at compile
+time, so an unresolved primitive would yield zero examples, not a failure
+message.
+"""
+
+use std.spipe.*
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+# ---------------------------------------------------------------------------
+# (2) of the triggering combination: Bitmap-typed param alongside a narrow
+# integer param. Declared for every narrow width, not just u8.
+# ---------------------------------------------------------------------------
+
+fn _set_alpha(bmp: Bitmap, x: i64, y: i64, a: u8):
+    val idx = (y * bmp.width + x) * 4
+    bmp.pixels[idx]     = a
+    bmp.pixels[idx + 1] = a
+    bmp.pixels[idx + 2] = a
+    bmp.pixels[idx + 3] = a
+
+fn _alpha_at(bmp: Bitmap, x: i64, y: i64) -> i64:
+    val idx = (y * bmp.width + x) * 4 + 3
+    bmp.pixels[idx] as i64
+
+# Never called — declaration alone was enough to break `u8` resolution.
+fn _unused_u8_sink(bmp: Bitmap, a: u8) -> i64:
+    (bmp.width as i64) + (a as i64)
+
+fn _unused_u16_sink(bmp: Bitmap, a: u16) -> i64:
+    (bmp.width as i64) + (a as i64)
+
+fn _unused_u32_sink(bmp: Bitmap, a: u32) -> i64:
+    (bmp.width as i64) + (a as i64)
+
+fn _unused_i8_sink(bmp: Bitmap, a: i8) -> i64:
+    (bmp.width as i64) + (a as i64)
+
+fn _unused_i16_sink(bmp: Bitmap, a: i16) -> i64:
+    (bmp.width as i64) + (a as i64)
+
+fn _unused_i32_sink(bmp: Bitmap, a: i32) -> i64:
+    (bmp.width as i64) + (a as i64)
+
+describe "Bitmap.zeros with narrow-int params":
+    it "Bitmap.zeros co-existing with a u8-typed Bitmap param resolves":
+        # (3) of the triggering combination — the static constructor call.
+        val bmp = Bitmap.zeros(4, 4)
+        expect(bmp.width).to_equal(4)
+        expect(bmp.height).to_equal(4)
+
+    it "a u8 value round-trips through a Bitmap-typed helper":
+        val bmp = Bitmap.zeros(4, 4)
+        expect(_alpha_at(bmp, 1, 1)).to_equal(0)
+        _set_alpha(bmp, 1, 1, 255 as u8)
+        expect(_alpha_at(bmp, 1, 1)).to_equal(255)
+
+    it "u8 remains usable as a cast target after Bitmap.zeros":
+        val bmp = Bitmap.zeros(2, 2)
+        val a = 200 as u8
+        expect(a as i64).to_equal(200)
+        expect(bmp.pixels.len()).to_equal(16)
+
+    it "every declared narrow-int sink is callable, not merely parseable":
+        val bmp = Bitmap.zeros(3, 3)
+        expect(_unused_u8_sink(bmp, 7 as u8)).to_equal(10)
+        expect(_unused_u16_sink(bmp, 7 as u16)).to_equal(10)
+        expect(_unused_u32_sink(bmp, 7 as u32)).to_equal(10)
+        expect(_unused_i8_sink(bmp, 7 as i8)).to_equal(10)
+        expect(_unused_i16_sink(bmp, 7 as i16)).to_equal(10)
+        expect(_unused_i32_sink(bmp, 7 as i32)).to_equal(10)
+
+    it "repeated Bitmap.zeros calls do not degrade u8 resolution":
+        var i = 0
+        var total = 0
+        while i < 3:
+            val bmp = Bitmap.zeros(2, 2)
+            _set_alpha(bmp, 0, 0, 128 as u8)
+            total = total + _alpha_at(bmp, 0, 0)
+            i = i + 1
+        expect(total).to_equal(384)

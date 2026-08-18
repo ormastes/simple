@@ -60,6 +60,13 @@ fn body_has_errors_with_terminator(insts: [MirInst], terminator: MirTerminator) 
     checker.check_function(mk_body_with_terminator(insts, terminator))
     checker.errors.len() > 0
 
+fn branching_body_has_errors(blocks: [MirBlock]) -> bool:
+    val body = MirBody(name: "branching_move_spec_fn", blocks: blocks,
+        locals: [], arg_count: 0, return_ty: MirType.i64())
+    var checker = BorrowChecker.create()
+    checker.check_function(body)
+    checker.errors.len() > 0
+
 describe "BorrowGraph move dataflow":
     it "detects use-after-move at the same program point":
         # Guard: same-point detection worked before the dataflow fix and
@@ -101,7 +108,33 @@ describe "BorrowGraph move dataflow":
         assert_false(b.?)
         assert_true(graph.has_errors())
 
+    it "assigns borrow identities globally across program points":
+        var graph = BorrowGraph.create()
+        val first = graph.record_borrow(2, Place.local(0), BorrowKind.Shared)
+        val second = graph.record_borrow(7, Place.local(1), BorrowKind.Shared)
+        assert_true(first.?)
+        assert_true(second.?)
+        assert_true(first.unwrap().id != second.unwrap().id)
+
 describe "BorrowChecker MIR use-after-move":
+    it "checks conflicting borrows in a non-entry successor block":
+        # Regression: analysis emitted global points 2/3 for block 1 while
+        # NLL checked synthetic points 1000/1001; successors were also empty,
+        # so reverse postorder never visited the block.
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val l2 = LocalId(id: 2)
+        val entry = MirBlock(id: BlockId.new(0), label: nil,
+            instructions: [], terminator: MirTerminator.Goto(BlockId.new(1)))
+        val successor = MirBlock(id: BlockId.new(1), label: nil,
+            instructions: [
+                mk_inst(MirInstKind.Ref(l1, MirBorrowKind.Shared,
+                    MirPlace.local_place(l0))),
+                mk_inst(MirInstKind.Ref(l2, MirBorrowKind.Mutable,
+                    MirPlace.local_place(l0)))
+            ], terminator: MirTerminator.Ret(nil))
+        assert_true(branching_body_has_errors([entry, successor]))
+
     it "errors on Move followed by a later use of the source":
         # Defect (a)/(b) end-to-end at the checker API: hand-built MIR with
         # an explicit Move then a Copy USE of the moved source at a later
