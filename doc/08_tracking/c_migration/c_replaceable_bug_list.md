@@ -25,7 +25,7 @@ tranches · `assess` = needs per-symbol caller analysis before commitment.
 | C-MIG-0010 | openssl/tls glue (3 files) | 968 | third-party wrapper | facade stays; owned handshake state tracking to Simple; KAT + interop corpus mandatory | assess |
 | C-MIG-0011 | time/timestamp (2 files) | 265 | runtime primitive | provider alias (clock syscall is the boundary) | planned |
 | C-MIG-0012 | bootstrap/startup (6 files) | 327 | bootstrap stage | staged self-hosting plan; not general-migration scope | planned |
-| C-MIG-0013 | mcp shim | 136 | product algorithm | pure Simple (MCP server already mostly Simple) | planned |
+| C-MIG-0013 | mcp shim | 136 | DEAD from product (0 callers of all 3 exports, verified 2026-08-18) | delete — staged, 3 link-site refs recorded in registry | **staged-delete** |
 | C-MIG-0014 | wasm shim (scv_wasm_shim.c) | 459 | platform ABI shim | retain; external SDK boundary (guard SKIPs it already) | assess |
 | C-MIG-0015 | media wrappers (sdl2/sdl3/glfw/audio/font, 23 files) | 5,409 | third-party wrapper | facades retained; owned pixel/format conversion helpers to Simple | assess |
 | C-MIG-0016 | src/runtime/test/** (27 files) | 3,870 | conformance oracle | test-only; never production-linked; no migration needed — verify not linked into product | planned |
