@@ -50,3 +50,18 @@ One owner per interface/registry; separate worktrees; schema versions on every i
 ## Implementation order
 
 Research §19 (19 steps, schemas first, gate promotion last).
+
+## C-migration test standard (user directive, 2026-08-18)
+
+Every C-to-Simple migration MUST, before the C is retired:
+1. **Perf-profile FIRST and fix perf problems before/with the migration** —
+   measure both sides on the shared corpus, record the ratio in the registry
+   entry; a >2x gap is a PERF finding to fix or file, never to hide
+   (crc32's 14.4x->2.25x chain is the worked example).
+2. **~100 branch-covering differential cases with SHARED test logic** — one
+   deterministic generator loop feeds the SAME inputs to BOTH the C oracle
+   and the Simple implementation and asserts equality inside that loop; the
+   loop is the shared logic (no duplicated per-side vector lists). Cover:
+   length 0..N, byte classes (0/127/128/255), domain boundary values,
+   invalid/reserved encodings, UTF-8 multibyte.
+3. Published KATs stay alongside the bulk loop.
