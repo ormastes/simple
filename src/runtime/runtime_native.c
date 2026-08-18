@@ -8257,8 +8257,8 @@ int64_t rt_for_iterable(int64_t collection) {
 
 /* rt_file_read_text, rt_file_exists, rt_file_delete, rt_env_get are
  * defined in runtime.c when the full runtime is linked, but the
- * core-c-bootstrap build only includes runtime_legacy_core.c and
- * runtime_mcp_core.c (not runtime.c).  Provide them here so that
+ * core-c-bootstrap build only includes runtime_legacy_core.c
+ * (not runtime.c).  Provide them here so that
  * native CLI binaries built against the core-c runtime can read files
  * and query the environment without segfaulting on nil stubs. */
 

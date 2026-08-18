@@ -265,9 +265,6 @@ int64_t  rt_time_ms(void);          /* Unix epoch milliseconds */
 char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF */
 int64_t  rt_stdin_read_line_text(void);    /* reads line from stdin as tagged text, empty on EOF */
 int64_t  rt_stdin_read_chars_text(int64_t count); /* reads up to count bytes from stdin as tagged text */
-int64_t  rt_stdin_read_mcp_message_text(void); /* reads one MCP framed or JSON-lines message body */
-int64_t  rt_mcp_initialize_response_text(int64_t message); /* native fast path for MCP initialize */
-void     rt_mcp_write_framed_text(int64_t body); /* writes Content-Length framed tagged text */
 int64_t  stdin_read_char(void);            /* reads one byte from stdin as tagged text */
 int64_t  rt_stdout_write_text(const char* s); /* writes text without newline, returns len */
 int64_t  print_raw(int64_t value);         /* writes tagged RuntimeValue to stdout */
@@ -706,6 +703,7 @@ bool     rt_process_kill(int64_t pid);
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
 int64_t     rt_browser_renderer_spawn_sandboxed(const char* cmd, SplArray* args);
 bool        rt_browser_renderer_sandbox_enter(void);
+bool        rt_browser_renderer_sandbox_netns_active(void);
 const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes);
 int64_t     rt_browser_renderer_write_stdout_some(const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 int64_t     rt_browser_renderer_write_protocol_some(const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
