@@ -131,6 +131,33 @@ track_b() {
     echo "FAIL — track C residue: $(wc -l < "$WORK/tb_residue.txt") file(s)"
     exit 1
   fi
+  # --- Track D: text<->bytes provider wrappers (signature-exact only) -----
+  # std.common.string_core.{text_to_bytes, bytes_to_text} are thin
+  # passthroughs. A caller file qualifies only when its extern decl matches
+  # the provider signature EXACTLY (param name free, types fixed) — signature
+  # variance (e.g. `-> [i64]`) means the caller relies on a different shape
+  # and stays manual.
+  for pair in "rt_text_to_bytes text_to_bytes text [u8]" "rt_bytes_to_text bytes_to_text [u8] text"; do
+    set -- $pair
+    sym=$1; wrap=$2
+    declre=""
+    case "$sym" in
+      rt_text_to_bytes) declre='^extern fn rt_text_to_bytes\([a-z_]+: text\) -> \[u8\]$' ;;
+      rt_bytes_to_text) declre='^extern fn rt_bytes_to_text\([a-z_]+: \[u8\]\) -> text$' ;;
+    esac
+    for f in $(/usr/bin/grep -rlE "$declre" src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
+      case "$f" in src/lib/common/string_core.spl) continue ;; esac
+      grep -qE "^export .*\b${sym}\b" "$f" && continue
+      bare=$(grep -oE "[a-z_]*${wrap}" "$f" | grep -cv "^${sym}\$")
+      [ "$bare" -gt 0 ] && continue
+      sed -i -E "s@${declre}@use std.common.string_core.{${wrap}}@" "$f"
+      sed -i "s/\b${sym}(/${wrap}(/g" "$f"
+      echo "$f" >> "$WORK/tb_touched.txt"
+      echo "$f $sym" >> "$WORK/tb_pairs.txt"
+    done
+  done
+  sort -u "$WORK/tb_touched.txt" > "$WORK/tb_touched_u.txt"
+  mv "$WORK/tb_touched_u.txt" "$WORK/tb_touched.txt"
   sort -u "$WORK/tb_touched.txt" > "$WORK/tb_touched_u.txt"
   mv "$WORK/tb_touched_u.txt" "$WORK/tb_touched.txt"
   wc -l < "$WORK/tb_touched.txt"
