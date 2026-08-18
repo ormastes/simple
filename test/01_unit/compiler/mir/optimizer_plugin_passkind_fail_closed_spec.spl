@@ -1,0 +1,143 @@
+# OptimizerPlugin PassKind fail-closed spec
+#
+# A plugin whose scope includes MIR but whose PassKind resolved to nil used to
+# be silently passed through by the run adapters. It must instead fail closed
+# with an explicit error naming the pass and the known MIR pass kinds.
+# Source-only plugins remain a routed no-op (Ok passthrough) — they have no
+# MIR pass by construction.
+
+use compiler.mir.mir_instructions.{
+    MirModule, MirFunction,
+    MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind,
+    BlockId
+}
+use compiler.mir.mir_types.{
+    MirType, MirTypeKind, MirSignature,
+    MirConstValue, LocalId, LocalKind, MirLocal
+}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir_opt.mir_opt.mod.{PassKind, PassScope, OptLevel}
+use compiler.mir_opt.optimizer_plugin.{
+    ApplyMode,
+    optimizer_plugin_mir, optimizer_plugin_source,
+    optimizer_plugin_run_on_function, optimizer_plugin_run_on_module,
+    optimizer_plugin_from_dynamic_descriptor,
+    optimizer_plugin_known_mir_kind_names
+}
+use compiler.mir_opt.optimizer_manifest.{
+    DynamicPassDescriptor, ManifestPassContract,
+    manifest_pass_contract_default, manifest_pass_entry_new,
+    dynamic_pass_descriptor_from_entry
+}
+
+fn make_probe_function() -> MirFunction:
+    val ret_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+    val const_inst = MirInst(
+        kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
+        span: nil
+    )
+    val entry = MirBlock(
+        id: BlockId(id: 0), label: Some("bb0"),
+        instructions: [const_inst],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    var locals: [MirLocal] = []
+    locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+    MirFunction(
+        symbol: SymbolId.new(0), name: "probe_fn", signature: sig,
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: nil, generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}
+    )
+
+fn make_probe_module() -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = make_probe_function()
+    MirModule(
+        name: "probe_module", functions: functions,
+        statics: {}, constants: {}, types: {}
+    )
+
+fn make_nil_kind_mir_plugin_descriptor() -> DynamicPassDescriptor:
+    val entry = manifest_pass_entry_new(
+        "custom_dyn_pass", [], PassScope.Function, [],
+        manifest_pass_contract_default(), "entry_sym"
+    )
+    dynamic_pass_descriptor_from_entry(entry, "test_plugin")
+
+describe "OptimizerPlugin PassKind fail-closed":
+    """MIR-scoped plugins with an unresolved PassKind must error, never pass through silently."""
+
+    it "known kind still routes on function":
+        val func = make_probe_function()
+        val plugin = optimizer_plugin_mir(
+            "dce", ["dead_code_elimination"],
+            PassKind.DeadCodeElimination, PassScope.Function,
+            ApplyMode.Static, OptLevel.Speed, "cheap"
+        )
+        val result_r = optimizer_plugin_run_on_function(plugin, func)
+        match result_r:
+            case Ok(f):
+                expect(f.name).to_equal("probe_fn")
+            case Err(msg):
+                assert_true(false)
+
+    it "known kind still routes on module":
+        val module = make_probe_module()
+        val plugin = optimizer_plugin_mir(
+            "const_fold", [],
+            PassKind.ConstantFolding, PassScope.Function,
+            ApplyMode.Static, OptLevel.Speed, "cheap"
+        )
+        val result_r = optimizer_plugin_run_on_module(plugin, module)
+        match result_r:
+            case Ok(m):
+                expect(m.name).to_equal("probe_module")
+            case Err(msg):
+                assert_true(false)
+
+    it "MIR-scoped plugin with nil kind errors on function, naming the pass":
+        val func = make_probe_function()
+        val dyn_desc = make_nil_kind_mir_plugin_descriptor()
+        val plugin = optimizer_plugin_from_dynamic_descriptor(dyn_desc, OptLevel.Speed)
+        val result_r = optimizer_plugin_run_on_function(plugin, func)
+        match result_r:
+            case Ok(f):
+                assert_true(false)
+            case Err(msg):
+                expect(msg).to_contain("custom_dyn_pass")
+                expect(msg).to_contain("PassKind")
+                expect(msg).to_contain("dead_code_elimination")
+                expect(msg).to_contain("constant_folding")
+
+    it "MIR-scoped plugin with nil kind errors on module, naming the pass":
+        val module = make_probe_module()
+        val dyn_desc = make_nil_kind_mir_plugin_descriptor()
+        val plugin = optimizer_plugin_from_dynamic_descriptor(dyn_desc, OptLevel.Speed)
+        val result_r = optimizer_plugin_run_on_module(plugin, module)
+        match result_r:
+            case Ok(m):
+                assert_true(false)
+            case Err(msg):
+                expect(msg).to_contain("custom_dyn_pass")
+                expect(msg).to_contain("Known MIR pass kinds")
+
+    it "source-only plugin remains a routed Ok passthrough":
+        val func = make_probe_function()
+        val plugin = optimizer_plugin_source(
+            "string_concat", [], ApplyMode.Static, OptLevel.Speed, ["concat"]
+        )
+        val result_r = optimizer_plugin_run_on_function(plugin, func)
+        match result_r:
+            case Ok(f):
+                expect(f.name).to_equal("probe_fn")
+            case Err(msg):
+                assert_true(false)
+
+    it "known kind names include the built-in registry stable names":
+        val names = optimizer_plugin_known_mir_kind_names()
+        assert_true(names.len() > 0)
+        expect(names).to_contain("dead_code_elimination")
+        expect(names).to_contain("constant_folding")
