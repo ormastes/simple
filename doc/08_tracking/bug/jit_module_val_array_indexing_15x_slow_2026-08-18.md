@@ -30,3 +30,16 @@ as locals (or const-promote immutable module vals). Library mitigation applied
 meanwhile in gzip/crc.spl: per-call local copy of the table (256 pushes ≈ us,
 recovers ~4.6 ns/read indexing in the JIT; negligible vs the per-byte loop in
 the interpreter).
+
+## Follow-up probes (same day): complete crc32 cost model in the JIT lane
+
+- Indexing a `bytes()`-RETURNED array is fast (~4.1 ns/read) — the slow
+  representation is specific to module-val-sourced arrays.
+- `text.byte_at(i)` costs ~44 ns/call — worse than bulk bytes()+index; not a
+  workaround.
+- Post-mitigation per-call budget (2,090-byte body, measured 88 us total vs
+  C 11.5 us): bytes() ≈ 58 us (66%, the builtin bulk-conversion bug),
+  per-call table copy ≈ 26 us (mitigation cost, removable only by fixing the
+  module-val representation), CRC loop itself ≈ 19 us (~9 ns/byte — near-C).
+  ⇒ With both compiler fixes the pure-Simple loop is already at parity
+  shape; no further library-level work is productive.
