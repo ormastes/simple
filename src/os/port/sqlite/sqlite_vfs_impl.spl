@@ -67,12 +67,12 @@
 # nested-struct mutation anywhere in this file.
 
 use std.database.atomic.{ FileLock }
+use std.io_runtime.{ file_exists }
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 extern fn rt_file_write_bytes(path: text, bytes: [u8]) -> bool
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_sync(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_random_i64() -> i64
@@ -417,7 +417,7 @@ pub class SqliteVfs:
     # otherwise with SQLITE_CANTOPEN semantics (-1).
     me x_open(path: text, flags: i64) -> i64:
         val full = normalize_full_path(self.cwd, path)
-        val exists = rt_file_exists(full)
+        val exists = file_exists(full)
         if exists and has_flag(flags, open_create()) and has_flag(flags, open_exclusive()):
             self.record("open", full, 0, 0, sqlite_cantopen())
             return -1
@@ -577,7 +577,7 @@ pub class SqliteVfs:
         if not self.handle_valid(h):
             return VfsSizeResult(code: sqlite_ioerr_fstat(), size: 0)
         val p = self.handle_path(h)
-        if not rt_file_exists(p):
+        if not file_exists(p):
             self.record("filesize", p, 0, 0, sqlite_ok())
             return VfsSizeResult(code: sqlite_ok(), size: 0)
         val n = rt_file_size(p)
@@ -588,7 +588,7 @@ pub class SqliteVfs:
     # the commit point of DELETE journal mode, so it is not optional.
     me x_delete(path: text, sync_dir: bool) -> i64:
         val full = normalize_full_path(self.cwd, path)
-        if not rt_file_exists(full):
+        if not file_exists(full):
             # SQLite tolerates deleting a file that is already gone.
             self.record("delete", full, 0, 0, sqlite_ok())
             return sqlite_ok()
@@ -607,7 +607,7 @@ pub class SqliteVfs:
     # xAccess.
     me x_access(path: text, flags: i64) -> VfsBoolResult:
         val full = normalize_full_path(self.cwd, path)
-        val e = rt_file_exists(full)
+        val e = file_exists(full)
         self.record("access", full, flags, 0, sqlite_ok())
         if not e:
             return VfsBoolResult(code: sqlite_ok(), value: false)
@@ -719,7 +719,7 @@ pub class SqliteVfs:
         if owner >= 0 and owner != h:
             self.record("checkreserved", p, 0, 0, sqlite_ok())
             return VfsBoolResult(code: sqlite_ok(), value: true)
-        if owner < 0 and rt_file_exists(p + ".lock"):
+        if owner < 0 and file_exists(p + ".lock"):
             # Held by another process.
             self.record("checkreserved", p, 0, 0, sqlite_ok())
             return VfsBoolResult(code: sqlite_ok(), value: true)
@@ -805,7 +805,7 @@ pub class SqliteVfs:
 # Free helpers.
 # ---------------------------------------------------------------------------
 pub fn read_all_bytes(path: text) -> [u8]:
-    if not rt_file_exists(path):
+    if not file_exists(path):
         val e: [u8] = []
         return e
     if val b = rt_file_read_bytes(path):

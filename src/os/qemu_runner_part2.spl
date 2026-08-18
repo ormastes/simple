@@ -49,13 +49,12 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
+use std.io_runtime.{ dir_create_all, file_exists }
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_env_cwd() -> text
@@ -174,7 +173,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val arch_label = arch_display_name(target.arch)
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
     val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
-    if cached_build_matches and rt_file_exists(target.output):
+    if cached_build_matches and file_exists(target.output):
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
@@ -237,7 +236,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
@@ -275,7 +274,7 @@ fn _write_native_build_stamp(target: OsTarget, content: text):
         print "[build] warning: could not write native-build stamp: {stamp_path}"
 
 fn _path_newer_than_output(path: text, output: text) -> bool:
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return false
     val (stdout, _stderr, exit_code) = rt_process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
     exit_code != 0 or stdout != ""
@@ -291,10 +290,10 @@ fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) ->
     false
 
 fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: text) -> bool:
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         return false
     val stamp_path = _native_build_stamp_path(target)
-    if not rt_file_exists(stamp_path):
+    if not file_exists(stamp_path):
         return false
     if rt_file_read_text(stamp_path) != expected_stamp:
         return false
@@ -302,20 +301,20 @@ fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: t
 
 fn _objcopy_path_prefix() -> text:
     # macOS Homebrew locations
-    if rt_file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
+    if file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
         return "/opt/homebrew/opt/llvm/bin"
-    if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
+    if file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     # Linux system locations (Debian/Ubuntu packaged LLVM)
-    if rt_file_exists("/usr/bin/llvm-objcopy"):
+    if file_exists("/usr/bin/llvm-objcopy"):
         return "/usr/bin"
-    if rt_file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
         return "/usr/lib/llvm-20/bin"
-    if rt_file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
         return "/usr/lib/llvm-19/bin"
-    if rt_file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
         return "/usr/lib/llvm-18/bin"
-    if rt_file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
         return "/usr/lib/llvm-17/bin"
     ""
 
@@ -327,7 +326,7 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     the Linux bootstrap binary at src/compiler_rust/target/release/simple
     was observed to do on 2026-04-13).
     """
-    if not rt_file_exists(candidate):
+    if not file_exists(candidate):
         return false
     val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
     exit_code == 0 and stdout != ""
@@ -514,13 +513,13 @@ fn _simpleos_log_config_source(enabled: bool) -> text:
         "    \"off\"\n"
 
 fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
-    if rt_file_exists(target.output):
+    if file_exists(target.output):
         if not rt_file_delete(target.output):
             print "[build] could not remove stale artifact: {target.output}"
             return false
-    if rt_file_exists(_legacy_simpleos_log_config_path()):
+    if file_exists(_legacy_simpleos_log_config_path()):
         rt_file_delete(_legacy_simpleos_log_config_path())
-    if not rt_dir_create_all("build/os/generated/generated"):
+    if not dir_create_all("build/os/generated/generated"):
         print "[build] could not create build/os/generated/generated"
         return false
     if not rt_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
@@ -536,9 +535,9 @@ fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
     true
 
 fn _cleanup_generated_build_helpers(build_marker: text):
-    if rt_file_exists(_simpleos_log_config_path()):
+    if file_exists(_simpleos_log_config_path()):
         rt_file_delete(_simpleos_log_config_path())
-    if build_marker != "" and rt_file_exists(_ssh_live_build_marker_path()):
+    if build_marker != "" and file_exists(_ssh_live_build_marker_path()):
         rt_file_delete(_ssh_live_build_marker_path())
     if build_marker != "":
         rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
@@ -803,7 +802,7 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
     """
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
