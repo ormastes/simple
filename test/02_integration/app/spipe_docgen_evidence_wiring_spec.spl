@@ -5,8 +5,10 @@
 
 use app.spipe_docgen.generator.{generate_feature_doc}
 use app.spipe_docgen.common.{SspecDoc, FeatureMetadata}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists, file_delete, file_read}
 use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.common.spec.evidence.format.evidence_sidecar.{emit_evidence}
+use std.common.spec.evidence.format.binary_layout.{stacked_manual_rows}
 
 fn make_doc(file_path: text) -> SspecDoc:
     SspecDoc(
@@ -22,7 +24,7 @@ fn read_output(output_dir: text, file_path: text) -> text:
     val result = generate_feature_doc(make_doc(file_path), output_dir)
     match result:
         case Ok(path):
-            val content = std.nogc_sync_mut.io.file_ops.file_read(path)
+            val content = file_read(path)
             content ?? ""
         case Err(e):
             "ERROR: " + e
@@ -74,5 +76,32 @@ describe "spipe_docgen typed-evidence wiring":
         expect(rendered).to_contain("## Typed Evidence")
         expect(rendered).to_contain("### Observed Output")
         expect(rendered).to_contain("hello typed evidence world")
+
+        file_delete(sidecar_path)
+
+    # Goal-4: proves the `emit_evidence` writer (evidence_sidecar.spl) and
+    # spipe_docgen's reader (evidence_loader.spl) agree on the sidecar
+    # convention end to end, and that a real binary word table survives as
+    # genuine Markdown pipe-table syntax, not double-escaped or re-emitted
+    # source. See doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md.
+    it "renders a real Markdown pipe table from emit_evidence's binary word rows":
+        val out_dir = "/tmp/spipe_docgen_evidence_wiring_test_emit_evidence"
+        dir_create(out_dir, true)
+        val spec_path = out_dir + "/emit_evidence_spec.spl"
+        val sidecar_path = spec_path + ".evidence.sdn"
+        if file_exists(sidecar_path):
+            file_delete(sidecar_path)
+
+        val rows = stacked_manual_rows([0xCAFEBABE], "W", 0)
+        emit_evidence(spec_path, "Binary evidence", rows)
+
+        val rendered = read_output(out_dir, spec_path)
+
+        expect(rendered).to_contain("## Typed Evidence")
+        expect(rendered).to_contain("### Binary evidence")
+        expect(rendered).to_contain("| Word | Value (hex) | Binary |")
+        expect(rendered).to_contain("| --- | --- | --- |")
+        expect(rendered).to_contain("| W0 | 0xbe ba fe ca 00 00 00 00 |")
+        expect(rendered.contains("\\|")).to_equal(false)
 
         file_delete(sidecar_path)

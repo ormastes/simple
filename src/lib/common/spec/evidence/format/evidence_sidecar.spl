@@ -1,0 +1,105 @@
+# Sidecar-manifest writer for typed-evidence Markdown manual generation.
+#
+# Proposed API from
+# doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md § "Proposed
+# API sketch": a spec run writes a small sidecar file next to (or mirroring)
+# the spec's own path, and `spipe_docgen`'s already-wired
+# `app.spipe_docgen.spipe_docgen.evidence_loader` reads it back and splices
+# it into the generated `.md` manual as a real Markdown pipe table — no
+# change to spipe_docgen's execution model, purely additive.
+#
+# Sidecar path convention (must match
+# `evidence_loader.evidence_sidecar_path` exactly, or the generated manual
+# silently drops the section):
+#   - `SIMPLE_SPEC_EVIDENCE_DIR` unset (default): "{spec_path}.evidence.sdn",
+#     co-located with the spec file.
+#   - `SIMPLE_SPEC_EVIDENCE_DIR` set: "{dir}/{spec_path}.evidence.sdn",
+#     mirroring the spec's relative path under that directory instead of
+#     writing into the tracked spec tree. Parent directories are created as
+#     needed.
+#
+# File format: the line-based convention documented in
+# `evidence_loader.spl`'s module docstring (`key=value` manifest header, then
+# `---`-delimited `ManualBlock` records). `emit_evidence` writes exactly one
+# block per call, of kind `table`, audience `qa` — a caller passing already
+# pipe-table-shaped lines (e.g. `stacked_md_table(...)`) gets a real rendered
+# Markdown table in the generated manual, not re-emitted source.
+#
+# Additive and append-only: repeated calls for the same spec append further
+# `---`-delimited blocks rather than overwriting earlier evidence from the
+# same run.
+
+use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+pub val EVIDENCE_DIR_ENV: text = "SIMPLE_SPEC_EVIDENCE_DIR"
+
+# Mirrors `evidence_loader.evidence_sidecar_path` — kept in sync by hand
+# since the loader lives in `src/app/spipe_docgen` (an application module)
+# and cannot be imported from `src/lib`.
+pub fn evidence_sidecar_path(spec_path: text) -> text:
+    val dir = env_get(EVIDENCE_DIR_ENV)
+    if dir == "":
+        return spec_path + ".evidence.sdn"
+    dir + "/" + spec_path + ".evidence.sdn"
+
+fn dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return "."
+    var out = ""
+    var i = 0
+    while i < parts.len() - 1:
+        if i > 0:
+            out = out + "/"
+        out = out + parts[i]
+        i = i + 1
+    out
+
+fn kv_line(key: text, value: text) -> text:
+    key + "=" + value
+
+fn block_lines(section_title: text, md_lines: [text]) -> [text]:
+    var out: [text] = []
+    out.push("kind=table")
+    out.push(kv_line("title", section_title))
+    out.push("audience=qa")
+    for line in md_lines:
+        out.push(kv_line("line", line))
+    out
+
+fn manifest_header(spec_path: text) -> [text]:
+    [
+        "schema=simple.sspec.evidence.v1",
+        kv_line("evidence_id", "emit_evidence"),
+        kv_line("profile_id", "binary_layout"),
+        kv_line("spec_path", spec_path),
+        "status=passed"
+    ]
+
+# Appends one rendered evidence block (already-formatted Markdown pipe-table
+# lines, e.g. from `binary_layout.stacked_md_table`) to the sidecar file for
+# `spec_path`, creating the manifest header only on the first write. Returns
+# true on success.
+pub fn emit_evidence(spec_path: text, section_title: text, md_lines: [text]) -> bool:
+    val target = evidence_sidecar_path(spec_path)
+    val parent = dirname(target)
+    if parent != "." and parent != "":
+        dir_create(parent, true)
+
+    var existing = ""
+    if file_exists(target):
+        val read = file_read(target)
+        existing = read ?? ""
+
+    var content = existing
+    if content.trim() == "":
+        for line in manifest_header(spec_path):
+            content = content + line + "\n"
+
+    content = content + "---\n"
+    for line in block_lines(section_title, md_lines):
+        content = content + line + "\n"
+
+    file_atomic_write(target, content)

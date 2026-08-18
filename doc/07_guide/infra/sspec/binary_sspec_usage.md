@@ -241,3 +241,45 @@ the same model, not a second, independently-drifting one.
   that happens to match still reports `"pass"`, not `"ignored"`
   (`binary_compare_spec.spl:71-92` isolates this with a reserved-free layout
   specifically to get a true `compare_mask == 0`).
+
+## Generating the md manual (real rendered evidence, not source)
+
+`spipe_docgen` (`src/app/spipe_docgen/`) is a static source-extraction tool —
+by itself it never executes a spec, so it can't capture what
+`stacked_manual_rows`/`compare_word` actually produced. Close that gap with
+the sidecar convention: a spec calls
+`std.common.spec.evidence.format.evidence_sidecar.emit_evidence(spec_path,
+section_title, md_lines)` during a normal `bin/simple test` run to append a
+Markdown-table-shaped evidence block to `"{spec_path}.evidence.sdn"`;
+`app.spipe_docgen.spipe_docgen.evidence_loader` reads that sidecar back and
+splices it into the generated `.md` as a `## Typed Evidence` / `###
+<section_title>` block, rendered through the real pipe-table renderer
+(`manual_render.render_pipe_table`) — so the manual shows the run's actual
+word/byte values, not re-emitted `.spl` source. `md_lines` must be RAW
+`" | "`-joined rows (header row first, no leading/trailing pipe, no
+separator row) — use `binary_layout.stacked_manual_rows(...)`, not
+`stacked_md_table(...)` (which is already fully rendered and would be
+double-escaped by the renderer). Set `SIMPLE_SPEC_EVIDENCE_DIR` to mirror the
+sidecar under a scratch directory instead of writing next to the tracked
+spec file; unset, it defaults to co-located with the spec.
+
+```bash
+# 1. Run the spec — it calls emit_evidence(...) as a side effect of a
+#    passing assertion, writing the sidecar next to the spec file.
+bin/simple test test/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.spl
+
+# 2. Generate the manual — spipe_docgen picks up the sidecar automatically.
+bin/simple src/app/spipe_docgen/main.spl \
+    test/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.spl \
+    --output /tmp/docgen_out --no-index
+
+# 3. Confirm a real pipe table landed under "## Typed Evidence".
+sed -n '/## Typed Evidence/,/## Scenario Summary/p' \
+    /tmp/docgen_out/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.md
+```
+
+Regression coverage:
+`test/02_integration/app/spipe_docgen_evidence_wiring_spec.spl` — "renders a
+real Markdown pipe table from emit_evidence's binary word rows" proves the
+writer and reader agree on the sidecar format end to end and that no
+double-escaping occurs (`\|` never appears in the rendered output).

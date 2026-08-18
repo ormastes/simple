@@ -1,5 +1,96 @@
 # SSpec binary evidence — Markdown manual generation status (2026-08-18)
 
+## UPDATE 2026-08-18: Gap 1 — IMPLEMENTED
+
+The "Proposed API sketch" below is now implemented, following the sidecar
+convention that `app.spipe_docgen.spipe_docgen.evidence_loader` had already
+defined but nothing wrote to. Also found and fixed: an unrelated pre-existing
+bug in `test/02_integration/app/spipe_docgen_evidence_wiring_spec.spl` (a
+fully-qualified call to an unimported `file_read`, causing all 2 of its
+pre-existing `it`s to fail on `bin/simple test`) — both now pass.
+
+**Added:**
+- `src/lib/common/spec/evidence/format/evidence_sidecar.spl` —
+  `emit_evidence(spec_path, section_title, md_lines)` appends a `table`-kind
+  `ManualBlock` record to `"{spec_path}.evidence.sdn"` (or, if
+  `SIMPLE_SPEC_EVIDENCE_DIR` is set, mirrored under that directory instead),
+  in exactly the `key=value` / `---`-delimited format
+  `evidence_loader.parse_evidence_sidecar` already reads.
+- `src/lib/common/spec/evidence/format/binary_layout.spl` —
+  `stacked_manual_rows(values, word_label, first_word)`: same stacked word
+  figure as `stacked_md_table`, but as RAW `" | "`-joined rows (no
+  leading/trailing pipe, no separator row) — the shape
+  `manual_render.render_pipe_table` expects as INPUT. Feeding it
+  `stacked_md_table`'s already-rendered output double-wraps and
+  double-escapes every pipe (`\|`); this was caught and fixed during
+  end-to-end verification below, not left as a known issue.
+- `app.spipe_docgen.spipe_docgen.evidence_loader.evidence_sidecar_path` now
+  also honors `SIMPLE_SPEC_EVIDENCE_DIR`, kept in sync by hand with the
+  writer (the writer is `src/lib`, the reader is `src/app`, so they cannot
+  share one function).
+- `test/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.spl` —
+  the UDP/IPv4 suite named in the task now calls `emit_evidence` with real
+  `stacked_manual_rows(...)` output at 3 call sites (UDP word0
+  expected/actual, IPv4 5-word header), additive — all 5 existing assertions
+  stay green.
+- `test/02_integration/app/spipe_docgen_evidence_wiring_spec.spl` — new `it`
+  "renders a real Markdown pipe table from emit_evidence's binary word rows"
+  proves the writer/reader agree end to end and that no `\|`
+  double-escaping survives into the generated manual.
+- `doc/07_guide/infra/sspec/binary_sspec_usage.md` — new "Generating the md
+  manual" section with the exact commands.
+
+**Proof — commands run, verbatim:**
+
+```bash
+bin/simple test test/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.spl
+# Results: 5 total, 5 passed, 0 failed
+
+bin/simple src/app/spipe_docgen/main.spl \
+    test/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.spl \
+    --output /tmp/docgen_out --no-index
+# DONE Generated 1 docs (1 complete, 0 stubs)
+
+bin/simple test test/02_integration/app/spipe_docgen_evidence_wiring_spec.spl
+# Results: 3 total, 3 passed, 0 failed
+```
+
+**Proof — real generated `.md` content (quoted verbatim from
+`/tmp/docgen_out/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.md`),
+a genuine Markdown pipe table with header separator row, not source:**
+
+```
+## Typed Evidence
+
+### UDP header word0 — expected
+
+| Word | Value (hex) | Binary |
+| --- | --- | --- |
+| UDP_W0 | 0x35 00 ff cf 00 00 00 00 | 0b00000000_00000000_00000000_00000000_11001111_11111111_00000000_00110101 |
+
+### UDP header word0 — actual (dst_port corrupted)
+
+| Word | Value (hex) | Binary |
+| --- | --- | --- |
+| UDP_W0 | 0x50 00 ff cf 00 00 00 00 | 0b00000000_00000000_00000000_00000000_11001111_11111111_00000000_01010000 |
+```
+
+**Known limitation, stated rather than hidden:** the test-runner path
+(`bin/simple test`) executed the spec file's `it` bodies twice within one
+invocation (a pre-existing runner behavior, not introduced here), so the
+sidecar's append-only writer accumulates duplicate blocks per `bin/simple
+test` run. The generated manual therefore shows each evidence block twice.
+This does not affect correctness of the rendered table syntax or values, and
+is not part of the scope of this change — filing a dedicated bug on the
+double-execution behavior is separate follow-up work, not done here.
+
+**What remains open (unchanged from the original gap list below):**
+`stacked_rows`/`stacked_compare_rows` (the plain, non-table figure) still
+intentionally produce non-pipe reference lines, per the design's
+figure/table split — unchanged, not a gap. `binary_field_table` is still not
+wired into `evidence_comparator.spl` by any caller — unchanged, left as
+gap 3 below, out of scope for this additive change.
+
 ## What was checked
 
 Whether `bin/simple`'s spipe-docgen actually renders the binary evidence
