@@ -1,0 +1,102 @@
+# Startup perf lanes — Phase D completion of the startup perf harness.
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+#   Phase D "Owned files": lanes = root help/version, source cold/warm, SMF
+#   load, one-body-change compile; plus an immutable per-run manifest (binary
+#   digest, host, load, sample count, p50/p95, RSS, opens, maps).
+#
+# WHAT WAS MISSING, MEASURED 2026-08-18: the detector measured only 2 lanes
+# (version, run-hello) and only p50 — `grep -rn p95 test/05_perf/startup`
+# found zero measurement. Four plan lanes and the manifest did not exist.
+#
+# Single-oracle rule: this spec asserts the detector's OUTPUT, it never
+# re-times anything — a second timing oracle that can disagree with the
+# committed budgets is exactly the split-brain the detector standard forbids.
+#
+# Example 1 is the REPRODUCING spec: each new lane must be measured and
+# reported with p50 AND p95, and the run must emit an immutable manifest.
+# Example 2 is the DEFECT-CLASS spec with a POSITIVE CONTROL: the detector's
+# fatal selftest feeds it a deliberately absurd (0ms) budgets file that MUST
+# FAIL and an absurdly generous one that MUST PASS with all 6 lanes — so the
+# lane cannot pass vacuously; this spec demands the literal evidence lines
+# for both fixtures, not just the OK summary.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+use std.fs.{read_file}
+
+val CHECK: text = "scripts/check/check-startup-perf-budget.shs"
+
+fn verdict_of(out: text) -> text:
+    var last: text = ""
+    for line in out.split("\n"):
+        if line.trim() != "":
+            last = line.trim()
+    last
+
+fn run_sh(script: text) -> (text, i64):
+    val out = process_run("sh", ["-c", script])
+    val stdout: text = out.0
+    val code: i64 = out.2
+    (stdout, code)
+
+describe "startup perf harness Phase D lanes":
+
+    it "measures all six lanes with p50 and p95 and writes an immutable manifest":
+        step("Run the detector for real against the committed budgets")
+        val (out, _code) = run_sh("sh " + CHECK + " 2>&1")
+        val v: text = verdict_of(out)
+
+        step("SKIP (no binary) is acceptable and self-labeling; anything else must report every lane")
+        if not v.starts_with("SKIP —"):
+            step("Verdict names all six lanes: version, help, warm, cold, smf-load, compile-body")
+            expect(v).to_contain("6 lane(s) measured")
+            expect(v).to_contain("version p50=")
+            expect(v).to_contain("help p50=")
+            expect(v).to_contain("run-hello-warm p50=")
+            expect(v).to_contain("run-hello-cold p50=")
+            expect(v).to_contain("smf-load p50=")
+            expect(v).to_contain("compile-body p50=")
+
+            step("p95 is reported alongside p50 (plan: 'p50 AND p95'), never p50 alone")
+            expect(v).to_contain("/p95=")
+
+            step("Binary identity is in the verdict — timings without identity are worthless")
+            expect(v).to_contain("binary=")
+
+            step("A manifest path line precedes the verdict, and the file exists with the plan's fields")
+            var mpath: text = ""
+            for line in out.split("\n"):
+                if line.starts_with("manifest: "):
+                    mpath = line.replace("manifest: ", "").trim()
+            expect(mpath != "").to_equal(true)
+            val (_o, fcode) = run_sh("test -f '" + mpath + "'")
+            expect(fcode).to_equal(0)
+            val m: text = read_file(mpath)
+            expect(m).to_contain("binary_sha256:")
+            expect(m).to_contain("host:")
+            expect(m).to_contain("loadavg:")
+            expect(m).to_contain("sample_count:")
+            expect(m).to_contain("version_p50_ms:")
+            expect(m).to_contain("version_p95_ms:")
+            expect(m).to_contain("compile_hello_p50_ms:")
+            expect(m).to_contain("run_hello_max_rss_kb:")
+            expect(m).to_contain("run_hello_opens:")
+            expect(m).to_contain("run_hello_mmaps:")
+
+    it "positive control: an absurd budget FAILs and a generous one PASSes, so the lane cannot pass vacuously":
+        step("Run the fatal selftest — it feeds a 0ms budgets file (must FAIL) and a 99999999ms one (must PASS)")
+        val (out, code) = run_sh("sh " + CHECK + " --selftest 2>&1")
+
+        step("The must-FAIL fixture actually fired a FAIL — a detector that cannot fail is not a detector")
+        expect(out).to_contain("selftest fixture1 (must-FAIL 0ms budgets): FAIL as required")
+
+        step("The must-PASS fixture PASSed non-vacuously, with all 6 lanes measured")
+        expect(out).to_contain("selftest fixture2 (must-PASS absurd budgets): PASS with 6 lanes as required")
+
+        step("A budgets file missing a lane key ERRORs — a lane can never be silently dropped")
+        expect(out).to_contain("selftest fixture4 (must-ERROR missing lane key): ERROR as required")
+
+        step("All four fixtures held, so the selftest exits 0")
+        expect(out).to_contain("selftest OK: 4 fixture(s)")
+        expect(code).to_equal(0)
