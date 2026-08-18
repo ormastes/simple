@@ -167,3 +167,43 @@ describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 
         assert_equal(big_simple_enc, big_c_enc)
         assert_equal(simple_decode(big_simple_enc), big)
         assert_equal(simple_decode(big_c_enc), rt_base64url_decode(big_c_enc))
+
+    # ---- out-of-alphabet input (added 2026-08-18) -------------------------
+    #
+    # Gap this closes: every example above feeds the decoders WELL-FORMED
+    # base64url. RFC 4648 section 3.3 requires a decoder to REJECT characters
+    # outside the alphabet unless the referring spec says otherwise. Measured
+    # here: neither provider rejects, and they are lenient in DIFFERENT ways,
+    # so the oracle cannot be trusted on this input class.
+    #
+    # These are CHARACTERIZATION examples, not approval. They pin the current
+    # pure-Simple behaviour so the fix is visible when it lands, and assert
+    # the divergence is real. They deliberately do NOT assert the two sides
+    # agree, because they do not — writing that equality would mean weakening
+    # one side.
+    #   -> doc/08_tracking/bug/base64url_decode_accepts_invalid_alphabet_2026-08-18.md
+    it "POSITIVE CONTROL: the pure-Simple decoder under test is really loaded":
+        # Guards the whole out-of-alphabet group below: if the import silently
+        # resolved to nothing, simple_decode would return "" for everything
+        # and the "yields empty" examples would pass for the wrong reason.
+        assert_equal(simple_encode("Simple"), "U2ltcGxl")
+        assert_equal(simple_decode("U2ltcGxl"), "Simple")
+
+    it "CHARACTERIZATION: an all-invalid group decodes to empty, not an error":
+        for v in ["!!!!", "%%", "...."]:
+            assert_equal(simple_decode(v), "")
+
+    it "CHARACTERIZATION: invalid symbols are dropped, not rejected (RFC 4648 s3.3 violation)":
+        # Mixed valid/invalid: the valid remainder is silently decoded, so a
+        # malformed segment is indistinguishable from a well-formed one at
+        # the call site. This is the defect the bug doc tracks.
+        assert_equal(simple_decode("ab*d").len(), 2)
+        assert_equal(simple_decode("a b c").len(), 2)
+
+    it "CHARACTERIZATION: '+' and '/' are tolerated, and the oracle disagrees":
+        # Standard-alphabet text is NOT valid base64url. Both sides accept it
+        # anyway and produce DIFFERENT results — so this is precisely where
+        # the differential oracle must not be treated as ground truth.
+        val std_alphabet = "a+b/c"
+        assert_equal(simple_decode(std_alphabet).len(), 3)
+        assert_true(simple_decode(std_alphabet) != rt_base64url_decode(std_alphabet))
