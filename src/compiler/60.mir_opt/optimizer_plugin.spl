@@ -154,6 +154,78 @@ fn optimizer_plugin_from_dynamic_descriptor(desc: DynamicPassDescriptor, level: 
 
 
 # ============================================================================
+# Dynamic Entry-Symbol Routing
+# ============================================================================
+# Pure Simple has no dlopen of .spl code, so dynamic manifest passes route
+# through a programmatic registry mapping an ABI entry_symbol
+# (simple.opt.mir.v1) to a typed PassKind routing token. This registry is the
+# seam a real dynamic loader can later fill. Resolution of an unregistered
+# entry_symbol fails closed, naming the symbol and listing registered ones —
+# mirroring the nil-PassKind fail-closed error style.
+
+struct DynamicEntrySymbolBinding:
+    entry_symbol: text
+    kind: PassKind
+
+struct DynamicEntrySymbolRegistry:
+    bindings: [DynamicEntrySymbolBinding]
+
+fn dynamic_entry_symbol_registry_new() -> DynamicEntrySymbolRegistry:
+    DynamicEntrySymbolRegistry(bindings: [])
+
+fn dynamic_entry_symbol_registry_register(registry: DynamicEntrySymbolRegistry, entry_symbol: text, kind: PassKind) -> DynamicEntrySymbolRegistry:
+    var bindings = registry.bindings
+    bindings.push(DynamicEntrySymbolBinding(entry_symbol: entry_symbol, kind: kind))
+    DynamicEntrySymbolRegistry(bindings: bindings)
+
+fn dynamic_entry_symbol_registry_lookup(registry: DynamicEntrySymbolRegistry, entry_symbol: text) -> PassKind?:
+    for binding in registry.bindings:
+        if binding.entry_symbol == entry_symbol:
+            return Some(binding.kind)
+    nil
+
+fn dynamic_entry_symbol_registry_symbols(registry: DynamicEntrySymbolRegistry) -> [text]:
+    var symbols: [text] = []
+    for binding in registry.bindings:
+        symbols = symbols.push(binding.entry_symbol)
+    symbols
+
+fn optimizer_plugin_unknown_symbol_error(desc: DynamicPassDescriptor, registry: DynamicEntrySymbolRegistry) -> text:
+    var registered = ""
+    for symbol in dynamic_entry_symbol_registry_symbols(registry):
+        if registered == "":
+            registered = symbol
+        else:
+            registered = registered + ", " + symbol
+    if registered == "":
+        registered = "(none)"
+    "optimizer dynamic pass '" + desc.name + "' entry_symbol '" + desc.entry_symbol + "' is not registered; refusing silent passthrough. Registered entry symbols: " + registered
+
+fn optimizer_plugin_resolve_dynamic_descriptor(registry: DynamicEntrySymbolRegistry, desc: DynamicPassDescriptor, level: OptLevel) -> Result<OptimizerPluginDescriptor, text>:
+    """Resolve a dynamic descriptor's entry_symbol against the registry.
+
+    On success the returned plugin carries a resolved PassKind, so the run
+    adapters route it like any built-in pass. On failure it errors closed —
+    the caller never receives a nil-kind MIR plugin from this path.
+    """
+    match dynamic_entry_symbol_registry_lookup(registry, desc.entry_symbol):
+        Some(kind):
+            Ok(OptimizerPluginDescriptor(
+                name: desc.name,
+                aliases: desc.aliases,
+                plugin_scope: PluginScope.Mir,
+                apply_mode: ApplyMode.Dynamic,
+                level: level,
+                cost_class: desc.cost_class,
+                mir_pass_kind: Some(kind),
+                mir_pass_scope: Some(desc.scope),
+                source_patterns: []
+            ))
+        nil:
+            Err(optimizer_plugin_unknown_symbol_error(desc, registry))
+
+
+# ============================================================================
 # Cost Budget
 # ============================================================================
 

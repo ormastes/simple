@@ -1,0 +1,156 @@
+# Optimizer manifest dynamic entry_symbol routing spec
+#
+# Dynamic manifest passes declare an entry_symbol (ABI simple.opt.mir.v1) but
+# had no loader/dispatcher: pattern rules routed, entry_symbol passes did not.
+# The DynamicEntrySymbolRegistry maps entry_symbol -> PassKind routing token;
+# resolution constructs a runnable plugin, and an unknown entry_symbol fails
+# closed naming the symbol and listing registered ones.
+
+use compiler.mir.mir_instructions.{
+    MirModule, MirFunction,
+    MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind,
+    BlockId
+}
+use compiler.mir.mir_types.{
+    MirType, MirTypeKind, MirSignature,
+    MirConstValue, LocalId, LocalKind, MirLocal
+}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir_opt.mir_opt.mod.{PassKind, PassScope, OptLevel}
+use compiler.mir_opt.optimizer_plugin.{
+    ApplyMode,
+    optimizer_plugin_mir,
+    optimizer_plugin_run_on_function, optimizer_plugin_run_on_module,
+    dynamic_entry_symbol_registry_new,
+    dynamic_entry_symbol_registry_register,
+    dynamic_entry_symbol_registry_lookup,
+    dynamic_entry_symbol_registry_symbols,
+    optimizer_plugin_resolve_dynamic_descriptor
+}
+use compiler.mir_opt.optimizer_manifest.{
+    DynamicPassDescriptor,
+    manifest_pass_contract_default, manifest_pass_entry_new,
+    dynamic_pass_descriptor_from_entry
+}
+
+fn make_probe_function() -> MirFunction:
+    val ret_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+    val const_inst = MirInst(
+        kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), ret_type),
+        span: nil
+    )
+    val entry = MirBlock(
+        id: BlockId(id: 0), label: Some("bb0"),
+        instructions: [const_inst],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    var locals: [MirLocal] = []
+    locals = locals.push(MirLocal(id: LocalId(id: 0), type_: ret_type, kind: LocalKind.Temp, name: nil))
+    MirFunction(
+        symbol: SymbolId.new(0), name: "probe_fn", signature: sig,
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: nil, generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}
+    )
+
+fn make_probe_module() -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = make_probe_function()
+    MirModule(
+        name: "probe_module", functions: functions,
+        statics: {}, constants: {}, types: {}
+    )
+
+fn make_dynamic_descriptor(name: text, entry_symbol: text) -> DynamicPassDescriptor:
+    val entry = manifest_pass_entry_new(
+        name, [], PassScope.Function, [],
+        manifest_pass_contract_default(), entry_symbol
+    )
+    dynamic_pass_descriptor_from_entry(entry, "test_plugin")
+
+describe "Optimizer manifest dynamic entry_symbol routing":
+    """Registered entry symbols resolve to runnable passes; unknown ones fail closed."""
+
+    it "registry registers and looks up an entry symbol":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dce_v1", PassKind.DeadCodeElimination)
+        val found = dynamic_entry_symbol_registry_lookup(registry, "spl_opt_dce_v1")
+        match found:
+            case Some(kind):
+                assert_true(true)
+            case nil:
+                assert_true(false)
+        val symbols = dynamic_entry_symbol_registry_symbols(registry)
+        expect(symbols).to_contain("spl_opt_dce_v1")
+
+    it "registered entry_symbol resolves and routes on function":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dce_v1", PassKind.DeadCodeElimination)
+        val desc = make_dynamic_descriptor("custom_dyn_pass", "spl_opt_dce_v1")
+        val resolved = optimizer_plugin_resolve_dynamic_descriptor(registry, desc, OptLevel.Speed)
+        match resolved:
+            case Ok(plugin):
+                val run_r = optimizer_plugin_run_on_function(plugin, make_probe_function())
+                match run_r:
+                    case Ok(f):
+                        expect(f.name).to_equal("probe_fn")
+                    case Err(msg):
+                        assert_true(false)
+            case Err(msg):
+                assert_true(false)
+
+    it "registered entry_symbol resolves and routes on module":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_cf_v1", PassKind.ConstantFolding)
+        val desc = make_dynamic_descriptor("custom_fold_pass", "spl_opt_cf_v1")
+        val resolved = optimizer_plugin_resolve_dynamic_descriptor(registry, desc, OptLevel.Speed)
+        match resolved:
+            case Ok(plugin):
+                val run_r = optimizer_plugin_run_on_module(plugin, make_probe_module())
+                match run_r:
+                    case Ok(m):
+                        expect(m.name).to_equal("probe_module")
+                    case Err(msg):
+                        assert_true(false)
+            case Err(msg):
+                assert_true(false)
+
+    it "unknown entry_symbol fails closed naming symbol and registered set":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dce_v1", PassKind.DeadCodeElimination)
+        val desc = make_dynamic_descriptor("mystery_pass", "spl_opt_missing_v1")
+        val resolved = optimizer_plugin_resolve_dynamic_descriptor(registry, desc, OptLevel.Speed)
+        match resolved:
+            case Ok(plugin):
+                assert_true(false)
+            case Err(msg):
+                expect(msg).to_contain("mystery_pass")
+                expect(msg).to_contain("spl_opt_missing_v1")
+                expect(msg).to_contain("Registered entry symbols")
+                expect(msg).to_contain("spl_opt_dce_v1")
+
+    it "empty registry error reports no registered symbols":
+        val registry = dynamic_entry_symbol_registry_new()
+        val desc = make_dynamic_descriptor("orphan_pass", "spl_opt_orphan_v1")
+        val resolved = optimizer_plugin_resolve_dynamic_descriptor(registry, desc, OptLevel.Speed)
+        match resolved:
+            case Ok(plugin):
+                assert_true(false)
+            case Err(msg):
+                expect(msg).to_contain("orphan_pass")
+                expect(msg).to_contain("(none)")
+
+    it "existing static MIR plugin routing is untouched":
+        val plugin = optimizer_plugin_mir(
+            "dce", ["dead_code_elimination"],
+            PassKind.DeadCodeElimination, PassScope.Function,
+            ApplyMode.Static, OptLevel.Speed, "cheap"
+        )
+        val run_r = optimizer_plugin_run_on_function(plugin, make_probe_function())
+        match run_r:
+            case Ok(f):
+                expect(f.name).to_equal("probe_fn")
+            case Err(msg):
+                assert_true(false)
