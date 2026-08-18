@@ -478,11 +478,35 @@ Full record: `doc/08_tracking/bug/deployed_seed_predates_landed_parser_fixes_blo
 These reached origin via OTHER lanes' pushes sweeping them out of the shared
 tree — not via any push of mine.
 
-**NOT landed:** the single-spec fix `d03b800c7d6`
-(`make_result_from_output` in `test_runner_single.spl` = **0** at origin). It is
-the largest fix of the lane: without it every `bin/simple test <one_file.spl>`
-has no abnormal-termination classification at all. Cherry-picks cleanly onto the
-current tip (`74f796c4566`), still blocked at the pre-push hook.
+**LANDED — corrected 2026-08-18.** This block previously read "**NOT landed:**
+the single-spec fix `d03b800c7d6` (`make_result_from_output` in
+`test_runner_single.spl` = **0** at origin)". That is no longer true and the
+stale claim is corrected here rather than left standing.
+
+Re-verified BY CONTENT at `origin/main` (`923c5690ccd`), the same way the table
+above is verified:
+
+| probe at `origin/main` | hits |
+|---|---|
+| `make_result_from_output` in `src/app/test_runner_new/test_runner_single.spl` | **2** |
+
+Both hits are live, not incidental: the import at line 37
+(`use std.test_runner.test_executor_parsing.{make_result_from_output}`) and the
+call at line 1070 (`val outcome = make_result_from_output(run.path, ...)`), with
+the OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN contract described in the file
+header at line 30. So `bin/simple test <one_file.spl>` DOES have
+abnormal-termination classification at origin today.
+
+It reached origin via `0f5b67b79b4e` ("fix(guards): remove three guard
+fail-opens; revive 15 dead env_get fallbacks") — again another lane sweeping the
+shared tree, not a push of this lane. `d03b800c7d6` itself was never pushed as a
+commit; only its content landed. The pre-push-hook blockage recorded below was
+real at the time and is left as written — it is history, not a live claim.
+
+Note the four `test_runner_single.spl` copies under `src/lib/*/test_runner/`
+still have **0** hits; the classification lives only in the `src/app` copy. That
+is a separate, unclosed divergence, not evidence against the above.
+
 
 ### Guard-integrity finding: the verdict depends on the WORKING TREE, not on what is pushed
 
@@ -521,11 +545,35 @@ the reference for what a working version looks like.
 These reached origin via OTHER lanes' pushes sweeping them out of the shared
 tree — not via any push of mine.
 
-**NOT landed:** the single-spec fix `d03b800c7d6`
-(`make_result_from_output` in `test_runner_single.spl` = **0** at origin). It is
-the largest fix of the lane: without it every `bin/simple test <one_file.spl>`
-has no abnormal-termination classification at all. Cherry-picks cleanly onto the
-current tip (`74f796c4566`), still blocked at the pre-push hook.
+**LANDED — corrected 2026-08-18.** This block previously read "**NOT landed:**
+the single-spec fix `d03b800c7d6` (`make_result_from_output` in
+`test_runner_single.spl` = **0** at origin)". That is no longer true and the
+stale claim is corrected here rather than left standing.
+
+Re-verified BY CONTENT at `origin/main` (`923c5690ccd`), the same way the table
+above is verified:
+
+| probe at `origin/main` | hits |
+|---|---|
+| `make_result_from_output` in `src/app/test_runner_new/test_runner_single.spl` | **2** |
+
+Both hits are live, not incidental: the import at line 37
+(`use std.test_runner.test_executor_parsing.{make_result_from_output}`) and the
+call at line 1070 (`val outcome = make_result_from_output(run.path, ...)`), with
+the OK/ERROR/CRASHED/TERMINATED/TIMEOUT/NOT_RUN contract described in the file
+header at line 30. So `bin/simple test <one_file.spl>` DOES have
+abnormal-termination classification at origin today.
+
+It reached origin via `0f5b67b79b4e` ("fix(guards): remove three guard
+fail-opens; revive 15 dead env_get fallbacks") — again another lane sweeping the
+shared tree, not a push of this lane. `d03b800c7d6` itself was never pushed as a
+commit; only its content landed. The pre-push-hook blockage recorded below was
+real at the time and is left as written — it is history, not a live claim.
+
+Note the four `test_runner_single.spl` copies under `src/lib/*/test_runner/`
+still have **0** hits; the classification lives only in the `src/app` copy. That
+is a separate, unclosed divergence, not evidence against the above.
+
 
 ### Guard-integrity finding: the verdict depends on the WORKING TREE, not on what is pushed
 
