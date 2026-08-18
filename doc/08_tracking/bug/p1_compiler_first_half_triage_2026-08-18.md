@@ -64,27 +64,48 @@ target-gated globals are not filtered before native symbol resolution — is at
 least still structurally true. That is a code-shape observation, **not** a
 reproduction of the AArch64 PCI/ECAM misselection.
 
-## Runs left INCONCLUSIVE by host throughput (not evidence)
+## The three pending runs — RESOLVED, and an earlier attribution CORRECTED
 
-Three `bin/simple test` invocations were started detached and never produced a
-`Results:` line before this session ended. A run with no `Results:` line is
-inconclusive and is recorded as such, never as a pass:
+An earlier revision of this file recorded the three detached runs as blocked by
+"host throughput". **That attribution was wrong and is retracted.** All three
+subsequently completed, and the process evidence contradicts a throughput
+explanation: while apparently stalled they sat in state `S` with **4 seconds of
+CPU consumed over 11m45s elapsed**, i.e. blocked rather than compute-starved,
+with the box's load average down at 4.15 on 32 cores. They were waiting, not
+queuing.
 
-- `test/01_unit/compiler/hir/resolve_import_symbols_spec.spl` (row **597**'s own
-  named spec, started to test its "three functional cycles fail all six
-  examples" claim). Row 597 therefore stays open with its claim neither
-  confirmed nor refuted.
-- `test/01_unit/lib/std/shell/path_spec.spl` and
-  `test/01_unit/lib/nogc_async_mut_noalloc/path/baremetal_path_spec.spl`
-  — pre-existing coverage over the three modules the row-559 fix touched.
+### Regression gap on the row-559 fix: CLOSED, green
 
-Cause is host throughput, not the specs: a parallel lane was running a full
-`bin/simple test --no-cover-check` suite for the duration, with ~25 concurrent
-`simple` processes on the box. The processes were confirmed alive and
-progressing (per-spec timeout 900s) rather than killed.
+Both pre-existing specs covering the three modules the fix touched pass:
 
-**Follow-up required:** re-run those two path specs on a quiet box to confirm the
-row-559 fix introduced no regression. The fix itself is independently evidenced
-(direct `bin/simple run` before/after, plus both new specs GREEN and the defect
-spec proven RED at `4 total, 1 passed, 3 failed` with the fix stashed), but that
-pre-existing-coverage check is a genuine open gap.
+```
+test/01_unit/lib/std/shell/path_spec.spl
+    outcome=OK declared>=23 executed=23 passed=23 failed=0 skipped=0 dropped=0
+    Results: 23 total, 23 passed, 0 failed
+
+test/01_unit/lib/nogc_async_mut_noalloc/path/baremetal_path_spec.spl
+    outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0
+    Results: 2 total, 2 passed, 0 failed
+```
+
+The row-559 fix therefore introduces no regression in existing coverage. This
+was the one genuine open gap flagged earlier; it is now closed.
+
+### Row 597: still INCONCLUSIVE, but the row's claim is not what happens
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/hir/resolve_import_symbols_spec.spl
+    declared>=1 executed=1 passed=0 failed=1 dropped=0
+    timeout=1 reason=child-timeout budget_ms=900000
+Results: 0 total, 0 passed, 0 failed          (exit 5)
+```
+
+`Results: 0 total` is **not** a pass and not a refutation — nothing executed. But
+note the shape: the row claims the spec "fails all six examples". It does not
+reach six examples at all; the child **times out after the full 900s budget**
+with zero tests executed. Whatever is wrong is a hang, not six assertion
+failures, so the row's description should not be trusted as a starting point.
+Row 597 stays open; the next session should attack the hang (isolate one
+provider/consumer fixture, as the row already suggests) rather than chase
+assertion failures that were never observed.
+
