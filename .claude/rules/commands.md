@@ -160,8 +160,20 @@ bin/simple --version 2>&1 | head -2
   49s -> 14s. Old rows are retained for history only; do NOT delete them. Fresh
   numbers:
   `doc/10_metrics/startup/cross_language_compute_compile_benchmark_2026-08-18.md`.
-- No pure-Simple binary can lint: `bootstrap/stage3/simple lint` is
-  `unknown command` (exit 1). `simple test` GREEN does not prove self-hosted.
+- Lint IS pure Simple and IS wired — the old "no pure-Simple binary can
+  lint" claim here was a category error. `bootstrap/stage3/simple lint` does
+  say `unknown command` (exit 1), but stage3 is built from
+  `src/app/cli/bootstrap_main.spl`, the BOOTSTRAP cli, which by design
+  exposes only `compile` and `native-build` (dispatch `:459-492`). It has no
+  `run`, `test`, `fmt` or `build` either, so probing it for `lint` proves
+  nothing. The implementation is `src/app/cli/lint_entry.spl` ->
+  `app.io.cli_lint_commands` with rules in `src/app/lint/main.spl` and
+  `src/compiler/90.tools/lint/`, wired at `dispatch/table.spl:113-118`. It
+  runs end to end in ~6s and its findings discriminate (clean fixture ->
+  `Lint passed`, dirty -> `warning[RAW-RT-001]`). Pinned by
+  `scripts/check/check-pure-simple-lint-runnable.shs`. The real gap is that
+  no FULL-CLI pure-Simple binary is deployed, not a missing lint port.
+  `simple test` GREEN still does not prove self-hosted.
 - Detail: `doc/07_guide/tooling/build_fast_path.md`
 
 ## Setup
