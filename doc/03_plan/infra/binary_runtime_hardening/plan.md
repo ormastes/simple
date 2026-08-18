@@ -109,6 +109,34 @@ Corollary for harnesses: bind call results to locals before comparing —
 `if not _approx(f(x), g(x), tol):` with nested call arguments produced a wrong
 boolean under `SIMPLE_EXECUTION_MODE=jit`.
 
+### `result = result + x` O(n^2) accumulation: canonical remedy currently BLOCKED (2026-08-18)
+
+`common.string_builder.StringBuilder` (`src/lib/common/string_builder.spl`,
+array-of-parts + single `join`) is the existing intended canonical fix for the
+`result = result + x` scalar accumulation pattern flagged by C-MIG-0023/0035
+and the base64 migration. **It is not currently safe to adopt library-wide**:
+measured on `to_upper_ascii` (naive `+` vs `StringBuilder`, synthetic corpus,
+n=100..30000):
+
+- **JIT lane** (`bin/simple run`): `StringBuilder` wins, crossover ~n=100-300,
+  up to 11.6x faster at n=30000 (54ms vs 627ms) — behaves as designed.
+- **Interpreter lane** (`SIMPLE_EXECUTION_MODE=interpreter`, also what
+  `bin/simple test` runs under): `StringBuilder` LOSES at every measured size
+  and gets relatively worse as n grows — 1.7x slower at n=100, 34.4x slower at
+  n=30000 (10.8s vs 314ms) — i.e. worse-than-quadratic in this lane. Root cause
+  suspected in interpreter array `.push()`/class-method-dispatch cost, not yet
+  isolated. Full numbers and analysis:
+  `doc/08_tracking/bug/string_builder_interpreter_push_worse_than_quadratic_2026-08-18.md`.
+
+Because most of this codebase's tests and tooling run under the interpreter
+lane, `StringBuilder` cannot yet be recommended as a blanket remedy for this
+pattern — a commit adopting it at two call sites (`to_upper_ascii`,
+`svmg/assembler.disasm`, `22faace491c`) was reverted for exactly this reason.
+Use it only where the caller is known to run under JIT/codegen; otherwise
+leave the `result = result + x` pattern in place (correct, just not optimal)
+until the interpreter-side perf bug above is fixed, and re-measure before
+re-adopting.
+
 ## Fix test standard (user directive, 2026-08-18)
 
 Every FIX (compiler, runtime, library, script) must land with:
