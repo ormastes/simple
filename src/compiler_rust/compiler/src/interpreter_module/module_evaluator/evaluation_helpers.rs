@@ -86,6 +86,18 @@ fn record_import_binding(
         return;
     };
     let binding = imported_binding(source_owner, source_name);
+    // Skip the write (and the env-cache generation bump it implies) when the
+    // identical binding is already recorded — the common case for the lazy
+    // re-imports the lint/parse hot path performs per declaration.
+    let already = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .get(&importer)
+            .and_then(|bindings| bindings.get(local_name))
+            .is_some_and(|existing| *existing == binding)
+    });
+    if already {
+        return;
+    }
     MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
         cell.borrow_mut()
             .entry(importer)
