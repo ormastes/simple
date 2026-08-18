@@ -1,0 +1,78 @@
+# Stage-0 allocation-free classifier — reproducing spec (WP-11s, §6.4).
+#
+# Reproducing: classification returns the correct class for a
+# representative set of invocations — help, version, run (source path
+# and CLI-0 command), test, artifacts, option shapes, and unknown.
+
+use std.spec.{describe, it, assert_eq}
+use app.startup.stage0.classifier.{
+    stage0_classify,
+    stage0_class_name,
+    stage0_class_root_default,
+    stage0_class_help,
+    stage0_class_version,
+    stage0_class_run_source,
+    stage0_class_smf_artifact,
+    stage0_class_native_exec,
+    stage0_class_command_run,
+    stage0_class_command_test,
+    stage0_class_namespace_option,
+    stage0_class_option_route,
+    stage0_class_sci_route,
+    stage0_class_unknown
+}
+
+describe "stage-0 classifier maps representative invocations to their class":
+    it "empty argv is the root default policy":
+        assert_eq(stage0_classify([]), stage0_class_root_default())
+
+    it "-h and --help classify as help":
+        assert_eq(stage0_classify(["-h"]), stage0_class_help())
+        assert_eq(stage0_classify(["--help"]), stage0_class_help())
+
+    it "-v and --version classify as version":
+        assert_eq(stage0_classify(["-v"]), stage0_class_version())
+        assert_eq(stage0_classify(["--version"]), stage0_class_version())
+
+    it "source extensions classify as run_source":
+        assert_eq(stage0_classify(["app/main.spl"]), stage0_class_run_source())
+        assert_eq(stage0_classify(["tool.shs", "--flag"]), stage0_class_run_source())
+        assert_eq(stage0_classify(["m.simple"]), stage0_class_run_source())
+        assert_eq(stage0_classify(["s.sscript"]), stage0_class_run_source())
+
+    it ".smf artifacts classify as smf_artifact":
+        assert_eq(stage0_classify(["build/out.smf"]), stage0_class_smf_artifact())
+
+    it "explicit paths without artifact extension classify as native_exec":
+        assert_eq(stage0_classify(["./mybin"]), stage0_class_native_exec())
+        assert_eq(stage0_classify(["/usr/bin/thing", "arg"]), stage0_class_native_exec())
+        assert_eq(stage0_classify(["../rel/bin"]), stage0_class_native_exec())
+
+    it "CLI-0 run and test commands get their own classes":
+        assert_eq(stage0_classify(["run", "app/main.spl"]), stage0_class_command_run())
+        assert_eq(stage0_classify(["test", "test/x_spec.spl"]), stage0_class_command_test())
+
+    it "--x namespace options classify by shape only":
+        assert_eq(stage0_classify(["--xlog.level=debug"]), stage0_class_namespace_option())
+
+    it "other leading options route to the SCI exact-option lookup":
+        assert_eq(stage0_classify(["--some-generated-option"]), stage0_class_option_route())
+        assert_eq(stage0_classify(["-q"]), stage0_class_option_route())
+
+    it "other bare command words route to SCI":
+        assert_eq(stage0_classify(["compile", "x.spl"]), stage0_class_sci_route())
+
+    it "hard -- terminator forces positional classification":
+        assert_eq(stage0_classify(["--", "app/main.spl"]), stage0_class_run_source())
+        assert_eq(stage0_classify(["--", "--help"]), stage0_class_sci_route())
+        assert_eq(stage0_classify(["--"]), stage0_class_unknown())
+
+    it "empty token is unknown":
+        assert_eq(stage0_classify([""]), stage0_class_unknown())
+
+    it "class names are stable diagnostics labels":
+        assert_eq(stage0_class_name(stage0_class_help()), "help")
+        assert_eq(stage0_class_name(stage0_class_version()), "version")
+        assert_eq(stage0_class_name(stage0_class_command_test()), "command_test")
+        assert_eq(stage0_class_name(stage0_class_unknown()), "unknown")
+        assert_eq(stage0_class_name(999), "unknown")

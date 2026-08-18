@@ -1,0 +1,89 @@
+# Stage-0 classifier — defect-class spec (WP-11s, §6.4).
+#
+# Positive control: the classifier DISCRIMINATES — different argv shapes
+# yield pairwise-different classes, so it cannot pass by returning one
+# constant.
+#
+# Allocation property: this host has no per-call heap-allocation probe
+# available to a spec (no allocator counter is exposed to Simple test
+# code), so the no-allocation claim is checked STATICALLY instead: the
+# classifier source is scanned and must contain none of the allocating
+# text/collection operations (concatenation, split, slicing, case
+# conversion, trim, replace, format, Dict/array construction, push).
+# That is what is measured; a direct runtime heap measurement is not.
+
+use std.spec.{describe, it, assert_true, assert_ne, assert_eq}
+use std.fs.{read_file}
+use app.startup.stage0.classifier.{
+    stage0_classify,
+    stage0_class_root_default,
+    stage0_class_help,
+    stage0_class_version,
+    stage0_class_run_source,
+    stage0_class_command_run,
+    stage0_class_command_test,
+    stage0_class_unknown
+}
+
+describe "stage-0 classifier discriminates and stays allocation-free":
+    it "positive control: distinct argv shapes yield pairwise distinct classes":
+        val c_root = stage0_classify([])
+        val c_help = stage0_classify(["--help"])
+        val c_ver = stage0_classify(["--version"])
+        val c_src = stage0_classify(["app/main.spl"])
+        val c_run = stage0_classify(["run", "x.spl"])
+        val c_test = stage0_classify(["test"])
+        val c_unk = stage0_classify([""])
+        # every pair distinct — a constant function fails all of these
+        assert_ne(c_root, c_help)
+        assert_ne(c_root, c_ver)
+        assert_ne(c_root, c_src)
+        assert_ne(c_root, c_run)
+        assert_ne(c_root, c_test)
+        assert_ne(c_root, c_unk)
+        assert_ne(c_help, c_ver)
+        assert_ne(c_help, c_src)
+        assert_ne(c_help, c_run)
+        assert_ne(c_help, c_test)
+        assert_ne(c_help, c_unk)
+        assert_ne(c_ver, c_src)
+        assert_ne(c_ver, c_run)
+        assert_ne(c_ver, c_test)
+        assert_ne(c_ver, c_unk)
+        assert_ne(c_src, c_run)
+        assert_ne(c_src, c_test)
+        assert_ne(c_src, c_unk)
+        assert_ne(c_run, c_test)
+        assert_ne(c_run, c_unk)
+        assert_ne(c_test, c_unk)
+        # and each lands on its declared class, not merely "different"
+        assert_eq(c_root, stage0_class_root_default())
+        assert_eq(c_help, stage0_class_help())
+        assert_eq(c_ver, stage0_class_version())
+        assert_eq(c_src, stage0_class_run_source())
+        assert_eq(c_run, stage0_class_command_run())
+        assert_eq(c_test, stage0_class_command_test())
+        assert_eq(c_unk, stage0_class_unknown())
+
+    it "same shape twice yields the same class (deterministic)":
+        assert_eq(stage0_classify(["--help"]), stage0_classify(["--help"]))
+        assert_eq(stage0_classify(["run"]), stage0_classify(["run"]))
+
+    it "static scan: classifier source contains no allocating operations":
+        val src = read_file("src/app/startup/stage0/classifier.spl")
+        assert_true(src.len() > 0)
+        # borrowed-read predicates are present (sanity: right file)
+        assert_true(src.contains("stage0_classify"))
+        assert_true(src.contains("ends_with"))
+        # forbidden allocating operations are absent
+        assert_true(not src.contains(".split("))
+        assert_true(not src.contains(".to_lower"))
+        assert_true(not src.contains(".to_upper"))
+        assert_true(not src.contains(".trim("))
+        assert_true(not src.contains(".substring("))
+        assert_true(not src.contains(".slice("))
+        assert_true(not src.contains(".replace("))
+        assert_true(not src.contains(".push("))
+        assert_true(not src.contains("format("))
+        assert_true(not src.contains("Dict"))
+        assert_true(not src.contains(" + "))
