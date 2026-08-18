@@ -1,0 +1,205 @@
+# Named Ranges (Defined Names)
+#
+# A workbook-level store mapping a user-chosen NAME to an A1 target — either a
+# single cell ("A1") or a range ("A1:C3") — so formulas and UI can refer to
+# "TaxRate" instead of "$B$7".
+#
+# Names are CASE-INSENSITIVE for lookup/duplicate detection (Excel semantics:
+# defining "TaxRate" then "TAXRATE" is a duplicate, not a second name), but the
+# ORIGINAL spelling is preserved and is what `list_names` returns.
+#
+# Validation rejects, with a human-readable reason:
+#   - empty or whitespace-only names
+#   - names that would be ambiguous with an A1 cell reference ("A1",
+#     "XFD1048576") — Excel forbids these for exactly this reason
+#   - the single letters R and C (reserved by R1C1 notation)
+#   - names not starting with a letter or underscore, or containing characters
+#     other than letters, digits, underscore and period
+#   - duplicates (unless redefining via `redefine_name`)
+#   - targets that are not a valid cell reference or range
+#
+# CEILING (documented, not a bug): names are workbook-global and unscoped —
+# there is no per-sheet scoping and no cross-sheet ("Sheet2!A1") target, since
+# the rest of this sheets model addresses cells without a sheet qualifier.
+#
+# INTEGRATION: formula.spl resolves references through `resolve_cell_value` /
+# `resolve_cell_range` (formula.spl:8652/8687), which take an A1 string. A
+# caller can therefore substitute names BEFORE evaluation by mapping each
+# identifier through `lookup_name`, or resolve directly here via
+# `name_target_refs`. No edit to formula.spl is required for that path.
+
+use app.office.sheets.cell.{parse_cell_ref}
+use app.office.sheets.cell_ref.{CellRange, parse_range, expand_range_refs}
+
+struct NamedRange:
+    name: text     # original spelling as defined
+    target: text   # normalized upper-case A1 cell or range
+
+class NameStore:
+    entries: Dict<text, NamedRange>   # key: upper-cased name
+
+impl NameStore:
+
+    static fn new() -> NameStore:
+        """Create an empty named-range store."""
+        NameStore(entries: {})
+
+    me define(name: text, target: text) -> text:
+        """Define a new name. Returns "" on success, or a reason on rejection.
+        Rejects a duplicate name; use `redefine` to overwrite deliberately."""
+        val reason = validate_name(name)
+        if reason.len() > 0:
+            return reason
+        val target_norm = normalize_target(target)
+        if target_norm.len() == 0:
+            return "target is not a valid cell reference or range: {target}"
+        val key = name.trim().upper()
+        if me.entries.contains_key(key):
+            return "duplicate name: {name}"
+        me.entries[key] = NamedRange(name: name.trim(), target: target_norm)
+        ""
+
+    me redefine(name: text, target: text) -> text:
+        """Define a name, overwriting any existing definition.
+        Returns "" on success, or a reason on rejection."""
+        val reason = validate_name(name)
+        if reason.len() > 0:
+            return reason
+        val target_norm = normalize_target(target)
+        if target_norm.len() == 0:
+            return "target is not a valid cell reference or range: {target}"
+        me.entries[name.trim().upper()] = NamedRange(name: name.trim(), target: target_norm)
+        ""
+
+    me lookup(name: text) -> text?:
+        """Return the normalized A1 target for a name, or nil if undefined.
+        Lookup is case-insensitive and ignores surrounding whitespace."""
+        val target = me.target_text(name)
+        if target.len() == 0:
+            return nil
+        target
+
+    me target_text(name: text) -> text:
+        """Return the normalized A1 target for a name, or "" if undefined.
+        The nil-free form used internally; `lookup` is the optional-returning one."""
+        val key = name.trim().upper()
+        if not me.entries.contains_key(key):
+            return ""
+        val entry: NamedRange = me.entries[key]
+        entry.target
+
+    me has(name: text) -> bool:
+        """Whether a name is defined (case-insensitive)."""
+        me.entries.contains_key(name.trim().upper())
+
+    me remove(name: text) -> bool:
+        """Remove a name. Returns false if it was not defined."""
+        val key = name.trim().upper()
+        if not me.entries.contains_key(key):
+            return false
+        me.entries = me.entries.remove(key)
+        true
+
+    me count() -> i64:
+        """Number of defined names."""
+        me.entries.len()
+
+    me list_names() -> [text]:
+        """All defined names in their original spelling, sorted case-insensitively."""
+        var out: [text] = []
+        for key in me.entries.keys():
+            out.push(me.entries[key].name)
+        _sort_ci(out)
+
+# =========================================================================
+# Resolution
+# =========================================================================
+
+fn name_target_range(store: NameStore, name: text) -> CellRange?:
+    """Resolve a name to a CellRange. Returns nil for an undefined name or a
+    name whose target is a single cell (use `name_target_refs` for both)."""
+    val target = store.target_text(name)
+    if target.len() == 0:
+        return nil
+    parse_range(target)
+
+fn name_target_refs(store: NameStore, name: text) -> [text]:
+    """Resolve a name to the list of cell references it covers. A single-cell
+    name yields one reference; an undefined name yields an empty list."""
+    val target = store.target_text(name)
+    if target.len() == 0:
+        return []
+    val range = parse_range(target)
+    if range != nil:
+        return expand_range_refs(range)
+    [target]
+
+# =========================================================================
+# Validation
+# =========================================================================
+
+fn validate_name(name: text) -> text:
+    """Check a candidate name. Returns "" if valid, else a rejection reason."""
+    val trimmed = name.trim()
+    if trimmed.len() == 0:
+        return "name is empty"
+    if parse_cell_ref(trimmed) != nil:
+        return "name collides with cell reference: {trimmed}"
+    val upper = trimmed.upper()
+    if upper == "R" or upper == "C":
+        return "name is reserved by R1C1 notation: {trimmed}"
+    val first = trimmed.char_at(0)
+    if not (_is_alpha_char(first) or first == "_"):
+        return "name must start with a letter or underscore: {trimmed}"
+    var i = 1
+    while i < trimmed.len():
+        val c = trimmed.char_at(i)
+        if not (_is_alpha_char(c) or _is_digit_char(c) or c == "_" or c == "."):
+            return "name contains an invalid character '{c}': {trimmed}"
+        i = i + 1
+    ""
+
+fn normalize_target(target: text) -> text:
+    """Normalize an A1 cell or range target to upper case.
+    Returns "" if the target is neither a valid cell reference nor a range."""
+    val trimmed = target.trim()
+    if trimmed.len() == 0:
+        return ""
+    val upper = trimmed.upper()
+    if parse_range(upper) != nil:
+        return upper
+    if parse_cell_ref(upper) != nil:
+        return upper
+    ""
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _is_alpha_char(c: text) -> bool:
+    val code = c.char_code_at(0)
+    (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+fn _is_digit_char(c: text) -> bool:
+    val code = c.char_code_at(0)
+    code >= 48 and code <= 57
+
+fn _sort_ci(items: [text]) -> [text]:
+    """Selection sort by upper-cased name — name lists are small."""
+    var taken: [bool] = []
+    for _item in items:
+        taken.push(false)
+    var out: [text] = []
+    var n = 0
+    while n < items.len():
+        var best = -1
+        var i = 0
+        while i < items.len():
+            if not taken[i]:
+                if best < 0 or items[i].upper() < items[best].upper():
+                    best = i
+            i = i + 1
+        taken[best] = true
+        out.push(items[best])
+        n = n + 1
+    out
