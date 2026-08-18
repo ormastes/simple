@@ -1,0 +1,58 @@
+# Regression: the AOT "both" output-format branch of
+# src/compiler/80.driver/driver_aot_pipeline.spl died post-link with
+#   error[E1002]: function `update_smf_manifest_entry` not found
+# because its two imports were written as FUNCTION-BODY-scoped
+# `use <path>.{name}` statements, which are a silent no-op for symbol
+# resolution. Root cause and the minimal repro are recorded in
+# doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md.
+#
+# This spec pins the contract the fixed call site relies on: both symbols are
+# reachable from module scope, and update_smf_manifest_entry accepts the exact
+# 10-argument shape driver_aot_pipeline.spl calls it with, and really writes a
+# manifest that can be read back.
+use std.spec.*
+use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry, smf_manifest_path_for_smf, load_smf_manifest, smf_manifest_find}
+use app.io.mod.{file_write, file_exists}
+
+describe "AOT both-format SMF manifest update":
+
+    it "records an SMF manifest entry for a freshly built source":
+        """The AOT lane builds a native binary, compiles a sibling SMF into the
+        native build cache, and then records that SMF in the cache manifest so a
+        later run can reuse it instead of recompiling."""
+
+        step("Stage a source file the AOT lane would have just compiled")
+        val source_path = "/tmp/simple_aot_both_regression_src.spl"
+        file_write(source_path, "fn main():\n    print(\"hi\")\n")
+        expect(file_exists(source_path)).to_be(true)
+
+        step("Derive the SMF cache path the same way the AOT branch does")
+        val cache_dir = "/tmp/simple_aot_both_regression_cache"
+        val smf_cache_path = source_to_cache_path(source_path, cache_dir, ".smf")
+        expect(smf_cache_path).to_contain(".smf")
+
+        step("Record the manifest entry with the AOT call site's 10-argument shape")
+        val ok = update_smf_manifest_entry(
+            source_path,
+            smf_cache_path,
+            424242,
+            "llvm",
+            2,
+            true,
+            false,
+            false,
+            "",
+            []
+        )
+        expect(ok).to_be(true)
+
+        step("Read the manifest back and confirm the entry is really there")
+        val manifest = load_smf_manifest(smf_manifest_path_for_smf(smf_cache_path))
+        val found = smf_manifest_find(manifest, source_path)
+        expect(found != nil).to_be(true)
+        if val Some(entry) = found:
+            expect(entry.smf_path).to_equal(smf_cache_path)
+            expect(entry.source_hash).to_equal(424242)
+            expect(entry.backend).to_equal("llvm")
+            expect(entry.opt_level).to_equal(2)
