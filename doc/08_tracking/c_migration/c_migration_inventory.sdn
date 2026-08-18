@@ -1429,3 +1429,68 @@ c_migrations:
       incl. multibyte UTF-8), 2026-08-18: simple_us=2288 c_us=514,
       ratio ~4.45x.
     shared_corpus: 100
+
+  - id: C-MIG-0041
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_dict_contains
+    classification: product_algorithm
+    replacement: std.common.dict_contains_pure.dict_has_key_text (NEW file
+      src/lib/common/dict_contains_pure.spl -- uncontested, outside all
+      HARD-AVOID paths for this round. Hand-walks the dict's own
+      `.keys()` array and compares each key with `==`, rather than
+      delegating to the built-in `contains_key` method, which on the
+      native lane is itself the thin wrapper around this same extern --
+      genuinely different machinery from both the C hash-table probe
+      and the built-in method dispatch)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_dict_contains(dict: i64, key: i64) -> bool is registered in the
+      interpreter's extern dispatch table (interpreter_extern/mod.rs:1171,
+      sffi_dict::rt_dict_contains_fn). `grep -n rt_dict_contains\b
+      src/runtime/runtime_native.c src/runtime/runtime.h` returns a hit
+      (runtime_native.c:8162: `int8_t rt_dict_contains(int64_t dict,
+      int64_t key)`), verified before writing the spec -- C-backed,
+      unlike C-MIG-0029..0039's Rust-interpreter-only siblings. The
+      interpreter-lane oracle used by the differential spec is the
+      Rust-interpreter's own extern registration
+      (interpreter_extern/sffi_dict.rs::rt_dict_contains_fn), which for
+      a text-keyed `Value::Dict` checks `map.contains_key(key)` directly
+      and mirrors the C semantics. Rejected candidates: `rt_array_repeat`
+      (sffi_array.rs, mod.rs:592) deferred to this round's second pick
+      (C-MIG-0042) to keep the two picks in different primitive domains
+      (dict vs array); `rt_string_rfind`/`rt_text_is_ascii` already
+      covered by C-MIG-0024/C-MIG-0039 respectively (Step 0 dedupe
+      check). No production `extern fn rt_dict_contains` caller
+      migration was performed -- this entry only establishes
+      differential correctness + perf evidence.
+    correctness_spec: test/01_unit/lib/common/dict_contains_pure_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. ordinary
+      present/absent text keys; edge cases: empty dict with empty and
+      non-empty probe key, single-entry dict with an empty-string key,
+      single-char key match/mismatch, prefix-of-a-real-key and
+      real-key-plus-suffix absent-key boundaries, multibyte UTF-8 keys
+      (Latin-1 and CJK) match/mismatch, NUL (0x00) and DEL (0x7f)
+      byte-class boundary keys; single-char-flip discrimination;
+      determinism check; 100-vector shared-logic bulk differential loop
+      over 8 probe keys against an 8-entry dict incl. multibyte,
+      2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple dict_has_key_text measured
+      ~4.9x the C-backed oracle over the 100-vector bulk corpus
+      (simple_us=3750, c_us=764, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). Above the plan's 2x threshold;
+      recorded honestly, not hidden -- same interpreter-lane caveat as
+      prior PERF findings. Not fixed here: the Simple side does a
+      linear `.keys()` array scan (O(n) per lookup, n=8 in this
+      corpus) versus the C side's O(1) hash-table probe, so the gap is
+      an inherent algorithmic-complexity difference, not an
+      implementation inefficiency; not filed as a standalone bug given
+      the small absolute magnitude (~29us/call at n=8) and the fact
+      that a hash-based Simple-side dict lookup would just re-wrap the
+      built-in method this spec deliberately avoided duplicating."
+    perf_measured: >
+      100 shared branch-covering text-key probes against an 8-entry
+      dict (incl. multibyte UTF-8 keys), 2026-08-18: simple_us=3750
+      c_us=764, ratio ~4.9x.
+    shared_corpus: 100
