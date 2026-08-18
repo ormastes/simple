@@ -339,44 +339,6 @@ fn handle_build_check() -> i32 {
 /// Stage 1: Compile compiler with current binary
 /// Stage 2: Compile compiler with Stage 1 output
 /// Stage 3: Compile compiler with Stage 2 output, verify Stage 2 == Stage 3
-/// Run the pure-Simple bootstrap authorization planner with `args`.
-///
-/// Kept as an out-of-process `run` of `src/app/build/bootstrap_receipt_main.spl`
-/// on purpose: the planner is documented as independent from the native-build
-/// CLI closure, so a seed can emit an admission leaf without linking against
-/// the compiler being rebuilt. Exit code is the planner's, propagated verbatim.
-fn delegate_to_bootstrap_receipt_planner(args: &[&str]) -> i32 {
-    use std::process::Command;
-
-    const PLANNER_ENTRY: &str = "src/app/build/bootstrap_receipt_main.spl";
-    if !PathBuf::from(PLANNER_ENTRY).exists() {
-        eprintln!(
-            "bootstrap-policy-error: planner-entry-missing: {} (run from the repo root)",
-            PLANNER_ENTRY
-        );
-        return 66;
-    }
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("bootstrap-policy-error: planner-delegation-failed: {}", e);
-            return 70;
-        }
-    };
-    let mut cmd = Command::new(exe);
-    cmd.arg("run").arg(PLANNER_ENTRY);
-    for a in args {
-        cmd.arg(a);
-    }
-    match cmd.status() {
-        Ok(st) => st.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("bootstrap-policy-error: planner-delegation-failed: {}", e);
-            70
-        }
-    }
-}
-
 fn handle_bootstrap(args: &[&str]) -> i32 {
     use std::process::Command;
 
@@ -391,41 +353,9 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
         println!("  --output=<dir>     Output directory (default: bootstrap)");
         println!("  --seed=<path>      Seed compiler binary (default: bin/simple or bin/release/<platform>/simple)");
         println!();
-        println!("PLANNING (no stage is started):");
-        println!("  --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path>");
-        println!("  --bootstrap-target=<t> --parent-compiler-sha256=<hex> --runtime-snapshot-sha256=<hex>");
-        println!("  --planner-source-closure-sha256=<hex> --planner-sha256=<hex>");
-        println!("  Any of these routes the whole invocation to the pure-Simple planner");
-        println!("  (src/app/build/bootstrap_receipt_main.spl); it writes a receipt and exits.");
-        println!();
         println!("The seed compiler must be a self-hosted Simple binary capable of");
         println!("running src/app/compile/native.spl to compile the compiler source.");
         return 0;
-    }
-
-    // Planner routing. `scripts/bootstrap/bootstrap-from-scratch.sh` tells the
-    // user verbatim to run
-    //   simple build bootstrap --bootstrap-reason=<r> --bootstrap-receipt=<p>
-    // Until 2026-08-18 this loop silently DROPPED both flags and started a real
-    // Stage 1 native-build instead of planning a receipt — the printed
-    // instruction and the behaviour disagreed. Any planner flag now routes the
-    // whole argv to the pure-Simple planner
-    // (src/app/build/bootstrap_receipt_main.spl,
-    // `plan_bootstrap_authorization`), which never starts a bootstrap stage.
-    const PLANNER_FLAGS: [&str; 7] = [
-        "--bootstrap-reason=",
-        "--bootstrap-receipt=",
-        "--bootstrap-target=",
-        "--parent-compiler-sha256=",
-        "--runtime-snapshot-sha256=",
-        "--planner-source-closure-sha256=",
-        "--planner-sha256=",
-    ];
-    if args
-        .iter()
-        .any(|a| PLANNER_FLAGS.iter().any(|p| a.starts_with(p)))
-    {
-        return delegate_to_bootstrap_receipt_planner(args);
     }
 
     // Parse options
@@ -439,13 +369,6 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
             output_dir = d.to_string();
         } else if let Some(s) = arg.strip_prefix("--seed=") {
             seed_compiler = Some(s.to_string());
-        } else {
-            // Fail closed. Silently accepting an unknown flag and doing
-            // something else is exactly the defect fixed above.
-            eprintln!("error: unknown 'build bootstrap' option: {}", arg);
-            eprintln!("  known: --backend= --output= --seed= --help");
-            eprintln!("  planner: --bootstrap-reason= --bootstrap-receipt= --bootstrap-target= --parent-compiler-sha256= --runtime-snapshot-sha256= --planner-source-closure-sha256= --planner-sha256=");
-            return 64;
         }
     }
 
@@ -570,11 +493,24 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     //   compiler native-build --source ... --entry ... --entry-closure -o <output>
     // Self-hosted Simple format:
     //   compiler src/app/compile/native.spl src/app/cli/main.spl <output>
-    let is_rust_driver = is_rust_driver_binary(compiler);
+    // Path-based classification alone is not enough: the Rust seed is routinely
+    // deployed to bin/release/<triple>/simple (a path that normally holds the
+    // self-hosted binary). Misclassifying it as self-hosted sends
+    // `--backend=llvm-lib`, which the seed's dispatch routes to the INTERPRETED
+    // native_build_main.spl worker — a pathological path that loads the whole
+    // compiler import graph under the tree-walking interpreter (observed
+    // 2026-08-18: 28.4 GB RSS, killed after 5508s, no binary). Probe the actual
+    // binary: the seed's --version prints a "bootstrap seed" warning banner.
+    let is_rust_driver = is_rust_driver_binary(compiler) || binary_reports_rust_seed(compiler);
 
     let mut cmd = Command::new(compiler);
     cmd.env_remove("_SIMPLE_STACK_SET");
     if is_rust_driver {
+        // Force the seed's in-process native_project pipeline. Without this the
+        // seed's own dispatch treats native-build as a pure-Simple tool and
+        // interprets src/app/cli/native_build_main.spl, which spawns the
+        // interpreted worker — the same pathological path described above.
+        cmd.env("SIMPLE_NATIVE_BUILD_RUST", "1");
         cmd.arg("native-build")
             .arg("--source")
             .arg("src/app")
@@ -792,6 +728,31 @@ fn platform_release_binary_candidates() -> Vec<PathBuf> {
     }
 
     candidates
+}
+
+/// True when `compiler` is actually the Rust bootstrap seed, regardless of the
+/// path it was deployed to. The seed prints a distinctive warning banner on
+/// `--version` ("bootstrap seed"); a genuine self-hosted binary does not, so
+/// this probe is behavior-neutral when a healthy self-hosted binary exists.
+/// Cheap (~20ms) and fail-open: any spawn/parse failure returns false, leaving
+/// classification to the path-based check.
+fn binary_reports_rust_seed(compiler: &str) -> bool {
+    std::process::Command::new(compiler)
+        .arg("--version")
+        // The banner is suppressed by SIMPLE_RUST_SEED_WARNING=0 or
+        // SIMPLE_BOOTSTRAP=1; strip both so the probe always sees it on a seed.
+        .env_remove("SIMPLE_RUST_SEED_WARNING")
+        .env_remove("SIMPLE_BOOTSTRAP")
+        .output()
+        .map(|out| {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            text.contains("bootstrap seed")
+        })
+        .unwrap_or(false)
 }
 
 fn is_rust_driver_binary(compiler: &str) -> bool {

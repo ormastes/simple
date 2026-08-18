@@ -57,3 +57,54 @@ and will be silently preferred on the next `build bootstrap`. A
 freshness check (staged binary mtime vs. release seed, or validating the
 embedded runtime input list against `src/runtime`) in
 `resolve_preferred_simple_binary` would close this class.
+
+## Second failure (same day): seed-as-worker takes the INTERPRETED native-build path — 28.4 GB RSS, killed at 5508s (FIXED)
+
+After archiving the stale staged binaries, `bin/simple build bootstrap` on the
+fresh seed (deployed 2026-08-18 06:12) failed differently. Stage 1 spawned:
+
+```
+bin/release/x86_64-unknown-linux-gnu/simple run src/app/cli/native_build_worker.spl \
+  --source src/app --entry src/app/cli/bootstrap_main.spl --entry-closure --strip \
+  --threads 1 --timeout 180 -o bootstrap/stage1/simple --backend=llvm-lib
+```
+
+i.e. an INTERPRETED worker; kill_simple_monitor killed it at
+**rss=28420MB >= 24000MB after 5508s**, no binary produced
+("native-build worker timed out ... The interpreted worker loads the whole
+compiler + LLVM import graph before any codegen").
+
+Root cause (two stacked misroutes in the Rust seed driver,
+`src/compiler_rust/driver/src/cli/commands/misc_commands.rs`):
+
+1. `resolve_preferred_simple_binary()` (~line 668) picks
+   `bin/release/x86_64-unknown-linux-gnu/simple` — which is currently the
+   RUST SEED itself (redeployed there 06:12). `is_rust_driver_binary()`
+   classifies by PATH only; its `contains("/bin/release/")` clause misses the
+   relative candidate `bin/release/...` (no leading slash), so the seed was
+   classified as a self-hosted binary and invoked with `--backend=llvm-lib`
+   (the pure-Simple command shape).
+2. Even correctly classified, the seed's own dispatch
+   (`driver/src/main.rs` `dispatch_command`) treats `native-build` as a
+   pure-Simple tool and interprets `src/app/cli/native_build_main.spl`, whose
+   `run_native_build_worker` spawns the interpreted worker above — the
+   pathological path. The seed's in-process `native_project` pipeline is only
+   reached via `SIMPLE_NATIVE_BUILD_RUST=1` (or a cross-target build), which
+   `compile_stage` never set.
+
+Fix (same file):
+- `binary_reports_rust_seed()`: probe the chosen compiler with `--version`
+  (env-stripped so `SIMPLE_BOOTSTRAP=1`/`SIMPLE_RUST_SEED_WARNING=0` can't
+  suppress the banner) and treat a "bootstrap seed" banner as rust-driver.
+  Behavior-neutral when a healthy self-hosted binary exists (no banner).
+- `compile_stage`: on the rust-driver branch, set
+  `SIMPLE_NATIVE_BUILD_RUST=1` so the seed uses its in-process pipeline
+  instead of interpreting the worker wrapper.
+
+Verification (2026-08-18, fixed binary
+`/mnt/data/tmp/cargo-seed-rebuild/release/simple`, 59,546,088 bytes 07:39):
+stage-1 child is now `bin/release/.../simple native-build --source src/app ...
+-o bootstrap/stage1/simple` with NO `--backend=llvm-lib` and NO
+`run native_build_worker.spl` child; RSS sampled via ps at t=60s and t=150s:
+172 MB / 161 MB (vs 28.4 GB pathological). Probe runs were bounded
+(`timeout 200/300`), so full stage completion is pending a full run.
