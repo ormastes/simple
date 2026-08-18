@@ -1,0 +1,173 @@
+# Component descriptor contract (research doc §5.1/§5.3, Phase B).
+#
+# Minimal pure-data descriptor for selectable components: id, version, the
+# three independent dynload axes (presence/placement/activation), provided
+# interfaces, and dependency ids. A fail-closed SDN-subset parser, a
+# validation pass (unknown axis values, duplicate ids, dangling dependency
+# references are explicit errors), and a resolve step producing the
+# comma key=value axis-spec string consumed by dynsmf_dynload_setting_parse
+# (src/os/smf/dynsmf_session.spl). Axis value sets are duplicated here as
+# plain strings rather than importing os.smf, so std.common stays free of an
+# os-layer dependency; the spec proves the handshake against the real parser.
+#
+# Research: doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md
+
+class ComponentDescriptor:
+    id: text
+    version: text
+    presence: text
+    placement: text
+    activation: text
+    provides: [text]
+    dependencies: [text]
+
+class ComponentParseOutcome:
+    ok: bool
+    reason: text
+    descriptors: [ComponentDescriptor]
+
+class ComponentValidation:
+    ok: bool
+    errors: [text]
+
+fn component_presence_values() -> [text]:
+    ["off", "auto", "on"]
+
+fn component_placement_values() -> [text]:
+    ["auto", "static", "dynamic"]
+
+# Mirrors the landed dynsmf activation set. The research-doc defaults table
+# also mentions "hotspot"; dynsmf_activation_valid does not accept it, so it
+# is deliberately excluded here to keep the handshake fail-closed.
+fn component_activation_values() -> [text]:
+    ["startup", "command", "first_use", "manual"]
+
+fn component_axis_value_valid(values: [text], v: text) -> bool:
+    var idx = 0
+    while idx < values.len():
+        if values[idx] == v:
+            return true
+        idx = idx + 1
+    false
+
+fn component_descriptor_default(id: text, version: text) -> ComponentDescriptor:
+    val empty: [text] = []
+    val empty2: [text] = []
+    ComponentDescriptor(id: id, version: version, presence: "auto", placement: "auto", activation: "first_use", provides: empty, dependencies: empty2)
+
+fn component_list_value_parse(value: text) -> [text]:
+    var out: [text] = []
+    if value.trim() == "":
+        return out
+    val parts = value.split(",")
+    var idx = 0
+    while idx < parts.len():
+        val item = parts[idx].trim()
+        if item != "":
+            out.push(item)
+        idx = idx + 1
+    out
+
+# Parse an SDN-subset component catalog, fail closed. Grammar:
+#
+#   component:
+#     id: optimizer.basic
+#     version: 1
+#     presence: auto
+#     placement: auto
+#     activation: command
+#     provides: opt.basic, opt.inline
+#     dependencies: compiler.frontend
+#
+# Blank lines and full-line `#` comments are ignored. Unknown keys, keys
+# outside a `component:` block, a block without an id, and malformed lines
+# are all hard parse failures — never silently skipped.
+fn component_descriptor_parse_sdn(source: text) -> ComponentParseOutcome:
+    var descriptors: [ComponentDescriptor] = []
+    var in_block = false
+    var cur = component_descriptor_default("", "")
+    var have_id = false
+    val lines = source.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        val line = lines[idx].trim()
+        idx = idx + 1
+        if line == "" or line.starts_with("#"):
+            continue
+        if line == "component:":
+            if in_block:
+                if not have_id:
+                    return ComponentParseOutcome(ok: false, reason: "missing_id_in_component_block", descriptors: descriptors)
+                descriptors.push(cur)
+            in_block = true
+            cur = component_descriptor_default("", "")
+            have_id = false
+            continue
+        val sep = line.index_of(":")
+        if sep < 0:
+            return ComponentParseOutcome(ok: false, reason: "malformed_line:" + line, descriptors: descriptors)
+        if not in_block:
+            return ComponentParseOutcome(ok: false, reason: "key_outside_component_block:" + line, descriptors: descriptors)
+        val key = line.substring(0, sep).trim()
+        val value = line.substring(sep + 1, line.len()).trim()
+        if key == "id":
+            if value == "":
+                return ComponentParseOutcome(ok: false, reason: "empty_id", descriptors: descriptors)
+            cur.id = value
+            have_id = true
+        elif key == "version":
+            cur.version = value
+        elif key == "presence":
+            cur.presence = value
+        elif key == "placement":
+            cur.placement = value
+        elif key == "activation":
+            cur.activation = value
+        elif key == "provides":
+            cur.provides = component_list_value_parse(value)
+        elif key == "dependencies":
+            cur.dependencies = component_list_value_parse(value)
+        else:
+            return ComponentParseOutcome(ok: false, reason: "unknown_key:" + key, descriptors: descriptors)
+    if in_block:
+        if not have_id:
+            return ComponentParseOutcome(ok: false, reason: "missing_id_in_component_block", descriptors: descriptors)
+        descriptors.push(cur)
+    ComponentParseOutcome(ok: true, reason: "parsed", descriptors: descriptors)
+
+# Validate a parsed catalog: unknown axis values, duplicate ids, and dangling
+# dependency references are explicit errors. Always returns the full error
+# list, never just the first hit.
+fn component_catalog_validate(descriptors: [ComponentDescriptor]) -> ComponentValidation:
+    var errors: [text] = []
+    var seen: [text] = []
+    var idx = 0
+    while idx < descriptors.len():
+        val d = descriptors[idx]
+        if component_axis_value_valid(seen, d.id):
+            errors.push("duplicate_id:" + d.id)
+        else:
+            seen.push(d.id)
+        if not component_axis_value_valid(component_presence_values(), d.presence):
+            errors.push("unknown_presence:" + d.id + ":" + d.presence)
+        if not component_axis_value_valid(component_placement_values(), d.placement):
+            errors.push("unknown_placement:" + d.id + ":" + d.placement)
+        if not component_axis_value_valid(component_activation_values(), d.activation):
+            errors.push("unknown_activation:" + d.id + ":" + d.activation)
+        idx = idx + 1
+    idx = 0
+    while idx < descriptors.len():
+        val d = descriptors[idx]
+        var dep_idx = 0
+        while dep_idx < d.dependencies.len():
+            val dep = d.dependencies[dep_idx]
+            if not component_axis_value_valid(seen, dep):
+                errors.push("dangling_dependency:" + d.id + ":" + dep)
+            dep_idx = dep_idx + 1
+        idx = idx + 1
+    ComponentValidation(ok: errors.len() == 0, errors: errors)
+
+# Resolve step: effective per-component dynload setting string, in exactly
+# the comma key=value grammar dynsmf_dynload_setting_parse accepts.
+fn component_effective_dynload_setting(d: ComponentDescriptor) -> text:
+    "presence=" + d.presence + ",placement=" + d.placement + ",activation=" + d.activation
