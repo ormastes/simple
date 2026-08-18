@@ -258,6 +258,9 @@ fn eprint_bounded(output: text):
 fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
     stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
 
+fn native_build_output_has_alloc_failure(stdout: text, stderr: text) -> bool:
+    stdout.contains("memory allocation of") or stderr.contains("memory allocation of")
+
 fn native_build_print_failure_hints(stdout: text, stderr: text):
     if native_build_output_has_nil_field_id(stdout, stderr):
         eprint "hint: nil `.id` field access usually lost the MIR/HIR context above."
@@ -302,7 +305,15 @@ fn run_native_build_worker(args: [text]) -> i64:
         eprint_bounded(stderr)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
-        if code == -1:
+        if code == -1 and native_build_output_has_alloc_failure(stdout, stderr):
+            # A Rust allocation abort also surfaces as the -1 sentinel. Reporting
+            # it as a timeout misattributes a memory blowup to a slow build and
+            # has repeatedly sent investigations at the wrong defect
+            # (doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md).
+            eprint "error: native-build worker ABORTED on a failed memory allocation (not a timeout)."
+            eprint "  The interpreted worker's RSS grows through parse/lowering; it hit the process"
+            eprint "  memory limit. Raise the ulimit -v / cgroup cap, or shrink --source."
+        else if code == -1:
             val secs = native_build_timeout_ms(args) / 1000
             eprint "error: native-build worker timed out after {secs}s before producing a binary."
             eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"
