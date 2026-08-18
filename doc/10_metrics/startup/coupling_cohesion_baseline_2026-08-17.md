@@ -81,3 +81,34 @@ Caveat: static-resolver closure numbers are an upper-bound approximation (unreso
 module paths are dropped; `NN.layer` mapping is heuristic). `deps fast` under-reports
 (direct-only, and 0 for the CLI init). For the AFTER gate, rerun the same script with
 identical resolution rules and diff row-by-row.
+
+## Delta 2026-08-18 — app.io facade wildcard removal
+
+Change: `src/app/io/{time_ops,sysinfo_ops,env_ops}.spl` converted from
+`export use std.nogc_sync_mut.io.<mod>.*` to explicit symbol lists (full public
+surface of each backing module: 13 / 4 / 7 symbols). Behavior identical — every
+in-tree consumer already imported explicit subsets of those lists. The
+`@allow(star_import)` waivers were removed with the wildcards.
+
+Method: same static resolver as the baseline (rebuilt this session with the
+described rules plus ancestor-dir resolution; a trailing-dot regex defect in the
+rebuild was fixed before measurement — before/after runs use the identical
+script). Absolute numbers therefore shift vs the 2026-08-17 table (tree moved +
+resolver rebuild); the before/after pair below is like-for-like.
+
+| metric (CLI dir aggregate, 81 roots) | before | after |
+|---|---|---|
+| closure (files) | 1406 | 1406 |
+| cycles (SCCs>1) | 32 | 32 |
+| files-in-cycles | 220 | 220 |
+| largest SCC | 45 | 45 |
+| **wildcard `export use *` hubs in closure** | **46** | **43** |
+
+Wall-clock probe (`/usr/bin/time bin/simple run` on a 4-line file importing all
+three facades; p50 of 3): before 0.76s, after 0.73s — noise-level, no
+regression. Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (59,621,024
+bytes, mtime 2026-08-17 20:28:24 UTC; Rust seed).
+
+Verification (foreground, `--no-session-daemon`):
+- `test/01_unit/app/compile_targets_env_facade_source_spec.spl` → `Results: 2 total, 2 passed, 0 failed`
+- `test/01_unit/compiler/backend/runtime_timestamp_owner_source_spec.spl` → `Results: 3 total, 2 passed, 1 failed` both WITH and WITHOUT the change (stash-rerun) — the 1 failure is pre-existing and unrelated.
