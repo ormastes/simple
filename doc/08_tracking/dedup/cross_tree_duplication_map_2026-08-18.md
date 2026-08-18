@@ -366,3 +366,78 @@ shape of `doc/08_tracking/bug/import_triggered_cross_module_symbol_misdispatch_2
 
 Merge stays blocked until one of them is renamed (a deliberate API decision, not a
 dedup side effect). The other 21 public symbols were collision-free.
+
+## Tranche 3 (goal 7, 2026-08-18) — `src/testing/mocking_advanced.spl` merged; `allocator.spl` considered
+
+Selection method: re-ran md5sum on every remaining top-20 candidate not yet
+merged/blocked (`df/mod.spl`, `allocator.spl`, `src/testing/mocking_advanced.spl`,
+`debug/formats/dwarf_parser.spl`), confirming there are actually 4 lib trees
+(`nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `gc_sync_mut`) and only the
+first 3 needed to match:
+
+| path | nogc_sync_mut | nogc_async_mut | gc_async_mut | gc_sync_mut |
+|---|---|---|---|---|
+| `df/mod.spl` | `af8b3cc1...` | `af8b3cc1...` (match) | missing | missing |
+| `allocator.spl` | `eb033d44...` | `eb033d44...` (match) | `eb033d44...` (match) | `7093108b...` (divergent) |
+| `src/testing/mocking_advanced.spl` | `67821e44...` | `67821e44...` (match) | `67821e44...` (match) | `1d0cca8b...` (divergent) |
+| `debug/formats/dwarf_parser.spl` | `b224da7e...` | `b224da7e...` (match) | missing | missing |
+
+`allocator.spl` and `mocking_advanced.spl` both have 3-way matches (safer:
+more copies collapsed) and zero `use`/`mod`/`import` lines in the source
+(`grep -nE '^(use|mod|import)'` on each returned nothing). `df/mod.spl` and
+`dwarf_parser.spl` only exist in 2 trees each — lower impact, deferred, not
+examined further this pass.
+
+### Accepted: `src/testing/mocking_advanced.spl` (637 lines)
+
+- Import audit: zero `use`/`mod`/`import` lines — passes.
+- Collision check: 14 top-level public symbols (`TaskPriority`,
+  `ScheduledTask`, `TaskScheduler`, `BackoffStrategy`, `RetryAttempt`,
+  `RetryPolicy`, `RateLimiter`, `TimeoutResult`, `TimeoutController`,
+  `ExecutionEvent`, `ExecutionOrderTracker`, `ConcurrencyController`,
+  `Debouncer`, `Throttler`) grepped against every
+  `fn`/`struct`/`enum`/`class`/`val`/`trait` definition under
+  `src/lib/common/` — **0 collisions**.
+- Moved to `src/lib/common/testing/mocking_advanced.spl` (637 lines,
+  unchanged). The 3 identical tree copies (`nogc_sync_mut`, `nogc_async_mut`,
+  `gc_async_mut`) replaced with a 6-line `pub use
+  std.common.testing.mocking_advanced*` delegator, same comment style as the
+  `testing/mock/builder.spl` precedent (`764913af784`). `gc_sync_mut`'s copy
+  (`1d0cca8b...`) is untouched — genuinely divergent content, no
+  normalization applied.
+- Callers: `grep -rln mocking_advanced src/ test/ --include='*.spl'` found
+  only same-tree relative importers — `use testing.mocking_advanced.*` in
+  each tree's own `src/testing/mocking.spl`, plus a comment mention in
+  `src/testing/__init__.spl`. No test spec references it directly
+  (`grep -rln mocking_advanced test/` empty), so a throwaway spec
+  (`test/01_unit/lib/std/testing/mocking_advanced_delegator_throwaway_spec.spl`,
+  instantiating `RetryPolicy.new(3)` through all 3 delegator paths via
+  `std.nogc_sync_mut.src.testing.mocking_advanced`,
+  `std.nogc_async_mut.src.testing.mocking_advanced`,
+  `std.gc_async_mut.src.testing.mocking_advanced`) was written, run
+  (`Results: 1 total, 1 passed, 0 failed`), and deleted (throwaway, not
+  committed).
+
+Net line delta: -1911 (three 637-line duplicates removed) + 637 (common
+owner) + 18 (three 6-line delegators) = **-1256 lines**, zero behavior
+change, zero regression. Commit: see `refactor(dedup)` commit for this
+target.
+
+### Deferred: `allocator.spl` (699 lines)
+
+Not merged this pass. Its symbol names (`Allocator`, `SystemAllocator`,
+`ArenaAllocator`, `PoolAllocator`, `SlabAllocator`, `sys_malloc`, `sys_free`,
+`sys_realloc`, `ptr_is_null`, `ptr_write`, `ptr_read`, `buffer_offset`,
+`memory_copy`, `align_up`, `is_aligned`, `next_power_of_2`,
+`is_power_of_2`) show **0 collisions** against `src/lib/common/` by the same
+grep, and the file itself has zero `use`/`mod` lines. But a broad
+`grep -rln allocator src/ test/ --include='*.spl'` returns dozens of hits
+(mimalloc*, gc.spl, rc.spl, ecs/entity.spl, gpu engine sessions, etc.) that
+were not individually triaged into "actually imports this file" vs.
+"mentions the word allocator/Allocator in an unrelated type/comment" within
+this pass's time budget — the map's own caution ("name suggests memory-tier
+sensitivity") means this file needs the closer per-caller read the protocol
+requires before a move, not just a symbol-collision grep. Left as a
+concrete next-pass target: re-run the caller grep, keep only lines with an
+actual `use`/`import` of this file's dotted path, then apply the same
+merge protocol.
