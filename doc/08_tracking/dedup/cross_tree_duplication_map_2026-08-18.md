@@ -441,3 +441,160 @@ requires before a move, not just a symbol-collision grep. Left as a
 concrete next-pass target: re-run the caller grep, keep only lines with an
 actual `use`/`import` of this file's dotted path, then apply the same
 merge protocol.
+
+## Tranche 4 (goal 7, 2026-08-18) — `engine/physics/joints.spl` and `diagram/__init__.spl` merged
+
+Selection: re-verified md5sum for every remaining top-20 candidate not yet
+merged/blocked/rejected (`net/http.spl`, `net/__init__.spl`,
+`file_system/utilities.spl`, `lsp/handlers/completion.spl`,
+`engine/physics/joints.spl`, `diagram/__init__.spl`, `df/mod.spl`,
+`message_transfer.spl`) and checked the actual resolution target of every
+`use`/`import` line (not just whether the name starts with `std.`) — this is
+the exact check that tripped up `net/tcp.spl` in tranche 2.
+
+**Rejected this pass, with evidence:**
+
+- `net/http.spl` (`27db0254...`, sync=async=gc_async, gc_sync
+  `a36bcf35...` divergent) — imports `use std.net.sffi.{...}`. Checked
+  `net/sffi.spl` directly: it is **4 genuinely different per-tree files**
+  (`1f7a9de0.../9fdd1d55.../f22521d2.../7e6ca979...`, no `src/lib/common/net/sffi.spl`
+  sibling). Same per-tree-only-import hazard as `net/tcp.spl` in tranche 2,
+  just disguised behind `std.net.sffi` instead of `std.net.tcp`. The map's
+  earlier "sffi import is a leaf module, not tree-neutral" verdict (line ~60
+  of this doc) was **wrong** — corrected here. SKIP.
+- `net/__init__.spl` (`a7c9a6c1...` sync=async=gc_async, gc_sync
+  `a1dc6b84...` divergent) — imports `std.net.tcp`, `std.net.udp`,
+  `std.net.http`, `std.net.sffi`, all four per-tree-only (confirmed
+  `net/tcp.spl` per tranche 2, `net/sffi.spl` above). SKIP.
+- `df/mod.spl` (`af8b3cc1...`, sync=async only, missing from
+  gc_async_mut/gc_sync_mut) — imports `use std.ndarray.*`. `ndarray/` is a
+  directory present separately in all 4 trees
+  (`src/lib/{nogc_sync_mut,nogc_async_mut,gc_async_mut,gc_sync_mut}/ndarray`),
+  with no `src/lib/common/ndarray` sibling — same per-tree-only hazard. SKIP.
+- `message_transfer.spl` (`d9814988...` sync=async=gc_async, gc_sync
+  `178b5893...` divergent) — imports `use memory.refc_binary.{...}` and
+  `use types.{...}`. Neither resolves inside any of the 3 matching trees:
+  `memory/refc_binary.spl` exists **only** under
+  `src/lib/nogc_async_mut_noalloc/memory/refc_binary.spl` (a 5th tree, not
+  one of the 3 that hold this file), and bare `types.spl` is missing from
+  `nogc_sync_mut` entirely (`find` returns it only under `nogc_async_mut`,
+  `gc_async_mut`, `common`, `crypto/`, `editor/`). The import graph for this
+  file does not resolve cleanly and was not further triaged (its 4 real
+  callers are `src/app/interpreter/memory/*`, a distinct file of the same
+  name, not these lib copies) — left DEFERRED, not SKIP, pending a closer
+  read of how these copies actually get loaded.
+- `lsp/handlers/completion.spl` (`2e8f2ec6...` sync=async=gc_async, gc_sync
+  `734d2dc6...` divergent) — imports `lsp.protocol`, `lsp.transport`,
+  `compiler.treesitter`, all app-layer. Not re-examined further this pass
+  (matches the map's original "needs read — app-layer imports" caution);
+  left DEFERRED.
+- `file_system/utilities.spl` (`5117d312...`, sync=async only) — is a
+  re-export hub (`mod file_system.types/file_ops/dir_ops/path_ops/metadata`,
+  5 sibling modules), not a standalone leaf; moving it requires moving or
+  verifying all 5 siblings too. Not attempted this pass; left DEFERRED.
+
+### Accepted: `engine/physics/joints.spl` (473 lines, sync+async only)
+
+- md5sum: `nogc_sync_mut` = `nogc_async_mut` = `7abec735c675b3fdf25f2f6e536e2462`.
+  Not present in `gc_async_mut` or `gc_sync_mut` (2-tree duplication, not 3/4).
+- Import audit: one import, `use std.common.math.{math_sqrt}` — resolves to
+  `src/lib/common/math.spl`, already a common-owned leaf module (precedent:
+  several existing `src/lib/common/*.spl` files already self-import via
+  `use std.common.*`, e.g. `src/lib/common/cave_ca.spl`,
+  `src/lib/common/base_encoding.spl` — confirmed this pattern works for a
+  file that itself lives under `common`). Passes.
+- Collision check: 11 top-level public symbols (`JointId`, `BodyRef`,
+  `JointForce`, `DistanceJoint`, `RevoluteJoint`, `PrismaticJoint`,
+  `SpringJoint`, `WeldJoint`, `JointType`, `JointEntry`, `JointRegistry`)
+  grepped against every `fn`/`struct`/`enum`/`class`/`val`/`trait`
+  definition under `src/lib/common/` — **0 collisions**.
+- Moved to `src/lib/common/engine/physics/joints.spl` (473 lines, unchanged).
+  The 2 identical tree copies (`nogc_sync_mut`, `nogc_async_mut`) replaced
+  with a 5-line `pub use std.common.engine.physics.joints*` delegator, same
+  comment style as the `testing/mock/builder.spl` precedent (`764913af784`).
+  `gc_async_mut`/`gc_sync_mut` never had this file — nothing to touch there.
+- Callers: `grep -rln 'physics.joints\|engine\.physics\.joints'` found
+  `test/01_unit/app/io/rapier2d_ffi_spec.spl`,
+  `test/03_system/engine/physics_joints_spec.spl`, plus mirrored copies
+  under `test/unit/` and `test/system/` (pre-existing test-tree
+  duplication, not touched).
+- Verification (real specs, no throwaway needed):
+  - `bin/simple test test/03_system/engine/physics_joints_spec.spl` ->
+    `Results: 8 total, 8 passed, 0 failed`.
+  - `bin/simple test test/01_unit/app/io/rapier2d_ffi_spec.spl` ->
+    `Results: 1 total, 1 passed, 0 failed`.
+  - Additionally wrote/ran/deleted a throwaway spec
+    (`test/01_unit/lib/std/dedup_throwaway/joints_diagram_delegator_throwaway_spec.spl`)
+    importing `std.nogc_async_mut.engine.physics.joints.{JointId}` to
+    directly exercise the `nogc_async_mut` delegator (the two real specs
+    above only reach the `nogc_sync_mut` copy) -> `Results: 2 total, 2
+    passed, 0 failed` (this run combined the diagram check too — see below).
+    Deleted before commit, not committed.
+
+Net line delta: -946 (two 473-line duplicates removed) + 473 (common owner)
++ 10 (two 5-line delegators) = **-463 lines**, zero behavior change, zero
+regression.
+
+### Accepted: `diagram/__init__.spl` (500 lines, sync+async only)
+
+- md5sum: `nogc_sync_mut` = `nogc_async_mut` = `45b31b2eef5e1a0708235e5fde9cae7c`.
+  Not present in `gc_async_mut` or `gc_sync_mut` (2-tree duplication).
+- Import audit: zero `use`/`mod`/`import` lines — passes (pure logic, a
+  documented "stub implementation for test compatibility").
+- Collision check: 17 top-level public symbols (`CallType`, `CallEvent`,
+  `CallEventRecorder`, `record_call`, `record_return`, `DiagramConfig`,
+  `_matches_pattern`, `_get_participant`, `_filter_events`,
+  `SequenceGenerator`, `generate_sequence`, `to_mermaid_sequence`,
+  `ClassDiagramGenerator`, `generate_class_diagram`, `to_mermaid_class`,
+  `ArchDiagramGenerator`, `generate_arch_diagram`, `to_mermaid_arch`)
+  grepped against every `fn`/`struct`/`enum`/`class`/`val`/`trait`
+  definition under `src/lib/common/` — **0 collisions**.
+- Moved to `src/lib/common/diagram/__init__.spl` (500 lines, unchanged). The
+  2 identical tree copies (`nogc_sync_mut`, `nogc_async_mut`) replaced with a
+  4-line `pub use std.common.diagram*` delegator, same comment style as
+  precedent. `gc_async_mut`/`gc_sync_mut` never had this file.
+- Callers: `grep -rln` for diagram usage found real production importers
+  (`src/compiler_rust/lib/std/src/diagram/integration.spl`,
+  `src/compiler_rust/lib/std/src/spec/diagram_integration.spl` — both Rust-seed
+  mirror paths, out of scope for this `src/lib` merge) and 4 real spec
+  families under `test/01_unit/lib/std/diagram/`
+  (`recorder_spec.spl`, `sequence_gen_spec.spl`, `class_gen_spec.spl`,
+  `arch_gen_spec.spl`), each mirrored under `test/unit/`.
+- Verification: ran all 4 real spec files against the merged `nogc_sync_mut`
+  delegator. **Pre-existing baseline failures were separately confirmed by
+  temporarily restoring each tree copy to its `HEAD` (pre-merge) content,
+  re-running, and diffing the `Results:` line** — every failure below is
+  identical before and after the merge, so none is attributable to this
+  change:
+  - `recorder_spec.spl`: `Results: 24 total, 24 passed, 0 failed` (before
+    and after — clean).
+  - `sequence_gen_spec.spl`: `Results: 18 total, 17 passed, 1 failed`
+    (before AND after — pre-existing, unrelated failure, unaffected by the
+    delegator).
+  - `class_gen_spec.spl`: `Results: 14 total, 11 passed, 3 failed` (before
+    AND after — pre-existing).
+  - `arch_gen_spec.spl`: `Results: 17 total, 15 passed, 2 failed` (before
+    AND after — pre-existing).
+  - Throwaway spec (see joints section above) additionally confirmed
+    `std.nogc_async_mut.diagram.{CallType}` resolves through the
+    `nogc_async_mut` delegator (the 4 real specs above only reach the
+    `nogc_sync_mut` copy) -> included in the `Results: 2 total, 2 passed, 0
+    failed` throwaway run. Deleted before commit.
+
+Net line delta: -1000 (two 500-line duplicates removed) + 500 (common
+owner) + 8 (two 4-line delegators) = **-492 lines**, zero *new* failures
+(4 pre-existing sequence/class/arch failures reproduced identically on
+`HEAD`, unrelated to this merge — see
+`doc/08_tracking/bug/` for future filing if not already tracked).
+
+**Tranche 4 total net line delta: -463 + -492 = -955 lines** across the 2
+merged targets.
+
+Files touched (absolute paths):
+- `/mnt/data/worktrees/simple-main/src/lib/common/engine/physics/joints.spl` (new)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/engine/physics/joints.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/engine/physics/joints.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/common/diagram/__init__.spl` (new)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_sync_mut/diagram/__init__.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/src/lib/nogc_async_mut/diagram/__init__.spl` (delegator)
+- `/mnt/data/worktrees/simple-main/doc/08_tracking/dedup/cross_tree_duplication_map_2026-08-18.md` (this section)
