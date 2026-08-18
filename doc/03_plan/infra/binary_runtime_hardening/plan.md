@@ -65,3 +65,17 @@ Every C-to-Simple migration MUST, before the C is retired:
    length 0..N, byte classes (0/127/128/255), domain boundary values,
    invalid/reserved encodings, UTF-8 multibyte.
 3. Published KATs stay alongside the bulk loop.
+
+## Fix test standard (user directive, 2026-08-18)
+
+Every FIX (compiler, runtime, library, script) must land with:
+1. **A reproduce test** — a spec that fails on the pre-fix code and passes on
+   the fixed code, encoding the exact reported shape (same input, same call
+   pattern). A fix whose only evidence is "the old symptom went away" is
+   incomplete.
+2. **Similar-case tests** — the neighboring shapes the same defect class
+   could hit (e.g. a fix for `to_hex` bounds also tests `from_hex` bounds;
+   an import-resolution fix also tests the aliased and qualified forms).
+   Derive them from the defect class, not just the one reported instance.
+3. Both live at the mirror `test/` path of the fixed file and are cited in
+   the bug doc's resolution note.
