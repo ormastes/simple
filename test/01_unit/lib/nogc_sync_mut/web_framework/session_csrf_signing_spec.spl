@@ -1,0 +1,95 @@
+# @req REQ-WEBFW-SIGNING-EXECUTES
+#
+# Reproduce + defect-class cover for the "never compiled" class recorded in
+# doc/08_tracking/bug/never_compiled_code_sweep_2026-08-18.md.
+#
+# `session.spl:compute_signature` (session-cookie signing) and
+# `csrf_integration.spl:csrf_token_for_session` (CSRF tokens) each bound
+# `hmac_sha256(...)`, declared `-> text` (common/crypto/hmac.spl:12, returns
+# lowercase HEX), and passed it to a file-local `bytes_to_hex(bytes: [i64])`.
+# `text` and `[i64]` cannot unify, so BOTH functions had a hard type error and
+# had therefore NEVER EXECUTED — while shipping in src/lib and looking finished.
+#
+# The root cause is not the type error. It is that no spec ever CALLED either
+# function: both files pass the basename coverage test, so file-level coverage
+# was structurally blind to it. This spec exists to make that impossible again.
+#
+# Oracle is EXTERNAL, not self-consistency: expected digests are from
+#   printf '%s' "<data>" | openssl dgst -sha256 -hmac "<key>" -r
+# so a wrong-but-self-consistent implementation still fails here.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.nogc_sync_mut.web_framework.session.{compute_signature}
+use std.nogc_sync_mut.web_framework.csrf_integration.{csrf_token_for_session}
+
+describe "web_framework signing paths actually execute":
+
+    # ---- reproducing: these calls previously could not run at all ----------
+    it "POSITIVE CONTROL: compute_signature runs and returns a 64-char hex digest":
+        # Before the fix this line could not execute: the function body had a
+        # type error, so any call died with
+        #   semantic: type mismatch: cannot convert string to int
+        val sig = compute_signature("user_42|role=admin", "s3cr3t-key")
+        assert_true(sig != "")
+        assert_equal(sig.len(), 64)
+
+    it "POSITIVE CONTROL: csrf_token_for_session runs and returns a 64-char hex token":
+        val tok = csrf_token_for_session("session_abc", "my-secret")
+        assert_true(tok != "")
+        assert_equal(tok.len(), 64)
+
+    # ---- external oracle: the digests must be RIGHT, not merely produced ---
+    it "compute_signature matches the openssl HMAC-SHA256 oracle":
+        # printf '%s' "user_42|role=admin" | openssl dgst -sha256 -hmac "s3cr3t-key"
+        assert_equal(
+            compute_signature("user_42|role=admin", "s3cr3t-key"),
+            "76e6d0e8d2475fc78a88f884145dd586abd43904408523306526b462f6b6934d")
+
+    it "csrf_token_for_session matches the openssl HMAC-SHA256 oracle":
+        # The token is HMAC over the message "csrf:{session_id}".
+        # printf '%s' "csrf:session_abc" | openssl dgst -sha256 -hmac "my-secret"
+        assert_equal(
+            csrf_token_for_session("session_abc", "my-secret"),
+            "36129a1d3ec8f47c11d9006e31a7d1993f9f094eee4157518092f316461eeff5")
+
+    # ---- defect class: the properties a signature/token must have ---------
+    it "output is lowercase hex only":
+        val sig = compute_signature("payload", "key")
+        val allowed = "0123456789abcdef"
+        var i = 0
+        while i < sig.len():
+            assert_true(allowed.contains(sig.char_at(i)))
+            i = i + 1
+
+    it "is deterministic for identical inputs":
+        assert_equal(
+            compute_signature("same-data", "same-key"),
+            compute_signature("same-data", "same-key"))
+        assert_equal(
+            csrf_token_for_session("sid-1", "sec-1"),
+            csrf_token_for_session("sid-1", "sec-1"))
+
+    it "changes when the SECRET changes (the security property)":
+        # If this failed, the secret would not be participating and any caller
+        # could forge a signature.
+        assert_true(
+            compute_signature("data", "secret-A") != compute_signature("data", "secret-B"))
+        assert_true(
+            csrf_token_for_session("sid", "secret-A") != csrf_token_for_session("sid", "secret-B"))
+
+    it "changes when the DATA changes (no collision on a one-char edit)":
+        assert_true(
+            compute_signature("amount=10", "k") != compute_signature("amount=90", "k"))
+
+    it "binds a CSRF token to its session id":
+        # Tokens must not be transplantable between sessions.
+        assert_true(
+            csrf_token_for_session("session_a", "s") != csrf_token_for_session("session_b", "s"))
+
+    it "handles empty data and empty session id without failing":
+        assert_equal(compute_signature("", "k").len(), 64)
+        assert_equal(csrf_token_for_session("", "s").len(), 64)
+
+    it "handles UTF-8 multibyte input":
+        # Key and data are UTF-8 text; multibyte content must not truncate.
+        assert_equal(compute_signature("héllo wörld ✓", "kéy").len(), 64)

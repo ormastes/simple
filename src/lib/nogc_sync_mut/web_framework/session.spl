@@ -29,7 +29,13 @@ val decoded = SignedCookieSession.decode(cookie, "my-secret-key")
 use std.database.{SdnDatabase, SdnTable, SdnRow}
 use std.database.sql.connection.{Database}
 use std.database.sql.types.{DbValue, DbError}
-use std.crypto.hmac.{hmac_sha256}
+# NOT `hmac_sha256`: THREE definitions share that exact name and signature
+# (common/crypto/hmac.spl:12, io/crypto_sffi.spl:96, app/io/crypto_ffi.spl:96),
+# so the call mis-dispatched to a non-pure-Simple variant returning a WRONG
+# digest. `hmac_sha256_bytes` is the only definition of its name in the tree.
+# See doc/08_tracking/bug/hmac_sha256_name_collision_wrong_digest_2026-08-18.md
+use std.common.crypto.hmac.{hmac_sha256_bytes}
+use std.common.crypto.types.{text_to_bytes}
 
 # ============================================================================
 # Session Store (DB-backed)
@@ -690,31 +696,17 @@ fn generate_session_id() -> text:
     parts.join("")
 
 fn compute_signature(data: text, secret: text) -> text:
-    """Compute HMAC-SHA256 signature as hex string."""
-    val hash_bytes = hmac_sha256(secret, data)
-    bytes_to_hex(hash_bytes)
+    """Compute HMAC-SHA256 signature as hex string.
 
-fn bytes_to_hex(bytes: [i64]) -> text:
-    """Convert byte array to hex string."""
-    var parts: [text] = []
-    for b in bytes:
-        val hi = (b / 16) % 16
-        val lo = b % 16
-        parts.push(hex_digit(hi))
-        parts.push(hex_digit(lo))
-    parts.join("")
+    `hmac_sha256` already returns lowercase hex (crypto/hmac.spl:11-13), so it
+    is returned directly. This previously fed the hex TEXT into a local
+    `bytes_to_hex(bytes: [i64])`, a type error that meant this function had
+    never executed — see
+    doc/08_tracking/bug/never_compiled_code_sweep_2026-08-18.md.
+    """
+    _webfw_digest_to_hex(hmac_sha256_bytes(text_to_bytes(secret), text_to_bytes(data)))
 
-fn hex_digit(n: i64) -> text:
-    """Convert 0-15 to hex character."""
-    if n < 10:
-        return "{n}"
-    match n:
-        10: "a"
-        11: "b"
-        12: "c"
-        13: "d"
-        14: "e"
-        _: "f"
+
 
 use std.io_runtime.{time_now_unix_micros}
 
@@ -725,3 +717,17 @@ extern fn rt_random_i64() -> i64
 
 fn current_timestamp() -> i64:
     time_now_unix_micros() / 1000000
+
+# Uniquely-named on purpose: `bytes_to_hex` has TEN definitions across src/lib
+# (including an UNTYPED `pub fn bytes_to_hex(data)` in common/serialization),
+# and the co-compiled ambiguous-name fallback picked one that renders each byte
+# as 8 hex digits, silently corrupting the digest. Do not rename this to
+# `bytes_to_hex`. See doc/08_tracking/bug/hmac_sha256_name_collision_wrong_digest_2026-08-18.md
+fn _webfw_digest_to_hex(bytes: [i64]) -> text:
+    """Render a byte list as lowercase hex, 2 chars per byte."""
+    val digits = "0123456789abcdef"
+    var parts: [text] = []
+    for b in bytes:
+        parts.push(digits.char_at((b / 16) % 16))
+        parts.push(digits.char_at(b % 16))
+    parts.join("")

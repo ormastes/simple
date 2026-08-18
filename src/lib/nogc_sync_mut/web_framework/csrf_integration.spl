@@ -19,7 +19,13 @@ if not valid:
 """
 
 use std.http_server.types.{HttpRequestData}
-use std.crypto.hmac.{hmac_sha256}
+# NOT `hmac_sha256`: THREE definitions share that exact name and signature
+# (common/crypto/hmac.spl:12, io/crypto_sffi.spl:96, app/io/crypto_ffi.spl:96),
+# so the call mis-dispatched to a non-pure-Simple variant returning a WRONG
+# digest. `hmac_sha256_bytes` is the only definition of its name in the tree.
+# See doc/08_tracking/bug/hmac_sha256_name_collision_wrong_digest_2026-08-18.md
+use std.common.crypto.hmac.{hmac_sha256_bytes}
+use std.common.crypto.types.{text_to_bytes}
 
 # ============================================================================
 # CSRF Token Generation
@@ -40,8 +46,11 @@ fn csrf_token_for_session(session_id: text, secret: text) -> text:
         Hex-encoded CSRF token
     """
     val message = "csrf:{session_id}"
-    val hash_bytes = hmac_sha256(secret, message)
-    bytes_to_hex(hash_bytes)
+    # `hmac_sha256` already returns lowercase hex (crypto/hmac.spl:11-13).
+    # This previously passed that hex TEXT to a local `bytes_to_hex(bytes: [i64])`
+    # — a type error, so CSRF token generation had never executed. See
+    # doc/08_tracking/bug/never_compiled_code_sweep_2026-08-18.md
+    _webfw_digest_to_hex(hmac_sha256_bytes(text_to_bytes(secret), text_to_bytes(message)))
 
 # ============================================================================
 # CSRF Token Verification
@@ -142,24 +151,16 @@ fn get_csrf_header(request: HttpRequestData) -> text:
             return header.1.trim()
     ""
 
-fn bytes_to_hex(bytes: [i64]) -> text:
-    """Convert byte array to hex string."""
+# Uniquely-named on purpose: `bytes_to_hex` has TEN definitions across src/lib
+# (including an UNTYPED `pub fn bytes_to_hex(data)` in common/serialization),
+# and the co-compiled ambiguous-name fallback picked one that renders each byte
+# as 8 hex digits, silently corrupting the digest. Do not rename this to
+# `bytes_to_hex`. See doc/08_tracking/bug/hmac_sha256_name_collision_wrong_digest_2026-08-18.md
+fn _webfw_digest_to_hex(bytes: [i64]) -> text:
+    """Render a byte list as lowercase hex, 2 chars per byte."""
+    val digits = "0123456789abcdef"
     var parts: [text] = []
     for b in bytes:
-        val hi = (b / 16) % 16
-        val lo = b % 16
-        parts.push(hex_digit(hi))
-        parts.push(hex_digit(lo))
+        parts.push(digits.char_at((b / 16) % 16))
+        parts.push(digits.char_at(b % 16))
     parts.join("")
-
-fn hex_digit(n: i64) -> text:
-    """Convert 0-15 to hex character."""
-    if n < 10:
-        return "{n}"
-    match n:
-        10: "a"
-        11: "b"
-        12: "c"
-        13: "d"
-        14: "e"
-        _: "f"
