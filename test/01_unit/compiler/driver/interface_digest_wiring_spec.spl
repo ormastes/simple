@@ -1,0 +1,92 @@
+"""
+# Interface Digest Wiring Specification
+
+**Category:** Infrastructure
+**Wires:** compiler.driver.cache.action_key.interface_digest_of — first real
+consumer (recorded into SmfManifestEntry.iface_digest, verified on load as a
+level-gated diagnostic).
+
+## Overview
+
+Contract of the textual interface digest (`interface_digest_of_source`):
+deterministic; sensitive to declaration-header (signature) edits; insensitive
+to body-only edits. Plus the three typed verdicts of
+`smf_manifest_entry_iface_verdict` (match / mismatch / absent) and the
+additive manifest round-trip (old rows parse with an absent digest).
+
+Honest limits of the textual v1 extractor are asserted, not hidden: struct
+FIELD lines are not part of the digest (documented in action_key.spl).
+"""
+
+use std.spec.*
+use compiler.driver.cache.action_key.{interface_digest_of, interface_digest_of_source, source_interface_parts}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_iface, smf_manifest_entry_iface_verdict, iface_digest_verdict_text, smf_manifest_to_sdn, smf_manifest_from_sdn, smf_manifest_new, smf_manifest_update, smf_manifest_find}
+
+val SRC_A: text = "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn hello() -> text:\n    \"hi\"\n"
+# Same signatures as SRC_A, different BODY only.
+val SRC_A_BODY_EDIT: text = "fn add(a: i64, b: i64) -> i64:\n    val t = a\n    t + b\n\nfn hello() -> text:\n    \"hello there\"\n"
+# Signature change: add's return type differs.
+val SRC_A_SIG_EDIT: text = "fn add(a: i64, b: i64) -> f64:\n    a + b\n\nfn hello() -> text:\n    \"hi\"\n"
+
+fn entry_with(iface: text) -> SmfManifestEntry:
+    smf_manifest_entry_new_with_iface("/tmp/x.spl", "/tmp/x.smf", 7, "cranelift", 0, false, true, false, "dev", [], iface)
+
+describe "interface_digest_of_source contract":
+    it "is deterministic for the same source":
+        expect(interface_digest_of_source(SRC_A)).to_equal(interface_digest_of_source(SRC_A))
+
+    it "changes when a fn signature changes":
+        expect(interface_digest_of_source(SRC_A) == interface_digest_of_source(SRC_A_SIG_EDIT)).to_equal(false)
+
+    it "is unchanged when only a fn body changes":
+        expect(interface_digest_of_source(SRC_A)).to_equal(interface_digest_of_source(SRC_A_BODY_EDIT))
+
+    it "extracts only declaration headers as parts":
+        val parts = source_interface_parts(SRC_A)
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("fn add(a: i64, b: i64) -> i64:")
+
+    it "matches interface_digest_of over the extracted parts":
+        expect(interface_digest_of_source(SRC_A)).to_equal(interface_digest_of(source_interface_parts(SRC_A)))
+
+describe "smf_manifest_entry_iface_verdict":
+    it "returns match when recorded digest equals recomputed":
+        val v = smf_manifest_entry_iface_verdict(entry_with(interface_digest_of_source(SRC_A)), SRC_A)
+        expect(iface_digest_verdict_text(v)).to_equal("match")
+
+    it "returns mismatch when the interface changed since compile":
+        val v = smf_manifest_entry_iface_verdict(entry_with(interface_digest_of_source(SRC_A)), SRC_A_SIG_EDIT)
+        expect(iface_digest_verdict_text(v)).to_equal("mismatch")
+
+    it "still matches when only a body changed (that is the point)":
+        val v = smf_manifest_entry_iface_verdict(entry_with(interface_digest_of_source(SRC_A)), SRC_A_BODY_EDIT)
+        expect(iface_digest_verdict_text(v)).to_equal("match")
+
+    it "returns absent for an old row with no recorded digest":
+        val v = smf_manifest_entry_iface_verdict(entry_with(""), SRC_A)
+        expect(iface_digest_verdict_text(v)).to_equal("absent")
+
+    it "returns absent when the live source is unreadable (fail closed on evidence)":
+        val v = smf_manifest_entry_iface_verdict(entry_with(interface_digest_of_source(SRC_A)), "")
+        expect(iface_digest_verdict_text(v)).to_equal("absent")
+
+describe "manifest round-trip carries the digest additively":
+    it "serializes and re-parses iface_digest":
+        val d = interface_digest_of_source(SRC_A)
+        var m = smf_manifest_new()
+        m = smf_manifest_update(m, entry_with(d))
+        val m2 = smf_manifest_from_sdn(smf_manifest_to_sdn(m))
+        match smf_manifest_find(m2, "/tmp/x.spl"):
+            case Some(e):
+                expect(e.iface_digest).to_equal(d)
+            case nil:
+                expect(true).to_equal(false)
+
+    it "parses an old 11-column row with an absent digest (never breaks old readers)":
+        val old_row = "entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families|\n    \"/tmp/y.spl\", \"/tmp/y.smf\", 5, 1, \"cranelift\", 0, 0, 1, 0, \"dev\", \"\""
+        val m = smf_manifest_from_sdn("smf_manifest:\n  version: 3\n  updated_at: 1\n\n" + old_row)
+        match smf_manifest_find(m, "/tmp/y.spl"):
+            case Some(e):
+                expect(e.iface_digest).to_equal("")
+            case nil:
+                expect(true).to_equal(false)
