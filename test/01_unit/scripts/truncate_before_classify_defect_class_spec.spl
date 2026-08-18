@@ -1,0 +1,90 @@
+"""
+# Defect CLASS: truncating a diagnostic BEFORE classifying it
+
+Class statement: when a tool derives a category from a message, any truncation
+must happen strictly AFTER the match. Truncate-then-match silently drops every
+input whose distinguishing token sits past the cut, and — the reason it is
+dangerous rather than merely untidy — it fails toward the catch-all bucket, so
+the output still looks complete. The concrete instance is
+`scripts/check/check-no-jit-module-drop.shs`; see
+`jit_drop_guard_bucket_truncation_spec.spl`.
+
+This spec is deliberately NOT about that one script: it models both orders over
+the same inputs and asserts they diverge exactly where the class predicts,
+INCLUDING a positive control (a short message) where the two orders must agree
+— without that control, "they differ" would also be satisfied by a broken
+classifier that always disagreed.
+
+Run with: bin/simple test test/01_unit/scripts/truncate_before_classify_defect_class_spec.spl
+"""
+
+use std.spec.*
+
+val _CUT = 160
+
+fn _truncate(s: text) -> text:
+    if s.length() <= _CUT:
+        return s
+    return s.substring(0, _CUT)
+
+# The classifier, as a pure function of whatever text it is handed.
+fn _classify(msg: text) -> text:
+    if msg.contains("Undefined("):
+        return "undefined"
+    if msg.contains("cannot resolve import"):
+        return "import"
+    if msg.contains("SMF emission failed"):
+        return "emit"
+    if msg.contains("Failed to parse object"):
+        return "codegen"
+    return "other"
+
+fn _classify_after_truncation(msg: text) -> text:
+    return _classify(_truncate(msg))
+
+fn _pad(prefix: text, n: i64) -> text:
+    var out = prefix
+    while out.length() < n:
+        out = out + "x"
+    return out
+
+describe "truncate-then-classify loses categories; classify-then-truncate does not":
+    """
+    As a maintainer of any diagnostic-bucketing tool, I need the category
+    decided on the whole message, so that a long path cannot launder a known
+    cause into the catch-all bucket.
+    """
+
+    it "a keyword past the cut is lost when the message is truncated first":
+        val msg = _pad("error: compile failed (", 150) + "): SMF emission failed: no code"
+        assert_true(msg.length() > _CUT)
+        expect(_classify(msg)).to_equal("emit")
+        expect(_classify_after_truncation(msg)).to_equal("other")
+
+    it "holds for every member of the family, not just one keyword":
+        val a = _pad("error: a (", 150) + "): cannot resolve import `mem`"
+        val b = _pad("error: b (", 150) + "): Undefined(\"undefined identifier: Port\")"
+        val c = _pad("error: c (", 150) + "): Failed to parse object into SMF"
+        expect(_classify(a)).to_equal("import")
+        expect(_classify(b)).to_equal("undefined")
+        expect(_classify(c)).to_equal("codegen")
+        expect(_classify_after_truncation(a)).to_equal("other")
+        expect(_classify_after_truncation(b)).to_equal("other")
+        expect(_classify_after_truncation(c)).to_equal("other")
+
+    it "POSITIVE CONTROL: a message shorter than the cut classifies identically both ways":
+        # Without this, the assertions above would also pass for a classifier
+        # that was simply broken in all cases.
+        val short = "error: x: SMF emission failed"
+        assert_true(short.length() <= _CUT)
+        expect(_classify(short)).to_equal("emit")
+        expect(_classify_after_truncation(short)).to_equal("emit")
+
+    it "POSITIVE CONTROL: a genuinely uncategorised long message is `other` both ways":
+        val unknown = _pad("error: d (", 150) + "): some cause nobody has a bucket for"
+        expect(_classify(unknown)).to_equal("other")
+        expect(_classify_after_truncation(unknown)).to_equal("other")
+
+    it "truncation still bounds what gets RECORDED":
+        val msg = _pad("error: e (", 150) + "): SMF emission failed: no code"
+        expect(_truncate(msg).length()).to_equal(_CUT)

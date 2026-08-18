@@ -1,0 +1,70 @@
+"""
+# Reproducing spec: the jit-module-drop fence bucketed a TRUNCATED error line
+
+`scripts/check/check-no-jit-module-drop.shs` splits its NOT-MEASURED remainder
+into cause buckets so the coverage gap is not one opaque number. Until
+2026-08-18 it truncated the compiler's first `error:` line to 160 characters
+and then matched the `case` patterns against the TRUNCATED text:
+
+    reason="$(grep -m1 -E '^error' "$log" | cut -c1-160)"
+    case "$reason" in ... *'SMF emission failed'*) ...
+
+Repo paths are long and the compiler prints the path twice, so the keyword was
+routinely cut off. Measured on this worktree (run
+build/check/jit-module-drop/run-379301-1787045145, 419 selected / 180 NOT
+MEASURED): 33 of the 35 `other` entries were truncated mid-message, and among
+them 4 were `SMF emission failed` — an EXISTING bucket the truncation was
+hiding — plus 5 `cannot resolve import`, 5 `has no field` and 6 `Failed to
+parse object`.
+
+Nothing about the PASS/FAIL verdict changed: this only mislabels files that
+were already NOT MEASURED. The fence's own explanation of its gap was wrong,
+which is the defect.
+
+Fix: keep the full line for matching, truncate only for the recorded reason.
+
+Run with: bin/simple test test/01_unit/scripts/jit_drop_guard_bucket_truncation_spec.spl
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+
+val _GUARD = "scripts/check/check-no-jit-module-drop.shs"
+
+# The real first-error line for src/lib/gc_async_mut/hardware/rv64/pipeline/types.spl,
+# recorded by the run above. Character 160 lands inside "fai|led".
+val _REAL = "error: compile failed (src/lib/gc_async_mut/hardware/rv64/pipeline/types.spl): semantic: src/lib/gc_async_mut/hardware/rv64/pipeline/types.spl: SMF emission failed: no code"
+
+fn _truncate160(s: text) -> text:
+    if s.length() <= 160:
+        return s
+    return s.substring(0, 160)
+
+describe "the fence classifies on the full error line, not the truncated one":
+    """
+    As the reader of a NOT-MEASURED breakdown, I need each unmeasured file
+    attributed to its real cause, so that the gap is actionable instead of
+    collapsing into `other`.
+    """
+
+    it "the recorded real message loses its bucket keyword at 160 characters":
+        # RED-side evidence: this is exactly what the old code matched on.
+        assert_true(_REAL.contains("SMF emission failed"))
+        assert_false(_truncate160(_REAL).contains("SMF emission failed"))
+
+    it "the guard now matches the case on the untruncated line":
+        val src = read_file(_GUARD)
+        assert_true(src.contains("reason_full=\"$(grep -m1 -E '^error' \"$log\" 2>/dev/null)\""))
+        assert_true(src.contains("case \"$reason_full\" in"))
+        assert_false(src.contains("case \"$reason\" in"))
+
+    it "the reason is still truncated for the record, from the full line":
+        val src = read_file(_GUARD)
+        assert_true(src.contains("cut -c1-160"))
+        assert_true(src.contains("printf '%s' \"$reason_full\" | cut -c1-160"))
+
+    it "the buckets the truncation was hiding are now named in the breakdown":
+        val src = read_file(_GUARD)
+        assert_true(src.contains("import=$u_import"))
+        assert_true(src.contains("type-error=$u_typeerr"))
+        assert_true(src.contains("codegen=$u_codegen"))
