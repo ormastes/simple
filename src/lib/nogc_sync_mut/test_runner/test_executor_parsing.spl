@@ -8,6 +8,7 @@
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.io.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out}
 use std.io.{env_get}
 use std.sffi.cli.{cli_get_args}
 use std.string_core.{char_code}
@@ -440,7 +441,11 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
     # carry failed: 0 so they cannot inflate the failed count -- but the
     # non-empty error keeps is_ok() false, so they cannot be swallowed into a
     # green run either. CRASHED and ERROR remain real failures.
-    if exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
+    # process_bounded_timed_out is the EXACT runtime contract (trailing
+    # "\nTIMEOUT\n" marker); the contains() disjuncts are kept for the
+    # process_run_timeout paths, whose "[TIMEOUT: Process killed after Ns]"
+    # note is appended by the Simple layer itself and is not trailing.
+    if process_bounded_timed_out(exit_code, stderr) or (exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out"))):
         return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT: no result after {timeout_secs}s (unverified)", timed_out: true, cached: false)
 
     # Frozen contract for a signal death (128 + signo):
@@ -473,6 +478,12 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after writing its crash sentinel", timed_out: false, cached: false)
         if has_crash_evidence(stdout + "\n" + stderr):
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after emitting a fault diagnostic; last output: {extract_error_message(stdout + "\n" + stderr)}", timed_out: false, cached: false)
+        if exit_code == -1:
+            # -1 without the runtime's trailing TIMEOUT marker is NOT a signal
+            # death (those arrive as 128+signo) and NOT a timeout: it is a
+            # spawn/reap failure at the process layer. Label it distinctly so
+            # the three -1-adjacent outcomes never share one message.
+            return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child produced no exit status -- spawn or reap failure at the process layer, not a timeout and not a signal death (unverified)", timed_out: false, cached: false)
         return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TERMINATED: child died by signal with no crash sentinel and no fault diagnostic (unverified -- an external killer such as earlyoom cannot be ruled out)", timed_out: false, cached: false)
 
     # Stdout summaries are presentation, not authenticated execution evidence.

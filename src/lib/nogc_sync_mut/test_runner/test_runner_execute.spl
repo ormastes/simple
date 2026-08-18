@@ -45,13 +45,10 @@ export use nogc_sync_mut.test_runner.test_executor_parsing.{
 }
 
 extern fn rt_getpid() -> i64
-use std.test_runner.test_executor_composite.{
-    run_test_file_composite,
-    extract_base_runtime, extract_platform_layer, extract_arch_from_spec,
-    run_test_file_baremetal, run_test_file_remote,
-    run_test_file_baremetal_via_interpreter, run_test_file_baremetal_qemu,
-    find_baremetal_elf, qemu_binary_for_arch, qemu_machine_for_arch
-}
+# NOTE: composite/baremetal/QEMU lane symbols intentionally NOT imported here.
+# They live behind test_executor_lanes.spl (which eagerly loads GPU/JIT lane
+# executors + ~300 compiler-backend modules, ~40s seed load). Importers that
+# dispatch those lanes use std.test_runner.test_executor_lanes directly.
 
 # A limit breach that KILLED the child from outside says nothing about the code
 # under test -- it is UNVERIFIED, never a failure. Only a limit the test itself
@@ -78,6 +75,21 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
 # =========================================================================
 # Core Execution Modes
 # =========================================================================
+#
+# PER-SPEC PROCESS ISOLATION IS UNCONDITIONAL AND IS NOT A MODE FEATURE.
+# Every run_test_file_* variant below spawns the spec in its OWN child process
+# (process_run_bounded / process_run_with_limits_bounded) regardless of
+# `options.unstable_mode`. This file reads `unstable_mode` NOWHERE, by design:
+# isolation is a PRECONDITION of the outcome contract, not a toggle. The
+# classes CRASHED / TERMINATED / TIMEOUT are derived from a child's exit code
+# and limit_type; without a child there is no exit code to classify, and a
+# segfaulting spec would take the runner down with it. Gating isolation on the
+# flag would therefore make non-unstable runs strictly less able to report the
+# truth, with no compensating benefit.
+# What `unstable_mode` actually controls today is exactly one thing:
+# `fail_fast = false` (src/app/test_runner_new/test_runner_main.spl:205) --
+# i.e. run to the END of both lists. See
+# doc/05_design/infra/test_runner/unstable_mode_scope_finding_2026-08-17.md.
 
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     # Coverage probes are MIR-owned. The HIR tree interpreter never executes
@@ -876,8 +888,9 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
 # Re-export from test_executor_parsing.spl
 export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simple_new_binary, find_runtime_lib_dir, make_result_from_output, build_child_args, coverage_wrapper_suffix, build_coverage_wrapper, extract_coverage_sdn, strip_coverage_blocks, COVERAGE_BEGIN, COVERAGE_END, COMPILER_COVERAGE_BEGIN, COMPILER_COVERAGE_END, list_tests_static, extract_static_test_name, extract_error_message, parse_test_output, extract_number_before, extract_number_after_colon}
 
-# Re-export from test_executor_composite.spl
-export use std.test_runner.test_executor_composite.{run_test_file_composite, extract_base_runtime, extract_platform_layer, extract_arch_from_spec, run_test_file_baremetal, run_test_file_remote, run_test_file_baremetal_via_interpreter, run_test_file_baremetal_qemu, find_baremetal_elf, qemu_binary_for_arch, qemu_machine_for_arch}
+# Composite/baremetal/QEMU lane symbols are deliberately NOT re-exported here
+# (would reintroduce the eager GPU/compiler-backend closure). Import them from
+# std.test_runner.test_executor_lanes instead.
 
 # Exports from this file
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
