@@ -174,7 +174,11 @@ fn gzip_compress_none(data):
 # VALIDATION AND METADATA
 # =============================================================================
 
-# Validate GZIP data integrity
+# Validate GZIP data integrity.
+# Checks structural framing (magic bytes, header, footer) AND performs a full
+# inflate of the payload, comparing the decompressed bytes' CRC32 and length
+# (mod 2^32) against the footer trailer. A stream with valid framing but a
+# corrupted deflate body or corrupted trailer fails validation (fail closed).
 fn gzip_validate(data):
     if data == nil:
         return false
@@ -194,13 +198,35 @@ fn gzip_validate(data):
     if header_info == nil:
         return false
 
+    val header_size = gzip_header_size(header_info)
+
     # Parse footer
     val footer_offset = data.len() - 8
     val footer_info = gzip_footer_parse(data, footer_offset)
     if footer_info == nil:
         return false
 
-    return true
+    if footer_offset < header_size:
+        return false
+
+    # Extract compressed payload and inflate it
+    val compressed_size = footer_offset - header_size
+    var compressed: [u8] = []
+    var i = 0
+    loop:
+        if i >= compressed_size:
+            break
+        compressed.push(data[header_size + i])
+        i = i + 1
+
+    val maybe_decompressed = inflate(compressed)
+    if maybe_decompressed == nil:
+        return false
+    val decompressed = maybe_decompressed ?? []
+
+    # Verify CRC32 and ISIZE (mod 2^32) of the decompressed payload against
+    # the footer trailer. Fail closed on any mismatch.
+    return gzip_footer_validate(footer_info, decompressed, decompressed.len())
 
 # Get GZIP metadata
 fn gzip_get_metadata(data):

@@ -1,0 +1,60 @@
+# Regression: gzip_validate must reject corrupted payloads, not just
+# structurally-well-formed frames.
+#
+# doc/08_tracking/bug/gzip_validate_structural_only_no_crc_2026-08-18.md
+# recorded that `gzip_validate` only checked magic bytes + header/footer
+# parse, never inflating the payload or comparing CRC32/ISIZE against the
+# trailer — so a stream with intact framing but a corrupted deflate body
+# passed validation. Fixed in
+# src/lib/nogc_sync_mut/compression/gzip/compress.spl:gzip_validate by
+# inflating the payload and delegating to gzip_footer_validate (CRC32 +
+# ISIZE mod 2^32), fail-closed on any mismatch — mirroring gzip_decompress.
+use std.spec.*
+use std.nogc_sync_mut.compression.gzip.{gzip_compress, gzip_decompress, gzip_validate}
+
+fn _sample_data(n: i64) -> [u8]:
+    var data: [u8] = []
+    var i = 0
+    while i < n:
+        data.push((i * 7 + 13) % 251)
+        i = i + 1
+    return data
+
+describe "gzip_validate — CRC32 + ISIZE trailer verification":
+    it "REPRODUCE: rejects a corrupted deflate-body byte (previously a false pass)":
+        var z = gzip_compress(_sample_data(100), 6)
+        val mid = z.len() / 2
+        z[mid] = (z[mid] + 1) % 256
+        assert_false(gzip_validate(z))
+
+    it "still accepts a valid roundtrip (no false positives)":
+        val z = gzip_compress(_sample_data(400), 6)
+        assert_true(gzip_validate(z))
+        val back = gzip_decompress(z) ?? []
+        assert_equal(back.len(), 400)
+
+    it "accepts a valid empty-payload gzip stream":
+        var empty: [u8] = []
+        val z = gzip_compress(empty, 6)
+        assert_true(gzip_validate(z))
+
+    it "rejects corrupted CRC trailer bytes":
+        var z = gzip_compress(_sample_data(50), 6)
+        val crc_offset = z.len() - 8
+        z[crc_offset] = z[crc_offset] ^ 0x01
+        assert_false(gzip_validate(z))
+
+    it "rejects a corrupted ISIZE trailer":
+        var z = gzip_compress(_sample_data(50), 6)
+        val isize_offset = z.len() - 4
+        z[isize_offset] = z[isize_offset] ^ 0x01
+        assert_false(gzip_validate(z))
+
+    it "rejects a truncated trailer (footer parse fails)":
+        var z = gzip_compress(_sample_data(50), 6)
+        var truncated: [u8] = []
+        var i = 0
+        while i < z.len() - 3:
+            truncated.push(z[i])
+            i = i + 1
+        assert_false(gzip_validate(truncated))
