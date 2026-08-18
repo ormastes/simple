@@ -71,9 +71,24 @@ Every C-to-Simple migration MUST, before the C is retired:
 | gate | what it proves | verdict measured 2026-08-18 |
 |---|---|---|
 | `scripts/check/check-no-direct-rt.shs` | direct `rt_*` ratchet, structured counts; wired into `pre-push-conflict-tree-guard.shs:837` | `PASS — 14800 file(s) scanned, forbidden=12794` |
-| `scripts/check/check-binary-sspec-evidence.shs` | binary-evidence suites run, are non-vacuous, and contain negative cases (reserved-violation + corruption render) | `PASS — 6 spec(s) checked, 37 example(s) total, 0 vacuous, negative cases present` |
+| `scripts/check/check-binary-sspec-evidence.shs` | binary-evidence suites run, are non-vacuous, and contain negative cases (reserved-violation + corruption render) | `PASS — 6 spec(s) checked, 54 example(s) total, 0 vacuous, negative cases present` |
 
 Both have fatal `--selftest` fixtures and print measured counts — never a bare PASS.
+The evidence floor ratchets up (37 → 46 → 54 on 2026-08-18) as adversarial cases land.
+
+## Delegating mechanical rt_ migration to a small model
+
+Guided haiku handles call-site rewriting well (5 batches, ~40 sites, correct
+provider/comment/quoted-string skips — it correctly refused to rewrite
+`"rt_process_run(cmd, args)"` inside an FFI *generator*). Two guide gaps cost
+real time, so state both explicitly in any such prompt:
+- **Import alias syntax is `use m.{name as alias}`, never `{name: alias}`.**
+  Haiku correctly recognised a name collision and reached for an alias, but
+  guessed `:`, which is a parse error that blocks every spec in the tree.
+- **Rewrite call sites only.** Deleting a local `fn foo(): rt_foo()` wrapper
+  and importing `foo` instead is a public-API change: other modules
+  `use this.module.{foo}`, and that is the shape of
+  `import_triggered_cross_module_symbol_misdispatch_2026-08-18.md`.
 
 ## Fix test standard (user directive, 2026-08-18)
 
