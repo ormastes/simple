@@ -57,6 +57,46 @@ describe "process_run_bounded timeout vs kill discrimination":
         expect(exit_code).to_equal(0)
         expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
 
+    it "does not flag a normal exit 0 as a timeout":
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "echo ok; exit 0"], 5000, 4096)
+        expect(exit_code).to_equal(0)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+
+    it "does not flag a plain nonzero natural exit (3) as a timeout":
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "exit 3"], 5000, 4096)
+        expect(exit_code).to_equal(3)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+
+    it "does not flag a fast child under a generous bound as a timeout":
+        # Child completes in milliseconds; the 8s bound must never fire.
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "true"], 8000, 4096)
+        expect(exit_code).to_equal(0)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+
+    it "does not classify a bare -1 with no marker (external kill collapse) as a timeout":
+        # The interpreter-extern / C-runtime collapse shape: -1 + EMPTY stderr,
+        # child already dead. Must never read as a deadline expiry.
+        expect(process_bounded_timed_out(-1, "")).to_equal(false)
+        expect(process_bounded_timed_out(-1, "some unrelated stderr\n")).to_equal(false)
+
+    it "holds the helper's exit-code boundary exactly (-1, -2, 0, 1)":
+        # Only -1 can ever be a timeout; the marker alone is never sufficient.
+        expect(process_bounded_timed_out(-1, "\nTIMEOUT\n")).to_equal(true)
+        expect(process_bounded_timed_out(-1, "Process timed out")).to_equal(true)
+        expect(process_bounded_timed_out(-1, "x [TIMEOUT: Process killed after 500ms]")).to_equal(true)
+        expect(process_bounded_timed_out(-2, "\nTIMEOUT\n")).to_equal(false)
+        expect(process_bounded_timed_out(0, "\nTIMEOUT\n")).to_equal(false)
+        expect(process_bounded_timed_out(1, "Process timed out")).to_equal(false)
+
+    it "preserves child stderr written before the deadline on a timeout":
+        # The marker is APPENDED; pre-deadline stderr must survive in front.
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "echo early-diagnostic >&2; sleep 30"], 500, 4096)
+        expect(exit_code).to_equal(-1)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(true)
+        expect(stderr).to_contain("early-diagnostic")
+
     it "keeps kill-signal decoding exact on the 128+signo band":
         expect(process_bounded_kill_signal(137)).to_equal(9)
         expect(process_bounded_kill_signal(143)).to_equal(15)
