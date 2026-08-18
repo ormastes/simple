@@ -1,0 +1,110 @@
+#!/bin/sh
+# check-test-runner-exits-after-summary.shs — assert `bin/simple test` EXITS
+# within a bounded time after printing its `Results:` / `Time:` summary.
+#
+# Bug: test runner processes were found spinning at ~100% CPU in USERSPACE
+# (utime climbing, stime 0, no syscalls) long after their summary was complete
+# and their output mtime had stopped advancing. Each spinner holds a test slot
+# (scripts/resource/test-slot.shs, cap 12) and ~3.1 GB RSS for the whole spin.
+# doc/08_tracking/bug/test_runner_spins_at_100pct_after_summary_2026-08-18.md
+#
+# Method: run the runner, record the wall time at which the summary line first
+# appears in its output, then the wall time at which the process exits. The
+# delta is the POST-SUMMARY TAIL. A healthy tail is seconds; a spinner never
+# ends. This measures the tail specifically, so it is not confounded by how
+# long the specs themselves take.
+#
+# Verdict is the LAST line of stdout: PASS/FAIL/ERROR with exit 0/1/2.
+#
+# rc 143/137/144 with no result line is UNVERIFIED -- neither pass nor fail --
+# because those are external kills (monitor/earlyoom/harness), not verdicts.
+# rc 139 IS a real segfault and its case still asserts a prompt exit.
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+SIMPLE="${SIMPLE:-$ROOT/bin/simple}"
+TAIL_BUDGET="${TAIL_BUDGET:-60}"     # seconds allowed between summary and exit
+RUN_BUDGET="${RUN_BUDGET:-1800}"     # hard ceiling for the whole run
+
+[ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked: no runner at $SIMPLE"; exit 2; }
+
+CHECKED=0; FAILED=0; UNVERIFIED=0; NAMES=""; UNAMES=""
+
+# one_case NAME <spec-args...>
+one_case() {
+    _name="$1"; shift
+    CHECKED=$(( CHECKED + 1 ))
+    _out=$(mktemp) || return 0
+
+    _t0=$(date +%s)
+    # Exit status is read on the line AFTER the command, never through a pipe:
+    # a pipeline's $? is the last stage's status and has produced false greens.
+    timeout "$RUN_BUDGET" "$SIMPLE" test "$@" > "$_out" 2>&1 &
+    _rp=$!
+
+    # Poll for the summary line, remembering when it first appeared.
+    _tsum=0
+    while kill -0 "$_rp" 2>/dev/null; do
+        if [ "$_tsum" -eq 0 ] && grep -qE '^(Results:|Time:)' "$_out" 2>/dev/null; then
+            _tsum=$(date +%s)
+        fi
+        sleep 1
+    done
+    wait "$_rp"
+    _rc=$?
+    _texit=$(date +%s)
+    if [ "$_tsum" -eq 0 ]; then
+        grep -qE '^(Results:|Time:)' "$_out" 2>/dev/null && _tsum=$_texit
+    fi
+
+    _has_result=no
+    grep -qE '^(Results:|Time:)' "$_out" 2>/dev/null && _has_result=yes
+
+    # External kill with no result line => UNVERIFIED. Never pass, never fail.
+    case "$_rc" in
+        143|137|144)
+            if [ "$_has_result" = no ]; then
+                UNVERIFIED=$(( UNVERIFIED + 1 )); UNAMES="$UNAMES $_name"
+                printf '  %-22s rc=%-3s UNVERIFIED (external kill, no result line)\n' "$_name" "$_rc"
+                rm -f "$_out"; return 0
+            fi
+            ;;
+    esac
+
+    if [ "$_has_result" = no ]; then
+        # No summary at all: this check has nothing to measure.
+        UNVERIFIED=$(( UNVERIFIED + 1 )); UNAMES="$UNAMES $_name"
+        printf '  %-22s rc=%-3s UNVERIFIED (no summary line emitted)\n' "$_name" "$_rc"
+        rm -f "$_out"; return 0
+    fi
+
+    _tail=$(( _texit - _tsum ))
+    _total=$(( _texit - _t0 ))
+    printf '  %-22s rc=%-3s total=%ss post_summary_tail=%ss (budget %ss)\n' \
+        "$_name" "$_rc" "$_total" "$_tail" "$TAIL_BUDGET"
+    if [ "$_tail" -gt "$TAIL_BUDGET" ]; then
+        FAILED=$(( FAILED + 1 )); NAMES="$NAMES $_name(tail=${_tail}s)"
+    fi
+    rm -f "$_out"
+}
+
+echo "test-runner post-summary exit checks (budget ${TAIL_BUDGET}s)"
+
+# A passing run, a failing run, a zero-spec selection, and a run whose spec
+# crashes (rc 139 is a REAL segfault verdict, and the runner must still exit).
+[ -n "${SPEC_PASS:-}"  ] && one_case passing_run   "$SPEC_PASS"
+[ -n "${SPEC_FAIL:-}"  ] && one_case failing_run   "$SPEC_FAIL"
+[ -n "${SPEC_CRASH:-}" ] && one_case crashing_run  "$SPEC_CRASH"
+one_case zero_specs_selected "test/__no_such_spec_dir_for_this_check__"
+
+[ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$FAILED" -gt 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, $UNVERIFIED unverified, $FAILED exceeded the post-summary budget:$NAMES"
+    exit 1
+fi
+if [ "$CHECKED" -eq "$UNVERIFIED" ]; then
+    echo "ERROR — nothing was checked: all $CHECKED case(s) UNVERIFIED:$UNAMES"
+    exit 2
+fi
+echo "PASS — $CHECKED case(s) checked, $UNVERIFIED unverified, all measured runs exited within ${TAIL_BUDGET}s of their summary"
+exit 0

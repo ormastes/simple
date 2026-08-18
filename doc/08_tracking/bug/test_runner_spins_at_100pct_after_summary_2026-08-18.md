@@ -124,3 +124,176 @@ no result line stays UNVERIFIED regardless.
   State recorded above instead.
 - No code change. The monitor lives in a different tree and the runner's spin
   site is unlocated; neither fix is "small and obvious".
+
+---
+
+## 2026-08-18 — CPU guard root-caused and FIXED; spin site narrowed (not proven)
+
+### 1. Why the CPU guard could not fire — exact, one line
+
+`scripts/resource/kill_simple_monitor.shs` runs under `set -e`. In
+`instant_cpu_pct`:
+
+```sh
+_prev=$(cat "$_f" 2>/dev/null)          # <-- no `|| true`
+printf '%s %s %s\n' ... > "$_f"         # <-- never reached on first sighting
+```
+
+On the **first** sighting of any pid the state file does not exist, `cat` exits
+1, the assignment inherits status 1, and `set -e` **terminates the whole
+monitor** — on the line *before* the `printf` that would have created the state
+file. So: no state file is ever written, no pid ever has a prior sample,
+`instant_cpu_pct` always returns empty, the caller correctly skips,
+`spin_streak` never reaches 3, and the CPU guard is **structurally incapable of
+firing**. `/tmp/.kill_monitor_cpu_1000/` being empty with a `06:36` mtime is not
+a symptom of a slow poll — it is the direct consequence.
+
+The daemon looked healthy: `systemctl --user status` reported `active
+(running)` while systemd respawned the corpse every ~15 s (10 s sleep +
+`RestartSec=5`). **Restart counter was 3735** when found, consistent with the
+last `cpu=` kill at 2026-08-17T06:30 and the rewrite's own 06:36 timestamp.
+
+Two more `set -e` landmines of the same class were found and fixed:
+`_n=$(cat "$_f")` in `spin_streak`, `_holder=$(cat "$LOCKDIR/pid")` in
+`acquire_lock`, and the `tr|sed|head` in `cpu_budget_secs`.
+
+Separately, `cleanup()` ended in `exit 0`, so a fatal startup failure was
+reported to systemd as a clean stop. It now preserves `$?`.
+
+### 2. The "one poll pass takes >45 s" lead is REFUTED
+
+Measured with the new `SLOWPOLL`/`HEARTBEAT` instrumentation, interval 5,
+254 uid-1000 processes on a loaded host:
+`last_poll_secs=0`, `0`, `1`, `0` over 13 polls. The poll pass is sub-second.
+The multi-KB argv `case` operands are **not** a cost problem. The previous
+lane's 45 s observation is better explained by the `set -e` death (the pass
+never completed) plus `kill_hard`'s `sleep 1` per victim when thresholds were
+lowered globally.
+
+### 3. Visibility (a dead guard must be visible)
+
+- **Startup assertion** `selftest_state_dir()`: writes and reads back a probe
+  file in the CPU state dir. On failure it logs `FATAL`, prints to stderr, and
+  **exits non-zero** rather than degrading silently to RSS-only.
+- **`START` line** recording pid, interval, thresholds and state dir.
+- **`HEARTBEAT` line** every `KILL_SIMPLE_HEARTBEAT_SECS` (default 300) with
+  `polls=`, `last_poll_secs=`, `samples=`. A heartbeat that keeps reporting
+  `samples=0` while simple processes run means the CPU guard is dead again;
+  absence of heartbeats means the daemon is.
+- **`SLOWPOLL` line** when a pass exceeds the interval — recorded, not hidden
+  by widening the interval.
+
+### 4. New: `KILL_SIMPLE_ONLY_PIDS` (test-safety allowlist)
+
+Unset in production (no behaviour change). When set, `kill_hard` refuses any
+pid outside the list. This exists because the only previous way to exercise a
+guard was to lower a threshold **globally** — and doing so during this
+investigation killed five other sessions' processes (recorded below).
+
+### 5. Spin site — narrowed, NOT proven
+
+The bug record's `Threads: 5`, leader `S` in `futex_wait_queue` joining one `R`
+thread named `simple-main`, was read as evidence of a stuck worker. It is not:
+`src/compiler_rust/driver/src/main.rs:1096-1112` re-spawns `real_main()` on a
+thread *named* `simple-main` with a 64 MB stack and immediately `join()`s it.
+That topology is the **normal** shape of every run. The spinning thread IS the
+program's main logic, and there is no test-runner worker pool (no
+`thread_spawn`/actor spawn anywhere under
+`src/lib/nogc_sync_mut/test_runner/` or `src/app/test_runner_new/`).
+**The "worker spinning on an unsignalled flag" hypothesis is refuted.**
+
+The live entry is `src/app/test_runner_new/test_runner_main.spl` (note:
+`src/app/test/test_runner_main.spl` does not exist). Tail after the summary
+(`print_summary` at :1117-1118, emitted by `test_runner_output.spl:210`):
+
+| step | site |
+|---|---|
+| coverage collect/report (only with `--coverage`) | :1120-1133 |
+| **`update_test_database(...)`** | :1136-1137 |
+| unverified-file naming loop | :1142-1150 |
+| spl_doctest / sdoctest modes | :1160-1179 |
+| `generate_test_result_md` + atomic write | :1182-1187 |
+| returns `exit_code` — **no explicit `exit()`**, falls off main | :1200 |
+
+Prime suspect, consistent with utime-climbing / stime-0 / no-syscalls:
+`src/lib/nogc_sync_mut/test_runner/test_runner_helpers.spl:238-252` —
+per-file `db.update_test_result`, then `db.cleanup_stale_runs(48)` and
+`db.save()` re-serialising `doc/08_tracking/test/test_db.sdn` (147 KB) and
+`test_db_runs.sdn` (192 KB) in the tree-walk interpreter. Also
+`update_features_from_tests` (:261-285) contains a genuinely **quadratic**
+nested loop (`for feature in all_features` x `for file_result in
+result.files`), though no call site for it was found on this path.
+
+This reframes the defect: most likely **not** a spin-wait but an unbounded /
+superlinear CPU-bound teardown that never terminates in practical time. That
+distinction matters — it is not fixable by signalling a flag.
+
+Spin constructs checked and cleared: `resource_monitor.rs:165-192` (condvar
+`wait_for`), `interpreter_extern/system.rs:118-155` (10 ms sleep poll),
+`examples_safety.rs`, `native_all/lib.rs:1489`, `resource_governor.spl:77`.
+
+**NOT verified:** which of the two candidates consumes the time. Attach
+profiling is blocked here (`ptrace_scope=1`, `perf_event_paranoid=4`), and the
+instrumented run needed to settle it was not performed — the host was carrying
+a priority bootstrap and a runner run costs ~5+ min of a contended box.
+`scripts/check/check-test-runner-exits-after-summary.shs` is written to
+measure the post-summary tail directly, and **has not been run**.
+
+### 6. Collateral damage, disclosed
+
+Before `KILL_SIMPLE_ONLY_PIDS` existed, a probe run with
+`KILL_SIMPLE_MEM_MB=0` (a global threshold) killed five processes belonging to
+other sessions, at 2026-08-18T04:12:
+
+- `417410` `simple run native_build_worker.spl ... engine_differential/nested_list_of_lists.spl`
+- `421162` `timeout 1200 bin/simple test test/01_unit/compiler/interp/execir_slice_spec.spl`
+- `421165` `bin/simple test test/01_unit/compiler/interp/execir_slice_spec.spl`
+- `423979` `bin/simple test test/01_unit/startup/cli_extension_config_registry_spec.spl`
+- `424890` `simple run native_build_worker.spl ... extern_unimplemented_weak_stub/negative`
+
+The running bootstrap (pids 487745/487751/488825, worktree
+`simple-stage4-clean`) was **not** affected and was verified alive afterwards.
+A later `pkill -f kill_simple_monitor` also stopped the systemd-managed monitor
+instance; systemd restarts it automatically.
+
+### 7. Tests
+
+`scripts/check/check-kill-monitor-cpu-guard.shs` — 6 cases, all fixture-scoped
+via `KILL_SIMPLE_ONLY_PIDS`, isolated lock/state/log dirs:
+
+```
+cpu_guard_fires              expect=killed got=killed monitor_alive=yes samples=16
+survives_and_samples         alive=yes samples=14 heartbeats=4
+rss_guard_still_fires        expect=killed got=killed monitor_alive=yes samples=0
+brief_spin_not_killed        expect=alive  got=alive  monitor_alive=yes samples=18
+idle_not_killed              expect=alive  got=alive  monitor_alive=yes samples=21
+startup_selftest_is_loud     exit=1 loud=1
+PASS — 6 case(s) checked, CPU guard fires, RSS guard intact, healthy work spared
+```
+
+**Negative control** (revert the single `|| true` on `_prev`, keep the
+allowlist so the control stays safe):
+
+```
+REVERTED: victim ALIVE (guard did not fire) samples=0
+FIXED:    victim KILLED (guard fired)       samples=10
+```
+
+The reverted monitor exits 1 on its first poll, exactly as the daemon had been
+doing 3735 times.
+
+### 8. Activation is DEFERRED — action required
+
+The script is fixed but the running daemon has **not** been restarted, and no
+systemd unit was modified. Restarting it would bring a live CPU guard back for
+the first time in a day **while a priority bootstrap is running**; the guard
+exempts `native_build_main.spl`/`native_build_worker.spl` by argv but not every
+CPU-bound bootstrap child. Restart once the bootstrap completes:
+
+```sh
+systemctl --user restart kill-simple-monitor
+grep -E 'START|HEARTBEAT|FATAL' /tmp/kill_simple_monitor.log | tail
+```
+
+Expect a `START ... selftest=ok` line, then `HEARTBEAT ... samples=<n>` with
+`n > 0`. `samples=0` or no heartbeat means the guard is dead again.
