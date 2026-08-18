@@ -150,8 +150,13 @@ nothing in the tree will tell you that — it will read as environmental noise.*
 Write at layer 2a, or declare the environmental dependency explicitly in the
 spec and in your report.
 
-Related known gaps: the WM compare lane has only **4** `.ppm` goldens
-(`test/03_system/gui/wm_compare/goldens/`) with no provenance note beside them,
+Related known gaps: the WM compare lane itself has only **4** `.ppm` goldens
+(`test/03_system/gui/wm_compare/goldens/`) with no provenance note beside them.
+Note this is NOT the tree's whole image-baseline set — `find test -name '*.ppm'`
+returns **399**, the bulk under `test/09_baselines/design_effects_compat/`
+(~5 per scenario). An earlier assessment reported "only 4 goldens" tree-wide;
+that was scoped to the UI/GUI spec dirs and missed `test/09_baselines/`
+entirely. The provenance concern stands and applies to all 399, not 4,
 and only ~14 files in the whole tree reference any `play_ui_*` / `play_wm_*` /
 `play_sdl2_*` name against 29 such tools. Do not assume a `play_*` path is
 exercised just because it exists.
@@ -303,7 +308,7 @@ it connects in this environment is **undetermined**, not that a template works.
 
 - Whether any `play_sdl2_*` / `play_wm_*` / `play_ui_*` tool connects
   successfully in this environment.
-- Whether the 4 `.ppm` goldens currently match compositor output, and whether
+- Whether the `.ppm` goldens (4 in the WM compare lane; 399 tree-wide) currently match compositor output, and whether
   they were ever human-reviewed (no provenance note exists beside them).
 - Whether the QEMU GTK capture lane boots here.
 - Whether `UITestClient.connect` reaches a harness — the API is verified to
