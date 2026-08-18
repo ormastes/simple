@@ -1494,3 +1494,63 @@ c_migrations:
       dict (incl. multibyte UTF-8 keys), 2026-08-18: simple_us=3750
       c_us=764, ratio ~4.9x.
     shared_corpus: 100
+
+  - id: C-MIG-0042
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_array_repeat
+    classification: product_algorithm
+    replacement: std.common.array_repeat_pure.repeat_int_pure (NEW file
+      src/lib/common/array_repeat_pure.spl -- uncontested, outside all
+      HARD-AVOID paths for this round. Builds the result with a plain
+      linear `.push()` append loop, genuinely different machinery from
+      the C side's fill-first-then-doubling-memcpy strategy and the
+      Rust-interpreter oracle's `vec![value.clone(); count]` macro
+      construction)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_array_repeat(value: i64, count: i64) -> [i64] is registered in
+      the interpreter's extern dispatch table (interpreter_extern/mod.rs:592,
+      sffi_array::rt_array_repeat_fn). `grep -n rt_array_repeat\b
+      src/runtime/runtime_native.c src/runtime/runtime.h` returns hits
+      in both files (runtime_native.c:6824: `SplArray* rt_array_repeat
+      (int64_t value, int64_t count)`, backing the `[value; count]`
+      JIT/native array-repeat syntax; runtime.h:453 declaration) --
+      C-backed. The interpreter-lane oracle used by the differential
+      spec is the Rust-interpreter's own extern registration
+      (interpreter_extern/sffi_array.rs::rt_array_repeat_fn), which
+      builds `vec![value.clone(); count.max(0) as usize]` and mirrors
+      the C semantics (including the negative-count-clamps-to-zero
+      behavior). Rejected candidates: `rt_dict_contains` used as this
+      round's first pick (C-MIG-0041) instead; `rt_simd_str_last_index_of`
+      already covered by C-MIG-0024's sibling coverage of index-of
+      primitives. No production `extern fn rt_array_repeat` caller
+      migration was performed -- this entry only establishes
+      differential correctness + perf evidence.
+    correctness_spec: test/01_unit/lib/common/array_repeat_pure_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. positive
+      and negative repeat values; edge cases: count=0 (empty result),
+      count=1 (single-element), negative count (clamps to empty, incl.
+      a large-magnitude negative), value=0/count=0 doubly-degenerate
+      case, doubling-memcpy chunk-boundary counts (2, 5), a large
+      count=500 oversized-input case, sentinel-adjacent int values
+      127/-128; single-value-flip discrimination; determinism check;
+      100-vector shared-logic bulk differential loop over 8x8
+      value x count combinations, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple repeat_int_pure measured
+      ~5.0x the C-backed oracle over the 100-vector bulk corpus
+      (simple_us=2716, c_us=543, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). Above the plan's 2x threshold;
+      recorded honestly, not hidden -- same interpreter-lane caveat as
+      prior PERF findings. Not fixed here: the gap is the C side's
+      doubling-memcpy strategy (each pass copies as much as has already
+      been filled, giving O(log n) memcpy calls instead of this round's
+      O(n) individual `.push()` calls) versus per-call interpreter
+      dispatch overhead on the Simple side; not filed as a standalone
+      bug given the small absolute magnitude at this corpus's counts
+      (<=20 elements per vector)."
+    perf_measured: >
+      100 shared branch-covering (value, count) vectors, counts 0..20,
+      2026-08-18: simple_us=2716 c_us=543, ratio ~5.0x.
+    shared_corpus: 100
