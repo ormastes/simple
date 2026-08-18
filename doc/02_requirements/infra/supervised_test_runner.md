@@ -161,7 +161,7 @@ etc. without a directory — read those as the `src/lib/...` copies.
 | R5 no parallelism | **SATISFIED (unchanged)** | Nothing in the unstable-mode work introduced concurrency; the sequential constraint is untouched. |
 | R6 attribution: path, outcome, exit code | **SATISFIED** | Per-`TestFileResult` path/outcome/code; verdict lines at `test_runner_main.spl:986`. |
 | R6 attribution: wall time | **SATISFIED** | `duration_ms` on every `TestFileResult`; totals `test_runner_output.spl:220-223`. |
-| R6 attribution: **peak RSS** | **NOT SATISFIED** | No `rss` / `peak_rss` / `max_rss` anywhere in the test-runner sources. The field exists only on the **build** side (`build_outcome.spl:214`) and is filed as always-0: `doc/08_tracking/bug/supervised_builder_unwired_and_no_peak_rss_2026-08-17.md`. R6's stated purpose — telling host contention from a real defect — is therefore only half-served. |
+| R6 attribution: **peak RSS** | **NOT SATISFIED** | No `rss` / `peak_rss` / `max_rss` anywhere in the test-runner sources. The field exists only on the **build** side (`build_outcome.spl:214`) and is filed as always-0: `doc/08_tracking/bug/supervised_builder_unwired_and_no_peak_rss_2026-08-17.md`. R6's stated purpose — telling host contention from a real defect — is therefore only half-served. Test-side blocker identified 2026-08-17 (no PID exposed pre-reap; `RUSAGE_CHILDREN` is session-wide, not per-unit) — needs a child-`wait4` rusage extern + seed rebuild: `doc/08_tracking/bug/test_runner_peak_rss_needs_child_rusage_extern_2026-08-17.md`. |
 | Contract: `TestOptions.unstable_mode` | **SATISFIED** | `test_runner_types.spl:94`, with `unstable_mode_set: bool` at `:95`. |
 | Contract: `--unstable` / `--no-unstable` | **SATISFIED** | `test_runner_args.spl:327-332`; passthrough allowlist `:156`; struct init `:629-630`. |
 | Contract: default ON for bootstrap, OFF interactive | **SATISFIED** | `test_runner_main.spl:192` reads `SIMPLE_BOOTSTRAP == "1"`; resolution `:194-200` (explicit flag wins either direction); announced `:203`. |
@@ -238,6 +238,29 @@ re-read before treating it as delivered.
 - **Peak RSS NOT SATISFIED — confirmed.** `grep -l 'peak_rss|max_rss|\brss\b'`
   over `src/lib/*/test_runner/` and `src/app/test_runner_new/` returns nothing.
   The row stands as written.
+- **Re-confirmed independently 2026-08-17 by Lane RSS, with the blocker now
+  identified rather than merely restated.** The only hit under those two trees
+  is an unrelated comment at `test_runner_types.spl:155`. The outcome record is
+  built in `test_runner_execute.spl` at `:171` (start), `:201-203` (exit code +
+  `duration_ms`), `:240-247` (`TestFileResult`) — peak RSS belongs exactly
+  there, and cannot be put there yet. Neither Linux source is reachable from
+  Simple today: `/proc/<pid>/status VmHWM` is dead because
+  `process_run_bounded` / `process_run_with_limits_bounded` spawn, wait and
+  **reap inside the runtime and never expose a PID** (stated in that file's own
+  header at `:6-7`), so every read a Simple caller could make is post-reap; and
+  `getrusage(RUSAGE_CHILDREN).ru_maxrss` survives the reap but is a
+  session-wide monotone maximum, so it would report a number for the first
+  heavy spec and go blank for every later one — the opposite of attribution.
+  The existing `rt_process_hwm_kib` (`src/runtime/runtime.c:1965`) reads
+  `/proc/self/status`, i.e. the runner's own peak, not the child's.
+  **Blocker:** a new runtime extern capturing the child's rusage at its own
+  `wait4()` (Rust/C change ⇒ seed rebuild), plus `peak_rss_kib` fields on
+  `ProcessResult` (`io/process_ops.spl:44-49`) and `TestFileResult`. Filed with
+  the exact extern signature, the macOS bytes-vs-KiB trap, the `-1`-not-`0`
+  unmeasured contract, and a resume command:
+  `doc/08_tracking/bug/test_runner_peak_rss_needs_child_rusage_extern_2026-08-17.md`.
+  **No code was landed and nothing was measured, so the row stays NOT
+  SATISFIED.**
 - **R1 "unconditional, not gated on unstable mode" — wording is defensible.**
   `unstable_mode` appears 3× in `test_runner_execute.spl` and **0×** in
   `test_runner_single.spl`, while `process_run_bounded` is called on both paths
