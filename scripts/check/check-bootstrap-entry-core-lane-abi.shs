@@ -1,0 +1,225 @@
+#!/bin/sh
+# Bootstrap-entry / runtime-lane ABI satisfaction gate.
+#
+# Defect reproduced 2026-08-18 (doc/08_tracking/bug/
+# aspect_weave_specs_timeout_vacuous_green_2026-08-18.md): `bin/simple build
+# bootstrap` dies at Stage 1 with
+#
+#   .../mod_3.o: in function `cli__bootstrap_main__run_rt_native_build':
+#   undefined reference to `rt_native_build'
+#
+# followed by the driver's own note that the selected core lane
+# (`core-c-bootstrap`) is intentionally limited to the Simple/C core ABI.
+#
+# The premise worth checking is NOT "a list is missing an entry". It is:
+#
+#   src/app/cli/bootstrap_main.spl:2 declares
+#       extern fn rt_native_build(args: [text]) -> i64
+#   and calls it (:156). The ONLY implementation of that symbol in the whole
+#   tree is src/compiler_rust/native_all/src/lib.rs (the hosted Rust runtime).
+#   There is no C body for it and there cannot be one -- it IS the native-build
+#   driver. So the bootstrap CLI entry legitimately needs a hosted-only symbol,
+#   and the seed already knows that: config.rs `is_bootstrap_main_entry` gates
+#   an AUTHORIZED hosted `libsimple_native_all.a` branch for exactly this
+#   entry. That branch is reachable only when `config.runtime_path` is Some,
+#   and the bare `build bootstrap` stage driver never supplies one.
+#
+# This gate encodes the invariant that the incident violated:
+#
+#   Every `extern fn rt_*` the bootstrap entry declares must be satisfiable by
+#   the runtime lane the bootstrap stage driver actually selects.
+#
+# Two halves, both required:
+#   1. ABI half (real compiler, not text): compile the core-c-bootstrap lane's
+#      C source set -- the list is EXTRACTED from tools.rs so it cannot drift --
+#      and nm the objects. "Defined" means "the linker would really see it".
+#      Every bootstrap extern defined there is satisfied by the core lane.
+#   2. Wiring half: an extern the core lane does NOT define is hosted-only. It
+#      is admissible only when it is recorded in
+#      scripts/check/bootstrap_hosted_only_externs.txt AND the stage driver
+#      provisions a hosted runtime authority for the bootstrap entry. The
+#      marker for that provisioning is the identifier
+#      BOOTSTRAP_HOSTED_RUNTIME_MARKER below, which the fix introduces.
+#
+# Limitation, stated rather than papered over: half 2 is a STATIC WIRING check
+# on driver source, not a link proof. It cannot replace an actual Stage 1 link;
+# it fails closed on the wiring that made the link impossible. Half 1 is a real
+# compile.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> extern(s) checked, ...            exit 0
+#   FAIL  — ...                                   exit 1
+#   ERROR — nothing was checked                   exit 2
+#
+# --selftest runs first, unconditionally, and is fatal.
+#
+#   sh scripts/check/check-bootstrap-entry-core-lane-abi.shs [--selftest]
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+ENTRY="src/app/cli/bootstrap_main.spl"
+TOOLS_RS="src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
+CONFIG_RS="src/compiler_rust/compiler/src/pipeline/native_project/config.rs"
+CONTRACT="scripts/check/bootstrap_hosted_only_externs.txt"
+RUNTIME_DIR="src/runtime"
+
+# The identifier the stage driver must use to provision a hosted runtime
+# authority for the bootstrap entry when no --runtime-path was supplied.
+BOOTSTRAP_HOSTED_RUNTIME_MARKER="bootstrap_hosted_native_all_runtime"
+
+CC="${CC:-cc}"
+command -v "$CC" >/dev/null 2>&1 || CC=gcc
+command -v "$CC" >/dev/null 2>&1 || CC=clang
+if ! command -v "$CC" >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (no C compiler: absence of a compiler is absence of evidence)"
+    exit 2
+fi
+command -v nm >/dev/null 2>&1 || {
+    echo "ERROR — nothing was checked (no nm)"
+    exit 2
+}
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+# --- extract the core-c-bootstrap lane's C source list from tools.rs ---------
+# Source of truth is build_c_runtime_library's `runtime_inputs`; extracting it
+# rather than restating it means the gate cannot silently drift from the lane.
+extract_core_lane_sources() {
+    sed -n '/let mut runtime_inputs = vec!\[/,/^    \];/p' "$TOOLS_RS" \
+        | grep -oE '"[A-Za-z0-9_/]+\.c"' | tr -d '"' | sort -u
+}
+
+# --- extern rt_* declarations of a Simple entry file ------------------------
+extract_rt_externs() {
+    grep -oE '^extern fn (rt_[A-Za-z0-9_]+)' "$1" 2>/dev/null \
+        | awk '{print $3}' | sort -u
+}
+
+# --- defined rt_* symbol set of the compiled core lane ----------------------
+core_lane_defined_symbols() {
+    out_dir="$1"
+    mkdir -p "$out_dir"
+    compiled=0
+    for src in $(extract_core_lane_sources); do
+        [ -f "$RUNTIME_DIR/$src" ] || continue
+        obj="$out_dir/$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
+        if ( cd "$RUNTIME_DIR" && nice -n 19 "$CC" -c -Os -fPIC -std=gnu11 \
+                -ffunction-sections -fdata-sections \
+                -fno-unwind-tables -fno-asynchronous-unwind-tables \
+                -fno-stack-protector -DSIMPLE_CORE_C_STANDALONE=1 \
+                -I. -Iplatform "$src" -o "$obj" ) >/dev/null 2>&1; then
+            compiled=$((compiled + 1))
+        fi
+    done
+    [ "$compiled" -gt 0 ] || return 1
+    nm -g --defined-only "$out_dir"/*.o 2>/dev/null \
+        | awk '$2 != "U" { print $3 }' | grep '^rt_' | sort -u
+}
+
+# --- selftest ----------------------------------------------------------------
+selftest() {
+    fx="$TMP_DIR/selftest"
+    mkdir -p "$fx"
+
+    # Fixture 1 (must-PASS): an entry whose only rt_ extern is core-defined.
+    printf 'extern fn rt_string_len(s: text) -> i64\n' >"$fx/core_only.spl"
+    # Fixture 2 (must-FAIL, POSITIVE CONTROL): a symbol genuinely outside the
+    # core ABI and absent from the hosted contract must still be REJECTED, so
+    # the fix cannot degenerate into "allow everything".
+    printf 'extern fn rt_definitely_not_core_abi(x: i64) -> i64\n' >"$fx/rogue.spl"
+    # Fixture 3 (must-FAIL): a file with no extern rt_ at all yields 0 checked,
+    # which the caller must turn into ERROR, never a pass.
+    printf '# nothing here\n' >"$fx/empty.spl"
+
+    n1=$(extract_rt_externs "$fx/core_only.spl" | wc -l)
+    [ "$n1" -eq 1 ] || { echo "selftest FAILED: fixture 1 extraction ($n1)"; exit 1; }
+    n2=$(extract_rt_externs "$fx/rogue.spl" | wc -l)
+    [ "$n2" -eq 1 ] || { echo "selftest FAILED: fixture 2 extraction ($n2)"; exit 1; }
+    extract_rt_externs "$fx/rogue.spl" | grep -qx rt_definitely_not_core_abi \
+        || { echo "selftest FAILED: fixture 2 did not name the rogue symbol"; exit 1; }
+    n3=$(extract_rt_externs "$fx/empty.spl" | wc -l)
+    [ "$n3" -eq 0 ] || { echo "selftest FAILED: fixture 3 should extract 0 ($n3)"; exit 1; }
+
+    # Fixture 4 (must-FAIL): the rogue symbol must not appear on the hosted
+    # contract, i.e. the contract is an explicit allowlist and not a wildcard.
+    if [ -f "$CONTRACT" ] && grep -qx rt_definitely_not_core_abi "$CONTRACT"; then
+        echo "selftest FAILED: contract file allows the positive-control symbol"
+        exit 1
+    fi
+
+    # Fixture 5: the lane source list must be extractable and non-empty --
+    # an empty list would make the ABI half vacuously green.
+    n5=$(extract_core_lane_sources | wc -l)
+    [ "$n5" -gt 0 ] || { echo "selftest FAILED: core lane source list is empty"; exit 1; }
+
+    echo "selftest OK (5 fixtures)"
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && exit 0
+
+# --- real scan ---------------------------------------------------------------
+[ -f "$ENTRY" ] || { echo "ERROR — nothing was checked (missing $ENTRY)"; exit 2; }
+
+EXTERNS=$(extract_rt_externs "$ENTRY")
+N_EXTERNS=$(printf '%s\n' "$EXTERNS" | grep -c . || true)
+if [ "$N_EXTERNS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no extern rt_* declarations in $ENTRY)"
+    exit 2
+fi
+
+DEFINED_FILE="$TMP_DIR/core_defined.txt"
+if ! core_lane_defined_symbols "$TMP_DIR/obj" >"$DEFINED_FILE"; then
+    echo "ERROR — nothing was checked (core-c-bootstrap lane produced no objects)"
+    exit 2
+fi
+N_DEFINED=$(grep -c . "$DEFINED_FILE" || true)
+if [ "$N_DEFINED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (core lane defined 0 rt_* symbols)"
+    exit 2
+fi
+
+HOSTED_WIRED=no
+if grep -q "$BOOTSTRAP_HOSTED_RUNTIME_MARKER" "$CONFIG_RS" 2>/dev/null; then
+    HOSTED_WIRED=yes
+fi
+
+unsatisfied=""
+hosted_needed=""
+for sym in $EXTERNS; do
+    if grep -qx "$sym" "$DEFINED_FILE"; then
+        continue
+    fi
+    if [ -f "$CONTRACT" ] && grep -qx "$sym" "$CONTRACT"; then
+        hosted_needed="$hosted_needed $sym"
+        continue
+    fi
+    unsatisfied="$unsatisfied $sym"
+done
+
+if [ -n "$unsatisfied" ]; then
+    echo "FAIL — $N_EXTERNS extern(s) checked against $N_DEFINED core-lane symbol(s); \
+neither core-defined nor on the hosted contract ($CONTRACT):$unsatisfied"
+    exit 1
+fi
+
+if [ -n "$hosted_needed" ] && [ "$HOSTED_WIRED" = no ]; then
+    echo "FAIL — $N_EXTERNS extern(s) checked against $N_DEFINED core-lane symbol(s); \
+hosted-only extern(s)$hosted_needed require a hosted runtime authority, but \
+$CONFIG_RS does not provision one for the bootstrap entry \
+(no \`$BOOTSTRAP_HOSTED_RUNTIME_MARKER\`) — the bare \`build bootstrap\` link \
+cannot resolve them"
+    exit 1
+fi
+
+if [ -n "$hosted_needed" ]; then
+    echo "PASS — $N_EXTERNS extern(s) checked against $N_DEFINED core-lane symbol(s), \
+hosted-only:$hosted_needed satisfied by a wired hosted runtime authority"
+else
+    echo "PASS — $N_EXTERNS extern(s) checked against $N_DEFINED core-lane symbol(s), \
+all core-defined"
+fi
+exit 0

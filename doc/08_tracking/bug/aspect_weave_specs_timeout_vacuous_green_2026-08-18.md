@@ -185,3 +185,93 @@ Consequences for the original report:
 * Defect 2 (vacuous `Results: 0 total`) is untouched by this and still stands.
 * The blocking work is now the class-field erasure above, which belongs to the
   seed/interpreter owners, not to the aspect lane.
+
+## Stage 1 link failure re-reproduced and triaged (2026-08-18, lane aspect-dynload)
+
+Reproduced on an unmodified tree at `b93044e05eb` with the shared Rust seed
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`.
+`bin/simple build bootstrap` ran ~8 min and ended RED:
+
+```
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+note: the selected core lane (`core-c-bootstrap`) is intentionally limited to
+  the Simple/C core ABI. ...
+  Compile failed (exit Some(1))
+Stage 1 FAILED
+```
+
+239 `undefined reference` lines, **86 distinct symbols, all `rt_*`** (full list
+beside this file in
+`bootstrap_stage1_link_undefined_symbols_2026-08-18.txt`).
+
+**The premise recorded above is materially wrong.** This is not one ABI list
+that needs an entry, and it is not one defect. Three distinct root causes:
+
+1. **A genuinely hosted-only extern (1 symbol).** `src/app/cli/bootstrap_main.spl:2`
+   declares `extern fn rt_native_build(args: [text]) -> i64` and calls it at
+   `:156`. Its only implementation in the tree is
+   `src/compiler_rust/native_all/src/lib.rs:143` — hosted Rust. There is no C
+   body and there cannot be one: it *is* the native-build driver. The seed
+   already knows this: `native_project/config.rs:69-72` recognises
+   `bootstrap_main.spl` and `config.rs:246-261` authorises the hosted
+   `libsimple_native_all.a` for it — but only when `config.runtime_path` is
+   `Some`, and `driver/src/cli/commands/misc_commands.rs:506-531`
+   (`compile_stage`) never supplies one; it only forwards `SIMPLE_RUNTIME_PATH`
+   if the caller already exported it. So this is **lane selection**, answer (a)
+   in form but not "widen the ABI".
+2. **A whole backend FFI surface outside the core lane (71 symbols).** Every
+   `rt_cranelift_*` referenced from `src/lib/nogc_sync_mut/sffi/codegen/*`
+   (`mod_646.o`). Measured directly: the core-c-bootstrap C set (extracted from
+   `tools.rs` `build_c_runtime_library`, 15 files) compiles to **729 defined
+   `rt_*` symbols**, and 1322 of the 1786 names in
+   `src/compiler_rust/common/src/runtime_symbols.rs` are absent from it. The
+   core lane is a deliberate subset; the Cranelift JIT surface is not in it.
+3. **A source defect the driver itself diagnoses (`rt_dir_list`).** Verbatim
+   from the run:
+
+   ```
+   note: `rt_dir_list` reached the linker undeclared because HIR lowering
+     resolved it to nothing and the `lenient_types` fallback lowered it to a
+     global. It is referenced at:
+     --> src/compiler/10.frontend/core/interpreter/module_loader_resolve.spl:363
+         in `_find_transparent_file` (unresolved identifier)
+   ```
+
+   That is answer (b): code pulling in a symbol it should not, via an
+   unresolved identifier silently lowered to a global. Not an ABI question.
+
+Also stale: the headline symbol quoted above,
+`compiler__mir__mir_aop_injection__inject_after_error_advice`, does **not**
+appear anywhere in this reproduce. The seed was redeployed 2026-08-18 06:12
+between the two runs, so that part of the earlier record no longer holds.
+
+**Why no fix landed here.** The correct fix for cause 1 lives in the Rust seed
+(`config.rs` / `misc_commands.rs`), and `bin/simple` is a symlink to a shared
+seed that this lane must not rebuild or replace, so no seed change can be
+deployed or verified from here. Causes 2 and 3 are separate work in
+`src/lib/nogc_sync_mut/sffi/codegen/` and `src/compiler/10.frontend/`
+respectively — neither is bootstrap ABI/lane config. Appending 86 symbols to a
+list to quieten the linker is exactly what the triage rules out.
+
+**Detector landed instead:** `scripts/check/check-bootstrap-entry-core-lane-abi.shs`
+fences cause 1 as a standing invariant — every `extern fn rt_*` the bootstrap
+entry declares must be satisfiable by the lane the stage driver actually
+selects. It compiles the core lane for real (`cc -c` + `nm`, no text
+heuristics), fails closed on a missing compiler or a 0-symbol/0-extern scan,
+and its fatal `--selftest` carries a POSITIVE CONTROL: a symbol outside the
+core ABI and off the contract allowlist
+(`scripts/check/bootstrap_hosted_only_externs.txt`) must still be REJECTED, so
+the eventual fix cannot degenerate into "allow everything". Current verdict:
+
+```
+FAIL — 1 extern(s) checked against 729 core-lane symbol(s); hosted-only
+  extern(s) rt_native_build require a hosted runtime authority, but
+  .../native_project/config.rs does not provision one for the bootstrap entry
+  (no `bootstrap_hosted_native_all_runtime`) — the bare `build bootstrap` link
+  cannot resolve them
+```
+
+Known limit, stated rather than papered over: the detector covers the entry's
+own `extern` declarations (1 today), not the 85 symbols that arrive through the
+`--entry-closure` transitive graph; and its wiring half is a static check on
+driver source, not a link proof.
