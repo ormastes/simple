@@ -1,0 +1,90 @@
+# @cover src/lib/common/structural/static_component_table.spl 80%
+"""
+# Static Component Table Generator (WP-14s)
+
+## Overview
+
+Generating a static table from a component catalog produces entries whose
+fold/no-fold verdicts match resolve_component exactly: placement=static
+folds, placement=auto folds only on a verified digest match, presence=off
+components are absent, and the generated module source bakes in ONLY the
+folded-static rows while dynamic ids stay external. A resolve failure
+(missing digest on placement=auto) aborts generation fail-closed.
+
+## Examples
+
+A four-component catalog with one static, one auto+matching-digest, one
+dynamic, one off yields folded={static, auto-matched}, dynamic={dynamic},
+absent={off}, and a generated module whose entries() contain exactly the
+two folded rows.
+
+**Plan:** doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md (Phase B)
+"""
+
+use std.spec
+use std.common.structural.static_component_table.{
+    static_component_table_verdict,
+    static_component_table_module_source
+}
+
+fn catalog_source() -> text:
+    "component:\n" +
+    "  id: compiler.core\n" +
+    "  version: 1\n" +
+    "  presence: on\n" +
+    "  placement: static\n" +
+    "  activation: startup\n" +
+    "component:\n" +
+    "  id: optimizer.basic\n" +
+    "  version: 2\n" +
+    "  presence: auto\n" +
+    "  placement: auto\n" +
+    "  activation: command\n" +
+    "component:\n" +
+    "  id: loader.zstd\n" +
+    "  version: 1\n" +
+    "  presence: on\n" +
+    "  placement: dynamic\n" +
+    "  activation: first_use\n" +
+    "component:\n" +
+    "  id: aspect.log_debug\n" +
+    "  version: 1\n" +
+    "  presence: off\n" +
+    "  placement: auto\n" +
+    "  activation: manual\n"
+
+fn digests_matching() -> [text]:
+    var d: [text] = []
+    d.push("compiler.core|hc|hc")
+    d.push("optimizer.basic|h123|h123")
+    d.push("loader.zstd|hz|hz")
+    d.push("aspect.log_debug|ha|ha")
+    d
+
+describe "static component table generation":
+
+    it "classifies every component exactly as resolve_component does":
+        val v = static_component_table_verdict(catalog_source(), digests_matching())
+        expect(v).to_equal("ok:folded=compiler.core,optimizer.basic:dynamic=loader.zstd:absent=aspect.log_debug")
+
+    it "bakes only folded-static rows into the generated module entries":
+        val src = static_component_table_module_source(catalog_source(), digests_matching())
+        expect(src.contains("rows.push(\"compiler.core|1|static|startup|presence=on,placement=static,activation=startup\")")).to_be(true)
+        expect(src.contains("rows.push(\"optimizer.basic|2|static|command|presence=auto,placement=auto,activation=command\")")).to_be(true)
+        expect(src.contains("rows.push(\"loader.zstd")).to_be(false)
+        expect(src.contains("aspect.log_debug")).to_be(false)
+
+    it "keeps dynamic components external in the generated module":
+        val src = static_component_table_module_source(catalog_source(), digests_matching())
+        expect(src.contains("ids.push(\"loader.zstd\")")).to_be(true)
+        expect(src.contains("ids.push(\"compiler.core\")")).to_be(false)
+
+    it "fails closed when a placement=auto component has no digest":
+        var no_auto_digest: [text] = []
+        no_auto_digest.push("compiler.core|hc|hc")
+        val v = static_component_table_verdict(catalog_source(), no_auto_digest)
+        expect(v).to_equal("err:resolve_failed:optimizer.basic:err:missing_impl_digest")
+
+    it "fails closed on a malformed catalog":
+        val v = static_component_table_verdict("component:\n  bogus: 1\n", digests_matching())
+        expect(v.starts_with("err:parse:")).to_be(true)
