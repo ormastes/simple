@@ -1,6 +1,18 @@
 # TODO: std.async.runtime cannot wake clock-based (timer/sleep) futures
 
 **Filed:** 2026-08-17 | **Area:** lib/async | **Type:** runtime-integration gap
+**Status:** DONE 2026-08-18 — Runtime now owns a deadline timer list.
+`Runtime.spawn_sleep(millis)` (plus module-level `spawn_sleep` on the global
+runtime) registers a `TimerEntry(deadline_us, task_id)`; `run_once()` fires due
+timers (swapping the task's Pending future for a Ready one — `Future` is a
+fixed poll result, so re-polling can never make it Ready) and, when nothing is
+runnable, parks the OS thread until the NEAREST deadline (run_sleepers idiom,
+no busy-spin, no new externs). Spec:
+`test/01_unit/lib/async/runtime_timer_sleep_spec.spl` (4/4: >=N ms, overlap
+elapsed << sum, sleep(0) prompt); `sleep_go_style_spec.spl` still 6/6.
+Sabotage-verified: neutering the timer fire makes the spec hang red (timeout).
+Item 2 below (poll-closure Future / pollable trait objects for storing
+SleepFuture as Future<()>) remains open.
 
 ## Gap
 `std.async.runtime.Runtime.run_once()` re-enqueues tasks only via

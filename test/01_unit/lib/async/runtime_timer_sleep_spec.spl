@@ -1,0 +1,55 @@
+# Runtime Timer Sleep Unit Tests
+#
+# **Feature ID:** #LIB-ASYNC-RUNTIME-TIMER-001
+# **Category:** Lib | Async
+#
+# Proves the general std.async.runtime can wake clock-based tasks:
+#   (a) a task sleeping N ms THROUGH THE RUNTIME completes and takes >= N ms
+#   (b) two runtime tasks with overlapping sleeps overlap (elapsed << sum)
+#   (c) spawn_sleep(0) completes promptly
+# Implements doc/08_tracking/todo/async_runtime_timer_wakeup_for_sleep_2026-08-17.md
+
+use std.async.runtime.{Runtime}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+describe "Runtime timer sleep basics":
+    it "a 40ms runtime sleep task completes and takes at least 40ms":
+        val rt = Runtime.new()
+        val tid = rt.spawn_sleep(40)
+        val t0 = time_now_unix_micros()
+        rt.run()
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_false(rt.tasks.contains_key(tid))
+        assert_true(elapsed_us >= 40000)
+
+    it "spawn_sleep(0) completes promptly":
+        val rt = Runtime.new()
+        val tid = rt.spawn_sleep(0)
+        val t0 = time_now_unix_micros()
+        rt.run()
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_false(rt.tasks.contains_key(tid))
+        assert_true(elapsed_us < 1000000)
+
+describe "Runtime timer sleep concurrency":
+    it "two overlapping 60ms runtime sleeps finish well under the 120ms sum":
+        val rt = Runtime.new()
+        val a = rt.spawn_sleep(60)
+        val b = rt.spawn_sleep(60)
+        val t0 = time_now_unix_micros()
+        rt.run()
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_false(rt.tasks.contains_key(a))
+        assert_false(rt.tasks.contains_key(b))
+        assert_true(elapsed_us >= 60000)
+        assert_true(elapsed_us < 110000)
+
+    it "nearest-deadline parking: 20ms and 80ms runtime sleeps finish in ~80ms":
+        val rt = Runtime.new()
+        rt.spawn_sleep(80)
+        rt.spawn_sleep(20)
+        val t0 = time_now_unix_micros()
+        rt.run()
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_true(elapsed_us >= 80000)
+        assert_true(elapsed_us < 160000)
