@@ -1,0 +1,424 @@
+#!/bin/sh
+# Refuse a Markdown tree whose sdoctest-runnable code fences are malformed.
+#
+# STATUS: ADVISORY (see PROMOTION below). Not yet wired into
+# scripts/check/pre-push-conflict-tree-guard.shs.
+#
+# FP-RATE: 0/1 (0%) on "the whole live-root population of hits, 1717 configured
+# Markdown files under config/sdoctest.sdn roots", measured 2026-08-18, method:
+# hand adjudication of every hit (population < 15, so the whole population was
+# adjudicated per detector_standard.md rule 8).
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# src/lib/nogc_sync_mut/test_runner/sdoctest/extractor.spl is a line-oriented
+# state machine:
+#   * OPEN  (:80) when trim(line) starts_with "```simple" | "```spl" | "```sdoctest"
+#   * CLOSE (:114) only when trim(line) == "```"
+#   * PUSH  (:119) only when the collected body is non-empty
+#
+# Two silent-loss shapes follow, and NEITHER produces a diagnostic:
+#   1. UNCLOSED -- a runnable fence that never meets a bare "```" leaves
+#      in_code_block true to EOF. The block is never pushed AND every later
+#      fence in that file is swallowed as its body. One typo deletes an
+#      arbitrary number of tests with no error, no warning, no count change.
+#   2. EMPTY -- a runnable fence that closes with a zero-line body is dropped
+#      at :119. Usually a placeholder someone meant to fill in.
+#
+# ---------------------------------------------------------------------------
+# ANTI-FALSE-POSITIVE DECISIONS (detector_standard.md rule 7 -- recorded here
+# so they can be rechecked rather than rediscovered)
+# ---------------------------------------------------------------------------
+# a) CR IS STRIPPED BEFORE THE TRIM. This is the single most important line in
+#    the script. The audit that motivated this guard
+#    (doc/09_report/md_fence_test_miss_audit_2026-08-18.md) reported 7 unclosed
+#    fences in live roots; ALL SEVEN were CRLF artifacts of a scanner that did
+#    not strip CR. src/lib/common/string_core.spl:110 lists "\r" in
+#    is_whitespace_char, so the real extractor's trim() eats it and those files
+#    are perfectly well-formed to the thing that actually reads them. A guard
+#    that does not strip CR reproduces a 100% false-positive rate on exactly
+#    the population it was built for.
+# b) THE MODEL IS THE EXTRACTOR, NOT COMMONMARK. A CommonMark parser treats a
+#    ```` block as opaque and a 4-space-indented "```simple" as literal text;
+#    the extractor does neither. Flagging CommonMark-unclosed fences would
+#    report defects that cost zero tests, and miss ones that cost real tests.
+#    We report what the runner actually loses. Consequence, stated rather than
+#    papered over: a ```simple nested inside a ```` block is seen by the
+#    extractor as a real fence, and this guard agrees with it.
+#    KNOWN LIMIT, stated rather than papered over: a file with an ODD number of
+#    bare "```" after a runnable open closes at the wrong line, so a later test
+#    is silently eaten while the file is not "unclosed" at EOF. This guard does
+#    not detect that shape; it is a fence-PAIRING defect, not a fence-CLOSURE
+#    one, and adjudicating it needs CommonMark nesting the extractor lacks.
+# c) ONLY RUNNABLE INFO STRINGS ARE TRACKED. A stray unclosed ```bash or ```json
+#    is invisible to the extractor and costs no tests, so it is not a finding
+#    here. The same audit measured a 96.9% FP rate for treating bare-info
+#    fences as missed tests; that bucket is deliberately out of scope.
+#
+# ---------------------------------------------------------------------------
+# SCOPE
+# ---------------------------------------------------------------------------
+# A TREE, not a BASE..NEW range -- fence well-formedness is a property of a
+# file, and a root can be added to config/sdoctest.sdn without any .md changing.
+# Roots and ignore globs are read from config/sdoctest.sdn, so the guard cannot
+# drift from the runner's own targeting.
+#
+# ---------------------------------------------------------------------------
+# PROMOTION
+# ---------------------------------------------------------------------------
+# Landed ADVISORY because it is honestly RED on main: one empty runnable fence
+# at doc/02_requirements/app/testing/easy_fix.md:38 whose intended content is
+# genuinely ambiguous (an indented, empty "```simple" under "## Usage").
+# Precedent: check-c-runtime-compiles-push.shs landed advisory at 04848434af0c.
+#
+# ---------------------------------------------------------------------------
+# MUTATION PROOF (detector_standard.md rule 10), run 2026-08-18
+# ---------------------------------------------------------------------------
+#   M1  delete the UNCLOSED printf+nbad++ in close_file
+#       -> --selftest ERROR exit 2, "must-detect unclosed fence was not
+#          detected" + "must-detect unclosed sdoctest fence was not detected"
+#   M2  delete `sub(/\r$/, "", line)`
+#       -> --selftest ERROR exit 2, "CRLF file over-fired — CR is not being
+#          stripped"  (this is the anti-FP invariant, and it is load bearing)
+#   M3  delete the EMPTY printf+nbad++
+#       -> --selftest ERROR exit 2, "must-detect empty fence was not detected"
+#   unmutated -> "PASS — 9 selftest fixture(s) checked, 0 failures" exit 0
+#
+# Usage:
+#   sh scripts/check/check-md-fence-wellformed.shs [--root DIR] [--selftest]
+#   --expect-findings <n>   accept and RECORD n known findings for this run
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> runnable fence(s) checked in <m> file(s), 0 malformed   exit 0
+#   FAIL  — ...                                                         exit 1
+#   ERROR — nothing was checked                                         exit 2
+
+set -u
+
+ROOT=""
+EXPECT=0
+DO_SELFTEST_ONLY=0
+INTERNAL_SCAN=0
+
+CONFIG_REL="config/sdoctest.sdn"
+
+# --------------------------------------------------------------------------
+# The scanner. Mirrors extractor.spl exactly; see ANTI-FALSE-POSITIVE above.
+# Emits one TSV record per finding, plus counters, on stdout.
+# --------------------------------------------------------------------------
+scan_files() {
+    # reads NUL-free file list on stdin
+    _list="$1"
+    if [ ! -s "$_list" ]; then
+        echo "COUNT	0	0"
+        return 0
+    fi
+    xargs -a "$_list" -d '\n' awk '
+    function close_file() {
+        if (inblk) {
+            printf "UNCLOSED\t%s\t%d\t%s\n", fname, openln, openinfo
+            nbad++
+        }
+        inblk = 0
+    }
+    FNR == 1 { close_file(); fname = FILENAME; nfiles++ }
+    {
+        line = $0
+        sub(/\r$/, "", line)            # (a) CR before trim -- load bearing
+        t = line
+        sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+        if (!inblk) {
+            if (t ~ /^```simple/ || t ~ /^```spl/ || t ~ /^```sdoctest/) {
+                inblk = 1; openln = FNR; body = 0; openinfo = t
+                nfence++
+            }
+        } else {
+            if (t == "```") {
+                inblk = 0
+                if (body == 0) {
+                    printf "EMPTY\t%s\t%d\t%s\n", fname, openln, openinfo
+                    nbad++
+                }
+            } else {
+                body++
+            }
+        }
+    }
+    END { close_file(); printf "COUNT\t%d\t%d\n", nfence, nfiles }
+    '
+}
+
+# --------------------------------------------------------------------------
+# Root/ignore discovery from config/sdoctest.sdn
+# --------------------------------------------------------------------------
+build_file_list() {
+    _base="$1"; _out="$2"
+    _cfg="$_base/$CONFIG_REL"
+    : > "$_out"
+    if [ ! -f "$_cfg" ]; then
+        return 1
+    fi
+    # sources: "- file: X" and "- dir: Y"
+    _srcs=$(sed -n 's/^[[:space:]]*-[[:space:]]*file:[[:space:]]*\(.*\)$/F \1/p; s/^[[:space:]]*-[[:space:]]*dir:[[:space:]]*\(.*\)$/D \1/p' "$_cfg")
+    # ignore: paths: ["a/**", "b/**"]  -> newline separated prefixes
+    _ign=$(sed -n 's/^[[:space:]]*paths:[[:space:]]*\[\(.*\)\][[:space:]]*$/\1/p' "$_cfg" \
+           | tr ',' '\n' | tr -d '"' | sed 's#[[:space:]]*##g; s#/\*\*$##; s#^$##' | grep -v '^$')
+    _tmpall="$_out.all"
+    : > "$_tmpall"
+    echo "$_srcs" | while IFS=' ' read -r kind path; do
+        [ -n "${path:-}" ] || continue
+        path=$(echo "$path" | sed 's#/*$##')
+        if [ "$kind" = "F" ]; then
+            [ -f "$_base/$path" ] && echo "$path" >> "$_tmpall"
+        else
+            [ -d "$_base/$path" ] && \
+              (cd "$_base" && find "$path" -type f -name '*.md') >> "$_tmpall"
+        fi
+    done
+    if [ -n "$_ign" ]; then
+        _pat=$(echo "$_ign" | sed 's#[].[^$*\\/]#\\&#g' | sed 's#^#^#' | paste -sd '|' -)
+        grep -Ev "$_pat" "$_tmpall" | sort -u > "$_out"
+    else
+        sort -u "$_tmpall" > "$_out"
+    fi
+    rm -f "$_tmpall"
+    # absolutise
+    sed -i "s#^#$_base/#" "$_out"
+    return 0
+}
+
+# --------------------------------------------------------------------------
+# Core scan of a base directory. Prints findings; sets globals via a temp file.
+# --------------------------------------------------------------------------
+# NOTE: run_scan is never called in a command substitution -- a subshell would
+# discard the SCAN_* results. It writes its human-readable report to
+# $SCAN_TMPDIR/report and the caller prints that file.
+run_scan() {
+    _base="$1"
+    SCAN_FENCES=0; SCAN_FILES=0; SCAN_BAD=0; SCAN_TMPDIR=""
+    _tmp=$(mktemp -d) || return 2
+    SCAN_TMPDIR="$_tmp"
+    : > "$_tmp/report"
+    if ! build_file_list "$_base" "$_tmp/files"; then
+        echo "ERROR — nothing was checked (no $CONFIG_REL under $_base)" >> "$_tmp/report"
+        return 2
+    fi
+    scan_files "$_tmp/files" > "$_tmp/out" 2>"$_tmp/err"
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        echo "ERROR — nothing was checked (scanner failed rc=$_rc)" >> "$_tmp/report"
+        return 2
+    fi
+    SCAN_FENCES=$(awk -F'\t' '$1=="COUNT"{f+=$2} END{print f+0}' "$_tmp/out")
+    SCAN_FILES=$(awk -F'\t' '$1=="COUNT"{n+=$3} END{print n+0}' "$_tmp/out")
+    grep -v '^COUNT	' "$_tmp/out" > "$_tmp/find" 2>/dev/null
+    SCAN_BAD=$(wc -l < "$_tmp/find" | tr -d ' ')
+    while IFS="$(printf '\t')" read -r kind path ln info; do
+        [ -n "${kind:-}" ] || continue
+        rel=${path#"$_base"/}
+        if [ "$kind" = "UNCLOSED" ]; then
+            echo "UNCLOSED runnable fence: $rel:$ln ($info) — swallows the rest of the file" >> "$_tmp/report"
+        else
+            echo "EMPTY runnable fence: $rel:$ln ($info) — silently dropped at extractor.spl:119" >> "$_tmp/report"
+        fi
+    done < "$_tmp/find"
+    return 0
+}
+
+# --------------------------------------------------------------------------
+# Selftest. Fatal, runs before every scan. Fixtures are written to a temp tree
+# with its own config/sdoctest.sdn so root discovery is exercised too.
+# --------------------------------------------------------------------------
+mkfixture() {
+    _d="$1"
+    mkdir -p "$_d/config" "$_d/doc" "$_d/doc/09_report"
+    cat > "$_d/config/sdoctest.sdn" <<'CFG'
+sources:
+  - dir: doc/
+    pattern: "*.md"
+ignore:
+  paths: ["doc/09_report/**"]
+CFG
+}
+
+selftest() {
+    _fails=0
+    _ran=0
+    _root=$(mktemp -d) || return 2
+
+    # ---- must-DETECT 1: plain unclosed runnable fence -------------------
+    _d="$_root/f_unclosed"; mkfixture "$_d"
+    printf 'intro\n\n```simple\nfn a(): 1\n\nmore prose that is now swallowed\n\n```simple\nfn b(): 2\n' > "$_d/doc/a.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_BAD:-0}" -lt 1 ] || ! echo "$_out" | grep -q 'UNCLOSED runnable fence: doc/a.md:3'; then
+        echo "SELFTEST FAIL: must-detect unclosed fence was not detected"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- must-DETECT 2: empty runnable fence ----------------------------
+    _d="$_root/f_empty"; mkfixture "$_d"
+    printf '# Usage\n\n```simple\n```\n\ntail\n' > "$_d/doc/b.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || ! echo "$_out" | grep -q 'EMPTY runnable fence: doc/b.md:3'; then
+        echo "SELFTEST FAIL: must-detect empty fence was not detected"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- must-DETECT 3: unclosed ```sdoctest (third accepted prefix) ----
+    _d="$_root/f_sdoctest"; mkfixture "$_d"
+    printf '```sdoctest\n>>> 1 + 1\n2\n' > "$_d/doc/c.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || ! echo "$_out" | grep -q 'UNCLOSED runnable fence: doc/c.md:1'; then
+        echo "SELFTEST FAIL: must-detect unclosed sdoctest fence was not detected"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- must-NOT-detect 1: nested/indented ``` inside a larger block ---
+    # A ```` outer block wrapping a complete ```simple pair, plus a ```simple
+    # block whose body contains an INDENTED ``` pair. Neither loses a test.
+    _d="$_root/f_nested"; mkfixture "$_d"
+    printf '````markdown\n```simple\nfn a(): 1\n```\n````\n\n```simple\nfn b(): 2\n    ```simple\n    fn inner(): 3\n    ```\n```\n' > "$_d/doc/d.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_BAD:-1}" -ne 0 ]; then
+        echo "SELFTEST FAIL: nested/indented fences over-fired ($_out)"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- must-NOT-detect 2: `text`-marked illustrative fence ------------
+    # Illustrative fences are the documented opt-out; an unclosed one costs
+    # no tests because the extractor never tracks it.
+    _d="$_root/f_text"; mkfixture "$_d"
+    printf '```text\nthis fence is never closed and that is fine\n' > "$_d/doc/e.md"
+    printf 'illustrative:\n\n```text\n```simple\nfn not_a_test(): 1\n```\n```\n' > "$_d/doc/e2.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_BAD:-1}" -ne 0 ]; then
+        echo "SELFTEST FAIL: text fence over-fired ($_out)"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- must-NOT-detect 3: CRLF well-formed file (the audit's 7 FPs) ---
+    _d="$_root/f_crlf"; mkfixture "$_d"
+    printf '```simple\r\nfn a(): 1\r\n```\r\n' > "$_d/doc/f.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_BAD:-1}" -ne 0 ]; then
+        echo "SELFTEST FAIL: CRLF file over-fired — CR is not being stripped ($_out)"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- must-NOT-detect 4: bare-info fence (96.9% FP bucket) -----------
+    _d="$_root/f_bare"; mkfixture "$_d"
+    printf '```\nsome ascii diagram\n```\n\n```\nunclosed bare block\n' > "$_d/doc/g.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_BAD:-1}" -ne 0 ]; then
+        echo "SELFTEST FAIL: bare-info fence over-fired ($_out)"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- scoping: a defect inside an IGNORED subtree is not a finding ---
+    _d="$_root/f_ignored"; mkfixture "$_d"
+    printf '```simple\nfn a(): 1\n' > "$_d/doc/09_report/h.md"
+    printf '```simple\nfn ok(): 1\n```\n' > "$_d/doc/live.md"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_BAD:-1}" -ne 0 ] || [ "${SCAN_FENCES:-0}" -ne 1 ]; then
+        echo "SELFTEST FAIL: ignore globs not honoured (bad=${SCAN_BAD:-?} fences=${SCAN_FENCES:-?})"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    # ---- non-vacuity: an empty tree must yield 0 fences so the caller is
+    # ---- FORCED to ERROR, never to a pass ------------------------------
+    _d="$_root/f_empty_tree"; mkfixture "$_d"
+    run_scan "$_d"; _rc=$?
+    _out=$(cat "$SCAN_TMPDIR/report")
+    _ran=$((_ran + 1))
+    if [ "$_rc" -ne 0 ] || [ "${SCAN_FILES:-1}" -ne 0 ]; then
+        echo "SELFTEST FAIL: empty tree did not report 0 files (files=${SCAN_FILES:-?})"; _fails=$((_fails + 1))
+    fi
+    rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+
+    rm -rf "$_root"
+    SELFTEST_RAN=$_ran
+    SELFTEST_FAILS=$_fails
+    [ "$_fails" -eq 0 ]
+}
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="${2:-}"; shift 2 ;;
+        --root=*) ROOT="${1#--root=}"; shift ;;
+        --expect-findings) EXPECT="${2:-0}"; shift 2 ;;
+        --expect-findings=*) EXPECT="${1#--expect-findings=}"; shift ;;
+        --selftest) DO_SELFTEST_ONLY=1; shift ;;
+        -h|--help) sed -n '1,80p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+if [ -z "$ROOT" ]; then
+    ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)
+fi
+ROOT=$(cd "$ROOT" 2>/dev/null && pwd) || { echo "ERROR — nothing was checked (bad --root)"; exit 2; }
+
+# Selftest is fatal and runs before EVERY scan.
+SELFTEST_LOG=$(mktemp)
+selftest > "$SELFTEST_LOG" 2>&1
+selftest_rc=$?
+selftest_out=$(cat "$SELFTEST_LOG"); rm -f "$SELFTEST_LOG"
+if [ "$selftest_rc" -ne 0 ]; then
+    echo "$selftest_out"
+    echo "ERROR — nothing was checked (selftest failed: ${SELFTEST_FAILS:-?} fixture(s))"
+    exit 2
+fi
+
+if [ "$DO_SELFTEST_ONLY" -eq 1 ]; then
+    echo "selftest: 9 fixtures, 0 failures"
+    echo "PASS — 9 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+run_scan "$ROOT"
+scan_rc=$?
+scan_out=$(cat "${SCAN_TMPDIR}/report" 2>/dev/null)
+rm -rf "${SCAN_TMPDIR:-/nonexistent}"
+if [ "$scan_rc" -ne 0 ]; then
+    echo "$scan_out"
+    exit 2
+fi
+[ -n "$scan_out" ] && echo "$scan_out"
+
+if [ "${SCAN_FILES:-0}" -eq 0 ] || [ "${SCAN_FENCES:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "${SCAN_BAD:-0}" -eq 0 ]; then
+    echo "PASS — ${SCAN_FENCES} runnable fence(s) checked in ${SCAN_FILES} file(s), 0 malformed"
+    exit 0
+fi
+
+if [ "${SCAN_BAD}" -eq "$EXPECT" ] && [ "$EXPECT" -gt 0 ]; then
+    echo "PASS — ${SCAN_FENCES} runnable fence(s) checked in ${SCAN_FILES} file(s), ${SCAN_BAD} malformed ACCEPTED via --expect-findings ${EXPECT}"
+    exit 0
+fi
+
+echo "FAIL — ${SCAN_FENCES} runnable fence(s) checked in ${SCAN_FILES} file(s), ${SCAN_BAD} malformed (see above)"
+exit 1
