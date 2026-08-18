@@ -1,0 +1,175 @@
+# Config-driven CLI extension-namespace registry (WP-C follow-on).
+#
+# Lets a hosting app declare `--x<ns>-<key>` namespaces in an SDN config so a
+# new dynamic argument works with ZERO .spl changes: the config declares the
+# namespace, argv tokens classify through the fail-closed
+# SimpleCliOptionRouteTableV1, and parsed (ns, key) -> value/flag results are
+# retrievable through CliExtensionParsedArgsV1.
+#
+# SDN shape (schema key is mandatory, fail-closed):
+#
+#   schema: simple.cli_extension/1
+#   namespaces:
+#     - namespace: llvm
+#       provider_id: provider.llvm
+#     - namespace: office
+#       provider_id: provider.office
+#       availability: optional
+#       missing_policy: warn_skip
+#
+# Integration is ONE line in the hosting app:
+#   val parsed = cli_extension_parse_argv_v1(config_source, argv)?
+
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.composition.cli_option_route.{
+    SimpleCliOptionRouteTableV1, SimpleCliExtensionNamespaceRecordV1,
+    CliExtensionTokenV1, classify_cli_tokens_v1, cli_lookup_namespace_v1,
+    CLI_TOKEN_EXTENSION, CLI_TOKEN_MALFORMED, CLI_TOKEN_PROGRAM_ARG,
+    CLI_TOKEN_POSITIONAL, CLI_TOKEN_EXACT_OPTION, CLI_TOKEN_TERMINATOR,
+    CLI_AVAILABILITY_REQUIRED, CLI_AVAILABILITY_OPTIONAL,
+    CLI_MISSING_ERROR, CLI_MISSING_WARN_SKIP, CLI_MISSING_SILENT_SKIP
+}
+
+val CLI_EXTENSION_CONFIG_SCHEMA_V1: text = "simple.cli_extension/1"
+
+fn _availability_from_text(s: text) -> Result<i64, text>:
+    if s == "" or s == "required": return Ok(CLI_AVAILABILITY_REQUIRED)
+    if s == "optional": return Ok(CLI_AVAILABILITY_OPTIONAL)
+    Err("cli-extension-config-error: invalid availability: " + s)
+
+fn _missing_policy_from_text(s: text) -> Result<i64, text>:
+    if s == "" or s == "error": return Ok(CLI_MISSING_ERROR)
+    if s == "warn_skip": return Ok(CLI_MISSING_WARN_SKIP)
+    if s == "silent_skip": return Ok(CLI_MISSING_SILENT_SKIP)
+    Err("cli-extension-config-error: invalid missing_policy: " + s)
+
+fn _cfg_text(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("cli-extension-config-error: field must be text: " + key)
+        case None: Err("cli-extension-config-error: missing field: " + key)
+
+fn _cfg_optional_text(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("cli-extension-config-error: field must be text: " + key)
+        case None: Ok("")
+
+# Build the fail-closed registry table from SDN source. Malformed SDN, a
+# wrong/missing schema, a missing namespaces list, bad fields, bad enum
+# spellings, duplicate or shape-invalid namespaces are all explicit errors.
+fn cli_extension_registry_from_sdn_v1(source: text) -> Result<SimpleCliOptionRouteTableV1, text>:
+    match parse_with_issues(source):
+        case Ok(parsed): _registry_from_root(parsed.0)
+        case Err(e): Err("cli-extension-config-error: malformed sdn: " + e)
+
+fn _registry_from_root(root: SdnValue) -> Result<SimpleCliOptionRouteTableV1, text>:
+    val schema = _cfg_text(root, "schema")?
+    if schema != CLI_EXTENSION_CONFIG_SCHEMA_V1:
+        return Err("cli-extension-config-error: unsupported schema: " + schema)
+    val ns_value = match root.get("namespaces"):
+        case Some(v): v
+        case None: return Err("cli-extension-config-error: missing field: namespaces")
+    val entries = match ns_value.as_array():
+        case Some(a): a
+        case None: return Err("cli-extension-config-error: namespaces must be an array")
+    var table = SimpleCliOptionRouteTableV1.create()
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        val namespace = _cfg_text(entry, "namespace")?
+        val provider_id = _cfg_text(entry, "provider_id")?
+        val availability = _availability_from_text(_cfg_optional_text(entry, "availability")?)?
+        val missing_policy = _missing_policy_from_text(_cfg_optional_text(entry, "missing_policy")?)?
+        val record = SimpleCliExtensionNamespaceRecordV1(
+            namespace: namespace, provider_id: provider_id,
+            availability: availability, missing_policy: missing_policy)
+        val diag = table.register_namespace(record)
+        if not diag.ok:
+            return Err("cli-extension-config-error: register failed for namespace " + namespace + ": " + diag.detail)
+        i = i + 1
+    Ok(table)
+
+# One parsed extension value: (namespace, key) -> value/flag.
+class CliExtensionValueV1:
+    namespace: text
+    key: text
+    provider_id: text
+    value: text
+    has_value: bool
+
+# Result of routing a classified argv against a registry.
+class CliExtensionParsedArgsV1:
+    var values: [CliExtensionValueV1]
+    var program_args: [text]
+    var passthrough: [text]     # non-extension tokens before `--` (exact options / positionals)
+
+    static fn create() -> CliExtensionParsedArgsV1:
+        CliExtensionParsedArgsV1(values: [], program_args: [], passthrough: [])
+
+    # Retrieve the value of `--x<ns>-<key>=<v>`; None when absent or flag-only.
+    fn get(self, namespace: text, key: text) -> text?:
+        var i = 0
+        while i < self.values.len():
+            val v = self.values[i]
+            if v.namespace == namespace and v.key == key and v.has_value:
+                return Some(v.value)
+            i = i + 1
+        None
+
+    # True when `--x<ns>-<key>` appeared (flag or valued form).
+    fn has(self, namespace: text, key: text) -> bool:
+        var i = 0
+        while i < self.values.len():
+            if self.values[i].namespace == namespace and self.values[i].key == key:
+                return true
+            i = i + 1
+        false
+
+fn _declared_namespaces_text(table: SimpleCliOptionRouteTableV1) -> text:
+    var out = ""
+    var i = 0
+    while i < table.namespaces.len():
+        if i > 0: out = out + ", "
+        out = out + table.namespaces[i].namespace
+        i = i + 1
+    out
+
+# Classify argv against a built registry. Fail-closed: an --x token in an
+# undeclared namespace is an explicit error listing the declared namespaces;
+# a malformed --x token is an explicit error. `--` hard-stops interception.
+fn cli_classify_with_registry_v1(table: SimpleCliOptionRouteTableV1, tokens: [text]) -> Result<CliExtensionParsedArgsV1, text>:
+    val classified = classify_cli_tokens_v1(tokens)
+    var out = CliExtensionParsedArgsV1.create()
+    var i = 0
+    while i < classified.len():
+        val tok = classified[i]
+        if tok.kind == CLI_TOKEN_MALFORMED:
+            return Err("cli-extension-error: malformed extension token: " + tokens[i])
+        if tok.kind == CLI_TOKEN_EXTENSION:
+            val lookup = cli_lookup_namespace_v1(table, tok.namespace)
+            if not lookup.ok:
+                return Err("cli-extension-error: unknown namespace '" + tok.namespace + "' in token " + tokens[i] + "; declared namespaces: " + _declared_namespaces_text(table))
+            out.values.push(CliExtensionValueV1(
+                namespace: tok.namespace, key: tok.key,
+                provider_id: lookup.record.provider_id,
+                value: tok.value, has_value: tok.has_value))
+        elif tok.kind == CLI_TOKEN_PROGRAM_ARG:
+            out.program_args.push(tokens[i])
+        elif tok.kind == CLI_TOKEN_TERMINATOR:
+            pass_do_nothing
+        else:
+            out.passthrough.push(tokens[i])
+        i = i + 1
+    Ok(out)
+
+# One-call entrypoint for a hosting app: SDN config source + argv in, parsed
+# extension values out. Zero .spl changes needed to add a new namespace/key.
+fn cli_extension_parse_argv_v1(config_source: text, tokens: [text]) -> Result<CliExtensionParsedArgsV1, text>:
+    val table = cli_extension_registry_from_sdn_v1(config_source)?
+    cli_classify_with_registry_v1(table, tokens)
