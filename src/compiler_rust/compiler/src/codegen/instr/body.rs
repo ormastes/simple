@@ -616,6 +616,9 @@ pub fn compile_function_body<M: Module>(
 
     // Track values and blocks
     let mut vreg_values: HashMap<VReg, cranelift_codegen::ir::Value> = HashMap::new();
+    // Nil-flag provenance; see InstrContext::nil_tainted.
+    let mut nil_tainted: HashMap<VReg, (BlockId, cranelift_codegen::ir::Value)> = HashMap::new();
+    let mut nil_tainted_locals: HashMap<usize, (BlockId, cranelift_codegen::ir::Value)> = HashMap::new();
     // Dynamically-created variables for local indices not in the pre-allocated `variables` map
     let mut extra_variables: HashMap<usize, cranelift_frontend::Variable> = HashMap::new();
     // Reverse map: VReg → local_index (populated by Load, used by push to store back)
@@ -1007,6 +1010,8 @@ pub fn compile_function_body<M: Module>(
                     vtable_data_ids,
                     vtable_type_ids,
                     vreg_types: &mut vreg_types,
+                    nil_tainted: &mut nil_tainted,
+                    nil_tainted_locals: &mut nil_tainted_locals,
                     fn_arities,
                     enum_defs,
                     tag_runtime_pool_join_result,
@@ -1046,6 +1051,8 @@ pub fn compile_function_body<M: Module>(
                     vtable_data_ids,
                     vtable_type_ids,
                     vreg_types: &mut vreg_types,
+                    nil_tainted: &mut nil_tainted,
+                    nil_tainted_locals: &mut nil_tainted_locals,
                     fn_arities,
                     enum_defs,
                     tag_runtime_pool_join_result,

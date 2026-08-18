@@ -145,6 +145,36 @@ pub struct InstrContext<'a, M: Module> {
     /// during the pre-emit walk. Missing entries mean "unknown type" (treat as signed by
     /// default when FR-0002b lands).
     pub vreg_types: &'a mut HashMap<VReg, TypeId>,
+    /// VRegs that hold a RAW i64 word which may be the tagged nil sentinel (3)
+    /// rather than a genuine integer, paired with the SSA flag that tells the
+    /// two apart and the MIR block that flag was created in.
+    ///
+    /// `UnboxInt` lowers to `rt_value_unbox_int`, which is *total*: a `TAG_INT`
+    /// box is shifted, and everything else -- including `RuntimeValue::NIL`
+    /// (the word 3) -- passes through VERBATIM. So a `Dict<_, i64>` miss, whose
+    /// tagged result is NIL, leaves the raw word 3 in an i64-typed vreg. The
+    /// render sink then calls `rt_raw_i64_to_string`, which prints `3` -- byte
+    /// identical to a legitimately stored 3. The tree-walking interpreter (the
+    /// oracle) prints `nil`.
+    ///
+    /// Nothing AFTER the decode can tell the two apart: a stored 3 and a miss
+    /// are both the raw word 3, ambiguous BY CONSTRUCTION, exactly as
+    /// `rt_array_at`'s doc comment in `runtime/src/value/collections.rs` argues
+    /// when it refuses to return the raw migration form. Routing such a value to
+    /// the nil-aware renderer `rt_opt_i64_to_string` was tried and MEASURED: it
+    /// only flips which side is wrong, printing a stored 3 as `nil`.
+    ///
+    /// So the discrimination is captured BEFORE the decode destroys it, where it
+    /// still exists: a stored 3 reaches `UnboxInt` as the TAGGED word 24, a miss
+    /// as the TAGGED word 3. `UnboxInt` emits `is_nil = (tagged_input == 3)` and
+    /// records it here; the render sink selects a literal `"nil"` string on it.
+    /// A literal `3` never flows through `UnboxInt`, so it has no flag and still
+    /// prints `3`.
+    ///
+    /// Bug: doc/08_tracking/bug/native_tagged_nil_prints_as_integer_3_in_i64_sink_2026-08-18.md
+    pub nil_tainted: &'a mut HashMap<VReg, (BlockId, cranelift_codegen::ir::Value)>,
+    /// Local slot indices currently holding a nil-flagged value. See `nil_tainted`.
+    pub nil_tainted_locals: &'a mut HashMap<usize, (BlockId, cranelift_codegen::ir::Value)>,
     /// Mangled function name → declared parameter count for cross-module free functions.
     pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
     /// Global enum definitions with payload field types.
@@ -221,6 +251,10 @@ impl<'a, M: Module> InstrContext<'a, M> {
         let vtable_type_ids: &'static std::collections::BTreeMap<TypeId, cranelift_module::DataId> =
             Box::leak(Box::new(std::collections::BTreeMap::new()));
         let vreg_types: &'a mut HashMap<VReg, TypeId> = Box::leak(Box::new(HashMap::new()));
+        let nil_tainted: &'a mut HashMap<VReg, (BlockId, cranelift_codegen::ir::Value)> =
+            Box::leak(Box::new(HashMap::new()));
+        let nil_tainted_locals: &'a mut HashMap<usize, (BlockId, cranelift_codegen::ir::Value)> =
+            Box::leak(Box::new(HashMap::new()));
 
         // Minimal dummy MirFunction
         let func: &'static MirFunction = Box::leak(Box::new(MirFunction::new(
@@ -255,6 +289,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
             vtable_data_ids,
             vtable_type_ids,
             vreg_types,
+            nil_tainted,
+            nil_tainted_locals,
             fn_arities,
             enum_defs,
             tag_runtime_pool_join_result: false,
@@ -363,10 +399,33 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::Load { dest, addr, .. } => {
             compile_load(ctx, builder, *dest, *addr)?;
+            // The nil flag follows the value through a local slot: MIR routes an
+            // unboxed dict/optional read into a local before the render sink
+            // reads it back. See InstrContext::nil_tainted.
+            if let Some(&local_index) = ctx.local_addr_map.get(addr) {
+                match ctx.nil_tainted_locals.get(&local_index).copied() {
+                    Some(flag) => {
+                        ctx.nil_tainted.insert(*dest, flag);
+                    }
+                    None => {
+                        ctx.nil_tainted.remove(dest);
+                    }
+                }
+            }
         }
 
         MirInst::Store { addr, value, .. } => {
             compile_store(ctx, builder, *addr, *value)?;
+            if let Some(&local_index) = ctx.local_addr_map.get(addr) {
+                match ctx.nil_tainted.get(value).copied() {
+                    Some(flag) => {
+                        ctx.nil_tainted_locals.insert(local_index, flag);
+                    }
+                    None => {
+                        ctx.nil_tainted_locals.remove(&local_index);
+                    }
+                }
+            }
         }
 
         MirInst::GlobalLoad { dest, global_name, ty } => {
@@ -540,7 +599,34 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::Call { dest, target, args } => {
+            // NIL-AWARE RENDER. `rt_raw_i64_to_string` formats its argument as a
+            // plain signed integer, so an operand carrying the undecoded nil
+            // sentinel printed as `3`, byte-identical to a legitimately stored 3,
+            // while the tree-walking interpreter printed `nil`. The two cannot be
+            // told apart from the raw word -- see InstrContext::nil_tainted -- so
+            // select on the flag captured at UnboxInt, before the decode.
+            let nil_flag = if let crate::mir::CallTarget::Pure(name) = target {
+                if name == "rt_raw_i64_to_string" && args.len() == 1 {
+                    ctx.nil_tainted
+                        .get(&args[0])
+                        .copied()
+                        .filter(|(blk, _)| *blk == ctx.mir_block_id)
+                        .map(|(_, flag)| flag)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             compile_call(ctx, builder, dest, target, args)?;
+            if let (Some(is_nil), Some(dest_reg)) = (nil_flag, dest.as_ref()) {
+                if let Some(&numeric) = ctx.vreg_values.get(dest_reg) {
+                    let (ptr, len) = helpers::create_string_constant(ctx, builder, "nil")?;
+                    let nil_str = helpers::call_runtime_2(ctx, builder, "rt_string_new_literal", ptr, len);
+                    let selected = builder.ins().select(is_nil, nil_str, numeric);
+                    ctx.vreg_values.insert(*dest_reg, selected);
+                }
+            }
         }
 
         MirInst::InlineAsm { instructions, volatile } => {
@@ -1493,6 +1579,15 @@ pub fn compile_instruction<M: Module>(
             // TAG_INT -> >>3, tagged true/false -> 1/0, everything else verbatim)
             // and is total on any input, including a raw untagged i64.
             let unboxed = helpers::call_runtime_1(ctx, builder, "rt_value_unbox_int", val);
+            // Provenance, captured BEFORE the decode destroys it. A stored 3 is
+            // the TAGGED word 24 and a miss is the TAGGED word 3; after
+            // rt_value_unbox_int both are the raw word 3, so the discrimination
+            // is only available here, on `val`. Carry it as an i8 SSA flag.
+            // See InstrContext::nil_tainted.
+            let is_nil = builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 3);
+            ctx.nil_tainted.insert(*dest, (ctx.mir_block_id, is_nil));
             ctx.vreg_values.insert(*dest, unboxed);
         }
 

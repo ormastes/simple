@@ -1,0 +1,159 @@
+"""
+# Tagged nil at an i64 render sink Specification
+
+**Feature IDs:** #CODEGEN-NIL-I64-SINK
+**Category:** Compiler / Cranelift codegen
+**Difficulty:** 4/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/native_tagged_nil_prints_as_integer_3_in_i64_sink_2026-08-18.md
+
+## Overview
+
+On the JIT/native lane a tagged nil reaching an i64 sink used to print as the
+integer `3`, byte-identical to a legitimately stored `3` — a silent wrong
+answer, not a crash. Mechanism: `rt_index_get` returns `RuntimeValue::NIL`
+(word `3`); `UnboxInt` lowers to the TOTAL `rt_value_unbox_int`, which passes
+every non-`TAG_INT` word through verbatim; the raw `3` lands in an i64 vreg and
+`rt_raw_i64_to_string` renders it `"3"`.
+
+## Lane coverage — READ BEFORE TRUSTING A GREEN RUN
+
+An sspec body NEVER executes under the Cranelift JIT (`describe`/`it`/`expect`
+are Rust interpreter intrinsics with no codegen lowering, and a spec file has
+no `fn main`). So every assertion here is made OUT OF PROCESS against a named
+engine, via `engine_stdout`, over
+`native_nil_i64_sink_render_jit_probe.spl`. The `interpret` column is the
+ORACLE; the `jit` column is the lane under test. Both are asserted for every
+case, so an arm that silently stopped reaching the engine it names goes RED
+instead of going vacuously green.
+
+## Reproduce-first evidence (measured, verbatim)
+
+Deployed Rust seed `bin/release/x86_64-unknown-linux-gnu/simple`
+(59620392 bytes, 2026-08-18 01:08:42), which does NOT carry the fix:
+
+| case          | interpret (oracle) | jit          |
+|---------------|--------------------|--------------|
+| miss          | `nil`              | **`3`**      |
+| hit = 7       | `7`                | `7`          |
+| literal 3     | `3`                | `3`          |
+| stored 3      | `3`                | `3`          |
+| i64::MAX      | `9223372036854775807` | same      |
+| -7            | `-7`               | `-7`         |
+
+So `"renders a dict miss as nil under the JIT"` is RED on the pre-fix binary
+and is the example that carries this file's weight.
+
+`stored 3` is not decoration: the first fix attempt (routing a tainted operand
+to `rt_opt_i64_to_string`) turned the miss green and simultaneously made the
+stored 3 print `nil`. A candidate fix must satisfy BOTH columns at once, which
+is why every case is asserted on both engines rather than only the miss.
+
+Mechanism: `src/lib/nogc_sync_mut/spec/engine_probe.spl`
+Pattern:   `doc/07_guide/infra/testing/spec_engine_reach.md`
+"""
+
+use std.spec
+use std.spec.engine_probe.{engine_stdout, is_known_engine}
+
+val _PROBE = "test/01_unit/compiler/codegen/native_nil_i64_sink_render_jit_probe.spl"
+
+
+describe "i64 render sink: interpreter oracle":
+    """
+    ## The reference answers
+
+    The tree-walking interpreter has always been correct here. This group is
+    the control column: if it fails, the probe or the harness broke, not
+    codegen.
+    """
+
+    it "prints nil for a dict miss":
+        expect(engine_stdout(_PROBE, "interpret")).to_contain("CASE_miss=nil")
+
+    it "prints every non-nil case as a plain integer":
+        val out = engine_stdout(_PROBE, "interpret")
+        expect(out).to_contain("CASE_hit=7")
+        expect(out).to_contain("CASE_literal=3")
+        expect(out).to_contain("CASE_stored_three=3")
+        expect(out).to_contain("CASE_big=9223372036854775807")
+        expect(out).to_contain("CASE_neg=-7")
+
+
+describe "i64 render sink under the Cranelift JIT":
+    """
+    As a compiler maintainer, I need a missing dict entry to stay
+    distinguishable from a stored `3` on the compiled lane, so that an absent
+    value can never be read as a legitimate answer.
+    """
+
+    it "renders a dict miss as nil under the JIT":
+        # THE reproduction. Pre-fix this reads `CASE_miss=3`.
+        expect(engine_stdout(_PROBE, "jit")).to_contain("CASE_miss=nil")
+
+    it "renders an ordinary hit unchanged under the JIT":
+        expect(engine_stdout(_PROBE, "jit")).to_contain("CASE_hit=7")
+
+    it "renders a literal 3 as 3 under the JIT":
+        # A literal never flows through UnboxInt, so it carries no nil
+        # provenance and must be untouched by the fix.
+        expect(engine_stdout(_PROBE, "jit")).to_contain("CASE_literal=3")
+
+    it "renders a STORED 3 as 3, not nil, under the JIT":
+        # The case that killed the first fix attempt: a sink-side rule keyed
+        # off the raw word cannot tell a stored 3 from a nil, so it merely
+        # flipped which side was wrong (`three: nil`).
+        expect(engine_stdout(_PROBE, "jit")).to_contain("CASE_stored_three=3")
+
+    it "renders i64::MAX unchanged under the JIT":
+        expect(engine_stdout(_PROBE, "jit")).to_contain("CASE_big=9223372036854775807")
+
+    it "renders a negative i64 unchanged under the JIT":
+        expect(engine_stdout(_PROBE, "jit")).to_contain("CASE_neg=-7")
+
+
+describe "JIT and interpreter agree line for line":
+    """
+    ## Differential oracle
+
+    Per-case containment can drift; this compares the whole CASE_ block from
+    both engines, so a NEW divergence in any case fails even if nobody adds an
+    assertion for it.
+    """
+
+    it "produces an identical CASE_ block on both engines":
+        val jit_lines = _case_lines(engine_stdout(_PROBE, "jit"))
+        val interp_lines = _case_lines(engine_stdout(_PROBE, "interpret"))
+        expect(jit_lines).to_equal(interp_lines)
+
+    it "actually collected six cases (non-vacuity)":
+        # An empty string equals an empty string. Without this, a probe that
+        # failed to run would make the differential example vacuously green.
+        expect(_case_count(engine_stdout(_PROBE, "interpret"))).to_equal(6)
+        expect(_case_count(engine_stdout(_PROBE, "jit"))).to_equal(6)
+
+    it "rejects an unrecognised engine name instead of silently using the JIT":
+        # SIMPLE_EXECUTION_MODE falls back to the JIT on any unknown value, so
+        # a typo would make an A/B comparison compare the JIT with itself.
+        assert_false(is_known_engine("interp"))
+        assert_true(is_known_engine("jit"))
+        assert_true(is_known_engine("interpret"))
+
+
+fn _case_lines(out: text) -> text:
+    var acc = ""
+    for line in out.split("\n"):
+        if line.starts_with("CASE_"):
+            acc = acc + line + ";"
+    acc
+
+
+fn _case_count(out: text) -> i64:
+    var n = 0
+    for line in out.split("\n"):
+        if line.starts_with("CASE_"):
+            n = n + 1
+    n
