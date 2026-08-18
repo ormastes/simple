@@ -66,11 +66,14 @@ comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.
 # re-export the extern (dangling-export guard), and are not the provider.
 # Async families are IN scope: their io_runtime.spl is a re-export facade
 # over nogc_sync_mut, so std.io_runtime resolves family-correctly.
-# EXCLUDED deliberately: rt_file_read_text (wrapper nil-coalesces to "") and
-# rt_file_write_text (wrapper adds mkdir fallback) — behavior differs from the
-# raw extern, so those callers need per-site review, not a mechanical rename.
-# rt_cli_get_args also excluded: get_args() coalesces nil to [] — verify
-# caller nil-handling before tabling it.
+# EXCLUDED deliberately: rt_file_read_text (wrapper nil-coalesces to "") —
+# bare callers whose nil flows onward need per-site review (track C handles
+# the ?? "" subclass). rt_file_write_text TABLED after site audit
+# (2026-08-18): 149 sites, 0 directory-probe patterns; the wrapper's
+# mkdir-retry is a transparent improvement at every audited site.
+# rt_cli_get_args TABLED after nil-audit (2026-08-18): nil is reachable only
+# on malloc failure (runtime_native.c:5221 returns nil on OOM); all audited
+# callers guard via len()/indexing, so nil->[] is benign.
 TB_TABLE="rt_time_now_unix_micros time_now_unix_micros
 rt_file_exists file_exists
 rt_file_delete file_delete
@@ -79,7 +82,9 @@ rt_getpid getpid
 rt_process_run process_run
 rt_file_copy file_copy
 rt_thread_sleep thread_sleep
-rt_sleep_ms thread_sleep"
+rt_sleep_ms thread_sleep
+rt_cli_get_args get_args
+rt_file_write_text file_write"
 
 track_b() {
   tb_done=0
@@ -90,7 +95,10 @@ track_b() {
     for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
       case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
       grep -qE "^export .*\b${sym}\b" "$f" && continue
-      bare=$(grep -oE "[a-z_]*${wrap}" "$f" | grep -cv "^${sym}\$")
+      # identifier-exact collision guard: tokenize and count identifiers
+      # EQUAL to the wrapper name (the old prefix-capture truncated
+      # rt_file_write_text to rt_file_write and self-collided every file).
+      bare=$(grep -oE '[a-z0-9_]+' "$f" | grep -cx "${wrap}")
       [ "$bare" -gt 0 ] && continue
       sed -i "s/^extern fn ${sym}(.*\$/use std.io_runtime.{${wrap}}/" "$f"
       sed -i "s/\b${sym}(/${wrap}(/g" "$f"
@@ -151,7 +159,10 @@ track_b() {
     for f in $(/usr/bin/grep -rlE "$declre" src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
       case "$f" in src/lib/common/string_core.spl) continue ;; esac
       grep -qE "^export .*\b${sym}\b" "$f" && continue
-      bare=$(grep -oE "[a-z_]*${wrap}" "$f" | grep -cv "^${sym}\$")
+      # identifier-exact collision guard: tokenize and count identifiers
+      # EQUAL to the wrapper name (the old prefix-capture truncated
+      # rt_file_write_text to rt_file_write and self-collided every file).
+      bare=$(grep -oE '[a-z0-9_]+' "$f" | grep -cx "${wrap}")
       [ "$bare" -gt 0 ] && continue
       sed -i -E "s@${declre}@use std.common.string_core.{${wrap}}@" "$f"
       sed -i "s/\b${sym}(/${wrap}(/g" "$f"
