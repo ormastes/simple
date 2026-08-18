@@ -20,6 +20,8 @@ extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
@@ -216,18 +218,25 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var wrapper_code: i64 = -2
     while wrapper_code == -2:
         wrapper_code = rt_process_wait(pid, 500)
-        if rt_file_exists(stdout_file):
-            val current = rt_file_read_text(stdout_file)
-            if current.len() > stdout_relayed:
-                print current[stdout_relayed:current.len()]
+        # Read only the bytes appended since the last poll. Reading the WHOLE
+        # file every poll and slicing off the tail (what this did before) is
+        # O(n^2) in the child's total output: relaying a 3 MB build log cost
+        # 146 MB of rchar. rt_file_read_text_at seeks to the offset, so the
+        # cost is now proportional to the NEW bytes only.
+        val out_size = rt_file_size(stdout_file)
+        if out_size > stdout_relayed:
+            val chunk = rt_file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed)
+            if chunk.len() > 0:
+                print chunk
                 rt_stdout_flush()
-                stdout_relayed = current.len()
-        if rt_file_exists(stderr_file):
-            val current_err = rt_file_read_text(stderr_file)
-            if current_err.len() > stderr_relayed:
-                eprint(current_err[stderr_relayed:current_err.len()])
+                stdout_relayed = stdout_relayed + chunk.len()
+        val err_size = rt_file_size(stderr_file)
+        if err_size > stderr_relayed:
+            val chunk_err = rt_file_read_text_at(stderr_file, stderr_relayed, err_size - stderr_relayed)
+            if chunk_err.len() > 0:
+                eprint(chunk_err)
                 rt_stderr_flush()
-                stderr_relayed = current_err.len()
+                stderr_relayed = stderr_relayed + chunk_err.len()
     proc_slot_release()
 
     var stdout = ""

@@ -1,0 +1,76 @@
+# @cover src/app/io/process_ops.spl 20%
+"""
+# Live-relay offset tracking in process_run_timeout_live
+
+**Category:** Runtime
+
+## Purpose and Audience
+
+`process_run_timeout_live` supervises long-running children (the native-build
+worker, the test runner) and relays their output as it is produced. It polls
+the child's stdout/stderr temp files on a 500ms interval.
+
+Until 2026-08-18 each poll called `rt_file_read_text` on the WHOLE temp file
+and sliced off the tail it had not yet printed. Only the new bytes were
+printed -- so output was never duplicated -- but the READ was O(n^2) in the
+child's total output. Measured with the Rust seed: relaying a 2.98 MB log cost
+146 MB of `rchar` in the supervising process, with the per-interval read cost
+growing linearly for the whole run. The fix reads only the appended bytes via
+`rt_file_size` + `rt_file_read_text_at`, which took the same run to 2.84 MB of
+`rchar` (linear, ~258 KB per 5s).
+
+## Scope and Preconditions
+
+Unix only (`process_run_timeout_live` delegates to the Windows path on
+Windows). Requires `/bin/sh` and `timeout`.
+
+## Primary Workflow
+
+Drive a child that appends unique, numbered lines in several bursts spread
+over more than one poll interval, so the relay loop is forced through multiple
+iterations with a growing file. The captured stdout must contain every emitted
+line exactly once, in order -- no loss, no duplication, no reordering, and no
+truncated final line.
+
+## Compatibility and Limitations
+
+**This spec asserts the CORRECTNESS property, not the performance one.** The
+relayed bytes go to the supervising process's own stdout, which a spec running
+inside that same process cannot capture, so the assertions are made on the
+returned stdout -- which is read from the same temp file the relay loop
+consumes. A wall-clock or throughput assertion was deliberately NOT written:
+this host routinely runs at load 33-55 with 20-30 concurrent `simple`
+processes, so any timing bound would be flaky. The O(n^2) regression is
+guarded by the recorded `rchar` measurement above and its ablation, not by
+this spec.
+"""
+
+use app.io.process_ops.{process_run_timeout_live}
+
+describe "process_run_timeout_live relay offset":
+    it "relays a multi-burst child without losing or duplicating a line":
+        # 5 bursts of 40 unique lines, ~400ms apart: spans several 500ms polls
+        # and grows the temp file between each one.
+        val script = "i=0; while [ $i -lt 5 ]; do j=0; while [ $j -lt 40 ]; do echo \"burst-$i-line-$j\"; j=$((j+1)); done; i=$((i+1)); sleep 0.4; done"
+        val (stdout, stderr, rc) = process_run_timeout_live("/bin/sh", ["-c", script], 60000)
+
+        expect(rc).to_equal(0)
+
+        val lines = stdout.trim().split("\n")
+        expect(lines.len()).to_equal(200)
+
+        # Every line unique and in emission order: proves no duplication,
+        # no loss and no reordering across poll boundaries.
+        var idx = 0
+        for i in 0..5:
+            for j in 0..40:
+                expect(lines[idx]).to_equal("burst-{i}-line-{j}")
+                idx = idx + 1
+
+    it "does not truncate a final line that lacks a trailing newline":
+        # printf without \n: the last bytes arrive as a partial line and must
+        # still be relayed and captured.
+        val (stdout, stderr, rc) = process_run_timeout_live("/bin/sh", ["-c", "echo first; sleep 0.6; printf 'no-trailing-newline'"], 60000)
+        expect(rc).to_equal(0)
+        expect(stdout).to_contain("first")
+        expect(stdout).to_contain("no-trailing-newline")
