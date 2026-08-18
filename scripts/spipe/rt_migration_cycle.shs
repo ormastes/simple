@@ -74,6 +74,30 @@ comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.
 # rt_cli_get_args TABLED after nil-audit (2026-08-18): nil is reachable only
 # on malloc failure (runtime_native.c:5221 returns nil on OOM); all audited
 # callers guard via len()/indexing, so nil->[] is benign.
+# rt_env_set / rt_dir_exists TABLED after site audit (2026-08-18): every
+# in-scope extern re-declaration is a uniform `(text[, text]) -> bool` (no
+# `?`/i64/List divergence like the file_size/file_read_bytes family below),
+# and io_runtime.spl's env_set/dir_exists are pure one-line passthroughs
+# (`rt_env_set(key, value)` / `rt_dir_exists(path)`, no coalescing) — safe.
+# EXCLUDED — rt_file_read_bytes: NOT tabled. The extern is re-declared 47
+# times across SIX incompatible return-type shapes ([u8], [u8]?, [i64],
+# [i64]?, List<i32>, i64) per
+# doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md
+# (still open at that section's "Not fixed here"). Even restricted to the
+# 11 in-scope files that declare the extern locally, fs.spl:625 declares
+# `-> [u8]?` and its read_bytes() (fs.spl:235) is a bare passthrough that
+# PRESERVES nil-vs-empty for callers; io_runtime.spl's wrapper
+# (file_read_bytes, line 140) is `rt_file_read_bytes(path) ?? []`, which
+# coalesces nil to []. A mechanical row would silently merge the
+# nil-distinguishing fs.spl call shape into the coalescing wrapper and
+# would additionally cross element-width lines at any [i64]-declaring site
+# outside this narrow scope. fs.spl is left untouched (provider boundary).
+# EXCLUDED — rt_file_size: same family. fs.spl:633 declares
+# `-> usize?` while every other in-scope site (io.spl, file_ops.spl,
+# process_ops.spl, etc.) declares `-> i64`, and io_runtime.spl's wrapper
+# (file_size, line 152) coalesces a negative rt_file_size result (i64
+# error sentinel) to 0 — not a passthrough, and not compatible with the
+# optional-preserving fs.spl shape.
 TB_TABLE="rt_time_now_unix_micros time_now_unix_micros
 rt_file_exists file_exists
 rt_file_delete file_delete
@@ -85,7 +109,9 @@ rt_thread_sleep thread_sleep
 rt_sleep_ms thread_sleep
 rt_cli_get_args get_args
 rt_file_write_text file_write
-rt_file_write_bytes file_write_bytes"
+rt_file_write_bytes file_write_bytes
+rt_env_set env_set
+rt_dir_exists dir_exists"
 
 track_b() {
   tb_done=0
