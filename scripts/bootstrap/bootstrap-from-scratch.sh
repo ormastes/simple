@@ -2524,6 +2524,15 @@ else
     fi
     if [ "${stage3_status}" -eq 0 ]; then
       echo "  warning: stage3 self-host produced no executable; Stage 4 unavailable"
+    elif [ "${stage3_status}" -gt 128 ]; then
+      # A signal death is not a compile failure. earlyoom(1) is userspace, so an
+      # out-of-memory kill leaves nothing in dmesg and used to surface here as a
+      # bare "failed (exit 143)" -- which reads as a compiler defect. Name it.
+      stage3_signal=$((stage3_status - 128))
+      echo "  warning: stage3 self-host was KILLED by signal ${stage3_signal} ($(kill -l "${stage3_signal}" 2>/dev/null || echo unknown)), not a compile failure; Stage 4 unavailable"
+      if [ "${stage3_signal}" -eq 15 ] || [ "${stage3_signal}" -eq 9 ]; then
+        echo "  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom'); host memory pressure, not the source, is the usual cause"
+      fi
     else
       echo "  warning: stage3 self-host failed (exit ${stage3_status}); Stage 4 unavailable"
     fi
