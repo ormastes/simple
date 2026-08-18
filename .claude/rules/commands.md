@@ -46,7 +46,7 @@ that import std, across 75 prefixes (`nogc_sync_mut/io/**`, `log`, `io_runtime`,
 
 Why there is no partial build: there is **no target/dependency model**. No
 `BuildTarget` exists in `80.driver` — only files.
-`DependencyEntry.needs_recompile` (`driver_build/incremental.spl:203-226`) is a
+`DependencyEntry.needs_recompile` (`driver_build/incremental.spl:280`) is a
 ONE-HOP predicate that never recurses, and is **never called** — its four
 importers take only fingerprint helpers. `action_key.spl` / `cas_store.spl` have
 zero external callers and are not exported from `cache/__init__.spl`.
@@ -60,11 +60,22 @@ path containing a `build/` component, and `git add` on it is a silent no-op.)
   lint-profile reader. **No build path traverses `dependencies:`.**
 - `action_key.spl:197-204` implements `interface_digest_of` canonically
   (`simple/interface/v1`), with `ActionDep.iface_digest` and dep sort on
-  `(module_id, iface_digest)`. **`grep -rn interface_digest_of src` returns one
-  line: its own definition. Zero callers — never computed, not merely ignored.**
+  `(module_id, iface_digest)`. **`/usr/bin/grep -rn interface_digest_of
+  src/compiler` returns 4 lines: its own definition
+  (`cache/action_key.spl:199`), one schema row
+  (`cache/schema/cache_protocol.sdn:844`), and two comments that merely name it
+  (`35.semantics/interface/compile_interface.spl:37`,
+  `cache/block/block_key.spl:10`). Zero actual CALL SITES — never computed, not
+  merely ignored.** (The count matters only so the claim can't be dismissed as
+  sloppy; the load-bearing part is the zero callers.)
 - The caches that DO run are content-keyed: `object_cache_key` hashes only the
   module's own source; `SmfManifestEntry` carries `source_hash` and has no
-  interface-digest field. `SmfManifest` is written but never verified on load.
+  interface-digest field. The manifest ROW *is* verified on the interpret path —
+  `driver_api_interpret.spl:55` calls `smf_manifest_entry_matches_source` and
+  fails closed to a full interpret on mismatch. What is unwired is the
+  whole-entry wrapper `smf_manifest_entry_verifies`
+  (`watcher/smf_manifest.spl:134`), which re-reads `entry.source_path` itself:
+  it is exported from `watcher/__init__.spl:33` and has zero callers.
 
 **Partly superseded 2026-08-17 — "content-keyed" was never the whole story, and
 is now less of it.** `object_cache_key` (`native_project/mod.rs`) already folded
@@ -81,8 +92,9 @@ entry; unset ⇒ `default`, identical to previous behaviour. Bootstrap stages ge
 `build/bootstrap/native_cache/<lane>/` plus a fail-closed ownership guard
 (`scripts/check/check-cache-scope-ownership.shs`, `.cache_scope` marker).
 What is NOT superseded: dependency-aware / partial rebuild. That still needs
-`interface_digest_of`, `simple.sdn` traversal, and `SmfManifest`
-load-verification — all still uncalled. Design:
+`interface_digest_of`, `simple.sdn` traversal, and `smf_manifest_entry_verifies`
+— all still uncalled. (Row-level manifest verification is NOT in that list: it
+already runs on the interpret path, see above.) Design:
 `doc/05_design/compiler/incremental_build/per_lane_private_caches.md`.
 
 ## Fast Path (measured 2026-08-09)
