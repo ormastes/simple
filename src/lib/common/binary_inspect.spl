@@ -1,0 +1,90 @@
+# Canonical binary-inspection helpers (binary_runtime_hardening goal 7).
+#
+# THE single owner for hex/byte inspection utilities — the Wave-1 duplication
+# audit found ~25 copies of bytes_to_hex, ~40 of hex_digit/byte_to_hex, ~30 of
+# hex_char_value, ~15 of is_hex_digit, and 6 identical format_bytes across the
+# tree (doc/03_plan/infra/binary_runtime_hardening/wave1_audit_results_2026-08-18.md
+# section C). New code imports from here; existing copies delegate here or are
+# deleted as they are touched. Pure functions only — no I/O.
+
+val _HEX = "0123456789abcdef"
+
+pub fn hex_digit(v: i64) -> text:
+    """Low nibble (0..15) to its lowercase hex char; "" outside the range."""
+    if v < 0 or v > 15:
+        return ""
+    _HEX[v]
+
+pub fn byte_to_hex(b: i64) -> text:
+    """One byte (0..255) to two lowercase hex chars; "" outside the range."""
+    if b < 0 or b > 255:
+        return ""
+    hex_digit((b / 16) % 16) + hex_digit(b % 16)
+
+pub fn bytes_to_hex(bytes: [i64]) -> text:
+    """Byte array to lowercase hex; "" when any element is outside 0..255
+    (matching the strictest existing copy, common/crypto/types.spl)."""
+    var out = ""
+    var i = 0
+    val n = bytes.len()
+    while i < n:
+        val h = byte_to_hex(bytes[i])
+        if h == "":
+            return ""
+        out = out + h
+        i = i + 1
+    out
+
+pub fn hex_char_value(c: text) -> i64:
+    """One hex char (either case) to its value; -1 when not a hex char."""
+    val code = char_code_of(c)
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 87
+    if code >= 65 and code <= 70:
+        return code - 55
+    -1
+
+pub fn is_hex_digit(c: text) -> bool:
+    hex_char_value(c) >= 0
+
+fn char_code_of(c: text) -> i64:
+    val raw = c.bytes()
+    if raw.len() == 0:
+        return -1
+    raw[0]
+
+pub fn hex_to_bytes(s: text) -> [i64]:
+    """Hex text (even length, either case) to bytes; [] on any invalid char
+    or odd length."""
+    val n = s.len()
+    if n % 2 != 0:
+        return []
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        val hi = hex_char_value(s[i])
+        val lo = hex_char_value(s[i + 1])
+        if hi < 0 or lo < 0:
+            return []
+        out.push(hi * 16 + lo)
+        i = i + 2
+    out
+
+pub fn format_bytes(bytes: i64) -> text:
+    """Human-readable size: 512 -> "512 B", 2048 -> "2 KB", ... (integer
+    division, matching the six identical perf.spl copies)."""
+    if bytes < 1024:
+        return "{bytes} B"
+    val kb = bytes / 1024
+    if kb < 1024:
+        return "{kb} KB"
+    val mb = kb / 1024
+    if mb < 1024:
+        return "{mb} MB"
+    val gb = mb / 1024
+    "{gb} GB"
+
+export hex_digit, byte_to_hex, bytes_to_hex, hex_char_value, is_hex_digit
+export hex_to_bytes, format_bytes
