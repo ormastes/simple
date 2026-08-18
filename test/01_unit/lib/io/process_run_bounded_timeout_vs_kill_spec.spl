@@ -1,0 +1,66 @@
+# process_run_bounded: timeout is distinguishable from signal-kill and spawn failure.
+#
+# Closes (partially) the open item in
+# doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md.
+# rt_process_run_bounded has three implementations with three timeout markers
+# (Rust runtime "\nTIMEOUT\n"; interpreter extern "Process timed out" — the
+# path THIS spec's process actually takes under `bin/simple test`; C runtime
+# "[TIMEOUT: Process killed after Nms]"). All return -1 + trailing marker on
+# deadline expiry. process_bounded_timed_out codifies that union.
+#
+# Signal deaths map to 128+signo ONLY on paths using exit_status_to_code
+# (env_process.rs:22-34). The interpreter-extern bounded path (system.rs
+# `status.code().unwrap_or(-1)`) and the C runtime (runtime_process.c:1481)
+# still collapse them to -1 with EMPTY stderr — a Rust/C-layer residue this
+# pure-Simple lane cannot fix, so the signal expectations below accept either
+# shape while still proving a kill is NEVER classified as a timeout.
+
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
+
+describe "process_run_bounded timeout vs kill discrimination":
+    it "reports a deadline expiry as -1 plus a trailing timeout marker":
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "sleep 30"], 500, 4096)
+        expect(exit_code).to_equal(-1)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(true)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+
+    it "never classifies an uncatchable SIGKILL death as a timeout":
+        # Deterministic external-kill fixture: the child SIGKILLs itself,
+        # indistinguishable from a host killer to the parent. Depending on
+        # backend the code is 137 (128+9, exit_status_to_code paths) or -1
+        # with empty stderr (interpreter-extern bounded / C runtime collapse).
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "kill -9 $$"], 5000, 4096)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+        val ok_shape = exit_code == 137 or (exit_code == -1 and stderr == "")
+        expect(ok_shape).to_equal(true)
+        if exit_code == 137:
+            expect(process_bounded_kill_signal(exit_code)).to_equal(9)
+
+    it "never classifies an external SIGTERM death as a timeout":
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "kill -TERM $$"], 5000, 4096)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+        val ok_shape = exit_code == 143 or (exit_code == -1 and stderr == "")
+        expect(ok_shape).to_equal(true)
+        if exit_code == 143:
+            expect(process_bounded_kill_signal(exit_code)).to_equal(15)
+
+    it "treats a plain nonzero exit as neither timeout nor signal":
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "exit 7"], 5000, 4096)
+        expect(exit_code).to_equal(7)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+        expect(process_bounded_kill_signal(exit_code)).to_equal(0)
+
+    it "does not mistake a child that merely PRINTS timeout text for a timeout":
+        # Marker checks are anchored to stderr's END with exit_code -1; a child
+        # that exits 0 after printing the words must not classify as timed out.
+        val (stdout, stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", "echo Process timed out >&2; echo TIMEOUT >&2; echo done; exit 0"], 5000, 4096)
+        expect(exit_code).to_equal(0)
+        expect(process_bounded_timed_out(exit_code, stderr)).to_equal(false)
+
+    it "keeps kill-signal decoding exact on the 128+signo band":
+        expect(process_bounded_kill_signal(137)).to_equal(9)
+        expect(process_bounded_kill_signal(143)).to_equal(15)
+        expect(process_bounded_kill_signal(-1)).to_equal(0)
+        expect(process_bounded_kill_signal(0)).to_equal(0)
+        expect(process_bounded_kill_signal(128)).to_equal(0)
+        expect(process_bounded_kill_signal(192)).to_equal(0)

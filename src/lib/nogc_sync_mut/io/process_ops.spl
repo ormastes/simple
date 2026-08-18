@@ -80,6 +80,51 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     proc_slot_release()
     (stdout, stderr, exit_code)
 
+# --------------------------------------------------------------------------
+# Timeout-vs-kill discrimination for process_run_bounded results.
+#
+# rt_process_run_bounded has THREE parallel implementations (all read-only
+# references, verified against a live probe 2026-08-18); their timeout markers
+# differ, but every one of them appends a marker as the LAST bytes of stderr
+# on a deadline expiry and returns exit_code -1:
+#   - Rust runtime (env_process.rs:1275):      trailing "\nTIMEOUT\n"
+#   - interpreter extern (system.rs:161-165):  trailing "Process timed out"
+#     (this is the path a spec child under `bin/simple test` actually takes)
+#   - C runtime (runtime_process.c:88-100):    trailing "[TIMEOUT: Process
+#     killed after <N>ms]"
+# Death by signal maps to 128 + signo on the Rust-runtime path
+# (exit_status_to_code, env_process.rs:22-34: SIGKILL -> 137, SIGTERM -> 143),
+# but the interpreter-extern BOUNDED path still collapses it to -1
+# (`status.code().unwrap_or(-1)`, system.rs:~172) and the C runtime collapses
+# it at runtime_process.c:1481 (`if (rt_fork_parent_signaled()) code = -1;`).
+# Closing THAT residue needs a Rust/C runtime change — see
+# doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md.
+# So: timeout is discriminable on every path; signal-vs-spawn-failure only
+# where 128+signo survives. Additive helpers only — tuple shape unchanged.
+# --------------------------------------------------------------------------
+
+pub fn process_bounded_timed_out(exit_code: i64, stderr: text) -> bool:
+    """True iff a process_run_bounded result means the deadline expired
+    (the runtime killed the child), per the trailing-marker contracts above.
+    Anchored to the END of stderr so a child that merely PRINTS the words
+    cannot classify as a timeout unless it also dies with exit_code -1."""
+    if exit_code != -1:
+        return false
+    if stderr.ends_with("\nTIMEOUT\n"):
+        return true
+    if stderr.ends_with("Process timed out"):
+        return true
+    stderr.ends_with("ms]") and stderr.contains("[TIMEOUT: Process killed after ")
+
+pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
+    """Signal number when a process_run_bounded child died by signal
+    (exit_code = 128 + signo), else 0. A timeout is NOT a signal death here:
+    every runtime reports timeout as -1 + marker, never 128+9. Returns 0 on
+    the paths that still collapse signal deaths to -1 (see block comment)."""
+    if exit_code > 128 and exit_code < 192:
+        return exit_code - 128
+    0
+
 pub fn process_spawn_piped(cmd: text, args: [text]) -> i64:
     rt_process_spawn_piped(cmd, args)
 
