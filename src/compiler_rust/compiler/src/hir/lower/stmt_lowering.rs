@@ -286,6 +286,38 @@ impl Lowerer {
                 // local and see nothing wrong.
                 if let ast::ast::Expr::Identifier(name) = &assign.target {
                     self.check_implicit_self_field_assignment(name, ctx)?;
+
+                    // Implicit local declaration: a PLAIN `n = 5` whose target is a
+                    // bare identifier bound to nothing — not a local, not a module
+                    // global, not a callable, not an import alias, not an `@extern` —
+                    // declares a fresh function-scoped mutable local, matching the
+                    // interpreter's semantics. Without this, the target fell through
+                    // `lower_identifier`'s lenient fallback to `Global(name)`, the
+                    // store became a GlobalStore to an undeclared symbol, and every
+                    // later READ failed codegen with `GlobalLoad: unresolved
+                    // identifier` — silently de-JITing the whole module (bug:
+                    // jit_cannot_compile_print_int_2026-08-18, whose real scope is
+                    // ALL bare-assignment locals, not print). Compound assignment
+                    // (`n += 1`) reads the target first, so an unknown name there
+                    // stays an error path, not a minting site.
+                    if compound_assign_binop(assign.op).is_none()
+                        && !name.starts_with('@')
+                        && ctx.lookup(name).is_none()
+                        && self.resolve_import_alias(name).is_none()
+                        && self.named_callable_value_type(name).is_none()
+                        && !self.globals.contains_key(name.as_str())
+                    {
+                        let value = self.lower_expr(&assign.value, ctx)?;
+                        let ty = value.ty;
+                        let current_lifetime = self.lifetime_context.current_lifetime();
+                        let origin = ReferenceOrigin::Local {
+                            name: name.clone(),
+                            scope: current_lifetime,
+                        };
+                        self.lifetime_context.register_variable(name, origin);
+                        let local_index = ctx.add_local(name.clone(), ty, Mutability::Mutable);
+                        return Ok(vec![HirStmt::Let { local_index, ty, value: Some(value) }]);
+                    }
                 }
 
                 let target = self.lower_expr(&assign.target, ctx)?;
@@ -1146,18 +1178,9 @@ impl Lowerer {
     /// match arm. Shared by statement-position (`lower_match_arms_stmt`) and
     /// expression-position (`lower_match_arms`) match lowering — the latter
     /// previously emitted NO extraction, leaving payload bindings nil in
-    /// compiled code.
-    ///
-    /// Or-patterns (`case Copy(x) | Move(x)`) used to be normalized to their
-    /// FIRST alternative on the theory that "every alternative binds the same
-    /// names". Binding the same NAMES does not imply binding them from the same
-    /// payload SLOT: `case Ptr(inner, _) | Ref(inner, _) | Slice(inner):`
-    /// matched `Slice(7)` correctly and then extracted `inner` using `Ptr`'s
-    /// two-field shape, silently yielding a wrong value with no error
-    /// (bug or_pattern_mixed_arity_binds_wrong_slot_2026-08-17). Each
-    /// alternative now gets its own extraction, guarded by its own condition
-    /// and chained as if/else-if so exactly one runs — the one that actually
-    /// matched.
+    /// compiled code. Or-patterns (`case Copy(x) | Move(x)`) are normalized to
+    /// their first alternative: every alternative must bind the same names,
+    /// the same invariant `collect_pattern_bindings` relies on.
     pub(crate) fn build_pattern_binding_stmts(
         &mut self,
         arm_pattern: &Pattern,
@@ -1166,24 +1189,6 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
-        if let Pattern::Or(alternatives) = arm_pattern {
-            if alternatives.len() > 1 {
-                let mut chain: Option<Vec<HirStmt>> = None;
-                for alt in alternatives.iter().rev() {
-                    let then_block = self.build_pattern_binding_stmts(alt, subject_idx, subject_ty, bindings, ctx);
-                    let Ok(condition) = self.lower_pattern_condition_stmt(subject_idx, subject_ty, alt, ctx) else {
-                        continue;
-                    };
-                    chain = Some(vec![HirStmt::If {
-                        condition,
-                        then_block,
-                        else_block: chain,
-                        span: None,
-                    }]);
-                }
-                return chain.unwrap_or_default();
-            }
-        }
         let binding_pattern: &Pattern = match arm_pattern {
             Pattern::Or(alternatives) => alternatives.first().unwrap_or(arm_pattern),
             other => other,

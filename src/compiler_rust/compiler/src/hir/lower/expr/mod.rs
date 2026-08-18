@@ -442,7 +442,7 @@ impl Lowerer {
             })
     }
 
-    fn named_callable_value_type(&mut self, name: &str) -> Option<TypeId> {
+    pub(super) fn named_callable_value_type(&mut self, name: &str) -> Option<TypeId> {
         let target = self
             .resolve_function_alias(name)
             .map(str::to_string)

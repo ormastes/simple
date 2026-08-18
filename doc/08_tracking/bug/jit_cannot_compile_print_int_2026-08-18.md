@@ -1,6 +1,9 @@
 # JIT cannot compile `print(<int>)` — whole module silently de-JITs
 
-**Status:** OPEN
+**Status:** FIXED 2026-08-18 (same session) — real scope was ALL bare-assignment
+locals, not print: `stmt_lowering.rs` now mints `n = 5` as a function-scoped
+mutable local instead of a lenient Global. All 12 strict-JIT probes green,
+including rt_ provider-alias lane parity.
 **Filed:** 2026-08-18
 **Found by:** rt_ alias-archaeology probes (binary_runtime_hardening Wave 1).
 
@@ -36,6 +39,20 @@ verdict for aliased rt_ externs is unobtainable until this compiles (the alias
 itself is exonerated — plain import, aliased import, and direct extern all
 failed identically on this print gap; alias-binding gate
 `check-import-alias-codegen.shs` PASSes 5/5).
+
+## Root-cause detail (measured with fresh seed build, same date)
+
+With the strict fail-open fix in place, the underlying codegen error surfaces:
+
+```
+[CODEGEN BODY] Function 'main' body compilation failed:
+GlobalLoad: unresolved identifier 'n' (not a global, function, const-data name, or import)
+```
+
+The lowering of `print(<local int var>)` emits a **GlobalLoad for the local
+variable `n`** — i.e. the print builtin's non-text argument path resolves its
+argument through the global namespace instead of the local slot. Not a print
+formatting gap; a scoping/lowering defect in the builtin-call path.
 
 ## Taxonomy
 
