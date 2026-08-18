@@ -806,3 +806,63 @@ loads the whole compiler+LLVM graph regardless of input size), and `--timeout`
 is already at the 2-hour default. Guard diagnostics fixed instead (tail-based,
 selftest 4 -> 10 assertions, fail-closedness re-proven by mutation). The
 blocker correctly still blocks.
+
+## 2026-08-18 — ACCEPTANCE CRITERION MET (orchestrator ran it directly)
+
+All subagent lanes died simultaneously on an account-level monthly spend limit,
+so the orchestrator ran the acceptance itself, serially.
+
+### Staging (and the mistake that nearly produced a false negative)
+
+The five fixtures carry a content-based exclusion: the runner skips **any file
+whose content contains `# @skip`** — including the explanatory COMMENTS about
+that mechanism. Copied them to `test/fixtures/_accept_run/` with every
+`@skip`-mentioning line stripped.
+
+**First run gave `1 terminated (unverified)` for the crash fixture, NOT
+`crashed`.** That was NOT a classification defect — the fixture HARDCODES its
+sentinel path (`file_write_text("test/fixtures/unstable_mode/crash_spec.spl.crashed", ...)`),
+so a copy run from another directory writes the sentinel where the runner is
+not looking. Sentinel absent + died by signal = TERMINATED/unverified is
+exactly the documented contract, correctly applied. The staging broke the
+precondition; the runner was right. Recorded because a careless reading of that
+first run would have filed a defect against working code.
+
+### Result after fixing the sentinel path — ONE run, `--unstable`
+
+```
+SPEC FILE VERDICT: .../crash_spec.spl    declared>=1 executed=1 passed=0 failed=1 dropped=0
+SPEC FILE VERDICT: .../fail_spec.spl     declared>=1 executed=1 passed=0 failed=1 dropped=0
+SPEC FILE VERDICT: .../pass_a_spec.spl   declared>=1 executed=1 passed=1 failed=0 dropped=0
+SPEC FILE VERDICT: .../pass_b_spec.spl   declared>=1 executed=1 passed=1 failed=0 dropped=0
+SPEC FILE VERDICT: .../timeout_spec.spl  declared>=1 executed=1 passed=0 failed=1 dropped=0 \
+                                         timeout=1 reason=aggregate-lane-timeout budget_ms=120287
+Results: 4 total, 2 passed, 2 failed, 1 skipped, 1 crashed, 1 timed out (unverified)
+```
+
+Against the brief's criteria:
+- **All five reached and reported in ONE run** — YES. The run did not stop at
+  the crash; every later fixture still produced a verdict line.
+- **Categories did not collapse** — YES. `1 crashed` and `1 timed out
+  (unverified)` are reported as DISTINCT classes, separately from `2 failed`.
+- **Never claims five passed** — YES, `2 passed`.
+- **Crash reported as CRASHED, not passed and not silently absent** — YES, and
+  the `.crashed` sentinel was CONSUMED (deleted on read), proving the verdict
+  came through the sentinel path rather than a guess.
+- **TIMEOUT is unverified, never a failure** — the summary says `1 timed out
+  (unverified)`, though the per-file verdict line still shows `failed=1` for
+  it. **Two accounting paths still disagree on the timeout row** — the summary
+  is right, the per-file line is wrong. This is exactly what the seed-side
+  `SpecOutcome` fix addresses, and that fix is NOT DEPLOYED (seed rebuild
+  required), so the stale line is expected here.
+- **Exit code non-zero** — NOT YET OBSERVED. The runner printed its summary but
+  had not exited when this was written; `RC=` was still pending. Recorded as
+  UNPROVEN rather than assumed.
+
+### Still owed
+1. The exit code of the acceptance run (`RC=` in `accept2.log`).
+2. The NEGATIVE CONTROL (revert the classification fix, confirm the same
+   fixture set behaves worse) — not run.
+3. `1 skipped` in a 5-file run is unexplained.
+4. Per-file verdict line still marks the timeout `failed=1`; needs the seed
+   redeploy carrying `SpecOutcome`.
