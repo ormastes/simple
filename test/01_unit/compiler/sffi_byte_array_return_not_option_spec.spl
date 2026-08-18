@@ -1,0 +1,57 @@
+"""
+# SFFI `[u8]` Return Must Not Be Option-Wrapped
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Regression pin for the historical interpreter defect where an SFFI wrapper
+declaring a plain `[u8]` return bound `Option::Some([bytes])` at the
+call site, so `.len()` failed with
+`method len not found on type enum (receiver value: Option::Some(...))`.
+
+Positive: a wrapper declared `-> [u8]` binds a real array — `.len()` works.
+Negative control: a wrapper declared `-> Option<[u8]>` really IS an Option and
+must NOT be silently unwrapped (proves the positive case is not a blanket
+auto-unwrap masking the same value-model bug from the other side).
+
+tag: unit, compiler, sffi
+"""
+
+use std.spipe.*
+use std.nogc_sync_mut.io.signature_sffi.{rsa_sha256_sign, rsa_sha512_sign, ecdsa_p256_sign}
+
+fn _opt_wrapper(pkcs8: [u8], message: [u8]) -> Option<[u8]>:
+    val sig = rsa_sha256_sign(pkcs8, message)
+    if sig.len() == 0:
+        return None
+    Some(sig)
+
+describe "SFFI byte-array return marshalling":
+
+    it "rsa_sha256_sign declared -> [u8] binds an array, not Option":
+        val bad: [u8] = [1u8, 2u8, 3u8]
+        val msg: [u8] = [9u8, 9u8]
+        val sig = rsa_sha256_sign(bad, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "rsa_sha512_sign declared -> [u8] binds an array, not Option":
+        val bad: [u8] = [1u8, 2u8, 3u8]
+        val msg: [u8] = [9u8, 9u8]
+        val sig = rsa_sha512_sign(bad, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "ecdsa_p256_sign declared -> [u8] binds an array, not Option":
+        val bad: [u8] = [1u8, 2u8, 3u8]
+        val msg: [u8] = [9u8, 9u8]
+        val sig = ecdsa_p256_sign(bad, msg)
+        expect(sig.len()).to_equal(0)
+
+    it "negative control: a real Option<[u8]> return stays an Option":
+        val bad: [u8] = [1u8, 2u8, 3u8]
+        val msg: [u8] = [9u8, 9u8]
+        val opt = _opt_wrapper(bad, msg)
+        expect(opt.is_none()).to_equal(true)
