@@ -422,15 +422,17 @@ fn has_crash_evidence(combined: text) -> bool:
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Outcome classification -- contract frozen in .spipe/unstable_test_mode/state.md.
     #
-    # The runtime collapses timeout AND death-by-signal onto ONE -1 sentinel:
-    # finish_child_output_bounded (runtime/src/value/sffi/env_process.rs:508)
-    # maps `status.code() == None` to -1, and its timeout branch (:535) returns
-    # a hard-coded -1 after appending a "\nTIMEOUT\n" marker to stderr. No
-    # signal number reaches this layer at all, so a directly-SIGTERMed child
-    # NEVER shows up as a plain rc 143 -- only as the -1 sentinel. A plain
-    # 143/144 can still arrive when an intermediate shell propagates it (the
-    # guard wrapper at env_process.rs:806 exits 143 on TERM), so both forms are
-    # classified as TERMINATED here.
+    # The signal number DOES reach this layer. `exit_status_to_code`
+    # (runtime/src/value/sffi/env_process.rs:22-34) returns `128 + signal` when
+    # `status.code()` is None; its own doc comment records that the old
+    # `unwrap_or(-1)` collapse was the bug and this is the fix. (An earlier
+    # version of THIS comment claimed the opposite and misled two lanes -- it
+    # was wrong, and 137/139/134 were falling through to the stdout-scrape
+    # mapper below, i.e. a segfault could be classified by scraping stdout.)
+    #
+    # `-1` now survives only for (a) timeout -- env_process.rs:563-567 returns a
+    # hard-coded -1 with timed_out=true and appends a "\nTIMEOUT\n" marker at
+    # :1275 -- and (b) spawn/reap failure. Both are unverified, not failures.
     #
     # TIMEOUT and TERMINATED are UNVERIFIED, never failures: earlyoom is
     # actively SIGTERMing `simple` on this host (fires at 10% memory, zero
@@ -441,7 +443,32 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
     if exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
         return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "TIMEOUT: no result after {timeout_secs}s (unverified)", timed_out: true, cached: false)
 
-    if exit_code == -1 or exit_code == 143 or exit_code == 144:
+    # Frozen contract for a signal death (128 + signo):
+    #   SIGTERM(15)/143            -> TERMINATED, unverified, failed: 0
+    #     earlyoom SIGTERMs `simple` on this host, so it says nothing about the
+    #     code under test.
+    #   SIGKILL(9)/137             -> CRASHED, failed: 1
+    #     earlyoom's FIRST move is SIGTERM, so a raw SIGKILL is not attributable
+    #     to it and is indistinguishable from the compiler dying. Under-reporting
+    #     a crash IS the silent-green defect.
+    #   SIGILL(4)/SIGABRT(6)/SIGBUS(7)/SIGFPE(8)/SIGSEGV(11) -> CRASHED, failed: 1
+    #   144 (128+16)               -> kept in the unverified class, as before.
+    val signo = if exit_code > 128 and exit_code < 192: exit_code - 128 else: 0
+    if signo == 4 or signo == 6 or signo == 7 or signo == 8 or signo == 9 or signo == 11:
+        val sentinel_seen = take_crash_sentinel(file_path)
+        val extra = if sentinel_seen:
+            " after writing its crash sentinel"
+        elif has_crash_evidence(stdout + "\n" + stderr):
+            "; last output: {extract_error_message(stdout + "\n" + stderr)}"
+        else:
+            ""
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal {signo} (exit {exit_code}){extra}", timed_out: false, cached: false)
+
+    # SIGHUP(1)/SIGINT(2)/SIGTERM(15) are the outside-killer set (same set as
+    # test_runner_fork.spl's `is_outside_kill`, which likewise excludes SIGKILL).
+    # Any other signal death joins them in the unverified class rather than
+    # falling through to the stdout-scrape mapper below.
+    if exit_code == -1 or exit_code == 143 or exit_code == 144 or signo > 0:
         if take_crash_sentinel(file_path):
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "CRASHED: child died by signal after writing its crash sentinel", timed_out: false, cached: false)
         if has_crash_evidence(stdout + "\n" + stderr):
@@ -531,9 +558,10 @@ fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
 fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
     if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
-    # -1 (timeout or signal death) and a shell-propagated 143/144 all need the
-    # six-class classification above, not the generic non-zero-exit path below.
-    if exit_code == -1 or exit_code == 143 or exit_code == 144:
+    # -1 (timeout / spawn failure) and every 128+signo death (incl. a
+    # shell-propagated 143/144) need the classification above, not the generic
+    # non-zero-exit path below.
+    if exit_code == -1 or (exit_code > 128 and exit_code < 192):
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
     val combined = stdout + "\n" + stderr
     val (_, _, skipped, pending) = parse_test_output(combined)

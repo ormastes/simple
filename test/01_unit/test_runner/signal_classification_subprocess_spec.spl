@@ -1,0 +1,62 @@
+# Signal classification for the subprocess test-execution path.
+#
+# `exit_status_to_code` (src/compiler_rust/runtime/src/value/sffi/env_process.rs:22-34)
+# returns `128 + signal`, so 137/139/134 genuinely reach
+# `make_result_from_output`. Before 2026-08-18 they matched none of the
+# -1/143/144 arms and fell through to the legacy stdout-scrape mapper, where a
+# child that printed a green summary and then segfaulted was reported as
+# `passed: 5`. These examples pin the frozen contract.
+
+use std.test_runner.test_executor_parsing.{make_result_from_output}
+
+describe "signal classification (subprocess path)":
+
+    it "classifies an unbudgeted SIGKILL (137) as CRASHED with failed: 1":
+        val r = make_result_from_output("/tmp/no_such_spec.spl", "", "", 137, 10, 60)
+        assert_equal(r.failed, 1)
+        assert_contains(r.error, "CRASHED")
+        assert_equal(r.timed_out, false)
+
+    it "classifies SIGSEGV (139) as CRASHED with failed: 1":
+        val r = make_result_from_output("/tmp/no_such_spec.spl", "", "", 139, 10, 60)
+        assert_equal(r.failed, 1)
+        assert_contains(r.error, "CRASHED")
+
+    it "classifies SIGABRT (134) as CRASHED with failed: 1":
+        val r = make_result_from_output("/tmp/no_such_spec.spl", "", "", 134, 10, 60)
+        assert_equal(r.failed, 1)
+        assert_contains(r.error, "CRASHED")
+
+    it "does not scrape a green stdout summary out of a killed child":
+        # The exact silent-green shape: the child printed a full pass summary,
+        # then died by SIGKILL. Its self-reported counts must not survive.
+        val out = "Results: 5 total, 5 passed, 0 failed"
+        val r = make_result_from_output("/tmp/no_such_spec.spl", out, "", 137, 10, 60)
+        assert_equal(r.passed, 0)
+        assert_equal(r.failed, 1)
+        assert_contains(r.error, "CRASHED")
+
+    it "keeps SIGTERM (143) unverified with failed: 0":
+        # earlyoom SIGTERMs `simple` on this host, so a SIGTERM says nothing
+        # about the code under test. Never a failure -- but the non-empty error
+        # keeps is_ok() false so it cannot be swallowed into a green run.
+        val r = make_result_from_output("/tmp/no_such_spec.spl", "", "", 143, 10, 60)
+        assert_equal(r.failed, 0)
+        assert_contains(r.error, "TERMINATED")
+        assert_false(r.error == "")
+
+    it "keeps 144 in the unverified class":
+        val r = make_result_from_output("/tmp/no_such_spec.spl", "", "", 144, 10, 60)
+        assert_equal(r.failed, 0)
+        assert_false(r.error == "")
+
+    it "maps -1 with TIMEOUT evidence to an unverified TIMEOUT":
+        val r = make_result_from_output("/tmp/no_such_spec.spl", "", "\nTIMEOUT\n", -1, 10, 60)
+        assert_equal(r.failed, 0)
+        assert_equal(r.timed_out, true)
+        assert_contains(r.error, "TIMEOUT")
+
+    it "never returns an empty error for any signal death":
+        for code in [137, 139, 134, 143, 144]:
+            val r = make_result_from_output("/tmp/no_such_spec.spl", "", "", code, 10, 60)
+            assert_false(r.error == "")
