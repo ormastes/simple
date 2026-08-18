@@ -1,0 +1,149 @@
+#!/bin/sh
+# check-bootstrap-receipt-instruction.shs
+#
+# Fail-closed guard: the command that the bootstrap admission gate PRINTS must
+# actually plan a receipt.
+#
+# Incident 2026-08-18: scripts/bootstrap/bootstrap-from-scratch.sh printed
+#   bootstrap-policy-error: reason-receipt-required; run 'simple build bootstrap
+#   --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path>'
+# and following that instruction verbatim did NOT plan a receipt — the Rust seed
+# silently dropped both flags and started a real Stage 1 native-build that died
+# after ~3 minutes ("native-build worker timed out after 180s"). Every other
+# bootstrap gate was green because none of them ever RUNS the printed advice.
+#
+# This guard extracts the recommended command from the gate's own message,
+# substitutes its placeholders, executes it, and asserts a receipt appears and
+# no bootstrap stage was started. It reads the message from the script, so
+# rewording the advice without making the new advice work is caught.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> assertion(s) checked, ...   exit 0
+#   FAIL — ...                             exit 1
+#   ERROR — nothing was checked            exit 2
+# A run that checked 0 assertions is ERROR, never a pass. --selftest is fatal.
+
+set -u
+
+REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+GATE_SCRIPT=${GATE_SCRIPT:-"${REPO_ROOT}/scripts/bootstrap/bootstrap-from-scratch.sh"}
+SIMPLE_BIN=${SIMPLE_BINARY:-${REPO_ROOT}/bin/simple}
+HEX64=0000000000000000000000000000000000000000000000000000000000000000
+REASON=${BOOTSTRAP_GUARD_REASON:-self-host-convergence-check}
+
+EV_CHECKED=0
+FAILURES=""
+
+fail() { FAILURES="${FAILURES}; $1"; }
+
+# Extract the single-quoted command from the reason-receipt-required message of
+# a gate script. Prints it on stdout; empty output means "not found".
+extract_instruction() {
+  sed -n "s/.*reason-receipt-required; run '\\([^']*\\)'.*/\\1/p" "$1" | head -1
+}
+
+# Substitute the message's placeholders into a runnable argv.
+materialize() {
+  # $1 = raw instruction text
+  printf '%s\n' "$1" |
+    sed -e "s|<typed-reason>|${REASON}|g" \
+        -e "s|<hex64>|${HEX64}|g" \
+        -e "s|<64 lowercase hex>|${HEX64}|g" \
+        -e "s|<path>|${RECEIPT_PATH}|g"
+}
+
+# ---------------------------------------------------------------- selftest ---
+selftest() {
+  st_fail=0
+  tmp=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+
+  # fixture 1: a well-formed message yields a non-empty instruction
+  printf "%s\n" "echo \"bootstrap-policy-error: reason-receipt-required; run 'simple run a/b.spl --bootstrap-receipt=<path>'\" >&2" >"${tmp}/good.sh"
+  got=$(extract_instruction "${tmp}/good.sh")
+  case "${got}" in
+    "simple run a/b.spl --bootstrap-receipt=<path>") ;;
+    *) echo "selftest: fixture 1 extraction wrong: '${got}'"; st_fail=1 ;;
+  esac
+
+  # fixture 2: a script with NO such message must extract empty (so the caller
+  # is forced to ERROR rather than vacuously pass)
+  printf "%s\n" "echo hello" >"${tmp}/none.sh"
+  got=$(extract_instruction "${tmp}/none.sh")
+  [ -z "${got}" ] || { echo "selftest: fixture 2 must extract nothing"; st_fail=1; }
+
+  # fixture 3: placeholder substitution actually replaces every placeholder
+  RECEIPT_PATH="${tmp}/r.sdn"
+  got=$(materialize "x --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path> --planner-sha256=<hex64>")
+  case "${got}" in
+    *"<"*) echo "selftest: fixture 3 left a placeholder: ${got}"; st_fail=1 ;;
+    *"${REASON}"*"${tmp}/r.sdn"*"${HEX64}"*) ;;
+    *) echo "selftest: fixture 3 substitution wrong: ${got}"; st_fail=1 ;;
+  esac
+
+  # fixture 4: a message naming a nonexistent entry file must be detectable
+  ent=$(printf '%s\n' "simple run does/not/exist.spl --bootstrap-receipt=<path>" | awk '{for(i=1;i<=NF;i++) if ($i=="run") {print $(i+1); exit}}')
+  [ "${ent}" = "does/not/exist.spl" ] || { echo "selftest: fixture 4 entry parse wrong: '${ent}'"; st_fail=1; }
+  [ -f "${REPO_ROOT}/${ent}" ] && { echo "selftest: fixture 4 entry must not exist"; st_fail=1; }
+
+  rm -rf "${tmp}"
+  if [ "${st_fail}" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+  fi
+}
+
+selftest
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 4 selftest fixture(s) checked"; exit 0; }
+
+# ------------------------------------------------------------------ scan -----
+[ -f "${GATE_SCRIPT}" ] || { echo "ERROR — nothing was checked (missing ${GATE_SCRIPT})"; exit 2; }
+
+INSTRUCTION=$(extract_instruction "${GATE_SCRIPT}")
+[ -n "${INSTRUCTION}" ] || {
+  echo "ERROR — nothing was checked (no reason-receipt-required instruction in ${GATE_SCRIPT})"
+  exit 2
+}
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+RECEIPT_PATH="${WORK}/admission.sdn"
+LOG="${WORK}/run.log"
+
+# assertion 1: the instruction names an entry that exists on disk.
+EV_CHECKED=$((EV_CHECKED + 1))
+ENTRY=$(printf '%s\n' "${INSTRUCTION}" | awk '{for(i=1;i<=NF;i++) if ($i=="run") {print $(i+1); exit}}')
+if [ -n "${ENTRY}" ] && [ ! -f "${REPO_ROOT}/${ENTRY}" ]; then
+  fail "instruction names a nonexistent entry: ${ENTRY}"
+fi
+
+# assertion 2: running the printed command exits 0.
+EV_CHECKED=$((EV_CHECKED + 1))
+CMD=$(materialize "${INSTRUCTION}")
+# The message says "simple"; run the binary under test.
+CMD_ARGS=$(printf '%s\n' "${CMD}" | sed -e "s|^simple ||")
+( cd "${REPO_ROOT}" && eval "\"${SIMPLE_BIN}\" ${CMD_ARGS}" ) >"${LOG}" 2>&1
+RC=$?
+[ "${RC}" -eq 0 ] || fail "printed command exited ${RC} (log: ${LOG})"
+
+# assertion 3: it produced a non-empty receipt at the path the user gave.
+EV_CHECKED=$((EV_CHECKED + 1))
+if [ ! -s "${RECEIPT_PATH}" ]; then
+  fail "printed command produced no receipt at ${RECEIPT_PATH}"
+fi
+
+# assertion 4: it planned only — no bootstrap stage may have been started.
+EV_CHECKED=$((EV_CHECKED + 1))
+if grep -qE 'Bootstrap pipeline starting|=== Stage [0-9]|native-build worker' "${LOG}" 2>/dev/null; then
+  fail "printed command STARTED a bootstrap stage instead of planning (log: ${LOG})"
+fi
+
+if [ "${EV_CHECKED}" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+if [ -n "${FAILURES}" ]; then
+  echo "FAIL — ${EV_CHECKED} assertion(s) checked${FAILURES}"
+  exit 1
+fi
+rm -rf "${WORK}"
+echo "PASS — ${EV_CHECKED} assertion(s) checked, the printed instruction plans a receipt and starts no stage"
+exit 0

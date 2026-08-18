@@ -390,7 +390,12 @@ if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
   bootstrap_stage2_trust_root=1
   bootstrap_reason=stage2-trust-root-refresh
 elif [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
-  echo "bootstrap-policy-error: reason-receipt-required; run 'simple build bootstrap --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path>'" >&2
+  # The named command must be one that PLANS a receipt, never one that starts a
+  # stage, and must list every flag the planner requires. The old wording named
+  # 'simple build bootstrap --bootstrap-reason=... --bootstrap-receipt=...',
+  # which on the Rust seed silently dropped both flags and started a real Stage 1
+  # native-build. Gated by scripts/check/check-bootstrap-receipt-instruction.shs.
+  echo "bootstrap-policy-error: reason-receipt-required; run 'simple run src/app/build/bootstrap_receipt_main.spl --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path> --parent-compiler-sha256=<hex64> --runtime-snapshot-sha256=<hex64> --planner-source-closure-sha256=<hex64> --planner-sha256=<hex64>'" >&2
   exit 64
 fi
 if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
