@@ -1,0 +1,50 @@
+# Outcome classification in the run summary must not be derived from
+# human-readable message TEXT.
+#
+# @req REQ-TESTRUNNER-R6
+#
+# Before the fix, test_runner_output.spl classified with
+# `err.starts_with("CRASHED")` etc. -- a prefix match on the WHOLE error string.
+# A lane rewording a message, or writing any class token the four hard-coded
+# prefixes did not list, silently dropped the unit out of every counter, and
+# TestRunResult.is_ok() (which only reads total_failed/total_timed_out) then
+# printed "All tests passed!" for a run containing an unreported error.
+
+use std.test_runner.test_runner_output.{test_file_outcome_class, test_file_outcome_tag}
+use std.test_runner.test_runner_types.{TestFileResult}
+
+fn mk(err: text, failed: i64, passed: i64, timed_out: bool) -> TestFileResult:
+    TestFileResult(
+        path: "spec.spl", passed: passed, failed: failed, skipped: 0, pending: 0,
+        duration_ms: 1, setup_ms: 0, error: err, timed_out: timed_out, cached: false
+    )
+
+describe "test_runner_output outcome classification":
+
+    it "classifies on the class token, not on the message wording":
+        """A lane may reword the message after the colon at any time; the class
+        must be unchanged."""
+        assert_equal(test_file_outcome_class(mk("CRASHED: child died by signal", 1, 0, false)), "CRASHED")
+        assert_equal(test_file_outcome_class(mk("CRASHED: some completely different wording", 1, 0, false)), "CRASHED")
+        assert_equal(test_file_outcome_class(mk("TERMINATED: killed by SIGTERM", 0, 0, false)), "TERMINATED")
+        assert_equal(test_file_outcome_class(mk("TIMEOUT: exceeded 600s", 0, 0, false)), "TIMEOUT")
+        assert_equal(test_file_outcome_class(mk("NOT EXECUTED: discovered but never run", 0, 0, false)), "NOT_RUN")
+
+    it "accepts the NOT_RUN spelling as well as NOT EXECUTED":
+        assert_equal(test_file_outcome_class(mk("NOT_RUN: truncated run", 0, 0, false)), "NOT_RUN")
+
+    it "never silently drops an error with an unrecognised class token":
+        """This is the case the old prefix match counted NOWHERE."""
+        assert_equal(test_file_outcome_class(mk("compile error: unexpected token", 0, 0, false)), "ERROR")
+
+    it "reports a unit that produced no verdict at all as NOT_RUN, never OK":
+        """Exit 0 with no result line is the silent-green shape."""
+        assert_equal(test_file_outcome_class(mk("", 0, 0, false)), "NOT_RUN")
+
+    it "still reports an ordinary passing unit as OK":
+        assert_equal(test_file_outcome_class(mk("", 0, 3, false)), "OK")
+        assert_equal(test_file_outcome_tag(mk("", 0, 3, false)), "PASS")
+
+    it "still reports an ordinary assertion failure as ERROR":
+        assert_equal(test_file_outcome_class(mk("", 2, 1, false)), "ERROR")
+        assert_equal(test_file_outcome_tag(mk("", 2, 1, false)), "FAIL")

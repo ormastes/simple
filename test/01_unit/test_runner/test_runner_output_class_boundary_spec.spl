@@ -1,0 +1,49 @@
+# Boundary guard: the six outcome classes must never collapse into one another.
+#
+# @req REQ-TESTRUNNER-R3
+#
+# TERMINATED(143) and TIMEOUT are UNVERIFIED and must NEVER be counted as
+# failures -- earlyoom is actively SIGTERMing `simple` on this host, so counting
+# a termination as a failure reports host contention as a code defect.
+# Conversely a CRASHED unit is a real failure and must never be laundered into
+# the unverified bucket, which is exactly what happened when the summary's
+# total_timed_out fallback fired on a run that had crashes but no timeouts.
+
+use std.test_runner.test_runner_output.{test_file_outcome_class, test_file_outcome_tag}
+use std.test_runner.test_runner_types.{TestFileResult}
+
+fn mk(err: text, failed: i64, timed_out: bool) -> TestFileResult:
+    TestFileResult(
+        path: "spec.spl", passed: 0, failed: failed, skipped: 0, pending: 0,
+        duration_ms: 1, setup_ms: 0, error: err, timed_out: timed_out, cached: false
+    )
+
+describe "test_runner_output outcome class boundaries":
+
+    it "keeps CRASHED distinct from TERMINATED":
+        val crashed = mk("CRASHED: fork child died by SIGSEGV", 1, false)
+        val terminated = mk("TERMINATED: fork child killed by SIGTERM (unverified)", 0, false)
+        assert_equal(test_file_outcome_class(crashed), "CRASHED")
+        assert_equal(test_file_outcome_class(terminated), "TERMINATED")
+        assert_false(test_file_outcome_class(crashed) == test_file_outcome_class(terminated))
+        assert_equal(test_file_outcome_tag(crashed), "CRASH")
+        assert_equal(test_file_outcome_tag(terminated), "TERM")
+
+    it "keeps TIMEOUT distinct from TERMINATED even though both are unverified":
+        assert_equal(test_file_outcome_class(mk("TIMEOUT: exceeded the per-unit budget", 0, false)), "TIMEOUT")
+        assert_equal(test_file_outcome_class(mk("TERMINATED: killed by signal", 0, false)), "TERMINATED")
+
+    it "never tags an unverified unit as a pass or a plain failure":
+        """rc=143/144 is UNVERIFIED: neither PASS nor FAIL."""
+        for err in ["TERMINATED: killed by SIGTERM", "TIMEOUT: budget exceeded"]:
+            val tag = test_file_outcome_tag(mk(err, 0, false))
+            assert_false(tag == "PASS")
+            assert_false(tag == "FAIL")
+
+    it "does not let the timed_out struct flag reclassify a CRASHED unit":
+        """The error class token wins over the flag, so a crash cannot be
+        laundered into the unverified bucket."""
+        assert_equal(test_file_outcome_class(mk("CRASHED: child died by signal", 1, true)), "CRASHED")
+
+    it "classifies a bare timed_out flag with no error text as TIMEOUT, not OK":
+        assert_equal(test_file_outcome_class(mk("", 0, true)), "TIMEOUT")

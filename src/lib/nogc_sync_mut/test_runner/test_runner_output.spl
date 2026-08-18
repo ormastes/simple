@@ -11,7 +11,93 @@ use common.text.{escape_json}
 # Result Printing
 # =========================================================================
 
+# =========================================================================
+# Outcome classification -- the SINGLE source of truth
+# =========================================================================
+#
+# Every producer of TestFileResult.error writes it as "<CLASS>: <message>"
+# (test_executor_parsing.spl, test_runner_fork.spl, test_runner_execute.spl,
+# test_runner_main.spl). Only the CLASS token -- the text before the first
+# colon -- is structural; everything after it is a human-readable message that
+# any lane may reword at any time.
+#
+# The previous code matched with `err.starts_with("CRASHED")` etc., i.e. it
+# matched a PREFIX OF THE WHOLE ERROR STRING, in two independent copies (the
+# per-spec tag and the summary counters). That is fragile in three separate
+# ways, all of which silently corrupt counts rather than failing loudly:
+#   1. a reworded message that happens to start with a different word is
+#      classified as an unknown error and vanishes from every counter;
+#   2. the two copies can drift apart (they already disagreed with
+#      test_runner_types.spl, which matches "TERMINATED:" WITH the colon);
+#   3. an error whose class token is not one of the four recognised prefixes
+#      was counted NOWHERE, and -- because TestRunResult.is_ok() only looks at
+#      total_failed/total_timed_out -- printed "All tests passed!".
+#
+# This function is now the only place a class is decided. It tokenises rather
+# than prefix-matches, so rewording the message cannot change a count, and it
+# is total: every TestFileResult maps to exactly one of the six classes
+# OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN, which therefore can
+# never collapse into one another and can never be silently absent.
+#
+# Deliberately NOT done here: re-deriving signal semantics (e.g. SIGKILL 137 =>
+# CRASHED rather than TERMINATED) by sniffing the message text. That decision
+# belongs to the producer that saw the wait status; re-deriving it from prose
+# here would reintroduce exactly the coupling this function removes.
+fn outcome_class_token(err: text) -> text:
+    if err == "":
+        return ""
+    val colon = err.find(":")
+    val head = if colon > 0: err[0:colon] else: err
+    head.trim().upper().replace("_", " ")
+
+fn test_file_outcome_class(result: TestFileResult) -> text:
+    val token = outcome_class_token(result.error)
+    if token == "CRASHED":
+        return "CRASHED"
+    if token == "TERMINATED":
+        return "TERMINATED"
+    if token == "TIMEOUT":
+        return "TIMEOUT"
+    if token == "NOT EXECUTED" or token == "NOT RUN":
+        return "NOT_RUN"
+    if token != "":
+        # A non-empty error with an unrecognised class token is a REAL failure.
+        # It must never fall through to OK -- that is the silent-green shape.
+        return "ERROR"
+    if result.timed_out:
+        return "TIMEOUT"
+    if result.failed > 0:
+        return "ERROR"
+    val examples = result.passed + result.failed + result.skipped + result.pending
+    if examples == 0:
+        # No error and no examples of any kind: the child produced no verdict.
+        # Same rule as test_file_result_is_unverified() in test_runner_types.
+        return "NOT_RUN"
+    "OK"
+
+# R6 attribution: the per-spec line must name the OUTCOME CLASS, not just
+# pass/fail. Before this, a CRASHED spec (failed: 1) and a TERMINATED or
+# TIMEOUT spec (failed: 0, unverified) both printed the same "FAIL" tag, so the
+# only place the six classes existed was the aggregate summary -- and per-spec
+# attribution is exactly what tells host contention apart from a real defect.
+fn test_file_outcome_tag(result: TestFileResult) -> text:
+    match test_file_outcome_class(result):
+        case "CRASHED": "CRASH"
+        case "TERMINATED": "TERM"
+        case "TIMEOUT": "TOUT"
+        case "NOT_RUN": "NRUN"
+        case "OK": "PASS"
+        case _: "FAIL"
+
 fn print_result_default(result: TestFileResult):
+    val tag = test_file_outcome_tag(result)
+    if tag == "CRASH" or tag == "TERM" or tag == "NRUN":
+        print "  {tag}  {result.path} ({result.duration_ms}ms)"
+        if result.error != "":
+            print "        Error: {result.error}"
+        else:
+            print "        Error: no result line and no examples -- the unit produced no verdict"
+        return
     if result.timed_out:
         print "  TOUT  {result.path} ({result.duration_ms}ms)"
         print "        Error: {result.error}"
@@ -146,11 +232,13 @@ fn print_summary(result: TestRunResult, format: text):
         summary = summary + ", {result.total_skipped} skipped"
     if result.total_pending > 0:
         summary = summary + ", {result.total_pending} pending"
-    # The six outcome classes are derived from the error-text prefixes written by
-    # make_result_from_output. CRASHED and NOT EXECUTED files are already counted
-    # in total_failed; naming them separately keeps "the suite reached the end"
-    # honest -- a crash must never read as a plain assertion failure, and never
-    # as absent.
+    # The six outcome classes come from test_file_outcome_class() -- the single
+    # classifier above, which tokenises the "<CLASS>:" head rather than
+    # prefix-matching the whole error string, so rewording a message can no
+    # longer change any of these counts. CRASHED and NOT EXECUTED files are
+    # already counted in total_failed; naming them separately keeps "the suite
+    # reached the end" honest -- a crash must never read as a plain assertion
+    # failure, and never as absent.
     #
     # TERMINATED and TIMEOUT are UNVERIFIED and are NEVER failures: they carry
     # failed: 0, so they are absent from total_failed by construction, and they
@@ -158,25 +246,29 @@ fn print_summary(result: TestRunResult, format: text):
     # silently absent either. earlyoom is SIGTERMing `simple` on this host, so
     # counting a termination as a failure reports host contention as a defect.
     #
-    # ponytail: derived from the error text instead of new TestFileResult fields,
-    # which every executor lane would have had to set. Promote to a real field if
-    # a second consumer needs it.
+    # ponytail: derived from the class token instead of new TestFileResult
+    # fields, which every executor lane would have had to set. Promote to a real
+    # field if a second consumer needs it.
     var crashed = 0
     var terminated = 0
     var timed_out = 0
     var not_run = 0
+    var errored = 0
     for f in result.files:
-        if f.error.starts_with("CRASHED"):
-            crashed = crashed + 1
-        elif f.error.starts_with("TERMINATED"):
-            terminated = terminated + 1
-        elif f.error.starts_with("TIMEOUT"):
-            timed_out = timed_out + 1
-        elif f.error.starts_with("NOT EXECUTED"):
-            not_run = not_run + 1
-    # Fall back to the struct flag for executors that set timed_out without
-    # routing through the prefix-writing mapper.
-    if timed_out == 0:
+        match test_file_outcome_class(f):
+            case "CRASHED": crashed = crashed + 1
+            case "TERMINATED": terminated = terminated + 1
+            case "TIMEOUT": timed_out = timed_out + 1
+            case "NOT_RUN": not_run = not_run + 1
+            case "ERROR": errored = errored + 1
+            case _: 0
+    # Fall back to the struct flag only for executors that set timed_out without
+    # producing per-file results at all. Guarded on ALL four class counters: the
+    # old `if timed_out == 0` fired whenever the run had crashes but no
+    # timeouts, adding total_timed_out on top and reporting the same units as
+    # both "crashed" and "timed out (unverified)" -- a collapse of CRASHED into
+    # TIMEOUT that also moved them out of the failure verdict.
+    if crashed == 0 and terminated == 0 and timed_out == 0 and not_run == 0:
         timed_out = result.total_timed_out
     if crashed > 0:
         summary = summary + ", {crashed} crashed"
@@ -197,7 +289,10 @@ fn print_summary(result: TestRunResult, format: text):
     # A CRASHED unit is a real failure and must never read as green. TERMINATED
     # and TIMEOUT are neither passes nor failures: the run is INCONCLUSIVE for
     # those units and must say so rather than claiming either.
-    val real_failures = result.total_failed + crashed + not_run
+    # `errored` covers a file carrying a real error that TestRunResult's own
+    # totals miss (error set, failed == 0). Without it such a run printed
+    # "All tests passed!".
+    val real_failures = result.total_failed + crashed + not_run + errored
     val unverified = terminated + timed_out
     if result.files.len() == 0 and result.is_ok():
         print "No tests selected."
