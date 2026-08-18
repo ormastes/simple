@@ -9,6 +9,8 @@
 #   base64_encode(data: text) -> text
 #   base64_decode(encoded: text) -> text
 #   base64url_encode(data: text) -> text
+#   base64url_encode_bytes(data: [u8]) -> text                    (binary-safe)
+#   base64url_encode_i64_bytes(data: [i64]) -> text               (std.crypto bytes)
 #   base64url_decode(encoded: text) -> text                       (lenient)
 #   base64url_decode_strict(encoded: text) -> Result<text, Base64UrlError>
 
@@ -44,6 +46,11 @@ fn _decode_char(c: i64) -> i64:
 # ============================================================================
 
 fn _base64_encode_bytes(data: text) -> [u8]:
+    """Text-taking wrapper over `_base64_encode_raw`. Kept as the entry point
+    for `base64_encode` / `base64url_encode`, whose inputs are `text`."""
+    _base64_encode_raw(data.bytes())
+
+fn _base64_encode_raw(bytes: [u8]) -> [u8]:
     """Core RFC 4648 §4 encode loop, returning raw ASCII output bytes
     (with '=' padding) instead of text. Building a [u8] array with `push`
     and converting to text ONCE at the end (O(n)) replaces the former
@@ -57,7 +64,6 @@ fn _base64_encode_bytes(data: text) -> [u8]:
     the same bytes does not exhibit this. See
     doc/08_tracking/bug/jit_module_level_u8_array_index_push_corruption_2026-08-18.md."""
     val encode_bytes = ENCODE_TABLE.bytes()
-    val bytes = data.bytes()
     val n = bytes.len()
     var out_bytes: [u8] = []
     var i = 0
@@ -196,7 +202,41 @@ pub fn base64_decode(encoded: text) -> text:
 
 pub fn base64url_encode(data: text) -> text:
     """Encode text as URL-safe base64 (RFC 4648 §5, no padding)."""
-    val std_bytes = _base64_encode_bytes(data)
+    _std_b64_to_url(_base64_encode_bytes(data))
+
+pub fn base64url_encode_bytes(data: [u8]) -> text:
+    """Encode arbitrary BINARY as URL-safe base64 (RFC 4648 §5, no padding).
+
+    Sibling of `base64url_encode`, which takes `text`. Digest output (HMAC,
+    SHA) is arbitrary binary: it contains 0x00 and bytes >= 0x80 that are not
+    valid UTF-8, so routing it through the text-typed API is lossy. Both
+    functions run the SAME core loop (`_base64_encode_raw`) and the SAME
+    url-alphabet mapping (`_std_b64_to_url`), so for any input that happens
+    to be valid text the two produce byte-identical output by construction,
+    not by coincidence.
+    """
+    _std_b64_to_url(_base64_encode_raw(data))
+
+pub fn base64url_encode_i64_bytes(data: [i64]) -> text:
+    """`base64url_encode_bytes` for callers whose byte arrays are `[i64]`.
+
+    `std.crypto` (`hmac_sha256_bytes`, `text_to_bytes`) represents bytes as
+    `[i64]`, while this module represents them as `[u8]`. This adapter exists
+    once here rather than being copy-pasted into every crypto caller. Each
+    element is masked to its low 8 bits, so an out-of-range `[i64]` element
+    cannot silently corrupt neighbouring output sextets.
+    """
+    val n = data.len()
+    var bytes: [u8] = []
+    var i = 0
+    while i < n:
+        bytes = bytes.push((data[i] & 255) as u8)
+        i = i + 1
+    base64url_encode_bytes(bytes)
+
+fn _std_b64_to_url(std_bytes: [u8]) -> text:
+    """Map standard base64 output bytes onto the url alphabet: '+'→'-',
+    '/'→'_', and drop '=' padding (RFC 4648 §5)."""
     val n = std_bytes.len()
     var out_bytes: [u8] = []
     var i = 0
