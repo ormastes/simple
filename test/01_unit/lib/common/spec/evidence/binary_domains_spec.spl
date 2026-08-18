@@ -1,0 +1,142 @@
+# @req REQ-SSPEC-BINARY-DOMAINS
+#
+# Goal-4 domain instances of the binary SSpec infra (design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md): the SAME
+# mask-aware comparator and stacked word-table serve a protocol header, a
+# cipher known-answer vector, and a compression stream — no per-domain diff
+# helpers.
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field,
+    compare_word, WordDiff, stacked_rows, stacked_compare_rows
+}
+use std.nogc_sync_mut.compression.gzip.{gzip_compress, gzip_decompress, gzip_validate}
+use os.crypto.aes_modes.{aes128_ofb_encrypt}
+
+fn pack_word(bytes: [u8], start: i64, n: i64) -> i64:
+    # big-endian pack of n bytes into an i64 word
+    var v = 0
+    var i = 0
+    while i < n:
+        v = (v << 8) | (bytes[start + i] & 0xff)
+        i = i + 1
+    v
+
+# ---------------------------------------------------------------------------
+# Protocol: TCP-header word 3 (16-bit window | 4-bit data offset | 6 flags...)
+# simplified to one 32-bit word fixture with a reserved gap — the stacked
+# figure is the reference view, the comparator the oracle.
+# ---------------------------------------------------------------------------
+fn tcp_word_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "tcp_w3_fixture",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("window", 0, 16, "receive window"),
+            binary_field("flags", 16, 6, "TCP flags"),
+            reserved_field("reserved", 22, 6),
+            binary_field("data_offset", 28, 4, "header length in words")
+        ],
+        source_ref: "RFC 9293 fixture"
+    )
+
+describe "binary domains — protocol stacked table":
+    it "renders the reference word table (word rows)":
+        val rows = stacked_rows([0x50021000, 0x00000000], "W", 0)
+        assert_equal(rows.len(), 2)
+        assert_true(rows[0].starts_with("W0"))
+        assert_true(rows[1].starts_with("W1"))
+
+    it "expands only the failing word with the failing field named":
+        val layout = tcp_word_layout()
+        # flags differ (SYN vs SYN+ACK), window and offset equal
+        val ok = compare_word(0x50021000, 0x50021000, layout, [])
+        val bad = compare_word(0x50021000, 0x50121000, layout, [])
+        val rows = stacked_compare_rows([ok, bad], layout, "W", 0)
+        assert_true(rows[0].contains("ok"))
+        var joined = ""
+        for r in rows:
+            joined = joined + r + "\n"
+        assert_true(joined.contains("FAIL"))
+        assert_true(joined.contains("flags"))
+        assert_true(joined.contains("expected"))
+        assert_true(joined.contains("actual"))
+
+    it "reserved bits fail even when both sides carry them":
+        val d = compare_word(0x00400000, 0x00400000, tcp_word_layout(), [])
+        assert_equal(d.status, "fail")
+
+# ---------------------------------------------------------------------------
+# Cipher: AES-128-OFB first block, NIST SP 800-38A F.4.1. The comparator
+# checks the ciphertext words; a single flipped ciphertext bit must FAIL.
+# ---------------------------------------------------------------------------
+fn cipher_word_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "ct_word",
+        total_bits: 64,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("ct_hi", 32, 32, "ciphertext bytes 0..3"),
+            binary_field("ct_lo", 0, 32, "ciphertext bytes 4..7")
+        ],
+        source_ref: "NIST SP 800-38A F.4.1"
+    )
+
+describe "binary domains — cipher KAT":
+    it "AES-128-OFB block 1 matches the NIST vector and corruption is caught":
+        val key: [u8] = [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c]
+        val iv: [u8] = [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]
+        val pt: [u8] = [0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a]
+        val ct = aes128_ofb_encrypt(key, iv, pt)
+        # expected ct block 1: 3b3fd92eb72dad20333449f8e83cfb4a
+        val expected_w0 = 0x3b3fd92eb72dad20
+        val actual_w0 = pack_word(ct, 0, 8)
+        val d = compare_word(expected_w0, actual_w0, cipher_word_layout(), [])
+        assert_equal(d.status, "pass")
+        # flip one bit of the actual ciphertext word: must fail and name a field
+        val corrupted = actual_w0 ^ 0x0000000000010000
+        val bad = compare_word(expected_w0, corrupted, cipher_word_layout(), [])
+        assert_equal(bad.status, "fail")
+        assert_true(bad.failing_fields.len() > 0)
+
+# ---------------------------------------------------------------------------
+# Compression: gzip roundtrip + corrupted-stream rejection.
+# ---------------------------------------------------------------------------
+describe "binary domains — compression":
+    it "roundtrips and validates":
+        var data: [u8] = []
+        var i = 0
+        while i < 400:
+            data.push((i * 7 + 13) % 251)
+            i = i + 1
+        val z = gzip_compress(data, 6)
+        assert_true(gzip_validate(z))
+        val back = gzip_decompress(z) ?? []
+        assert_equal(back.len(), data.len())
+        var j = 0
+        var same = true
+        while j < data.len():
+            if back[j] != data[j]:
+                same = false
+            j = j + 1
+        assert_true(same)
+
+    it "rejects a corrupted stream":
+        var data: [u8] = []
+        var i = 0
+        while i < 100:
+            data.push(i % 256)
+            i = i + 1
+        var z = gzip_compress(data, 6)
+        # corrupt one byte inside the deflate body
+        val mid = z.len() / 2
+        z[mid] = (z[mid] + 1) % 256
+        # gzip_validate is structural-only and passes corrupted bodies — the
+        # load-bearing rejection contract is gzip_decompress returning nil on
+        # footer-CRC mismatch. Bug filed for the over-promising name:
+        # doc/08_tracking/bug/gzip_validate_structural_only_no_crc_2026-08-18.md
+        assert_true(gzip_decompress(z) == nil)

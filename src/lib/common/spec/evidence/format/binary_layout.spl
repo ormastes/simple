@@ -383,3 +383,50 @@ pub fn render_word_line(label: text, d: WordDiff) -> text:
             names = if names == "": n else: names + "," + n
         line = line + " [" + names + "]"
     line
+
+# ---------------------------------------------------------------------------
+# Stacked multi-word figure (the default reference view of the binary SSpec
+# design: doc/05_design/infra/sspec/binary_reference_stacked_design.md).
+# Renders words as rows (word_label + index), one line per word; a word whose
+# WordDiff failed expands to a bit-level row pair with the failing fields
+# named. Pure text projection — evidence stays in WordDiff.
+# ---------------------------------------------------------------------------
+
+fn _bin_group(value: i64, bits: i64) -> text:
+    var out = ""
+    var i = bits - 1
+    while i >= 0:
+        out = out + (if ((value >> i) & 1) != 0: "1" else: "0")
+        if i > 0 and i % 8 == 0:
+            out = out + "_"
+        i = i - 1
+    out
+
+# One reference row per word value: "CDW10  0x00123400"
+pub fn stacked_rows(values: [i64], word_label: text, first_word: i64) -> [text]:
+    var rows: [text] = []
+    var i = 0
+    while i < values.len():
+        val idx = first_word + i
+        rows.push(word_label + "{idx}  0x" + bytes_hex(u64_to_le_bytes(values[i])))
+        i = i + 1
+    rows
+
+# Expected/actual stacked comparison: compact per-word line; a failing word
+# adds expected/actual bit rows (16-bit groups) and the failing field names.
+pub fn stacked_compare_rows(diffs: [WordDiff], layout: BinaryLayout, word_label: text, first_word: i64) -> [text]:
+    var rows: [text] = []
+    var i = 0
+    while i < diffs.len():
+        val d = diffs[i]
+        val idx = first_word + i
+        rows.push(render_word_line(word_label + "{idx}", d))
+        if d.status == "fail":
+            rows.push("  expected  " + _bin_group(d.expected, layout.total_bits))
+            rows.push("  actual    " + _bin_group(d.actual, layout.total_bits))
+            var names = ""
+            for n in d.failing_fields:
+                names = if names == "": n else: names + ", " + n
+            rows.push("  ^ FAIL in: " + names)
+        i = i + 1
+    rows
