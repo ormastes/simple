@@ -17,11 +17,13 @@ description: SPipe Loop — periodic check-and-implement plus daily-debug ingest
    them → verify zero residue → run `check-no-direct-rt.shs` (baseline must
    ratchet down or hold) → scoped commit of only the touched files.
    Verdict is the last stdout line (`PASS`/`NOOP`/`FAIL`/`ERROR`). Tracks A
-   (uncalled deletions), B (11 symbol→wrapper rewrites: time_now_unix_micros,
+   (uncalled deletions), B (12 symbol→wrapper rewrites: time_now_unix_micros,
    file_exists, file_delete, env_get, getpid, process_run, file_copy,
-   thread_sleep, get_args, file_write), C (rt_file_read_text coalesced),
-   and D (text/bytes signature-exact) are active; current baseline 14241
-   forbidden sites. NOOP means converged for the current safe
+   thread_sleep, get_args, file_write, file_write_bytes), C
+   (rt_file_read_text coalesced), and D (text/bytes signature-exact) are
+   active; current baseline 13101 forbidden sites (2026-08-18; ratchets
+   down-only — read scripts/check/no_direct_rt_baseline.txt for the live
+   value). NOOP means converged for the current safe
    class; wider automation stays manual per
    `doc/03_plan/infra/binary_runtime_hardening/plan.md` Wave 3.
    Other tracks of continuous-check mode remain unimplemented.
