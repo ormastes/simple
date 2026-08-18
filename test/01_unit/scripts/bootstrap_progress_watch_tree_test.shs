@@ -51,6 +51,23 @@ nested_line=$(tail -n 1 "${nested_log}")
 [ "$(field done "${nested_line}")" = "unknown" ] || fail "missing event did not fall back to unknown"
 [ "$(field terminal "${nested_line}")" = "unknown" ] || fail "missing terminal did not fall back to unknown"
 
+# Second RSS basis must be present and non-vacuous. The parent-chain sum alone
+# silently loses a re-parented worker or an unreadable subtree -- that is how a
+# 67.4 GB stage-3 compile logged tree_rss_kb=34753460 (34.7 GB), a total
+# smaller than one live process. The process-group sum cannot lose a subtree to
+# re-parenting, so it bounds the chain sum from below. NEGATIVE CONTROL: revert
+# the pgrp tracking in bootstrap-progress-watch.shs and all three fields report
+# `unknown`, failing the numeric comparisons below.
+nested_pg=$(field tree_rss_pgroup_kb "${nested_line}")
+nested_misses=$(field tree_scan_misses "${nested_line}")
+case "${nested_pg}" in ''|*[!0-9]*) fail "tree_rss_pgroup_kb is not numeric: ${nested_pg}" ;; esac
+case "${nested_misses}" in ''|*[!0-9]*) fail "tree_scan_misses is not numeric: ${nested_misses}" ;; esac
+case "$(field tree_pgroup_processes "${nested_line}")" in
+  ''|*[!0-9]*) fail "tree_pgroup_processes is not numeric" ;;
+esac
+[ "${nested_pg}" -ge "$(field tree_rss_kb "${nested_line}")" ] ||
+  fail "process-group RSS basis (${nested_pg}) is below the parent-chain sum"
+
 # Adjacent leaf case: a process with no descendants has identical root/tree RSS.
 sleep 30 &
 leaf_pid=$!

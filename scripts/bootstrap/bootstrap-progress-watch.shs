@@ -127,8 +127,10 @@ process_tree_metrics() {
       n = split(rest, a, " ")
       if (n < 22) return 0
       # a[1] is field 3 (state), so field N is a[N-2]:
-      # ppid(4)=a[2] utime(14)=a[12] stime(15)=a[13] starttime(22)=a[20] rss(24)=a[22]
+      # ppid(4)=a[2] pgrp(5)=a[3] utime(14)=a[12] stime(15)=a[13]
+      # starttime(22)=a[20] rss(24)=a[22]
       parent[pid] = a[2]
+      pgrp[pid]   = a[3]
       ticks[pid]  = a[12] + a[13]
       start[pid]  = a[20]
       rsspg[pid]  = a[22]
@@ -137,8 +139,10 @@ process_tree_metrics() {
     }
     BEGIN {
       n = 0
+      misses = 0
       while (("ls -1 /proc 2>/dev/null" | getline p) > 0) {
-        if (p ~ /^[0-9]+$/ && load(p)) { pids[++n] = p }
+        if (p !~ /^[0-9]+$/) continue
+        if (load(p)) { pids[++n] = p } else { misses++ }
       }
       close("ls -1 /proc 2>/dev/null")
 
@@ -164,7 +168,25 @@ process_tree_metrics() {
 
       printf "when %s\n", now > state
       total_rss = 0; nproc = 0; dticks = 0
+      pg_rss = 0; pg_nproc = 0
+      root_pg = (root in pgrp) ? pgrp[root] : ""
       top_pid = "none"; top_rss = 0; top_comm = "none"
+      # SECOND, INDEPENDENT BASIS. `included[]` above walks the PARENT CHAIN
+      # only, so a worker that outlives its intermediate parent (re-parented to
+      # init/a subreaper) silently leaves the tree, and any pid whose
+      # /proc/<pid>/stat read failed drops its WHOLE subtree with it -- both
+      # vanish from total_rss with no signal at all. That is how a 67.4 GB
+      # stage-3 compile logged tree_rss_kb=34753460 (34.7 GB): the reported
+      # total was smaller than a single live process. The process GROUP does
+      # not move when a parent dies, so summing it too makes the loss visible.
+      # tree_rss_kb keeps its parent-chain meaning; read tree_rss_pgroup_kb
+      # alongside it, and treat pgroup >> chain as "the chain lost a subtree".
+      for (i = 1; i <= n; i++) {
+        pid = pids[i]
+        if (excluded[pid] || root_pg == "" || pgrp[pid] != root_pg) continue
+        pg_nproc++
+        pg_rss += rsspg[pid]
+      }
       for (i = 1; i <= n; i++) {
         pid = pids[i]
         if (!included[pid] || excluded[pid]) continue
@@ -187,7 +209,8 @@ process_tree_metrics() {
 
       if (prev_when == "" || now - prev_when < 1) { cpu = "unknown" }
       else { cpu = sprintf("%.1f", dticks * 100.0 / (clk * (now - prev_when))) }
-      printf "%s %d %d %s %d %s\n", cpu, total_rss * pagekb, nproc, top_pid, top_rss * pagekb, top_comm
+      printf "%s %d %d %s %d %s %d %d %d\n", cpu, total_rss * pagekb, nproc, \
+        top_pid, top_rss * pagekb, top_comm, pg_rss * pagekb, pg_nproc, misses
     }
   '
 }
@@ -305,6 +328,9 @@ while :; do
   top_pid=${4:-none}
   top_rss_kb=${5:-unknown}
   top_comm=${6:-none}
+  tree_rss_pgroup_kb=${7:-unknown}
+  tree_pgroup_processes=${8:-unknown}
+  tree_scan_misses=${9:-unknown}
   # cpu_pct now means "instantaneous CPU of the work", i.e. the whole tree. It
   # used to mean the root pid's lifetime average, which for the wrapper shell
   # was a constant 0.0 no matter what the build was doing.
@@ -336,10 +362,11 @@ while :; do
   status=alive
   [ "$stall_streak" -lt "$stall_samples" ] || status=alive-no-progress
 
-  printf 'event=sample timestamp=%s status=%s pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_rss_kb=%s tree_processes=%s top_pid=%s top_rss_kb=%s top_comm=%s stall_streak=%s milestone=%s main_log_bytes=%s phase=%s unit_kind=%s done=%s total=%s remaining=%s tasks_done=%s tasks_total=%s tasks_remaining=%s failed=%s cached=%s current=%s terminal=%s\n' \
+  printf 'event=sample timestamp=%s status=%s pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_rss_kb=%s tree_processes=%s top_pid=%s top_rss_kb=%s top_comm=%s tree_rss_pgroup_kb=%s tree_pgroup_processes=%s tree_scan_misses=%s stall_streak=%s milestone=%s main_log_bytes=%s phase=%s unit_kind=%s done=%s total=%s remaining=%s tasks_done=%s tasks_total=%s tasks_remaining=%s failed=%s cached=%s current=%s terminal=%s\n' \
     "$now" "$status" "$watch_pid" "$((now - started_at))" "$process_elapsed" \
     "$cpu_pct" "$rss_kb" "$tree_cpu_pct" "$tree_rss_kb" \
-    "$tree_processes" "$top_pid" "$top_rss_kb" "$top_comm" "$stall_streak" \
+    "$tree_processes" "$top_pid" "$top_rss_kb" "$top_comm" \
+    "$tree_rss_pgroup_kb" "$tree_pgroup_processes" "$tree_scan_misses" "$stall_streak" \
     "$milestone" "$log_bytes" "$phase" "$unit_kind" \
     "$done" "$total" "$remaining" "$tasks_done" "$tasks_total" \
     "$tasks_remaining" "$failed" "$cached" "$current" "$terminal" \
