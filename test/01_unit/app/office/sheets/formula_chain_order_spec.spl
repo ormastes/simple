@@ -1,0 +1,90 @@
+"""Calc recalculation evaluates formula cells in dependency order.
+
+`file_formats._ff_dep_plan` already built the reference graph for circular
+detection; the peel order it produces is a topological order, and
+`recalculate_formula_cells` now evaluates the acyclic cells in it, parking each
+numeric result in the sheet as a plain number for the rest of the pass.
+
+That is a CORRECTNESS fix, not only a speed-up. `formula._resolve_cell_value`
+resolves a referenced formula by re-evaluating its expression, bounded by
+`MAX_EVAL_DEPTH = 64` — two frames per hop — so before this change a chain
+longer than ~33 hops silently returned 0.0 at the bound and cached a plausible
+but WRONG number. Measured on a 60-cell `A1=1, An = A(n-1)+1` chain, one
+`recalculate_formula_cells` call:
+
+    before: A33 = 33, A34 = 33, A40 = 33, A60 = 33   (27 of 59 cells wrong)
+    after:  A33 = 33, A34 = 34, A40 = 40, A60 = 60   (0 wrong), 37.07s -> 6.29s
+
+Ground truth is trivial arithmetic: cell n of the chain holds n.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _disp(sh: Sheet, ref_str: text) -> text:
+    """Display text of one cell."""
+    cell_display_text(sh.get_cell(ref_str))
+
+fn _chain(n: i32) -> Sheet:
+    """`A1 = 1` then `Ai = A(i-1) + 1` up to `An`, recalculated exactly ONCE —
+    a single call is the whole point, so no second pass can paper over an
+    ordering defect."""
+    var sh = Sheet.new("chain")
+    sh.set_value("A1", "1")
+    var i = 2
+    while i <= n:
+        sh.set_value("A{i}", "=A{i - 1}+1")
+        i = i + 1
+    recalculate_formula_cells(sh)
+
+fn _reverse_chain() -> Sheet:
+    """The same three-hop chain declared with its dependencies LAST, so a pass
+    that merely walks the sheet in insertion order cannot get it right by luck:
+    D1 depends on C1, which depends on B1, which is the only literal."""
+    var sh = Sheet.new("rev")
+    sh.set_value("D1", "=C1*2")
+    sh.set_value("C1", "=B1+3")
+    sh.set_value("B1", "5")
+    recalculate_formula_cells(sh)
+
+describe "Calc recalculation: dependency-ordered evaluation":
+    it "a three-hop chain is correct after a single recalculate call":
+        val sh = _reverse_chain()
+        expect(_disp(sh, "C1")).to_equal("8")
+        expect(_disp(sh, "D1")).to_equal("16")
+
+    it "a chain shorter than the old recursion bound is unchanged":
+        val sh = _chain(60)
+        expect(_disp(sh, "A2")).to_equal("2")
+        expect(_disp(sh, "A33")).to_equal("33")
+
+    it "a chain PAST the old recursion bound no longer caps at 33":
+        val sh = _chain(60)
+        expect(_disp(sh, "A34")).to_equal("34")
+        expect(_disp(sh, "A40")).to_equal("40")
+        expect(_disp(sh, "A60")).to_equal("60")
+
+    it "every cell of a 60-long chain holds its own index":
+        val sh = _chain(60)
+        var wrong = 0
+        var i = 2
+        while i <= 60:
+            if _disp(sh, "A{i}") != "{i}":
+                wrong = wrong + 1
+            i = i + 1
+        expect(wrong).to_equal(0)
+
+    it "recalculating a deep chain twice keeps the same displays":
+        var sh = _chain(60)
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A60")).to_equal("60")
+
+    it "cells stay formulas after the pass — parked numbers are restored":
+        # If Phase 3 failed to restore a parked cell, A6 would be a frozen
+        # literal and editing the head of the chain could not move it.
+        var sh = _chain(6)
+        sh.set_value("A1", "10")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A6")).to_equal("15")

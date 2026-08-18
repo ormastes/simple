@@ -507,7 +507,7 @@ fn _ff_formula_ref_tokens(expr: text) -> [text]:
     This is a lexical scan, not a parse: text inside double quotes is skipped,
     and a letters+digits run immediately followed by `(` is a function name
     (LOG10(...), T1(...)) rather than a reference. Over-detection is harmless
-    for the only caller — `_ff_circular_cells` keeps an edge only when the
+    for the only caller — `_ff_dep_plan` keeps an edge only when the
     named cell actually exists AND holds a formula."""
     val src = _ff_strip_dollars(expr)
     val n = src.len()
@@ -557,9 +557,32 @@ fn _ff_formula_ref_tokens(expr: text) -> [text]:
             i = i + 1
     out
 
-fn _ff_circular_cells(sheet: Sheet, keys: [text]) -> [text]:
-    """Keys of the formula cells that sit on — or transitively depend on — a
-    circular reference.
+struct FfDepPlan:
+    """Both products of the one dependency-graph pass over a sheet's formula
+    cells: the evaluation `order` (dependencies strictly before dependents) and
+    the `circular` set (cells on, or reaching, a cycle)."""
+    order: [text]
+    circular: [text]
+
+fn _ff_is_numeric_display(s: text) -> bool:
+    """Whether a cached display is a plain number, so it can stand in for the
+    formula during this pass. Error strings (`#CIRC!`, `#SPILL!`, `#DIV/0!`) and
+    text results deliberately fail this test and are left as formulas."""
+    if s.len() == 0:
+        return false
+    var i = 0
+    var digits = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if _ff_is_digit_ch(c):
+            digits = digits + 1
+        elif c != "-" and c != "+" and c != "." and c != "e" and c != "E":
+            return false
+        i = i + 1
+    digits > 0
+
+fn _ff_dep_plan(sheet: Sheet, keys: [text]) -> FfDepPlan:
+    """Evaluation order and circular-reference set for a sheet's formula cells.
 
     Depth-bounded recursive evaluation (`formula._resolve_cell_value`) makes a
     cycle TERMINATE, but it terminates by returning 0.0 sixty-four frames down,
@@ -570,7 +593,12 @@ fn _ff_circular_cells(sheet: Sheet, keys: [text]) -> [text]:
     Method is Kahn peeling on the *outgoing* edges: a formula cell whose every
     formula dependency is already resolved is itself resolvable, repeated to a
     fixpoint. Whatever never resolves is exactly the set of cells in a cycle
-    plus the cells that reach one — which is also what Excel errors out."""
+    plus the cells that reach one — which is also what Excel errors out.
+
+    The peel order IS a topological order, so it is recorded rather than thrown
+    away: a cell is appended only once every cell it references has already been
+    appended. Evaluating in that order is what lets a chain settle in one pass
+    (see `recalculate_formula_cells`)."""
     var fkeys: [text] = []
     for key in keys:
         match sheet.get_cell(key).value:
@@ -600,6 +628,7 @@ fn _ff_circular_cells(sheet: Sheet, keys: [text]) -> [text]:
         resolved.push(false)
         r = r + 1
 
+    var order: [text] = []
     var changed = true
     while changed:
         changed = false
@@ -612,6 +641,7 @@ fn _ff_circular_cells(sheet: Sheet, keys: [text]) -> [text]:
                         all_ready = false
                 if all_ready:
                     resolved[i] = true
+                    order.push(fkeys[i])
                     changed = true
             i = i + 1
 
@@ -621,7 +651,7 @@ fn _ff_circular_cells(sheet: Sheet, keys: [text]) -> [text]:
         if not resolved[b]:
             bad.push(fkeys[b])
         b = b + 1
-    bad
+    FfDepPlan(order: order, circular: bad)
 
 fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
     """Recalculate every formula cell, caching its display value, so `=A1+B1`
@@ -641,16 +671,27 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
     first (idempotent).
 
     Cells on (or depending on) a circular reference are found up front by
-    `_ff_circular_cells` and cache `#CIRC!` without being evaluated at all —
+    `_ff_dep_plan` and cache `#CIRC!` without being evaluated at all —
     depth-bounded evaluation alone terminated but produced a silent bogus
-    number."""
+    number.
+
+    The same graph pass yields the evaluation ORDER for the acyclic cells, and
+    that order is a correctness fix, not only a speed-up: each cell's numeric
+    result is parked in the sheet as a plain number for the remainder of the
+    pass, so a dependent reads a value instead of recursively re-evaluating its
+    dependency's expression. Without it, `_resolve_cell_value`'s
+    MAX_EVAL_DEPTH=64 bound truncated any chain longer than ~33 hops and cached
+    a silent wrong number (a 60-cell `=A(n-1)+1` chain cached 33 from A34 on).
+    Parked cells are restored to `FormulaVal` with their cached display in
+    Phase 3, so the returned sheet is shaped exactly as before."""
     var work = sheet
     var keys: [text] = []
     for key in work.cells.keys():
         keys.push(key)
 
-    # Phase 0: dependency-graph circular-reference detection.
-    val circular = _ff_circular_cells(work, keys)
+    # Phase 0: one dependency-graph pass — circular set AND evaluation order.
+    val plan = _ff_dep_plan(work, keys)
+    val circular = plan.circular
 
     # Phase 1: compute array grids and blockage against the pre-spill sheet.
     var specs: [SpillSpec] = []
@@ -668,42 +709,79 @@ fn recalculate_formula_cells(sheet: Sheet) -> Sheet:
             _:
                 pass_do_nothing("non-formula cells are not array origins")
 
-    # Phase 2: write scalar results and array spills.
-    for key in keys:
+    # Phase 2a: cells on or reaching a cycle cache #CIRC! without evaluating.
+    for key in circular:
+        val ccell = work.get_cell(key)
+        match ccell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                work.set_cell(key, Cell(
+                    value: CellValue.FormulaVal(expr: expr, cached_display: "#CIRC!"),
+                    style: ccell.style
+                ))
+            _:
+                pass_do_nothing("only formula cells are ever reported circular")
+
+    # Phase 2b: the acyclic cells, in dependency order (dependencies first).
+    #
+    # A cell whose scalar result is a plain number is parked in the sheet AS
+    # that number for the rest of the pass, and restored to its formula in
+    # Phase 3. That is what makes the order load-bearing: a dependent then reads
+    # a NumberVal instead of re-entering `_resolve_cell_value` on its
+    # dependency's expression, so a chain settles in one pass and no longer runs
+    # into the MAX_EVAL_DEPTH=64 recursion bound. Measured before this change,
+    # a 60-long `=A(n-1)+1` chain silently cached 33 for every cell from A34 on.
+    var sub_keys: [text] = []
+    var sub_exprs: [text] = []
+    var sub_disps: [text] = []
+    for key in plan.order:
         val cell = work.get_cell(key)
         match cell.value:
             CellValue.FormulaVal(expr, cached_display):
-                if circular.contains(key):
-                    work.set_cell(key, Cell(
-                        value: CellValue.FormulaVal(expr: expr, cached_display: "#CIRC!"),
-                        style: cell.style
-                    ))
-                else:
-                    var spec_idx = -1
-                    var si = 0
-                    while si < specs.len():
-                        if specs[si].origin == key:
-                            spec_idx = si
-                        si = si + 1
-                    if spec_idx >= 0:
-                        val spec = specs[spec_idx]
-                        if spec.blocked:
-                            work.set_cell(key, Cell(
-                                value: CellValue.FormulaVal(expr: expr, cached_display: "#SPILL!"),
-                                style: cell.style
-                            ))
-                        else:
-                            work = _write_spill(work, key, expr, spec.agrid, cell.style)
-                    else:
-                        set_formula_origin(key)
-                        reset_let_bindings()
-                        val result = evaluate_formula(expr, work)
+                var spec_idx = -1
+                var si = 0
+                while si < specs.len():
+                    if specs[si].origin == key:
+                        spec_idx = si
+                    si = si + 1
+                if spec_idx >= 0:
+                    val spec = specs[spec_idx]
+                    if spec.blocked:
                         work.set_cell(key, Cell(
-                            value: CellValue.FormulaVal(expr: expr, cached_display: _scalar_display(result)),
+                            value: CellValue.FormulaVal(expr: expr, cached_display: "#SPILL!"),
+                            style: cell.style
+                        ))
+                    else:
+                        work = _write_spill(work, key, expr, spec.agrid, cell.style)
+                else:
+                    set_formula_origin(key)
+                    reset_let_bindings()
+                    val result = evaluate_formula(expr, work)
+                    val disp = _scalar_display(result)
+                    if _ff_is_numeric_display(disp):
+                        work.set_cell(key, Cell(
+                            value: CellValue.NumberVal(value: disp.to_f64()),
+                            style: cell.style
+                        ))
+                        sub_keys.push(key)
+                        sub_exprs.push(expr)
+                        sub_disps.push(disp)
+                    else:
+                        work.set_cell(key, Cell(
+                            value: CellValue.FormulaVal(expr: expr, cached_display: disp),
                             style: cell.style
                         ))
             _:
                 pass_do_nothing("non-formula cells keep their value")
+
+    # Phase 3: put the parked formulas back, carrying their cached displays.
+    var sk = 0
+    while sk < sub_keys.len():
+        val pcell = work.get_cell(sub_keys[sk])
+        work.set_cell(sub_keys[sk], Cell(
+            value: CellValue.FormulaVal(expr: sub_exprs[sk], cached_display: sub_disps[sk]),
+            style: pcell.style
+        ))
+        sk = sk + 1
     set_formula_origin("")
     reset_let_bindings()
     work
