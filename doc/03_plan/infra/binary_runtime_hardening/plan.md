@@ -124,19 +124,40 @@ n=100..30000):
 - **Interpreter lane** (`SIMPLE_EXECUTION_MODE=interpreter`, also what
   `bin/simple test` runs under): `StringBuilder` LOSES at every measured size
   and gets relatively worse as n grows — 1.7x slower at n=100, 34.4x slower at
-  n=30000 (10.8s vs 314ms) — i.e. worse-than-quadratic in this lane. Root cause
-  suspected in interpreter array `.push()`/class-method-dispatch cost, not yet
-  isolated. Full numbers and analysis:
+  n=30000 (10.8s vs 314ms) — i.e. worse-than-quadratic in this lane. Full
+  numbers and analysis:
   `doc/08_tracking/bug/string_builder_interpreter_push_worse_than_quadratic_2026-08-18.md`.
 
-Because most of this codebase's tests and tooling run under the interpreter
-lane, `StringBuilder` cannot yet be recommended as a blanket remedy for this
-pattern — a commit adopting it at two call sites (`to_upper_ascii`,
-`svmg/assembler.disasm`, `22faace491c`) was reverted for exactly this reason.
-Use it only where the caller is known to run under JIT/codegen; otherwise
-leave the `result = result + x` pattern in place (correct, just not optimal)
-until the interpreter-side perf bug above is fixed, and re-measure before
-re-adopting.
+**Root cause LOCALIZED 2026-08-18, not yet fixed.** Confirmed with an
+independent minimal repro (`self.items.push(x)` on a plain class field, no
+`StringBuilder`/text involved: 30x growth in n -> ~58x growth in interpreter
+wall time; flat under JIT). Two compounding causes, both required for a real
+fix: (1) `handle_array_methods`'s generic `"push"|"append"` arm
+(`interpreter_method/collections.rs:179-184`) clones the entire backing `Vec`
+on every push when the receiver is not a bare local identifier — which is
+exactly `self.field.push(x)`, i.e. how `StringBuilder` accumulates; (2) a
+deliberate, pre-existing ownership-sharing choice in the identifier-receiver
+method-dispatch fast path (`interpreter_helpers/patterns.rs:578-606`, "zero-
+copy self" — re-inserts an `Arc::clone` of the callee's `fields` map into the
+caller's env for the WHOLE call, not just argument evaluation) pins that
+field's Arc refcount at 2 for the entire method body, defeating ANY local
+`Arc::make_mut` fix at the push call site alone. An attempted fix for (1) was
+built, compiled clean, and benchmarked against a locally-built seed
+(`CARGO_TARGET_DIR` under `/mnt/data`, deployed `bin/simple` untouched) — it
+made the harness SLOWER (11.25s vs 4.66s at n=30000, not the deployed-binary
+StringBuilder numbers above), proving (2) must be fixed too, and was reverted.
+Patch sketch for the combined fix is recorded in the bug doc.
+
+**Verdict: StringBuilder does NOT become blanket-adoptable once "this fix" is
+deployed, because there is no single fix yet — the real fix is two coupled
+changes (see bug doc), still unimplemented.** Because most of this codebase's
+tests and tooling run under the interpreter lane, `StringBuilder` cannot yet
+be recommended as a blanket remedy for this pattern — a commit adopting it at
+two call sites (`to_upper_ascii`, `svmg/assembler.disasm`, `22faace491c`) was
+reverted for exactly this reason. Use it only where the caller is known to run
+under JIT/codegen; otherwise leave the `result = result + x` pattern in place
+(correct, just not optimal) until BOTH interpreter-side causes above are
+fixed, and re-measure (harness in the bug doc) before re-adopting.
 
 ## Fix test standard (user directive, 2026-08-18)
 
