@@ -1,0 +1,106 @@
+# @req REQ-SSPEC-BINARY-COMPARE
+#
+# Mask-aware comparator for binary SSpec: delta = (actual XOR expected) AND
+# compare_mask. Locks the two semantic invariants of the stacked-reference
+# design (doc/05_design/infra/sspec/binary_reference_stacked_design.md):
+# gray/ignored means compare_mask contributed zero bits; reserved is NOT
+# gray — reserved fields are actively checked even when the caller marks
+# them dont_care or passes a nonzero expected in that range.
+
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, ByteOrder, BitOrder,
+    binary_field, reserved_field,
+    ComparePolicy, policy_exact, policy_dont_care, policy_masked,
+    WordDiff, compare_word, render_word_line
+}
+
+# 16-bit toy word: flag(0,1) | mode(1,3) | reserved(4,4) | payload(8,8)
+fn toy_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "toy16",
+        total_bits: 16,
+        byte_order: ByteOrder.little,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("flag", 0, 1, "enable flag"),
+            binary_field("mode", 1, 3, "mode select"),
+            reserved_field("reserved_mid", 4, 4),
+            binary_field("payload", 8, 8, "payload byte")
+        ],
+        source_ref: "test fixture"
+    )
+
+describe "binary compare_word":
+    it "passes when all checked bits match":
+        val d = compare_word(0x5A03, 0x5A03, toy_layout(), [])
+        assert_equal(d.status, "pass")
+        assert_equal(d.delta, 0)
+
+    it "fails an exact field and names it":
+        # payload differs: 0x5A vs 0x4A
+        val d = compare_word(0x5A03, 0x4A03, toy_layout(), [])
+        assert_equal(d.status, "fail")
+        var found = false
+        for n in d.failing_fields:
+            if n == "payload":
+                found = true
+        assert_true(found)
+
+    it "checks reserved bits even when expected also has them set":
+        # bit 5 set in BOTH expected and actual: a naive xor would pass,
+        # but reserved_zero must fail on the ACTUAL bit being set.
+        val d = compare_word(0x0020, 0x0020, toy_layout(), [])
+        assert_equal(d.status, "fail")
+        var found = false
+        for n in d.failing_fields:
+            if n == "reserved_mid":
+                found = true
+        assert_true(found)
+
+    it "reserved overrides a dont_care request":
+        val d = compare_word(0x0000, 0x0010, toy_layout(), [policy_dont_care("reserved_mid")])
+        assert_equal(d.status, "fail")
+
+    it "dont_care field cannot fail the assertion":
+        val pols = [policy_dont_care("payload")]
+        # payload wildly different, everything else equal
+        val d = compare_word(0xFF01, 0x0001, toy_layout(), pols)
+        assert_equal(d.status, "pass")
+
+    it "reports ignored when no bits are compared":
+        val pols = [
+            policy_dont_care("flag"),
+            policy_dont_care("mode"),
+            policy_dont_care("payload")
+        ]
+        # restrict layout to non-reserved fields only for a true all-gray word
+        val layout = BinaryLayout(
+            layout_id: "toy_nores",
+            total_bits: 16,
+            byte_order: ByteOrder.little,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                binary_field("flag", 0, 1, "enable flag"),
+                binary_field("mode", 1, 3, "mode select"),
+                binary_field("payload", 8, 8, "payload byte")
+            ],
+            source_ref: "test fixture"
+        )
+        val d = compare_word(0x1234, 0x4321, layout, pols)
+        assert_equal(d.status, "ignored")
+        assert_equal(d.compare_mask, 0)
+
+    it "masked policy compares only the selected sub-bits":
+        # payload masked to low nibble: high-nibble diff ignored, low-nibble diff fails
+        val pols = [policy_masked("payload", 0x0F)]
+        val ok = compare_word(0xA503, 0xF503, toy_layout(), pols)
+        assert_equal(ok.status, "pass")
+        val bad = compare_word(0xA503, 0xA603, toy_layout(), pols)
+        assert_equal(bad.status, "fail")
+
+    it "renders a compact word line with failing field names":
+        val d = compare_word(0x5A03, 0x4A03, toy_layout(), [])
+        val line = render_word_line("W0", d)
+        assert_true(line.contains("FAIL"))
+        assert_true(line.contains("payload"))

@@ -279,3 +279,107 @@ pub fn pte_layout() -> BinaryLayout:
         ],
         source_ref: "src/os/kernel/types/bitfield.spl"
     )
+
+# ---------------------------------------------------------------------------
+# Mask-aware comparator (binary SSpec core)
+#
+# Canonical rule: delta = (actual XOR effective_expected) AND compare_mask.
+# Two semantic invariants (design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md):
+#   1. "ignored" means compare_mask contributed 0 bits under the current
+#      context — the value is captured but cannot fail the assertion.
+#   2. Reserved is NOT ignored: reserved fields are actively checked against
+#      their fixed value (zero here, matching `reserved_violations` above),
+#      regardless of what the caller passed as `expected` in that range.
+# ---------------------------------------------------------------------------
+
+# Per-field comparison policy. `policy` is one of:
+#   "exact"          compare all field bits
+#   "dont_care"      contribute no bits to compare_mask
+#   "reserved_zero"  compare all field bits against 0
+#   "reserved_one"   compare all field bits against all-ones
+#   "masked"         compare only the bits set in `mask` (field-relative)
+pub struct ComparePolicy:
+    field: text
+    policy: text
+    mask: i64
+
+pub fn policy_exact(field: text) -> ComparePolicy:
+    ComparePolicy(field: field, policy: "exact", mask: 0)
+
+pub fn policy_dont_care(field: text) -> ComparePolicy:
+    ComparePolicy(field: field, policy: "dont_care", mask: 0)
+
+pub fn policy_masked(field: text, mask: i64) -> ComparePolicy:
+    ComparePolicy(field: field, policy: "masked", mask: mask)
+
+pub struct WordDiff:
+    expected: i64
+    actual: i64
+    compare_mask: i64
+    delta: i64
+    status: text          # "pass" | "fail" | "ignored"
+    failing_fields: [text]
+
+fn _policy_for(field_name: text, policies: [ComparePolicy]) -> text:
+    for p in policies:
+        if p.field == field_name:
+            return p.policy
+    "exact"
+
+fn _mask_for(field_name: text, policies: [ComparePolicy]) -> i64:
+    for p in policies:
+        if p.field == field_name:
+            return p.mask
+    0
+
+# Compare one word of `layout` under per-field `policies`. A field with no
+# entry in `policies` defaults to "exact"; a layout field flagged `reserved`
+# is ALWAYS checked as reserved_zero, overriding any dont_care request —
+# a reserved bit flipping must be able to fail the assertion.
+pub fn compare_word(expected: i64, actual: i64, layout: BinaryLayout, policies: [ComparePolicy]) -> WordDiff:
+    var compare_mask: i64 = 0
+    var effective_expected = expected
+    for field in layout.fields:
+        val field_bits = ((1 << field.width) - 1) << field.lsb
+        var pol = _policy_for(field.name, policies)
+        if field.reserved:
+            pol = "reserved_zero"
+        if pol == "dont_care":
+            continue
+        if pol == "masked":
+            compare_mask = compare_mask | ((_mask_for(field.name, policies) << field.lsb) & field_bits)
+        else:
+            compare_mask = compare_mask | field_bits
+        if pol == "reserved_zero":
+            effective_expected = effective_expected & ~field_bits
+        if pol == "reserved_one":
+            effective_expected = effective_expected | field_bits
+    val delta = (actual ^ effective_expected) & compare_mask
+    var failing: [text] = []
+    for field in layout.fields:
+        val field_bits = ((1 << field.width) - 1) << field.lsb
+        if (delta & field_bits) != 0:
+            failing.push(field.name)
+    val status = if compare_mask == 0: "ignored" else: (if delta == 0: "pass" else: "fail")
+    WordDiff(
+        expected: expected,
+        actual: actual,
+        compare_mask: compare_mask,
+        delta: delta,
+        status: status,
+        failing_fields: failing,
+    )
+
+# One compact expected/actual line for the stacked view, e.g.
+#   "CDW12 expected 0x0000000055200007 actual 0x0000000054200007 FAIL [stc]"
+pub fn render_word_line(label: text, d: WordDiff) -> text:
+    val mark = if d.status == "pass": "ok" else: (if d.status == "ignored": "~ don't care" else: "FAIL")
+    var line = label + " expected 0x" + bytes_hex(u64_to_le_bytes(d.expected))
+    line = line + " actual 0x" + bytes_hex(u64_to_le_bytes(d.actual)) + " " + mark
+    if d.status == "fail":
+        var names = ""
+        for n in d.failing_fields:
+            names = if names == "": n else: names + "," + n
+        line = line + " [" + names + "]"
+    line
