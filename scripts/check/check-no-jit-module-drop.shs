@@ -41,9 +41,20 @@
 #      declaration-only modules refuse to run at all ("no `main` function and no
 #      top-level statements"), so they could never be covered.
 #
+# SELECTED IS NOT MEASURED
+# -------------------------
+# The verdict deliberately reports two different numbers. A file is MEASURED
+# only if the compiler actually lowered its function bodies, which is the only
+# point at which this defect class can be observed. Three outcomes count as
+# measured — CLEAN (compiled outright), LOWERED_CLEAN (lowered, then failed for
+# a strictly downstream reason; see LOWERED_RE below), and DROP. Everything
+# else is NOT MEASURED and this fence has no opinion about it, in either
+# direction. Do not quote the selected count as coverage.
+#
 # EXIT CODES (matching the repo's pre-push guard convention)
-#   0  PASS  — every selected file was compiled and none dropped. The verdict
-#              line states how many were actually examined.
+#   0  PASS  — no selected file that reached the oracle dropped. The verdict
+#              line states how many were actually MEASURED, and how many were
+#              not.
 #   1  FAIL  — at least one file has a paren-less accessor drop. Each is NAMED.
 #   2  ERROR — nothing was checked, or the fence could not prove it can fire.
 #              This is NOT a pass.
@@ -94,11 +105,67 @@ DROP_RE='cannot infer field type while lowering'
 # compiler's own diagnostic is the oracle and grep is not.
 ACCESSORS='length len size empty chars first last capacity'
 
+# A compile that fails ONLY with this message has nevertheless PROVEN the
+# absence of the defect class in that module, and counting it as unmeasurable
+# was throwing away real coverage.
+#
+# WHY (measured 2026-08-18, by mutation, not by reading the compiler):
+#   `cannot compile to standalone SMF: N function(s) contain constructs that
+#   require the interpreter` is raised AFTER HIR lowering of every function in
+#   the module has already completed — it is a property of the lowered result,
+#   not a gate in front of lowering. The accessor diagnostic is raised DURING
+#   lowering, so it strictly precedes this one. Proof: appending
+#   `fn g(zs: List<Int>) -> Int: return zs.length` to a module that fails this
+#   way makes the compiler report the accessor error INSTEAD, on the same file
+#   (verified against the real `src/app/portal/git_views.spl` and against the
+#   minimal `?`-operator fixture the selftest now plants). So: this message
+#   present AND the drop signature absent == lowering ran to completion and
+#   found no paren-less accessor. That is measurement, not an excuse.
+#
+# This is the ONLY reason string with that property. Every other failure —
+# `Undefined(...)`, `parse:`, `lint:`, `SMF emission failed`, a timeout —
+# aborts BEFORE or INSTEAD OF lowering the bodies, and was verified by the same
+# mutation to swallow an injected `.length` (drop signature absent even though
+# the accessor was there). Those stay UNMEASURABLE. Do not extend this list
+# without repeating the mutation experiment for the reason you want to add.
+LOWERED_RE='cannot compile to standalone SMF'
+
 [ -x "$BIN" ] || { echo "ERROR — nothing was checked (compiler '$BIN' is not executable)"; exit 2; }
+
+# ORACLE IDENTITY — recorded in the verdict, not merely used.
+#
+# The measured/unmeasured RATIO of this fence moved between two runs on the
+# same day (127/288 then 234/181) and the first hypothesis was
+# non-determinism. Most of that move was a CODE change (the LOWERED_CLEAN
+# category), but a residual source is real and unrecorded: `bin/simple` is a
+# symlink that other sessions REPLACE mid-session — three distinct builds were
+# observed in one session per .claude/rules/commands.md. A different compiler
+# resolves a different set of symbols, so it measures a different set of
+# modules. A coverage number quoted without the identity of the oracle that
+# produced it is not comparable to any other run, so both the resolved binary
+# and the per-file timeout (which decides the timeout bucket under load) are
+# stamped into every verdict line.
+BIN_REAL="$(readlink -f "$BIN" 2>/dev/null || echo "$BIN")"
+BIN_STAMP="$(stat -c '%s/%Y' "$BIN_REAL" 2>/dev/null || echo 'unknown')"
+ORACLE_ID="oracle=$BIN_REAL($BIN_STAMP) timeout=${TIMEOUT}s"
 mkdir -p "$LOG_DIR" || { echo "ERROR — nothing was checked (cannot create $LOG_DIR)"; exit 2; }
 
-WORK="$LOG_DIR/work"
-rm -rf "$WORK"
+# RUN-UNIQUE scratch + per-run log directory.
+#
+# Until 2026-08-18 both the scratch file ($LOG_DIR/work/one.log) and the
+# per-drop logs ($LOG_DIR/drop-*.log) were fixed paths under $LOG_DIR. ~10
+# sessions share this checkout, so two concurrent instances raced on the same
+# one.log: logs named for one file were found containing another file's error,
+# and the startup `rm -rf "$WORK"` of the second instance deleted the first
+# one's scratch mid-scan. Triage from those logs was worthless. Everything a
+# run writes now lives under a run-unique directory; only the two summary
+# lists are additionally published at the stable $LOG_DIR paths, and only by
+# an atomic rename at the END of the run, so a reader can never see a
+# half-written list from a run still in flight.
+RUN_ID="$$-$(date +%s)"
+RUN_DIR="$LOG_DIR/run-$RUN_ID"
+mkdir -p "$RUN_DIR" || { echo "ERROR — nothing was checked (cannot create $RUN_DIR)"; exit 2; }
+WORK="$RUN_DIR/work"
 mkdir -p "$WORK" || { echo "ERROR — nothing was checked (cannot create $WORK)"; exit 2; }
 
 # ---------------------------------------------------------------------------
@@ -122,10 +189,20 @@ compile_one() {
     _rc=0
     timeout "$TIMEOUT" "$BIN" compile "$_f" -o "$WORK/out.smf" >"$_log" 2>&1 || _rc=$?
     rm -f "$WORK/out.smf"
+    # Published for the caller's bucketing. `timeout` reports 124 when it kills
+    # the child, which is a BUDGET exhaustion and a different problem from a
+    # semantic failure; conflating the two into one "silent" bucket hid the
+    # single most load-dependent, run-to-run-unstable cause of lost coverage.
+    LAST_RC="$_rc"
     if grep -q "$DROP_RE" "$_log" 2>/dev/null; then
         echo "DROP"
     elif [ "$_rc" -eq 0 ]; then
         echo "CLEAN"
+    elif grep -q "$LOWERED_RE" "$_log" 2>/dev/null; then
+        # Lowering completed; the failure is strictly downstream of the gate
+        # this fence watches. Measured clean, by a weaker but sufficient
+        # oracle. See LOWERED_RE above for the mutation proof.
+        echo "LOWERED_CLEAN"
     else
         # Compiled non-zero for some OTHER reason (missing dep, unrelated
         # semantic error, timeout). This file was NOT measured for the defect
@@ -155,22 +232,65 @@ selftest() {
     printf 'val xs = [1, 2, 3]\nprint xs.length\n' >"$_fx/known_bad.spl" || return 2
     printf 'val xs = [1, 2, 3]\nprint xs.len()\n'  >"$_fx/known_good.spl" || return 2
 
-    _bad="$(compile_one "$_rel/known_bad.spl" "$LOG_DIR/selftest-bad.log")"
-    _good="$(compile_one "$_rel/known_good.spl" "$LOG_DIR/selftest-good.log")"
+    # Fixtures 3 and 4 pin the LOWERED_CLEAN category in BOTH directions. A
+    # category that says "failed to compile, but still counts as measured" is
+    # exactly the shape of a fail-open, so it is not taken on trust: the
+    # `?`-operator body below makes the module non-standalone-SMF-compilable,
+    # and the ONLY difference between the two files is the paren-less
+    # accessor. If the pair ever stops separating — if the accessor version is
+    # not DROP, or the clean version is not LOWERED_CLEAN — the ordering
+    # assumption that licenses this whole category has changed and the fence
+    # refuses to report on anything.
+    printf 'fn inner() -> Result<Int, String>:\n    return Ok(1)\n\nfn f() -> Result<Int, String>:\n    val v = inner()?\n    return Ok(v + 1)\n\nfn main():\n    print "x"\n' >"$_fx/known_lowered.spl" || return 2
+    cp "$_fx/known_lowered.spl" "$_fx/known_lowered_bad.spl" || return 2
+    printf '\nfn g(zs: List<Int>) -> Int:\n    return zs.length\n' >>"$_fx/known_lowered_bad.spl" || return 2
+
+    # Fixture 5 pins the OTHER failure direction of LOWERED_CLEAN: a module
+    # that dies at semantic resolution never lowers its bodies, so even though
+    # it literally contains `.length` the oracle cannot see it. It MUST come
+    # back UNMEASURABLE. If a future widening of LOWERED_RE ever let this one
+    # through as measured-clean, the fence would be laundering unmeasured
+    # modules into the green count — so this fixture, not a code comment, is
+    # what holds that line.
+    printf 'fn g(zs: List<Int>) -> Int:\n    return no_such_identifier_xyz(zs).length\n' >"$_fx/known_unmeasurable.spl" || return 2
+
+    _bad="$(compile_one "$_rel/known_bad.spl" "$RUN_DIR/selftest-bad.log")"
+    _good="$(compile_one "$_rel/known_good.spl" "$RUN_DIR/selftest-good.log")"
+    _low="$(compile_one "$_rel/known_lowered.spl" "$RUN_DIR/selftest-lowered.log")"
+    _lowbad="$(compile_one "$_rel/known_lowered_bad.spl" "$RUN_DIR/selftest-lowered-bad.log")"
+    _unmeas="$(compile_one "$_rel/known_unmeasurable.spl" "$RUN_DIR/selftest-unmeasurable.log")"
 
     if [ "$_bad" != "DROP" ]; then
         echo "ERROR — nothing was checked: the known-BAD fixture (\`xs.length\`) was classified '$_bad', not DROP."
         echo "        The fence cannot detect the defect it exists to detect, so it will not report on anything."
-        echo "        Log: $LOG_DIR/selftest-bad.log"
+        echo "        Log: $RUN_DIR/selftest-bad.log"
         return 2
     fi
     if [ "$_good" != "CLEAN" ]; then
         echo "ERROR — nothing was checked: the known-GOOD fixture (\`xs.len()\`) was classified '$_good', not CLEAN."
         echo "        The fence would flag correct code, so its verdict is worthless."
-        echo "        Log: $LOG_DIR/selftest-good.log"
+        echo "        Log: $RUN_DIR/selftest-good.log"
         return 2
     fi
-    echo "selftest: OK (known-bad -> DROP, known-good -> CLEAN; 2 fixtures, both directions)"
+    if [ "$_low" != "LOWERED_CLEAN" ]; then
+        echo "ERROR — nothing was checked: the known-LOWERED fixture (non-standalone-SMF, no accessor) was classified '$_low', not LOWERED_CLEAN."
+        echo "        The LOWERED_CLEAN category rests on lowering running BEFORE the standalone-SMF check; that no longer holds."
+        echo "        Log: $RUN_DIR/selftest-lowered.log"
+        return 2
+    fi
+    if [ "$_lowbad" != "DROP" ]; then
+        echo "ERROR — nothing was checked: the known-LOWERED-BAD fixture (same module + \`zs.length\`) was classified '$_lowbad', not DROP."
+        echo "        LOWERED_CLEAN would then be counting UNMEASURED modules as measured — the exact fail-open this fence exists to avoid."
+        echo "        Log: $RUN_DIR/selftest-lowered-bad.log"
+        return 2
+    fi
+    if [ "$_unmeas" != "UNMEASURABLE" ]; then
+        echo "ERROR — nothing was checked: the known-UNMEASURABLE fixture (semantic failure, never lowered) was classified '$_unmeas', not UNMEASURABLE."
+        echo "        A module that never reached lowering is being counted as measured. That is a fail-open."
+        echo "        Log: $RUN_DIR/selftest-unmeasurable.log"
+        return 2
+    fi
+    echo "selftest: OK (known-bad -> DROP, known-good -> CLEAN, non-standalone -> LOWERED_CLEAN, non-standalone+accessor -> DROP, semantic-failure -> UNMEASURABLE; 5 fixtures, both directions)"
     return 0
 }
 
@@ -259,7 +379,7 @@ if [ "$st_rc" -ne 0 ]; then
     exit 2
 fi
 if [ "$MODE" = "selftest" ]; then
-    echo "PASS — 2 fixture(s) checked (selftest only; NO tree files were examined)"
+    echo "PASS — 5 fixture(s) checked (selftest only; NO tree files were examined). $ORACLE_ID"
     exit 0
 fi
 
@@ -278,10 +398,27 @@ echo "scanning $n_total file(s) — $SCOPE"
 
 n_checked=0
 n_clean=0
+n_lowered=0
 n_drop=0
 n_unmeasurable=0
-DROP_LIST="$LOG_DIR/drops.txt"
-UNMEAS_LIST="$LOG_DIR/unmeasurable.txt"
+# Buckets for the UNMEASURED remainder. The point of splitting them is that
+# "unmeasurable" is not one problem: a `lint:` refusal and a 120s timeout have
+# nothing in common and need different fixes. A single opaque number invites a
+# reader to treat the gap as irreducible; the breakdown shows it is not.
+u_undefined=0    # semantic resolution failed — module needs context the probe
+                 # does not provide (missing import/package/prelude symbol)
+u_parse=0        # source does not parse for this compiler
+u_lint=0         # lint refused before the compiler ran (e.g. spipe rules)
+u_emit=0         # SMF emission failed after lowering, but not the SMF-fallback case
+u_timeout=0      # killed by the per-file budget (rc 124) — LOAD-DEPENDENT, and
+                 # therefore the bucket that makes this fence's coverage move
+                 # between runs. Kept separate from u_silent for exactly that
+                 # reason: a timeout is fixed by budget or by a quieter box, a
+                 # silent non-zero is a real defect to chase.
+u_silent=0       # non-zero with no `error:` line — signal or OOM kill
+u_other=0
+DROP_LIST="$RUN_DIR/drops.txt"
+UNMEAS_LIST="$RUN_DIR/unmeasurable.txt"
 : >"$DROP_LIST"
 : >"$UNMEAS_LIST"
 
@@ -303,16 +440,35 @@ for f in $FILES; do
             [ -n "$detail" ] || detail="$(grep -o "$DROP_RE.*" "$log" | head -1)"
             printf '%s\t%s\n' "$f" "$detail" >>"$DROP_LIST"
             printf 'DROP  %s  %s\n' "$f" "$detail"
-            cp "$log" "$LOG_DIR/drop-$(echo "$f" | tr '/' '_').log" 2>/dev/null
+            cp "$log" "$RUN_DIR/drop-$(echo "$f" | tr '/' '_').log" 2>/dev/null
             ;;
         CLEAN)
             n_clean=$((n_clean + 1))
             ;;
+        LOWERED_CLEAN)
+            n_lowered=$((n_lowered + 1))
+            ;;
         *)
             n_unmeasurable=$((n_unmeasurable + 1))
             reason="$(grep -m1 -E '^error' "$log" 2>/dev/null | cut -c1-160)"
-            [ -n "$reason" ] || reason="compile failed or timed out with no 'error:' line"
-            printf '%s\t%s\n' "$f" "$reason" >>"$UNMEAS_LIST"
+            if [ "${LAST_RC:-0}" -eq 124 ]; then
+                reason="killed by the ${TIMEOUT}s per-file budget (rc 124)${reason:+ — last error: $reason}"
+                u_timeout=$((u_timeout + 1))
+                bucket="timeout"
+            elif [ -z "$reason" ]; then
+                reason="compile failed or timed out with no 'error:' line"
+                u_silent=$((u_silent + 1))
+                bucket="silent"
+            else
+                case "$reason" in
+                    *'Undefined('*|*'unresolved '*) u_undefined=$((u_undefined + 1)); bucket="undefined" ;;
+                    *'parse:'*)                     u_parse=$((u_parse + 1));         bucket="parse" ;;
+                    *'lint:'*)                      u_lint=$((u_lint + 1));           bucket="lint" ;;
+                    *'SMF emission failed'*)        u_emit=$((u_emit + 1));           bucket="emit" ;;
+                    *)                              u_other=$((u_other + 1));         bucket="other" ;;
+                esac
+            fi
+            printf '%s\t%s\t%s\n' "$f" "$bucket" "$reason" >>"$UNMEAS_LIST"
             ;;
     esac
 done
@@ -326,14 +482,28 @@ fi
 # unrelated reason, so this fence has NO opinion about it. Reporting it as
 # covered would be the fail-open pattern. It is stated in the verdict line so a
 # reader can never mistake partial coverage for full coverage.
+n_measured=$((n_clean + n_lowered + n_drop))
+if [ "$n_checked" -gt 0 ]; then
+    pct=$(( n_measured * 100 / n_checked ))
+else
+    pct=0
+fi
+
+# Publish the two summary lists at the stable, documented paths — by rename,
+# at the END of the run, so a concurrent reader never sees a partial list.
+cp "$DROP_LIST" "$LOG_DIR/.drops.txt.$RUN_ID" 2>/dev/null && mv "$LOG_DIR/.drops.txt.$RUN_ID" "$LOG_DIR/drops.txt" 2>/dev/null
+cp "$UNMEAS_LIST" "$LOG_DIR/.unmeasurable.txt.$RUN_ID" 2>/dev/null && mv "$LOG_DIR/.unmeasurable.txt.$RUN_ID" "$LOG_DIR/unmeasurable.txt" 2>/dev/null
+
 if [ "$n_unmeasurable" -gt 0 ]; then
-    echo "NOTE: $n_unmeasurable file(s) could not be measured (unrelated compile failure); listed in $UNMEAS_LIST"
-    echo "      These are NOT covered by the verdict below."
+    echo "NOT MEASURED: $n_unmeasurable of $n_checked selected file(s) never reached the oracle."
+    echo "      This fence has NO OPINION about them. They are neither clean nor dirty here."
+    echo "      breakdown: undefined-identifier=$u_undefined parse=$u_parse lint=$u_lint smf-emission=$u_emit timeout=$u_timeout silent=$u_silent other=$u_other"
+    echo "      list: $UNMEAS_LIST (also published at $LOG_DIR/unmeasurable.txt)"
 fi
 
 if [ "$n_drop" -gt 0 ]; then
     echo "      full drop list: $DROP_LIST"
-    echo "FAIL — $n_checked file(s) checked, $n_drop with a paren-less accessor whole-module de-JIT ($n_clean clean, $n_unmeasurable unmeasurable). Accessor family: $ACCESSORS"
+    echo "FAIL — $n_checked selected, $n_measured MEASURED (${pct}%), $n_unmeasurable NOT MEASURED; $n_drop with a paren-less accessor whole-module de-JIT ($n_clean compiled clean, $n_lowered lowered-clean). Accessor family: $ACCESSORS. $ORACLE_ID"
     exit 1
 fi
 
@@ -342,8 +512,8 @@ fi
 # reads green while proving nothing — found in exactly that form on 2026-08-08
 # when a bad path list made every file fail to compile. A run in which not one
 # file compiled clean has no evidence behind its verdict.
-if [ "$n_clean" -eq 0 ]; then
-    echo "ERROR — nothing was checked: all $n_checked selected file(s) were unmeasurable and NOT ONE compiled clean."
+if [ "$n_measured" -eq 0 ]; then
+    echo "ERROR — nothing was checked: all $n_checked selected file(s) were unmeasurable and NOT ONE reached the oracle."
     echo "        With no clean compile there is no evidence the oracle ran against real code."
     echo "        Check the file list is valid and repo-relative. See $UNMEAS_LIST"
     exit 2
@@ -351,5 +521,9 @@ fi
 
 sample_note=""
 [ "$MAX_FILES" -gt 0 ] && sample_note=" [SAMPLE capped at $MAX_FILES of $n_total]"
-echo "PASS — $n_checked module(s) checked, 0 paren-less accessor de-JIT drops ($n_clean compiled clean, $n_unmeasurable unmeasurable), selftest fired in both directions$sample_note"
+# The verdict states SELECTED and MEASURED as two different numbers on
+# purpose. The previous wording — "PASS — 415 module(s) checked" — read as
+# 415 measured when only 127 were, and the qualifier sat in a parenthetical
+# after it. "checked" is deliberately not used as a headline noun any more.
+echo "PASS — $n_measured of $n_checked selected module(s) MEASURED (${pct}%), 0 paren-less accessor de-JIT drops; $n_unmeasurable NOT MEASURED and NOT covered by this verdict ($n_clean compiled clean, $n_lowered lowered-clean), selftest fired in both directions. $ORACLE_ID$sample_note"
 exit 0
