@@ -121,10 +121,7 @@ pub fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u64) -> std::io::R
         let Some(name) = file_name.to_str() else {
             continue;
         };
-        let is_candidate = name.starts_with("simple.log")
-            || (name.starts_with("crash_") && name.ends_with(".log"))
-            || name.starts_with(".simple-log-probe-");
-        if !is_candidate {
+        if !is_cleanup_candidate(name) {
             continue;
         }
 
@@ -150,10 +147,100 @@ pub fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u64) -> std::io::R
     Ok(())
 }
 
+/// Name filter for `cleanup_old_logs`: decides candidacy from the file NAME
+/// alone, before any metadata syscall.
+fn is_cleanup_candidate(name: &str) -> bool {
+    name.starts_with("simple.log")
+        || (name.starts_with("crash_") && name.ends_with(".log"))
+        || name.starts_with(".simple-log-probe-")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_old_logs, resolve_log_dir};
+    use super::{cleanup_old_logs, is_cleanup_candidate, resolve_log_dir};
     use std::fs;
+    use std::path::Path;
+    use std::time::SystemTime;
+
+    fn make_old(p: &Path) {
+        fs::write(p, "x").unwrap();
+        let f = fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+    }
+
+    // REPRO shape: many non-candidate entries + few candidates; only
+    // candidates are touched. The stat count itself isn't observable here,
+    // so candidacy is additionally pinned by the predicate tests below.
+    #[test]
+    fn cleanup_ignores_bulk_non_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        for i in 0..50 {
+            make_old(&dir.join(format!("unrelated_{i}.txt")));
+        }
+        make_old(&dir.join("simple.log.old"));
+        make_old(&dir.join("crash_7.log"));
+
+        cleanup_old_logs(dir, 7).unwrap();
+
+        assert!(!dir.join("simple.log.old").exists());
+        assert!(!dir.join("crash_7.log").exists());
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 50);
+    }
+
+    #[test]
+    fn cleanup_empty_dir_is_ok() {
+        let temp = tempfile::tempdir().unwrap();
+        cleanup_old_logs(temp.path(), 7).unwrap();
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cleanup_missing_dir_is_ok() {
+        let temp = tempfile::tempdir().unwrap();
+        cleanup_old_logs(&temp.path().join("nope"), 7).unwrap();
+    }
+
+    #[test]
+    fn cleanup_dir_with_only_candidates_empties_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        make_old(&dir.join("simple.log.1"));
+        make_old(&dir.join("crash_a.log"));
+        make_old(&dir.join(".simple-log-probe-1"));
+        cleanup_old_logs(dir, 7).unwrap();
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cleanup_retains_candidate_newer_than_cutoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        fs::write(dir.join("simple.log.fresh"), "x").unwrap(); // mtime = now
+        make_old(&dir.join("simple.log.stale"));
+        cleanup_old_logs(dir, 7).unwrap();
+        assert!(dir.join("simple.log.fresh").exists());
+        assert!(!dir.join("simple.log.stale").exists());
+    }
+
+    // Matching is prefix-based (plus .log suffix for crash_), NOT substring.
+    #[test]
+    fn candidate_predicate_matches_intended_names() {
+        assert!(is_cleanup_candidate("simple.log"));
+        assert!(is_cleanup_candidate("simple.log.2020-01-01"));
+        assert!(is_cleanup_candidate("crash_123.log"));
+        assert!(is_cleanup_candidate(".simple-log-probe-abc"));
+
+        // Pattern appearing mid-name must NOT match.
+        assert!(!is_cleanup_candidate("my_simple.log"));
+        assert!(!is_cleanup_candidate("old_crash_123.log"));
+        assert!(!is_cleanup_candidate("x.simple-log-probe-1"));
+        // crash_ prefix without .log suffix must NOT match.
+        assert!(!is_cleanup_candidate("crash_123.txt"));
+        assert!(!is_cleanup_candidate("crash_"));
+        assert!(!is_cleanup_candidate("unrelated.txt"));
+        assert!(!is_cleanup_candidate(""));
+    }
 
     #[test]
     fn cleanup_removes_only_old_matching_files() {
