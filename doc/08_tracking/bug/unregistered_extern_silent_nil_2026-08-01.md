@@ -751,7 +751,7 @@ Data: `doc/08_tracking/bug/data/unbacked_extern_census_2026-08-18.tsv`.
 | 49 | `rust_source_feature_gated` — `pub extern "C" fn` present, absent from this build | build-config |
 | 10 | `external_library_symbol` — SDL/gl/cu/vk… from a dlopen'd lib | if installed |
 | 85 | `SHADOWED_BY_SPL_FN` — a pure-Simple `fn` of that name exists | ambiguous |
-| **262** | **`DEAD_DECLARATION`** — zero call sites in the declaring module | **deletable now** |
+| **262** | **`DEAD_DECLARATION`** — zero call sites in the declaring module | ~~deletable now~~ **NOT deletable — see Stage 2, verified 2026-08-18: 0 of 262 are unreferenced** |
 | **1,203** | **`GENUINELY_MISSING`** — live module-scoped call sites, no backing found | **no** |
 
 Two methodology points, both of which move the number materially:
@@ -808,10 +808,67 @@ should not be done as a flag flip.**
   measured — same values, same exit statuses, one new stderr line per distinct
   name.** Without this stage every later stage is unmeasurable, which is the
   real reason it comes first.
-- **Stage 2 — delete the 262 `DEAD_DECLARATION` symbols.** Zero call sites in
-  their declaring module, so removal is a no-op at runtime and shrinks the
-  surface by 15% of the candidate set for free. Breaks nothing by construction;
-  each deletion is individually verifiable by re-running the census.
+- **Stage 2 — delete the 262 `DEAD_DECLARATION` symbols. ABANDONED 2026-08-18
+  after verification: 0 deleted, and the class is not deletable as computed.**
+  The original claim below is left in place because it is what was disproved.
+  *(Original: "Zero call sites in their declaring module, so removal is a no-op
+  at runtime and shrinks the surface by 15% of the candidate set for free.
+  Breaks nothing by construction; each deletion is individually verifiable by
+  re-running the census.")*
+
+  Independent tree-wide re-verification of all 262
+  (`doc/08_tracking/bug/data/dead_declaration_verification_2026-08-18.tsv`,
+  produced by a `sym(`-literal scan plus a bare-word scan over
+  `src test scripts doc`, excluding each symbol's own declaring files):
+
+  | finding | count |
+  |---|---|
+  | claimed `DEAD_DECLARATION` | 262 |
+  | **have a real `.spl` call site in another file** | **70** |
+  | have a non-`.spl` code/script/test reference (`.rs`/`.c`/`scripts/`) | 41 |
+  | referenced only from `doc/` (documented public API surface) | 111 |
+  | **have NO reference of any kind outside the declaring file** | **0** |
+  | **deleted** | **0** |
+
+  Two independent defects in the classification, both of which make
+  `DEAD_DECLARATION` mean something other than "dead":
+
+  1. **Module-scoped call counting is fail-open for libraries.** The census
+     counts callers only in the declaring file's own directory. Every one of
+     these declarations lives in a binding module whose entire purpose is to be
+     called from *elsewhere* — 173 of the 262 are declared under `src/lib/**` or
+     `src/compiler_rust/lib/std/**` (public stdlib), 29 under
+     `sffi_gen/specs/**` and `ffi_gen.specs/**` (input specifications to a code
+     generator, where zero callers is the correct steady state), 39 under
+     `src/os/**`. "Zero callers in my own directory" is the *normal* state for a
+     public API, not evidence of death. 70 symbols have a hard `.spl` call site
+     one directory away and were still scored dead.
+  2. **The `external_library_symbol` prefix list is incomplete, so its misses
+     fall through into `DEAD_DECLARATION`.** `DEAD_DECLARATION` is a residual
+     class reached only after every backing tier fails, so any gap in an earlier
+     tier lands here. `lua_*`/`luaL_*` (`src/lib/nogc_sync_mut/lua/lua_sffi.spl`)
+     are Lua C API symbols resolved from a `dlopen`'d liblua and are absent from
+     the `EXT` prefix tuple. The GPU/SIMD kernel intrinsics
+     (`local_id`, `group_id`, `local_size`, `num_groups`, `mem_fence`,
+     `barrier_and_fence`, `src/compiler_rust/lib/std/src/gpu/kernel/**`,
+     `ext/simd/sffi.spl`) are never host symbols at all — they are lowered by
+     the GPU/SIMD backend at codegen time, so "not in `nm` output" is expected
+     and carries no information about liveness.
+
+  The residual 192 with no `.spl` caller are all either documented public API,
+  generator spec input, arch intrinsics, or `rt_*` runtime hooks that represent
+  unimplemented intent (`rt_ed25519_generate_keypair` in
+  `src/app/package.registry/signing.spl`; `rt_test262_eval` /
+  `rt_test262_load_corpus` in `src/app/ui.chromium/js_audit.spl`). Per the repo
+  rule on unimplemented intent, none of those may be deleted as dead weight.
+
+  **Consequence for Stage 3.** The frozen baseline must be built over the
+  *union* of `GENUINELY_MISSING` and `DEAD_DECLARATION` (1,465), not over the
+  1,203 alone — treating the 262 as removed would ratchet 262 live, mostly
+  public-API declarations straight to fatal. Before any future deletion pass,
+  the census needs: cross-module call counting (import-aware, not
+  directory-scoped), a `lua_`/`luaL_` entry in the `EXT` prefix tuple, and a
+  backend-intrinsic tier for the GPU/SIMD kernel namespace.
 - **Stage 3 — baseline ratchet, NOT a prefix.** Since no directory is clean, the
   boundary must be the census itself: strict-by-default for any unbacked extern
   **not** in a frozen baseline (the 1,203, checked in as the census TSV), while
