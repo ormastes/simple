@@ -98,23 +98,48 @@ that is silently wrong** — `.size` and `.empty` die at runtime and self-report
 
 Restricting to paren-less `.length` on non-comment lines in the 181:
 
-> **UPPER BOUND: 52 modules, 137 sites.**
+> **UPPER BOUND (raw grep): 52 modules, 137 lines.**
+>
+> **MEASURED (2026-08-18, lane FPLENGTH): 6 genuine sites in 4 modules.**
+> **The 137 figure is 95.6% false positive (131 of 137).**
 
-This is an upper bound and **not** a defect count. It is known to be inflated,
-and the inflation is not small:
+Derivation — every one of the 137 lines was classified by resolving the
+RECEIVER's type and asking whether its declaring struct/class actually declares
+a `length` field (69 types in `src/` do). Encoded as
+`scripts/check/check-paren-less-length-classify.shs` (fatal `--selftest` with
+both a must-detect and a must-NOT-detect fixture); the residue it leaves
+undetermined was hand-verified.
 
-- **Genuine struct fields read exactly like the defect.** `SvimPiece.length` is
-  the documented example. In this very set, `ref.length` / `binary.length`
-  (`src/app/interpreter/memory/refc_binary_spec.spl`,
-  `message_transfer.spl`) are very likely real fields on a binary/ref struct.
-- A lane today was caught by the same trap on `parsed.first`, where `Pair` has
-  genuine `first`/`second` **fields** — adding `()` would have broken it.
-- Scope is not statically decidable. That is precisely why the guard uses the
-  compiler's diagnostic as its oracle and grep only as a superset pre-filter.
+| bucket | sites | note |
+|---|---:|---|
+| **METHOD — genuine paren-less call (the defect)** | **6** | 4 found automatically, 2 by hand |
+| FIELD — legitimate struct field named `length` | 92 | `RefcBinary`, `BinaryRef`, `H2FrameHeader`, `DerLength`, `SemanticToken`, `SpanOpBatch`, `PmapSidecarEntry`, `NvfsExtentRow`, `SosixFsServiceDispatchPlanV1`, `SafetensorsTensorEntry`, … |
+| NON_CODE — not Simple code at all | 35 | inside string literals (embedded JS `document.querySelectorAll(...).length`, Test262 fixtures `'hello'.length`), docstrings (`Hash.length` in RFC 8446 pseudo-code), and one `for i in 0..length:` range that is not an access |
+| UNDETERMINED — labelled, not dropped | 4 | `ref_val.length` ×4 in the three `message_transfer.spl` copies: the receiver is `ValueWrapper`, which declares `ref_length`/`ref_offset`/`ref_id` and **no** `length` — a distinct wrong-field-name issue, not this defect class |
 
-The honest statement is: **at most 52 of the 181 unmeasured modules could
-contain a silent whole-module de-JIT; the true number is unknown and is very
-plausibly a small fraction of that.**
+Total 6 + 92 + 35 + 4 = 137.
+
+The 6 genuine sites, all on builtin containers:
+
+| site | receiver | why |
+|---|---|---|
+| `src/app/dap/hooks.spl:327` | `self.current_frames` | field declared `[StackFrame]` — an array |
+| `src/app/dap/hooks.spl:443` | `parts` | `condition.split("==")` — an array |
+| `src/app/dap/hooks.spl:449` | `mod_parts` | `mod_expr.split("%")` — an array |
+| `src/os/port/disk_image_bake.spl:42` | `data` | `val data: [u8]` — an array |
+| `src/os/apps/sshd/sshd.spl:134` | `resolved` | `fs_exec_resolve(name) -> text` — a string |
+| `src/os/apps/sshd/sshd.spl:179` | `resolved` | same |
+
+The last two are the classifier's known limit: the type comes from a
+CROSS-FILE function return, which intra-file textual resolution cannot see, so
+the script leaves them UNDETERMINED rather than guessing. That is why the
+undetermined bucket exists and why it is never counted as clean.
+
+So the honest statement replacing the upper bound is: **at most 4 of the 181
+unmeasured modules contain a paren-less `.length` de-JIT, and all 6 sites are
+now named.** The remaining warnings in this section about `SvimPiece.length`
+and the `Pair.first` trap are confirmed, quantified: they account for 92 of the
+137, and non-Simple text for another 35.
 
 ## 4. Why the measured/unmeasured ratio MOVES
 
