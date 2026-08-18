@@ -11,12 +11,12 @@ use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, no_response_verdict_line, has_verdict_line, exit_code_reason}
 
 extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{file_delete}
 extern fn rt_file_rename(from: text, to: text) -> bool
-extern fn rt_getpid() -> i64
+use std.io_runtime.{getpid}
 extern fn rt_sleep_ms(ms: i64)
 use std.io_runtime.{time_now_unix_micros}
 extern fn rt_path_absolute(path: text) -> text
@@ -31,11 +31,11 @@ extern fn rt_path_absolute(path: text) -> text
 fn atomic_write_text(path: text, content: text) -> bool:
     val tmp_path = "{path}.tmp"
     if not rt_file_write_text(tmp_path, content):
-        rt_file_delete(tmp_path)
+        file_delete(tmp_path)
         return false
     if rt_file_rename(tmp_path, path):
         return true
-    rt_file_delete(tmp_path)
+    file_delete(tmp_path)
     false
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
@@ -127,7 +127,7 @@ fn parse_client_run(args: [text]) -> ClientRun:
     for p in paths:
         if not p.ends_with(".spl"):
             return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "expected .spl test file")
-        if not rt_file_exists(p):
+        if not file_exists(p):
             return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "test file not found")
     ClientRun(path: paths[0], paths: paths, timeout_secs: timeout_secs, valid: true, error: "")
 
@@ -144,7 +144,7 @@ fn invoking_binary() -> text:
     — see doc/08_tracking/bug/
     simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
     val self_path = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
     ""
 
@@ -153,7 +153,7 @@ fn simple_binary() -> text:
     # with a binary other than the invoking one (cross-binary parity specs);
     # preserve it explicitly rather than by falling through to a fixed path.
     val configured = env_get("SIMPLE_BINARY") ?? ""
-    if configured != "" and rt_file_exists(configured):
+    if configured != "" and file_exists(configured):
         return configured
     # The invoking binary, resolved in-process. This MUST outrank the
     # bin/simple / debug-seed candidate list below: cli_get_args()[0] here is
@@ -171,7 +171,7 @@ fn simple_binary() -> text:
     # executable; passing it to process_run(_timeout) produces a misleading
     # permission-denied failure instead of running the test. Same fix as
     # test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and rt_file_exists(raw[0]):
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
         return raw[0]
     # bin/simple (the deployed pure-Simple self-hosted binary — see
     # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
@@ -187,11 +187,11 @@ fn simple_binary() -> text:
     # ending in "Process timed out" (src/lib/nogc_sync_mut/src/infra.spl:686 /
     # src/compiler_rust/compiler/src/interpreter_extern/system.rs:165,228).
     # See doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md.
-    if rt_file_exists("bin/simple"):
+    if file_exists("bin/simple"):
         return "bin/simple"
-    if rt_file_exists("/proc/self/exe"):
+    if file_exists("/proc/self/exe"):
         return "/proc/self/exe"
-    if rt_file_exists("src/compiler_rust/target/debug/simple"):
+    if file_exists("src/compiler_rust/target/debug/simple"):
         return "src/compiler_rust/target/debug/simple"
     "./bin/simple"
 
@@ -221,7 +221,7 @@ fn daemon_lock_alive() -> bool:
     Only the lock FILE is ever removed, and only for a PID that is provably not
     the daemon; no process is ever signalled. Bug:
     stale_daemon_lock_fakes_total_red_2026-08-09."""
-    if not rt_file_exists(LIGHT_LOCK):
+    if not file_exists(LIGHT_LOCK):
         return false
     val (_stdout, _stderr, code) = process_run_timeout(
         "/bin/sh",
@@ -231,7 +231,7 @@ fn daemon_lock_alive() -> bool:
     code == 0
 
 fn lock_holder_pid() -> text:
-    if not rt_file_exists(LIGHT_LOCK):
+    if not file_exists(LIGHT_LOCK):
         return ""
     ((rt_file_read_text(LIGHT_LOCK) ?? "").split("\n")[0]).trim()
 
@@ -258,10 +258,10 @@ fn daemon_recorded_binary() -> text:
     if not daemon_lock_alive():
         return ""
     val recorded = (rt_file_read_text(LIGHT_BINARY) ?? "").trim()
-    if recorded != "" and rt_file_exists(recorded):
+    if recorded != "" and file_exists(recorded):
         return recorded
     val deployed = rt_path_absolute("bin/simple") ?? ""
-    if deployed != "" and rt_file_exists(deployed):
+    if deployed != "" and file_exists(deployed):
         return deployed
     ""
 
@@ -269,7 +269,7 @@ fn ensure_daemon() -> bool:
     if daemon_lock_alive():
         return true
     report_stale_lock()
-    rt_file_delete(LIGHT_LOCK)
+    file_delete(LIGHT_LOCK)
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -280,7 +280,7 @@ fn ensure_daemon() -> bool:
         return false
     var waits = 0
     while waits < 40:
-        if rt_file_exists(LIGHT_LOCK):
+        if file_exists(LIGHT_LOCK):
             return true
         rt_sleep_ms(50)
         waits = waits + 1
@@ -410,21 +410,21 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
 # across two fast iterations, and a colliding id would make the second request
 # overwrite the first one's response file.
 fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
-    val id = "{time_now_unix_micros()}-{rt_getpid()}-{seq}.req"
+    val id = "{time_now_unix_micros()}-{getpid()}-{seq}.req"
     val req_path = "{LIGHT_REQ_DIR}/{id}"
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
     val expiry_micros = light_request_expiry_micros(time_now_unix_micros(), timeout_ms)
-    rt_file_delete(resp_path)
+    file_delete(resp_path)
     if not atomic_write_text(req_path, light_request_encode(path, expiry_micros)):
-        rt_file_delete(req_path)
-        rt_file_delete(resp_path)
+        file_delete(req_path)
+        file_delete(resp_path)
         print "ERROR: test daemon request write failed: {req_path}"
         return 1
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
     while time_now_unix_micros() < deadline:
-        if rt_file_exists(resp_path):
+        if file_exists(resp_path):
             val content = rt_file_read_text(resp_path) ?? ""
-            rt_file_delete(resp_path)
+            file_delete(resp_path)
             return print_response(content)
         rt_sleep_ms(100)
     # No response inside the budget + grace. Emit an INCONCLUSIVE verdict: the

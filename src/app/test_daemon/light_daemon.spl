@@ -7,16 +7,16 @@ use app.test_daemon.light_protocol.{light_request_deadline, light_request_parse,
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{file_delete}
 extern fn rt_file_rename(from: text, to: text) -> bool
-extern fn rt_getpid() -> i64
+use std.io_runtime.{getpid}
 extern fn rt_sleep_ms(ms: i64)
 use std.io_runtime.{time_now_unix_micros}
 extern fn rt_path_absolute(path: text) -> text
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get}
 
 # Atomic write: tmp + rename (see test_runner_client.spl for the race this
 # closes — #98: a plain rt_file_write_text response could be observed
@@ -27,7 +27,7 @@ fn atomic_write_text(path: text, content: text) -> bool:
     if rt_file_write_text(tmp_path, content):
         if rt_file_rename(tmp_path, path):
             return true
-        rt_file_delete(tmp_path)
+        file_delete(tmp_path)
     rt_file_write_text(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
@@ -50,13 +50,13 @@ fn invoking_binary() -> text:
     doc/08_tracking/bug/
     simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
     val self_path = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
     ""
 
 fn simple_binary() -> text:
-    val configured = (rt_env_get("SIMPLE_BINARY") ?? "")
-    if configured != "" and rt_file_exists(configured):
+    val configured = (env_get("SIMPLE_BINARY") ?? "")
+    if configured != "" and file_exists(configured):
         return configured
     # The invoking binary outranks every guessed candidate below. argv[0] here
     # is this script's own source path, so the raw[0] check never fires for the
@@ -71,7 +71,7 @@ fn simple_binary() -> text:
     # exists, but it is not executable; passing it to process_run_timeout
     # produces a misleading permission-denied failure instead of running the
     # test. Same fix as test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and rt_file_exists(raw[0]):
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
         return raw[0]
     # bin/simple (the deployed pure-Simple self-hosted binary — see
     # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
@@ -88,11 +88,11 @@ fn simple_binary() -> text:
     # daemon (the override still fires — it just can't rescue a run that was
     # never going to finish in time), always ending in "Process timed out".
     # See doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md.
-    if rt_file_exists("bin/simple"):
+    if file_exists("bin/simple"):
         return "bin/simple"
-    if rt_file_exists("/proc/self/exe"):
+    if file_exists("/proc/self/exe"):
         return "/proc/self/exe"
-    if rt_file_exists("src/compiler_rust/target/debug/simple"):
+    if file_exists("src/compiler_rust/target/debug/simple"):
         return "src/compiler_rust/target/debug/simple"
     "./bin/simple"
 
@@ -118,12 +118,12 @@ fn handle_request(binary: text, name: text):
     val test_path = request.0
     if test_path == "":
         atomic_write_text(response_path(name), "1\nmissing test path")
-        rt_file_delete(req_path)
+        file_delete(req_path)
         return
     val deadline = light_request_deadline(request.1, time_now_unix_micros())
     if deadline.0:
         atomic_write_text(response_path(name), "1\nERROR: test daemon request expired before execution")
-        rt_file_delete(req_path)
+        file_delete(req_path)
         return
     val timeout_ms = deadline.1
     val timeout_secs = (timeout_ms + 999) / 1000
@@ -149,21 +149,21 @@ fn handle_request(binary: text, name: text):
         if out_code == 0:
             out_code = 1
     atomic_write_text(response_path(name), "{out_code}\n{body}")
-    rt_file_delete(req_path)
+    file_delete(req_path)
 
 fn main() -> i64:
     ensure_dirs()
-    rt_file_write_text(LIGHT_LOCK, "{rt_getpid()}")
+    rt_file_write_text(LIGHT_LOCK, "{getpid()}")
     val binary = simple_binary()
     # Publish the served binary BEFORE accepting any request, so a client that
     # observes the lock also observes an accurate binary record.
     atomic_write_text(LIGHT_BINARY, binary)
     var idle = 0
     while idle < 240:
-        if rt_file_exists(LIGHT_STOP):
-            rt_file_delete(LIGHT_STOP)
-            rt_file_delete(LIGHT_LOCK)
-            rt_file_delete(LIGHT_BINARY)
+        if file_exists(LIGHT_STOP):
+            file_delete(LIGHT_STOP)
+            file_delete(LIGHT_LOCK)
+            file_delete(LIGHT_BINARY)
             return 0
         val entries = rt_dir_list(LIGHT_REQ_DIR)
         if entries.len() == 0:
@@ -175,6 +175,6 @@ fn main() -> i64:
         while i < entries.len():
             handle_request(binary, entries[i])
             i = i + 1
-    rt_file_delete(LIGHT_LOCK)
-    rt_file_delete(LIGHT_BINARY)
+    file_delete(LIGHT_LOCK)
+    file_delete(LIGHT_BINARY)
     0

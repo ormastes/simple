@@ -5,16 +5,16 @@ use app.io.process_ops.{process_run, process_run_timeout}
 use app.test_daemon.light_protocol.{timeout_verdict_line}
 
 extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{file_delete}
 extern fn rt_file_rename(from: text, to: text) -> bool
-extern fn rt_getpid() -> i64
+use std.io_runtime.{getpid}
 extern fn rt_sleep_ms(ms: i64)
 use std.io_runtime.{time_now_unix_micros}
 extern fn rt_path_absolute(path: text) -> text
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get}
 
 # Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
 # truncate) then write() as two separate steps, so a concurrent reader that
@@ -28,7 +28,7 @@ fn atomic_write_text(path: text, content: text) -> bool:
     if rt_file_write_text(tmp_path, content):
         if rt_file_rename(tmp_path, path):
             return true
-        rt_file_delete(tmp_path)
+        file_delete(tmp_path)
     rt_file_write_text(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
@@ -79,13 +79,13 @@ fn invoking_binary() -> text:
     helper's /proc/self describes the HELPER). See doc/08_tracking/bug/
     simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
     val self_path = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
     ""
 
 fn simple_binary() -> text:
-    val configured = (rt_env_get("SIMPLE_BINARY") ?? "")
-    if configured != "" and rt_file_exists(configured):
+    val configured = (env_get("SIMPLE_BINARY") ?? "")
+    if configured != "" and file_exists(configured):
         return configured
     # The invoking binary outranks every guessed candidate below; guessing here
     # is what silently substituted the stale deployed binary for a freshly
@@ -99,16 +99,16 @@ fn simple_binary() -> text:
     # executable; passing it to process_run(_timeout) produces a misleading
     # permission-denied failure instead of running the test. Same fix as
     # test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and rt_file_exists(raw[0]):
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
         return raw[0]
     # bin/simple (the deployed pure-Simple self-hosted binary) MUST be tried
     # before any Rust-seed candidate — a stray dev-loop
     # src/compiler_rust/target/debug/simple must never outrank it. Same class
     # of defect as light_daemon.spl / test_runner_client.spl; see
     # doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md.
-    if rt_file_exists("bin/simple"):
+    if file_exists("bin/simple"):
         return "bin/simple"
-    if rt_file_exists("src/compiler_rust/target/debug/simple"):
+    if file_exists("src/compiler_rust/target/debug/simple"):
         return "src/compiler_rust/target/debug/simple"
     "./bin/simple"
 
@@ -118,7 +118,7 @@ fn ensure_dirs():
     rt_dir_create_all(LIGHT_RESP_DIR)
 
 fn daemon_pid() -> text:
-    if not rt_file_exists(LIGHT_LOCK):
+    if not file_exists(LIGHT_LOCK):
         return ""
     val content = rt_file_read_text(LIGHT_LOCK) ?? ""
     if content == "":
@@ -151,8 +151,8 @@ fn ensure_daemon() -> bool:
     if stale_pid != "":
         print "warning: test-daemon: stale lock {LIGHT_LOCK} (recorded pid {stale_pid} is not a live light_daemon); removing it and respawning."
         print "warning: test-daemon: if this repeats, clear the lane by hand: rm -rf {LIGHT_DAEMON_DIR}"
-    rt_file_delete(LIGHT_LOCK)
-    rt_file_delete(LIGHT_STOP)
+    file_delete(LIGHT_LOCK)
+    file_delete(LIGHT_STOP)
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -180,14 +180,14 @@ fn cli_test_daemon_start() -> i64:
 fn cli_test_daemon_stop() -> i64:
     ensure_dirs()
     if not daemon_lock_alive():
-        rt_file_delete(LIGHT_LOCK)
+        file_delete(LIGHT_LOCK)
         print "Test daemon: not running"
         return 0
     rt_file_write_text(LIGHT_STOP, "stop")
     var waits = 0
     while waits < 40:
         if not daemon_lock_alive():
-            rt_file_delete(LIGHT_LOCK)
+            file_delete(LIGHT_LOCK)
             print "Test daemon stopped"
             return 0
         rt_sleep_ms(50)
@@ -199,7 +199,7 @@ fn cli_test_daemon_status() -> i64:
     if daemon_lock_alive():
         print "Test daemon: running (pid: {daemon_pid()})"
         return 0
-    rt_file_delete(LIGHT_LOCK)
+    file_delete(LIGHT_LOCK)
     print "Test daemon: not running"
     0
 
@@ -219,23 +219,23 @@ fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
         print "Usage: simple test-daemon run <path>"
         return 1
     val path = args[0]
-    if not path.ends_with(".spl") or not rt_file_exists(path):
+    if not path.ends_with(".spl") or not file_exists(path):
         print "error: test file not found: {path}"
         return 1
     if not ensure_daemon():
         print "Failed to start test daemon"
         return 1
 
-    val id = "{time_now_unix_micros()}-{rt_getpid()}.req"
+    val id = "{time_now_unix_micros()}-{getpid()}.req"
     val req_path = "{LIGHT_REQ_DIR}/{id}"
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
-    rt_file_delete(resp_path)
+    file_delete(resp_path)
     atomic_write_text(req_path, path)
     val deadline = time_now_unix_micros() + 600000000
     while time_now_unix_micros() < deadline:
-        if rt_file_exists(resp_path):
+        if file_exists(resp_path):
             val content = rt_file_read_text(resp_path) ?? ""
-            rt_file_delete(resp_path)
+            file_delete(resp_path)
             return print_response(content)
         rt_sleep_ms(100)
     print "ERROR: test daemon timed out: {path}"

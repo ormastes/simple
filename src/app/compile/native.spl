@@ -26,9 +26,9 @@
 # Direct extern declarations to avoid module closure limitations
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 extern fn rt_cli_get_args() -> [text]
-extern fn rt_getpid() -> i64
+use std.io_runtime.{getpid}
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use std.log.{error, warn, info, debug}
@@ -89,7 +89,7 @@ fn find_mold_for_native() -> text:
         return ""
     val current_dir = shell_output("pwd")
     val local_mold = current_dir + "/bin/mold/mold"
-    if rt_file_exists(local_mold):
+    if file_exists(local_mold):
         return local_mold
     val which_result = shell_output("which mold 2>/dev/null")
     if which_result.len() > 0:
@@ -131,10 +131,10 @@ fn strip_native_all_constructors(native_lib_path: text, platform: text, verbose:
         warn("compile", "[LIM-010] objcopy not found; native_all linked unstripped")
         return native_lib_path
     val temp_dir = _get_temp_dir()
-    val filtered = "{temp_dir}/libsimple_native_all_stripped_{rt_getpid()}.a"
+    val filtered = "{temp_dir}/libsimple_native_all_stripped_{getpid()}.a"
     val cmd = "{objcopy} --remove-section=.init_array --remove-section=.ctors --remove-section=.fini_array --remove-section=.dtors '{native_lib_path}' '{filtered}' 2>&1"
     val (out, err, exit_code) = shell(cmd)
-    if exit_code == 0 and rt_file_exists(filtered):
+    if exit_code == 0 and file_exists(filtered):
         if verbose:
             debug("compile", "Stripped LLVM constructors from native_all: {filtered}")
         return filtered
@@ -150,7 +150,7 @@ fn find_simple_native_all_library() -> text:
         "bin/lib/libsimple_native_all.a"
     ]
     for candidate in candidates:
-        if rt_file_exists(candidate):
+        if file_exists(candidate):
             return candidate
     ""
 
@@ -199,47 +199,47 @@ fn resolve_module_file(module_path: text, base_dir: text) -> text:
         if slash_parts.len() >= 2 and slash_parts[0].contains("-"):
             val type_rel = "type/" + domain_to_dir_name(slash_parts[0]) + "/" + slash_parts[1..].join("/")
             val type_path = type_rel + ".spl"
-            if rt_file_exists(type_path):
+            if file_exists(type_path):
                 return type_path
             val type_init = type_rel + "/__init__.spl"
-            if rt_file_exists(type_init):
+            if file_exists(type_init):
                 return type_init
 
     if not module_path.contains("."):
         val default_type_rel = "type/" + domain_to_dir_name("simple-lang") + "/" + module_path
         val default_type_path = default_type_rel + ".spl"
-        if rt_file_exists(default_type_path):
+        if file_exists(default_type_path):
             return default_type_path
         val default_type_init = default_type_rel + "/__init__.spl"
-        if rt_file_exists(default_type_init):
+        if file_exists(default_type_init):
             return default_type_init
 
     val rel_path = module_path.replace(".", "/")
     val spl_path = base_dir + "/" + rel_path + ".spl"
-    if rt_file_exists(spl_path):
+    if file_exists(spl_path):
         return spl_path
     val init_path = base_dir + "/" + rel_path + "/__init__.spl"
-    if rt_file_exists(init_path):
+    if file_exists(init_path):
         return init_path
     # Handle app.X.Y imports - resolve to src/app/X/Y.spl from project root
     if module_path.starts_with("app."):
         val parts = module_path.substring(4)
         val app_rel = parts.replace(".", "/")
         val app_path = "src/app/" + app_rel + ".spl"
-        if rt_file_exists(app_path):
+        if file_exists(app_path):
             return app_path
         val app_init = "src/app/" + app_rel + "/__init__.spl"
-        if rt_file_exists(app_init):
+        if file_exists(app_init):
             return app_init
     # Handle std.X.Y imports - resolve to src/lib/X/Y.spl from project root
     if module_path.starts_with("std."):
         val parts = module_path.substring(4)
         val lib_rel = parts.replace(".", "/")
         val lib_path = "src/lib/" + lib_rel + ".spl"
-        if rt_file_exists(lib_path):
+        if file_exists(lib_path):
             return lib_path
         val lib_init = "src/lib/" + lib_rel + "/__init__.spl"
-        if rt_file_exists(lib_init):
+        if file_exists(lib_init):
             return lib_init
     # Fallback: strip leading package prefix if it matches the base dir name
     # Handles intra-package imports like "use compiler.core.tokens" when base_dir is src/core
@@ -254,10 +254,10 @@ fn resolve_module_file(module_path: text, base_dir: text) -> text:
             val stripped_mod = module_path.substring(dot_pos + 1)
             val stripped = stripped_mod.replace(".", "/")
             val stripped_path = base_dir + "/" + stripped + ".spl"
-            if rt_file_exists(stripped_path):
+            if file_exists(stripped_path):
                 return stripped_path
             val stripped_init = base_dir + "/" + stripped + "/__init__.spl"
-            if rt_file_exists(stripped_init):
+            if file_exists(stripped_init):
                 return stripped_init
     ""
 
@@ -327,7 +327,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         _cli_eprint("[DEBUG] aot_native_file_with_backend returned: {llvm_result}")
         match llvm_result:
             case CompileResult.Success(_):
-                if rt_file_exists(output_file):
+                if file_exists(output_file):
                     val size = file_size(output_file)
                     info("compile", "Compiled: {output_file} ({size} bytes)")
                 return 0
@@ -343,7 +343,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         info("compile", "Compiling {source_file} to native binary...")
 
     # Step 1: Generate C via MIR C backend (in-process)
-    val pid = rt_getpid()
+    val pid = getpid()
     val temp_cpp = "{_get_temp_dir()}/simple_native_{pid}.c"
     val aot_result = aot_c_file(source_file, temp_cpp)
     match aot_result:
@@ -405,7 +405,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     var native_lib_flags = ""
     val native_lib_path = find_simple_native_all_library()
     var linked_native_lib_path = native_lib_path
-    if native_lib_path != "" and rt_file_exists(native_lib_path):
+    if native_lib_path != "" and file_exists(native_lib_path):
         linked_native_lib_path = strip_native_all_constructors(native_lib_path, platform, verbose)
         native_lib_flags = " {linked_native_lib_path} -lstdc++ -lm"
 
@@ -417,7 +417,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 
     # Step 4: Cleanup temp file
     file_delete(temp_cpp)
-    if linked_native_lib_path != native_lib_path and rt_file_exists(linked_native_lib_path):
+    if linked_native_lib_path != native_lib_path and file_exists(linked_native_lib_path):
         file_delete(linked_native_lib_path)
 
     # Step 5: Report results
@@ -427,7 +427,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
             error("compile", clang_out)
         return 1
 
-    if rt_file_exists(output_file):
+    if file_exists(output_file):
         val size = file_size(output_file)
         info("compile", "Compiled: {output_file} ({size} bytes)")
         if verbose:

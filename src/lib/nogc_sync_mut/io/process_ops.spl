@@ -8,7 +8,7 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get}
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
@@ -22,16 +22,16 @@ extern fn rt_process_read_stdout(pid: i64) -> text
 extern fn rt_process_is_alive(pid: i64) -> bool
 extern fn rt_process_close_piped(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_delete}
+use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
-extern fn rt_getpid() -> i64
+use std.io_runtime.{getpid}
 extern fn rt_stdout_flush()
 extern fn rt_stderr_flush()
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
-    val os_env = rt_env_get("OS")
+    val os_env = env_get("OS")
     if os_env == nil:
         false
     else:
@@ -153,11 +153,11 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     """Unix implementation using the native async process facade."""
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var temp_dir = rt_env_get("TMPDIR")
+    var temp_dir = env_get("TMPDIR")
     if temp_dir == nil or temp_dir == "":
         temp_dir = "/tmp"
 
-    val pid_str = "{rt_getpid()}"
+    val pid_str = "{getpid()}"
     val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
@@ -181,12 +181,12 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     var stdout = ""
     var stderr = ""
-    if rt_file_exists(stdout_file):
+    if file_exists(stdout_file):
         stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
-    if rt_file_exists(stderr_file):
+        file_delete(stdout_file)
+    if file_exists(stderr_file):
         stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
+        file_delete(stderr_file)
 
     if pid <= 0:
         (stdout, stderr + "\n[ERROR: failed to spawn process '{cmd}']", -1)
@@ -200,13 +200,13 @@ fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (tex
     """Windows implementation using async spawn + temp files"""
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var temp_dir = rt_env_get("TEMP")
+    var temp_dir = env_get("TEMP")
     if temp_dir == "":
-        temp_dir = rt_env_get("TMP")
+        temp_dir = env_get("TMP")
     if temp_dir == "":
         temp_dir = "C:\\Windows\\Temp"
 
-    val pid_str = "{rt_getpid()}"
+    val pid_str = "{getpid()}"
     val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}\\simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}\\simple_err_{pid_str}_{time_str}.txt"
@@ -226,13 +226,13 @@ fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (tex
     var stdout = ""
     var stderr = ""
 
-    if rt_file_exists(stdout_file):
+    if file_exists(stdout_file):
         stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
+        file_delete(stdout_file)
 
-    if rt_file_exists(stderr_file):
+    if file_exists(stderr_file):
         stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
+        file_delete(stderr_file)
 
     if exit_code == -2:
         rt_process_kill(pid)
@@ -278,11 +278,11 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var temp_dir = rt_env_get("TMPDIR")
+    var temp_dir = env_get("TMPDIR")
     if temp_dir == nil or temp_dir == "":
         temp_dir = "/tmp"
 
-    val pid_str = "{rt_getpid()}"
+    val pid_str = "{getpid()}"
     val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
@@ -318,13 +318,13 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
         exit_code = rt_process_wait(pid, quantum)
         elapsed_ms = elapsed_ms + quantum
-        if rt_file_exists(stdout_file):
+        if file_exists(stdout_file):
             val current = rt_file_read_text(stdout_file)
             if current.len() > stdout_relayed:
                 print current[stdout_relayed:current.len()]
                 rt_stdout_flush()
                 stdout_relayed = current.len()
-        if rt_file_exists(stderr_file):
+        if file_exists(stderr_file):
             val current_err = rt_file_read_text(stderr_file)
             if current_err.len() > stderr_relayed:
                 eprint(current_err[stderr_relayed:current_err.len()])
@@ -338,12 +338,12 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     var stdout = ""
     var stderr = ""
-    if rt_file_exists(stdout_file):
+    if file_exists(stdout_file):
         stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
-    if rt_file_exists(stderr_file):
+        file_delete(stdout_file)
+    if file_exists(stderr_file):
         stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
+        file_delete(stderr_file)
 
     if timed_out:
         val timeout_secs = (effective_timeout + 999) / 1000

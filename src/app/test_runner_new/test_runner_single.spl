@@ -39,13 +39,13 @@ use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
 
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{file_delete}
 extern fn rt_env_set(key: text, value: text) -> bool
 use std.io_runtime.{time_now_unix_micros}
-extern fn rt_getpid() -> i64
+use std.io_runtime.{getpid}
 extern fn rt_path_absolute(path: text) -> text
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
@@ -106,7 +106,7 @@ fn preprocess_infix_for_child(file_path: text) -> text:
     val slash = _single_last_slash(file_path)
     val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
     val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
-    val tmp = dir + ".spipe_matchers_{rt_getpid()}_{time_now_unix_micros()}_" + base
+    val tmp = dir + ".spipe_matchers_{getpid()}_{time_now_unix_micros()}_" + base
     val ok = rt_file_write_text(tmp, joined)
     if not ok:
         return file_path
@@ -161,13 +161,13 @@ fn parse_child_run(args: [text]) -> ChildRun:
         return ChildRun(path: "", timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing test file")
     if not path.ends_with(".spl"):
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "expected .spl test file")
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "test file not found")
     ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "")
 
 fn find_simple_binary() -> text:
     val configured = env_get("SIMPLE_BINARY")
-    if configured != nil and configured != "" and rt_file_exists(configured):
+    if configured != nil and configured != "" and file_exists(configured):
         return configured
     # Resolve the invoking binary IN-PROCESS via /proc/self/exe
     # (std::fs::canonicalize). Never shell out to `readlink`: a spawned
@@ -177,15 +177,15 @@ fn find_simple_binary() -> text:
     # fell through to a possibly-stale bin/simple — see
     # doc/08_tracking/bug/test_runner_child_binary_ignores_invoking_binary_2026-07-27.md.
     val self_path = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
     val raw = cli_get_args()
     # Source-mode argv can begin with test_runner_single.spl itself. It exists,
     # but it is not executable; passing it to process_run_timeout produces a
     # misleading permission-denied failure instead of running the test.
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and rt_file_exists(raw[0]):
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
         return raw[0]
-    if rt_file_exists("bin/simple"):
+    if file_exists("bin/simple"):
         return "bin/simple"
     "./bin/simple"
 
@@ -453,7 +453,7 @@ fn parse_child_example_summary(output: text) -> (i64, i64, i64):
     (0, 0, 0)
 
 fn read_test_result_evidence(path: text) -> (i64, i64, i64):
-    if path == "" or not rt_file_exists(path):
+    if path == "" or not file_exists(path):
         return (0, 0, 0)
     val content = rt_file_read_text(path)
     val parts = content.split("\n")
@@ -583,7 +583,7 @@ fn _cov_instrument_for_coverage(current: text, original: text) -> text:
     val slash = _single_last_slash(original)
     val dir = if slash >= 0: original.substring(0, slash + 1) else: ""
     val base = if slash >= 0: original.substring(slash + 1) else: original
-    val tmp = dir + ".spipe_cov_{rt_getpid()}_{time_now_unix_micros()}_" + base
+    val tmp = dir + ".spipe_cov_{getpid()}_{time_now_unix_micros()}_" + base
     if rt_file_write_text(tmp, content + epilogue):
         return tmp
     current
@@ -654,7 +654,7 @@ fn _cov_targets(spec_src: text) -> [text]:
                 rel = "src/app/" + _cov_dots_to_slashes(module.substring(4))
             if rel != "":
                 path = rel + ".spl"
-        if path != "" and path.ends_with(".spl") and rt_file_exists(path):
+        if path != "" and path.ends_with(".spl") and file_exists(path):
             if not seen.contains_key(path):
                 seen[path] = true
                 targets.push(path)
@@ -978,18 +978,18 @@ fn main() -> i64:
         if temp_root == "":
             temp_root = "/tmp"
         val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
-        evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{rt_getpid()}_{time_now_unix_micros()}.txt"
-        if rt_file_exists(evidence_path):
-            val _ = rt_file_delete(evidence_path)
-        if rt_file_exists(evidence_path):
+        evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
+        if file_exists(evidence_path):
+            val _ = file_delete(evidence_path)
+        if file_exists(evidence_path):
             if exec_path != run.path:
-                val _ = rt_file_delete(exec_path)
+                val _ = file_delete(exec_path)
             print "error: test-runner: cannot prepare structured result evidence"
             return 1
         previous_evidence_path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
         if not rt_env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
-            if exec_path != run.path and rt_file_exists(exec_path):
-                val _ = rt_file_delete(exec_path)
+            if exec_path != run.path and file_exists(exec_path):
+                val _ = file_delete(exec_path)
             print "error: test-runner: cannot configure structured result evidence"
             return 1
     val start = time_now_unix_micros()
@@ -997,17 +997,17 @@ fn main() -> i64:
     val (stdout, stderr, code) = process_run_bounded(binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
     val duration_ms = (time_now_unix_micros() - start) / 1000
     if assert_ran and not rt_env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
-        if evidence_path != "" and rt_file_exists(evidence_path):
-            val _ = rt_file_delete(evidence_path)
-        if exec_path != run.path and rt_file_exists(exec_path):
-            val _ = rt_file_delete(exec_path)
+        if evidence_path != "" and file_exists(evidence_path):
+            val _ = file_delete(evidence_path)
+        if exec_path != run.path and file_exists(exec_path):
+            val _ = file_delete(exec_path)
         print "error: test-runner: cannot restore structured result environment"
         return 1
     val (evidence_passed, evidence_failed, has_evidence) = read_test_result_evidence(evidence_path)
-    if evidence_path != "" and rt_file_exists(evidence_path):
-        val _ = rt_file_delete(evidence_path)
-    if exec_path != run.path and rt_file_exists(exec_path):
-        val _ = rt_file_delete(exec_path)
+    if evidence_path != "" and file_exists(evidence_path):
+        val _ = file_delete(evidence_path)
+    if exec_path != run.path and file_exists(exec_path):
+        val _ = file_delete(exec_path)
     var child_stdout = stdout
     var cov_sdn = ""
     if cov_on:
@@ -1035,7 +1035,7 @@ fn main() -> i64:
             # file at that path) write this spec's SDN alone — never block a
             # test run on a malformed pre-existing artifact.
             val new_cov = parse_coverage_sdn(cov_sdn)
-            val to_write = if rt_file_exists(cov_output_path):
+            val to_write = if file_exists(cov_output_path):
                 val existing_raw = rt_file_read_text(cov_output_path)
                 if existing_raw.trim().starts_with("# Coverage Report"):
                     render_coverage_sdn(merge_coverage(parse_coverage_sdn(existing_raw), new_cov))

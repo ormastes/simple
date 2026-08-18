@@ -22,8 +22,8 @@
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{file_exists}
+use std.io_runtime.{file_delete}
 extern fn rt_file_hash_sha256(path: text) -> text
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
@@ -105,7 +105,7 @@ pub fn is_sha256_ref(value: text) -> bool:
 # bytes are already on disk.
 pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
     if not rt_dir_create(COUNTERPART_ARTIFACT_ROOT, true):
-        if not rt_file_exists(COUNTERPART_ARTIFACT_ROOT):
+        if not file_exists(COUNTERPART_ARTIFACT_ROOT):
             return put_failed("cannot create artifact root " + COUNTERPART_ARTIFACT_ROOT)
 
     val staging = COUNTERPART_ARTIFACT_ROOT + "/.staging-" + run_id
@@ -114,7 +114,7 @@ pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
 
     val digest = rt_file_hash_sha256(staging)
     if not is_sha256_ref(digest):
-        rt_file_delete(staging)
+        file_delete(staging)
         return put_failed("runtime returned a non-sha256 digest: '" + digest + "'")
 
     val final_dir = COUNTERPART_ARTIFACT_ROOT + "/" + artifact_shard(digest)
@@ -123,8 +123,8 @@ pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
 
     # Already stored: content addressing makes a re-put a no-op, but only after
     # the existing blob is confirmed to still hash to its own name.
-    if rt_file_exists(final_path):
-        rt_file_delete(staging)
+    if file_exists(final_path):
+        file_delete(staging)
         val existing = rt_file_hash_sha256(final_path)
         if existing != digest:
             return put_failed("stored artifact " + digest + " hashes to " + existing + ": store is corrupt")
@@ -135,9 +135,9 @@ pub fn artifact_put(content: text, run_id: text) -> ArtifactPutOutcome:
         )
 
     if not rt_file_write_text(final_path, content):
-        rt_file_delete(staging)
+        file_delete(staging)
         return put_failed("cannot write artifact to " + final_path)
-    rt_file_delete(staging)
+    file_delete(staging)
 
     # Read-back verification. Writing and then trusting the write is how a
     # truncated artifact becomes a green run.
@@ -159,7 +159,7 @@ pub fn artifact_get(reference: text) -> ArtifactGetOutcome:
     if not is_sha256_ref(reference):
         return ArtifactGetOutcome(ok: false, content: "", error: "not a sha256 ref: '" + reference + "'")
     val path = artifact_path(reference)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ArtifactGetOutcome(ok: false, content: "", error: "artifact " + reference + " is not in the store")
     val actual = rt_file_hash_sha256(path)
     if actual != reference:
@@ -174,7 +174,7 @@ pub fn artifact_get(reference: text) -> ArtifactGetOutcome:
 pub fn artifact_exists(reference: text) -> bool:
     if not is_sha256_ref(reference):
         return false
-    rt_file_exists(artifact_path(reference))
+    file_exists(artifact_path(reference))
 
 # ---------------------------------------------------------------------------
 # Manifest / retention
@@ -228,7 +228,7 @@ pub fn artifact_manifest_unverifiable(records: [ArtifactRecord]) -> [text]:
     for record in records:
         if not is_sha256_ref(record.sha256):
             bad.push("record with non-sha256 ref '" + record.sha256 + "'")
-        elif not rt_file_exists(record.path):
+        elif not file_exists(record.path):
             bad.push("missing blob for " + record.sha256)
         elif rt_file_hash_sha256(record.path) != record.sha256:
             bad.push("content mismatch for " + record.sha256)
