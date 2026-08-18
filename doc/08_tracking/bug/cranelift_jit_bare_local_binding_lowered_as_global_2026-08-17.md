@@ -104,3 +104,85 @@ programs". Under `SIMPLE_ALLOW_STUB_FALLBACK` the same programs would get an
 Scratchpad only. Recreate with the three-line minimal program above and run
 `bin/simple run`. Do NOT try to gate this with a `*_spec.spl` — the spec runner is
 the interpreter and will pass regardless.
+
+## Blast-radius census (lane CENSUS, 2026-08-17)
+
+**Headline: 0 confirmed occurrences of this defect shape in owned Simple source.**
+This is a real defect with a real reproducer, but it is a *latent grammar trap*,
+not a live systemic performance/correctness problem in the current tree.
+
+### Scope
+
+Scanned `src/lib/**`, `src/app/**`, `src/compiler/**`, `src/os/**` — 13,645
+`.spl` files. **Excluded per CLAUDE.md Owned-Code Scope:** `src/compiler_rust/vendor/**`,
+`src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`,
+`src/runtime/stb_truetype.h`, and any `.vscode-test/` directory. Scans used
+`os.walk` (not the repo's wrapped ugrep, which honours `.gitignore` and
+under-reports) and ran in the background to avoid truncation.
+
+### Matching rule
+
+A hit is a line inside a function body of the form `NAME = EXPR` where:
+- `NAME` is a plain identifier — **not** `d[k] = v`, `a.b = v`, or a call;
+- the operator is exactly `=` — excludes `==`, `!=`, `<=`, `>=`, `+=`, `-=`,
+  `*=`, `/=`, `%=`, `//=`, `|=`, `&=`, `^=`, `<<=`, `>>=`, `:=`, `=>`;
+- carried paren/bracket/brace depth is 0 — excludes multi-line call arguments,
+  named/keyword args, struct-literal fields, dict/array literals, default
+  parameter values;
+- the line is not in a comment or a `"""` docstring;
+- `NAME` is **not** a module-level global (`val`/`var`/`const`/`let`/`static [mut]`
+  at indent 0) anywhere in owned code — writes to those are legitimate;
+- `NAME` was not already introduced in this function by a declaration
+  (including `var a = 1; var b = 2` multi-decl lines), a parameter (including
+  multi-line signatures), a `for` binder, or a `case`/`catch`/`as` binder.
+
+Assignments to an already-declared local are counted separately as *rebinds* and
+are **empirically innocent** (see below): 71,225 of them.
+
+### Funnel — each stage is a false-positive class removed
+
+| stage | hits | FP class eliminated |
+|---|---|---|
+| naive `^\s*NAME\s*=` (depth/op/comment filtered) | 4,247 | — |
+| + `"""` docstring blocks, file-local globals | 313 | doc examples, own-module globals |
+| + tree-wide global set, `_` wildcard | 25 | imported/cross-module globals |
+| + `;` multi-decl, `static`/`let mut`, multi-line params | 9 | missed declarations |
+| + hand-check of all 9 | **0** | params, enclosing-block decls |
+
+**Estimated false-positive rate of a naive regex: ~100%** (a hand-checked random
+sample of 20 at the 313-hit stage was 20/20 false positives — all module globals
+or imported globals). Of the final 9, hand-checking every one found 7 were
+declared locals/parameters my scanner's scoping missed, and 2
+(`src/compiler/test/simple_coverage_test.spl:387,396`) are a *different* shape:
+a nested `fn` assigning to an outer local (closure capture).
+
+### Empirical confirmation (`bin/simple run` = Cranelift JIT; the Rust SEED)
+
+Attributed to the seed at `bin/release/x86_64-unknown-linux-gnu/simple`, which
+prints its own bootstrap-seed warning. `bin/simple test` is the tree-walk
+interpreter and cannot exercise this path at all; it was not used as evidence.
+
+| program | result |
+|---|---|
+| `fn main(): o = 5; print(o)` | **RED** — `GlobalLoad: unresolved identifier 'o'`, JIT falls back, prints `5`, exit 0. Reproducer reconfirmed. |
+| `var o = 1` then `o = 5` | GREEN — no JIT failure. Rebinding a declared local is clean. |
+| `var a`/`var b`, `b = a + 1` | GREEN |
+| `static mut G: i64 = 0`, `G = 7` under `unsafe:` | GREEN — validates the global exclusion |
+| nested `fn` assigning outer `called` | JIT fails, but with a **different** error: `unresolved external symbol 'side_effect' would NULL-jump in JIT`. Separate defect, not this one. |
+
+The rebind result is the load-bearing one: it is what keeps 71,225 sites out of
+the blast radius. Had rebinds also triggered, this would have been catastrophic.
+
+### Verdict
+
+**Not systemic — a latent trap, correctly filed as a real bug.** Owned Simple
+code consistently uses `val`/`var`, so essentially no production function is
+currently losing native codegen this way. The severity remains in the *failure
+mode*, not the count: silent whole-function interpreter fallback at exit 0, and
+silently wrong results under `SIMPLE_ALLOW_STUB_FALLBACK`.
+
+**Recommendation:** do **not** perform any mechanical rewrite — there is nothing
+to rewrite. Fix the resolver as the bug body already proposes, and consider a
+lint rule so a bare binding is a diagnostic rather than a silent deoptimisation.
+Separately, file the closure-capture JIT failure found above; it is a real,
+distinct gap with live occurrences.
