@@ -79,8 +79,20 @@ pub struct WordLayout:
     first_word: i64
     source_ref: text
 
+# Same overlap test as `fields_overlap` in binary_layout.spl, mirrored here
+# rather than called directly because `LayoutFieldSpec` (global bit_offset)
+# and `BinaryFieldSpec` (word-local lsb) are different shapes — the algorithm
+# is identical: two half-open bit ranges [offset, offset+width) intersect
+# unless one entirely precedes the other.
+fn layout_fields_overlap(a: LayoutFieldSpec, b: LayoutFieldSpec) -> bool:
+    not (a.bit_offset + a.bit_width <= b.bit_offset or b.bit_offset + b.bit_width <= a.bit_offset)
+
 # A field crossing a word boundary can't be packed into either word's local
 # `BinaryLayout`, so it is reported rather than silently truncated or split.
+# Also mirrors `layout_errors` in binary_layout.spl: overlapping fields let
+# two rows disagree about the same bit, and duplicate names make
+# `WordDiff.failing_fields.contains(name)` unable to distinguish which field
+# actually failed — both are reported here the same way.
 pub fn layout_schema_errors(layout: WordLayout) -> [text]:
     var errs: [text] = []
     for field in layout.fields:
@@ -93,7 +105,20 @@ pub fn layout_schema_errors(layout: WordLayout) -> [text]:
             errs.push("field " + field.name + " crosses a word boundary")
         if field.bit_offset < 0 or field.bit_offset + field.bit_width > layout.word_bits * layout.word_count:
             errs.push("field " + field.name + " exceeds the layout")
+    var i = 0
+    while i < layout.fields.len():
+        var j = i + 1
+        while j < layout.fields.len():
+            if layout.fields[i].name == layout.fields[j].name:
+                errs.push("field " + layout.fields[i].name + " has a duplicate name")
+            if layout_fields_overlap(layout.fields[i], layout.fields[j]):
+                errs.push("field " + layout.fields[i].name + " overlaps " + layout.fields[j].name)
+            j = j + 1
+        i = i + 1
     errs
+
+pub fn layout_schema_is_valid(layout: WordLayout) -> bool:
+    layout_schema_errors(layout).len() == 0
 
 # ---------------------------------------------------------------------------
 # Per-word projection — the only place a `WordLayout` touches the existing
@@ -137,9 +162,26 @@ fn word_policies(layout: WordLayout) -> [ComparePolicy]:
 # `WordLayout` declaration, never hand-written alongside it.
 # ---------------------------------------------------------------------------
 
+# Fails closed on a malformed layout the same way `decode_u64` fails closed
+# in binary_layout.spl — the difference is the return type. `decode_u64`
+# returns `CanonicalEvidence`, which has a dedicated `parse_error` variant to
+# carry the reason; `layout_words`/`layout_masks`/`layout_compare`/
+# `layout_render` return plain `[i64]`/`[WordDiff]`/`[text]`, which have no
+# error variant to express "invalid" distinctly from "valid but empty" (an
+# empty `WordLayout.fields` with `word_count: 0` is itself a legitimate,
+# non-error empty result). The minimal honest choice given that constraint:
+# return an EMPTY list on any layout defect (from `layout_schema_errors`, and
+# for `layout_compare`/`layout_render` also on `actual_words.len() !=
+# layout.word_count` — see the finding-4 note on that check below). Callers
+# that need the reason should call `layout_schema_errors` directly first.
+fn layout_is_invalid(layout: WordLayout) -> bool:
+    layout_schema_errors(layout).len() > 0
+
 # The packed expected value for each word, built by inserting every field's
 # `expected_value` at its local offset (reserved/dont_care fields insert 0).
 pub fn layout_words(layout: WordLayout) -> [i64]:
+    if layout_is_invalid(layout):
+        return []
     var words: [i64] = []
     var w = 0
     while w < layout.word_count:
@@ -156,6 +198,8 @@ pub fn layout_words(layout: WordLayout) -> [i64]:
 # comparator uses (expected vs. itself, so delta is always 0) and reading off
 # `compare_mask`, so this can never disagree with what actually gets checked.
 pub fn layout_masks(layout: WordLayout) -> [i64]:
+    if layout_is_invalid(layout):
+        return []
     val expected = layout_words(layout)
     val policies = word_policies(layout)
     var masks: [i64] = []
@@ -168,7 +212,22 @@ pub fn layout_masks(layout: WordLayout) -> [i64]:
     masks
 
 # One `WordDiff` per word, delegating to `compare_word` per word.
+#
+# Finding 4 (audit doc: layout_schema_errors_missing_overlap_and_generation_
+# wiring_2026-08-18.md) documented `actual_words.len() > word_count` as
+# "intentional" — extra trailing words were silently ignored. Decided here:
+# that is a real risk, not a feature — a captured frame longer than the
+# declared layout (e.g. a corrupted or oversized wire capture) is exactly the
+# kind of defect this comparator exists to catch, and silently reading only
+# the first `word_count` words can mask it. So a length mismatch (too few OR
+# too many actual words) is now a fail-closed validation error, same as an
+# invalid `WordLayout` — it returns `[]`, matching the layout-defect case
+# above so callers have exactly one failure shape to check.
 pub fn layout_compare(layout: WordLayout, actual_words: [i64]) -> [WordDiff]:
+    if layout_is_invalid(layout):
+        return []
+    if actual_words.len() != layout.word_count:
+        return []
     val expected = layout_words(layout)
     val policies = word_policies(layout)
     var diffs: [WordDiff] = []
@@ -183,6 +242,10 @@ pub fn layout_compare(layout: WordLayout, actual_words: [i64]) -> [WordDiff]:
 # one call to `stacked_compare_rows` per word, since each word carries its
 # own local `BinaryLayout` (fields don't span words).
 pub fn layout_render(layout: WordLayout, actual_words: [i64]) -> [text]:
+    if layout_is_invalid(layout):
+        return []
+    if actual_words.len() != layout.word_count:
+        return []
     val diffs = layout_compare(layout, actual_words)
     var rows: [text] = []
     var w = 0

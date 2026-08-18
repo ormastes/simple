@@ -1,7 +1,29 @@
 # `layout_schema_errors` missing overlap/duplicate-name checks and never wired into generation
 
-- Status: OPEN
+- Status: RESOLVED 2026-08-18
 - Found: 2026-08-18 (goal 4 evidence-hardening pass over the binary SSpec suites)
+- Fixed: `src/lib/common/spec/evidence/format/layout_schema.spl` —
+  `layout_schema_errors` now mirrors `layout_errors`'s overlap check
+  (`layout_fields_overlap`, same half-open-range algorithm as
+  `fields_overlap` in `binary_layout.spl`, adapted to `LayoutFieldSpec`'s
+  global `bit_offset`/`bit_width` shape) plus a duplicate-field-name check.
+  `layout_words`/`layout_masks`/`layout_compare`/`layout_render` now call a
+  new `layout_is_invalid` guard first and fail closed by returning an empty
+  list (`[]`) on any layout defect — the minimal honest option since these
+  functions return plain `[i64]`/`[WordDiff]`/`[text]` with no `parse_error`
+  variant like `CanonicalEvidence` has for `decode_u64`. `layout_compare`/
+  `layout_render` additionally now fail closed (empty) when
+  `actual_words.len() != layout.word_count` — finding 4 below was decided as
+  a real risk, not intentional behavior, and is fixed the same way.
+- Regression/similar-case specs (fixed-behavior assertions + new adversarial
+  cases): `test/01_unit/lib/common/spec/evidence/binary_layout_schema_spec.spl`
+  — 20 examples, 0 failures (was 12 before this fix; the 4 former FINDING
+  cases now assert the corrected behavior, plus 8 new similar-case tests:
+  1-bit boundary overlap, case-sensitive non-overlap, three-way overlap,
+  valid-adjacent no-false-positive, and one fail-closed generator check per
+  entry point). All 6 binary evidence specs remain green (54 examples total,
+  up from 46) per `sh scripts/check/check-binary-sspec-evidence.shs`
+  (`FLOOR_TOTAL` raised 46 -> 54).
 - Files: `src/lib/common/spec/evidence/format/layout_schema.spl`
 - Regression specs (adversarial cases, asserting CURRENT unsafe behavior):
   `test/01_unit/lib/common/spec/evidence/binary_layout_schema_spec.spl`

@@ -168,12 +168,10 @@ describe "declarative binary layout — generation":
         val errs = layout_schema_errors(bad)
         assert_true(errs.len() > 0)
 
-    # FINDING: unlike `layout_errors` in binary_layout.spl (which also checks
-    # field overlap), `layout_schema_errors` has NO overlap check and NO
-    # duplicate-name check. Two fields that occupy the same bits are not
-    # flagged. Filed:
+    # RESOLVED: `layout_schema_errors` now mirrors `layout_errors` in
+    # binary_layout.spl — overlap and duplicate-name checks added.
     # doc/08_tracking/bug/layout_schema_errors_missing_overlap_and_generation_wiring_2026-08-18.md
-    it "FINDING: layout_schema_errors does not catch overlapping fields":
+    it "layout_schema_errors catches overlapping fields":
         val overlapping = WordLayout(
             layout_id: "overlap",
             word_bits: 32,
@@ -189,10 +187,9 @@ describe "declarative binary layout — generation":
             source_ref: "synthetic",
         )
         val errs = layout_schema_errors(overlapping)
-        # Current (unsafe) behavior: overlap is silently accepted.
-        assert_equal(errs.len(), 0)
+        assert_true(errs.len() > 0)
 
-    it "FINDING: layout_schema_errors does not catch duplicate field names":
+    it "layout_schema_errors catches duplicate field names":
         val duped = WordLayout(
             layout_id: "duped",
             word_bits: 32,
@@ -208,9 +205,88 @@ describe "declarative binary layout — generation":
             source_ref: "synthetic",
         )
         val errs = layout_schema_errors(duped)
+        assert_true(errs.len() > 0)
+
+    it "layout_schema_errors catches duplicate names differing only in case as DISTINCT (case-sensitive) — no false positive":
+        val distinct_case = WordLayout(
+            layout_id: "case_distinct",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("Flag", 0, 8, 0xFF, "first"),
+                compare_field("flag", 8, 8, 0xFF, "different name by case")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val errs = layout_schema_errors(distinct_case)
         assert_equal(errs.len(), 0)
 
-    it "FINDING: layout_words/layout_compare never call layout_schema_errors — a malformed (overlapping) layout is silently generated and compared instead of failing closed":
+    it "layout_schema_errors catches a 1-bit overlap at the boundary between two fields":
+        val one_bit_overlap = WordLayout(
+            layout_id: "one_bit_overlap",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("a", 0, 8, 0xFF, "bits 0..7"),
+                compare_field("b", 7, 8, 0xFF, "bits 7..14, overlaps bit 7 only")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val errs = layout_schema_errors(one_bit_overlap)
+        assert_true(errs.len() > 0)
+
+    it "valid adjacent (touching, non-overlapping) fields do not false-positive":
+        val adjacent = WordLayout(
+            layout_id: "adjacent",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("a", 0, 8, 0xFF, "bits 0..7"),
+                compare_field("b", 8, 8, 0xFF, "bits 8..15, touches a but does not overlap")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val errs = layout_schema_errors(adjacent)
+        assert_equal(errs.len(), 0)
+
+    it "layout_schema_errors catches a three-way overlap (all three pairs flagged)":
+        val three_way = WordLayout(
+            layout_id: "three_way_overlap",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("a", 0, 8, 0xFF, "bits 0..7"),
+                compare_field("b", 4, 8, 0xFF, "bits 4..11, overlaps a"),
+                compare_field("c", 6, 8, 0xFF, "bits 6..13, overlaps a and b")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val errs = layout_schema_errors(three_way)
+        assert_true(errs.len() >= 3)
+
+    # RESOLVED: layout_words/layout_masks/layout_compare/layout_render now
+    # call layout_schema_errors (via layout_is_invalid) and fail closed by
+    # returning an empty list, mirroring the shape of `decode_u64`'s fail-
+    # closed pattern within the constraints of a plain `[i64]`/`[WordDiff]`/
+    # `[text]` return type (no parse_error variant available — see the doc
+    # comment above `layout_is_invalid`).
+    it "layout_words fails closed (empty) on an invalid (overlapping) layout":
         val overlapping = WordLayout(
             layout_id: "overlap_generation",
             word_bits: 32,
@@ -225,24 +301,67 @@ describe "declarative binary layout — generation":
             first_word: 0,
             source_ref: "synthetic",
         )
-        # layout_schema_errors correctly reports this layout is malformed by
-        # the overlap definition it DOES enforce elsewhere... but nothing in
-        # the generation path consults it: layout_words/layout_compare run to
-        # completion on this overlapping layout without raising a parse
-        # error, unlike `decode_u64` in binary_layout.spl which calls
-        # `layout_errors` and fails closed on any layout defect.
         val words = layout_words(overlapping)
-        assert_equal(words.len(), 1)
-        val diffs = layout_compare(overlapping, words)
-        assert_equal(diffs.len(), 1)
-        assert_equal(diffs[0].status, "pass")
+        assert_equal(words.len(), 0)
 
-    it "extra actual words beyond word_count are silently ignored, not flagged as corruption":
-        # A captured frame longer than the declared layout (e.g. a
-        # corrupted/oversized wire capture) is not distinguishable from a
-        # correctly-sized one: layout_compare only iterates word_count times
-        # and never inspects actual_words.len(), so trailing extra words
-        # contribute no evidence and cannot fail the assertion.
+    it "layout_masks fails closed (empty) on an invalid (duplicate-name) layout":
+        val duped = WordLayout(
+            layout_id: "duped_generation",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("same", 0, 8, 0xFF, "first"),
+                compare_field("same", 8, 8, 0xFF, "second, same name")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val masks = layout_masks(duped)
+        assert_equal(masks.len(), 0)
+
+    it "layout_compare fails closed (empty) on an invalid (overlapping) layout instead of silently passing":
+        val overlapping = WordLayout(
+            layout_id: "overlap_compare",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("a", 0, 8, 0xAA, "field a"),
+                compare_field("b", 4, 8, 0x55, "field b overlaps a in bits 4..7")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val diffs = layout_compare(overlapping, [0])
+        assert_equal(diffs.len(), 0)
+
+    it "layout_render fails closed (empty) on an invalid layout":
+        val bad = WordLayout(
+            layout_id: "bad_render",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [compare_field("neg", 0, -1, 0, "negative width")],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val rows = layout_render(bad, [0])
+        assert_equal(rows.len(), 0)
+
+    # RESOLVED (finding 4, deliberate decision): extra/short actual words are
+    # no longer silently accepted. Documented risk was that a captured frame
+    # longer than the declared layout (corrupted/oversized wire capture) is
+    # indistinguishable from a correctly-sized one; that is now a fail-closed
+    # validation error (empty result) rather than a silent pass, matching the
+    # invalid-layout case above.
+    it "extra actual words beyond word_count now fail closed instead of being silently ignored":
         val schema = WordLayout(
             layout_id: "single_word",
             word_bits: 32,
@@ -255,7 +374,20 @@ describe "declarative binary layout — generation":
             source_ref: "synthetic",
         )
         val expected = layout_words(schema)[0]
-        # extra trailing word with garbage content is never read
         val diffs = layout_compare(schema, [expected, 0xDEADBEEF])
-        assert_equal(diffs.len(), 1)
-        assert_equal(diffs[0].status, "pass")
+        assert_equal(diffs.len(), 0)
+
+    it "too few actual words also fails closed instead of indexing out of range":
+        val schema = WordLayout(
+            layout_id: "two_word",
+            word_bits: 32,
+            word_count: 2,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [compare_field("kept", 0, 32, 0x11223344, "checked field")],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val diffs = layout_compare(schema, [0x11223344])
+        assert_equal(diffs.len(), 0)
