@@ -1099,6 +1099,8 @@ bootstrap_stage_sanity() (
   sanity_home=$3
   sanity_tmpdir=$4
   sanity_path=$5
+  # Captured BEFORE the environment scrub below, which unsets everything.
+  sanity_repo_root=${repo_root}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1115,9 +1117,39 @@ bootstrap_stage_sanity() (
   frontend_log="${evidence_tmp}.frontend"
   rm -f "${evidence_tmp}" "${frontend_log}"
   candidate_sha_before=$(bootstrap_stage3_hash_file "${candidate}") || return 1
+  # Expected version is DERIVED, never hardcoded. The literal
+  # "simple-bootstrap 1.0.0-beta" used to live here; release commit 9a3f6051996
+  # bumped src/app/cli/bootstrap_identity.spl (and ./VERSION) to 1.0.0-RC and did
+  # not update this file, making the gate unsatisfiable by ANY correctly-built
+  # Stage-2 binary. The failure was invisible because the version comparison had
+  # no *_status field in the evidence -- every recorded field read as passing.
+  # Fail-closed: an unreadable/empty VERSION, or a VERSION that disagrees with
+  # bootstrap_identity.spl, is an ERROR (sanity_status=error), never a pass.
+  version_expect_status=0
+  version_expected=
+  if [ -r "${sanity_repo_root}/VERSION" ]; then
+    version_expected=$(sed -n '1s/[[:space:]]*$//p' "${sanity_repo_root}/VERSION")
+  fi
+  if [ -z "${version_expected}" ]; then
+    version_expect_status=1
+  else
+    # Cross-check the compiled-in source of truth against ./VERSION. Drift
+    # between these two is the exact defect this gate failed to survive.
+    version_identity=$(sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
+      "${sanity_repo_root}/src/app/cli/bootstrap_identity.spl" | sed -n '1p')
+    if [ -z "${version_identity}" ] ||
+      [ "${version_identity}" != "${version_expected}" ]; then
+      version_expect_status=2
+    fi
+  fi
   version_status=0
   version=$(run_timeout 10 "${candidate}" --version 2>&1) ||
     version_status=$?
+  version_match_status=1
+  if [ "${version_expect_status}" -eq 0 ] &&
+    [ "${version}" = "simple-bootstrap ${version_expected}" ]; then
+    version_match_status=0
+  fi
   unsupported_status=0
   if unsupported=$(run_timeout 10 "${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1); then
     unsupported_status=0
@@ -1144,14 +1176,55 @@ bootstrap_stage_sanity() (
     frontend_status=${frontend_bootstrap_status}
   fi
   candidate_sha_after=$(bootstrap_stage3_hash_file "${candidate}") || return 1
-  sanity_status=fail
-  if [ "${version_status}" -eq 0 ] &&
-    [ "${version}" = "simple-bootstrap 1.0.0-beta" ] &&
-    [ "${unsupported_status}" -eq 1 ] &&
-    case "${unsupported}" in *"unknown command 'run'"*) true ;; *) false ;; esac &&
+  # The `run` sub-check is a NEGATIVE CONTROL, not a capability probe: the
+  # Stage-2 candidate is built from src/app/cli/bootstrap_main.spl, which
+  # deliberately implements only native-build/compile/--version/--help. Asserting
+  # that `run` is rejected with rc 1 and the exact diagnostic proves the
+  # candidate reached its own argv dispatch -- i.e. it is the bootstrap entry we
+  # asked for and not some other binary. Do not "fix" it into a `run` that works.
+  unsupported_match_status=1
+  if [ "${unsupported_status}" -eq 1 ]; then
+    case "${unsupported}" in
+      *"unknown command 'run'"*) unsupported_match_status=0 ;;
+    esac
+  fi
+  sha_stable_status=1
+  if [ "${candidate_sha_before}" = "${candidate_sha_after}" ]; then
+    sha_stable_status=0
+  fi
+  # Non-vacuity: count the sub-checks actually evaluated. A run that evaluated
+  # none is ERROR, never a pass.
+  sanity_checks_run=5
+  if [ "${version_expect_status}" -ne 0 ]; then
+    sanity_status=error
+    sanity_checks_run=0
+  elif [ "${version_status}" -eq 0 ] &&
+    [ "${version_match_status}" -eq 0 ] &&
+    [ "${unsupported_match_status}" -eq 0 ] &&
     [ "${frontend_status}" -eq 0 ] &&
-    [ "${candidate_sha_before}" = "${candidate_sha_after}" ]; then
+    [ "${sha_stable_status}" -eq 0 ]; then
     sanity_status=pass
+  else
+    sanity_status=fail
+  fi
+  # Name the failing sub-check. The old gate exited 2 with no diagnostic text at
+  # all, which is why a stale version literal cost a full 30-minute bootstrap to
+  # even localise.
+  if [ "${sanity_status}" != pass ]; then
+    case "${version_expect_status}" in
+      1) echo "error: sanity ERROR - cannot read ${sanity_repo_root}/VERSION" >&2 ;;
+      2) echo "error: sanity ERROR - ./VERSION ('${version_expected}') disagrees with src/app/cli/bootstrap_identity.spl ('${version_identity}')" >&2 ;;
+    esac
+    [ "${version_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - --version exited ${version_status}" >&2
+    { [ "${version_expect_status}" -ne 0 ] || [ "${version_match_status}" -eq 0 ]; } ||
+      echo "error: sanity FAIL - version mismatch: got '${version}', want 'simple-bootstrap ${version_expected}'" >&2
+    [ "${unsupported_match_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - 'run' negative control: rc ${unsupported_status}, output '${unsupported}'" >&2
+    [ "${frontend_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - frontend smoke exited ${frontend_status} (bootstrap-mode pass: ${frontend_bootstrap_status})" >&2
+    [ "${sha_stable_status}" -eq 0 ] ||
+      echo "error: sanity FAIL - candidate binary mutated during sanity" >&2
   fi
   if [ -n "${evidence_path}" ]; then
     {
@@ -1160,13 +1233,19 @@ bootstrap_stage_sanity() (
       echo "candidate_sha256_before=${candidate_sha_before}"
       echo "version_status=${version_status}"
       echo "version_output=${version}"
+      echo "version_expected=${version_expected}"
+      echo "version_expect_status=${version_expect_status}"
+      echo "version_match_status=${version_match_status}"
       echo "unsupported_status=${unsupported_status}"
       printf 'unsupported_output_sha256=%s\n' \
         "$(printf '%s' "${unsupported}" | bootstrap_stage3_hash_stream)"
       echo "frontend_smoke_status=${frontend_status}"
+      echo "unsupported_match_status=${unsupported_match_status}"
       echo "frontend_smoke_bootstrap_mode_status=${frontend_bootstrap_status}"
       echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file "${frontend_log}")"
       echo "candidate_sha256_after=${candidate_sha_after}"
+      echo "sha_stable_status=${sha_stable_status}"
+      echo "checks_run=${sanity_checks_run}"
     } >"${evidence_tmp}" || return 1
     mv "${evidence_tmp}" "${evidence_path}"
   fi
@@ -2115,7 +2194,16 @@ else
       "${stage_build_path}"; then
       echo "error: Stage 2 bootstrap compiler sanity failed" >&2
       stage2_status=2
-      rm -f "${stage2_bin}"
+      # Preserve, do not destroy: the old `rm -f` deleted the only copy of the
+      # artifact and with it all post-mortem value. Renaming keeps the failed
+      # candidate off every downstream `-x "${stage2_bin}"` guard (which is what
+      # the delete was actually for) while leaving it on disk for diagnosis.
+      rm -f "${stage2_bin}.rejected"
+      if mv "${stage2_bin}" "${stage2_bin}.rejected"; then
+        echo "  rejected Stage 2 binary preserved: ${stage2_bin}.rejected" >&2
+      else
+        rm -f "${stage2_bin}"
+      fi
     fi
   fi
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then

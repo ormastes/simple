@@ -1,0 +1,171 @@
+#!/bin/sh
+# Drives bootstrap_stage_sanity() from scripts/bootstrap/bootstrap-from-scratch.sh
+# in isolation against synthetic candidate binaries.
+#
+# Why this exists: the gate's version comparison was a hardcoded literal
+# ("simple-bootstrap 1.0.0-beta"). Release commit 9a3f6051996 bumped the
+# compiler's version to 1.0.0-RC without updating it, so NO correctly-built
+# Stage-2 binary could pass. Nothing detected it, because (a) the imported
+# Stage-2's stage2-sanity.receipt was COPIED not re-measured, and (b) the
+# version comparison had no *_status field in the evidence -- every recorded
+# field read as passing while the gate returned failure with no diagnostic.
+#
+# The function under test is EXTRACTED FROM THE SHIPPED FILE at run time, so
+# this test cannot silently drift from the code it certifies.
+#
+# Verdict is the last stdout line: PASS/FAIL/ERROR. A run that executed 0
+# cases is ERROR, never a pass.
+
+set -u
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+src="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "${work}"' EXIT
+
+CASES_RUN=0
+FAILURES=
+
+note() { printf '  %s\n' "$*"; }
+
+# ---- extract the function under test, verbatim -----------------------------
+fn="${work}/fn.sh"
+awk '/^bootstrap_stage_sanity\(\) \(/{f=1} f{print} f&&/^\)$/{exit}' "${src}" >"${fn}"
+if ! grep -q '^bootstrap_stage_sanity() (' "${fn}"; then
+  echo "ERROR — nothing was checked (could not extract bootstrap_stage_sanity from ${src})"
+  exit 2
+fi
+if ! grep -q '^)$' "${fn}"; then
+  echo "ERROR — nothing was checked (extracted function is truncated)"
+  exit 2
+fi
+# Regression assertion: the expected version must NOT be a hardcoded literal.
+if grep -q 'version.*=.*"simple-bootstrap 1\.0\.0-[A-Za-z]' "${fn}"; then
+  echo "ERROR — nothing was checked (gate still hardcodes an expected version literal)"
+  exit 2
+fi
+
+# ---- harness: stubs for the gate's collaborators ---------------------------
+harness="${work}/harness.sh"
+cat >"${harness}" <<'EOF'
+run_timeout() { shift; "$@"; }
+bootstrap_stage3_hash_file() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+bootstrap_stage3_hash_stream() { sha256sum | cut -d' ' -f1; }
+# candidate_frontend_smoke: real one compiles a fixture. Stub delegates to the
+# candidate so a broken candidate genuinely fails the smoke, as in production.
+candidate_frontend_smoke() {
+  "$1" __frontend_smoke__ 2>&1 || return $?
+  return 0
+}
+backend=llvm
+EOF
+
+drive() { # drive <candidate> <evidence>  -> echoes rc on its own line
+  ( . "${harness}"; repo_root="${REPO_ROOT_OVERRIDE}"; . "${fn}"
+    bootstrap_stage_sanity "$1" "$2" "${work}/h" "${work}/t" "$PATH" >/dev/null 2>&1
+    echo "RC=$?" )
+}
+
+mkdir -p "${work}/h" "${work}/t"
+
+mk_candidate() { # mk_candidate <path> <version-string> <smoke-rc> <run-behaviour>
+  cat >"$1" <<EOF
+#!/bin/sh
+case "\$1" in
+  --version) echo "simple-bootstrap $2"; exit 0 ;;
+  __frontend_smoke__) exit $3 ;;
+  run) $4 ;;
+esac
+echo "error: unknown command '\$1'"; exit 1
+EOF
+  chmod +x "$1"
+}
+REJECT_RUN="echo \"error: unknown command 'run'\"; exit 1"
+
+check() { # check <name> <expect pass|fail> <candidate> [expect_status_field]
+  name=$1; expect=$2; cand=$3
+  ev="${work}/${name}.env"
+  out=$(drive "${cand}" "${ev}")
+  rc=$(printf '%s' "${out}" | sed -n 's/^RC=//p')
+  CASES_RUN=$((CASES_RUN + 1))
+  if [ "${rc}" = 143 ] || [ "${rc}" = 137 ] || [ "${rc}" = 144 ]; then
+    FAILURES="${FAILURES} ${name}(UNVERIFIED-signal-${rc})"
+    note "${name}: UNVERIFIED (rc ${rc})"; return
+  fi
+  st=$(sed -n 's/^status=//p' "${ev}" 2>/dev/null)
+  if [ "${expect}" = pass ]; then
+    if [ "${rc}" = 0 ] && [ "${st}" = pass ]; then note "${name}: PASS (accepted, as required)"
+    else FAILURES="${FAILURES} ${name}(expected-accept,got-rc=${rc},status=${st})"
+         note "${name}: FAIL (expected accept; rc=${rc} status=${st})"; fi
+  else
+    if [ "${rc}" != 0 ] && [ "${st}" != pass ]; then note "${name}: PASS (rejected, as required; status=${st})"
+    else FAILURES="${FAILURES} ${name}(expected-reject,got-rc=${rc},status=${st})"
+         note "${name}: FAIL (expected reject; rc=${rc} status=${st})"; fi
+  fi
+}
+
+REPO_ROOT_OVERRIDE="${repo_root}"
+
+echo "bootstrap_stage_sanity gate cases:"
+
+# --- REPRODUCER: current repo version. Fails against the pre-fix gate (which
+#     demanded the stale literal 1.0.0-beta), passes after the fix. -----------
+REPO_VERSION=$(sed -n '1s/[[:space:]]*$//p' "${repo_root}/VERSION")
+mk_candidate "${work}/good" "${REPO_VERSION}" 0 "${REJECT_RUN}" 
+check reproducer_current_version pass "${work}/good"
+
+# --- MUST STILL REJECT ------------------------------------------------------
+# 1. Wrong version entirely (an unrelated/stale binary).
+mk_candidate "${work}/badver" "0.0.0-bogus" 0 "${REJECT_RUN}"
+check reject_wrong_version fail "${work}/badver"
+
+# 2. The 2026-08-09 incident shape: frontend smoke cannot process a file.
+mk_candidate "${work}/nolex" "${REPO_VERSION}" 1 "${REJECT_RUN}"
+check reject_frontend_smoke_broken fail "${work}/nolex"
+
+# 3. Stub that exits non-zero for everything.
+printf '#!/bin/sh\nexit 3\n' >"${work}/stub"; chmod +x "${work}/stub"
+check reject_dead_stub fail "${work}/stub"
+
+# 4. Negative control integrity: a candidate that ACCEPTS `run` is not the
+#    bootstrap entry we asked to build, and must be rejected.
+mk_candidate "${work}/hasrun" "${REPO_VERSION}" 0 "exit 0"
+check reject_candidate_that_accepts_run fail "${work}/hasrun"
+
+# 5. Fail-closed on a missing VERSION file: must be ERROR-not-pass.
+mkdir -p "${work}/norepo/src/app/cli"
+REPO_ROOT_OVERRIDE="${work}/norepo"
+check reject_missing_VERSION fail "${work}/good"
+REPO_ROOT_OVERRIDE="${repo_root}"
+
+# 6. Fail-closed on VERSION vs bootstrap_identity.spl DRIFT -- the exact defect.
+mkdir -p "${work}/drift/src/app/cli"
+echo "9.9.9-drift" >"${work}/drift/VERSION"
+cp "${repo_root}/src/app/cli/bootstrap_identity.spl" "${work}/drift/src/app/cli/"
+REPO_ROOT_OVERRIDE="${work}/drift"
+mk_candidate "${work}/driftbin" "9.9.9-drift" 0 "${REJECT_RUN}"
+check reject_version_drift fail "${work}/driftbin"
+REPO_ROOT_OVERRIDE="${repo_root}"
+
+# --- non-vacuity + evidence completeness -----------------------------------
+for f in version_expect_status version_match_status unsupported_match_status \
+         sha_stable_status checks_run; do
+  CASES_RUN=$((CASES_RUN + 1))
+  if grep -q "^${f}=" "${work}/reproducer_current_version.env" 2>/dev/null; then
+    note "evidence_field_${f}: PASS"
+  else
+    FAILURES="${FAILURES} evidence_field_${f}(absent)"
+    note "evidence_field_${f}: FAIL (absent from evidence -- this is how the"
+    note "  version mismatch stayed invisible)"
+  fi
+done
+
+if [ "${CASES_RUN}" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+if [ -n "${FAILURES}" ]; then
+  echo "FAIL — ${CASES_RUN} case(s) checked, failures:${FAILURES}"
+  exit 1
+fi
+echo "PASS — ${CASES_RUN} case(s) checked, gate accepts a legitimate candidate and rejects every broken one"
+exit 0
