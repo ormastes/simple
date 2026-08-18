@@ -26,6 +26,7 @@
 # re-decode immediates.
 
 use compiler.mir.mir_data.*
+use compiler.interp.mir_interp_error.{InterpError}
 
 class ExecIrProgram:
     """Flat encoded program: code array + register plan."""
@@ -297,3 +298,493 @@ fn execir_run(program: ExecIrProgram) -> i64:
             return 0
         pc = pc + 4
     0
+
+# ============================================================================
+# Slice 2 — error channel + direct calls
+# ============================================================================
+#
+# Additional opcodes (module programs only):
+#   40 CALL    dest(-1 if none), callee_entry_pc, callee_frame_size
+#   41 ARG     arg_index, src_reg, _        (stage caller-frame value)
+#   42 BINDARG dest_reg, arg_index, _       (callee prologue reads staged arg)
+#
+# Result shape mirrors MirInterpreter.execute_function: (i64?, InterpError?).
+# Div/Rem by zero returns (nil, Some(InterpError.DivisionByZero(...))) with
+# the interpreter's exact messages ("Integer division" / "Integer modulo").
+# execir_run (slice 1) is unchanged: no error channel, div/rem-by-zero -> 0.
+
+fn execir_run_result(program: ExecIrProgram) -> (i64?, InterpError?):
+    """Slice-1 program execution with the interpreter's result shape."""
+    var regs: [i64] = []
+    var i = 0
+    while i < program.reg_count:
+        regs.push(0)
+        i = i + 1
+    var k = 0
+    val nconsts = program.const_regs.len()
+    while k < nconsts:
+        regs[program.const_regs[k]] = program.const_vals[k]
+        k = k + 1
+    val code = program.code
+    var pc = program.entry_pc
+    while true:
+        val op = code[pc]
+        val a = code[pc + 1]
+        val b = code[pc + 2]
+        if op == 10:
+            regs[a] = regs[b] + regs[code[pc + 3]]
+        elif op == 17:
+            regs[a] = if regs[b] < regs[code[pc + 3]]: 1 else: 0
+        elif op == 4:
+            pc = if regs[a] != 0: b else: code[pc + 3]
+            continue
+        elif op == 3:
+            pc = a
+            continue
+        elif op == 5:
+            return (Some(regs[a]), nil)
+        elif op == 1:
+            regs[a] = b
+        elif op == 2:
+            regs[a] = regs[b]
+        elif op == 11:
+            regs[a] = regs[b] - regs[code[pc + 3]]
+        elif op == 12:
+            regs[a] = regs[b] * regs[code[pc + 3]]
+        elif op == 13:
+            val r = regs[code[pc + 3]]
+            if r == 0:
+                return (nil, Some(InterpError.DivisionByZero(message: "Integer division")))
+            regs[a] = regs[b] / r
+        elif op == 14:
+            val r = regs[code[pc + 3]]
+            if r == 0:
+                return (nil, Some(InterpError.DivisionByZero(message: "Integer modulo")))
+            regs[a] = regs[b] % r
+        elif op == 15:
+            regs[a] = if regs[b] == regs[code[pc + 3]]: 1 else: 0
+        elif op == 16:
+            regs[a] = if regs[b] != regs[code[pc + 3]]: 1 else: 0
+        elif op == 18:
+            regs[a] = if regs[b] <= regs[code[pc + 3]]: 1 else: 0
+        elif op == 19:
+            regs[a] = if regs[b] > regs[code[pc + 3]]: 1 else: 0
+        elif op == 20:
+            regs[a] = if regs[b] >= regs[code[pc + 3]]: 1 else: 0
+        elif op == 21:
+            regs[a] = regs[b] & regs[code[pc + 3]]
+        elif op == 22:
+            regs[a] = regs[b] | regs[code[pc + 3]]
+        elif op == 23:
+            regs[a] = regs[b] xor regs[code[pc + 3]]
+        elif op == 24:
+            regs[a] = regs[b] << (regs[code[pc + 3]] & 63)
+        elif op == 25:
+            regs[a] = regs[b] >> (regs[code[pc + 3]] & 63)
+        elif op == 30:
+            regs[a] = 0 - regs[b]
+        elif op == 31:
+            regs[a] = if regs[b] == 0: 1 else: 0
+        elif op == 32:
+            regs[a] = -1 - regs[b]
+        else:
+            return (nil, Some(InterpError.RuntimeError(message: "ExecIR: unknown opcode {op}")))
+        pc = pc + 4
+    (nil, Some(InterpError.RuntimeError(message: "ExecIR: fell off program")))
+
+class ExecIrModule:
+    """Flat multi-function program. Frame sizes are baked into each CALL
+    record; only the entry frame size is needed up front."""
+    code: [i64]
+    entry_pc: i64
+    entry_frame: i64
+
+class ExecIrFnPlan:
+    """Per-function encoding plan (internal to execir_encode_call)."""
+    func: MirFunction
+    enc: ExecIrEncoder
+    rel_pc: {i64: i64}   # block id -> pc relative to first block slot
+    callees: [text]
+    prologue: i64        # slots before first block (BINDARGs + LOADKs + entry JMP)
+    size: i64
+    base: i64            # absolute segment start; set by layout
+    frame_size: i64
+
+fn execir_call_target_name(target: MirOperand) -> text?:
+    """Callee name for a direct call: a Const Str operand, else nil."""
+    match target.kind:
+        case Const(value, type_):
+            match value:
+                case Str(name): Some(name)
+                case _: nil
+        case _: nil
+
+fn execir_plan_function(func: MirFunction, table: {text: MirFunction}) -> ExecIrFnPlan?:
+    """Analyze one function: registers, const pool, encodability, relative
+    block pcs, callee names. nil if outside the encodable subset."""
+    var enc = ExecIrEncoder.create()
+    for local in func.locals:
+        enc.reg_of[local.id.id] = enc.next_reg
+        enc.next_reg = enc.next_reg + 1
+    var callees: [text] = []
+    var rel: {i64: i64} = {}
+    var pc = 0
+    var n_args = 0
+    for local in func.locals:
+        match local.kind:
+            case Arg(index): n_args = n_args + 1
+            case _: pass
+    for block in func.blocks:
+        rel[block.id.id] = pc
+        for inst in block.instructions:
+            var ok = false
+            match inst.kind:
+                case Const(dest, value, type_):
+                    match value:
+                        case Int(v): ok = true
+                        case Bool(v): ok = true
+                        case _: ok = false
+                case Copy(dest, src): ok = true
+                case Move(dest, src): ok = true
+                case BinOp(dest, op, left, right):
+                    ok = (execir_binop_code(op) >= 0 and
+                          enc.operand_reg(left) != nil and enc.operand_reg(right) != nil)
+                case UnaryOp(dest, op, operand):
+                    var uok = false
+                    match op:
+                        case Neg: uok = true
+                        case Not: uok = true
+                        case BitNot: uok = true
+                        case _: uok = false
+                    ok = uok and enc.operand_reg(operand) != nil
+                case Call(dest, call_target, args):
+                    val name = execir_call_target_name(call_target)
+                    val nm = name ?? ""
+                    if name != nil and table.contains(nm) and args.len() <= 8:
+                        var args_ok = true
+                        for arg in args:
+                            if enc.operand_reg(arg) == nil:
+                                args_ok = false
+                        if args_ok:
+                            callees.push(nm)
+                            pc = pc + 4 * args.len()
+                            ok = true
+                case _: ok = false
+            if not ok:
+                return nil
+            pc = pc + 4
+        val term_ok = match block.terminator:
+            case Goto(target): true
+            case If(cond, then_, else_): enc.operand_reg(cond) != nil
+            case Ret(value):
+                match value:
+                    case Some(op): enc.operand_reg(op) != nil
+                    case _:
+                        enc.const_reg(0)
+                        true
+            case _: false
+        if not term_ok:
+            return nil
+        pc = pc + 4
+    val prologue = 4 * (n_args + enc.const_regs.len() + 1)
+    Some(ExecIrFnPlan(func: func, enc: enc, rel_pc: rel, callees: callees,
+                      prologue: prologue, size: prologue + pc, base: 0,
+                      frame_size: enc.next_reg))
+
+fn execir_emit4(code: [i64], op: i64, a: i64, b: i64, c: i64) -> [i64]:
+    """Append one 4-slot record; returns the (possibly copied) array so it
+    works under both reference and value array-parameter semantics."""
+    code.push(op)
+    code.push(a)
+    code.push(b)
+    code.push(c)
+    code
+
+fn execir_emit_function(plan: ExecIrFnPlan, plan_idx: {text: i64}, plans: [ExecIrFnPlan]) -> [i64]?:
+    """Emit plan's code and return it, or nil on failure. Layout (all
+    bases) must be set. Returns the code rather than mutating plan.enc —
+    mutations through an aliased class param are lost in the interpreter."""
+    var out: [i64] = []
+    var enc = plan.enc
+    val func = plan.func
+    val body_base = plan.base + plan.prologue
+    # Prologue: bind args, materialize const pool, jump to entry block.
+    for local in func.locals:
+        match local.kind:
+            case Arg(index):
+                val r = enc.reg_of[local.id.id] ?? -1
+                if r < 0:
+                    return nil
+                out = execir_emit4(out, 42, r, index, 0)
+            case _: pass
+    var k = 0
+    while k < enc.const_regs.len():
+        out = execir_emit4(out, 1, enc.const_regs[k], enc.const_vals[k], 0)
+        k = k + 1
+    val entry_rel = plan.rel_pc[func.entry_block.id] ?? -1
+    if entry_rel < 0:
+        return nil
+    out = execir_emit4(out, 3, body_base + entry_rel, 0, 0)
+    # Blocks.
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Const(dest, value, type_):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    if dreg < 0:
+                        return nil
+                    val imm = match value:
+                        case Int(v): v
+                        case Bool(v): if v: 1 else: 0
+                        case _: return nil
+                    out = execir_emit4(out, 1, dreg, imm, 0)
+                case Copy(dest, src):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val sreg = enc.reg_of[src.id] ?? -1
+                    if dreg < 0 or sreg < 0:
+                        return nil
+                    out = execir_emit4(out, 2, dreg, sreg, 0)
+                case Move(dest, src):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val sreg = enc.reg_of[src.id] ?? -1
+                    if dreg < 0 or sreg < 0:
+                        return nil
+                    out = execir_emit4(out, 2, dreg, sreg, 0)
+                case BinOp(dest, op, left, right):
+                    val code = execir_binop_code(op)
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val lreg = enc.operand_reg(left)
+                    val rreg = enc.operand_reg(right)
+                    if code < 0 or dreg < 0 or lreg == nil or rreg == nil:
+                        return nil
+                    out = execir_emit4(out, code, dreg, lreg ?? 0, rreg ?? 0)
+                case UnaryOp(dest, op, operand):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val sreg = enc.operand_reg(operand)
+                    if dreg < 0 or sreg == nil:
+                        return nil
+                    val ucode = match op:
+                        case Neg: 30
+                        case Not: 31
+                        case BitNot: 32
+                        case _: return nil
+                    out = execir_emit4(out, ucode, dreg, sreg ?? 0, 0)
+                case Call(dest, call_target, args):
+                    val name = execir_call_target_name(call_target) ?? ""
+                    val ci = plan_idx[name] ?? -1
+                    if ci < 0:
+                        return nil
+                    val callee = plans[ci]
+                    var j = 0
+                    while j < args.len():
+                        val areg = enc.operand_reg(args[j])
+                        if areg == nil:
+                            return nil
+                        out = execir_emit4(out, 41, j, areg ?? 0, 0)
+                        j = j + 1
+                    var dreg = -1
+                    match dest:
+                        case Some(d):
+                            dreg = enc.reg_of[d.id] ?? -1
+                            if dreg < 0:
+                                return nil
+                        case _: pass
+                    out = execir_emit4(out, 40, dreg, callee.base, callee.frame_size)
+                case _:
+                    return nil
+        match block.terminator:
+            case Goto(target):
+                val tpc = plan.rel_pc[target.id] ?? -1
+                if tpc < 0:
+                    return nil
+                out = execir_emit4(out, 3, body_base + tpc, 0, 0)
+            case If(cond, then_, else_):
+                val creg = enc.operand_reg(cond)
+                val tpc = plan.rel_pc[then_.id] ?? -1
+                val epc = plan.rel_pc[else_.id] ?? -1
+                if creg == nil or tpc < 0 or epc < 0:
+                    return nil
+                out = execir_emit4(out, 4, creg ?? 0, body_base + tpc, body_base + epc)
+            case Ret(value):
+                match value:
+                    case Some(op):
+                        val rreg = enc.operand_reg(op)
+                        if rreg == nil:
+                            return nil
+                        out = execir_emit4(out, 5, rreg ?? 0, 0, 0)
+                    case _:
+                        out = execir_emit4(out, 5, enc.const_reg(0), 0, 0)
+            case _:
+                return nil
+    Some(out)
+
+fn execir_encode_call(func: MirFunction, table: {text: MirFunction}) -> ExecIrModule?:
+    """Lower func plus every transitively-called table function into one
+    flat module, or nil if anything reachable is outside the encodable
+    subset. Visited-set cycle guard: recursive/self calls encode once."""
+    var plans: [ExecIrFnPlan] = []
+    var plan_idx: {text: i64} = {}
+    val entry_plan0 = execir_plan_function(func, table)
+    if entry_plan0 == nil:
+        return nil
+    var worklist: [text] = []
+    val ep = entry_plan0 ?? execir_dummy_plan(func)
+    plans.push(ep)
+    plan_idx[func.name] = 0
+    for c in ep.callees:
+        worklist.push(c)
+    var w = 0
+    while w < worklist.len():
+        val name = worklist[w]
+        w = w + 1
+        if plan_idx.contains(name):
+            continue
+        if not table.contains(name):
+            return nil
+        val p0 = execir_plan_function(table[name], table)
+        if p0 == nil:
+            return nil
+        val p = p0 ?? execir_dummy_plan(func)
+        plan_idx[name] = plans.len()
+        plans.push(p)
+        for c in p.callees:
+            worklist.push(c)
+    # Layout: sequential segments in discovery order.
+    var base = 0
+    var pi = 0
+    while pi < plans.len():
+        plans[pi].base = base
+        base = base + plans[pi].size
+        pi = pi + 1
+    # Emit and concatenate.
+    var code: [i64] = []
+    pi = 0
+    while pi < plans.len():
+        val fcode0 = execir_emit_function(plans[pi], plan_idx, plans)
+        if fcode0 == nil:
+            return nil
+        val fcode = fcode0 ?? []
+        if fcode.len() != plans[pi].size:
+            return nil
+        for slot in fcode:
+            code.push(slot)
+        pi = pi + 1
+    Some(ExecIrModule(code: code, entry_pc: 0, entry_frame: plans[0].frame_size))
+
+fn execir_dummy_plan(func: MirFunction) -> ExecIrFnPlan:
+    """Unreachable ??-arm filler; never executed."""
+    ExecIrFnPlan(func: func, enc: ExecIrEncoder.create(), rel_pc: {},
+                 callees: [], prologue: 0, size: 0, base: 0, frame_size: 0)
+
+fn execir_run_module(m: ExecIrModule) -> (i64?, InterpError?):
+    """Tight-loop execution of a multi-function module with a frame stack.
+    Result shape and div/rem-by-zero errors match MirInterpreter."""
+    var regs: [i64] = []
+    var i = 0
+    while i < m.entry_frame:
+        regs.push(0)
+        i = i + 1
+    var fb = 0
+    var st_ret: [i64] = []
+    var st_fb: [i64] = []
+    var st_dest: [i64] = []
+    var pending: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    val code = m.code
+    var pc = m.entry_pc
+    while true:
+        val op = code[pc]
+        val a = code[pc + 1]
+        val b = code[pc + 2]
+        if op == 10:
+            regs[fb + a] = regs[fb + b] + regs[fb + code[pc + 3]]
+        elif op == 17:
+            regs[fb + a] = if regs[fb + b] < regs[fb + code[pc + 3]]: 1 else: 0
+        elif op == 4:
+            pc = if regs[fb + a] != 0: b else: code[pc + 3]
+            continue
+        elif op == 3:
+            pc = a
+            continue
+        elif op == 5:
+            val v = regs[fb + a]
+            val depth = st_ret.len()
+            if depth == 0:
+                return (Some(v), nil)
+            # Pop frame: free callee window, restore caller, deliver result.
+            while regs.len() > fb:
+                regs.pop()
+            fb = st_fb[depth - 1]
+            st_fb.pop()
+            val ret_pc = st_ret[depth - 1]
+            st_ret.pop()
+            val dest = st_dest[depth - 1]
+            st_dest.pop()
+            if dest >= 0:
+                regs[fb + dest] = v
+            pc = ret_pc + 4
+            continue
+        elif op == 40:
+            if st_ret.len() >= 200:
+                return (nil, Some(InterpError.RuntimeError(message: "ExecIR: call depth exceeded")))
+            st_ret.push(pc)
+            st_fb.push(fb)
+            st_dest.push(a)
+            fb = regs.len()
+            var n = 0
+            while n < code[pc + 3]:
+                regs.push(0)
+                n = n + 1
+            pc = b
+            continue
+        elif op == 41:
+            pending[a] = regs[fb + b]
+        elif op == 42:
+            regs[fb + a] = pending[b]
+        elif op == 1:
+            regs[fb + a] = b
+        elif op == 2:
+            regs[fb + a] = regs[fb + b]
+        elif op == 11:
+            regs[fb + a] = regs[fb + b] - regs[fb + code[pc + 3]]
+        elif op == 12:
+            regs[fb + a] = regs[fb + b] * regs[fb + code[pc + 3]]
+        elif op == 13:
+            val r = regs[fb + code[pc + 3]]
+            if r == 0:
+                return (nil, Some(InterpError.DivisionByZero(message: "Integer division")))
+            regs[fb + a] = regs[fb + b] / r
+        elif op == 14:
+            val r = regs[fb + code[pc + 3]]
+            if r == 0:
+                return (nil, Some(InterpError.DivisionByZero(message: "Integer modulo")))
+            regs[fb + a] = regs[fb + b] % r
+        elif op == 15:
+            regs[fb + a] = if regs[fb + b] == regs[fb + code[pc + 3]]: 1 else: 0
+        elif op == 16:
+            regs[fb + a] = if regs[fb + b] != regs[fb + code[pc + 3]]: 1 else: 0
+        elif op == 18:
+            regs[fb + a] = if regs[fb + b] <= regs[fb + code[pc + 3]]: 1 else: 0
+        elif op == 19:
+            regs[fb + a] = if regs[fb + b] > regs[fb + code[pc + 3]]: 1 else: 0
+        elif op == 20:
+            regs[fb + a] = if regs[fb + b] >= regs[fb + code[pc + 3]]: 1 else: 0
+        elif op == 21:
+            regs[fb + a] = regs[fb + b] & regs[fb + code[pc + 3]]
+        elif op == 22:
+            regs[fb + a] = regs[fb + b] | regs[fb + code[pc + 3]]
+        elif op == 23:
+            regs[fb + a] = regs[fb + b] xor regs[fb + code[pc + 3]]
+        elif op == 24:
+            regs[fb + a] = regs[fb + b] << (regs[fb + code[pc + 3]] & 63)
+        elif op == 25:
+            regs[fb + a] = regs[fb + b] >> (regs[fb + code[pc + 3]] & 63)
+        elif op == 30:
+            regs[fb + a] = 0 - regs[fb + b]
+        elif op == 31:
+            regs[fb + a] = if regs[fb + b] == 0: 1 else: 0
+        elif op == 32:
+            regs[fb + a] = -1 - regs[fb + b]
+        else:
+            return (nil, Some(InterpError.RuntimeError(message: "ExecIR: unknown opcode {op}")))
+        pc = pc + 4
+    (nil, Some(InterpError.RuntimeError(message: "ExecIR: fell off module")))
