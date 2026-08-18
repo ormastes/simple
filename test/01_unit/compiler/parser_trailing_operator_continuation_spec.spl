@@ -1,0 +1,207 @@
+"""
+# Parser: trailing-operator line continuation at the SAME indentation
+
+## Overview
+
+A line that ENDS in a binary operator cannot form a complete expression, so the
+next physical line must be layout-neutral: no INDENT/DEDENT is emitted and the
+right-hand side continues there. Crucially the continuation line may sit at the
+**same** indentation as the head line — an extra continuation indent must not be
+required.
+
+```simple
+val a = 1 +
+2
+```
+
+The lexer-side predicate driving this is `token_requires_rhs`
+(`src/compiler/10.frontend/core/tokens.spl`), shared by `CoreLexer` and the
+legacy scanner. TODO-DB row 561.
+
+## What is deliberately NOT a continuation
+
+`token_requires_rhs` excludes open-ended `..` and the unary/postfix `not` / `!`
+forms, and a line that already ends in a complete value never absorbs the line
+below it. `same_indent_not_folded` pins that second half: folding it would turn
+`a` into `a - 1`.
+
+## Relationship to the leading-operator form
+
+The mirror-image feature — an operator at the START of the continuation line —
+is covered by `parser_leading_operator_continuation_spec.spl`. Both must hold;
+this file only exercises the trailing form at same indentation.
+"""
+
+use std.spec
+
+# --- Arithmetic, continuation line at the SAME indent -------------------------
+
+fn trail_plus(a: i64, b: i64) -> i64:
+    val x = a +
+    b
+    return x
+
+fn trail_minus(a: i64, b: i64) -> i64:
+    val x = a -
+    b
+    return x
+
+fn trail_star(a: i64, b: i64) -> i64:
+    val x = a *
+    b
+    return x
+
+fn trail_slash(a: i64, b: i64) -> i64:
+    val x = a /
+    b
+    return x
+
+fn trail_percent(a: i64, b: i64) -> i64:
+    val x = a %
+    b
+    return x
+
+# --- Logical ------------------------------------------------------------------
+
+fn trail_and(a: bool, b: bool) -> bool:
+    val x = a and
+    b
+    return x
+
+fn trail_or(a: bool, b: bool) -> bool:
+    val x = a or
+    b
+    return x
+
+# --- Comparison / equality ----------------------------------------------------
+
+fn trail_eq(a: i64, b: i64) -> bool:
+    val x = a ==
+    b
+    return x
+
+fn trail_lt(a: i64, b: i64) -> bool:
+    val x = a <
+    b
+    return x
+
+# --- Bitwise ------------------------------------------------------------------
+#
+# The same-indent bitwise-OR shape called out on TODO-DB row 561: a trailing `|`
+# must not be lexed as the start of an or-pattern arm.
+
+fn trail_bit_or(a: i64, b: i64) -> i64:
+    val x = a |
+    b
+    return x
+
+fn trail_bit_and(a: i64, b: i64) -> i64:
+    val x = a &
+    b
+    return x
+
+# --- A chain spanning more than two lines -------------------------------------
+#
+# Every continuation line must be absorbed, not just the one directly after the
+# head, and operator precedence must survive the folding.
+
+fn trail_chain_four(a: i64, b: i64, c: i64, d: i64) -> i64:
+    val x = a +
+    b +
+    c +
+    d
+    return x
+
+fn trail_chain_precedence(a: i64, b: i64, c: i64) -> i64:
+    val x = a -
+    b *
+    c
+    return x
+
+fn trail_chain_logical(a: bool, b: bool, c: bool) -> bool:
+    val x = a and
+    b or
+    c
+    return x
+
+# --- Statement contexts -------------------------------------------------------
+
+fn trail_in_return(a: text, b: text) -> text:
+    return a +
+    " reason=" + b
+
+fn trail_in_reassign(n: i64) -> i64:
+    var acc = 0
+    acc = acc +
+    n
+    acc = acc *
+    2
+    return acc
+
+fn trail_in_if_condition(a: i64, b: i64) -> i64:
+    if a >
+    b:
+        return 1
+    return 0
+
+# --- NEGATIVE control ---------------------------------------------------------
+#
+# `var x = a` is already a complete expression, so the same-indent `-1` below it
+# is a SEPARATE expression statement, not a continuation. If the trailing-operator
+# rule over-reached into "fold any same-indent line", this would return a - 1.
+
+fn same_indent_not_folded(a: i64) -> i64:
+    var x = a
+    -1
+    return x
+
+# The mirror negative: a body that legitimately begins with a unary operator
+# after a complete statement must keep its own meaning.
+
+fn dedented_implicit_return(n: i64) -> i64:
+    var i = 0
+    while i < n:
+        i = i + 1
+    -1
+
+describe("trailing-operator line continuation at the same indentation"):
+    it("continues arithmetic operators onto the next line"):
+        assert_equal(trail_plus(1, 2), 3)
+        assert_equal(trail_minus(5, 2), 3)
+        assert_equal(trail_star(3, 4), 12)
+        assert_equal(trail_slash(8, 2), 4)
+        assert_equal(trail_percent(9, 4), 1)
+
+    it("continues and/or onto the next line"):
+        assert_equal(trail_and(true, false), false)
+        assert_equal(trail_and(true, true), true)
+        assert_equal(trail_or(true, false), true)
+        assert_equal(trail_or(false, false), false)
+
+    it("continues comparison and equality operators onto the next line"):
+        assert_equal(trail_eq(2, 2), true)
+        assert_equal(trail_eq(2, 3), false)
+        assert_equal(trail_lt(1, 2), true)
+        assert_equal(trail_lt(2, 1), false)
+
+    it("continues bitwise operators onto the next line"):
+        assert_equal(trail_bit_or(4, 1), 5)
+        assert_equal(trail_bit_and(6, 3), 2)
+
+    it("absorbs every line of a chain spanning more than two lines"):
+        assert_equal(trail_chain_four(1, 2, 3, 4), 10)
+        assert_equal(trail_chain_logical(true, false, false), false)
+        assert_equal(trail_chain_logical(false, false, true), true)
+
+    it("preserves operator precedence across the folded lines"):
+        assert_equal(trail_chain_precedence(10, 3, 2), 4)
+
+    it("continues in return, reassignment and condition positions"):
+        assert_equal(trail_in_return("boom", "x"), "boom reason=x")
+        assert_equal(trail_in_reassign(5), 10)
+        assert_equal(trail_in_if_condition(2, 1), 1)
+        assert_equal(trail_in_if_condition(1, 2), 0)
+
+    it("does not fold a same-indent line that follows a complete expression"):
+        assert_equal(same_indent_not_folded(7), 7)
+        assert_equal(dedented_implicit_return(3), -1)
