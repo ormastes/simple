@@ -1,0 +1,114 @@
+#!/bin/sh
+# Reproduce the unbacked-extern census (report only; never gates).
+#
+# Classifies every distinct `extern`-declared symbol in owned .spl source by
+# whether anything actually backs it AT RUNTIME, rather than by whether its
+# name appears somewhere in C/Rust text. That distinction matters: the older
+# scripts/check/check-extern-registration.shs scores a symbol "registered" if
+# `sym(` appears anywhere in any .c/.h/.rs file, so every CALL SITE counts as
+# evidence of a DEFINITION and the unbacked count comes out far too low.
+#
+# Backed tiers, in priority order:
+#   bare_exempt             @extern("bare", ...) — freestanding, host-unresolvable by design
+#   in_deployed_binary      defined symbol in the deployed `simple` (nm --defined-only)
+#   libc_libm               defined in libc/libm/libgcc_s, i.e. resolvable by dlsym
+#   interp_extern_registry  a string literal in interpreter_extern/**.rs (name-dispatched)
+# Candidate-unbacked sub-classes:
+#   c_runtime_source_only     defined in owned src/runtime/*.c but absent from the seed binary
+#   rust_source_feature_gated `pub extern "C" fn` in src/compiler_rust but absent from the binary
+#   external_library_symbol   SDL_/gl/cu/vk/... — resolved from a dlopen'd library, if present
+#   SHADOWED_BY_SPL_FN        a pure-Simple `fn` of the same name exists somewhere
+#   DEAD_DECLARATION          zero call sites in the declaring module's own directory
+#   GENUINELY_MISSING         live call sites in the declaring module, no backing found
+#
+# Call sites are counted MODULE-SCOPED (declaring file's directory), not
+# tree-wide: Simple resolution is module-scoped, so a tree-wide count credits
+# `env_get`/`json_parse`/`path_join`-style name collisions with thousands of
+# calls that never reach the extern. Tree-wide scoring inflated
+# GENUINELY_MISSING from 1,203 to 1,320 in exactly that way.
+#
+# Usage: sh scripts/check/extern-backing-census.shs [output.tsv]
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${root}"
+OUT="${1:-/dev/stdout}"
+BIN="${SIMPLE_BIN:-${root}/bin/release/x86_64-unknown-linux-gnu/simple}"
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
+
+grep -rnE --include='*.spl' --exclude-dir=vendor \
+  '@extern|^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+fn[[:space:]]' src test 2>/dev/null \
+| perl -ne 'chomp; next unless /^([^:]+):(\d+):(.*)$/; my($f,$l,$t)=($1,$2,$3); next if $t=~/^\s*#/;
+  my($abi,$sym)=("host","");
+  if($t=~/\@extern\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/){$abi=$1;$sym=$2;}
+  elsif($t=~/\@extern\(\s*"([^"]+)"\s*\)/){$sym=$1;}
+  elsif($t=~/\@extern\s+fn\s+([A-Za-z_]\w*)/){$sym=$1;}
+  elsif($t=~/^\s*(?:pub\s+)?extern\s+fn\s+([A-Za-z_]\w*)/){$sym=$1;}
+  print "$abi\t$sym\t$f:$l\n" if $sym ne "";' | sort -u > "$W/decls.tsv"
+
+n=$(wc -l < "$W/decls.tsv" | tr -d ' ')
+if [ "$n" -lt 5000 ]; then
+  echo "ERROR — nothing was checked: only $n declarations found; the extractor is broken." >&2
+  exit 2
+fi
+[ -x "$BIN" ] || { echo "ERROR — nothing was checked: no binary at $BIN" >&2; exit 2; }
+
+cut -f2 "$W/decls.tsv" | sort -u > "$W/syms.txt"
+awk -F'\t' '$1=="bare"{print $2}' "$W/decls.tsv" | sort -u > "$W/bare.txt"
+nm -a --defined-only "$BIN" 2>/dev/null | awk '{print $NF}' | sort -u > "$W/bin.txt"
+for L in libc.so.6 libm.so.6 libgcc_s.so.1 libpthread.so.0 libdl.so.2; do
+  [ -e "/lib/x86_64-linux-gnu/$L" ] && nm -D --defined-only "/lib/x86_64-linux-gnu/$L" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/@.*//'
+done | sort -u > "$W/libc.txt"
+grep -rhoE '"[A-Za-z_][A-Za-z0-9_]{2,}"' src/compiler_rust/compiler/src/interpreter_extern/ --include=*.rs \
+  | tr -d '"' | sort -u > "$W/interp.txt"
+find src/runtime \( -name '*.c' -o -name '*.h' \) | grep -v '/vendor/' \
+  | grep -vE 'miniaudio.h|stb_image.h|stb_truetype.h' > "$W/cfiles.txt"
+xargs -a "$W/cfiles.txt" grep -hoE '^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\([^;]*$' 2>/dev/null \
+  | grep -oE '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' | tr -d ' (' | sort -u > "$W/cdefs.txt"
+grep -rhoE '(pub[[:space:]]+(unsafe[[:space:]]+)?extern[[:space:]]+"C"[[:space:]]+fn|#\[no_mangle\][[:space:]]*pub[[:space:]]+fn)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
+  src/compiler_rust --include=*.rs 2>/dev/null | awk '{print $NF}' | sort -u > "$W/rsdefs.txt"
+grep -rhoE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' --include='*.spl' \
+  --exclude-dir=vendor src test 2>/dev/null | awk '{print $NF}' | sort -u > "$W/splfns.txt"
+sed 's/$/(/' "$W/syms.txt" > "$W/needles.txt"
+grep -rnoFf "$W/needles.txt" --include='*.spl' --exclude-dir=vendor src test 2>/dev/null > "$W/occ.txt" || :
+
+W="$W" OUT="$OUT" python3 - <<'PY'
+import os,collections
+W=os.environ["W"]; OUT=os.environ["OUT"]
+S=lambda f:set(open(f"{W}/{f}").read().split())
+syms=[l.strip() for l in open(f"{W}/syms.txt") if l.strip()]; sset=set(syms)
+declfiles=collections.defaultdict(set); decllines=collections.defaultdict(set)
+for L in open(f"{W}/decls.tsv"):
+    a=L.rstrip("\n").split("\t")
+    if len(a)<3: continue
+    f,ln=a[2].rsplit(":",1); declfiles[a[1]].add(f); decllines[a[1]].add((f,ln))
+occ=collections.defaultdict(list)
+for L in open(f"{W}/occ.txt"):
+    try: f,ln,m=L.rstrip("\n").split(":",2)
+    except ValueError: continue
+    s=m.rstrip("(")
+    if s in sset: occ[s].append((f,ln))
+bare,binf,libc,interp=S("bare.txt"),S("bin.txt"),S("libc.txt"),S("interp.txt")
+cdefs,rsdefs,splfns=S("cdefs.txt"),S("rsdefs.txt"),S("splfns.txt")
+EXT=("SDL_","SDL3_","sqlite3_","gl","cu","nv","cl","Vk","vk","av","Py_","ma_","stbi_","curl_","SSL_","EVP_","BIO_","X509_","LLVM")
+rows=[];c=collections.Counter()
+for s in syms:
+    dfs=declfiles[s]; dirs={os.path.dirname(f) for f in dfs}
+    n=len([1 for (f,l) in occ[s] if (f,l) not in decllines[s] and (f in dfs or os.path.dirname(f) in dirs)])
+    if   s in bare:   k="bare_exempt"
+    elif s in binf:   k="in_deployed_binary"
+    elif s in libc:   k="libc_libm"
+    elif s in interp: k="interp_extern_registry"
+    elif s in cdefs:  k="c_runtime_source_only"
+    elif s in rsdefs: k="rust_source_feature_gated"
+    elif s.startswith(EXT): k="external_library_symbol"
+    elif n==0:        k="DEAD_DECLARATION"
+    elif s in splfns: k="SHADOWED_BY_SPL_FN"
+    else:             k="GENUINELY_MISSING"
+    c[k]+=1; rows.append((s,k,n,sorted(dfs)[0] if dfs else ""))
+with open(OUT,"w") as fh:
+    fh.write("symbol\tclass\tscoped_callsites\tfirst_declaring_file\n")
+    for r in sorted(rows,key=lambda t:(t[1],-t[2],t[0])): fh.write("\t".join(map(str,r))+"\n")
+import sys
+for k,v in c.most_common(): print(f"{v:6d}  {k}", file=sys.stderr)
+print(f"{len(syms):6d}  TOTAL distinct extern symbols", file=sys.stderr)
+PY

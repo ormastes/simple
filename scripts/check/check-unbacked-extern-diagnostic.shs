@@ -1,0 +1,143 @@
+#!/bin/sh
+# Guard: the unbacked-extern diagnostic must fire for BOTH terminal shapes.
+#
+# WHY THIS EXISTS
+# ---------------
+# `interp_call_handler` (src/compiler_rust/compiler/src/interpreter_sffi.rs) is
+# `extern "C" -> RuntimeValue` and has NO error channel: every failure becomes
+# `RuntimeValue::NIL`. The only defence against a fabricated nil is the
+# diagnostic in `report_unbacked_extern` -- warn-only by default,
+# fatal under `SIMPLE_STRICT_EXTERN=1`.
+#
+# That defence had a hole. There are TWO terminal "nothing backs this name"
+# shapes, and until 2026-08-18 only one of them armed it:
+#
+#   shape A  un-prefixed name  -> handler's own `else` arm, sets UNBACKED_EXTERN
+#   shape B  rt_*/spl_* name   -> call_extern_function_with_values(), whose
+#                                 fall-through returns E1002
+#                                 "unknown extern function: <name>" and never
+#                                 touched UNBACKED_EXTERN
+#
+# Shape B is the MAJORITY: 3,206 of 3,952 distinct declared extern symbols in
+# this tree are rt_/spl_-prefixed (census 2026-08-18). So both the default
+# warning and SIMPLE_STRICT_EXTERN=1 were silently INERT for ~81% of the
+# declaration surface -- a flag that looks like a safety net and catches
+# nothing is worse than no flag, because it converts an open question into a
+# false all-clear. Measured before the fix:
+#
+#   extern fn rt_lane_absent_probe_xyz(x: i64) -> i64
+#   $ SIMPLE_STRICT_EXTERN=1 bin/simple run probe.spl
+#   got 0                          # rc=0, no warning, no refusal
+#   $ SIMPLE_STRICT_EXTERN=1 bin/simple run probe_unprefixed.spl
+#   error: extern `lane_absent_probe_xyz` ... refuses to substitute nil for it.
+#   rc=1                           # the sibling DID refuse
+#
+# This guard pins both shapes so shape B cannot silently regress to inert.
+#
+# WHAT IS DELIBERATELY *NOT* ASSERTED
+# -----------------------------------
+# That the default is strict. It is not, and flipping it today is unsafe: the
+# same census found 1,203 declared symbols with no backing anywhere and live
+# call sites in their own module. See
+# doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md for the
+# staged promotion plan. This guard asserts only that the DIAGNOSTIC is armed
+# and that the OPT-IN works -- i.e. that stage 1 holds -- and it asserts the
+# default lane still exits 0, so a premature default flip trips it.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "${root}"
+
+SIMPLE_BIN="${SIMPLE_BIN:-${root}/bin/simple}"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+EV_CHECKED=0
+FAILS=""
+
+fail() { FAILS="${FAILS}
+  - $1"; }
+
+# Non-vacuity: absence of a binary is absence of evidence, never a pass.
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "ERROR — nothing was checked: no executable at $SIMPLE_BIN"
+  exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# One case = one fixture, run twice (default lane, strict lane).
+#   $1 label   $2 extern symbol
+# Asserts:
+#   default : rc 0, stderr carries the warning naming the symbol   (warn-only)
+#   strict  : rc 1, stderr carries the refusal naming the symbol
+#             and NOT rc 134 -- a fully-diagnosed refusal must not look like a
+#             crash (this regressed once; see the bug doc, 2026-08-18).
+# ---------------------------------------------------------------------------
+probe() {
+  label=$1; sym=$2
+  f="$work/${label}.spl"
+  cat > "$f" <<EOF
+extern fn ${sym}(x: i64) -> i64
+
+fn main() -> i64:
+    val r = ${sym}(7)
+    print "got {r}"
+    0
+EOF
+
+  # --- default lane: warn, do not change the exit status -------------------
+  out="$work/${label}.default.err"
+  set +e
+  SIMPLE_STRICT_EXTERN= timeout 300 "$SIMPLE_BIN" run "$f" >"$work/${label}.default.out" 2>"$out"
+  rc=$?
+  set -e
+  EV_CHECKED=$((EV_CHECKED + 1))
+  if [ "$rc" -ne 0 ]; then
+    fail "[$label] default lane exited $rc, expected 0 (warn-only must not change exit status)"
+  fi
+  if ! grep -q "warning: extern \`${sym}\`" "$out"; then
+    fail "[$label] default lane printed no unbacked-extern warning naming ${sym} — the diagnostic is INERT for this shape"
+  fi
+
+  # --- strict lane: refuse cleanly ----------------------------------------
+  out="$work/${label}.strict.err"
+  set +e
+  SIMPLE_STRICT_EXTERN=1 timeout 300 "$SIMPLE_BIN" run "$f" >"$work/${label}.strict.out" 2>"$out"
+  rc=$?
+  set -e
+  EV_CHECKED=$((EV_CHECKED + 1))
+  if [ "$rc" -eq 134 ]; then
+    fail "[$label] strict lane exited 134 (SIGABRT/core dump) — a diagnosed refusal must exit 1, not abort()"
+  elif [ "$rc" -ne 1 ]; then
+    fail "[$label] strict lane exited $rc, expected 1 — SIMPLE_STRICT_EXTERN=1 is INERT for this shape"
+  fi
+  if ! grep -q "SIMPLE_STRICT_EXTERN=1 refuses to substitute nil" "$out"; then
+    fail "[$label] strict lane printed no refusal diagnostic naming ${sym}"
+  fi
+  if ! grep -q "$sym" "$out"; then
+    fail "[$label] strict lane refusal did not name the symbol ${sym}"
+  fi
+}
+
+# shape A — un-prefixed: reaches interp_call_handler's own `else` arm.
+probe unprefixed lane_unbacked_probe_shape_a
+# shape B — rt_-prefixed: reaches call_extern_function_with_values' E1002
+#           fall-through. THIS is the one that was inert, and it is the
+#           majority form in the tree. Do not delete it.
+probe rt_prefixed rt_lane_unbacked_probe_shape_b
+# shape B' — spl_-prefixed: same branch as B, different prefix. Both prefixes
+#            are named in the same `else if`, so a partial regression that
+#            keeps one and drops the other is possible.
+probe spl_prefixed spl_lane_unbacked_probe_shape_b
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked: no probe ran"
+  exit 2
+fi
+
+if [ -n "$FAILS" ]; then
+  echo "FAIL — $EV_CHECKED probe run(s) checked, defects found:$FAILS"
+  exit 1
+fi
+
+echo "PASS — $EV_CHECKED probe run(s) checked, unbacked-extern diagnostic armed on all shapes"
+exit 0

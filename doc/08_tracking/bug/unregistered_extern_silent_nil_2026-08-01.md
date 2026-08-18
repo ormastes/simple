@@ -654,3 +654,192 @@ the emulation cores (`rt_arm64`/`rt_arm32`/`rt_rv32`/`rt_x86`, need a loaded
 guest image), `rt_torch` (needs libtorch), and the network stacks
 (`rt_tls13`/`rt_ssh`/`rt_quic`, need a live peer). For those the disposition
 rests on source evidence only and is labelled INFERRED, not PROVED.
+
+---
+
+# 2026-08-18 — census, the inert-strict-mode defect, and the promotion sequence
+
+## Difficulty: HARD (the default flip), MODERATE (what was actually shipped)
+
+Not because any one change is intricate, but because the blocking constraint is
+structural: `interp_call_handler` is `extern "C" -> RuntimeValue` with **no
+error channel**. Every failure inside it is already a `RuntimeValue::NIL` by the
+time the caller sees it, so "return an error" is not available without changing
+the ABI of a symbol the JIT emits calls to. The only two levers inside the
+current signature are (a) print a diagnostic and (b) terminate the process.
+That is why the strict lane is `process::exit(1)` and not a propagated error,
+and why "make it strict" is a policy question about 1,203 real call sites rather
+than a code question.
+
+## Defect found and FIXED: `SIMPLE_STRICT_EXTERN=1` was INERT for ~81% of externs
+
+This is the headline. The flag that exists to measure the blast radius could
+not see most of the tree.
+
+There are **two** terminal "nothing backs this name" shapes in
+`interp_call_handler`, and only one of them armed the diagnostic:
+
+| shape | name form | terminal branch | set `UNBACKED_EXTERN`? |
+|---|---|---|---|
+| A | un-prefixed | the handler's own `else` arm | yes |
+| B | `rt_*` / `spl_*` | `call_extern_function_with_values()` fall-through, `error_utils::unknown_function` → E1002 `unknown extern function: <name>` | **no** |
+
+Shape B is the majority form: **3,206 of 3,952** distinct declared extern
+symbols are `rt_`/`spl_`-prefixed. Measured on the deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`, md5
+`f4d7a685e131bc863042322ce25c8f88`) with two fixtures identical except for the
+symbol name:
+
+```
+extern fn rt_lane_absent_probe_xyz(x: i64) -> i64
+$ SIMPLE_STRICT_EXTERN=1 bin/simple run probe_rt.spl
+got 0                                     # rc=0 — no warning, no refusal
+
+extern fn lane_absent_probe_xyz(x: i64) -> i64
+$ SIMPLE_STRICT_EXTERN=1 bin/simple run probe_plain.spl
+error: extern `lane_absent_probe_xyz` ... refuses to substitute nil for it.
+                                          # rc=1 — the sibling DID refuse
+```
+
+So the earlier "SIMPLE_STRICT_EXTERN=1 exists and works" was true only for the
+746 un-prefixed symbols. A flag that looks like a safety net and catches nothing
+is worse than no flag: it converts an open question into a false all-clear.
+
+**Fix** (`src/compiler_rust/compiler/src/interpreter_sffi.rs`, the `Err` arm of
+`interp_call_handler`): shape B is now recognised by its exact E1002 message,
+anchored to `name`, and arms the same diagnostic. Anchoring to the name matters
+— E1002 is also raised for ordinary undefined calls, so the code alone would
+misattribute an error raised *inside* a real extern body.
+
+**This is warn-only by default, so it changes no program's value and no exit
+status.** Verified: the default lane still prints `got 0` and exits 0 for both
+shapes; only a once-per-name stderr warning is new (silenceable with
+`SIMPLE_QUIET_EXTERN_WARN=1`).
+
+Regression guard: `scripts/check/check-unbacked-extern-diagnostic.shs`
+(3 fixtures × 2 lanes = 6 probe runs; asserts warn-only keeps rc 0, strict
+gives rc 1 and specifically **not** 134). Proven RED-before / GREEN-after:
+
+```
+$ SIMPLE_BIN=<pre-fix seed>  sh scripts/check/check-unbacked-extern-diagnostic.shs
+FAIL — 6 probe run(s) checked, defects found:
+  - [rt_prefixed]  default lane printed no unbacked-extern warning ... INERT
+  - [rt_prefixed]  strict lane exited 0, expected 1 ... INERT
+  - [spl_prefixed] (same two)  ... rc=1
+$ SIMPLE_BIN=<rebuilt seed>  sh scripts/check/check-unbacked-extern-diagnostic.shs
+PASS — 6 probe run(s) checked, unbacked-extern diagnostic armed on all shapes
+```
+
+The un-prefixed probe passes on **both** binaries, which is what isolates the
+failure to shape B rather than to the harness.
+
+## The census
+
+Reproduce: `sh scripts/check/extern-backing-census.shs <out.tsv>`.
+Data: `doc/08_tracking/bug/data/unbacked_extern_census_2026-08-18.tsv`.
+
+**3,952 distinct extern symbols** across 14,898 declaration sites (owned scope,
+`src` + `test`, vendored excluded).
+
+| n | class | backed? |
+|---|---|---|
+| 1,418 | `in_deployed_binary` — defined symbol per `nm --defined-only` | yes |
+| 663 | `interp_extern_registry` — name-dispatched in `interpreter_extern/**` | yes |
+| 59 | `libc_libm` — resolvable by dlsym | yes |
+| 38 | `bare_exempt` — `@extern("bare", …)`, freestanding by design | exempt |
+| 165 | `c_runtime_source_only` — in owned `src/runtime/*.c`, absent from the seed | native lane only |
+| 49 | `rust_source_feature_gated` — `pub extern "C" fn` present, absent from this build | build-config |
+| 10 | `external_library_symbol` — SDL/gl/cu/vk… from a dlopen'd lib | if installed |
+| 85 | `SHADOWED_BY_SPL_FN` — a pure-Simple `fn` of that name exists | ambiguous |
+| **262** | **`DEAD_DECLARATION`** — zero call sites in the declaring module | **deletable now** |
+| **1,203** | **`GENUINELY_MISSING`** — live module-scoped call sites, no backing found | **no** |
+
+Two methodology points, both of which move the number materially:
+
+- **The old ~919 figure came from a text scan.** `check-extern-registration.shs`
+  scores a symbol "registered" when `sym(` appears anywhere in any `.c/.h/.rs`
+  file — every **call site** counts as evidence of a **definition**. This census
+  uses real symbol tables (`nm`) plus the interpreter's name-dispatch literals.
+- **Call sites are counted MODULE-SCOPED**, not tree-wide. Simple resolution is
+  module-scoped, so a tree-wide count credits name collisions
+  (`env_get` 2,442 "calls", `json_parse` 283, `path_join` 176, `size_of` 115)
+  to an extern those calls never reach. Tree-wide scoring inflated
+  GENUINELY_MISSING from 1,203 to 1,320 purely that way.
+
+### Where the 1,203 live
+
+| n | declaring area |
+|---|---|
+| 212 | `src/os/kernel` |
+| 205 | `src/lib/nogc_sync_mut` |
+| 171 | `src/app/io` |
+| 151 | `src/compiler_rust/lib` |
+| 66 | `src/lib/common` |
+| 49 | `src/lib/gc_async_mut` |
+| 41 | `src/os/drivers` |
+
+Largest single families by module-scoped call volume: `spl_free_buffer` (351),
+`spl_load_i64` (195), `rt_push_byte` (194), `spl_alloc_buffer` (186),
+`spl_store_u8` (170) — i.e. the T32/SFFI buffer family and
+`src/runtime/simple_core/core_array.spl`'s raw memory primitives.
+
+## Why the default was NOT flipped — with the evidence
+
+**No subset boundary in this tree is clean.** That is the finding that kills the
+obvious stage-2 design. Every top-level area has GENUINELY_MISSING symbols:
+
+```
+374/1469  src/lib          370/ 575  src/os        207/ 668  src/app
+151/ 805  src/compiler_rust  61/ 236  src/compiler   27/  67  test/01_unit
+```
+
+So "strict for a named clean prefix or directory" cannot be implemented today —
+there is no such prefix and no such directory. Flipping globally would turn
+1,203 symbols with live call sites into hard process exits. **Not done, and it
+should not be done as a flag flip.**
+
+## Sequenced promotion
+
+- **Stage 0 — clean refusal** (DONE, `8beeb621c70f`). Strict mode exits 1 with a
+  diagnostic instead of `abort()`/134/core dump.
+- **Stage 1 — arm the diagnostic on ALL shapes** (DONE, this change). Warn-only
+  default, so nothing breaks; `SIMPLE_STRICT_EXTERN=1` becomes meaningful for
+  the 3,206 `rt_`/`spl_` symbols it previously ignored. **Breaks nothing:
+  measured — same values, same exit statuses, one new stderr line per distinct
+  name.** Without this stage every later stage is unmeasurable, which is the
+  real reason it comes first.
+- **Stage 2 — delete the 262 `DEAD_DECLARATION` symbols.** Zero call sites in
+  their declaring module, so removal is a no-op at runtime and shrinks the
+  surface by 15% of the candidate set for free. Breaks nothing by construction;
+  each deletion is individually verifiable by re-running the census.
+- **Stage 3 — baseline ratchet, NOT a prefix.** Since no directory is clean, the
+  boundary must be the census itself: strict-by-default for any unbacked extern
+  **not** in a frozen baseline (the 1,203, checked in as the census TSV), while
+  baselined symbols stay warn-only. Effect: every **new** unbacked extern is
+  fatal from day one; the existing backlog cannot grow. This is the same
+  ratchet pattern as `test_tree_divergence_baseline.txt` and
+  `extern_abi_signature_baseline.txt`. Cost to be measured before landing: one
+  baseline load per process in a hot path; the diagnostic is already
+  once-per-name so the lookup can be too.
+- **Stage 4 — retire families, shrink the baseline.** Ordered by call volume:
+  the `spl_*` buffer/memory family (~1,100 module-scoped calls across ~10
+  symbols) first, then `src/os/kernel` (212 symbols — many of which are
+  arguably mis-tagged and should carry `@extern("bare", …)`, which would move
+  them to `bare_exempt` rather than requiring an implementation).
+- **Stage 5 — global strict default**, only once the baseline reaches zero.
+  Not before, and not on a schedule.
+
+Note that stage 4's kernel bucket is partly a **tagging** problem, not an
+implementation problem: 370 of 575 `src/os` externs are unbacked on the host
+because they are freestanding, yet only 38 symbols tree-wide carry the `bare`
+ABI tag. Correctly tagging those is cheaper than implementing them and is
+probably the single highest-leverage item in the backlog.
+
+## Not fixed here
+
+The native/AOT lane's weak-stub fabrication is a **separate** defect with its
+own record
+(`native_build_fabricates_weak_stub_for_unimplemented_extern_2026-08-18.md`).
+This change is JIT/interpreter-lane only. Confirmed still reproducing: the
+un-prefixed probe returns `got 3` — a fabricated value, not nil — under the
+default lane on both the old and the new binary.

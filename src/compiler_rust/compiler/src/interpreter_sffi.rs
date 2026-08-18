@@ -824,7 +824,39 @@ unsafe extern "C" fn interp_call_handler(
             // Distinguish "no implementation exists" from a genuine error
             // raised inside a real extern. Only the former is the silent-nil
             // defect this diagnostic targets.
-            if UNBACKED_EXTERN.with(|f| f.replace(false)) {
+            //
+            // TWO terminal "nothing backs this name" shapes exist, not one:
+            //
+            //   1. The `else` arm above sets UNBACKED_EXTERN directly. It is
+            //      reached ONLY by names that are neither `rt_`- nor `spl_`-
+            //      prefixed nor in `interp_call_uses_extern_dispatch`.
+            //   2. An `rt_`/`spl_`-prefixed name goes to
+            //      `call_extern_function_with_values`, whose own terminal
+            //      fall-through returns `error_utils::unknown_function(name)`
+            //      -- `unknown extern function: <name>` (E1002). That arm
+            //      never touched UNBACKED_EXTERN.
+            //
+            // Shape 2 is the MAJORITY of this tree's externs (measured
+            // 2026-08-18: 3,206 of 3,952 distinct declared symbols are
+            // `rt_`/`spl_`-prefixed), so until this branch existed both the
+            // default warning AND `SIMPLE_STRICT_EXTERN=1` were silently INERT
+            // for ~81% of the declaration surface. Measured before the fix:
+            //
+            //   extern fn rt_lane_absent_probe_xyz(x: i64) -> i64
+            //   $ SIMPLE_STRICT_EXTERN=1 bin/simple run probe.spl
+            //   got 0        # rc=0, no warning, no refusal
+            //
+            // versus the un-prefixed sibling in the same shape, which exited 1
+            // with the refusal diagnostic. Detecting shape 2 by its exact
+            // message is deliberate: `CompileError` carries no dedicated
+            // "unbacked extern" variant, and E1002/UNDEFINED_FUNCTION is also
+            // raised for ordinary undefined calls, so the code alone would
+            // over-report. The needle is anchored to THIS name so an E1002
+            // about some other symbol raised *inside* a real extern body is
+            // not misattributed to `name`.
+            let unbacked = UNBACKED_EXTERN.with(|f| f.replace(false))
+                || format!("{e:?}").contains(&format!("unknown extern function: {name}\""));
+            if unbacked {
                 report_unbacked_extern(name, args.len());
             }
             simple_runtime::RuntimeValue::NIL
