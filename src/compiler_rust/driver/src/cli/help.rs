@@ -342,6 +342,24 @@ mod tests {
         assert!(help.contains("doc/06_spec/image"));
         assert!(help.contains("simple test [path] [options]"));
     }
+
+    /// `--unstable` / `--no-unstable` must stay discoverable: the mode is only
+    /// "an explicit option" if a human can find it from `simple help test`.
+    /// Contract mirrored here from `src/app/test_runner_new/test_runner_single.spl`
+    /// (six-class outcome set) and `test_runner_main.spl` (per-path default).
+    #[test]
+    fn test_test_help_documents_unstable_mode_and_its_per_path_default() {
+        let help = test_help_text();
+        assert!(help.contains("--unstable"));
+        assert!(help.contains("--no-unstable"));
+        for outcome in [
+            "OK", "ERROR", "CRASHED", "TERMINATED", "TIMEOUT", "NOT_RUN",
+        ] {
+            assert!(help.contains(outcome), "help must name outcome {outcome}");
+        }
+        assert!(help.contains("unverified, not failures"));
+        assert!(help.contains("ON for the bootstrap path, OFF for interactive runs"));
+    }
 }
 
 pub fn print_version() {
