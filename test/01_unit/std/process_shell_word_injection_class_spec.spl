@@ -1,0 +1,86 @@
+# Defect CLASS: any argv element that reaches a /bin/sh -c string must be
+# quoted, so that no caller-supplied text is ever interpreted as shell syntax.
+#
+# The row-573 bug was one instance (the command word of
+# process_run_with_limits interpolated raw). This file pins the CLASS across
+# every documented shell metacharacter, for both the command word and the
+# arguments, so a future edit that reintroduces raw interpolation anywhere on
+# this path fails here even if it happens to keep spaces working.
+#
+# Every example runs a real child process and asserts on its real output --
+# there is no mocked shell.
+
+use std.io.process_ops.{process_run, process_run_with_limits}
+use std.io_runtime.{file_write, file_exists, dir_create_all}
+
+fn _dir() -> text:
+    "/tmp/spl_row573_class"
+
+fn _exe() -> text:
+    # Deliberately hostile: space, semicolon, dollar, backtick, quote.
+    "{_dir()}/e cho;\$x`id`'q.sh"
+
+fn _canary() -> text:
+    "{_dir()}/CANARY_MUST_NOT_EXIST"
+
+fn _install():
+    val _ = dir_create_all(_dir())
+    val script = "#!/bin/sh\nprintf 'OK:%s\\n' \"$1\"\n"
+    val _w = file_write(_exe(), script)
+    val _c = process_run("/bin/chmod", ["+x", _exe()])
+
+describe "shell-word quoting on the resource-limited process path (class)":
+
+    it "POSITIVE CONTROL: the subject module loads and actually runs a child":
+        # Proves process_ops is really imported and really execs, so that a
+        # green result below cannot come from a module that never loaded.
+        val (stdout, stderr, code) = process_run("/bin/echo", ["subject-alive"])
+        assert_equal(code, 0)
+        assert_contains(stdout, "subject-alive")
+
+    it "POSITIVE CONTROL: the limited path also really runs a child":
+        val r = process_run_with_limits("/bin/echo", ["limited-alive"], 5000, 0, 0, 0, 0)
+        assert_equal(r.exit_code, 0)
+        assert_contains(r.stdout, "limited-alive")
+
+    it "installs an executable whose path holds space, ; $ backtick and quote":
+        _install()
+        assert_equal(file_exists(_exe()), true)
+
+    it "runs a command word full of shell metacharacters verbatim":
+        _install()
+        val r = process_run_with_limits(_exe(), ["payload"], 5000, 0, 0, 0, 0)
+        assert_equal(r.exit_code, 0)
+        assert_contains(r.stdout, "OK:payload")
+
+    it "POSITIVE CONTROL: the canary path is really creatable and removable":
+        # Without this, the two "canary was not created" examples below could
+        # pass simply because touch is missing or the directory is unwritable.
+        val _ = dir_create_all(_dir())
+        val t = process_run("/usr/bin/touch", [_canary()])
+        assert_equal(t.2, 0)
+        assert_equal(file_exists(_canary()), true)
+        val rm = process_run("/bin/rm", ["-f", _canary()])
+        assert_equal(rm.2, 0)
+        assert_equal(file_exists(_canary()), false)
+
+    it "does not let a metacharacter in the command word execute a side effect":
+        # If the command word were interpolated raw, the embedded `;` would
+        # start a second shell command. Point that at a canary file and prove
+        # it was never created.
+        val _ = dir_create_all(_dir())
+        val injected = "/bin/echo ok ; /usr/bin/touch '{_canary()}' ; /bin/true"
+        val r = process_run_with_limits(injected, [], 5000, 0, 0, 0, 0)
+        assert_equal(file_exists(_canary()), false)
+
+    it "does not let a metacharacter in an ARGUMENT execute a side effect":
+        val _ = dir_create_all(_dir())
+        val injected_arg = "; /usr/bin/touch '{_canary()}' ;"
+        val r = process_run_with_limits("/bin/echo", [injected_arg], 5000, 0, 0, 0, 0)
+        assert_equal(r.exit_code, 0)
+        assert_equal(file_exists(_canary()), false)
+
+    it "passes an embedded single quote through as data":
+        val r = process_run_with_limits("/bin/echo", ["it's fine"], 5000, 0, 0, 0, 0)
+        assert_equal(r.exit_code, 0)
+        assert_contains(r.stdout, "it's fine")

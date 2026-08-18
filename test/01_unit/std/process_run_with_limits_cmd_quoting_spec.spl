@@ -1,0 +1,61 @@
+# Reproducer: process_run_with_limits lost argv fidelity on the command word.
+#
+# todo_db row 573 (area runtime, P1) asks for provider-complete timeout/capture
+# with argv preservation. Unlike process_run and process_run_timeout_unix --
+# which pass argv through untouched, or single-quote-escape BOTH cmd and args
+# (src/lib/nogc_sync_mut/io/process_ops.spl:166-167) -- the resource-limited
+# path built its /bin/sh -c string by interpolating `cmd` RAW while escaping
+# only the arguments.
+#
+# RED before the fix, with the executable at a path containing a space:
+#   process_run           -> exit 0, argv intact
+#   process_run_with_limits -> exit 127
+#     "timeout: failed to run command '/mnt/data/tmp/p1rt/dir': No such file
+#      or directory"
+# The shell split the command at the space and `timeout` execed the prefix.
+#
+# Fix: escape the command word with the same single-quote scheme as the args.
+
+use std.io.process_ops.{process_run, process_run_with_limits}
+use std.io_runtime.{file_write, file_exists, dir_create_all}
+
+fn _fixture_dir() -> text:
+    "/tmp/spl_row573_dir with space"
+
+fn _fixture_exe() -> text:
+    "{_fixture_dir()}/echo args.sh"
+
+fn _install_fixture():
+    val _ = dir_create_all(_fixture_dir())
+    val script = "#!/bin/sh\nprintf 'ARG0=[%s]\\n' \"$1\"\nprintf 'ARG1=[%s]\\n' \"$2\"\n"
+    val _w = file_write(_fixture_exe(), script)
+    val _c = process_run("/bin/chmod", ["+x", _fixture_exe()])
+
+describe "process_run_with_limits command-word quoting (row 573)":
+
+    it "installs a fixture executable under a path containing a space":
+        # Positive control: without this the rest of the file proves nothing.
+        _install_fixture()
+        assert_equal(file_exists(_fixture_exe()), true)
+
+    it "process_run preserves argv through a spaced command path (baseline)":
+        _install_fixture()
+        val (stdout, stderr, code) = process_run(_fixture_exe(), ["hello world", "b"])
+        assert_equal(code, 0)
+        assert_contains(stdout, "ARG0=[hello world]")
+        assert_contains(stdout, "ARG1=[b]")
+
+    it "process_run_with_limits preserves argv through a spaced command path":
+        # THE REGRESSION. Before the fix this was exit 127 with an empty
+        # stdout and a `timeout: failed to run command` stderr.
+        _install_fixture()
+        val r = process_run_with_limits(_fixture_exe(), ["hello world", "b"], 5000, 0, 0, 0, 0)
+        assert_equal(r.exit_code, 0)
+        assert_contains(r.stdout, "ARG0=[hello world]")
+        assert_contains(r.stdout, "ARG1=[b]")
+
+    it "does not report a spaced command path as a limit violation":
+        _install_fixture()
+        val r = process_run_with_limits(_fixture_exe(), ["hello world", "b"], 5000, 0, 0, 0, 0)
+        assert_equal(r.limit_exceeded, false)
+        assert_equal(r.limit_type, "")
