@@ -277,6 +277,36 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // `@extern fn name(...) -> T` with NO body is a declaration of an external
+        // symbol, exactly like the `extern fn name(...) -> T` keyword form. Without
+        // this it fell through as a normal FunctionDef with an empty body, which MIR
+        // lowered to an `Unreachable` terminator (a `ud2` trap) and the native-build
+        // mangler then emitted as a STRONG module-mangled *definition* — a green
+        // build producing a binary that SIGILLs on the first call. Routing it to
+        // Node::Extern puts it into `extern_fn_names`, so it gets Linkage::Import and
+        // an unimplemented symbol fails the build by name.
+        // The bodied form `@extern("runtime", "rt_x") fn rt_x(...): <body>` is
+        // untouched: it has a body, so it stays a FunctionDef.
+        if is_abstract
+            && body.statements.is_empty()
+            && generic_params.is_empty()
+            && attributes.iter().any(|attr| attr.name == "extern")
+        {
+            return Ok(Node::Extern(ExternDef {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                name,
+                params,
+                return_type,
+                visibility: Visibility::Private,
+                attributes,
+            }));
+        }
+
         Ok(Node::Function(FunctionDef {
             span: Span::new(
                 start_span.start,

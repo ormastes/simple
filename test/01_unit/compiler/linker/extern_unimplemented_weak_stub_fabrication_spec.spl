@@ -3,7 +3,8 @@
 # Unimplemented `extern fn` must fail the build, never fabricate a value
 
 **Category:** Runtime
-**Status:** In Progress (RED — compiler-side fix not landed as of 2026-08-18)
+**Status:** Implemented (both the `extern fn` keyword form and the `@extern`
+attribute form fail the build by name; verified 2026-08-18)
 
 ## Purpose and Audience
 
@@ -34,7 +35,14 @@ Two fixtures, both built the same way:
   yield a program that prints `got 3`.
 - `test/fixtures/extern_unimplemented_weak_stub/positive/main.spl` declares
   `rt_string_len`, a real exported runtime symbol. It MUST build and print
-  `got 4`. This positive control is what stops the negative assertions from
+  `got 4`.
+- `at_negative/` and `at_positive/` are the same pair written with the
+  `@extern` ATTRIBUTE spelling instead of the `extern fn` keyword. They are
+  separate fixtures because the two spellings took different code paths: the
+  attribute form was parsed as a bodyless ordinary function, never reached
+  `Linkage::Import`, and was emitted as a strong `ud2` definition, so BOTH its
+  cases -- missing symbol AND real runtime symbol -- produced a green build
+  whose binary SIGILLed. This positive control is what stops the negative assertions from
   passing vacuously: a compiler that rejected every `extern fn` would satisfy
   the negative case alone, and this spec would still be wrong to go green.
 
@@ -116,6 +124,60 @@ describe "extern fn with no implementation":
 
         step("and the program must return the runtime's real answer, not a stub")
         expect(out.contains("RUN_RC=0")).to_equal(true)
+        expect(out.contains("RUN_OUT=got 4")).to_equal(true)
+
+
+# ---------------------------------------------------------------------------
+# The `@extern` ATTRIBUTE form. The two examples above drive the `extern fn`
+# KEYWORD form; this pair drives the same promise written the other way round,
+# because the two spellings took entirely different code paths and only the
+# keyword one was fixed. A bodyless `@extern fn` was parsed as an ordinary
+# FunctionDef with an empty body (`is_abstract` is set for any bodyless `fn`),
+# never entered `extern_fn_names`, so it missed the `Linkage::Import` branch;
+# MIR gave it an `Unreachable` terminator and the native mangler emitted a
+# STRONG module-mangled DEFINITION whose whole body was `ud2`. The build exited
+# 0 and the binary SIGILLed (exit 132) on the first call -- loud at runtime, but
+# still a green build that could not produce a working binary.
+#
+# The positive control matters more here than in the keyword pair: before the
+# fix it ALSO SIGILLed, even though `rt_string_len` is a real exported runtime
+# symbol. The `@extern` form was not merely failing to reject missing symbols,
+# it was failing to bind ANY of them. A fix that only made the negative case
+# fail would leave every legitimate `@extern` declaration broken.
+# ---------------------------------------------------------------------------
+
+describe "@extern fn with no implementation":
+    it "fails the build instead of emitting a strong ud2 definition":
+        step("build the @extern-form negative fixture on the in-process native lane")
+        val out = build_and_run("test/fixtures/extern_unimplemented_weak_stub/at_negative")
+
+        step("the build must not succeed")
+        expect(out.contains("BUILD_RC=0")).to_equal(false)
+
+        step("the diagnostic must name the missing symbol")
+        expect(out.contains("lane_definitely_absent_at_probe")).to_equal(true)
+
+        step("no binary may be produced")
+        expect(out.contains("BINARY=no")).to_equal(true)
+
+        step("and therefore nothing can be left to SIGILL at runtime")
+        expect(out.contains("RUN_RC=132")).to_equal(false)
+
+    # Positive control. This one was RED before the fix too -- see the note
+    # above -- so it is load-bearing, not decoration.
+    it "still builds and returns the real value when the @extern is implemented":
+        step("build the @extern-form positive fixture against a real runtime symbol")
+        val out = build_and_run("test/fixtures/extern_unimplemented_weak_stub/at_positive")
+
+        step("the build must succeed and emit a binary")
+        expect(out.contains("BUILD_RC=0")).to_equal(true)
+        expect(out.contains("BINARY=yes")).to_equal(true)
+
+        step("the program must run to completion, not trap on a fabricated definition")
+        expect(out.contains("RUN_RC=132")).to_equal(false)
+        expect(out.contains("RUN_RC=0")).to_equal(true)
+
+        step("and it must return the runtime's real answer")
         expect(out.contains("RUN_OUT=got 4")).to_equal(true)
 
 
