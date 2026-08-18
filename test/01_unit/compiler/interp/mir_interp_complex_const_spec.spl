@@ -1,0 +1,109 @@
+# MIR interpreter complex-constant spec.
+#
+# Oracle for _eval_const in src/compiler/95.interp/mir_interpreter.spl:
+# Str constants register in string_table under stable negative ids
+# (readable via get_const_string); Array/Tuple constants materialize as
+# aggregates (base address >= the 100000 aggregate base, size recorded).
+# Previously these fell to the `case _: 0` stub.
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+fn cc_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn cc_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.new(0),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: nil
+    )
+
+fn cc_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn cc_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: insts, terminator: term)
+
+fn cc_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+# fn: l0 = <const>; ret l0
+fn cc_const_fn(value: MirConstValue) -> MirFunction:
+    val locals = [cc_local(0, LocalKind.Var)]
+    val b0 = cc_blk(0, [
+        cc_inst(MirInstKind.Const(cc_lid(0), value, MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(cc_lid(0)))))
+    cc_fn("const_fn", locals, [b0])
+
+describe "MIR interpreter complex constants":
+    it "string constant registers under a negative id and reads back":
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(cc_const_fn(MirConstValue.Str("hello const")))
+        expect(res[1]).to_be_nil()
+        val id = res[0] ?? 0
+        assert_true(id < 0)
+        val back = interp.get_const_string(id)
+        expect(back ?? "").to_equal("hello const")
+
+    it "two string constants get distinct ids and both read back":
+        var interp = MirInterpreter.create()
+        val r1 = interp.execute_function(cc_const_fn(MirConstValue.Str("first")))
+        val r2 = interp.execute_function(cc_const_fn(MirConstValue.Str("second")))
+        val id1 = r1[0] ?? 0
+        val id2 = r2[0] ?? 0
+        assert_true(id1 != id2)
+        expect(interp.get_const_string(id1) ?? "").to_equal("first")
+        expect(interp.get_const_string(id2) ?? "").to_equal("second")
+
+    it "array constant materializes at an aggregate base address":
+        var interp = MirInterpreter.create()
+        val elems = [MirConstValue.Int(10), MirConstValue.Int(20), MirConstValue.Int(30)]
+        val res = interp.execute_function(cc_const_fn(MirConstValue.Array(elems)))
+        expect(res[1]).to_be_nil()
+        val base = res[0] ?? -1
+        assert_true(base >= 100000)
+
+    it "nested array registers its inner string constant":
+        var interp = MirInterpreter.create()
+        val elems = [MirConstValue.Str("inner"), MirConstValue.Int(7)]
+        val res = interp.execute_function(cc_const_fn(MirConstValue.Array(elems)))
+        expect(res[1]).to_be_nil()
+        val base = res[0] ?? -1
+        assert_true(base >= 100000)
+        # The inner string was registered during recursive const eval:
+        # ids grow downward from -1, so the first registered string is -1.
+        expect(interp.get_const_string(-1) ?? "").to_equal("inner")
+
+    it "scalar zero constant still returns 0":
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(cc_const_fn(MirConstValue.Zero))
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(0)

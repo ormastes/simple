@@ -525,12 +525,73 @@ impl MirInterpreter:
 
     me execute_const(dest: LocalId, value: MirConstValue):
         """Execute constant load."""
+        # Hot path first: scalar constants take the same three arms as before,
+        # with zero extra work. Only complex constants fall to _eval_const.
         val val_int = match value:
             case Int(v): v
             case Float(v): f64_to_bits(v)
             case Bool(v): if v: 1 else: 0
-            case _: 0  # Stub for complex constants
+            case _: self._eval_const(value)
         self.set_local(dest, val_int)
+
+    me _eval_const(value: MirConstValue) -> i64:
+        """Recursively evaluate a constant, storing complex values in tables.
+
+        Strings register in string_table under a stable negative id
+        (readable back via get_const_string). Array/Tuple/Struct constants
+        materialize as aggregates using the same base-address + slot-per-8
+        layout Aggregate/GetField/GetElementPtr already use, so indexed
+        reads on them just work.
+        """
+        match value:
+            case Int(v): v
+            case Float(v): f64_to_bits(v)
+            case Bool(v): if v: 1 else: 0
+            case Str(v): self._store_string(v)
+            case Array(elements): self._store_const_aggregate(elements)
+            case Tuple(elements): self._store_const_aggregate(elements)
+            case Struct(fields):
+                # Field order follows keys() order, matching GetField's
+                # positional field*8 offsets for lowered struct reads.
+                var elems: [MirConstValue] = []
+                for key in fields.keys():
+                    elems.push(fields[key])
+                self._store_const_aggregate(elems)
+            case Zero: 0
+            case _: 0
+
+    me _store_const_aggregate(elements: [MirConstValue]) -> i64:
+        """Materialize a constant aggregate; returns its base address."""
+        val base_addr = self.next_aggregate_id
+        val count = elements.len()
+        self.next_aggregate_id = self.next_aggregate_id + (count * 8) + 8
+        var i = 0
+        for elem in elements:
+            val elem_val = self._eval_const(elem)
+            val slot = LocalId(id: base_addr + (i * 8))
+            self.set_local(slot, elem_val)
+            i = i + 1
+        self.aggregate_sizes[base_addr] = count
+        base_addr
+
+    me _store_string(s: text) -> i64:
+        """Register a string constant; returns its stable (negative) id.
+
+        Ids grow downward from -1 so they can never collide with aggregate
+        base addresses (>= 100000) or small scalar values used as truthy
+        pointers elsewhere.
+        """
+        val id = self.next_string_id
+        self.next_string_id = self.next_string_id - 1
+        self.string_table[id] = s
+        id
+
+    fn get_const_string(id: i64) -> text?:
+        """Look up a registered string constant by its id."""
+        if self.string_table.contains(id):
+            Some(self.string_table[id])
+        else:
+            nil
 
     me execute_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> InterpError?:
         """Evaluate binary operation."""
