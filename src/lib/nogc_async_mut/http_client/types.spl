@@ -60,12 +60,22 @@ fn url_encode(text: text) -> text:
     parts.join("")
 
 fn url_decode(text: text) -> text:
+    # Byte-consistent scan: `run_start` tracks a pending byte RANGE of
+    # untouched input to flush as one slice, so a multibyte UTF-8 codepoint
+    # is never split into single-byte pieces (each of which would decode
+    # to U+FFFD on its own -- see
+    # doc/08_tracking/bug/mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md).
+    # `%`/`+` are always single ASCII bytes, so per-byte comparison via
+    # `.substring(i, i+1)` is safe for detecting them.
     var parts: [text] = []
     var i = 0
     var len = text.length()
+    var run_start = 0
     while i < len:
-        var ch = text.char_at(i)
+        var ch = text.substring(i, i + 1)
         if ch == "%":
+            if run_start < i:
+                parts.push(text.substring(run_start, i))
             if i + 2 < len:
                 var hex = text.substring(i + 1, i + 3)
                 var code = hex.parse_int(16)
@@ -74,12 +84,17 @@ fn url_decode(text: text) -> text:
             else:
                 parts.push(ch)
                 i = i + 1
-        else:
-            if ch == "+":
-                parts.push(" ")
-            else:
-                parts.push(ch)
+            run_start = i
+        elif ch == "+":
+            if run_start < i:
+                parts.push(text.substring(run_start, i))
+            parts.push(" ")
             i = i + 1
+            run_start = i
+        else:
+            i = i + 1
+    if run_start < len:
+        parts.push(text.substring(run_start, len))
     parts.join("")
 
 fn url_encode_component(component: text) -> text:

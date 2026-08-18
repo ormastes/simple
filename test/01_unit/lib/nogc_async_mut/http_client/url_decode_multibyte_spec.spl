@@ -1,0 +1,58 @@
+# @req REQ-BUG-MIXED-INDEX-URL-DECODE
+#
+# Regression spec for
+# doc/08_tracking/bug/mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md:
+# `url_decode` (src/lib/nogc_async_mut/http_client/types.spl) looped
+# `while i < text.length()` (BYTE length) calling `.char_at(i)` (CODEPOINT
+# index) and pushing the result to reconstruct the output. Multibyte input
+# was reconstructed WRONG.
+#
+# Pre-fix repro (captured verbatim via `git stash` + `bin/simple run`):
+#   url_decode("caf\u{e9}")
+#   assert_equal failed: expected café, got caf<invalid utf-8 byte>
+#
+# A naive first fix attempt (swap `.char_at(i)` for `.substring(i, i + 1)`
+# but keep pushing/joining ONE byte at a time) still corrupted multibyte
+# input -- each single BYTE of a multibyte codepoint is independently
+# invalid UTF-8, so slicing and immediately re-joining single bytes does not
+# round-trip:
+#   assert_equal failed: expected café, got caf<invalid><invalid>
+#
+# Real fix: track a pending byte-RANGE (`run_start`) and flush it as ONE
+# `.substring(run_start, i)` slice whenever a `%`/`+` control byte is found,
+# never reconstructing byte-by-byte. `.substring(i, i + 1)` is still used to
+# DETECT the single-byte ASCII control characters, which is safe (an ASCII
+# byte never appears as a UTF-8 continuation byte).
+
+use std.spec.{describe, it, assert_equal}
+use std.nogc_async_mut.http_client.types.{url_decode}
+
+describe "url_decode -- multibyte UTF-8 safety":
+    it "passes a multibyte literal through unchanged (reproduces the bug)":
+        assert_equal(url_decode("caf\u{e9}"), "caf\u{e9}")
+
+    it "handles multibyte at the first position":
+        assert_equal(url_decode("\u{e9}bc"), "\u{e9}bc")
+
+    it "handles multibyte at the last position":
+        assert_equal(url_decode("abc\u{e9}"), "abc\u{e9}")
+
+    it "handles a pure-multibyte string":
+        assert_equal(url_decode("\u{e9}\u{e8}\u{ea}"), "\u{e9}\u{e8}\u{ea}")
+
+    it "handles mixed ASCII + multibyte + '+'":
+        assert_equal(url_decode("a+caf\u{e9}+b"), "a caf\u{e9} b")
+
+    it "still decodes '+' as space":
+        assert_equal(url_decode("a+b"), "a b")
+
+    # NOTE: `%XX` percent-escape decoding (e.g. "hello%20world" -> "hello
+    # world") has a SEPARATE, PRE-EXISTING defect unrelated to the mixed
+    # byte/codepoint indexing class this spec targets: `hex.parse_int(16)`
+    # returns `Option<i64>` and the un-unwrapped Option's `.to_char()` is a
+    # silent no-op, so every `%XX` escape is dropped instead of decoded.
+    # Verified present BEFORE this fix too (via `git stash` on
+    # url_decode alone): `url_decode("hello%20world")` already produced
+    # "helloworld" on the pre-fix `.char_at()` version. Out of scope for the
+    # mixed-index sweep; not asserted here to avoid conflating the two
+    # defects. See src/lib/nogc_async_mut/http_client/types.spl:url_decode.

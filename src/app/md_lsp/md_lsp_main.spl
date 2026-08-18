@@ -57,34 +57,37 @@ fn _md_lsp_extract_field(json: text, key: text) -> text:
             return ""
         return inner.substring(0, end_idx)
     elif after.starts_with("{") or after.starts_with("["):
-        # Return nested object/array as-is (find balanced close)
+        # Return nested object/array as-is (find balanced close).
+        # Byte-range slice at the end (`after.substring(0, j + 1)`), never a
+        # byte-by-byte reconstruction: joining single-byte pieces of a
+        # multibyte UTF-8 codepoint corrupts it, since each piece is
+        # individually invalid UTF-8. `.substring(j, j+1)` is still used to
+        # DETECT the ASCII brace bytes, which is safe (see
+        # doc/08_tracking/bug/mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md).
         var depth = 0
         var j = 0
         val alen = after.len()
-        var parts: [text] = []
         while j < alen:
-            val ch = after.char_at(j)
+            val ch = after.substring(j, j + 1)
             if ch == "{" or ch == "[":
                 depth = depth + 1
             elif ch == "}" or ch == "]":
                 depth = depth - 1
-            parts.push(ch)
             j = j + 1
             if depth == 0:
-                return parts.join("")
-        return parts.join("")
+                return after.substring(0, j)
+        return after.substring(0, alen)
     else:
-        # number or keyword (null, true, false)
-        var parts: [text] = []
+        # number or keyword (null, true, false) -- same byte-range-slice
+        # fix as above.
         var j = 0
         val alen = after.len()
         while j < alen:
-            val ch = after.char_at(j)
+            val ch = after.substring(j, j + 1)
             if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r":
-                return parts.join("")
-            parts.push(ch)
+                return after.substring(0, j)
             j = j + 1
-        parts.join("")
+        after.substring(0, alen)
 
 fn _md_lsp_frame(json: text) -> text:
     val byte_count = json.len()

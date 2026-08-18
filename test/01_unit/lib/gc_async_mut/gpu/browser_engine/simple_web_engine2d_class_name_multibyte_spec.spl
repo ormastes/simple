@@ -1,0 +1,50 @@
+# @req REQ-BUG-MIXED-INDEX-ENGINE2D-CLASS-NAME
+#
+# Regression spec for
+# doc/08_tracking/bug/mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md:
+# `_first_class_name` and `_collect_class_names`
+# (src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl)
+# scanned an HTML `class="..."` attribute value token-by-token using
+# `.char_at(i)` (CODEPOINT-indexed) bounded by `.len()` (BYTE length), then
+# sliced the matched token with `.substring(trimmed_start, trimmed_end)`
+# (BYTE-indexed) using those SAME indices.
+#
+# Pre-fix repro (captured verbatim via `git stash` + `bin/simple run`):
+#   _first_class_name("caf\u{e9} bar")
+#   assert_equal failed: expected café, got caf<invalid byte>
+# (the trailing byte of "é" was dropped because the token boundary, found by
+# codepoint-space scanning, was applied as a byte-space slice bound one byte
+# short).
+#
+# Fix: replaced `.char_at(...)` with `.substring(idx, idx + 1)` throughout
+# both functions, keeping every index consistently a BYTE index. A
+# single-byte ASCII comparison (space/tab/etc.) is safe at any byte offset
+# since ASCII bytes never occur as UTF-8 continuation bytes.
+
+use std.spec.{describe, it, assert_equal}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    _first_class_name, _collect_class_names
+}
+
+describe "_first_class_name -- multibyte UTF-8 safety":
+    it "extracts a multibyte class token intact (reproduces the bug)":
+        assert_equal(_first_class_name("caf\u{e9} bar"), "caf\u{e9}")
+
+    it "handles multibyte at the first position":
+        assert_equal(_first_class_name("\u{e9}bc def"), "\u{e9}bc")
+
+    it "handles multibyte at the last position (single token, no trailing space)":
+        assert_equal(_first_class_name("abc\u{e9}"), "abc\u{e9}")
+
+    it "handles multibyte adjacent to the token/space boundary":
+        assert_equal(_first_class_name("x\u{e9} y"), "x\u{e9}")
+
+    it "handles a pure-multibyte class value":
+        assert_equal(_first_class_name("\u{e9}\u{e8}\u{ea}"), "\u{e9}\u{e8}\u{ea}")
+
+describe "_collect_class_names -- multibyte UTF-8 safety":
+    it "collects multiple class tokens including a mixed ASCII+multibyte one":
+        val names = _collect_class_names("btn caf\u{e9}-icon active")
+        assert_equal(names[0], "btn")
+        assert_equal(names[1], "caf\u{e9}-icon")
+        assert_equal(names[2], "active")

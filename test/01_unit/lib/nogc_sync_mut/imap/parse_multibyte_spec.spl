@@ -1,0 +1,69 @@
+# @req REQ-BUG-MIXED-INDEX-IMAP-PARSE
+#
+# Regression spec for
+# doc/08_tracking/bug/mixed_byte_and_codepoint_indexing_defect_class_2026-08-18.md:
+# `imap_split_at_first_space`, `imap_strip_crlf`, `imap_parse_capability_tokens`
+# (src/lib/nogc_sync_mut/imap/parse.spl) used to scan with `.char_at(i)`
+# (CODEPOINT-indexed) while bounding the loop with `.length()` (BYTE-indexed)
+# and slicing with `.substring(...)` (also BYTE-indexed) at the SAME index
+# `i`. For multibyte UTF-8 input this misaligned the slice boundary.
+#
+# Pre-fix repro (captured verbatim via `git stash` + `bin/simple run`):
+#   imap_split_at_first_space("caf\u{e9} bar")[1]
+#   assert_equal failed: expected bar, got  bar
+# (note the leading space in the "got" value -- the split landed one BYTE
+# short of the real space because "é" is 2 bytes/1 codepoint, so the
+# byte-space `.substring` after a codepoint-space scan index was off by one).
+#
+# Fix: replaced `.char_at(i)` with `.substring(i, i + 1)` for the comparison,
+# keeping `i` consistently a BYTE index throughout, matching the established
+# pattern in `path_pure.spl`'s `is_sep_at` helper. ASCII bytes never appear as
+# continuation bytes in UTF-8, so a single-byte ASCII comparison is safe to
+# perform at any byte offset.
+
+use std.spec.{describe, it, assert_equal}
+use std.nogc_sync_mut.imap.parse.{
+    imap_split_at_first_space, imap_strip_crlf, imap_parse_capability_tokens
+}
+
+describe "imap_split_at_first_space -- multibyte UTF-8 safety":
+    it "splits correctly when a multibyte char precedes the space (reproduces the bug)":
+        val parts = imap_split_at_first_space("caf\u{e9} bar")
+        assert_equal(parts[0], "caf\u{e9}")
+        assert_equal(parts[1], "bar")
+
+    it "handles multibyte at the first position":
+        val parts = imap_split_at_first_space("\u{e9}bc def")
+        assert_equal(parts[0], "\u{e9}bc")
+        assert_equal(parts[1], "def")
+
+    it "handles multibyte adjacent to the space (last byte before it)":
+        val parts = imap_split_at_first_space("x\u{e9} y")
+        assert_equal(parts[0], "x\u{e9}")
+        assert_equal(parts[1], "y")
+
+    it "handles a pure-multibyte string with no space":
+        val parts = imap_split_at_first_space("\u{e9}\u{e8}\u{ea}")
+        assert_equal(parts[0], "\u{e9}\u{e8}\u{ea}")
+
+    it "handles mixed ASCII + multibyte across two words":
+        val parts = imap_split_at_first_space("a1 caf\u{e9} tag")
+        assert_equal(parts[0], "a1")
+        assert_equal(parts[1], "caf\u{e9} tag")
+
+describe "imap_strip_crlf -- multibyte UTF-8 safety":
+    it "leaves a multibyte-terminated line without CRLF unchanged":
+        assert_equal(imap_strip_crlf("caf\u{e9}"), "caf\u{e9}")
+
+    it "strips CRLF following multibyte content":
+        assert_equal(imap_strip_crlf("caf\u{e9}\r\n"), "caf\u{e9}")
+
+    it "strips bare LF following multibyte content":
+        assert_equal(imap_strip_crlf("caf\u{e9}\n"), "caf\u{e9}")
+
+describe "imap_parse_capability_tokens -- multibyte UTF-8 safety":
+    it "tokenizes capability data containing a multibyte token":
+        val toks = imap_parse_capability_tokens("IMAP4rev1 X-CAF\u{e9} STARTTLS")
+        assert_equal(toks[0], "IMAP4rev1")
+        assert_equal(toks[1], "X-CAF\u{e9}")
+        assert_equal(toks[2], "STARTTLS")
