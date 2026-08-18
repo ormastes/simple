@@ -173,16 +173,36 @@ fn run_native(binary: text, path: text, name: text) -> LaneResult:
     # native-build can print warnings and still exit 0 while producing NO
     # artifact, so the artifact's existence -- not the exit code -- is the
     # test for whether the build succeeded.
-    val build_cmd = binary + " native-build " + path + " -o " + artifact + " >/dev/null 2>&1"
+    # Capture the build diagnostics instead of discarding them. This used to be
+    # `>/dev/null 2>&1`, which made every native failure read as the same
+    # contentless note ("native-build produced no artifact") with no way to tell
+    # a timeout from an allocation abort from a codegen error. On 2026-08-18 all
+    # 11 fixtures failed that way at once and the reason was invisible in the
+    # gate output, which is the difference between a finding and a shrug.
+    val log = ARTIFACT_DIR + "/" + name + ".build.log"
+    val build_cmd = binary + " native-build " + path + " -o " + artifact + " > " + log + " 2>&1"
     process_run("/bin/sh", ["-c", build_cmd])
     val (exists, _e, _c) = process_run("/bin/sh", ["-c", "test -s " + artifact + " && echo YES || echo NO"])
     if not exists.trim().contains("YES"):
-        return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "native-build produced no artifact")
+        val (reason, _re, _rc) = process_run("/bin/sh", ["-c", "grep -m1 -E '^error:' " + log + " 2>/dev/null || tail -n 1 " + log + " 2>/dev/null"])
+        val cleaned = reason.trim()
+        if cleaned.len() > 0:
+            return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "native-build produced no artifact: " + cleaned + " (full log: " + log + ")")
+        return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "native-build produced no artifact (full log: " + log + ")")
     val (stdout, _s2, _c2) = process_run("/bin/sh", ["-c", "./" + artifact + " 2>/dev/null"])
     val norm = normalize(stdout)
     if norm.len() == 0:
         return LaneResult(lane: "native", output: stdout, normalized: norm, ok: false, note: "artifact ran but printed nothing")
     LaneResult(lane: "native", output: stdout, normalized: norm, ok: true, note: "")
+
+# `SIMPLE_EXECUTION_MODE` silently selects the JIT for ANY unrecognised value,
+# so a typo in DIFF_LANES (`jitt`, `interp`, `nativ`) would run the JIT a second
+# time and be REPORTED as a third lane that agrees with itself -- a manufactured
+# green. Verified 2026-08-18: `DIFF_LANES=interpret,jit,bogus` printed
+# "PASS — 1 fixture(s) compared across 3 lane(s)" while only two engines ever
+# ran. Fail closed on an unknown lane name instead.
+fn known_lane(lane: text) -> bool:
+    lane == "interpret" or lane == "interpreter" or lane == "jit" or lane == "native"
 
 fn run_lane(binary: text, path: text, name: text, lane: text) -> LaneResult:
     if lane == "native":
@@ -233,8 +253,20 @@ fn main() -> i64:
     print("=== multi-engine differential harness ===")
     print_binary_identity(binary)
     print("lanes:   {lanes.len()} -> {lanes}")
+    for lane in lanes:
+        if not known_lane(lane):
+            print("ERROR — unknown lane '{lane}' in DIFF_LANES; SIMPLE_EXECUTION_MODE would silently run the JIT for it and report a phantom agreeing lane. Valid: interpret, interpreter, jit, native. Nothing was checked.")
+            return 2
     print("fixtures: {fixtures.len()}")
     print("")
+
+    # Per-lane tally of how many fixtures that lane actually ANSWERED. A lane
+    # that answered ZERO across the whole corpus is a systemically dead lane,
+    # not a run of unlucky fixtures, and it silently degrades the gate's
+    # coverage -- see `dead_lanes` in the summary below.
+    var lane_answered: [i64] = []
+    for _l in lanes:
+        lane_answered.push(0)
 
     var divergences = 0
     var new_divergences = 0
@@ -267,6 +299,12 @@ fn main() -> i64:
         for r in results:
             if not r.ok:
                 errors_here = errors_here + 1
+
+        var li = 0
+        for r in results:
+            if r.ok:
+                lane_answered[li] = lane_answered[li] + 1
+            li = li + 1
 
         val doc = baselined_divergence(name)
         var verdict = "AGREE"
@@ -302,6 +340,28 @@ fn main() -> i64:
     print("agreements:        {agreements}")
     print("divergences:       {divergences} ({new_divergences} NEW, unbaselined)")
     print("lane errors:       {lane_errors} (failed closed -- not counted as divergence)")
+
+    # A lane that answered nothing at all is reported LOUDLY and named in the
+    # verdict line. It is not a divergence and does not fail the gate -- a
+    # two-lane comparison is still real evidence -- but it does mean the gate
+    # is running with less coverage than its name implies, and any defect that
+    # lives ONLY in that lane is invisible while the gate reads green. That is
+    # a fail-open, so it must never be silent. (2026-08-18: the native lane
+    # went 0-for-11 exactly this way.)
+    var dead_lanes = ""
+    var di = 0
+    for lane in lanes:
+        if lane_answered[di] == 0:
+            if dead_lanes.len() > 0:
+                dead_lanes = dead_lanes + ","
+            dead_lanes = dead_lanes + lane
+        di = di + 1
+    if dead_lanes.len() > 0:
+        print("")
+        print("DEGRADED COVERAGE: lane(s) [{dead_lanes}] answered 0 of {fixtures.len()} fixtures.")
+        print("  Every comparison above ran WITHOUT them. A defect that exists only in a")
+        print("  dead lane cannot be detected by this run; a green verdict does not cover it.")
+        print("  Each fixture's per-lane note names the cause and points at its build log.")
     print("")
     print("NOTE: the native lane emits NO separator between print() calls;")
     print("comparison strips whitespace entirely so that quirk alone cannot")
@@ -322,5 +382,8 @@ fn main() -> i64:
     if new_divergences > 0:
         print("FAIL — {new_divergences} unbaselined divergence(s) among {compared} fixture(s) compared")
         return 1
+    if dead_lanes.len() > 0:
+        print("PASS (DEGRADED) — {compared} fixture(s) compared, 0 new divergences ({divergences} baselined, {lane_errors} lane error(s)); lane(s) [{dead_lanes}] answered nothing and are NOT covered by this verdict")
+        return 0
     print("PASS — {compared} fixture(s) compared across {lanes.len()} lane(s), 0 new divergences ({divergences} baselined, {lane_errors} lane error(s))")
     0

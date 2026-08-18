@@ -274,3 +274,15 @@ would pass identically whether the bug is present or fixed.
 - `doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`
 - `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`
 - `doc/08_tracking/bug/cross_engine_differential_29_disagreements_2026-08-17.md`
+
+## Three-lane run: the native lane could not be measured
+
+The full three-lane run completed after this was filed. All 11 fixtures
+reported `native: LANE_ERROR -- native-build produced no artifact`, so the
+native column of the container table above could not be filled in and the
+`native` half of Defect B from the 2026-08-09 filing remains **unverified on
+this tree** — neither confirmed nor cleared. That lane failure is a separate
+defect, filed as
+`doc/08_tracking/bug/native_build_dies_in_module_load_misreported_as_7200s_timeout_2026-08-18.md`.
+It did not affect the gate's FAIL: failed-closed lanes are never scored as
+divergences, and the FAIL here is a genuine interpret-vs-jit disagreement.
