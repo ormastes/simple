@@ -1,6 +1,7 @@
 # hwir_foundation_spec residual failures after missing std.spec import fix (2026-08-16)
 
 Status: RESOLVED 2026-08-19 (was OPEN P2) — residual 21 confirmed live 2026-08-17; the *infra* half had been silently clobbered and was re-applied, see the bottom section
+Status: OPEN (P2) — residual 21 confirmed live 2026-08-17; the *infra* half had been silently clobbered and was re-applied, see the bottom section
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Context

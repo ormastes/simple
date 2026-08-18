@@ -56,6 +56,9 @@ rebuilding and redeploying the shared `bin/release/x86_64-unknown-linux-gnu/simp
 touched in this pass. Note that `blit` already measures 0 ms via `write_span`,
 so the missing kernel is not currently costing anything.
 
+Status: PARTIALLY RESOLVED / OPEN (P2, downgraded from P1)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
 ## Live re-run 2026-08-17 (measured, not inspected)
 
 Binary: `readlink -f bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`,
