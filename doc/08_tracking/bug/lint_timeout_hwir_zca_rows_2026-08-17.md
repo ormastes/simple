@@ -1,24 +1,27 @@
-## Re-verified 2026-08-17 - STILL OPEN, WORSE than filed
-
-Re-ran `nice -n 19 timeout 900 sh scripts/check/lint-cached.shs
-src/compiler/50.mir/hwir/zca_rows.spl`. It exceeded **900s** (not just the 600s
-in the original filing) and produced **no verdict line**; the log froze at 382
-lines after the module-load `[gc-warning]` block and never advanced. Killed
-manually.
-
-Measured file shape (for the cost model): **1901 lines, 30 function decls**.
-At the documented ~11.7s startup + ~3.3-4.0s/decl that predicts ~130s, so the
-observed >900s is **~7x above** the linear prediction - consistent with the
-superlinear per-decl cost being the root cause, and it means the published cost
-model under-predicts badly on this file. Profiling the linter on this file
-remains the right next step.
-
 # Lint timeout (>600s) on src/compiler/50.mir/hwir/zca_rows.spl
 
 - Date: 2026-08-17
-- Status: DUPLICATE of lint_single_file_superlinear_timeout_on_line_count_2026-08-06.md
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
-  yet located (profiling blocked on this host); optimisation still OPEN.**
+- Status: **OPEN (bounded, guarded)** — DUPLICATE of
+  lint_single_file_superlinear_timeout_on_line_count_2026-08-06.md.
+  The superlinear term is **not yet located** (profiling blocked on this host);
+  optimisation still OPEN. The "not a hang / cost not deadlock" verdict, the
+  guard, and the specs are all present and green.
+- **Re-verified 2026-08-17 (later pass), by execution, not inspection:**
+  - `out=$(timeout 500 sh scripts/check/check-lint-cost-budget.shs); rc=$?`
+    -> `rc=0`, `selftest: 4 fixture(s) passed`,
+    `PASS — 1 fixture(s) checked, lint completed in 62s of a 240s budget
+    (load=51.03, concurrent simple=36)`. The guard is live and non-vacuous.
+  - `wc -l src/compiler/50.mir/hwir/zca_rows.spl` -> **1901** (unchanged; the
+    file has not been split or shrunk, so the bound still applies).
+  - Both specs and both fixtures present:
+    `ls scripts/check/check-lint-cost-budget.shs
+    test/01_unit/compiler/lint/lint_{terminates_with_verdict,still_bites_prevention}_spec.spl
+    test/fixtures/lint_cost/` -> all 5 paths exist.
+  - Profiling still blocked: `cat /proc/sys/kernel/yama/ptrace_scope
+    /proc/sys/kernel/perf_event_paranoid` -> `1` / `4`. Unchanged, so
+    follow-up 1 below cannot be started on this host.
+  - `zca_rows.spl` itself was **deliberately not lint-timed** in this pass and
+    no files were batched, per the standing cost bound.
 - Command: `sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl`
   (via seed `bin/simple lint`), killed by `timeout 600` (rc=124), no verdict line.
 
@@ -146,88 +149,36 @@ verdict.
    guard's budget.
 3. Until then `zca_rows.spl` is effectively un-lintable and is knowingly outside
    the lint sweep — an honest documented bound, not a silent skip.
-## Re-verified 2026-08-17 - STILL OPEN, WORSE than filed
 
-Re-ran `nice -n 19 timeout 900 sh scripts/check/lint-cached.shs
-src/compiler/50.mir/hwir/zca_rows.spl`. It exceeded **900s** (not just the 600s
-in the original filing) and produced **no verdict line**; the log froze at 382
-lines after the module-load `[gc-warning]` block and never advanced. Killed
-manually.
+## Bisection findings (2026-08-18, fixture ablation — profiler still blocked)
 
-Measured file shape (for the cost model): **1901 lines, 30 function decls**.
-At the documented ~11.7s startup + ~3.3-4.0s/decl that predicts ~130s, so the
-observed >900s is **~7x above** the linear prediction - consistent with the
-superlinear per-decl cost being the root cause, and it means the published cost
-model under-predicts badly on this file. Profiling the linter on this file
-remains the right next step.
+Binary: bin/release/x86_64-unknown-linux-gnu/simple (rebuilt seed, 2026-08-18 01:08, 59,620,392 B).
+All times single runs on the shared box, ~12s startup included. Fixtures in session scratchpad lint_bisect/.
 
-## 2026-08-17 bounded source fix
+| fixture | time |
+|---|---|
+| zca fn1 only (13 ctor entries) | 43s |
+| zca fn2 only (46 comb_op entries) | 218s |
+| zca fn2 + identical renamed copy | 313s (1.46x — repeated content is CHEAP) |
+| fn2, comb_ops halved (23 entries) | 144s |
+| fn2, comb_ops emptied | 86s |
+| synthetic: 40 static calls, 1-method class | 36s |
+| synthetic: 40 free-fn calls | 43s (static dispatch NOT the driver) |
+| synthetic + zca imports | 39s (import context NOT the driver) |
+| synthetic: 40 calls, 40-method class | 96s |
+| synthetic: 10 calls, 40-method class | 68s |
 
-No profiler capture exists beyond the wall-clock/log-freeze evidence above,
-so the earlier superlinear-per-declaration attribution remains a hypothesis.
-Static audit did identify one avoidable deep pass: `check_required_comment`
-recursively walks and recopies warning arrays through nested expressions even
-when the source contains none of the REQC trigger families. `zca_rows.spl` is
-a 132148-byte builder-heavy AST and contains no such trigger.
-
-The lint CLI now uses `required_comment_source_may_match`, a conservative
-linear admission check, before that recursive walk. It covers `pass_*`,
-`todo(...)`, wildcard cases, and every name in the live dangerous-keyword
-registry, including names registered later. The focused regression reads the
-exact Zca file and proves rejection while adjacent wildcard and dangerous-name
-sources remain admitted.
-
-Status: **SOURCE FIXED / RUNTIME TIMING PENDING**. This isolated worktree has
-no deployed pure-Simple CLI with a `lint`/`test` command; the available shared
-staged bootstrap executable exposes compile flags only. Per repository policy
-no Rust-seed fallback was used, and the 900-second command was not repeated.
-A deployed pure-Simple binary must run the focused spec and a bounded lint
-timing before this record can close.
-
-## 2026-08-17 macOS ARM deployment-authority audit — still pending
-
-The focused admission spec was invoked once through the executable currently
-deployed at `/Users/ormastes/simple/bin/release/aarch64-apple-darwin/simple`
-(SHA-256 `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc`):
-
-```
-Results: 2 total, 2 passed, 0 failed
-Time: 288ms (setup: 10129ms)
-```
-
-The one exact `zca_rows.spl` lint timing was then started under a 600-second
-process alarm. During startup that same executable identified its authority:
-
-```
-WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
-Build and use the pure-Simple bin/simple instead.
-```
-
-The run was stopped after 96.99 seconds rather than spending the remaining
-budget on inadmissible seed evidence. It had emitted substantially more than
-the old 382-line frozen transcript, but it had no lint verdict at interruption;
-neither that progress nor the focused 2/2 result can close a criterion that
-explicitly requires deployed pure-Simple authority. The isolated worktree also
-has no `bin/simple`, and no deployment/provenance receipt beside the executable
-establishes a pure-Simple lineage.
-
-Status remains **SOURCE FIXED / PURE-SIMPLE RUNTIME TIMING PENDING**. The exact
-remaining host-fixable gap is deployment of a receipt-bound pure-Simple CLI;
-after that, run the focused spec once and one bounded exact-file lint timing.
-Do not relabel the current release-path seed or cite its path as authority.
-
-# Lint timeout (>600s) on src/compiler/50.mir/hwir/zca_rows.spl
-
-- Date: 2026-08-17
-- Command: `sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl`
-  (via seed `bin/simple lint`), killed by `timeout 600` (rc=124), no verdict line.
-- Context: sequential lint sweep of files changed vs origin/main; sibling files
-  (`driver_public_compile_process.spl`, `store.spl`) linted in normal time in the
-  same session.
-- Known cost model (`.claude/rules/commands.md`): ~11.7s startup + ~3.3-4.0s per
-  function decl, superlinear. `zca_rows.spl` appears to exceed the 600s budget on
-  its own, so per-decl superlinearity makes this file un-lintable in practice.
-- Expected: single-file lint completes within the 600s budget or the linter
-  reports partial progress.
-- Follow-up: profile lint on this file; the superlinear per-decl cost is the
-  suspected root cause.
+Conclusions:
+- Cost is roughly LINEAR per array entry (~2.5-3.2s/entry in zca, ~0.6s in a 1-method-class synthetic),
+  so the "superlinear in file" observation tracks entry counts, not a global quadratic.
+- The dominant term is per-METHOD-DECLARATION on the callee class (~1.2s per static method even with
+  few calls: 40-method class costs ~50s body before calls scale), plus a methods x call-sites
+  interaction (~0.9s/call at 40 methods vs ~0.3s at 1 method).
+- Duplicated identical functions are sub-linear (1.46x), so per-content caching exists; distinct
+  declarations do not share it.
+- Suspect shape: per-declaration semantic elaboration re-processes the whole impl (per-method cost),
+  and each call site rescans the callee class method list. Fix direction: memoize per-class method
+  tables across declarations/call sites in the lint path.
+- zca_rows.spl (30 such functions, hundreds of Hw* ctor entries against many-method hwir classes)
+  is exactly the worst case of this model; no single construct removal fixes it — the per-decl and
+  per-call constants must drop.
