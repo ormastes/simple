@@ -1,0 +1,114 @@
+"""
+# Guard: paren-less `.length` on a builtin container (String / Array)
+
+Lane LENGTHFIX, 2026-08-18. Companion to lane FPLENGTH's classifier
+(`scripts/check/check-paren-less-length-classify.shs`), which reduced 137
+candidate sites to 6 genuine ones. This spec fences those 6.
+
+## The defect
+
+`x.length` with no parentheses on a `text` or an array is NOT a field read and
+NOT a call. Neither `String` nor `Array` has a `length` FIELD, so HIR lowering
+cannot infer a field type and the whole module fails to lower:
+
+    HIR lowering error: Unsupported feature: cannot infer field type while
+    lowering main: struct 'Array' field 'length' ...: paren-less accessor on a
+    builtin container. Use the method form (e.g. `.len()`) instead.
+
+Measured on this session's binary (probe under `bin/simple run`): identical
+error for `struct 'String' field 'length'`. User-visible behaviour, per the
+compiler's own diagnostic text: the module silently DE-JITs (~100-1000x
+slowdown, no diagnostic) on the run path, and is a HARD ERROR under
+`simple compile` / `SIMPLE_JIT_STRICT`. So the six sites below made
+`src/app/dap/hooks.spl`, `src/os/port/disk_image_bake.spl` and
+`src/os/apps/sshd/sshd.spl` uncompilable-as-written, not merely slow.
+
+## The six sites fixed
+
+  src/app/dap/hooks.spl:327   self.current_frames.length  -- [StackFrame]
+  src/app/dap/hooks.spl:443   parts.length                -- [text] from .split()
+  src/app/dap/hooks.spl:449   mod_parts.length            -- [text] from .split()
+  src/os/port/disk_image_bake.spl:42  data.length          -- val data: [u8]
+  src/os/apps/sshd/sshd.spl:134  resolved.length          -- fs_exec_resolve() -> text
+  src/os/apps/sshd/sshd.spl:179  resolved.length          -- fs_exec_resolve() -> text
+
+## Why this spec scans SOURCE rather than calling the functions
+
+The three owners are unreachable from the interpreter test lane: `hooks.spl`
+needs a live DAP interpreter hook session (`rt_hook_get_stack_frames`),
+`disk_image_bake.spl` needs a FAT32 bake target, and `sshd.spl` is
+`@cfg(x86_64)` / `@cfg(riscv64)` SimpleOS-guest code with `serial_println`.
+Calling them in-process is not possible here, so a behavioural spec on them
+would be vacuous either way. Instead: (a) SOURCE assertions that go red on the
+unfixed text, and (b) BEHAVIOURAL assertions on the same receiver shapes,
+which prove `.length()` is the correct accessor and returns the right value.
+
+Run with: bin/simple test test/01_unit/compiler/paren_less_length_accessor_guard_spec.spl
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file}
+
+val _HOOKS = "src/app/dap/hooks.spl"
+val _BAKE = "src/os/port/disk_image_bake.spl"
+val _SSHD = "src/os/apps/sshd/sshd.spl"
+
+fn _has(path: text, needle: text) -> bool:
+    read_file(path).contains(needle)
+
+describe "paren-less .length on builtin containers is eliminated at the 6 confirmed sites":
+    """
+    As a compiler maintainer, I need every genuine paren-less `.length` METHOD
+    reference replaced by `.length()`, so that no module silently de-JITs or
+    fails `simple compile` on an accessor that reads as harmless.
+    """
+
+    it "dap/hooks.spl uses the call form for the stack-frame array":
+        # RED before the fix: the file contained `self.current_frames.length:`.
+        assert_true(_has(_HOOKS, "self.current_frames.length()"))
+        assert_false(_has(_HOOKS, "self.current_frames.length:"))
+
+    it "dap/hooks.spl uses the call form for both .split() results":
+        # RED before the fix: `parts.length ==` / `mod_parts.length ==`.
+        assert_true(_has(_HOOKS, "parts.length() == 2"))
+        assert_true(_has(_HOOKS, "mod_parts.length() == 2"))
+        assert_false(_has(_HOOKS, "parts.length == 2"))
+        assert_false(_has(_HOOKS, "mod_parts.length == 2"))
+
+    it "disk_image_bake.spl uses the call form for the [u8] payload":
+        # RED before the fix: `data.length == 0`.
+        assert_true(_has(_BAKE, "data.length() == 0"))
+        assert_false(_has(_BAKE, "data.length == 0"))
+
+    it "sshd.spl uses the call form for both fs_exec_resolve() text results":
+        # RED before the fix: `resolved.length == 0u64` at :134 and :179.
+        assert_true(_has(_SSHD, "resolved.length() == 0u64"))
+        assert_false(_has(_SSHD, "resolved.length == 0u64"))
+
+describe "the call form is the correct accessor for each receiver shape":
+    """
+    Similar-case coverage: the same four receiver shapes as the six sites,
+    exercised for real so the source assertions above are not the only
+    evidence that `.length()` is the right replacement.
+    """
+
+    it "returns the element count for a plain array (hooks.spl:327 shape)":
+        val frames: [i64] = [10, 20, 30]
+        expect(frames.length()).to_equal(3)
+
+    it "returns the part count for a .split() result (hooks.spl:443/449 shape)":
+        val parts = "a==b".split("==")
+        expect(parts.length()).to_equal(2)
+        val mod_parts = "h%3".split("%")
+        expect(mod_parts.length()).to_equal(2)
+
+    it "returns 0 for an empty [u8] payload (disk_image_bake.spl:42 shape)":
+        val data: [u8] = []
+        expect(data.length()).to_equal(0)
+
+    it "returns the byte count for text and compares against a u64 literal (sshd.spl shape)":
+        val resolved: text = "/usr/bin/clang"
+        expect(resolved.length()).to_equal(14)
+        assert_false(resolved.length() == 0u64)
+        val missing: text = ""
+        assert_true(missing.length() == 0u64)
