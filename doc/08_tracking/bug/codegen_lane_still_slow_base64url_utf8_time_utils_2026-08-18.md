@@ -33,6 +33,7 @@ disguise.
 | C-MIG-0022 utf8_validate | 32.9x | ~~16.6x~~ -> **8.27x post-fix** (simple_us=140011 c_us=16938, 300 reps x 88-vector corpus, batched-ASCII fast path added 2026-08-18) | improved ~2x further, still OPEN (>2x threshold) |
 | C-MIG-0019 time_utils | 2.01x | **3.18x** (simple_us=265627 c_us=83431, 30 reps x 100-vector corpus) | ARTIFACT — isolated 2026-08-18: probe-free batch timing shows codegen ~1.6x FASTER than interpreter, see finding 3 verdict |
 | C-MIG-0023 base64url | 44.1x | **44.7x** (simple_us=6155385 c_us=137565, 50 reps x 100-vector corpus) | no improvement moving to JIT |
+| C-MIG-0023 base64url | 44.1x | ~~44.7x~~ -> **35.05x post-fix** (simple_us=404308 c_us=11534, 50 reps x 100-vector corpus, array-accumulator fix landed 2026-08-18) | improved ~1.28x further, still OPEN (>2x threshold) |
 | C-MIG-0022 utf8_validate | 32.9x | ~~16.6x~~ -> **8.27x post-fix** (simple_us=140011 c_us=16938, 300 reps x 88-vector corpus, batched-ASCII fast path added 2026-08-18) | improved ~2x further, still OPEN (>2x threshold) |
 | C-MIG-0019 time_utils | 2.01x | **3.18x** (simple_us=265627 c_us=83431, 30 reps x 100-vector corpus) | ARTIFACT — isolated 2026-08-18: probe-free batch timing shows codegen ~1.6x FASTER than interpreter, see finding 3 verdict |
 

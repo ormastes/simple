@@ -304,7 +304,7 @@ c_migrations:
       existing base64.spl implementation as a base64url twin; migrating
       remaining extern-declared callers is left for a follow-up.
     correctness_spec: test/01_unit/lib/common/base_encoding/base64/base64url_crosslang_spec.spl
-    correctness_result: "6 examples, 6 passed (RFC 4648 §10 KAT vectors re-expressed url-safe, C-oracle differential round-trip incl. UTF-8 multibyte, url-safe-alphabet-no-padding assertion, single-char-corruption discrimination, determinism check, 100-vector shared-logic bulk differential loop over length 0..99 with UTF-8 multibyte every 7th char, 2026-08-18)"
+    correctness_result: "7 examples, 7 passed (RFC 4648 §10 KAT vectors re-expressed url-safe, C-oracle differential round-trip incl. UTF-8 multibyte, url-safe-alphabet-no-padding assertion, single-char-corruption discrimination, determinism check, 100-vector shared-logic bulk differential loop over length 0..99 with UTF-8 multibyte every 7th char, plus exact-boundary-length similar-case coverage (0/1/2/3-byte tails + >4KB input) added with the array-accumulator perf fix, 2026-08-18)"
     c_status: retained_as_test_oracle
     perf_status: "PERF FINDING — pure-Simple base64url_encode measured ~44.1x
       slower than the C oracle (interpreter dispatch to the `base64` crate's
@@ -335,7 +335,35 @@ c_migrations:
       appears dominated by runtime string representation/allocation, not
       interpreter dispatch, so it does not shrink under JIT. See
       doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
-      finding 1 — still open."
+      finding 1 — still open.
+
+      POST-FIX (2026-08-18): base64_encode/base64url_encode/base64url_decode/
+      _bytes_to_text rewritten to accumulate into a `[u8]`/`[text]` array via
+      `.push()` and join/convert to text ONCE at the end, replacing the
+      per-char `out = out + c` scalar concatenation (same binary,
+      bin/release/x86_64-unknown-linux-gnu/simple, 59620392 bytes, mtime
+      2026-08-18 01:08:42). Same harness shape (50 reps x 100-vector shared
+      corpus, KAT-verified before timing, SIMPLE_JIT_STRICT=1, exit 0):
+      simple_us=404308 c_us=11534, ratio ~35.05x (down from 44.7x) — a ~15x
+      absolute reduction in Simple-side time (6155385us -> 404308us) but
+      still >2x the C oracle, so this entry stays OPEN per the plan's PERF
+      threshold; remaining gap is per-byte function-call/array-push/text-
+      conversion overhead versus the C table-lookup-into-fixed-buffer
+      approach. Found and fixed along the way: a module-level `val [u8]`
+      (`ENCODE_TABLE.bytes()` hoisted to module scope) indexed and then
+      `.push()`-ed into another `[u8]` array reads back CORRUPTED under the
+      codegen/JIT lane (e.g. byte 65 'A' read back as 8) — a genuine JIT bug,
+      not an algorithm bug; worked around by computing the encode table bytes
+      as a function-local instead of a module-level `val`. See
+      doc/08_tracking/bug/jit_module_level_u8_array_index_push_corruption_2026-08-18.md.
+      Interpreter-lane (`bin/simple test`) perf_evidence got WORSE after this
+      fix (188006/4366 before -> ~560000-870000/3000-4000 after, i.e.
+      `[u8].push()` re-allocation cost dominates under the tree-walk
+      interpreter even though it wins decisively under JIT) — correctness
+      unaffected (spec stays 7/7 green), and per
+      `.claude/rules/testing.md` the interpreter is explicitly not the engine
+      ordinary programs run on, so the codegen-lane result is the one this
+      fix targets."
 
   - id: C-MIG-0024
     path: src/runtime/runtime_native.c
