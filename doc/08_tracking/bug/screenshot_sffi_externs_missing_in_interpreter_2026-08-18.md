@@ -43,3 +43,34 @@ rebuilding the seed; this lane is forbidden from replacing `bin/simple`.
   ``semantic: function `disable_ffi_screenshots` not found``
 - POST-RENAME: `Results: 11 total, 0 passed, 11 failed` —
   `semantic: unknown extern function: rt_screenshot_enable`
+
+## Resolution (2026-08-18)
+FIXED in source (seed-resident; this lane does not deploy `bin/simple`).
+
+Added `src/compiler_rust/compiler/src/interpreter_extern/screenshot_sffi.rs`,
+registered as `pub mod screenshot_sffi;` and via 16 `insert_simple!` entries in
+`interpreter_extern/mod.rs`. The handlers delegate to the real runtime
+(`simple_runtime::value::screenshot_sffi`, already a dependency of the compiler
+crate — same pattern as `interpreter_extern/atomic.rs`), so the interpret and
+native lanes share one implementation and one piece of state. Symbols wired:
+enable, disable, is_enabled, set_refresh, is_refresh, set_output_dir,
+get_output_dir, set_context, clear_context, clear_captures,
+capture_before_terminal, capture_after_terminal, exists, get_path,
+capture_count, free_string.
+
+Headless: none of these needs a display — terminal capture writes the ANSI
+buffer to a text file under the output dir, so the family works headless.
+
+Evidence (private build at /mnt/data/tmp/shotfix/release/simple; RED baseline
+/mnt/data/tmp/classfix/release/simple):
+- `test/{02_,}integration/lib/std/screenshot/screenshot_ffi_spec.spl`
+  RED   `Results: 11 total, 0 passed, 11 failed` (`unknown extern function: rt_screenshot_enable`)
+  GREEN `Results: 11 total, 10 passed, 1 failed`
+- new `screenshot_sffi_extern_dispatch_spec.spl` (both test trees)
+  RED   `Results: 5 total, 0 passed, 5 failed`
+  GREEN `Results: 5 total, 5 passed, 0 failed`
+
+The one remaining failure is an UNRELATED parser defect, not a screenshot gap:
+`expect exists == false` fails with ``semantic: variable `expect` not found``
+whenever the local is named `exists`. Tracked in
+`doc/08_tracking/bug/expect_before_identifier_named_exists_2026-08-18.md`.

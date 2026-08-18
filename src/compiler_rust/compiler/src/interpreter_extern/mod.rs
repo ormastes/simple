@@ -130,6 +130,7 @@ pub mod dynamic_sffi;
 #[cfg(feature = "gui")]
 pub mod winit_sffi;
 pub mod rapier2d_sffi;
+pub mod screenshot_sffi;
 pub mod io_driver;
 pub mod qmp_socket;
 pub mod host_wm_bridge;
@@ -270,6 +271,22 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // as an alias for the existing, already-implemented converter rather than
     // duplicating logic.
     insert_simple!("rt_string_from_byte_array", conversion::rt_bytes_to_text_fn);
+    insert_simple!("rt_screenshot_enable", screenshot_sffi::rt_screenshot_enable);
+    insert_simple!("rt_screenshot_disable", screenshot_sffi::rt_screenshot_disable);
+    insert_simple!("rt_screenshot_is_enabled", screenshot_sffi::rt_screenshot_is_enabled);
+    insert_simple!("rt_screenshot_set_refresh", screenshot_sffi::rt_screenshot_set_refresh);
+    insert_simple!("rt_screenshot_is_refresh", screenshot_sffi::rt_screenshot_is_refresh);
+    insert_simple!("rt_screenshot_set_output_dir", screenshot_sffi::rt_screenshot_set_output_dir);
+    insert_simple!("rt_screenshot_get_output_dir", screenshot_sffi::rt_screenshot_get_output_dir);
+    insert_simple!("rt_screenshot_set_context", screenshot_sffi::rt_screenshot_set_context);
+    insert_simple!("rt_screenshot_clear_context", screenshot_sffi::rt_screenshot_clear_context);
+    insert_simple!("rt_screenshot_clear_captures", screenshot_sffi::rt_screenshot_clear_captures);
+    insert_simple!("rt_screenshot_capture_before_terminal", screenshot_sffi::rt_screenshot_capture_before_terminal);
+    insert_simple!("rt_screenshot_capture_after_terminal", screenshot_sffi::rt_screenshot_capture_after_terminal);
+    insert_simple!("rt_screenshot_exists", screenshot_sffi::rt_screenshot_exists);
+    insert_simple!("rt_screenshot_get_path", screenshot_sffi::rt_screenshot_get_path);
+    insert_simple!("rt_screenshot_capture_count", screenshot_sffi::rt_screenshot_capture_count);
+    insert_simple!("rt_screenshot_free_string", screenshot_sffi::rt_screenshot_free_string);
     insert_simple!("bytes_to_u16_be", conversion::bytes_to_u16_be_fn);
     insert_simple!("bytes_to_u16_le", conversion::bytes_to_u16_le_fn);
     insert_simple!("bytes_to_u32_be", conversion::bytes_to_u32_be_fn);
