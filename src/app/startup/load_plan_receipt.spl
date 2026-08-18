@@ -1,0 +1,214 @@
+# Load plan / load receipt records (startup_perf_architecture_2026-08-17
+# §8.10 LoadPlanV1, §8.11 LoadReceiptV1).
+#
+# A plan states what a loader INTENDS to do; a receipt states what it
+# ACTUALLY did. The pair makes a loader claim checkable instead of
+# asserted: the receipt carries the plan_hash of the plan it executed,
+# plus observed counts, and load_receipt_check_against_plan compares the
+# two field by field, naming the first mismatch.
+#
+# Both are plain versioned data. Serialized form is SDN (`load_plan:` /
+# `load_receipt:` header, `key: value` rows) — never JSON/YAML. No
+# speculative extensibility: fields are exactly the §8.10/§8.11 sets.
+#
+# page_faults is optional per §8.11: -1 means "not observed" and is
+# never compared against the plan (plans do not predict page faults).
+
+# §8.10 — intent. Side-effect-free to build; plan_hash is computed over
+# the canonical SDN rendering of every other field, so two plans that
+# differ in any field get different hashes.
+pub struct LoadPlanV1:
+    schema: i64
+    artifact_path: text
+    artifact_kind: text
+    target: text
+    abi_identity: text
+    interface_identity: text
+    impl_identity: text
+    dependency_order: [text]
+    planned_segment_count: i64
+    planned_bytes_mapped: i64
+    relocation_summary: text
+    planned_relocation_count: i64
+    import_count: i64
+    export_count: i64
+    load_policy: text
+    security_policy: text
+    cache_identity: text
+    plan_hash: text
+
+# §8.11 — evidence of what actually happened.
+pub struct LoadReceiptV1:
+    schema: i64
+    artifact_digest: text
+    plan_hash: text
+    selected_provider: text
+    static_or_dynamic: text
+    bytes_read: i64
+    bytes_mapped: i64
+    segment_count: i64
+    relocation_count: i64
+    resolved_import_count: i64
+    page_faults: i64
+    protection_transitions: i64
+    cache_status: text
+    generation: i64
+    result: text
+    failure_reason: text
+
+# Verdict of checking a receipt against its plan. ok=false always names
+# the first mismatching field in `mismatch`.
+pub struct LoadReceiptCheck:
+    ok: bool
+    mismatch: text
+
+# FNV-1a 64-bit over the text's char codes, rendered as hex. Pure, no
+# dependencies; collision-resistance is not a goal — discrimination and
+# stability are.
+fn _fnv1a_hex(s: text) -> text:
+    var h: i64 = -3750763034362895579   # 0xcbf29ce484222325 as i64
+    var i = 0
+    while i < s.len():
+        h = h ^ s.char_code_at(i)
+        h = h * 1099511628211
+        i = i + 1
+    _hex_of_i64(h)
+
+fn _hex_of_i64(v: i64) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var n = 16
+    var x = v
+    while n > 0:
+        val nib = x & 15
+        out = digits.char_at(nib) + out
+        x = x >> 4
+        n = n - 1
+    out
+
+fn _join(parts: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            out = out + sep
+        out = out + parts[i]
+        i = i + 1
+    out
+
+# Canonical body of the plan WITHOUT plan_hash — the hash input.
+fn _plan_body_sdn(p: LoadPlanV1) -> text:
+    "load_plan:\n" +
+    "  schema: " + p.schema.to_string() + "\n" +
+    "  artifact_path: " + p.artifact_path + "\n" +
+    "  artifact_kind: " + p.artifact_kind + "\n" +
+    "  target: " + p.target + "\n" +
+    "  abi_identity: " + p.abi_identity + "\n" +
+    "  interface_identity: " + p.interface_identity + "\n" +
+    "  impl_identity: " + p.impl_identity + "\n" +
+    "  dependency_order: " + _join(p.dependency_order, ",") + "\n" +
+    "  planned_segment_count: " + p.planned_segment_count.to_string() + "\n" +
+    "  planned_bytes_mapped: " + p.planned_bytes_mapped.to_string() + "\n" +
+    "  relocation_summary: " + p.relocation_summary + "\n" +
+    "  planned_relocation_count: " + p.planned_relocation_count.to_string() + "\n" +
+    "  import_count: " + p.import_count.to_string() + "\n" +
+    "  export_count: " + p.export_count.to_string() + "\n" +
+    "  load_policy: " + p.load_policy + "\n" +
+    "  security_policy: " + p.security_policy + "\n" +
+    "  cache_identity: " + p.cache_identity + "\n"
+
+pub fn load_plan_hash(p: LoadPlanV1) -> text:
+    _fnv1a_hex(_plan_body_sdn(p))
+
+# Returns the plan with plan_hash filled from its own canonical body.
+pub fn load_plan_seal(p: LoadPlanV1) -> LoadPlanV1:
+    var out = p
+    out.plan_hash = load_plan_hash(p)
+    out
+
+pub fn load_plan_to_sdn(p: LoadPlanV1) -> text:
+    _plan_body_sdn(p) + "  plan_hash: " + p.plan_hash + "\n"
+
+pub fn load_receipt_to_sdn(r: LoadReceiptV1) -> text:
+    "load_receipt:\n" +
+    "  schema: " + r.schema.to_string() + "\n" +
+    "  artifact_digest: " + r.artifact_digest + "\n" +
+    "  plan_hash: " + r.plan_hash + "\n" +
+    "  selected_provider: " + r.selected_provider + "\n" +
+    "  static_or_dynamic: " + r.static_or_dynamic + "\n" +
+    "  bytes_read: " + r.bytes_read.to_string() + "\n" +
+    "  bytes_mapped: " + r.bytes_mapped.to_string() + "\n" +
+    "  segment_count: " + r.segment_count.to_string() + "\n" +
+    "  relocation_count: " + r.relocation_count.to_string() + "\n" +
+    "  resolved_import_count: " + r.resolved_import_count.to_string() + "\n" +
+    "  page_faults: " + r.page_faults.to_string() + "\n" +
+    "  protection_transitions: " + r.protection_transitions.to_string() + "\n" +
+    "  cache_status: " + r.cache_status + "\n" +
+    "  generation: " + r.generation.to_string() + "\n" +
+    "  result: " + r.result + "\n" +
+    "  failure_reason: " + r.failure_reason + "\n"
+
+# Build a receipt FROM observed facts against a sealed plan. The caller
+# supplies what the load actually did; nothing is copied from the plan
+# except its hash (the link), so a deviating load cannot hide.
+pub fn load_receipt_record(
+        plan: LoadPlanV1,
+        artifact_digest: text,
+        selected_provider: text,
+        static_or_dynamic: text,
+        bytes_read: i64,
+        bytes_mapped: i64,
+        segment_count: i64,
+        relocation_count: i64,
+        resolved_import_count: i64,
+        page_faults: i64,
+        protection_transitions: i64,
+        cache_status: text,
+        generation: i64,
+        result: text,
+        failure_reason: text) -> LoadReceiptV1:
+    LoadReceiptV1(
+        schema: 1,
+        artifact_digest: artifact_digest,
+        plan_hash: plan.plan_hash,
+        selected_provider: selected_provider,
+        static_or_dynamic: static_or_dynamic,
+        bytes_read: bytes_read,
+        bytes_mapped: bytes_mapped,
+        segment_count: segment_count,
+        relocation_count: relocation_count,
+        resolved_import_count: resolved_import_count,
+        page_faults: page_faults,
+        protection_transitions: protection_transitions,
+        cache_status: cache_status,
+        generation: generation,
+        result: result,
+        failure_reason: failure_reason)
+
+fn _fail(field: text) -> LoadReceiptCheck:
+    LoadReceiptCheck(ok: false, mismatch: field)
+
+# Field-by-field discrimination. A receipt matches its plan only when:
+# the plan_hash links it to THIS plan (recomputed, so a tampered plan
+# also fails), and every observed count equals the planned count.
+# page_faults is deliberately not checked (optional evidence, §8.11).
+pub fn load_receipt_check_against_plan(plan: LoadPlanV1, r: LoadReceiptV1) -> LoadReceiptCheck:
+    if r.plan_hash != plan.plan_hash:
+        return _fail("plan_hash: receipt " + r.plan_hash + " != plan " + plan.plan_hash)
+    if plan.plan_hash != load_plan_hash(plan):
+        return _fail("plan_hash: plan is not sealed or was altered after sealing")
+    if r.segment_count != plan.planned_segment_count:
+        return _fail("segment_count: plan " + plan.planned_segment_count.to_string() +
+                     " receipt " + r.segment_count.to_string())
+    if r.bytes_mapped != plan.planned_bytes_mapped:
+        return _fail("bytes_mapped: plan " + plan.planned_bytes_mapped.to_string() +
+                     " receipt " + r.bytes_mapped.to_string())
+    if r.relocation_count != plan.planned_relocation_count:
+        return _fail("relocation_count: plan " + plan.planned_relocation_count.to_string() +
+                     " receipt " + r.relocation_count.to_string())
+    if r.resolved_import_count != plan.import_count:
+        return _fail("resolved_import_count: plan " + plan.import_count.to_string() +
+                     " receipt " + r.resolved_import_count.to_string())
+    if r.result != "ok":
+        return _fail("result: " + r.result + " (" + r.failure_reason + ")")
+    LoadReceiptCheck(ok: true, mismatch: "")

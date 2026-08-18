@@ -1,0 +1,76 @@
+# Load plan/receipt spec (startup_perf_architecture §8.10/§8.11): a load
+# that does exactly what its sealed plan says produces a receipt that
+# checks GREEN against that plan, and both serialize as SDN.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.load_plan_receipt.{
+    LoadPlanV1,
+    load_plan_hash,
+    load_plan_seal,
+    load_plan_to_sdn,
+    load_receipt_to_sdn,
+    load_receipt_record,
+    load_receipt_check_against_plan
+}
+
+fn sample_plan() -> LoadPlanV1:
+    val deps: [text] = ["std.core", "std.io"]
+    load_plan_seal(LoadPlanV1(
+        schema: 1,
+        artifact_path: "build/out/app.smf",
+        artifact_kind: "smf",
+        target: "x86_64-unknown-linux-gnu",
+        abi_identity: "abi-v1",
+        interface_identity: "iface-aaaa",
+        impl_identity: "impl-bbbb",
+        dependency_order: deps,
+        planned_segment_count: 3,
+        planned_bytes_mapped: 8192,
+        relocation_summary: "rela",
+        planned_relocation_count: 12,
+        import_count: 5,
+        export_count: 7,
+        load_policy: "map_selected_segments",
+        security_policy: "default",
+        cache_identity: "cache-v1/default",
+        plan_hash: ""))
+
+describe "load plan sealing":
+    it "seals a plan with a non-empty stable hash":
+        val p = sample_plan()
+        assert_true(p.plan_hash != "")
+        assert_eq(p.plan_hash, load_plan_hash(p))
+
+    it "renders SDN with header and plan_hash row":
+        val sdn = load_plan_to_sdn(sample_plan())
+        assert_true(sdn.contains("load_plan:"))
+        assert_true(sdn.contains("  planned_segment_count: 3"))
+        assert_true(sdn.contains("  plan_hash: "))
+
+describe "a conforming load produces a matching receipt":
+    it "receipt recorded with the planned counts checks GREEN":
+        val p = sample_plan()
+        val r = load_receipt_record(p, "sha256:feed", "posix_mmap", "dynamic",
+                                    8192, 8192, 3, 12, 5, -1, 2,
+                                    "hit", 4, "ok", "")
+        assert_eq(r.plan_hash, p.plan_hash)
+        val chk = load_receipt_check_against_plan(p, r)
+        assert_true(chk.ok)
+        assert_eq(chk.mismatch, "")
+
+    it "receipt renders as SDN with observed counts":
+        val p = sample_plan()
+        val r = load_receipt_record(p, "sha256:feed", "posix_mmap", "dynamic",
+                                    8192, 8192, 3, 12, 5, -1, 2,
+                                    "hit", 4, "ok", "")
+        val sdn = load_receipt_to_sdn(r)
+        assert_true(sdn.contains("load_receipt:"))
+        assert_true(sdn.contains("  segment_count: 3"))
+        assert_true(sdn.contains("  plan_hash: " + p.plan_hash))
+
+    it "optional page_faults does not affect the verdict":
+        val p = sample_plan()
+        val r = load_receipt_record(p, "sha256:feed", "posix_mmap", "dynamic",
+                                    8192, 8192, 3, 12, 5, 999, 2,
+                                    "hit", 4, "ok", "")
+        assert_true(load_receipt_check_against_plan(p, r).ok)

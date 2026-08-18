@@ -1,0 +1,96 @@
+# Defect-class spec with POSITIVE CONTROL (startup_perf_architecture
+# §8.10/§8.11): the receipt must DISCRIMINATE. A load that deviates from
+# its plan is detectable (plan says N, receipt says M, mismatch named);
+# two different plans yield different hashes/receipts, so the check
+# cannot pass by emitting constants.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.load_plan_receipt.{
+    LoadPlanV1,
+    LoadReceiptV1,
+    load_plan_seal,
+    load_receipt_record,
+    load_receipt_check_against_plan
+}
+
+fn plan_with(segments: i64, bytes: i64) -> LoadPlanV1:
+    val deps: [text] = ["std.core"]
+    load_plan_seal(LoadPlanV1(
+        schema: 1,
+        artifact_path: "build/out/app.smf",
+        artifact_kind: "smf",
+        target: "x86_64-unknown-linux-gnu",
+        abi_identity: "abi-v1",
+        interface_identity: "iface-aaaa",
+        impl_identity: "impl-bbbb",
+        dependency_order: deps,
+        planned_segment_count: segments,
+        planned_bytes_mapped: bytes,
+        relocation_summary: "rela",
+        planned_relocation_count: 4,
+        import_count: 2,
+        export_count: 3,
+        load_policy: "normal",
+        security_policy: "default",
+        cache_identity: "cache-v1/default",
+        plan_hash: ""))
+
+fn receipt_for(p: LoadPlanV1, segments: i64, bytes: i64) -> LoadReceiptV1:
+    load_receipt_record(p, "sha256:feed", "posix_mmap", "dynamic",
+                        bytes, bytes, segments, 4, 2, -1, 1,
+                        "miss", 1, "ok", "")
+
+describe "positive control — conforming load is GREEN":
+    it "receipt matching its plan passes":
+        val p = plan_with(3, 4096)
+        assert_true(load_receipt_check_against_plan(p, receipt_for(p, 3, 4096)).ok)
+
+describe "deviation is detectable":
+    it "plan says 3 segments, receipt says 5 — mismatch names segment_count":
+        val p = plan_with(3, 4096)
+        val chk = load_receipt_check_against_plan(p, receipt_for(p, 5, 4096))
+        assert_false(chk.ok)
+        assert_true(chk.mismatch.contains("segment_count"))
+        assert_true(chk.mismatch.contains("3"))
+        assert_true(chk.mismatch.contains("5"))
+
+    it "bytes_mapped deviation is caught":
+        val p = plan_with(3, 4096)
+        val chk = load_receipt_check_against_plan(p, receipt_for(p, 3, 8192))
+        assert_false(chk.ok)
+        assert_true(chk.mismatch.contains("bytes_mapped"))
+
+    it "a receipt for a DIFFERENT plan is rejected via plan_hash":
+        val a = plan_with(3, 4096)
+        val b = plan_with(4, 4096)
+        val chk = load_receipt_check_against_plan(a, receipt_for(b, 4, 4096))
+        assert_false(chk.ok)
+        assert_true(chk.mismatch.contains("plan_hash"))
+
+    it "a plan altered after sealing is rejected":
+        var p = plan_with(3, 4096)
+        val r = receipt_for(p, 3, 4096)
+        p.planned_segment_count = 3
+        p.import_count = 99
+        val chk = load_receipt_check_against_plan(p, r)
+        assert_false(chk.ok)
+
+    it "a failed load result is never GREEN":
+        val p = plan_with(3, 4096)
+        val r = load_receipt_record(p, "sha256:feed", "posix_mmap", "dynamic",
+                                    4096, 4096, 3, 4, 2, -1, 1,
+                                    "miss", 1, "error", "mmap failed")
+        val chk = load_receipt_check_against_plan(p, r)
+        assert_false(chk.ok)
+        assert_true(chk.mismatch.contains("mmap failed"))
+
+describe "no constant receipts — different plans differ":
+    it "two different plans have different plan hashes":
+        val a = plan_with(3, 4096)
+        val b = plan_with(4, 4096)
+        assert_true(a.plan_hash != b.plan_hash)
+
+    it "receipts of two different plans carry different plan hashes":
+        val a = plan_with(3, 4096)
+        val b = plan_with(3, 8192)
+        assert_true(receipt_for(a, 3, 4096).plan_hash != receipt_for(b, 3, 8192).plan_hash)
