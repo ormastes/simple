@@ -1,0 +1,72 @@
+# REPRODUCING spec for the JIT container-boxing i64 truncation defect.
+#
+# Bug: doc/08_tracking/bug/jit_container_i64_boxing_truncation_2026-08-18.md
+#
+# This spec does NOT rely on the spec runner's own engine. `bin/simple test`
+# pins the child engine to `interpret` and de-JITs any module without a
+# `fn main`, so an in-process assertion could never observe a JIT defect --
+# it would pass identically whether the bug is present or fixed. Instead the
+# spec SHELLS OUT, running one probe program under both engines and comparing
+# the two transcripts. That makes it a real, non-vacuous regression pin.
+#
+# Observed on the deployed Rust seed (2026-08-18):
+#
+#   line          interpret                  jit
+#   b60           1152921504606846976        -1152921504606846976
+#   b61           2305843009213693952        0
+#   b62           4611686018427387904        0
+#   bmax          9223372036854775807        -1
+#
+# while every `s<n>=` scalar line agrees on both engines, and `bneg60`
+# (-2^60) agrees too -- the exact signature of a 61-bit SIGNED payload
+# (range -2^60 .. 2^60-1) with a 3-bit tag stolen from the low end.
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val PROBE: text = "test/fixtures/engine_differential_probe/i64_container_boxing_sweep.spl"
+
+fn _run_lane(engine: text) -> text:
+    val cmd = "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " ${SIMPLE_BIN:-bin/simple} run " + PROBE + " 2>/dev/null"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _line_for(transcript: text, key: text) -> text:
+    for line in transcript.split("\n"):
+        val cleaned = line.trim()
+        if cleaned.contains(" " + key + "="):
+            return cleaned
+    ""
+
+describe "JIT container boxing must round-trip every i64 (subprocess differential)":
+
+    it "runs the probe on both engines and gets real output from each":
+        # Non-vacuity gate. If either lane printed nothing, every later
+        # comparison would trivially 'agree' and the spec would be a lie.
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_true(interp.len() > 0)
+        assert_true(jit.len() > 0)
+        assert_true(interp.contains("b60="))
+        assert_true(jit.contains("b60="))
+
+    it "agrees on 2^60 read back out of a list":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_line_for(jit, "b60"), _line_for(interp, "b60"))
+
+    it "agrees on 2^62 read back out of a list":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_line_for(jit, "b62"), _line_for(interp, "b62"))
+
+    it "agrees on i64::MAX read back out of a list":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_line_for(jit, "bmax"), _line_for(interp, "bmax"))
+
+    it "agrees on the whole transcript":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(jit, interp)

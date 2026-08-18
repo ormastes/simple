@@ -1,0 +1,102 @@
+# DEFECT-CLASS spec for "a large i64 is corrupted on the way through a
+# container" on the Cranelift JIT lane.
+#
+# Bug: doc/08_tracking/bug/jit_container_i64_boxing_truncation_2026-08-18.md
+#
+# The reproducing spec (jit_container_i64_boxing_truncation_repro_spec.spl)
+# pins ONE shape: `[i64]` element round-trip. This spec asks the more useful
+# question -- how far does the class extend? -- by pushing the SAME value
+# through several container kinds and diffing the interpreter against the JIT.
+#
+# Class boundary measured on the deployed Rust seed (2026-08-18), value 2^62:
+#
+#   container      interpret               jit
+#   scalar         4611686018427387904     4611686018427387904   (correct)
+#   struct field   4611686018427387904     4611686018427387904   (correct)
+#   [i64]          4611686018427387904     0                     (CORRUPT)
+#   [[i64]]        4611686018427387904     0                     (CORRUPT)
+#   tuple          4611686018427387904     0                     (CORRUPT)
+#
+# Root cause: the container fast paths in the Cranelift backend box with a
+# bare `ishl_imm(raw, 3)` and unbox with `sshr_imm(raw, 3)` instead of calling
+# `rt_value_int` / `rt_value_unbox_int`. The runtime's two-representation
+# scheme (inline 61-bit payload, else a TAG_HEAP `HeapInt`) is already correct
+# -- `RuntimeValue::fits_inline_int` specifies the range as -2^60 ..= 2^60-1 --
+# but the inline shift sites never consult it, so anything outside that band
+# is silently truncated. That the NEGATIVE endpoint -2^60 survives while +2^60
+# does not is the fingerprint of exactly that asymmetric two's-complement band.
+#
+# POSITIVE CONTROL: every `ctl_*` reading pushes the small value 7 through the
+# IDENTICAL container and code path. Those must agree on both engines. Their
+# agreement is what proves this spec is measuring a magnitude-dependent defect
+# rather than a broken probe, a dead lane, or an empty transcript -- without
+# them, "the two lanes differ" would be uninterpretable.
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val PROBE: text = "test/fixtures/engine_differential_probe/i64_container_kinds.spl"
+
+fn _run_lane(engine: text) -> text:
+    val cmd = "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " ${SIMPLE_BIN:-bin/simple} run " + PROBE + " 2>/dev/null"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+fn _reading(transcript: text, key: text) -> text:
+    for line in transcript.split("\n"):
+        val cleaned = line.trim()
+        if cleaned.starts_with(key + "="):
+            return cleaned
+    ""
+
+describe "positive control: small values round-trip through every container on both engines":
+
+    it "produces a non-empty transcript on both engines":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_true(interp.len() > 0)
+        assert_true(jit.len() > 0)
+
+    it "agrees on the small value through a scalar, a list, a nested list, a struct and a tuple":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_reading(jit, "ctl_scalar"), _reading(interp, "ctl_scalar"))
+        assert_equal(_reading(jit, "ctl_list"), _reading(interp, "ctl_list"))
+        assert_equal(_reading(jit, "ctl_nested"), _reading(interp, "ctl_nested"))
+        assert_equal(_reading(jit, "ctl_struct"), _reading(interp, "ctl_struct"))
+        assert_equal(_reading(jit, "ctl_tuple"), _reading(interp, "ctl_tuple"))
+
+    it "reads a real value for every control, not an empty string":
+        # A missing key would make every comparison above compare "" to "",
+        # which passes vacuously. Pin the actual content.
+        val interp = _run_lane("interpret")
+        assert_equal(_reading(interp, "ctl_list"), "ctl_list=7")
+        assert_equal(_reading(interp, "ctl_tuple"), "ctl_tuple=7")
+
+describe "defect class: a large i64 must survive every container kind":
+
+    it "survives a scalar (already correct -- guards against regression)":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_reading(jit, "big_scalar"), _reading(interp, "big_scalar"))
+
+    it "survives a struct field (already correct -- guards against regression)":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_reading(jit, "big_struct"), _reading(interp, "big_struct"))
+
+    it "survives a list element":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_reading(jit, "big_list"), _reading(interp, "big_list"))
+
+    it "survives a nested list element":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_reading(jit, "big_nested"), _reading(interp, "big_nested"))
+
+    it "survives a tuple element":
+        val interp = _run_lane("interpret")
+        val jit = _run_lane("jit")
+        assert_equal(_reading(jit, "big_tuple"), _reading(interp, "big_tuple"))
