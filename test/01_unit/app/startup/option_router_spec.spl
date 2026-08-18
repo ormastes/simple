@@ -1,0 +1,111 @@
+# Stage-0 option router — reproducing acceptance spec (Phase C / WP-19a-s).
+# Options route to the registered handler route, including the
+# `--x<ns>-<key>[=<value>]` extension split and the hard `--` boundary.
+
+use std.spec
+use std.nogc_sync_mut.composition.cli_option_route.{
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED,
+    CLI_ROUTE_ERR_UNKNOWN_NAMESPACE, CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE,
+    CLI_ROUTE_ERR_RESERVED_SPELLING
+}
+use app.startup.option_router.{
+    OptionRouterRouteV1, OptionRouterNamespaceV1,
+    option_router_table_create_v1, option_router_register_route_v1,
+    option_router_register_namespace_v1, option_router_dispatch_token_v1,
+    option_router_route_argv_v1,
+    ROUTER_DISPATCH_EXACT, ROUTER_DISPATCH_EXTENSION,
+    ROUTER_DISPATCH_POSITIONAL, ROUTER_DISPATCH_TERMINATOR,
+    ROUTER_DISPATCH_PROGRAM_ARG, ROUTER_DISPATCH_ERROR
+}
+
+fn _table():
+    var t = option_router_table_create_v1()
+    val (t1, d1) = option_router_register_route_v1(t, OptionRouterRouteV1(option_id: "core.verbose", spelling: "--verbose", value_mode: CLI_VALUE_MODE_FLAG, provider_id: ""))
+    assert d1.ok
+    val (t2, d2) = option_router_register_route_v1(t1, OptionRouterRouteV1(option_id: "core.opt_level", spelling: "--opt-level", value_mode: CLI_VALUE_MODE_REQUIRED, provider_id: ""))
+    assert d2.ok
+    val (t3, d3) = option_router_register_namespace_v1(t2, OptionRouterNamespaceV1(namespace: "log", provider_id: "provider.log", provider_marker_path: ""))
+    assert d3.ok
+    t3
+
+describe "stage0 option router — exact routes":
+    it "routes a flag spelling to its handler route":
+        val t = _table()
+        val d = option_router_dispatch_token_v1(t, "--verbose", false)
+        expect(d.kind).to_be(ROUTER_DISPATCH_EXACT)
+        expect(d.option_id).to_be("core.verbose")
+        expect(d.route_index).to_be(0)
+        expect(d.has_value).to_be(false)
+
+    it "routes a valued spelling with =value to the right handler":
+        val t = _table()
+        val d = option_router_dispatch_token_v1(t, "--opt-level=2", false)
+        expect(d.kind).to_be(ROUTER_DISPATCH_EXACT)
+        expect(d.option_id).to_be("core.opt_level")
+        expect(d.has_value).to_be(true)
+        expect(d.value).to_be("2")
+
+    it "value-mode is enforced: required without = is an error, flag with = is an error":
+        val t = _table()
+        expect(option_router_dispatch_token_v1(t, "--opt-level", false).kind).to_be(ROUTER_DISPATCH_ERROR)
+        expect(option_router_dispatch_token_v1(t, "--verbose=1", false).kind).to_be(ROUTER_DISPATCH_ERROR)
+
+    it "unknown exact option is a fail-closed error":
+        val t = _table()
+        expect(option_router_dispatch_token_v1(t, "--nope", false).kind).to_be(ROUTER_DISPATCH_ERROR)
+
+    it "reserved spellings cannot be registered":
+        val t = _table()
+        val (_, d) = option_router_register_route_v1(t, OptionRouterRouteV1(option_id: "bad", spelling: "--help", value_mode: CLI_VALUE_MODE_FLAG, provider_id: ""))
+        expect(d.ok).to_be(false)
+        expect(d.code).to_be(CLI_ROUTE_ERR_RESERVED_SPELLING)
+
+describe "stage0 option router — --x extension split":
+    it "splits --x<ns>-<key>=<value> into namespace/key/value":
+        val t = _table()
+        val d = option_router_dispatch_token_v1(t, "--xlog-level=debug", false)
+        expect(d.kind).to_be(ROUTER_DISPATCH_EXTENSION)
+        expect(d.namespace).to_be("log")
+        expect(d.key).to_be("level")
+        expect(d.value).to_be("debug")
+        expect(d.has_value).to_be(true)
+        expect(d.ns_index).to_be(0)
+
+    it "flag form --x<ns>-<key> has no value; key may contain dashes":
+        val t = _table()
+        val d = option_router_dispatch_token_v1(t, "--xlog-color-mode", false)
+        expect(d.kind).to_be(ROUTER_DISPATCH_EXTENSION)
+        expect(d.namespace).to_be("log")
+        expect(d.key).to_be("color-mode")
+        expect(d.has_value).to_be(false)
+
+    it "unknown namespace and malformed --x tokens are fail-closed errors":
+        val t = _table()
+        val d1 = option_router_dispatch_token_v1(t, "--xzz-key", false)
+        expect(d1.kind).to_be(ROUTER_DISPATCH_ERROR)
+        expect(d1.error_code).to_be(CLI_ROUTE_ERR_UNKNOWN_NAMESPACE)
+        val d2 = option_router_dispatch_token_v1(t, "--xlog", false)
+        expect(d2.kind).to_be(ROUTER_DISPATCH_ERROR)
+        expect(d2.error_code).to_be(CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE)
+        val d3 = option_router_dispatch_token_v1(t, "--x-key", false)
+        expect(d3.kind).to_be(ROUTER_DISPATCH_ERROR)
+
+describe "stage0 option router — argv routing with hard -- boundary":
+    it "routes a mixed argv and stops intercepting after --":
+        val t = _table()
+        match option_router_route_argv_v1(t, ["--verbose", "--xlog-level=info", "input.spl", "--", "--xlog-level=late"]):
+            case Ok(ds):
+                expect(ds.len()).to_be(5)
+                expect(ds[0].kind).to_be(ROUTER_DISPATCH_EXACT)
+                expect(ds[1].kind).to_be(ROUTER_DISPATCH_EXTENSION)
+                expect(ds[2].kind).to_be(ROUTER_DISPATCH_POSITIONAL)
+                expect(ds[3].kind).to_be(ROUTER_DISPATCH_TERMINATOR)
+                expect(ds[4].kind).to_be(ROUTER_DISPATCH_PROGRAM_ARG)
+            case Err(e):
+                expect(e).to_be("")
+
+    it "argv routing is fail-closed on the first bad token":
+        val t = _table()
+        match option_router_route_argv_v1(t, ["--verbose", "--xzz-key"]):
+            case Ok(_): expect(true).to_be(false)
+            case Err(e): expect(e.contains("unknown namespace")).to_be(true)

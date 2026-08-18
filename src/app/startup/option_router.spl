@@ -1,0 +1,224 @@
+# Stage-0 option router (Phase C / WP-19a-s, startup_perf_plan_2026-08-17).
+#
+# CONSUMES the option-route record layer in
+# src/lib/nogc_sync_mut/composition/cli_option_route.spl (constants + grammar
+# predicates) and dispatches one argv token to its registered handler route,
+# including the lexical `--x<ns>-<key>[=<value>]` extension split with the
+# hard `--` boundary.
+#
+# Allocation discipline (plan: "no provider load / no heap allocation during
+# argv parsing"): the router table is built ONCE before parsing (allocation
+# is fine there). During parse, dispatch does index scans and string
+# comparisons on the token in place; the only text produced is the dispatch
+# OUTPUT fields themselves (namespace/key/value slices), never intermediate
+# per-argument structures. Providers are NEVER opened during parse: marker
+# I/O lives solely in option_router_load_provider_marker_v1, which only the
+# consumer of a matched extension dispatch calls.
+#
+# Records here are `struct`, not `class`: pure data, and the 2026-08-18 seed
+# erases class field access under `bin/simple test`
+# (doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md).
+# For the same reason the --x split is re-derived here in struct form from the
+# same grammar (§5.9) rather than through the class-returning
+# split_cli_extension_token_v1; the shared predicates
+# cli_namespace_shape_valid_v1 / cli_spelling_reserved_v1 are reused directly.
+
+use std.nogc_sync_mut.composition.cli_option_route.{
+    CLI_VALUE_MODE_FLAG, CLI_VALUE_MODE_REQUIRED, CLI_VALUE_MODE_OPTIONAL,
+    CLI_ROUTE_OK, CLI_ROUTE_ERR_RESERVED_SPELLING, CLI_ROUTE_ERR_DUPLICATE_ALIAS,
+    CLI_ROUTE_ERR_DUPLICATE_NAMESPACE, CLI_ROUTE_ERR_UNKNOWN_NAMESPACE,
+    CLI_ROUTE_ERR_BAD_FIELD, CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE,
+    cli_namespace_shape_valid_v1, cli_spelling_reserved_v1
+}
+use app.io.mod.{file_exists, file_read}
+
+# dispatch kinds
+val ROUTER_DISPATCH_EXACT: i64 = 1        # matched a registered exact route
+val ROUTER_DISPATCH_EXTENSION: i64 = 2    # well-formed --x token, known namespace
+val ROUTER_DISPATCH_POSITIONAL: i64 = 3
+val ROUTER_DISPATCH_TERMINATOR: i64 = 4   # the hard `--`
+val ROUTER_DISPATCH_PROGRAM_ARG: i64 = 5  # after `--`, never intercepted
+val ROUTER_DISPATCH_ERROR: i64 = 6        # unknown option/namespace, bad grammar, value-mode violation
+
+struct OptionRouterRouteV1:
+    option_id: text
+    spelling: text
+    value_mode: i64
+    provider_id: text
+
+struct OptionRouterNamespaceV1:
+    namespace: text
+    provider_id: text
+    provider_marker_path: text
+
+struct OptionRouterTableV1:
+    routes: [OptionRouterRouteV1]
+    namespaces: [OptionRouterNamespaceV1]
+
+struct OptionRouterDiagV1:
+    ok: bool
+    code: i64
+    detail: text
+
+# One dispatch result. route_index / ns_index point back into the table for
+# handler binding; -1 when not applicable.
+struct OptionRouterDispatchV1:
+    kind: i64
+    route_index: i64
+    ns_index: i64
+    option_id: text
+    namespace: text
+    key: text
+    value: text
+    has_value: bool
+    error_code: i64
+    error: text
+
+fn option_router_table_create_v1() -> OptionRouterTableV1:
+    OptionRouterTableV1(routes: [], namespaces: [])
+
+fn _diag(ok: bool, code: i64, detail: text) -> OptionRouterDiagV1:
+    OptionRouterDiagV1(ok: ok, code: code, detail: detail)
+
+fn _value_mode_ok(m: i64) -> bool:
+    m == CLI_VALUE_MODE_FLAG or m == CLI_VALUE_MODE_REQUIRED or m == CLI_VALUE_MODE_OPTIONAL
+
+# Registration (pre-parse; allocation allowed here). Fail-closed: reserved
+# spellings (incl. the whole --x prefix), duplicates, bad value modes.
+fn option_router_register_route_v1(table: OptionRouterTableV1, route: OptionRouterRouteV1) -> (OptionRouterTableV1, OptionRouterDiagV1):
+    if route.option_id.len() == 0 or route.spelling.len() == 0:
+        return (table, _diag(false, CLI_ROUTE_ERR_BAD_FIELD, "empty option_id or spelling"))
+    if not _value_mode_ok(route.value_mode):
+        return (table, _diag(false, CLI_ROUTE_ERR_BAD_FIELD, "value_mode"))
+    if cli_spelling_reserved_v1(route.spelling):
+        return (table, _diag(false, CLI_ROUTE_ERR_RESERVED_SPELLING, route.spelling))
+    var i = 0
+    while i < table.routes.len():
+        if table.routes[i].spelling == route.spelling:
+            return (table, _diag(false, CLI_ROUTE_ERR_DUPLICATE_ALIAS, route.spelling))
+        i = i + 1
+    var out = table
+    out.routes.push(route)
+    (out, _diag(true, CLI_ROUTE_OK, ""))
+
+fn option_router_register_namespace_v1(table: OptionRouterTableV1, ns: OptionRouterNamespaceV1) -> (OptionRouterTableV1, OptionRouterDiagV1):
+    if not cli_namespace_shape_valid_v1(ns.namespace):
+        return (table, _diag(false, CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE, ns.namespace))
+    if ns.provider_id.len() == 0:
+        return (table, _diag(false, CLI_ROUTE_ERR_BAD_FIELD, "empty provider_id"))
+    var i = 0
+    while i < table.namespaces.len():
+        if table.namespaces[i].namespace == ns.namespace:
+            return (table, _diag(false, CLI_ROUTE_ERR_DUPLICATE_NAMESPACE, ns.namespace))
+        i = i + 1
+    var out = table
+    out.namespaces.push(ns)
+    (out, _diag(true, CLI_ROUTE_OK, ""))
+
+fn _dispatch(kind: i64, route_index: i64, ns_index: i64, option_id: text, namespace: text, key: text, value: text, has_value: bool, error_code: i64, error: text) -> OptionRouterDispatchV1:
+    OptionRouterDispatchV1(kind: kind, route_index: route_index, ns_index: ns_index, option_id: option_id, namespace: namespace, key: key, value: value, has_value: has_value, error_code: error_code, error: error)
+
+fn _plain(kind: i64) -> OptionRouterDispatchV1:
+    _dispatch(kind, -1, -1, "", "", "", "", false, CLI_ROUTE_OK, "")
+
+fn _err(code: i64, detail: text) -> OptionRouterDispatchV1:
+    _dispatch(ROUTER_DISPATCH_ERROR, -1, -1, "", "", "", "", false, code, detail)
+
+# Dispatch ONE token. `terminated` = a hard `--` was already seen.
+# No provider I/O on any path through this function.
+fn option_router_dispatch_token_v1(table: OptionRouterTableV1, token: text, terminated: bool) -> OptionRouterDispatchV1:
+    if terminated:
+        return _plain(ROUTER_DISPATCH_PROGRAM_ARG)
+    if token == "--":
+        return _plain(ROUTER_DISPATCH_TERMINATOR)
+    if not token.starts_with("--"):
+        return _plain(ROUTER_DISPATCH_POSITIONAL)
+    if token.starts_with("--x"):
+        return _dispatch_extension(table, token)
+    _dispatch_exact(table, token)
+
+# Exact route match: `token == spelling`, or `spelling=` prefix with a value
+# tail. In-place scans only; the value slice is the dispatch output.
+fn _dispatch_exact(table: OptionRouterTableV1, token: text) -> OptionRouterDispatchV1:
+    val n = token.len()
+    var i = 0
+    while i < table.routes.len():
+        val r = table.routes[i]
+        val sl = r.spelling.len()
+        if token == r.spelling:
+            if r.value_mode == CLI_VALUE_MODE_REQUIRED:
+                return _err(CLI_ROUTE_ERR_BAD_FIELD, "option requires =<value>: " + r.spelling)
+            return _dispatch(ROUTER_DISPATCH_EXACT, i, -1, r.option_id, "", "", "", false, CLI_ROUTE_OK, "")
+        if n > sl and token.starts_with(r.spelling) and token.slice(sl, sl + 1) == "=":
+            if r.value_mode == CLI_VALUE_MODE_FLAG:
+                return _err(CLI_ROUTE_ERR_BAD_FIELD, "flag option takes no value: " + r.spelling)
+            return _dispatch(ROUTER_DISPATCH_EXACT, i, -1, r.option_id, "", "", token.slice(sl + 1, n), true, CLI_ROUTE_OK, "")
+        i = i + 1
+    _err(CLI_ROUTE_ERR_BAD_FIELD, "unknown option: " + token)
+
+# Lexical `--x<ns>-<key>[=<value>]` split (research §5.9): namespace never
+# contains `-`, a value REQUIRES `=`, delimiter indices found by one scan.
+fn _dispatch_extension(table: OptionRouterTableV1, token: text) -> OptionRouterDispatchV1:
+    val body_start = 3
+    val n = token.len()
+    var dash = -1
+    var eq = -1
+    var i = body_start
+    while i < n:
+        val ch = token.slice(i, i + 1)
+        if ch == "=":
+            eq = i
+            break
+        if ch == "-" and dash < 0:
+            dash = i
+        i = i + 1
+    if dash < 0 or dash == body_start:
+        return _err(CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE, "malformed extension token: " + token)
+    val namespace = token.slice(body_start, dash)
+    if not cli_namespace_shape_valid_v1(namespace):
+        return _err(CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE, "malformed extension token: " + token)
+    val key_end = if eq >= 0: eq else: n
+    val key = token.slice(dash + 1, key_end)
+    if key.len() == 0:
+        return _err(CLI_ROUTE_ERR_BAD_NAMESPACE_SHAPE, "malformed extension token: " + token)
+    var ns_index = -1
+    var j = 0
+    while j < table.namespaces.len():
+        if table.namespaces[j].namespace == namespace:
+            ns_index = j
+            break
+        j = j + 1
+    if ns_index < 0:
+        return _err(CLI_ROUTE_ERR_UNKNOWN_NAMESPACE, "unknown namespace: " + namespace)
+    if eq >= 0:
+        return _dispatch(ROUTER_DISPATCH_EXTENSION, -1, ns_index, "", namespace, key, token.slice(eq + 1, n), true, CLI_ROUTE_OK, "")
+    _dispatch(ROUTER_DISPATCH_EXTENSION, -1, ns_index, "", namespace, key, "", false, CLI_ROUTE_OK, "")
+
+# Route a whole argv. Fail-closed: the first ERROR dispatch aborts. The
+# result array is the output; no provider is opened anywhere in here.
+fn option_router_route_argv_v1(table: OptionRouterTableV1, tokens: [text]) -> Result<[OptionRouterDispatchV1], text>:
+    var out: [OptionRouterDispatchV1] = []
+    var terminated = false
+    var i = 0
+    while i < tokens.len():
+        val d = option_router_dispatch_token_v1(table, tokens[i], terminated)
+        if d.kind == ROUTER_DISPATCH_ERROR:
+            return Err("option-router-error: " + d.error)
+        if d.kind == ROUTER_DISPATCH_TERMINATOR:
+            terminated = true
+        out.push(d)
+        i = i + 1
+    Ok(out)
+
+# The ONLY provider-touching path. Called by the CONSUMER of a matched
+# extension dispatch, never by the parser. Fail-closed: a missing marker is
+# an explicit error — which is exactly what makes the lazy-load sabotage
+# probe open-evidence: if parsing had opened providers eagerly, a registered
+# namespace whose marker does not exist would already have failed.
+fn option_router_load_provider_marker_v1(table: OptionRouterTableV1, dispatch: OptionRouterDispatchV1) -> Result<text, text>:
+    if dispatch.kind != ROUTER_DISPATCH_EXTENSION or dispatch.ns_index < 0:
+        return Err("option-router-error: not an extension dispatch")
+    val ns = table.namespaces[dispatch.ns_index]
+    if not file_exists(ns.provider_marker_path):
+        return Err("option-router-error: provider marker missing for namespace '" + ns.namespace + "': " + ns.provider_marker_path)
+    Ok(file_read(ns.provider_marker_path))
