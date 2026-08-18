@@ -28,6 +28,8 @@
   **2026-08-18: the dominant term IS located** — see the banner above — and it
   is a de-JIT constant factor, not a superlinear term. Optimisation still OPEN
   (the fix is a struct rename plus a driver-heuristic change, neither landed). The "not a hang / cost not deadlock" verdict, the
+  The superlinear term is **not yet located** (profiling blocked on this host);
+  optimisation still OPEN. The "not a hang / cost not deadlock" verdict, the
   guard, and the specs are all present and green.
 - **Re-verified 2026-08-17 (later pass), by execution, not inspection:**
   - `out=$(timeout 500 sh scripts/check/check-lint-cost-budget.shs); rc=$?`
