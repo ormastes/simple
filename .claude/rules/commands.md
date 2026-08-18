@@ -60,8 +60,8 @@ path containing a `build/` component, and `git add` on it is a silent no-op.)
   lint-profile reader. **No build path traverses `dependencies:`.**
 - `action_key.spl:197-204` implements `interface_digest_of` canonically
   (`simple/interface/v1`), with `ActionDep.iface_digest` and dep sort on
-  `(module_id, iface_digest)`. **`/usr/bin/grep -rn interface_digest_of
-  src/compiler` returns 4 lines: its own definition
+  `(module_id, iface_digest)`. **`/usr/bin/grep -rn interface_digest_of src`
+  returns 4 lines (all under `src/compiler`): its own definition
   (`cache/action_key.spl:199`), one schema row
   (`cache/schema/cache_protocol.sdn:844`), and two comments that merely name it
   (`35.semantics/interface/compile_interface.spl:37`,
