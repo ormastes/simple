@@ -22,9 +22,34 @@
 > fixture printed `field=42`) rests on an execution run and is left as filed; only
 > its causal attribution is retracted here.
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status (single authoritative line, 2026-08-17): CLOSED — DID NOT REPRODUCE.**
+  Basis: EXECUTION evidence — two independent 2026-08-17 reproducer runs of the
+  doc's own bind-then-mutate (P6) shape under the interpreter both show the local
+  ALIASING the field (`back_through_root=1`; `field=42 / local=42`). See the two
+  dated sections at the end of this file.
+  - *Mechanism is NOT established.* The closing triage section attributes the
+    change to `Value::ClassInstance(Arc<..>)`; the header Correction above
+    retracts that attribution on SOURCE evidence (zero producers). Execution
+    evidence and source evidence are different kinds and neither overrides the
+    other here: the OBSERVATION (aliasing works) stands, the CAUSE is unknown.
+  - *What would reopen this row:* a reproducer run — not a source reading — in
+    which the P6 shape prints `back_through_root=0` under
+    `SIMPLE_EXECUTION_MODE=interpreter` on a stated binary.
+- ~~Status: OPEN (P1)~~ — **SUPERSEDED.** Written 2026-08-17 06:41 by
+  `1d52c95627b` (reformat of the original 2026-08-10 `OPEN — engine divergence`
+  filing). That same commit's message already records this row as behaving; the
+  line was reformatted, not re-adjudicated, and 35 minutes later `e5083c948b0`
+  appended the DID NOT REPRODUCE section without updating it. Stale line, kept
+  for history.
+- ~~Status re-verified 2026-08-17 by source inspection (triage shard 02).~~ —
+  **SUPERSEDED**, same commit, same reason.
 - **Filed:** 2026-08-10
+- **Scope note for everything below this block:** the sections that follow
+  (Blocks / What diverges / Production consequence / Why the spec is left RED /
+  Unblock condition / Root cause located) are the ORIGINAL 2026-08-10 filing and
+  its root-cause work, preserved verbatim as discovery evidence. Their
+  present-tense "remains RED" / "still OPEN" wording describes 2026-08-10, not
+  today's disposition. This header block is the current status.
 - **Blocks:** `test/{02_integration,integration}/app/sj_daemon_mutual_exclusion_spec.spl`
   example *"sees the lease through SjClient -> fallback_exec -> handle_cli_args"*,
   deliberately left **RED**.
