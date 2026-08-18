@@ -157,6 +157,61 @@ Given that:
    test runner to resolve a spec against multiple trees, which is outside
    this tranche's scope (`dwarf_parser.spl` was NOT one of the 5 targets).
 
+## Tranche 2 (2026-08-18) — `net/telnet.spl` and `src/testing/mock/verification.spl`
+
+Precedent used: `ce7b330b911` (`amqp_utils.spl` -> `src/lib/common/amqp_utils.spl`,
+3 tree copies replaced with a 5-line `pub use std.common.amqp_utils*`
+delegator; sample read from `src/lib/nogc_sync_mut/amqp_utils.spl`).
+
+There are actually **4** lib trees on disk (`nogc_sync_mut`, `nogc_async_mut`,
+`gc_async_mut`, `gc_sync_mut`), not 3 — `gc_sync_mut` was silently excluded
+from every prior "all 3 trees" byte-identity claim in this doc. Re-verified
+by md5sum:
+
+- `net/telnet.spl`: `nogc_sync_mut` / `nogc_async_mut` / `gc_async_mut` all
+  `604fcfe0...` (identical); `gc_sync_mut` is `19a3bd81...` (**different**).
+- `src/testing/mock/verification.spl`: `nogc_sync_mut` / `nogc_async_mut` /
+  `gc_async_mut` all `a3db08cd...` (identical); `gc_sync_mut` is
+  `6171dde8...` (**different**). So "all 3 trees" in the earlier entries was
+  correct as far as it went — it just never mentioned the 4th, non-matching
+  tree exists.
+
+### 1. `net/telnet.spl` — SKIP (tree-specific import found)
+
+Its 3 `use` lines: `std.error.{SimpleError, error}`,
+`std.net.tcp.{TcpStream}`, `std.common.string_core.{bytes_to_text}`.
+`std.error` and `std.common.string_core` do resolve to
+`src/lib/common/error.spl` / `src/lib/common/string_core.spl` — genuinely
+tree-neutral. But `std.net.tcp` does **not** live under `src/lib/common/` at
+all — `net/tcp.spl` exists only as 4 separate per-tree files
+(`src/lib/{nogc_sync_mut,nogc_async_mut,gc_async_mut}/net/tcp.spl` at
+`f70b1c37...`, `src/lib/gc_sync_mut/net/tcp.spl` at `d16f6184...`, itself the
+same 3-identical-plus-1-different split as telnet.spl). A `std.X` prefix does
+not imply tree-neutrality here: `std.net.tcp` resolves per-tree via each
+tree's own search root, so a copy of `telnet.spl` moved into
+`src/lib/common/` would have no `net/tcp.spl` sibling to resolve against.
+This is exactly the `std.<tier>.*`-shaped hazard the task called out, just
+disguised as `std.net.tcp` instead of `std.nogc_sync_mut.net.tcp`. **SKIP —
+not moved.**
+
+### 2. `src/testing/mock/verification.spl` — SKIP (tree-specific import found)
+
+Its only import: `import testing.mock.builder: CallRecord, MockFunction,
+Expectation, VerificationResult`. `builder.spl` is the same shape again —
+`src/lib/{nogc_sync_mut,nogc_async_mut,gc_async_mut}/src/testing/mock/builder.spl`
+all `39179f9e...` (identical), `src/lib/gc_sync_mut/.../builder.spl` is
+`2e2e1802...` (different) — and none of the 4 copies live under
+`src/lib/common/` (confirmed: `find src/lib/common -iname '*testing*' -o
+-iname '*mock*'` returns nothing under `src/lib/common` for this path).
+Moving `verification.spl` to common would leave its `import
+testing.mock.builder` line unresolvable from the common root. **SKIP — not
+moved.**
+
+Both targets fail the import-audit step of the per-file protocol before
+reaching the collision-check or move steps, so no collision count, caller
+count, or test run was performed for either — the protocol is fail-closed on
+import audit alone. No files were changed, no commit was made for tranche 2.
+
 **Status: all 5 targets DEFERRED, not merged.** No regression risk was
 introduced (zero files changed). Re-verified-identical is recorded above so
 a future pass does not need to redo step (a). Recommended before attempting
