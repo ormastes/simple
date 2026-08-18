@@ -44,6 +44,7 @@ this closure is about the infrastructure outage only, not about that gap.
 
 
 Status: RESOLVED 2026-08-18 (see note above) — was P1, blocked every push to `main`.
+Status: OPEN (P1) — blocks every push to `main`, including releases.
 
 ## Symptom
 

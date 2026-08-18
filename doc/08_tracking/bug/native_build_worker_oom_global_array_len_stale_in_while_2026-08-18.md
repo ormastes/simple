@@ -7,6 +7,7 @@
   stale read. The method-call self-update sites wrote only `env`, never
   `MODULE_GLOBALS`, which is the store the non-local read path prefers. Fixed
   in interpreter_helpers/patterns.rs; see the Resolution section.
+  INTERPRETER defect (stale global read in loop conditions) remains OPEN.
 - **Predecessor rows:** `native_build_interpreted_worker_rss_blowup_2026-08-18.md`
   (term-2 creep, 2^31 datum), `native_build_source_closure_zero_sources_2026-08-17.md`.
   The task-orders row `prepush_hook_unpassable_native_build_oom_2026-08-17.md`
@@ -195,3 +196,7 @@ wall with no verdict line, because it hangs inside the loop; `bin/simple
 run` gives the bounded verdict. The `.spl` workaround in
 `placeholder_lambda.spl` is deliberately left in place — it is valid
 defensively and independent of this fix.
+- Interpreter fix for the stale global read in while conditions — OPEN, above.
+- `run3.log` incidentally shows `.str()` is not a method on `i64` under the
+  seed interpreter (`method 'str' not found on type 'i64'`) — pre-existing gap,
+  noted only.
