@@ -1,0 +1,299 @@
+# ExecIR — flat pre-decoded execution IR (startup-perf Phase E, slice 1).
+#
+# Lowers a MirFunction's straight-line arithmetic (Const/Copy/Move/BinOp/
+# UnaryOp) plus Goto/If/Ret control flow into a flat i64 opcode/operand
+# array, executed by a tight while-loop with no per-instruction enum
+# dispatch or dict lookups. Anything outside that subset (calls, memory,
+# aggregates, switch, float/str constants) yields nil from execir_encode —
+# the caller falls back to MirInterpreter.
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+# Research: doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md
+#
+# Instruction layout: fixed 4 slots [op, a, b, c].
+#   1 LOADK  dest, imm, _
+#   2 MOV    dest, src, _
+#   3 JMP    pc,   _,   _
+#   4 JIF    cond, then_pc, else_pc     (cond != 0 -> then_pc)
+#   5 RET    src,  _,   _
+#   10..25 binops: dest, lreg, rreg
+#     10 Add 11 Sub 12 Mul 13 Div 14 Rem 15 Eq 16 Ne 17 Lt 18 Le
+#     19 Gt 20 Ge 21 BitAnd 22 BitOr 23 BitXor 24 Shl 25 Shr
+#   30 NEG dest, src  31 NOT dest, src  32 BITNOT dest, src
+#
+# Const operands are materialized into a dedicated read-only register pool
+# initialized once per run (const_regs/const_vals), so hot loops never
+# re-decode immediates.
+
+use compiler.mir.mir_data.*
+
+class ExecIrProgram:
+    """Flat encoded program: code array + register plan."""
+    code: [i64]
+    reg_count: i64
+    const_regs: [i64]
+    const_vals: [i64]
+    entry_pc: i64
+
+class ExecIrEncoder:
+    """Encoding state. Internal to execir_encode."""
+    reg_of: {i64: i64}       # LocalId.id -> reg index
+    const_reg_of: {i64: i64} # const value -> pooled reg index
+    next_reg: i64
+    const_regs: [i64]
+    const_vals: [i64]
+    code: [i64]
+
+impl ExecIrEncoder:
+    static fn create() -> ExecIrEncoder:
+        ExecIrEncoder(reg_of: {}, const_reg_of: {}, next_reg: 0,
+                      const_regs: [], const_vals: [], code: [])
+
+    me const_reg(v: i64) -> i64:
+        """Register holding constant v, pooling duplicates."""
+        if self.const_reg_of.contains(v):
+            return self.const_reg_of[v] ?? 0
+        val r = self.next_reg
+        self.next_reg = self.next_reg + 1
+        self.const_reg_of[v] = r
+        self.const_regs.push(r)
+        self.const_vals.push(v)
+        r
+
+    me operand_reg(operand: MirOperand) -> i64?:
+        """Register for an operand, or nil if not encodable."""
+        match operand.kind:
+            case Copy(local): self.reg_of[local.id]
+            case Move(local): self.reg_of[local.id]
+            case Const(value, type_):
+                match value:
+                    case Int(v): Some(self.const_reg(v))
+                    case Bool(v): Some(self.const_reg(if v: 1 else: 0))
+                    case _: nil
+
+    me emit(op: i64, a: i64, b: i64, c: i64):
+        self.code.push(op)
+        self.code.push(a)
+        self.code.push(b)
+        self.code.push(c)
+
+fn execir_binop_code(op: MirBinOp) -> i64:
+    """Opcode for a supported MirBinOp, or -1."""
+    match op:
+        case Add: 10
+        case Sub: 11
+        case Mul: 12
+        case Div: 13
+        case Rem: 14
+        case Eq: 15
+        case Ne: 16
+        case Lt: 17
+        case Le: 18
+        case Gt: 19
+        case Ge: 20
+        case BitAnd: 21
+        case BitOr: 22
+        case BitXor: 23
+        case Shl: 24
+        case Shr: 25
+        case _: -1
+
+fn execir_encode(func: MirFunction) -> ExecIrProgram?:
+    """Lower func into an ExecIrProgram, or nil if any instruction or
+    terminator falls outside the encodable subset (fallback contract)."""
+    var enc = ExecIrEncoder.create()
+
+    # Pass 0: register per local, in declaration order.
+    for local in func.locals:
+        enc.reg_of[local.id.id] = enc.next_reg
+        enc.next_reg = enc.next_reg + 1
+
+    # Pass 1: code offset per block (fixed 4-slot instructions, one
+    # terminator record per block), rejecting unencodable kinds early.
+    var block_pc: {i64: i64} = {}
+    var pc = 0
+    for block in func.blocks:
+        block_pc[block.id.id] = pc
+        for inst in block.instructions:
+            val ok = match inst.kind:
+                case Const(dest, value, type_):
+                    match value:
+                        case Int(v): true
+                        case Bool(v): true
+                        case _: false
+                case Copy(dest, src): true
+                case Move(dest, src): true
+                case BinOp(dest, op, left, right): execir_binop_code(op) >= 0
+                case UnaryOp(dest, op, operand):
+                    match op:
+                        case Neg: true
+                        case Not: true
+                        case BitNot: true
+                        case _: false
+                case _: false
+            if not ok:
+                return nil
+            pc = pc + 4
+        val term_ok = match block.terminator:
+            case Goto(target): true
+            case If(cond, then_, else_): true
+            case Ret(value): true
+            case _: false
+        if not term_ok:
+            return nil
+        pc = pc + 4
+
+    # Pass 2: emit.
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Const(dest, value, type_):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    if dreg < 0:
+                        return nil
+                    val imm = match value:
+                        case Int(v): v
+                        case Bool(v): if v: 1 else: 0
+                        case _: return nil
+                    enc.emit(1, dreg, imm, 0)
+                case Copy(dest, src):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val sreg = enc.reg_of[src.id] ?? -1
+                    if dreg < 0 or sreg < 0:
+                        return nil
+                    enc.emit(2, dreg, sreg, 0)
+                case Move(dest, src):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val sreg = enc.reg_of[src.id] ?? -1
+                    if dreg < 0 or sreg < 0:
+                        return nil
+                    enc.emit(2, dreg, sreg, 0)
+                case BinOp(dest, op, left, right):
+                    val code = execir_binop_code(op)
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val lreg = enc.operand_reg(left)
+                    val rreg = enc.operand_reg(right)
+                    if code < 0 or dreg < 0 or lreg == nil or rreg == nil:
+                        return nil
+                    enc.emit(code, dreg, lreg ?? 0, rreg ?? 0)
+                case UnaryOp(dest, op, operand):
+                    val dreg = enc.reg_of[dest.id] ?? -1
+                    val sreg = enc.operand_reg(operand)
+                    if dreg < 0 or sreg == nil:
+                        return nil
+                    val ucode = match op:
+                        case Neg: 30
+                        case Not: 31
+                        case BitNot: 32
+                        case _: return nil
+                    enc.emit(ucode, dreg, sreg ?? 0, 0)
+                case _:
+                    return nil
+        match block.terminator:
+            case Goto(target):
+                val tpc = block_pc[target.id] ?? -1
+                if tpc < 0:
+                    return nil
+                enc.emit(3, tpc, 0, 0)
+            case If(cond, then_, else_):
+                val creg = enc.operand_reg(cond)
+                val tpc = block_pc[then_.id] ?? -1
+                val epc = block_pc[else_.id] ?? -1
+                if creg == nil or tpc < 0 or epc < 0:
+                    return nil
+                enc.emit(4, creg ?? 0, tpc, epc)
+            case Ret(value):
+                match value:
+                    case Some(op):
+                        val rreg = enc.operand_reg(op)
+                        if rreg == nil:
+                            return nil
+                        enc.emit(5, rreg ?? 0, 0, 0)
+                    case _:
+                        enc.emit(5, enc.const_reg(0), 0, 0)
+            case _:
+                return nil
+
+    val entry = block_pc[func.entry_block.id] ?? -1
+    if entry < 0:
+        return nil
+    Some(ExecIrProgram(code: enc.code, reg_count: enc.next_reg,
+                       const_regs: enc.const_regs, const_vals: enc.const_vals,
+                       entry_pc: entry))
+
+fn execir_run(program: ExecIrProgram) -> i64:
+    """Tight-loop execution of a flat ExecIR program. Div/Rem by zero
+    yields 0 (the encodable subset carries no error channel this slice)."""
+    var regs: [i64] = []
+    var i = 0
+    while i < program.reg_count:
+        regs.push(0)
+        i = i + 1
+    var k = 0
+    val nconsts = program.const_regs.len()
+    while k < nconsts:
+        regs[program.const_regs[k]] = program.const_vals[k]
+        k = k + 1
+
+    val code = program.code
+    var pc = program.entry_pc
+    while true:
+        val op = code[pc]
+        val a = code[pc + 1]
+        val b = code[pc + 2]
+        if op == 10:
+            regs[a] = regs[b] + regs[code[pc + 3]]
+        elif op == 17:
+            regs[a] = if regs[b] < regs[code[pc + 3]]: 1 else: 0
+        elif op == 4:
+            pc = if regs[a] != 0: b else: code[pc + 3]
+            continue
+        elif op == 3:
+            pc = a
+            continue
+        elif op == 5:
+            return regs[a]
+        elif op == 1:
+            regs[a] = b
+        elif op == 2:
+            regs[a] = regs[b]
+        elif op == 11:
+            regs[a] = regs[b] - regs[code[pc + 3]]
+        elif op == 12:
+            regs[a] = regs[b] * regs[code[pc + 3]]
+        elif op == 13:
+            val r = regs[code[pc + 3]]
+            regs[a] = if r != 0: regs[b] / r else: 0
+        elif op == 14:
+            val r = regs[code[pc + 3]]
+            regs[a] = if r != 0: regs[b] % r else: 0
+        elif op == 15:
+            regs[a] = if regs[b] == regs[code[pc + 3]]: 1 else: 0
+        elif op == 16:
+            regs[a] = if regs[b] != regs[code[pc + 3]]: 1 else: 0
+        elif op == 18:
+            regs[a] = if regs[b] <= regs[code[pc + 3]]: 1 else: 0
+        elif op == 19:
+            regs[a] = if regs[b] > regs[code[pc + 3]]: 1 else: 0
+        elif op == 20:
+            regs[a] = if regs[b] >= regs[code[pc + 3]]: 1 else: 0
+        elif op == 21:
+            regs[a] = regs[b] & regs[code[pc + 3]]
+        elif op == 22:
+            regs[a] = regs[b] | regs[code[pc + 3]]
+        elif op == 23:
+            regs[a] = regs[b] xor regs[code[pc + 3]]
+        elif op == 24:
+            regs[a] = regs[b] << (regs[code[pc + 3]] & 63)
+        elif op == 25:
+            regs[a] = regs[b] >> (regs[code[pc + 3]] & 63)
+        elif op == 30:
+            regs[a] = 0 - regs[b]
+        elif op == 31:
+            regs[a] = if regs[b] == 0: 1 else: 0
+        elif op == 32:
+            regs[a] = -1 - regs[b]
+        else:
+            return 0
+        pc = pc + 4
+    0

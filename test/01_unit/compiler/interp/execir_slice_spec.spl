@@ -1,0 +1,183 @@
+# ExecIR slice 1 spec (startup-perf Phase E).
+#
+# Differential oracle: execir_encode + execir_run must agree with
+# MirInterpreter.execute_function on the arith/branch/loop fixtures from
+# mir_interpreter_hot_path_spec.spl's idiom; a function outside the
+# encodable subset (calls) must yield nil from execir_encode (fallback
+# contract). Also microbenches ExecIR vs MirInterpreter on the loop.
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.interp.execir.{ExecIrProgram, execir_encode, execir_run}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+extern fn rt_time_ms() -> i64
+
+fn xr_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn xr_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.new(0),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: nil
+    )
+
+fn xr_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn xr_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: insts, terminator: term)
+
+fn xr_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn xr_str_operand(s: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(s), MirType.i64()))
+
+# fn arith() = (7 + 5) * 3 - 4
+fn xr_arith_fn() -> MirFunction:
+    val locals = [xr_local(0, LocalKind.Temp), xr_local(1, LocalKind.Temp), xr_local(2, LocalKind.Temp)]
+    val b0 = xr_blk(0, [
+        xr_inst(MirInstKind.BinOp(xr_lid(0), MirBinOp.Add, mir_operand_const_int(7), mir_operand_const_int(5))),
+        xr_inst(MirInstKind.BinOp(xr_lid(1), MirBinOp.Mul, mir_operand_copy(xr_lid(0)), mir_operand_const_int(3))),
+        xr_inst(MirInstKind.BinOp(xr_lid(2), MirBinOp.Sub, mir_operand_copy(xr_lid(1)), mir_operand_const_int(4)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xr_lid(2)))))
+    xr_fn("arith", locals, [b0])
+
+# fn unary_copy() = -(7) copied through a temp, plus Const load
+fn xr_unary_fn() -> MirFunction:
+    val locals = [xr_local(0, LocalKind.Var), xr_local(1, LocalKind.Temp), xr_local(2, LocalKind.Temp)]
+    val b0 = xr_blk(0, [
+        xr_inst(MirInstKind.Const(xr_lid(0), MirConstValue.Int(7), MirType.i64())),
+        xr_inst(MirInstKind.UnaryOp(xr_lid(1), MirUnaryOp.Neg, mir_operand_copy(xr_lid(0)))),
+        xr_inst(MirInstKind.Copy(xr_lid(2), xr_lid(1)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xr_lid(2)))))
+    xr_fn("unary_copy", locals, [b0])
+
+# fn branch(c) = if c != 0: 7 else: 9
+fn xr_branch_fn(c: i64) -> MirFunction:
+    val locals = [xr_local(0, LocalKind.Var)]
+    val b0 = xr_blk(0, [
+        xr_inst(MirInstKind.Const(xr_lid(0), MirConstValue.Int(c), MirType.i64()))
+    ], MirTerminator.If(mir_operand_copy(xr_lid(0)), BlockId.new(1), BlockId.new(2)))
+    val b1 = xr_blk(1, [], MirTerminator.Ret(Some(mir_operand_const_int(7))))
+    val b2 = xr_blk(2, [], MirTerminator.Ret(Some(mir_operand_const_int(9))))
+    xr_fn("branch", locals, [b0, b1, b2])
+
+# sum 0..n-1 via loop
+fn xr_loop_fn(n: i64) -> MirFunction:
+    val locals = [xr_local(0, LocalKind.Var), xr_local(1, LocalKind.Var), xr_local(2, LocalKind.Temp)]
+    val b0 = xr_blk(0, [
+        xr_inst(MirInstKind.Const(xr_lid(0), MirConstValue.Int(0), MirType.i64())),
+        xr_inst(MirInstKind.Const(xr_lid(1), MirConstValue.Int(0), MirType.i64()))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b1 = xr_blk(1, [
+        xr_inst(MirInstKind.BinOp(xr_lid(2), MirBinOp.Lt, mir_operand_copy(xr_lid(0)), mir_operand_const_int(n)))
+    ], MirTerminator.If(mir_operand_copy(xr_lid(2)), BlockId.new(2), BlockId.new(3)))
+    val b2 = xr_blk(2, [
+        xr_inst(MirInstKind.BinOp(xr_lid(1), MirBinOp.Add, mir_operand_copy(xr_lid(1)), mir_operand_copy(xr_lid(0)))),
+        xr_inst(MirInstKind.BinOp(xr_lid(0), MirBinOp.Add, mir_operand_copy(xr_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b3 = xr_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(xr_lid(1)))))
+    xr_fn("loop_sum", locals, [b0, b3, b1, b2])
+
+# non-encodable: contains a Call instruction
+fn xr_call_fn() -> MirFunction:
+    val locals = [xr_local(0, LocalKind.Var)]
+    val b0 = xr_blk(0, [
+        xr_inst(MirInstKind.Call(Some(xr_lid(0)), xr_str_operand("add1"), []))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xr_lid(0)))))
+    xr_fn("caller", locals, [b0])
+
+fn xr_interp_result(f: MirFunction) -> i64:
+    var interp = MirInterpreter.create()
+    val res = interp.execute_function(f)
+    res[0] ?? -1
+
+describe "ExecIR slice 1 (encode + tight-loop run)":
+    it "arith: differential vs MirInterpreter, both 32":
+        val prog = execir_encode(xr_arith_fn())
+        expect(prog != nil).to_equal(true)
+        val ev = execir_run(prog ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0))
+        expect(ev).to_equal(32)
+        expect(ev).to_equal(xr_interp_result(xr_arith_fn()))
+
+    it "unary and copy: differential vs MirInterpreter, both -7":
+        val prog = execir_encode(xr_unary_fn())
+        expect(prog != nil).to_equal(true)
+        val ev = execir_run(prog ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0))
+        expect(ev).to_equal(-7)
+        expect(ev).to_equal(xr_interp_result(xr_unary_fn()))
+
+    it "branch: nonzero takes then, zero takes else, both match interpreter":
+        val pt = execir_encode(xr_branch_fn(1))
+        val pe = execir_encode(xr_branch_fn(0))
+        expect(pt != nil).to_equal(true)
+        expect(pe != nil).to_equal(true)
+        val vt = execir_run(pt ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0))
+        val ve = execir_run(pe ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0))
+        expect(vt).to_equal(7)
+        expect(ve).to_equal(9)
+        expect(vt).to_equal(xr_interp_result(xr_branch_fn(1)))
+        expect(ve).to_equal(xr_interp_result(xr_branch_fn(0)))
+
+    it "loop with non-entry-order blocks: sum 0..49 == 1225, matches interpreter":
+        val prog = execir_encode(xr_loop_fn(50))
+        expect(prog != nil).to_equal(true)
+        val ev = execir_run(prog ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0))
+        expect(ev).to_equal(1225)
+        expect(ev).to_equal(xr_interp_result(xr_loop_fn(50)))
+
+    it "non-encodable function (Call) returns nil — fallback contract":
+        val prog = execir_encode(xr_call_fn())
+        expect(prog == nil).to_equal(true)
+
+    it "microbench: ExecIR vs MirInterpreter on loop_sum(4000)":
+        val n = 4000
+        val expected = n * (n - 1) / 2
+        val f = xr_loop_fn(n)
+        val prog0 = execir_encode(f)
+        expect(prog0 != nil).to_equal(true)
+        val prog = prog0 ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0)
+        val t0 = rt_time_ms()
+        val ev = execir_run(prog)
+        val t1 = rt_time_ms()
+        var interp = MirInterpreter.create()
+        val res = interp.execute_function(f)
+        val t2 = rt_time_ms()
+        expect(ev).to_equal(expected)
+        expect(res[0] ?? -1).to_equal(expected)
+        val execir_ms = t1 - t0
+        val interp_ms = t2 - t1
+        print "BENCH execir_run loop_sum(4000) ms: " + str(execir_ms)
+        print "BENCH MirInterpreter loop_sum(4000) ms: " + str(interp_ms)
+        expect(ev).to_equal(res[0] ?? -1)
