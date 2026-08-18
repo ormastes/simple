@@ -201,3 +201,12 @@ The class-detection spec added by the earlier lane stays green, so the
 generalising gate was not weakened to accommodate the fix.
 
 Status: FIXED.
+
+## Re-landed 2026-08-18 (lane-test-fix)
+
+The Resolution above was lost during the REBASE91 salvage — the generator on
+this lane had no `conversion_is_safe` again and the spec was RED
+(`Results: 4 total, 3 passed, 1 failed`). The identical generator + golden
+change was re-applied; the spec is now
+`Results: 4 total, 4 passed, 0 failed` and the class spec
+`Results: 5 total, 5 passed, 0 failed`. Still no spec assertion was edited.

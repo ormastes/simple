@@ -1,7 +1,7 @@
 # Bug: `regenerate_memory_capabilities()` never emits a `conversion_is_safe`-named theorem — generated Lean output only proves narrow special cases (reflexivity, two hand-picked pairs), not general conversion safety
 
 - **Date:** 2026-07-20
-- Status: OPEN (P2)
+- Status: FIXED 2026-08-18 (re-landed after REBASE91 salvage loss; was P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Area:** `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl` (`regenerate_memory_capabilities`), exercised via `test/00_formal_verification/compiler/regeneration_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple` (prints the Rust-seed bootstrap warning); this is a content-generation gap in pure-`.spl` code, not an interpreter defect, so it is expected to reproduce identically on a self-hosted binary.
@@ -47,3 +47,27 @@ returns zero hits. The ten `add_theorem(build_theorem(` calls (lines 105, 112,
 describes — `"can_convert_refl"` (:106) and `"exclusive_to_shared"` (:113) lead
 them — and `def canConvert` is emitted at :67 with no general safety theorem
 quantified over it.
+
+## RE-LANDED 2026-08-18 (lane-test-fix) — FIXED
+
+The generator fix described under "Suggested fix direction" option (a) was lost
+in the REBASE91 salvage and is re-applied here:
+`regenerate_memory_capabilities()` now emits, ahead of the four instance
+theorems, the biconditional
+
+```
+theorem conversion_is_safe (srcCap : RefCapability) (dstCap : RefCapability) :
+  canConvert srcCap dstCap = true ↔ isMoreRestrictive srcCap dstCap := by
+  cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive]
+```
+
+which pins `canConvert` in both directions and therefore covers the REJECTED
+conversions the instance theorems never mentioned. The golden
+`src/verification/memory_capabilities/src/MemoryCapabilities.lean` carries the
+same theorem. No spec assertion was edited.
+
+Evidence (`bin/simple`, Rust seed, `--no-cover-check --no-session-daemon --sequential`):
+
+- before: `Results: 4 total, 3 passed, 1 failed` (`✗ regenerates memory capability output`)
+- after:  `Results: 4 total, 4 passed, 0 failed`
+- class spec `regeneration_theorem_emission_class_spec.spl`: `Results: 5 total, 5 passed, 0 failed`
