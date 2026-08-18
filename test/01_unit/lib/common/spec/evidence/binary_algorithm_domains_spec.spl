@@ -1,0 +1,177 @@
+# @req REQ-SSPEC-BINARY-DOMAINS
+#
+# Goal-4 ALGORITHM-domain instances of the binary SSpec infra (design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md), imitating
+# test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl: the SAME
+# mask-aware comparator and stacked word-table serve a hash KAT and a
+# checksum, reusing the existing std.common.crypto.sha256 / std.common.compress
+# implementations — no algorithm is reimplemented here.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, ByteOrder, BitOrder, binary_field,
+    compare_word, WordDiff, stacked_compare_rows,
+    policy_dont_care
+}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.compress.utilities.{crc32_bytes}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn text_to_i64_bytes(s: text) -> [i64]:
+    val raw = rt_text_to_bytes(s)
+    var out: [i64] = []
+    var i = 0
+    while i < raw.len():
+        out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn text_to_u8_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+fn words_from_bytes(bytes: [i64], word_bytes: i64) -> [i64]:
+    # big-endian pack, `word_bytes` bytes per word
+    var out: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        var v = 0
+        var j = 0
+        while j < word_bytes:
+            v = (v << 8) | (bytes[i + j] & 0xff)
+            j = j + 1
+        out.push(v)
+        i = i + word_bytes
+    out
+
+# ---------------------------------------------------------------------------
+# Hash: SHA-256 NIST KATs, digest viewed as 8 x 32-bit words (stacked rows).
+# A single flipped input byte must diverge exactly in the words downstream
+# of the avalanche — the evidence FORMAT shows which digest words differ.
+# ---------------------------------------------------------------------------
+fn sha256_word_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "sha256_digest_word",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("word", 0, 32, "SHA-256 digest word (32 bits)")
+        ],
+        source_ref: "NIST FIPS 180-4 SHA-256 KAT"
+    )
+
+describe "binary algorithm domains — SHA-256 KAT stacked words":
+    it "matches the empty-string vector across all 8 digest words":
+        # sha256("") = e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855
+        val expected: [i64] = [
+            0xe3b0c442, 0x98fc1c14, 0x9afbf4c8, 0x996fb924,
+            0x27ae41e4, 0x649b934c, 0xa495991b, 0x7852b855
+        ]
+        val digest_bytes = sha256_bytes([])
+        val actual = words_from_bytes(digest_bytes, 4)
+        assert_equal(actual.len(), 8)
+        val layout = sha256_word_layout()
+        var i = 0
+        while i < 8:
+            val d = compare_word(expected[i], actual[i], layout, [])
+            assert_equal(d.status, "pass")
+            i = i + 1
+
+    it "matches the \"abc\" vector and a flipped input byte fails a downstream word":
+        # sha256("abc") = ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+        val expected: [i64] = [
+            0xba7816bf, 0x8f01cfea, 0x414140de, 0x5dae2223,
+            0xb00361a3, 0x96177a9c, 0xb410ff61, 0xf20015ad
+        ]
+        val ok_bytes = sha256_bytes(text_to_i64_bytes("abc"))
+        val ok_words = words_from_bytes(ok_bytes, 4)
+        val layout = sha256_word_layout()
+        var diffs: [WordDiff] = []
+        var i = 0
+        while i < 8:
+            diffs.push(compare_word(expected[i], ok_words[i], layout, []))
+            i = i + 1
+        val ok_rows = stacked_compare_rows(diffs, layout, "W", 0)
+        var ok_joined = ""
+        for r in ok_rows:
+            ok_joined = ok_joined + r + "\n"
+        assert_true(ok_joined.contains("ok"))
+        assert_true(!ok_joined.contains("FAIL"))
+
+        # Corrupt one input byte ("abc" -> "abd") — the digest is
+        # unrelated by avalanche, so at least one word must FAIL.
+        val bad_bytes = sha256_bytes(text_to_i64_bytes("abd"))
+        val bad_words = words_from_bytes(bad_bytes, 4)
+        var bad_diffs: [WordDiff] = []
+        i = 0
+        while i < 8:
+            bad_diffs.push(compare_word(expected[i], bad_words[i], layout, []))
+            i = i + 1
+        val bad_rows = stacked_compare_rows(bad_diffs, layout, "W", 0)
+        var bad_joined = ""
+        for r in bad_rows:
+            bad_joined = bad_joined + r + "\n"
+        assert_true(bad_joined.contains("FAIL"))
+        assert_true(bad_joined.contains("word"))
+        assert_true(bad_joined.contains("expected"))
+        assert_true(bad_joined.contains("actual"))
+
+# ---------------------------------------------------------------------------
+# Checksum: CRC32 (Rocksoft "check" value) — single-word comparison plus a
+# masked comparison demonstrating when a partial-word mask is appropriate:
+# truncated/half-word checksums (e.g. a 16-bit CRC embedded in a 32-bit
+# field) only need the populated half compared, not the whole word.
+# ---------------------------------------------------------------------------
+fn crc32_full_word_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "crc32_full_word",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("crc32", 0, 32, "CRC-32/ISO-HDLC checksum")
+        ],
+        source_ref: "Rocksoft CRC catalogue — CRC-32/ISO-HDLC check value"
+    )
+
+fn crc32_low_half_layout() -> BinaryLayout:
+    # `hi_ignored` is a plain (non-reserved) field paired with a "dont_care"
+    # policy at compare time: `reserved_field` always checks reserved_zero
+    # (overriding dont_care), so an intentionally-ignored high half — as
+    # opposed to bits that must genuinely be zero — is modeled this way.
+    BinaryLayout(
+        layout_id: "crc32_low_half",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("crc16_lo", 0, 16, "low 16 bits only — truncated-checksum view"),
+            binary_field("hi_ignored", 16, 16, "high half ignored via dont_care policy")
+        ],
+        source_ref: "Truncated-checksum masking demo"
+    )
+
+describe "binary algorithm domains — CRC32 word comparison":
+    it "matches the Rocksoft check value for \"123456789\" as a single word":
+        # CRC-32/ISO-HDLC check("123456789") = 0xCBF43926
+        val expected: i64 = 0xCBF43926
+        val actual = crc32_bytes(text_to_u8_bytes("123456789")) as i64
+        val layout = crc32_full_word_layout()
+        val d = compare_word(expected, actual, layout, [])
+        assert_equal(d.status, "pass")
+
+    it "masked (low-half) comparison ignores a differing high half — appropriate for a truncated checksum":
+        val expected: i64 = 0xCBF43926
+        # Simulate a corrupted high half (as if only the low 16 bits are the
+        # authoritative truncated checksum): full-word compare must FAIL,
+        # but the low-half masked layout must still PASS.
+        val corrupted_high: i64 = 0x0000FFFF & expected | (0xDEAD << 16)
+        val full_layout = crc32_full_word_layout()
+        val full_diff = compare_word(expected, corrupted_high, full_layout, [])
+        assert_equal(full_diff.status, "fail")
+
+        val half_layout = crc32_low_half_layout()
+        val half_diff = compare_word(expected, corrupted_high, half_layout, [policy_dont_care("hi_ignored")])
+        assert_equal(half_diff.status, "pass")
+        assert_equal(half_diff.failing_fields.len(), 0)
