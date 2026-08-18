@@ -1,7 +1,7 @@
 # Bug: unit-literal SI prefixes `_k`/`_m` (milli) don't scale, and semantic-wrapper `.suffix()` returns the wrong string
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/unit_types_spec.spl`)
+- **Status:** OPEN — re-measured RED 2026-08-17 (see "Re-verification 2026-08-17" below)
 - **Area:** unit-type SI-prefix literal parsing / semantic-wrapper unit
   registry (interpreter or lexer, not isolated further in this pass), deployed
   seed at `bin/release/x86_64-unknown-linux-gnu/simple`
@@ -69,3 +69,74 @@ Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed. Not isolated to a minimal
 standalone repro in this pass (time-boxed); the full spec file is the
 reproduction vehicle.
+
+## Re-verification 2026-08-17 — STILL RED (executed, not inferred)
+
+Binary identity:
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ stat -c '%s %y' "$(readlink -f bin/simple)"
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+Command and result:
+
+```
+$ bin/simple test test/feature/usage/unit_types_spec.spl --no-session-daemon
+SI Prefixes
+  ✗ uses kilo prefix
+    expected 5 to equal 5000
+  ✓ uses mega prefix
+  ✗ uses milli prefix
+    expected 500 < 1.0 to hold
+Semantic Wrapper APIs
+  ✓ uses unit wrappers in public function signatures
+  ✗ supports helper functions around semantic wrapper units
+    expected time to equal ms
+SPEC FILE VERDICT: ... declared>=21 executed=21 passed=18 failed=3 dropped=0
+Results: 21 total, 18 passed, 3 failed
+```
+
+All three original failures reproduce byte-identically on the 2026-08-17 binary
+(`5` vs `5000`, `500 < 1.0`, `time` vs `ms`), and `2_Mm` still passes — the
+kilo/milli asymmetry is unchanged.
+
+### Why not fixed in this pass (not feasible in `.spl`)
+
+The unit-literal SI-prefix path is **Rust-seed-only**. The multiplier lookup is
+`decompose_si_prefix` in `src/compiler_rust/compiler/src/interpreter_unit.rs:49`,
+called from `src/compiler_rust/compiler/src/interpreter/expr/units.rs:70,94`;
+`.suffix()` resolution is in
+`src/compiler_rust/compiler/src/interpreter_method/special/types.rs`. The
+pure-Simple `src/compiler/30.types/units/unit_registry.spl` contains no
+`si_prefix` symbol and no `k`/`m` multiplier table at all, so there is nothing on
+the `.spl` side to correct. `bin/simple` is the Rust seed (it prints the seed
+banner on every run above), so any fix requires a Rust edit plus a seed rebuild —
+outside a `.spl`-only change and outside this pass's scope. Left OPEN with the
+fresh RED evidence above.
+
+## Re-run 2026-08-17 on the NEWLY REDEPLOYED Rust seed — STILL RED
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+md5 `669150b61f2f20401a6a895ae54e9fee`, size 59550432, mtime
+2026-08-17 20:10:45 UTC.
+
+```
+$ timeout 3000 nice -n 19 bin/simple test \
+    test/feature/usage/unit_types_spec.spl --no-session-daemon
+  ✗ uses kilo prefix
+    expected 5 to equal 5000
+  ✓ uses mega prefix
+  ✗ uses milli prefix
+    expected 500 < 1.0 to hold
+  ✗ supports helper functions around semantic wrapper units
+    expected time to equal ms
+Results: 21 total, 18 passed, 3 failed
+EXIT=1
+```
+
+**Verdict: STILL-OPEN.** All three failures reproduce byte-identically on the
+newly redeployed seed, and `2_Mm` still passes — the kilo/milli asymmetry is
+unchanged by the rebuild.

@@ -2,7 +2,9 @@
 
 - **ID:** tierless_std_import_readdir_order_2026-08-17
 - **Severity:** P1 (silent wrong-symbol selection, not reproducible across machines)
-- **Status:** MITIGATED 2026-08-17 (selection made deterministic; still not an error)
+- **Status:** MITIGATED — **VERIFIED 2026-08-17** (selection deterministic;
+  spec now produces a real verdict: `Results: 12 total, 12 passed, 0 failed`,
+  exit 0). Still deliberately not a hard error — see "Deliberately NOT done".
 - **File:** `src/compiler/99.loader/module_resolver/resolution.spl`
 - **Supersedes the open half of:**
   `tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md`
@@ -69,17 +71,57 @@ The detection half exists because a fix that merely sorted alphabetically, or
 that filtered the listing down to known tiers, would satisfy the reproducer
 and be wrong.
 
-**THE SPEC HAS NEVER PRODUCED A VERDICT. Do not treat this fix as verified.**
-Three runs were started; all three were **killed (exit 144)** before reaching
-their `Results:` line, on a box under a live 16-job bootstrap at load 120-185.
-This is a kill, not a slow run — re-running it is the outstanding action:
+~~THE SPEC HAS NEVER PRODUCED A VERDICT.~~ **Resolved 2026-08-17** — the
+outstanding re-run was performed and the spec produced a real `Results:` line.
+The three earlier runs were killed (exit 144) under a live 16-job bootstrap at
+load 120-185; on a quieter box (load 16.6) it completes in roughly 20 minutes.
+
+## Verification 2026-08-17
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt 2026-08-17).
+
+Exact command (the one this record named as the outstanding action):
 
 ```
-bin/simple test test/01_unit/compiler/module_resolver/tierless_std_import_order_spec.spl --timeout 1200
+$ bin/simple test test/01_unit/compiler/module_resolver/tierless_std_import_order_spec.spl --timeout 1200
+Results: 12 total, 12 passed, 0 failed
+EXIT=0
 ```
 
-Note for whoever picks this up: an `OK` from `check-test-verdict-not-silent.shs`
-does not settle it either. Only a `Results: N total, N passed` line does.
+All 12 examples, verbatim:
+
+```
+✓ puts common first regardless of the incoming listing order
+✓ yields the SAME order for two different readdir permutations
+✓ prefers common over gc_async_mut for a path present in both
+✓ prefers nogc_sync_mut over gc_async_mut
+✓ drops nothing
+✓ keeps every non-tier entry rather than filtering it out
+✓ sorts every non-tier entry AFTER every canonical tier
+✓ preserves the relative order of non-tier entries
+✓ is a no-op on a listing with no canonical tiers
+✓ handles an empty listing
+✓ orders a full five-tier listing exactly as TIER_PRECEDENCE declares
+✓ lists all five canonical tiers, so no tier is silently unranked
+```
+
+This is a `Results: N total, N passed` line, which is the bar this record set —
+not an `OK` from `check-test-verdict-not-silent.shs`. Note the count is **12**,
+not the 4+7=11 the Evidence section above predicts; the twelfth is
+`lists all five canonical tiers, so no tier is silently unranked`, a detection
+example guarding `TIER_PRECEDENCE` completeness. No spec or source edit was made
+during this verification.
+
+Source re-read to confirm the record's claims match the code
+(`src/compiler/99.loader/module_resolver/resolution.spl`): `TIER_PRECEDENCE` at
+line 610 holds the five tiers in the documented least-capability-first order;
+`tier_ordered_subdirs` at 618 is a total permutation (canonical tiers first in
+precedence order, then every non-canonical entry in original relative order);
+line 128 is the single call site, wrapping `self.cached_dir_list(lib_dir)`.
+
+What remains open is unchanged and deliberate: an ambiguous tier-less import is
+deterministically resolved and warned about, **not rejected**.
 
 ## Not proven
 

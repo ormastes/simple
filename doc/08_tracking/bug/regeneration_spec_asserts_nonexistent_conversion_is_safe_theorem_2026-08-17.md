@@ -1,7 +1,7 @@
 # `regeneration_spec` asserts a `conversion_is_safe` theorem that exists nowhere
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN — needs a formal-model decision, not a test edit
+- **Status:** **FIXED 2026-08-17** — the formal-model decision was made and the PRODUCT (the generator) was changed; see "Resolution" at the bottom
 - **Severity:** medium (1 RED example in the formal-verification suite)
 - **Spec:** `test/00_formal_verification/compiler/regeneration_spec.spl:22-26`
 - **Generator:** `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`
@@ -138,3 +138,66 @@ passes for the two healthy generators:
 `src/compiler_rust/`, outside the test lanes file scope. The assertion at
 line 26 is deliberately left in place: it is the reproducer, and making it
 green by renaming would convert a real verification gap into a false green.
+
+## Resolution 2026-08-17 — reading (2) was correct; the generator gained the theorem
+
+**First, a correction to the re-triage section above.** Its claim that the
+generator "emits NO theorem at all" is wrong, and the method that produced it is
+the bug: it grepped for `add_raw_line("theorem ...")`. The generator emits
+theorems through a different API — `codegen_.add_theorem(build_theorem(name,
+params, statement, proof))` — and already emitted **ten** of them
+(`can_convert_refl`, `exclusive_to_shared`, `isolated_to_exclusive`,
+`isolated_to_shared`, `empty_env_allows_exclusive`, ...,
+`empty_env_wellformed`). So the original filing's reading was the accurate one:
+four narrower conversion theorems, no aggregate.
+
+Between the two readings the original record offered, **reading (2) is the right
+one**, and it was resolved in the product rather than the spec. The record itself
+named the gap precisely: "there is no theorem saying the *disallowed* conversions
+are rejected". That is a real hole — every conversion theorem was an instance
+naming one ALLOWED conversion, so a future edit widening `canConvert` (admitting,
+say, `Shared -> Exclusive`) would have broken the capability lattice with every
+proof still green.
+
+Added to
+`src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`,
+ahead of the four instance theorems:
+
+```
+theorem conversion_is_safe (srcCap dstCap : RefCapability) :
+    canConvert srcCap dstCap = true ↔ isMoreRestrictive srcCap dstCap
+```
+
+proved by `cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive]`.
+It is a **biconditional** against the already-present `isMoreRestrictive` order,
+so it pins `canConvert` in both directions — it covers exactly the rejected
+conversions the instance theorems never mentioned. The assertion at line 26 of
+the three mirrored spec copies was **not** edited; it now passes because the
+proof obligation it demanded exists.
+
+### Evidence
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+2026-08-17 12:58:51 (Rust seed).
+
+```
+$ bin/simple test test/00_formal_verification/compiler/regeneration_spec.spl --no-session-daemon --sequential
+rc=0
+    ✓ regenerates async compile output
+    ✓ regenerates GC borrow output
+    ✓ regenerates memory capability output
+    ✓ returns all expected file entries
+SPEC FILE VERDICT: ... declared>=4 executed=4 passed=4 failed=0 dropped=0
+Results: 4 total, 4 passed, 0 failed
+
+$ bin/simple test test/01_unit/compiler/verification/regeneration_spec.spl --no-session-daemon --sequential
+rc=0 / Results: 4 total, 4 passed, 0 failed
+
+$ bin/simple test test/00_formal_verification/compiler/regeneration_theorem_emission_class_spec.spl --no-session-daemon --sequential
+rc=0 / Results: 5 total, 5 passed, 0 failed
+```
+
+The class-detection spec added by the earlier lane stays green, so the
+generalising gate was not weakened to accommodate the fix.
+
+Status: FIXED.

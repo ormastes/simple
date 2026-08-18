@@ -17,10 +17,26 @@
 #   if_expr_dead_branch_probe     -> if_expression_dead_branch_binds_empty_list_2026-08-06
 #   js_engine_assign_dispatch     -> stage4_seed_interpreter_statement_dispatch_regression_2026-08-16
 #   boxed_int_61bit_probe         -> the 61-bit boxed-int truncation family
-#                                    (CONTROL: this one is EXPECTED to diverge;
-#                                     it proves the mode switch is actually live,
-#                                     so an all-green run cannot be a false green
-#                                     produced by an ignored env var)
+#                                    (LEGACY CONTROL: expected to diverge, but it
+#                                     is a DEFECT, so it stops diverging the moment
+#                                     the defect is fixed. It is now advisory only;
+#                                     see mode_switch_control_probe below.)
+#
+# CONTROL (synthetic, defect-free): mode_switch_control_probe references an
+# unresolvable external symbol. Only the Cranelift path emits `[jit-fallback]`
+# for that, so the two engines are distinguishable by construction and the
+# control cannot "expire" by someone fixing a bug. This replaces the old
+# arrangement where the positive control WAS a live defect -- see
+# doc/08_tracking/bug/engine_divergence_guard_control_depends_on_fixed_defect_2026-08-17.md
+#
+# BINARY SELECTION AND STALENESS (fail-closed):
+#   The compiler under test is `${SIMPLE_BIN:-$ROOT/bin/simple}`. If that binary
+#   predates any engine source it claims to be probing (src/compiler_rust,
+#   src/runtime), the run CANNOT report PASS: it reports
+#   `ERROR — nothing was checked` (exit 2), because a green produced by a binary
+#   older than the code is a green by construction. A FAIL is still reported as
+#   FAIL -- an observed divergence is real evidence on any binary. See
+#   doc/08_tracking/bug/engine_divergence_guard_hardcodes_stale_seed_2026-08-17.md
 #
 # Env vars must be passed with `env VAR=... bin/simple ...` directly:
 # scripts/resource/test-slot.shs does NOT propagate env to the child and has
@@ -34,15 +50,26 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
-SIMPLE="$ROOT/bin/simple"
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
 DIR="$ROOT/test/01_unit/engine_divergence/probes"
 CHECKED=0
 FAILED=""
+MODE_SWITCH_LIVE=0
+STALE=""
 
 if [ ! -x "$SIMPLE" ]; then
     echo "ERROR — nothing was checked (no $SIMPLE)"
     exit 2
 fi
+
+# Staleness: engine sources newer than the binary mean this binary cannot speak
+# for the tree. Recorded here, enforced at verdict time (never upgrades a FAIL).
+for _d in "$ROOT/src/compiler_rust" "$ROOT/src/runtime"; do
+    [ -d "$_d" ] || continue
+    _n=$(find "$_d" -type f \( -name '*.rs' -o -name '*.c' -o -name '*.h' \) \
+        -newer "$SIMPLE" -print 2>/dev/null | wc -l)
+    [ "$_n" -gt 0 ] && STALE="$STALE $_d($_n)"
+done
 
 # Run one probe under one mode; echo only the probe's marker lines.
 run_probe() {
@@ -96,9 +123,38 @@ expect_same() {
     echo "  $_name: OK (both engines, correct values)"
 }
 
-# expect_diverge <probe> -- the control. A run where this AGREES means the
-# SIMPLE_EXECUTION_MODE switch was ignored, which would make every other
-# result in this file a false green. That is a FAIL, not a pass.
+# expect_mode_switch_live <probe> -- the SYNTHETIC control. The probe calls an
+# unresolvable external symbol; only the Cranelift path reports `[jit-fallback]`
+# for that, so the marker appears under =jit and not under =interpreter. It
+# depends on no defect and therefore cannot expire when the tree improves.
+expect_mode_switch_live() {
+    _name="$1"
+    _f="$DIR/$_name.spl"
+    if [ ! -f "$_f" ]; then
+        FAILED="$FAILED $_name(missing)"
+        return
+    fi
+    _ie=$(timeout 300 env SIMPLE_EXECUTION_MODE=interpreter "$SIMPLE" run "$_f" 2>&1)
+    _je=$(timeout 300 env SIMPLE_EXECUTION_MODE=jit "$SIMPLE" run "$_f" 2>&1)
+    CHECKED=$((CHECKED + 1))
+    _ihas=$(echo "$_ie" | grep -c 'jit-fallback')
+    _jhas=$(echo "$_je" | grep -c 'jit-fallback')
+    if [ "$_jhas" -eq 0 ] || [ "$_ihas" -ne 0 ]; then
+        echo "  $_name: CONTROL BROKEN — the SIMPLE_EXECUTION_MODE switch is not"
+        echo "    taking effect (jit marker seen: jit=$_jhas interpreter=$_ihas), so no"
+        echo "    other result in this file is trustworthy."
+        FAILED="$FAILED $_name(control-broken)"
+        return
+    fi
+    MODE_SWITCH_LIVE=1
+    echo "  $_name: OK (synthetic control — mode switch is live)"
+}
+
+# expect_diverge <probe> -- LEGACY defect-based control, advisory. If it stops
+# diverging the defect behind it was fixed; that is good news, not a broken
+# harness, so it is reported as RETIRED provided the synthetic control above
+# proved the mode switch live. If the synthetic control did NOT run or failed,
+# agreement here is still a FAIL.
 expect_diverge() {
     _name="$1"
     _f="$DIR/$_name.spl"
@@ -117,15 +173,28 @@ expect_diverge() {
             ;;
     esac
     if [ "$_i" = "$_j" ]; then
-        echo "  $_name: CONTROL BROKEN — engines agree, so the mode switch is"
-        echo "    not taking effect and no other result in this file is trustworthy."
+        if [ "$MODE_SWITCH_LIVE" = "1" ]; then
+            echo "  $_name: CONTROL RETIRED — engines agree, i.e. the defect this"
+            echo "    legacy control relied on (61-bit boxed-int truncation, fixed by"
+            echo "    610ce80229e) is gone. Mode-switch liveness is asserted by"
+            echo "    mode_switch_control_probe, so this is not a failure. Drop this"
+            echo "    probe from the roster."
+            return
+        fi
+        echo "  $_name: CONTROL BROKEN — engines agree and the synthetic control did"
+        echo "    not establish that the mode switch is live; no other result in this"
+        echo "    file is trustworthy."
         FAILED="$FAILED $_name(control-broken)"
         return
     fi
-    echo "  $_name: OK (control diverges as expected — mode switch is live)"
+    echo "  $_name: OK (legacy control still diverges — defect not yet fixed)"
 }
 
 echo "engine-divergence probes (binary: $(readlink -f "$SIMPLE"))"
+
+# Synthetic control runs FIRST: everything below is only trustworthy if the
+# mode switch is live.
+expect_mode_switch_live mode_switch_control_probe
 
 # struct = value semantics, class = identity semantics, under BOTH engines.
 expect_same alias_value_semantics_probe \
@@ -151,7 +220,7 @@ J2_nested_obj=num:42.0
 J3_simple_assign=num:7.0
 J4_typeof_undef=str:undefined"
 
-# CONTROL — must diverge (61-bit boxed-int truncation under JIT).
+# LEGACY CONTROL — advisory (61-bit boxed-int truncation under JIT).
 expect_diverge boxed_int_61bit_probe
 
 if [ "$CHECKED" -eq 0 ]; then
@@ -162,6 +231,14 @@ fi
 if [ -n "$FAILED" ]; then
     echo "FAIL — $CHECKED probe(s) checked, offending:$FAILED"
     exit 1
+fi
+
+if [ -n "$STALE" ]; then
+    echo "ERROR — nothing was checked: $(readlink -f "$SIMPLE") predates engine"
+    echo "  source newer than it:$STALE — a green from a binary older than the code"
+    echo "  is a green by construction. Rebuild/redeploy, or point SIMPLE_BIN at a"
+    echo "  binary built from this tree, and re-run."
+    exit 2
 fi
 
 echo "PASS — $CHECKED probe(s) checked across 2 engine(s) (interpreter, jit), 0 divergences"

@@ -1,6 +1,6 @@
 # Cross-module type-name collision: `ContractExpr`/`ContractExprKind` resolve to the wrong module
 
-**Date:** 2026-08-17. **Status:** OPEN (spec left RED by policy).
+**Date:** 2026-08-17. **Status:** FIXED 2026-08-17 (verified by execution — see "Verification 2026-08-17" at the bottom). The narrower interpreter hardening described under "Unblock condition" remains a separate, still-open hazard.
 
 ## Symptom
 `test/00_formal_verification/compiler/unified_attrs_spec.spl` — 2 of 5 examples RED:
@@ -89,3 +89,45 @@ and enum member lookup keyed by a global type-name table rather than by the
 aliased module — is unchanged. It is out of this lane's file scope, and it
 remains a live latent hazard for any future same-named pair. The "Unblock
 condition" section above still describes the real compiler-side fix.
+
+## Verification 2026-08-17 — the spec is GREEN, this row is CLOSED
+
+The "Resolution" section above landed the `LeanContractExpr` /
+`LeanContractExprKind` rename but recorded no post-fix spec run, so the record
+still said `Status: OPEN (spec left RED by policy)`. It has now been re-run.
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+**59537240 bytes, mtime 2026-08-17 12:58:51** (Rust seed).
+
+```
+$ timeout 3000 nice -n 19 bin/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl
+Results: 5 total, 5 passed, 0 failed
+[exited with code 0]
+```
+
+Both documented failures are gone:
+`semantic: unknown variant or method 'Forall' on enum ContractExprKind` and
+`semantic: unknown static method call on class ContractExpr` no longer appear
+anywhere in the run. This matches the "Unblock condition" prediction exactly —
+**the 2 RED examples went green with no spec edit**, only the rename.
+
+### What is still open, and is deliberately NOT closed by this
+
+The interpreter/semantic behaviour itself — class and enum member lookup keyed
+by a global type-name table rather than by the aliased module — is unchanged.
+The rename removed the one colliding pair; it did not remove the mechanism, and
+the next same-named class/enum pair in a co-compiled closure will reproduce this
+verbatim. That mechanism is tracked as a live latent hazard by the "Unblock
+condition" section above and by the sibling rows
+`cross_module_public_symbol_collisions_2026-08-16.md` and
+`private_helper_name_collision_across_modules_has_2026-08-17.md` (the function
+half of the same family). Closing THIS row closes the `ContractExpr` instance
+only.
+
+## Re-run on rebuilt seed 2026-08-17 (seed md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45)
+
+    bin/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl --no-session-daemon --sequential
+    SPEC FILE VERDICT: ... declared>=5 executed=5 passed=5 failed=0 dropped=0   (exit 0)
+
+All 5 examples GREEN on the rebuilt seed (previously 2 of 5 RED). FIXED status
+re-confirmed by execution.

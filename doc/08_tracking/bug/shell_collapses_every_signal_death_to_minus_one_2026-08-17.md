@@ -1,7 +1,7 @@
 # `shell()` collapses every signal death to -1, so CRASHED and TERMINATED are indistinguishable
 
 Date: 2026-08-17
-Status: OPEN
+Status: FIXED 2026-08-17 — verified by execution on a freshly built, non-deployed seed. See the note at the end.
 Site: `src/lib/nogc_sync_mut/io/process_ops.spl` — `shell()`
 Found by: the poisoned-fixture lane while building
 `test/01_unit/compiler/driver/build_supervisor_poisoned_fixture_spec.spl`
@@ -71,3 +71,60 @@ invocation.
 - `src/compiler/80.driver/driver_build/build_outcome.spl` — the vocabulary this
   defect undermines
 - `.spipe/supervised-crash-safe-build/state.md` — feature state
+
+## 2026-08-17 — FIXED
+
+Root cause was NOT in `shell()` itself: `shell()` just forwards `rt_process_run`'s exit
+code. Both implementations of that extern threw the signal away via
+`.code().unwrap_or(-1)`:
+
+- `src/compiler_rust/runtime/src/value/sffi/env_process.rs` (all 7 status-decode sites)
+- `src/compiler_rust/compiler/src/interpreter_extern/system.rs` (the interpreter's own
+  `rt_process_run` / `rt_process_execute` / `rt_process_wait` / `rt_shell_exec*` — this is
+  the one `bin/simple run` actually reaches, and fixing only the runtime left the probe RED)
+
+Each file now has an `exit_status_to_code()` helper returning `128 + signal()` when
+`code()` is `None` on Unix, matching the POSIX convention
+`build_outcome_classify_status` already decodes. No change was needed in
+`process_ops.spl` or `build_outcome.spl`.
+
+Verification (`p.shell(...)`, raw channel, no `sh -c '...'; rc=$?; exit $rc` wrapper):
+
+```
+$ env SIMPLE_RUST_SEED_WARNING=0 bin/simple run sig.spl        # deployed pre-fix seed
+SEGV=-1
+TERM=-1
+KILL=-1
+EXIT7=7
+$ env SIMPLE_RUST_SEED_WARNING=0 /mnt/data/cargo-bugfix-0dc8/release/simple run sig.spl
+SEGV=139
+TERM=143
+KILL=137
+EXIT7=7
+```
+
+Binary: /mnt/data/cargo-bugfix-0dc8/release/simple (built 2026-08-17 13:48, 59554384 bytes, from this worktree's source; NOT deployed to bin/simple). The spec workarounds are left in place until the fixed seed is deployed;
+`build_supervisor_status_channel_fidelity_spec.spl` asserts the RAW channel FAILS the
+fidelity contract, so it will need updating in the same change that redeploys.
+
+**Status:** FIXED in source, verified by execution on a freshly built, non-deployed seed.
+Deployed `bin/simple` still shows -1 until a redeploy.
+
+## 2026-08-17 20:1x — RESOLVED on the DEPLOYED seed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+```
+$ env SIMPLE_RUST_SEED_WARNING=0 bin/simple run sig.spl
+SEGV=139
+TERM=143
+KILL=137
+EXIT7=7
+```
+
+(The probe logs a JIT->interpreter fallback for `main`, so the values come from the
+interpreter's own `rt_process_run` — which is exactly the path the fix had to reach.)
+Identical to the isolated-build result. **Status: RESOLVED.**
+Follow-up owed: the spec workarounds were held "until the fixed seed is deployed", which
+has now happened — `build_supervisor_status_channel_fidelity_spec.spl` still asserts the
+RAW channel FAILS the fidelity contract and must be updated in a separate change.

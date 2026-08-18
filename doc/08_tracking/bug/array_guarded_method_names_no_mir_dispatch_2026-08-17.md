@@ -1,7 +1,9 @@
 # Array `pop`/`rev`/`reverse`/`sorted`/`take`/`drop`/`clear` have no MIR dispatch under native codegen
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN
+- **Status:** STILL-OPEN (re-verified 2026-08-17 — see Verification 2026-08-17b;
+  static corroboration unchanged, native lane not re-run: `native-build` did not
+  reach codegen within a 580 s budget on this host)
 - **Severity:** P1 — but LOUD (aborts), not a silent wrong result
 - **Class:** name-keyed method dispatch with no receiver type
 - **Sibling (FIXED):** `Dict.clear()` — same class, repaired by routing to
@@ -195,3 +197,70 @@ weakened to make the suite green.
 - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:4780` has
   `case "clear": true`, so a second lowering path exists that was not traced.
   It may already be the intended home for these names.
+## Verification 2026-08-17b
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt 2026-08-17).
+
+**Verdict: STILL-OPEN.** No fix applied.
+
+### 1. Interpreter and JIT are healthy — the defect is native-codegen-only
+
+Repro `.../scratchpad/arr6.spl`:
+
+    fn main():
+        var a = [1, 2, 3]
+        print("pop=${a.pop()}")
+        print("rev=${[1,2,3].rev()}")
+        print("reverse=${[1,2,3].reverse()}")
+        print("sorted=${[3,1,2].sorted()}")
+        print("take=${[1,2,3].take(2)}")
+        print("drop=${[1,2,3].drop(1)}")
+
+    SIMPLE_EXECUTION_MODE=interpreter bin/simple run <file>
+    SIMPLE_EXECUTION_MODE=jit         bin/simple run <file>
+
+Both engines printed, byte-identically:
+
+    pop=$3
+    rev=$[3, 2, 1]
+    reverse=$[3, 2, 1]
+    sorted=$[1, 2, 3]
+    take=$[1, 2]
+    drop=$[2, 3]
+
+All six names resolve and compute correctly on both engines. (The stray `$`
+before each interpolated value is a separate seed interpolation artifact, not
+part of this bug.) This narrows the record's scope: the report's PANICs belong
+to the **native** lane only.
+
+### 2. Static corroboration re-run — unchanged, so nothing has been wired
+
+    for n in pop rev reverse sorted take drop clear; do \
+      grep -rn "method == \"$n\"" src/compiler/50.mir/ | wc -l; done
+    grep -rn 'receiver_is_array' src/compiler/50.mir/_MirLoweringExpr/ | wc -l
+    grep -rn 'receiver_is_dict'  src/compiler/50.mir/_MirLoweringExpr/ | wc -l
+
+    pop=0 rev=0 reverse=0 sorted=0 take=0 drop=0 clear=2
+    receiver_is_array=0   receiver_is_dict=12
+
+Still 0 dispatch sites for all six array names, still no `receiver_is_array`
+guard. The Array side of the name set remains unwired.
+
+### 3. Native lane NOT re-run — reason, stated rather than papered over
+
+    bin/simple native-build .../np_pop.spl --entry-closure -o .../np_pop.bin
+    buildrc=124   (timeout after 580 s)
+    last log line: [build] parse 0/1 step 1/6 .../np_pop.spl
+
+The build did not get past `parse` (step 1 of 6) in 580 s on this host, so no
+native binary was produced and the report's PANIC shape was neither confirmed
+nor refuted today. The table in "Evidence (measured 2026-08-17)" above stands
+unamended on its original measurement.
+
+**No fix was attempted.** Wiring six dispatch arms blind, with no runnable
+native lane to verify them against, would ship an unverified change — and the
+record's own "Not yet established" section notes the target `rt_*` array
+surface was never enumerated, and that a second lowering path
+(`switch_operators_calls.spl:4780`) may be the intended home. That choice needs
+a working native repro loop to settle.

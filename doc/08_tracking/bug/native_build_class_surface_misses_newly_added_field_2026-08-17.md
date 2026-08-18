@@ -1,6 +1,58 @@
 # native-build's class surface misses a newly added field across modules
 
-**Status:** OPEN (P1 — aborts the native-build worker)
+**Status:** OPEN (P1 — aborts the native-build worker). Re-triaged 2026-08-17;
+not reproduced in isolation, see "Re-triage" below.
+
+## Re-triage 2026-08-17 (seed `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes, mtime 2026-08-17 12:58:51)
+
+Two things sharpen the diagnosis, both read directly from source:
+
+1. **The message is not emitted by a "semantic pass" at all.** It comes from the
+   Rust seed interpreter's runtime field read,
+   `src/compiler_rust/compiler/src/interpreter/expr.rs:103-124`
+   (`get_field_value`, `Value::Object { fields, class }` arm). It fires when the
+   *instance*'s `fields` map lacks the key — i.e. the object was CONSTRUCTED from
+   a class definition that did not have the field. So the stale thing is the
+   interpreter's global class registry at construction time, not a per-module
+   type surface in `src/compiler/**`. `native-build` is implicated only because it
+   runs `src/app/cli/native_build_worker.spl` under that same interpreter with the
+   whole compiler tree loaded (visible in `ps`), which is where a registry
+   collision becomes likely.
+
+2. **The registry is bare-name, last-write-wins** — stated at
+   `src/compiler/10.frontend/ast.spl:58-65`, which is the earliest of the three
+   instances and was fixed by RENAMING the colliding `Module` to `AstModule`.
+   That is a different mechanism from "newly added field", and the two theories
+   the "Not verified" list below already flags are still the open question.
+
+   For this instance the collision is not visible in `.spl` sources:
+   `grep -rn "^class HirLowering\|^struct HirLowering" src/` returns exactly one
+   `.spl` hit (`src/compiler/20.hir/hir_lowering/types.spl:58`); the other two
+   hits are fixture strings inside `interpreter_patterns.rs`.
+
+**Debug hook that already exists and should be used next:** `expr.rs:109-116`
+dumps the instance's ACTUAL field list under `SIMPLE_DBG_COLLISION=1`. Running
+the failing native-build with that set — after temporarily inlining the
+accessors in `_Items/module_lowering.spl` back to the direct field read — will
+say in one run whether the constructed `HirLowering` is missing only the new
+field (stale definition) or has a wholly different field set (collision).
+
+**Not fixed in this pass**, and why: reproducing requires a native-build of the
+compiler tree with the workaround reverted. The two builds sharing this host were
+already at 11-12 GB RSS each, and this defect's own prior run is recorded as
+ballooning to 29.4 GB before being killed. A small two-module fixture (class in
+one file, `impl` in a sibling) was written but NOT run to a verdict under
+native-build in this pass, so it is not offered as evidence either way; note that
+the same shape is used widely across the tree and generally works, so a minimal
+fixture is unlikely to be sufficient.
+
+Harder blocker measured the same day: on this host the interpreted native-build
+worker **aborts on a single 8 GiB allocation** while loading the compiler graph,
+before any semantic work happens (`memory allocation of 8589934592 bytes
+failed`, core dumped, misreported by the driver as a 7200s timeout — see
+`native_build_static_method_trailing_default_unresolved_2026-08-17.md`). Until
+that is fixed, NO native-build-based reproduction of this row is possible here,
+including the `SIMPLE_DBG_COLLISION=1` run proposed above.
 **Filed:** 2026-08-17
 **Component:** native-build semantic pass (pure-Simple), cross-module class fields
 **Class:** engine divergence — the seed interpreter resolves it, native-build aborts

@@ -31,7 +31,7 @@
 > Regression guard: `test/01_unit/engine_divergence/check-engine-divergence-probes.shs`.
 
 
-**Status:** OPEN — handoff to seed owner
+**Status:** RESOLVED 2026-08-17 (re-verified on the seed rebuilt 2026-08-17 12:58) — see re-verification appended at end of file.
 **OWNER:** Stage-4 / seed-bootstrap owner — the session that rebuilds and
 redeploys `bin/release/<triple>/simple`. This is a Rust-seed defect; it can only
 be fixed and re-verified by rebuilding+redeploying the seed. It is NOT fixable in
@@ -126,3 +126,28 @@ Add an interpreter smoke that runs BEFORE any seed redeploy and blocks a bad
 seed: a tiny JS-engine script exercising (a) a `for` loop accumulating into a
 var and (b) `typeof <undeclared>`; assert the accumulator result and that no
 `ReferenceError` / `variable ... not found` is emitted. Gate seed deploy on it.
+
+## RESOLVED 2026-08-17 — re-verified on the rebuilt seed
+
+The seed this record blamed has since been rebuilt. Re-ran the standalone probe
+(no spec runner, no 120s budget) on the deployed binary:
+
+binary identity: `readlink -f bin/simple` =
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`;
+`stat -c '%s %y'` = `59537240 2026-08-17 12:58:51.339525019 +0000`
+
+```
+$ timeout 300 env SIMPLE_EXECUTION_MODE=interpreter bin/simple run \
+    test/01_unit/engine_divergence/probes/js_engine_assign_dispatch_probe.spl
+J1_for_accum=num:3.0            # doc said 0
+J2_nested_obj=num:42.0          # doc said "variable `a` not found"
+J3_simple_assign=num:7.0        # doc said "ReferenceError: x is not defined"
+[WARN] [probe] ReferenceError: zzz is not defined   # the probe's own typeof fixture
+J4_typeof_undef=str:undefined   # doc said typeof-undefined mis-exec
+rc=0
+```
+
+All four documented symptoms are green. The `ReferenceError: zzz` line is the
+probe deliberately referencing an undeclared name for the J4 `typeof` case, not
+a residual defect. Nothing was changed for this record; it is closed by
+measurement on the current seed.

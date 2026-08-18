@@ -1,7 +1,10 @@
 # `rt_file_open` — extern-ABI oracle declares 4 args; the only definition takes 3
 
 **Date:** 2026-08-17
-**Status:** OPEN — gate is RED at HEAD because of this row
+**Status:** FIXED 2026-08-17 (this row) — `runtime_sffi.rs:1888` corrected to 3
+args; `extern_abi_spl_backend_arity_mismatches=0`. The gate as a whole is still
+RED, but on 8 DIFFERENT rows in its second half that were previously never
+reached — see "Resolution" below.
 **Family:** `doc/08_tracking/bug/rt_extern_abi_divergence_family_2026-08-10.md`
 **Found by:** os/runtime bug lane, while reproducing
 `rt_dir_list_platform_header_collides_with_extern_2026-08-10.md` (that row is now
@@ -69,6 +72,52 @@ Not applied by this lane: `src/compiler_rust/**` is owned by another lane in thi
 campaign and is explicitly off-limits. Do **not** "fix the list" in the two
 pure-Simple backends as the gate message suggests — they are the correct side, and
 padding them to 4 args would make them diverge from the only real implementation.
+
+## Resolution (2026-08-17, applied)
+
+Applied exactly the one-line fix above, in `runtime_sffi.rs:1888`:
+
+```rust
+-    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I64, I64], &[I32]), // path, mode -> fd
++    RuntimeFuncSpec::new("rt_file_open", &[I64, I64, I32], &[I32]), // path_ptr, path_len, mode -> fd
+```
+
+Binary identity of the tree at the time (the gate itself does not use it):
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+Gate re-run (rc read on the line after the command, not through a pipe):
+
+```
+$ sh scripts/check/check-extern-abi-signatures.shs
+$ rc=$?
+exit=1
+extern_abi_spl_backend_arity_mismatches=0      <-- was 2; this bug's row is gone
+extern_abi_mismatches_current=22
+extern_abi_mismatch_new=rt_db_delete	2	3	runtime_db.c
+extern_abi_mismatch_new=rt_db_get	2	3	runtime_db.c
+extern_abi_mismatch_new=rt_dir_glob	2	4	directory.rs
+extern_abi_mismatch_new=rt_file_find	4	5	directory.rs
+extern_abi_mismatch_new=rt_invlpg	ret:int	ret:void	runtime_native.c
+extern_abi_mismatch_new=rt_struct_alloc	ret:int	ret:ptr	runtime_memory.c
+extern_abi_mismatch_new=rt_struct_alloc	ret:int	ret:ptr	runtime_native.c
+extern_abi_mismatch_new=rt_write_cr3	ret:int	ret:void	runtime_native.c
+FAIL — 510 symbols checked, 8 new mismatch(es)
+```
+
+`rt_file_open` no longer appears anywhere in the output, and the second half of
+the gate (510 symbols, the C-header/definition comparison) now RUNS for the first
+time — exactly the consequence this record predicted. The 8 rows it reports are
+**not** introduced by this change: the earlier run exited during the arity half
+and never reached this code path. They are a separate, larger defect class and
+are NOT fixed here.
+
+**No `src/runtime/*.c` file was touched by this change**, so
+`check-c-runtime-compiles-push.shs` was not applicable to it.
 
 ## Not verified
 

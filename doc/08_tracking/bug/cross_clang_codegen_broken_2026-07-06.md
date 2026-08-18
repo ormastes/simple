@@ -2,8 +2,29 @@
 
 **Date:** 2026-07-06
 **Area:** os/llvm_self_hosting, cross toolchain, SimpleOS Phase 4 (clang_static)
-Status: OPEN (P2)
+Status: OPEN (P2) — UNVERIFIABLE HERE (no cross toolchain present)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+
+**Repro attempt 2026-08-17 (live, not inspection).** The repro's `$CC` does not
+exist, and neither does any part of the tree it lives in:
+
+```
+$ ls -l build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang-20
+ls: cannot access '...': No such file or directory
+$ ls build/os/llvm/
+ls: cannot access 'build/os/llvm/': No such file or directory
+```
+
+Binary identity of the tooling at the time of this attempt:
+`readlink -f bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`,
+`stat -c '%s %y'` = `59537240 2026-08-17 12:58:51 +0000` (irrelevant to this
+bug — the defect is in a cross clang, not in `simple`).
+
+Reason it cannot be closed either way: reproducing or refuting the SIGABRT
+requires a full LLVM cross-toolchain build for `x86_64-unknown-simpleos`
+(`scripts/os/build_simpleos_llvm_image.shs`), a bootstrap-scale build that is
+explicitly out of scope for verification passes. **No pass is claimed. Stays
+OPEN with the `-O0`/host-clang workaround unchanged.**
 
 **Re-verification (2026-08-10):** The referenced binary
 `build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang-20` does not exist in

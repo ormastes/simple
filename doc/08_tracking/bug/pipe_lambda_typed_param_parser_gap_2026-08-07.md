@@ -1,5 +1,28 @@
 # Pipe-lambda typed parameters rejected by parser (fixed in seed source, pending rebuild)
 
+- **Status (2026-08-17): RESOLVED — the pending rebuild has happened and the repro passes.**
+
+  Binary identity:
+  ```
+  readlink -f bin/simple
+  /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+  stat -c '%s %y' -> 59537240 2026-08-17 12:58:51.339525019 +0000
+  ```
+  Repro (`scratchpad/r1.spl`):
+  ```simple
+  fn main():
+      val f = |x: i64| x + 1
+      print("{f(5)}\n")
+  ```
+  ```
+  $ bin/simple run r1.spl
+  [INFO] JIT compilation failed, falling back to interpreter: ... lambda/closure ABI ...
+  6
+  ```
+  Parses and evaluates correctly — the `Unexpected token: expected Pipe, found
+  Colon` error is gone. (The JIT-closure-ABI deferral message is a separate,
+  pre-existing known limitation, not this defect.)
+
 Date: 2026-08-07
 
 ## Symptom

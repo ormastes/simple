@@ -88,3 +88,23 @@ was ~13.5 kB/s, so the cost is a compute-bound, allocation-free loop —
 plausibly Dict insert probing at scale, or a per-item linear scan. The next
 stage-3 cycle will name the sub-step from the new receipts; that is the
 prerequisite for fixing it.
+
+## Status re-check 2026-08-17 — STILL OPEN (mitigation confirmed in tree)
+
+binary identity: `readlink -f bin/simple` = `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`; `stat -c '%s %y'` = `59537240 2026-08-17 12:58:51.339525019 +0000`
+
+The receipts half of this record is present in the current tree:
+
+```
+$ grep -n "surface_build\|surface_alias\|export_origins\|surface_freeze" \
+      src/compiler/80.driver/driver_source_pipeline_parsing.spl
+343:  log_build_progress("surface_build", "files", 0, ...
+393:  log_build_progress("surface_build", "files", ...
+396:  log_build_progress("surface_alias", "aliases", 0, ...
+421:  log_build_progress("surface_alias", "aliases", entry_alias_done, ...
+423:  log_build_progress("export_origins", "surfaces", 0, -1, ...
+```
+
+The "still open" half — why the window costs ~30 minutes — is unchanged and was
+not measured here: naming the sub-step requires a stage-3 run to emit these new
+receipts, and a bootstrap was out of scope for this session. Nothing changed.

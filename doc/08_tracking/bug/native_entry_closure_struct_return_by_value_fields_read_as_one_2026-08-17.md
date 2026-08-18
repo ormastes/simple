@@ -1,7 +1,9 @@
 # A struct RETURNED BY VALUE reads every field as `1` under native-build `--entry-closure`
 
 Date: 2026-08-17
-Status: OPEN — root cause isolated, codegen fix not attempted
+Status: OPEN — root cause isolated; the seed-side fail-open IS now fixed in
+source, but the symptom could not be re-measured (see the 2026-08-17 re-check at
+the bottom)
 Owner: native codegen / aggregate return ABI
 Severity: HIGH — silent wrong values, no diagnostic, on the exact Stage-2/3 path
 
@@ -136,3 +138,43 @@ before any example ran. Embedded fixture sources must avoid `{...}` entirely.
 ## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
 
 LIVE by content — and NOT ours to fix: `hir/lower/expr/access.rs` is a lane explicitly claimed by another concurrent session. The guessed field index is still there: src/compiler_rust/compiler/src/hir/lower/expr/access.rs:286-291, `self.get_field_info(recv_hir.ty, field).ok().map(|(field_index,_)| field_index).or_else(|| self.try_resolve_global_field_index_by_name(...)).unwrap_or(0)` — a failed resolution still silently yields field 0, which is the documented 'every field reads as field 0' mechanism. Handed to the access.rs owner unmodified.
+
+## Re-check 2026-08-17 (independent lane) — the fail-open is gone from SOURCE; symptom UNMEASURED
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC.
+
+**The `.unwrap_or(0)` cited in the triage line above no longer exists.**
+`grep -n "unwrap_or(0)" src/compiler_rust/compiler/src/hir/lower/expr/access.rs`
+returns nothing. The access.rs owner replaced it with a three-attempt
+fail-closed resolution (`get_field_info` -> `try_resolve_global_field_index_by_name`
+-> `try_resolve_registry_field_index_by_name`, then a diagnostic naming the
+struct and field), at `access.rs:286-299`, whose own comment cites this row's
+mechanism verbatim. Landed in `d7213eb6174` (2026-08-17 07:36:55 +0000), which
+**predates** the deployed seed's 12:58:51 mtime — so the deployed binary
+plausibly contains it, though that was not independently confirmed.
+
+**The runtime symptom could not be re-measured**, so this row stays OPEN rather
+than being claimed fixed. The minimal reproducer at the top of this row was run
+twice against the deployed seed and never reached codegen:
+
+```
+$ (ulimit -v 12000000; SIMPLE_BOOTSTRAP=1 timeout 1800 bin/simple native-build \
+     --source $S/sret --entry $S/sret/user3.spl --entry-closure -o $S/sret/user3.bin \
+     > $S/sret/build.log 2>&1); echo "rc=$?"
+rc=255
+$ grep -n "memory allocation" $S/sret/build.log
+956:memory allocation of 2147483648 bytes failed
+1191:memory allocation of 2147483648 bytes failed
+```
+
+The interpreted native-build worker aborts on a failed allocation during
+`parse` on this ONE-module, no-import fixture. Detail and the driver-side
+misreport fix:
+`doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md`.
+
+Unblock condition for closing this row: a native-build that completes, then
+`./user3.bin` printing `len=3 tag=77` on BOTH lines, plus the two RED specs
+(`native_struct_return_by_value_field_read_spec.spl`,
+`native_aggregate_return_transport_class_spec.spl`) going green. Do not close it
+on the source diff alone.

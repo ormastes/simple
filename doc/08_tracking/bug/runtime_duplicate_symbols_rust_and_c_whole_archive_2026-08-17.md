@@ -1,9 +1,11 @@
 # Four `rt_*` symbols are defined in BOTH the Rust and C runtimes; `--whole-archive` turns that into a link failure for `simple-native-all`
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN — **filed, not fixed, deliberately.** Choosing which definition
-  wins is a design decision about the native lane, not a mechanical edit, and a
-  wrong choice here breaks that lane.
+- **Status:** FIXED 2026-08-17 — link succeeds, `test result: ok. 12 passed; 0
+  failed`. **The diagnosis in the body below is WRONG and is kept only as the
+  record of what was believed; see "Actual root cause" and "Resolution".** The
+  duplicates were Rust-vs-Rust (`simple-runtime` rlib vs `simple-native-all`'s
+  own cgu), not Rust-vs-C, and no C file was involved or changed.
 - **Severity:** High — blocks `cargo test --release` from producing a linked test
   binary for `simple-native-all`.
 - **Component:** `src/compiler_rust/runtime/**`, `src/runtime/*.c`,
@@ -112,6 +114,82 @@ one is in scope.
 This is a hypothesis. It must be validated by actually linking `simple-native-all`
 and by confirming the native/baremetal lane still resolves all four symbols.
 
+## Actual root cause (measured 2026-08-17 — supersedes everything above)
+
+The linker names both sides, and neither is C:
+
+```
+rust-lld: error: duplicate symbol: rt_file_atomic_write
+>>> defined at simple_native_all.42a812a79b2b9b04-cgu.00
+>>>            .../simple_native_all-243ad17baf575096.simple_native_all...cgu.00.rcgu.o:(rt_file_atomic_write)
+>>> defined at simple_runtime.a13b17549e7407f2-cgu.02
+>>>            simple_runtime...cgu.02.rcgu.o:(.text.rt_file_atomic_write+0x0) in archive .../libsimple_runtime.rlib
+```
+
+`libruntime_sffi_c.a` is on the command line under `-Wl,--whole-archive`, but it
+supplies **none** of the four names — `runtime.c`, `runtime_legacy_core.c` and
+`runtime_native.c` (the three C files holding those definitions) are not in
+`build.rs`'s `c_sources` list at all, so they are not in that archive. The
+`--whole-archive` mechanism section above is therefore a red herring.
+
+The real conflict: `simple-native-all` defines all four itself
+(`native_all/src/lib.rs:1166`, `native_all/src/mem_snapshot_provider.rs:225/271/397`)
+and `runtime/Cargo.toml:23` already declares the feature that says so —
+`native-all-provider = []  # simple-native-all owns overlapping aggregate exports`
+— but that feature was **never read anywhere in `runtime/src/**`**, so the runtime
+crate kept exporting them too.
+
+## Resolution (applied)
+
+Minimal edit, following the existing `driver-hooks` precedent
+(`runtime/src/value/cli_sffi.rs:334`): gate the runtime's four exports on
+`#[cfg(not(feature = "native-all-provider"))]` —
+`runtime/src/mem_snapshot.rs` (4 items: both `rt_mem_snapshot_open` cfg-arms,
+`_record`, `_close`, plus its `#[cfg(test)]` module) and
+`runtime/src/value/sffi/file_io/file_ops.rs:365` plus its two tests. No C source
+and no `build.rs` change; `--whole-archive` left exactly as it was.
+
+Evidence — built at HEAD in an isolated `git worktree` (`/mnt/data/bugfix-wt-0dc81`)
+because the shared working copy carries another lane's uncommitted, non-compiling
+`module_loader.rs` edit (3x E0308) that blocks any build there:
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000
+
+# BEFORE (HEAD, no fix): exit=101, all four duplicate-symbol errors reproduced.
+$ CARGO_TARGET_DIR=/mnt/data/cargo-target-bugfix cargo test --release -p simple-native-all --no-run
+$ rc=$?
+exit=101
+
+# AFTER:
+$ CARGO_TARGET_DIR=/mnt/data/cargo-target-bugfix cargo test --release -p simple-native-all --no-run
+$ rc=$?
+exit=0
+    Finished `release` profile [optimized] target(s) in 5m 18s
+  Executable unittests src/lib.rs (.../release/deps/simple_native_all-243ad17baf575096)
+
+$ /mnt/data/cargo-target-bugfix/release/deps/simple_native_all-243ad17baf575096
+$ rc=$?
+exit=0
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+# All four symbols are still exported by the linked binary (native_all's copies):
+$ nm -D .../simple_native_all-243ad17baf575096 | grep -E ' T (rt_file_atomic_write|rt_mem_snapshot_(open|close|record))$'
+00000000008a8a90 T rt_file_atomic_write
+00000000008b6bd0 T rt_mem_snapshot_close
+00000000008b6bf0 T rt_mem_snapshot_open
+00000000008b7070 T rt_mem_snapshot_record
+
+# Feature OFF paths unaffected — runtime's own tests still link, seed still checks:
+$ cargo test --release -p simple-runtime --no-run   ; rc=0
+$ cargo check --release --bin simple                ; rc=0
+```
+
+No `src/runtime/*.c` was modified, so `check-c-runtime-compiles-push.shs` was not
+applicable and was not run.
+
 ## Exit criteria
 
 1. `cargo test --release` in `src/compiler_rust` produces a linked
@@ -126,3 +204,11 @@ and by confirming the native/baremetal lane still resolves all four symbols.
    reintroduce the masking problem that design avoids.
 4. The link leg of `check-seed-builds-push.shs` promoted from advisory to gating
    once 1-3 hold.
+
+**Status against these criteria (2026-08-17):** (1) MET — quoted above. (2) N/A
+as written: the C definitions were never in this link, and none of them were
+touched, so the baremetal/native lane is bit-for-bit unaffected by this change.
+(3) NOT DONE — still open, and now needs a different shape than described: the
+collision to detect is Rust-crate-vs-Rust-crate (`simple-runtime` vs
+`simple-native-all`), which is outside `check-runtime-api-regression-push.shs`'s
+Rust-set/C-set framing entirely. (4) NOT DONE.

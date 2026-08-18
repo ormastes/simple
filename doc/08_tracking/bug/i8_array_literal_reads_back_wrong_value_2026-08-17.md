@@ -7,6 +7,8 @@ copy defect because it needs an `[i8]` array, which is rare in this tree.
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Status:** OPEN — noticed and measured, not investigated.
+Status: **FIXED 2026-08-17** — the missing GREEN below has now been observed on a
+rebuilt seed. See "GREEN observed" at the end of this record.
 
 ## Summary
 
@@ -160,3 +162,43 @@ instance from a foreign worktree was observed SIGTERMing healthy runs at
 `age>=60s`, well below this spec's runtime. Runs without it died at rc 143/144
 before printing a header, which through a pipe launders as a silent exit 0 --
 indistinguishable from the silent-green defect class this batch hunts.
+
+## GREEN observed 2026-08-17 (the missing evidence, now supplied)
+
+Binary identity (recorded per `.claude/rules/commands.md`):
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+That binary POST-dates the fix (the previous RED baseline above was taken on the
+2026-08-16 22:59:37 seed). Reproducer, verbatim:
+
+```
+$ cat r3.spl
+fn si8() -> [i8]:
+    [5i8, 6i8, 7i8]
+
+fn main():
+    val i = si8()
+    print i[0]
+    print i[1]
+    print i[2]
+main()
+
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run r3.spl
+5
+6
+7
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run r3.spl
+5
+6
+7
+```
+
+Both engines now agree and print the written values; the pre-fix JIT printed
+`<special:43> <special:67> <special:59>`. The `TypeId::I8` sites are confirmed
+present in their post-fix (int-boxing) position, e.g.
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_collection.rs:16,243,312`.

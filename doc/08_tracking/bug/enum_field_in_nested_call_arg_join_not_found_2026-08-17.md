@@ -1,10 +1,11 @@
 # `method 'join' not found on value of type enum in nested call context`
 
 - **Filed:** 2026-08-17
-- **Status:** FIX LANDED (pending redeploy) — root-caused and fixed 2026-08-17
-  in `src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs`
-  (`instantiate_class`); the deployed `bin/simple` seed predates the fix, so the
-  spec keeps its temporary-local workaround until the next seed redeploy.
+- **Status:** FIXED — root-caused and fixed 2026-08-17 in
+  `src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs`
+  (`instantiate_class`). **Redeploy has now happened and the fix is verified
+  live on both engines** — see "Verification 2026-08-17 (live run, redeployed
+  seed)" at the bottom.
 - **Severity:** medium — blocks a natural, short expression form; forces a
   temporary local at every call site.
 
@@ -92,3 +93,59 @@ unrelated `spl_fonts`/extern-wiring regression tracked in
 Remove the temporary-local workaround from
 `test/01_unit/compiler/linker/linker_context_spec.spl` (and its
 `test/unit/...` mirror) and the spec must stay green.
+
+## Verification 2026-08-17 (live run, redeployed seed)
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt 2026-08-17) —
+this build POST-dates the `class_instantiation.rs` fix.
+
+Repro `enum1.spl` (scratchpad) — the minimal shape from the Root cause section:
+a struct with an enum-typed field and an impl-`static fn new` whose 3 param
+names mirror the 3 field names but whose `tags` param type (`[text]`) differs
+from the field type (`text`), constructed with a fully-named literal both in
+statement position and nested inside another call's argument list:
+
+```simple
+enum Status:
+    Compiled
+    Pending
+
+struct Entry:
+    name: text
+    tags: text
+    status: Status
+
+impl Entry:
+    static fn new(name: text, tags: [text], status: Status) -> Entry:
+        return Entry(name: name, tags: tags.join(","), status: status)
+
+fn take(e: Entry) -> text:
+    return e.name
+
+fn main():
+    val e = Entry(name: "Vec", tags: "a", status: Status.Compiled)
+    print("stmt=${e.tags}")
+    print("nested=${take(Entry(name: "Vec2", tags: "b", status: Status.Compiled))}")
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run .../enum1.spl
+stmt=$a
+nested=$Vec2
+
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run .../enum1.spl
+stmt=$a
+nested=$Vec2
+```
+
+Both engines: no `method 'join' not found on value of type enum in nested call
+context`. The literal built the struct DIRECTLY rather than auto-routing to the
+name-coincident `static fn new` — proven by `tags` reading back as `a`/`b`
+verbatim; had `new` run, `tags.join(",")` would have been applied (and would
+have errored on a `text` receiver). Nested-call position behaves identically to
+statement position. No code change was needed in this pass; the fix was already
+in the deployed seed.
+
+(Incidental, unrelated to this bug: the seed's interpolation prints a leading
+`$` — `stmt=$a` rather than `stmt=a`. Not investigated here.)

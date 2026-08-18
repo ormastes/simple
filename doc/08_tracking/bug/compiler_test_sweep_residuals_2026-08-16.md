@@ -344,3 +344,59 @@ mirroring `metrics_port.spl`.
 `src/compiler/85.mdsoc/mdsoc/types.spl:425+`. Not the cause of the failures
 above (verified — the impl behaves correctly), but it is exactly the co-compiled
 class-collision shape the compiler warns about elsewhere.
+
+## 2026-08-17 content triage (shard 02) — UNDETERMINED
+
+Not resolvable by source reading. This row is a sweep RESIDUAL list (while-guard,
+receive/after, exhaustiveness, nested-optional nil, pipe placeholder, arena OOB)
+— each item is a test outcome, not a quotable source defect, and the cited
+`src/compiler/10.frontend/core/parser.spl` has no line reference. Closing any
+item requires re-running the sweep, which is out of scope here. Repro spec
+`test/01_unit/compiler_core/parser_spec.spl` still present. Left OPEN unchanged.
+
+## 2026-08-17 re-verification (fresh execution, not source reading)
+
+The 2026-08-17 shard-02 triage above closed as UNDETERMINED because it could not
+run the sweep. This pass ran the record's own named repro spec.
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+2026-08-17 12:58:51 (Rust seed).
+
+```
+$ bin/simple test test/01_unit/compiler_core/parser_spec.spl --no-session-daemon --sequential
+rc=1
+SPEC FILE VERDICT: test/01_unit/compiler_core/parser_spec.spl declared>=24 executed=24 passed=21 failed=3 dropped=0
+Results: 24 total, 21 passed, 3 failed
+```
+
+So the residual is **live and now quantified**: 3 of 24, not an unknown count.
+This upgrades the shard-02 row from UNDETERMINED to reproduced-OPEN.
+
+**Left RED deliberately**, per `.claude/rules/testing.md` and this record's own
+"Unblock conditions": interpreter items 1-8 need behaviour implemented in
+`src/compiler/10.frontend/core/interpreter/`, and the backend items
+(erased-receiver builder-chain resolution, `rt_process_run_capture`, wasm
+`CompileOptions`) are seed-side and blocked on a redeploy. Nothing here was
+weakened to reduce the count.
+
+**One adjacent defect from this record's family WAS fixed today**, in the runtime
+rather than in a spec: `rt_env_get` is declared `-> text` everywhere but returned
+`nil` for an unset variable, so the ubiquitous `if v != "": use(v)` override
+idiom took the wrong branch (`nil != ""` is true) and passed a non-text
+downstream. Fixed in
+`src/compiler_rust/runtime/src/value/sffi/env_process.rs`; full evidence in
+`doc/08_tracking/bug/shellout_specs_target_refusing_production_wrapper_2026-08-17.md`.
+It is called out here because it is exactly the "silently wrong result that
+presents as a plausible compiler-shaped failure" class this sweep record tracks,
+and any spec in the residual list that resolves an optional env override was
+subject to it.
+
+Status: OPEN (unchanged).
+
+## Re-run on rebuilt seed 2026-08-17 (seed md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45)
+
+    bin/simple test test/01_unit/compiler_core/parser_spec.spl --no-session-daemon --sequential
+    SPEC FILE VERDICT: ... declared>=24 executed=24 passed=21 failed=3 dropped=0   (exit 1)
+
+Identical to the recorded baseline (21/24). Row stays OPEN. Only the
+parser_spec row was re-run in this pass.

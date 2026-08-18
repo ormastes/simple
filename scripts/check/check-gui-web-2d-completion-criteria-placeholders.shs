@@ -4,6 +4,86 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# Verdict contract (see .claude/rules/vcs.md): the LAST stdout line is always
+# one of `PASS — <n> ... checked`, `FAIL — ...` (exit 1), or
+# `ERROR — nothing was checked` (exit 2).  A run that evaluated 0 gates is an
+# ERROR, never a PASS: this guard used to exit 0 after printing only an
+# `key=value` evidence dump, which is indistinguishable from a real audit.
+# See doc/08_tracking/bug/check_scripts_vacuity_census_2026-08-17.md.
+RUN_SELFTEST=0
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) RUN_SELFTEST=1 ;;
+        *) echo "usage: $0 [--selftest]" >&2; exit 64 ;;
+    esac
+done
+
+selftest() {
+    st_fail=0
+    st_dir="${TMPDIR:-/tmp}/gui-web-2d-completion-selftest.$$"
+    rm -rf "$st_dir"; mkdir -p "$st_dir"
+    trap 'rm -rf "$st_dir"' EXIT
+
+    # Build a must-PASS fixture from THIS script's own required-gate list, so
+    # the fixture can never drift out of sync with the gates being enforced.
+    st_gates="$(sed -n 's/^ *require_gate "[^"]*" "\(.*\)"$/\1/p' "$0")"
+    st_ngates="$(printf '%s\n' "$st_gates" | grep -c .)"
+    if [ "$st_ngates" -lt 1 ]; then
+        echo "selftest FAIL: extracted 0 required gates from $0" >&2
+        return 1
+    fi
+    printf '%s\n' "$st_gates" > "$st_dir/all_gates.spl"
+    # missing exactly one gate
+    printf '%s\n' "$st_gates" | sed '1d' > "$st_dir/missing_gate.spl"
+    # all gates present, but a placeholder remains
+    cp "$st_dir/all_gates.spl" "$st_dir/placeholder.spl"
+    echo 'expect("TODO(gui-web-2d-completion) renderer").to_equal("evidence-backed")' >> "$st_dir/placeholder.spl"
+
+    st_case() { # name spec_path expect_exit expect_substr
+        st_out="$st_dir/$1.out"
+        # Never read an exit code through a pipe, and never let `set -e` kill
+        # the selftest on a fixture that is SUPPOSED to exit non-zero.
+        set +e
+        GUI_WEB_2D_COMPLETION_SPEC_PATH="$2" \
+        GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=0 \
+        BUILD_DIR="$st_dir/build.$1" REPORT_PATH="$st_dir/report.$1.md" \
+            sh "$0" >"$st_out" 2>&1
+        st_ec=$?
+        set -e
+        st_line="$(tail -1 "$st_out")"
+        if [ "$st_ec" != "$3" ]; then
+            echo "selftest FAIL $1: exit $st_ec expected $3 ($st_line)" >&2
+            st_fail=$((st_fail + 1)); return 0
+        fi
+        case "$st_line" in
+            *"$4"*) : ;;
+            *) echo "selftest FAIL $1: verdict '$st_line' lacks '$4'" >&2
+               st_fail=$((st_fail + 1)) ;;
+        esac
+    }
+
+    st_case must-pass       "$st_dir/all_gates.spl"    0 "PASS — $st_ngates completion gate(s) checked"
+    st_case must-fail-gate  "$st_dir/missing_gate.spl" 1 "FAIL — $st_ngates completion gate(s) checked"
+    st_case must-fail-todo  "$st_dir/placeholder.spl"  1 "FAIL — $st_ngates completion gate(s) checked"
+    st_case must-error-nospec "$st_dir/does-not-exist.spl" 2 "ERROR — nothing was checked"
+
+    if [ "$st_fail" != "0" ]; then
+        echo "gui_web_2d_completion_selftest status=FAIL cases_failed=$st_fail" >&2
+        return 1
+    fi
+    echo "gui_web_2d_completion_selftest status=PASS cases=4"
+    return 0
+}
+
+if [ "$RUN_SELFTEST" = "1" ]; then
+    if selftest; then
+        echo "PASS — 4 fixture(s) checked (selftest only, scan skipped)"
+        exit 0
+    fi
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+
 SPEC_PATH="${GUI_WEB_2D_COMPLETION_SPEC_PATH:-test/03_system/check/gui_web_2d_goal_completion_criteria_spec.spl}"
 BUILD_DIR="${BUILD_DIR:-build/gui_web_2d_completion_criteria_placeholders}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_web_2d_completion_criteria_placeholders_$(date -u +%F).md}"
@@ -125,6 +205,35 @@ fi
 
 cat "$BUILD_DIR/evidence.env"
 
-if [ "$status" != "pass" ] && [ "$ALLOW_INCOMPLETE" != "1" ]; then
-    exit 1
+# --- verdict (always the last stdout line) ---------------------------------
+# Fail-closed non-vacuity: 0 gates evaluated means the spec was unreadable, so
+# nothing was measured.  That is ERROR, never PASS and never FAIL — a FAIL
+# would assert a content defect this run never observed.
+if [ "$required_gate_count" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no completion criteria spec at '$SPEC_PATH')"
+    exit 2
 fi
+
+if [ "$status" = "pass" ]; then
+    echo "PASS — $required_gate_count completion gate(s) checked, 0 missing, 0 placeholder(s) remaining"
+    exit 0
+fi
+
+verdict_detail="$reason"
+if [ "$missing_required_gate_count" != "0" ]; then
+    verdict_detail="$verdict_detail; missing gates: $missing_required_gates"
+fi
+if [ "$todo_count" != "0" ]; then
+    verdict_detail="$verdict_detail; $todo_count placeholder(s) remaining"
+fi
+
+if [ "$ALLOW_INCOMPLETE" = "1" ]; then
+    # Recorded escape, never a silent one: the verdict states that the failure
+    # was accepted by an explicit env opt-in, so a caller reading only the last
+    # line cannot mistake it for a clean audit.
+    echo "PASS — $required_gate_count completion gate(s) checked, incomplete ACCEPTED via GUI_WEB_2D_COMPLETION_ALLOW_INCOMPLETE=1 ($verdict_detail)"
+    exit 0
+fi
+
+echo "FAIL — $required_gate_count completion gate(s) checked, $verdict_detail"
+exit 1

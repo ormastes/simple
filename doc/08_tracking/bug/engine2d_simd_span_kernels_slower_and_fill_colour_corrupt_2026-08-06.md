@@ -1,7 +1,58 @@
 # engine2d SIMD row/span kernels are slower than scalar, and `fill_span` corrupts the fill colour
 
-Status: OPEN (P1)
+Status: PARTIALLY RESOLVED / OPEN (P2, downgraded from P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
+
+## Live re-run 2026-08-17 (measured, not inspected)
+
+Binary: `readlink -f bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`,
+`stat -c '%s %y'` = `59537240 2026-08-17 12:58:51 +0000`, md5
+`78ffcbcd3f4cfaa11e3d9c1db37bf0b2` (still the Rust seed — it prints the seed
+banner). Same harness, same 11-fresh-process protocol, 640-px span, 400 iters:
+
+```
+sh test/perf/graphics_2d/run_span_bench.shs 11 native            # default (auto)
+SIMPLE_2D_SIMD=off sh test/perf/graphics_2d/run_span_bench.shs 11 scalar
+```
+
+| kernel | native p50 | scalar p50 | native p99 | scalar p99 |
+|--------|-----------|-----------|-----------|-----------|
+| fill   | **7 ms**  | **0 ms**  | 11 ms     | 3 ms      |
+| copy   | **0 ms**  | 13 ms     | 0 ms      | 17 ms     |
+| blend  | 40 ms     | **28 ms** | 92 ms     | 40 ms     |
+| blit   | **0 ms**  | 12 ms     | 1 ms      | 18 ms     |
+max RSS: 43.8 MB native vs 48.3 MB scalar.
+
+**What changed since 2026-08-06:** `copy` and `blit` are no longer parity — they
+are now dramatically FASTER native (0 ms vs 12-13 ms), and native RSS is now the
+lower of the two. This is the effect of the `write_span` bulk write-back channel
+(see the 2026-08-15 comment block at `simd_kernels.spl:409`), which removed the
+interpreted per-pixel scatter that §1 blamed.
+
+**What is still true:** `fill` and `blend` remain pessimisations native
+(7 vs 0 ms, 40 vs 28 ms p50; blend's p99 is 2.3x worse), so §1's core claim
+survives for those two kernels only.
+
+**Correction to §1's "Action taken":** that mitigation is NO LONGER in the
+source. `native_pixel_rows_enabled()`
+(`src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl:392-403`) now returns
+`true` under `auto` whenever an ISA is detected — only an explicit
+`SIMPLE_2D_SIMD=off` selects scalar. Confirmed live: the default run prints
+`native_rows=true`, `SIMPLE_2D_SIMD=off` prints `native_rows=false`. So the
+default lane today takes the slower `fill`/`blend` paths.
+
+**§2 re-confirmed non-defect.** The exact repro was re-run
+(`rt_engine2d_simd_fill_span_u32(a, 2, 4, 0xFF112233)`, decoded by shift+mask,
+never by decimal): indices 2..5 = `a=255 r=17 g=34 b=51` = `0xFF112233`
+byte-exact; 0,1,6,7 untouched. The retraction stands.
+
+**§3 mostly closed.** `rt_engine2d_simd_blend_span_u32` (`:2048`) and
+`rt_engine2d_simd_blend_const_span_u32` (`:2113`) now EXIST in
+`src/runtime/runtime_simd_dispatch.c` and are declared in
+`simd_native_rows.spl:7,8`. Only `rt_engine2d_simd_blit_row_u32` is still
+absent (0 grep hits). Remaining work is therefore: adopt the in-place blend
+span in the Simple blend path, fix the native `fill` regression, and add
+`blit_row` — not "there is no in-place blend kernel at any layer".
 
 **Filed:** 2026-08-06 · **Severity:** high (perf regression by construction + wrong pixels)
 **Workstream:** WS-D (2D perf), findings D-F2 / D-F3 / D-F9

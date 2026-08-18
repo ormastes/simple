@@ -90,3 +90,37 @@ simulated ENOSPC rejection and recovery case. No admitted bounded continuation
 artifact was present, so no full bootstrap was started. A future retry only
 needs a stable ownership window for the already-enforced input set; weakening
 or bypassing the mismatch gate would reintroduce the defect.
+## Status re-check 2026-08-17 — STILL BLOCKED, precondition re-measured
+
+binary identity: `readlink -f bin/simple` = `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`; `stat -c '%s %y'` = `59537240 2026-08-17 12:58:51.339525019 +0000`
+
+The blocking precondition (concurrently-edited Rust inputs in this shared
+working tree) is still true today — the guard would fire again on any
+`--full-bootstrap`:
+
+```
+$ git status --porcelain src/compiler_rust src/runtime
+ M src/compiler_rust/compiler/src/codegen/instr/core.rs
+ M src/compiler_rust/compiler/src/hir/lower/expr/operators.rs
+ M src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs
+ M src/compiler_rust/compiler/src/interpreter/expr/calls.rs
+ M src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs
+ M src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs
+ M src/compiler_rust/compiler/src/interpreter_extern/system.rs
+ M src/compiler_rust/parser/src/lexer/strings.rs
+ M src/compiler_rust/runtime/src/value/core.rs
+ M src/compiler_rust/runtime/src/value/sffi/env_process.rs
+ M src/runtime/runtime_process.c
+?? src/compiler_rust/target_wt/
+?? src/runtime/runtime_terminal_mode_impl.h
+?? src/runtime/runtime_terminal_signal_scope_impl.h
+```
+
+Note the dirty set is DIFFERENT from the one frozen on 2026-08-15 (11 tracked
+files vs 17, only a partial overlap), which is itself the evidence that the tree
+is still being edited concurrently. No full bootstrap was attempted — running one
+was explicitly out of scope for this session, and doing so under these conditions
+would reproduce `Rust inputs changed during full bootstrap` rather than teach
+anything new. The guard is correct; the environment still cannot satisfy it.
+Requires a quiesced tree or a private worktree with a frozen `src/compiler_rust`.
+Nothing changed.

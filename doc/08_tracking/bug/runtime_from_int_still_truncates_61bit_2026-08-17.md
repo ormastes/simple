@@ -1,7 +1,9 @@
 # `RuntimeValue::from_int` still truncates to 61 bits at HEAD — the fix landed, was reverted, and only its readers and specs came back
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN. Confirmed by **execution**, not source reading alone.
+- **Status:** PARTIALLY FIXED 2026-08-17 — runtime choke point + JIT green
+  (`boxed_int_wide_roundtrip` 3/3, rc 0); LLVM backend and MIR interpreter still
+  TRUNCATING. See the note at the end. Do not close.
 - **Severity:** High, and mis-recorded as fixed. This defect has been declared
   resolved at least four times.
 - **Component:** `src/compiler_rust/runtime/src/value/core.rs`,
@@ -160,3 +162,74 @@ Not "`from_int` was changed" — all of:
 5. A revert-detection note: this fix has been reverted by a stale snapshot once
    (`e14a2ffb4df`), so re-landing it must be re-verified at origin **after** the
    push, not only locally.
+
+## 2026-08-17 — CHOKE POINT FIXED; two paths still open (honest partial)
+
+`src/compiler_rust/runtime/src/value/core.rs`:
+
+- `from_int` now consults `fits_inline_int` and routes wide values to a new
+  `from_wide_int`, which allocates a `HeapInt` leaf with
+  `HeapHeader::new(HeapObjectType::Int, …)` and returns a tagged heap pointer —
+  modelled directly on the existing `from_u64`/`from_float` boxing. This is the
+  **missing producer** exit criterion 2 asks for. OOM/layout failure falls back to the
+  legacy inline shift rather than returning a wrong kind.
+- `as_int` reads the box back via `as_heap_i64()` when the value is not an inline int.
+- `is_int()` is deliberately unchanged (tag-only), which is what the test's
+  `fits_inline_int(v) == boxed.is_int()` assertion pins.
+
+Exit criterion 1, quoted verbatim, rc read on the line AFTER the unpiped invocation:
+
+```
+$ cd src/compiler_rust && CARGO_TARGET_DIR=/mnt/data/cargo-bugfix-0dc8 \
+    cargo test --release -p simple-runtime --test boxed_int_wide_roundtrip
+BOXED_TEST_RC=0
+running 3 tests
+test every_i64_survives_the_inline_boundary ... ok
+test fits_inline_int_matches_the_actual_inline_capacity ... ok
+test wide_ints_from_the_bug_report_roundtrip ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Per-path status after this change:
+
+| Path | State |
+|---|---|
+| Runtime tagging (`core.rs from_int`/`as_int`) | **FIXED**, test-covered (above) |
+| Cranelift JIT (`cranelift_emitter.rs`, `instr/mod.rs` `BoxInt`) | **FIXED by delegation** — both call `rt_value_int`, which is `from_int` verbatim, so the in-source comment claiming heap-boxing is now true |
+| **LLVM backend** (`codegen/llvm/emitter.rs:2096` `build_left_shift`, `functions.rs:~1946`) | **STILL TRUNCATING** — emits a raw `shl 3` and never calls `rt_value_int`, exactly as criterion 3 warns. Not changed here: it needs the emitter to call the runtime instead of open-coding the tag, which is a codegen change this row's evidence does not cover. |
+| MIR interpreter (`mir_interpreter.rs:764-780`) | **STILL TRUNCATING** — `emit_box_int`/`emit_unbox_int` are a symmetric in-model shift with no access to the runtime allocator; boxing there means giving that interpreter a heap. Documented, not fixed. |
+
+Criteria 1 and 2 are met and verified by execution. **Criteria 3 and 4 are NOT met** —
+do not read this note as a closure, and do not close the row until the LLVM emitter is
+fixed independently. Criterion 5 (re-verify at origin after push) is untouched: nothing
+was pushed from this lane.
+
+Binary: /mnt/data/cargo-bugfix-0dc8/release/simple (built 2026-08-17 13:48, 59554384 bytes, from this worktree's source; NOT deployed to bin/simple). `bin/simple` is still the pre-fix seed.
+
+**Status:** PARTIALLY FIXED — runtime choke point + JIT green; LLVM backend and MIR
+interpreter still open.
+
+## 2026-08-17 20:1x — re-run on the DEPLOYED seed: still PARTIAL, as designed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+The runtime choke point + Cranelift JIT half is now verified on the deployed binary
+(probe `c3b.spl`, interpreter vs jit, five wide-int shapes — identical and correct):
+
+```
+var=1152921504606846976  arr=1152921504606846976  lit=1152921504606846976
+lit62=4611686018427387904  push=1152921504606846976      (both engines)
+```
+
+But the row is NOT closed: the live Simple-side reproducer spec is still partly red.
+
+```
+$ bin/simple test test/01_unit/compiler/codegen/wide_int_boundary_class_spec.spl --no-session-daemon --timeout 900
+Results: 3 total, 2 passed, 1 failed
+```
+
+That residual is the LLVM-emitter / MIR-interpreter half the per-path table above
+already records as STILL TRUNCATING. No regression relative to the isolated build.
+
+**Status: still PARTIALLY FIXED — runtime + JIT green on the DEPLOYED seed; LLVM
+backend and MIR interpreter still open.**

@@ -1,7 +1,8 @@
 # `native_compile` can fail a unit with ZERO diagnostic; the truncator drops the middle of stderr
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN. Two defects in one row because they compound; the second is the worse one.
+- **Status:** Defect 1 **FIXED** (re-verified 2026-08-17, see *Re-verification* at the
+  bottom). Defect 2 mitigated; the head+tail excerpt policy itself stays OPEN.
 - **Lane:** `native-build`, `native_compile` stage (step 5/6).
 
 ## Observed
@@ -216,3 +217,15 @@ unsupported.
 Defect 1: FIXED and ablated. Defect 2: mitigated (full spill to a named file);
 the head+tail excerpt policy itself is unchanged and remains open as a
 cosmetic-priority follow-up now that no evidence is destroyed by it.
+
+## Re-verification 2026-08-17 (independent lane)
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (the Rust bootstrap seed).
+
+```
+$ timeout 600 sh scripts/check/check-build-outcome-reason-attribution.shs
+PASS — 4 invariant(s) checked, non-OK units carry printed reasons (ablated against pre-fix rev e89f0c6f94a: control printed the path with no reason)
+```
+
+Defect 1 confirmed fixed and gated. No change made to this row's code.

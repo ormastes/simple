@@ -685,19 +685,6 @@ fn process_use_stmt(
                         }
                     }
                 }
-                ImportTarget::Group(items) => {
-                    // A Group import that explicitly names an item equal to the module's
-                    // own name (`use pkg.Mod.{Mod}`) must bind the member, not the
-                    // enclosing module dict -- don't clobber it.
-                    let group_binds_name = items.iter().any(|item| match item {
-                        ImportTarget::Single(name) => name == &binding_name,
-                        ImportTarget::Aliased { alias, .. } => alias == &binding_name,
-                        _ => false,
-                    });
-                    if !group_binds_name {
-                        env.insert(binding_name.clone(), value);
-                    }
-                }
                 _ => {
                     // For non-glob imports, keep the module dict under its name for qualified access
                     env.insert(binding_name.clone(), value);
@@ -816,7 +803,7 @@ pub(super) fn create_filtered_env(env: &Env) -> Env {
 /// for caching (avoids creating duplicate Arc wrappers).
 pub(super) fn export_functions(
     local_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
-    filtered_env: &Env,
+    filtered_env: &Arc<HashMap<String, Value>>,
     exports: &mut HashMap<String, Value>,
     env: &mut Env,
 ) -> HashMap<String, Arc<simple_parser::ast::FunctionDef>> {
@@ -845,7 +832,11 @@ pub(super) fn export_functions(
         env_size = filtered_env.len(),
         "Second pass: exporting public functions"
     );
-    let shared_env = Arc::new(filtered_env.clone());
+    // Share the already-frozen map as the CoW base instead of copying it: the
+    // old `Arc::new(filtered_env.clone())` materialized a second full copy of
+    // the module's entire visible-name map and retained it forever via every
+    // exported function's `captured_env`.
+    let shared_env = Arc::new(Env::with_base(Arc::clone(filtered_env)));
     let mut exported_count = 0;
     for (name, shared_def) in &shared_defs {
         let func_with_env = Value::Function {

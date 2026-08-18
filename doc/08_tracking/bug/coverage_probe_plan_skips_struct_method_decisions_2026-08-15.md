@@ -1,7 +1,39 @@
 ## Re-verified 2026-08-17 — reproducer GONE; defect NOT fixed; localized; BLOCKED on a seed rebuild
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: OPEN (P3) — re-verified 2026-08-17 by EXECUTION (not inspection). Two
+changes to the record: coverage output is no longer a silent no-op, and the
+defect is NOT struct-specific.
+
+Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+(59537240 bytes, 2026-08-17 12:58:51 UTC).
+
+```
+$ SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<scratch>/cov.sdn \
+    bin/simple run <scratch>/cov.spl
+struct=true class=true free=true
+structF=false classF=false freeF=false
+$ ls -la <scratch>/cov.sdn
+-rw-rw-r-- 1 ... 532 Aug 17 13:20 <scratch>/cov.sdn
+```
+
+Probe file: struct method, class method and free `fn`, each with one identical
+`if n > 0` decision, each driven through BOTH arms.
+
+* **Section 3 above is now STALE** — `SIMPLE_COVERAGE_OUTPUT` on the `run` path
+  DOES write a file now (532 bytes, at the requested path).
+* **The written report is entirely empty**, and that is the fresh finding:
+  `total_files: 0, total_lines: 0, total_functions: 0, total_decisions: 0,
+  total_conditions: 0`, with `decision_percent: 100.0` from a 0/0 division.
+  The class method and the free function are attributed **zero** as well, so the
+  gap is NOT struct-method-specific as the title claims — nothing at all is
+  instrumented on the `run` path. The vacuous `100.0%` is the same silent-green
+  shape flagged before, just relocated from a missing file to an empty one.
+* **Still out of reach in pure Simple, same blocker as before:** all
+  instrumentation lives in the Rust seed
+  (`src/compiler_rust/compiler/src/mir/lower/lowering_coverage.rs`,
+  `driver/src/exec_core.rs:562`, `pipeline/codegen.rs`). No `.spl` fix exists;
+  `src/compiler/50.mir/mir_coverage_probe_admission.spl` is a validator only.
+  Left OPEN with the failing evidence above rather than fixed.
 
 ### 1. The named reproducer no longer exists
 

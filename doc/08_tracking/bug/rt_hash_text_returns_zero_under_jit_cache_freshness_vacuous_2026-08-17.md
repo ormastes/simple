@@ -1,7 +1,7 @@
 # rt_hash_text returns 0 under JIT/native — every cache source-hash check is vacuous
 
 **Filed:** 2026-08-17
-**Status:** OPEN
+**Status:** FIXED 2026-08-17 in source (JIT now returns the interpreter hash); needs a seed rebuild+redeploy to take effect for `bin/simple` users
 **Severity:** HIGH — silently consumes stale compiled artifacts
 **Area:** compiler / cache consistency, runtime externs
 
@@ -76,3 +76,83 @@ than a zero stub — a silent zero-returning stub is fail-open by construction.
 `bin/simple run scripts/check/check-smf-manifest-source-hash-verification.spl`
 prints `NOTE: rt_hash_text is degenerate (returns 0) on this execution path`
 whenever the defect is live.
+
+## Root cause — NOT a missing runtime export
+
+The row's premise ("there is no `rt_hash_text` in the Rust runtime crate source
+or the C runtime") is **wrong as measured in this checkout**: it exists in both,
+`src/compiler_rust/runtime/src/value/collections.rs:4452`
+(`pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64`, djb2, the same
+algorithm and the same values as the interpreter extern) and
+`src/runtime/runtime_native.c:7791`, and it is in the JIT symbol table
+(`src/compiler_rust/common/src/runtime_symbols.rs:587`).
+
+The zero came from an **inline codegen fast path**, not from symbol resolution.
+The decisive experiment: `rt_str_hash` is a thin alias of the very same runtime
+function, and in ONE program under `SIMPLE_EXECUTION_MODE=jit`
+
+    A={rt_hash_text(a)} B={rt_str_hash(a)}   ->   A=0 B=193485963
+
+Same engine, same string, same underlying implementation — so the runtime symbol
+was fine and only the name `rt_hash_text` was being intercepted.
+`src/compiler_rust/compiler/src/codegen/instr/calls.rs` intercepted it with
+`compile_inline_hash_text`, which re-implemented the string heap layout in
+Cranelift IR (`tag == 1`, `kind == 'STRI'`, len at +8, data at +16) and branched
+to a literal **0** on every assumption failure. Those assumptions did not hold,
+so it emitted 0 for all inputs. This is the same sentinel-that-is-not-a-sentinel
+family as the rest of the fail-open cluster: an unmet precondition returned a
+plausible VALUE instead of an error.
+
+## Fix landed
+
+The inline path is deleted (call site + the ~150-line
+`compile_inline_hash_text`), so `rt_hash_text` always calls the real runtime
+symbol. `cargo check --release -p simple-compiler` clean; `cargo build --release
+--bin simple` exit 0.
+
+## Verification (A/B, one tree, two binaries)
+
+Probe: `extern fn rt_hash_text(s: text) -> i64` printing `rt_hash_text("abc")`
+and `rt_hash_text("xyz")`.
+
+| binary | interpreter | jit |
+|---|---|---|
+| `bin/simple` (deployed seed, 12:58 2026-08-17, pre-fix) | `h1=193485963 h2=193511792` | **`h1=0 h2=0`** |
+| `/mnt/data/cargo-hashfix/release/simple` (this fix) | `h1=193485963 h2=193511792` | **`h1=193485963 h2=193511792`** |
+
+The row's own runnable detector agrees, and is non-vacuous — it still reports the
+defect on the old binary:
+
+    ./bin/simple run scripts/check/check-smf-manifest-source-hash-verification.spl
+    NOTE: rt_hash_text is degenerate (returns 0) on this execution path;
+    PASS — 4 case(s) checked, 0 failed                                   (exit 0)
+
+    /mnt/data/cargo-hashfix/release/simple run scripts/check/check-smf-manifest-source-hash-verification.spl
+    PASS — 6 case(s) checked, 0 failed                                   (exit 0)
+
+(no `degenerate` NOTE, and 6 cases instead of 4 — the two extra cases are the
+ones the detector can only exercise when the hash is real).
+
+**Not done:** the fixed binary was NOT deployed over `bin/simple` — other lanes
+are using that symlink. Until a seed rebuild lands, `bin/simple` still returns 0
+under JIT and the `smf_manifest_entry_matches_source` containment remains the
+thing standing between a stale `.smf` and execution. The row's second ask —
+"make an unresolved runtime extern a hard error rather than a zero stub" — is a
+separate, wider change and is NOT addressed here.
+
+## 2026-08-17 20:1x — RESOLVED on the DEPLOYED seed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+```
+$ env SIMPLE_EXECUTION_MODE=jit bin/simple run hash.spl
+h1=193485963 h2=193511792
+$ env SIMPLE_EXECUTION_MODE=interpreter bin/simple run hash.spl
+h1=193485963 h2=193511792
+$ bin/simple run scripts/check/check-smf-manifest-source-hash-verification.spl
+PASS — 6 case(s) checked, 0 failed          (rc=0)
+```
+
+JIT hashes are nonzero and identical to the interpreter; the detector reports 6
+cases (not the degenerate 4) with no `degenerate` NOTE. Matches the
+isolated-build result. **Status: RESOLVED.**

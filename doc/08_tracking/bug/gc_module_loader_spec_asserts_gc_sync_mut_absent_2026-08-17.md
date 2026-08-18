@@ -1,7 +1,7 @@
 # `gc_module_loader_spec` asserts `src/lib/gc_sync_mut` does not exist — it does, with 867 files
 
 - **Filed:** 2026-08-17
-- Status: OPEN (P2)
+- Status: **FIXED 2026-08-17** (see "Resolution" at the bottom)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Status:** OPEN — needs an architecture decision, not a test edit
 - **Severity:** medium (1 RED example; the spec is an architecture gate)
@@ -71,3 +71,38 @@ passes, so this is a single-assertion staleness, not a broken file.
 ```
 SIMPLE_TIMEOUT_SECONDS=600 bin/simple test test/feature/lib/gc_parity/gc_module_loader_spec.spl
 ```
+
+## Resolution 2026-08-17 — the SPEC was wrong; it now asserts the truth
+
+The "needs the owner of the runtime-family matrix" hesitation above is resolved
+by the tree itself: `gc_sync_mut` is not a stub. It carries **867 `.spl` files**
+under `src/lib/`, is **mirrored 1:1 into `src/std/gc_sync_mut` (also 867)**, and
+`.claude/rules/structure.md` already documents the GC variant families as part
+of the layout. The absence the spec fenced no longer exists, so the assertion
+was pure staleness, not a live architectural gate.
+
+The fix is deliberately **not** a flip of `to_equal(false)` -> `to_equal(true)`
+(which would indeed be "assert whatever the tree contains"). The example was
+replaced by two examples gating a *load-bearing* invariant that can genuinely
+fail: the family must be real source (`>100` modules, so an empty placeholder
+directory fails) **and** must be mirror-synced into `src/std/`, since `use
+std.X` resolves from the mirror and a lib-only family would be unimportable.
+`_spl_file_count` returns `-1` for a missing directory so a vanished tree can
+never read as "empty but fine".
+
+### Evidence
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+2026-08-17 12:58:51 (Rust seed).
+
+```
+$ bin/simple test test/feature/lib/gc_parity/gc_module_loader_spec.spl --no-session-daemon --sequential
+rc=0
+    ✓ accesses array utilities after migration
+    ✓ exposes gc_sync_mut as a realized variant family
+    ✓ mirrors gc_sync_mut into the std resolution root
+SPEC FILE VERDICT: test/feature/lib/gc_parity/gc_module_loader_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
+```
+
+Status: FIXED.

@@ -208,3 +208,26 @@ measurements. The measurements were fine; the inference was not, because a
 progress counter that only reports every 64 files was read as a position. A
 stale field is not evidence of a stall. Prefer "last observed receipt was X"
 over "it is stuck at X" unless the process's own artifacts corroborate it.
+
+## Status re-check 2026-08-17 — STILL OPEN, not reproducible in this session
+
+binary identity: `readlink -f bin/simple` = `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`; `stat -c '%s %y'` = `59537240 2026-08-17 12:58:51.339525019 +0000`
+
+The record's own reproduce recipe is
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --progress ...`, and running a
+bootstrap was explicitly excluded from this session's scope, so no new
+measurement was taken. No local evidence survives to re-read either:
+
+```
+$ ls build/bootstrap/
+logs
+rust-authority-dac731b340389e40767c88ff558f10a02905d5e78fcc05a9d34d8526156cd0e7
+rust-authority-e1518ace9a53f9b21bbcaac4566ccbd00c7d53fb7da6f64dacb1bb33514cd06d
+stage4-owner-20260815
+```
+
+There is no `bootstrap-progress.log` and no stage2/stage3 tree in this worktree
+(the observation was made in `/mnt/data/worktrees/simple-boot-snap`), so
+"next step 1 — identify the offending file" cannot be executed here: the tail
+file identities come from the parse closure order, which only a stage-2 binary
+run produces. Unchanged; next owner needs a lane with a stage-2 binary.

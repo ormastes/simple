@@ -70,7 +70,7 @@ Three additional facts found while verifying, all worth knowing:
 # Rust seed resolver cannot resolve dotted package directories; `simple info` is dead in seed mode
 
 - **Date:** 2026-08-17
-- **Status:** OPEN — source fix present (Strategy 5 dotted-directory join, `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs:303`) but the deployed seed has NOT been rebuilt, so the user-visible symptom still reproduces. Re-triage after redeploy. (Triage 2026-08-17: bucket B, not closable.)
+- **Status:** FIXED 2026-08-17 — seed rebuilt and redeployed; the reported symptom (`Cannot resolve module: app.package.registry.config`) no longer reproduces. See "Verification 2026-08-17 (post-redeploy)" at the end of this file. One unrelated residual is recorded there.
 - **Severity:** medium (blocks `simple info`, `search`, `yank`, `publish` whenever `bin/simple` is the seed)
 - **Component:** `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`
 
@@ -173,3 +173,85 @@ cannot load `src/app/**` limits what bootstrap can validate.
 
 `scratchpad/agentlogs/tool_info.log`; full session context in
 `scratchpad/tools_report.md`.
+
+---
+
+## Verification 2026-08-17 (post-redeploy) — FIXED
+
+Binary identity (recorded per policy):
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+(Rust seed, rebuilt 2026-08-17 — newer and larger than the 59536728 / 2026-08-16
+22:59:37 pre-fix binary named in the Symptom section.)
+
+### 1. Original symptom command
+
+```
+$ bin/simple info > scratchpad/info.log 2>&1; echo "EXIT=$?"
+EXIT=1
+$ /usr/bin/grep -c "Cannot resolve module" scratchpad/info.log
+0
+```
+
+The `error: semantic: Cannot resolve module: app.package.registry.config` line is
+**gone** — 0 occurrences. That is the defect this record is about, and it is fixed.
+
+### 2. Direct dotted-directory repro (both dotted shapes, incl. the 3-segment one)
+
+Scratch file `dotted_repro.spl`:
+
+```
+use app.package.registry.config
+use app.ui.chromium.acid2.pixel_grid
+print("resolved dotted package dirs OK")
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run \
+    /tmp/.../scratchpad/dotted_repro.spl
+EXIT=0
+resolved dotted package dirs OK
+```
+
+Both the two-segment (`package.registry`) and the three-segment
+(`ui.chromium.acid2`) dotted directories resolve, which is exactly what
+Strategy 5 was written for. Source confirmed present at
+`src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs:303-328`
+(`let dotted = parts[depth..depth + window].join(".");`, window walked
+longest-first via `for window in (2..=remaining).rev()`).
+
+### 3. JIT engine — not comparable for this repro, stated rather than glossed
+
+```
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run /tmp/.../scratchpad/dotted_repro.spl
+EXIT=1
+error: SIMPLE_JIT_STRICT: HIR lowering error: cannot resolve import
+`app.package.registry`: ... "cannot resolve import: module path segment `app`
+not found" ... help: check that the module exists at "/tmp/.../scratchpad/app"
+```
+
+This is **not** the dotted-directory defect: the JIT lane anchors its module
+search at the SCRIPT's directory (`/tmp/.../scratchpad/app`), so an out-of-tree
+scratch file cannot see `src/app/**` at all — it fails on the very first segment
+`app`, before any dotting is attempted. The interpreter lane finds the project
+root and therefore exercises the fix. No in-tree scratch file was created to
+work around this (scratch repros only, per the task constraints).
+
+### Residuals observed but NOT part of this defect
+
+- `bin/simple info` still exits **1 while printing no diagnostic and none of the
+  `Project Info` output** that `src/app/info/main.spl:137-140` should produce.
+  Module resolution now succeeds (0 `Cannot resolve module` lines); something
+  later in the `info` lane fails silently. Different defect, not re-triaged here.
+- The deployed seed **cannot parse an indented function body**. Measured:
+  `printf 'fn main()\n    print("hi")\n' > hello.spl` gives
+  `error: compile failed: parse: ...: Unexpected token: expected expression,
+  found Indent` under both `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`, while
+  a bare top-level `print("hi")` runs fine. This is plausibly fallout from the
+  concurrent `parser/src/expressions/binary.rs` lane mentioned above. It is why
+  the repro above is written as top-level statements. Not this record's defect.

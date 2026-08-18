@@ -272,6 +272,73 @@ hypothesis that an empty source-discovery Dict was caused by inert
 `Dict.clear()` is therefore untestable on this binary — and is in any case
 excluded by arm A, which populates the closure normally.
 
+## 2026-08-17 — the `parse` stall is an ALLOCATION ABORT, not a timeout (measured)
+
+The "What the four guards are ACTUALLY blocked on: `parse` makes no progress"
+section above is corrected here: `parse` is not stuck, and the run does not
+reach any deadline. The interpreted worker's RSS grows monotonically through
+`parse` until the allocator aborts, and the driver then **misreports that abort
+as a 7200s timeout** — which is exactly why the elapsed time never matched the
+number in the message (caveat 1 above).
+
+Same binary this row pins (size 59537240, mtime 2026-08-17 12:58:51 UTC).
+Fixture: a single module, no imports (`sret/user3.spl`, the struct-return
+reproducer). Bounded per the lane's hard limits:
+
+```
+$ (ulimit -v 12000000; SIMPLE_BOOTSTRAP=1 timeout 1800 bin/simple native-build \
+     --source $S/sret --entry $S/sret/user3.spl --entry-closure -o $S/sret/user3.bin \
+     > $S/sret/build.log 2>&1); echo "rc=$?"
+rc=255
+$ grep -n "memory allocation\|timed out after" $S/sret/build.log
+956:memory allocation of 2147483648 bytes failed
+1191:memory allocation of 2147483648 bytes failed
+1195:error: native-build worker timed out after 7200s before producing a binary.
+```
+
+Elapsed wall time was ~250s, not 7200s. RSS of the worker process
+(`bin/simple run src/app/cli/native_build_worker.spl ...`, i.e. the whole
+native-build compiler running INTERPRETED under the seed) sampled while it ran:
+
+```
+$ ps -o etimes=,rss=,pcpu= -p <worker>
+    224 3893748 70.0
+    244 4135828 70.9
+```
+
+3.7 GiB -> 3.9 GiB in 20s at ~70% CPU, on a ONE-module fixture. Concurrent
+workers from other lanes on the same host were observed at 15-17 GiB RSS
+(`native_trailing_default_param`, 599s elapsed). So the guards' `7200s` verdicts
+are memory blowups of the interpreted worker, wearing a timeout's clothes.
+
+### Fixed here: the misattribution
+
+`src/app/cli/native_build_main.spl` — `process_run_timeout_live` returns the
+same `-1` sentinel for a deadline expiry and for an abnormally-terminated child,
+and the `code == -1` arm unconditionally printed the timeout text. It now checks
+the captured output for an allocation-failure line first and prints
+`error: native-build worker ABORTED on a failed memory allocation (not a timeout).`
+The timeout text is unchanged for a genuine deadline expiry.
+
+Verification, same command as above after the change:
+
+```
+$ grep -n "ABORTED on a failed memory\|timed out after" $S/sret/build2.log
+rc=255
+1194:error: native-build worker ABORTED on a failed memory allocation (not a timeout).
+```
+
+(`rc` read from a variable on the line after the command. The misleading
+`timed out after 7200s` line is gone; the run still fails, honestly, for the
+real reason.)
+
+The blowup itself is NOT fixed here — it is a property of running the whole
+compiler interpreted, and it is the real blocker for
+`check-native-trailing-default-param`, `check-predicate-parser-native-build`,
+`check-native-object-cache-granularity` and
+`check-native-inprocess-positional-nonvacuous`. It needs its own row and its own
+owner.
+
 ## Next step for whoever picks this up
 
 Find why the source-closure walk returns 0 for `--source test/fixtures
@@ -346,3 +413,18 @@ compiler interpreted, and it is the real blocker for
 `check-native-object-cache-granularity` and
 `check-native-inprocess-positional-nonvacuous`. It needs its own row and its own
 owner.
+
+## 2026-08-18 — the deferred blowup now has its own row and an owner
+
+The "needs its own row and its own owner" item above is taken up in
+`doc/08_tracking/bug/native_build_interpreted_worker_rss_blowup_2026-08-18.md`.
+Located, not fixed. Summary of what that row establishes by measurement on the
+2-file `native_trailing_default_param` fixture (seed 59581296, 2026-08-18
+00:21:41, load 54-69): the blowup is **two** terms, not one — a fixed ~2.74 GB
+paid loading the worker's import closure *before any `[build]` step is emitted*
+(proportional to the compiler, not to `--source`), plus an unbounded ~1.3 MB/s
+creep **inside `parse` while the counter stays at `0/2`**, which nothing in a
+2-file fixture can be proportional to and which extrapolates to the 15-17 GB
+workers observed here. A no-import control measures 20.5 MB, so the 2.74 GB is
+all import-closure load. No fix and no before/after: the host hit 14 earlyoom
+kills in 15 minutes and the lane was halted mid-measurement.

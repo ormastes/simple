@@ -5,8 +5,62 @@
 **Severity:** P2 — silently unparseable source; the diagnostic points at a
 different construct than the actual cause, and cost one push-blocking
 investigation most of a session.
-**Status:** OPEN
+**Status:** **FIXED** (verified 2026-08-17 on the seed rebuilt that day)
 **Found by:** office lane, while triaging a pre-push guard failure.
+
+## RESOLUTION (2026-08-17) — fixed exactly as recommended, verified
+
+`literal` is now a CONTEXTUAL keyword, the preferred fix recommended below.
+The disambiguation is at
+`src/compiler_rust/parser/src/parser_impl/core.rs:670-676`:
+
+```rust
+TokenKind::Literal => {
+    if self.peek_next().kind == TokenKind::Fn {
+        self.parse_literal_function()
+    } else {
+        self.parse_expression_or_assignment()
+    }
+}
+```
+
+i.e. the parser commits to the `literal fn` production only when a `Fn` actually
+follows, and otherwise treats `literal` as an ordinary identifier — the same
+`peek_next` shape used for `from` immediately below it in that match.
+
+**Binary identity:**
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt that day).
+
+**Command and observed output** — the exact FAILS fixture from this row, run per
+the Verification note (`run`, not `check`):
+
+```
+$ cat kw_bad.spl
+fn probe() -> i64:
+    var literal = 1
+    literal = literal + 1
+    literal
+
+fn main() -> i64:
+    print("{probe()}\n")
+    0
+$ bin/simple run kw_bad.spl
+2
+```
+
+`2` is the correct value, so the name is not merely accepted but bound and
+mutated correctly. The `expected Fn, found Assign` diagnostic is gone.
+
+**Still outstanding from this row (NOT done here):** `.claude/rules/language.md`
+still does not mention `literal` in its keyword discussion. Since the name is now
+contextual it no longer needs to be listed as reserved, so no edit is strictly
+required — but the "Note on the documented keyword list" section below is
+retained for the record.
+
+The related `identifier_named_grid_hijacked_by_grid_literal_parser_2026-08-09.md`
+was NOT re-checked here and may still be open; the general class fix this row
+suggested was not attempted — each keyword is still being fixed one at a time.
 
 ## Symptom
 

@@ -28,6 +28,53 @@
 > address it.
 
 
+> ## 2026-08-17 (triage re-run): STILL OPEN — native lane NOT EXECUTABLE on this host
+>
+> Binary identity of the tool used:
+>
+> ```
+> $ readlink -f bin/simple
+> /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+> $ stat -c '%s %y' "$(readlink -f bin/simple)"
+> 59537240 2026-08-17 12:58:51.339525019 +0000
+> ```
+>
+> **Interpreter control (PASSES — and is NOT the lane this bug is about):**
+> the exact minimal repro from the Symptom section below, run through the
+> interpreter, prints the correct strings:
+>
+> ```
+> $ bin/simple run <repro>.spl
+> A e=x v=payload
+> ```
+>
+> This must not be read as a fix. `enum_tuple_text_slots` is the pure-Simple
+> MIR-lowering side table; the interpreter never consults it. The defect is
+> cranelift-direct codegen only.
+>
+> **The actual lane could not be run.** `bin/simple native-build --backend
+> cranelift <repro>.spl -o <out>` was attempted twice (foreground and detached,
+> the second with a ~50min budget) and produced **no binary**:
+>
+> ```
+> error: native-build worker timed out after 7200s before producing a binary.
+> ```
+>
+> for a 10-line source file. Host was at load average ~49 with many concurrent
+> `simple` processes. Additionally there is **no stage4 binary present** —
+> `build/bootstrap/` contains only `logs/`, two `rust-authority-*` markers and a
+> `stage4-owner-*` marker, no `stage*/simple` — so the stage4 self-hosted AOT lane
+> named in this record has no tool to run it with in this working copy.
+>
+> Verdict: STILL OPEN with the source mechanism unchanged (the W5 table below is
+> re-confirmed accurate against current source), and now additionally with fresh
+> evidence that verification of any candidate fix is blocked here on native-build
+> capacity, not just on the cross-owner boundary. No fix attempted: the three
+> candidate approaches all live under `src/compiler/50.mir/**` and none of them
+> can be verified without a working cranelift-direct build, so landing one would
+> be an unverifiable change to compiler lowering.
+
+
 - **Date:** 2026-07-24
 - **Lane:** stage4 self-hosted AOT (`native-build --backend cranelift`, cranelift-direct)
 - **Severity:** correctness (wrong runtime output; compiles + exits 0)

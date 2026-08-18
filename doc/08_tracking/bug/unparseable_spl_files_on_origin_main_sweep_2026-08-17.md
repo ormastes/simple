@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-17
 - **Revision swept:** `origin/main` = `eb4d4d9cd2518d08dd5d91cfbef26daf11cb4309`
-- **Status:** RED — Tier 1 (the compiler, loaded by every `native-build`) has **23 unparseable files**
+- **Status:** **Tier 1 and Tier 2 are GREEN as of 2026-08-17** (0 unparseable of 9,478 probed). Tier 3 (`src/app`, does not block a push) still has 24. See "Resolution 2026-08-17".
 - **Headline:** most of them are **not bad source**. A parser built from `origin/main` **rejects 32 files
   that the currently deployed `bin/simple` accepts.** `origin/main` carries a Rust parser regression.
 
@@ -192,3 +192,86 @@ sees a division operator. A repo-wide census found exactly these 9 and no others
 
 Raw per-file results, fixtures and the stale-vs-fresh comparison live in this session's scratchpad
 (`t1.tsv`, `t2.tsv`, `t3.tsv`, `cmp1.tsv`, `cmp3.tsv`, `fix/`); they are not committed.
+
+## Resolution 2026-08-17 — Tier 1 and Tier 2 are at ZERO
+
+Re-swept the whole of `src/compiler` + `src/lib` + `src/app` (12,115 files,
+`xargs -P 12`) with the same probe and the same non-vacuity rules as the
+original sweep, on the redeployed seed `bin/release/x86_64-unknown-linux-gnu/simple`
+(59537240 bytes, 2026-08-17 12:58:51).
+
+| tier | swept | unparseable BEFORE (origin/main, this doc) | AFTER first re-sweep | AFTER fixes |
+|---|---|---|---|---|
+| 1 `src/compiler` | 1686 | 23 | 5 | **0** |
+| 2 `src/lib` | 7749 | 8 | 4 | **0** |
+| 3 `src/app` | 2639 | 55 | 24 | 24 (not addressed) |
+
+The 32-file relative-import regression is gone on the redeployed binary, exactly
+as the "UPDATE" section predicted — it was fixed in the parser and had simply not
+reached the swept revision. The 9 de-symlinked `src/app/leak_finder/*` +
+`src/app/lint/main.spl` blobs are also gone: all 9 now carry real source, not a
+relative path.
+
+### What was actually fixed here — 9 genuine source defects
+
+All nine were located from a **single** compile each, using the caret added by
+`compile_parse_diagnostics_carry_no_line_column_2026-08-17.md` (fixed in the same
+session). The doc's own estimate for the old message was ~600 invocations per
+file of prefix bisection.
+
+**Tier 2 (`src/lib`, 4 files)** — the doc listed 7 here, of which 3
+(`web_framework/persistence.spl`, `web_framework/session_redis.spl`,
+`scv/integrity.spl`, `scv/integrity_object.spl` — the refutable-`val` family)
+had already been fixed by another lane and now parse:
+
+| file | site | shape | fix |
+|---|---|---|---|
+| `common/crypto/x25519_mlkem768/matrix_receipt.spl` | 698:20 | `if c: "" elif c2:` / newline / `x else: y` — inline `else` trailing a block-`if` expression | expanded to a block `if`/`elif`/`else` |
+| `hardware/rv64gc_rtl/imac_protected_core.spl` | 530:33 | same | same |
+| `nogc_async_mut/wm/wm_optimization.spl` | 57:5 (+ 2 more sites, 12 lines total) | same-indent **leading**-`+` continuation | moved the operator to the end of the previous line |
+| `gc_async_mut/gpu/browser_engine/…_renderer_foundation.spl` | 500:17 | `offset < 0 or …` parsed as a generic-argument list | parenthesised the comparison |
+
+**Tier 1 (`src/compiler`, 5 files)** — every one was the *same* family the doc
+identified, "continuation-line indentation, not any one keyword": a wrapped
+boolean condition whose continuation is indented MORE than the statement that
+follows it.
+
+| file | sites | fix |
+|---|---|---|
+| `00.common/assurance/formal_delivery_gates.spl` | 3 (`_v1` and `_v2`) | hoisted each wrapped condition into a `val`, then `if <val>:` |
+| `90.tools/verify/replay_runner.spl` | 1 | same |
+| `50.mir/hwir/riscv_scalar_csr_owner.spl` | 2 | same, plus expanding the inline `if/else` |
+| `50.mir/hwir/riscv_scalar_fence_owner.spl` | 2 | same |
+| `00.common/mission_critical/__init__.spl` | 1 | wrapped `export A, B,` / newline / `C from mod` joined onto one line |
+
+Note the multiplicity: each of those files carried the shape **more than once**,
+so the first fix only moved the reported line. The caret is what made iterating
+cheap.
+
+These are **source normalisations around known parser gaps**, not parser fixes.
+The gaps themselves stay filed —
+`parser_same_indent_leading_operator_continuation_2026-08-17.md`,
+`parser_block_if_expr_trailing_inline_else_2026-08-17.md`,
+`const_generic_argument_rejected_in_constructor_call_2026-08-17.md` — per
+CLAUDE.md's rule against silently normalising a workaround.
+
+### Verification (non-vacuity stated)
+
+```
+$ xargs -a t12.txt -P 12 -n 1 sh probe.sh > sweep12.tsv     # t12.txt = src/compiler + src/lib
+probed=9478 parsefail=0 rc124=212
+```
+
+`rc124` is the 15s `TIMEOUT_PARSED` class the doc defines (parse errors emit in
+well under a second, so a run that survived to codegen had already parsed); it is
+not a failure. **The control that makes this non-vacuous:** the identical probe
+over the identical file list an hour earlier returned **9** Tier-1/Tier-2
+PARSEFAILs (33 across all three tiers). The probe finds failures when they exist.
+
+### Not addressed — Tier 3 (`src/app`, 24 files)
+
+Does not block a push, per this doc's own tiering. The current list is dominated
+by reserved keywords used as parameter names (`actor`, `val`, `exists`), four
+`expected Import, found LBrace` under `src/app/interpreter/expr/`, two
+`expected LParen, found Lt`, one unterminated f-string, and two
+`vscode_extension/examples/phase1-*.spl` fixtures. Left for a follow-up.

@@ -48,6 +48,10 @@ deployed binary older than 2026-08-17 still reports the stale
 - Status: OPEN (P3)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - Status: FIXED (diagnostic); const generics themselves remain unimplemented by design
+- Status: STILL-OPEN (P3) — layer 1 (diagnostic) FIXED **and now deployed**;
+  layer 2 (const generic parameters) unimplemented by recorded design decision.
+- Status re-verified 2026-08-17 by source inspection (triage shard 00), then by
+  live execution — see "Verification 2026-08-17 (live run)" at the bottom.
 - Original report follows.
 
 - Status: OPEN
@@ -103,3 +107,61 @@ option (b) without recording the design decision — the spec is currently the
 only artifact stating the intent.
 
 Spec left RED deliberately per `.claude/rules/testing.md`.
+
+## 2026-08-17 content triage (shard 02) — layer 2 confirmed OPEN
+
+Cited `src/compiler/10.frontend/core/parser_expr.spl:767` verified: the numeric
+generic-argument diagnostic described in the RESOLUTION section is present in
+`try_skip_ident_generic_args` (definition at :767, const-generic comment block
+at :785-795). Layer 1 is closed in source; layer 2 (const generic parameters
+unimplemented) is a language-feature gap with no implementation anywhere, so
+`test/01_unit/lib/nogc_sync_mut/src/array_builder_tensor_spec.spl` stays
+blocked. No doc correction needed.
+
+## Verification 2026-08-17 (live run)
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt 2026-08-17).
+
+Repro `cg1.spl` (scratchpad), the exact shape from this record:
+
+```simple
+struct Box2<T, N>:
+    v: i64
+
+fn main():
+    val a = Box2<i64, 2>(v: 7)
+    print("v=${a.v}")
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run .../cg1.spl
+error: compile failed: parse: in ".../cg1.spl": Unexpected token: expected a type
+in generic argument position (Simple has no const generic parameters, so a
+numeric literal such as `Tensor<i64, 2>` is not a valid generic argument; drop
+the explicit generic arguments and let them be inferred, e.g. `Tensor(...)`),
+found integer literal
+
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run .../cg1.spl
+[INFO] JIT compilation failed, falling back to interpreter: module load error:
+parse: ... (same diagnostic)
+error: compile failed: parse: ... (same diagnostic)
+```
+
+Control, type-position generic argument (`cg2.spl`, `Box2<i64, i32>(v: 7)`):
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run .../cg2.spl
+v=$7
+```
+
+**Layer 1 CLOSED and deployed:** the stale `Unexpected token: expected
+expression, found Comma` is gone on both engines; the diagnostic now names the
+construct and the limitation. **Layer 2 STILL-OPEN:** `2` is still not a legal
+generic argument — const generic parameters remain unimplemented, per the
+recorded design decision that `Tensor` rank stays a runtime property of
+`_shape`. `test/01_unit/lib/nogc_sync_mut/src/array_builder_tensor_spec.spl`
+therefore stays blocked. No code change made in this pass.
+
+(Incidental, unrelated to this bug and not investigated here: the seed prints
+`v=$7` rather than `v=7` — an interpolation artifact of the deployed seed.)

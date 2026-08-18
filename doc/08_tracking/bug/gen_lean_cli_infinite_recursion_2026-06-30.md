@@ -1,7 +1,45 @@
 # gen-lean CLI Infinite Recursion — Rust codegen unreachable - 2026-06-30
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: RESOLVED 2026-08-17 (verified by EXECUTION). The recursion is gone AND a
+second, newly-exposed blocker was fixed in this pass.
+
+Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+(59537240 bytes, 2026-08-17 12:58:51 UTC).
+
+**1. Recursion: gone.** `timeout 90 bin/simple gen-lean compare` TERMINATES. The
+bootstrap-seed banner appears exactly **2** times in the combined output
+(`grep -c 'bootstrap seed only'` -> 2), i.e. the wrapper performs a SINGLE
+delegation hop, not an unbounded chain. `bin/simple gen-lean --help` exits 0 and
+prints the real usage text.
+
+**2. Newly exposed blocker, fixed here.** With recursion gone, the delegated
+process reached `src/compiler/90.tools/verify/main.spl` and died with
+`error: runtime: Module "io" does not export 'fs'` — a stale
+`import io.fs as fs` whose only use was `fs.exist(path)`. Fixed in pure Simple:
+`use std.io.{file_exists}` / `file_exists(path)`
+(`src/lib/nogc_sync_mut/io/file_ops.spl:64`, exported at
+`src/lib/nogc_sync_mut/io/__init__.spl:107`).
+
+**3. Rust codegen is now reachable from the CLI** — the exact claim this bug said
+was impossible:
+
+```
+$ bin/simple gen-lean compare 2>/dev/null | head -30
+  [1/15] regenerate_nogc_compile...
+    step 1: LeanCodegen.new
+    ...
+    step 15: emit
+  [2/15] regenerate_async_compile...
+  ...
+  [15/15] regenerate_tensor_memory...
+$ bin/simple gen-lean compare >/dev/null 2>&1; echo $?
+1
+```
+
+All 15 inventory projects are generated and compared. Exit 1 is the legitimate
+compare-mismatch verdict (generated output differs from the checked-in Lean
+files), not the recursion failure. The "Secondary limitation" section below
+(fixed 15-project inventory) is unchanged and remains a design scope limit.
 
 ## Status
 

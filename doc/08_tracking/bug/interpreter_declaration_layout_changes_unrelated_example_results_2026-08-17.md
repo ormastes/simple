@@ -2,9 +2,14 @@
 
 ## Status
 
-OPEN — P1. Reproduced deterministically on a quiet host, in both session-daemon
-modes. Root cause not yet located in source. Filed 2026-08-17 by the m9a_tests
-triage lane.
+STILL-OPEN — P1, but **NO LONGER REPRODUCIBLE** on the seed rebuilt
+2026-08-17 12:58:51 UTC. The A/B pair from the Reproduction section was
+re-run byte-for-byte on that binary and produced **identical** results
+(14 total, 13 passed, 1 failed — the same single known fixture defect in
+both). The five-example flip is gone. Kept OPEN rather than closed FIXED
+because the root cause was never located and no source change was made
+here, so this is an observation that the symptom vanished under a rebuilt
+binary, not a demonstrated fix. See the 2026-08-17 verification section.
 
 ## Severity rationale
 
@@ -132,6 +137,57 @@ same file is suspect until this is resolved.
 
 Root cause is in the interpreter (`src/compiler_rust/**`), outside the test
 lane's file scope. Filed as **diagnosis only** — no source change made.
+
+## Verification 2026-08-17 (re-run of the exact A/B pair)
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt 2026-08-17).
+Host load average at start: 16.64.
+
+Variants reconstructed exactly as the Reproduction section specifies:
+
+```sh
+S=<scratchpad>
+git show 79ad784175ab~1:test/unit/lib/crypto/paseto_v4_kat_spec.spl > $S/base_spec.spl   # 345 lines
+cp $S/base_spec.spl $S/A/paseto_v4_kat_spec.spl
+awk 'NR==183{print; print ""; print "fn _zz_probe_unused() -> i64:"; print "    1"; next}1' \
+    $S/base_spec.spl > $S/B/paseto_v4_kat_spec.spl                                       # 348 lines
+```
+
+Insertion confirmed in place (B lines 184-187, an unused `fn _zz_probe_unused`
+between `_decrypt_4e3` and `_tampered_local_ok`).
+
+Commands and exact verdicts:
+
+```
+$ bin/simple test $S/A/paseto_v4_kat_spec.spl --no-session-daemon --timeout 2400
+EXIT=1
+Results: 14 total, 13 passed, 1 failed
+  ✗ tampered token signature is rejected
+
+$ bin/simple test $S/B/paseto_v4_kat_spec.spl --no-session-daemon --timeout 2400
+EXIT=1
+Results: 14 total, 13 passed, 1 failed
+  ✗ tampered token signature is rejected
+```
+
+**A and B are now identical**, down to the identity of the single failing
+example. The recorded baseline (A) of `14 total, 8 passed, 6 failed` did not
+reproduce; A now matches what the record documented only for B. The five
+examples that previously flipped (`4-E-1`/`4-E-3 decrypts to original payload`,
+`tampered ciphertext is rejected by BLAKE2b MAC`, `correct footer allows
+decryption`, `4-S-1 verifies and payload matches`) pass in **both** variants.
+
+The one remaining failure is the independently-filed fixture defect
+(`paseto_v4_tampered_token_signature_accepted_2026-07-20.md`), unchanged and
+present in both — the same control the original record used, and it still
+shows this is not a uniform "everything passes now".
+
+No source change was made for this record. The interpreter root cause was never
+localized to a `src/compiler_rust/**` file:line, so this is recorded as a
+symptom that no longer manifests on the current seed, not as a fix. The next
+bisect the record proposes (separating declaration count / order / line offset)
+cannot be run until a binary that reproduces the baseline RED is identified.
 
 ## Related
 

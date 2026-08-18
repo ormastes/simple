@@ -1,6 +1,63 @@
 # native-build loses a static method's owner name -> "undefined variable Widget"
 
 - **Filed:** 2026-08-17
+- **Status: OPEN — fix present in the tree, still UNVERIFIED (2026-08-17 re-run).**
+  See "Verification attempt 2026-08-17" below: the confirming run still cannot
+  reach a verdict, so the "shipped state" row of the ablation table remains
+  unconfirmed and must not be described as green.
+
+## Verification attempt 2026-08-17 (this pass)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+mtime 2026-08-17 12:58:51 (the Rust seed).
+
+Both halves of the fix were confirmed present in the working tree by source
+inspection:
+
+- owner NAME fallback — `_MirLoweringExpr/method_calls_literals.spl:1078-1100`
+  ("NAME-DERIVED FALLBACK"), `lookup_or_invalid` + `Class | Struct | Enum |
+  Import` kind test.
+- name-derived method lookup — same file, `:2729-2752` ("NAME-DERIVED OWNER
+  LOOKUP", second half), `lookup_or_invalid` + `lookup_method_in_type`, accepting
+  only a `Function` symbol, ordered BEFORE the `lookup_unique_static_method`
+  widening exactly as this row prescribes.
+
+The confirming build still does not reach a verdict:
+
+```
+$ (ulimit -v 12000000; timeout 1500 nice -n 19 bin/simple native-build \
+      test/fixtures/native_trailing_default_param/main.spl -o <scratch>/ntdp.bin)
+BUILD_RC=255
+error: native-build worker timed out after 7200s before producing a binary.
+  The interpreted worker loads the whole compiler + LLVM import graph before any
+  codegen; ...
+$ grep -c 'undefined variable Widget' <scratch>/ntdp.log
+0
+```
+
+This is an INFRASTRUCTURE outcome, not evidence either way: zero occurrences of
+`undefined variable Widget` here does NOT mean the defect is fixed, because MIR
+lowering was never reached.
+
+A second run (20 GB address-space cap, 3000s budget) isolated the real blocker
+from the worker's own stderr:
+
+```
+memory allocation of 8589934592 bytes failed
+timeout: the monitored command dumped core
+error: native-build worker timed out after 7200s before producing a binary.
+```
+
+The worker **aborts on a single 8 GiB allocation** while loading the compiler
+graph, and the driver misreports that abort as a 7200s timeout (inside a 3000s
+budget). Until that is fixed, this row's fix cannot be verified by any
+native-build run — full detail and measurements are in
+`native_build_static_method_trailing_default_unresolved_2026-08-17.md`.
+
+Also fixed in this pass, though it did NOT affect these runs (both died before
+lowering): the 38 UNCONDITIONAL `eprint("[mir-method-call] ...")` probes in
+`method_calls_literals.spl` are now gated behind `SIMPLE_MIR_METHOD_CALL_TRACE=1`
+(default off), per the log-retention policy.
 - **Lane:** `native-build` (AOT MIR lowering). NOT the tree-walk interpreter, NOT the Cranelift JIT.
 - **Blast radius:** blocked EVERY push repo-wide, via the mandatory pre-push guard
   `scripts/check/check-native-trailing-default-param.shs`.

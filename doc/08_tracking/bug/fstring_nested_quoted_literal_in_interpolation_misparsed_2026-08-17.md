@@ -6,10 +6,124 @@ isolation table below. Filename kept stable so existing references still resolve
 # f-string: a nested double-quoted literal inside an interpolation is mis-parsed
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (grammar defect unfixed); the one load-bearing call site is worked around
+- **Status:** **FIXED at source in BOTH parsers, and PROVEN on a purpose-built
+  binary (2026-08-17).** The deployed `bin/simple` still fails — it predates the
+  fix — so this stays visible until a redeploy. See "RESOLUTION" immediately below.
 - **Severity:** P2 as a grammar defect. It was P1 in *effect*, because the single
   affected call site sits on `native-build`'s stderr-truncation path and its parse
   error was emitted **instead of** the real build diagnostic.
+
+## RESOLUTION (2026-08-17) — root cause found and fixed in both parsers
+
+The isolation in this row was right and led straight to the defect. The
+"likely shape" guessed below (a special `??` path, or quote-state being dropped
+after an operator) is **not** what it was; the actual cause is simpler and is an
+omission, not a special case.
+
+### Root cause
+
+Both parsers gate whether an unescaped `"` inside an interpolation may OPEN a
+nested string on a helper that asks "is this an operand position?", by testing
+what the interpolation text scanned so far ENDS with. **`??` was simply missing
+from that helper's operator list**, so `{q ?? "` was judged NOT an operand
+position, the quote was taken to close the OUTER string, and the literal's tail
+(`tmp`) fell out as a bare identifier — exactly the mechanism this row's
+variant-B evidence pinned.
+
+That helper is deliberately conservative: it was introduced for
+`string_literal_brace_breaks_concat_2026-06-29` so that `"p { " + x + " }"`
+keeps its `+` operators. That is why variant A (a call ARGUMENT, `paren_depth >
+0`) passed while variant B (`??` RHS at `paren_depth == 0`) failed — the two
+positions really are scanned by different rules, as this row suspected.
+
+### The fix — two files, one line of logic each
+
+**Rust seed** — `src/compiler_rust/parser/src/lexer/strings.rs`, in
+`fn nested_string_may_open` (the two-char operator list):
+
+```rust
+// Null-coalescing `??` — its RHS is an operand position, so a string
+// literal may legitimately open there (`{x ?? "d"}`).
+for op in ["==", "!=", "<=", ">=", "??"] {
+```
+
+**Pure-Simple self-hosted frontend** —
+`src/compiler/10.frontend/core/lexer_struct.spl`, in
+`fn fs_nested_string_may_open` (which carries a comment naming the Rust function
+as its counterpart), added alongside the existing two-char comparison test:
+
+```simple
+# Null-coalescing `??` — its RHS is an operand position, so a
+# string literal may legitimately open there (`{x ?? "d"}`).
+if last == "?" and prev == "?":
+    return true
+```
+
+Both were changed so the two frontends do not diverge.
+
+### Proof — binary identity and exact commands
+
+The deployed seed cannot show this: it was built at 12:58 UTC, before the fix.
+A binary was therefore built from a **clean isolated worktree containing ONLY
+these two edits** (`git worktree add --detach /mnt/data/parserfix_wt HEAD`, then
+the two hunks applied; `git diff --stat` in it reports exactly
+`lexer_struct.spl | 4 ++++` and `strings.rs | 4 +++-`, nothing else — the shared
+main working tree had unrelated uncommitted edits from parallel sessions, which
+is why a worktree was used rather than building in place).
+
+```
+$ cd /mnt/data/parserfix_wt/src/compiler_rust
+$ CARGO_TARGET_DIR=/mnt/data/parser_bugfix_target cargo build --release --bin simple
+    Finished `release` profile [optimized] target(s) in 3m 17s
+```
+
+Binary under test: `/mnt/data/parser_bugfix_target/release/simple`,
+size 59586264, mtime 2026-08-17 13:49, md5 `7ae18c5cc70671d815db2df24360b3c7`.
+
+**Variant A+B — this row's 6-line minimal repro, unmodified:**
+
+```
+$ /mnt/data/parser_bugfix_target/release/simple run r4.spl
+p=TMPDIR/x.log
+```
+
+Was ``error[E1002]: function `TMPDIR` not found``. Now matches the "applied"
+(hoisted-workaround) arm's output exactly.
+
+**Variant B — bare `??` with a string RHS, no nested call:**
+
+```
+$ cat r4b.spl
+fn main() -> i64:
+    val q = ""
+    val tmp2 = "{q ?? "/tmp"}/x.log"
+    print("p={tmp2}\n")
+    0
+$ /mnt/data/parser_bugfix_target/release/simple run r4b.spl
+p=/x.log
+```
+
+Was ``error: semantic: variable `tmp` not found``. `/x.log` is correct: `q` is
+`""`, which is not null, so `??` yields `""`. This is the variant the row warned
+must be checked separately — "a fix that only repairs A+B while leaving bare B
+broken would look green on the original symptom." Both are green.
+
+Variant A was already passing and was re-confirmed unaffected earlier in the
+same session on the deployed seed.
+
+### What is NOT done
+
+- **No redeploy.** `bin/simple` is unchanged and still exhibits the bug; the
+  proof binary above is a throwaway under `/mnt/data/`. Binary-level proof for
+  everyday use needs a bootstrap/redeploy.
+- **The pure-Simple half is proven at SOURCE level only.** It is the exact
+  mirror of the Rust hunk, in the function that names the Rust one as its
+  counterpart, but the self-hosted frontend was not executed — the deployed
+  binary is the Rust seed, and a pure-Simple binary would require a bootstrap
+  (currently blocked, see `.claude/rules/bootstrap.md`).
+- **No regression spec was added.** The row asks for one covering all three
+  variants; that is still outstanding and should land with the redeploy.
+- The workaround at `src/app/cli/native_build_main.spl:226` was left in place.
 
 ## Symptom
 
@@ -137,3 +251,25 @@ This defect was found while chasing
 ``method `compile` not found on type `object` `` in the native lane. They are
 **not** the same thing, and that hypothesis is separately refuted — see
 `doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md`.
+
+## 2026-08-17 20:1x — RESOLVED on the DEPLOYED seed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+```
+$ cat fstr.spl
+fn pick(a: text) -> text:
+    a
+
+fn main() -> i64:
+    val p = "{pick("TMPDIR") ?? "/tmp"}/x.log"
+    print("p={p}\n")
+    0
+$ env SIMPLE_RUST_SEED_WARNING=0 bin/simple run fstr.spl
+p=TMPDIR/x.log
+rc=0
+```
+
+The reverted (non-hoisted) form now compiles and runs; the previous
+`error[E1002]: function \`TMPDIR\` not found` is gone. Matches the
+isolated-build result. **Status: RESOLVED.**

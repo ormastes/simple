@@ -119,16 +119,39 @@ pub fn evaluate_module_exports_with_preloaded(
     // export_functions returns the Arc<FunctionDef> map it builds internally,
     // so the same Arc instances flow into both Value::Function (in exports) and the cache.
     let filtered_env = create_filtered_env(&env);
+    // Materialize the module's visible-name map ONCE and share the Arc.
+    //
+    // This map is wide: measured on the interpreted native-build worker, the
+    // average module carries ~1170 visible names and the worst offenders carry
+    // >7000 — modules re-export their transitive imports, so a 3.4 KB source
+    // file can own a 5000-entry environment. It used to be materialized TWICE
+    // and both copies retained for the life of the process:
+    //   * `filtered_env.freeze()` is `Arc::new(self.to_map())` — a full copy,
+    //     retained by MODULE_ENV_BY_OWNER;
+    //   * `export_functions` did `Arc::new(filtered_env.clone())` — also a full
+    //     copy, because `filtered_env` is built by `.collect()` so every entry
+    //     lives in the CoW *overlay*, defeating the O(1) Arc-base clone that
+    //     `CowEnv::clone` is designed for. That copy is retained by every
+    //     exported `Value::Function`'s `captured_env`.
+    // Freezing once and handing `export_functions` the Arc lets it build a
+    // `CowEnv` with a shared base instead, so the map exists exactly once.
+    let frozen_env = filtered_env.freeze();
+    let filtered_env_len = filtered_env.len();
+    drop(filtered_env);
     if let Some(path) = module_path {
         let owner: Arc<str> = Arc::from(normalize_path_key(path).to_string_lossy().as_ref());
         MODULE_ENV_BY_OWNER.with(|cell| {
-            cell.borrow_mut().insert(owner, filtered_env.freeze());
+            cell.borrow_mut().insert(owner, Arc::clone(&frozen_env));
         });
     }
-    let local_functions_arc = export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
+    let local_functions_arc = export_functions(&local_functions, &frozen_env, &mut exports, &mut env);
 
     // Process bare export statements
     process_bare_exports(&bare_exports, &env, &mut exports, module_path);
+
+    if let Some(path) = module_path {
+        crate::mem_trace::record_env(&path.display().to_string(), filtered_env_len, exports.len());
+    }
 
     // Return env, exports, and the local definitions for caching
     Ok((env, exports, local_functions_arc, local_classes, local_enums))

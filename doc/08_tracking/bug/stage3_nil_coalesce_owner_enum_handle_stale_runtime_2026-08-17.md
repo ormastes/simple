@@ -67,3 +67,29 @@ stale-id defect (candidate C).
 - `scripts/check/check-nil-coalesce-option-gate.shs` — the behavioural guard for
   the gate this record concerns. It was not modified.
 - `doc/08_tracking/bug/stage3_nil_coalesce_unwraps_user_enum_payload_2026-08-08.md`
+
+## Re-verified 2026-08-17 (still OPEN — current tree re-exonerated, lane not reachable)
+
+binary identity: `readlink -f bin/simple` = `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`; `stat -c '%s %y'` = `59537240 2026-08-17 12:58:51.339525019 +0000`
+
+The behavioural guard was RUN, not merely cited, and its ablation arm proves it
+is not vacuous:
+
+```
+$ (ulimit -v 8000000; timeout 900 sh scripts/check/check-nil-coalesce-option-gate.shs)
+[selftest][RED] case1 VERDICT: FAIL - user enum unwrapped to PAYLOAD (defect reproduced)
+[selftest] OK — ablated arm reproduces the defect (rc=1), fixed arm checked below
+core_values.spl: enum_id gate present
+[GREEN] case1 user-enum:   enum_id=7 disc=0 coalesced=0x64ea765332a1   (pass-through)
+[GREEN] case2 option-some: enum_id=1 disc=0 payload=0x7 coalesced=0x7  (unwrapped)
+PASS — 3 case(s) checked, user enums pass through and canonical Option still unwraps
+rc=0
+```
+
+The gate is present in the current tree (`rt_unwrap_or_self`,
+`src/runtime/runtime_native.c:4042`). Candidate (B) stays refuted.
+
+Still OPEN for the reason the record already states: candidates (A) stale linked
+runtime in the stage-3 lane and (C) downstream-of-stale-id can only be decided by
+re-running the stage-3 replay, and a bootstrap was explicitly out of scope for
+this session. Nothing was changed for this record.

@@ -92,3 +92,30 @@ under both engines by
 spec asserts this behaviour and is therefore legitimately RED on the JIT arm
 until this bug is fixed — per `.claude/rules/testing.md`, a correct spec that
 fails is left failing and recorded here rather than weakened.
+
+## Re-verified 2026-08-17 — STILL OPEN (seed defect, not fixable in .spl)
+
+Binary identity: `readlink -f bin/simple` ->
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`;
+`stat -c '%s %y'` -> `59537240 2026-08-17 12:58:51.339525019 +0000`.
+
+Repro (`r3.spl`, the `nil_local_unwrap_or` and `annotated_nil` rows of the
+table above):
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run r3.spl
+nil_local_unwrap_or:  -1
+annotated_nil:        -1
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run r3.spl
+nil_local_unwrap_or:  nil
+annotated_nil:        nil
+```
+
+Unchanged from the original filing: interpreter correct, JIT returns `nil`
+instead of the requested default.
+
+**Not fixed here:** the lowering is in the Rust bootstrap seed
+(`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`, the
+`"unwrap" | "unwrap_or" | "expect"` arm, plus the JIT `UnwrapOr` lowering), so
+it is out of scope for a pure-Simple fix. Root cause file:line for the JIT arm
+still NOT located — deliberately not guessed at.

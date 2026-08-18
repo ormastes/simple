@@ -1,6 +1,77 @@
 # native-build cannot resolve a class static method with trailing default params
 
-**Status:** OPEN (P1 — this is what blocks every push)
+**Status:** OPEN (P1). Re-run 2026-08-17: the fixture build still produces NO
+verdict — it fails as infrastructure before MIR lowering, so this row is neither
+confirmed nor cleared. One contributing cause was fixed in that pass (the
+unconditional trace flood, below).
+
+## Re-run 2026-08-17
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+mtime 2026-08-17 12:58:51.
+
+```
+$ (ulimit -v 12000000; timeout 1500 nice -n 19 bin/simple native-build \
+      test/fixtures/native_trailing_default_param/main.spl -o <scratch>/ntdp.bin)
+BUILD_RC=255
+error: native-build worker timed out after 7200s before producing a binary.
+$ grep -c 'undefined variable Widget' <scratch>/ntdp.log
+0
+```
+
+The zero count is NOT a pass — MIR lowering was never reached, so there was
+nothing to report.
+
+### The actual blocker, isolated: an 8 GiB single allocation, misreported as a timeout
+
+A second run with a 20 GB address-space cap and a 3000s budget reached the same
+point and printed the real cause in the worker's own stderr:
+
+```
+memory allocation of 8589934592 bytes failed
+timeout: the monitored command dumped core
+!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!
+error: native-build worker timed out after 7200s before producing a binary.
+```
+
+The worker **aborts on a single 8 GiB allocation** while loading the compiler
+graph and dumps core; the driver then reports a *7200s timeout* — inside a 3000s
+wall budget, for a process that lived minutes. Two consequences:
+
+1. Neither this row nor the owner-unresolved row can be verified at all until
+   that allocation is fixed: every verification run dies before MIR lowering.
+2. `worker timed out after 7200s` is a **misclassification of an abort/OOM**, and
+   its remediation advice ("Raise --timeout, shrink --source") points the reader
+   the wrong way. This is what made commit `88d1078f3ef` read the failure as a
+   slow / RSS-ballooning worker.
+
+Measured, both runs identically: worker stderr 36907 bytes,
+`[mir-method-call]` trace lines 0, `undefined variable Widget` 0 — nothing from
+MIR lowering in either.
+
+### Also fixed in this pass: the unconditional trace flood
+
+Honest scope note first: it did **not** change these two runs (both logs are
+byte-identical in size and contain zero trace lines, because lowering was never
+reached). It is fixed because it is a real hazard for any run that DOES reach
+lowering.
+
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` carried **38
+unconditional** `eprint("[mir-method-call] ...")` probes, several of them on the
+per-method-call entry path (`start`, `result-types`, `receiver-type`,
+`resolution-enter`, ...). Lowering the whole compiler tree therefore emits tens
+of megabytes of stderr, which feeds the truncator that drops the real
+diagnostics from the MIDDLE of the log.
+
+All 38 are now gated on `SIMPLE_MIR_METHOD_CALL_TRACE=1` (default off) via a new
+`mir_method_call_trace_enabled()` helper in the same file — kept rather than
+deleted, per `doc/07_guide/infra/logging/log_retention_policy.md`, and matching
+the existing `SIMPLE_MIR_LOG_CONV` / `SIMPLE_MIR_FIELD_TRACE` pattern in this
+layer. Verified mechanical: `diff` of the file before/after shows changes on the
+trace lines and the new helper only.
+
+This does not by itself resolve the resolution defect; it removes the evidence
+hazard that has been masking it.
 **Filed:** 2026-08-17
 **Component:** native-build MIR lowering, class/static-method resolution
 **Class:** engine divergence — the seed resolves it, native-build does not

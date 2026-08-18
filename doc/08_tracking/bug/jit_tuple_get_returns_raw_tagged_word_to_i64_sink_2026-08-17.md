@@ -3,7 +3,7 @@
 **ID:** jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17
 **Date:** 2026-08-17
 **Severity:** P1 — silent wrong value, exit 0, no diagnostic.
-**Status:** OPEN — reproduced and minimised, not fixed.
+**Status:** OPEN — re-verified on the 2026-08-17 12:58 seed; the omitted lowering site is now identified (see the end of this record). Not fixed: Rust seed.
 
 ## How it was found
 
@@ -81,3 +81,63 @@ idiomatic way this tree returns multi-value results (e.g. the whole
 `test/01_unit/compiler/codegen/int_width_boxing_matrix_class_spec.spl`. That
 spec is expected to be RED on this row until this bug is fixed; per
 `.claude/rules/testing.md` the assertion is left in place rather than weakened.
+
+## Re-verified STILL OPEN + the omitted lowering site is now identified (2026-08-17)
+
+Binary identity:
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000     (the Rust seed, rebuilt 12:58)
+```
+
+Repro re-run verbatim (the record's own program):
+
+```
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run r2.spl
+40
+40
+5
+5
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run r2.spl
+5
+5
+5
+5
+```
+
+**Answer to "which lowering site omits the unbox": there is no tuple site.**
+This is a RUST SEED defect, in
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs`:
+
+| line | arm | behaviour |
+|---|---|---|
+| 263 | `method == "get" && receiver_is_array(..)` | routes to `lower_index_expr(receiver, &args[0], element_ty)` — which pairs the read with `UnboxInt`/`UnboxFloat` (+`UnitNarrow`). CORRECT. |
+| 290 | `method == "get" && receiver_is_dict(..)` | same routing. CORRECT. |
+| — | tuple receiver | **absent.** No `receiver_is_tuple` arm exists. |
+
+With no arm, a tuple `.get(i)` falls through to the generic dotted-name path and
+lands on `codegen/instr/methods.rs:459-462`
+(`("Tuple","get") => call_runtime_2(.., "rt_tuple_get", ..)`), which emits a bare
+call and NO unbox. `rt_tuple_get`
+(`src/compiler_rust/runtime/src/value/collections.rs:2214`) returns the tuple
+slot verbatim — a tagged `RuntimeValue` — so an `i64`-typed sink receives
+`v << 3`. Arrays escape this because `("Array","get")`
+(`methods.rs:378`) is never reached: line 263 intercepts first.
+
+`print t.get(0)` is correct for the same reason the record already gives: the
+print path accepts a tagged RuntimeValue.
+
+Fix shape (not applied — Rust seed, per this task's rules): add a
+`receiver_is_tuple` arm alongside lines 263/290 that resolves the element type
+from the tuple's HIR type at the (constant) index and routes through the same
+unbox tail (`unbox_dict_read_result`, `lowering_expr_struct.rs:707`). Note the
+element type is per-INDEX for a tuple, unlike array/dict, so the arm must
+require a constant index and fall back to the current behaviour otherwise —
+which is why this is not a copy-paste of the array arm and was not guessed here.
+
+This also predicts the record's open question about `f64`/struct tuple sinks:
+every non-`ANY` scalar sink is affected, and `u64`/`i32` "passing" in the matrix
+probe is most likely those rows' sinks not being statically typed, not the
+defect being i64-specific. Not measured; stated as a prediction, not a finding.

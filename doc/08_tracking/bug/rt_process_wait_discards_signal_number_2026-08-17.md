@@ -1,7 +1,8 @@
 # `rt_process_wait` discards the signal number of a killed child
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (worked around, not fixed)
+- **Status:** FIXED 2026-08-17 (Rust runtime + C runtime), verified by execution on a
+  freshly built, non-deployed seed. See the note at the end. Workaround removal pending redeploy.
 - **Domain:** runtime / process
 - **Severity:** P2 — silently collapses every distinct process death into one
   indistinguishable value
@@ -77,3 +78,55 @@ spawns real children that really die. Ablating `parallel_supervised_argv()` back
 to `["-c", inner_cmd]` turns 2 of its 4 examples red (`expected [] to contain
 oom.spl`), which is the direct proof that the runtime, unaided, cannot see the
 signal.
+
+## 2026-08-17 — FIXED
+
+`exit_status_to_code()` was added to `src/compiler_rust/runtime/src/value/sffi/env_process.rs`
+(returns `code()` when present, else `128 + ExitStatusExt::signal()` on Unix, else -1) and
+every `.code().unwrap_or(-1)` site in that file — including both `rt_process_wait` branches
+— now routes through it. The C runtime had the same defect: `rt_process_wait` in
+`src/runtime/runtime_process.c` returned -1 for `!WIFEXITED`; it now returns
+`128 + WTERMSIG(status)` on `WIFSIGNALED` in both the blocking and polling branches.
+
+Repro/verification (probe spawns via `rt_process_spawn_async` and waits, no supervising
+shell — i.e. the workaround is NOT in the path):
+
+```
+$ env SIMPLE_RUST_SEED_WARNING=0 bin/simple run wait.spl        # deployed pre-fix seed
+SEGV=-1
+TERM=-1
+KILL=-1
+$ env SIMPLE_RUST_SEED_WARNING=0 /mnt/data/cargo-bugfix-0dc8/release/simple run wait.spl
+SEGV=139
+TERM=143
+KILL=137
+```
+
+C-runtime gate: `sh scripts/check/check-c-runtime-compiles-push.shs` ->
+`PASS — 104 file(s) compiled, 0 errors (2 skipped for unavailable external dependencies)`.
+
+Binary: /mnt/data/cargo-bugfix-0dc8/release/simple (built 2026-08-17 13:48, 59554384 bytes, from this worktree's source; NOT deployed to bin/simple).
+
+Not done, deliberately: `parallel_supervised_argv()` in
+`src/compiler/80.driver/driver_build/parallel.spl` is left in place. Removing the
+wrapper requires the fixed runtime to be the DEPLOYED one; deleting it now would break
+every build running on the current `bin/simple`. Delete it after the seed redeploy.
+
+**Status:** FIXED (runtime + C runtime), verified by execution on a freshly built,
+non-deployed seed. Wrapper removal pending redeploy.
+
+## 2026-08-17 20:1x — RESOLVED on the DEPLOYED seed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+```
+$ env SIMPLE_RUST_SEED_WARNING=0 bin/simple run wait.spl
+SEGV=139
+TERM=143
+KILL=137
+```
+
+Identical to the isolated-build result (was `-1/-1/-1` on the pre-fix deployed seed).
+**Status: RESOLVED.** Follow-up still owed: `parallel_supervised_argv()` in
+`src/compiler/80.driver/driver_build/parallel.spl` was kept only until the fixed seed
+was deployed — that condition is now met, so the wrapper can be deleted in a separate change.

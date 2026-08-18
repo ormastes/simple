@@ -77,3 +77,33 @@ surfaced the residual; the reproducing shape alone stays green.
 
 Do not write `xs.first() ?? d` / `xs.get(i) ?? d` on integer collections.
 Test emptiness explicitly (`if xs.len() > 0`) and index directly.
+
+## Re-verified 2026-08-17 — STILL OPEN (seed defect, not fixable in .spl)
+
+Binary identity: `readlink -f bin/simple` ->
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`;
+`stat -c '%s %y'` -> `59537240 2026-08-17 12:58:51.339525019 +0000`.
+
+Repro (`r5.spl`, the `first3` / `get3` rows):
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run r5.spl
+first3=3
+get3=3
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run r5.spl
+first3=-1
+get3=-1
+```
+
+Reproduces exactly as filed. The accessor exemption list is confirmed still
+present at
+`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:1815-1822`
+(`"first" | "last" | "get" | "min" | "max" | "pop" | "remove" | "at"`, inside
+`lower_coalesce` which begins at `:1774`).
+
+**Not fixed here:** Rust bootstrap seed, and the record's own analysis is that
+the correct fix is the `seed_hirtype_optional_plan.md` work (accessor result
+must carry a distinguishable `T?` with a BOXED payload across the JIT call
+boundary), not a local patch — suppressing the nil check for these accessors
+would trade this bug for the strictly worse `[].first() ?? -1` leak. Not
+attempted; standing workaround unchanged.

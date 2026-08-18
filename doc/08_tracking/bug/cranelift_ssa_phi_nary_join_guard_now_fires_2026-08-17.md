@@ -1,7 +1,12 @@
 # cranelift `__simple_ssa_phi` N-ary-join guard now fires in a real spec
 
 - **Filed:** 2026-08-17
-- Status: OPEN (P2)
+- Status: STILL-OPEN (P3, downgraded) — the **headline claim is disproven by
+  execution**: the guard does NOT fire, `sugar_plugin_spec.spl` is 13/13 green.
+  What remains open is only the *secondary concern* (the guard's bare `return`
+  leaves `value_map[dest_id]` unset instead of trapping) plus the unimplemented
+  N-ary fallback itself, both latent. See "Verification 2026-08-17 (execution,
+  not source inspection)" at the end of this file.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Status:** OPEN
 - **Severity:** medium (one RED example; guard prevents a silent miscompile)
@@ -143,3 +148,92 @@ but its comment still asserts the case is unreachable:
 
 The bug report says the guard DOES fire in sugar_plugin_spec, so either the
 comment or the report is wrong. Owner path: src/compiler/70.backend/**.
+
+## 2026-08-17 content triage (shard 02) — STILL OPEN
+
+Guard text verified verbatim in current source; the N-ary fallback is still
+unimplemented and bails out rather than lowering:
+
+```
+src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:728-730
+                if args.len() > 4 and not slot_map.has(phi_guard_id):
+                    eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
+                    return
+```
+
+The in-source comment (lines 717-724) still claims the case is latent ("No
+caller currently emits N-ary joins through this backend"); the report says it
+fires in `test/feature/plugin/sugar_plugin_spec.spl`. The comment is the stale
+half — it is a claim about callers, not about this file — but confirming which
+caller emits the N-ary join requires running the backend, which is out of scope
+for this triage.
+
+---
+
+## Verification 2026-08-17 (execution, not source inspection) — STILL-OPEN, narrowed
+
+The two triage shards above ("STILL OPEN") both stated they were
+**source-inspection only** and both hinged on the same unresolved question:
+whether any caller actually emits an N-ary join. That question is answerable by
+running the spec, so it was run.
+
+Binary identity (recorded per policy):
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+(Rust seed, rebuilt 2026-08-17.)
+
+### The record's own Repro command
+
+```
+$ SIMPLE_TIMEOUT_SECONDS=600 bin/simple test test/feature/plugin/sugar_plugin_spec.spl
+EXIT=0
+SPEC FILE VERDICT: test/feature/plugin/sugar_plugin_spec.spl declared>=13 executed=13 passed=13 failed=0 dropped=0
+Results: 13 total, 13 passed, 0 failed
+```
+
+Grep of the full run log for `ssa_phi`, `N-ary` and `✗` returns **nothing** —
+the guard's `eprint` does not appear anywhere in the output. This confirms the
+"CLOSED 2026-08-17 — misdiagnosis" section: the quoted `eprint(ranelift]` text
+was the runner echoing an asserted source string in a failure diff, not runtime
+output. **The N-ary-join guard does not fire.** The stale half is the bug
+report's title and Symptom section, not the in-source comment: no evidence
+exists that any caller emits an N-ary join through this backend.
+
+### What is genuinely still open (why this is not closed outright)
+
+Verified verbatim in the current source,
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:728-730`:
+
+```
+                if args.len() > 4 and not slot_map.has(phi_guard_id):
+                    eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
+                    return
+```
+
+Two latent defects survive, both as originally described:
+
+1. **The bare `return` is wrong even as a guard.** It exits the handler without
+   writing `value_map[dest_id]`, so the loud error is followed by an
+   undefined-value read at the next use of that local. The sibling
+   `unsupported intrinsic` arm at lines 745-748 does the right thing
+   (`eprint` + `cranelift_trap(ctx, 0)` + fresh continuation block). This is a
+   pure-Simple, self-contained fix.
+2. **The N-ary fallback is still unimplemented** — the two arms at lines 741-744
+   read only `args[1]` / `args[0]` and have no predecessor-block information.
+
+Neither was fixed in this pass: per the record's own "Fix direction", option (1)
+(guarantee `slot_map` entries for phi destinations) needs verification that it
+does not regress the stage4 lane's `LocalId?`-argument workarounds, and no
+executable case exists today to verify against — the spec that was believed to
+be that case is green. Fixing a latent path with no reproducing test would be
+unverifiable by construction.
+
+Recommended re-scope: retitle this record from "guard now fires" to "N-ary
+`__simple_ssa_phi` fallback unimplemented; guard path leaks an unset
+`value_map` entry", and treat the `cranelift_trap` change as the actionable
+piece.

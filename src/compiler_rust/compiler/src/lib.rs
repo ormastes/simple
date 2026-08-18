@@ -88,6 +88,7 @@ pub mod verification_checker;
 pub mod weaving;
 pub mod watchdog;
 pub mod memory_guard;
+pub mod mem_trace;
 pub mod web_compiler;
 
 #[cfg(test)]

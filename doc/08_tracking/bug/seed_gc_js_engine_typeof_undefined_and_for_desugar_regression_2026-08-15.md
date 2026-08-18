@@ -1,7 +1,12 @@
 # Seed interpreter regression: JS-engine statement dispatch broken — `for is not defined` / `__simple_i is not defined` / `typeof`-of-undefined throws
 
 - **Date:** 2026-08-15
-- **Status:** OPEN — seed (Rust bootstrap) interpreter regression. Not a source change.
+- **Status:** FIXED (2026-08-17) for both titled defects — `typeof` of an
+  undeclared identifier and the C-style `for` / `__simple_i` desugar now
+  execute correctly, verified by direct execution (evidence below).
+  A RESIDUAL, separately-scoped gap remains in the same subset parser
+  (`switch` / `try` / `void` / `delete` still unparsed) — see
+  "Residual, measured 2026-08-17".
 - **Severity:** High — silently breaks the in-process JS engine (`BrowserSession.open_html`, page-script execution, ES5 conformance) whenever the affected seed is the active `bin/simple`.
 - **Owned scope:** compiler seed (`src/compiler_rust`), stdlib JS engine (`src/lib/*/js/engine`, `src/lib/gc_async_mut/web`).
 
@@ -151,3 +156,66 @@ green on the current origin seed (diagnostic evidence — a self-hosted redeploy
 should reconfirm). The broader seed statement-dispatch regression (es5_conformance
 38/54, interpreter_vars 12/21) remains a SEED defect for the seed/Stage-4 owner;
 the recommended seed-level CI guard above still applies.
+
+## Verification re-run (2026-08-17)
+
+Binary identity of the tool that produced every number below:
+
+```
+$ readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+`bin/simple --version` still prints the bootstrap-seed banner, so per project
+rules all of this is DIAGNOSTIC evidence, not release evidence.
+
+**`bin/simple test` on the browser spec was INCONCLUSIVE, not a pass.** It
+printed 22 lines, all `use-warning` / `gc-warning`, with **no results line at
+all**, and exited 0 — exactly the silent-green failure mode recorded in
+`.claude/rules/testing.md` and
+`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+It is therefore NOT quoted here as a pass:
+
+```
+$ timeout 1800 bin/simple test test/01_unit/browser_engine/browser_script_execution_spec.spl
+... 19 [use-warning]/[gc-warning] lines ...
+[exited with code 0]          # no "Results:" line -> INCONCLUSIVE
+```
+
+The two titled behaviours were instead confirmed by direct execution through
+`JsRuntime.eval` (scratch repro, not committed):
+
+```
+$ bin/simple run <scratch>/js_repro.spl
+typeof-undeclared: Ok function      # `typeof require` -> "function", does NOT throw
+for-loop: Ok 3                      # var s=0; for (var __simple_i=0; __simple_i<3; ...) s=s+__simple_i; s
+
+$ bin/simple run <scratch>/js_repro2.spl      # same file, `typeof zzz_nope`
+typeof-undeclared: Ok undefined     # ES semantics: typeof undeclared === "undefined"
+for-loop: Ok 3
+```
+
+Both previously threw `ReferenceError: ... is not defined`. Both titled
+defects are fixed.
+
+## Residual, measured 2026-08-17 (NOT the titled defect)
+
+```
+$ timeout 2400 bin/simple test test/03_system/feature/js/es5_conformance_spec.spl
+[WARN] [es5-conformance] ReferenceError: delete is not defined
+[WARN] [es5-conformance] ReferenceError: try is not defined
+[WARN] [es5-conformance] ReferenceError: void is not defined
+54 examples, 11 failures
+Results: 54 total, 43 passed, 11 failed
+```
+
+Improved from the 38/54-failing baseline recorded above to **11/54 failing**,
+and the surviving signatures are `switch` / `try` / `void` / `delete` only —
+`for`, `if` and `while` no longer appear. Same root cause class as the fix
+(the nogc subset parser in
+`src/lib/nogc_sync_mut/js/engine/parser.spl` handles `for`/`while`/`if`/block
+and nothing else), but a distinct, unimplemented-feature gap rather than the
+regression this record is about. Unblock condition: add `switch`, `try/catch/
+finally`, and the `void` / `delete` unary operators to that subset parser, then
+re-run the command above and expect 54/54.

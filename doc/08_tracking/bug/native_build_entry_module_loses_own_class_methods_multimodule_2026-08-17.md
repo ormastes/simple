@@ -106,3 +106,35 @@ multi-module `native-build` instance-method dispatch. Consider renaming it when
 this is fixed, and note that the guard is only meaningful where `bin/simple`
 exists; see
 `doc/08_tracking/bug/guard_silent_nonzero_exit_no_verdict_line_2026-08-17.md`.
+
+## 2026-08-17 re-check (independent lane) — STILL OPEN, reproduction blocked
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC.
+
+Locus unchanged: `try_instance_method` is still
+`src/compiler/35.semantics/resolve_strategies.spl:133-138`, a single
+`symbols.lookup_method_in_type_raw` with a `nil` fallthrough — no change since
+this row was filed.
+
+**The `unresolved method call: bump` symptom could not be reproduced today**, and
+the reason is NOT that it is fixed: the native-build worker never reaches MIR
+lowering. It is the interpreted whole-compiler worker
+(`bin/simple run src/app/cli/native_build_worker.spl ...`) and it aborts on a
+failed allocation during `parse`. Two concurrent runs of this row's own fixture
+were observed live on this host:
+
+```
+$ ps -eo pid,etimes,pcpu,rss,args | grep native_build_worker
+3700449  599  90.7  17314092  ... --entry test/fixtures/native_trailing_default_param/main.spl ...
+3703879  537  88.5  15549864  ... --entry test/fixtures/native_option_eq_representation/main.spl ...
+```
+
+17 GiB and 15 GiB RSS respectively, still climbing, on two-file fixtures. A
+one-module no-import fixture bounded at `ulimit -v 12000000` aborted outright
+with `memory allocation of 2147483648 bytes failed`.
+
+So `check-native-trailing-default-param` cannot give this row a verdict at
+present. Detail, and the driver-side fix that stops that abort being reported as
+a `7200s` timeout:
+`doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md`.

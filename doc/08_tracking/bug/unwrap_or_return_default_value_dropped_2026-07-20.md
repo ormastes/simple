@@ -1,7 +1,43 @@
 # Bug: `unwrap or_return: <default>` never parses/stores the default value; propagates like `?` instead
 
+- **Status (2026-08-17): RESOLVED for the interpreter lane this record scopes.**
+
+  Binary: `readlink -f bin/simple` ->
+  `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
+  `stat -c '%s %y'` -> `59537240 2026-08-17 12:58:51.339525019 +0000`.
+  ```
+  $ bin/simple test test/feature/usage/safe_unwrap_operators_spec.spl --no-session-daemon
+  unwrap or_return: with early return
+    ✓ returns value when present
+    ✓ returns default when None
+    ✓ works with Result
+    ✓ returns default for Result Err
+  Results: 23 total, 20 passed, 3 failed
+  ```
+  All four `or_return:` examples — the three named in this record plus the
+  happy-path one — now pass. Direct repro under the interpreter:
+  ```
+  $ SIMPLE_EXECUTION_MODE=interpret bin/simple run r2b.spl   # None -> or_return: 7 ; Some(5) -> +1
+  7
+  6
+  ```
+  i.e. the default value is parsed, stored and returned, and the happy path is
+  no longer corrupted (`82`-instead-of-`84` symptom is gone).
+
+  **Two residuals, both DIFFERENT defects, not this one:**
+  1. The 3 remaining failures in that spec are all in the `unwrap else:` lazy
+     context (`calls closure only when Option is None`, `evaluates closure for
+     Result Err`, `closure can perform side effects`) — the fallback closure is
+     not being invoked. Untracked here.
+  2. The same `or_return:` repro run through the JIT/native lane
+     (`bin/simple run` without `SIMPLE_EXECUTION_MODE=interpret`) prints `32`
+     for both the None and the Some case — wrong on the compiled path while
+     correct interpreted. This record was explicitly interpreter-scoped
+     ("only the Rust seed's tree-walking interpreter ... was probed"), so it is
+     closed on that lane only.
+
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/safe_unwrap_operators_spec.spl`)
+- **Status:** RESOLVED 2026-08-17 (interpreter lane); originally open (found triaging `test/feature/usage/safe_unwrap_operators_spec.spl`)
 - **Area:** `src/compiler_rust/parser/src/expressions/postfix.rs` (`TokenKind::OrReturn` arm),
   `src/compiler_rust/compiler/src/interpreter/expr.rs` (`Expr::UnwrapOrReturn`), deployed seed
   at `bin/release/x86_64-unknown-linux-gnu/simple`

@@ -1,7 +1,24 @@
 # Bug: HPACK huffman single-symbol decode returns empty; concat-built [u8] encodes wrong
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: RESOLVED 2026-08-17 (verified by EXECUTION, not inspection).
+
+Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+(59537240 bytes, 2026-08-17 12:58:51 UTC).
+
+```
+$ bin/simple run <scratch>/h1.spl
+enc_len=1
+dec_len=1
+dec0=97
+concat=97
+fg1=97
+EXIT=0
+```
+
+Repro source: doc's own repro plus the `[u8]` concat cases — `hpack_huffman_decode`
+of `hpack_huffman_encode([97])` returns `[97]` (was `Ok([])`); `var p:[u8]=[]; p=p+[97]`
+gives 97 (was 8); `var f:[u8]=[10]; var g:[u8]=[97]; (f+g)[1]` gives 97 (was 0).
+No `src/lib` change was required or made.
 
 **Date:** 2026-06-30
 **Severity:** Medium — `hpack_huffman_decode` drops short payloads; blocks

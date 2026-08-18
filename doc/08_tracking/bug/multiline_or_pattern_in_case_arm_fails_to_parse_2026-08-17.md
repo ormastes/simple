@@ -1,6 +1,6 @@
 # A multi-line or-pattern in a `case` arm does not parse
 
-Status: OPEN (P2)
+Status: **FIXED** (verified 2026-08-17 on the seed rebuilt that day; was P2)
 **Found:** 2026-08-17 while unblocking `check-native-trailing-default-param` on main
 
 ## Symptom
@@ -59,6 +59,58 @@ The lines are now 150+ characters, which is itself undesirable.
 The pattern parser should skip `Indent`/`Dedent` tokens while a pattern is
 syntactically incomplete -- i.e. immediately after a trailing `|`. Compare the
 expression parser, which already tolerates wrapped binary operators.
+
+## RESOLUTION (2026-08-17) — fixed, verified
+
+The "Fix direction" below was implemented (by another lane; this row only
+verifies it). Root cause fix:
+`src/compiler_rust/parser/src/parser_patterns.rs:209-220`
+`fn skip_newlines_and_indents_for_pattern()` — skips `Newline`/`Indent` while a
+pattern is syntactically incomplete, returning the Indent count so the arm can
+unwind, exactly as this row prescribed.
+
+**Binary identity:**
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust seed, rebuilt that day).
+
+**Command and observed output** — trailing-`|` form (the exact shape in this row):
+
+```
+$ cat r3.spl
+enum E:
+    A(x: i64)
+    B(x: i64)
+    C(x: i64)
+fn f(e: E) -> i64:
+    match e:
+        case A(x) | B(x) |
+                C(x):
+            x
+fn main() -> i64:
+    print("{f(E.A(3))}\n")
+    0
+$ bin/simple run r3.spl
+3
+```
+
+It not only parses but **evaluates correctly** (`3`), so the arm is not silently
+truncated.
+
+Additionally, the previously-untested **leading-`|`** continuation style (listed
+under "Not proven" below) was tested here and also PASSES:
+
+```
+$ cat r3b.spl      # ... case A(x) | B(x)
+                   #             | C(x):
+$ bin/simple run r3b.spl
+7
+```
+
+Still genuinely untested: `if val`/`let`-pattern positions.
+
+The workaround in `src/compiler/50.mir/verification_semantic_coverage.spl`
+(arms joined onto 150+ char single lines) may now be reverted to the wrapped
+form; that is left to the owning lane and is not done here.
 
 ## Not proven
 - Only `case` arms in `match` were tested. Whether `if val`/`let`-pattern

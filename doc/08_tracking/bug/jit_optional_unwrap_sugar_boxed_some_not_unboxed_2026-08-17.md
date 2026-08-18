@@ -91,3 +91,32 @@ the smaller file. Filed here rather than dropped, but NOT root-caused.
 `src/compiler_rust/compiler/src/hir/lower/expr/control.rs` was not owned by the
 session that found this (file ownership was limited to `stmt_lowering.rs` and
 `codegen/jit.rs`), so no patch was attempted. Reported, not fixed.
+
+## Re-verified 2026-08-17 — STILL OPEN (seed defect, not fixable in .spl)
+
+Binary identity: `readlink -f bin/simple` ->
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`;
+`stat -c '%s %y'` -> `59537240 2026-08-17 12:58:51.339525019 +0000`.
+
+Repro (`r2.spl`: `fn f() -> i64?: return Some(99)`, then `if val e = f(): print e`
+and `print f() ?? 0`):
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run r2.spl
+99
+99
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run r2.spl
+5338887559137        <- raw enum pointer (bare `if val` sugar)
+792                  <- 99 << 3, un-unboxed BoxInt (`??`)
+```
+
+Both wrong values reproduce exactly as filed (the pointer differs run to run,
+as expected). Cited sites confirmed at slightly shifted lines: the two
+`rt_unwrap_or_self` builtin emissions are
+`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:1874` (bare `if val` /
+coalesce then-branch unwrap) and `:2242`.
+
+**Not fixed here:** defect is in the Rust bootstrap seed, out of scope for a
+pure-Simple fix. The filed fix direction (emit the `rt_enum_id(subj) >= 0`
+discrimination branch that `stmt_lowering.rs` already has, at BOTH sites) still
+stands and was not attempted.

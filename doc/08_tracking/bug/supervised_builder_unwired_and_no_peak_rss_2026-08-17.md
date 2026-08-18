@@ -1,7 +1,8 @@
 # Supervised builder: not yet wired to a front end, and peak RSS is always 0
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN
+- **Status:** OPEN (all four gaps re-confirmed 2026-08-17 by an independent lane —
+  see *Re-confirmation* at the bottom; no code change made)
 - **Domain:** compiler / driver
 - **Severity:** P2
 
@@ -116,3 +117,27 @@ in `driver_aot_native_output.spl` (`0c9d671fcd59`), so an in-process build now
 reaches the end of the module list and names every bad module in one run. That
 covers a compiler ERROR; it does not survive a worker SIGSEGV, which is exactly
 what Gap 1 still owes.
+
+## Re-confirmation 2026-08-17 (independent lane, no change made)
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust bootstrap seed).
+
+```
+$ grep -n "build_supervised\|peak_rss_kb" src/compiler/80.driver/driver_build/parallel.spl
+399:        # as a crashed spec reported as a pass. `build_supervised()` is the real
+693:    me build_supervised(spawn_fn: any, artifact_fn: any) -> BuildOutcomeSet:
+$ grep -rln "build_supervised" src/compiler/80.driver/driver_build
+./parallel.spl
+```
+
+Gap 1 stands: the only occurrences of the name are its own definition and a
+comment. Gap 2 stands: `peak_rss_kb` appears only in `build_outcome.spl`
+(:128 field, :132/:150 params, :143 the always-0 construction, :176 the print) —
+no producer measures it.
+
+Gap 2 is additionally blocked for this lane by its HARD LIMITS: surfacing a
+child's `ru_maxrss` needs a new `rt_process_*` primitive in the C/Rust runtime,
+which cannot be picked up without a bootstrap. Deliberately not attempted.
+Gaps 1, 3 and 4 are unchanged, and the "do not wire `spawn_fn` to a full
+rebuild" warning above still applies.

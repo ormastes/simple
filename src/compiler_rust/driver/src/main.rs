@@ -63,9 +63,18 @@
 //! `db_lock.rs` — they're small, self-contained, and have no pure-Simple
 //! peer yet. See doc/TODO.md area=driver for ordering.
 
+// Allocation accounting wraps the REAL allocator (mimalloc by default) rather
+// than replacing it, so `SIMPLE_MEM_TRACE=1` reports on the same allocator the
+// production binary uses. See compiler/src/mem_trace.rs.
 #[cfg(feature = "alloc-mimalloc")]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: simple_compiler::mem_trace::TrackingAlloc<mimalloc::MiMalloc> =
+    simple_compiler::mem_trace::TrackingAlloc::new(mimalloc::MiMalloc);
+
+#[cfg(not(feature = "alloc-mimalloc"))]
+#[global_allocator]
+static GLOBAL: simple_compiler::mem_trace::TrackingAlloc<std::alloc::System> =
+    simple_compiler::mem_trace::TrackingAlloc::new(std::alloc::System);
 
 use std::path::{Path, PathBuf};
 

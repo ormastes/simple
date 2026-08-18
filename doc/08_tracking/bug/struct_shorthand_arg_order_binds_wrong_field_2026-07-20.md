@@ -1,5 +1,41 @@
 # Bug: struct-literal shorthand argument binds to `nil` when it follows an explicit named argument
 
+- **Status (2026-08-17, later pass): FIXED IN SOURCE, verified with a locally
+  built seed; NOT yet in the deployed `bin/simple`.**
+
+  Confirmed still RED with the deployed seed first
+  (`readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+  `59537240 2026-08-17 12:58:51 +0000`):
+  ```
+  bin/simple test test/feature/usage/struct_shorthand_spec.spl --no-session-daemon
+  Results: 15 total, 13 passed, 2 failed
+  bin/simple test test/01_unit/compiler/frontend/struct_shorthand_after_named_arg_spec.spl --no-session-daemon
+  Results: 3 total, 1 passed, 2 failed
+  ```
+
+  **Fix applied** at the isolated root cause,
+  `src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs`:
+  the second pass now precomputes the set of field names claimed by named
+  arguments in the same call, and advances `positional_idx` past any
+  already-claimed slot before consuming a positional (shorthand) argument. So
+  `Point(x: 10, y)` skips slot 0 (`x`, filled by name) and binds `y` to `y`.
+
+  Re-verified with a seed built from this source into an isolated
+  `CARGO_TARGET_DIR=/mnt/data/tmp-cargo-shorthand` (deployed `bin/simple`
+  untouched):
+  ```
+  /mnt/data/tmp-cargo-shorthand/release/simple test test/feature/usage/struct_shorthand_spec.spl --no-session-daemon
+  Results: 15 total, 15 passed, 0 failed
+  ... test/01_unit/compiler/frontend/struct_shorthand_after_named_arg_spec.spl
+  Results: 3 total, 3 passed, 0 failed
+  ... test/01_unit/compiler/frontend/name_resolved_argument_order_independence_class_spec.spl
+  Results: 8 total, 8 passed, 0 failed
+  ```
+  **Unblock condition:** next seed rebuild/bootstrap that deploys
+  `src/compiler_rust/**`; the three specs stay RED under the currently deployed
+  binary until then. The latent same-shape site at
+  `interpreter_call/core/bitfield_support.rs:115,129-132` was NOT touched.
+
 - **Status (2026-08-17, lane A): STILL LIVE — reproduced at tip, root cause now
   isolated, fix NOT applied (owning file is outside this lane's scope).**
 
@@ -120,3 +156,22 @@ bin/release/x86_64-unknown-linux-gnu/simple test <repro spec above> --no-session
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+## 2026-08-17 20:1x — RESOLVED on the DEPLOYED seed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+```
+$ bin/simple test test/feature/usage/struct_shorthand_spec.spl --no-session-daemon --timeout 900
+Results: 15 total, 15 passed, 0 failed
+$ bin/simple test test/01_unit/compiler/frontend/struct_shorthand_after_named_arg_spec.spl --no-session-daemon --timeout 900
+Results: 3 total, 3 passed, 0 failed
+$ bin/simple test test/01_unit/compiler/frontend/name_resolved_argument_order_independence_class_spec.spl --no-session-daemon --timeout 900
+Results: 8 total, 8 passed, 0 failed
+```
+
+Matches the isolated-build result exactly (15/15, 3/3, 8/8). No regression.
+The latent same-shape site at `interpreter_call/core/bitfield_support.rs:115,129-132`
+is still untouched.
+
+**Status: RESOLVED** (verified on the deployed binary).

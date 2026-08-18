@@ -27,6 +27,54 @@ fn loader_stats_enabled() -> bool {
     })
 }
 
+/// Diagnostic: report per-cache entry counts alongside RSS.
+/// Gated behind SIMPLE_CACHE_SIZE_REPORT=<N> (report every N module loads).
+fn cache_size_report_interval() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("SIMPLE_CACHE_SIZE_REPORT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+    })
+}
+
+fn rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
+        .map(|pages| pages * 4)
+        .unwrap_or(0)
+}
+
+/// Print a one-line breakdown of every never-evicted loader cache.
+pub fn report_cache_sizes(tag: &str) {
+    let exports = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
+    let (cls_m, cls_e) = MODULE_CLASSES_CACHE
+        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (fn_m, fn_e) = MODULE_FUNCTIONS_CACHE
+        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (en_m, en_e) = MODULE_ENUMS_CACHE
+        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let partial = PARTIAL_MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
+    let (env_m, env_e) =
+        MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.len()).sum::<usize>()));
+    let (ovl_k, ovl_e) =
+        FUNCTION_OVERLOADS.with(|c| (c.borrow().len(), c.borrow().values().map(|v| v.len()).sum::<usize>()));
+    eprintln!(
+        "[cache-size] {} rss_mb={} exports={} classes={}m/{}e functions={}m/{}e enums={}m/{}e partial={} env_by_owner={}m/{}e overloads={}k/{}e",
+        tag,
+        rss_kb() / 1024,
+        exports,
+        cls_m, cls_e,
+        fn_m, fn_e,
+        en_m, en_e,
+        partial,
+        env_m, env_e,
+        ovl_k, ovl_e
+    );
+}
+
 /// Aggregated loader statistics for diagnosing heavy-path imports.
 /// Gated behind SIMPLE_LOADER_TRACE=1.
 #[derive(Default)]
@@ -95,6 +143,7 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
+    crate::mem_trace::report("clear_module_cache");
     crate::memory_guard::print_diagnostics();
     crate::memory_guard::reset_stats();
     // Print resolve stats before clearing (if profiling enabled)
@@ -371,6 +420,13 @@ pub fn cache_module_definitions(
     MODULE_ENUMS_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, enums.clone());
     });
+    let interval = cache_size_report_interval();
+    if interval > 0 {
+        let n = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
+        if n % interval == 0 {
+            report_cache_sizes(&format!("modules={}", n));
+        }
+    }
 }
 
 /// Get cached module definitions and merge them into the provided HashMaps.

@@ -1,8 +1,9 @@
 # `eprint` loses its trailing newline on the JIT and the LLVM backend (interpreter is correct)
 
 - **ID:** eprint_loses_newline_on_jit_and_llvm_backend_2026-08-17
-- **Status:** OPEN — reproduced by probe, root cause located in current source,
-  **not fixed** (see "Why no fix landed here" below).
+- **Status:** FIXED 2026-08-17 (JIT lane verified by execution on a freshly built,
+  non-deployed seed; pure-Simple LLVM mapping changed but source-only). See the
+  2026-08-17 note at the end. Deployed `bin/simple` still shows the defect until redeploy.
 - **Filed:** 2026-08-17
 - **Severity:** P2 by blast radius, but it corrupts every native/JIT diagnostic
   stream, which makes it a P1-grade *investigation hazard*: consecutive
@@ -122,3 +123,61 @@ re-investigation of it must rule this out first, and should not trust
   reproduce on either seed engine, see that row's 2026-08-17 note)
 - `stdlib_eprint_shadows_prelude_builtin_program_wide_2026-08-17.md`
 - `eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md`
+
+## 2026-08-17 — FIXED (JIT + pure-Simple LLVM mapping)
+
+Root cause in the Cranelift/JIT lane was **not** in the pure-Simple backend but in
+the seed's `src/compiler_rust/compiler/src/codegen/instr/core.rs`: `eprint`/`spl_eprint`
+mapped to `rt_eprint_value`/`rt_eprint_str` (no newline) while `print` mapped to the
+`println` variants. `eprint` is now mapped to the `eprintln` runtime entry points and
+added to the three `matches!` lists that select the ln-variant for the last argument,
+the space separator, and the zero-argument case.
+
+The pure-Simple LLVM mapping at `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:1603`
+was changed from `@rt_eprint` to `@rt_eprintln`, as this row proposed. Note the
+undefined-symbol observation in the section above still stands: neither runtime defines
+a bare `rt_eprint`/`rt_eprintln(ptr)`, only the `_str`/`_value` forms, so that arm was
+already broken independently of the newline. That arm could not be executed here
+(self-host is blocked, see `.claude/rules/bootstrap.md` KNOWN BLOCKER), so the
+pure-Simple change is **source-only, unverified by execution**.
+
+Verification (JIT), binary identity stated:
+
+```
+$ readlink -f bin/simple ; stat -c '%s %y' "$(readlink -f bin/simple)"
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59537240 2026-08-17 12:58:51 +0000        # DEPLOYED seed, pre-fix
+$ env SIMPLE_EXECUTION_MODE=jit bin/simple run <probe> 2>&1 | od -c | tail -1
+   e   a   d   .  \n   A   B   C  \n   D  \n                 # RED, reproduced
+
+# after the fix, freshly built seed (NOT deployed):
+$ env SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=jit \
+    /mnt/data/cargo-bugfix-0dc8/release/simple run <probe> 2>&1 | od -c
+0000000   A  \n   B  \n   C  \n   D  \n
+```
+
+Binary: /mnt/data/cargo-bugfix-0dc8/release/simple (built 2026-08-17 13:48, 59554384 bytes, from this worktree's source; NOT deployed to bin/simple).
+
+**Redeploy required to close in the deployed lane.** `bin/simple` is still the
+pre-fix seed; the JIT fix is only observable in the freshly built binary above until
+a bootstrap/redeploy lands.
+
+**Status:** FIXED in source (JIT lane verified by execution; pure-Simple LLVM mapping
+source-only). Awaiting seed redeploy.
+
+## 2026-08-17 20:1x — RESOLVED on the DEPLOYED seed
+
+Binary: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (bin/simple), md5 669150b61f2f20401a6a895ae54e9fee, 59550432 bytes, mtime 2026-08-17 20:10:45 — the REDEPLOYED seed carrying this session's fixes.
+
+```
+$ env SIMPLE_EXECUTION_MODE=jit bin/simple run ep.spl 2>&1 | od -c | tail -3
+0000000   A  \n   B  \n   C  \n   D  \n
+$ env SIMPLE_EXECUTION_MODE=interpreter bin/simple run ep.spl 2>&1 | od -c | tail -3
+0000000   A  \n   B  \n   C  \n   D  \n
+```
+
+JIT now byte-identical to the interpreter (`A\nB\nC\nD\n`); the old JIT
+`ABC\nD\n` collapse is gone. Matches the isolated-build result.
+The pure-Simple LLVM mapping half is source-verified only, as recorded above.
+
+**Status: RESOLVED** for the JIT/interpreter lanes on the deployed binary.

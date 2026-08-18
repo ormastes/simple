@@ -108,3 +108,25 @@ After:
 - `test/01_unit/os/smux/smux_dashboard_spec.spl` — `declared>=21 executed=21 passed=21 failed=0 dropped=0`, exit 0
 
 Status: FIXED.
+
+## Re-verified 2026-08-17 (independent lane)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+2026-08-17 12:58:51 (Rust seed).
+
+```
+$ bin/simple test test/01_unit/os/smux_spec.spl --no-session-daemon --sequential
+rc=0
+SPEC FILE VERDICT: test/01_unit/os/smux_spec.spl declared>=20 executed=20 passed=20 failed=0 dropped=0
+Results: 20 total, 20 passed, 0 failed
+
+$ bin/simple test test/01_unit/os/smux/smux_dashboard_spec.spl --no-session-daemon --sequential
+rc=0
+SPEC FILE VERDICT: test/01_unit/os/smux/smux_dashboard_spec.spl declared>=21 executed=21 passed=21 failed=0 dropped=0
+Results: 21 total, 21 passed, 0 failed
+```
+
+Both carry a real `Results:` line with non-zero executed counts, so this is not
+the `exit 0 with no summary` silent-green mode. Confirms FIXED — unlike the
+sibling `hwir_foundation_spec` fix from the same week, this one is genuinely
+present in the tree.

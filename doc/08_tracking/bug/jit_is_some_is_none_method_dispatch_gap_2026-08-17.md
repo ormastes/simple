@@ -97,3 +97,41 @@ shape and the absent/present controls.
 - `doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md`
 - `doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md`
   (both fixed by the `rt_is_none` change that exposed this one)
+
+## Re-verified 2026-08-17 — STILL OPEN (seed defect, not fixable in .spl)
+
+Binary identity:
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ stat -c '%s %y' "$(readlink -f bin/simple)"
+59537240 2026-08-17 12:58:51.339525019 +0000
+```
+
+Repro (`r1b.spl`: `zero_i64()`/`absent_i64()` returning `i64?`, four
+`.is_some()`/`.is_none()` prints):
+
+```
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run r1b.spl
+true
+false
+false
+true
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run r1b.spl
+Runtime error: Function 'is_some' not found
+Runtime error: unresolved symbol -- this is a code-generation dispatch gap, not a program error. Refusing to substitute a placeholder value (...)
+```
+
+**Update to the shape taxonomy:** Shape B (silently-wrong on a function-call
+receiver) no longer reproduces — the function-call receiver now ALSO fails
+closed, same as Shape A. So the current live symptom is uniformly a hard stop,
+never a silent wrong value. The `sextend` arms are not even reached; dispatch
+fails before them. Confirmed still present, at shifted line numbers:
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1905`
+(`is_none`, sextend at `:1912`), `:1915` (`is_some`, sextend at `:1922`),
+`:1925` (`is_ok`/`is_err`, sextend at `:1941`).
+
+**Not fixed here:** the defect is entirely in the Rust bootstrap seed
+(`src/compiler_rust/**`), so it is out of scope for a pure-Simple fix. Recorded,
+not guessed at.

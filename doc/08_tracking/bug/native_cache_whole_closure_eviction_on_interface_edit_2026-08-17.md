@@ -118,3 +118,45 @@ inversion. So the driver-side slice should digest `ParserModule` /
 subprocess: a run with that env set still wrote to `build/native_cache`. Use the
 `--cache-dir` flag, which does work. An env-only invocation silently measures a
 shared, contended cache.
+
+## 2026-08-17 re-check (independent lane) — STILL OPEN, no code change made
+
+Binary identity: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+size 59537240, mtime 2026-08-17 12:58:51 UTC (Rust bootstrap seed).
+
+Mechanism re-confirmed unchanged in source:
+
+```
+$ grep -n "driver_native_sources_fingerprint\|sources-" \
+    src/compiler/80.driver/driver_aot_native_output.spl
+322:pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
+516:        val cache_scope_root = rt_path_join(base_cache_scope_root, "sources-{sources_fingerprint}")
+$ grep -rln "interface_digest_of" src/compiler/80.driver/cache
+src/compiler/80.driver/cache/block/block_key.spl
+src/compiler/80.driver/cache/action_key.spl
+src/compiler/80.driver/cache/schema/cache_protocol.sdn
+```
+
+The whole-closure fingerprint still names the object DIRECTORY. The
+`interface_digest_of` name now appears in three files rather than one, but the
+two extra hits are not the missing production caller this row asks for:
+`schema/cache_protocol.sdn` is a schema declaration, and `block/block_key.spl:10`
+is a COMMENT mentioning the name. `action_key.spl:199` is still the sole
+`fn interface_digest_of` and its only definition. Nothing on the native-build driver
+path calls it.
+
+**The fix was deliberately NOT attempted in this lane.** Replacing the coarse
+directory partition with per-module dependency edges converts a safe
+over-invalidation into a potential UNDER-invalidation — the fail-open class this
+row itself warns about — and it can only be validated by the four-scenario
+measurement at the top (cold / no-change / body edit / interface edit). That
+measurement cannot be taken right now: every native-build of even a ONE-module
+fixture aborts before codegen with
+`memory allocation of 2147483648 bytes failed` under the interpreted worker
+(evidence and the driver-side misreport fix:
+`doc/08_tracking/bug/native_build_source_closure_zero_sources_2026-08-17.md`).
+Landing an unverifiable invalidation change would risk silently wrong binaries,
+so the row stays OPEN with its fix direction intact.
+
+Prerequisite for anyone picking this up: get a native-build of a small fixture
+to COMPLETE first, then re-run the four scenarios.

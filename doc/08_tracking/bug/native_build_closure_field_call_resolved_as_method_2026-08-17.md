@@ -1,7 +1,40 @@
 # Calling a closure-valued FIELD as `self.f(...)` is resolved as a METHOD call on the class
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN (root cause in a forbidden path for the filing lane — see Ownership)
+- **Status:** RESOLVED 2026-08-17 (fixed in the seed interpreter by `cfe08d5732d`,
+  "fix(interpreter): generalize callable-field method-call syntax"; re-verified
+  below on the seed rebuilt 2026-08-17 12:58). The `parallel.spl` local-binding
+  workaround and its two guard specs are kept — they are harmless and pin the
+  shape.
+
+## Re-verification 2026-08-17 (seed rebuilt 12:58)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59537240 bytes,
+mtime 2026-08-17 12:58:51.
+
+Case 1 — named fn in an `any` field, `self.cb(a, b)`:
+
+```
+$ bin/simple run <scratch>/closure.spl
+RC=0
+[INFO] JIT compilation failed, falling back to interpreter: ... deferring to interpreter
+result=7
+```
+
+Case 2 — lambda in the field, called both as `self.cb(...)` inside a method and
+as `h.cb(...)` from outside the class:
+
+```
+$ bin/simple run <scratch>/closure2.spl
+RC=0
+inner=7
+outer=11
+```
+
+Both previously-RED forms now produce the correct values; the
+``method `cb` not found on class `Holder` `` error is gone. Root-cause fix is the
+callable-field fallback routed through `call_value_as_callable`, landed in
+`src/compiler_rust/compiler/src/interpreter_method/mod.rs` by `cfe08d5732d`.
 - **Reported symptom:** multi-module native build fails on BOTH backends with
   `method owner_collect_fn not found on class ParallelBuilder`
   at `src/compiler/80.driver/driver_build/parallel.spl:248`.

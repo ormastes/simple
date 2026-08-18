@@ -978,6 +978,10 @@ pub fn load_and_merge_module(
     debug!(path = ?module_path, depth, "Loading module");
     mark_module_loading(&module_path);
     let _load_guard = crate::memory_guard::ModuleLoadGuard::enter(&module_path);
+    // Allocation accounting: attributes retained bytes to THIS module,
+    // exclusive of the nested loads it triggers (SIMPLE_MEM_TRACE=1).
+    let _mem_scope = crate::mem_trace::ModuleScope::enter(&module_path);
+    let mem_before_parse = crate::mem_trace::live();
 
     // Read and parse the module
     let mut source = match fs::read_to_string(&module_path) {
@@ -1026,6 +1030,13 @@ pub fn load_and_merge_module(
         &mut filtered_items,
         simple_common::target::TargetArch::host(),
     );
+    crate::mem_trace::record_parse(
+        &module_path.display().to_string(),
+        crate::mem_trace::live() as i64 - mem_before_parse as i64,
+        source.len(),
+        filtered_items.len(),
+    );
+
     let load_start = Instant::now();
 
     // Evaluate the module to get its environment (including imports)
