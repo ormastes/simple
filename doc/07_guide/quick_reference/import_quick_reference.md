@@ -290,7 +290,7 @@ Simple searches for modules in these directories:
 4. Application directory: `./src/app`
 
 Example:
-```simple
+```text
 use lib.database.core     # Looks for: ./src/lib/database/core.spl
 use app.io                # Looks for: ./src/app/io/mod.spl
 use std.spec              # Looks for: ./src/lib/src/spec.spl
@@ -305,7 +305,7 @@ src/app/io/mod.spl
 ```
 
 Import as:
-```simple
+```text
 use app.io.{function_name}
 ```
 
@@ -319,7 +319,7 @@ src/lib/database/
 ```
 
 Import as:
-```simple
+```text
 use lib.database.{something_from_mod}        # From mod.spl
 use lib.database.core.{StringInterner}       # From core.spl
 use lib.database.bug.{BugDatabase}           # From bug.spl
@@ -327,7 +327,7 @@ use lib.database.bug.{BugDatabase}           # From bug.spl
 
 ### Relative Imports
 
-```simple
+```text
 # In src/app/cli/main.spl:
 use .utils.{helper_function}  # Looks for: src/app/cli/utils.spl
 
