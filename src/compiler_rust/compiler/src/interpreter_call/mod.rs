@@ -11,7 +11,8 @@ pub use bdd::{clear_bdd_state, get_ignored_tests, get_test_results};
 pub use core::clear_class_instantiation_state;
 pub(crate) use bdd::{
     exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED,
-    BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_COUNT, BDD_MATCHER_RAN,
+    BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_COUNT,
+    BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
     BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{

@@ -307,3 +307,89 @@ SPEC FILE VERDICT: test/perf/ui_access/ui_access_hot_paths_spec.spl declared>=1 
 
 `reason=unresolved-module` in the shard, but it runs standalone. Different
 defect, needs its own record.
+
+## ROOT CAUSE FOUND (2026-08-18, lane-test-fix) — it is the RUST SEED, not spec.spl
+
+The "Mechanism" section above is wrong about WHERE the loss happens for
+`bin/simple test`. Verified by instrumenting `src/lib/nogc_sync_mut/spec.spl`
+with prints and observing NONE of them fire: `describe`/`it`/`expect` in a spec
+run by `bin/simple test` are intercepted by interpreter BUILTINS in the Rust
+seed (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`), so
+`_expect_begin_matcher` at spec.spl:715 is not on that path at all. (That LIFO
+pop is still a latent fail-open in the pure-Simple runner and was fixed too.)
+
+The real mechanism, in the seed:
+
+- A failing bare `expect <cond>` sets only `BDD_EXPECT_PROVISIONAL`
+  (`bdd.rs`, three sites), never the hard `BDD_EXPECT_FAILED`.
+- Any `.to_*()` matcher clears `BDD_EXPECT_PROVISIONAL` unconditionally and
+  sets `BDD_MATCHER_RAN` (`interpreter_method/mod.rs:371-375`).
+- At example end (`bdd.rs:862`) the verdict was
+  `hard_failed || (provisional && !matcher_ran) || vacuous`.
+
+`BDD_MATCHER_RAN` is MONOTONIC per example, so one matcher anywhere suppressed
+a standing provisional raised by an unrelated bare `expect` — in either order.
+That is exactly the observed table.
+
+### Fix applied
+
+Targeted retraction by ordinal, mirroring option 1 of "Proposed fix":
+
+- New thread-locals `BDD_EXPECT_SEQ` (ordinal of the most recent `expect(...)`
+  in this example) and `BDD_PROVISIONAL_SEQ` (ordinal of the expect that raised
+  the standing provisional), reset at example start and in `clear_bdd_state()`.
+- A matcher retracts the provisional ONLY when `BDD_PROVISIONAL_SEQ ==
+  BDD_EXPECT_SEQ`, i.e. it is chained to the very expect that raised it.
+- Example-end verdict becomes `hard_failed || provisional || vacuous`;
+  `BDD_MATCHER_RAN` is kept for diagnostics but is no longer load-bearing.
+- `src/lib/nogc_sync_mut/spec.spl`: the blind `current_test_errors.pop()` is
+  now gated on `_expect_provisional_len` matching the current list length, so
+  it can only remove the entry that this expect pushed.
+
+### Reproducing fixture
+
+`test/fixture/spec/expect_failure_retention_fixture.spl` (deliberately RED,
+deliberately NOT named `*_spec.spl` so directory sweeps do not collect it).
+7 examples: 6 must FAIL, 1 positive control must pass.
+
+```sh
+bin/simple test test/fixture/spec/expect_failure_retention_fixture.spl --no-cover-check
+# BUGGY seed  : Results: 7 total, 4 passed, 3 failed   <- 3 real failures lost
+# FIXED seed  : Results: 7 total, 1 passed, 6 failed
+```
+
+Verbatim RED, measured against the shared seed
+`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`:
+
+```
+  ✓ bare expect after a passing matcher MUST FAIL
+  ✓ bare expect before a passing matcher MUST FAIL
+  ✓ two bare expects after a matcher MUST FAIL
+  ✗ failing matcher only MUST FAIL
+  ✗ failing matcher then passing matcher MUST FAIL
+  ✗ bare expect only MUST FAIL
+  ✓ control all assertions pass MUST PASS
+Results: 7 total, 4 passed, 3 failed
+```
+
+### GREEN is BLOCKED — not verified
+
+The fix cannot be exercised in this lane: the Rust seed at HEAD does not
+compile, for two defects unrelated to this change, so no fixed binary can be
+built and `bin/simple` (a shared seed, not to be replaced) still carries the
+bug:
+
+```
+error[E0432]: unresolved import `crate::interpreter::module_globals_generation`
+  --> compiler/src/interpreter_call/core/function_exec.rs:10
+error[E0599]: the method `as_ref` exists for reference `&simple_parser::FunctionDef` ...
+  --> compiler/src/interpreter_sffi.rs:125
+```
+
+`module_globals_generation` is defined NOWHERE in the tree. Until those are
+fixed and a seed is rebuilt, this fix is UNVERIFIED and the bug stays OPEN.
+A pure-Simple pinning spec is not possible either: the failure bookkeeping is
+interpreter thread-local state that an example cannot read from inside itself
+(two designs tried and discarded — an exported drain helper in spec.spl reads a
+stale module env and always returns 0; a child-process spec produced no output
+under the runner). The fixture above is the pin until the seed builds.

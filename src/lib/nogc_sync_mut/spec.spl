@@ -110,6 +110,7 @@ fn _execute_it(name: text, block: fn()):
     # Preserve the shared array identity across nested calls; rebinding here
     # can leave matchers mutating a stale value under global writeback.
     current_test_errors.clear()
+    _expect_provisional_len = -1
     val pending_before = test_pending
 
     # Run before_each hooks
@@ -683,6 +684,15 @@ pub fn prevent_file(mockfn, reason: text):
 
 var _expect_helper_slots: [ExpectHelper] = []
 
+# Length of current_test_errors immediately AFTER the most recent provisional
+# error was pushed by an expect(...) call, or -1 when there is no outstanding
+# provisional error. _expect_begin_matcher() retracts the provisional entry ONLY
+# when the list is still exactly this long, i.e. the top entry is provably the
+# one that expect(...) itself pushed. A blind LIFO pop here used to destroy
+# genuine failures recorded by a bare `expect <cond>` in the same example —
+# see doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md.
+var _expect_provisional_len: i64 = -1
+
 fn _stable_expect_helper(value, negated: bool, implicit_error: bool) -> i64:
     if _expect_helper_slots.len() == 0:
         _expect_helper_slots = [ExpectHelper(value: value, negated: negated, implicit_error: implicit_error)]
@@ -691,6 +701,10 @@ fn _stable_expect_helper(value, negated: bool, implicit_error: bool) -> i64:
     helper.negated = negated
     helper.implicit_error = implicit_error
     _expect_helper_slots = [helper]
+    if implicit_error:
+        _expect_provisional_len = current_test_errors.len()
+    else:
+        _expect_provisional_len = -1
     1
 
 pub fn expect(value: bool) -> i64:
@@ -715,8 +729,16 @@ pub fn expect_not(value: bool) -> i64:
 fn _expect_begin_matcher(implicit_error: bool):
     # Keep this outside ExpectHelper. Older Phase-3 native lowering can lose
     # a class receiver on an internal matcher-to-helper method call.
-    if implicit_error and current_test_errors.len() > 0:
+    #
+    # Targeted retraction: remove the provisional error this expect(...) pushed,
+    # and ONLY that one. If anything else has been appended since (a genuine
+    # failure from a bare `expect <cond>`, a prevent() guard, ...) the list is
+    # longer than _expect_provisional_len and nothing is removed. The slot is
+    # cleared either way so a second matcher on the same subject cannot pop a
+    # real failure.
+    if implicit_error and _expect_provisional_len > 0 and current_test_errors.len() == _expect_provisional_len:
         val _ = current_test_errors.pop()
+    _expect_provisional_len = -1
 
 pub trait ExpectScalarMatcher:
     fn not_() -> i64

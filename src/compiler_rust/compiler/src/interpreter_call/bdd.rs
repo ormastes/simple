@@ -51,6 +51,20 @@ thread_local! {
     // end a hollow-call provisional failure is suppressed iff a matcher ran.
     pub(crate) static BDD_MATCHER_RAN: RefCell<bool> = const { RefCell::new(false) };
 
+    // Ordinal of the most recent `expect(...)` raised in the current example
+    // (1-based; 0 = none yet), and the ordinal of the expect that raised the
+    // STANDING provisional failure (0 = none standing).
+    //
+    // These make provisional retraction TARGETED. BDD_MATCHER_RAN is monotonic
+    // per example, so it said only "some matcher ran somewhere", which let a
+    // matcher on one expect suppress an unrelated bare `expect <cond>` failure
+    // on another — in either order, silently turning a real failure into PASS
+    // (doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md). A
+    // matcher may now retract only the provisional raised by the expect it is
+    // actually chained to, i.e. when BDD_PROVISIONAL_SEQ == BDD_EXPECT_SEQ.
+    pub(crate) static BDD_EXPECT_SEQ: RefCell<usize> = const { RefCell::new(0) };
+    pub(crate) static BDD_PROVISIONAL_SEQ: RefCell<usize> = const { RefCell::new(0) };
+
     // Vacuity gate for `expect(<non-bool subject>)`.
     //
     // A matcher-less `expect(<subject>)` only asserts truthiness. For a BOOL
@@ -781,6 +795,8 @@ pub(super) fn eval_bdd_builtin(
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
             BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
             BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
+            BDD_EXPECT_SEQ.with(|cell| *cell.borrow_mut() = 0);
+            BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = 0);
             BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
             BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
             BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
@@ -853,13 +869,20 @@ pub(super) fn eval_bdd_builtin(
                     // ran on the expect — a matcher means the call result was
                     // actually checked (and may legitimately be falsy, e.g.
                     // `expect(returns_zero()).to_equal(0)`).
-                    let matcher_ran = BDD_MATCHER_RAN.with(|cell| *cell.borrow());
+                    // Retained for diagnostics only: whether ANY matcher ran.
+                    // It is deliberately NOT part of the failure decision — a
+                    // matcher elsewhere in the example must never suppress a
+                    // standing provisional it did not raise. Retraction is now
+                    // targeted (BDD_PROVISIONAL_SEQ vs BDD_EXPECT_SEQ) in
+                    // interpreter_method/mod.rs, so a provisional that is still
+                    // set here was never consumed by its own matcher.
+                    let _matcher_ran = BDD_MATCHER_RAN.with(|cell| *cell.borrow());
                     // Vacuity: more non-bool `expect(...)` subjects were raised
                     // than matchers ran, so at least one expect asserted nothing.
                     let needs = BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow());
                     let matchers = BDD_MATCHER_COUNT.with(|cell| *cell.borrow());
                     let vacuous = needs > matchers;
-                    let failed = hard_failed || (provisional && !matcher_ran) || vacuous;
+                    let failed = hard_failed || provisional || vacuous;
                     let mut failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
                     if vacuous && !hard_failed {
                         let subject = BDD_VACUOUS_SUBJECT
@@ -939,6 +962,9 @@ pub(super) fn eval_bdd_builtin(
             // back to a Bool(false) check on the evaluated value.  In both
             // cases the resulting evaluated value is still returned so a
             // downstream `.to(matcher)` chain (form (1)) keeps working.
+            // Ordinal of this expect within the example. A matcher may retract
+            // only the provisional raised by THIS expect (see BDD_EXPECT_SEQ).
+            BDD_EXPECT_SEQ.with(|cell| *cell.borrow_mut() += 1);
             if args.is_empty() {
                 return Ok(Some(Value::Bool(false)));
             }
@@ -999,6 +1025,8 @@ pub(super) fn eval_bdd_builtin(
                             let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
                             if !value.truthy() {
                                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
+                                BDD_PROVISIONAL_SEQ
+                                    .with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|s| *s.borrow()));
                                 BDD_FAILURE_MSG.with(|cell| {
                                     *cell.borrow_mut() = Some(format!(
                                         "expected {} {} {} to hold",
@@ -1027,6 +1055,8 @@ pub(super) fn eval_bdd_builtin(
                     // (mirrors the ordered-comparison and call-expr paths).
                     if !matched {
                         BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
+                        BDD_PROVISIONAL_SEQ
+                            .with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|s| *s.borrow()));
                         BDD_FAILURE_MSG.with(|cell| {
                             *cell.borrow_mut() = Some(format!(
                                 "expected {} to {} {}",
@@ -1098,6 +1128,7 @@ pub(super) fn eval_bdd_builtin(
                 // may be exactly what the matcher expects). If no matcher follows,
                 // it stands as a hollow-expect failure at example end.
                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
+                BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = BDD_EXPECT_SEQ.with(|s| *s.borrow()));
                 BDD_FAILURE_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!(
                         "expected subject to be truthy, got {}",
@@ -1935,6 +1966,8 @@ pub fn clear_bdd_state() {
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = false);
     BDD_MATCHER_RAN.with(|cell| *cell.borrow_mut() = false);
+    BDD_EXPECT_SEQ.with(|cell| *cell.borrow_mut() = 0);
+    BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = 0);
     BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
     BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
     BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);

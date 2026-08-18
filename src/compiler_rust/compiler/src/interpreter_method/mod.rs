@@ -368,8 +368,21 @@ pub(crate) fn evaluate_method_call(
             | "not_to"
             | "to_not"
     ) {
-        use crate::interpreter::interpreter_call::{BDD_EXPECT_PROVISIONAL, BDD_MATCHER_COUNT, BDD_MATCHER_RAN};
-        BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+        use crate::interpreter::interpreter_call::{
+            BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_MATCHER_COUNT, BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
+        };
+        // TARGETED retraction: clear the provisional only when it was raised by
+        // the expect this matcher is chained to. Clearing unconditionally
+        // destroyed a genuine bare `expect <cond>` failure raised by a
+        // different expect in the same example — see
+        // doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md.
+        let owns_provisional = BDD_PROVISIONAL_SEQ
+            .with(|cell: &std::cell::RefCell<usize>| *cell.borrow())
+            == BDD_EXPECT_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow());
+        if owns_provisional {
+            BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
+            BDD_PROVISIONAL_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow_mut() = 0);
+        }
         // Monotonic within an example: records that a matcher checked the expect
         // receiver, so a re-set provisional flag can't false-fail the example.
         BDD_MATCHER_RAN.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
