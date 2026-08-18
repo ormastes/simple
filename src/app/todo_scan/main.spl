@@ -49,7 +49,7 @@ struct TodoEntry:
     line: i64
     issue: text         # GitHub issue number (optional)
     blocked: text       # Blocked by issues (optional)
-    status: text        # open, in_progress, closed
+    status: text        # open, blocked, in_progress, closed
 
 # ============================================================================
 # Scanner
@@ -118,6 +118,12 @@ fn scan_file(file_path: text, start_id: i64) -> [TodoEntry]:
         # Parse formatted TODO: [area][priority] description [#issue] [blocked:#n]
         val parsed = parse_todo_text(rest)
 
+        # A TODO carrying `[blocked:<reason>]` is not actionable work; record it
+        # as `blocked` so a rescan cannot flatten curated blocked rows to `open`.
+        var entry_status = "open"
+        if parsed.blocked.len() > 0:
+            entry_status = "blocked"
+
         results.push(TodoEntry(
             id: current_id,
             keyword: keyword,
@@ -128,7 +134,7 @@ fn scan_file(file_path: text, start_id: i64) -> [TodoEntry]:
             line: line_num,
             issue: parsed.issue,
             blocked: parsed.blocked,
-            status: "open"
+            status: entry_status
         ))
         current_id = current_id + 1
     results
@@ -180,7 +186,11 @@ fn parse_todo_text(input: text) -> ParsedTodo:
         val issue_end_rel = after_issue.index_of("]")
         if issue_end_rel > 0:
             issue = after_issue[2:issue_end_rel]
-            var before_issue = remaining[0:issue_start]
+            # Keep the text AFTER the tag too: truncating here dropped a
+            # trailing `[blocked:...]` tag, so an issue-tagged TODO was never
+            # recorded as blocked.
+            val issue_tail = after_issue[issue_end_rel + 1:]
+            var before_issue = remaining[0:issue_start] + issue_tail
             remaining = before_issue.trim()
 
     # Extract [blocked:#n,#m] from end
@@ -190,7 +200,8 @@ fn parse_todo_text(input: text) -> ParsedTodo:
         val blocked_end_rel = after_blocked.index_of("]")
         if blocked_end_rel > 0:
             blocked = after_blocked[9:blocked_end_rel]
-            var before_blocked = remaining[0:blocked_start]
+            val blocked_tail = after_blocked[blocked_end_rel + 1:]
+            var before_blocked = remaining[0:blocked_start] + blocked_tail
             remaining = before_blocked.trim()
 
     description = remaining

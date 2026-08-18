@@ -1,0 +1,49 @@
+# todo-scan status/blocked classification — defect-class coverage
+#
+# Defect class: the status a TODO is recorded with must be derived from what the
+# marker actually says, not hardcoded. This spec opens with a positive control
+# proving `parse_todo_text` really loaded and computes, so a sweep that silently
+# stopped parsing cannot show up as a clean pass.
+
+use app.todo_scan.main (parse_todo_text, scan_file)
+use app.io.mod (file_write, dir_create_all)
+
+describe "todo_scan marker parsing (positive control)":
+    it "actually parses area, priority and description from a formatted marker":
+        val parsed = parse_todo_text("[render-perf][P1] measure the 8K80 lane")
+        expect(parsed.area).to_equal("render-perf")
+        expect(parsed.priority).to_equal("P1")
+        expect(parsed.description).to_equal("measure the 8K80 lane")
+        expect(parsed.blocked).to_equal("")
+
+    it "normalizes a priority alias, proving the parser is not returning defaults":
+        val parsed = parse_todo_text("[demo][high] aliased priority")
+        expect(parsed.priority).to_equal("P1")
+
+describe "todo_scan status derives from the blocked tag":
+    it "separates the blocked reason from the description":
+        val parsed = parse_todo_text("[demo][P1] do the thing [blocked:hardware-absent]")
+        expect(parsed.blocked).to_equal("hardware-absent")
+        expect(parsed.description).to_equal("do the thing")
+
+    it "keeps issue and blocked tags independent":
+        val parsed = parse_todo_text("[demo][P1] do the thing [#42] [blocked:hardware-absent]")
+        expect(parsed.issue).to_equal("42")
+        expect(parsed.blocked).to_equal("hardware-absent")
+
+    it "keeps issue and blocked tags independent in either order":
+        val parsed = parse_todo_text("[demo][P1] do the thing [blocked:hardware-absent] [#42]")
+        expect(parsed.issue).to_equal("42")
+        expect(parsed.blocked).to_equal("hardware-absent")
+        expect(parsed.description).to_equal("do the thing")
+
+    it "classifies a mixed file so blocked and open rows stay distinguishable":
+        dir_create_all("/tmp/todo_scan_spec")
+        val path = "/tmp/todo_scan_spec/mixed_fixture.spl"
+        file_write(path, "# TODO: [demo][P1] blocked one [blocked:hardware-absent]\n# TODO: [demo][P1] open one\n# TODO: [demo][P2] blocked two [blocked:no-self-hosted-deploy]\n")
+
+        val entries = scan_file(path, 0)
+        expect(entries.len()).to_equal(3)
+        expect(entries[0].status).to_equal("blocked")
+        expect(entries[1].status).to_equal("open")
+        expect(entries[2].status).to_equal("blocked")
