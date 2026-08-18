@@ -1047,3 +1047,136 @@ c_migrations:
       shipped), and the domain-boundary + 100-vector suites confirm no gap
       slipped through, including the largest-finite-vs-infinite boundary
       (1.0e308 vs 1.0e308*10.0).
+
+  - id: C-MIG-0035
+    path: src/compiler_rust/compiler/src/interpreter_extern/simd.rs
+    symbols:
+      - rt_text_to_upper_ascii
+    classification: product_algorithm
+    replacement: std.common.text_ascii.to_upper_ascii (NEW file
+      src/lib/common/text_ascii.spl -- uncontested, outside all HARD-AVOID
+      paths for this round including string_core.spl and
+      base_encoding*/**. Walks the string character-by-character, using
+      `index_of` against a literal lowercase-alphabet table to find the
+      substitution index, rather than the extern's byte-map machinery)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_text_to_upper_ascii(s: text) -> text is registered in the
+      interpreter's extern dispatch table (interpreter_extern/mod.rs:1919,
+      simd::rt_text_to_upper_ascii) via a Rust byte-map
+      (`b.to_ascii_uppercase()`). No C runtime counterpart exists (`grep -rn
+      rt_text_to_upper_ascii src/runtime/*.c src/runtime/*.h` returns zero
+      hits; this project's runtime C sources have no `rt_text_*`
+      case-conversion symbols at all); this is a pure-Rust-interpreter
+      extern, same kind as C-MIG-0029..0034 (no_c_implementation_rust_only_
+      extern). Rejected candidates: `rt_text_validate_utf8` /
+      `rt_text_find_invalid_utf8` (mod.rs:1915, simd.rs:2044/2054) are
+      registered but return an opaque/internal result shape not documented
+      as a stable contract this pass -- deferred; `rt_text_is_ascii`
+      (mod.rs:1916) is registered and a legitimate sibling but skipped to
+      keep this round's two picks in different domains (text vs path).
+    correctness_spec: test/01_unit/lib/common/text_ascii_to_upper_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. ordinary
+      mixed-case strings; edge cases: empty string, single lower/upper
+      char, all-whitespace, digits/punctuation passthrough, non-ASCII
+      multibyte UTF-8 passthrough (accented and CJK) including a multibyte
+      character directly adjacent to an ASCII run; single-char-flip
+      discrimination; determinism check; 100-vector shared-logic bulk
+      differential loop over lowercase runs, mixed corpora, suffixes, and
+      whitespace-padded strings, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple to_upper_ascii measured ~25.4x
+      the Rust byte-map oracle over the 100-vector bulk corpus
+      (simple_us=19165, c_us=756, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), well above the plan's 2x threshold.
+      Root cause: per-character `text` string concatenation
+      (`result = result + ch`) in a loop is O(n^2) allocation under the
+      tree-walk interpreter, unlike the extern's single Vec<u8> collect --
+      the interpreter-lane caveat noted in prior PERF findings applies here
+      even more sharply because this is a string-building kernel, not a
+      scalar-arithmetic one. Recorded honestly, not hidden; a StringBuilder-
+      based rewrite (src/lib/common/string_builder.spl exists in-tree) would
+      likely close most of this gap and is filed as a follow-up rather than
+      folded into this migration to keep this change's diff minimal."
+    perf_measured: >
+      100 shared branch-covering text values, 2026-08-18: simple_us=19165
+      c_us=756, ratio ~25.4x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      No output-divergence defect found (5/5 examples pass, including the
+      multibyte-UTF-8-adjacent-to-ASCII-run boundary). A DESIGN-TIME defect
+      was caught before the spec ever ran: an initial version of
+      to_upper_ascii used a nonexistent `ch.code()` accessor to get a
+      numeric codepoint (no `.code()` method exists on `text`/char values
+      in this codebase -- confirmed by grep). Fixed by rewriting the
+      lowercase-range check as an `index_of` lookup against a literal
+      "abcdefghijklmnopqrstuvwxyz" table instead.
+
+  - id: C-MIG-0036
+    path: src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+    symbols:
+      - rt_path_ext
+    classification: product_algorithm
+    replacement: std.common.path_pure.path_ext (NEW file
+      src/lib/common/path_pure.spl -- uncontested. Scans the final path
+      component by hand for the last separator and the last dot, an
+      explicit character-scan approach, not a re-wrap of Rust's `Path`
+      type machinery)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_path_ext(path: text) -> text is registered in the interpreter's
+      extern dispatch table (interpreter_extern/mod.rs:1607,
+      file_io::rt_path_ext) via Rust's `std::path::Path::extension()`. No C
+      runtime counterpart exists (`grep -rn rt_path_ext src/runtime/*.c
+      src/runtime/*.h` returns zero hits; this project's runtime C sources
+      have no `rt_path_*` symbols at all -- path parsing is Rust-`std`-only
+      here); this is a pure-Rust-interpreter extern, same kind as
+      C-MIG-0029..0035 (no_c_implementation_rust_only_extern). Rejected
+      candidates: `rt_path_basename` / `rt_path_dirname` (mod.rs:1605/1606)
+      are registered legitimate siblings, but `extension()` was picked for
+      its sharper edge-case surface (dotfiles, trailing dots, no-dot
+      names); `rt_path_absolute` / `rt_path_relative` (mod.rs:1604/1609)
+      are registered but touch the real filesystem/CWD, which would make a
+      pure differential spec environment-dependent -- deferred.
+    correctness_spec: test/01_unit/lib/common/path_pure_ext_crosslang_spec.spl
+    correctness_result: "5 examples, 5 passed (KAT vectors incl. simple/
+      nested/absolute paths with extensions; edge cases: empty string,
+      single char with no dot, no-extension name, dotfile with no further
+      dot, dotfile WITH a further dot, '.' and '..', trailing separator on
+      a name with no dot AND on a name with a dot ('a.b/'), path that is
+      only separators ('/'), repeated separators before the final
+      component, trailing dot with nothing after it, bare filename with no
+      separator, dot as first char of a non-leading directory component;
+      single-char-flip discrimination; determinism check; 100-vector
+      shared-logic bulk differential loop mixing leading directories,
+      trailing separators, and repeated separators over 9 base-name
+      shapes, 2026-08-18)"
+    c_status: no_c_implementation_rust_only_extern
+    perf_status: "PERF FINDING — pure-Simple path_ext measured ~10.7x the
+      Rust `Path::extension()` oracle over the 100-vector bulk corpus
+      (simple_us=5688, c_us=532, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18), above the plan's 2x threshold.
+      Recorded honestly, not hidden -- same interpreter-lane caveat as
+      C-MIG-0035 and prior PERF findings (character-by-character text
+      scanning plus `substring` calls under the tree-walk interpreter vs a
+      single Rust `Path` parse)."
+    perf_measured: >
+      100 shared branch-covering path strings, 2026-08-18: simple_us=5688
+      c_us=532, ratio ~10.7x.
+    shared_corpus: 100
+    fixed_perf_bugs: []
+    domain_bug_note: >
+      REAL DEFECT FOUND AND FIXED via the 100-vector bulk loop (the
+      hand-picked KATs alone did not catch it): the first version of
+      `last_component` in src/lib/common/path_pure.spl returned "" for ANY
+      path ending in a separator, on the wrong assumption that
+      `Path::file_name()` is None once a path ends in "/". Direct
+      comparison against `rt_path_ext` proved otherwise -- Rust's
+      `Path::file_name()`/`Path::extension()` ignore trailing separators
+      and use the component before them: "a.b/" -> extension "b" and
+      "dir/f.rs/" -> extension "rs" on the oracle, both nonempty, while the
+      buggy Simple side returned "". Fixed by stripping trailing
+      separators before locating the final component (a path that becomes
+      fully empty after stripping, e.g. "/", still correctly yields "").
+      Re-verified against the oracle for "a.b/", "dir/f.rs/", and "/".
