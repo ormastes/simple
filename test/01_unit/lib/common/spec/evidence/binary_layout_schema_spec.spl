@@ -1,0 +1,137 @@
+# @req REQ-SSPEC-BINARY-DOMAINS
+#
+# Goal-4 GENERATION half: a `WordLayout` declared once (named fields with
+# global bit offsets/widths and a per-field `compare`/`dont_care`/`reserved`
+# policy) generates the expected words, compare masks, and labeled diff rows
+# — instead of a spec hand-building a word array next to a separate
+# `[ComparePolicy]` list. Design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md
+#
+# Reproduce-parity: the TCP-header fixture here must generate the exact same
+# expected word / compare mask as the hand-built `tcp_word_layout()` in
+# `binary_domains_spec.spl`, proving the declarative path is not a second,
+# independently-drifting model.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field, compare_word
+}
+use std.common.spec.evidence.format.layout_schema.{
+    WordLayout, LayoutFieldSpec, FieldPolicy,
+    compare_field, dont_care_field_spec, reserved_field_spec,
+    layout_words, layout_masks, layout_compare, layout_render,
+    layout_to_sdn, layout_from_sdn
+}
+
+# Same fixture as `binary_domains_spec.spl`'s `tcp_word_layout()`, declared
+# through the new schema instead of a hand-built `BinaryLayout` literal.
+fn tcp_schema_layout() -> WordLayout:
+    WordLayout(
+        layout_id: "tcp_w3_fixture_schema",
+        word_bits: 32,
+        word_count: 1,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            compare_field("window", 0, 16, 0x1000, "receive window"),
+            compare_field("flags", 16, 6, 0x02, "TCP flags"),
+            reserved_field_spec("reserved", 22, 6),
+            compare_field("data_offset", 28, 4, 5, "header length in words")
+        ],
+        word_label: "W",
+        first_word: 0,
+        source_ref: "RFC 9293 fixture",
+    )
+
+# The hand-built layout from binary_domains_spec.spl, reproduced here so this
+# spec can assert parity without importing a test file from another test file.
+fn tcp_hand_built_layout() -> BinaryLayout:
+    BinaryLayout(
+        layout_id: "tcp_w3_fixture",
+        total_bits: 32,
+        byte_order: ByteOrder.big,
+        bit_order: BitOrder.lsb0,
+        fields: [
+            binary_field("window", 0, 16, "receive window"),
+            binary_field("flags", 16, 6, "TCP flags"),
+            reserved_field("reserved", 22, 6),
+            binary_field("data_offset", 28, 4, "header length in words")
+        ],
+        source_ref: "RFC 9293 fixture"
+    )
+
+describe "declarative binary layout — generation":
+    it "generates the same expected word as the hand-built fixture (reproduce-parity)":
+        val schema = tcp_schema_layout()
+        val words = layout_words(schema)
+        assert_equal(words.len(), 1)
+        # hand-built expected packed the same way: data_offset=5<<28 | flags=0x02<<16 | window=0x1000
+        val hand_built_expected = (5 << 28) | (0x02 << 16) | 0x1000
+        assert_equal(words[0], hand_built_expected)
+        assert_equal(words[0], 0x50021000)
+
+    it "generates the same compare mask as the hand-built comparator (reproduce-parity)":
+        val schema = tcp_schema_layout()
+        val masks = layout_masks(schema)
+        val hand_built = tcp_hand_built_layout()
+        val hand_built_diff = compare_word(0x50021000, 0x50021000, hand_built, [])
+        assert_equal(masks.len(), 1)
+        assert_equal(masks[0], hand_built_diff.compare_mask)
+
+    it "field-labeled diff names the corrupted field":
+        val schema = tcp_schema_layout()
+        val expected = layout_words(schema)[0]
+        # corrupt the flags field only (bit 17 flips one flag bit)
+        val corrupted = expected ^ (1 << 17)
+        val rows = layout_render(schema, [corrupted])
+        var joined = ""
+        for r in rows:
+            joined = joined + r + "\n"
+        assert_true(joined.contains("FAIL"))
+        assert_true(joined.contains("flags"))
+        assert_true(joined.contains("window") == false or joined.contains("^ FAIL in: flags"))
+
+    it "reserved field violation fails even though the caller never asked to check it":
+        val schema = tcp_schema_layout()
+        val expected = layout_words(schema)[0]
+        # set a bit inside the reserved range (bits 22..27)
+        val corrupted = expected | (1 << 23)
+        val diffs = layout_compare(schema, [corrupted])
+        assert_equal(diffs.len(), 1)
+        assert_equal(diffs[0].status, "fail")
+        assert_true(diffs[0].failing_fields.contains("reserved"))
+
+    it "dont_care field never fails regardless of actual value":
+        val schema = WordLayout(
+            layout_id: "dont_care_fixture",
+            word_bits: 32,
+            word_count: 1,
+            byte_order: ByteOrder.big,
+            bit_order: BitOrder.lsb0,
+            fields: [
+                compare_field("kept", 0, 16, 0x1234, "checked field"),
+                dont_care_field_spec("scratch", 16, 16, "ignored field")
+            ],
+            word_label: "W",
+            first_word: 0,
+            source_ref: "synthetic",
+        )
+        val expected = layout_words(schema)[0]
+        # flip every bit in the dont_care field's range — must still pass
+        val actual = expected ^ 0xFFFF0000
+        val diffs = layout_compare(schema, [actual])
+        assert_equal(diffs.len(), 1)
+        assert_equal(diffs[0].status, "pass")
+
+    it "round-trips through SDN":
+        val schema = tcp_schema_layout()
+        val sdn_text = layout_to_sdn(schema)
+        val back = layout_from_sdn(sdn_text)
+        match back:
+            case Some(loaded):
+                assert_equal(loaded.layout_id, schema.layout_id)
+                assert_equal(loaded.word_bits, schema.word_bits)
+                assert_equal(loaded.fields.len(), schema.fields.len())
+                assert_equal(layout_words(loaded)[0], layout_words(schema)[0])
+            case None:
+                assert_true(false)

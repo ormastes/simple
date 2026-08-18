@@ -1,0 +1,299 @@
+# Declarative binary layout schema — the GENERATION half of goal 4 (design:
+# doc/05_design/infra/sspec/binary_reference_stacked_design.md).
+#
+# `binary_layout.spl` already gives a mask-aware comparator (`compare_word`)
+# and a stacked-figure renderer (`stacked_compare_rows`) — but every caller
+# so far hand-builds the expected words AND repeats the field policy as a
+# separate `[ComparePolicy]` list next to it. This module lets a layout be
+# declared ONCE, as named fields with a global bit offset/width and a single
+# per-field policy (`compare` / `dont_care` / `reserved`), and generates the
+# expected words, the compare masks, and the labeled diff rows from that one
+# declaration — it never invents a second comparator or table model, it only
+# drives `compare_word` / `stacked_compare_rows` per word.
+#
+# Guide: doc/05_design/infra/sspec/binary_reference_stacked_design.md
+# Research: doc/01_research/infra/sspec_binary/binary_sspec_rt_hardening_frozen_design_2026-08-18.md
+
+use std.common.spec.evidence.format.binary_layout.{
+    BinaryLayout, BinaryFieldSpec, ByteOrder, BitOrder,
+    binary_field, reserved_field, byte_order_name, bit_order_name,
+    ComparePolicy, policy_dont_care, compare_word, WordDiff,
+    stacked_compare_rows, field_extract, field_insert
+}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+# ---------------------------------------------------------------------------
+# Field policy
+# ---------------------------------------------------------------------------
+
+pub enum FieldPolicy:
+    compare       # checked exactly against expected_value
+    dont_care     # contributes no bits to the compare mask
+    reserved      # always checked against 0, regardless of expected_value
+
+pub fn field_policy_name(p: FieldPolicy) -> text:
+    match p:
+        case FieldPolicy.compare: "compare"
+        case FieldPolicy.dont_care: "dont_care"
+        case FieldPolicy.reserved: "reserved"
+
+pub fn field_policy_from_name(name: text) -> FieldPolicy:
+    match name:
+        case "dont_care": FieldPolicy.dont_care
+        case "reserved": FieldPolicy.reserved
+        case _: FieldPolicy.compare
+
+# `bit_offset` is a GLOBAL offset from bit 0 of word 0 (not word-local), so a
+# layout spanning several words is still one flat field list.
+pub struct LayoutFieldSpec:
+    name: text
+    bit_offset: i64
+    bit_width: i64
+    policy: FieldPolicy
+    expected_value: i64
+    description: text
+
+pub fn compare_field(name: text, bit_offset: i64, bit_width: i64, expected_value: i64, description: text) -> LayoutFieldSpec:
+    LayoutFieldSpec(name: name, bit_offset: bit_offset, bit_width: bit_width, policy: FieldPolicy.compare, expected_value: expected_value, description: description)
+
+pub fn dont_care_field_spec(name: text, bit_offset: i64, bit_width: i64, description: text) -> LayoutFieldSpec:
+    LayoutFieldSpec(name: name, bit_offset: bit_offset, bit_width: bit_width, policy: FieldPolicy.dont_care, expected_value: 0, description: description)
+
+pub fn reserved_field_spec(name: text, bit_offset: i64, bit_width: i64) -> LayoutFieldSpec:
+    LayoutFieldSpec(name: name, bit_offset: bit_offset, bit_width: bit_width, policy: FieldPolicy.reserved, expected_value: 0, description: "reserved")
+
+# ---------------------------------------------------------------------------
+# Word layout — one declaration, many words
+# ---------------------------------------------------------------------------
+
+pub struct WordLayout:
+    layout_id: text
+    word_bits: i64
+    word_count: i64
+    byte_order: ByteOrder
+    bit_order: BitOrder
+    fields: [LayoutFieldSpec]
+    word_label: text
+    first_word: i64
+    source_ref: text
+
+# A field crossing a word boundary can't be packed into either word's local
+# `BinaryLayout`, so it is reported rather than silently truncated or split.
+pub fn layout_schema_errors(layout: WordLayout) -> [text]:
+    var errs: [text] = []
+    for field in layout.fields:
+        if field.bit_width <= 0:
+            errs.push("field " + field.name + " has non-positive width")
+            continue
+        val lo_word = field.bit_offset / layout.word_bits
+        val hi_word = (field.bit_offset + field.bit_width - 1) / layout.word_bits
+        if lo_word != hi_word:
+            errs.push("field " + field.name + " crosses a word boundary")
+        if field.bit_offset < 0 or field.bit_offset + field.bit_width > layout.word_bits * layout.word_count:
+            errs.push("field " + field.name + " exceeds the layout")
+    errs
+
+# ---------------------------------------------------------------------------
+# Per-word projection — the only place a `WordLayout` touches the existing
+# `BinaryLayout` / `compare_word` machinery, so mask/compare semantics can
+# never drift between the declarative schema and the hand-built path.
+# ---------------------------------------------------------------------------
+
+fn fields_in_word(layout: WordLayout, word_idx: i64) -> [LayoutFieldSpec]:
+    var out: [LayoutFieldSpec] = []
+    for field in layout.fields:
+        if field.bit_offset / layout.word_bits == word_idx:
+            out.push(field)
+    out
+
+fn word_binary_layout(layout: WordLayout, word_idx: i64) -> BinaryLayout:
+    var specs: [BinaryFieldSpec] = []
+    for field in fields_in_word(layout, word_idx):
+        val local_lsb = field.bit_offset - word_idx * layout.word_bits
+        if field.policy == FieldPolicy.reserved:
+            specs.push(reserved_field(field.name, local_lsb, field.bit_width))
+        else:
+            specs.push(binary_field(field.name, local_lsb, field.bit_width, field.description))
+    BinaryLayout(
+        layout_id: layout.layout_id + "_w{word_idx}",
+        total_bits: layout.word_bits,
+        byte_order: layout.byte_order,
+        bit_order: layout.bit_order,
+        fields: specs,
+        source_ref: layout.source_ref,
+    )
+
+fn word_policies(layout: WordLayout) -> [ComparePolicy]:
+    var out: [ComparePolicy] = []
+    for field in layout.fields:
+        if field.policy == FieldPolicy.dont_care:
+            out.push(policy_dont_care(field.name))
+    out
+
+# ---------------------------------------------------------------------------
+# Generation: words / masks / compare / render — all derived from the one
+# `WordLayout` declaration, never hand-written alongside it.
+# ---------------------------------------------------------------------------
+
+# The packed expected value for each word, built by inserting every field's
+# `expected_value` at its local offset (reserved/dont_care fields insert 0).
+pub fn layout_words(layout: WordLayout) -> [i64]:
+    var words: [i64] = []
+    var w = 0
+    while w < layout.word_count:
+        var acc: i64 = 0
+        for field in fields_in_word(layout, w):
+            val local_lsb = field.bit_offset - w * layout.word_bits
+            val fv = if field.policy == FieldPolicy.compare: field.expected_value else: 0
+            acc = field_insert(acc, local_lsb, field.bit_width, fv)
+        words.push(acc)
+        w = w + 1
+    words
+
+# Compare masks per word — computed by running the SAME `compare_word` the
+# comparator uses (expected vs. itself, so delta is always 0) and reading off
+# `compare_mask`, so this can never disagree with what actually gets checked.
+pub fn layout_masks(layout: WordLayout) -> [i64]:
+    val expected = layout_words(layout)
+    val policies = word_policies(layout)
+    var masks: [i64] = []
+    var w = 0
+    while w < layout.word_count:
+        val bl = word_binary_layout(layout, w)
+        val d = compare_word(expected[w], expected[w], bl, policies)
+        masks.push(d.compare_mask)
+        w = w + 1
+    masks
+
+# One `WordDiff` per word, delegating to `compare_word` per word.
+pub fn layout_compare(layout: WordLayout, actual_words: [i64]) -> [WordDiff]:
+    val expected = layout_words(layout)
+    val policies = word_policies(layout)
+    var diffs: [WordDiff] = []
+    var w = 0
+    while w < layout.word_count:
+        val bl = word_binary_layout(layout, w)
+        diffs.push(compare_word(expected[w], actual_words[w], bl, policies))
+        w = w + 1
+    diffs
+
+# Stacked reference rows (design's default view) with field-labeled diffs —
+# one call to `stacked_compare_rows` per word, since each word carries its
+# own local `BinaryLayout` (fields don't span words).
+pub fn layout_render(layout: WordLayout, actual_words: [i64]) -> [text]:
+    val diffs = layout_compare(layout, actual_words)
+    var rows: [text] = []
+    var w = 0
+    while w < layout.word_count:
+        val bl = word_binary_layout(layout, w)
+        val word_rows = stacked_compare_rows([diffs[w]], bl, layout.word_label, layout.first_word + w)
+        for r in word_rows:
+            rows.push(r)
+        w = w + 1
+    rows
+
+# ---------------------------------------------------------------------------
+# SDN round-trip — reuses the real SDN parser/encoder (`std.common.sdn.*`);
+# no parallel text format is invented here.
+# ---------------------------------------------------------------------------
+
+fn field_to_sdn(field: LayoutFieldSpec) -> SdnValue:
+    SdnValue.Dict({
+        "name": SdnValue.String(field.name),
+        "bit_offset": SdnValue.Int(field.bit_offset),
+        "bit_width": SdnValue.Int(field.bit_width),
+        "policy": SdnValue.String(field_policy_name(field.policy)),
+        "expected_value": SdnValue.Int(field.expected_value),
+        "description": SdnValue.String(field.description),
+    })
+
+pub fn layout_to_sdn(layout: WordLayout) -> text:
+    var field_values: [SdnValue] = []
+    for field in layout.fields:
+        field_values.push(field_to_sdn(field))
+    val doc = SdnValue.Dict({
+        "layout_id": SdnValue.String(layout.layout_id),
+        "word_bits": SdnValue.Int(layout.word_bits),
+        "word_count": SdnValue.Int(layout.word_count),
+        "byte_order": SdnValue.String(byte_order_name(layout.byte_order)),
+        "bit_order": SdnValue.String(bit_order_name(layout.bit_order)),
+        "word_label": SdnValue.String(layout.word_label),
+        "first_word": SdnValue.Int(layout.first_word),
+        "source_ref": SdnValue.String(layout.source_ref),
+        "fields": SdnValue.Array(field_values),
+    })
+    sdn_encode_canonical(doc)
+
+fn byte_order_from_name(name: text) -> ByteOrder:
+    match name:
+        case "little": ByteOrder.little
+        case "big": ByteOrder.big
+        case _: ByteOrder.unspecified
+
+fn bit_order_from_name(name: text) -> BitOrder:
+    match name:
+        case "lsb0": BitOrder.lsb0
+        case "msb0": BitOrder.msb0
+        case _: BitOrder.unspecified
+
+# `?.` chaining on `get_path(...)` results was measured to silently collapse
+# to `None` on this interpreter even when `get_path` succeeded (see
+# `layout_from_sdn` regression covered by the SDN-round-trip spec case) — so
+# every lookup here is a plain nested `match`, never `?.`.
+fn sdn_field_text(v: SdnValue, path: text, fallback: text) -> text:
+    match v.get_path(path):
+        case Some(x):
+            match x.as_str():
+                case Some(s): s
+                case None: fallback
+        case None: fallback
+
+fn sdn_field_int(v: SdnValue, path: text, fallback: i64) -> i64:
+    match v.get_path(path):
+        case Some(x):
+            match x.as_i64():
+                case Some(i): i
+                case None: fallback
+        case None: fallback
+
+fn field_from_sdn(v: SdnValue) -> LayoutFieldSpec:
+    val name = sdn_field_text(v, "name", "")
+    val bit_offset = sdn_field_int(v, "bit_offset", 0)
+    val bit_width = sdn_field_int(v, "bit_width", 0)
+    val policy = field_policy_from_name(sdn_field_text(v, "policy", "compare"))
+    val expected_value = sdn_field_int(v, "expected_value", 0)
+    val description = sdn_field_text(v, "description", "")
+    LayoutFieldSpec(name: name, bit_offset: bit_offset, bit_width: bit_width, policy: policy, expected_value: expected_value, description: description)
+
+# Returns `None` on parse failure — callers that need the reason should call
+# `parse_with_issues` themselves; this is the round-trip convenience path.
+pub fn layout_from_sdn(text_in: text) -> WordLayout?:
+    match parse_with_issues(text_in):
+        case Err(_):
+            None
+        case Ok(parsed):
+            val doc = parsed.0
+            var fields: [LayoutFieldSpec] = []
+            match doc.get_path("fields"):
+                case Some(fv):
+                    match fv.as_array():
+                        case Some(items):
+                            for item in items:
+                                fields.push(field_from_sdn(item))
+                        case None:
+                            pass_do_nothing
+                case None:
+                    pass_do_nothing
+            Some(WordLayout(
+                layout_id: sdn_field_text(doc, "layout_id", ""),
+                word_bits: sdn_field_int(doc, "word_bits", 0),
+                word_count: sdn_field_int(doc, "word_count", 0),
+                byte_order: byte_order_from_name(sdn_field_text(doc, "byte_order", "")),
+                bit_order: bit_order_from_name(sdn_field_text(doc, "bit_order", "")),
+                fields: fields,
+                word_label: sdn_field_text(doc, "word_label", ""),
+                first_word: sdn_field_int(doc, "first_word", 0),
+                source_ref: sdn_field_text(doc, "source_ref", ""),
+            ))
