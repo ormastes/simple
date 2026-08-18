@@ -70,3 +70,165 @@ because two unbuildable trees reached `main` on 2026-08-11 exactly that way.
   *invoking* tree, so the same commits can pass from one checkout and fail from
   another. Confirmed here that the FAIL reproduces from BOTH the main tree and a
   clean `git worktree` at the origin tip, so this one is not worktree-specific.
+
+---
+
+# Update 2026-08-18 (lane NATIVEBUILD): root cause is an UNBOUNDED RSS LEAK, not a timeout
+
+## Verdict: SLOW-with-a-leak, not HUNG — and the kill is earlyoom, not the timer
+
+The worker makes continuous forward progress and never wedges. It is killed
+because it exhausts memory, long before any timeout fires. Both remedies named
+in the compiler's own error message (`raise --timeout`, `shrink --source`) are
+therefore not merely dead, they are **diagnosing the wrong resource**.
+
+## /proc evidence (attach-based profiling is blocked here; this is sampling only)
+
+Probe: a **2-line** hello-world, its own 1-file `--source` dir.
+
+```
+fun main():
+    print("hello")
+```
+
+Process tree (`bin/simple native-build` -> `timeout` -> the real worker):
+
+```
+1360710 S  rss=33076KB    bin/simple native-build ...          <- parent poller
+1360898 S  rss=2132KB     timeout --kill-after=10s 900s stdbuf -oL -eL ...
+1360905 S  rss=3965564KB  simple run src/app/cli/native_build_worker.spl  <- WORKER
+```
+
+Worker RSS trajectory, sampled every 10s — monotonic, no plateau, no GC:
+
+| t | RSS | CPU ticks (utime/stime) | state |
+|---|---|---|---|
+| 0s  | 4.77 GB | 7637 / 6592 | S |
+| 20s | 4.89 GB | 8236 / 6627 | S |
+| 40s | 4.95 GB | 8527 / 6645 | S |
+| 60s | 5.09 GB | 9159 / 6682 | S |
+| 80s | 5.18 GB | 9624 / 6706 | S |
+| **8m47s (final)** | **6.22 GB** | 13233 / 7165 | S |
+
+**6.2 GB and still climbing, for a two-line program.** Growth ~5-11 MB/s,
+utime climbing throughout: it is *executing*, not blocked. State is `S`/`R`,
+never `D`, and it never sits on one wchan.
+
+## Why this presents as rc=255 "timeout"
+
+`earlyoom` on this host is configured to **prefer killing `simple`**:
+
+```
+/usr/bin/earlyoom -r 3600 --prefer ^(simple|rustc|cc1|cc1plus|lto1|collect2|qemu-system|ld) ...
+```
+
+At probe time the box had 125 GB total / 107 GB used / **1 GB free**. A worker
+growing 5-11 MB/s reaches the ceiling in tens of minutes and is SIGTERMed.
+Per the evidence rule, note that **no `[TIMEOUT: Process killed after Ns]` line
+was ever emitted** by native-build in these runs — so the earlier rc=255 results
+attributed to the timer are more likely earlyoom kills. The 2-hour budget was
+never the binding constraint.
+
+## Secondary defect found in the parent: O(n^2) log relay
+
+The parent poller (`src/app/io/process_ops.spl`, `process_run_timeout_live`,
+~line 148 onward) polls on a sleep and **re-reads the whole stdout/stderr temp
+file on every poll** to relay newly-appended bytes. Sampled: main thread in
+`futex_wait_queue`, worker thread `simple-main` in `hrtimer_nanosleep`, with
+`syscr` +160 and `rchar` +1.08 MB per 20s while its own RSS stayed pinned at
+exactly 33076 KB. Harmless at small log sizes, quadratic on a long run. Not the
+blocker, but it is real and worth fixing separately.
+
+## Code path
+
+- Dispatch: `src/compiler_rust/driver/src/main.rs:168-178` — `native-build`
+  goes to the Rust in-process handler **only** if `SIMPLE_NATIVE_BUILD_RUST`
+  is set (`:168`) or the build is cross-target (`:176`). Otherwise it falls
+  through to the pure-Simple path.
+- Interpreted worker: `src/app/cli/native_build_worker.spl`, spawned as
+  `simple run <worker>.spl` — i.e. the **seed interpreter** interpreting a
+  program that imports the entire compiler + LLVM graph. That import graph, not
+  the user's input, is what allocates; this is why a 2-file `--source` behaves
+  identically to the full tree.
+- Misleading diagnostic text: `src/app/cli/native_build_main.spl:314-320`.
+  Note `:314` already anticipates the memory ceiling ("The interpreted worker's
+  RSS grows through parse/lowering; it hit the process ...") — the memory
+  branch exists, but the message that actually fires blames the timeout.
+- In-process backend: `src/compiler_rust/driver/src/cli/native_build.rs`
+  (`NativeProjectBuilder`, ~line 620) — runs in the current process, no
+  interpreted worker, no `simple run`.
+
+## The in-process route is VIABLE — proven
+
+The remedy needs **no code change**: the env-var route already exists at
+`main.rs:168`. Same probe, same flags:
+
+```
+env -u SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST=1 bin/simple native-build \
+  --source <probe> --entry-closure --entry <probe>/main.spl -o <out> --timeout 900
+RC=0  ELAPSED=50s
+  Time: 0.2s compile + 47.7s link = 47.9s total
+  Binary: probe2.bin (28 KB)
+Build complete: 1 compiled, 0 cached, 0 failed
+```
+
+**RC=0 in 50 seconds**, versus the interpreted worker never completing and
+reaching 6.2 GB. Compile is 0.2s; the 47.7s is all linker. Memory stays flat.
+
+## Recommendation
+
+Route host-target `native-build` through the in-process backend by default,
+inverting the condition at `main.rs:168` so the interpreted worker is opt-in
+rather than the default. For the immediate push blocker, exporting
+`SIMPLE_NATIVE_BUILD_RUST=1` around the control build in
+`scripts/check/check-native-extern-fabrication.shs` is sufficient (that script
+is owned by lane GUARD2 — not changed here).
+
+## Caveats — two separate pre-existing defects, NOT part of this bug
+
+1. The produced binary **segfaults**. The build emits
+   `error: runtime archive is STALE: build/simple-core/libsimple_runtime.a ...
+   refusing to link a stale archive`, then links anyway after
+   `Generating 3 stub functions for unresolved symbols` (`__cpu_indicator_init`,
+   `__cpu_model`, `fun`). A stale-archive error that does not stop the link, and
+   a stub named `fun`, are both independently suspicious. So the in-process
+   route makes the guard's control fixture *build*; whether the guard also needs
+   it to *run* must be checked before declaring the blocker cleared.
+2. At the time of writing **15 other `native_build_worker.spl` processes** from
+   other lanes were live on this host, all leaking on the same path. This is a
+   host-wide memory drain, not one lane's problem.
+
+## Status
+
+Push blocker: **still BLOCKED** as filed, but the cause is now identified and a
+proven, zero-code-change workaround exists. No code changed by this lane —
+the fix belongs in the dispatch default (`main.rs:168`) and/or the guard script,
+and the leak itself in the interpreted worker remains OPEN and unfixed.
+
+## 2026-08-18 — the execution-mode theory is dead; both engines hit the same ~12.5 GB ceiling
+
+A recurring proposal for this blocker is "stop forcing the tree-walking
+interpreter" (`src/app/cli/native_build_main.spl:272-273` sets
+`SIMPLE_EXECUTION_MODE=interpret` when unset, with no justification at the call
+site). **Measured, and it does not help.** Identical 3-line fixture, identical
+command except the mode (`SIMPLE_NATIVE_BUILD_WORKER=1 ... bin/simple run
+src/app/cli/native_build_worker.spl --entry tiny.spl`, `ulimit -v 27000000`,
+`timeout 600`, `/usr/bin/time -v`):
+
+| mode | peak RSS | wall | outcome |
+|---|---|---|---|
+| interpret | 12,577,548 KB (12.58 GB) | 4:45.49 | RC=134 abort, no binary |
+| jit | 12,523,856 KB (12.52 GB) | 6:54.43 | RC=134 abort, no binary |
+
+Both die at `[build] parse 0/1 step 1/6`. Same ceiling within 0.5%; JIT is ~45%
+SLOWER. The failure is therefore **not** an interpreter defect and **not** a JIT
+defect — it is retention during module loading (737 modules loaded once each,
+~17 MB retained per module, ~400x on-disk size). The default was deliberately
+left unchanged: switching it would trade nothing for worse wall time.
+
+Corroborating datapoint at full scale, same day: the direct-seed
+`--entry-closure` build of `bootstrap_main.spl` was SIGTERMed (RC=143) at
+10:46 wall with earlyoom naming it explicitly (`"simple": badness 1014,
+VmRSS 9164 MiB`), well inside a 1800s bound — memory, not time. Detail:
+`doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md`
+(2026-08-18 section).
