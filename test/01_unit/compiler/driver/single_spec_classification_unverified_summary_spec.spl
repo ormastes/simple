@@ -1,0 +1,87 @@
+use std.spec
+use app.io.process_ops.{process_run_bounded}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# @req REQ-TEST-RUNNER-UNVERIFIED-SUMMARY
+#
+# Black-box guard over `src/app/test_runner_new/test_runner_single.spl`, the
+# path `bin/simple test <one_file.spl>` and every `--no-session-daemon` run
+# take. That path DOES apply the frozen six-class classification (it calls
+# `make_result_from_output` at test_runner_single.spl:1070), but until
+# 2026-08-18 its human-facing summary still printed the literal word `PASS`
+# for a TIMEOUT/TERMINATED run, because those classes carry `failed: 0` by
+# contract and the summary branched on `failed == 0` alone. The exit code was
+# already 2; the line every session pastes as evidence said PASS.
+#
+# Two examples, deliberately opposite:
+#   1. a child that never finishes must print UNVERIFIED, never PASS (this
+#      example FAILS before the fix and passes after)
+#   2. a genuinely passing child must still print PASS (boundary guard: the
+#      fix must not turn ordinary greens into UNVERIFIED)
+
+# @timeout 900
+
+val SIMPLE_BIN = "bin/simple"
+
+fn write_temp_spec(path: text, body: text) -> bool:
+    rt_file_write_text(path, body)
+
+fn run_single(spec_path: text, budget_secs: i64) -> (text, i64):
+    """Run the single-spec runner out-of-process and return (stdout, rc).
+
+    `--no-session-daemon` forces the test_runner_single.spl path. `--timeout`
+    budgets the CHILD only; setting SIMPLE_TIMEOUT_SECONDS instead would also
+    budget the PARENT, which kills the runner before it can classify anything.
+    """
+    val (stdout, stderr, code) = process_run_bounded(
+        SIMPLE_BIN,
+        ["test", "--no-session-daemon", "--timeout", "{budget_secs}", spec_path],
+        (budget_secs + 240) * 1000,
+        4000000)
+    (stdout + "\n" + stderr, code)
+
+fn last_verdict_word(output: text) -> text:
+    """The runner's final PASS/FAIL/UNVERIFIED banner line, as a bare word.
+
+    Scanned rather than grepped for a substring: the word PASS appears in
+    hundreds of lint/warning lines this runner emits before its summary, so a
+    plain `.contains("PASS")` is not an oracle at all.
+    """
+    var found = "NONE"
+    for line in output.split("\n"):
+        val t = line.trim()
+        if t.starts_with("UNVERIFIED "):
+            found = "UNVERIFIED"
+        elif t.starts_with("PASS "):
+            found = "PASS"
+        elif t.starts_with("FAIL "):
+            found = "FAIL"
+    found
+
+describe "single-spec runner classifies an unverified child in its summary":
+
+    it "prints UNVERIFIED, not PASS, when the child is killed at its budget":
+        """A spec that never terminates produces no verified result. The
+        summary must say so in words, not print PASS with a 0-total tally."""
+        val p = "/tmp/single_spec_classification_hang_spec.spl"
+        assert_true(write_temp_spec(p, "use std.spec\n\ndescribe \"hang\":\n    it \"never finishes\":\n        var i = 0\n        while true:\n            i = i + 1\n"))
+        val (out, rc) = run_single(p, 10)
+        # Non-vacuity: if the runner produced no banner at all, the assertions
+        # below would be comparing NONE to PASS and passing for the wrong
+        # reason. Require that a summary was actually reached.
+        assert_true(out.contains("Results:"))
+        assert_equal(last_verdict_word(out), "UNVERIFIED")
+        # Exit code 2 is the pre-existing contract for an unverified run; it
+        # must remain distinct from both 0 (green) and 1 (real failure).
+        assert_equal(rc, 2)
+
+    it "still prints PASS for a spec that genuinely passes":
+        """Boundary guard: the UNVERIFIED branch must fire only on the
+        TIMEOUT/TERMINATED classes, never on an ordinary green run."""
+        val p = "/tmp/single_spec_classification_ok_spec.spl"
+        assert_true(write_temp_spec(p, "use std.spec\n\ndescribe \"ok\":\n    it \"adds\":\n        expect(1 + 1).to_equal(2)\n"))
+        val (out, rc) = run_single(p, 120)
+        assert_true(out.contains("Results:"))
+        assert_equal(last_verdict_word(out), "PASS")
+        assert_equal(rc, 0)
