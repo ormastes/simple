@@ -1,0 +1,62 @@
+# Source-comment doctest extraction (.spl) — lane SRCDOC
+#
+# Covers: docstring `sdoctest:` blocks, comment-prefixed fences, the
+# must-NOT-match negatives from doc/09_report/doctest_extractor_miss_audit_2026-08-18.md,
+# and .md non-regression.
+
+use std.test_runner.sdoctest.extractor.{extract_spl_blocks_from_content, extract_blocks_from_content}
+use std.test_runner.sdoctest.discovery.{sdoctest_file_eligible}
+
+describe "sdoctest .spl source extraction":
+
+    it "extracts a docstring sdoctest: block":
+        val src = "fn f() -> bool:\n    \"\"\"Doc.\n\n    sdoctest:\n        expect(f()).to_equal(true)\n        expect(1).to_equal(1)\n    \"\"\"\n    true\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 1)
+        assert_equal(blocks[0].code, "expect(f()).to_equal(true)\nexpect(1).to_equal(1)")
+        assert_equal(blocks[0].language, "simple")
+
+    it "extracts a comment-prefixed simple fence":
+        val src = "# ```simple\n# val x = 1\n# print x\n# ```\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 1)
+        assert_equal(blocks[0].code, "val x = 1\nprint x")
+        assert_equal(blocks[0].language, "simple")
+
+    it "preserves nested comment markers inside a fence body":
+        val src = "# ```simple\n# val o = g()\n# # Expect: true\n# ```\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 1)
+        assert_equal(blocks[0].code, "val o = g()\n# Expect: true")
+
+    it "does NOT match a struct field named sdoctest:":
+        val src = "struct Args:\n    sdoctest: bool\n    sdoctest_env: text\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 0)
+
+    it "does NOT match a >>> ASCII banner in a comment":
+        val src = "# >>> RENDER LANE <<<\n# >>> phase 2 <<<\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 0)
+
+    it "does NOT match an unclosed comment fence":
+        val src = "# ```simple\n# val x = 1\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 0)
+
+    it "does NOT emit an empty docstring sdoctest: block":
+        val src = "fn f():\n    \"\"\"Doc.\n\n    sdoctest:\n    \"\"\"\n    0\n"
+        val blocks = extract_spl_blocks_from_content(content: src, file_path: "x.spl")
+        assert_equal(blocks.len(), 0)
+
+    it "keeps markdown extraction unchanged":
+        val md = "text\n\n```simple\nval a = 1\n```\n\nmore\n\n```simple:skip\nval b = 2\n```\n"
+        val blocks = extract_blocks_from_content(content: md, file_path: "x.md")
+        assert_equal(blocks.len(), 2)
+        assert_equal(blocks[0].code, "val a = 1")
+        assert_equal(blocks[1].code, "val b = 2")
+
+    it "gates .spl discovery behind the opt-in flag":
+        assert_true(sdoctest_file_eligible("a/b.md", false))
+        assert_false(sdoctest_file_eligible("a/b.spl", false))
+        assert_true(sdoctest_file_eligible("a/b.spl", true))

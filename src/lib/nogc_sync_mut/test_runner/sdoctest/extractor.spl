@@ -17,6 +17,10 @@ fn extract_sdoctest_blocks(file_path: text) -> [SdoctestBlock]:
     val content = file_read(file_path) ?? ""
     if content == "":
         return []
+    # Source files (.spl) use the comment/docstring extractor. Markdown keeps
+    # the original fence extractor byte-for-byte.
+    if file_path.ends_with(".spl"):
+        return extract_spl_blocks_from_content(content: content, file_path: file_path)
     extract_blocks_from_content(content: content, file_path: file_path)
 
 fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock]:
@@ -310,3 +314,168 @@ fn line_indent_count(line: text) -> i64:
 # =========================================================================
 # Exports
 # =========================================================================
+
+# =========================================================================
+# Source-comment (.spl) Extraction
+# =========================================================================
+#
+# Two documented forms that the markdown extractor cannot see, because a
+# comment prefix defeats the raw-line fence test at line 80:
+#
+#   1. docstring block:   a line whose trimmed text is exactly `sdoctest:`
+#      inside a `\"\"\"` docstring; body is the more-indented lines below it.
+#   2. comment fence:     a `#` / `##` / `///` prefixed ` ``` simple` fence,
+#      closed by a same-prefixed bare fence.
+#
+# Deliberate non-matches (see doc/09_report/doctest_extractor_miss_audit_2026-08-18.md):
+#   - struct fields named `sdoctest:` (they carry a value, and are not in a docstring)
+#   - `>>> BANNER <<<` ASCII art in comments (comment `>>>` prompts are not a form)
+#   - unclosed comment fences and empty bodies (dropped, as in markdown)
+
+fn extract_spl_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock]:
+    val lines = content.split("\n")
+    var blocks: [SdoctestBlock] = []
+    var i = 0
+    var in_doc = false
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # ---- form 1: docstring `sdoctest:` block ----
+        if in_doc and trimmed == "sdoctest:":
+            val marker_indent = line_indent_count(line)
+            var body: [text] = []
+            var base_indent = -1
+            var j = i + 1
+            while j < lines.len():
+                val bl = lines[j]
+                val bt = bl.trim()
+                if bt == "":
+                    body.push("")
+                    j = j + 1
+                    continue
+                if bt.contains("\"\"\""):
+                    break
+                val ind = line_indent_count(bl)
+                if ind <= marker_indent:
+                    break
+                if base_indent < 0:
+                    base_indent = ind
+                body.push(dedent_line(bl, base_indent))
+                j = j + 1
+            val cleaned = drop_trailing_blanks(body)
+            if cleaned.len() > 0:
+                blocks.push(SdoctestBlock(
+                    source_file: file_path,
+                    line_number: i + 2,
+                    code: cleaned.join("\n"),
+                    language: "simple",
+                    modifiers: []
+                ))
+            i = j
+            continue
+
+        # ---- form 2: comment-prefixed fence ----
+        val marker = comment_marker(trimmed)
+        if marker != "":
+            val body_text = strip_comment_marker(trimmed, marker)
+            if body_text.starts_with("```simple") or body_text.starts_with("```spl") or body_text.starts_with("```sdoctest"):
+                val fence_info = parse_fence_line(body_text)
+                val lang = fence_info.0
+                val mods = fence_info.1
+                var code_lines: [text] = []
+                var closed = false
+                var k = i + 1
+                while k < lines.len():
+                    val cl = lines[k]
+                    val ct = cl.trim()
+                    val cm = comment_marker(ct)
+                    if cm != marker:
+                        break
+                    val cb = strip_comment_marker(ct, marker)
+                    if cb.trim() == "```":
+                        closed = true
+                        break
+                    code_lines.push(cb)
+                    k = k + 1
+                if closed:
+                    var final_lines = code_lines
+                    if lang == "sdoctest":
+                        final_lines = strip_doctest_prompts(code_lines)
+                    val cleaned2 = drop_trailing_blanks(final_lines)
+                    if cleaned2.len() > 0:
+                        blocks.push(SdoctestBlock(
+                            source_file: file_path,
+                            line_number: i + 2,
+                            code: cleaned2.join("\n"),
+                            language: lang,
+                            modifiers: mods
+                        ))
+                    i = k + 1
+                    continue
+                # unclosed fence: drop it and resume scanning after the opener
+                i = i + 1
+                continue
+
+        # ---- docstring tracking (after the checks above) ----
+        if count_occurrences(line, "\"\"\"") % 2 == 1:
+            in_doc = not in_doc
+
+        i = i + 1
+
+    blocks
+
+fn comment_marker(trimmed: text) -> text:
+    if trimmed.starts_with("///"):
+        return "///"
+    if not trimmed.starts_with("#"):
+        return ""
+    var n = 0
+    while n < trimmed.len() and trimmed[n:n + 1] == "#":
+        n = n + 1
+    trimmed[0:n]
+
+fn strip_comment_marker(trimmed: text, marker: text) -> text:
+    var r = trimmed[marker.len():]
+    if r.starts_with(" "):
+        r = r[1:]
+    r
+
+fn dedent_line(line: text, base_indent: i64) -> text:
+    var n = 0
+    var i = 0
+    while i < line.len() and n < base_indent:
+        val ch = line[i:i + 1]
+        if ch == " ":
+            n = n + 1
+        elif ch == "\t":
+            n = n + 4
+        else:
+            break
+        i = i + 1
+    line[i:]
+
+fn drop_trailing_blanks(lines: [text]) -> [text]:
+    var last = -1
+    var i = 0
+    while i < lines.len():
+        if lines[i].trim() != "":
+            last = i
+        i = i + 1
+    if last < 0:
+        return []
+    lines[0:last + 1]
+
+fn count_occurrences(s: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    var count = 0
+    var i = 0
+    while i + needle.len() <= s.len():
+        if s[i:i + needle.len()] == needle:
+            count = count + 1
+            i = i + needle.len()
+        else:
+            i = i + 1
+    count
