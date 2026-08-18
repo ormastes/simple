@@ -1,0 +1,82 @@
+# Pins the per-path default for unstable mode, as OBSERVED end to end in
+# lane BOOTDEFAULT (2026-08-17):
+#
+#   case                                   observed "Unstable mode:" line
+#   (a) no env, no flag                 -> OFF (interactive default)
+#   (b) SIMPLE_BOOTSTRAP=1, no flag     -> ON  (bootstrap default)
+#   (c) SIMPLE_BOOTSTRAP=1 --no-unstable-> OFF (--no-unstable)
+#   (d) no env, --unstable              -> ON  (--unstable)
+#
+# The resolution has two halves and this spec pins BOTH, because either half
+# alone can silently break the requirement:
+#
+#  1. `parse_test_args` must record an explicit flag in the SECOND field
+#     (`unstable_mode_set`), not only in `unstable_mode` — otherwise
+#     `--no-unstable` under SIMPLE_BOOTSTRAP=1 is indistinguishable from "no
+#     flag given" and the bootstrap default silently wins (case (c)).
+#  2. `src/app/test_runner_new/test_runner_main.spl` must consult
+#     `unstable_mode_set` FIRST and only fall back to the SIMPLE_BOOTSTRAP
+#     marker, and must PRINT the resulting mode — a mode with no printed
+#     evidence cannot be verified by anyone.
+#
+# Half 2 is pinned by source assertions rather than by invoking the runner:
+# a single `bin/simple test` startup costs ~10 minutes on this host, so four
+# nested runner invocations are not a viable spec.
+
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.io_runtime.{read_file}
+
+# Mirror of the resolution rule in test_runner_main.spl (~line 192-204).
+fn resolve_unstable(unstable_mode: bool, unstable_mode_set: bool, bootstrap_env: text) -> bool:
+    if unstable_mode_set:
+        return unstable_mode
+    return bootstrap_env == "1"
+
+describe "unstable mode per-path default":
+    context "argument parsing records BOTH fields":
+        it "leaves both fields false when neither flag is given":
+            val options = parse_test_args(["--unit"])
+            expect(options.unstable_mode).to_equal(false)
+            expect(options.unstable_mode_set).to_equal(false)
+
+        it "records --unstable as an EXPLICIT true":
+            val options = parse_test_args(["--unstable"])
+            expect(options.unstable_mode).to_equal(true)
+            expect(options.unstable_mode_set).to_equal(true)
+
+        it "records --no-unstable as an EXPLICIT false, not as absence":
+            val options = parse_test_args(["--no-unstable"])
+            expect(options.unstable_mode).to_equal(false)
+            expect(options.unstable_mode_set).to_equal(true)
+
+    context "the four observed cases":
+        it "(a) no env, no flag -> OFF":
+            val o = parse_test_args(["--unit"])
+            expect(resolve_unstable(o.unstable_mode, o.unstable_mode_set, "")).to_equal(false)
+
+        it "(b) SIMPLE_BOOTSTRAP=1, no flag -> ON":
+            val o = parse_test_args(["--unit"])
+            expect(resolve_unstable(o.unstable_mode, o.unstable_mode_set, "1")).to_equal(true)
+
+        it "(c) SIMPLE_BOOTSTRAP=1 with --no-unstable -> OFF (override downward)":
+            val o = parse_test_args(["--no-unstable"])
+            expect(resolve_unstable(o.unstable_mode, o.unstable_mode_set, "1")).to_equal(false)
+
+        it "(d) no env, --unstable -> ON (override upward)":
+            val o = parse_test_args(["--unstable"])
+            expect(resolve_unstable(o.unstable_mode, o.unstable_mode_set, "")).to_equal(true)
+
+    context "the runner itself resolves and REPORTS the mode":
+        it "reads the bootstrap marker from SIMPLE_BOOTSTRAP":
+            val source = read_file("src/app/test_runner_new/test_runner_main.spl")
+            expect(source.contains("env_get(\"SIMPLE_BOOTSTRAP\")")).to_equal(true)
+
+        it "consults unstable_mode_set so an explicit flag beats the default":
+            val source = read_file("src/app/test_runner_new/test_runner_main.spl")
+            expect(source.contains("if options.unstable_mode_set:")).to_equal(true)
+
+        it "prints the resolved mode and its origin":
+            val source = read_file("src/app/test_runner_new/test_runner_main.spl")
+            # Split so this spec's own literal is not itself interpolated.
+            expect(source.contains("print \"Unstable mode: ")).to_equal(true)
+            expect(source.contains("unstable_state = if updated_options.unstable_mode")).to_equal(true)
