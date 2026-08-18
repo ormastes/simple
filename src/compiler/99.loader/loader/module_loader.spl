@@ -10,6 +10,11 @@
 # - Type inference (compiler_ctx.infer_types)
 # - Template instantiation (compiler_ctx.instantiate)
 # Benefits: No circular dependency, clean separation
+#
+# Cohesion split (2026-08-18): lazy service machinery (ensure_*/created/exec
+# allocation) lives in .module_loader_services; semantic-cache bookkeeping in
+# .module_loader_semantic. Both are re-exported here so this file remains the
+# public surface — zero consumer import changes.
 
 use ..loader.compiler_sffi.*
 use ..linker.obj_taker.*
@@ -31,6 +36,26 @@ use .resource_lifecycle.{
 use .smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
 use .smf_cache.{validated_smf_load}
 use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, LifecycleManager}
+
+export use .module_loader_services.{
+    moduleloader_ensure_compiler_ctx, moduleloader_ensure_obj_taker,
+    moduleloader_ensure_provider, moduleloader_ensure_jit,
+    moduleloader_ensure_loader_mapper, moduleloader_ensure_lifecycle,
+    moduleloader_compiler_ctx_created, moduleloader_obj_taker_created,
+    moduleloader_provider_created, moduleloader_jit_service_created,
+    moduleloader_loader_mapper_created, moduleloader_lifecycle_created,
+    moduleloader_any_heavy_service_created,
+    moduleloader_allocate_exec_module, moduleloader_allocate_exec_jit,
+    moduleloader_unmap_internal_symbols
+}
+export use .module_loader_semantic.{
+    moduleloader_record_semantic_export, moduleloader_record_semantic_dependency,
+    moduleloader_semantic_dependents, moduleloader_record_semantic_fingerprint,
+    moduleloader_record_dependency_semantic_fingerprint,
+    moduleloader_semantic_cache_is_fresh, moduleloader_semantic_dependents_of,
+    moduleloader_drop_semantic_cache_record,
+    text_array_contains, text_array_push_unique, text_array_intersects
+}
 
 # ============================================================================
 # Loaded Module
@@ -109,10 +134,11 @@ struct LazyModuleLoader:
     """Runtime module loader with JIT instantiation support."""
     # Lazy service cells (startup perf plan Phase D, 2026-08-17): heavy
     # services are NOT created at construction. Each lives at slot 0 of a
-    # single-entry Dict cell, created on first use by its ensure_* helper.
-    # Dict cells are used (not Option fields) because dict-element writes
-    # through a `self` parameter alias correctly in the interpreter, while
-    # scalar/Option field writes on a struct parameter are lost.
+    # single-entry Dict cell, created on first use by its ensure_* helper
+    # (see .module_loader_services). Dict cells are used (not Option fields)
+    # because dict-element writes through a `self` parameter alias correctly
+    # in the interpreter, while scalar/Option field writes on a struct
+    # parameter are lost.
     # Shared compiler context (SFFI handle)
     compiler_ctx_cell: Dict<i64, CompilerContext>
     # ObjTaker for extraction and instantiation
@@ -169,95 +195,6 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             semantic_exports: {},
             semantic_dependencies: {}
         )
-
-
-# ============================================================================
-# Lazy service creation (Phase D) — ensure_* helpers + created-state accessors
-# ============================================================================
-
-fn moduleloader_ensure_compiler_ctx(self: LazyModuleLoader) -> CompilerContext:
-    """Create the shared compiler SFFI context on first use."""
-    if not self.compiler_ctx_cell.has(0):
-        self.compiler_ctx_cell[0] = CompilerContext.create()
-    self.compiler_ctx_cell[0]
-
-fn moduleloader_ensure_obj_taker(self: LazyModuleLoader) -> ObjTaker:
-    """Create the ObjTaker (and its compiler context) on first use."""
-    if not self.obj_taker_cell.has(0):
-        val obj_taker_config = ObjTakerConfig(
-            enable_caching: self.config.enable_cache,
-            max_cache_size: self.config.max_cache_size,
-            verbose: self.config.verbose,
-            allow_deferred: true
-        )
-        val compiler_ctx = moduleloader_ensure_compiler_ctx(self)
-        self.obj_taker_cell[0] = ObjTaker.with_compiler_context(compiler_ctx, obj_taker_config)
-    self.obj_taker_cell[0]
-
-fn moduleloader_ensure_provider(self: LazyModuleLoader) -> ObjectProvider:
-    """Create the shared object provider on first use."""
-    if not self.provider_cell.has(0):
-        self.provider_cell[0] = ObjectProvider.new(ObjectProviderConfig(
-            search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
-            libraries: [],
-            enable_cache: self.config.enable_cache,
-            verbose: self.config.verbose,
-            prefer_backend: ""
-        ))
-    self.provider_cell[0]
-
-fn moduleloader_ensure_jit(self: LazyModuleLoader) -> JitInstantiator:
-    """Create the JIT instantiator (exec-mapper host) on first use.
-
-    enable_jit is carried into JitInstantiatorConfig.enabled exactly as the
-    eager constructor did — a disabled config still hosts the exec mapper for
-    module loading but never JIT-compiles (fail-closed, no silent enable).
-    """
-    if not self.jit_cell.has(0):
-        self.jit_cell[0] = JitInstantiator.new(JitInstantiatorConfig(
-            update_smf: false,
-            max_depth: 50,
-            enabled: self.config.enable_jit,
-            verbose: self.config.verbose
-        ))
-    self.jit_cell[0]
-
-fn moduleloader_ensure_loader_mapper(self: LazyModuleLoader) -> LoaderMapper:
-    """Create the loader exec-mapper policy wrapper on first use."""
-    if not self.loader_mapper_cell.has(0):
-        self.loader_mapper_cell[0] = LoaderMapper.new(LoaderMapperConfig(
-            allow_replace_on_reload: self.config.hot_reload
-        ))
-    self.loader_mapper_cell[0]
-
-fn moduleloader_ensure_lifecycle(self: LazyModuleLoader) -> ResourceLifecycleManager:
-    """Create the lifecycle manager (owns the SMF cache manager) on first use."""
-    if not self.lifecycle_cell.has(0):
-        val smf_cache_mgr = smfcachemanager_with_new_cache()
-        self.lifecycle_cell[0] = lifecycle_new(LifecycleConfig(verbose: self.config.verbose), smf_cache_mgr)
-    self.lifecycle_cell[0]
-
-fn moduleloader_compiler_ctx_created(self: LazyModuleLoader) -> bool:
-    self.compiler_ctx_cell.has(0)
-
-fn moduleloader_obj_taker_created(self: LazyModuleLoader) -> bool:
-    self.obj_taker_cell.has(0)
-
-fn moduleloader_provider_created(self: LazyModuleLoader) -> bool:
-    self.provider_cell.has(0)
-
-fn moduleloader_jit_service_created(self: LazyModuleLoader) -> bool:
-    self.jit_cell.has(0)
-
-fn moduleloader_loader_mapper_created(self: LazyModuleLoader) -> bool:
-    self.loader_mapper_cell.has(0)
-
-fn moduleloader_lifecycle_created(self: LazyModuleLoader) -> bool:
-    """True once the lifecycle manager (and its SMF cache manager) exists."""
-    self.lifecycle_cell.has(0)
-
-fn moduleloader_any_heavy_service_created(self: LazyModuleLoader) -> bool:
-    moduleloader_compiler_ctx_created(self) or moduleloader_obj_taker_created(self) or moduleloader_provider_created(self) or moduleloader_jit_service_created(self) or moduleloader_loader_mapper_created(self) or moduleloader_lifecycle_created(self)
 
 
 fn lazymoduleloader_with_defaults() -> LazyModuleLoader:
@@ -758,60 +695,8 @@ fn current_time() -> i64:
     rt_time_now_unix_micros()
 
 # ============================================================================
-# Internal helpers
+# Semantic invalidation + unload lifecycle
 # ============================================================================
-
-fn text_array_contains(items: [text], needle: text) -> bool:
-    for item in items:
-        if item == needle:
-            return true
-    false
-
-fn text_array_push_unique(items: [text], value: text) -> [text]:
-    if text_array_contains(items, value):
-        return items
-    items.push(value)
-
-fn text_array_intersects(left: [text], right: [text]) -> bool:
-    for item in left:
-        if text_array_contains(right, item):
-            return true
-    false
-
-fn moduleloader_record_semantic_export(self: LazyModuleLoader, path: text, key: text):
-    if not self.semantic_exports.has(path):
-        self.semantic_exports[path] = []
-    self.semantic_exports[path] = text_array_push_unique(self.semantic_exports[path], key)
-
-fn moduleloader_record_semantic_dependency(self: LazyModuleLoader, path: text, key: text):
-    if not self.semantic_dependencies.has(path):
-        self.semantic_dependencies[path] = []
-    self.semantic_dependencies[path] = text_array_push_unique(self.semantic_dependencies[path], key)
-
-fn moduleloader_semantic_dependents(self: LazyModuleLoader, changed_key: text) -> [text]:
-    var changed_keys: [text] = [changed_key]
-    var affected: [text] = []
-    var progressed = true
-    while progressed:
-        progressed = false
-        for path in self.modules.keys():
-            if text_array_contains(affected, path):
-                continue
-            val exports = if self.semantic_exports.has(path):
-                self.semantic_exports[path]
-            else:
-                []
-            val deps = if self.semantic_dependencies.has(path):
-                self.semantic_dependencies[path]
-            else:
-                []
-            if text_array_intersects(exports, changed_keys) or text_array_intersects(deps, changed_keys):
-                affected = text_array_push_unique(affected, path)
-                changed_keys = text_array_push_unique(changed_keys, path)
-                for exported_key in exports:
-                    changed_keys = text_array_push_unique(changed_keys, exported_key)
-                progressed = true
-    affected
 
 fn moduleloader_invalidate_semantic_change(self: LazyModuleLoader, changed_key: text) -> [text]:
     """Unload a changed semantic artifact and every transitive dependent.
@@ -895,98 +780,6 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     # 7. Remove module from cache.
     moduleloader_drop_semantic_cache_record(self, path)
     self.modules = self.modules.remove(path)
-
-fn moduleloader_record_semantic_fingerprint(self: LazyModuleLoader, path: text, fingerprint: text):
-    """Record the semantic/public-ABI/accessor fingerprint for a loaded artifact."""
-    self.semantic_fingerprints[path] = fingerprint
-
-fn moduleloader_record_dependency_semantic_fingerprint(self: LazyModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
-    """Record the dependency fingerprint that made a dependent artifact valid."""
-    var deps: Dict<text, text> = {}
-    if self.dependency_semantic_fingerprints.has(dependent_path):
-        deps = self.dependency_semantic_fingerprints[dependent_path]
-    deps[dependency_path] = fingerprint
-    self.dependency_semantic_fingerprints[dependent_path] = deps
-
-fn moduleloader_semantic_cache_is_fresh(self: LazyModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
-    """Fail-closed semantic cache validation for loader/JIT artifacts."""
-    if not self.semantic_fingerprints.has(path):
-        return false
-    if self.semantic_fingerprints[path] != current_fingerprint:
-        return false
-
-    if not self.dependency_semantic_fingerprints.has(path):
-        return current_dependencies.keys().len() == 0
-
-    val stored_deps = self.dependency_semantic_fingerprints[path]
-    if stored_deps.keys().len() != current_dependencies.keys().len():
-        return false
-
-    for dep_path in current_dependencies.keys():
-        if not stored_deps.has(dep_path):
-            return false
-        if stored_deps[dep_path] != current_dependencies[dep_path]:
-            return false
-    true
-
-fn moduleloader_semantic_dependents_of(self: LazyModuleLoader, changed_path: text) -> [text]:
-    """Return transitive semantic dependents, including dependency cycles."""
-    var affected: [text] = []
-    var changed_keys: [text] = [changed_path]
-    var progressed = true
-    while progressed:
-        progressed = false
-        for module_path in self.dependency_semantic_fingerprints.keys():
-            if affected.contains(module_path):
-                continue
-            val deps = self.dependency_semantic_fingerprints[module_path]
-            var depends_on_changed = false
-            for candidate in changed_keys:
-                if deps.has(candidate):
-                    depends_on_changed = true
-            if depends_on_changed:
-                affected = affected.push(module_path)
-                changed_keys = changed_keys.push(module_path)
-                progressed = true
-    affected
-
-fn moduleloader_drop_semantic_cache_record(self: LazyModuleLoader, path: text):
-    """Drop semantic cache metadata for one artifact."""
-    if self.semantic_fingerprints.has(path):
-        self.semantic_fingerprints = self.semantic_fingerprints.remove(path)
-    if self.dependency_semantic_fingerprints.has(path):
-        self.dependency_semantic_fingerprints = self.dependency_semantic_fingerprints.remove(path)
-
-fn moduleloader_allocate_exec_module(self: LazyModuleLoader, owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> i64:
-    """Allocate executable memory and copy code."""
-    val mapped = moduleloader_ensure_loader_mapper(self).map(moduleloader_ensure_jit(self).exec_mapper, owner_id, symbol, code, allow_replace)
-    match mapped:
-        case Ok(address):
-            address
-        case Err(map_error):
-            if self.config.verbose:
-                print "[loader] map_symbol failed for {symbol}: {map_error}"
-            0
-
-fn moduleloader_allocate_exec_jit(self: LazyModuleLoader, owner_id: text, symbol: text, code: [u8]) -> i64:
-    """Allocate executable memory for JIT fallback path via JIT mapper policy."""
-    val jit = moduleloader_ensure_jit(self)
-    val mapped = jit.jit_mapper.map(jit.exec_mapper, owner_id, symbol, code)
-    match mapped:
-        case Ok(address):
-            address
-        case Err(map_error):
-            if self.config.verbose:
-                print "[loader] jit map failed for {symbol}: {map_error}"
-            0
-
-fn moduleloader_unmap_internal_symbols(self: LazyModuleLoader, symbols: [text]):
-    """Best-effort cleanup for staged replacement symbols."""
-    if not moduleloader_jit_service_created(self):
-        return
-    val jit = moduleloader_ensure_jit(self)
-    for symbol in symbols:
-        _ = jit.exec_mapper.unmap_symbol(symbol)
 
 # ============================================================================
 # Validated Loading (checks backend/options match)
