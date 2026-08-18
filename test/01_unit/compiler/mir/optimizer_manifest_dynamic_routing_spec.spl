@@ -142,6 +142,66 @@ describe "Optimizer manifest dynamic entry_symbol routing":
                 expect(msg).to_contain("orphan_pass")
                 expect(msg).to_contain("(none)")
 
+    it "two registered symbols both resolve and route":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dce_v1", PassKind.DeadCodeElimination)
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_cf_v1", PassKind.ConstantFolding)
+        val desc_a = make_dynamic_descriptor("dyn_dce", "spl_opt_dce_v1")
+        val desc_b = make_dynamic_descriptor("dyn_cf", "spl_opt_cf_v1")
+        val resolved_a = optimizer_plugin_resolve_dynamic_descriptor(registry, desc_a, OptLevel.Speed)
+        match resolved_a:
+            case Ok(plugin):
+                val run_r = optimizer_plugin_run_on_function(plugin, make_probe_function())
+                match run_r:
+                    case Ok(f):
+                        expect(f.name).to_equal("probe_fn")
+                    case Err(msg):
+                        assert_true(false)
+            case Err(msg):
+                assert_true(false)
+        val resolved_b = optimizer_plugin_resolve_dynamic_descriptor(registry, desc_b, OptLevel.Speed)
+        match resolved_b:
+            case Ok(plugin):
+                val run_r = optimizer_plugin_run_on_module(plugin, make_probe_module())
+                match run_r:
+                    case Ok(m):
+                        expect(m.name).to_equal("probe_module")
+                    case Err(msg):
+                        assert_true(false)
+            case Err(msg):
+                assert_true(false)
+
+    it "unknown entry_symbol error lists all registered symbols":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dce_v1", PassKind.DeadCodeElimination)
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_cf_v1", PassKind.ConstantFolding)
+        val desc = make_dynamic_descriptor("mystery_pass", "spl_opt_missing_v1")
+        val resolved = optimizer_plugin_resolve_dynamic_descriptor(registry, desc, OptLevel.Speed)
+        match resolved:
+            case Ok(plugin):
+                assert_true(false)
+            case Err(msg):
+                expect(msg).to_contain("spl_opt_dce_v1")
+                expect(msg).to_contain("spl_opt_cf_v1")
+
+    it "re-registering the same symbol keeps the first binding (lookup is first-match)":
+        var registry = dynamic_entry_symbol_registry_new()
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dup_v1", PassKind.DeadCodeElimination)
+        registry = dynamic_entry_symbol_registry_register(registry, "spl_opt_dup_v1", PassKind.ConstantFolding)
+        val found = dynamic_entry_symbol_registry_lookup(registry, "spl_opt_dup_v1")
+        match found:
+            case Some(kind):
+                match kind:
+                    case DeadCodeElimination:
+                        assert_true(true)
+                    case _:
+                        assert_true(false)
+            case nil:
+                assert_true(false)
+        # Both duplicate entries are reported in the symbol list
+        val symbols = dynamic_entry_symbol_registry_symbols(registry)
+        expect(symbols.len()).to_equal(2)
+
     it "existing static MIR plugin routing is untouched":
         val plugin = optimizer_plugin_mir(
             "dce", ["dead_code_elimination"],
