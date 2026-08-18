@@ -70,6 +70,13 @@ class MirInterpreter:
     # resolved (name, function). Invalidated by set_function_table.
     cached_call_name: text
     cached_call_fn: MirFunction?
+    # Perf (frame pool): bounded reuse of INNER-call frame dicts only. The
+    # top-level locals/blocks set up by execute_function are never pooled --
+    # complex-const behavior relies on top-level locals persisting across
+    # execute_function calls on one instance. Dicts are cleared ON REUSE
+    # (in _take_*) so no value can leak between sibling or successive calls.
+    frame_locals_pool: [{i64: i64}]
+    frame_blocks_pool: [{i64: MirBlock}]
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -101,7 +108,9 @@ impl MirInterpreter:
             error_frames: [],
             debug_enabled: dbg,
             cached_call_name: "",
-            cached_call_fn: nil
+            cached_call_fn: nil,
+            frame_locals_pool: [],
+            frame_blocks_pool: []
         )
 
     fn is_debug_log_enabled() -> bool:
@@ -700,6 +709,36 @@ impl MirInterpreter:
     # Call Support
     # ========================================================================
 
+    me _take_frame_locals() -> {i64: i64}:
+        """Take a locals dict for an inner call frame: pooled (cleared) or fresh."""
+        val n = self.frame_locals_pool.len()
+        if n == 0:
+            return {}
+        var d = self.frame_locals_pool[n - 1]
+        self.frame_locals_pool.pop()
+        # Clear-on-reuse: without this, a previous callee's locals leak into
+        # the next call (undefined locals must stay fail-closed at -1).
+        d.clear()
+        d
+
+    me _take_frame_blocks() -> {i64: MirBlock}:
+        """Take a blocks dict for an inner call frame: pooled (cleared) or fresh."""
+        val n = self.frame_blocks_pool.len()
+        if n == 0:
+            return {}
+        var d = self.frame_blocks_pool[n - 1]
+        self.frame_blocks_pool.pop()
+        d.clear()
+        d
+
+    me _release_frame_dicts(locals_dict: {i64: i64}, blocks_dict: {i64: MirBlock}):
+        """Return a finished inner frame's dicts to the bounded pool (max 8 each).
+        Pool exhaustion is safe: over-limit dicts are simply dropped."""
+        if self.frame_locals_pool.len() < 8:
+            self.frame_locals_pool.push(locals_dict)
+        if self.frame_blocks_pool.len() < 8:
+            self.frame_blocks_pool.push(blocks_dict)
+
     me _call_function(callee: MirFunction, args: [MirOperand]) -> (i64?, InterpError?):
         """Call a function by saving state, executing, and restoring."""
         # Evaluate arguments before saving state
@@ -721,9 +760,9 @@ impl MirInterpreter:
         self.call_stack.push(frame)
         self.current_function = callee.name
 
-        # Set up fresh state for callee
-        self.locals = {}
-        self.blocks = {}
+        # Set up fresh state for callee (pooled dicts, cleared on reuse)
+        self.locals = self._take_frame_locals()
+        self.blocks = self._take_frame_blocks()
         self.has_returned = false
         self.return_value = nil
         self.previous_block = nil
@@ -799,6 +838,10 @@ impl MirInterpreter:
         """Pop the top frame from call stack and restore state."""
         val stack_len = self.call_stack.len()
         if stack_len > 0:
+            # Recycle the finished callee's dicts (self.locals/self.blocks are
+            # the callee's here; the caller's are restored from the frame below,
+            # so top-level execute_function state is never pooled).
+            self._release_frame_dicts(self.locals, self.blocks)
             val frame = self.call_stack[stack_len - 1]
             self.current_function = frame.function_name
             self.locals = frame.locals

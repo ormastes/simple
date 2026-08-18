@@ -123,6 +123,39 @@ fn hp_call_loop_fn(n: i64) -> MirFunction:
     val b3 = hp_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(1)))))
     hp_fn("call_loop", locals, [b0, b1, b2, b3])
 
+# writer() sets its local 5 to 99 -- used to try to poison a reused pooled frame
+fn hp_writer_fn() -> MirFunction:
+    val locals = [hp_local(5, LocalKind.Var)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.Const(hp_lid(5), MirConstValue.Int(99), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_const_int(1))))
+    hp_fn("writer", locals, [b0])
+
+# reader() does NOT declare local 5 but reads it -- must see fail-closed -1,
+# never a stale 99 left by writer() in a reused pooled frame
+fn hp_reader_fn() -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Temp)]
+    val b0 = hp_blk(0, [], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(5)))))
+    hp_fn("reader", locals, [b0])
+
+# caller: call writer(), then return reader()
+fn hp_sibling_calls_fn() -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Var), hp_local(1, LocalKind.Var)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.Call(Some(hp_lid(0)), hp_str_operand("writer"), [])),
+        hp_inst(MirInstKind.Call(Some(hp_lid(1)), hp_str_operand("reader"), []))
+    ], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(1)))))
+    hp_fn("sibling_calls", locals, [b0])
+
+# chain link: name(a) = next(a) + 1
+fn hp_chain_link_fn(name: text, next: text) -> MirFunction:
+    val locals = [hp_local(0, LocalKind.Arg(0)), hp_local(1, LocalKind.Var), hp_local(2, LocalKind.Temp)]
+    val b0 = hp_blk(0, [
+        hp_inst(MirInstKind.Call(Some(hp_lid(1)), hp_str_operand(next), [mir_operand_copy(hp_lid(0))])),
+        hp_inst(MirInstKind.BinOp(hp_lid(2), MirBinOp.Add, mir_operand_copy(hp_lid(1)), mir_operand_const_int(1)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(hp_lid(2)))))
+    hp_fn(name, locals, [b0])
+
 describe "MIR interpreter hot path (Phase D slice)":
     it "arith: (7 + 5) * 3 - 4 == 32":
         var interp = MirInterpreter.create()
@@ -166,6 +199,48 @@ describe "MIR interpreter hot path (Phase D slice)":
         val warm = interp.execute_function(hp_call_loop_fn(4))
         expect(cold[0] ?? -1).to_equal(4)
         expect(warm[0] ?? -1).to_equal(4)
+
+    it "frame pool: no value leakage between sibling calls (fail-closed -1)":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["writer"] = hp_writer_fn()
+        table["reader"] = hp_reader_fn()
+        interp.set_function_table(table)
+        # writer() poisons local 5 with 99 in its (soon pooled) frame; reader()
+        # reuses that pooled frame but never declares local 5 -- a missing
+        # clear-on-reuse would surface 99 here instead of fail-closed -1.
+        val res = interp.execute_function(hp_sibling_calls_fn())
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -777).to_equal(-1)
+
+    it "frame pool: deep call chain returns correct depth twice (reuse-safe)":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["add1"] = hp_callee_fn()
+        table["c2"] = hp_chain_link_fn("c2", "add1")
+        table["c1"] = hp_chain_link_fn("c1", "c2")
+        table["c0"] = hp_chain_link_fn("c0", "c1")
+        interp.set_function_table(table)
+        val caller = hp_chain_link_fn("root", "c0")
+        val first = interp.execute_function(caller)
+        val second = interp.execute_function(caller)
+        expect(first[1]).to_be_nil()
+        expect(first[0] ?? -1).to_equal(5)
+        expect(second[0] ?? -1).to_equal(5)
+
+    it "frame pool: nesting deeper than the pool bound is safe":
+        var interp = MirInterpreter.create()
+        var table: {text: MirFunction} = {}
+        table["c10"] = hp_callee_fn()
+        # c10 is add1; c9..c0 each add 1 more -> chain depth 11 (> pool bound 8)
+        var i = 9
+        while i >= 0:
+            table["c{i}"] = hp_chain_link_fn("c{i}", "c{i + 1}")
+            i = i - 1
+        interp.set_function_table(table)
+        val res = interp.execute_function(hp_chain_link_fn("root", "c0"))
+        expect(res[1]).to_be_nil()
+        expect(res[0] ?? -1).to_equal(12)
 
     it "debug logging is off by default (accessor-observed)":
         var interp = MirInterpreter.create()
