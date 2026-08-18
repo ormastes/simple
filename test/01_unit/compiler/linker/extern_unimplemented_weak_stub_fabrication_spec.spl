@@ -61,6 +61,8 @@ and cross-target lanes are out of scope here.
 
 use std.spec.*
 use std.io_runtime.{process_run}
+use compiler.driver.driver_aot_native_output.{driver_native_link_undefined_symbols,
+    driver_native_extern_decl_matches}
 
 # The build+run harness is a single `sh -c` script so that the build's own exit
 # status is read on the line after the command (never through a pipe — a pipe
@@ -112,3 +114,77 @@ describe "extern fn with no implementation":
         step("and the program must return the runtime's real answer, not a stub")
         expect(out.contains("RUN_RC=0")).to_equal(true)
         expect(out.contains("RUN_OUT=got 4")).to_equal(true)
+
+
+# ---------------------------------------------------------------------------
+# Regression coverage for the link-failure surfacing fix (origin/main
+# 8beeb621c70f, FIX A). All four link-failure sites now route through
+# `driver_native_link_failure_result`, which parses lld "undefined symbol:" and
+# GNU ld "undefined reference to" out of the raw linker output, maps each name
+# back to its `extern fn` declaration site, and appends the raw linker text
+# verbatim.
+#
+# These examples exercise the two pure, exported halves of that mapping
+# directly, under the interpreter — they need no linker, no native build, and
+# no host toolchain, so they run on any lane. The end-to-end assertions live in
+# the two examples above.
+# ---------------------------------------------------------------------------
+
+describe "linker output is parsed back to the missing symbols":
+    it "names the symbol an lld undefined-symbol error reports":
+        step("feed real lld stderr, including its >>> referenced-by continuation lines")
+        val names = driver_native_link_undefined_symbols(
+            "ld.lld: error: undefined symbol: lane_definitely_absent_probe\n" +
+            ">>> referenced by main.spl\n" +
+            ">>>               object.o:(main)\n")
+        expect(names.len()).to_equal(1)
+        expect(names[0]).to_equal("lane_definitely_absent_probe")
+
+    it "names the symbol a GNU ld undefined-reference error reports":
+        step("GNU ld quotes the symbol in backticks and a trailing quote")
+        val names = driver_native_link_undefined_symbols(
+            "/usr/bin/ld: object.o: in function `main':\n" +
+            "main.spl:(.text+0x5): undefined reference to `lane_definitely_absent_probe'\n")
+        expect(names.len()).to_equal(1)
+        expect(names[0]).to_equal("lane_definitely_absent_probe")
+
+    it "reports each missing symbol once no matter how many call sites reference it":
+        step("the same symbol repeated, plus a second distinct one")
+        val names = driver_native_link_undefined_symbols(
+            "ld.lld: error: undefined symbol: alpha_probe\n" +
+            "ld.lld: error: undefined symbol: alpha_probe\n" +
+            "/usr/bin/ld: main.o:(.text+0x9): undefined reference to `beta_probe'\n")
+        expect(names.len()).to_equal(2)
+        expect(names[0]).to_equal("alpha_probe")
+        expect(names[1]).to_equal("beta_probe")
+
+    # No-false-positive control. Without this, a parser that returned a bogus
+    # name for ANY linker error would make the examples above green while
+    # rewriting unrelated link failures into a wrong "unimplemented extern"
+    # diagnostic — and the raw cause would be the part the reader lost.
+    it "extracts nothing from link failures that are not undefined symbols":
+        step("a missing library is a different failure and must pass through untouched")
+        expect(driver_native_link_undefined_symbols(
+            "/usr/bin/ld: cannot find -lfoo: No such file or directory\n" +
+            "clang: error: linker command failed with exit code 1\n").len()).to_equal(0)
+
+        step("so is a relocation error, an empty log, and prose that merely discusses the phrase")
+        expect(driver_native_link_undefined_symbols(
+            "ld.lld: error: relocation R_X86_64_32S out of range\n").len()).to_equal(0)
+        expect(driver_native_link_undefined_symbols("").len()).to_equal(0)
+
+describe "a missing symbol is mapped back to its extern fn declaration":
+    it "matches the declaration whose name is exactly the missing symbol":
+        step("the matcher sees the declaration line with `extern fn ` already removed")
+        expect(driver_native_extern_decl_matches("abs(x: i64) -> i64", "abs")).to_be(true)
+        expect(driver_native_extern_decl_matches("abs", "abs")).to_be(true)
+        expect(driver_native_extern_decl_matches("abs <T>(x: T)", "abs")).to_be(true)
+        expect(driver_native_extern_decl_matches("abs<T>(x: T)", "abs")).to_be(true)
+        expect(driver_native_extern_decl_matches("abs: i64", "abs")).to_be(true)
+
+    it "does not blame a longer declaration that merely starts with the same letters":
+        step("this is what stops `abs` reporting the site of `abs_long`")
+        expect(driver_native_extern_decl_matches("abs_long(x: i64)", "abs")).to_be(false)
+        expect(driver_native_extern_decl_matches("absolute()", "abs")).to_be(false)
+        expect(driver_native_extern_decl_matches("other(x: i64)", "abs")).to_be(false)
+        expect(driver_native_extern_decl_matches("", "abs")).to_be(false)
