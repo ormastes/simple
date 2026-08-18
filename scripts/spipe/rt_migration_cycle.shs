@@ -154,6 +154,47 @@ comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.
 # to either shape would be wrong for the other's call sites (key type and
 # return type both differ), so this symbol is excluded on evidence, not
 # merely deferred.
+# Round 6 (2026-08-18) — frequency census top candidates after exclusions
+# (rt_exit, rt_mkdir_p, rt_math_sqrt, rt_time_now_monotonic_ms,
+# rt_timestamp_now were the top-5 by mention count outside the existing
+# table/exclusions/allowlist; two tiers below audited):
+# rt_time_now_monotonic_ms TABLED below. Uniform `() -> i64` extern across
+# every in-scope declaration; io_runtime.spl now exports a bare-passthrough
+# wrapper (time_now_monotonic_ms, added this round).
+# EXCLUDED — rt_exit: NOT tabled. Three incompatible extern shapes found:
+# `(code: i32)`, `(code: i32) -> void`, `(code: i64)` — parameter width and
+# return type both diverge, so no single bare passthrough is signature-exact
+# for every in-scope site.
+# EXCLUDED — rt_math_sqrt: NOT tabled. Two extern overloads, `(x: f32) ->
+# f32` and `(x: f64) -> f64` — a bare passthrough wrapper needs one fixed
+# type; this symbol has two.
+# EXCLUDED — rt_mkdir_p: NOT tabled, wrapper-first candidate blocked by a
+# name collision inside io_runtime.spl itself: `pub fn mkdir_p` already
+# exists there, but its body calls `rt_dir_create_all(path)`, a DIFFERENT
+# extern than `rt_mkdir_p` — same class of mismatch as the already-excluded
+# rt_dir_create row above. Adding a bare `rt_mkdir_p` passthrough under the
+# name `mkdir_p` would silently redefine/shadow the existing (different)
+# function; per the collision rule this symbol is skipped rather than
+# renamed speculatively.
+# EXCLUDED — rt_timestamp_now: NOT a wrapper-first candidate. Zero
+# `extern fn rt_timestamp_now(` declarations exist under src/lib or src/app
+# — every mention is a codegen/runtime-internal reference outside migration
+# scope.
+# Next-tier candidates (by mention count, after excluding the above) also
+# audited and TABLED below: rt_shell_exec `(cmd: text) -> text` (uniform,
+# io_runtime.spl was clean of the name `shell_exec` itself — a same-named,
+# different-signature `shell_exec` exists only in src/os/apps/shell/exec.spl,
+# outside TB_TABLE's rewrite scope, so the conventional name was used per the
+# collision rule); rt_file_rename `(_, _) -> bool` (uniform up to parameter
+# name across 4 declaration sites — from/to, old_path/new_path, source/dest,
+# src/dst — same tolerated variance as every other table row; io_runtime.spl
+# had no `file_rename` name); rt_process_run_timeout
+# `(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)` (uniform
+# across every in-scope declaration; io_runtime.spl had no
+# `process_run_timeout` name — several PROVIDER files define their own
+# same-named function, which naturally excludes them from Track B rewrite via
+# the existing bare-identifier collision guard, and is not a blocker for
+# adding the io_runtime wrapper itself).
 TB_TABLE="rt_time_now_unix_micros time_now_unix_micros
 rt_file_exists file_exists
 rt_file_delete file_delete
@@ -174,7 +215,11 @@ rt_process_is_running process_is_running
 rt_dir_list dir_list
 rt_dir_walk dir_walk
 rt_platform_name platform_name
-rt_hash_text hash_text"
+rt_hash_text hash_text
+rt_time_now_monotonic_ms time_now_monotonic_ms
+rt_shell_exec shell_exec
+rt_file_rename file_rename
+rt_process_run_timeout process_run_timeout"
 
 track_b() {
   tb_done=0
