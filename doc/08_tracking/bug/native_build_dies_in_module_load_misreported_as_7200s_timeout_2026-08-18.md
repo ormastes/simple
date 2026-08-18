@@ -148,3 +148,37 @@ These do not fix the defect above; they stop the gate from hiding it.
   — the earlier investigation misdirected by this same `-1` misattribution.
 - `doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md`
   — the native-only divergence that justifies the native lane existing.
+
+## Verification of the harness changes (real runs, not reasoning)
+
+`DIFF_FILTER=f64` with all three lanes, on the patched harness:
+
+    [f64_roundtrip] AGREE
+      interpret: sum=0.30000000000000004whole=2.0neg=-1.5tiny=0.000001big=1000000000000000000.0list_sum=6.875boxed0=1.5
+      jit: sum=0.30000000000000004whole=2.0neg=-1.5tiny=0.000001big=1000000000000000000.0list_sum=6.875boxed0=1.5
+      native: LANE_ERROR -- native-build produced no artifact: error: native-build worker timed out after 7200s before producing a binary. (full log: build/engine_differential/f64_roundtrip.build.log)
+    ...
+    PASS (DEGRADED) — 1 fixture(s) compared, 0 new divergences (0 baselined, 1 lane error(s)); lane(s) [native] answered nothing and are NOT covered by this verdict
+
+exit 0. The LANE_ERROR note now carries the cause and a log path; the verdict
+states its own degraded coverage. Compare the old output for the same
+condition, which was the bare `native: LANE_ERROR -- native-build produced no
+artifact` with a verdict claiming "across 3 lane(s)".
+
+Unknown-lane rejection, exit code read directly into a variable rather than
+through a pipe (a pipeline's `$?` is the last stage's status and has produced
+false greens in this repo before — the first attempt at this check appeared to
+exit 0 for exactly that reason):
+
+    $ DIFF_LANES=interpret,jit,bogus DIFF_FILTER=f64 sh scripts/check/check-engine-differential.shs > /tmp/lane.log 2>&1; echo "real_exit=$?"
+    real_exit=2
+    $ tail -1 /tmp/lane.log
+    ERROR — unknown lane 'bogus' in DIFF_LANES; SIMPLE_EXECUTION_MODE would silently run the JIT for it and report a phantom agreeing lane. Valid: interpret, interpreter, jit, native. Nothing was checked.
+
+Before the change the identical command printed
+`PASS — 1 fixture(s) compared across 3 lane(s), 0 new divergences` at exit 0.
+
+No-regression check: the two-lane gate (`DIFF_LANES=interpret,jit`) returns the
+same verdict before and after the patch —
+`FAIL — 1 unbaselined divergence(s) among 11 fixture(s) compared`, with
+`agreements: 9 / divergences: 2 (1 NEW) / lane errors: 0`.
