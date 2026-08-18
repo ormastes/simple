@@ -1,0 +1,91 @@
+# Startup perf-budget lane — makes `scripts/check/check-startup-perf-budget.shs`
+# reachable from `bin/simple test`.
+#
+# Plan: doc/03_plan/compiler/startup_performance/startup_perf_plan_2026-08-17.md
+#   Phase D ("profile-first optimization ... >=5-sample p50/p95 reports").
+#
+# WHAT WAS MISSING, MEASURED 2026-08-18: `test/05_perf/startup/` held only
+# `budgets.sdn`, `hello_fixture.spl` and `README.md` — no `_spec.spl` at all.
+# The detector existed and was correct, but nothing in the test tree ran it,
+# so a startup regression could land with every suite green. This spec is the
+# missing edge, not a second implementation of the measurement: re-deriving
+# p50 in a spec body would give a SECOND, differently-noisy oracle that could
+# disagree with the committed budgets, which is exactly the split-brain the
+# detector standard forbids. The script stays the single source of truth.
+#
+# WHY THE VERDICT LINE AND NOT THE EXIT CODE. Per the repo rule, exit 0 is not
+# a pass: a script that dies before measuring anything can still exit 0. Every
+# example below asserts the literal verdict TEXT (`PASS —` / `SKIP —` /
+# `ERROR —`), which the detector emits as the last line of stdout, and the
+# exit code is only ever checked alongside it.
+#
+# Each example fails (not passes) under these wrong behaviours:
+#   * "the detector's selftest silently stops covering its fixtures"
+#       -> ex.1 fails: it demands the literal 3-fixture selftest-OK line.
+#   * "the detector reports PASS without ever running a command"
+#       -> ex.2 fails: a PASS verdict must carry `command(s) measured` and an
+#          `N=` sample count; a vacuous PASS has neither.
+#   * "a missing budgets file degrades to a silent pass"
+#       -> ex.3 fails: fail-closed demands `ERROR — nothing was checked`
+#          and exit 2, never 0.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val CHECK: text = "scripts/check/check-startup-perf-budget.shs"
+
+# Last non-empty line of stdout — the detector standard puts the verdict there.
+fn verdict_of(out: text) -> text:
+    var last: text = ""
+    for line in out.split("\n"):
+        if line.trim() != "":
+            last = line.trim()
+    last
+
+fn run_sh(script: text) -> (text, i64):
+    val out = process_run("sh", ["-c", script])
+    val stdout: text = out.0
+    val code: i64 = out.2
+    (stdout, code)
+
+describe "startup perf budget lane":
+
+    it "the detector's own selftest still covers all three fixtures":
+        step("Run the detector in --selftest mode; its fixtures are the positive control for this whole lane")
+        val (out, code) = run_sh("sh " + CHECK + " --selftest 2>&1")
+
+        step("must-FAIL (0ms budget), must-PASS (absurd budget) and must-ERROR (missing budgets file) must all still be exercised")
+        expect(out).to_contain("selftest OK: 3 fixture(s)")
+
+        step("A selftest that cannot prove its own fixtures is fatal upstream, so it must exit 0 here")
+        expect(code).to_equal(0)
+
+    it "a real measurement reports a verdict that states what it measured":
+        step("Run the detector for real against the committed budgets")
+        val (out, _code) = run_sh("sh " + CHECK + " 2>&1")
+        val v: text = verdict_of(out)
+
+        step("The verdict is never silent: it is PASS, SKIP or FAIL, and each names itself")
+        val named = v.starts_with("PASS —") or v.starts_with("SKIP —") or v.starts_with("FAIL —")
+        expect(named).to_equal(true)
+
+        step("A PASS must be non-vacuous — it has to say how many commands it measured and with how many samples")
+        if v.starts_with("PASS —"):
+            expect(v).to_contain("command(s) measured")
+            expect(v).to_contain("N=")
+
+    it "an unrecognised argument fails closed rather than measuring nothing quietly":
+        # The missing-budgets-file path is covered by the detector's own
+        # must-ERROR fixture (asserted in ex.1). The reachable-from-here
+        # fail-closed path is an unknown argument: the script deliberately has
+        # no flag that selects a different budgets file, so this is the only
+        # way a caller can hand it something it cannot act on.
+        step("Invoke the detector with an argument it does not recognise")
+        val (out, code) = run_sh("sh " + CHECK + " --not-a-real-flag 2>&1")
+        val v: text = verdict_of(out)
+
+        step("An unactionable invocation is absence of evidence — ERROR, never a pass")
+        expect(v).to_contain("ERROR — nothing was checked")
+
+        step("and exit 2, so a caller cannot mistake it for a clean run")
+        expect(code).to_equal(2)
