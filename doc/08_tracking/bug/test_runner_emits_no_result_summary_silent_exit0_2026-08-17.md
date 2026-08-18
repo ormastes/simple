@@ -316,3 +316,58 @@ time the summary is printed and the status chosen, every example has already
 finished. Both specs therefore drive the shell guard as a subprocess with
 fixture runners, which is the closest in-spec approximation; the guard's own
 `--selftest` is the fail-closed backstop.
+
+## Independent re-verification 2026-08-18 (lane SILENTGREEN) — DOES NOT REPRODUCE
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, which
+prints the bootstrap-seed warning on stderr. All findings below attribute to
+the **Rust seed**, and to `bin/simple test` (tree-walk interpreter), not to
+`bin/simple run` (Cranelift JIT). Every exit code below was captured on the
+line immediately after the command, never through a pipe. No run was killed
+(no rc=143/144 observed, so no UNVERIFIED arm needed re-running).
+
+**Arm A — the original reproducer verbatim, no env overrides:**
+
+```
+$ nice -n 15 bin/simple test test/01_unit/lib/common/text_advanced_case_conversion_spec.spl
+$ echo $?
+0
+```
+105 stdout lines + 241 stderr lines (not 1897), and stdout now carries BOTH
+verdict forms:
+```
+SPEC FILE VERDICT: test/01_unit/lib/common/text_advanced_case_conversion_spec.spl declared>=4 executed=4 passed=4 failed=0 dropped=0
+Results: 4 total, 4 passed, 0 failed
+```
+Exit 0 here is a *justified* green: it is accompanied by an explicit
+`Results:` line, which is the property the defect denied.
+
+**Arm B — positive proof that a failing spec is NOT laundered into exit 0.**
+Fixture (scratchpad, not committed): one passing and one deliberately failing
+example.
+```
+$ nice -n 15 bin/simple test build/test-artifacts/silentgreen_probe/deliberate_fail_spec.spl
+$ echo $?
+1
+SPEC FILE VERDICT: .../deliberate_fail_spec.spl declared>=2 executed=2 passed=1 failed=1 dropped=0
+Results: 2 total, 1 passed, 1 failed
+```
+
+**Arm C — the existing regression spec still holds:**
+```
+$ bin/simple test test/01_unit/app/test_runner/silent_green_verdict_spec.spl
+$ echo $?
+0
+Results: 2 total, 2 passed, 0 failed
+```
+
+**Arm D — the fail-closed shell gate is live:**
+`sh scripts/check/check-test-verdict-not-silent.shs --selftest` ->
+`PASS — selftest only, 4 fixture(s) checked`, exit 0.
+
+Conclusion: the silent-green shape (exit 0 with zero result lines) does not
+reproduce on this host today, and both the shell gate and the in-tree
+regression spec that would catch its return are present and green. Cause 1
+(the kill-monitor SIGTERM race) remains a real, nondeterministic hazard, but
+it surfaces as rc=143 — UNVERIFIED — not as a silent exit 0, and is therefore
+a separate concern from this defect.
