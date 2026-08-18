@@ -1,0 +1,63 @@
+# @req REQ-C-MIG-TIMESTAMP
+#
+# C-MIG-0019 (binary_runtime_hardening Wave 4): pure-Simple calendar
+# arithmetic in std.common.time_utils vs the C oracle in
+# src/runtime/runtime_timestamp.c (Howard-Hinnant era-based civil calendar).
+# The C functions have NO product Simple callers (only ffi_gen specs and the
+# backend symbol closure reference them) — this spec freezes the C behavior
+# as a test oracle so the C unit can be classified and eventually retired.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.time_utils.{
+    timestamp_from_components, timestamp_add_days, timestamp_diff_days,
+    timestamp_get_year, timestamp_get_month, timestamp_get_day,
+    timestamp_get_hour, timestamp_get_minute, timestamp_get_second
+}
+
+# C oracle (test-only; never production-linked from Simple product code).
+extern fn rt_timestamp_from_components(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32, microsecond: i32) -> i64
+extern fn rt_timestamp_add_days(micros: i64, days: i64) -> i64
+extern fn rt_timestamp_diff_days(micros1: i64, micros2: i64) -> i64
+
+describe "time_utils pure-Simple vs C oracle":
+    it "epoch is zero in both":
+        val s = timestamp_from_components(1970, 1, 1, 0, 0, 0, 0)
+        assert_equal(s, 0)
+        assert_equal(s, rt_timestamp_from_components(1970, 1, 1, 0, 0, 0, 0))
+
+    it "matches the C oracle on representative dates":
+        # (year month day hour min sec usec) covering: leap day, century
+        # non-leap, 400-year leap, end-of-year, pre-epoch, far future
+        val y = [2000, 2024, 1900, 1999, 1969, 2100, 2038]
+        val mo = [2,    2,    3,    12,   12,   2,    1]
+        val d = [29,   29,   1,    31,   31,   28,   19]
+        val h = [12,   23,   0,    23,   23,   6,    3]
+        var i = 0
+        while i < y.len():
+            val simple = timestamp_from_components(y[i], mo[i], d[i], h[i], 59, 59, 123456)
+            val oracle = rt_timestamp_from_components(y[i], mo[i], d[i], h[i], 59, 59, 123456)
+            assert_equal(simple, oracle)
+            i = i + 1
+
+    it "round-trips through the component getters":
+        val t = timestamp_from_components(2024, 2, 29, 13, 45, 7, 0)
+        assert_equal(timestamp_get_year(t), 2024)
+        assert_equal(timestamp_get_month(t), 2)
+        assert_equal(timestamp_get_day(t), 29)
+        assert_equal(timestamp_get_hour(t), 13)
+        assert_equal(timestamp_get_minute(t), 45)
+        assert_equal(timestamp_get_second(t), 7)
+
+    it "add_days and diff_days match the C oracle including negatives":
+        val t = timestamp_from_components(2024, 1, 15, 0, 0, 0, 0)
+        assert_equal(timestamp_add_days(t, 45), rt_timestamp_add_days(t, 45))
+        assert_equal(timestamp_add_days(t, -400), rt_timestamp_add_days(t, -400))
+        val t2 = timestamp_from_components(2023, 1, 15, 6, 0, 0, 0)
+        assert_equal(timestamp_diff_days(t, t2), rt_timestamp_diff_days(t, t2))
+        assert_equal(timestamp_diff_days(t2, t), rt_timestamp_diff_days(t2, t))
+
+    it "leap-day arithmetic crosses correctly":
+        val feb28 = timestamp_from_components(2024, 2, 28, 0, 0, 0, 0)
+        val mar1 = timestamp_add_days(feb28, 2)
+        assert_equal(timestamp_get_month(mar1), 3)
+        assert_equal(timestamp_get_day(mar1), 1)
