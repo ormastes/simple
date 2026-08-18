@@ -13,15 +13,15 @@ extern fn sys_get_args() -> [text]
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_exit(code: i64)
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.io_runtime.{process_run}
 extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_run_tests_process_args(gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_handle_compile(args: [text]) -> i64
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get}
 extern fn rt_env_set(key: text, value: text) -> bool
 use std.io_runtime.{getpid}
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 extern fn rt_path_absolute(path: text) -> text
 extern fn rt_mkdir_p(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -33,7 +33,7 @@ extern fn print_raw(value: text) -> i64
 # --- Shell/file helpers (local copies to avoid circular imports) ---
 
 fn cli_env_get(key: text) -> text:
-    rt_env_get(key)
+    env_get(key)
 
 fn cli_handle_compile(args: [text]) -> i64:
     rt_cli_handle_compile(args)
@@ -67,7 +67,7 @@ pub fn _cli_shell(command: text) -> _CliProcessResult:
         ("cmd.exe", ["/c", command])
     else:
         ("/bin/sh", ["-c", command])
-    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, stderr, code) = process_run(shell_path, shell_args)
     _CliProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 fn _cli_shell_bool(command: text) -> bool:
@@ -75,7 +75,7 @@ fn _cli_shell_bool(command: text) -> bool:
     result.exit_code == 0
 
 fn _cli_file_exists_impl(path: text) -> bool:
-    rt_file_exists(path)
+    file_exists(path)
 
 # Direct runtime primitives below — no shell-out: rt_process_run drops the
 # args array under the deployed binary's Cranelift JIT SFFI arg marshalling
@@ -98,7 +98,7 @@ fn _cli_file_write_impl(path: text, content: text) -> bool:
 fn _cli_file_copy_impl(src: text, dst: text) -> bool:
     # rt_file_copy is mis-marshalled under the deployed JIT
     # (seed runtime_sffi.rs:1557): stage via read + delete + write-at-0.
-    if not rt_file_exists(src):
+    if not file_exists(src):
         false
     else:
         val content = rt_file_read_text(src)
@@ -113,7 +113,7 @@ fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
     # mkdir -p semantics for both branches via rt_mkdir_p; rt_file_exists
     # fallback accepts a pre-existing directory (verified working under the
     # deployed JIT while the mkdir shell-out reports failure).
-    rt_mkdir_p(path) or rt_file_exists(path)
+    rt_mkdir_p(path) or file_exists(path)
 
 fn _cli_eprint(msg: text):
     eprint(msg)
@@ -133,7 +133,7 @@ pub fn _cli_resolve_argv0(cwd_path: text, argv0: text) -> text:
 
 fn _cli_find_on_path(argv0: text) -> text:
     val command = if _cli_is_windows_platform(): "where" else: "which"
-    val (stdout, _stderr, code) = rt_process_run(command, [argv0])
+    val (stdout, _stderr, code) = process_run(command, [argv0])
     if code != 0:
         return ""
     stdout.split("\n")[0].trim()
@@ -222,15 +222,15 @@ pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     var resolved_cmd = cmd
     if _cli_is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val (_stdout, _stderr, code) = rt_process_run("where", [cmd + ".exe"])
+            val (_stdout, _stderr, code) = process_run("where", [cmd + ".exe"])
             if code == 0:
                 resolved_cmd = cmd + ".exe"
     else:
         if not cmd.contains("/"):
-            val (stdout, _stderr, code) = rt_process_run("which", [cmd])
+            val (stdout, _stderr, code) = process_run("which", [cmd])
             if code == 0 and stdout.trim().len() > 0:
                 resolved_cmd = stdout.trim()
-    rt_process_run(resolved_cmd, args)
+    process_run(resolved_cmd, args)
 
 pub fn _cli_run_workspace_root_guard() -> i64:
     val (stdout, stderr, code) = _cli_process_run("sh", ["scripts/check-workspace-root-guard.shs", "audit", "--staged"])
