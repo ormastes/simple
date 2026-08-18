@@ -145,3 +145,35 @@ echo $?          # rc on its own line, never through a pipe
 ```
 
 Expect: the STALE `error:` line, then rc=0, then a segfault (139) from the binary.
+
+## Reproduction status on this host: NOT REPRODUCED (inconclusive — earlyoom, not a failure)
+
+Attempted 2026-08-17/18 by lane STALELINK. **The run did not complete and must not be read as
+either a confirmation or a refutation.**
+
+- The invocation *was* on the intended route: `SIMPLE_NATIVE_BUILD_RUST=1` is honoured at
+  `src/compiler_rust/driver/src/main.rs:168-172`, which dispatches straight to the Rust handler.
+- The process (PID 1633022) ran 5+ minutes under host load-avg 85, RSS climbing 60 MB -> 635 MB,
+  and was then **SIGTERM'd**. The shell reported `Terminated`.
+- This was **earlyoom, not a build failure**. `journalctl -t earlyoom` for the same window shows
+  `mem avail: 12854 of 128683 MiB (9.99%) ... low memory! ... sending SIGTERM to process ... "simple"
+  badness 1013, VmRSS 9027 MiB`. Host had ~1 GB free with ~15 concurrent lanes building.
+- Consistent with an external kill rather than native-build's own timer: **no
+  `[TIMEOUT: Process killed after Ns]` line was emitted**, which native-build prints when its own
+  timer fires. Per lane convention an rc of 143/144 is UNVERIFIED, never "failed".
+- Only the seed banner reached `build.log`; the STALE line was never reached, and **no binary was
+  produced**, so the segfault half could not be tested either.
+
+### Measurement error worth recording (the defect's own failure mode, in the harness)
+
+The rc was captured as `... ; echo "RC_LINE"; echo $?`. That reads the exit status of the
+intervening `echo`, **not** of `native-build` — it printed a meaningless `0`. Had it been trusted,
+this file would have claimed "rc=0" as evidence for a bug that is *about* a bogus rc=0. Capture rc
+into a variable on the line immediately after the command, exactly as
+`check-c-runtime-compiles-push.shs` does, and never let another command intervene.
+
+Re-running was declined rather than retried: the host was at ~1 GB free with earlyoom actively
+killing `simple` processes, so another attempt would have harmed concurrent lanes without a
+better chance of completing. **The static analysis above stands on its own and does not depend on
+this reproduction**; the three code paths are read directly from committed source. A repro should
+be re-attempted on an idle host.
