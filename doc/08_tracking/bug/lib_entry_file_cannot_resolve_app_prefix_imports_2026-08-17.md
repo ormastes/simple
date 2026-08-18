@@ -93,7 +93,12 @@ ownership — hence filed rather than deleted.
 bin/simple run src/lib/nogc_sync_mut/test_runner/main.spl   # rc=1, E1034
 bin/simple run src/app/test_daemon/session_types.spl        # rc=0 — target is fine
 bin/simple run src/lib/nogc_sync_mut/lsp/transport.spl      # rc=1, same shape, different pkg
+bin/simple run src/app/test_runner_new/test_runner_main.spl # rc=0, 0 unresolved — CONTROL
 ```
+
+The last line is the control that pins the root cause: the live runner under `src/app/**`
+pulls in the same `std.test_runner.*` modules and resolves everything (rc=0, zero
+`cannot resolve import`). Only the entry file's location differs.
 
 Do not use `bin/simple check` (>600s). Do not bisect with `head -N` — cutting mid-block
 manufactures its own error so every prefix appears broken.
