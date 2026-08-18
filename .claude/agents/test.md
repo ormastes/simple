@@ -122,3 +122,26 @@ review all seven scores, blockers, stable findings, mirror state, and REQ
 traceability. Scaffolds preserve source hash/REQ IDs and fail fast until real
 assertions exist. `improve` requires exact confirmation and rollback;
 `documentize` reuses SPipe.
+
+## Every fix ships a reproduction spec AND similar-case specs
+
+A bug fix without tests is unverified; a fix with only the one reproducing
+example is under-verified. Mandatory for every bug fix:
+
+1. **Reproduction spec, red-first.** Write the example that reproduces the
+   reported symptom, run it, and OBSERVE it fail with that exact symptom
+   BEFORE fixing. After the fix, re-run and report both observations
+   (`red: <failing values> → green: N/N`). A spec written after the fix may
+   assert something that was already true — it proves nothing.
+2. **Similar-case specs.** The defect's SHAPE usually exists in sibling code
+   paths: the other variants of the same match, the other members of the same
+   API family, the other axis values of the same config, boundary neighbors
+   (0/1/max, empty/single/many). Add examples for the nearest siblings —
+   grep for the pattern that was wrong and cover each place it repeats. A
+   fix that closes one arm and leaves its twins untested invites the same
+   bug back one door over.
+3. **Sabotage check.** Re-break the fix (or an equivalent mutation), confirm
+   the new specs go red, restore, confirm green. Report green→red→green.
+
+If a reproduction genuinely cannot be automated (external hardware, timing),
+say so in the bug doc and record the manual repro steps — never silently skip.

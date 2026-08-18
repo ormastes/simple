@@ -1840,16 +1840,6 @@ reader may discard or fail to expose such bytes on a tty; use a byte-streaming
 captures data but the wrapper reports silence, fail the wrapper and fix it
 before attributing the result to board wiring.
 
-For original Apollo Lake UP Squared first light, use an x64 UEFI removable
-image at `EFI/BOOT/BOOTX64.EFI`, selected once with F7. A stick attached to the
-UP2 is not remotely writable unless the board already provides a trusted
-Linux/SSH or RAM/PXE writer environment. Such a writer must stage+hash first,
-admit exactly one stable by-id/serial/capacity, reject root/swap/mounted or
-internal media, sync, recheck identity, and verify an exact-length readback.
-Do not treat Micro-B OTG, UEFI Shell, UART, or PXE as an uploader without live
-capability evidence. CN16 is 3.3 V TTL UART; CN22 is 1.8 V CPLD/BIOS update,
-not an Apollo Lake CPU JTAG port. BIOS/SPI flashing is outside first light.
-
 ## GPU / notebook remote lanes (planned, 2026-08-07)
 
 `cuda` and `vulkan` are planned composite remote backends at the same grammar depth as
@@ -1877,6 +1867,14 @@ something that was already true. Write the example first, **run it, watch it
 fail with the exact symptom in the bug report**, then fix the code and re-run.
 Report both observations (`3 failed → 21/0`, with the failing values quoted);
 "added a spec, suite green" is not evidence the spec covers the defect.
+
+A reproduction alone is still under-verified: the defect's shape usually
+repeats in sibling paths (other match arms, the same API family's other
+members, neighboring config axes, boundary values). Add similar-case examples
+for the nearest siblings in the same spec, and close with a sabotage probe
+(re-break the fix → specs red → restore → green, all three observed and
+reported). See `.claude/agents/test.md` § "Every fix ships a reproduction
+spec AND similar-case specs".
 
 ## GUI sanity tests (pure-Simple lane)
 
@@ -2483,53 +2481,6 @@ the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
 
-For the StarFive JH7110/Tigard lane, if SBI injection cannot run because the
-U74 hart is unexaminable, the only software fallback is a bounded Debug Module
-`ndmreset` pulse with `dmactive` retained. Verify it in a new OpenOCD session by
-halting and resuming the exact hart and by observing fresh firmware UART
-markers. If either proof is absent, emit BLOCKED and require physical
-reset/power-cycle; do not loop reset attempts.
-
-VisionFive 2 NVMe acceptance requires read-only PCI plus controller/namespace
-identity before a distinct identity-bound provisioning action. Keep JH7110
-PCIe1 setup outside common PCI/NVMe. Carry non-coherent DMA allocation handles:
-synchronize SQ/data before doorbells and CQ/Identify/read buffers before CPU
-parsing. Format only a bounded GPT partition, issue durable NVMe Flush, then
-prove unmount/remount readback and command-correlated public-VFS `ls /nvme`.
-
-Running spec lanes beside an active bootstrap (2026-08-17): pin the runner to
-an immutable lineage-named snapshot under `build/phase_snapshots/`
-(`phase1_<t1>_phase2_<t2>/simple`; see its README), never `bin/simple` or an
-in-place stage output — those are replaced mid-flight and a swapped binary
-crashes the lane. The phase compiler build owns CPU/memory: run spec lanes
-`nice`d with <=2 concurrent test processes; earlyoom kills `simple` first
-under pressure (a 3.1 GB worker died at 9.97% free), so treat a vanished
-runner as possible OOM, not a matcher bug. For fleet-style sweeps, run
-per-directory under `timeout` and drop to per-file on crash so one crashing
-spec never stops the sweep.
-
-Later 2026-08-17: a frozen rsync bootstrap tree must keep vendored `gen/`
-dirs (`vendor/typenum/src/gen` — a blanket `--exclude 'gen/'` breaks offline
-cargo) and a `.git` (the stage engine binds Stage-3 git HEAD/dirty state).
-The planner-admission-v2 gate is unconditionally fail-closed and blocks all
-bootstraps (`doc/08_tracking/bug/bootstrap_admission_v2_fail_closed_blocks_all_bootstraps_2026-08-17.md`;
-last working script: `b1ff6537ed8`). Incremental profile clamps selfhost
-jobs to 2 — patch to 16 on a big box (8 under 40 GB free). If two phase-1
-generations land before phase 2 starts, phase 2 takes the NEWEST; never stop
-at first failure — collect all problems through phase 4. Every bug fix ships
-a reproducing spec plus a similar-problem generalization spec, cited in the
-bug doc.
-
-Build-lane doctrine (2026-08-17): exactly ONE compile-build owner at a time —
-two concurrent stage-2 builds nearly triggered earlyoom; the script-driven
-run survives, ad-hoc builds yield. Phase builds never wait for verification:
-sanity/tool-harness runs in a parallel niced lane. Phase 2 completed via
-dynload, so the phase-4 relink needs `--full-cli`/`--mode=one-binary`. Known
-pipeline traps (unfiled — file on next touch): silent stage-2 exit-1 with a
-0-byte log under the transcribed sandbox env; a phantom
-`stage2-capability.log` reference; native-build has no keep-going flag. The
-LintDiag LLVM codegen defect is the canonical phase-2-found compiler bug —
-phase 2 doubles as a compiler-bug detector.
 ## 2026-08-17 — run-to-end phases, silent green, reserved words
 
 **Per-phase run-to-end loop.** Each bootstrap phase runs to completion and
@@ -2552,6 +2503,51 @@ Never accept exit 0 as proof of pass: require an explicit results/count line,
 else mark INCONCLUSIVE and verify with a direct `bin/simple run` repro. Also
 recorded in `.claude/rules/testing.md`.
 
+**A lane state file is a hypothesis, not a record.** `.spipe/<lane>/state.md`
+is written by sessions that could not run everything they claimed, and it
+drifts in BOTH directions. Measured 2026-08-17/18 in one lane: a slice marked
+`TODO` had in fact landed long ago (the module was ~9,846 lines with 60+
+specs), and a separate item recorded as "pure perf change, no observable value
+delta" was actually a wrong-number correctness bug (27 of 59 cells in a
+dependency chain silently read `33`). Both were found only by reading the
+source. Before acting on any state-file claim — especially before implementing
+something it calls TODO, or skipping something it calls DONE — verify it by
+content: grep the symbol, read the module, check the commit. When you correct
+one, mark the old claim SUPERSEDED with the disproving evidence rather than
+deleting it; a state file that silently rewrites itself teaches the next
+session nothing. And when a slice's status genuinely cannot be determined,
+write UNKNOWN — never infer progress from an adjacent green.
+
+**`bin/simple check` must never gate anything.** It is BLIND to parse errors:
+it exits `0` on files the parser cannot read. A log entry of the form
+"`bin/simple check <file>` exited 0" is therefore not evidence that the file is
+well-formed, let alone correct, and any gate or acceptance criterion resting on
+it is fail-open. Use a spec run that prints `Results:`, or `bin/simple lint`
+(seed-only), for that claim.
+
+**Record binary identity before AND after every run.** `bin/simple` is a
+symlink that other lanes replace mid-session — measured 2026-08-17: **three**
+redeploys in one day (12:58, 20:10, 20:28). A result attributed to the wrong
+artifact is worse than no result, and "the compiler was rebuilt" is never by
+itself evidence that a toolchain blocker cleared. Bracket each run with:
+
+```bash
+readlink -f bin/simple && stat -c '%s %y' "$(readlink -f bin/simple)"
+```
+
+If the two brackets disagree, the run is INCONCLUSIVE — rerun it, do not
+reconcile it. Seed-vs-self-hosted is decidable without executing anything
+risky: the Rust seed is ~59.6 MB and prints a seed warning, the pure-Simple
+artifact is ~3.46 MB, and a working `lint` subcommand is positive proof of a
+SEED (pure-Simple binaries answer `unknown command`), not of progress.
+
+**The box saturates around 20-30 concurrent `simple` processes**, and past that
+it manufactures false timeouts — runs that would pass are killed or time out
+with no `Results:` line, which is an environment verdict, not a test failure
+(see "Running specs on a loaded box" above for the full four-verdict triage).
+Check load before launching a batch, and treat a timeout observed under high
+concurrency as unverified rather than red.
+
 **Reserved words.** `doc/07_guide/quick_reference/syntax_quick_reference.md`
 now lists all 124 lexer keywords, extracted from
 `src/compiler_rust/parser/src/lexer/identifiers.rs`. The `pub` / `move` /
@@ -2560,3 +2556,26 @@ site. Its documentation half is closed
 (`doc/08_tracking/bug/pub_reserved_identifier_undocumented_2026-08-10.md`); the
 behavioural half (make the tokens contextual) stays OPEN. The previously-linked
 generated `keyword_reference.md` never existed — do not cite it as a source.
+
+## Binary SSpec (stacked reference) — planned surface (2026-08-18)
+
+For binary/protocol/crypto/compression specs, the frozen design adds two
+macro-level forms (no grammar change):
+
+- `reference SomeType` — emits the default **vertically stacked multi-word**
+  layout figure for a fixed-layout struct into the generated manual (global at
+  file scope, local inside `describe`/`it`; deduped by resolved type identity;
+  never a quoted string).
+- `expect(actual).to_binary(expected)` — typed comparison reusing that exact
+  layout; matching words stay compact, a mismatching bitfield word expands to
+  the bit-level figure with the failing field named.
+
+Semantics: `delta = (actual XOR expected) AND compare_mask`. Gray/don't-care
+means `compare_mask = 0` under the current context; **reserved is NOT gray** —
+`reserved_zero`/`reserved_one` fields are actively checked. One shared
+comparator/evidence pipeline (`std.spec.binary` + `spipe_docgen.reference`);
+do not write ad-hoc hex/bit diff helpers in specs.
+
+Design/plan: `doc/05_design/infra/sspec/binary_reference_stacked_design.md`,
+`doc/03_plan/infra/binary_runtime_hardening/plan.md`, feature wiki
+`doc/00_llm_process/feature_expert/binary_runtime_hardening/skill.md`.

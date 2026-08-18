@@ -287,6 +287,9 @@ redeploy this lane's contract holds only for the `Results:` line. Note
 - [notebook_lanes](../../feature_expert/notebook_lanes/skill.md) — notebook
   executors validate mode specs through this layer's extractor helpers and
   share lane locks (`src/lib/nogc_sync_mut/notebook/lane_locks.spl`, landed) with the GPU lanes for board/GPU exclusivity.
+- [office_suite](../../feature_expert/office_suite/skill.md) — Calc/Sheets;
+  its cursor-invariant spec is RED for the interpreter trap below, not for a
+  defect in the code under test.
 - [prevention_mocks](../../feature_expert/prevention_mocks/skill.md) — its
   directory-wide scope is blocked specifically by this layer's lack of a
   per-directory config/fixture hook (`find_config_file`,
@@ -307,6 +310,29 @@ update this skill with the new links and handoff notes before committing.
 - Record feature experts that depend on this layer.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## A RED spec that is not a defect: class element read returns a COPY (2026-08-17)
+
+`doc/08_tracking/bug/interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`.
+Under the **interpreter** — which is the lane every `*_spec.spl` runs on —
+binding a class-typed element out of a collection and then mutating it loses the
+write. The accessor pattern is ordinary and appears all over the app layer, e.g.
+`Workbook.active()` (`src/app/office/sheets/spreadsheet.spl:245-247`) is just
+`me.sheets[me.active_sheet]`.
+
+```
+val sh = wb.active()
+sh.set_cell(...)      # silently discarded; a later read sees stale state
+```
+
+Diagnostic: the spec fails on a read-back assertion while the production code
+path is demonstrably correct, and the same logic passes when the object is
+constructed directly rather than fetched out of a collection. Rule: **before
+filing a red spec against the code under test, check whether the subject was
+obtained by indexing a collection of class values.** Write through the owning
+aggregate instead. Live instance:
+`test/01_unit/app/office/cursor_hidden_row_invariant_spec.spl`. Sibling wording
+for retained ports: [tiny_ui layer expert](../tiny_ui/skill.md) § Review traps.
 
 ## Profile pinning from `simple.sdn` (WP-4, 2026-08-07)
 
@@ -382,3 +408,15 @@ a vacuous run is never a pass). `--control` is the negative-control arm.
 discovery, `test_runner_files.spl:423`) and the literal `tag: "skip"` (what
 `--only-skipped` actually matches). Without the second marker a directory run
 discovers 0 files and reports `No test files found`, exit 4.
+
+## Fix-verification contract (2026-08-18)
+
+Every bug fix lands with: (1) a **reproduction spec run red-first** (observe
+the reported symptom fail before the fix, report red→green with values);
+(2) **similar-case specs** covering the sibling code paths that share the
+defect's shape (other match arms, API-family twins, neighboring config axes,
+boundary values — grep for the wrong pattern and cover each repeat);
+(3) a **sabotage probe** (re-break → red → restore → green, all three
+observed). Canonical wording: `.claude/agents/test.md` § "Every fix ships a
+reproduction spec AND similar-case specs"; SPipe process hook:
+`.claude/skills/spipe.md` § "Reproduce-first for bug-fix specs".

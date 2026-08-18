@@ -77,7 +77,9 @@ bin/simple bug-gen
 2. **Isolate:** Use SIMPLE_LOG to trace execution
 3. **Identify:** Check common runtime limitations (see code agent)
 4. **Fix:** Apply workaround or fix root cause
-5. **Verify:** Run test to confirm fix
+5. **Verify:** Run the repro test red-first (observe the exact symptom), fix, re-run green; report both observations
+6. **Cover siblings:** Add similar-case specs for the code paths sharing the defect shape (other match arms, API-family twins, boundary neighbors) — see the test agent's "Every fix ships a reproduction spec AND similar-case specs"
+7. **Sabotage:** Re-break the fix, watch the specs go red, restore, watch green
 
 ## Active Session Debugging (DAP+LSP)
 

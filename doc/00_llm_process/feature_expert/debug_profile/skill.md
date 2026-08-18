@@ -124,3 +124,15 @@ P3 `79f3b662376` · P4 `a800bb04066` · P5 `abacef5d7f4` · P6 `7d53bf0a83b` ·
 P6b `7f4004e1ff1` · P7 `40f72d2ceb1` · P8 `f94d2c2b02a` · P9 `6e108de66b2` ·
 P10 `a4156a456d2` · P11 `2562958c4b0` · P13 `5fb82db579b` · P14 `c3307d1404d` ·
 P15 `1bc53420716` · N3 `c2fc4ebaef5`
+
+## Fix-verification contract (2026-08-18)
+
+Every bug fix lands with: (1) a **reproduction spec run red-first** (observe
+the reported symptom fail before the fix, report red→green with values);
+(2) **similar-case specs** covering the sibling code paths that share the
+defect's shape (other match arms, API-family twins, neighboring config axes,
+boundary values — grep for the wrong pattern and cover each repeat);
+(3) a **sabotage probe** (re-break → red → restore → green, all three
+observed). Canonical wording: `.claude/agents/test.md` § "Every fix ships a
+reproduction spec AND similar-case specs"; SPipe process hook:
+`.claude/skills/spipe.md` § "Reproduce-first for bug-fix specs".
