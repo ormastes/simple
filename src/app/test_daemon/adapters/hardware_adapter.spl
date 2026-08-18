@@ -22,7 +22,7 @@ use std.nogc_sync_mut.debug.remote.types.{DebugConfig}
 use app.io.mod.{process_spawn_async_env, process_is_alive, process_kill}
 
 use std.io_runtime.{time_now_unix_micros}
-extern fn rt_sleep_ms(ms: i64)
+use std.io_runtime.{thread_sleep}
 extern fn rt_shell_exec(cmd: text) -> text
 extern fn rt_shell_exit_code() -> i64
 extern fn rt_tcp_connect(host: text, port: i64) -> bool
@@ -105,7 +105,7 @@ impl OpenocdAdapter:
             return lease
 
         # Wait for OpenOCD to start and listen on GDB port
-        rt_sleep_ms(OPENOCD_STARTUP_WAIT_MS)
+        thread_sleep(OPENOCD_STARTUP_WAIT_MS)
 
         val effective_gdb_port = gdb_port_str.to_i64() ?? self.gdb_port
         val connected = self.wait_for_gdb_port("localhost", effective_gdb_port, 10)
@@ -155,7 +155,7 @@ impl OpenocdAdapter:
             val cmd = "echo 'reset halt' | nc localhost {self.telnet_port}"
             rt_shell_exec(cmd)
             val exit_code = rt_shell_exit_code()
-            rt_sleep_ms(500)
+            thread_sleep(500)
             return exit_code == 0
 
         if policy == RESET_RELOAD_BINARY:
@@ -163,13 +163,13 @@ impl OpenocdAdapter:
             val binary = lease.key.artifact_hash
             val reset_cmd = "echo 'reset halt' | nc localhost {self.telnet_port}"
             rt_shell_exec(reset_cmd)
-            rt_sleep_ms(500)
+            thread_sleep(500)
 
             if binary != "":
                 val flash_cmd = "echo 'program {binary} verify reset' | nc localhost {self.telnet_port}"
                 rt_shell_exec(flash_cmd)
                 val exit_code = rt_shell_exit_code()
-                rt_sleep_ms(1000)
+                thread_sleep(1000)
                 return exit_code == 0
             return true
 
@@ -210,7 +210,7 @@ impl OpenocdAdapter:
         # Try graceful shutdown via telnet
         val shutdown_cmd = "echo 'shutdown' | nc localhost {self.telnet_port}"
         rt_shell_exec(shutdown_cmd)
-        rt_sleep_ms(500)
+        thread_sleep(500)
 
         if lease.pid > 0:
             process_kill(lease.pid)
@@ -241,7 +241,7 @@ impl OpenocdAdapter:
         while attempt < max_retries:
             if rt_tcp_connect(host, port):
                 return true
-            rt_sleep_ms(500)
+            thread_sleep(500)
             attempt = attempt + 1
         false
 
@@ -382,7 +382,7 @@ impl Trace32Adapter:
             return lease
 
         # Wait for TRACE32 to initialize
-        rt_sleep_ms(self.cfg.startup_wait_ms)
+        thread_sleep(self.cfg.startup_wait_ms)
 
         val connected = self.wait_for_rcl_port(host, rcl_port, self.cfg.max_retries)
 
@@ -397,7 +397,7 @@ impl Trace32Adapter:
                 Ok(c):
                     c.do_script(practice)
                     c.disconnect()
-                    rt_sleep_ms(self.cfg.reset_settle_ms)
+                    thread_sleep(self.cfg.reset_settle_ms)
                 Err(_):
                     pass_dn
 
@@ -448,7 +448,7 @@ impl Trace32Adapter:
                 if policy == RESET_HARD:
                     val r = c.run_command("SYStem.RESetTarget")
                     c.disconnect()
-                    rt_sleep_ms(self.cfg.reset_settle_ms)
+                    thread_sleep(self.cfg.reset_settle_ms)
                     match r:
                         Ok(_): return true
                         Err(_): return false
@@ -461,12 +461,12 @@ impl Trace32Adapter:
                             return false
                         Ok(_):
                             pass_dn
-                    rt_sleep_ms(self.cfg.reset_settle_ms)
+                    thread_sleep(self.cfg.reset_settle_ms)
 
                     val binary = lease.key.artifact_hash
                     if binary != "":
                         val flash_r = c.run_command("Data.LOAD.Elf {binary}")
-                        rt_sleep_ms(self.cfg.flash_settle_ms)
+                        thread_sleep(self.cfg.flash_settle_ms)
                         match flash_r:
                             Err(_):
                                 c.disconnect()
@@ -476,7 +476,7 @@ impl Trace32Adapter:
 
                     val pc_r = c.run_command("Register.Set PC Reset")
                     c.disconnect()
-                    rt_sleep_ms(200)
+                    thread_sleep(200)
                     match pc_r:
                         Ok(_): return true
                         Err(_): return false
@@ -522,7 +522,7 @@ impl Trace32Adapter:
             Ok(c):
                 c.run_command("QUIT")
                 c.disconnect()
-                rt_sleep_ms(self.cfg.reset_settle_ms)
+                thread_sleep(self.cfg.reset_settle_ms)
             Err(_):
                 pass_dn
 
@@ -573,7 +573,7 @@ impl Trace32Adapter:
         while attempt < max_retries:
             if rt_tcp_connect(host, port):
                 return true
-            rt_sleep_ms(self.cfg.retry_interval_ms)
+            thread_sleep(self.cfg.retry_interval_ms)
             attempt = attempt + 1
         false
 
