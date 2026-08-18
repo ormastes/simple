@@ -586,3 +586,51 @@ c_migrations:
       i % 11 == 0, surrogate-range at i % 7 == 0), 2026-08-18:
       simple_us=9939 c_us=2811, ratio ~3.5x.
     shared_corpus: 100
+
+  - id: C-MIG-0028
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_byte_char
+    classification: product_algorithm
+    replacement: std.common.encoding.byte_char.byte_char (new file
+      src/lib/common/encoding/byte_char.spl — a pure-Simple UTF-8 encoder
+      for the Latin-1-transparent byte-to-scalar mapping, deliberately
+      independent of std.common.string_core per this round's HARD AVOID)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_byte_char(v: i64) -> text is registered in the interpreter's extern
+      dispatch table (interpreter_extern/conversion.rs::rt_byte_char_fn) via
+      Rust's `byte_val as u8 as char` -- a raw Latin-1 (ISO-8859-1)
+      transparency mapping (byte 0x00..0xFF maps directly to the identical
+      Unicode scalar value U+0000..U+00FF) followed by UTF-8 encoding -- not
+      the C source directly when running under `bin/simple test`
+      (tree-walk interpreter). No prior pure-Simple counterpart existed
+      outside string_core.spl, so one was written:
+      src/lib/common/encoding/byte_char.spl reimplements the UTF-8 byte math
+      directly (1-byte encoding for 0x00..0x7F, 2-byte 0xC2/0xC3-lead
+      encoding for 0x80..0xFF) using u64 bit ops, and uses `rt_bytes_to_text`
+      only as a raw byte-array-to-text memcpy primitive (the same
+      non-algorithmic role that extern already plays inside
+      string_core.spl's own char_from_code_inline, per C-MIG-0027), not as
+      a reimplementation shortcut.
+    correctness_spec: test/01_unit/lib/common/encoding_byte_char_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. ASCII
+      letters/digits/space/NUL/DEL, the 1-byte/2-byte UTF-8 encoding-length
+      boundary (0x7F vs 0x80), the full 2-byte Latin-1 supplement range,
+      single-byte corruption discrimination, determinism check, 100-vector
+      shared-logic bulk differential loop over the full 0..255 byte range
+      with forced boundary values at fixed moduli, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple byte_char measured ~2.5x the
+      C/Rust oracle over the 100-vector bulk corpus (simple_us=4335,
+      c_us=1731, single run, tree-walk interpreter via `bin/simple test`,
+      2026-08-18), just above the plan's 2x threshold. Recorded honestly,
+      not hidden — same interpreter-lane caveat as prior PERF findings
+      (bin/simple test hard-defaults to the interpreter, not the JIT/native
+      engine ordinary programs run on)."
+    perf_measured: >
+      100 shared branch-covering byte values (seeded LCG cycling through the
+      full 0..255 range, plus forced boundary values at fixed moduli:
+      0x7F at i % 17 == 0, 0x80 at i % 13 == 0, 0x00 at i % 11 == 0,
+      0xFF at i % 7 == 0), 2026-08-18: simple_us=4335 c_us=1731, ratio ~2.5x.
+    shared_corpus: 100
