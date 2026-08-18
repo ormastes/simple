@@ -286,6 +286,76 @@ return value when nothing consumes it.
 
 ## Fix decision
 
+## UPDATE 2026-08-18 (later): reproduced again, inconsistently, while wiring goal-4 evidence
+
+Wiring `emit_evidence` into
+`test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl` (2 `it`
+blocks, 2 `emit_evidence` calls each, called as bare statements exactly like
+the already-wired `binary_protocol_domains_spec.spl`) reproduced the
+duplicate-evidence symptom on a **single** `bin/simple test
+test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl` invocation —
+`Results: 6 total, 6 passed, 0 failed` (correct assertion count, no test
+re-run), yet the sidecar
+`test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl.evidence.sdn`
+contains each of the 4 `title=` blocks **twice** (8 blocks total), byte-for-
+byte identical pairs. Repro command:
+
+```
+bin/simple test test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl
+```
+
+Verbatim duplicated sidecar content (both copies identical):
+
+```
+kind=table
+title=TCP word3 — expected
+audience=qa
+line=Word | Value (hex) | Binary
+line=TCP_W0 | 0x00 10 02 50 00 00 00 00 | 0b00000000_00000000_00000000_00000000_01010000_00000010_00010000_00000000
+---
+kind=table
+title=TCP word3 — actual (flags corrupted)
+audience=qa
+line=Word | Value (hex) | Binary
+line=TCP_W0 | 0x00 10 12 50 00 00 00 00 | 0b00000000_00000000_00000000_00000000_01010000_00010010_00010000_00000000
+---
+kind=table
+title=AES-128-OFB block1 — expected (NIST vector)
+audience=qa
+line=Word | Value (hex) | Binary
+line=CT_W0 | 0x20 ad 2d b7 2e d9 3f 3b | 0b00111011_00111111_11011001_00101110_10110111_00101101_10101101_00100000
+---
+kind=table
+title=AES-128-OFB block1 — actual (bit-flipped)
+audience=qa
+line=Word | Value (hex) | Binary
+line=CT_W0 | 0x20 ad 2c b7 2e d9 3f 3b | 0b00111011_00111111_11011001_00101110_10110111_00101100_10101101_00100000
+```
+(the same 4 blocks appear again immediately after, lines 31-53 of the sidecar
+at reproduction time)
+
+This propagated into the `spipe-docgen`-generated manual
+(`/tmp/docgen_out/01_unit/lib/common/spec/evidence/binary_domains_spec.md`),
+where "### TCP word3 — expected" / "### TCP word3 — actual (flags corrupted)"
+and part of the AES section each appear twice under "## Typed Evidence".
+
+**Confirms the "not currently reproducible" note above was itself a
+non-reproduction, not a resolution — the bug is real but intermittent.**
+Notably, in the SAME session, two sibling suites wired with the identical
+pattern (`binary_algorithm_domains_spec.spl`, 4 `emit_evidence` calls;
+`binary_embedded_domains_spec.spl`, 2 calls) did **not** double on their own
+single `bin/simple test` runs — `grep -c '^title=' ...evidence.sdn` returned
+exactly 4 and exactly 2 respectively, matching the call count with no
+duplication. So the doubling is not universal to all `emit_evidence`
+call-sites in one process, consistent with the existing writeup's "not
+reliably reproducible" characterization, but this is a concrete, dated
+instance with a verbatim capture, unlike the prior inconclusive probing. No
+code fix attempted, per this bug doc's existing scope and the task that
+found it. Whoever revisits the root cause should treat this instance as a new
+data point: same shape of duplication (exact pairs, correct assertion
+count), but suite-dependent even under near-identical `it`/`emit_evidence`
+shapes in the same process.
+
 **Not fixed.** The call site was not conclusively located (see "Site" above),
 `it`/`describe` handling is load-bearing infra used by ~19,500 tracked
 `*_spec.spl` files, and CLAUDE.md/testing rules require any change here to be

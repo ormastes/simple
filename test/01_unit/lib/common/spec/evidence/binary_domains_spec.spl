@@ -9,10 +9,16 @@
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
 use std.common.spec.evidence.format.binary_layout.{
     BinaryLayout, ByteOrder, BitOrder, binary_field, reserved_field,
-    compare_word, WordDiff, stacked_rows, stacked_compare_rows
+    compare_word, WordDiff, stacked_rows, stacked_compare_rows, stacked_manual_rows
 }
+use std.common.spec.evidence.format.evidence_sidecar.{emit_evidence}
 use std.nogc_sync_mut.compression.gzip.{gzip_compress, gzip_decompress, gzip_validate}
 use os.crypto.aes_modes.{aes128_ofb_encrypt}
+
+# Correlates back to this spec file's own path so spipe_docgen's evidence
+# loader (src/app/spipe_docgen/spipe_docgen/evidence_loader.spl) can find the
+# sidecar — see doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md.
+val SPEC_PATH: text = "test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl"
 
 fn pack_word(bytes: [u8], start: i64, n: i64) -> i64:
     # big-endian pack of n bytes into an i64 word
@@ -65,6 +71,11 @@ describe "binary domains — protocol stacked table":
         assert_true(joined.contains("expected"))
         assert_true(joined.contains("actual"))
 
+        val expected_table = stacked_manual_rows([0x50021000], "TCP_W", 0)
+        val actual_table = stacked_manual_rows([0x50121000], "TCP_W", 0)
+        emit_evidence(SPEC_PATH, "TCP word3 — expected", expected_table)
+        emit_evidence(SPEC_PATH, "TCP word3 — actual (flags corrupted)", actual_table)
+
     it "reserved bits fail even when both sides carry them":
         val d = compare_word(0x00400000, 0x00400000, tcp_word_layout(), [])
         assert_equal(d.status, "fail")
@@ -102,6 +113,11 @@ describe "binary domains — cipher KAT":
         val bad = compare_word(expected_w0, corrupted, cipher_word_layout(), [])
         assert_equal(bad.status, "fail")
         assert_true(bad.failing_fields.len() > 0)
+
+        val expected_table = stacked_manual_rows([expected_w0], "CT_W", 0)
+        val actual_table = stacked_manual_rows([corrupted], "CT_W", 0)
+        emit_evidence(SPEC_PATH, "AES-128-OFB block1 — expected (NIST vector)", expected_table)
+        emit_evidence(SPEC_PATH, "AES-128-OFB block1 — actual (bit-flipped)", actual_table)
 
 # ---------------------------------------------------------------------------
 # Compression: gzip roundtrip + corrupted-stream rejection.

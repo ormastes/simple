@@ -35,6 +35,12 @@ done
 SPEC_DIR="$ROOT/test/01_unit/lib/common/spec/evidence"
 SPECS="binary_compare_spec binary_domains_spec binary_protocol_domains_spec binary_algorithm_domains_spec binary_embedded_domains_spec binary_layout_schema_spec"
 
+# Suites expected to emit_evidence() into a "<spec>.spl.evidence.sdn" sidecar
+# (goal 4: all binary domain suites now emit real evidence into the md
+# manual, not just binary_protocol_domains_spec). Checked for non-empty
+# content AFTER each is run below.
+EVIDENCE_SPECS="binary_domains_spec binary_protocol_domains_spec binary_algorithm_domains_spec binary_embedded_domains_spec"
+
 # Ratchet floor: recorded from the last measured healthy total (measured
 # 2026-08-18: 6 specs, 54 examples — compare=11, domains=6, protocol=5,
 # algorithm=4, embedded=8, layout_schema=20). Raised from 46 -> 54 after
@@ -97,6 +103,17 @@ selftest() {
   printf 'it "happy path only":\n    expect(x).to_be(true)\n' > "$st_dir/neg_absent.spl"
   if grep -qi "reserved" "$st_dir/neg_absent.spl"; then
     echo "ERROR — selftest failed: reserved-bit marker false-detected in negative fixture"; rm -rf "$st_dir"; exit 2
+  fi
+
+  # fixture 5: evidence-sidecar non-emptiness check — empty file must be
+  # detected as a failure, non-empty file must pass.
+  : > "$st_dir/empty.evidence.sdn"
+  if [ -s "$st_dir/empty.evidence.sdn" ]; then
+    echo "ERROR — selftest failed: empty sidecar fixture reported non-empty"; rm -rf "$st_dir"; exit 2
+  fi
+  printf 'schema=simple.sspec.evidence.v1\n' > "$st_dir/nonempty.evidence.sdn"
+  if [ ! -s "$st_dir/nonempty.evidence.sdn" ]; then
+    echo "ERROR — selftest failed: non-empty sidecar fixture reported empty"; rm -rf "$st_dir"; exit 2
   fi
 
   rm -rf "$st_dir"
@@ -162,6 +179,19 @@ done
 
 if [ -n "$FAIL_REASON" ]; then
   echo "FAIL — $FAIL_REASON (executed:$EXECUTED skipped:$SKIPPED)"
+  exit 1
+fi
+
+# ---- evidence-sidecar non-emptiness (goal 4: all domain suites emit) ----
+EMPTY_SIDECARS=""
+for s in $EVIDENCE_SPECS; do
+  sc="$SPEC_DIR/$s.spl.evidence.sdn"
+  if [ ! -s "$sc" ]; then
+    EMPTY_SIDECARS="$EMPTY_SIDECARS $s"
+  fi
+done
+if [ -n "$EMPTY_SIDECARS" ]; then
+  echo "FAIL — evidence sidecar missing or empty for:$EMPTY_SIDECARS (expected emit_evidence() output after running the spec)"
   exit 1
 fi
 

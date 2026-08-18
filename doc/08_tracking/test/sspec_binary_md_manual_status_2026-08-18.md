@@ -279,3 +279,91 @@ and no code path routes those functions' output through the one renderer
 (`manual_render.render_pipe_table`) that does produce genuine table syntax.
 Closing that gap needs a pipeline change (evidence capture + correlation),
 which is out of scope for an additive-only fix and is left as GAP #1 above.
+
+## UPDATE 2026-08-18 (cont.): all domain suites now emit evidence
+
+Gaps 2 and 3 stay open (unchanged, out of scope). This update wires
+`emit_evidence` + `stacked_manual_rows` into the three remaining goal-4
+domain suites, following the exact pattern already landed in
+`binary_protocol_domains_spec.spl` above — additive only, no existing
+assertion changed. **All 4 domain suites now emit evidence into the md
+manual:**
+
+- `test/01_unit/lib/common/spec/evidence/binary_protocol_domains_spec.spl`
+  (UDP/IPv4) — already wired, unchanged.
+- `test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl` (TCP header
+  word / AES-128-OFB KAT / gzip) — 2 `emit_evidence` call sites added: TCP
+  word3 expected/actual (flags-corrupted), AES-128-OFB block1 expected
+  (NIST vector) / actual (bit-flipped).
+- `test/01_unit/lib/common/spec/evidence/binary_algorithm_domains_spec.spl`
+  (SHA-256/CRC32) — 2 call sites added: SHA-256("abc") expected digest words
+  / actual (corrupted-input "abd"), CRC-32/ISO-HDLC("123456789") expected /
+  actual (corrupted high half).
+- `test/01_unit/lib/common/spec/evidence/binary_embedded_domains_spec.spl`
+  (UART 16550 LSR/FCR registers) — 1 call site added (2 `emit_evidence`
+  calls): UART LSR readback expected (idle, THR/TX empty) / actual
+  (framing_error set).
+
+**Proof — commands run, verbatim (results lines quoted, before/after count
+identical since no assertion was added):**
+
+```bash
+bin/simple test test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl
+# Results: 6 total, 6 passed, 0 failed
+
+bin/simple test test/01_unit/lib/common/spec/evidence/binary_algorithm_domains_spec.spl
+# Results: 4 total, 4 passed, 0 failed
+
+bin/simple test test/01_unit/lib/common/spec/evidence/binary_embedded_domains_spec.spl
+# Results: 8 total, 8 passed, 0 failed
+
+bin/simple src/app/spipe_docgen/main.spl test/01_unit/lib/common/spec/evidence/binary_domains_spec.spl --output /tmp/docgen_out --no-index
+bin/simple src/app/spipe_docgen/main.spl test/01_unit/lib/common/spec/evidence/binary_algorithm_domains_spec.spl --output /tmp/docgen_out --no-index
+bin/simple src/app/spipe_docgen/main.spl test/01_unit/lib/common/spec/evidence/binary_embedded_domains_spec.spl --output /tmp/docgen_out --no-index
+# DONE Generated 1 docs (1 complete, 0 stubs)   [x3]
+```
+
+**Proof — real generated table rows, quoted verbatim (header separator row
+included, proving genuine rendered table syntax, not source):**
+
+`binary_algorithm_domains_spec.md`:
+```
+### SHA-256("abc") — expected digest words
+
+| Word | Value (hex) | Binary |
+| --- | --- | --- |
+| SHA_W0 | 0xbf 16 78 ba 00 00 00 00 | 0b00000000_00000000_00000000_00000000_10111010_01111000_00010110_10111111 |
+```
+
+`binary_embedded_domains_spec.md`:
+```
+### UART LSR readback — actual (framing_error set)
+
+| Word | Value (hex) | Binary |
+| --- | --- | --- |
+| LSR_W0 | 0x68 00 00 00 00 00 00 00 | 0b00000000_00000000_00000000_00000000_00000000_00000000_00000000_01101000 |
+```
+
+**Known-issue reproduction (do not treat as resolved):** while generating
+`binary_domains_spec.md`, the sidecar
+`binary_domains_spec.spl.evidence.sdn` came out with each of its 4
+`emit_evidence` blocks duplicated (8 blocks total, byte-identical pairs) from
+a single `bin/simple test` invocation, reproducing
+`doc/08_tracking/bug/spec_runner_executes_it_bodies_twice_2026-08-18.md`
+(previously marked "not currently reproducible"). The sibling
+`binary_algorithm_domains_spec` and `binary_embedded_domains_spec` sidecars,
+wired the same session with the identical call pattern, did **not** double.
+See that bug doc's new dated entry for the verbatim duplicate content and
+analysis. No code fix attempted (out of scope here, per that doc's existing
+"Fix decision").
+
+**Gate:** `sh scripts/check/check-binary-sspec-evidence.shs` was extended
+with a non-emptiness check on the 4 wired suites' `.evidence.sdn` sidecars
+(previously the gate only checked example counts and negative-case markers,
+never that emission actually happened) and reruns green:
+```
+PASS — 6 spec(s) checked, 54 example(s) total, 0 vacuous, negative cases present (executed: binary_compare_spec(11) binary_domains_spec(6) binary_protocol_domains_spec(5) binary_algorithm_domains_spec(4) binary_embedded_domains_spec(8) binary_layout_schema_spec(20) skipped:)
+```
+The 54-example floor was already measured with these suites' current example
+counts (domains=6, algorithm=4, embedded=8 — unchanged, since no assertion
+was added), so no ratchet was needed.

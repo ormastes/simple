@@ -283,3 +283,11 @@ Regression coverage:
 real Markdown pipe table from emit_evidence's binary word rows" proves the
 writer and reader agree on the sidecar format end to end and that no
 double-escaping occurs (`\|` never appears in the rendered output).
+
+**All 4 domain suites under `test/01_unit/lib/common/spec/evidence/` now
+emit evidence this way** — swap the spec path in step 1/2/3 above for any of:
+`binary_protocol_domains_spec.spl` (UDP/IPv4), `binary_domains_spec.spl`
+(TCP header/AES-128-OFB/gzip), `binary_algorithm_domains_spec.spl`
+(SHA-256/CRC32), or `binary_embedded_domains_spec.spl` (UART 16550
+LSR/FCR registers) — the command set is identical for each. Status and
+per-suite proof: `doc/08_tracking/test/sspec_binary_md_manual_status_2026-08-18.md`.
