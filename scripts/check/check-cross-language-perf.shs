@@ -1638,13 +1638,33 @@ section "Cold Startup — hello world ($RUNS runs avg)"
 row "Language" "Avg (ms)" "Mode" "" "" >>"$REPORT_PATH"
 sep
 
+# Source execution can silently JIT/fallback to a non-interpreter engine, so a
+# measured Simple row is only labeled interpreter when the process itself emits a
+# `simple_execution_mode_v1` receipt naming the final engine with fallback=false.
+# Without that receipt the row is reported blocked and is not labeled interpreter.
+final_actual_mode() {
+    env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" 2>&1 >/dev/null \
+        | sed -n 's/^simple_execution_mode_v1 .*actual=\([A-Za-z0-9_-][A-Za-z0-9_-]*\) fallback=false$/\1/p' \
+        | tail -1
+}
+
 if [ -x "$SIMPLE_BINARY" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello.spl" "$RUNS")
-    row "Simple (interpreter)" "$ms" "interpret" "" ""
+    _cold_engine=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/hello.spl")
+    if [ -n "$_cold_engine" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello.spl" "$RUNS")
+        row "Simple (interpreter)" "$ms" "$_cold_engine" "" ""
+    else
+        row "Simple (interpreter)" "n/a" "blocked: no final-engine actual-mode receipt" "" ""
+    fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hello_simple.smf" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello_simple.smf" "$RUNS")
-    row "Simple (SMF loader)" "$ms" "smf" "" ""
+    _cold_loader=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/hello_simple.smf")
+    if [ -n "$_cold_loader" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello_simple.smf" "$RUNS")
+        row "Simple (SMF loader)" "$ms" "$_cold_loader" "" ""
+    else
+        row "Simple (SMF loader)" "n/a" "blocked: no final-loader actual-mode receipt" "" ""
+    fi
 fi
 if [ -x "$BUILD_DIR/hello_simple_native" ]; then
     ms=$(avg_ms "$BUILD_DIR/hello_simple_native" "$RUNS")
@@ -1673,12 +1693,22 @@ warm_row() {
 # Simple interpreter/SMF: extern fn calls segfault in interpreter and SMF loader
 # can't resolve time externs. Fall back to outer-process avg of fib.spl runs.
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib.spl" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib.spl" "$RUNS")
-    warm_row "Simple (interpreter)" "$ms" "tree-walk (outer-process, no in-proc timing)"
+    _warm_engine=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/fib.spl")
+    if [ -n "$_warm_engine" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib.spl" "$RUNS")
+        warm_row "Simple (interpreter)" "$ms" "$_warm_engine (outer-process, no in-proc timing)"
+    else
+        warm_row "Simple (interpreter)" "n/a" "blocked: no final-engine actual-mode receipt"
+    fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_simple.smf" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib_simple.smf" "$RUNS")
-    warm_row "Simple (SMF loader)" "$ms" "bytecode (outer-process, no in-proc timing)"
+    _warm_loader=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/fib_simple.smf")
+    if [ -n "$_warm_loader" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib_simple.smf" "$RUNS")
+        warm_row "Simple (SMF loader)" "$ms" "$_warm_loader (outer-process, no in-proc timing)"
+    else
+        warm_row "Simple (SMF loader)" "n/a" "blocked: no final-loader actual-mode receipt"
+    fi
 fi
 # Simple native: in-process timing works via extern fn
 if [ -x "$BUILD_DIR/fib_warm_simple_native" ]; then

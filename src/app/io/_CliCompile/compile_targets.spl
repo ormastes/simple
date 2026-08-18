@@ -542,21 +542,10 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return p3
     ""
 
-fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
-    # Resolve a module segment list to an .spl file under a --source root.
-    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
-    # the root's dir name. Returns "" if unresolved.
-    val module_path = _nb_join_segments(segs)
-    val entry_dir = _driver_entry_import_dirname(importer_path)
-    if segs.len() > 0:
-        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
-        if resolved != "":
-            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
-            for root in source_dirs:
-                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
-                val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
-                if resolved_abs.starts_with(root_prefix):
-                    return resolved
+fn _nb_resolve_direct_source_roots(segs: [text], source_dirs: [text]) -> text:
+    # Probe the explicitly declared --source roots directly. This is the cheap
+    # lane: a plain file-exists check per root, no cwd/importer compatibility
+    # probes. Returns "" when no declared root holds the module.
     for root in source_dirs:
         val dir_name = _nb_basename(root)
         val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
@@ -572,6 +561,29 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> t
         val direct_path = _nb_resolve_under_root(root, segs)
         if direct_path != "":
             return direct_path
+    ""
+
+fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
+    # Resolve a module segment list to an .spl file under a --source root.
+    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
+    # the root's dir name. Returns "" if unresolved.
+    val module_path = _nb_join_segments(segs)
+    val entry_dir = _driver_entry_import_dirname(importer_path)
+    # Explicit --source roots win before the compatibility resolver: a hit here
+    # is one file-exists probe, while _driver_resolve_entry_import pays cwd,
+    # src, and importer-relative probes for every unique import.
+    val direct_source_path = _nb_resolve_direct_source_roots(segs, source_dirs)
+    if direct_source_path != "":
+        return direct_source_path
+    if segs.len() > 0:
+        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
+        if resolved != "":
+            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
+            for root in source_dirs:
+                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
+                val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
+                if resolved_abs.starts_with(root_prefix):
+                    return resolved
     if segs.len() > 0 and not _nb_source_dirs_cover_workspace(source_dirs):
         val src_path = _nb_resolve_under_root("src", segs)
         if src_path != "":

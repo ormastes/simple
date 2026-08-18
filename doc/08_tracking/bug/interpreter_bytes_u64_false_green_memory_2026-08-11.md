@@ -14,8 +14,8 @@ lineage; admission and RSS proof remain pending.
 The historical bootstrap-seed run of
 `test/05_perf/bytes_push_1mib.spl` reported length `0` for the 1 MiB, 4 MiB,
 and 32 MiB cases, exited successfully, took 7.32 s, and peaked at 2,730,740
-KiB RSS. Those observations are diagnostic rather than self-hosted release
-evidence.
+KiB RSS. Those observations are
+diagnostic rather than self-hosted release evidence.
 
 ## Root cause and repairs
 The fixture formerly declared `rt_bytes_alloc(len: u64)` while the interpreter
