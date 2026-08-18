@@ -199,6 +199,73 @@ already-open silent-green defect
 (`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`):
 never accept exit 0 without an explicit `Results:` line.
 
+### Landed mechanics (2026-08-17) — where each piece lives
+
+All under `src/lib/nogc_sync_mut/test_runner/` unless stated. Lane record:
+`.spipe/unstable_test_mode/state.md` (read-only for other lanes).
+
+- **Flags** (`a3738dd8d0c`): `TestOptions.unstable_mode` + `unstable_mode_set`
+  in `test_runner_types.spl:88-89`; `--unstable` / `--no-unstable` in
+  `test_runner_args.spl`. Partial struct literals are legal here
+  (`execution_strategy.spl:245` builds `TestOptions` with ~30 of 81 fields), so
+  adding a field does not break other construction sites.
+- **Classification** (`882fb6e31ea`): `make_result_from_output` in
+  `test_executor_parsing.spl` emits the four error prefixes; `INCONCLUSIVE`
+  verdict at `test_runner_output.spl:199`. Unverified classes carry
+  `failed: 0` but a NON-EMPTY `error`, so `is_ok()` stays false and they cannot
+  collapse into a green.
+- **Mode selection** (`e37cc015713`): bootstrap default is
+  `env_get("SIMPLE_BOOTSTRAP") == "1"` — an EXISTING signal, consumed at
+  `test_runner_main.spl:194-198`. `ci_mode` was rejected: `--ci` also fires on
+  non-bootstrap CI runs. When ON, `fail_fast = false` is set EXPLICITLY.
+- **Limit-exceeded path** (`530fa623afa`): the three `if result.limit_exceeded:`
+  early returns in `test_runner_execute.spl` used to hardcode `failed: 1` and
+  return BEFORE `make_result_from_output`, making the classification
+  unreachable. Now timeout/memory/cpu → `failed: 0` + `TIMEOUT:`/`TERMINATED:`;
+  fds/procs stay `failed: 1` (the test itself exhausted them).
+- **Fork mode** (`cafcc59ccef`): `make_result_from_output` only tested
+  `-1 || 143 || 144`, but fork mode delivers REAL signal numbers via `waitpid`
+  (`runtime_fork.c:463-465` returns `128 + WTERMSIG`) — so SIGSEGV(139),
+  SIGABRT(134), SIGKILL(137) all fell through unclassified and a segfault was
+  NOT reported as CRASHED. Now classified from the signal number. Fork mode is
+  the ONLY path with the real signal; every other mode collapses signal-death
+  and timeout into `-1` (`env_process.rs:508,535`), which is why the sentinel
+  file exists. Fork children stay COW-inherited from the parent interpreter
+  image — crash contained, but not a fresh process.
+- **Single-spec path** (`d03b800c7d6`): `test_runner_single.spl` now imports the
+  shared classifier (`use std.test_runner.test_executor_parsing.{make_result_from_output}`),
+  closing the largest gap — every `bin/simple test <one_file.spl>` and every
+  `--no-session-daemon` run previously had NO abnormal-termination
+  classification. `unverified_error` returns **exit 2** so a TERMINATED/TIMEOUT
+  spec with `failed: 0` cannot fall into the `failed == 0 → exit 0` green.
+  **This commit was NOT at origin at last check** — verify before assuming it.
+
+### Measurement discipline for this lane
+
+- Sentinel path is `<spec_path>.crashed`, deleted on read so a stale sentinel
+  cannot mislabel a later run.
+- Fixture discovery needs BOTH markers: `--only-skipped` selects on the literal
+  `tag: "skip"`, NOT on `# @skip`. With `# @skip` alone the run reports
+  `Results: 0 total`, exit 4 — a vacuous run that reads like a clean one.
+- Budget **>= 1200s**: `discover` ~269s + `Session setup` ~286s before the test
+  loop starts. A 400s cap produced zero `Results:` lines.
+- An ablation worktree must get a BYTE-IDENTICAL COPY of the binary, never a
+  symlink — a symlink resolves back into the main tree's `src/lib` and silently
+  defeats the ablation.
+- `total_timed_out` aggregation in `test_runner_modes.spl:261-374` is COMMENTED
+  OUT; those totals are unreliable.
+
+### Seed-blocked, not fixable from `.spl`
+
+`SPEC FILE VERDICT` still prints `failed=1` for a timed-out spec, contradicting
+the same run's `failed: 0` summary. Emitter is
+`src/compiler_rust/driver/src/cli/basic.rs:169`, compiled into `bin/simple` —
+same structural problem as the CLI help text (`driver/src/cli/help.rs`), where
+the text is triplicated and two of three copies are dead. Until the next seed
+redeploy this lane's contract holds only for the `Results:` line. Note
+`bin/simple test --help` does not exist; the working form is
+`bin/simple help test`.
+
 ## Feature experts depending on this layer
 
 - [gpu_offload_check](../../feature_expert/gpu_offload_check/skill.md) — seven
@@ -267,3 +334,51 @@ premise 4, `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.m
   executing extra module init in a session that later drives frontend parsing
   triggers `doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md`
   — hence the deliberate small duplicate here. Unifying the three readers is WP-3.
+
+## Unstable mode: six outcome classes that cannot collapse (2026-08-18)
+
+Delivered shape of `doc/02_requirements/infra/supervised_test_runner.md`.
+
+- **`TestOptions.unstable_mode` / `unstable_mode_set`** (`test_runner_types.spl`),
+  parsed from `--unstable` / `--no-unstable` (`test_runner_args.spl:328-332`).
+  Default ON for the bootstrap path, OFF for interactive runs; either flag
+  overrides in both directions.
+- **Class token, not prefix match.** `test_file_outcome_class()`
+  (`test_runner_output.spl`) is the single classifier: it tokenises the
+  `"<CLASS>:"` head of `TestFileResult.error` into exactly one of
+  `OK` / `ERROR` / `CRASHED` / `TERMINATED` / `TIMEOUT` / `NOT_RUN`. It is
+  total — an unrecognised class token is `ERROR`, never `OK`, so no unit can be
+  silently absent from the summary. Both the per-spec tag and the summary
+  counters read it; there is no second copy to drift.
+- **Per-spec attribution (R6).** `print_result_default` prints
+  `CRASH` / `TERM` / `TOUT` / `NRUN` / `FAIL` / `PASS` with the path and wall
+  time. Before this, a crash and an earlyoom kill both printed `FAIL`, so the
+  classes existed only in the aggregate line. **Peak RSS is still NOT carried**
+  — `TestFileResult` has no RSS field and every executor lane would have to set
+  one; R6 is partial on that axis.
+- **`TERMINATED` and `TIMEOUT` are UNVERIFIED, never failures** (they carry
+  `failed: 0`), but their non-empty error keeps `is_ok()` false, so they cannot
+  be swallowed into a green run either. The verdict line says
+  `INCONCLUSIVE: N unit(s) ... never produced a verdict.` `TestRunOutcome.Unverified`
+  exits **5**.
+- **earlyoom evidence hazard.** earlyoom SIGTERMs processes named `simple` on
+  this host, so death-by-signal alone does not prove a crash. The crash fixture
+  writes `<spec_path>.crashed` immediately before killing itself
+  (`take_crash_sentinel`); sentinel present + signal death = CRASHED, sentinel
+  absent + signal death = TERMINATED/UNVERIFIED.
+
+### Acceptance gate
+
+`sh scripts/check/check-unstable-test-mode-acceptance.shs` runs the five
+fixtures in `test/fixtures/unstable_mode/` (crash / timeout / assertion-failure
+/ two passes) in ONE sequential run and asserts: a `Results:` line exists, the
+runner exits non-zero, the summary names a crashed unit and an unverified unit,
+it never claims five passed, both healthy fixtures pass (proving the suite
+reached the END), and per-spec outcome-class lines are present. Verdict is the
+last stdout line (`PASS` / `FAIL` exit 1 / `ERROR — nothing was checked` exit 2;
+a vacuous run is never a pass). `--control` is the negative-control arm.
+
+**Selecting the fixtures:** they carry BOTH `# @skip` (to stay out of default
+discovery, `test_runner_files.spl:423`) and the literal `tag: "skip"` (what
+`--only-skipped` actually matches). Without the second marker a directory run
+discovers 0 files and reports `No test files found`, exit 4.
