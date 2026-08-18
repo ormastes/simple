@@ -235,3 +235,16 @@ Verification (foreground, `--no-session-daemon`):
 - `test/03_system/compiler/vhdl_backend_system_spec.spl` — Results: 10 total, 10 passed, 0 failed
 - `test/03_system/compiler/vhdl_mir_backend_call_port_map_spec.spl` — Results: 1 total, 0 passed, 1 failed
   (baseline-identical: same temp-restore — Results: 1 total, 0 passed, 1 failed)
+
+### Delta 2026-08-18 (cross-layer mega-SCC break: 50.mir <-> 60.mir_opt <-> tiered_jit)
+
+The 36-file "largest SCC" was not MirLowering-internal but a cross-layer cycle:
+mir.spl facade -> mir_lowering part-files -> `use compiler.mir_opt.{ssa_alloca_transform_blocks}`
+(package facade!) -> whole optimizer package -> passes' `use compiler.mir.mir.*` back to the facade,
+plus var_reassign <-> tiered_jit. Import-line-only fixes:
+- bootstrap_globals: ssa_alloca_transform_blocks now imported from its definer (var_reassign_ssa).
+- 20 mir_opt files: `use compiler.mir.mir.*` -> `use compiler.mir.mir_data.*` (passes use data types only).
+- MirLowering/MirLoweringExpr part-files: facade back-imports expanded to explicit sibling imports.
+Measured (dep_baseline.py, CLI closure): largest SCC 36 -> 13; files-in-cycles 169 -> 150.
+Verified: optimizer_plugin 56/56, dynamic routing 6/6, hot-path 8/8, bounds_check_elim 7/7,
+collection_opt 30/31 baseline-identical (temp-restore A/B).

@@ -1,5 +1,6 @@
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
-use compiler.mir.mir_lowering_expr.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
 # MIR Lowering - Expression Lowering
 #
 # Expression lowering from HIR to MIR:
@@ -919,114 +920,6 @@ impl MirLowering:
                 case _:
                     ()
 
-        result
-
-    me emit_scalar_pattern_compare(scrut_local: LocalId, literal: HirExpr) -> LocalId:
-        """Compare one scalar match value without pointer-identity text bugs."""
-        var b = self.builder
-        var comparison = LocalId(id: 0)
-        match literal.kind:
-            case IntLit(value, _):
-                val wanted = b.emit_const_int(value)
-                comparison = b.emit_binop(MirBinOp.Eq, mir_operand_copy(scrut_local), mir_operand_copy(wanted), MirType.bool())
-            case BoolLit(value):
-                val wanted = b.emit_const_int(if value: 1 else: 0)
-                comparison = b.emit_binop(MirBinOp.Eq, mir_operand_copy(scrut_local), mir_operand_copy(wanted), MirType.bool())
-            case StringLit(value, _):
-                val wanted = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
-                b.emit_const(wanted, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
-                val eq_func = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_text_eq_any"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-                ))
-                val raw_result = b.emit_call(eq_func, [mir_operand_copy(scrut_local), mir_operand_copy(wanted)], MirType.i64())
-                var raw_equal = LocalId(id: 0)
-                if val found = raw_result:
-                    raw_equal = found
-                val zero = b.emit_const_int(0)
-                comparison = b.emit_binop(MirBinOp.Ne, mir_operand_copy(raw_equal), mir_operand_copy(zero), MirType.bool())
-            case _:
-                self.error("match scalar dispatch received a non-scalar literal", Some(literal.span))
-                val always_false = b.emit_const_int(0)
-                comparison = b.emit_binop(MirBinOp.Ne, mir_operand_copy(always_false), mir_operand_copy(always_false), MirType.bool())
-        self.builder = b
-        comparison
-
-    me emit_scalar_literal_dispatch(scrut_local: LocalId, cases: [(HirExpr, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
-        """Ordered equality chain for int/bool/text value patterns."""
-        var b = self.builder
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
-        var inferred_known = false
-        var inferred_ty = MirType.i64()
-        var result_defined = false
-        val merge_block = b.new_block(Some("match_merge"))
-        self.builder = b
-
-        var i = 0
-        while i < cases.len():
-            val literal = cases[i].0
-            val body = cases[i].1
-            val cmp_local = self.emit_scalar_pattern_compare(scrut_local, literal)
-            var b_cmp = self.builder
-            val arm_block = b_cmp.new_block(Some("match_arm"))
-            val next_block = b_cmp.new_block(Some("match_next"))
-            b_cmp.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
-            b_cmp.switch_to_block(arm_block)
-            self.builder = b_cmp
-
-            val arm_result = self.lower_block_expected(body, expected_type)
-            var b_arm = self.builder
-            if not b_arm.current_block_has_explicit_terminator():
-                if arm_result.?:
-                    val fallback = LocalId(id: 0)
-                    val arm_local = arm_result ?? fallback
-                    b_arm.emit_copy(result, arm_local)
-                    result_defined = true
-                    if self.struct_value_syms.contains(arm_local.id):
-                        self.struct_value_syms[result.id] = self.struct_value_syms[arm_local.id]
-                    if not inferred_known:
-                        if val arm_ty = self.local_mir_type_of(arm_local):
-                            inferred_known = true
-                            inferred_ty = arm_ty
-                b_arm.terminate_goto(merge_block)
-            b_arm.switch_to_block(next_block)
-            self.builder = b_arm
-            i = i + 1
-
-        if val default_symbol = default_binding:
-            if default_symbol == nil:
-                self.error("match default binding has no resolved symbol", nil)
-            else:
-                self.local_map[default_symbol.id] = scrut_local
-                self.bind_local(default_symbol.id, scrut_local)
-        val default_result = self.lower_block_expected(default_body, expected_type)
-        var b_default = self.builder
-        if not b_default.current_block_has_explicit_terminator():
-            if default_result.?:
-                val fallback = LocalId(id: 0)
-                val default_local = default_result ?? fallback
-                b_default.emit_copy(result, default_local)
-                result_defined = true
-                if not inferred_known:
-                    if val default_ty = self.local_mir_type_of(default_local):
-                        inferred_known = true
-                        inferred_ty = default_ty
-            b_default.terminate_goto(merge_block)
-        b_default.switch_to_block(merge_block)
-        if not result_defined:
-            b_default.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known:
-            b_default.set_local_type(result, inferred_ty)
-        self.builder = b_default
-
-        if val found_expected = expected_type:
-            self.remember_local_hir_type(result.id, found_expected, 0, 0)
-            match found_expected.kind:
-                case HirTypeKind.Optional(_):
-                    self.option_value_locals[result.id] = true
-                    self.mark_runtime_value_local(result.id)
-                case _:
-                    ()
         result
 
     me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
@@ -4509,16 +4402,8 @@ impl MirLowering:
                 case _:
                     pass
 
-        if is_direct:
-            val direct_symbol_id = mir_expr_symbol_id_value(direct_symbol)
-            val exact_bound_local = self.find_local(direct_symbol_id)
-            if exact_bound_local.id >= 0 and self.symbols.exact_local_value_binding_raw(direct_symbol_id, direct_name):
-                # Symbol ids are module-local and can collide with a NamedVar's
-                # authored builtin/import name on the flat bootstrap lane. A
-                # local binding owns this callee only when the stored record's
-                # name and value-kind match the HIR payload. This still keeps a
-                # genuinely shadowing `val int = ...; int(x)` indirect.
-                is_direct = false
+        if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
+            is_direct = false
 
         if is_direct:
             # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
@@ -4586,19 +4471,6 @@ impl MirLowering:
                 return str_arg_local
             if direct_name == "int" and args.len() == 1:
                 val int_arg_local = self.lower_expr(args[0].value)
-                val int_arg_type = self.local_mir_type_of(int_arg_local)
-                if int_arg_type != nil:
-                    match int_arg_type.kind:
-                        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool:
-                            # Numeric/bool int() is a language conversion, not
-                            # string parsing. Emit the typed MIR cast so f64
-                            # never becomes a function-pointer operand.
-                            var b_int_cast = self.builder
-                            val int_cast = b_int_cast.emit_cast(mir_operand_copy(int_arg_local), MirType.i64())
-                            self.builder = b_int_cast
-                            return int_cast
-                        case _:
-                            ()
                 val int_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_string_to_int_any"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
