@@ -1,0 +1,192 @@
+#!/bin/sh
+# check-startup-perf-budget.shs — startup perf-budget lane (test/05_perf/startup/).
+#
+# Measures p50 of N=7 runs of `bin/simple --version` and
+# `bin/simple run test/05_perf/startup/hello_fixture.spl` against budgets read
+# from the COMMITTED file test/05_perf/startup/budgets.sdn.
+#
+# Detector-standard conformance (doc/07_guide/infra/detector/detector_standard.md):
+# - Fatal --selftest with must-FAIL (0ms budget), must-PASS (absurd budget) and
+#   must-ERROR (missing budgets file) fixtures; selftest failure is fatal.
+# - Non-vacuity: verdict is the last stdout line; a run that measured 0
+#   commands is ERROR (exit 2), never a pass.
+# - Three-way: PASS (exit 0) / SKIP folded into ERROR-vs-PASS explicitly:
+#   bin/simple missing/unresolvable => SKIP verdict, exit 0, clearly labeled,
+#   never counted as a measurement. FAIL (exit 1) names measured-vs-budget.
+# - Exit codes read on the line after the command, never through a pipe.
+# - Recorded escape: budgets change ONLY by editing budgets.sdn with a dated
+#   comment. No env var or flag overrides a budget.
+# - Binary identity (seed vs self-hosted) is recorded in the verdict line.
+# FP-RATE: not yet measured (advisory lane); budgets set at measured p50 x3 to
+# keep the expected FP rate from box noise near zero. Adjudicate before any
+# promotion to blocking.
+#
+# Verdict convention: last stdout line is
+#   PASS — <n> command(s) measured, ... (exit 0)
+#   SKIP — ...                          (exit 0)
+#   FAIL — ...                          (exit 1)
+#   ERROR — nothing was checked ...     (exit 2)
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BUDGETS_DEFAULT="$ROOT/test/05_perf/startup/budgets.sdn"
+HELLO="$ROOT/test/05_perf/startup/hello_fixture.spl"
+N=7
+
+now_ms() { date +%s%N | sed 's/......$//'; }
+
+read_budget() {
+  # read_budget <file> <key> -> value or empty
+  sed -n "s/^$2:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p" "$1" | head -1
+}
+
+p50_of_7() {
+  # stdin: 7 integers -> prints the 4th sorted
+  sort -n | sed -n '4p'
+}
+
+measure_p50() {
+  # measure_p50 <mode>  (mode: version|run) -> prints p50 ms, rc 0; rc 1 if a run failed
+  _i=0
+  _samples=""
+  while [ $_i -lt $N ]; do
+    _s=$(now_ms)
+    if [ "$1" = version ]; then
+      "$SIMPLE_BIN" --version >/dev/null 2>&1
+      _rc=$?
+    else
+      "$SIMPLE_BIN" run "$HELLO" >/dev/null 2>&1
+      _rc=$?
+    fi
+    _e=$(now_ms)
+    if [ $_rc -ne 0 ]; then return 1; fi
+    _samples="$_samples $((_e - _s))"
+    _i=$((_i + 1))
+  done
+  printf '%s\n' $_samples | p50_of_7
+}
+
+run_check() {
+  # run_check <budgets_file> ; prints verdict as last line, returns 0/1/2
+  BF="$1"
+  if [ ! -f "$BF" ]; then
+    echo "ERROR — nothing was checked: budgets file missing: $BF"
+    return 2
+  fi
+  BV=$(read_budget "$BF" version_ms)
+  BR=$(read_budget "$BF" run_hello_ms)
+  if [ -z "$BV" ] || [ -z "$BR" ]; then
+    echo "ERROR — nothing was checked: budgets file lacks version_ms/run_hello_ms: $BF"
+    return 2
+  fi
+  SIMPLE_BIN="$ROOT/bin/simple"
+  if [ ! -e "$SIMPLE_BIN" ]; then
+    echo "SKIP — bin/simple missing at $SIMPLE_BIN; 0 command(s) measured (explicit skip, not a pass on measurements)"
+    return 0
+  fi
+  REAL=$(readlink -f "$SIMPLE_BIN" 2>/dev/null)
+  if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
+    echo "SKIP — bin/simple unresolvable/not executable ($SIMPLE_BIN); 0 command(s) measured"
+    return 0
+  fi
+  if [ ! -f "$HELLO" ]; then
+    echo "ERROR — nothing was checked: hello fixture missing: $HELLO"
+    return 2
+  fi
+  # Binary identity: seed vs self-hosted, plus resolved path.
+  IDENT="self-hosted-or-unknown"
+  VOUT=$("$SIMPLE_BIN" --version 2>&1 | head -3)
+  case "$VOUT" in *"bootstrap seed"*) IDENT="rust-seed";; esac
+
+  PV=$(measure_p50 version)
+  _rc=$?
+  if [ $_rc -ne 0 ]; then
+    echo "ERROR — nothing was checked: bin/simple --version exited non-zero during measurement"
+    return 2
+  fi
+  PR=$(measure_p50 run)
+  _rc=$?
+  if [ $_rc -ne 0 ]; then
+    echo "ERROR — nothing was checked: bin/simple run hello exited non-zero during measurement"
+    return 2
+  fi
+  if [ -z "$PV" ] || [ -z "$PR" ]; then
+    echo "ERROR — nothing was checked: p50 computation yielded no value"
+    return 2
+  fi
+  FAILS=""
+  [ "$PV" -gt "$BV" ] && FAILS="version p50=${PV}ms > budget ${BV}ms"
+  if [ "$PR" -gt "$BR" ]; then
+    [ -n "$FAILS" ] && FAILS="$FAILS; "
+    FAILS="${FAILS}run-hello p50=${PR}ms > budget ${BR}ms"
+  fi
+  if [ -n "$FAILS" ]; then
+    echo "FAIL — 2 command(s) measured (N=$N, binary=$IDENT $REAL): $FAILS"
+    return 1
+  fi
+  echo "PASS — 2 command(s) measured (N=$N, binary=$IDENT $REAL): version p50=${PV}ms <= ${BV}ms, run-hello p50=${PR}ms <= ${BR}ms"
+  return 0
+}
+
+selftest() {
+  TMP=$(mktemp -d)
+  ok=1
+  # Fixture 1: 0ms budget must FAIL (mutation proof — sabotaged budget).
+  printf 'version_ms: 0\nrun_hello_ms: 0\n' > "$TMP/zero.sdn"
+  out=$(run_check "$TMP/zero.sdn")
+  rc=$?
+  last=$(printf '%s\n' "$out" | tail -1)
+  case "$last" in
+    FAIL\ *) : ;;
+    SKIP\ *) echo "selftest: fixture1 inconclusive (bin/simple absent): $last"; ok=0 ;;
+    *) echo "selftest FAILURE: 0ms budget did not FAIL (rc=$rc): $last"; ok=0 ;;
+  esac
+  # Fixture 2: absurdly high budget must PASS.
+  printf 'version_ms: 99999999\nrun_hello_ms: 99999999\n' > "$TMP/huge.sdn"
+  out=$(run_check "$TMP/huge.sdn")
+  rc=$?
+  last=$(printf '%s\n' "$out" | tail -1)
+  case "$last" in
+    PASS\ *) : ;;
+    SKIP\ *) echo "selftest: fixture2 inconclusive (bin/simple absent): $last"; ok=0 ;;
+    *) echo "selftest FAILURE: absurd budget did not PASS (rc=$rc): $last"; ok=0 ;;
+  esac
+  # Fixture 3: missing budgets file must ERROR (exit 2).
+  out=$(run_check "$TMP/nonexistent.sdn")
+  rc=$?
+  last=$(printf '%s\n' "$out" | tail -1)
+  if [ $rc -ne 2 ]; then
+    echo "selftest FAILURE: missing budgets file gave rc=$rc, want 2: $last"; ok=0
+  fi
+  case "$last" in ERROR\ *) : ;; *) echo "selftest FAILURE: missing budgets verdict not ERROR: $last"; ok=0 ;; esac
+  rm -rf "$TMP"
+  if [ $ok -ne 1 ]; then
+    echo "ERROR — nothing was checked: selftest failed (fatal)"
+    return 2
+  fi
+  echo "selftest OK: 3 fixture(s) (must-FAIL 0ms, must-PASS absurd, must-ERROR missing file)"
+  return 0
+}
+
+case "${1:-}" in
+  --selftest)
+    selftest
+    exit $?
+    ;;
+  "" )
+    selftest >/dev/null
+    _rc=$?
+    if [ $_rc -ne 0 ]; then
+      echo "ERROR — nothing was checked: selftest failed (fatal)"
+      exit 2
+    fi
+    run_check "$BUDGETS_DEFAULT"
+    exit $?
+    ;;
+  *)
+    echo "usage: $0 [--selftest]"
+    echo "ERROR — nothing was checked: unknown argument $1"
+    exit 2
+    ;;
+esac
