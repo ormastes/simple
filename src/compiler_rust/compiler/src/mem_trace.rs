@@ -58,6 +58,151 @@ fn on_alloc(size: usize) {
     PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// Oversized single-allocation guard (native-build worker OOM, defect 2)
+// ---------------------------------------------------------------------------
+//
+// The native-build worker aborts with `memory allocation of 17179869184 bytes
+// failed` -- exactly 2^34 in ONE request, while the process held only ~10.9 GB.
+// 2^33 and 2^31 failures are also on record: a ladder exactly 3 bits apart,
+// which is the signature of a tagged integer used raw as an element count (a
+// 3-bit tag shift turns N into 8N, and 8 bytes/element multiplies by 8 again).
+//
+// A single capture of the call site settles it, so the check runs on the size
+// BEFORE the inner allocator is called: the interesting request is the one that
+// FAILS, and `on_alloc` only runs on success.
+//
+// See doc/08_tracking/bug/native_build_interpreted_worker_rss_blowup_2026-08-18.md
+
+/// Fixed floor for the check on the hot path. Anything below this can never be
+/// reported, so the hot path is one compare against a constant.
+const BIG_ALLOC_FLOOR: usize = 256 * 1024 * 1024;
+
+thread_local! {
+    /// Re-entrancy guard: capturing a backtrace and formatting it allocates,
+    /// and those allocations run through this same allocator.
+    static IN_BIG_REPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Effective threshold in bytes, or `None` when the guard is off.
+/// `SIMPLE_BIG_ALLOC_MB=<n>` sets it; `SIMPLE_MEM_TRACE=1` turns it on at the
+/// 256 MB floor. Read lazily, and only from inside the re-entrancy guard.
+fn big_alloc_threshold() -> Option<usize> {
+    static T: OnceLock<Option<usize>> = OnceLock::new();
+    *T.get_or_init(|| {
+        if let Ok(v) = std::env::var("SIMPLE_BIG_ALLOC_MB") {
+            if let Ok(n) = v.trim().parse::<usize>() {
+                return Some(n * 1024 * 1024);
+            }
+        }
+        if enabled() { Some(BIG_ALLOC_FLOOR) } else { None }
+    })
+}
+
+/// Report one oversized allocation request with a backtrace. Never inlined and
+/// never on the fast path.
+#[cold]
+#[inline(never)]
+fn report_big_alloc(size: usize, kind: &str) {
+    // `try_with` because this can run during TLS teardown.
+    if IN_BIG_REPORT.try_with(|c| c.replace(true)).unwrap_or(true) {
+        return;
+    }
+    if let Some(threshold) = big_alloc_threshold() {
+        if size >= threshold {
+            let pow2 = if size.is_power_of_two() {
+                format!(" = 2^{}", size.trailing_zeros())
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "[mem][BIG] {kind} request of {size} bytes ({:.1} MB{pow2})                  while live={:.1}MB rss={:.1}MB allocs={}",
+                mb(size),
+                mb(live()),
+                mb(rss_bytes()),
+                TOTAL_ALLOCS.load(Ordering::Relaxed),
+            );
+            let _ = INTERP_STACK.try_with(|s| {
+                let s = s.borrow();
+                if !s.is_empty() {
+                    let tail: Vec<&str> = s
+                        .iter()
+                        .rev()
+                        .take(25)
+                        .map(|n| n.as_str())
+                        .collect();
+                    eprintln!(
+                        "[mem][BIG] interp stack (innermost first, depth {}): {}",
+                        s.len(),
+                        tail.join(" <- ")
+                    );
+                }
+            });
+            eprintln!(
+                "[mem][BIG] backtrace:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }
+    IN_BIG_REPORT.with(|c| c.set(false));
+}
+
+// ---------------------------------------------------------------------------
+// Interpreted-function name stack (BIG-alloc attribution only)
+// ---------------------------------------------------------------------------
+//
+// The Rust backtrace at a huge allocation shows only exec_node/exec_block
+// interpreter frames; the pure-Simple function whose loop is doing the
+// allocating is invisible. This TLS stack of interpreted function names is
+// maintained only when the big-alloc guard is on, so the production hot path
+// pays one branch on a cached bool per function call.
+
+thread_local! {
+    static INTERP_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// True when the big-alloc guard is on (so the interp name stack is worth
+/// maintaining).
+pub fn big_alloc_guard_on() -> bool {
+    big_alloc_threshold().is_some()
+}
+
+/// RAII frame naming the interpreted function currently executing.
+/// A no-op unless the big-alloc guard is enabled.
+pub struct InterpFrame(bool);
+
+impl InterpFrame {
+    pub fn enter(name: &str) -> Self {
+        if !big_alloc_guard_on() {
+            return InterpFrame(false);
+        }
+        let pushed = INTERP_STACK
+            .try_with(|s| {
+                s.borrow_mut().push(name.to_string());
+                true
+            })
+            .unwrap_or(false);
+        InterpFrame(pushed)
+    }
+}
+
+impl Drop for InterpFrame {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = INTERP_STACK.try_with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+    }
+}
+
+#[inline(always)]
+fn check_big(size: usize, kind: &str) {
+    if size >= BIG_ALLOC_FLOOR {
+        report_big_alloc(size, kind);
+    }
+}
+
 #[inline]
 fn on_dealloc(size: usize) {
     LIVE_BYTES.fetch_sub(size, Ordering::Relaxed);
@@ -65,6 +210,7 @@ fn on_dealloc(size: usize) {
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAlloc<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        check_big(layout.size(), "alloc");
         let p = unsafe { self.0.alloc(layout) };
         if !p.is_null() {
             on_alloc(layout.size());
@@ -78,6 +224,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAlloc<A> {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        check_big(layout.size(), "alloc_zeroed");
         let p = unsafe { self.0.alloc_zeroed(layout) };
         if !p.is_null() {
             on_alloc(layout.size());
@@ -86,6 +233,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAlloc<A> {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        check_big(new_size, "realloc");
         let p = unsafe { self.0.realloc(ptr, layout, new_size) };
         if !p.is_null() {
             on_dealloc(layout.size());

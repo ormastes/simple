@@ -350,9 +350,22 @@ fn transform_placeholder_call_args_after_interpolation():
     allocates new nodes, which must not be walked again by this pass.
     """
     val initial_expr_count = expr_tag.len()
-    _ph_pattern_node_marks = []
-    while _ph_pattern_node_marks.len() < initial_expr_count:
-        _ph_pattern_node_marks.push(false)
+    # Build the marks array in a LOCAL and assign the module-global ONCE. Under
+    # the Rust-seed interpreter, `.push()` on a module-global array lands in a
+    # per-call copy while `.len()` in a while condition (and later indexed
+    # reads) see the stale global, so the previous
+    # `while _ph_pattern_node_marks.len() < n: _ph_pattern_node_marks.push(false)`
+    # fill loop never terminated and doubled the vec until a 2^34-byte realloc
+    # aborted the native-build worker. Whole-array assignment and `g[i] = x`
+    # index stores DO propagate (verified), so only method-call mutation of the
+    # global is avoided here. See
+    # doc/08_tracking/bug/native_build_worker_oom_global_array_len_stale_in_while_2026-08-18.md
+    var fresh_marks: [bool] = []
+    var mark_fill = 0
+    while mark_fill < initial_expr_count:
+        fresh_marks.push(false)
+        mark_fill = mark_fill + 1
+    _ph_pattern_node_marks = fresh_marks
     var arm_index = 0
     while arm_index < arm_pattern.len():
         mark_placeholder_pattern_tree(arm_pattern[arm_index], initial_expr_count)

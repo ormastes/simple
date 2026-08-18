@@ -637,6 +637,10 @@ pub(crate) fn execute_function_body(
     if let Some(cov) = crate::coverage::get_global_coverage() {
         cov.lock().unwrap().record_function_call(&func.name);
     }
+    // Big-alloc attribution: name the interpreted function on a TLS stack so an
+    // oversized-allocation report can say WHICH .spl function's loop allocated.
+    // No-op (one cached-bool branch) unless the guard is enabled.
+    let _mem_frame = crate::mem_trace::InterpFrame::enter(&func.name);
 
     // Stack overflow detection: push depth, auto-pop on drop
     let _depth_guard = crate::interpreter::push_call_depth(&func.name)?;
