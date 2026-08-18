@@ -98,6 +98,35 @@ comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.
 # (file_size, line 152) coalesces a negative rt_file_size result (i64
 # error sentinel) to 0 — not a passthrough, and not compatible with the
 # optional-preserving fs.spl shape.
+#
+# Round 3 (2026-08-18) — top uncovered symbols by mention frequency audited:
+# rt_dir_create_all, rt_file_append_text, rt_process_is_running TABLED below
+# (uniform signature across every in-scope src/lib/nogc_sync_mut + src/app
+# declaration, and io_runtime.spl's wrapper is a bare one-line passthrough
+# with no branching/coalescing/guard).
+# EXCLUDED — rt_dir_create: NOT tabled. io_runtime.spl's wrapper
+# (dir_create, line 250) is `if recursive: rt_dir_create_all(path) else:
+# rt_dir_create(path, false)` — a branching dispatch to a DIFFERENT extern
+# depending on the argument value, not a bare passthrough of the callee's
+# own extern. A mechanical rewrite would swap a direct 2-arg call for this
+# branch and assumes rt_dir_create(path, true) == rt_dir_create_all(path),
+# which is unverified.
+# EXCLUDED — rt_process_kill: NOT tabled. io_runtime.spl's wrapper
+# (process_kill, line 313) adds `if pid <= 1: return false` before calling
+# rt_process_kill — a safety guard that changes behavior for pid<=1
+# call-site values, not a bare passthrough.
+# EXCLUDED — rt_process_spawn_async: NOT tabled. Signature split:
+# src/app/io/process_env_ops.spl:4 declares a THIRD parameter,
+# `(cmd: text, args: [text], env: {text: text}) -> i64`, while every other
+# in-scope site (io_runtime.spl, play/launcher.spl, io/process_ops.spl,
+# test_runner/system_monitor.spl, app/io/process_ops.spl) declares the
+# 2-arg `(cmd: text, args: [text]) -> i64` form the wrapper matches. A
+# mechanical rewrite would silently drop the `env` argument at that site.
+# EXCLUDED — rt_path_join / rt_path_absolute / rt_time_now_micros: NOT
+# tabled. io_runtime.spl exports no path_join/path_absolute/time_now_micros
+# wrapper at all (path.spl is a separate, non-io_runtime provider; only
+# rt_time_now_unix_micros — already tabled above — has an io_runtime
+# wrapper), so there is no passthrough target for the mechanical rewrite.
 TB_TABLE="rt_time_now_unix_micros time_now_unix_micros
 rt_file_exists file_exists
 rt_file_delete file_delete
@@ -111,7 +140,10 @@ rt_cli_get_args get_args
 rt_file_write_text file_write
 rt_file_write_bytes file_write_bytes
 rt_env_set env_set
-rt_dir_exists dir_exists"
+rt_dir_exists dir_exists
+rt_dir_create_all dir_create_all
+rt_file_append_text file_append_text
+rt_process_is_running process_is_running"
 
 track_b() {
   tb_done=0
