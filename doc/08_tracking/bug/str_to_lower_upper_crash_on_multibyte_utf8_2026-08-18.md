@@ -8,6 +8,7 @@
 str_replace_all, str_reverse) — see "Fix applied" and "Defect-class audit"
 below. `str_split`'s empty-separator branch shares the crash SHAPE but not a
 safe one-liner fix and is left OPEN as a remaining instance.
+**Status:** OPEN
 
 ## Symptom
 
@@ -122,3 +123,10 @@ Existing `string_core` specs re-verified green post-fix (sequential runs):
 (112/112), `string_core_ends_with_crosslang_spec.spl` (6/6),
 `string_core_rfind_crosslang_spec.spl` (5/5),
 `string_core_char_from_code_crosslang_spec.spl` (6/6) — all `0 failed`.
+## Fix sketch (not applied here — out of scope for a C-MIG evidence task)
+
+Either: (a) rewrite the loop to use `s[i:i+1]` range slicing instead of
+`s[i]`, matching every sibling function in the file; or (b) clarify/fix the
+single-bracket-index vs `.len()` basis mismatch at the language/interpreter
+level so `s[i]` and `s.len()` agree on byte vs codepoint semantics
+everywhere, not just in this file.

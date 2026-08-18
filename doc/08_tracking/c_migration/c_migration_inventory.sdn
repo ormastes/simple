@@ -466,3 +466,67 @@ c_migrations:
       full-subject classes), 2026-08-18: simple_us=17415 c_us=9654, ratio
       ~1.8x.
     shared_corpus: 100
+
+  - id: C-MIG-0026
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_raw_i64_to_string
+    classification: product_algorithm
+    replacement: std.common.convert.i64_to_text (already implemented in
+      src/lib/common/convert.spl:253-255 — a pure string-interpolation-based
+      i64-to-decimal-text conversion, independent of the
+      `rt_raw_i64_to_string` extern)
+    simple_callers_migrated: []
+    caller_note: >
+      rt_raw_i64_to_string(n: i64) -> text is registered in the interpreter's
+      extern dispatch table (interpreter_extern/sffi_string.rs::
+      rt_raw_i64_to_string_fn, interpreter_extern/mod.rs:1901) via
+      `value.as_int()?.to_string()` — not the C source directly when running
+      under `bin/simple test` (tree-walk interpreter). Both the interpreter
+      shim and the C source at runtime_native.c:3102 implement the identical
+      contract (decimal formatting of an i64 including sign, including the
+      i64::MIN/i64::MAX boundary values), so this spec differentially
+      compares against whichever is actually reached by the extern call,
+      documenting that distinction rather than assuming the C file itself
+      executes.
+
+      Candidate history: rt_string_starts_with (hinted in C-MIG-0025's
+      report) is NOT registered in the interpreter's extern dispatch table
+      (only rt_string_ends_with/rt_string_rfind/rt_string_concat/
+      rt_string_eq/rt_string_len/rt_string_new/rt_string_bytes/
+      rt_string_data/rt_string_free/rt_string_builder_*/rt_string_to_int/
+      rt_raw_i64_to_string/rt_string_byte_at are present) — REJECTED,
+      unregistered. rt_text_to_lower_ascii vs str_to_lower: both fully
+      registered, but str_to_lower/str_to_upper CRASH
+      (`semantic: string index out of bounds`) on any multibyte UTF-8 input
+      because they index with single-bracket `s[i]` (codepoint-indexed)
+      bounded by `s.len()` (byte-length) — a genuine defect, filed at
+      doc/08_tracking/bug/str_to_lower_upper_crash_on_multibyte_utf8_2026-08-18.md
+      — REJECTED, a crashing replacement is not valid. rt_string_rfind vs
+      str_last_index_of: correct, but already covered by C-MIG-0024 —
+      REJECTED as a duplicate.
+    correctness_spec: test/01_unit/lib/common/convert_i64_to_text_crosslang_spec.spl
+    correctness_result: "6 examples, 6 passed (KAT vectors incl. zero/
+      positive/negative/i64::MIN/i64::MAX boundary formatting,
+      powers-of-ten digit-count-transition boundaries, single-digit-
+      corruption discrimination, determinism check, 100-vector shared-logic
+      bulk differential loop over magnitudes spanning 1..~10^18 with sign
+      alternation and forced zero/i64::MIN branches, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "PERF FINDING — pure-Simple i64_to_text measured ~2.3x
+      slower than the C oracle over the 100-vector bulk corpus
+      (simple_us=6086, c_us=2647, single run, tree-walk interpreter via
+      `bin/simple test`, 2026-08-18). i64_to_text goes through Simple's
+      general string-interpolation formatter (`\"{n}\"`) while the Rust/C
+      sides call a direct integer-to-decimal routine; ratio recorded per the
+      mandatory perf-regression rule since it exceeds the plan's 2x
+      threshold, not hidden. Not yet filed as a standalone bug — same
+      inconclusive-fast-path caveat as C-MIG-0022/0023/0024 (bin/simple test
+      hard-defaults to the interpreter, not the engine ordinary programs run
+      on)."
+    perf_measured: >
+      100 shared branch-covering i64 values (seeded LCG producing magnitudes
+      spanning digit counts 0..19 with sign alternation, plus forced zero at
+      i % 13 == 0 and forced i64::MIN at i % 23 == 0), 2026-08-18:
+      simple_us=6086 c_us=2647, ratio ~2.3x.
+    shared_corpus: 100
