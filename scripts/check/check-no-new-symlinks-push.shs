@@ -193,6 +193,28 @@ fi
 
 run_selftest || die 2 "selftest failed; refusing to trust the real scan"
 
+# Explicit, RECORDED escape (added 2026-08-18, lane FPGUARD).
+# `--expect-new-symlinks <n>` accepts exactly n new symlinks for THIS push and
+# names the count and the paths in the verdict line, following the
+# `--expect-files <n>` / `--expect-removals <n>` precedent. More than n still
+# FAILs, so the guard stays fail-closed; the escape only makes an already-known
+# addition a conscious, recorded decision instead of a blanket bypass.
+# Proven false positive it exists for: adding another `.claude/commands/*.md`
+# alias symlink — the repo's own established convention, 93 such symlinks are
+# already grandfathered in — is rejected with no way to proceed except ignoring
+# the guard entirely, which is exactly how a guard stops being believed.
+# Reproducer: doc/08_tracking/bug/pre_push_guard_false_positives_2026-08-18.md
+expect_new=0
+if [ "${1:-}" = "--expect-new-symlinks" ]; then
+    shift
+    [ "$#" -gt 0 ] || die 2 "--expect-new-symlinks needs a number"
+    expect_new=$1
+    case "$expect_new" in
+        ''|*[!0-9]*) die 2 "--expect-new-symlinks '$expect_new' is not a non-negative integer" ;;
+    esac
+    shift
+fi
+
 range="${1:-}"
 explicit=0
 [ -n "$range" ] && explicit=1
@@ -243,6 +265,14 @@ new_paths=$(new_symlinks_between "$left" "$right")
 rc=$?
 [ "$rc" -eq 0 ] || die 2 "git diff --raw '$left' '$right' failed with status $rc"
 
+n_new=0
+[ -n "$new_paths" ] && n_new=$(printf '%s\n' "$new_paths" | "$GREP" -c .)
+
+if [ -n "$new_paths" ] && [ "$n_new" -eq "$expect_new" ] && [ "$expect_new" -gt 0 ]; then
+    echo "$SELF: PASS — $range introduces $n_new new symlink(s), exactly the $expect_new accepted via --expect-new-symlinks: $(printf '%s' "$new_paths" | tr '\n' ' ' | sed 's/ $//') (repo $toplevel)"
+    exit 0
+fi
+
 if [ -n "$new_paths" ]; then
     echo "NEW SYMLINK(S) INTRODUCED — will not check out on a Windows session" >&2
     echo "that lacks a fresh-logon SeCreateSymbolicLinkPrivilege token:" >&2
@@ -261,9 +291,13 @@ DO NOT PUSH (or accept knowingly). Options:
     elevation — this guard exists to make that a conscious choice, not a
     silent trap.
 EOF
-    echo "$SELF: FAIL — new symlink(s) found in $range"
+    echo "$SELF: FAIL — $n_new new symlink(s) found in $range (accepted via --expect-new-symlinks: $expect_new)"
     exit 1
 fi
 
+if [ "$expect_new" -gt 0 ]; then
+    die 2 "--expect-new-symlinks $expect_new was passed but $range introduces 0 new symlinks.
+  An escape that accepts more than actually happened is not a check. Re-run without it."
+fi
 echo "$SELF: PASS — $range introduces no new symlinks (repo $toplevel)"
 exit 0

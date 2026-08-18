@@ -113,6 +113,30 @@ die() {
 # comment explaining why it is legitimately allowed to contain markers.
 ALLOWLIST=""
 
+# Explicit, RECORDED per-push escape (added 2026-08-18, lane FPGUARD).
+# `--allow <path>` (repeatable, must precede the range) exempts exactly one
+# tracked path for exactly this run and NAMES it in the verdict line, following
+# the `--expect-files <n>` / `--expect-removals <n>` precedent. It is
+# path-scoped on purpose: a count-based escape here would wave through a real
+# rebase-injected marker in some OTHER file, which is the whole failure this
+# guard exists to catch. A path-scoped escape cannot.
+# Proven false positive it exists for: a legitimate documentation page that
+# SHOWS conflict-marker syntax in a fenced example (e.g. a "how to resolve a
+# conflict" guide) has a matching open+close pair in committed content and is
+# rejected identically to a poisoned source file. Reproducer:
+#   doc/08_tracking/bug/pre_push_guard_false_positives_2026-08-18.md
+CLI_ALLOW=""
+
+while [ "${1:-}" = "--allow" ]; do
+    shift
+    [ "$#" -gt 0 ] || { echo "$SELF: ERROR — --allow needs a path" >&2; exit 2; }
+    CLI_ALLOW="$CLI_ALLOW$1
+"
+    ALLOWLIST="$ALLOWLIST$1
+"
+    shift
+done
+
 range="${1:-}"
 explicit=0
 [ -n "$range" ] && explicit=1
@@ -218,6 +242,7 @@ fi
 
 found=0
 scanned=0
+exempted=0
 skipped_deleted=0
 
 while IFS= read -r line; do
@@ -228,6 +253,7 @@ while IFS= read -r line; do
         D*) skipped_deleted=$((skipped_deleted + 1)); continue ;;
     esac
     if is_allowlisted "$path"; then
+        exempted=$((exempted + 1))
         continue
     fi
     if ! git show "$tip:$path" > "$TMPD/content" 2>"$TMPD/showerr"; then
@@ -270,9 +296,22 @@ while IFS= read -r line; do
     fi
 done < "$TMPD/paths"
 
+# Verdict suffix that RECORDS any escape actually used, so a passing run can
+# never hide the fact that a path was exempted.
+allow_note=""
+if [ -n "$CLI_ALLOW" ]; then
+    allow_note=", $(printf '%s' "$CLI_ALLOW" | "$GREP" -c . ) path(s) exempted by explicit --allow: $(printf '%s' "$CLI_ALLOW" | tr '\n' ' ' | sed 's/ $//')"
+fi
+
 if [ "$scanned" -eq 0 ]; then
-    die 2 "range '$range' changed $nlines path(s) but 0 were scanned
+    # Still fail closed when the zero came from anything OTHER than paths the
+    # caller named on the command line for this run.
+    if [ "$exempted" -eq 0 ] || [ -z "$CLI_ALLOW" ] || [ "$exempted" -ne "$(printf '%s' "$CLI_ALLOW" | "$GREP" -c .)" ]; then
+        die 2 "range '$range' changed $nlines path(s) but 0 were scanned
   ($skipped_deleted deletion(s), the rest allowlisted). Nothing was verified."
+    fi
+    echo "$SELF: PASS — 0 file(s) scanned at $tip across $ncommits commit(s) in $range$allow_note (repo $toplevel)"
+    exit 0
 fi
 
 if [ "$found" -ne 0 ]; then
@@ -299,9 +338,9 @@ then re-check:
   jj resolve --list
   jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
 EOF
-    echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned)"
+    echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned$allow_note)"
     exit 1
 fi
 
-echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers (repo $toplevel)"
+echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers$allow_note (repo $toplevel)"
 exit 0
