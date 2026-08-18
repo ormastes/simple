@@ -1,0 +1,108 @@
+# Startup receipt (startup_perf_architecture_2026-08-17 §6.6).
+#
+# A receipt is evidence of what startup actually did, so a startup claim
+# can be checked instead of asserted. Per §6.6 it is produced OFF the hot
+# path: the recorder consumes decisions that startup already made (the
+# StartupLaunchPlan and StartupLoadDecision), copies a fixed set of
+# scalar facts, and is invoked AFTER those decisions exist — it computes
+# nothing on their behalf and nothing on the hot path depends on it.
+#
+# Evidence levels (§6.6):
+#   none    — no receipt: the recorder returns immediately with an
+#             unrecorded receipt and never reads the plan/decision fields.
+#   compact — fixed-size StartupReceiptV1 populated from the plan/decision.
+#   full    — compact fields plus room for an external probe to join
+#             load/open/map/exec evidence later; the recorder itself adds
+#             nothing beyond marking the level (the probe is external by
+#             design, §6.6).
+#
+# Serialized form is SDN (one `startup_receipt:` header, `key: value`
+# rows), rendered only on demand — never as part of recording.
+
+use app.startup.launch_metadata.StartupLaunchPlan
+use app.startup.load_policy_wiring.StartupLoadDecision
+
+pub struct StartupReceiptV1:
+    schema: i64
+    evidence_level: text
+    recorded: bool
+    entry_kind: text
+    entry_path: text
+    load_policy: text
+    cache_strategy: text
+    preload_mode: text
+    include_mmap_cache: bool
+    program_args_count: i64
+    native_dynlib_count: i64
+    smf_dynlib_count: i64
+    decision_supported: bool
+
+pub fn startup_evidence_none() -> text:
+    "none"
+
+pub fn startup_evidence_compact() -> text:
+    "compact"
+
+pub fn startup_evidence_full() -> text:
+    "full"
+
+fn _empty_receipt(level: text) -> StartupReceiptV1:
+    StartupReceiptV1(
+        schema: 1,
+        evidence_level: level,
+        recorded: false,
+        entry_kind: "",
+        entry_path: "",
+        load_policy: "",
+        cache_strategy: "",
+        preload_mode: "",
+        include_mmap_cache: false,
+        program_args_count: 0,
+        native_dynlib_count: 0,
+        smf_dynlib_count: 0,
+        decision_supported: false)
+
+# Record a receipt from decisions startup already made. Level "none"
+# short-circuits before touching plan/decision (no evidence allocation,
+# §6.6). Unknown levels fail closed to an unrecorded receipt.
+pub fn startup_receipt_record(level: text, plan: StartupLaunchPlan, decision: StartupLoadDecision) -> StartupReceiptV1:
+    if level != startup_evidence_compact() and level != startup_evidence_full():
+        return _empty_receipt(startup_evidence_none())
+    StartupReceiptV1(
+        schema: 1,
+        evidence_level: level,
+        recorded: true,
+        entry_kind: plan.entry_kind,
+        entry_path: plan.entry_path,
+        load_policy: decision.load_policy,
+        cache_strategy: decision.cache_strategy,
+        preload_mode: decision.preload_mode,
+        include_mmap_cache: decision.include_mmap_cache,
+        program_args_count: plan.program_args.len(),
+        native_dynlib_count: plan.load_native_dynlibs.len(),
+        smf_dynlib_count: plan.load_smf_dynlibs.len(),
+        decision_supported: decision.supported)
+
+fn _bool_text(b: bool) -> text:
+    if b:
+        return "true"
+    "false"
+
+# SDN rendering — on demand only, never part of recording. An unrecorded
+# receipt renders empty so a "none" startup emits zero bytes.
+pub fn render_startup_receipt_sdn(r: StartupReceiptV1) -> text:
+    if not r.recorded:
+        return ""
+    "startup_receipt:\n" +
+    "  schema: " + r.schema.to_text() + "\n" +
+    "  evidence_level: " + r.evidence_level + "\n" +
+    "  entry_kind: " + r.entry_kind + "\n" +
+    "  entry_path: " + r.entry_path + "\n" +
+    "  load_policy: " + r.load_policy + "\n" +
+    "  cache_strategy: " + r.cache_strategy + "\n" +
+    "  preload_mode: " + r.preload_mode + "\n" +
+    "  include_mmap_cache: " + _bool_text(r.include_mmap_cache) + "\n" +
+    "  program_args_count: " + r.program_args_count.to_text() + "\n" +
+    "  native_dynlib_count: " + r.native_dynlib_count.to_text() + "\n" +
+    "  smf_dynlib_count: " + r.smf_dynlib_count.to_text() + "\n" +
+    "  decision_supported: " + _bool_text(r.decision_supported) + "\n"

@@ -1,0 +1,88 @@
+# Startup receipt spec (startup_perf_architecture_2026-08-17 §6.6).
+#
+# Reproducing spec: a startup (plan + load decision) produces a receipt
+# whose recorded facts match what actually happened — every receipt field
+# is checked against the plan/decision it was recorded from, and the SDN
+# rendering carries the same facts.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.launch_metadata.{
+    LaunchMetadata,
+    StartupLaunchPlan,
+    launch_metadata_default,
+    startup_plan_from_metadata
+}
+use app.startup.load_policy_wiring.{StartupLoadDecision, startup_load_decision}
+use app.startup.receipt.{
+    startup_evidence_none,
+    startup_evidence_compact,
+    startup_evidence_full,
+    startup_receipt_record,
+    render_startup_receipt_sdn
+}
+
+fn script_startup_metadata() -> LaunchMetadata:
+    launch_metadata_default("script")
+
+describe "startup receipt records what startup actually did":
+    it "compact receipt fields match the plan and decision they came from":
+        val m = script_startup_metadata()
+        val args = ["--alpha", "--beta"]
+        val plan = startup_plan_from_metadata("app/main.spl", args, m, true, false)
+        val d = startup_load_decision(m, true, false)
+        val r = startup_receipt_record(startup_evidence_compact(), plan, d)
+        assert_true(r.recorded)
+        assert_eq(r.schema, 1)
+        assert_eq(r.evidence_level, "compact")
+        assert_eq(r.entry_kind, plan.entry_kind)
+        assert_eq(r.entry_path, "app/main.spl")
+        assert_eq(r.load_policy, d.load_policy)
+        assert_eq(r.cache_strategy, d.cache_strategy)
+        assert_eq(r.preload_mode, d.preload_mode)
+        assert_eq(r.include_mmap_cache, d.include_mmap_cache)
+        # program_args are normalized with entry_path prepended as argv0
+        assert_eq(r.program_args_count, plan.program_args.len())
+        assert_eq(r.program_args_count, 3)
+        assert_eq(r.native_dynlib_count, plan.load_native_dynlibs.len())
+        assert_eq(r.smf_dynlib_count, plan.load_smf_dynlibs.len())
+        assert_eq(r.decision_supported, d.supported)
+
+    it "SDN rendering carries the recorded facts":
+        val m = script_startup_metadata()
+        val plan = startup_plan_from_metadata("app/main.spl", ["x"], m, true, false)
+        val d = startup_load_decision(m, true, false)
+        val r = startup_receipt_record(startup_evidence_compact(), plan, d)
+        val sdn = render_startup_receipt_sdn(r)
+        assert_true(sdn.contains("startup_receipt:"))
+        assert_true(sdn.contains("entry_path: app/main.spl"))
+        assert_true(sdn.contains("load_policy: " + d.load_policy))
+        assert_true(sdn.contains("program_args_count: " + plan.program_args.len().to_text()))
+
+    it "full level records the same facts and marks the level":
+        val m = script_startup_metadata()
+        val plan = startup_plan_from_metadata("app/main.spl", [], m, true, false)
+        val d = startup_load_decision(m, true, false)
+        val r = startup_receipt_record(startup_evidence_full(), plan, d)
+        assert_true(r.recorded)
+        assert_eq(r.evidence_level, "full")
+        assert_eq(r.entry_kind, plan.entry_kind)
+
+describe "startup receipt off-hot-path property (§6.6 evidence levels)":
+    it "level none records nothing and renders zero bytes":
+        val m = script_startup_metadata()
+        val plan = startup_plan_from_metadata("app/main.spl", ["a"], m, true, false)
+        val d = startup_load_decision(m, true, false)
+        val r = startup_receipt_record(startup_evidence_none(), plan, d)
+        assert_false(r.recorded)
+        assert_eq(r.entry_path, "")
+        assert_eq(r.program_args_count, 0)
+        assert_eq(render_startup_receipt_sdn(r), "")
+
+    it "unknown evidence level fails closed to an unrecorded receipt":
+        val m = script_startup_metadata()
+        val plan = startup_plan_from_metadata("app/main.spl", [], m, true, false)
+        val d = startup_load_decision(m, true, false)
+        val r = startup_receipt_record("verbose", plan, d)
+        assert_false(r.recorded)
+        assert_eq(r.evidence_level, "none")
+        assert_eq(render_startup_receipt_sdn(r), "")

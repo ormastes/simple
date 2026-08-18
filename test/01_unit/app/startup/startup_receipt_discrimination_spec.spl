@@ -1,0 +1,53 @@
+# Startup receipt discrimination spec (defect-class, §6.6).
+#
+# A receipt that emitted a constant would satisfy any per-field spec
+# written against one startup. This spec proves the receipt DISCRIMINATES:
+# two different startup paths must produce different receipts, and — the
+# positive control — the same startup path recorded twice must produce
+# identical ones. A constant emitter passes the control but fails the
+# discrimination cases; a random emitter fails the control.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.launch_metadata.{
+    LaunchMetadata,
+    launch_metadata_default,
+    startup_plan_from_metadata
+}
+use app.startup.load_policy_wiring.startup_load_decision
+use app.startup.receipt.{
+    StartupReceiptV1,
+    startup_evidence_compact,
+    startup_receipt_record,
+    render_startup_receipt_sdn
+}
+
+fn receipt_for(entry_kind: text, entry_path: text, args: [text], host_mmap: bool) -> StartupReceiptV1:
+    val m = launch_metadata_default(entry_kind)
+    val plan = startup_plan_from_metadata(entry_path, args, m, host_mmap, false)
+    val d = startup_load_decision(m, host_mmap, false)
+    startup_receipt_record(startup_evidence_compact(), plan, d)
+
+describe "startup receipt discriminates between startup paths":
+    it "positive control: the same startup path yields byte-identical receipts":
+        val a = receipt_for("script", "app/main.spl", ["x"], true)
+        val b = receipt_for("script", "app/main.spl", ["x"], true)
+        assert_eq(render_startup_receipt_sdn(a), render_startup_receipt_sdn(b))
+        assert_true(render_startup_receipt_sdn(a).len() > 0)
+
+    it "script vs native startup produce different receipts":
+        val s = receipt_for("script", "app/main.spl", [], true)
+        val n = receipt_for("native", "bin/app", [], true)
+        assert_false(s.entry_kind == n.entry_kind)
+        assert_false(render_startup_receipt_sdn(s) == render_startup_receipt_sdn(n))
+
+    it "same artifact, different host mmap support, differ in load facts":
+        val with_mmap = receipt_for("smf", "app/main.smf", [], true)
+        val without = receipt_for("smf", "app/main.smf", [], false)
+        assert_false(render_startup_receipt_sdn(with_mmap) == render_startup_receipt_sdn(without))
+
+    it "same path, different program args, differ in recorded arg count":
+        val one = receipt_for("script", "app/main.spl", ["a"], true)
+        val three = receipt_for("script", "app/main.spl", ["a", "b", "c"], true)
+        assert_eq(one.program_args_count, 2)  # argv0 (entry path) + "a"
+        assert_eq(three.program_args_count, 4)
+        assert_false(render_startup_receipt_sdn(one) == render_startup_receipt_sdn(three))
