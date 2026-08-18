@@ -113,16 +113,24 @@ pub fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u64) -> std::io::R
 
     for entry in std::fs::read_dir(log_dir)? {
         let entry = entry?;
-        let path = entry.path();
 
-        if !path.is_file() {
+        // Filter by NAME first — no metadata syscall for non-candidates.
+        // A backlog of unrelated files (e.g. 10k crash_*.log) previously cost
+        // one statx per entry per process start.
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let is_candidate = name.starts_with("simple.log")
+            || (name.starts_with("crash_") && name.ends_with(".log"))
+            || name.starts_with(".simple-log-probe-");
+        if !is_candidate {
             continue;
         }
 
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if !name.starts_with("simple.log") {
-                continue;
-            }
+        let path = entry.path();
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
         }
 
         let metadata = entry.metadata()?;
@@ -144,8 +152,35 @@ pub fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u64) -> std::io::R
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_log_dir;
+    use super::{cleanup_old_logs, resolve_log_dir};
     use std::fs;
+
+    #[test]
+    fn cleanup_removes_only_old_matching_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        for name in [
+            "simple.log.2020-01-01",
+            "crash_123.log",
+            ".simple-log-probe-999",
+            "unrelated.txt",
+        ] {
+            let p = dir.join(name);
+            fs::write(&p, "x").unwrap();
+            let f = fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
+        }
+        // Recent candidate must survive.
+        fs::write(dir.join("simple.log"), "x").unwrap();
+
+        cleanup_old_logs(dir, 7).unwrap();
+
+        assert!(!dir.join("simple.log.2020-01-01").exists());
+        assert!(!dir.join("crash_123.log").exists());
+        assert!(!dir.join(".simple-log-probe-999").exists());
+        assert!(dir.join("unrelated.txt").exists());
+        assert!(dir.join("simple.log").exists());
+    }
 
     #[test]
     fn resolve_log_dir_uses_preferred_directory_when_writable() {
