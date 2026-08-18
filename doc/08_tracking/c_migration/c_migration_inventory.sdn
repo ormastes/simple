@@ -55,13 +55,19 @@ c_migrations:
       - rt_mcp_initialize_response_text
       - rt_mcp_write_framed_text
       - rt_stdin_read_mcp_message_text
-    classification: dead_from_product
+    classification: partially_dead (CORRECTED 2026-08-18, second scan incl. scripts/)
     evidence: >
-      Zero Simple/Rust/C callers of all three exported symbols (whole-src
-      scan 2026-08-18; only self + runtime.h declarations). The MCP server
-      is pure Simple — this shim's API is unreachable.
-    replacement: none_needed
-    deletion_staged: true
+      rt_mcp_initialize_response_text and rt_mcp_write_framed_text: dead
+      (no consumer beyond decl/impl/link-lists). rt_stdin_read_mcp_message_text
+      is LIVE: scripts/setup/refresh-rt-forward-cache.shs:64 maps
+      std.mcp_sdk.transport.stdio.mcp_stdio_read_message onto it (dynamic
+      dispatch invisible to direct-call greps), and
+      scripts/check/validate_mcp_native_smoke.spl:320 asserts its presence.
+      The original "zero callers" claim missed scripts/ — caught by the
+      deletion agent's fail-closed re-verification before any change.
+    replacement: migrate the stdio read to pure Simple (or retarget the
+      forward-cache mapping) BEFORE deleting; the two dead symbols can go first
+    deletion_staged: partial_two_symbols_only
     deletion_blockers:
       - src/compiler_rust/compiler/src/pipeline/native_project/tools.rs (link list)
       - scripts/check/check-runtime-symbol-lane-divergence.shs (symbol roster)
@@ -85,3 +91,32 @@ c_migrations:
       pass during capsule verification (die on failure) — build-time
       conformance oracles, never linked into the product runtime library.
     replacement: none_needed
+
+  - id: C-MIG-0020
+    path: src/runtime/runtime_native.c, src/runtime/runtime_legacy_core.c
+    symbols:
+      - rt_hash_text
+      - rt_str_hash (spl_str_hash)
+    classification: product_algorithm
+    replacement: std.hash text.hash() / rt_hash_text ABI bridge (already
+      implemented in src/lib/nogc_sync_mut/src/hash.spl — same FNV-1a
+      64-bit offset basis 0xcbf29ce484222325 and prime 0x100000001b3)
+    simple_callers_migrated: []
+    caller_note: >
+      9 files declare `extern fn rt_hash_text(s: text) -> i64` and call it
+      directly (hashmap.spl, hashset.spl, persistent_map/__init__.spl,
+      daemon_sdk/protocol.spl, and 5 test_daemon app files). No source edit
+      is needed: hash.spl's `pub fn rt_hash_text` ABI bridge already
+      satisfies that extern symbol in native builds (see hash.spl's own
+      "C ABI bridge" comment), so all 9 already run the pure-Simple
+      implementation today. Rewriting the extern decls to `use
+      std.hash.{rt_hash_text}` would be cosmetic only, and for
+      persistent_map/__init__.spl (family nogc_async_immut) it would add a
+      cross-family import of nogc_sync_mut.src.hash, which the layer
+      guard flags on other higher-layer imports in this same run
+      (`higher_layer_runtime_family` gc-warning) — left untouched to avoid
+      an unrelated layering regression.
+    correctness_spec: test/01_unit/lib/nogc_sync_mut/hash_text_crosslang_spec.spl
+    correctness_result: "7 examples, 7 passed (FNV-1a KAT for empty string and \"abc\", C-oracle differential incl. UTF-8, boundary lengths, corruption-discrimination, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: not_hot_path

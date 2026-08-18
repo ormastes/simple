@@ -1,0 +1,80 @@
+# @req REQ-C-MIG-HASHTEXT
+#
+# C-MIG-0020 (binary_runtime_hardening Wave 4): pure-Simple FNV-1a text
+# hashing in std.hash (`impl Hash for text` / the `rt_hash_text` ABI bridge
+# in src/lib/nogc_sync_mut/src/hash.spl) vs the C oracle `rt_hash_text` in
+# src/runtime/runtime_native.c (and the sibling `spl_str_hash` /
+# `rt_str_hash` in src/runtime/runtime_legacy_core.c, same FNV-1a offset
+# 0xcbf29ce484222325 / prime 0x100000001b3). This spec freezes the C
+# behavior as a differential oracle so C-MIG-0020 can mark the C unit
+# `retained_as_test_oracle` and, eventually, migrate remaining native-build
+# `extern fn rt_hash_text` callers onto the Simple bridge.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.hash.{rt_hash_text as simple_hash_text}
+
+# C oracle (test-only; never production-linked from Simple product code here).
+extern fn rt_hash_text(s: text) -> i64
+
+describe "text hash — pure-Simple FNV-1a vs C oracle":
+    it "matches the C oracle on the empty string (offset basis)":
+        val simple = simple_hash_text("")
+        val oracle = rt_hash_text("")
+        assert_equal(simple, oracle)
+        # FNV-1a 64-bit offset basis 0xcbf29ce484222325 as signed i64.
+        assert_equal(simple, -3750763034362895579)
+
+    it "matches the C oracle on a known ASCII KAT":
+        # FNV-1a 64-bit of "abc" is well-known: 0xe71fa2190541574b.
+        val simple = simple_hash_text("abc")
+        val oracle = rt_hash_text("abc")
+        assert_equal(simple, oracle)
+        assert_equal(simple, -1792535898324117685)  # 0xe71fa2190541574b signed
+
+    it "matches the C oracle across representative differential vectors":
+        val vectors = [
+            "a", "ab", "hello", "hello world",
+            "The quick brown fox jumps over the lazy dog",
+            "0", "00", "false", "null",
+            "a very long string used to exercise the multiply-heavy inner loop over many bytes so that overflow wraparound behavior is exercised the same way in both implementations"
+        ]
+        var i = 0
+        while i < vectors.len():
+            val simple = simple_hash_text(vectors[i])
+            val oracle = rt_hash_text(vectors[i])
+            assert_equal(simple, oracle)
+            i = i + 1
+
+    it "matches the C oracle on UTF-8 multi-byte input":
+        val vectors = ["héllo", "日本語", "emoji 🎉 test", "Ω≈ç√∫"]
+        var i = 0
+        while i < vectors.len():
+            val simple = simple_hash_text(vectors[i])
+            val oracle = rt_hash_text(vectors[i])
+            assert_equal(simple, oracle)
+            i = i + 1
+
+    it "matches the C oracle on boundary-length inputs":
+        # 1, 8, 63, 64, 65 bytes — exercises word-boundary edge cases.
+        val lens = [1, 8, 63, 64, 65]
+        var li = 0
+        while li < lens.len():
+            var s = ""
+            var n = 0
+            while n < lens[li]:
+                s = s + "x"
+                n = n + 1
+            assert_equal(simple_hash_text(s), rt_hash_text(s))
+            li = li + 1
+
+    it "single-byte corruption changes the hash (avalanche / discrimination)":
+        val a = simple_hash_text("The quick brown fox")
+        val b = simple_hash_text("The quick brown foy")  # last char flipped
+        assert_true(a != b)
+        # And the C oracle agrees the two differ too.
+        assert_true(rt_hash_text("The quick brown fox") != rt_hash_text("The quick brown foy"))
+
+    it "is deterministic and order-sensitive on both sides":
+        assert_equal(simple_hash_text("ab"), simple_hash_text("ab"))
+        assert_true(simple_hash_text("ab") != simple_hash_text("ba"))
+        assert_true(rt_hash_text("ab") != rt_hash_text("ba"))

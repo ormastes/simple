@@ -25,12 +25,13 @@ tranches · `assess` = needs per-symbol caller analysis before commitment.
 | C-MIG-0010 | openssl/tls glue (3 files) | 968 | third-party wrapper | facade stays; owned handshake state tracking to Simple; KAT + interop corpus mandatory | assess |
 | C-MIG-0011 | time/timestamp (2 files) | 265 | runtime primitive | provider alias (clock syscall is the boundary) | planned |
 | C-MIG-0012 | bootstrap/startup (6 files) | 327 | bootstrap stage | staged self-hosting plan; not general-migration scope | planned |
-| C-MIG-0013 | mcp shim | 136 | DEAD from product (0 callers of all 3 exports, verified 2026-08-18) | delete — staged, 3 link-site refs recorded in registry | **staged-delete** |
+| C-MIG-0013 | mcp shim | 136 | CORRECTED: 2 of 3 exports dead; rt_stdin_read_mcp_message_text LIVE via rt-forward cache mapping | partial delete staged; migrate stdio read first | assess |
 | C-MIG-0014 | wasm shim (scv_wasm_shim.c) | 459 | platform ABI shim | retain; external SDK boundary (guard SKIPs it already) | assess |
 | C-MIG-0015 | media wrappers (sdl2/sdl3/glfw/audio/font, 23 files) | 5,409 | third-party wrapper | facades retained; owned pixel/format conversion helpers to Simple | assess |
 | C-MIG-0016 | src/runtime/test/** (27 files) | 3,870 | conformance oracle | test-only, VERIFIED never production-linked (capsule selfcheck binaries only) | **verified** |
 | C-MIG-0017 | memory/memtrack/packed_span (excl. pool) | 1,146 | runtime primitive | provider boundary + Simple-side accounting | planned |
 | C-MIG-0018 | hosted_win32.c + scilib/rocm/cuda shims | ~3,000 | platform shim | retain thin ABI shims; declared-retained entries in registry | assess |
+| C-MIG-0020 | runtime_native.c:rt_hash_text + runtime_legacy_core.c:rt_str_hash | ~15 | product algorithm | std.hash text.hash() / rt_hash_text ABI bridge (already implemented, proven equivalent) | **done** (7/7 differential incl. KAT + UTF-8 + boundary lengths, C retained as oracle) |
 
 Every `assess` entry must be resolved to a concrete class before Wave-4 work
 on it starts (unclassified = critical failure per release gates §18). New
