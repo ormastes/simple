@@ -44,3 +44,45 @@ boundary so the executors load only when a composite/GPU spec is actually
 routed. Secondary: the seed re-reads each `src/lib/nogc_sync_mut/io/*.spl` up
 to 16x in one process (1558 opens / 604 unique files per test invocation) —
 seed-side (Rust), out of pure-Simple scope, noting for the seed owner.
+
+## Fixed 2026-08-18: three more edges rerouted (fork / async / sequential_container)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed, 59621024 bytes,
+mtime 2026-08-17 20:28). Loaded shared box — treat numbers as an envelope.
+
+Three lib modules imported cheap helpers (`make_result_from_output`,
+`find_simple_binary`, `build_child_args`) VIA `test_runner_execute` although all
+are defined in `test_executor_parsing` — putting execute→composite→GPU→compiler
+into their closures. Rerouted to the defining module (one `use` line each):
+
+- `src/lib/nogc_sync_mut/test_runner/test_runner_fork.spl:33`
+- `src/lib/nogc_sync_mut/test_runner/test_runner_async.spl:11`
+- `src/lib/nogc_sync_mut/test_runner/sequential_container.spl:16`
+
+Import-closure probe (`bin/simple run` of one-line `use` + hello, 3 runs):
+
+| module | before (3 runs) | after (3 runs) |
+|---|---|---|
+| test_runner_fork | 41.7 / 53.9 / 61.7s | 2.9 / 2.4 / 2.2s |
+| test_runner_async | 39.7 / 34.8 / 85.4s | 1.8 / 3.0 / 3.3s |
+| sequential_container | 108.4 / 115.5 / (killed) | 2.4 / 2.2 / 2.6s |
+
+This also breaks the fork→execute import cycle (execute imports fork).
+
+Regression spec (new):
+`test/01_unit/lib/test_runner/fork_async_container_parsing_reroute_spec.spl`
+— `Results: 2 total, 2 passed, 0 failed`; sabotage cycle verified (renamed the
+imported symbol → `Results: 2 total, 1 passed, 1 failed`, restored → green).
+`doctest_runner_find_binary_reroute_spec.spl`: `Results: 2 total, 2 passed, 0 failed`.
+`profile_aware_execution_spec.spl`: `Results: 20 total, 20 passed, 0 failed`.
+`test_runner_result_wrapper_spec.spl`: `Results: 4 total, 3 passed, 1 failed` —
+the failure ("fail-closed pure native route") string-asserts on
+`src/app/test/font_evidence_runner.spl` content and is unrelated to these
+reroutes (that file has concurrent uncommitted edits by another session).
+
+## Still remaining
+
+`test_runner_execute` itself (and thus `main.spl` full runs,
+`qemu_test_runner`, `test_runner_main.spl`) still eagerly imports
+`test_executor_composite` → GPU/JIT executors. Cutting that needs the
+structural lane-registry / subprocess split described above — unchanged.

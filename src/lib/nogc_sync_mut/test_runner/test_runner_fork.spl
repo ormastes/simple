@@ -30,7 +30,7 @@
 # outside kill.
 
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
-use std.test_runner.test_runner_execute.{make_result_from_output}
+use std.test_runner.test_executor_parsing.{make_result_from_output}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 # SFFI declarations for fork bridge
@@ -62,13 +62,26 @@ fn signal_name_of(signo: i64) -> text:
     return "signal {signo}"
 
 fn is_outside_kill(signo: i64) -> bool:
-    """SIGTERM/SIGINT/SIGKILL/SIGHUP are what an EXTERNAL killer sends.
+    """SIGHUP/SIGINT/SIGTERM are what an EXTERNAL killer sends.
 
-    earlyoom SIGTERMs (and then SIGKILLs) processes named `simple` at 10%
-    memory on this zero-swap host, so these say nothing about the test itself:
-    they are UNVERIFIED, never failures. A fault signal (SIGSEGV/SIGABRT/
-    SIGBUS/SIGILL/SIGFPE) is the program's own defect and IS a failure."""
-    signo == 1 or signo == 2 or signo == 9 or signo == 15
+    earlyoom SIGTERMs processes named `simple` at 10% memory on this zero-swap
+    host, so these say nothing about the test itself: they are UNVERIFIED, never
+    failures. A fault signal (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE) is the
+    program's own defect and IS a failure.
+
+    SIGKILL(9) is deliberately NOT in this set. Every kill this supervisor
+    itself budgets is already classified before this predicate is reached --
+    `classify_fork_exit` returns TIMEOUT on `rt_fork_parent_timed_out()` first
+    -- so any SIGKILL that gets here is UNBUDGETED, i.e. nothing in this runner
+    asked for it. earlyoom's first move is SIGTERM, so an unbudgeted SIGKILL is
+    not attributable to it either, and is indistinguishable from the compiler
+    dying. Classifying it as TERMINATED/unverified would silently swallow
+    exactly the crash this classification exists to surface, so 137 is CRASHED.
+    (Known tension, stated rather than hidden: earlyoom CAN escalate to SIGKILL
+    after its SIGTERM. Such a run is then reported as CRASHED rather than
+    unverified -- the deliberate direction, since over-reporting a crash is
+    recoverable and under-reporting one is the silent-green defect.)"""
+    signo == 1 or signo == 2 or signo == 15
 
 fn classify_fork_exit(file_path: text, exit_code: i64, timeout_secs: i64, duration_ms: i64, setup_ms: i64) -> TestFileResult:
     """Classify a fork child's death without the -1 sentinel guesswork.
