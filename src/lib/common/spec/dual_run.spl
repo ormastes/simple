@@ -1,0 +1,79 @@
+# dual_run.spl — shadow/dual-run comparison helper for C<->Simple migration
+# specs (binary_runtime_hardening plan, Wave 4: "flip provider -> C becomes
+# test oracle -> shadow mode during migration").
+#
+# This is deliberately tiny: no registry, no plugin system, no config file.
+# A spec calls dual_check_f64 / dual_check_text once per case with the
+# pure-Simple result and the C/Rust oracle's result for the SAME input, and
+# gets back a DualVerdict it can assert on and report from.
+#
+# NaN policy (f64): NaN != NaN by IEEE-754, so a naive `==` would call two
+# NaN results a divergence even though both sides correctly signalled "not a
+# number" on the same input. dual_check_f64 treats both-NaN as AGREEMENT and
+# exactly-one-NaN as DIVERGENCE. Exact-bits comparison (bit_exact: true)
+# additionally distinguishes -0.0 from 0.0 (which plain `==` treats as
+# equal) — pass it when the migration's contract cares about sign-of-zero,
+# as numeric_round's floor/ceil migrations do.
+#
+# HONEST LIMITATION: this runs both implementations only inside test specs.
+# It is not a production shadow that dual-runs on live traffic — see
+# doc/07_guide/infra/c_migration/dual_run_shadow.md.
+
+struct DualVerdict:
+    pair_name: text
+    agree: bool
+    simple_repr: text
+    oracle_repr: text
+
+fn _f64_is_nan(x: f64) -> bool:
+    x != x
+
+fn _is_neg_zero_text(x: f64) -> bool:
+    # `bin/simple test` runs the tree-walk interpreter, where 1.0/0.0 raises
+    # "semantic: division by zero" instead of yielding +inf, so sign-of-zero
+    # cannot be probed via division there. Read it off the text formatting
+    # instead: interpolation of -0.0 prints a leading '-'.
+    x == 0.0 and "{x}".starts_with("-")
+
+fn _f64_bits_equal(a: f64, b: f64) -> bool:
+    # Exact-zero-sign compare via text formatting: distinguishes -0.0/0.0
+    # (which `==` treats as equal) without requiring a bitcast builtin.
+    val a_is_neg_zero = _is_neg_zero_text(a)
+    val b_is_neg_zero = _is_neg_zero_text(b)
+    if a_is_neg_zero or b_is_neg_zero:
+        a_is_neg_zero and b_is_neg_zero
+    else:
+        a == b
+
+pub fn dual_check_f64(name: text, simple_result: f64, oracle_result: f64, bit_exact: bool) -> DualVerdict:
+    val simple_nan = _f64_is_nan(simple_result)
+    val oracle_nan = _f64_is_nan(oracle_result)
+    var agree = false
+    if simple_nan and oracle_nan:
+        agree = true
+    else if simple_nan or oracle_nan:
+        agree = false
+    else if bit_exact:
+        agree = _f64_bits_equal(simple_result, oracle_result)
+    else:
+        agree = simple_result == oracle_result
+    DualVerdict(
+        pair_name: name,
+        agree: agree,
+        simple_repr: "{simple_result}",
+        oracle_repr: "{oracle_result}",
+    )
+
+pub fn dual_check_text(name: text, simple_result: text, oracle_result: text) -> DualVerdict:
+    DualVerdict(
+        pair_name: name,
+        agree: simple_result == oracle_result,
+        simple_repr: simple_result,
+        oracle_repr: oracle_result,
+    )
+
+pub fn dual_verdict_report(v: DualVerdict) -> text:
+    if v.agree:
+        "OK   {v.pair_name}: simple={v.simple_repr} oracle={v.oracle_repr}"
+    else:
+        "DIVERGE {v.pair_name}: simple={v.simple_repr} oracle={v.oracle_repr}"

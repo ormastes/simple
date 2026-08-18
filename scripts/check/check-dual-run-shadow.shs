@@ -1,0 +1,176 @@
+#!/bin/sh
+# check-dual-run-shadow.shs — fail-closed gate for the C/Simple dual-run
+# shadow harness (binary_runtime_hardening plan, Wave 4 goal 6: "flip
+# provider -> C becomes test oracle -> shadow mode during migration").
+#
+# Runs test/01_unit/lib/common/spec/dual_run_shadow_spec.spl (which exercises
+# src/lib/common/spec/dual_run.spl's dual_check_f64/dual_check_text helper
+# across 4 already-migrated C<->Simple pairs) and reports a verdict.
+#
+# HONEST LIMITATION: this dual-runs both implementations only inside test
+# specs, not on live production traffic — see
+# doc/07_guide/infra/c_migration/dual_run_shadow.md.
+#
+# CONVENTION (matches sibling scripts/check/*.shs gates):
+#   verdict is the LAST line of stdout:
+#     PASS  — <n> pair(s) checked, <m> case(s), 0 divergent   exit 0
+#     FAIL  — ...                                              exit 1
+#     ERROR — nothing was checked                              exit 2
+#   `--selftest` runs before every scan and is fatal.
+#
+# The `simple test` exit status is read into a variable on the line right
+# after the invocation, never through a pipe — a pipeline's $? is the last
+# stage's status, which has produced false greens in this repo before.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SPEC_DEFAULT="test/01_unit/lib/common/spec/dual_run_shadow_spec.spl"
+SIMPLE_BIN_DEFAULT="bin/simple"
+PAIRS=4
+
+usage() {
+    echo "usage: $0 [--spec PATH] [--simple-bin PATH] [--selftest-only]"
+}
+
+# ---------------------------------------------------------------------------
+# run_spec_stub <stub_bin> <spec>
+#   Echoes: "<rc> <total> <passed> <failed>" (numbers 0 when unparsed).
+# ---------------------------------------------------------------------------
+run_spec_stub() {
+    rs_bin=$1
+    rs_spec=$2
+    rs_out=$(mktemp)
+
+    "$rs_bin" test "$rs_spec" >"$rs_out" 2>&1
+    rs_rc=$?
+
+    rs_line=$(grep -a '^Results:' "$rs_out" | tail -1)
+    rs_total=$(echo "$rs_line" | sed -n 's/^Results: \([0-9]*\) total.*/\1/p')
+    rs_passed=$(echo "$rs_line" | sed -n 's/.*, \([0-9]*\) passed.*/\1/p')
+    rs_failed=$(echo "$rs_line" | sed -n 's/.*, \([0-9]*\) failed.*/\1/p')
+    [ -z "$rs_total" ] && rs_total=0
+    [ -z "$rs_passed" ] && rs_passed=0
+    [ -z "$rs_failed" ] && rs_failed=0
+
+    rm -f "$rs_out"
+    echo "$rs_rc $rs_total $rs_passed $rs_failed"
+}
+
+# ---------------------------------------------------------------------------
+# Self-test. Fatal — a gate that cannot prove it bites is not evidence.
+# Uses stub `simple` binaries so the self-test costs milliseconds.
+# ---------------------------------------------------------------------------
+selftest() {
+    st_dir=$(mktemp -d)
+    st_fail=0
+    echo 'describe "x":' >"$st_dir/spec.spl"
+
+    # (a) healthy agreeing run -> must read as PASS-shaped (passed==total, failed==0, total>0)
+    cat >"$st_dir/healthy" <<'STUB'
+#!/bin/sh
+echo "Results: 8 total, 8 passed, 0 failed"
+exit 0
+STUB
+    chmod +x "$st_dir/healthy"
+    st_r=$(run_spec_stub "$st_dir/healthy" "$st_dir/spec.spl")
+    st_failed=$(echo "$st_r" | cut -d' ' -f4)
+    st_total=$(echo "$st_r" | cut -d' ' -f2)
+    if [ "$st_failed" != "0" ] || [ "$st_total" -le 0 ]; then
+        echo "selftest: FAILED — healthy fixture not read as clean-pass-shaped"
+        st_fail=1
+    fi
+
+    # (b) divergent pair (a real failure) -> must be caught, failed>0
+    cat >"$st_dir/divergent" <<'STUB'
+#!/bin/sh
+echo "Results: 8 total, 7 passed, 1 failed"
+exit 1
+STUB
+    chmod +x "$st_dir/divergent"
+    st_r=$(run_spec_stub "$st_dir/divergent" "$st_dir/spec.spl")
+    st_failed=$(echo "$st_r" | cut -d' ' -f4)
+    if [ "$st_failed" -le 0 ]; then
+        echo "selftest: FAILED — divergent fixture was not caught as a failure"
+        st_fail=1
+    fi
+
+    # (c) zero-pair / vacuous run (no Results line at all) -> must read as total==0 -> ERROR
+    cat >"$st_dir/vacuous" <<'STUB'
+#!/bin/sh
+echo "no test summary printed"
+exit 0
+STUB
+    chmod +x "$st_dir/vacuous"
+    st_r=$(run_spec_stub "$st_dir/vacuous" "$st_dir/spec.spl")
+    st_total=$(echo "$st_r" | cut -d' ' -f2)
+    if [ "$st_total" -ne 0 ]; then
+        echo "selftest: FAILED — vacuous fixture was not read as 0 total"
+        st_fail=1
+    fi
+
+    rm -rf "$st_dir"
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    echo "selftest: 3 fixture(s) passed"
+}
+
+# ---------------------------------------------------------------------------
+
+SPEC=$SPEC_DEFAULT
+SIMPLE_BIN=$SIMPLE_BIN_DEFAULT
+SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --spec)          SPEC=$2; shift 2 ;;
+        --simple-bin)    SIMPLE_BIN=$2; shift 2 ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        -h|--help)       usage; exit 0 ;;
+        *) echo "unknown argument: $1"; usage; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+selftest
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 3 fixture(s) checked, selftest only, no real spec run"
+    exit 0
+fi
+
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked"; exit 2; }
+
+if [ ! -f "$SPEC" ]; then
+    echo "missing spec: $SPEC"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "no runnable simple binary at: $SIMPLE_BIN"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+RESULT=$(run_spec_stub "$SIMPLE_BIN" "$SPEC")
+RC=$(echo "$RESULT" | cut -d' ' -f1)
+TOTAL=$(echo "$RESULT" | cut -d' ' -f2)
+PASSED=$(echo "$RESULT" | cut -d' ' -f3)
+FAILED=$(echo "$RESULT" | cut -d' ' -f4)
+
+if [ "$TOTAL" -eq 0 ]; then
+    echo "no Results: line found in '$SIMPLE_BIN test $SPEC' output (rc=$RC)"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ "$FAILED" -gt 0 ] || [ "$RC" -ne 0 ]; then
+    echo "FAIL — $PAIRS pair(s) checked, $TOTAL case(s), $FAILED divergent (rc=$RC)"
+    exit 1
+fi
+
+echo "PASS — $PAIRS pair(s) checked, $TOTAL case(s), 0 divergent"
+exit 0
