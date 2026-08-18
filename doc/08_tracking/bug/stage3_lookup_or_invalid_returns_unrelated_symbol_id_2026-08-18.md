@@ -142,3 +142,89 @@ timeout is a pre-existing property of `check` on this ~3,000-line file on this
 host (load average 80-95 during the run), **not** an effect of this change. The
 two arms are indistinguishable, so the edit is not implicated; it also means
 compile-level verification of this file was not achieved either way.
+
+---
+
+## ROOT CAUSE PROVEN + FIXED (2026-08-18)
+
+**Mechanism: `SymbolTable.reset_module()`'s eight `self.<dict>.clear()` calls
+never executed.** A Dict-typed **class FIELD** receiver does not reach the Dict
+dispatch on the self-hosted native backend: the field projection carries no HIR
+type and its MIR temp is typed `i64`, so `receiver_is_dict` stays false and the
+`local_is_runtime_dict` probe misses. The call falls into the *string* arm.
+This is already documented and **proved by disassembly of the stage-2 compiler**
+at `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:361-372` (for
+`.contains`; `.clear()` on the same receiver shape takes the identical path) and
+narrated for `.clear()` specifically at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1618-1639`.
+
+The scalar resets on the following lines (`next_symbol_id = 0`,
+`next_scope_id = 1`) *did* run. So symbol NAMES from every previously-lowered
+module survived in `root_scope_symbols` / `exact_symbols` / `qualified_*` while
+ids restarted at 0; each new module re-issued ids that stale names still pointed
+at, and `lookup_or_invalid(name)` returned the id of an unrelated declaration.
+This predicts every observed signal: the drift of `Visibility` between
+source_idx 256 and 257 (ids re-issued per module), and the
+bootstrap-globals-family bias (module-level `var`/`const`/free `fn` are declared
+earliest, so they hold the low ids a later module's payload-type lookup lands
+on). The id-space hypothesis in this row is **CONFIRMED**, with the precise
+code path named.
+
+**Why `3c31fc3aa8b` ("route Dict.clear() to rt_dict_clear") did not fix it:** it
+added the dispatch *arm*, but the arm is guarded by `receiver_is_dict`, which
+this receiver shape never sets. For `self.<dict>.clear()` the arm is unreachable
+dead code. The snap worktree used for the failing 13:42 stage-3 log
+(`513cbb7b4`) contains that commit — the fix was present and the flood persisted.
+
+### Fix (`src/compiler/20.hir/hir_types.spl`)
+
+1. `reset_module()` now **assigns a fresh Dict** to each of the eight maps
+   (`self.symbols = {}`, …) instead of calling `.clear()`. A plain field STORE
+   cannot be mis-dispatched at any layer. No handle to these dicts is held
+   across a module boundary (every consumer re-reads the field; the one internal
+   alias, `root_scope_symbols`, is re-published into the root `Scope` row in the
+   same method).
+2. `lookup_or_invalid()` now **fails closed** on an id outside
+   `[0, next_symbol_id)` — the only way such an id can exist is a name binding
+   that outlived its module, i.e. exactly the wrong-id shape. It returns an
+   honest invalid id instead of a valid-looking foreign one.
+
+This does **not** supersede the `hir_payload_binding_names_agree` containment in
+`claim_materialized_payload_binding`; that gating is untouched and still passes.
+
+### Guard
+
+`scripts/check/check-hir-symbol-table-module-reset.shs` (fail-closed;
+`--selftest` runs first and is fatal, with the reverted pre-fix shape as a
+must-FAIL fixture, plus a resets-fixed/guard-reverted fixture and an empty-file
+fixture that must yield 0 checked so the caller ERRORs).
+
+Both arms, measured:
+
+```
+sh scripts/check/check-hir-symbol-table-module-reset.shs
+PASS — 9 invariant(s) checked in .../hir_types.spl                        rc 0
+
+# control: origin's unmodified copy
+sh scripts/check/check-hir-symbol-table-module-reset.shs /tmp/hir_types_reverted.spl
+FAIL — 9 invariant(s) checked, violations: reset_module-uses-clear:root_scope_symbols
+  reset_module-uses-clear:symbols ... lookup_or_invalid-missing-id-range-guard  rc 1
+```
+
+### Still UNVERIFIED
+
+- No bootstrap was run (one was already running; starting a second was
+  prohibited). That Stage 3 now admits is **not** demonstrated — only that the
+  mechanism which produced the flood is removed at source.
+- `bin/simple check` on this file is unusable (pre-existing 300s timeout on
+  compiler files, another lane owns it), so compile-level verification was not
+  attempted.
+
+### Same-family residual, NOT fixed here
+
+`HirLowering.begin_module()` (`20.hir/hir_lowering/types.spl:283`) resets ~15
+more class-field containers with the same `self.<field>.clear()` spelling and is
+exposed to the identical no-op. Only the resolver's own maps were converted, to
+keep this change scoped. The general defect — Dict/array-typed class-field
+receivers losing their type at MIR lowering — is the real upstream fix and is
+tracked at `expr_dispatch.spl:361-372`.

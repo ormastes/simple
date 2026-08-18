@@ -240,15 +240,42 @@ impl SymbolTable:
         table
 
     me reset_module():
-        """Reset module-local symbol state without replacing this table."""
-        self.root_scope_symbols.clear()
-        self.symbols.clear()
-        self.scopes.clear()
-        self.gpu_function_targets.clear()
-        self.gpu_function_backend_orders.clear()
-        self.qualified_functions.clear()
-        self.qualified_types.clear()
-        self.exact_symbols.clear()
+        """Reset module-local symbol state without replacing this table.
+
+        DO NOT spell these resets as `self.<field>.clear()`. A Dict-typed
+        CLASS FIELD receiver does not reach the Dict dispatch on the
+        self-hosted native backend: the field projection carries no HIR type
+        and its MIR temp is typed `i64`, so `receiver_is_dict` stays false and
+        the `local_is_runtime_dict` probe misses
+        (`50.mir/_MirLoweringExpr/expr_dispatch.spl:361-372`, proved by
+        disassembly of the stage-2 compiler). The call then falls into the
+        string arm and the clear NEVER HAPPENS, while the scalar resets below
+        (`next_symbol_id = 0`) always do. That combination is the whole
+        Stage 3 `enum payload dependency ... resolved to non-type binding`
+        flood: symbol NAMES from every previously-lowered module survived in
+        the scope/index maps while ids restarted at 0, so each new module
+        silently re-used ids that stale names still pointed at and
+        `lookup_or_invalid(name)` returned the id of an unrelated declaration
+        in another module. (`3c31fc3aa8b` added the `rt_dict_clear` dispatch
+        arm but could not fix the receiver TYPING, so for `self.<dict>.clear()`
+        that arm is unreachable and the defect survived it.)
+
+        A plain field STORE of a fresh Dict is unambiguous at every layer and
+        cannot be mis-dispatched. Nothing outside this class holds a handle to
+        these dicts across a module boundary: every consumer re-reads the
+        field (`self.symbols[...]`, `self.exact_symbols[...]`), and the one
+        internal alias, `root_scope_symbols`, is re-published into the root
+        Scope row below in the same breath.
+        doc/08_tracking/bug/stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18.md
+        """
+        self.root_scope_symbols = {}
+        self.symbols = {}
+        self.scopes = {}
+        self.gpu_function_targets = {}
+        self.gpu_function_backend_orders = {}
+        self.qualified_functions = {}
+        self.qualified_types = {}
+        self.exact_symbols = {}
         self.current_scope = ScopeId(id: 0)
         self.next_symbol_id = 0
         self.next_scope_id = 1
@@ -478,6 +505,20 @@ impl SymbolTable:
             val scope = self.scopes[scope_id.id]
             if rt_dict_contains(scope.symbols, name):
                 val found: i64 = scope.symbols[name]
+                # Fail closed on an id this table cannot own. Every id ever
+                # handed out by `define()` satisfies `0 <= id < next_symbol_id`
+                # (it is `next_symbol_id` at allocation time, which then
+                # advances and never decreases within a module), and
+                # `register_preserved_symbol` raises the counter past any
+                # pre-numbered id it accepts. So an out-of-range id can only be
+                # a name binding that outlived the module it was made in --
+                # exactly the wrong-id shape this lookup used to return as if
+                # it were a real answer. An honest "not found" is the correct
+                # response; silently returning a valid-LOOKING id belonging to
+                # an unrelated declaration is the defect.
+                # doc/08_tracking/bug/stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18.md
+                if found < 0 or found >= self.next_symbol_id:
+                    return SymbolId(id: -1)
                 return SymbolId(id: found)
 
             match scope.parent:

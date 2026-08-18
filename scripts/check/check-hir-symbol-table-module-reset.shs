@@ -1,0 +1,150 @@
+#!/bin/sh
+# check-hir-symbol-table-module-reset.shs
+#
+# Fail-closed guard for
+# doc/08_tracking/bug/stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18.md
+#
+# Two invariants of src/compiler/20.hir/hir_types.spl:
+#
+#   1. SymbolTable.reset_module() must reset its name/id maps by ASSIGNING a
+#      fresh Dict (`self.X = {}`), never by calling `self.X.clear()`. A
+#      Dict-typed CLASS FIELD receiver does not reach the Dict dispatch on the
+#      self-hosted native backend (the field projection carries no HIR type,
+#      its MIR temp is i64, `receiver_is_dict` stays false -- see
+#      50.mir/_MirLoweringExpr/expr_dispatch.spl:361-372), so the clear never
+#      happens while the scalar `next_symbol_id = 0` reset always does. Stale
+#      names then point at ids the next module re-uses, and
+#      `lookup_or_invalid` returns a foreign symbol id.
+#
+#   2. lookup_or_invalid() must fail closed on an id outside
+#      [0, next_symbol_id) rather than returning it.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> invariant(s) checked   exit 0
+#   FAIL — ...                        exit 1
+#   ERROR — nothing was checked       exit 2   (n == 0 is never a pass)
+#
+# --selftest runs first and is fatal; it includes the reverted (pre-fix) shape
+# as a must-FAIL fixture.
+
+FIELDS="root_scope_symbols symbols scopes gpu_function_targets gpu_function_backend_orders qualified_functions qualified_types exact_symbols"
+
+# scan FILE -> prints failures on stdout, echoes checked-count on last line via
+# the globals EV_CHECKED / EV_FAILED written to a temp file.
+scan_file() {
+    f="$1"
+    checked=0
+    failures=""
+
+    if [ ! -f "$f" ]; then
+        EV_CHECKED=0
+        EV_FAILED="missing file: $f"
+        return
+    fi
+
+    body=$(awk '/^    me reset_module\(\):/{on=1;next} on && /^    (me|fn|static fn) /{exit} on{print}' "$f")
+    if [ -z "$body" ]; then
+        EV_CHECKED=0
+        EV_FAILED="reset_module() body not found in $f"
+        return
+    fi
+
+    for fld in $FIELDS; do
+        checked=$((checked + 1))
+        if printf '%s\n' "$body" | grep -q "self\.${fld}\.clear()"; then
+            failures="${failures} reset_module-uses-clear:${fld}"
+        elif ! printf '%s\n' "$body" | grep -q "self\.${fld} = {}"; then
+            failures="${failures} reset_module-missing-fresh-dict:${fld}"
+        fi
+    done
+
+    lbody=$(awk '/^    fn lookup_or_invalid\(/{on=1;next} on && /^    (me|fn|static fn) /{exit} on{print}' "$f")
+    checked=$((checked + 1))
+    if [ -z "$lbody" ]; then
+        failures="${failures} lookup_or_invalid-body-not-found"
+    elif ! printf '%s\n' "$lbody" | grep -q "self\.next_symbol_id"; then
+        failures="${failures} lookup_or_invalid-missing-id-range-guard"
+    fi
+
+    EV_CHECKED=$checked
+    EV_FAILED="$failures"
+}
+
+selftest() {
+    d=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
+    good="$d/good.spl"
+    bad="$d/bad.spl"
+    bad2="$d/bad2.spl"
+    empty="$d/empty.spl"
+
+    {
+        echo '    me reset_module():'
+        for fld in $FIELDS; do echo "        self.${fld} = {}"; done
+        echo '        self.next_symbol_id = 0'
+        echo ''
+        echo '    fn lookup_or_invalid(name: text) -> SymbolId:'
+        echo '        if found < 0 or found >= self.next_symbol_id:'
+        echo '            return SymbolId(id: -1)'
+    } > "$good"
+
+    # Reverted shape: the exact pre-fix code. Must FAIL.
+    {
+        echo '    me reset_module():'
+        for fld in $FIELDS; do echo "        self.${fld}.clear()"; done
+        echo '        self.next_symbol_id = 0'
+        echo ''
+        echo '    fn lookup_or_invalid(name: text) -> SymbolId:'
+        echo '        return SymbolId(id: found)'
+    } > "$bad"
+
+    # Resets fixed but the lookup range guard reverted. Must FAIL.
+    {
+        echo '    me reset_module():'
+        for fld in $FIELDS; do echo "        self.${fld} = {}"; done
+        echo ''
+        echo '    fn lookup_or_invalid(name: text) -> SymbolId:'
+        echo '        return SymbolId(id: found)'
+    } > "$bad2"
+
+    : > "$empty"
+
+    rc=0
+    scan_file "$good"
+    [ "$EV_CHECKED" -eq 9 ] && [ -z "$EV_FAILED" ] || { echo "selftest: good fixture did not pass (checked=$EV_CHECKED failed=$EV_FAILED)"; rc=1; }
+
+    scan_file "$bad"
+    [ -n "$EV_FAILED" ] || { echo "selftest: reverted fixture did not FAIL"; rc=1; }
+    case "$EV_FAILED" in *reset_module-uses-clear:symbols*) : ;; *) echo "selftest: reverted fixture failure did not name the clear() shape"; rc=1 ;; esac
+
+    scan_file "$bad2"
+    case "$EV_FAILED" in *lookup_or_invalid-missing-id-range-guard*) : ;; *) echo "selftest: missing-range-guard fixture not detected"; rc=1 ;; esac
+
+    scan_file "$empty"
+    [ "$EV_CHECKED" -eq 0 ] || { echo "selftest: empty fixture must yield 0 checked"; rc=1; }
+
+    rm -rf "$d"
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL — selftest failed"
+        exit 1
+    fi
+}
+
+selftest
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+target="${1:-$root/src/compiler/20.hir/hir_types.spl}"
+
+scan_file "$target"
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked${EV_FAILED:+ (${EV_FAILED})}"
+    exit 2
+fi
+
+if [ -n "$EV_FAILED" ]; then
+    echo "FAIL — $EV_CHECKED invariant(s) checked in $target, violations:$EV_FAILED"
+    exit 1
+fi
+
+echo "PASS — $EV_CHECKED invariant(s) checked in $target"
+exit 0
