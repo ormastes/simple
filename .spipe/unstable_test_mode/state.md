@@ -711,16 +711,32 @@ finished; no damage, by luck not care).
   — SIGKILL deliberately excluded, with a docstring that already states the
   reasoning AND the earlyoom-escalation tension. Line 72 is INSIDE that
   docstring. The code was correct all along.
-- **R2b MISCHARACTERISED.** Claimed `test_executor_parsing.spl:444` "handles
-  only -1/143/144, lanes disagree". The subprocess path CANNOT SEE 137 — the
-  Rust boundary collapses every signal AND timeout into one `-1`
-  (`env_process.rs:508,535`). It disambiguates by crash SENTINEL FILE then
-  fault-diagnostic evidence. Two mechanisms for two lanes with different
-  information, not a disagreement.
+- **R2b — the ORCHESTRATOR'S "correction" WAS ITSELF WRONG. The audit was
+  closer to true.** The orchestrator claimed the subprocess path cannot see 137
+  because "the Rust boundary collapses every signal AND timeout into one `-1`
+  (`env_process.rs:508,535`)". That is STALE. `exit_status_to_code`
+  (`env_process.rs:22-34`) returns `128 + signal`; its own doc comment records
+  that the `unwrap_or(-1)` collapse WAS the bug and this is the fix. `-1` now
+  survives only for TIMEOUT (`:539`, `:563-567`) and spawn/reap failure.
+  Consequence: **137/139/134 genuinely CAN arrive on the subprocess path and
+  match NONE of the `-1/143/144` arms**, falling through to the legacy
+  stdout-scrape. REAL GAP, still open; fix is to widen that arm to
+  `exit_code > 128`. The in-source comment in `test_executor_parsing.spl`
+  citing `:508,535` as always-`-1` is stale and is what misled both the
+  orchestrator AND the FORK lane. Row recorded as PARTIAL, not SATISFIED.
 
-**Rule for this lane going forward: distinguish docstring/comment from code
-before asserting what a line does.** Still genuinely open from that audit: two
-lanes return different unverified exit codes (2 vs 5).
+**Two rules for this lane going forward:** (1) distinguish docstring/comment
+from CODE before asserting what a line does; (2) do not trust an IN-SOURCE
+COMMENT about another layer's behaviour — read that layer. Rule 2 is what the
+orchestrator broke, and a stale comment propagated the same false claim into
+two independent lanes.
+
+Exit-code split RESOLVED: **standardise on 5.** Not a preference —
+`test_run_outcome_exit_code` already maps `UsageError => 2`, so
+`test_runner_single.spl:1226-1231` returning a bare `2` makes "bad flag" and
+"the host killed your spec" indistinguishable in the same runner.
+`Unverified => 5` is unambiguous. Survey of `scripts/**`: nothing branches on
+2-vs-5 (callers test `rc == 0` only), so migration cost is one literal.
 
 ### THE SCOPE FINDING — what `unstable_mode` actually does
 
