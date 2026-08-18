@@ -1,0 +1,77 @@
+# SimpleCliExtensionV1 end-to-end: an SDN-declared (data-only, 0-compile)
+# extension describes, validates, applies and completes.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.cli_extension_wire.{
+    SimpleCliExtensionV1, CliExtensionInvocationV1, CliExtensionAppliedV1,
+    cli_extension_from_sdn_v1, cli_extension_describe_v1,
+    cli_extension_validate_v1, cli_extension_apply_v1, cli_extension_complete_v1,
+    cli_extension_applied_empty_v1, cli_extension_applied_get_v1
+}
+
+fn _log_ext_sdn() -> text:
+    var s = "schema: simple.cli_extension_wire/1\n"
+    s = s + "namespace: log\n"
+    s = s + "provider_id: provider.log\n"
+    s = s + "options:\n"
+    s = s + "  - key: level\n"
+    s = s + "    kind: value\n"
+    s = s + "    values: [debug, info, warn]\n"
+    s = s + "    help: set the log level\n"
+    s = s + "  - key: color\n"
+    s = s + "    kind: flag\n"
+    s
+
+fn _load_log_ext() -> SimpleCliExtensionV1:
+    match cli_extension_from_sdn_v1(_log_ext_sdn()):
+        case Ok(e): e
+        case Err(_): SimpleCliExtensionV1(ns: "LOAD_FAILED", provider_id: "", options: [])
+
+fn _applied_value(state: CliExtensionAppliedV1, key: text) -> text:
+    match cli_extension_applied_get_v1(state, key):
+        case Some(v): v
+        case None: "<absent>"
+
+describe "SimpleCliExtensionV1 wire — end to end":
+    it "loads an extension from SDN and describes it deterministically":
+        val ext = _load_log_ext()
+        expect(ext.ns).to_equal("log")
+        expect(ext.provider_id).to_equal("provider.log")
+        expect(ext.options.len()).to_equal(2)
+        val desc = cli_extension_describe_v1(ext)
+        expect(desc.contains("--xlog-level=<value>")).to_equal(true)
+        expect(desc.contains("one of: debug|info|warn")).to_equal(true)
+        expect(desc.contains("--xlog-color")).to_equal(true)
+
+    it "validates a well-formed invocation into a typed record":
+        val ext = _load_log_ext()
+        match cli_extension_validate_v1(ext, "--xlog-level=debug"):
+            case Ok(v):
+                expect(v.ns).to_equal("log")
+                expect(v.key).to_equal("level")
+                expect(v.value).to_equal("debug")
+                expect(v.provider_id).to_equal("provider.log")
+            case Err(e):
+                expect("validate failed: " + e).to_equal("")
+
+    it "applies options into state with last-wins semantics":
+        val ext = _load_log_ext()
+        var state = cli_extension_applied_empty_v1()
+        match cli_extension_apply_v1(ext, state, "--xlog-level=info"):
+            case Ok(s): state = s
+            case Err(e): expect("apply failed: " + e).to_equal("")
+        match cli_extension_apply_v1(ext, state, "--xlog-color"):
+            case Ok(s): state = s
+            case Err(e): expect("apply failed: " + e).to_equal("")
+        match cli_extension_apply_v1(ext, state, "--xlog-level=warn"):
+            case Ok(s): state = s
+            case Err(e): expect("apply failed: " + e).to_equal("")
+        expect(state.keys.len()).to_equal(2)
+        expect(_applied_value(state, "level")).to_equal("warn")
+        expect(_applied_value(state, "color")).to_equal("")
+        expect(_applied_value(state, "verbose")).to_equal("<absent>")
+
+    it "completes option spellings by prefix, empty for unknown prefixes":
+        val ext = _load_log_ext()
+        expect(cli_extension_complete_v1(ext, "--xlog-")).to_equal(["--xlog-level=", "--xlog-color"])
+        expect(cli_extension_complete_v1(ext, "--xlog-le")).to_equal(["--xlog-level="])
+        expect(cli_extension_complete_v1(ext, "--xnet-").len()).to_equal(0)

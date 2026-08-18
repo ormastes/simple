@@ -1,0 +1,73 @@
+# Defect-class spec: cli_extension_wire validate MUST fail closed on
+# anything it does not recognise. Every rejection case is paired with a
+# POSITIVE CONTROL in the same spec — a valid sibling invocation that is
+# still accepted — so the spec cannot pass by rejecting everything.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.cli_extension_wire.{
+    SimpleCliExtensionV1, cli_extension_from_sdn_v1, cli_extension_validate_v1
+}
+
+fn _ext_sdn() -> text:
+    var s = "schema: simple.cli_extension_wire/1\n"
+    s = s + "namespace: log\n"
+    s = s + "provider_id: provider.log\n"
+    s = s + "options:\n"
+    s = s + "  - key: level\n"
+    s = s + "    kind: value\n"
+    s = s + "    values: [debug, info, warn]\n"
+    s = s + "  - key: color\n"
+    s = s + "    kind: flag\n"
+    s
+
+fn _ext() -> SimpleCliExtensionV1:
+    match cli_extension_from_sdn_v1(_ext_sdn()):
+        case Ok(e): e
+        case Err(_): SimpleCliExtensionV1(ns: "LOAD_FAILED", provider_id: "", options: [])
+
+# "" when accepted; the error text when rejected.
+fn _verdict(ext: SimpleCliExtensionV1, token: text) -> text:
+    match cli_extension_validate_v1(ext, token):
+        case Ok(_): ""
+        case Err(e): e
+
+describe "SimpleCliExtensionV1 validate — fail-closed with positive control":
+    it "rejects an unknown namespace while accepting the valid sibling":
+        val ext = _ext()
+        expect(_verdict(ext, "--xnet-level=debug").contains("unknown namespace")).to_equal(true)
+        expect(_verdict(ext, "--xlog-level=debug")).to_equal("")  # positive control
+
+    it "rejects an undeclared key while accepting the valid sibling":
+        val ext = _ext()
+        expect(_verdict(ext, "--xlog-verbose").contains("unknown option key")).to_equal(true)
+        expect(_verdict(ext, "--xlog-color")).to_equal("")  # positive control
+
+    it "rejects a value outside the closed set while accepting an allowed one":
+        val ext = _ext()
+        expect(_verdict(ext, "--xlog-level=chatty").contains("not allowed")).to_equal(true)
+        expect(_verdict(ext, "--xlog-level=warn")).to_equal("")  # positive control
+
+    it "rejects arity misuse both ways while accepting the correct forms":
+        val ext = _ext()
+        expect(_verdict(ext, "--xlog-color=on").contains("takes no value")).to_equal(true)
+        expect(_verdict(ext, "--xlog-level").contains("requires =<value>")).to_equal(true)
+        expect(_verdict(ext, "--xlog-color")).to_equal("")        # positive control
+        expect(_verdict(ext, "--xlog-level=info")).to_equal("")   # positive control
+
+    it "rejects non-extension and malformed tokens":
+        val ext = _ext()
+        expect(_verdict(ext, "--help") != "").to_equal(true)
+        expect(_verdict(ext, "plain-arg") != "").to_equal(true)
+        expect(_verdict(ext, "--xLOG-level=debug") != "").to_equal(true)
+
+    it "fails closed on a bad config: wrong schema and duplicate keys rejected, valid config accepted":
+        val bad_schema = "schema: simple.other/9\nnamespace: log\nprovider_id: p\noptions:\n  - key: a\n    kind: flag\n"
+        match cli_extension_from_sdn_v1(bad_schema):
+            case Ok(_): expect("accepted wrong schema").to_equal("")
+            case Err(e): expect(e.contains("unsupported schema")).to_equal(true)
+        var dup = "schema: simple.cli_extension_wire/1\nnamespace: log\nprovider_id: p\noptions:\n"
+        dup = dup + "  - key: a\n    kind: flag\n  - key: a\n    kind: flag\n"
+        match cli_extension_from_sdn_v1(dup):
+            case Ok(_): expect("accepted duplicate key").to_equal("")
+            case Err(e): expect(e.contains("duplicate option key")).to_equal(true)
+        val good = _ext()
+        expect(good.ns).to_equal("log")  # positive control

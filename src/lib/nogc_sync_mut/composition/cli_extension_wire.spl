@@ -1,0 +1,306 @@
+# SimpleCliExtensionV1 — the CLI extension wire (Phase C / WP-19b-s).
+#
+# Versioned four-verb protocol for a data-driven `--x<ns>-<key>[=<value>]`
+# extension: describe / validate / apply / complete. An extension is DATA
+# (an SDN record), never code — editing one costs 0 compiles and 0 links,
+# per Phase C acceptance. Token lexing mirrors the fail-closed
+# SimpleCliOptionRouteTableV1 grammar (struct-typed split; ns shape check
+# imported from cli_option_route).
+#
+# SDN shape (schema key mandatory, fail-closed):
+#
+#   schema: simple.cli_extension_wire/1
+#   namespace: log
+#   provider_id: provider.log
+#   options:
+#     - key: level
+#       kind: value          # `value` (=<v> required) or `flag` (bare only)
+#       values: [debug, info, warn]   # optional closed value set
+#       help: set the log level
+#
+# Verbs (all pure, deterministic):
+#   cli_extension_describe_v1(ext)            -> text
+#   cli_extension_validate_v1(ext, token)     -> Result<CliExtensionInvocationV1, text>
+#   cli_extension_apply_v1(ext, state, token) -> Result<CliExtensionAppliedV1, text>
+#   cli_extension_complete_v1(ext, prefix)    -> [text]
+
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.composition.cli_option_route.{cli_namespace_shape_valid_v1}
+
+val CLI_EXTENSION_WIRE_SCHEMA_V1: text = "simple.cli_extension_wire/1"
+val CLI_EXT_OPT_FLAG: i64 = 1
+val CLI_EXT_OPT_VALUE: i64 = 2
+
+# One declared option of an extension namespace.
+struct CliExtensionOptionV1:
+    key: text
+    kind: i64          # CLI_EXT_OPT_FLAG | CLI_EXT_OPT_VALUE
+    values: [text]     # closed value set; empty = any value accepted
+    help: text
+
+# The versioned extension protocol record. Composition only — no hooks.
+struct SimpleCliExtensionV1:
+    ns: text
+    provider_id: text
+    options: [CliExtensionOptionV1]
+
+# One validated invocation of an extension option.
+struct CliExtensionInvocationV1:
+    ns: text
+    key: text
+    provider_id: text
+    value: text
+    has_value: bool
+
+# Applied-option state: parallel key/value arrays (flags carry value "").
+struct CliExtensionAppliedV1:
+    keys: [text]
+    values: [text]
+
+fn cli_extension_applied_empty_v1() -> CliExtensionAppliedV1:
+    CliExtensionAppliedV1(keys: [], values: [])
+
+fn cli_extension_applied_get_v1(state: CliExtensionAppliedV1, key: text) -> text?:
+    var i = 0
+    while i < state.keys.len():
+        if state.keys[i] == key:
+            return Some(state.values[i])
+        i = i + 1
+    None
+
+# --- loading (fail-closed) -------------------------------------------------
+
+fn _wire_text(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("cli-extension-wire-error: field must be text: " + key)
+        case None: Err("cli-extension-wire-error: missing field: " + key)
+
+fn _wire_optional_text(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("cli-extension-wire-error: field must be text: " + key)
+        case None: Ok("")
+
+fn _kind_from_text(s: text) -> Result<i64, text>:
+    if s == "flag": return Ok(CLI_EXT_OPT_FLAG)
+    if s == "value": return Ok(CLI_EXT_OPT_VALUE)
+    Err("cli-extension-wire-error: invalid option kind: " + s)
+
+fn _values_from_entry(entry: SdnValue) -> Result<[text], text>:
+    match entry.get("values"):
+        case Some(v):
+            match v.as_array():
+                case Some(items):
+                    var out: [text] = []
+                    var i = 0
+                    while i < items.len():
+                        match items[i].as_str():
+                            case Some(s): out.push(s)
+                            case None: return Err("cli-extension-wire-error: values entries must be text")
+                        i = i + 1
+                    Ok(out)
+                case None: Err("cli-extension-wire-error: values must be an array")
+        case None:
+            val empty: [text] = []
+            Ok(empty)
+
+# Build a SimpleCliExtensionV1 from SDN source. Malformed SDN, wrong or
+# missing schema, missing namespace/provider_id/options, an invalid kind
+# spelling, and duplicate option keys are all explicit errors.
+fn cli_extension_from_sdn_v1(source: text) -> Result<SimpleCliExtensionV1, text>:
+    match parse_with_issues(source):
+        case Ok(parsed): _extension_from_root(parsed.0)
+        case Err(e): Err("cli-extension-wire-error: malformed sdn: " + e)
+
+fn _extension_from_root(root: SdnValue) -> Result<SimpleCliExtensionV1, text>:
+    val schema = _wire_text(root, "schema")?
+    if schema != CLI_EXTENSION_WIRE_SCHEMA_V1:
+        return Err("cli-extension-wire-error: unsupported schema: " + schema)
+    val ns_name = _wire_text(root, "namespace")?
+    val provider_id = _wire_text(root, "provider_id")?
+    val opts_value = match root.get("options"):
+        case Some(v): v
+        case None: return Err("cli-extension-wire-error: missing field: options")
+    val entries = match opts_value.as_array():
+        case Some(a): a
+        case None: return Err("cli-extension-wire-error: options must be an array")
+    var options: [CliExtensionOptionV1] = []
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        val key = _wire_text(entry, "key")?
+        var j = 0
+        while j < options.len():
+            if options[j].key == key:
+                return Err("cli-extension-wire-error: duplicate option key: " + key)
+            j = j + 1
+        val kind = _kind_from_text(_wire_text(entry, "kind")?)?
+        val values = _values_from_entry(entry)?
+        val help = _wire_optional_text(entry, "help")?
+        options.push(CliExtensionOptionV1(key: key, kind: kind, values: values, help: help))
+        i = i + 1
+    Ok(SimpleCliExtensionV1(ns: ns_name, provider_id: provider_id, options: options))
+
+# --- describe ---------------------------------------------------------------
+
+fn _declared_keys_text(ext: SimpleCliExtensionV1) -> text:
+    var out = ""
+    var i = 0
+    while i < ext.options.len():
+        if i > 0: out = out + ", "
+        out = out + ext.options[i].key
+        i = i + 1
+    out
+
+# Deterministic description: one grammar line per declared option, in
+# declaration order. Never empty — an option-less extension states so.
+fn cli_extension_describe_v1(ext: SimpleCliExtensionV1) -> text:
+    var out = "extension " + ext.ns + " (provider: " + ext.provider_id + "):\n"
+    if ext.options.len() == 0:
+        return out + "  (no options declared)\n"
+    var i = 0
+    while i < ext.options.len():
+        val opt = ext.options[i]
+        var line = "  --x" + ext.ns + "-" + opt.key
+        if opt.kind == CLI_EXT_OPT_VALUE:
+            line = line + "=<value>"
+            if opt.values.len() > 0:
+                var vs = ""
+                var j = 0
+                while j < opt.values.len():
+                    if j > 0: vs = vs + "|"
+                    vs = vs + opt.values[j]
+                    j = j + 1
+                line = line + "  (one of: " + vs + ")"
+        if opt.help != "":
+            line = line + "  " + opt.help
+        out = out + line + "\n"
+        i = i + 1
+    out
+
+# --- validate (fail-closed) -------------------------------------------------
+
+# Validate one raw argv token against the extension. FAIL CLOSED: anything
+# not recognised — a non---x token, a lexically malformed token, a foreign
+# namespace, an undeclared key, a flag given a value, a value option missing
+# its value, or a value outside a closed set — is an explicit error.
+# Lexical split of one `--x<ns>-<key>[=<value>]` token, mirroring the
+# route-table grammar (`--x[a-z][a-z0-9_]*-key[=value]`, `=`-only values).
+# Struct-typed (not the route module's class token) so it stays field-safe
+# under the test runner.
+struct CliExtensionSplitV1:
+    is_extension: bool
+    malformed: bool
+    ns: text
+    key: text
+    value: text
+    has_value: bool
+
+fn _split_extension_token(token: text) -> CliExtensionSplitV1:
+    val none = CliExtensionSplitV1(is_extension: false, malformed: false, ns: "", key: "", value: "", has_value: false)
+    if token == "--" or not token.starts_with("--x"):
+        return none
+    val body_start = 3
+    val n = token.len()
+    var dash = -1
+    var eq = -1
+    var i = body_start
+    while i < n:
+        val ch = token.slice(i, i + 1)
+        if ch == "=":
+            eq = i
+            break
+        if ch == "-" and dash < 0:
+            dash = i
+        i = i + 1
+    val bad = CliExtensionSplitV1(is_extension: false, malformed: true, ns: "", key: "", value: "", has_value: false)
+    if dash < 0 or dash == body_start:
+        return bad
+    val ns_part = token.slice(body_start, dash)
+    if not cli_namespace_shape_valid_v1(ns_part):
+        return bad
+    val key_end = if eq >= 0: eq else: n
+    val key_part = token.slice(dash + 1, key_end)
+    if key_part.len() == 0:
+        return bad
+    if eq >= 0:
+        return CliExtensionSplitV1(is_extension: true, malformed: false, ns: ns_part, key: key_part, value: token.slice(eq + 1, n), has_value: true)
+    CliExtensionSplitV1(is_extension: true, malformed: false, ns: ns_part, key: key_part, value: "", has_value: false)
+
+fn cli_extension_validate_v1(ext: SimpleCliExtensionV1, token: text) -> Result<CliExtensionInvocationV1, text>:
+    val tok = _split_extension_token(token)
+    if tok.malformed:
+        return Err("cli-extension-wire-error: malformed extension token: " + token)
+    if not tok.is_extension:
+        return Err("cli-extension-wire-error: not an extension token: " + token)
+    if tok.ns != ext.ns:
+        return Err("cli-extension-wire-error: unknown namespace '" + tok.ns + "'; this extension serves: " + ext.ns)
+    var idx = -1
+    var i = 0
+    while i < ext.options.len():
+        if ext.options[i].key == tok.key:
+            idx = i
+        i = i + 1
+    if idx < 0:
+        return Err("cli-extension-wire-error: unknown option key '" + tok.key + "'; declared keys: " + _declared_keys_text(ext))
+    val opt = ext.options[idx]
+    if opt.kind == CLI_EXT_OPT_FLAG and tok.has_value:
+        return Err("cli-extension-wire-error: option '" + tok.key + "' is a flag and takes no value")
+    if opt.kind == CLI_EXT_OPT_VALUE and not tok.has_value:
+        return Err("cli-extension-wire-error: option '" + tok.key + "' requires =<value>")
+    if opt.kind == CLI_EXT_OPT_VALUE and opt.values.len() > 0:
+        var ok_value = false
+        var j = 0
+        while j < opt.values.len():
+            if opt.values[j] == tok.value:
+                ok_value = true
+            j = j + 1
+        if not ok_value:
+            return Err("cli-extension-wire-error: value '" + tok.value + "' not allowed for option '" + tok.key + "'")
+    Ok(CliExtensionInvocationV1(
+        ns: tok.ns, key: tok.key, provider_id: ext.provider_id,
+        value: tok.value, has_value: tok.has_value))
+
+# --- apply ------------------------------------------------------------------
+
+# Effect one option: validate (fail-closed), then fold it into the applied
+# state. A repeated key overwrites (last-wins); flags record value "".
+fn cli_extension_apply_v1(ext: SimpleCliExtensionV1, state: CliExtensionAppliedV1, token: text) -> Result<CliExtensionAppliedV1, text>:
+    val inv = cli_extension_validate_v1(ext, token)?
+    var keys = state.keys
+    var values = state.values
+    var i = 0
+    var replaced = false
+    while i < keys.len():
+        if keys[i] == inv.key:
+            values[i] = inv.value
+            replaced = true
+        i = i + 1
+    if not replaced:
+        keys.push(inv.key)
+        values.push(inv.value)
+    Ok(CliExtensionAppliedV1(keys: keys, values: values))
+
+# --- complete ---------------------------------------------------------------
+
+# Shell-completion candidates for a partial token: the full option spellings
+# of this extension (`--x<ns>-<key>`, plus a trailing `=` for value options),
+# declaration order, filtered by prefix. Unknown prefixes yield [].
+fn cli_extension_complete_v1(ext: SimpleCliExtensionV1, prefix: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < ext.options.len():
+        val opt = ext.options[i]
+        var cand = "--x" + ext.ns + "-" + opt.key
+        if opt.kind == CLI_EXT_OPT_VALUE:
+            cand = cand + "="
+        if cand.starts_with(prefix):
+            out.push(cand)
+        i = i + 1
+    out
