@@ -122,7 +122,7 @@ pub fn init_interpreter_state(items: &[Node]) {
         funcs.clear();
         for item in items {
             if let Node::Function(f) = item {
-                funcs.insert(f.name.clone(), Arc::new(f.as_ref().clone()));
+                funcs.insert(f.name.clone(), Arc::new(f.clone()));
             }
         }
     });

@@ -22,6 +22,91 @@ use crate::di::DiConfig;
 use crate::interpreter_unit::*;
 use crate::value::Value;
 
+// ---------------------------------------------------------------------------
+// Module-globals generation tracking (interpreter env cache invalidation)
+// ---------------------------------------------------------------------------
+//
+// `captured_env_with_live_globals` (interpreter_call/core/function_exec.rs)
+// caches the per-owner call environment; that cache is only valid while the
+// module-global stores are unchanged. Rather than trusting every one of the
+// ~40 mutation sites to remember to invalidate, the five stores below are
+// wrapped in `GenTrackedCell`, whose `borrow_mut()` bumps a thread-local
+// generation counter unconditionally. A bump on a borrow_mut that turns out
+// not to mutate costs only a cache miss (performance), never staleness
+// (correctness).
+
+thread_local! {
+    static MODULE_GLOBALS_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Current module-globals generation for this thread.
+pub(crate) fn module_globals_generation() -> u64 {
+    MODULE_GLOBALS_GENERATION.with(|c| c.get())
+}
+
+fn bump_module_globals_generation() {
+    MODULE_GLOBALS_GENERATION.with(|c| c.set(c.get().wrapping_add(1)));
+    // SIMPLE_INTERP_ENV_CACHE_STATS=2: sampled backtraces to locate the
+    // dominant generation-bump (env-cache miss) source. Level-gated, off by
+    // default.
+    static BUMP_TRACE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("SIMPLE_INTERP_ENV_CACHE_STATS").is_ok_and(|v| v == "2")
+    });
+    if *BUMP_TRACE {
+        thread_local! {
+            static BUMPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        }
+        BUMPS.with(|b| {
+            let n = b.get() + 1;
+            b.set(n);
+            if n % 5000 == 0 {
+                eprintln!("[env-cache] bump #{n} at:\n{}", std::backtrace::Backtrace::force_capture());
+            }
+        });
+    }
+}
+
+/// RefCell wrapper that bumps the module-globals generation on every
+/// `borrow_mut()`, so any possible mutation invalidates dependent caches.
+pub(crate) struct GenTrackedCell<T> {
+    inner: RefCell<T>,
+}
+
+impl<T> GenTrackedCell<T> {
+    pub(crate) fn new(value: T) -> Self {
+        GenTrackedCell {
+            inner: RefCell::new(value),
+        }
+    }
+
+    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, T> {
+        self.inner.borrow()
+    }
+
+    pub(crate) fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
+        bump_module_globals_generation();
+        self.inner.borrow_mut()
+    }
+}
+
+/// Debug census of the module-global stores, printed by the mem-trace report
+/// (`mem_trace.rs`). Restored after a concurrent-session reconcile clobbered
+/// the original definition while its call site survived on main.
+pub(crate) fn report_globals_census() {
+    let flat = MODULE_GLOBALS.with(|c| c.borrow().len());
+    let (owners, owned_entries) = MODULE_GLOBALS_BY_OWNER.with(|c| {
+        let m = c.borrow();
+        (m.len(), m.values().map(|g| g.len()).sum::<usize>())
+    });
+    let envs = MODULE_ENV_BY_OWNER.with(|c| c.borrow().len());
+    let bindings = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| {
+        c.borrow().values().map(|b| b.len()).sum::<usize>()
+    });
+    eprintln!(
+        "[mem] globals census: flat={flat} owners={owners} owned_entries={owned_entries} module_envs={envs} import_bindings={bindings}"
+    );
+}
+
 /// Information about a literal function for custom string suffix handling.
 ///
 /// Literal functions allow explicit override of suffix → type mapping:
@@ -282,16 +367,16 @@ thread_local! {
     /// Module-level mutable variables accessible from functions.
     /// When a module declares `let mut x = ...` at top level, x is added here.
     /// Functions can read and write these variables.
-    pub(crate) static MODULE_GLOBALS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBALS: GenTrackedCell<HashMap<String, Value>> = GenTrackedCell::new(HashMap::new());
     /// Live globals keyed by their defining module.
-    pub(crate) static MODULE_GLOBALS_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBALS_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, HashMap<String, Value>>> = GenTrackedCell::new(HashMap::new());
     /// Initial owner-qualified globals retained with the module cache.
-    pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, HashMap<String, Value>>> = GenTrackedCell::new(HashMap::new());
     /// Immutable filtered module environments keyed by owner.
-    pub(crate) static MODULE_ENV_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_ENV_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = GenTrackedCell::new(HashMap::new());
     /// Imported global bindings keyed by importer, then local name.
     /// Values retain the defining owner and defining name for collision-free refresh.
-    pub(crate) static MODULE_GLOBAL_BINDINGS_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, (Arc<str>, String)>>> = RefCell::new(HashMap::new());
+    pub(crate) static MODULE_GLOBAL_BINDINGS_BY_OWNER: GenTrackedCell<HashMap<Arc<str>, HashMap<String, (Arc<str>, String)>>> = GenTrackedCell::new(HashMap::new());
     /// BDD Test Registry - shared across all modules that import spec.registry
     /// This ensures that describe/context/it blocks register to the same location
     /// regardless of how the registry module is imported.
