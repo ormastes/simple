@@ -1,0 +1,57 @@
+"""
+# SFFI `[u8]` Return Marshalling — Defect-Class Sweep
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Class-level companion to `sffi_byte_array_return_not_option_spec.spl`.
+
+That spec pins ONE family (`signature_sffi`'s sign wrappers). This one sweeps
+the SIBLING externs that share the same declared shape — a raw `extern fn`
+whose return type is a plain `[u8]` — to prove the historical
+`Option::Some([bytes])` mis-binding is absent across the class, not just at the
+one call site that originally reported it.
+
+Positive control: `rt_bytes_alloc(24)` must return an array whose `.len()` is
+exactly 24 — a value the marshaller had to actually compute and transport, so a
+green sweep cannot come from a stubbed-out or never-loaded extern path.
+
+NOT covered here, deliberately: `rt_file_read_bytes` on a missing path is a
+sibling of this class that is currently BROKEN in a *different* way — the
+tree-walk interpreter binds `nil` (`method len not found on type nil`) rather
+than an array, and `rt_bytes_alloc(24)` disagrees across engines (24 under
+`bin/simple test`, 0 under `bin/simple run`). Both are filed in
+`doc/08_tracking/bug/sffi_u8_return_nil_and_cross_engine_len_2026-08-18.md`
+and must not be folded into this spec until they are fixed.
+
+tag: unit, compiler, sffi
+"""
+
+use std.spipe.*
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+extern fn rt_byte_array_new(cap: i64) -> [u8]
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+
+describe "SFFI [u8] return marshalling — defect class":
+
+    it "positive control: rt_bytes_alloc(24) transports a real 24-byte array":
+        val buf = rt_bytes_alloc(24)
+        expect(buf.len()).to_equal(24)
+
+    it "positive control: rt_bytes_alloc(1) is length 1, not a constant":
+        val buf = rt_bytes_alloc(1)
+        expect(buf.len()).to_equal(1)
+
+    it "rt_byte_array_new declared -> [u8] binds an array":
+        val buf = rt_byte_array_new(8)
+        expect(buf.len() >= 0).to_equal(true)
+
+    it "rt_bytes_from_raw(0, 0) declared -> [u8] binds an empty array":
+        val buf = rt_bytes_from_raw(0, 0)
+        expect(buf.len()).to_equal(0)
+
