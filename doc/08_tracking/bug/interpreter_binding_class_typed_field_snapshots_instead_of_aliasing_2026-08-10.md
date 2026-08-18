@@ -22,6 +22,17 @@
 > fixture printed `field=42`) rests on an execution run and is left as filed; only
 > its causal attribution is retracted here.
 
+> **CONTRADICTION OPEN (2026-08-18): the blocked spec is still RED.** The
+> CLOSED/DID-NOT-REPRODUCE disposition below rests on a minimal two-class
+> fixture. The `Blocks:` spec was never re-run after that closure. It has now
+> been re-run and the blocked example still fails with the original signature —
+> see the dated section at the end of this file. The disposition line is left
+> as filed (a minimal fixture passing is a real observation), but it is
+> **not consistent with the tree**: either the fixture is too small to exercise
+> the defect, or the spec is red for a second, different reason. Resolving this
+> requires narrowing the gap between the two, not re-adjudicating either from
+> the other. This record was NOT reopened unilaterally.
+
 - **Status (single authoritative line, 2026-08-17): CLOSED — DID NOT REPRODUCE.**
   Basis: EXECUTION evidence — two independent 2026-08-17 reproducer runs of the
   doc's own bind-then-mutate (P6) shape under the interpreter both show the local
@@ -211,3 +222,91 @@ was not touched or softened.
 
 Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
 CORE-P1 sweep. REPRODUCER RUN GREEN. Fixed by the `ClassInstance(Arc<ClassInstance>)` shared-identity value variant added in `a155bff913f4` (2026-08-15), which gives source `class` values reference semantics distinct from the copy-on-write `Object` carrier used for `struct` values (`src/compiler_rust/compiler/src/value.rs:1234-1240`). That commit PREDATES the currently deployed seed, so it is testable with the deployed binary today. Fixture: bind a class-typed field to a local, mutate through the local, read back through the field --\n\n```\nclass Inner:\n    n: i64\nclass Outer:\n    inner: Inner\nfn main():\n    val o = Outer(inner: Inner(n: 0))\n    val bound = o.inner\n    bound.n = 42\n    print("field=" + o.inner.n.to_string())\n    print("local=" + bound.n.to_string())\n```\n\n`bin/simple run` -> rc 0, `field=42` / `local=42`. The local ALIASES the field as a class value must; the reported snapshot behaviour is gone.
+
+---
+
+## 2026-08-18 — the `Blocks:` spec was re-run: still RED, original signature
+
+The 2026-08-17 closure above cites execution evidence, but that evidence is a
+**minimal 2-class fixture**, not the spec this record names in its `Blocks:`
+line. Nothing in the file showed that spec had been re-run after the closure, so
+it was re-run now.
+
+**Spec location.** Present under its exact original name, in both live mirror
+trees, byte-identical (`diff` clean, 91 lines each):
+
+- `test/02_integration/app/sj_daemon_mutual_exclusion_spec.spl`
+- `test/integration/app/sj_daemon_mutual_exclusion_spec.spl`
+
+No rename had occurred, so the re-run is against the intended file.
+
+**Command** (detached `nohup setsid` + sentinel, never wrapped in `timeout`):
+
+```
+bin/simple test test/02_integration/app/sj_daemon_mutual_exclusion_spec.spl
+```
+
+**Binary identity** — recorded before AND after; byte-identical across the run,
+so the result does not span a redeploy:
+
+```
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+59621024 2026-08-17 20:28:24.151268554 +0000
+```
+
+(Still the Rust seed, per `.claude/rules/commands.md`.)
+
+**Result** — quoted verbatim:
+
+```
+Results: 5 total, 4 passed, 1 failed
+```
+
+The single failure is **exactly** the example this record names in `Blocks:`,
+and no other:
+
+```
+sj daemon - exclusion survives the by-value SjClient caller chain
+  ✗ sees the lease through SjClient -> fallback_exec -> handle_cli_args
+    expected 0 to equal 75
+  ✓ NEGATIVE CONTROL: same chain with no lease held is NOT 75
+```
+
+### This is the class-aliasing signature, not something else
+
+The failure matches the documented shape precisely rather than merely being red:
+
+- The lease is acquired through `client.handler.lease_manager`, then
+  `fallback_exec(client.handler, ...)` returns `exit_code 0` instead of `75` —
+  the mutation is not observed through a second read of the same field. That is
+  the `D4` row of the "Production consequence" table above (`D4.fallback_exit=0`),
+  reproduced unchanged.
+- Its paired **negative control passes**, so the example is not satisfiable by a
+  handler that answers `0` unconditionally; the two examples still discriminate.
+- The three examples that never depended on this defect (direct-handler
+  exclusion, its control, lease release) are all still GREEN — matching "Why the
+  spec is left RED, not softened" exactly. A general regression would not leave
+  precisely those three green and precisely this one red.
+
+So this is **deliberately-red-on-purpose still being red**, not a new regression
+and not a different defect. The distinction matters: nothing here says the tree
+got worse; it says the closure was never checked against the artifact it blocks.
+
+### What would resolve the contradiction (neither side is decidable alone)
+
+1. Re-run the closure's minimal fixture and this spec **on one stated binary in
+   one session**, recording the engine lane explicitly. The 2026-08-17 fixture
+   run does not state whether it ran interpreter or JIT; this record's whole
+   claim is an interpreter/JIT *divergence*, and `bin/simple test` does not print
+   its execution lane in the spec log. A fixture that passed under JIT would be
+   consistent with this spec failing under the interpreter and would dissolve the
+   contradiction without either observation being wrong.
+2. If both are on the same lane, extend the minimal fixture toward the spec's
+   real shape (field read passed as a **call argument**, not just bound and
+   mutated in the same frame) until it flips — the delta that flips it is the
+   actual remaining defect.
+3. Only then re-adjudicate the status line. Do not close on the fixture alone
+   again, and do not reopen on this run alone.
+
+Not done here, deliberately: the spec was **not edited**, no source was changed
+to make anything pass, and the disposition line above was **not flipped**.
