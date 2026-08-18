@@ -23,8 +23,12 @@ use compiler.driver.driver_source_loading.{
 # Dict.entries currently lowers to this implementation; keep its object in the
 # entry closure even though this walker no longer constructs a custom HashMap.
 use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
-use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
-use lazy app.compile.native (compile_native)
+# NOTE: `use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)` and
+# `use lazy app.compile.native (compile_native)` used to sit here. Neither name is
+# referenced anywhere in this file, and `use lazy` is EAGER in the Rust bootstrap
+# interpreter (evaluation_helpers.rs:588 loads it immediately), so both edges were
+# paid in full at module-bootstrap time: app/compile/native.spl alone retained
+# 10,910 export bindings and cost 692ms. Removed as dead imports.
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
@@ -32,6 +36,7 @@ use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metada
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{read_file_text}
 extern fn rt_path_absolute(path: text) -> text
 
 fn _cli_eprint(message: text):
@@ -632,7 +637,7 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
-        val content = rt_file_read_text(f) ?? ""
+        val content = read_file_text(f)
         if trace_closure and f == entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:

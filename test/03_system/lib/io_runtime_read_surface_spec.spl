@@ -29,8 +29,15 @@ one of the tier declarations turns this file red instead of silently
 rerouting a caller into a not-found at its first call site.
 """
 
-use std.spec.{describe, it, expect, assert_true, assert_false}
-use std.io_runtime.{file_exists, file_read, read_file, read_file_text}
+use std.spec.{describe, it, expect, assert_true, assert_false, assert_equal}
+use std.io_runtime.{file_exists, file_read, read_file, read_file_text, hash_text}
+use std.io_runtime.{time_now_monotonic_ms, shell_exec, file_rename, process_run_timeout}
+
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
 describe "std.io_runtime file-read surface resolves and reads":
     """
@@ -60,3 +67,36 @@ describe "std.io_runtime file-read surface resolves and reads":
     it "read_file_text reaches the tier module the shim re-exports from":
         val content = read_file_text("src/lib/nogc_sync_mut/io_runtime.spl")
         expect(content).to_contain("pub fn read_file_text")
+
+    it "hash_text is a bare passthrough to rt_hash_text":
+        assert_equal(hash_text(""), rt_hash_text(""))
+        assert_equal(hash_text("simple"), rt_hash_text("simple"))
+        assert_equal(hash_text("src/lib/io_runtime.spl"), rt_hash_text("src/lib/io_runtime.spl"))
+
+    it "time_now_monotonic_ms is a bare passthrough to rt_time_now_monotonic_ms (monotonic non-decreasing)":
+        val a = rt_time_now_monotonic_ms()
+        val b = time_now_monotonic_ms()
+        val c = rt_time_now_monotonic_ms()
+        assert_true(b >= a)
+        assert_true(c >= b)
+
+    it "shell_exec is a bare passthrough to rt_shell_exec":
+        assert_equal(shell_exec("echo simple"), rt_shell_exec("echo simple"))
+        assert_equal(shell_exec("printf ok"), rt_shell_exec("printf ok"))
+
+    it "file_rename is a bare passthrough to rt_file_rename":
+        val a1 = "/tmp/io_runtime_spec_rename_a1.txt"
+        val a2 = "/tmp/io_runtime_spec_rename_a2.txt"
+        val b1 = "/tmp/io_runtime_spec_rename_b1.txt"
+        val b2 = "/tmp/io_runtime_spec_rename_b2.txt"
+        shell_exec("touch {a1}")
+        shell_exec("touch {b1}")
+        assert_equal(file_rename(a1, a2), rt_file_rename(b1, b2))
+        assert_true(file_exists(a2))
+        assert_true(file_exists(b2))
+        shell_exec("rm -f {a2} {b2}")
+
+    it "process_run_timeout is a bare passthrough to rt_process_run_timeout":
+        val r1 = process_run_timeout("echo", ["simple"], 5000)
+        val r2 = rt_process_run_timeout("echo", ["simple"], 5000)
+        assert_equal(r1, r2)
