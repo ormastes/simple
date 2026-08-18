@@ -30,6 +30,7 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
   design doc above.
 
 ## Landed so far (2026-08-18, updated end of session)
+## Landed so far (2026-08-18)
 - Gate: `scripts/check/check-no-direct-rt.shs` — ratchet mode (baseline
   `scripts/check/no_direct_rt_baseline.txt` = **12821**, only goes down) +
   `--critical`/`SIMPLE_RT_CRITICAL=1` phase-A error mode (any forbidden site
