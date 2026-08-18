@@ -1,5 +1,84 @@
 # `bin/simple test` double-executes unbound expression-statements inside `it` bodies (2026-08-18) — CONFIRMED, narrower than reported
 
+## Update 2026-08-18: site localized (Rust seed), fix BLOCKED-ON-DEPLOY
+
+**Site:** `src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`,
+function `exec_block_closure_into`, the `Node::Expression(expr)` match arm
+(~line 261-287, the block reached via `exec_block_value` /
+`exec_block_closure` — the path `"it" | "slow_it" | "limited_it"` in
+`src/compiler_rust/compiler/src/interpreter_call/bdd.rs:820` uses to run an
+`it` body's `Value::BlockClosure`).
+
+**Causality evidence.** Built a debug seed
+(`CARGO_TARGET_DIR=<scratch>/cargo_target cargo build --release --bin simple`,
+exit 0) with two temporary `eprintln!` probes bracketing the
+`handle_method_call_with_self_update(expr, ...)` call inside the
+`Node::Expression` arm, printing `std::mem::discriminant(expr)` on entry and a
+plain "done" on exit. Ran the exact minimal repro from this doc against the
+instrumented binary directly (bypassing the deployed seed symlink):
+
+Unbound-call repro (`print`; bare `rt_file_append_text(...)`;
+`expect(1).to_equal(1)`) — 8 trace lines, correctly nested:
+```
+start Discriminant(18)   # outer describe-block statement: the `it "...": <block>` call
+  start Discriminant(18) # it-body stmt 1: rt_file_append_text(...) call
+  done
+  start Discriminant(18) # it-body stmt 1 AGAIN — same discriminant, no intervening stmt
+  done
+  start Discriminant(20) # it-body stmt 2: expect(1).to_equal(1) (MethodCall)
+  done
+done
+```
+Sidecar file: 2 lines (`MARKER_APPEND` x2), `MARKER_PRINT` once — matches the
+doc's original raw counts exactly.
+
+Val-bound control (`val ok = rt_file_append_text(...)`; `expect(ok)...`) run
+through the same instrumented binary — only 4 trace lines:
+```
+start Discriminant(18)   # outer describe-block statement (the `it` call)
+  start Discriminant(20) # it-body stmt: expect(ok).to_equal(true) (MethodCall)
+  done
+done
+```
+Sidecar file: 1 line. The `val ok = ...` statement is a `Node::Let`, a
+different code path in the same function (not the `Node::Expression` arm just
+instrumented) and is not traced here at all — consistent with it running
+exactly once.
+
+**Conclusion.** Inside a single pass of `exec_block_closure_into`'s `for node
+in nodes` loop over an `it` body's `Value::BlockClosure`, the
+`Node::Expression` arm is entered and exited **twice in a row for the same
+bare-call statement** before the loop proceeds to the next statement — while a
+`Node::Let` (bound) statement and a `Node::Expression` whose expr is a
+`MethodCall` (`expect(...).to_equal(...)`) are each entered exactly once. This
+localizes the defect to either (a) the `nodes: &[Node]` slice for an `it`
+body's `BlockClosure` literally containing the bare-call statement twice
+(built somewhere upstream — parser or `Value::BlockClosure` construction for
+`it "...": <indented block>`), or (b) the loop body re-invoking the same
+iteration for that one node kind. Distinguishing (a) from (b) needs one more
+probe (`nodes.len()` / node index printed alongside the discriminant) that
+this investigation's budget did not reach — flagged as the next step below.
+
+**Proposed patch (not applied — see fix decision):** once (a) vs (b) is
+confirmed, either de-duplicate the `nodes` vector at whatever site
+constructs the `it`-body `BlockClosure`, or (if (b)) remove the duplicate loop
+iteration in `exec_block_closure_into`'s `Node::Expression` arm in
+`block_execution.rs`. No code was changed to test this — the fix requires
+locating the duplication's origin first, which is additional work beyond this
+task's budget.
+
+**Fix decision: BLOCKED-ON-DEPLOY, not fixed.** The site is in
+`src/compiler_rust` (the Rust seed). The deployed `bin/simple` (used by every
+`bin/simple test` invocation in this environment) is this same seed
+(`bin/simple --version` prints the `WARNING: this Rust-built Simple binary is
+a bootstrap seed only` banner) — a source fix here has no effect until the
+seed is rebuilt and redeployed, which is Bootstrap Stage 3's blocker (see
+`.claude/rules/bootstrap.md`). Per CLAUDE.md's "Default tooling = pure-Simple
+self-hosted binary" and the seed-fix constraint noted in the task, no
+compiler-side change was landed. All temporary `eprintln!` instrumentation was
+reverted before committing; `git diff -- src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`
+is empty.
+
 ## Status
 
 CONFIRMED, not fixed. Confirms the claim made in passing by
