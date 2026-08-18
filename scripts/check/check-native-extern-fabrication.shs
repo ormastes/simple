@@ -51,6 +51,158 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# --- Build-failure reporting.
+#
+# WHY A DEDICATED REPORTER: every native-build log this script produces --
+# control AND both absent-case ([default], [strict]) logs -- is ~1200 lines of
+# seed banner, lint warnings and gc-warnings, and the ACTUAL error is the LAST
+# few lines. Printing `sed -n '1,20p'` surfaces nothing but the "this is a
+# bootstrap seed" banner and an `export use *` lint warning, so an operator
+# reads a fabrication-shaped verdict for what is really e.g. `native-build
+# worker timed out after 7200s`. Measured 2026-08-17: 1181-line log, real error
+# on lines 1178-1181. This reporter prints the TAIL.
+#
+# 2026-08-18: originally `report_ctrl_failure`, wired only into the control
+# branch. The two absent-case branches kept their head-print and were therefore
+# still undiagnosable; they are now routed through here too. `$3` names which
+# build the log belongs to so the operator is not told "control" about a
+# [strict] failure.
+report_build_failure() {
+    _log="$1"
+    _rc="$2"
+    _what="${3:-control}"
+    _lines="$(wc -l <"$_log" 2>/dev/null || echo 0)"
+    echo "  build exit=$_rc, log=$_log ($_lines lines)"
+    echo "  --- last 25 lines of the $_what build log (the real error lives HERE,"
+    echo "      not at the head: the head is seed banner + lint warnings) ---"
+    tail -n 25 "$_log" 2>/dev/null | sed 's/^/  | /'
+    echo "  --- end of $_what build log ---"
+    if grep -q "worker timed out after" "$_log" 2>/dev/null; then
+        echo "  DIAGNOSIS: this is a native-build WORKER TIMEOUT, not extern fabrication."
+        echo "             This gate cannot pass until native-build itself completes."
+    fi
+}
+
+# --- Selftest (FATAL, runs before any scan).
+#     Fixtures prove the control-failure path actually surfaces the real error.
+if [ "${1:-}" = "--selftest" ]; then
+    st_dir="$(mktemp -d)"
+    trap 'rm -rf "$st_dir"' EXIT HUP INT TERM
+    st_fail=0
+    st_checked=0
+
+    # Fixture 1: a long log whose real error is only at the TAIL (the measured
+    # 2026-08-17 shape). The head-only reporter this replaced printed none of it.
+    f1="$st_dir/long.log"
+    i=0
+    while [ "$i" -lt 1200 ]; do
+        echo "warning: irrelevant seed/lint noise line $i" >>"$f1"
+        i=$((i + 1))
+    done
+    echo "error: native-build worker timed out after 7200s before producing a binary." >>"$f1"
+    out1="$(report_build_failure "$f1" 255)"
+    st_checked=$((st_checked + 1))
+    case "$out1" in
+        *"worker timed out after 7200s"*) ;;
+        *) echo "SELFTEST FAIL — tail-of-log fixture: real error never reached stdout"; st_fail=1 ;;
+    esac
+    st_checked=$((st_checked + 1))
+    case "$out1" in
+        *"this is a native-build WORKER TIMEOUT"*) ;;
+        *) echo "SELFTEST FAIL — tail-of-log fixture: timeout was not diagnosed"; st_fail=1 ;;
+    esac
+
+    # Fixture 2: a short log must be surfaced in full (no regression for the
+    # small-log case the old head-print handled correctly).
+    f2="$st_dir/short.log"
+    printf 'line-one\nerror: something small and real\n' >"$f2"
+    out2="$(report_build_failure "$f2" 1)"
+    st_checked=$((st_checked + 1))
+    case "$out2" in
+        *"error: something small and real"*) ;;
+        *) echo "SELFTEST FAIL — short-log fixture: error not surfaced"; st_fail=1 ;;
+    esac
+    st_checked=$((st_checked + 1))
+    case "$out2" in
+        *"this is a native-build WORKER TIMEOUT"*)
+            echo "SELFTEST FAIL — short-log fixture: timeout falsely diagnosed"; st_fail=1 ;;
+        *) ;;
+    esac
+
+    # Fixture 3: the [default] absent-case branch. Same ~1200-line shape as the
+    # control log, because it is produced by the same native-build invocation.
+    # Two assertions: the tail-borne error reaches stdout, AND the report names
+    # the branch (an operator must not be told "control" about an absent-case
+    # failure). A third assertion proves the fixture is genuinely head-hostile,
+    # i.e. that the `sed -n '1,20p'` this replaced really would have surfaced
+    # nothing -- otherwise the other two could pass vacuously.
+    f3="$st_dir/absent-default.log"
+    i=0
+    while [ "$i" -lt 1200 ]; do
+        echo "warning: [bootstrap seed] export use * lint noise line $i" >>"$f3"
+        i=$((i + 1))
+    done
+    echo "error: native-build worker timed out after 7200s (absent-default)" >>"$f3"
+    out3="$(report_build_failure "$f3" 255 "[default] absent-case")"
+    st_checked=$((st_checked + 1))
+    case "$out3" in
+        *"worker timed out after 7200s (absent-default)"*) ;;
+        *) echo "SELFTEST FAIL — [default] fixture: real error never reached stdout"; st_fail=1 ;;
+    esac
+    st_checked=$((st_checked + 1))
+    case "$out3" in
+        *"[default] absent-case build log"*) ;;
+        *) echo "SELFTEST FAIL — [default] fixture: report did not name the branch"; st_fail=1 ;;
+    esac
+    st_checked=$((st_checked + 1))
+    head3="$(sed -n '1,20p' "$f3")"
+    case "$head3" in
+        *"absent-default"*)
+            echo "SELFTEST FAIL — [default] fixture is not head-hostile; the assertions above are vacuous"
+            st_fail=1 ;;
+        *) ;;
+    esac
+
+    # Fixture 4: the [strict] absent-case branch, with a NON-timeout error. It
+    # must be surfaced, and it must NOT be falsely diagnosed as a worker timeout.
+    f4="$st_dir/absent-strict.log"
+    i=0
+    while [ "$i" -lt 1200 ]; do
+        echo "warning: [bootstrap seed] export use * lint noise line $i" >>"$f4"
+        i=$((i + 1))
+    done
+    echo "error: linker invocation failed: cannot find -lfoo (absent-strict)" >>"$f4"
+    out4="$(report_build_failure "$f4" 1 "[strict] absent-case")"
+    st_checked=$((st_checked + 1))
+    case "$out4" in
+        *"cannot find -lfoo (absent-strict)"*) ;;
+        *) echo "SELFTEST FAIL — [strict] fixture: real error never reached stdout"; st_fail=1 ;;
+    esac
+    st_checked=$((st_checked + 1))
+    case "$out4" in
+        *"this is a native-build WORKER TIMEOUT"*)
+            echo "SELFTEST FAIL — [strict] fixture: non-timeout error falsely diagnosed as a timeout"
+            st_fail=1 ;;
+        *) ;;
+    esac
+    st_checked=$((st_checked + 1))
+    case "$out4" in
+        *"[strict] absent-case build log"*) ;;
+        *) echo "SELFTEST FAIL — [strict] fixture: report did not name the branch"; st_fail=1 ;;
+    esac
+
+    if [ "$st_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ "$st_fail" -ne 0 ]; then
+        echo "FAIL — selftest: $st_checked fixture assertion(s) run, at least one failed"
+        exit 1
+    fi
+    echo "PASS — selftest: $st_checked fixture assertion(s) checked, 0 failed"
+    exit 0
+fi
+
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
 WORK_DIR="${WORK_DIR:-/tmp/check-native-extern-fabrication.$$}"
 ABSENT_FIXTURE="test/fixtures/native_extern_fabrication_probe/main.spl"
@@ -68,11 +220,15 @@ fail=0
 #     because native-build itself is broken.
 ctrl_bin="$WORK_DIR/control"
 ctrl_log="$WORK_DIR/control.log"
-if ! env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build \
+# rc is captured on its own line, never read through a pipe (a pipeline's $? is
+# the LAST element's status and has produced false greens in this repo before).
+ctrl_build_rc=0
+env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" native-build \
     --source test/fixtures --entry-closure --entry "$CONTROL_FIXTURE" \
-    --cache-dir "$WORK_DIR/cache-ctrl" --output "$ctrl_bin" >"$ctrl_log" 2>&1; then
+    --cache-dir "$WORK_DIR/cache-ctrl" --output "$ctrl_bin" >"$ctrl_log" 2>&1 || ctrl_build_rc=$?
+if [ "$ctrl_build_rc" -ne 0 ]; then
     echo "FAIL — control fixture (no extern) no longer builds under native-build"
-    sed -n '1,20p' "$ctrl_log"
+    report_build_failure "$ctrl_log" "$ctrl_build_rc" "control"
     fail=1
 else
     ctrl_out="$(timeout 20 "$ctrl_bin" 2>>"$ctrl_log" || true)"
@@ -112,7 +268,7 @@ check_absent_case() {
             echo "       mentions '$ABSENT_SYMBOL' -- this looks like an UNRELATED build"
             echo "       failure, not the expected extern-fabrication refusal. Investigate"
             echo "       rather than treating this as the gap having closed."
-            sed -n '1,20p' "$log_path"
+            report_build_failure "$log_path" "$build_rc" "[$label] absent-case"
             fail=1
             return 0
         fi
@@ -142,7 +298,7 @@ check_absent_case() {
         echo "FAIL — [$label] native-build exited 0, no fabricated symbol found by nm, and no"
         echo "       diagnostic was printed. This is an UNEXPECTED third outcome — investigate"
         echo "       manually rather than trusting either known state."
-        sed -n '1,20p' "$log_path"
+        report_build_failure "$log_path" "$build_rc" "[$label] absent-case"
         fail=1
         return 0
     fi

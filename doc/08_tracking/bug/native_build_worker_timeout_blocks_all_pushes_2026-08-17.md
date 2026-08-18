@@ -63,6 +63,42 @@ whoever owns the native-build lane.
 **Never** resolve this with `git push --no-verify`. Nine mandatory guards exist
 because two unbuildable trees reached `main` on 2026-08-11 exactly that way.
 
+## Diagnostics follow-up completed 2026-08-18 (lane GUARD2)
+
+The diagnostics half of this is now finished in
+`scripts/check/check-native-extern-fabrication.shs`. The reporter added on
+2026-08-17 (`report_ctrl_failure`) was wired into the control branch only; the
+two absent-case branches (`[default]`, `[strict]`) still did `sed -n '1,20p'`
+on logs of the same ~1180-line shape, where the head is nothing but the
+bootstrap-seed banner and an `export use *` lint warning and the real error is
+in the last four lines — so a genuine failure in either of those branches was
+undiagnosable.
+
+Changes (diagnostics only — the gate still checks exactly what it did):
+
+- `report_ctrl_failure` renamed to `report_build_failure` and given a third
+  argument naming which build the log belongs to, so an operator is not told
+  "control" about a `[strict]` failure. Still tail-based (`tail -n 25`), still
+  prints rc, log path and line count, still emits the explicit
+  `DIAGNOSIS: ... WORKER TIMEOUT, not extern fabrication` line on a match.
+- All three remaining `sed -n '1,20p'` call sites (the unrelated-build-failure
+  branch and the unexpected-third-outcome branch inside `check_absent_case`,
+  for both env combinations) now route through it. Build rc is still captured
+  on its own line via `|| rc=$?`, never through a pipe.
+- `--selftest` extended from 4 to **10** fixture assertions, still fatal:
+  the two original control fixtures plus a `[default]` long-log fixture
+  (tail surfaced / branch named / fixture proven head-hostile so the first two
+  assertions cannot pass vacuously) and a `[strict]` long-log fixture carrying
+  a NON-timeout error (surfaced / not falsely diagnosed as a timeout / branch
+  named). Verdict: `PASS — selftest: 10 fixture assertion(s) checked, 0 failed`.
+  Fail-closedness re-proven by mutating the reporter back to a head-print in a
+  scratch copy: 3 assertions fire and the run exits 1.
+
+**The push blocker is unchanged and still in place.** The control fixture was
+not deleted, relaxed, or made conditional, and the FAIL/exit-1 path is
+untouched — a broken `native-build` still blocks the push. Only the message an
+operator reads got better.
+
 ## Related
 
 - `doc/08_tracking/bug/origin_main_unbuildable_rust_seed_2026-08-11.md`
