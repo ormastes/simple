@@ -1,0 +1,132 @@
+# @cover src/app/startup/startup_planner.spl 80%
+"""
+# Startup Planner Specification (WP-15s)
+
+## Overview
+
+Verifies the pure startup planner: a classified request plus a component
+catalog plans the expected component set (requested + activation=startup +
+transitive dependencies) in dependency-first deterministic order, with
+per-component static/dynamic/absent choices delegated to the fail-closed
+resolve_component decision table. Errors (unknown component, cycle,
+resolve failures) are explicit — never a silent fallback.
+
+**Plan:** doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md (WP-15s)
+"""
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use std.common.structural.component.descriptor.{
+    ComponentDescriptor,
+    ComponentDescriptorV1,
+    component_descriptor_default,
+    component_descriptor_v1
+}
+use app.startup.startup_planner.{
+    PlannerRequest,
+    StartupLoadPlan,
+    planner_request_default,
+    plan_startup,
+    plan_render
+}
+
+fn desc(id: text, presence: text, placement: text, activation: text, deps: [text]) -> ComponentDescriptorV1:
+    var d = component_descriptor_default(id, "1")
+    d.presence = presence
+    d.placement = placement
+    d.activation = activation
+    d.dependencies = deps
+    component_descriptor_v1(d)
+
+fn spec_catalog() -> [ComponentDescriptorV1]:
+    val none: [text] = []
+    val dep_fe: [text] = ["compiler.frontend"]
+    val dep_opt: [text] = ["optimizer.basic"]
+    var cat: [ComponentDescriptorV1] = []
+    cat.push(desc("core.log", "on", "static", "startup", none))
+    cat.push(desc("compiler.frontend", "on", "static", "command", none))
+    cat.push(desc("optimizer.basic", "auto", "dynamic", "command", dep_fe))
+    cat.push(desc("optimizer.vector", "auto", "dynamic", "first_use", dep_opt))
+    cat.push(desc("gui.debug", "off", "dynamic", "manual", none))
+    cat
+
+describe "startup planner reproduces the expected plan":
+    it "plans requested set plus startup components plus transitive deps, dependency-first":
+        var req = planner_request_default("compile")
+        req.requested = ["optimizer.vector"]
+        val plan = plan_startup(req, spec_catalog())
+        assert_true(plan.ok)
+        assert_eq(plan.reason, "planned")
+        # core.log (activation=startup) first, then the dependency chain.
+        assert_eq(plan.steps.len(), 4)
+        assert_eq(plan.steps[0].id, "core.log")
+        assert_eq(plan.steps[1].id, "compiler.frontend")
+        assert_eq(plan.steps[2].id, "optimizer.basic")
+        assert_eq(plan.steps[3].id, "optimizer.vector")
+        # placement axis honoured: static stays static, dynamic never folds.
+        assert_eq(plan.steps[0].mode, "static")
+        assert_eq(plan.steps[1].mode, "static")
+        assert_eq(plan.steps[2].mode, "dynamic")
+        assert_eq(plan.steps[3].mode, "dynamic")
+        assert_eq(plan.steps[3].activation, "first_use")
+        assert_eq(plan.steps[2].dynload_setting, "presence=auto,placement=dynamic,activation=command")
+
+    it "presence=off resolves absent explicitly, never silently dropped":
+        var req = planner_request_default("debug")
+        req.requested = ["gui.debug"]
+        val plan = plan_startup(req, spec_catalog())
+        assert_true(plan.ok)
+        # core.log (startup) + gui.debug (absent, explicit)
+        assert_eq(plan.steps.len(), 2)
+        assert_eq(plan.steps[1].id, "gui.debug")
+        assert_eq(plan.steps[1].mode, "absent")
+
+    it "is deterministic: identical inputs render the identical plan":
+        var req = planner_request_default("compile")
+        req.requested = ["optimizer.vector"]
+        val a = plan_render(plan_startup(req, spec_catalog()))
+        val b = plan_render(plan_startup(req, spec_catalog()))
+        assert_eq(a, b)
+
+    it "fails closed on an unknown requested component":
+        var req = planner_request_default("compile")
+        req.requested = ["no.such.component"]
+        val plan = plan_startup(req, spec_catalog())
+        assert_false(plan.ok)
+        assert_eq(plan.reason, "unknown_component:no.such.component")
+        assert_eq(plan.steps.len(), 0)
+
+    it "fails closed on a dependency cycle":
+        val dep_b: [text] = ["b"]
+        val dep_a: [text] = ["a"]
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(desc("a", "on", "dynamic", "command", dep_b))
+        cat.push(desc("b", "on", "dynamic", "command", dep_a))
+        var req = planner_request_default("compile")
+        req.requested = ["a"]
+        val plan = plan_startup(req, cat)
+        assert_false(plan.ok)
+        assert_eq(plan.reason, "dependency_cycle")
+
+    it "placement=auto folds static only on a verified digest match":
+        val none: [text] = []
+        var cat: [ComponentDescriptorV1] = []
+        cat.push(desc("auto.comp", "auto", "auto", "command", none))
+        var req = planner_request_default("compile")
+        req.requested = ["auto.comp"]
+        req.digest_ids = ["auto.comp"]
+        req.embedded_hashes = ["h1"]
+        req.configured_hashes = ["h1"]
+        val folded = plan_startup(req, cat)
+        assert_true(folded.ok)
+        assert_eq(folded.steps[0].mode, "static")
+        req.configured_hashes = ["h2"]
+        val stale = plan_startup(req, cat)
+        assert_true(stale.ok)
+        assert_eq(stale.steps[0].mode, "dynamic")
+        # missing digest on the auto path is an explicit error, not a guess
+        req.digest_ids = []
+        req.embedded_hashes = []
+        req.configured_hashes = []
+        val missing = plan_startup(req, cat)
+        assert_false(missing.ok)
+        assert_eq(missing.reason, "missing_impl_digest:auto.comp")

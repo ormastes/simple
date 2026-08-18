@@ -1,0 +1,100 @@
+# @cover src/app/startup/startup_planner.spl 60%
+"""
+# Startup Planner Discrimination Specification (defect-class, WP-15s)
+
+## Overview
+
+Positive-control spec: the planner must DISCRIMINATE — different requests
+against the same catalog yield different plans, so a stub that returns one
+fixed plan cannot pass. Also proves the no-host-I/O constraint by static
+scan: the planner module's source imports only pure descriptor helpers and
+contains no file/env/process/network API tokens.
+
+**Plan:** doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md (WP-15s)
+"""
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use std.common.structural.component.descriptor.{
+    ComponentDescriptorV1,
+    component_descriptor_default,
+    component_descriptor_v1
+}
+use app.startup.startup_planner.{
+    PlannerRequest,
+    planner_request_default,
+    plan_startup,
+    plan_render
+}
+
+fn desc2(id: text, presence: text, placement: text, activation: text, deps: [text]) -> ComponentDescriptorV1:
+    var d = component_descriptor_default(id, "1")
+    d.presence = presence
+    d.placement = placement
+    d.activation = activation
+    d.dependencies = deps
+    component_descriptor_v1(d)
+
+fn disc_catalog() -> [ComponentDescriptorV1]:
+    val none: [text] = []
+    val dep_fe: [text] = ["compiler.frontend"]
+    var cat: [ComponentDescriptorV1] = []
+    cat.push(desc2("compiler.frontend", "on", "static", "command", none))
+    cat.push(desc2("optimizer.basic", "auto", "dynamic", "command", dep_fe))
+    cat.push(desc2("lsp.server", "auto", "dynamic", "manual", none))
+    cat
+
+describe "startup planner discriminates between requests (positive control)":
+    it "different requested sets yield different plans against one catalog":
+        val cat = disc_catalog()
+        var req_opt = planner_request_default("compile")
+        req_opt.requested = ["optimizer.basic"]
+        var req_lsp = planner_request_default("lsp")
+        req_lsp.requested = ["lsp.server"]
+        var req_none = planner_request_default("version")
+        val p_opt = plan_render(plan_startup(req_opt, cat))
+        val p_lsp = plan_render(plan_startup(req_lsp, cat))
+        val p_none = plan_render(plan_startup(req_none, cat))
+        # all three plans are pairwise distinct — a fixed plan cannot pass
+        assert_true(p_opt != p_lsp)
+        assert_true(p_opt != p_none)
+        assert_true(p_lsp != p_none)
+        # and each still succeeds, so the difference is content, not failure
+        assert_true(plan_startup(req_opt, cat).ok)
+        assert_true(plan_startup(req_lsp, cat).ok)
+        assert_true(plan_startup(req_none, cat).ok)
+
+    it "the same request yields the same plan (control for the control)":
+        val cat = disc_catalog()
+        var req = planner_request_default("compile")
+        req.requested = ["optimizer.basic"]
+        assert_eq(plan_render(plan_startup(req, cat)), plan_render(plan_startup(req, cat)))
+
+    it "catalog content changes the plan too":
+        var req = planner_request_default("compile")
+        req.requested = ["optimizer.basic"]
+        val full = plan_render(plan_startup(req, disc_catalog()))
+        val none: [text] = []
+        var small: [ComponentDescriptorV1] = []
+        small.push(desc2("optimizer.basic", "auto", "dynamic", "command", none))
+        val trimmed = plan_render(plan_startup(req, small))
+        assert_true(full != trimmed)
+
+describe "startup planner performs no host I/O (static scan)":
+    it "planner source imports only pure descriptor helpers and no I/O API tokens":
+        val src = read_file("src/app/startup/startup_planner.spl")
+        assert_true(src.len() > 0)
+        # sanity: right file
+        assert_true(src.contains("fn plan_startup"))
+        assert_true(src.contains("use std.common.structural.component.descriptor"))
+        # forbidden host-I/O surfaces are absent from the module source
+        assert_true(not src.contains("std.nogc_sync_mut"))
+        assert_true(not src.contains("std.nogc_async_mut"))
+        assert_true(not src.contains("read_" + "file"))
+        assert_true(not src.contains("write_" + "file"))
+        assert_true(not src.contains("open" + "("))
+        assert_true(not src.contains("getenv"))
+        assert_true(not src.contains("env" + "("))
+        assert_true(not src.contains("spawn"))
+        assert_true(not src.contains("socket"))
+        assert_true(not src.contains("http"))
+        assert_true(not src.contains("rt_" ))

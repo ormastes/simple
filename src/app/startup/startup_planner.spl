@@ -1,0 +1,208 @@
+# Startup planner (WP-15s, audit gap #13).
+#
+# PURE FUNCTION from a classified startup request + component catalog to a
+# deterministic StartupLoadPlan. NO HOST I/O by construction: this module
+# imports only std.common structural component data types and pure helpers,
+# never fs/net/env/process APIs, and every fact it plans from arrives as an
+# argument. A planner that reads files is the loader, not the planner; the
+# separation is what makes this testable.
+#
+# Local input/output shapes (PlannerRequest / StartupLoadPlan) are defined
+# here because the contract structs (StartupRequestV1/StartupPlanV1 under
+# src/app/startup/contract/**, WP-11s) are being built concurrently by a
+# sibling lane. RECONCILE with that contract once it lands: PlannerRequest
+# should become a thin projection of StartupRequestV1 and StartupLoadPlan
+# should embed into StartupPlanV1.
+#
+# Plan semantics:
+#   - Selected set = requested component ids, plus every catalog component
+#     with activation=startup and presence!=off, plus transitive
+#     dependencies of everything selected.
+#   - Per-component static/dynamic/absent choice delegates to the landed
+#     fail-closed resolve_component (descriptor.spl §5.3 decision table),
+#     fed by the request's impl-digest pairs.
+#   - Order = dependency-first deterministic topological order; ties broken
+#     by catalog order (stable), so equal inputs always yield the identical
+#     plan. A dependency cycle is an explicit error, never a silent drop.
+#   - presence=off resolves ABSENT: kept in the plan with mode "absent" and
+#     excluded from load order, so the caller sees the decision explicitly
+#     (no silent fallback).
+#
+# Research: doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md (WP-15)
+# Plan: doc/03_plan/agent_tasks/startup_perf_parallel_plan_2026-08-17.md (WP-15s row)
+
+use std.common.structural.component.descriptor.{
+    ComponentDescriptorV1,
+    ComponentChoice,
+    resolve_component
+}
+
+# Classified startup request as the planner needs it. Parallel arrays for
+# the digest map keep this struct-only (2026-08-18 class-erasure toolchain
+# bug under `bin/simple test`; see the bug doc named in CLAUDE.md context).
+struct PlannerRequest:
+    command: text
+    requested: [text]
+    digest_ids: [text]
+    embedded_hashes: [text]
+    configured_hashes: [text]
+
+struct PlanStep:
+    id: text
+    version: text
+    mode: text            # "static" | "dynamic" | "absent"
+    activation: text
+    dynload_setting: text
+
+struct StartupLoadPlan:
+    ok: bool
+    reason: text
+    command: text
+    steps: [PlanStep]     # dependency-first load order; "absent" steps carry no load
+
+fn planner_request_default(command: text) -> PlannerRequest:
+    val a: [text] = []
+    val b: [text] = []
+    val c: [text] = []
+    val d: [text] = []
+    PlannerRequest(command: command, requested: a, digest_ids: b, embedded_hashes: c, configured_hashes: d)
+
+fn plan_error(command: text, reason: text) -> StartupLoadPlan:
+    val steps: [PlanStep] = []
+    StartupLoadPlan(ok: false, reason: reason, command: command, steps: steps)
+
+fn planner_list_contains(items: [text], v: text) -> bool:
+    var idx = 0
+    while idx < items.len():
+        if items[idx] == v:
+            return true
+        idx = idx + 1
+    false
+
+fn planner_digest_for(req: PlannerRequest, id: text, embedded: bool) -> text:
+    var idx = 0
+    while idx < req.digest_ids.len():
+        if req.digest_ids[idx] == id:
+            if embedded:
+                return req.embedded_hashes[idx]
+            return req.configured_hashes[idx]
+        idx = idx + 1
+    ""
+
+fn planner_catalog_find(catalog: [ComponentDescriptorV1], id: text) -> i64:
+    var idx = 0
+    while idx < catalog.len():
+        if catalog[idx].body.id == id:
+            return idx
+        idx = idx + 1
+    -1
+
+# Selected set: requested + activation=startup components + transitive deps.
+# Deterministic: worklist seeded in catalog order then request order.
+fn planner_select(req: PlannerRequest, catalog: [ComponentDescriptorV1]) -> [text]:
+    var selected: [text] = []
+    var work: [text] = []
+    var idx = 0
+    while idx < catalog.len():
+        val b = catalog[idx].body
+        if b.activation == "startup" and b.presence != "off":
+            work.push(b.id)
+        idx = idx + 1
+    idx = 0
+    while idx < req.requested.len():
+        work.push(req.requested[idx])
+        idx = idx + 1
+    var widx = 0
+    while widx < work.len():
+        val id = work[widx]
+        widx = widx + 1
+        if planner_list_contains(selected, id):
+            continue
+        selected.push(id)
+        val cat_idx = planner_catalog_find(catalog, id)
+        if cat_idx >= 0:
+            val deps = catalog[cat_idx].body.dependencies
+            var didx = 0
+            while didx < deps.len():
+                work.push(deps[didx])
+                didx = didx + 1
+    selected
+
+# Dependency-first deterministic topological order over the selected ids,
+# ties broken by selected-list order (itself catalog-then-request stable).
+# Returns empty on cycle; caller reports the explicit error.
+fn planner_toposort(selected: [text], catalog: [ComponentDescriptorV1]) -> [text]:
+    var ordered: [text] = []
+    var remaining: [text] = []
+    var idx = 0
+    while idx < selected.len():
+        remaining.push(selected[idx])
+        idx = idx + 1
+    while remaining.len() > 0:
+        var placed = false
+        var ridx = 0
+        while ridx < remaining.len():
+            val id = remaining[ridx]
+            val cat_idx = planner_catalog_find(catalog, id)
+            var ready = true
+            if cat_idx >= 0:
+                val deps = catalog[cat_idx].body.dependencies
+                var didx = 0
+                while didx < deps.len():
+                    val dep = deps[didx]
+                    if planner_list_contains(selected, dep) and not planner_list_contains(ordered, dep):
+                        ready = false
+                    didx = didx + 1
+            if ready:
+                ordered.push(id)
+                var rest: [text] = []
+                var kidx = 0
+                while kidx < remaining.len():
+                    if kidx != ridx:
+                        rest.push(remaining[kidx])
+                    kidx = kidx + 1
+                remaining = rest
+                placed = true
+                break
+            ridx = ridx + 1
+        if not placed:
+            val empty: [text] = []
+            return empty
+    ordered
+
+# The planner. Pure: (request, catalog) -> plan. Fail-closed on unknown
+# components, resolve errors, and dependency cycles.
+fn plan_startup(req: PlannerRequest, catalog: [ComponentDescriptorV1]) -> StartupLoadPlan:
+    val selected = planner_select(req, catalog)
+    var idx = 0
+    while idx < selected.len():
+        if planner_catalog_find(catalog, selected[idx]) < 0:
+            return plan_error(req.command, "unknown_component:" + selected[idx])
+        idx = idx + 1
+    val ordered = planner_toposort(selected, catalog)
+    if selected.len() > 0 and ordered.len() == 0:
+        return plan_error(req.command, "dependency_cycle")
+    var steps: [PlanStep] = []
+    idx = 0
+    while idx < ordered.len():
+        val id = ordered[idx]
+        val emb = planner_digest_for(req, id, true)
+        val cfg = planner_digest_for(req, id, false)
+        val resolved = resolve_component(catalog, id, emb, cfg)
+        match resolved:
+            Ok(choice):
+                steps.push(PlanStep(id: choice.id, version: choice.version, mode: choice.mode, activation: choice.activation, dynload_setting: choice.dynload_setting))
+            Err(e):
+                return plan_error(req.command, e.code + ":" + e.detail)
+        idx = idx + 1
+    StartupLoadPlan(ok: true, reason: "planned", command: req.command, steps: steps)
+
+# Canonical text rendering of a plan, for determinism comparisons in specs.
+fn plan_render(plan: StartupLoadPlan) -> text:
+    var out = "command=" + plan.command + ";ok=" + plan.ok.to_text() + ";reason=" + plan.reason
+    var idx = 0
+    while idx < plan.steps.len():
+        val s = plan.steps[idx]
+        out = out + "|" + s.id + ":" + s.mode + ":" + s.activation
+        idx = idx + 1
+    out
