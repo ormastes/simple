@@ -1,8 +1,12 @@
 # `bin/simple test <spec>` emits no pass/fail summary and exits 0 (silent green)
 
 - **Date:** 2026-08-17
-- **Status:** OPEN
-- **Status:** FIXED (seed fix pending redeploy; shell guard live)
+- **Status:** FIXED (seed fix pending redeploy; shell guard live; pure-Simple
+  classifier fix RE-VERIFIED 2026-08-18 by independent lane — guard `--selftest`
+  PASS (4 fixtures), regression spec `Results: 9 total, 9 passed, 0 failed`
+  exit 0, sabotage (unverified early-return removed) reproduced
+  `expected unverified, got pass` / `Results: 9 total, 4 passed, 5 failed`
+  exit 1, restore byte-exact and green again)
 - **Severity:** HIGH — a spec that never runs is indistinguishable from a spec
   that passes, on the command every session uses as its evidence.
 
@@ -40,11 +44,6 @@ Either a result summary (counts of scenarios run / passed / failed) with a
 non-zero exit on failure, or an explicit `ERROR — nothing was run` with a
 non-zero exit. A run that executed zero assertions must never exit 0.
 
-## Next step
-
-Determine whether the seed's `test` subcommand actually loads and executes the
-spec at all, or only type-checks it. If it only type-checks, the command should
-say so.
 ## Root cause (2026-08-17, two independent causes)
 
 **1. The observed symptom is a SIGTERM kill, not a runner code path.**
