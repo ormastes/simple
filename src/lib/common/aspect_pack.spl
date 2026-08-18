@@ -1,0 +1,894 @@
+# Aspect-pack SMF container + application Aspect Catalog (design §11, §12).
+#
+# Implements the last unbuilt major piece of
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md:
+#
+#   1. `kind=aspect_pack` SMF container: ONE file holding MULTIPLE aspect
+#      modules, marked by APK_FLAG_ASPECT_PACK. The pack directory is
+#      uncompressed; each module payload is an INDEPENDENT deflate frame
+#      (design §12.3: one pack file != one compression stream), so loading
+#      one aspect never decompresses the rest of the pack.
+#   2. An uncompressed Aspect Catalog section (application SMF side) that
+#      routes a facet key DIRECTLY to (pack path, module id) — no directory
+#      scanning, no opening of unrelated packs (design §11.1).
+#   3. A loader driver with MEASURED counters (packs_opened,
+#      modules_decompressed, bytes_decompressed), following the
+#      sci_reader `index_probes`/`records_examined` pattern, so the two
+#      central performance claims are asserted by specs, not asserted in prose.
+#
+# All multi-byte fields little-endian. Fail-closed everywhere: corrupt
+# catalog entry, truncated pack, wrong flag are explicit typed errors —
+# never a silent fallback to scanning.
+#
+# Pack layout:
+#   header (32 bytes)
+#     0  magic[8]        = "SMFAPK1\0"
+#     8  schema u16      = 1
+#    10  flags  u16        bit0 = APK_FLAG_ASPECT_PACK (must be set)
+#    12  module_count u32
+#    16  dir_size u64      directory bytes (starts at offset 32)
+#    24  total_size u64    whole pack size
+#   directory (uncompressed, sequential variable-length entries) — this is
+#   design §11.2 ModuleEntry:
+#     u32 id_len, id bytes, u32 aspect_len, aspect bytes,
+#     u32 mabi_len, module_abi_hash, u32 cabi_len, required_core_public_abi_hash,
+#     u32 vfp_len, variant_fingerprint,
+#     u64 payload_off (absolute), u64 comp_size, u64 uncomp_size,
+#     u32 crc32 of the COMPRESSED payload bytes
+#   data area: independent deflate frames, one per module.
+#
+# Catalog layout (design §11.1 — FacetRoute, JoinpointRoute and StartupAspect
+# share one record array, discriminated by entry_kind):
+#   header (24 bytes): magic[8]="SMFACAT1", u16 schema=1, u16 reserved,
+#     u32 entry_count, u64 total_size
+#   entries (uncompressed, sequential):
+#     u32 key_len, key, u32 pack_len, pack_path, u32 mod_len, module_id,
+#     u32 entry_kind, u32 activation, u32 abi_len, facet_contract_abi_hash,
+#     u32 crc32 over (key ++ pack_path ++ module_id ++ u32 kind ++
+#                     u32 activation ++ abi bytes)
+#   A corrupt entry is detected via its crc when SELECTED and is an
+#   explicit APK_CATALOG_CORRUPT error.
+#
+# Activation policy (design §9.4) is enforced on the facet-acquisition path:
+# `off` is refused as APK_ASPECT_EXCLUDED, `manual` is refused as
+# APK_ASPECT_MANUAL (it loads only through apk_load_aspect_manual, the
+# `aspect.load` of design §6.7), and every other mode may load lazily.
+# apk_try_facet performs NO I/O and returns only an already-resident facet.
+
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.compress.gzip.{gzip_crc32}
+use std.common.compress.deflate.{deflate_compress, deflate_decompress}
+
+val APK_MAGIC_V1: text = "SMFAPK1\0"
+val APK_CATALOG_MAGIC_V1: text = "SMFACAT1"
+val APK_SCHEMA_V1: i64 = 1
+val APK_FLAG_ASPECT_PACK: i64 = 1
+val APK_HEADER_SIZE_V1: i64 = 32
+val APK_CATALOG_HEADER_SIZE_V1: i64 = 24
+
+# Catalog record kinds (design §11.1: FacetRoute / JoinpointRoute / StartupAspect)
+val APK_ENTRY_FACET: i64 = 0
+val APK_ENTRY_JOINPOINT: i64 = 1
+val APK_ENTRY_STARTUP: i64 = 2
+
+# Activation modes (design §9.4)
+val APK_ACT_OFF: i64 = 0
+val APK_ACT_STATIC: i64 = 1
+val APK_ACT_STARTUP: i64 = 2
+val APK_ACT_LAZY_FACET: i64 = 3
+val APK_ACT_MANUAL: i64 = 4
+val APK_ACT_LAZY_PATCHABLE: i64 = 5
+val APK_ACT_HOT: i64 = 6
+
+# ---------------------------------------------------------------- structs
+
+struct ApkModuleSourceV1:
+    module_id: text
+    aspect_id: text
+    payload: [u8]
+
+# design §11.2 ModuleEntry: the ABI/variant identity carried uncompressed in
+# the pack directory, so compatibility is decided WITHOUT decompressing.
+struct ApkModuleSourceV2:
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    variant_fingerprint: text
+    payload: [u8]
+
+struct ApkBuildResultV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    bytes: [u8]
+    module_count: i64
+
+struct ApkHandleV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    schema_version: i64
+    flags: i64
+    module_count: i64
+    dir_size: i64
+    total_size: i64
+
+struct ApkModuleLoadV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    variant_fingerprint: text
+    payload: [u8]
+    modules_decompressed: i64
+    bytes_decompressed: i64
+    entries_examined: i64
+
+struct ApkCatalogEntryV1:
+    facet_key: text
+    pack_path: text
+    module_id: text
+
+# design §11.1 FacetRoute/JoinpointRoute: routing plus the activation mode and
+# the facet contract ABI hash the route promises.
+struct ApkCatalogEntryV2:
+    facet_key: text
+    pack_path: text
+    module_id: text
+    entry_kind: i64
+    activation: i64
+    abi_hash: text
+
+struct ApkCatalogHandleV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    schema_version: i64
+    entry_count: i64
+    total_size: i64
+
+struct ApkCatalogRouteV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    facet_key: text
+    pack_path: text
+    module_id: text
+    entry_kind: i64
+    activation: i64
+    abi_hash: text
+
+struct ApkFacetLoadV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    facet_key: text
+    pack_path: text
+    module_id: text
+    aspect_id: text
+    activation: i64
+    from_cache: bool
+    payload: [u8]
+
+# ---------------------------------------------------------------- LE helpers
+
+fn _apk_push_u16(out: [u8], value: i64):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+
+fn _apk_push_u32(out: [u8], value: i64):
+    var i = 0
+    while i < 4:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+
+fn _apk_push_u64(out: [u8], value: i64):
+    var i = 0
+    while i < 8:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+
+fn _apk_push_bytes(out: [u8], src: [u8]):
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+
+fn _apk_push_text(out: [u8], value: text):
+    val b = text_to_bytes(value)
+    _apk_push_u32(out, b.len())
+    _apk_push_bytes(out, b)
+
+fn _apk_read_u16(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _apk_read_u32(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 4:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _apk_read_u64(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 8:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _apk_read_text(data: [u8], offset: i64, length: i64) -> text:
+    var raw: [u8] = []
+    var i = 0
+    while i < length:
+        raw.push(data[offset + i])
+        i = i + 1
+    bytes_to_text(raw)
+
+fn _apk_crc(data: [u8]) -> i64:
+    (gzip_crc32(data) as i64) & 4294967295
+
+# ---------------------------------------------------------------- pack build
+
+fn apk_build_pack_v1(modules: [ApkModuleSourceV1]) -> ApkBuildResultV1:
+    """Build a pack from modules that declare no ABI identity (design §11.2
+    fields left empty, i.e. compatibility is not checked for them)."""
+    var upgraded: [ApkModuleSourceV2] = []
+    var i = 0
+    while i < modules.len():
+        upgraded.push(ApkModuleSourceV2(module_id: modules[i].module_id,
+            aspect_id: modules[i].aspect_id, module_abi_hash: "",
+            required_core_public_abi_hash: "", variant_fingerprint: "",
+            payload: modules[i].payload))
+        i = i + 1
+    apk_build_pack_v2(upgraded)
+
+fn apk_build_pack_v2(modules: [ApkModuleSourceV2]) -> ApkBuildResultV1:
+    """Build a kind=aspect_pack SMF container. The directory is uncompressed;
+    each module payload becomes an INDEPENDENT deflate frame."""
+    var empty: [u8] = []
+    val n = modules.len()
+    if n == 0:
+        return ApkBuildResultV1(ok: false, error_code: "APK_EMPTY",
+            error_message: "an aspect pack must hold at least one module", bytes: empty, module_count: 0)
+    # duplicate module ids fail closed
+    var i = 0
+    while i < n:
+        var j = i + 1
+        while j < n:
+            if modules[i].module_id == modules[j].module_id:
+                return ApkBuildResultV1(ok: false, error_code: "APK_DUP_MODULE",
+                    error_message: "duplicate module id: {modules[i].module_id}", bytes: empty, module_count: 0)
+            j = j + 1
+        i = i + 1
+
+    # compress every payload independently
+    var frames: [u8] = []
+    var frame_off: [i64] = []
+    var frame_len: [i64] = []
+    var frame_crc: [i64] = []
+    i = 0
+    while i < n:
+        val comp = deflate_compress(modules[i].payload)
+        if comp.len() == 0 and modules[i].payload.len() > 0:
+            return ApkBuildResultV1(ok: false, error_code: "APK_COMPRESS_FAILED",
+                error_message: "deflate failed for module {modules[i].module_id}", bytes: empty, module_count: 0)
+        frame_off.push(frames.len())
+        frame_len.push(comp.len())
+        var crc_i = 0
+        crc_i = _apk_crc(comp)
+        frame_crc.push(crc_i)
+        _apk_push_bytes(frames, comp)
+        i = i + 1
+
+    # directory (payload_off is absolute; compute dir size first via a dry build)
+    var dir: [u8] = []
+    # first pass with placeholder offsets to learn dir size
+    i = 0
+    while i < n:
+        val idb = text_to_bytes(modules[i].module_id)
+        val asb = text_to_bytes(modules[i].aspect_id)
+        _apk_push_u32(dir, idb.len())
+        _apk_push_bytes(dir, idb)
+        _apk_push_u32(dir, asb.len())
+        _apk_push_bytes(dir, asb)
+        _apk_push_text(dir, modules[i].module_abi_hash)
+        _apk_push_text(dir, modules[i].required_core_public_abi_hash)
+        _apk_push_text(dir, modules[i].variant_fingerprint)
+        _apk_push_u64(dir, 0)
+        _apk_push_u64(dir, frame_len[i])
+        _apk_push_u64(dir, modules[i].payload.len())
+        _apk_push_u32(dir, frame_crc[i])
+        i = i + 1
+    val dir_size = dir.len()
+    val data_base = APK_HEADER_SIZE_V1 + dir_size
+
+    # second pass with real absolute offsets
+    var dir2: [u8] = []
+    i = 0
+    while i < n:
+        val idb = text_to_bytes(modules[i].module_id)
+        val asb = text_to_bytes(modules[i].aspect_id)
+        _apk_push_u32(dir2, idb.len())
+        _apk_push_bytes(dir2, idb)
+        _apk_push_u32(dir2, asb.len())
+        _apk_push_bytes(dir2, asb)
+        _apk_push_text(dir2, modules[i].module_abi_hash)
+        _apk_push_text(dir2, modules[i].required_core_public_abi_hash)
+        _apk_push_text(dir2, modules[i].variant_fingerprint)
+        _apk_push_u64(dir2, data_base + frame_off[i])
+        _apk_push_u64(dir2, frame_len[i])
+        _apk_push_u64(dir2, modules[i].payload.len())
+        _apk_push_u32(dir2, frame_crc[i])
+        i = i + 1
+
+    val total = data_base + frames.len()
+    var out: [u8] = []
+    _apk_push_bytes(out, text_to_bytes(APK_MAGIC_V1))
+    _apk_push_u16(out, APK_SCHEMA_V1)
+    _apk_push_u16(out, APK_FLAG_ASPECT_PACK)
+    _apk_push_u32(out, n)
+    _apk_push_u64(out, dir_size)
+    _apk_push_u64(out, total)
+    _apk_push_bytes(out, dir2)
+    _apk_push_bytes(out, frames)
+    ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: out, module_count: n)
+
+# ---------------------------------------------------------------- pack open
+
+fn _apk_open_error(code: text, message: text) -> ApkHandleV1:
+    ApkHandleV1(ok: false, error_code: code, error_message: message,
+        schema_version: 0, flags: 0, module_count: 0, dir_size: 0, total_size: 0)
+
+fn apk_open_pack_v1(data: [u8]) -> ApkHandleV1:
+    """Validate the pack header + geometry. Bounded: reads only the 32-byte
+    header. Fail-closed: bad magic, wrong flag (an ordinary SMF must be
+    REJECTED as a pack, and vice versa), truncation are explicit errors."""
+    if data.len() < APK_HEADER_SIZE_V1:
+        return _apk_open_error("APK_TRUNCATED_HEADER", "pack shorter than the fixed header")
+    val magic = text_to_bytes(APK_MAGIC_V1)
+    var i = 0
+    while i < 8:
+        if data[i] != magic[i]:
+            return _apk_open_error("APK_BAD_MAGIC", "pack magic is not SMFAPK1")
+        i = i + 1
+    val schema = _apk_read_u16(data, 8)
+    if schema != APK_SCHEMA_V1:
+        return _apk_open_error("APK_BAD_VERSION", "unsupported aspect pack schema version")
+    val flags = _apk_read_u16(data, 10)
+    if (flags & APK_FLAG_ASPECT_PACK) == 0:
+        return _apk_open_error("APK_NOT_ASPECT_PACK", "SMF_FLAG_ASPECT_PACK is not set; refusing to treat an ordinary module as a pack")
+    val module_count = _apk_read_u32(data, 12)
+    val dir_size = _apk_read_u64(data, 16)
+    val total_size = _apk_read_u64(data, 24)
+    if module_count <= 0 or module_count > 1048576:
+        return _apk_open_error("APK_BAD_GEOMETRY", "unreasonable module_count")
+    if total_size != data.len():
+        return _apk_open_error("APK_TRUNCATED_PACK", "declared total_size does not match available bytes")
+    if APK_HEADER_SIZE_V1 + dir_size > data.len():
+        return _apk_open_error("APK_TRUNCATED_PACK", "directory extends past the end of the pack")
+    ApkHandleV1(ok: true, error_code: "", error_message: "",
+        schema_version: schema, flags: flags, module_count: module_count,
+        dir_size: dir_size, total_size: total_size)
+
+# ---------------------------------------------------------------- module load
+
+fn _apk_load_error(code: text, message: text, examined: i64) -> ApkModuleLoadV1:
+    var empty: [u8] = []
+    ApkModuleLoadV1(ok: false, found: false, error_code: code, error_message: message,
+        module_id: "", aspect_id: "", module_abi_hash: "",
+        required_core_public_abi_hash: "", variant_fingerprint: "", payload: empty,
+        modules_decompressed: 0, bytes_decompressed: 0, entries_examined: examined)
+
+fn apk_load_module_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkModuleLoadV1:
+    """Load EXACTLY ONE module from the pack. Walks only the uncompressed
+    directory; decompresses only the selected module's frame. The counters
+    (modules_decompressed, bytes_decompressed) measure that claim."""
+    var empty: [u8] = []
+    if not handle.ok:
+        return _apk_load_error("APK_BAD_HANDLE", "load on an unopened pack", 0)
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var examined = 0
+    var slot = 0
+    while slot < handle.module_count:
+        if off + 4 > dir_end:
+            return _apk_load_error("APK_DIR_CORRUPT", "directory entry extends past directory end", examined)
+        val id_len = _apk_read_u32(data, off)
+        if off + 4 + id_len + 4 > dir_end:
+            return _apk_load_error("APK_DIR_CORRUPT", "module id span escapes the directory", examined)
+        val mid = _apk_read_text(data, off + 4, id_len)
+        val as_off = off + 4 + id_len
+        val aspect_len = _apk_read_u32(data, as_off)
+        val mabi_off = as_off + 4 + aspect_len
+        if mabi_off + 4 > dir_end:
+            return _apk_load_error("APK_DIR_CORRUPT", "module abi span escapes the directory", examined)
+        val mabi_len = _apk_read_u32(data, mabi_off)
+        val cabi_off = mabi_off + 4 + mabi_len
+        if cabi_off + 4 > dir_end:
+            return _apk_load_error("APK_DIR_CORRUPT", "core abi span escapes the directory", examined)
+        val cabi_len = _apk_read_u32(data, cabi_off)
+        val vfp_off = cabi_off + 4 + cabi_len
+        if vfp_off + 4 > dir_end:
+            return _apk_load_error("APK_DIR_CORRUPT", "variant fingerprint span escapes the directory", examined)
+        val vfp_len = _apk_read_u32(data, vfp_off)
+        val fix_off = vfp_off + 4 + vfp_len
+        if fix_off + 28 > dir_end:
+            return _apk_load_error("APK_DIR_CORRUPT", "directory entry fixed fields truncated", examined)
+        examined = examined + 1
+        if mid == module_id:
+            val aspect_id = _apk_read_text(data, as_off + 4, aspect_len)
+            val module_abi_hash = _apk_read_text(data, mabi_off + 4, mabi_len)
+            val core_abi_hash = _apk_read_text(data, cabi_off + 4, cabi_len)
+            val variant_fp = _apk_read_text(data, vfp_off + 4, vfp_len)
+            val payload_off = _apk_read_u64(data, fix_off)
+            val comp_size = _apk_read_u64(data, fix_off + 8)
+            val uncomp_size = _apk_read_u64(data, fix_off + 16)
+            val want_crc = _apk_read_u32(data, fix_off + 24)
+            if payload_off < dir_end or payload_off + comp_size > data.len():
+                return _apk_load_error("APK_TRUNCATED_PACK", "module payload lies outside the pack data area", examined)
+            var comp: [u8] = []
+            var i = 0
+            while i < comp_size:
+                comp.push(data[payload_off + i])
+                i = i + 1
+            if _apk_crc(comp) != want_crc:
+                return _apk_load_error("APK_MODULE_CORRUPT", "compressed frame failed its checksum", examined)
+            val payload = deflate_decompress(comp)
+            if payload.len() != uncomp_size:
+                return _apk_load_error("APK_MODULE_CORRUPT", "decompressed size does not match directory", examined)
+            return ApkModuleLoadV1(ok: true, found: true, error_code: "", error_message: "",
+                module_id: mid, aspect_id: aspect_id, module_abi_hash: module_abi_hash,
+                required_core_public_abi_hash: core_abi_hash, variant_fingerprint: variant_fp,
+                payload: payload,
+                modules_decompressed: 1, bytes_decompressed: comp_size, entries_examined: examined)
+        off = fix_off + 28
+        slot = slot + 1
+    ApkModuleLoadV1(ok: true, found: false, error_code: "", error_message: "",
+        module_id: "", aspect_id: "", module_abi_hash: "",
+        required_core_public_abi_hash: "", variant_fingerprint: "", payload: empty,
+        modules_decompressed: 0, bytes_decompressed: 0, entries_examined: examined)
+
+# ---------------------------------------------------------------- catalog
+
+fn apk_build_catalog_v1(entries: [ApkCatalogEntryV1]) -> ApkBuildResultV1:
+    """Build a catalog of plain lazy_facet routes with no declared contract
+    ABI (design §9.4: lazy_facet is the default for typed facets)."""
+    var upgraded: [ApkCatalogEntryV2] = []
+    var i = 0
+    while i < entries.len():
+        upgraded.push(ApkCatalogEntryV2(facet_key: entries[i].facet_key,
+            pack_path: entries[i].pack_path, module_id: entries[i].module_id,
+            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        i = i + 1
+    apk_build_catalog_v2(upgraded)
+
+fn apk_build_catalog_v2(entries: [ApkCatalogEntryV2]) -> ApkBuildResultV1:
+    """Build the uncompressed application Aspect Catalog section. Duplicate
+    (kind, key) pairs fail closed (routing must be unambiguous)."""
+    var empty: [u8] = []
+    val n = entries.len()
+    var i = 0
+    while i < n:
+        var j = i + 1
+        while j < n:
+            if entries[i].facet_key == entries[j].facet_key and entries[i].entry_kind == entries[j].entry_kind:
+                return ApkBuildResultV1(ok: false, error_code: "APK_DUP_FACET",
+                    error_message: "duplicate facet key: {entries[i].facet_key}", bytes: empty, module_count: 0)
+            j = j + 1
+        i = i + 1
+    var body: [u8] = []
+    i = 0
+    while i < n:
+        val kb = text_to_bytes(entries[i].facet_key)
+        val pb = text_to_bytes(entries[i].pack_path)
+        val mb = text_to_bytes(entries[i].module_id)
+        val ab = text_to_bytes(entries[i].abi_hash)
+        var joined: [u8] = []
+        _apk_push_bytes(joined, kb)
+        _apk_push_bytes(joined, pb)
+        _apk_push_bytes(joined, mb)
+        _apk_push_u32(joined, entries[i].entry_kind)
+        _apk_push_u32(joined, entries[i].activation)
+        _apk_push_bytes(joined, ab)
+        _apk_push_u32(body, kb.len())
+        _apk_push_bytes(body, kb)
+        _apk_push_u32(body, pb.len())
+        _apk_push_bytes(body, pb)
+        _apk_push_u32(body, mb.len())
+        _apk_push_bytes(body, mb)
+        _apk_push_u32(body, entries[i].entry_kind)
+        _apk_push_u32(body, entries[i].activation)
+        _apk_push_u32(body, ab.len())
+        _apk_push_bytes(body, ab)
+        _apk_push_u32(body, _apk_crc(joined))
+        i = i + 1
+    var out: [u8] = []
+    _apk_push_bytes(out, text_to_bytes(APK_CATALOG_MAGIC_V1))
+    _apk_push_u16(out, APK_SCHEMA_V1)
+    _apk_push_u16(out, 0)
+    _apk_push_u32(out, n)
+    _apk_push_u64(out, APK_CATALOG_HEADER_SIZE_V1 + body.len())
+    _apk_push_bytes(out, body)
+    ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: out, module_count: n)
+
+fn _apk_cat_open_error(code: text, message: text) -> ApkCatalogHandleV1:
+    ApkCatalogHandleV1(ok: false, error_code: code, error_message: message,
+        schema_version: 0, entry_count: 0, total_size: 0)
+
+fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
+    if data.len() < APK_CATALOG_HEADER_SIZE_V1:
+        return _apk_cat_open_error("APK_CATALOG_TRUNCATED", "catalog shorter than the fixed header")
+    val magic = text_to_bytes(APK_CATALOG_MAGIC_V1)
+    var i = 0
+    while i < 8:
+        if data[i] != magic[i]:
+            return _apk_cat_open_error("APK_CATALOG_BAD_MAGIC", "catalog magic is not SMFACAT1")
+        i = i + 1
+    val schema = _apk_read_u16(data, 8)
+    if schema != APK_SCHEMA_V1:
+        return _apk_cat_open_error("APK_CATALOG_BAD_VERSION", "unsupported catalog schema version")
+    val entry_count = _apk_read_u32(data, 12)
+    val total_size = _apk_read_u64(data, 16)
+    if entry_count < 0 or entry_count > 1048576:
+        return _apk_cat_open_error("APK_CATALOG_BAD_GEOMETRY", "unreasonable entry_count")
+    if total_size != data.len():
+        return _apk_cat_open_error("APK_CATALOG_TRUNCATED", "declared total_size does not match available bytes")
+    ApkCatalogHandleV1(ok: true, error_code: "", error_message: "",
+        schema_version: schema, entry_count: entry_count, total_size: total_size)
+
+fn _apk_route_error(code: text, message: text) -> ApkCatalogRouteV1:
+    ApkCatalogRouteV1(ok: false, found: false, error_code: code, error_message: message,
+        facet_key: "", pack_path: "", module_id: "",
+        entry_kind: APK_ENTRY_FACET, activation: APK_ACT_OFF, abi_hash: "")
+
+fn apk_catalog_route_v1(data: [u8], handle: ApkCatalogHandleV1, facet_key: text) -> ApkCatalogRouteV1:
+    """Route a FacetRoute key DIRECTLY to (pack_path, module_id)."""
+    _apk_catalog_route_kind(data, handle, facet_key, APK_ENTRY_FACET)
+
+fn apk_catalog_route_joinpoint_v1(data: [u8], handle: ApkCatalogHandleV1, slot_key: text) -> ApkCatalogRouteV1:
+    """Route a JoinpointRoute slot key (design §11.1) to its owning pack and
+    module. Same table, different record kind — a facet key never satisfies a
+    join-point lookup and vice versa."""
+    _apk_catalog_route_kind(data, handle, slot_key, APK_ENTRY_JOINPOINT)
+
+fn _apk_catalog_route_kind(data: [u8], handle: ApkCatalogHandleV1, facet_key: text, want_kind: i64) -> ApkCatalogRouteV1:
+    """Exact (kind, key) match over the uncompressed catalog only — never opens
+    a pack, never scans a directory. A corrupt SELECTED entry is an explicit
+    APK_CATALOG_CORRUPT error, never a silent fallback."""
+    if not handle.ok:
+        return _apk_route_error("APK_CATALOG_BAD_HANDLE", "route on an unopened catalog")
+    if facet_key == "":
+        return _apk_route_error("APK_CATALOG_EMPTY_KEY", "facet key must not be empty")
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var slot = 0
+    while slot < handle.entry_count:
+        if off + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "catalog entry extends past section end")
+        val key_len = _apk_read_u32(data, off)
+        if off + 4 + key_len + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "facet key span escapes the section")
+        val key = _apk_read_text(data, off + 4, key_len)
+        val p_off = off + 4 + key_len
+        val pack_len = _apk_read_u32(data, p_off)
+        val m_off = p_off + 4 + pack_len
+        if m_off + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "pack path span escapes the section")
+        val mod_len = _apk_read_u32(data, m_off)
+        val k_off = m_off + 4 + mod_len
+        if k_off + 12 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "module id span escapes the section")
+        val entry_kind = _apk_read_u32(data, k_off)
+        val activation = _apk_read_u32(data, k_off + 4)
+        val abi_len = _apk_read_u32(data, k_off + 8)
+        val crc_off = k_off + 12 + abi_len
+        if crc_off + 4 > handle.total_size:
+            return _apk_route_error("APK_CATALOG_CORRUPT", "contract abi span escapes the section")
+        if key == facet_key and entry_kind == want_kind:
+            val pack_path = _apk_read_text(data, p_off + 4, pack_len)
+            val module_id = _apk_read_text(data, m_off + 4, mod_len)
+            val abi_hash = _apk_read_text(data, k_off + 12, abi_len)
+            var joined: [u8] = []
+            _apk_push_bytes(joined, text_to_bytes(key))
+            _apk_push_bytes(joined, text_to_bytes(pack_path))
+            _apk_push_bytes(joined, text_to_bytes(module_id))
+            _apk_push_u32(joined, entry_kind)
+            _apk_push_u32(joined, activation)
+            _apk_push_bytes(joined, text_to_bytes(abi_hash))
+            if _apk_crc(joined) != _apk_read_u32(data, crc_off):
+                return _apk_route_error("APK_CATALOG_CORRUPT", "selected catalog entry failed its checksum")
+            return ApkCatalogRouteV1(ok: true, found: true, error_code: "", error_message: "",
+                facet_key: key, pack_path: pack_path, module_id: module_id,
+                entry_kind: entry_kind, activation: activation, abi_hash: abi_hash)
+        off = crc_off + 4
+        slot = slot + 1
+    ApkCatalogRouteV1(ok: true, found: false, error_code: "", error_message: "",
+        facet_key: facet_key, pack_path: "", module_id: "",
+        entry_kind: want_kind, activation: APK_ACT_OFF, abi_hash: "")
+
+fn apk_catalog_startup_keys_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]:
+    """List, in catalog order, the keys of every entry whose activation is
+    `startup` (design §9.4): the set an application must bind BEFORE it
+    publishes itself. Reads only the uncompressed catalog. A structurally
+    corrupt catalog yields the keys collected so far and stops — callers that
+    need a hard error route the individual key."""
+    var out: [text] = []
+    if not handle.ok:
+        return out
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var slot = 0
+    while slot < handle.entry_count:
+        if off + 4 > handle.total_size:
+            return out
+        val key_len = _apk_read_u32(data, off)
+        val p_off = off + 4 + key_len
+        if p_off + 4 > handle.total_size:
+            return out
+        val pack_len = _apk_read_u32(data, p_off)
+        val m_off = p_off + 4 + pack_len
+        if m_off + 4 > handle.total_size:
+            return out
+        val mod_len = _apk_read_u32(data, m_off)
+        val k_off = m_off + 4 + mod_len
+        if k_off + 12 > handle.total_size:
+            return out
+        val activation = _apk_read_u32(data, k_off + 4)
+        val abi_len = _apk_read_u32(data, k_off + 8)
+        if activation == APK_ACT_STARTUP:
+            out.push(_apk_read_text(data, off + 4, key_len))
+        off = k_off + 12 + abi_len + 4
+        slot = slot + 1
+    out
+
+# ---------------------------------------------------------------- loader
+#
+# Loader driver with cumulative MEASURED counters, keyed by an i64 handle
+# (module-level columnar arrays; state access is kept inline per
+# doc/08_tracking/bug/interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md).
+# Packs are registered as bytes under their catalog-relative path (the
+# in-memory equivalent of the deployed application image), stored in a
+# flat byte pool.
+
+var _ld_packs_opened: [i64] = []
+var _ld_modules_decompressed: [i64] = []
+var _ld_bytes_decompressed: [i64] = []
+var _ld_cache_hits: [i64] = []
+var _ld_last_error: [text] = []
+
+# Already-bound facet registry (design §14.3 step 3): a second acquisition of
+# the same facet must not reopen its pack nor inflate its frame again, and is
+# what makes apk_try_facet's "never performs I/O" contract observable.
+var _fc_ld: [i64] = []
+var _fc_key: [text] = []
+var _fc_module: [text] = []
+var _fc_aspect: [text] = []
+var _fc_activation: [i64] = []
+var _fc_pack: [text] = []
+var _fc_off: [i64] = []
+var _fc_len: [i64] = []
+var _fc_pool: [u8] = []
+
+var _pk_ld: [i64] = []
+var _pk_path: [text] = []
+var _pk_off: [i64] = []
+var _pk_len: [i64] = []
+var _pk_pool: [u8] = []
+
+fn apk_loader_new() -> i64:
+    """Create a loader with zeroed counters. Returns its handle."""
+    val id = _ld_packs_opened.len()
+    _ld_packs_opened = _ld_packs_opened.push(0)
+    _ld_modules_decompressed = _ld_modules_decompressed.push(0)
+    _ld_bytes_decompressed = _ld_bytes_decompressed.push(0)
+    _ld_cache_hits = _ld_cache_hits.push(0)
+    _ld_last_error = _ld_last_error.push("")
+    id
+
+fn apk_loader_packs_opened(ld: i64) -> i64:
+    _ld_packs_opened[ld]
+
+fn apk_loader_modules_decompressed(ld: i64) -> i64:
+    _ld_modules_decompressed[ld]
+
+fn apk_loader_bytes_decompressed(ld: i64) -> i64:
+    _ld_bytes_decompressed[ld]
+
+fn apk_loader_cache_hits(ld: i64) -> i64:
+    _ld_cache_hits[ld]
+
+fn apk_loader_last_error(ld: i64) -> text:
+    _ld_last_error[ld]
+
+fn apk_loader_register_pack(ld: i64, path: text, data: [u8]) -> bool:
+    """Register pack bytes under a catalog-relative path. Duplicate path in
+    the same loader fails closed. Registration does NOT open or validate the
+    pack — that happens (and is counted) only on load."""
+    var i = 0
+    val n = _pk_ld.len()
+    while i < n:
+        if _pk_ld[i] == ld and _pk_path[i] == path:
+            _ld_last_error[ld] = "pack already registered: {path}"
+            return false
+        i = i + 1
+    _pk_ld = _pk_ld.push(ld)
+    _pk_path = _pk_path.push(path)
+    _pk_off = _pk_off.push(_pk_pool.len())
+    _pk_len = _pk_len.push(data.len())
+    var j = 0
+    while j < data.len():
+        _pk_pool = _pk_pool.push(data[j])
+        j = j + 1
+    _ld_last_error[ld] = ""
+    true
+
+fn _apk_facet_error(code: text, message: text) -> ApkFacetLoadV1:
+    var empty: [u8] = []
+    ApkFacetLoadV1(ok: false, found: false, error_code: code, error_message: message,
+        facet_key: "", pack_path: "", module_id: "", aspect_id: "",
+        activation: APK_ACT_OFF, from_cache: false, payload: empty)
+
+fn _apk_facet_miss(facet_key: text) -> ApkFacetLoadV1:
+    var empty: [u8] = []
+    ApkFacetLoadV1(ok: true, found: false, error_code: "", error_message: "",
+        facet_key: facet_key, pack_path: "", module_id: "", aspect_id: "",
+        activation: APK_ACT_OFF, from_cache: false, payload: empty)
+
+fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
+    """Design §6.7 `try_facet`: NEVER performs I/O. Returns an already-bound
+    facet or a clean miss — it never consults the catalog, never opens a pack
+    and never decompresses, so none of the loader counters can move."""
+    var i = 0
+    val n = _fc_ld.len()
+    while i < n:
+        if _fc_ld[i] == ld and _fc_key[i] == facet_key:
+            var payload: [u8] = []
+            var j = 0
+            val base = _fc_off[i]
+            val plen = _fc_len[i]
+            while j < plen:
+                payload.push(_fc_pool[base + j])
+                j = j + 1
+            _ld_cache_hits[ld] = _ld_cache_hits[ld] + 1
+            _ld_last_error[ld] = ""
+            return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
+                facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
+                aspect_id: _fc_aspect[i], activation: _fc_activation[i],
+                from_cache: true, payload: payload)
+        i = i + 1
+    _apk_facet_miss(facet_key)
+
+fn apk_load_facet(ld: i64, catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
+    """Design §6.7 `facet`: may load when the route's activation mode permits
+    it. `off` (never included) and `manual` (explicit `aspect.load` only) are
+    refused as explicit errors — never silently loaded."""
+    _apk_acquire_facet(ld, catalog, facet_key, false)
+
+fn apk_load_aspect_manual(ld: i64, catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
+    """Design §6.7 `aspect.load`: an explicit request, so `manual` routes are
+    permitted here. `off` is still refused — that code is not in the image."""
+    _apk_acquire_facet(ld, catalog, facet_key, true)
+
+fn apk_activate_startup(ld: i64, catalog: [u8]) -> i64:
+    """Bind every `startup` route before the application publishes itself
+    (design §9.4). Returns the number bound; the first failure stops and is
+    left in apk_loader_last_error."""
+    val cat = apk_open_catalog_v1(catalog)
+    if not cat.ok:
+        _ld_last_error[ld] = cat.error_message
+        return 0
+    val keys = apk_catalog_startup_keys_v1(catalog, cat)
+    var bound = 0
+    var i = 0
+    while i < keys.len():
+        val got = _apk_acquire_facet(ld, catalog, keys[i], true)
+        if not got.ok:
+            return bound
+        bound = bound + 1
+        i = i + 1
+    bound
+
+fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetLoadV1:
+    """Full routed load: catalog -> ONE pack -> ONE module.
+
+    Order follows design §14.3: already-bound registry first, then the
+    FacetRoute, then the activation policy, then exactly one pack open and
+    exactly one frame inflate, then the ABI check of design §17.
+
+    Increments the loader's counters: packs_opened by exactly 1 (only the
+    routed pack is opened), modules_decompressed by exactly 1 (only the
+    routed module's frame is inflated), bytes_decompressed by that frame's
+    compressed size. A repeat acquisition moves none of them. Every failure is
+    an explicit typed error; there is no directory-scanning fallback path in
+    this module at all."""
+    var empty: [u8] = []
+    val cached = apk_try_facet(ld, facet_key)
+    if cached.found:
+        return cached
+    val cat = apk_open_catalog_v1(catalog)
+    if not cat.ok:
+        _ld_last_error[ld] = cat.error_message
+        return _apk_facet_error(cat.error_code, cat.error_message)
+    val route = apk_catalog_route_v1(catalog, cat, facet_key)
+    if not route.ok:
+        _ld_last_error[ld] = route.error_message
+        return _apk_facet_error(route.error_code, route.error_message)
+    if not route.found:
+        _ld_last_error[ld] = ""
+        return _apk_facet_miss(facet_key)
+
+    # activation policy (design §9.4) — decided from the catalog alone, so a
+    # refused aspect costs no pack open and no decompression at all.
+    if route.activation == APK_ACT_OFF:
+        _ld_last_error[ld] = "aspect is excluded from this image: {facet_key}"
+        return _apk_facet_error("APK_ASPECT_EXCLUDED", "aspect is excluded from this image: {facet_key}")
+    if route.activation == APK_ACT_MANUAL and not explicit:
+        _ld_last_error[ld] = "manual aspect requires an explicit load: {facet_key}"
+        return _apk_facet_error("APK_ASPECT_MANUAL", "manual aspect requires an explicit load: {facet_key}")
+
+    # locate the routed pack's registered bytes (exact path, no scanning)
+    var pidx = -1
+    var i = 0
+    val n = _pk_ld.len()
+    while i < n:
+        if _pk_ld[i] == ld and _pk_path[i] == route.pack_path:
+            pidx = i
+        i = i + 1
+    if pidx < 0:
+        _ld_last_error[ld] = "routed pack is not deployed: {route.pack_path}"
+        return _apk_facet_error("APK_PACK_MISSING", "routed pack is not deployed: {route.pack_path}")
+    var pack: [u8] = []
+    var j = 0
+    val base = _pk_off[pidx]
+    val plen = _pk_len[pidx]
+    while j < plen:
+        pack.push(_pk_pool[base + j])
+        j = j + 1
+
+    _ld_packs_opened[ld] = _ld_packs_opened[ld] + 1
+    val handle = apk_open_pack_v1(pack)
+    if not handle.ok:
+        _ld_last_error[ld] = handle.error_message
+        return _apk_facet_error(handle.error_code, handle.error_message)
+    val load = apk_load_module_v1(pack, handle, route.module_id)
+    if not load.ok:
+        _ld_last_error[ld] = load.error_message
+        return _apk_facet_error(load.error_code, load.error_message)
+    if not load.found:
+        _ld_last_error[ld] = "catalog routed to a module absent from its pack: {route.module_id}"
+        return _apk_facet_error("APK_ROUTE_DANGLING", "catalog routed to a module absent from its pack: {route.module_id}")
+    # design §17: the route promises a facet contract ABI; the module states
+    # its own. A mismatch is a load failure, never a best-effort bind. An
+    # empty promise means the route declares no ABI and nothing is checked.
+    if route.abi_hash != "" and route.abi_hash != load.module_abi_hash:
+        _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
+        return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
+    _ld_modules_decompressed[ld] = _ld_modules_decompressed[ld] + load.modules_decompressed
+    _ld_bytes_decompressed[ld] = _ld_bytes_decompressed[ld] + load.bytes_decompressed
+    _ld_last_error[ld] = ""
+
+    # publish into the already-bound registry so the next acquisition is I/O-free
+    _fc_ld = _fc_ld.push(ld)
+    _fc_key = _fc_key.push(facet_key)
+    _fc_module = _fc_module.push(load.module_id)
+    _fc_aspect = _fc_aspect.push(load.aspect_id)
+    _fc_activation = _fc_activation.push(route.activation)
+    _fc_pack = _fc_pack.push(route.pack_path)
+    _fc_off = _fc_off.push(_fc_pool.len())
+    _fc_len = _fc_len.push(load.payload.len())
+    var k = 0
+    while k < load.payload.len():
+        _fc_pool = _fc_pool.push(load.payload[k])
+        k = k + 1
+
+    ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
+        facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
+        aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
+        payload: load.payload)

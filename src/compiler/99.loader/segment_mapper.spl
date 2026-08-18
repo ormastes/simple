@@ -1,0 +1,342 @@
+# Segment-granular executable mapper (startup_perf_architecture_2026-08-17
+# §8.4, §8.15).
+#
+# WHY THIS EXISTS
+# ---------------
+# The historical loader path mapped ONE executable region PER SYMBOL:
+# `object_mapper.map_symbol` and the compat loader's SMF branch both called
+# `native_alloc_exec_memory` inside a per-symbol loop. A module with N
+# exported functions therefore cost N mmaps, N RW->RX protection
+# transitions, and N icache flushes -- O(symbols) syscalls where the file
+# format only ever described O(sections) of contiguous code.
+#
+# This module maps ONE region PER SEGMENT (an SMF section) and makes a
+# symbol what it actually is in the object format: an OFFSET into that
+# segment. Cost becomes O(segments) and is independent of symbol count.
+#
+# CORRECTNESS INVARIANTS (a loader that maps less but resolves wrong is
+# strictly worse than a slow one):
+#   * A symbol address is `segment_base + symbol.offset`, with
+#     `symbol.offset` interpreted exactly as SMF defines it -- relative to
+#     its section. `read_code` in the SMF reader computes symbol bytes as
+#     `section_file_offset + symbol.offset`, so the same arithmetic against
+#     a whole-section mapping yields byte-identical code at the symbol's
+#     address.
+#   * Every bind is bounds-checked: `offset >= 0` and
+#     `offset + size <= segment_size`. A symbol that does not lie inside
+#     its declared segment is an error, never a silent truncation.
+#   * Alignment: mmap returns a page-aligned base, so a symbol keeps its
+#     section-relative alignment for any section alignment <= page size.
+#     `map_segment` REJECTS a stronger requested alignment rather than
+#     mapping something under-aligned.
+#   * W^X: protection is flipped for the WHOLE segment, once per
+#     transition, and every transition is counted. Relocation is bracketed
+#     by `begin_relocation` (RX->RW) / `end_relocation` (RW->RX + icache
+#     flush); a segment left in RW is visible as an odd transition count.
+#   * Relocation offsets are SEGMENT-relative and applied once at the
+#     segment base -- the format's own frame of reference.
+
+use .smf_mmap_native.{
+    native_alloc_exec_memory,
+    native_write_exec_memory,
+    native_make_executable,
+    native_make_rw,
+    native_flush_icache,
+    native_get_function_pointer,
+    native_free_exec_memory
+}
+use app.startup.load_plan_receipt.{
+    LoadPlanV1, LoadReceiptV1, load_plan_seal, load_receipt_record
+}
+
+# Page size assumed by the alignment guard. mmap bases are page-aligned on
+# every supported target; a section demanding more than this cannot be
+# honoured by a plain anonymous mapping and is refused.
+val SEGMENT_MAX_ALIGNMENT: i64 = 4096
+
+"""One mapped segment: a single contiguous executable region."""
+struct MappedSegment:
+    owner_id: text
+    section_index: i32
+    base: i64
+    size: i64
+    alignment: i64
+    symbol_count: i64
+    protected_executable: bool
+
+"""A symbol placed inside a mapped segment. Address is derived, not
+allocated -- there is no per-symbol memory region."""
+struct SegmentSymbol:
+    name: text
+    owner_id: text
+    section_index: i32
+    offset: i64
+    size: i64
+    address: i64
+
+"""Observed mapping facts, the input to a LoadReceiptV1."""
+struct SegmentMapperStats:
+    segment_count: i64
+    symbol_count: i64
+    bytes_mapped: i64
+    mapping_calls: i64
+    protection_transitions: i64
+    generation: i64
+
+struct SegmentMapper:
+    segments: Dict<text, MappedSegment>
+    symbols: Dict<text, SegmentSymbol>
+    bytes_mapped: i64
+    mapping_calls: i64
+    protection_transitions: i64
+    generation: i64
+    verbose: bool
+
+fn segment_key(owner_id: text, section_index: i32) -> text:
+    owner_id + "#" + (section_index as i64).to_string()
+
+impl SegmentMapper:
+    static fn new() -> SegmentMapper:
+        SegmentMapper(
+            segments: {},
+            symbols: {},
+            bytes_mapped: 0,
+            mapping_calls: 0,
+            protection_transitions: 0,
+            generation: 0,
+            verbose: false
+        )
+
+    """Map ONE segment with ONE allocation. This is the only place in the
+    segment path that allocates executable memory; symbol count never
+    influences how often it is called."""
+    me map_segment(owner_id: text, section_index: i32, bytes: [u8], alignment: i64) -> Result<i64, text>:
+        val size = bytes.len() as i64
+        if size <= 0:
+            return Err("Cannot map empty segment {section_index} for {owner_id}")
+        if alignment > SEGMENT_MAX_ALIGNMENT:
+            return Err("Segment {section_index} alignment {alignment} exceeds page alignment {SEGMENT_MAX_ALIGNMENT}")
+
+        val key = segment_key(owner_id, section_index)
+        if self.segments.has(key):
+            return Err("Segment already mapped: {key}")
+
+        val base = native_alloc_exec_memory(size)
+        self.mapping_calls = self.mapping_calls + 1
+        if base == 0:
+            return Err("Executable allocation failed for segment {key} ({size} bytes)")
+
+        val written = native_write_exec_memory(base, bytes, 0)
+        if written != size:
+            _ = native_free_exec_memory(base, size)
+            return Err("Failed to copy segment bytes for {key}")
+
+        if not native_make_executable(base, size):
+            _ = native_free_exec_memory(base, size)
+            return Err("Failed to switch RW->RX for segment {key}")
+        self.protection_transitions = self.protection_transitions + 1
+        native_flush_icache(base, size)
+
+        self.generation = self.generation + 1
+        self.segments[key] = MappedSegment(
+            owner_id: owner_id,
+            section_index: section_index,
+            base: base,
+            size: size,
+            alignment: alignment,
+            symbol_count: 0,
+            protected_executable: true
+        )
+        self.bytes_mapped = self.bytes_mapped + size
+
+        if self.verbose:
+            print "[segment-mapper] mapped {key} base=0x{base} size={size}"
+
+        Ok(base)
+
+    """Place a symbol inside an already-mapped segment. Allocates nothing:
+    the address is `base + offset`, bounds-checked against the segment."""
+    me bind_symbol(owner_id: text, section_index: i32, name: text, offset: i64, size: i64) -> Result<i64, text>:
+        val key = segment_key(owner_id, section_index)
+        if not self.segments.has(key):
+            return Err("Cannot bind {name}: segment {key} is not mapped")
+        var seg = self.segments[key]
+        if offset < 0:
+            return Err("Symbol {name} has negative segment offset {offset}")
+        if size < 0:
+            return Err("Symbol {name} has negative size {size}")
+        if offset + size > seg.size:
+            return Err("Symbol {name} at offset {offset} size {size} exceeds segment {key} size {seg.size}")
+
+        val address = native_get_function_pointer(seg.base + offset)
+        self.symbols[name] = SegmentSymbol(
+            name: name,
+            owner_id: owner_id,
+            section_index: section_index,
+            offset: offset,
+            size: size,
+            address: address
+        )
+        seg.symbol_count = seg.symbol_count + 1
+        self.segments[key] = seg
+        Ok(address)
+
+    fn lookup(name: text) -> i64?:
+        if self.symbols.has(name):
+            return Some(self.symbols[name].address)
+        nil
+
+    fn get_symbol(name: text) -> SegmentSymbol?:
+        if self.symbols.has(name):
+            return Some(self.symbols[name])
+        nil
+
+    fn segment_base(owner_id: text, section_index: i32) -> i64:
+        val key = segment_key(owner_id, section_index)
+        if self.segments.has(key):
+            return self.segments[key].base
+        0
+
+    fn segment_size(owner_id: text, section_index: i32) -> i64:
+        val key = segment_key(owner_id, section_index)
+        if self.segments.has(key):
+            return self.segments[key].size
+        0
+
+    """RX -> RW for the whole segment, once, ahead of relocation."""
+    me begin_relocation(owner_id: text, section_index: i32) -> Result<(), text>:
+        val key = segment_key(owner_id, section_index)
+        if not self.segments.has(key):
+            return Err("Cannot relocate unmapped segment {key}")
+        var seg = self.segments[key]
+        if not native_make_rw(seg.base, seg.size):
+            return Err("Failed to make segment {key} writable for relocation")
+        self.protection_transitions = self.protection_transitions + 1
+        seg.protected_executable = false
+        self.segments[key] = seg
+        Ok(())
+
+    """RW -> RX for the whole segment, once, plus a single icache flush."""
+    me end_relocation(owner_id: text, section_index: i32) -> Result<(), text>:
+        val key = segment_key(owner_id, section_index)
+        if not self.segments.has(key):
+            return Err("Cannot finish relocation of unmapped segment {key}")
+        var seg = self.segments[key]
+        if not native_make_executable(seg.base, seg.size):
+            return Err("Failed to restore RX on segment {key}")
+        self.protection_transitions = self.protection_transitions + 1
+        native_flush_icache(seg.base, seg.size)
+        seg.protected_executable = true
+        self.segments[key] = seg
+        Ok(())
+
+    """One munmap per segment, never per symbol."""
+    me unmap_owner(owner_id: text) -> i32:
+        var keys: [text] = []
+        for key in self.segments.keys():
+            if self.segments[key].owner_id == owner_id:
+                keys.push(key)
+
+        var removed = 0
+        for key in keys:
+            val seg = self.segments[key]
+            if native_free_exec_memory(seg.base, seg.size):
+                self.bytes_mapped = self.bytes_mapped - seg.size
+                self.segments = self.segments.remove(key)
+                removed = removed + 1
+
+        var dead: [text] = []
+        for name in self.symbols.keys():
+            if self.symbols[name].owner_id == owner_id:
+                dead.push(name)
+        for name in dead:
+            self.symbols = self.symbols.remove(name)
+
+        removed
+
+    me clear():
+        var owners: [text] = []
+        for key in self.segments.keys():
+            val owner = self.segments[key].owner_id
+            var seen = false
+            for existing in owners:
+                if existing == owner:
+                    seen = true
+            if not seen:
+                owners.push(owner)
+        for owner in owners:
+            _ = self.unmap_owner(owner)
+
+    fn stats() -> SegmentMapperStats:
+        SegmentMapperStats(
+            segment_count: self.segments.keys().len() as i64,
+            symbol_count: self.symbols.keys().len() as i64,
+            bytes_mapped: self.bytes_mapped,
+            mapping_calls: self.mapping_calls,
+            protection_transitions: self.protection_transitions,
+            generation: self.generation
+        )
+
+# ============================================================================
+# Plan / receipt bridge (§8.10 / §8.11)
+#
+# The mapping-count claim of this module is only checkable if the loader
+# STATES its intent and then RECORDS what it did. `segment_load_plan`
+# builds the sealed intent; `segment_load_receipt` turns observed mapper
+# stats into the evidence. `load_receipt_check_against_plan` (owned by
+# app.startup.load_plan_receipt) compares them and names any deviation --
+# notably a segment_count that grew with symbol count.
+# ============================================================================
+
+fn segment_load_plan(
+        artifact_path: text,
+        target: text,
+        planned_segment_count: i64,
+        planned_bytes_mapped: i64,
+        planned_relocation_count: i64,
+        import_count: i64,
+        export_count: i64) -> LoadPlanV1:
+    load_plan_seal(LoadPlanV1(
+        schema: 1,
+        artifact_path: artifact_path,
+        artifact_kind: "smf",
+        target: target,
+        abi_identity: "",
+        interface_identity: "",
+        impl_identity: "",
+        dependency_order: [],
+        planned_segment_count: planned_segment_count,
+        planned_bytes_mapped: planned_bytes_mapped,
+        relocation_summary: "segment-relative",
+        planned_relocation_count: planned_relocation_count,
+        import_count: import_count,
+        export_count: export_count,
+        load_policy: "segment-per-mapping",
+        security_policy: "wxor",
+        cache_identity: ""))
+
+fn segment_load_receipt(
+        plan: LoadPlanV1,
+        artifact_digest: text,
+        stats: SegmentMapperStats,
+        bytes_read: i64,
+        relocation_count: i64,
+        resolved_import_count: i64,
+        result: text,
+        failure_reason: text) -> LoadReceiptV1:
+    load_receipt_record(
+        plan,
+        artifact_digest,
+        "segment_mapper",
+        "dynamic",
+        bytes_read,
+        stats.bytes_mapped,
+        stats.segment_count,
+        relocation_count,
+        resolved_import_count,
+        -1,
+        stats.protection_transitions,
+        "miss",
+        stats.generation,
+        result,
+        failure_reason)

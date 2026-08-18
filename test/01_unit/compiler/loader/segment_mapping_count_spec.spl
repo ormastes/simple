@@ -1,0 +1,107 @@
+# REPRODUCING SPEC for audit gap #14 (startup_perf_architecture §8.4, §8.15).
+#
+# Before the fix, the loader called native_alloc_exec_memory once PER
+# SYMBOL: N exported symbols cost N mappings. This spec pins the property
+# that makes that a defect: the number of MAPPINGS must be a function of
+# the SEGMENT count only, and must not move when the symbol count moves.
+#
+# The evidence is the LoadReceiptV1 emitted by the mapper, checked against
+# a LoadPlanV1 whose planned_segment_count is the segment count. Under the
+# old per-symbol behaviour segment_count would equal the symbol count and
+# load_receipt_check_against_plan would name a segment_count deviation.
+
+use std.spec.{describe, it, assert_true, assert_eq}
+use compiler.loader.segment_mapper.{
+    SegmentMapper, segment_load_plan, segment_load_receipt
+}
+use app.startup.load_plan_receipt.{load_receipt_check_against_plan}
+
+# A filler segment big enough to hold `count` 8-byte symbol slots.
+fn filler(size: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0i64
+    while i < size:
+        out.push(0x90u8)   # nop
+        i = i + 1
+    out
+
+# Map `segments` segments, bind `per_segment` symbols into each, and return
+# the mapper so its observed stats can be read.
+fn map_case(owner: text, segments: i64, per_segment: i64) -> SegmentMapper:
+    var mapper = SegmentMapper.new()
+    var s = 0i64
+    while s < segments:
+        val bytes = filler(per_segment * 8)
+        match mapper.map_segment(owner, s as i32, bytes, 16):
+            case Ok(_):
+                pass
+            case Err(e):
+                print "map_segment failed: {e}"
+        var k = 0i64
+        while k < per_segment:
+            val name = "sym_s{s}_k{k}"
+            match mapper.bind_symbol(owner, s as i32, name, k * 8, 8):
+                case Ok(_):
+                    pass
+                case Err(e):
+                    print "bind_symbol failed: {e}"
+            k = k + 1
+        s = s + 1
+    mapper
+
+describe "loader maps one region per segment":
+    it "makes exactly one mapping per segment for 2 segments x 3 symbols":
+        val mapper = map_case("mod_small", 2, 3)
+        val stats = mapper.stats()
+        assert_eq(stats.segment_count, 2)
+        assert_eq(stats.mapping_calls, 2)
+        assert_eq(stats.symbol_count, 6)
+
+    it "keeps the mapping count flat when symbol count grows 10x":
+        val small = map_case("mod_a", 2, 3).stats()
+        val large = map_case("mod_b", 2, 30).stats()
+        # Symbols grew 10x ...
+        assert_eq(small.symbol_count, 6)
+        assert_eq(large.symbol_count, 60)
+        # ... mappings did not move at all. This is the whole point: under
+        # the per-symbol loader these two numbers were 6 and 60.
+        assert_eq(small.mapping_calls, large.mapping_calls)
+        assert_eq(large.mapping_calls, 2)
+        assert_eq(large.segment_count, 2)
+
+    it "scales mappings with segments, not symbols":
+        val one_seg = map_case("mod_c", 1, 40).stats()
+        val four_seg = map_case("mod_d", 4, 1).stats()
+        assert_eq(one_seg.mapping_calls, 1)
+        assert_eq(four_seg.mapping_calls, 4)
+        assert_true(one_seg.symbol_count > four_seg.symbol_count)
+
+    it "flips protection once per segment, not once per symbol":
+        val stats = map_case("mod_prot", 2, 25).stats()
+        # One RW->RX transition per mapped segment.
+        assert_eq(stats.protection_transitions, 2)
+
+describe "receipt proves the mapping count against the plan":
+    it "checks GREEN when observed segment_count equals the plan":
+        var mapper = map_case("mod_receipt", 3, 12)
+        val stats = mapper.stats()
+        val plan = segment_load_plan("fixture.smf", "host", 3, stats.bytes_mapped, 0, 0, 36)
+        val receipt = segment_load_receipt(plan, "digest", stats, stats.bytes_mapped, 0, 0, "ok", "")
+        assert_eq(receipt.segment_count, 3)
+        val verdict = load_receipt_check_against_plan(plan, receipt)
+        assert_true(verdict.ok)
+
+    it "checks RED when the load maps per symbol instead of per segment":
+        # NEGATIVE CONTROL: a plan that intends 3 segment mappings, and a
+        # receipt reporting one mapping per symbol (36). The check must
+        # refuse it and name segment_count -- otherwise this whole spec
+        # could pass while the loader regressed.
+        var mapper = map_case("mod_regress", 3, 12)
+        val stats = mapper.stats()
+        val plan = segment_load_plan("fixture.smf", "host", 3, stats.bytes_mapped, 0, 0, 36)
+        val per_symbol = segment_load_receipt(plan, "digest", stats, stats.bytes_mapped, 0, 0, "ok", "")
+        var regressed = per_symbol
+        regressed.segment_count = 36
+        val verdict = load_receipt_check_against_plan(plan, regressed)
+        assert_true(not verdict.ok)
+        assert_true(verdict.mismatch.contains("segment_count"))

@@ -1,0 +1,253 @@
+# Defect-class spec with POSITIVE CONTROL for the aspect-pack design's two
+# central performance claims (design §11-12), measured via loader counters:
+#   1. loading ONE aspect from an N-module pack (N=4) decompresses EXACTLY ONE
+#      module — asserted on modules_decompressed and bytes_decompressed
+#      (== the selected frame's compressed size, strictly less than the pack),
+#   2. it opens ONLY its own pack even when other packs are deployed —
+#      asserted on packs_opened while a second pack sits registered.
+# Plus fail-closed defect cases: corrupt catalog entry, truncated pack,
+# wrong flag, corrupt module frame, undeployed routed pack — each an explicit
+# typed error, never a silent fallback to scanning.
+
+use std.common.aspect_pack.{ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_try_facet, apk_load_aspect_manual, apk_loader_cache_hits, APK_ENTRY_FACET, APK_ACT_OFF, APK_ACT_MANUAL, APK_ACT_LAZY_FACET, apk_build_pack_v1, apk_open_pack_v1, apk_build_catalog_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_load_module_v1, apk_loader_packs_opened, apk_loader_modules_decompressed, apk_loader_bytes_decompressed, APK_HEADER_SIZE_V1, APK_CATALOG_HEADER_SIZE_V1}
+use std.common.compress.deflate.{deflate_compress}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+
+fn _payload(tag: text, repeats: i64) -> [u8]:
+    var s = ""
+    var i = 0
+    while i < repeats:
+        s = s + "aspect module {tag} statement number {i}; "
+        i = i + 1
+    text_to_bytes(s)
+
+# Pack A: FOUR modules (N>1 so "exactly one" is a meaningful number).
+fn _pack_a_modules() -> [ApkModuleSourceV1]:
+    var out: [ApkModuleSourceV1] = []
+    out.push(ApkModuleSourceV1(module_id: "log.sinks", aspect_id: "log", payload: _payload("log.sinks", 80)))
+    out.push(ApkModuleSourceV1(module_id: "metrics.counters", aspect_id: "metrics", payload: _payload("metrics.counters", 70)))
+    out.push(ApkModuleSourceV1(module_id: "profile.mem", aspect_id: "profile", payload: _payload("profile.mem", 90)))
+    out.push(ApkModuleSourceV1(module_id: "profile.cpu", aspect_id: "profile", payload: _payload("profile.cpu", 65)))
+    out
+
+# Pack B: a distinct pack for the second facet.
+fn _pack_b_modules() -> [ApkModuleSourceV1]:
+    var out: [ApkModuleSourceV1] = []
+    out.push(ApkModuleSourceV1(module_id: "debug.hooks", aspect_id: "debug", payload: _payload("debug.hooks", 55)))
+    out.push(ApkModuleSourceV1(module_id: "debug.dump", aspect_id: "debug", payload: _payload("debug.dump", 45)))
+    out
+
+fn _catalog() -> [u8]:
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(facet_key: "metrics/Observable", pack_path: "aspect/a.apk", module_id: "metrics.counters"))
+    entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "aspect/b.apk", module_id: "debug.hooks"))
+    val cat = apk_build_catalog_v1(entries)
+    cat.bytes
+
+describe "aspect-pack defect class: measured claims and fail-closed errors":
+    it "REQ-APK-DC-01 POSITIVE CONTROL: one facet load decompresses exactly one of 4 modules and opens only its own pack":
+        val pa = apk_build_pack_v1(_pack_a_modules())
+        val pb = apk_build_pack_v1(_pack_b_modules())
+        expect(pa.ok).to_equal(true)
+        expect(pb.ok).to_equal(true)
+        expect(pa.module_count).to_equal(4)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/a.apk", pa.bytes)).to_equal(true)
+        expect(apk_loader_register_pack(ld, "aspect/b.apk", pb.bytes)).to_equal(true)
+
+        val got = apk_load_facet(ld, _catalog(), "metrics/Observable")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(true)
+        expect(got.module_id).to_equal("metrics.counters")
+        expect(bytes_to_text(got.payload)).to_equal(bytes_to_text(_payload("metrics.counters", 70)))
+
+        # claim 2: only the routed pack was opened, though two are deployed
+        expect(apk_loader_packs_opened(ld)).to_equal(1)
+        # claim 1: exactly ONE of the pack's 4 modules was decompressed,
+        # and the bytes decompressed are exactly the SELECTED frame's
+        # compressed size — not the pack's whole data area.
+        expect(apk_loader_modules_decompressed(ld)).to_equal(1)
+        val selected_frame = deflate_compress(_payload("metrics.counters", 70))
+        expect(apk_loader_bytes_decompressed(ld)).to_equal(selected_frame.len())
+        # strictly less than the sum of all frames (the pack minus header/dir)
+        expect(apk_loader_bytes_decompressed(ld) < pa.bytes.len() - APK_HEADER_SIZE_V1).to_equal(true)
+
+        # a second distinct facet still resolves correctly, from the OTHER pack
+        val got2 = apk_load_facet(ld, _catalog(), "debug/Debuggable")
+        expect(got2.ok).to_equal(true)
+        expect(got2.found).to_equal(true)
+        expect(got2.pack_path).to_equal("aspect/b.apk")
+        expect(got2.module_id).to_equal("debug.hooks")
+        expect(bytes_to_text(got2.payload)).to_equal(bytes_to_text(_payload("debug.hooks", 55)))
+        expect(apk_loader_packs_opened(ld)).to_equal(2)
+        expect(apk_loader_modules_decompressed(ld)).to_equal(2)
+
+    it "REQ-APK-DC-02 a corrupt SELECTED catalog entry is an explicit error, never a fallback":
+        val cat = _catalog()
+        # entry 1 is first in the body; flip a byte inside its pack_path
+        # (key "metrics/Observable" is 18 bytes; pack_path starts at
+        # header + 4 + 18 + 4). The key still matches, the crc must not.
+        var bad: [u8] = []
+        var i = 0
+        while i < cat.len():
+            bad.push(cat[i])
+            i = i + 1
+        val flip_at = APK_CATALOG_HEADER_SIZE_V1 + 4 + 18 + 4
+        bad[flip_at] = ((bad[flip_at] as i64) ^ 255) as u8
+        val ld = apk_loader_new()
+        val got = apk_load_facet(ld, bad, "metrics/Observable")
+        expect(got.ok).to_equal(false)
+        expect(got.error_code).to_equal("APK_CATALOG_CORRUPT")
+        # nothing was opened or decompressed on the failure path
+        expect(apk_loader_packs_opened(ld)).to_equal(0)
+        expect(apk_loader_modules_decompressed(ld)).to_equal(0)
+
+    it "REQ-APK-DC-03 a truncated pack is an explicit error":
+        val pa = apk_build_pack_v1(_pack_a_modules())
+        var cut: [u8] = []
+        var i = 0
+        while i < pa.bytes.len() - 10:
+            cut.push(pa.bytes[i])
+            i = i + 1
+        val handle = apk_open_pack_v1(cut)
+        expect(handle.ok).to_equal(false)
+        expect(handle.error_code).to_equal("APK_TRUNCATED_PACK")
+        # and through the routed loader path as well
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/a.apk", cut)).to_equal(true)
+        expect(apk_loader_register_pack(ld, "aspect/b.apk", apk_build_pack_v1(_pack_b_modules()).bytes)).to_equal(true)
+        val got = apk_load_facet(ld, _catalog(), "metrics/Observable")
+        expect(got.ok).to_equal(false)
+        expect(got.error_code).to_equal("APK_TRUNCATED_PACK")
+        expect(apk_loader_modules_decompressed(ld)).to_equal(0)
+
+    it "REQ-APK-DC-04 a pack without SMF_FLAG_ASPECT_PACK is rejected, not reinterpreted":
+        val pa = apk_build_pack_v1(_pack_a_modules())
+        var bad: [u8] = []
+        var i = 0
+        while i < pa.bytes.len():
+            bad.push(pa.bytes[i])
+            i = i + 1
+        bad[10] = 0   # clear the flags byte (bit0 = APK_FLAG_ASPECT_PACK)
+        val handle = apk_open_pack_v1(bad)
+        expect(handle.ok).to_equal(false)
+        expect(handle.error_code).to_equal("APK_NOT_ASPECT_PACK")
+
+    it "REQ-APK-DC-05 a corrupt module frame fails its checksum before decompression":
+        val pa = apk_build_pack_v1(_pack_a_modules())
+        var bad: [u8] = []
+        var i = 0
+        while i < pa.bytes.len():
+            bad.push(pa.bytes[i])
+            i = i + 1
+        # flip the LAST byte: it lies inside the last module's frame
+        val last = bad.len() - 1
+        bad[last] = ((bad[last] as i64) ^ 255) as u8
+        val handle = apk_open_pack_v1(bad)
+        expect(handle.ok).to_equal(true)
+        # the corrupted frame belongs to profile.cpu (last module)
+        val broken = apk_load_module_v1(bad, handle, "profile.cpu")
+        expect(broken.ok).to_equal(false)
+        expect(broken.error_code).to_equal("APK_MODULE_CORRUPT")
+        # a DIFFERENT module in the same pack still loads: corruption of an
+        # unselected frame cannot break unrelated aspects (independence claim)
+        val fine = apk_load_module_v1(bad, handle, "log.sinks")
+        expect(fine.ok).to_equal(true)
+        expect(fine.found).to_equal(true)
+
+    it "REQ-APK-DC-06 a routed pack that is not deployed is an explicit error":
+        val ld = apk_loader_new()
+        val got = apk_load_facet(ld, _catalog(), "metrics/Observable")
+        expect(got.ok).to_equal(false)
+        expect(got.error_code).to_equal("APK_PACK_MISSING")
+        expect(apk_loader_packs_opened(ld)).to_equal(0)
+
+    it "REQ-APK-DC-07 activation policy is decided from the catalog alone: off and manual never load implicitly":
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "off/Excluded", pack_path: "aspect/a.apk",
+            module_id: "log.sinks", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_OFF, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "profile/Manual", pack_path: "aspect/a.apk",
+            module_id: "profile.mem", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_MANUAL, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/a.apk", apk_build_pack_v1(_pack_a_modules()).bytes)).to_equal(true)
+
+        val excluded = apk_load_facet(ld, cat.bytes, "off/Excluded")
+        expect(excluded.ok).to_equal(false)
+        expect(excluded.error_code).to_equal("APK_ASPECT_EXCLUDED")
+        val implicit = apk_load_facet(ld, cat.bytes, "profile/Manual")
+        expect(implicit.ok).to_equal(false)
+        expect(implicit.error_code).to_equal("APK_ASPECT_MANUAL")
+        # a refused aspect costs no pack open and no decompression at all
+        expect(apk_loader_packs_opened(ld)).to_equal(0)
+        expect(apk_loader_modules_decompressed(ld)).to_equal(0)
+
+        # explicit aspect.load is permitted for manual; off stays refused
+        val manual = apk_load_aspect_manual(ld, cat.bytes, "profile/Manual")
+        expect(manual.ok).to_equal(true)
+        expect(manual.found).to_equal(true)
+        expect(manual.module_id).to_equal("profile.mem")
+        expect(apk_loader_modules_decompressed(ld)).to_equal(1)
+        expect(apk_load_aspect_manual(ld, cat.bytes, "off/Excluded").error_code).to_equal("APK_ASPECT_EXCLUDED")
+
+    it "REQ-APK-DC-08 a second acquisition is I/O free, and try_facet never loads":
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/a.apk", apk_build_pack_v1(_pack_a_modules()).bytes)).to_equal(true)
+        expect(apk_loader_register_pack(ld, "aspect/b.apk", apk_build_pack_v1(_pack_b_modules()).bytes)).to_equal(true)
+
+        # try_facet BEFORE any load: a clean miss that moves no counter
+        val cold = apk_try_facet(ld, "metrics/Observable")
+        expect(cold.found).to_equal(false)
+        expect(apk_loader_packs_opened(ld)).to_equal(0)
+
+        val first = apk_load_facet(ld, _catalog(), "metrics/Observable")
+        expect(first.found).to_equal(true)
+        expect(first.from_cache).to_equal(false)
+        val opened = apk_loader_packs_opened(ld)
+        val inflated = apk_loader_bytes_decompressed(ld)
+
+        val second = apk_load_facet(ld, _catalog(), "metrics/Observable")
+        expect(second.found).to_equal(true)
+        expect(second.from_cache).to_equal(true)
+        expect(bytes_to_text(second.payload)).to_equal(bytes_to_text(_payload("metrics.counters", 70)))
+        # nothing was reopened and nothing was inflated a second time
+        expect(apk_loader_packs_opened(ld)).to_equal(opened)
+        expect(apk_loader_bytes_decompressed(ld)).to_equal(inflated)
+        expect(apk_loader_modules_decompressed(ld)).to_equal(1)
+
+        # and try_facet now answers without I/O
+        val warm = apk_try_facet(ld, "metrics/Observable")
+        expect(warm.found).to_equal(true)
+        expect(warm.from_cache).to_equal(true)
+        expect(apk_loader_packs_opened(ld)).to_equal(opened)
+        expect(apk_loader_cache_hits(ld)).to_equal(2)
+
+    it "REQ-APK-DC-09 a facet contract ABI mismatch is a load failure, not a best-effort bind":
+        var mods: [ApkModuleSourceV2] = []
+        mods.push(ApkModuleSourceV2(module_id: "debug.hooks", aspect_id: "debug",
+            module_abi_hash: "abi-2", required_core_public_abi_hash: "core-1",
+            variant_fingerprint: "vfp", payload: _payload("debug.hooks", 55)))
+        val pack = apk_build_pack_v2(mods)
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/b.apk",
+            module_id: "debug.hooks", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+            abi_hash: "abi-1"))
+        val cat = apk_build_catalog_v2(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/b.apk", pack.bytes)).to_equal(true)
+        val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(got.ok).to_equal(false)
+        expect(got.error_code).to_equal("APK_ABI_MISMATCH")
+        # a failed bind is never published to the already-bound registry
+        expect(apk_try_facet(ld, "debug/Debuggable").found).to_equal(false)
+
+        # the matching ABI binds
+        var ok_entries: [ApkCatalogEntryV2] = []
+        ok_entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/b.apk",
+            module_id: "debug.hooks", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
+            abi_hash: "abi-2"))
+        val ld2 = apk_loader_new()
+        expect(apk_loader_register_pack(ld2, "aspect/b.apk", pack.bytes)).to_equal(true)
+        val fine = apk_load_facet(ld2, apk_build_catalog_v2(ok_entries).bytes, "debug/Debuggable")
+        expect(fine.ok).to_equal(true)
+        expect(fine.found).to_equal(true)

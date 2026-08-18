@@ -1,0 +1,133 @@
+# DEFECT-CLASS SPEC with POSITIVE CONTROL for audit gap #14.
+#
+# The failure mode this fix could introduce is worse than the slowness it
+# removes: mapping fewer regions but resolving symbols to the wrong
+# address. Counting mappings alone cannot catch that -- a loader that maps
+# one region and resolves every symbol to its base would score perfectly
+# on the mapping-count spec.
+#
+# So this spec is the control: symbols placed in ONE shared segment must
+# each resolve to base+offset AND the code at that address must actually
+# EXECUTE and return that symbol's own value. Three distinct return values
+# means an aliased or off-by-one address fails loudly.
+#
+# Machine code is x86-64: B8 <imm32> C3  ==  mov eax, imm32 ; ret.
+
+use std.spec.{describe, it, assert_true, assert_eq}
+use compiler.loader.segment_mapper.{SegmentMapper, segment_key}
+use compiler.loader.smf_mmap_native.{native_call_function_0}
+
+val SLOT: i64 = 8   # each function occupies an 8-byte slot
+
+# `mov eax, value ; ret` padded to SLOT bytes with nops.
+fn ret_const(value: i64) -> [u8]:
+    var out: [u8] = []
+    out.push(0xB8u8)
+    out.push((value & 0xFF) as u8)
+    out.push(((value >> 8) & 0xFF) as u8)
+    out.push(((value >> 16) & 0xFF) as u8)
+    out.push(((value >> 24) & 0xFF) as u8)
+    out.push(0xC3u8)
+    while out.len() < SLOT:
+        out.push(0x90u8)
+    out
+
+# One segment holding three distinct functions back to back.
+fn three_fn_segment() -> [u8]:
+    var out: [u8] = []
+    for b in ret_const(11):
+        out.push(b)
+    for b in ret_const(22):
+        out.push(b)
+    for b in ret_const(33):
+        out.push(b)
+    out
+
+fn mapped_trio(owner: text) -> SegmentMapper:
+    var mapper = SegmentMapper.new()
+    match mapper.map_segment(owner, 0, three_fn_segment(), 16):
+        case Ok(_):
+            pass
+        case Err(e):
+            print "map_segment failed: {e}"
+    var i = 0i64
+    while i < 3:
+        val names = ["f_eleven", "f_twentytwo", "f_thirtythree"]
+        match mapper.bind_symbol(owner, 0, names[i], i * SLOT, 6):
+            case Ok(_):
+                pass
+            case Err(e):
+                print "bind_symbol failed: {e}"
+        i = i + 1
+    mapper
+
+describe "symbols resolve to correct offsets inside one mapping":
+    it "places each symbol at base + its segment offset":
+        val mapper = mapped_trio("trio_addr")
+        val base = mapper.segment_base("trio_addr", 0)
+        assert_true(base != 0)
+        assert_eq(mapper.lookup("f_eleven") ?? 0, base)
+        assert_eq(mapper.lookup("f_twentytwo") ?? 0, base + SLOT)
+        assert_eq(mapper.lookup("f_thirtythree") ?? 0, base + 2 * SLOT)
+
+    it "gives three DISTINCT addresses from a single mapping":
+        # Guards the degenerate "map once, alias everything to base" fix.
+        val mapper = mapped_trio("trio_distinct")
+        val a = mapper.lookup("f_eleven") ?? 0
+        val b = mapper.lookup("f_twentytwo") ?? 0
+        val c = mapper.lookup("f_thirtythree") ?? 0
+        assert_true(a != b)
+        assert_true(b != c)
+        assert_true(a != c)
+        assert_eq(mapper.stats().mapping_calls, 1)
+
+describe "POSITIVE CONTROL: the mapped code still executes correctly":
+    it "calls each symbol and gets that symbol's own value back":
+        val mapper = mapped_trio("trio_exec")
+        # If the segment were mapped without the RW->RX transition, or the
+        # bytes were copied at the wrong offset, these calls would crash or
+        # return the wrong constant.
+        assert_eq(native_call_function_0(mapper.lookup("f_eleven") ?? 0), 11)
+        assert_eq(native_call_function_0(mapper.lookup("f_twentytwo") ?? 0), 22)
+        assert_eq(native_call_function_0(mapper.lookup("f_thirtythree") ?? 0), 33)
+
+describe "bounds and lifecycle stay correct":
+    it "refuses a symbol that does not lie inside its segment":
+        var mapper = SegmentMapper.new()
+        _ = mapper.map_segment("bad", 0, three_fn_segment(), 16)
+        val too_far = mapper.bind_symbol("bad", 0, "outside", 24, 8)
+        assert_true(match too_far:
+            case Ok(_): false
+            case Err(_): true)
+
+    it "refuses a negative offset":
+        var mapper = SegmentMapper.new()
+        _ = mapper.map_segment("neg", 0, three_fn_segment(), 16)
+        val bad = mapper.bind_symbol("neg", 0, "negative", -8, 8)
+        assert_true(match bad:
+            case Ok(_): false
+            case Err(_): true)
+
+    it "refuses an alignment stronger than a page":
+        var mapper = SegmentMapper.new()
+        val over = mapper.map_segment("align", 0, three_fn_segment(), 65536)
+        assert_true(match over:
+            case Ok(_): false
+            case Err(_): true)
+        assert_eq(mapper.stats().segment_count, 0)
+
+    it "frees one region per segment on unmap, dropping its symbols":
+        var mapper = SegmentMapper.new()
+        _ = mapper.map_segment("own", 0, three_fn_segment(), 16)
+        _ = mapper.map_segment("own", 1, three_fn_segment(), 16)
+        _ = mapper.bind_symbol("own", 0, "s0", 0, 6)
+        _ = mapper.bind_symbol("own", 1, "s1", 0, 6)
+        assert_eq(mapper.stats().segment_count, 2)
+        assert_eq(mapper.unmap_owner("own"), 2)
+        val after = mapper.stats()
+        assert_eq(after.segment_count, 0)
+        assert_eq(after.symbol_count, 0)
+        assert_eq(after.bytes_mapped, 0)
+
+    it "builds a stable segment key":
+        assert_eq(segment_key("mod", 3), "mod#3")

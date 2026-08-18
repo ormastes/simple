@@ -1,0 +1,128 @@
+# Reproducing spec: aspect-pack SMF container + application Aspect Catalog
+# (design doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md §11-12).
+# A facet routes THROUGH the catalog to its pack and module, and the module
+# loads correctly (byte-exact payload) from the kind=aspect_pack container.
+
+use std.common.aspect_pack.{ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_catalog_route_joinpoint_v1, apk_catalog_startup_keys_v1, apk_activate_startup, APK_ENTRY_FACET, APK_ENTRY_JOINPOINT, APK_ACT_LAZY_FACET, APK_ACT_LAZY_PATCHABLE, APK_ACT_STARTUP, apk_build_pack_v1, apk_open_pack_v1, apk_load_module_v1, apk_build_catalog_v1, apk_open_catalog_v1, apk_catalog_route_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_loader_packs_opened, apk_loader_modules_decompressed, APK_FLAG_ASPECT_PACK, APK_HEADER_SIZE_V1}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+
+fn _payload(tag: text, repeats: i64) -> [u8]:
+    var s = ""
+    var i = 0
+    while i < repeats:
+        s = s + "module {tag} advice body line {i}; "
+        i = i + 1
+    text_to_bytes(s)
+
+fn _modules() -> [ApkModuleSourceV1]:
+    var out: [ApkModuleSourceV1] = []
+    out.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: _payload("debug.core", 40)))
+    out.push(ApkModuleSourceV1(module_id: "metrics.counters", aspect_id: "metrics", payload: _payload("metrics.counters", 60)))
+    out.push(ApkModuleSourceV1(module_id: "trace.spans", aspect_id: "trace", payload: _payload("trace.spans", 50)))
+    out
+
+describe "aspect-pack SMF container and Aspect Catalog":
+    it "REQ-APK-01 builds a multi-module pack whose header carries SMF_FLAG_ASPECT_PACK":
+        val built = apk_build_pack_v1(_modules())
+        expect(built.ok).to_equal(true)
+        expect(built.module_count).to_equal(3)
+        val handle = apk_open_pack_v1(built.bytes)
+        expect(handle.ok).to_equal(true)
+        expect((handle.flags & APK_FLAG_ASPECT_PACK) != 0).to_equal(true)
+        expect(handle.module_count).to_equal(3)
+        expect(handle.total_size).to_equal(built.bytes.len())
+
+    it "REQ-APK-02 loads one module byte-exactly from the pack":
+        val built = apk_build_pack_v1(_modules())
+        val handle = apk_open_pack_v1(built.bytes)
+        val load = apk_load_module_v1(built.bytes, handle, "metrics.counters")
+        expect(load.ok).to_equal(true)
+        expect(load.found).to_equal(true)
+        expect(load.aspect_id).to_equal("metrics")
+        val want = _payload("metrics.counters", 60)
+        expect(load.payload.len()).to_equal(want.len())
+        expect(bytes_to_text(load.payload)).to_equal(bytes_to_text(want))
+
+    it "REQ-APK-03 the catalog routes a facet key directly to (pack, module)":
+        var entries: [ApkCatalogEntryV1] = []
+        entries.push(ApkCatalogEntryV1(facet_key: "metrics/Debuggable", pack_path: "aspect/obs.apk", module_id: "metrics.counters"))
+        entries.push(ApkCatalogEntryV1(facet_key: "trace/Traceable", pack_path: "aspect/obs.apk", module_id: "trace.spans"))
+        val cat = apk_build_catalog_v1(entries)
+        expect(cat.ok).to_equal(true)
+        val ch = apk_open_catalog_v1(cat.bytes)
+        expect(ch.ok).to_equal(true)
+        expect(ch.entry_count).to_equal(2)
+        val route = apk_catalog_route_v1(cat.bytes, ch, "trace/Traceable")
+        expect(route.ok).to_equal(true)
+        expect(route.found).to_equal(true)
+        expect(route.pack_path).to_equal("aspect/obs.apk")
+        expect(route.module_id).to_equal("trace.spans")
+        # unknown key: clean typed miss, never an error, never a scan fallback
+        val miss = apk_catalog_route_v1(cat.bytes, ch, "nosuch/Facet")
+        expect(miss.ok).to_equal(true)
+        expect(miss.found).to_equal(false)
+
+    it "REQ-APK-04 end-to-end: facet -> catalog -> pack -> correct module payload":
+        val built = apk_build_pack_v1(_modules())
+        var entries: [ApkCatalogEntryV1] = []
+        entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk", module_id: "debug.core"))
+        val cat = apk_build_catalog_v1(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", built.bytes)).to_equal(true)
+        val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(true)
+        expect(got.pack_path).to_equal("aspect/obs.apk")
+        expect(got.module_id).to_equal("debug.core")
+        expect(got.aspect_id).to_equal("debug")
+        expect(bytes_to_text(got.payload)).to_equal(bytes_to_text(_payload("debug.core", 40)))
+        expect(apk_loader_packs_opened(ld)).to_equal(1)
+        expect(apk_loader_modules_decompressed(ld)).to_equal(1)
+
+    it "REQ-APK-05 a join-point route and a facet route never satisfy each other":
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "slot/817", pack_path: "aspect/obs.apk",
+            module_id: "trace.spans", entry_kind: APK_ENTRY_JOINPOINT, activation: APK_ACT_LAZY_PATCHABLE, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        expect(cat.ok).to_equal(true)
+        val ch = apk_open_catalog_v1(cat.bytes)
+        val jp = apk_catalog_route_joinpoint_v1(cat.bytes, ch, "slot/817")
+        expect(jp.found).to_equal(true)
+        expect(jp.module_id).to_equal("trace.spans")
+        expect(jp.activation).to_equal(APK_ACT_LAZY_PATCHABLE)
+        # the same key is NOT a facet route, and the facet key is not a slot
+        expect(apk_catalog_route_v1(cat.bytes, ch, "slot/817").found).to_equal(false)
+        expect(apk_catalog_route_joinpoint_v1(cat.bytes, ch, "debug/Debuggable").found).to_equal(false)
+
+    it "REQ-APK-06 startup routes are listed from the catalog and bound before publication":
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "trace/Traceable", pack_path: "aspect/obs.apk",
+            module_id: "trace.spans", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_STARTUP, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        val ch = apk_open_catalog_v1(cat.bytes)
+        val keys = apk_catalog_startup_keys_v1(cat.bytes, ch)
+        expect(keys.len()).to_equal(1)
+        expect(keys[0]).to_equal("trace/Traceable")
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", apk_build_pack_v1(_modules()).bytes)).to_equal(true)
+        expect(apk_activate_startup(ld, cat.bytes)).to_equal(1)
+        # exactly the startup module was loaded, not the lazy one
+        expect(apk_loader_modules_decompressed(ld)).to_equal(1)
+
+    it "REQ-APK-07 the pack directory carries the module ABI identity uncompressed":
+        var mods: [ApkModuleSourceV2] = []
+        mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+            module_abi_hash: "abi-debug-1", required_core_public_abi_hash: "core-7",
+            variant_fingerprint: "vfp-a", payload: _payload("debug.core", 40)))
+        val built = apk_build_pack_v2(mods)
+        expect(built.ok).to_equal(true)
+        val handle = apk_open_pack_v1(built.bytes)
+        val load = apk_load_module_v1(built.bytes, handle, "debug.core")
+        expect(load.found).to_equal(true)
+        expect(load.module_abi_hash).to_equal("abi-debug-1")
+        expect(load.required_core_public_abi_hash).to_equal("core-7")
+        expect(load.variant_fingerprint).to_equal("vfp-a")
