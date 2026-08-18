@@ -855,14 +855,32 @@ Against the brief's criteria:
   is right, the per-file line is wrong. This is exactly what the seed-side
   `SpecOutcome` fix addresses, and that fix is NOT DEPLOYED (seed rebuild
   required), so the stale line is expected here.
-- **Exit code non-zero** — NOT YET OBSERVED. The runner printed its summary but
-  had not exited when this was written; `RC=` was still pending. Recorded as
-  UNPROVEN rather than assumed.
+- **Exit code non-zero** — **STILL UNPROVEN, and the reason is itself a
+  defect.** `RC=124` was eventually written to the log, but that is the OUTER
+  `timeout 2400` wrapper's status, NOT the runner's. The runner printed its
+  COMPLETE summary and then **did not exit for 40 minutes**, until the wrapper
+  killed it. So the acceptance run's own exit code has never been observed —
+  because the process does not terminate. Counting 124 as "exit non-zero" would
+  be the exact rc-through-a-wrapper error this lane has warned every agent
+  about; it is explicitly NOT counted.
+
+  Consequence for the goal: "run to the END of the test list" is satisfied, but
+  a supervisor that finishes its work and never terminates is not done, and its
+  non-termination is precisely what makes the last acceptance condition
+  unobservable. Filed to lane NONEXIT.
 
 ### Still owed
-1. The exit code of the acceptance run (`RC=` in `accept2.log`).
-2. The NEGATIVE CONTROL (revert the classification fix, confirm the same
-   fixture set behaves worse) — not run.
+1. The exit code of the acceptance run — blocked by the non-exit defect above,
+   not merely unmeasured.
+2. The NEGATIVE CONTROL over the full five-fixture set — NOT run, deliberately.
+   Running it means reverting a runner file in a SHARED tree that other
+   sessions build against, which is the hazard that destroyed another lane's
+   work today. The equivalent ablation WAS performed on the exact defect by
+   lane SIGNALFIX, same signal shape, same code path, with restore:
+   `BEFORE rc=137 -> passed=5 failed=1 "Process exited with code 137"` vs
+   `AFTER rc=137 -> passed=0 failed=1 "CRASHED: child died by signal 9"`.
+   That is cited in place of re-breaking a shared file. A full five-fixture
+   control remains available in an ISOLATED worktree if someone wants it.
 3. `1 skipped` in a 5-file run is unexplained.
 4. Per-file verdict line still marks the timeout `failed=1`; needs the seed
    redeploy carrying `SpecOutcome`.
