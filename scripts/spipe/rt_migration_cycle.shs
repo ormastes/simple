@@ -64,7 +64,8 @@ comm -12 "$WORK/uncalled_all.txt" "$WORK/libapp_declared.txt" > "$WORK/uncalled.
 # in-file (the decl line becomes the use line, so import placement is exact),
 # do not already mention the bare wrapper name (collision guard), do not
 # re-export the extern (dangling-export guard), and are not the provider.
-# Async families are left for a layering-aware pass.
+# Async families are IN scope: their io_runtime.spl is a re-export facade
+# over nogc_sync_mut, so std.io_runtime resolves family-correctly.
 # EXCLUDED deliberately: rt_file_read_text (wrapper nil-coalesces to "") and
 # rt_file_write_text (wrapper adds mkdir fallback) — behavior differs from the
 # raw extern, so those callers need per-site review, not a mechanical rename.
@@ -83,7 +84,7 @@ track_b() {
   : > "$WORK/tb_pairs.txt"
   printf '%s\n' "$TB_TABLE" | while IFS=' ' read -r sym wrap; do
     [ -n "$sym" ] || continue
-    for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src/lib/nogc_sync_mut src/app --include='*.spl' 2>/dev/null); do
+    for f in $(/usr/bin/grep -rlE "^extern fn ${sym}\(" src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
       case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
       grep -qE "^export .*\b${sym}\b" "$f" && continue
       bare=$(grep -oE "[a-z_]*${wrap}" "$f" | grep -cv "^${sym}\$")
@@ -94,6 +95,42 @@ track_b() {
       echo "$f $sym" >> "$WORK/tb_pairs.txt"
     done
   done
+  # --- Track C: rt_file_read_text(X) ?? "" -> read_file_text(X) ---------
+  # The wrapper read_file_text(path) IS rt_file_read_text(path) ?? "" (see
+  # io_runtime.spl file_read), so ONLY call sites already coalescing to ""
+  # are drop-in. A file qualifies when it declares the extern AND every
+  # call-position use matches the simple-argument coalesced shape
+  # rt_file_read_text(<no-parens-arg>) ?? "". Anything else (bare call whose
+  # nil flows onward, ?? other-default, nested-paren arg) leaves the file
+  # for per-site review.
+  for f in $(/usr/bin/grep -rlE '^extern fn rt_file_read_text\(' src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null); do
+    case "$f" in src/lib/nogc_sync_mut/io_runtime.spl) continue ;; esac
+    grep -qE '^export .*\brt_file_read_text\b' "$f" && continue
+    bare=$(grep -oE '[a-z_]*read_file_text' "$f" | grep -cv '^rt_file_read_text$')
+    [ "$bare" -gt 0 ] && continue
+    coalesced=$(grep -cE '^[^#]*\brt_file_read_text\([^()]*\) \?\? ""' "$f")
+    [ "$coalesced" -gt 0 ] || continue
+    sed -i 's/\brt_file_read_text(\([^()]*\)) ?? ""/read_file_text(\1)/g' "$f"
+    remaining=$(grep -cE '^[^#]*\brt_file_read_text\(' "$f")
+    if [ "$remaining" -eq 0 ]; then
+      # every call migrated: the decl becomes the import
+      sed -i 's/^extern fn rt_file_read_text(.*$/use std.io_runtime.{read_file_text}/' "$f"
+      echo "$f rt_file_read_text" >> "$WORK/tb_pairs.txt"
+    else
+      # mixed file: keep the extern for the remaining bare calls and add the
+      # import on the line after it
+      sed -i '/^extern fn rt_file_read_text(/a use std.io_runtime.{read_file_text}' "$f"
+    fi
+    # per-site residual: the coalesced pattern itself must be gone
+    if grep -qE '^[^#]*\brt_file_read_text\([^()]*\) \?\? ""' "$f"; then
+      echo "TRACKC-RESIDUE $f" >> "$WORK/tb_residue.txt"
+    fi
+    echo "$f" >> "$WORK/tb_touched.txt"
+  done
+  if [ -s "$WORK/tb_residue.txt" ] 2>/dev/null; then
+    echo "FAIL — track C residue: $(wc -l < "$WORK/tb_residue.txt") file(s)"
+    exit 1
+  fi
   sort -u "$WORK/tb_touched.txt" > "$WORK/tb_touched_u.txt"
   mv "$WORK/tb_touched_u.txt" "$WORK/tb_touched.txt"
   wc -l < "$WORK/tb_touched.txt"
@@ -103,7 +140,7 @@ n_candidates=$(wc -l < "$WORK/uncalled.txt")
 if [ "$n_candidates" -eq 0 ]; then
   echo "cycle: scanned $(wc -l < "$WORK/libapp_declared.txt") declared symbol(s), 0 uncalled (track A converged)"
   if [ $DRY -eq 1 ]; then
-    tbc=$(/usr/bin/grep -rlE '^extern fn rt_time_now_unix_micros\(' src/lib/nogc_sync_mut src/app --include='*.spl' 2>/dev/null | grep -v 'io_runtime.spl' | wc -l)
+    tbc=$(/usr/bin/grep -rlE '^extern fn rt_time_now_unix_micros\(' src/lib/nogc_sync_mut src/lib/nogc_async_mut src/lib/gc_async_mut src/app --include='*.spl' 2>/dev/null | grep -v 'io_runtime.spl' | wc -l)
     echo "PASS — dry-run, track B candidates: $tbc file(s)"
     exit 0
   fi
