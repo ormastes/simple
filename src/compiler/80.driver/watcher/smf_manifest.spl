@@ -304,13 +304,31 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
 val SMF_MANIFEST_DEFAULT_PATH: text = "build/smf/manifest.sdn"
 
 fn load_smf_manifest(path: text) -> SmfManifest:
-    """Load manifest from file. Returns empty manifest if file doesn't exist."""
+    """Load manifest from file. Returns empty manifest if file doesn't exist.
+
+    Every entry is whole-entry verified on load via
+    smf_manifest_entry_verifies (re-reads entry.source_path and checks the
+    recorded hash). Entries that fail verification are DROPPED — fail closed:
+    a stale or unverifiable row can never be returned to a caller, so a
+    manifest lookup on a changed source misses instead of silently reusing
+    the stale .smf. Valid, unchanged entries are retained unchanged.
+    """
     if not rt_file_exists(path):
         return smf_manifest_new()
     val content = rt_file_read_text(path) ?? ""
     if content == "":
         return smf_manifest_new()
-    smf_manifest_from_sdn(content)
+    smf_manifest_drop_unverified(smf_manifest_from_sdn(content))
+
+fn smf_manifest_drop_unverified(manifest: SmfManifest) -> SmfManifest:
+    """Return a manifest containing only entries that pass whole-entry
+    verification (smf_manifest_entry_verifies). Fail closed on mismatch."""
+    var entries: Dict<text, SmfManifestEntry> = {}
+    for key in manifest.entries.keys():
+        val e = manifest.entries[key]
+        if smf_manifest_entry_verifies(e):
+            entries[key] = e
+    SmfManifest(version: manifest.version, entries: entries, updated_at: manifest.updated_at)
 
 fn save_smf_manifest(manifest: SmfManifest, path: text) -> bool:
     """Save manifest to file using atomic tmp+rename."""
