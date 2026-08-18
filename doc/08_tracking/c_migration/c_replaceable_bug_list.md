@@ -32,6 +32,7 @@ tranches · `assess` = needs per-symbol caller analysis before commitment.
 | C-MIG-0017 | memory/memtrack/packed_span (excl. pool) | 1,146 | runtime primitive | provider boundary + Simple-side accounting | planned |
 | C-MIG-0018 | hosted_win32.c + scilib/rocm/cuda shims | ~3,000 | platform shim | retain thin ABI shims; declared-retained entries in registry | assess |
 | C-MIG-0020 | runtime_native.c:rt_hash_text + runtime_legacy_core.c:rt_str_hash | ~15 | product algorithm | std.hash text.hash() / rt_hash_text ABI bridge (already implemented, proven equivalent) | **done** (7/7 differential incl. KAT + UTF-8 + boundary lengths, C retained as oracle) |
+| C-MIG-0021 | runtime_native.c:rt_string_to_int | ~10 | product algorithm | std.common.text.parse_i64 (text.spl, already implemented, proven equivalent on well-formed input) | **done** (7/7 differential incl. KAT + 100-vector shared branch-covering bulk loop with perf evidence, C retained as oracle; failure-sentinel divergence 0-vs--1 on malformed/empty input documented not asserted-equal; perf ratio ~1.59x, under 2x threshold) |
 | C-MIG-0022 | runtime_simd_utf8.c:rt_text_validate_utf8 | ~5 | product algorithm | pure-Simple validated_utf8_bytes_to_text_linear (base_encoding/utilities.spl, already implemented, proven equivalent) | **done** (4/4 differential incl. KAT + malformed-byte discrimination + 88-vector bulk loop, C retained as oracle; PERF FINDING: Simple ~32.9x slower under interpreter, recorded not hidden) |
 
 Every `assess` entry must be resolved to a concrete class before Wave-4 work

@@ -132,6 +132,38 @@ c_migrations:
     c_status: retained_as_test_oracle
     perf_status: not_hot_path
 
+  - id: C-MIG-0021
+    path: src/runtime/runtime_native.c
+    symbols:
+      - rt_string_to_int
+    classification: product_algorithm
+    replacement: std.common.text.parse_i64 (already implemented in
+      src/lib/common/text.spl:5 — s.trim().parse_int() ?? -1)
+    simple_callers_migrated: []
+    caller_note: >
+      No production `extern fn rt_string_to_int` caller was found under
+      src/lib or src/app (only this spec's own test-only extern decl). The
+      symbol IS registered in the interpreter's extern dispatch table
+      (interpreter_extern/sffi_string.rs::rt_string_to_int_fn), and that is
+      what an interpreted `extern fn rt_string_to_int` call actually reaches
+      — not the C source's `strtoll(buf, NULL, 10)` at
+      runtime_native.c:5093. Measured directly (bin/simple run probe):
+      rt_string_to_int("42abc") == 0 and rt_string_to_int("") == 0, which
+      matches the Rust shim's strict `text.trim().parse::<i64>().unwrap_or(0)`
+      and contradicts strtoll's leading-numeric-prefix semantics (which
+      would give 42abc -> 42). This is a real behavioral gap between the C
+      *source* and what the interpreted extern path actually executes;
+      filed as a caller-note here rather than a separate bug because no
+      product code depends on the divergent (malformed-input) branch.
+      parse_i64 uses a DIFFERENT failure sentinel (-1 vs the oracle's 0) on
+      malformed/empty input, so the differential spec asserts equality only
+      on well-formed decimal integers and documents (without asserting
+      cross-side equality) the 0-vs-(-1) sentinel divergence separately.
+    correctness_spec: test/01_unit/lib/nogc_sync_mut/parse_i64_crosslang_spec.spl
+    correctness_result: "7 examples, 7 passed (well-formed-integer KAT + differential vectors, empty/malformed-input sentinel divergence documented not asserted-equal, 100-vector shared branch-covering bulk loop with perf evidence, corruption-discrimination, 2026-08-18)"
+    c_status: retained_as_test_oracle
+    perf_status: "measured on the 100-vector shared corpus: simple_us=2366, c_us=1487 (ratio ~1.59x, interpreter dispatch through the same process for both sides); under the 2x PERF-finding threshold, no perf finding recorded"
+
   - id: C-MIG-0022
     path: src/runtime/runtime_simd_utf8.c
     symbols:
