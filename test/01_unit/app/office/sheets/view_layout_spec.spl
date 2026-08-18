@@ -1,0 +1,109 @@
+"""Office sheets freeze-panes and print-area core behaviour spec.
+
+Covers freezing rows/columns, unfreezing, querying the frozen extent, and
+setting/clearing/querying a print area as an A1 range.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.view_layout.{
+    default_view_layout, freeze_panes, unfreeze_panes, has_frozen_panes,
+    frozen_extent, is_frozen_ref, set_print_area, clear_print_area,
+    has_print_area, print_area_refs
+}
+
+describe "freeze panes: core":
+    """Freeze leading rows/columns and query the frozen extent."""
+
+    it "starts with nothing frozen":
+        val layout = default_view_layout()
+        expect(has_frozen_panes(layout)).to_equal(false)
+        expect(frozen_extent(layout)).to_equal("R0C0")
+
+    it "freezes rows only":
+        var sheet = Sheet.new("S1")
+        val result = freeze_panes(sheet, default_view_layout(), 2, 0)
+        expect(result.ok).to_equal(true)
+        expect(frozen_extent(result.layout)).to_equal("R2C0")
+
+    it "freezes columns only":
+        var sheet = Sheet.new("S1")
+        val result = freeze_panes(sheet, default_view_layout(), 0, 3)
+        expect(result.ok).to_equal(true)
+        expect(frozen_extent(result.layout)).to_equal("R0C3")
+
+    it "freezes rows and columns together":
+        var sheet = Sheet.new("S1")
+        val result = freeze_panes(sheet, default_view_layout(), 1, 1)
+        expect(result.ok).to_equal(true)
+        expect(has_frozen_panes(result.layout)).to_equal(true)
+        expect(frozen_extent(result.layout)).to_equal("R1C1")
+
+    it "unfreezes back to nothing frozen":
+        var sheet = Sheet.new("S1")
+        val frozen = freeze_panes(sheet, default_view_layout(), 2, 2)
+        val cleared = unfreeze_panes(frozen.layout)
+        expect(has_frozen_panes(cleared)).to_equal(false)
+        expect(frozen_extent(cleared)).to_equal("R0C0")
+
+describe "freeze panes: per-cell membership":
+    """is_frozen_ref reports whether a cell stays pinned while scrolling."""
+
+    it "reports a cell in a frozen row as frozen":
+        var sheet = Sheet.new("S1")
+        val layout = freeze_panes(sheet, default_view_layout(), 2, 0).layout
+        expect(is_frozen_ref(layout, "D1")).to_equal(true)
+        expect(is_frozen_ref(layout, "D2")).to_equal(true)
+        expect(is_frozen_ref(layout, "D3")).to_equal(false)
+
+    it "reports a cell in a frozen column as frozen":
+        var sheet = Sheet.new("S1")
+        val layout = freeze_panes(sheet, default_view_layout(), 0, 2).layout
+        expect(is_frozen_ref(layout, "A9")).to_equal(true)
+        expect(is_frozen_ref(layout, "B9")).to_equal(true)
+        expect(is_frozen_ref(layout, "C9")).to_equal(false)
+
+describe "print area: core":
+    """Set, query, expand, and clear a print area."""
+
+    it "starts with no print area":
+        val layout = default_view_layout()
+        expect(has_print_area(layout)).to_equal(false)
+        expect(layout.print_area).to_equal("")
+
+    it "sets a print area from an A1 range":
+        var sheet = Sheet.new("S1")
+        val result = set_print_area(sheet, default_view_layout(), "A1:C10")
+        expect(result.ok).to_equal(true)
+        expect(result.layout.print_area).to_equal("A1:C10")
+        expect(has_print_area(result.layout)).to_equal(true)
+
+    it "expands the print area into cell references":
+        var sheet = Sheet.new("S1")
+        val layout = set_print_area(sheet, default_view_layout(), "A1:B2").layout
+        val refs = print_area_refs(layout)
+        expect(refs.len()).to_equal(4)
+        expect(refs[0]).to_equal("A1")
+
+    it "clears a set print area":
+        var sheet = Sheet.new("S1")
+        val layout = set_print_area(sheet, default_view_layout(), "A1:C3").layout
+        val cleared = clear_print_area(layout)
+        expect(has_print_area(cleared)).to_equal(false)
+        expect(print_area_refs(cleared).len()).to_equal(0)
+
+describe "view layout: axis independence":
+    """Freeze state and print area are independent slots on one layout."""
+
+    it "keeps the print area across a freeze and unfreeze":
+        var sheet = Sheet.new("S1")
+        val with_area = set_print_area(sheet, default_view_layout(), "A1:C3").layout
+        val frozen = freeze_panes(sheet, with_area, 1, 1).layout
+        expect(frozen.print_area).to_equal("A1:C3")
+        expect(unfreeze_panes(frozen).print_area).to_equal("A1:C3")
+
+    it "keeps the frozen extent across clearing the print area":
+        var sheet = Sheet.new("S1")
+        val frozen = freeze_panes(sheet, default_view_layout(), 2, 1).layout
+        val with_area = set_print_area(sheet, frozen, "A1:C3").layout
+        expect(frozen_extent(clear_print_area(with_area))).to_equal("R2C1")
