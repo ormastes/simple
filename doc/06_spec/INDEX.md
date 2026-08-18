@@ -1,20 +1,20 @@
 # Test Specification Index
 
-*Generated: 2026-08-10*
+*Generated: 2026-08-18*
 
 ## Quick Stats
 
 - **Total Features:** 1
 - **Complete Documentation:** 1
 - **Stubs Remaining:** 0
-- **Total Lines:** 96
-- **Warnings:** 1
+- **Total Lines:** 11
+- **Warnings:** 6
 
 ---
 
-## Application (1 features)
+## Syntax / Math DSL (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [LLM Caret Messaging Phase 3/4 CLI Boundary](03_system/app/llm_caret/feature/llm_caret_messaging_phase_cli_spec.md) | Partial | N/A | 3 | 40% | 96 lines |
+| [Math Block Tensor Operations Specification](feature/usage/math_blocks_spec.md) | Implemented | 4/5 | 28 | 20% | 11 lines |
 

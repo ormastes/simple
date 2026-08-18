@@ -1,5 +1,16 @@
 # Math Block Tensor Operations Specification
 
+> The `m{}` math block supports torch-compatible tensor operations for numerical computing. Each math block is a self-contained DSL expression that returns a Block value.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 28 | 28 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Math Block Tensor Operations Specification
+
 The `m{}` math block supports torch-compatible tensor operations for numerical computing. Each math block is a self-contained DSL expression that returns a Block value.
 
 ## At a Glance
@@ -10,8 +21,8 @@ The `m{}` math block supports torch-compatible tensor operations for numerical c
 | Category | Syntax / Math DSL |
 | Difficulty | 4/5 |
 | Status | Implemented |
-| Source | `test/03_system/feature/usage/math_blocks_spec.spl` |
-| Updated | 2026-05-30 |
+| Source | `test/feature/usage/math_blocks_spec.spl` |
+| Updated | 2026-08-18 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -26,7 +37,7 @@ Each math block is a self-contained DSL expression that returns a Block value.
 #### evaluates addition
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -49,7 +60,7 @@ expect(result).to_equal(5)
 #### evaluates subtraction
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -72,7 +83,7 @@ expect(result).to_equal(7)
 #### evaluates multiplication
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -95,7 +106,7 @@ expect(result).to_equal(20)
 #### evaluates division
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -118,7 +129,7 @@ expect(result).to_equal(5)
 #### evaluates complex expression
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -141,7 +152,7 @@ expect(result).to_equal(20)
 #### respects operator precedence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -164,7 +175,7 @@ expect(result).to_equal(14)
 #### evaluates power
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -187,7 +198,7 @@ expect(result).to_equal(8.0)
 #### evaluates negative numbers
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -212,7 +223,7 @@ expect(result).to_equal(-2)
 #### evaluates sqrt of 16
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -235,7 +246,7 @@ expect(result).to_equal(4.0)
 #### evaluates sqrt of 9
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -258,7 +269,7 @@ expect(result).to_equal(3.0)
 #### evaluates abs of negative
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -281,7 +292,7 @@ expect(result).to_equal(5)
 #### evaluates abs of positive
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -304,7 +315,7 @@ expect(result).to_equal(7)
 #### evaluates frac
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -327,7 +338,7 @@ expect(result).to_equal(3.0)
 #### evaluates nested functions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -352,7 +363,7 @@ expect(result).to_equal(4.0)
 #### computes dot product
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -367,7 +378,7 @@ expect(result).to_equal(32.0)
 <summary>Rendered scenario source</summary>
 
 > # dot([1,2,3], [4,5,6]) = 1*4 + 2*5 + 3*6 = 32<br>
-> val result = $\operatorname{dot}([, 2, 3, [, 5, 6)$<br>
+> val result = $\operatorname{dot}(?, 2, 3, ?, 5, 6)$<br>
 > expect(result).to_equal(32.0)
 
 </details>
@@ -377,7 +388,7 @@ expect(result).to_equal(32.0)
 #### computes dot product simple
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -392,7 +403,7 @@ expect(result).to_equal(4.0)
 <summary>Rendered scenario source</summary>
 
 > # dot([1,1], [2,2]) = 1*2 + 1*2 = 4<br>
-> val result = $\operatorname{dot}([, 1, [, 2)$<br>
+> val result = $\operatorname{dot}(?, 1, ?, 2)$<br>
 > expect(result).to_equal(4.0)
 
 </details>
@@ -404,7 +415,7 @@ expect(result).to_equal(4.0)
 #### evaluates pi greater than 3
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -427,7 +438,7 @@ expect(result).to_be_greater_than(3.0)
 #### evaluates pi less than 4
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -450,7 +461,7 @@ expect(result).to_be_less_than(4.0)
 #### evaluates e greater than 2
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -473,7 +484,7 @@ expect(result).to_be_greater_than(2.0)
 #### evaluates e less than 3
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -498,7 +509,7 @@ expect(result).to_be_less_than(3.0)
 #### evaluates array subscript
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -513,7 +524,7 @@ expect(result).to_equal(20.0)
 <summary>Rendered scenario source</summary>
 
 > # Array access returns scalar<br>
-> val result = $[$<br>
+> val result = $?$<br>
 > expect(result).to_equal(20.0)
 
 </details>
@@ -523,7 +534,7 @@ expect(result).to_equal(20.0)
 #### evaluates nested array subscript
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -538,7 +549,7 @@ expect(result).to_equal(2.0)
 <summary>Rendered scenario source</summary>
 
 > # 2D array access<br>
-> val result = $[$<br>
+> val result = $?$<br>
 > expect(result).to_equal(2.0)
 
 </details>
@@ -550,7 +561,7 @@ expect(result).to_equal(2.0)
 #### evaluates LaTeX frac
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -563,7 +574,7 @@ expect(result).to_equal(5.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\$<br>
+> val result = $? \frac{?}{?}$<br>
 > expect(result).to_equal(5.0)
 
 </details>
@@ -573,7 +584,7 @@ expect(result).to_equal(5.0)
 #### evaluates LaTeX sqrt
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -586,7 +597,7 @@ expect(result).to_equal(5.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\$<br>
+> val result = $? \sqrt{?}$<br>
 > expect(result).to_equal(5.0)
 
 </details>
@@ -596,7 +607,7 @@ expect(result).to_equal(5.0)
 #### evaluates Greek letter pi
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -609,7 +620,7 @@ expect(result).to_be_greater_than(3.0)
 <details>
 <summary>Rendered scenario source</summary>
 
-> val result = $\$<br>
+> val result = $? \pi$<br>
 > expect(result).to_be_greater_than(3.0)
 
 </details>
@@ -621,7 +632,7 @@ expect(result).to_be_greater_than(3.0)
 #### exports simple arithmetic
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -650,7 +661,7 @@ expect(result).to_equal(5)
 #### exports fractions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -675,7 +686,7 @@ expect(result).to_equal(0.5)
 #### exports Greek letters
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -707,3 +718,5 @@ expect(result).to_be_greater_than(3.0)
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>

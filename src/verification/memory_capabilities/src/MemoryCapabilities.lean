@@ -87,6 +87,10 @@ def wellFormed (env : RefEnv) : Prop :=
     countRefsWithCapability refs RefCapability.Exclusive +
       countRefsWithCapability refs RefCapability.Isolated ≤ 1
 
+theorem conversion_is_safe (srcCap : RefCapability) (dstCap : RefCapability) :
+  canConvert srcCap dstCap = true ↔ isMoreRestrictive srcCap dstCap := by
+  cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive]
+
 theorem can_convert_refl (cap : RefCapability) :
   canConvert cap cap = true := by
   cases cap <;> rfl
