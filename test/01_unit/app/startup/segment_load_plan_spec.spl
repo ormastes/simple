@@ -1,0 +1,147 @@
+# Segment load planner spec (startup_perf_plan_2026-08-17): per-preload_mode
+# plans; malformed/overlapping/zero-length tables fail closed; empty table
+# yields an empty but planned plan.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq}
+use app.startup.launch_metadata.{
+    LOAD_POLICY_MAP_SELECTED_SEGMENTS,
+    LOAD_POLICY_NORMAL,
+    LOAD_POLICY_READ_AHEAD_SELECTED,
+    LaunchMetadata,
+    launch_metadata_default
+}
+use app.startup.load_policy_wiring.{StartupLoadDecision, startup_load_decision}
+use app.startup.segment_load_plan.{
+    parse_segment_table,
+    segment_action_map_read_only,
+    segment_action_read_ahead,
+    segment_action_skip,
+    segment_load_plan
+}
+
+fn metadata_with_policy(policy: text) -> LaunchMetadata:
+    var m = launch_metadata_default("smf")
+    m.load_policy = policy
+    m
+
+fn decision_for(policy: text) -> StartupLoadDecision:
+    startup_load_decision(metadata_with_policy(policy), true, false)
+
+fn sample_table_text() -> text:
+    "segments:\n" +
+    "  kind: rx offset: 0 len: 4096\n" +
+    "  kind: r offset: 4096 len: 512\n" +
+    "  kind: rw offset: 4608 len: 256\n" +
+    "  kind: bss offset: 0 len: 1024\n"
+
+describe "segment table parsing":
+    it "parses a well-formed table with all four kinds":
+        val t = parse_segment_table(sample_table_text())
+        assert_true(t.valid)
+        assert_eq(t.error, "")
+        assert_eq(t.rows.len(), 4)
+        assert_eq(t.rows[0].kind, "rx")
+        assert_eq(t.rows[0].offset, 0)
+        assert_eq(t.rows[0].len, 4096)
+        assert_eq(t.rows[3].kind, "bss")
+
+    it "ignores blank lines and comments":
+        val t = parse_segment_table("# header\nsegments:\n\n  kind: r offset: 0 len: 8\n")
+        assert_true(t.valid)
+        assert_eq(t.rows.len(), 1)
+
+    it "fails closed on a missing segments: header":
+        val t = parse_segment_table("kind: rx offset: 0 len: 16\n")
+        assert_false(t.valid)
+        assert_true(t.error != "")
+        assert_eq(t.rows.len(), 0)
+
+    it "fails closed on an unknown segment kind":
+        val t = parse_segment_table("segments:\n  kind: wx offset: 0 len: 16\n")
+        assert_false(t.valid)
+        assert_true(t.error != "")
+
+    it "fails closed on a non-numeric offset":
+        val t = parse_segment_table("segments:\n  kind: rx offset: abc len: 16\n")
+        assert_false(t.valid)
+        assert_true(t.error != "")
+
+    it "fails closed on a row missing a field":
+        val t = parse_segment_table("segments:\n  kind: rx offset: 0\n")
+        assert_false(t.valid)
+        assert_true(t.error != "")
+
+    it "rejects zero-length segments":
+        val t = parse_segment_table("segments:\n  kind: rx offset: 0 len: 0\n")
+        assert_false(t.valid)
+        assert_true(t.error != "")
+
+    it "rejects overlapping file-backed segments":
+        val t = parse_segment_table(
+            "segments:\n  kind: rx offset: 0 len: 4096\n  kind: r offset: 100 len: 64\n")
+        assert_false(t.valid)
+        assert_true(t.error != "")
+
+    it "allows bss to share offsets with file-backed segments":
+        val t = parse_segment_table(
+            "segments:\n  kind: rx offset: 0 len: 4096\n  kind: bss offset: 0 len: 64\n")
+        assert_true(t.valid)
+
+describe "segment plan per preload_mode":
+    it "map_selected_segments maps rx and r, skips rw and bss":
+        val plan = segment_load_plan(
+            decision_for(LOAD_POLICY_MAP_SELECTED_SEGMENTS),
+            parse_segment_table(sample_table_text()))
+        assert_true(plan.planned)
+        assert_eq(plan.rows.len(), 4)
+        assert_eq(plan.rows[0].action, segment_action_map_read_only())
+        assert_eq(plan.rows[1].action, segment_action_map_read_only())
+        assert_eq(plan.rows[2].action, segment_action_skip())
+        assert_eq(plan.rows[3].action, segment_action_skip())
+        assert_eq(plan.rows[0].offset, 0)
+        assert_eq(plan.rows[0].len, 4096)
+
+    it "read_ahead_selected schedules reads for all file-backed segments":
+        val plan = segment_load_plan(
+            decision_for(LOAD_POLICY_READ_AHEAD_SELECTED),
+            parse_segment_table(sample_table_text()))
+        assert_true(plan.planned)
+        assert_eq(plan.rows[0].action, segment_action_read_ahead())
+        assert_eq(plan.rows[1].action, segment_action_read_ahead())
+        assert_eq(plan.rows[2].action, segment_action_read_ahead())
+        assert_eq(plan.rows[3].action, segment_action_skip())
+
+    it "normal policy loads nothing eagerly but still plans":
+        val plan = segment_load_plan(
+            decision_for(LOAD_POLICY_NORMAL),
+            parse_segment_table(sample_table_text()))
+        assert_true(plan.planned)
+        assert_true(plan.reason != "")
+        assert_eq(plan.rows[0].action, segment_action_skip())
+        assert_eq(plan.rows[1].action, segment_action_skip())
+        assert_eq(plan.rows[2].action, segment_action_skip())
+
+describe "segment plan fail-closed paths":
+    it "invalid decision produces an empty plan with an explicit reason":
+        val plan = segment_load_plan(
+            decision_for("bogus_policy"),
+            parse_segment_table(sample_table_text()))
+        assert_false(plan.planned)
+        assert_eq(plan.rows.len(), 0)
+        assert_true(plan.reason != "")
+
+    it "invalid table produces an empty plan with an explicit reason":
+        val plan = segment_load_plan(
+            decision_for(LOAD_POLICY_MAP_SELECTED_SEGMENTS),
+            parse_segment_table("segments:\n  kind: rx offset: 0 len: 0\n"))
+        assert_false(plan.planned)
+        assert_eq(plan.rows.len(), 0)
+        assert_true(plan.reason != "")
+
+    it "empty table yields an empty but planned plan":
+        val plan = segment_load_plan(
+            decision_for(LOAD_POLICY_MAP_SELECTED_SEGMENTS),
+            parse_segment_table("segments:\n"))
+        assert_true(plan.planned)
+        assert_eq(plan.rows.len(), 0)
+        assert_true(plan.reason != "")

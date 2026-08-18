@@ -1,0 +1,192 @@
+# Segment load planner (startup_perf_plan_2026-08-17, loader segment lane).
+#
+# Turns a StartupLoadDecision (load_policy_wiring) plus a parsed segment
+# table into a concrete per-segment plan: which byte ranges to map
+# read-only, which to schedule for read-ahead, and which to skip.
+#
+# Segment descriptor format (SDN-ish, decided here because research §8.3
+# names the SmfSegmentV2 fields but no concrete on-disk text form): a
+# `segments:` header line, then one row per segment:
+#
+#   segments:
+#     kind: rx offset: 0 len: 4096
+#     kind: r offset: 4096 len: 512
+#
+# Kinds follow research §8.3: rx / r / rw / bss. Everything else, any
+# non-numeric field, zero-length rows, negative offsets, and overlapping
+# rows fail CLOSED: the table is marked invalid with an explicit error and
+# every plan built from it is empty with a reason.
+
+use app.startup.load_policy_wiring.StartupLoadDecision
+
+pub struct StartupSegmentRow:
+    kind: text
+    offset: i64
+    len: i64
+
+pub struct StartupSegmentTable:
+    rows: [StartupSegmentRow]
+    valid: bool
+    error: text
+
+pub struct SegmentPlanRow:
+    offset: i64
+    len: i64
+    action: text
+
+pub struct SegmentLoadPlan:
+    rows: [SegmentPlanRow]
+    planned: bool
+    reason: text
+
+# Plan-action vocabulary accessors (kept as fns so consumers never depend
+# on mutable module state).
+pub fn segment_action_map_read_only() -> text:
+    "map_read_only"
+
+pub fn segment_action_read_ahead() -> text:
+    "read_ahead"
+
+pub fn segment_action_skip() -> text:
+    "skip"
+
+fn _segment_kind_is_known(kind: text) -> bool:
+    kind == "rx" or kind == "r" or kind == "rw" or kind == "bss"
+
+fn _invalid_table(error: text) -> StartupSegmentTable:
+    val none: [StartupSegmentRow] = []
+    StartupSegmentTable(rows: none, valid: false, error: error)
+
+# Digit-only non-negative integer parse; -1 on anything else (fail closed).
+fn _parse_segment_number(s: text) -> i64:
+    if s.len() == 0:
+        return -1
+    var value: i64 = 0
+    var i = 0
+    while i < s.len():
+        val d = _digit_value(s[i])
+        if d < 0:
+            return -1
+        value = value * 10 + d
+        i = i + 1
+    value
+
+fn _digit_value(ch: text) -> i64:
+    val digits = "0123456789"
+    var d = 0
+    while d < 10:
+        if ch == digits[d]:
+            return d
+        d = d + 1
+    -1
+
+fn _row_field(tokens: [text], label: text) -> text:
+    var i = 0
+    while i + 1 < tokens.len():
+        if tokens[i] == label:
+            return tokens[i + 1]
+        i = i + 1
+    ""
+
+fn _split_row_tokens(line: text) -> [text]:
+    var tokens: [text] = []
+    for part in line.split(" "):
+        val t = part.trim()
+        if t != "":
+            tokens.push(t)
+    tokens
+
+# Parse the SDN-ish descriptor above into a table. Fail-closed on any
+# structural problem; a table with valid=false must never be planned.
+pub fn parse_segment_table(content: text) -> StartupSegmentTable:
+    var rows: [StartupSegmentRow] = []
+    var saw_header = false
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if line == "segments:":
+            saw_header = true
+            continue
+        if not saw_header:
+            return _invalid_table("segment row before segments: header")
+        val tokens = _split_row_tokens(line)
+        val kind = _row_field(tokens, "kind:")
+        val offset_text = _row_field(tokens, "offset:")
+        val len_text = _row_field(tokens, "len:")
+        if kind == "" or offset_text == "" or len_text == "":
+            return _invalid_table("malformed segment row: " + line)
+        if not _segment_kind_is_known(kind):
+            return _invalid_table("unknown segment kind: " + kind)
+        val offset = _parse_segment_number(offset_text)
+        val length = _parse_segment_number(len_text)
+        if offset < 0:
+            return _invalid_table("non-numeric segment offset: " + offset_text)
+        if length < 0:
+            return _invalid_table("non-numeric segment len: " + len_text)
+        if length == 0:
+            return _invalid_table("zero-length segment at offset " + offset_text)
+        rows.push(StartupSegmentRow(kind: kind, offset: offset, len: length))
+    if not saw_header:
+        return _invalid_table("missing segments: header")
+    # Overlap check (bss rows describe zero-fill memory, not file bytes, so
+    # they are exempt from the FILE-range overlap rule).
+    var i = 0
+    while i < rows.len():
+        var j = i + 1
+        while j < rows.len():
+            val a = rows[i]
+            val b = rows[j]
+            if a.kind != "bss" and b.kind != "bss":
+                if a.offset < b.offset + b.len and b.offset < a.offset + a.len:
+                    return _invalid_table("overlapping segments at offsets " +
+                        a.offset.to_text() + " and " + b.offset.to_text())
+            j = j + 1
+        i = i + 1
+    StartupSegmentTable(rows: rows, valid: true, error: "")
+
+fn _empty_plan(reason: text) -> SegmentLoadPlan:
+    val none: [SegmentPlanRow] = []
+    SegmentLoadPlan(rows: none, planned: false, reason: reason)
+
+# Map a decision's preload_mode plus one segment row onto a plan action.
+# map_read_only: only read-only file-backed segments (rx, r) are eligible;
+# rw must not be shared-mapped read-only and bss has no file bytes.
+# read_ahead: every file-backed segment benefits from scheduled reads.
+fn _segment_action_for(preload_mode: text, kind: text) -> text:
+    if kind == "bss":
+        return segment_action_skip()
+    if preload_mode == "map_read_only":
+        if kind == "rx" or kind == "r":
+            return segment_action_map_read_only()
+        return segment_action_skip()
+    if preload_mode == "read_ahead":
+        return segment_action_read_ahead()
+    segment_action_skip()
+
+# Build the per-segment load plan for an artifact. Never silent: an
+# unsupported/INVALID decision or an invalid table yields an empty,
+# planned=false plan carrying an explicit reason.
+pub fn segment_load_plan(
+    decision: StartupLoadDecision,
+    table: StartupSegmentTable
+) -> SegmentLoadPlan:
+    if not decision.supported:
+        var why = decision.error
+        if why == "":
+            why = "unsupported load decision"
+        return _empty_plan("load decision unsupported: " + why)
+    if not table.valid:
+        return _empty_plan("invalid segment table: " + table.error)
+    var rows: [SegmentPlanRow] = []
+    for seg in table.rows:
+        rows.push(SegmentPlanRow(
+            offset: seg.offset,
+            len: seg.len,
+            action: _segment_action_for(decision.preload_mode, seg.kind)))
+    var reason = ""
+    if decision.preload_mode == "":
+        reason = "load_policy requests no eager preload"
+    if table.rows.len() == 0:
+        reason = "empty segment table"
+    SegmentLoadPlan(rows: rows, planned: true, reason: reason)
