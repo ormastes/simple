@@ -1,0 +1,50 @@
+# @req REQ-C-MIG-CRC32-TEXT
+#
+# C-MIG tranche 1 (binary_runtime_hardening): pure-Simple crc32_text vs the
+# C runtime oracle rt_crc32_text (src/runtime/runtime_legacy_core.c:445).
+# Process per doc/03_plan/infra/binary_runtime_hardening/plan.md Wave 4:
+# freeze C behavior -> KAT + differential evidence -> migrate callers.
+#
+# The C extern stays HERE as a test oracle after production callers migrate;
+# it must not be reintroduced into product code (check-no-direct-rt.shs).
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.nogc_sync_mut.compression.gzip.{crc32_text}
+
+# Test-oracle use of the C implementation (classified test_oracle, never
+# production-linked; see the rt_ boundary design).
+extern fn rt_crc32_text(content: text) -> i64
+
+describe "crc32_text pure-Simple vs C oracle":
+    it "matches the published CRC-32/ISO-HDLC KAT":
+        # Rocksoft/CRC catalogue check value for "123456789"
+        assert_equal(crc32_text("123456789"), 0xCBF43926)
+
+    it "returns 0 for empty input (C contract)":
+        assert_equal(crc32_text(""), 0)
+
+    it "matches the C oracle on representative vectors":
+        val vectors = [
+            "a",
+            "abc",
+            "hello world",
+            "The quick brown fox jumps over the lazy dog",
+            "0000000000000000000000000000000000000000",
+            "\n\t\r mixed  whitespace \n",
+            "utf8: héllo wörld ✓"
+        ]
+        for v in vectors:
+            assert_equal(crc32_text(v), rt_crc32_text(v))
+
+    it "matches the C oracle on a longer body (database WAL shape)":
+        var body = ""
+        var i = 0
+        while i < 200:
+            body = body + "row-{i}|payload|"
+            i = i + 1
+        assert_equal(crc32_text(body), rt_crc32_text(body))
+
+    it "differs on corrupted input (checksum actually discriminates)":
+        val good = crc32_text("wal-entry-payload")
+        val bad = crc32_text("wal-entry-payloae")
+        assert_true(good != bad)
