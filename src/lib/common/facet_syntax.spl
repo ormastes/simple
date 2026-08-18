@@ -1,0 +1,531 @@
+# Surface syntax for aspect facets -> AspectCatalog lowering
+#
+# Implements section 6.1/6.2/6.3/6.4/6.5 of
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md:
+#
+#   aspect <name>:
+#       facet interface <F>[ extends A, B]:
+#           <body ...>
+#       facet impl <Impl>[<T: Bound>]
+#           for T
+#           implements <F>
+#           public readonly:
+#           <body ...>
+#       bind facet <F>
+#           to pc{ implements(I) & type(a.b.**) }
+#           using <Impl>
+#           [multi]
+#       require facet <F>
+#           on pc{ implements(I) }
+#
+# Declarations are LOWERED onto the records already provided by
+# std.facet_registry (catalog_register_aspect / catalog_bind_facet): this
+# module adds no new runtime model, it only gives the model a surface.
+#
+# A `bind facet` is resolved against a declared TYPE WORLD
+# (world_register_type) — the set of business types known to the build. Each
+# matching type produces exactly one binding record, so binding uniqueness
+# (invariant 5.5) is still enforced by the registry, not re-implemented here.
+#
+# Invariant 5.1/5.2 is structural here: lowering only ever appends catalog
+# rows. It never rewrites, extends, or reorders a world type, so a program
+# whose aspect source is removed lowers to zero bindings and its business
+# types are bit-identical in the world.
+#
+# Toolchain note: every public function takes and returns ONLY primitives
+# (i64 handle, text, bool). Under `bin/simple test` a class-typed value that
+# crosses a module boundary erases to `object`
+# (doc/08_tracking/bug/class_field_access_erased_under_test_runner_2026-08-18.md),
+# so no class crosses this API. State is columnar module arrays keyed by the
+# catalog handle, matching src/lib/common/facet_registry.spl.
+
+use std.facet_registry.{catalog_register_aspect, catalog_bind_facet, facet_binding_exists}
+
+# ---- declared type world (the business types a binding may select) ----
+var _w_cat: [i64] = []
+var _w_type: [text] = []
+var _w_ifaces: [text] = []   # ","-separated interface names
+
+# ---- declared facet interfaces / implementations ----
+var _fi_cat: [i64] = []
+var _fi_aspect: [text] = []
+var _fi_name: [text] = []
+
+var _fp_cat: [i64] = []
+var _fp_aspect: [text] = []
+var _fp_name: [text] = []
+var _fp_facet: [text] = []
+
+# ---- `require facet` obligations ----
+var _rq_cat: [i64] = []
+var _rq_aspect: [text] = []
+var _rq_facet: [text] = []
+var _rq_pc: [text] = []
+
+# ---- per-catalog parse diagnostics ----
+var _err_cat: [i64] = []
+var _err_msg: [text] = []
+
+fn _glob_match(pattern: text, subject: text) -> bool:
+    """Anchored glob over a dotted type name. `*` and `**` both match any run
+    of characters (the design's `**` crosses module separators; `*` inside a
+    single segment is a subset of that, so one scanner serves both)."""
+    if pattern == "*" or pattern == "**":
+        return true
+    if not pattern.contains("*"):
+        return pattern == subject
+    val parts = pattern.split("*")
+    var pos = 0
+    var i = 0
+    val n = parts.len()
+    var ok = true
+    while i < n:
+        val part = parts[i]
+        if part == "":
+            i = i + 1
+            continue
+        if i == 0:
+            if not subject.starts_with(part):
+                ok = false
+                i = n
+                continue
+            pos = part.len()
+        else:
+            val rest = subject.substring(pos, subject.len())
+            val at = rest.index_of(part)
+            if at < 0:
+                ok = false
+                i = n
+                continue
+            pos = pos + at + part.len()
+        i = i + 1
+    if not ok:
+        return false
+    val last = parts[parts.len() - 1]
+    if last != "":
+        if not subject.ends_with(last):
+            return false
+    ok
+
+fn _pc_atom(atom: text, type_name: text, ifaces: text) -> bool:
+    val a = atom.trim()
+    if a.starts_with("!"):
+        return not _pc_atom(a.substring(1, a.len()), type_name, ifaces)
+    if a.starts_with("type(") and a.ends_with(")"):
+        return _glob_match(a.substring(5, a.len() - 1).trim(), type_name)
+    if a.starts_with("implements(") and a.ends_with(")"):
+        val want = a.substring(11, a.len() - 1).trim()
+        var i = 0
+        val parts = ifaces.split(",")
+        val n = parts.len()
+        var hit = false
+        while i < n:
+            if parts[i].trim() == want:
+                hit = true
+            i = i + 1
+        return hit
+    if a.starts_with("subtype(") and a.ends_with(")"):
+        val want = a.substring(8, a.len() - 1).trim()
+        var i = 0
+        val parts = ifaces.split(",")
+        val n = parts.len()
+        var hit = false
+        while i < n:
+            if parts[i].trim() == want:
+                hit = true
+            i = i + 1
+        return hit
+    false
+
+fn _pc_match(pc_body: text, type_name: text, ifaces: text) -> bool:
+    """Evaluate a pointcut body (the text inside `pc{ ... }`). Precedence:
+    `!` binds tightest, then `&`, then `|` — the existing pc{} operator set,
+    reused rather than reinvented (design 6.1)."""
+    val ors = pc_body.split("|")
+    var i = 0
+    val n = ors.len()
+    var any_hit = false
+    while i < n:
+        val ands = ors[i].split("&")
+        var j = 0
+        val m = ands.len()
+        var all_hit = true
+        while j < m:
+            if not _pc_atom(ands[j], type_name, ifaces):
+                all_hit = false
+            j = j + 1
+        if all_hit and m > 0:
+            any_hit = true
+        i = i + 1
+    any_hit
+
+fn _indent_of(line: text) -> i64:
+    var i = 0
+    val n = line.len()
+    var done = false
+    while i < n and not done:
+        if line.substring(i, i + 1) == " ":
+            i = i + 1
+        else:
+            done = true
+    i
+
+fn _pc_body(line: text) -> text:
+    """Extract `X` from `... pc{ X }`; "" when the line has no pc block."""
+    val at = line.index_of("pc{")
+    if at < 0:
+        return ""
+    val rest = line.substring(at + 3, line.len())
+    val close = rest.index_of("}")
+    if close < 0:
+        return ""
+    rest.substring(0, close).trim()
+
+fn syntax_error(cat: i64) -> text:
+    """Diagnostic from the most recent facet_parse on this catalog ("" when
+    it succeeded)."""
+    var i = 0
+    val n = _err_cat.len()
+    var msg = ""
+    while i < n:
+        if _err_cat[i] == cat:
+            msg = _err_msg[i]
+        i = i + 1
+    msg
+
+fn world_register_type(cat: i64, type_name: text, implements_csv: text) -> bool:
+    """Declare a business type (and the business interfaces it implements)
+    into the catalog's type world. This is the CORE package's own shape —
+    facet lowering only reads it and never modifies it (invariant 5.2)."""
+    var i = 0
+    val n = _w_cat.len()
+    while i < n:
+        if _w_cat[i] == cat and _w_type[i] == type_name:
+            return false
+        i = i + 1
+    _w_cat = _w_cat.push(cat)
+    _w_type = _w_type.push(type_name)
+    _w_ifaces = _w_ifaces.push(implements_csv)
+    true
+
+fn world_size(cat: i64) -> i64:
+    var i = 0
+    var c = 0
+    val n = _w_cat.len()
+    while i < n:
+        if _w_cat[i] == cat:
+            c = c + 1
+        i = i + 1
+    c
+
+fn facet_interface_declared(cat: i64, aspect: text, name: text) -> bool:
+    var i = 0
+    val n = _fi_cat.len()
+    var hit = false
+    while i < n:
+        if _fi_cat[i] == cat and _fi_aspect[i] == aspect and _fi_name[i] == name:
+            hit = true
+        i = i + 1
+    hit
+
+fn facet_impl_declared(cat: i64, aspect: text, name: text) -> bool:
+    var i = 0
+    val n = _fp_cat.len()
+    var hit = false
+    while i < n:
+        if _fp_cat[i] == cat and _fp_aspect[i] == aspect and _fp_name[i] == name:
+            hit = true
+        i = i + 1
+    hit
+
+fn facet_impl_facet(cat: i64, aspect: text, name: text) -> text:
+    """The facet interface a declared `facet impl` says it implements."""
+    var i = 0
+    val n = _fp_cat.len()
+    var f = ""
+    while i < n:
+        if _fp_cat[i] == cat and _fp_aspect[i] == aspect and _fp_name[i] == name:
+            f = _fp_facet[i]
+        i = i + 1
+    f
+
+fn facet_parse(cat: i64, src: text) -> i64:
+    """Parse aspect facet surface syntax and lower it onto the catalog.
+
+    Returns the number of catalog BINDING records produced (0 is a legal
+    answer: a source with only declarations binds nothing), or -1 on a syntax
+    or resolution error, with the reason available from syntax_error(cat).
+
+    Fails closed: an unknown line, a `bind facet` naming an undeclared facet
+    interface or implementation, a `using` naming an impl declared for a
+    different facet, or a missing `to`/`using` clause is an error, never a
+    silently-skipped line."""
+    var i = 0
+    val n = _err_cat.len()
+    var have_err_slot = false
+    while i < n:
+        if _err_cat[i] == cat:
+            _err_msg[i] = ""
+            have_err_slot = true
+        i = i + 1
+    if not have_err_slot:
+        _err_cat = _err_cat.push(cat)
+        _err_msg = _err_msg.push("")
+
+    val lines = src.split("\n")
+    var li = 0
+    val nl = lines.len()
+    var aspect = ""
+    var body_indent = -1
+    var bound = 0
+    var fail = ""
+
+    # pending `bind facet` / `require facet` statement
+    var pend_kind = ""      # "bind" | "require" | ""
+    var pend_facet = ""
+    var pend_pc = ""
+    var pend_impl = ""
+    var pend_multi = false
+
+    while li < nl and fail == "":
+        val raw = lines[li]
+        val ind = _indent_of(raw)
+        val line = raw.trim()
+        li = li + 1
+
+        if line == "" or line.starts_with("#"):
+            continue
+        if body_indent >= 0 and ind > body_indent:
+            continue
+        body_indent = -1
+
+        # ---- continuation clauses of a pending bind/require ----
+        if pend_kind != "" and line.starts_with("to "):
+            pend_pc = _pc_body(line)
+            if pend_pc == "":
+                fail = "bind facet: expected `to pc{...}`, got: {line}"
+            continue
+        if pend_kind != "" and line.starts_with("on "):
+            pend_pc = _pc_body(line)
+            if pend_pc == "":
+                fail = "require facet: expected `on pc{...}`, got: {line}"
+            continue
+        if pend_kind == "bind" and line.starts_with("using "):
+            pend_impl = line.substring(6, line.len()).trim()
+            continue
+        if pend_kind == "bind" and line == "multi":
+            pend_multi = true
+            continue
+
+        # ---- a new statement closes any pending one ----
+        if pend_kind != "":
+            if pend_kind == "bind":
+                var fi_ok = false
+                var fp_ok = false
+                var fp_f = ""
+                var q = 0
+                val nfi = _fi_cat.len()
+                while q < nfi:
+                    if _fi_cat[q] == cat and _fi_aspect[q] == aspect and _fi_name[q] == pend_facet:
+                        fi_ok = true
+                    q = q + 1
+                var q2 = 0
+                val nfp = _fp_cat.len()
+                while q2 < nfp:
+                    if _fp_cat[q2] == cat and _fp_aspect[q2] == aspect and _fp_name[q2] == pend_impl:
+                        fp_ok = true
+                        fp_f = _fp_facet[q2]
+                    q2 = q2 + 1
+                if pend_pc == "" or pend_impl == "":
+                    fail = "incomplete `bind facet {pend_facet}` (needs `to pc(...)` and `using`)"
+                elif not fi_ok:
+                    fail = "bind facet: undeclared facet interface: {pend_facet}"
+                elif not fp_ok:
+                    fail = "bind facet: undeclared facet impl: {pend_impl}"
+                elif fp_f != pend_facet:
+                    fail = "bind facet: {pend_impl} does not implement {pend_facet}"
+                else:
+                    var w = 0
+                    val nw = _w_cat.len()
+                    while w < nw and fail == "":
+                        if _w_cat[w] == cat and _pc_match(pend_pc, _w_type[w], _w_ifaces[w]):
+                            if catalog_bind_facet(cat, aspect, pend_facet, _w_type[w], pend_pc, pend_impl, pend_multi):
+                                bound = bound + 1
+                            else:
+                                fail = "bind facet {pend_facet} -> {_w_type[w]}: rejected by catalog"
+                        w = w + 1
+            else:
+                if pend_pc == "":
+                    fail = "incomplete `require facet {pend_facet}` (needs `on pc(...)`)"
+                else:
+                    _rq_cat = _rq_cat.push(cat)
+                    _rq_aspect = _rq_aspect.push(aspect)
+                    _rq_facet = _rq_facet.push(pend_facet)
+                    _rq_pc = _rq_pc.push(pend_pc)
+            pend_kind = ""
+            pend_facet = ""
+            pend_pc = ""
+            pend_impl = ""
+            pend_multi = false
+            if fail != "":
+                continue
+
+        # ---- statement heads ----
+        if line.starts_with("aspect ") and line.ends_with(":"):
+            aspect = line.substring(7, line.len() - 1).trim()
+            if aspect == "":
+                fail = "aspect: missing name"
+                continue
+            catalog_register_aspect(cat, aspect, "packs/{aspect}.smf")
+            continue
+
+        if line.starts_with("facet interface "):
+            if aspect == "":
+                fail = "facet interface outside an aspect"
+                continue
+            var head = line.substring(16, line.len()).trim()
+            if head.ends_with(":"):
+                head = head.substring(0, head.len() - 1).trim()
+            if head.contains(" extends "):
+                head = head.substring(0, head.index_of(" extends ")).trim()
+            if head == "":
+                fail = "facet interface: missing name"
+                continue
+            _fi_cat = _fi_cat.push(cat)
+            _fi_aspect = _fi_aspect.push(aspect)
+            _fi_name = _fi_name.push(head)
+            if line.ends_with(":"):
+                body_indent = ind
+            continue
+
+        if line.starts_with("facet impl "):
+            if aspect == "":
+                fail = "facet impl outside an aspect"
+                continue
+            var nm = line.substring(11, line.len()).trim()
+            if nm.contains("<"):
+                nm = nm.substring(0, nm.index_of("<")).trim()
+            if nm.contains(" "):
+                nm = nm.substring(0, nm.index_of(" ")).trim()
+            if nm == "":
+                fail = "facet impl: missing name"
+                continue
+            _fp_cat = _fp_cat.push(cat)
+            _fp_aspect = _fp_aspect.push(aspect)
+            _fp_name = _fp_name.push(nm)
+            _fp_facet = _fp_facet.push("")
+            continue
+
+        if line.starts_with("for ") or line == "public readonly:" or line == "readonly:" or line == "private:":
+            if line.ends_with(":"):
+                body_indent = ind - 4
+                if body_indent < 0:
+                    body_indent = 0
+            continue
+
+        if line.starts_with("implements "):
+            val f = line.substring(11, line.len()).trim()
+            var k = _fp_cat.len() - 1
+            if k < 0:
+                fail = "`implements {f}` without a preceding facet impl"
+                continue
+            _fp_facet[k] = f
+            continue
+
+        if line.starts_with("bind facet "):
+            if aspect == "":
+                fail = "bind facet outside an aspect"
+                continue
+            pend_kind = "bind"
+            pend_facet = line.substring(11, line.len()).trim()
+            continue
+
+        if line.starts_with("require facet "):
+            if aspect == "":
+                fail = "require facet outside an aspect"
+                continue
+            pend_kind = "require"
+            pend_facet = line.substring(14, line.len()).trim()
+            continue
+
+        fail = "unrecognized facet declaration: {line}"
+
+    # ---- flush a statement that ended at EOF ----
+    if fail == "" and pend_kind == "bind":
+        var fi_ok = false
+        var fp_ok = false
+        var fp_f = ""
+        var q = 0
+        val nfi = _fi_cat.len()
+        while q < nfi:
+            if _fi_cat[q] == cat and _fi_aspect[q] == aspect and _fi_name[q] == pend_facet:
+                fi_ok = true
+            q = q + 1
+        var q2 = 0
+        val nfp = _fp_cat.len()
+        while q2 < nfp:
+            if _fp_cat[q2] == cat and _fp_aspect[q2] == aspect and _fp_name[q2] == pend_impl:
+                fp_ok = true
+                fp_f = _fp_facet[q2]
+            q2 = q2 + 1
+        if pend_pc == "" or pend_impl == "":
+            fail = "incomplete `bind facet {pend_facet}` (needs `to pc(...)` and `using`)"
+        elif not fi_ok:
+            fail = "bind facet: undeclared facet interface: {pend_facet}"
+        elif not fp_ok:
+            fail = "bind facet: undeclared facet impl: {pend_impl}"
+        elif fp_f != pend_facet:
+            fail = "bind facet: {pend_impl} does not implement {pend_facet}"
+        else:
+            var w2 = 0
+            val nw2 = _w_cat.len()
+            while w2 < nw2 and fail == "":
+                if _w_cat[w2] == cat and _pc_match(pend_pc, _w_type[w2], _w_ifaces[w2]):
+                    if catalog_bind_facet(cat, aspect, pend_facet, _w_type[w2], pend_pc, pend_impl, pend_multi):
+                        bound = bound + 1
+                    else:
+                        fail = "bind facet {pend_facet} -> {_w_type[w2]}: rejected by catalog"
+                w2 = w2 + 1
+    if fail == "" and pend_kind == "require":
+        if pend_pc == "":
+            fail = "incomplete `require facet {pend_facet}` (needs `on pc(...)`)"
+        else:
+            _rq_cat = _rq_cat.push(cat)
+            _rq_aspect = _rq_aspect.push(aspect)
+            _rq_facet = _rq_facet.push(pend_facet)
+            _rq_pc = _rq_pc.push(pend_pc)
+
+    if fail != "":
+        var e = 0
+        val ne = _err_cat.len()
+        while e < ne:
+            if _err_cat[e] == cat:
+                _err_msg[e] = fail
+            e = e + 1
+        return -1
+    bound
+
+fn requirements_unmet(cat: i64) -> text:
+    """`require facet` obligation check (design 6.5), evaluated over the
+    declared type world. Returns ";"-separated "<type>:<aspect>/<facet>"
+    entries for every world type a requirement selects that has NO binding
+    for that facet; "" when every obligation is met.
+
+    This is a pure query: it loads nothing, scans no directory, and mutates
+    neither the world nor the catalog."""
+    var out = ""
+    var r = 0
+    val nr = _rq_cat.len()
+    while r < nr:
+        if _rq_cat[r] == cat:
+            var w = 0
+            val nw = _w_cat.len()
+            while w < nw:
+                if _w_cat[w] == cat and _pc_match(_rq_pc[r], _w_type[w], _w_ifaces[w]):
+                    if not facet_binding_exists(cat, _w_type[w], _rq_aspect[r], _rq_facet[r]):
+                        if out != "":
+                            out = out + ";"
+                        out = out + "{_w_type[w]}:{_rq_aspect[r]}/{_rq_facet[r]}"
+                w = w + 1
+        r = r + 1
+    out
