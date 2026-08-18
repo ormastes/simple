@@ -1,0 +1,101 @@
+"""
+# Engine2D Backend Lane Order Parity
+
+**Feature IDs:** #engine2d-backend-lane-order
+**Category:** Unit / Graphics
+**Status:** Implemented
+
+## Overview
+
+Defect-class guard for the duplicated `gpu/engine2d/backend_lane` module. The
+`nogc_async_mut` copy silently drifted from the canonical `gc_async_mut`
+ordering contract: it dropped the explicit-native (`baremetal`/`virtio_gpu`)
+head, dropped `qualcomm`/`intel`, and returned a comma-joined list from
+`engine2d_backend_lane_preference_summary()` instead of the `>`-separated
+summary. Every caller that resolves `std.gpu.engine2d.backend_lane` got the
+stale order without any error.
+
+This spec pins the ordering CONTRACT that both copies must satisfy, so a future
+divergence in either family fails here instead of in a downstream perf gate.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** N/A
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** N/A
+"""
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.backend_lane.{
+    engine2d_backend_lane_drawing_preference_order,
+    engine2d_backend_lane_full_preference_order,
+    engine2d_backend_lane_preference_summary,
+    engine2d_backend_lane_preferred_candidate,
+    engine2d_font_offload_backend_order
+}
+
+fn index_of(order: [text], name: text) -> i64:
+    var i: i64 = 0
+    while i < order.len():
+        if order[i] == name:
+            return i
+        i = i + 1
+    -1
+
+describe "engine2d backend lane order parity":
+    it "keeps the full order explicit-native first and GPU-tier complete":
+        val full = engine2d_backend_lane_full_preference_order()
+
+        expect(full[0]).to_equal("baremetal")
+        expect(full[1]).to_equal("virtio_gpu")
+        expect(full[2]).to_equal("metal")
+        expect(index_of(full, "qualcomm")).to_be_greater_than(0)
+        expect(index_of(full, "intel")).to_be_greater_than(0)
+        expect(full[full.len() - 1]).to_equal("cpu")
+
+    it "keeps the drawing order native-first without explicit-native surfaces":
+        val drawing = engine2d_backend_lane_drawing_preference_order()
+
+        expect(drawing[0]).to_equal("metal")
+        expect(index_of(drawing, "baremetal")).to_equal(-1)
+        expect(index_of(drawing, "virtio_gpu")).to_equal(-1)
+        expect(index_of(drawing, "cuda")).to_be_less_than(index_of(drawing, "vulkan"))
+        expect(index_of(drawing, "vulkan")).to_be_less_than(index_of(drawing, "directx"))
+        expect(index_of(drawing, "directx")).to_be_less_than(index_of(drawing, "opencl"))
+        expect(drawing[drawing.len() - 1]).to_equal("cpu")
+
+    it "keeps the summary a readable preference chain, not a joined list":
+        val summary = engine2d_backend_lane_preference_summary()
+
+        expect(summary).to_contain("vulkan > directx > opencl")
+        expect(summary).to_contain("baremetal")
+        expect(summary).to_contain("cpu_simd > software > cpu")
+
+    it "keeps drawing order and font-offload order tier-consistent":
+        # Positive control: both orders must rank the same GPU tiers the same
+        # way, so a drift in either list is caught here.
+        val drawing = engine2d_backend_lane_drawing_preference_order()
+        val font = engine2d_font_offload_backend_order()
+
+        expect(index_of(font, "metal")).to_equal(index_of(drawing, "metal"))
+        expect(index_of(font, "cuda")).to_equal(index_of(drawing, "cuda"))
+        expect(index_of(font, "vulkan")).to_equal(index_of(drawing, "vulkan"))
+        expect(index_of(font, "cpu")).to_equal(index_of(drawing, "cpu"))
+
+    it "excludes explicit-native candidates from automatic selection":
+        # Positive control (include_explicit_native = true) proves the helper
+        # can still pick baremetal when the caller opts in, so the negative
+        # case below is a real exclusion and not a broken lookup.
+        expect(engine2d_backend_lane_preferred_candidate(["cpu", "vulkan", "cuda"], false)).to_equal("cuda")
+        expect(engine2d_backend_lane_preferred_candidate(["cpu", "baremetal"], false)).to_equal("cpu")
+        expect(engine2d_backend_lane_preferred_candidate(["cpu", "baremetal"], true)).to_equal("baremetal")
