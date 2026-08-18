@@ -900,3 +900,35 @@ own record
 This change is JIT/interpreter-lane only. Confirmed still reproducing: the
 un-prefixed probe returns `got 3` — a fabricated value, not nil — under the
 default lane on both the old and the new binary.
+
+## Stage 3 LANDED (2026-08-18) — frozen baseline ratchet
+
+`scripts/check/check-unbacked-extern-ratchet.shs` + the frozen
+`scripts/check/unbacked_extern_baseline.txt` (1,466 symbols).
+
+- **Frozen set is the UNION**, `GENUINELY_MISSING ∪ DEAD_DECLARATION`, exactly as
+  the Stage 2 evidence requires. Baselining only `GENUINELY_MISSING` would have
+  ratcheted 262 verified-live public-API declarations to fatal.
+- **Census regenerated, not trusted.** Re-running
+  `scripts/check/extern-backing-census.shs` on the live tree gave 1,204
+  `GENUINELY_MISSING` + 262 `DEAD_DECLARATION` = **1,466**, one more than the
+  committed `doc/08_tracking/bug/data/unbacked_extern_census_2026-08-18.tsv`
+  (1,465). The single drift symbol is `lane_definitely_absent_at_probe`,
+  landed by a parallel session after the TSV was written. The baseline is built
+  from the regenerated census; a stale baseline would have been worse than none.
+- **Both directions gate**, mirroring `check-test-tree-divergence.shs`: a new
+  unbacked symbol FAILs, and a baselined symbol that is no longer unbacked
+  (backed now, or declaration removed) FAILs as a stale baseline.
+- **Verdicts verified on the real tree**, verbatim:
+  - clean: `PASS — 1466 unbacked extern symbol(s) checked, 0 new, 0 stale` (exit 0)
+  - injected new unbacked extern in a scratch `.spl`:
+    `FAIL — 1467 symbol(s) checked, 1 newly unbacked: zz_ratchet_probe_symbol_never_backed` (exit 1)
+  - stale baseline (a baselined name no longer in the census):
+    `FAIL — 1467 symbol(s) checked, 1 baselined symbol(s) no longer unbacked (stale baseline): zz_fake_backed_now` (exit 1)
+  - `--selftest`: `PASS — 4 selftest fixture(s) checked, 0 failures` (exit 0),
+    fatal, runs before every scan.
+- **Not done, deliberately:** no default was flipped and no declaration was
+  deleted — Stage 2 proved both unsafe. The guard is a source-level ratchet; it
+  does not change compiler behaviour. Scan cost ~20s (census dominates).
+- Deliberate-update path `--generate-baseline`, documented as reviewed-updates-only
+  in `.claude/rules/vcs.md` alongside the divergence-baseline warning.

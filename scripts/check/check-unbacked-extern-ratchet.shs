@@ -1,0 +1,218 @@
+#!/bin/sh
+# Frozen-baseline ratchet for unbacked extern declarations.
+#
+# Stage 3 of the plan in
+# doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md.
+#
+# WHAT IT GATES
+# -------------
+# The tree currently declares ~3,954 distinct extern symbols, of which a large
+# set has no runtime backing. Stages 0-2 established that the population cannot
+# simply be made fatal: Stage 2 tried to delete the "dead" ones and found ZERO
+# of the 262 DEAD_DECLARATION symbols were actually dead (70 have a real .spl
+# call site in ANOTHER file, 41 have non-.spl references, 111 are documented
+# public API — see doc/08_tracking/bug/data/dead_declaration_verification_2026-08-18.tsv).
+# DEAD_DECLARATION is a residual class that absorbs gaps from the earlier tiers
+# (dlopen'd liblua symbols, GPU/SIMD intrinsics lowered at codegen that are
+# never host symbols), not a dead-code list.
+#
+# So the ratchet freezes the UNION:
+#     unbacked := GENUINELY_MISSING  U  DEAD_DECLARATION
+# Baselining only GENUINELY_MISSING would ratchet 262 live public-API
+# declarations straight to fatal. Do not narrow this set.
+#
+# RULES (mirrors scripts/check/check-test-tree-divergence.shs)
+#   * any unbacked symbol NOT in the baseline            -> FAIL (new debt)
+#   * any baselined symbol that is no longer unbacked    -> FAIL (stale baseline)
+#     ("no longer unbacked" = it became backed, or its declaration was removed;
+#      both mean the frozen file no longer describes the tree, and a stale
+#      baseline is how a ratchet silently stops ratcheting.)
+#   * 0 symbols compared                                 -> ERROR, never a pass
+#
+# CLASSIFICATION is delegated to scripts/check/extern-backing-census.shs — the
+# single source of truth — so the guard cannot drift from the census. That
+# census reads DEFINED symbol tables out of real link artifacts (nm), so it
+# requires the deployed binary; its absence is an ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/check/check-unbacked-extern-ratchet.shs            # scan
+#   sh scripts/check/check-unbacked-extern-ratchet.shs --census FILE.tsv
+#   sh scripts/check/check-unbacked-extern-ratchet.shs --generate-baseline
+#   sh scripts/check/check-unbacked-extern-ratchet.shs --selftest  # fixtures only
+#
+# --generate-baseline is for DELIBERATE, REVIEWED baseline updates only. Do not
+# use it to make a FAIL go away: a FAIL naming new symbols means real new debt.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$root"
+
+BASELINE="${BASELINE:-scripts/check/unbacked_extern_baseline.txt}"
+CENSUS_SH="scripts/check/extern-backing-census.shs"
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
+
+# --- unbacked set extraction ------------------------------------------------
+# $1 = census tsv, $2 = output symbol list
+extract_unbacked() {
+  awk -F'\t' 'NR>1 && ($2=="GENUINELY_MISSING" || $2=="DEAD_DECLARATION") {print $1}' "$1" \
+    | sort -u > "$2"
+}
+
+read_baseline() { # $1 = baseline file, $2 = out
+  if [ -r "$1" ]; then
+    sed -e 's/#.*$//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' | sort -u > "$2"
+  else
+    : > "$2"
+  fi
+}
+
+# Pure comparison. Sets EV_CHECKED / EV_NEW / EV_STALE / EV_VERDICT / EV_RC.
+# $1 = current unbacked list, $2 = baseline list.
+compare() {
+  cur=$1; base=$2
+  comm -23 "$cur" "$base" > "$W/new.txt"
+  comm -13 "$cur" "$base" > "$W/stale.txt"
+  sort -u "$cur" "$base" > "$W/union.txt"
+  EV_CHECKED=$(wc -l < "$W/union.txt" | tr -d ' ')
+  EV_NEW=$(wc -l < "$W/new.txt" | tr -d ' ')
+  EV_STALE=$(wc -l < "$W/stale.txt" | tr -d ' ')
+  if [ "$EV_CHECKED" -eq 0 ]; then
+    EV_VERDICT="ERROR — nothing was checked: 0 extern symbols compared"
+    EV_RC=2
+    return 0
+  fi
+  if [ "$EV_NEW" -gt 0 ] || [ "$EV_STALE" -gt 0 ]; then
+    msg="FAIL — $EV_CHECKED symbol(s) checked"
+    if [ "$EV_NEW" -gt 0 ]; then
+      msg="$msg, $EV_NEW newly unbacked: $(tr '\n' ' ' < "$W/new.txt" | sed 's/ $//')"
+    fi
+    if [ "$EV_STALE" -gt 0 ]; then
+      msg="$msg, $EV_STALE baselined symbol(s) no longer unbacked (stale baseline): $(tr '\n' ' ' < "$W/stale.txt" | sed 's/ $//')"
+    fi
+    EV_VERDICT="$msg"
+    EV_RC=1
+    return 0
+  fi
+  EV_VERDICT="PASS — $EV_CHECKED unbacked extern symbol(s) checked, 0 new, 0 stale"
+  EV_RC=0
+}
+
+# --- selftest ---------------------------------------------------------------
+# Fatal, runs before every scan. Exercises the comparison contract with
+# synthetic census/baseline fixtures (no census run, so it stays fast).
+mkfixture() { # $1 = path, then class:symbol pairs
+  f=$1; shift
+  printf 'symbol\tclass\tscoped_callsites\tfirst_declaring_file\n' > "$f"
+  for p in "$@"; do
+    printf '%s\t%s\t0\tsrc/fixture.spl\n' "${p#*:}" "${p%%:*}" >> "$f"
+  done
+}
+
+selftest() {
+  fail=0
+  F="$W/st"; mkdir -p "$F"
+
+  # 1. clean run must PASS
+  mkfixture "$F/c1.tsv" GENUINELY_MISSING:aa DEAD_DECLARATION:bb in_deployed_binary:zz
+  printf 'aa\nbb\n' > "$F/b1.txt"
+  extract_unbacked "$F/c1.tsv" "$F/u1.txt"; read_baseline "$F/b1.txt" "$F/rb1.txt"
+  compare "$F/u1.txt" "$F/rb1.txt"; rc=$EV_RC
+  if [ "$rc" -ne 0 ] || [ "$EV_CHECKED" -ne 2 ]; then
+    echo "selftest FIXTURE 1 (clean must PASS) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  # 2. a NEW unbacked symbol must FAIL
+  mkfixture "$F/c2.tsv" GENUINELY_MISSING:aa DEAD_DECLARATION:bb GENUINELY_MISSING:newsym
+  extract_unbacked "$F/c2.tsv" "$F/u2.txt"
+  compare "$F/u2.txt" "$F/rb1.txt"; rc=$EV_RC
+  case "$EV_VERDICT" in *newsym*) hit=1 ;; *) hit=0 ;; esac
+  if [ "$rc" -ne 1 ] || [ "$hit" -ne 1 ]; then
+    echo "selftest FIXTURE 2 (new unbacked must FAIL naming it) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  # 3. a baselined symbol that became BACKED must FAIL as stale
+  mkfixture "$F/c3.tsv" GENUINELY_MISSING:aa in_deployed_binary:bb
+  extract_unbacked "$F/c3.tsv" "$F/u3.txt"
+  compare "$F/u3.txt" "$F/rb1.txt"; rc=$EV_RC
+  case "$EV_VERDICT" in *"stale baseline"*bb*) hit=1 ;; *) hit=0 ;; esac
+  if [ "$rc" -ne 1 ] || [ "$hit" -ne 1 ]; then
+    echo "selftest FIXTURE 3 (now-backed baselined symbol must FAIL stale) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  # 4. an empty scan must force ERROR (never a vacuous pass)
+  mkfixture "$F/c4.tsv" in_deployed_binary:zz
+  : > "$F/b4.txt"
+  extract_unbacked "$F/c4.tsv" "$F/u4.txt"; read_baseline "$F/b4.txt" "$F/rb4.txt"
+  compare "$F/u4.txt" "$F/rb4.txt"; rc=$EV_RC
+  if [ "$rc" -ne 2 ] || [ "$EV_CHECKED" -ne 0 ]; then
+    echo "selftest FIXTURE 4 (empty scan must ERROR) failed: rc=$rc [$EV_VERDICT]" >&2; fail=1
+  fi
+
+  if [ "$fail" -ne 0 ]; then
+    echo "ERROR — nothing was checked: selftest failed, guard is untrustworthy" >&2
+    echo "ERROR — nothing was checked: selftest failed, guard is untrustworthy"
+    exit 2
+  fi
+  echo "selftest: 4/4 fixtures OK" >&2
+}
+
+# --- argument parsing -------------------------------------------------------
+MODE=scan
+CENSUS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest)          MODE=selftest ;;
+    --generate-baseline) MODE=generate ;;
+    --census)            shift; CENSUS="${1:-}" ;;
+    --baseline)          shift; BASELINE="${1:-}" ;;
+    -h|--help)           sed -n '1,50p' "$0"; exit 0 ;;
+    *) echo "ERROR — nothing was checked: unknown argument '$1'"; exit 2 ;;
+  esac
+  shift
+done
+
+selftest
+if [ "$MODE" = selftest ]; then
+  echo "PASS — 4 selftest fixture(s) checked, 0 failures"
+  exit 0
+fi
+
+# --- census -----------------------------------------------------------------
+if [ -z "$CENSUS" ]; then
+  CENSUS="$W/census.tsv"
+  set +e
+  sh "$CENSUS_SH" "$CENSUS" 2>"$W/census.err"
+  census_rc=$?
+  set -e
+  if [ "$census_rc" -ne 0 ]; then
+    echo "ERROR — nothing was checked: census failed (rc=$census_rc): $(head -1 "$W/census.err")"
+    exit 2
+  fi
+fi
+if [ ! -s "$CENSUS" ]; then
+  echo "ERROR — nothing was checked: census output '$CENSUS' is empty or missing"
+  exit 2
+fi
+
+extract_unbacked "$CENSUS" "$W/cur.txt"
+
+if [ "$MODE" = generate ]; then
+  n=$(wc -l < "$W/cur.txt" | tr -d ' ')
+  if [ "$n" -eq 0 ]; then
+    echo "ERROR — nothing was checked: census yielded 0 unbacked symbols; refusing to write an empty baseline"
+    exit 2
+  fi
+  {
+    echo "# Frozen baseline of UNBACKED extern symbols (Stage 3 ratchet)."
+    echo "# Union of census classes GENUINELY_MISSING and DEAD_DECLARATION."
+    echo "# Generated by: sh scripts/check/check-unbacked-extern-ratchet.shs --generate-baseline"
+    echo "# DELIBERATE, REVIEWED updates only — see .claude/rules/vcs.md."
+    cat "$W/cur.txt"
+  } > "$BASELINE"
+  echo "PASS — $n unbacked extern symbol(s) checked, baseline written to $BASELINE"
+  exit 0
+fi
+
+read_baseline "$BASELINE" "$W/base.txt"
+compare "$W/cur.txt" "$W/base.txt"
+echo "$EV_VERDICT"
+exit "$EV_RC"
