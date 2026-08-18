@@ -23,13 +23,20 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
 - Gate: `scripts/check/check-no-direct-rt.shs` — ratchet mode (baseline
   `no_direct_rt_baseline.txt`, only goes down) + `--critical`/`SIMPLE_RT_CRITICAL=1`
   phase-A error mode (any forbidden site fails); FAIL prints fix-it guidance.
+  Current state: 14793 files scanned, 14241 forbidden sites (baseline
+  14251), with 6697 allowed provider references.
 - Comparator: `binary_layout.spl` `compare_word` (8/8 spec green,
   `binary_compare_spec.spl`).
 - C-MIG-0001 (crc32_text): differential 5/5, regression 35/35, perf spec
   `test/05_perf/lib/crc32_text_c_vs_simple_perf_spec.spl` (interpreter-lane
-  ceiling only; native parity pending). Registry:
+  ceiling only; native parity pending). C-MIG inventory: 19 entries
+  (2 done, 8 planned, 8 assess, 1 verified). Registry:
   `doc/08_tracking/c_migration/c_migration_inventory.sdn` + bug list
-  `c_replaceable_bug_list.md` (C-MIG-0001..0018).
+  `c_replaceable_bug_list.md` (C-MIG-0001..0020).
+- Track B (parallel-agent wave): 11 symbol→wrapper rows in rt_migration_cycle.shs
+  TB_TABLE (time_now_unix_micros, file_exists, file_delete, env_get, getpid,
+  process_run, file_copy, thread_sleep, get_args, file_write); Track C
+  (rt_file_read_text coalesced), Track D (text/bytes signature-exact).
 - Compiler fixes proving the alias lane: strict-JIT fail-open closed;
   bare-assignment locals minted correctly (both in `src/compiler_rust`,
   deployed binary still needs rebuild+deploy to pick up the second).
