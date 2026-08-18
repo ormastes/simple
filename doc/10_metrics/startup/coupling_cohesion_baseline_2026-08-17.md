@@ -248,3 +248,27 @@ plus var_reassign <-> tiered_jit. Import-line-only fixes:
 Measured (dep_baseline.py, CLI closure): largest SCC 36 -> 13; files-in-cycles 169 -> 150.
 Verified: optimizer_plugin 56/56, dynamic routing 6/6, hot-path 8/8, bounds_check_elim 7/7,
 collection_opt 30/31 baseline-identical (temp-restore A/B).
+
+## Repeatable re-measure gate (added 2026-08-18)
+
+The scratchpad Python resolver above is now superseded for gating by a committed,
+self-contained detector: `scripts/check/check-coupling-budget.shs` (pure sh+awk,
+~10s wall, no Python, no `bin/simple`). It recomputes the same import-graph
+closure + Tarjan SCC over ALL `.spl` under `src/compiler` + `src/app` (a wider
+scope than the per-root rows above, so numbers differ by design) and compares
+against `scripts/check/coupling_budget_baseline.txt`. Measured 2026-08-18 on
+`main` (5596 files in closure):
+
+| metric | value |
+|---|---|
+| cycles (SCCs > 1) | 63 |
+| files-in-cycles | 249 |
+| largest SCC | 13 |
+| backend largest (members under `src/compiler/{70.,}backend/` in one SCC) | 10 |
+
+Verdict convention per `doc/07_guide/infra/detector/detector_standard.md`:
+`PASS`/`FAIL`/`ERROR` exit 0/1/2, non-vacuous (0 resolved files = ERROR), fatal
+`--selftest` (must-FAIL synthetic 3-cycle, must-PASS acyclic, 2x must-ERROR)
+runs before every scan. Recorded escape: edit the baseline with a dated comment;
+no flag accepts a regression. Sabotage-verified: budget lowered below measured
+→ `FAIL — ... largest_scc=13>5` exit 1; restored → PASS exit 0.
