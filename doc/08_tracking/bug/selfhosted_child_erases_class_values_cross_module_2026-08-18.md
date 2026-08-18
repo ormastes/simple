@@ -9,7 +9,7 @@
 
 
 **Date:** 2026-08-18
-**Status:** OPEN
+**Status:** RESOLVED (was OPEN)
 **Severity:** HIGH (blocks any spec that drives a class instance defined in another module)
 **Child binary:** `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple` (as reported by the test runner's `child binary:` line)
 
@@ -66,3 +66,29 @@ A redeployed self-hosted child binary that preserves class identity across
 module boundaries; then fold the BuildCache round-trip cases (persist +
 reload + sabotage of the persisted `deps_iface` row) back into
 `dep_interface_cache_key_spec.spl`.
+
+## RESOLVED 2026-08-18 (lane-aspect-dynload)
+
+Root cause: reference-identity `class` values (`ClassDef::is_value_type ==
+false`) are stored as `Value::ClassInstance`, while `Value::Object` holds
+value-identity `struct`s. Two interpreter dispatchers had arms only for
+`Value::Object`:
+
+- `src/compiler_rust/compiler/src/interpreter/expr/calls.rs:358` (field read)
+- `src/compiler_rust/compiler/src/interpreter_method/mod.rs:1242` (method call)
+
+`ClassInstance` fell into the catch-all, and `Value::type_name()` renders it as
+`"object"` (`value_impl.rs:638`) — which is exactly why the receiver printed
+with its correct class and fields while the static identity looked erased.
+Both now have `Value::ClassInstance` arms; the method arm binds `self` to the
+instance itself, preserving reference semantics.
+
+Acceptance:
+- test/01_unit/compiler/interpreter/class_value_field_access_spec.spl —
+  `Results: 4 total, 4 passed, 0 failed`
+- test/01_unit/compiler/interpreter/class_value_field_access_control_spec.spl —
+  `Results: 4 total, 4 passed, 0 failed`
+- test/01_unit/lib/structural/component_descriptor_spec.spl —
+  `Results: 12 total, 12 passed, 0 failed`
+- `run`-mode positive control unchanged (class field, class method, struct
+  field, cross-module class field all correct).

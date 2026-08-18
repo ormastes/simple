@@ -356,6 +356,54 @@ pub(super) fn eval_call_expr(
 
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let result = match recv_val {
+                // Reference-identity class values (`class`, i.e.
+                // ClassDef::is_value_type == false) are stored as
+                // Value::ClassInstance, NOT Value::Object. This arm used to be
+                // missing, so every field read on a `class` fell through to the
+                // catch-all below and reported "undefined field '<f>': cannot
+                // access field on value of type 'object'" (type_name() renders
+                // ClassInstance as "object", which is why the receiver printed
+                // correctly while its static identity looked erased). Mirror
+                // the Object arm: direct field, '_'-prefixed auto-zero, then
+                // get_/is_/no-paren getter forwarding through the method
+                // dispatcher (which already has a ClassInstance arm).
+                Value::ClassInstance(ref instance) => {
+                    if let Some(val) = instance.field(field) {
+                        return Ok(Some(val));
+                    }
+                    if field.starts_with('_') {
+                        return Ok(Some(Value::Int(0)));
+                    }
+                    let empty_args: Vec<Argument> = vec![];
+                    let class_name = instance.class().to_string();
+                    for candidate in [format!("get_{field}"), format!("is_{field}"), field.clone()] {
+                        let has_method = classes
+                            .get(class_name.as_str())
+                            .is_some_and(|c| c.methods.iter().any(|m| m.name == candidate))
+                            || impl_methods
+                                .get(class_name.as_str())
+                                .is_some_and(|ms| ms.iter().any(|m| m.name == candidate));
+                        if has_method {
+                            return Ok(Some(evaluate_method_call(
+                                receiver,
+                                &candidate,
+                                &empty_args,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?));
+                        }
+                    }
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_FIELD)
+                        .with_help(format!("check that field or method '{field}' exists on class {class_name}"));
+                    Err(CompileError::semantic_with_context(
+                        format!("undefined field '{field}': class {class_name} has no such field or getter"),
+                        ctx,
+                    ))
+                }
                 Value::Object {
                     ref fields, ref class, ..
                 } => {

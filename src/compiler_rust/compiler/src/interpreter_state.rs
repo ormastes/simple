@@ -20,53 +20,6 @@ use crate::aop_config::AopConfig;
 use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
 use crate::di::DiConfig;
 use crate::interpreter_unit::*;
-// ---------------------------------------------------------------------------
-// Module-globals generation tracking (interpreter env cache invalidation)
-// ---------------------------------------------------------------------------
-//
-// `captured_env_with_live_globals` (interpreter_call/core/function_exec.rs)
-// caches the per-owner call environment; that cache is only valid while the
-// module-global stores are unchanged. Rather than trusting every one of the
-// ~40 mutation sites to remember to invalidate, the five stores below are
-// wrapped in `GenTrackedCell`, whose `borrow_mut()` bumps a thread-local
-// generation counter unconditionally. A bump on a borrow_mut that turns out
-// not to mutate costs only a cache miss (performance), never staleness
-// (correctness).
-
-thread_local! {
-    static MODULE_GLOBALS_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Current module-globals generation for this thread.
-pub(crate) fn module_globals_generation() -> u64 {
-    MODULE_GLOBALS_GENERATION.with(|c| c.get())
-}
-
-fn bump_module_globals_generation() {
-    MODULE_GLOBALS_GENERATION.with(|c| c.set(c.get().wrapping_add(1)));
-}
-
-/// RefCell wrapper that bumps the module-globals generation on every
-/// `borrow_mut()`, so any possible mutation invalidates dependent caches.
-pub(crate) struct GenTrackedCell<T> {
-    inner: RefCell<T>,
-}
-
-impl<T> GenTrackedCell<T> {
-    pub(crate) fn new(value: T) -> Self {
-        GenTrackedCell { inner: RefCell::new(value) }
-    }
-
-    pub(crate) fn borrow(&self) -> std::cell::Ref<'_, T> {
-        self.inner.borrow()
-    }
-
-    pub(crate) fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
-        bump_module_globals_generation();
-        self.inner.borrow_mut()
-    }
-}
-
 use crate::value::Value;
 
 // ---------------------------------------------------------------------------

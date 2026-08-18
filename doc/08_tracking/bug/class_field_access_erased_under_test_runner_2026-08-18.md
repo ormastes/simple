@@ -10,7 +10,7 @@
 > registry, and the native capsule receipt).
 
 
-**Status:** OPEN — seed regression, worked around in std.common.structural.component
+**Status:** RESOLVED (was OPEN) — seed regression, worked around in std.common.structural.component
 **Binary:** /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
 (59645008 bytes, mtime 2026-08-18 10:12:23) — the shared seed replaced mid-session.
 
@@ -55,3 +55,29 @@ src/lib/common/structural/component/descriptor.spl: pure-data records
 converted `class` -> `struct` (they carry no methods; struct is the honest
 shape anyway). Any spec-blocking class in other modules needs either the same
 treatment or the seed fix.
+
+## RESOLVED 2026-08-18 (lane-aspect-dynload)
+
+Root cause: reference-identity `class` values (`ClassDef::is_value_type ==
+false`) are stored as `Value::ClassInstance`, while `Value::Object` holds
+value-identity `struct`s. Two interpreter dispatchers had arms only for
+`Value::Object`:
+
+- `src/compiler_rust/compiler/src/interpreter/expr/calls.rs:358` (field read)
+- `src/compiler_rust/compiler/src/interpreter_method/mod.rs:1242` (method call)
+
+`ClassInstance` fell into the catch-all, and `Value::type_name()` renders it as
+`"object"` (`value_impl.rs:638`) — which is exactly why the receiver printed
+with its correct class and fields while the static identity looked erased.
+Both now have `Value::ClassInstance` arms; the method arm binds `self` to the
+instance itself, preserving reference semantics.
+
+Acceptance:
+- test/01_unit/compiler/interpreter/class_value_field_access_spec.spl —
+  `Results: 4 total, 4 passed, 0 failed`
+- test/01_unit/compiler/interpreter/class_value_field_access_control_spec.spl —
+  `Results: 4 total, 4 passed, 0 failed`
+- test/01_unit/lib/structural/component_descriptor_spec.spl —
+  `Results: 12 total, 12 passed, 0 failed`
+- `run`-mode positive control unchanged (class field, class method, struct
+  field, cross-module class field all correct).

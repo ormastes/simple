@@ -1,0 +1,44 @@
+# Reproduce spec for the 2026-08-18 seed regression: every field read on a
+# reference-identity `class` value failed under `bin/simple test` with
+# "undefined field '<f>': cannot access field on value of type 'object'".
+# Root cause: the interpreter's field-access evaluator
+# (src/compiler_rust/compiler/src/interpreter/expr/calls.rs) had arms for
+# Value::Object but none for Value::ClassInstance, which is how `class`
+# (is_value_type == false) values are stored.
+use std.spec
+use compiler.common.config.{Logger}
+
+class LocalCounter:
+    count: i64
+
+    fn doubled() -> i64:
+        self.count * 2
+
+fn local_class_field() -> i64:
+    val c = LocalCounter(count: 21)
+    c.count
+
+fn local_class_method() -> i64:
+    val c = LocalCounter(count: 21)
+    c.doubled()
+
+fn cross_module_class_field() -> i64:
+    val l = Logger(level: 3)
+    l.level
+
+fn cross_module_static_then_field_ok() -> bool:
+    val l = Logger.from_env()
+    l.level >= 0
+
+describe "class value field access under the test runner":
+    it "reads a field on a locally declared class":
+        expect(local_class_field()).to_equal(21)
+
+    it "dispatches an instance method on a locally declared class":
+        expect(local_class_method()).to_equal(42)
+
+    it "reads a field on a class imported from another module":
+        expect(cross_module_class_field()).to_equal(3)
+
+    it "reads a field on a class returned by a cross-module static method":
+        expect(cross_module_static_then_field_ok()).to_be(true)

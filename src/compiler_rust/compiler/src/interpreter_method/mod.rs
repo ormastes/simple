@@ -1239,6 +1239,62 @@ pub(crate) fn evaluate_method_call(
                 ));
             }
         }
+        // Reference-identity `class` values are Value::ClassInstance, not
+        // Value::Object, and this primary dispatcher had no arm for them: every
+        // instance-method call on a `class` fell through to the generic
+        // "method `X` not found on type `object`" error (type_name() renders
+        // ClassInstance as "object", so the receiver printed correctly while
+        // its static identity looked erased). Bind `self` to the ClassInstance
+        // value itself — that keeps reference semantics, since the instance's
+        // fields live behind a shared RwLock.
+        Value::ClassInstance(instance) => {
+            let class_name = instance.class().to_string();
+            let method_def: Option<Arc<FunctionDef>> = classes
+                .get(class_name.as_str())
+                .and_then(|class_def| class_def.methods.iter().find(|m| m.name == method).cloned())
+                .map(Arc::new)
+                .or_else(|| {
+                    impl_methods
+                        .get(class_name.as_str())
+                        .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
+                })
+                .or_else(|| {
+                    GLOBAL_IMPL_METHODS.with(|cell| {
+                        cell.borrow()
+                            .get(class_name.as_str())
+                            .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
+                    })
+                })
+                .or_else(|| {
+                    TRAIT_IMPLS.with(|cell| {
+                        cell.borrow().iter().find_map(|((_t, ty), ms)| {
+                            (ty == &class_name)
+                                .then(|| ms.iter().find(|m| m.name == method).cloned())
+                                .flatten()
+                        })
+                    })
+                });
+            if let Some(method_def) = method_def {
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                }
+                let mut self_fields = HashMap::new();
+                self_fields.insert("self".to_string(), recv_val.clone());
+                let self_fields = Arc::new(self_fields);
+                return crate::interpreter::interpreter_call::exec_function_with_values_and_self(
+                    method_def.as_ref(),
+                    &arg_vals,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    Some((class_name.as_str(), &self_fields)),
+                );
+            }
+            // Not found — fall through to the shared error/UFCS path below.
+        }
         Value::Object { class, fields } => {
             // Try to find and execute the method
             if let Some(result) = find_and_exec_method(
