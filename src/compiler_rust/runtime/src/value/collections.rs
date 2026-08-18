@@ -3862,10 +3862,19 @@ pub extern "C" fn rt_string_bytes(string: RuntimeValue) -> RuntimeValue {
     }
     unsafe {
         let bytes = std::slice::from_raw_parts(str_data, str_len as usize);
+        // Bulk fill: capacity is exact, so write the element slots directly
+        // and publish len once. The previous per-byte rt_array_push paid a
+        // call + capacity check per element and measured ~28 ns/byte from
+        // JIT code — 66% of crc32_text's whole 7.6x-vs-C gap (bug:
+        // jit_module_val_array_indexing_15x_slow_2026-08-18, follow-up
+        // section "complete crc32 cost model").
         let result = rt_array_new(bytes.len() as u64);
-        for &b in bytes {
-            rt_array_push(result, RuntimeValue::from_int(b as i64));
+        let arr = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, result);
+        let data = (*arr).data;
+        for (i, &b) in bytes.iter().enumerate() {
+            *data.add(i) = RuntimeValue::from_int(b as i64);
         }
+        (*arr).len = bytes.len() as u64;
         result
     }
 }

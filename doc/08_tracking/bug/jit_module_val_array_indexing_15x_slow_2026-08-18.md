@@ -43,3 +43,15 @@ the interpreter).
   module-val representation), CRC loop itself ≈ 19 us (~9 ns/byte — near-C).
   ⇒ With both compiler fixes the pure-Simple loop is already at parity
   shape; no further library-level work is productive.
+
+## bytes() bulk-fill FIX landed (same day): 26,393 -> 1,964 us per 500x2090B
+
+`rt_string_bytes` (runtime/src/value/collections.rs) now bulk-fills the
+exact-capacity array's element slots directly and publishes len once,
+instead of one rt_array_push per byte. Measured with a verified fresh build
+(first attempt was a cwd-broken cargo run masked by a pipe — the classic
+exit-code trap; re-measured after a real rebuild):
+- bytes(): ~28 ns/byte -> ~1.9 ns/byte (13x)
+- crc32_text codegen lane: 44,128 -> 20,150 us => 3.5x vs C (from 14.4x).
+Remaining gap: per-call table copy (~13 ms/500 calls, removable only by the
+module-val representation fix) + near-C CRC loop.
