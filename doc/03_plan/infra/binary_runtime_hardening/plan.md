@@ -90,6 +90,25 @@ real time, so state both explicitly in any such prompt:
   `use this.module.{foo}`, and that is the shape of
   `import_triggered_cross_module_symbol_misdispatch_2026-08-18.md`.
 
+## Measuring perf: two corrections learned the hard way (2026-08-18)
+
+1. **`SIMPLE_JIT_STRICT=1` does NOT select an engine.** Bare `bin/simple run`
+   already Cranelift-JITs; the flag only makes codegen failures refuse instead
+   of silently falling back. The engine knob is
+   `SIMPLE_EXECUTION_MODE=interpreter|jit` (`.claude/rules/testing.md`).
+   Measured proof: identical numbers with and without the strict flag.
+   `bin/simple test` is the interpreter lane.
+2. **Ratios are only comparable within one corpus.** The same `sqrt_f64` reads
+   12.2x on the spec's corpus and 61.8x on a 1e-300..1e300 corpus, because
+   range reduction iterates far more at extreme magnitudes. Always state the
+   corpus alongside the ratio, and never compare a before/after measured on
+   different corpora (the base64 44.7x->35x claim was withdrawn for exactly
+   this reason; its pinned-corpus A/B gave the real figure, 438x->32x).
+
+Corollary for harnesses: bind call results to locals before comparing —
+`if not _approx(f(x), g(x), tol):` with nested call arguments produced a wrong
+boolean under `SIMPLE_EXECUTION_MODE=jit`.
+
 ## Fix test standard (user directive, 2026-08-18)
 
 Every FIX (compiler, runtime, library, script) must land with:
