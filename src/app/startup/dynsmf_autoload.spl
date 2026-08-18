@@ -21,9 +21,10 @@ use os.smf.dynsmf_session.{
     dynsmf_abi_path,
     dynsmf_ifacehash_path,
     dynsmf_interface_hash_current,
-    dynsmf_artifact_status
+    dynsmf_artifact_status,
+    dynsmf_dynload_setting_parse
 }
-use app.io.mod.{env_get, process_spawn_async}
+use app.io.mod.{env_get, process_spawn_async, file_exists, file_read_text}
 
 fn dynsmf_dispatch_background_compiles(session: DynSmfSession, manifest: [DynSmfManifestEntry]) -> DynSmfSession:
     var out = session
@@ -146,3 +147,160 @@ pub fn dynsmf_startup_artifact_status_lines_for_manifest(manifest: [DynSmfManife
 
 pub fn dynsmf_startup_artifact_status_lines() -> [text]:
     dynsmf_startup_artifact_status_lines_for_manifest(dynsmf_default_manifest())
+
+# --- WP-B config consumption: dynload settings from SDN file + env override ---
+#
+# Config surface (fail-closed everywhere — a malformed line is an explicit
+# error, never a silent default):
+#
+# 1. SDN file (default path: simple_dynload.sdn), subset grammar:
+#        dynload:
+#          <library_id>: "presence=auto,placement=static,activation=startup"
+#    Only the `dynload:` section is read; other top-level sections are ignored.
+#    A malformed line INSIDE the dynload section is a hard config error.
+#
+# 2. Env override SIMPLE_DYNLOAD: `<library_id>:<spec>[;<library_id>:<spec>...]`
+#    where <spec> is the same comma key=value axis grammar. Env wins per
+#    library id over the file entry for the same id.
+#
+# Unknown library ids (not in the manifest) and axis parse failures surface as
+# DynSmfDynloadConfig(ok: false, reason: ...).
+
+class DynSmfDynloadConfig:
+    ok: bool
+    reason: text
+    settings: [DynSmfDynloadSetting]
+
+fn dynsmf_dynload_strip_quotes(v: text) -> text:
+    val parts = v.split("\"")
+    if parts.len() == 3 and parts[0] == "" and parts[2] == "":
+        return parts[1]
+    v
+
+# Extract (ids, specs) pairs from SDN text. Returns reason "" on success.
+fn dynsmf_dynload_pairs_from_sdn(sdn_text: text, ids: [text], specs: [text]) -> text:
+    val lines = sdn_text.split("\n")
+    var in_section = false
+    var li = 0
+    while li < lines.len():
+        val raw = lines[li]
+        val line = raw.trim()
+        if line != "" and not line.starts_with("#"):
+            val indented = raw.starts_with(" ") or raw.starts_with("\t")
+            if not indented:
+                in_section = line == "dynload:"
+                if in_section == false and not line.ends_with(":") and line.split(":").len() < 2:
+                    return "malformed_sdn_top_level:" + line
+            elif in_section:
+                val kv = line.split(":")
+                if kv.len() != 2:
+                    return "malformed_dynload_line:" + line
+                val id = kv[0].trim()
+                val spec = dynsmf_dynload_strip_quotes(kv[1].trim())
+                if id == "":
+                    return "malformed_dynload_line:" + line
+                ids.push(id)
+                specs.push(spec)
+        li = li + 1
+    ""
+
+# Extract pairs from the SIMPLE_DYNLOAD env grammar. Returns reason "" on success.
+fn dynsmf_dynload_pairs_from_env(env_text: text, ids: [text], specs: [text]) -> text:
+    val trimmed = env_text.trim()
+    if trimmed == "":
+        return ""
+    val entries = trimmed.split(";")
+    var ei = 0
+    while ei < entries.len():
+        val entry = entries[ei].trim()
+        if entry != "":
+            val kv = entry.split(":")
+            if kv.len() != 2 or kv[0].trim() == "":
+                return "malformed_env_entry:" + entry
+            ids.push(kv[0].trim())
+            specs.push(kv[1].trim())
+        ei = ei + 1
+    ""
+
+fn dynsmf_dynload_manifest_find(manifest: [DynSmfManifestEntry], id: text) -> i64:
+    var mi = 0
+    while mi < manifest.len():
+        if manifest[mi].id == id:
+            return mi
+        mi = mi + 1
+    -1
+
+pub fn dynsmf_dynload_settings_from_values(manifest: [DynSmfManifestEntry], sdn_text: text, env_text: text) -> DynSmfDynloadConfig:
+    val empty: [DynSmfDynloadSetting] = []
+    var file_ids: [text] = []
+    var file_specs: [text] = []
+    val file_err = dynsmf_dynload_pairs_from_sdn(sdn_text, file_ids, file_specs)
+    if file_err != "":
+        return DynSmfDynloadConfig(ok: false, reason: file_err, settings: empty)
+    var env_ids: [text] = []
+    var env_specs: [text] = []
+    val env_err = dynsmf_dynload_pairs_from_env(env_text, env_ids, env_specs)
+    if env_err != "":
+        return DynSmfDynloadConfig(ok: false, reason: env_err, settings: empty)
+    # env wins per library id: replace matching file entry, else append
+    var oi = 0
+    while oi < env_ids.len():
+        var replaced = false
+        var fi = 0
+        while fi < file_ids.len():
+            if file_ids[fi] == env_ids[oi]:
+                file_specs[fi] = env_specs[oi]
+                replaced = true
+            fi = fi + 1
+        if not replaced:
+            file_ids.push(env_ids[oi])
+            file_specs.push(env_specs[oi])
+        oi = oi + 1
+    var settings: [DynSmfDynloadSetting] = []
+    var pi = 0
+    while pi < file_ids.len():
+        val mi = dynsmf_dynload_manifest_find(manifest, file_ids[pi])
+        if mi < 0:
+            return DynSmfDynloadConfig(ok: false, reason: "unknown_library:" + file_ids[pi], settings: empty)
+        val parsed = dynsmf_dynload_setting_parse(manifest[mi], file_specs[pi])
+        if not parsed.ok:
+            return DynSmfDynloadConfig(ok: false, reason: file_ids[pi] + ":" + parsed.reason, settings: empty)
+        settings.push(parsed.setting)
+        pi = pi + 1
+    DynSmfDynloadConfig(ok: true, reason: "loaded", settings: settings)
+
+pub fn dynsmf_dynload_config_default_path() -> text:
+    "simple_dynload.sdn"
+
+pub fn dynsmf_dynload_settings_load(manifest: [DynSmfManifestEntry], config_path: text) -> DynSmfDynloadConfig:
+    var sdn_text = ""
+    if config_path != "" and file_exists(config_path):
+        sdn_text = file_read_text(config_path)
+    dynsmf_dynload_settings_from_values(manifest, sdn_text, env_get("SIMPLE_DYNLOAD") ?? "")
+
+# Config-driven startup entry: loads settings from SDN file + SIMPLE_DYNLOAD
+# env, then runs the settings-aware startup session. A config error fails
+# closed: NO entries are loaded; a single failed "dynload_config" evidence row
+# records the reason.
+pub fn dynsmf_startup_session_with_dynload_config_values(args: [text], env_dynsmf: text, env_disable: text, session_id: text, manifest: [DynSmfManifestEntry], sdn_text: text, env_dynload: text) -> DynSmfSession:
+    val config = dynsmf_dynload_settings_from_values(manifest, sdn_text, env_dynload)
+    if not config.ok:
+        val policy = dynsmf_policy_from_args_env(args, env_dynsmf, env_disable)
+        var out = dynsmf_session_new(session_id, policy)
+        out = dynsmf_session_add_evidence(out, DynSmfEvidenceRow(library_id: "*", action: "dynload_config", policy_source: out.policy.source, status: "failed", handle: 0, generation: out.generation, reason: config.reason))
+        return out
+    dynsmf_startup_session_with_dynload_settings(args, env_dynsmf, env_disable, session_id, manifest, config.settings)
+
+pub fn dynsmf_startup_session_with_dynload_config(args: [text], session_id: text, manifest: [DynSmfManifestEntry], config_path: text) -> DynSmfSession:
+    var sdn_text = ""
+    if config_path != "" and file_exists(config_path):
+        sdn_text = file_read_text(config_path)
+    dynsmf_startup_session_with_dynload_config_values(
+        args,
+        env_get("SIMPLE_DYNSMF") ?? "",
+        env_get("SIMPLE_DYNSMF_DISABLE") ?? "",
+        session_id,
+        manifest,
+        sdn_text,
+        env_get("SIMPLE_DYNLOAD") ?? ""
+    )

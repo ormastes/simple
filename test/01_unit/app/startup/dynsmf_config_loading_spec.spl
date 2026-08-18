@@ -1,0 +1,103 @@
+# @cover src/app/startup/dynsmf_autoload.spl 40%
+"""
+# dynSMF Dynload Config Loading Specification
+
+## Overview
+
+Verifies that WP-B dynload settings are consumable from real startup config
+sources instead of only in-memory strings: an SDN file section (`dynload:`
+with per-library axis specs) plus the SIMPLE_DYNLOAD env override
+(`<id>:<spec>[;<id>:<spec>]`, same comma key=value axis grammar). Env wins
+per library id. Malformed config fails closed with an explicit reason —
+never a silent default. Absent config yields empty settings (unchanged
+back-compat behavior).
+
+**Research:** doc/01_research/compiler/startup_performance/startup_perf_architecture_2026-08-17.md (section 5.3)
+"""
+
+use std.spec
+use os.smf.dynsmf_session.{
+    DynSmfManifestEntry,
+    dynsmf_presence_off,
+    dynsmf_presence_on,
+    dynsmf_placement_dynamic,
+    dynsmf_activation_manual,
+    dynsmf_activation_startup
+}
+use app.startup.dynsmf_autoload.{
+    dynsmf_dynload_settings_from_values,
+    dynsmf_dynload_settings_load
+}
+use app.io.mod.{file_write, file_delete}
+
+fn spec_entry(id: text, autoload: bool) -> DynSmfManifestEntry:
+    DynSmfManifestEntry(id: id, path: "build/dynsmf/" + id + ".smf", source_module: "test.mod." + id, artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: autoload, exports: ["run"])
+
+fn spec_manifest() -> [DynSmfManifestEntry]:
+    [spec_entry("lib_a", true), spec_entry("lib_b", false)]
+
+fn spec_sdn_text() -> text:
+    "# startup dynload config\n" +
+        "dynload:\n" +
+        "  lib_a: \"presence=on,placement=dynamic,activation=manual\"\n" +
+        "  lib_b: \"presence=off\"\n"
+
+describe "dynSMF dynload config loading":
+    it "loads settings from SDN file text only":
+        val config = dynsmf_dynload_settings_from_values(spec_manifest(), spec_sdn_text(), "")
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(2)
+        expect(config.settings[0].library_id).to_equal("lib_a")
+        expect(config.settings[0].presence).to_equal(dynsmf_presence_on())
+        expect(config.settings[0].placement).to_equal(dynsmf_placement_dynamic())
+        expect(config.settings[0].activation).to_equal(dynsmf_activation_manual())
+        expect(config.settings[1].presence).to_equal(dynsmf_presence_off())
+
+    it "loads settings from env text only":
+        val config = dynsmf_dynload_settings_from_values(spec_manifest(), "", "lib_b:presence=on,activation=startup")
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(1)
+        expect(config.settings[0].library_id).to_equal("lib_b")
+        expect(config.settings[0].presence).to_equal(dynsmf_presence_on())
+        expect(config.settings[0].activation).to_equal(dynsmf_activation_startup())
+
+    it "lets env override the file entry for the same library id":
+        val config = dynsmf_dynload_settings_from_values(spec_manifest(), spec_sdn_text(), "lib_a:presence=off")
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(2)
+        expect(config.settings[0].library_id).to_equal("lib_a")
+        expect(config.settings[0].presence).to_equal(dynsmf_presence_off())
+
+    it "fails closed on a malformed file axis value":
+        val bad = spec_sdn_text() + "  lib_b: \"presence=maybe\"\n"
+        val config = dynsmf_dynload_settings_from_values(spec_manifest(), bad, "")
+        expect(config.ok).to_equal(false)
+        expect(config.reason).to_contain("unknown_presence:maybe")
+        expect(config.settings.len()).to_equal(0)
+
+    it "fails closed on a malformed env entry and unknown library ids":
+        val bad_env = dynsmf_dynload_settings_from_values(spec_manifest(), "", "lib_a presence=on")
+        expect(bad_env.ok).to_equal(false)
+        expect(bad_env.reason).to_contain("malformed_env_entry")
+        val unknown = dynsmf_dynload_settings_from_values(spec_manifest(), "", "lib_zz:presence=on")
+        expect(unknown.ok).to_equal(false)
+        expect(unknown.reason).to_equal("unknown_library:lib_zz")
+
+    it "returns empty settings when no config is present (back-compat)":
+        val config = dynsmf_dynload_settings_from_values(spec_manifest(), "", "")
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(0)
+
+    it "reads a real SDN config file from disk":
+        val path = "build/dynsmf_config_loading_spec_fixture.sdn"
+        file_write(path, spec_sdn_text())
+        val config = dynsmf_dynload_settings_load(spec_manifest(), path)
+        file_delete(path)
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(2)
+        expect(config.settings[0].presence).to_equal(dynsmf_presence_on())
+
+    it "treats a missing config file as empty settings":
+        val config = dynsmf_dynload_settings_load(spec_manifest(), "build/definitely_missing_dynload_config.sdn")
+        expect(config.ok).to_equal(true)
+        expect(config.settings.len()).to_equal(0)
