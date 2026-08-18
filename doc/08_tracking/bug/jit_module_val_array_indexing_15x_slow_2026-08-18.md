@@ -55,3 +55,27 @@ exit-code trap; re-measured after a real rebuild):
 - crc32_text codegen lane: 44,128 -> 20,150 us => 3.5x vs C (from 14.4x).
 Remaining gap: per-call table copy (~13 ms/500 calls, removable only by the
 module-val representation fix) + near-C CRC loop.
+
+## SEVERITY UPGRADE (same day): fn-initialized module-val arrays read WRONG VALUES via the fast path
+
+Two distinct classes, measured on the current fixed seed (strict JIT):
+
+| module-val initializer | typed hoisted read (`val t = V` then `t[i]` in hot loop) |
+|---|---|
+| array LITERAL (`val V = [1,2,3,4]`) | CORRECT but ~73-80 ns/read (annotation does not help) |
+| function call (`val V = make()`)    | ~4 ns/read but returns WRONG VALUES |
+
+Repro for the wrong-value class: switching gzip/crc.spl's loops from
+`_table_copy()` back to direct `val table = _CRC32_TABLE` makes the
+CRC-32 KAT ("123456789" -> 0xCBF43926) FAIL under SIMPLE_JIT_STRICT=1
+while the same code passes interpreted. This matches module_pass.rs's own
+comment trail: `global_init_values` stores only const-evaluable
+initializers — a function-call initializer's result is never stored (the
+"gap 8 write-side half" explicitly marked untouched), so the typed fast
+path reads an uninitialized slot. Consequence: EARLIER "fast" module-val
+probe numbers (4.1 us/1M) in this file are value-unverified and likely
+measured zero-reads — treat only KAT-verified numbers as real.
+
+The `_table_copy()` mitigation in gzip/crc.spl is therefore load-bearing
+for CORRECTNESS, not just speed. Do not remove it until this bug is fixed
+and the crosslang KAT passes under strict JIT with direct module-val reads.
