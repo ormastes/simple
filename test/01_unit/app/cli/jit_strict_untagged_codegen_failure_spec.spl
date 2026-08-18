@@ -1,0 +1,57 @@
+"""
+# `SIMPLE_JIT_STRICT=1` refuses fallback on UNTAGGED codegen failures too
+
+Regression guard for
+doc/08_tracking/bug/simple_jit_strict_fail_open_nontagged_failures_2026-08-18.md.
+Before the fix (`src/compiler_rust/driver/src/exec_core.rs`), strict mode only
+refused interpreter fallback for errors carrying the literal
+`SIMPLE_JIT_STRICT:` tag (unresolved import, paren-less accessor, a few other
+classified families). A plain Cranelift function-body compile failure —
+untagged — fell back silently even under strict mode, printing the
+interpreter's result with exit 0. This is distinct from the existing
+`run_semantic_error_exit_code_spec.spl` coverage, which only exercises the
+already-tagged "unresolved identifier" family.
+
+The fixture used here (`n = 5; print(n)`) is the exact untagged failure named
+in the bug doc: bare-assignment locals lower to a `GlobalLoad` that the
+Cranelift backend cannot resolve, so JIT compilation fails with no
+`SIMPLE_JIT_STRICT:` tag at all. That underlying lowering defect is tracked
+separately (doc/08_tracking/bug/jit_cannot_compile_print_int_2026-08-18.md)
+and is NOT required to be fixed for this spec: this spec asserts the
+STRICT-MODE FALLBACK CONTRACT, which is orthogonal to whether any particular
+construct happens to fail to JIT-compile.
+
+@manual_section cli/run_exit_codes
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, file_write}
+
+val PROBE_DIR = "build/probe_jit_strict_untagged"
+val PROBE = "{PROBE_DIR}/bare_assign_probe.spl"
+
+fn write_probe():
+    shell("mkdir -p {PROBE_DIR}")
+    file_write(PROBE, "fn main():\n    n = 5\n    print(n)\n")
+
+fn run_engine(engine_env: text) -> (text, i64):
+    # The test daemon exports SIMPLE_EXECUTION_MODE=interpreter to children;
+    # SIMPLE_EXECUTION_MODE=jit here is required or this spec would silently
+    # never exercise the JIT lane at all (see run_semantic_error_exit_code_spec.spl).
+    val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=jit {engine_env} timeout 60 bin/simple run {PROBE} 2>&1")
+    (r.stdout + r.stderr, r.exit_code)
+
+describe "SIMPLE_JIT_STRICT=1 vs an untagged Cranelift codegen failure":
+    it "without strict mode, falls back to the interpreter and exits 0":
+        # @req REQ-CLI-EXIT-004
+        write_probe()
+        val (out, rc) = run_engine("")
+        assert_equal(rc, 0)
+        assert_contains(out, "5")
+
+    it "with strict mode, refuses fallback and exits non-zero naming the reason":
+        # @req REQ-CLI-EXIT-004
+        write_probe()
+        val (out, rc) = run_engine("SIMPLE_JIT_STRICT=1")
+        assert_not_equal(rc, 0)
+        assert_contains(out, "SIMPLE_JIT_STRICT=1: refusing interpreter fallback after JIT failure")

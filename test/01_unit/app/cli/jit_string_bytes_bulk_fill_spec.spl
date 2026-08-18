@@ -1,0 +1,56 @@
+"""
+# `.bytes()` correctness under the JIT-lane bulk-fill fast path
+
+Regression guard for the `rt_string_bytes` bulk-fill change (perf commit
+"rt_string_bytes bulk fill — bytes() 13x faster", touching
+src/compiler_rust/runtime/src/value/collections.rs): direct element-slot
+writes plus a single length publish replaced a per-byte `rt_array_push` loop.
+Because the fast path writes past `bytes.len()` slots directly instead of
+growing incrementally, an off-by-one in the slot count or the final length
+publish would silently corrupt `.bytes()` on exactly the boundary shapes this
+spec exercises: ASCII, multibyte UTF-8 (byte count != char count), empty, and
+a long (>4KB) string.
+
+`rt_string_bytes` is a native runtime function reached from JIT-compiled
+code; forcing `SIMPLE_EXECUTION_MODE=jit` (the test daemon otherwise exports
+`interpreter` to children) is required so this spec actually exercises the
+fixed code path rather than the tree-walk interpreter's own `.bytes()`
+implementation.
+
+@manual_section cli/run_exit_codes
+"""
+
+use std.spec.*
+use std.io_runtime.{shell, file_write}
+
+val PROBE_DIR = "build/probe_jit_string_bytes"
+val PROBE = "{PROBE_DIR}/bytes_probe.spl"
+
+fn run_probe(body: text) -> (text, i64):
+    shell("mkdir -p {PROBE_DIR}")
+    file_write(PROBE, body)
+    val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 timeout 60 bin/simple run {PROBE} 2>&1")
+    (r.stdout + r.stderr, r.exit_code)
+
+describe "rt_string_bytes bulk fill — .bytes() correctness (JIT lane, SIMPLE_JIT_STRICT=1 proves real codegen ran)":
+    it "ASCII string: byte count equals char count":
+        val (out, rc) = run_probe("fn main():\n    print(\"hello\".bytes().len())\n")
+        assert_equal(rc, 0)
+        assert_contains(out, "5")
+
+    it "multibyte UTF-8 string: byte count exceeds char count":
+        # "cafe" + U+00E9 (e-acute) = 4 ASCII bytes + 2-byte UTF-8 sequence = 5 bytes, 4 chars
+        val (out, rc) = run_probe("fn main():\n    print(\"caf\u{00e9}\".bytes().len())\n")
+        assert_equal(rc, 0)
+        assert_contains(out, "5")
+
+    it "empty string: zero bytes, no out-of-bounds write":
+        val (out, rc) = run_probe("fn main():\n    print(\"\".bytes().len())\n")
+        assert_equal(rc, 0)
+        assert_contains(out, "0")
+
+    it "long string (>4KB): bulk-fill length publish matches full byte count":
+        val long_body = "fn main():\n    print(\"" + "A".repeat(5000) + "\".bytes().len())\n"
+        val (out, rc) = run_probe(long_body)
+        assert_equal(rc, 0)
+        assert_contains(out, "5000")
