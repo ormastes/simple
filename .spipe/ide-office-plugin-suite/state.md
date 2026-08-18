@@ -30,7 +30,18 @@ Integrate the Simple IDE launch surface with the existing plugin, office, markdo
 Binary import/export compatibility for proprietary PPTX/XLSX files is not complete unless separately specified; this feature covers IDE capability integration and internal compatible surfaces first.
 
 ## Phase
-dev-done
+CLOSED — dev-done, re-verified by content 2026-08-18
+
+Independently re-verified against the source tree (not against this log):
+`src/app/ide/feature_report.spl`, `src/app/ide/agent_dashboard.spl`,
+`src/app/office/slides/design.spl`, and the sheets compatibility surface under
+`src/app/office/sheets/` are all present and wired. No open item found.
+
+Caveat on the pass counts below: every `N passed / 0 failed` figure in this log
+was recorded in an earlier session and was NOT re-executed on 2026-08-18 (no
+self-hosted binary is available — see `.spipe/office_cli_tui_ui_access/state.md`
+"Blocker status"). The closure above rests on content verification, not on a
+fresh run.
 
 ## Log
 - dev: Created state file with 9 acceptance criteria (type: feature).

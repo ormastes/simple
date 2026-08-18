@@ -30,7 +30,25 @@ Make IDE markdown drawing/editing and the counter/LibreOffice-style office app p
 
 ## Phase
 
-dev-done
+CLOSED — dev-done, re-verified by content 2026-08-18
+
+Independently re-verified against the source tree (not against this log): all
+four hardening surfaces exist and are wired through `src/app/office/mod.spl` —
+`src/app/office/counter.spl` (`CounterApp`, `counter_apply_action`),
+`wysiwyg_update_line_checked` (`md_wysiwyg.spl`), `update_cell_checked`
+(`sheets/spreadsheet.spl`), and `slide_update_text_checked` (`slides/slide.spl`).
+No open AC found.
+
+Caveat on the pass counts below: every `N/0` figure in this log was recorded in
+an earlier session and was NOT re-executed on 2026-08-18 (no self-hosted binary
+is available — see `.spipe/office_cli_tui_ui_access/state.md` "Blocker status").
+The closure above rests on content verification, not on a fresh run.
+
+Note on the `bin/simple check` evidence below: several log entries cite
+`bin/simple check <file>` exiting `0` as verification. Per the lesson now
+recorded in `.claude/skills/spipe.md`, `check` is BLIND to parse errors — it
+exits 0 on unparseable files — so those exit-0 citations are not evidence that
+the files are well-formed. The specs listed alongside them are.
 
 ## Log
 

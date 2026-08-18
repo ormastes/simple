@@ -45,7 +45,39 @@ Provide first-class Simple CLI launch and semantic UI-access support for the IDE
 
 ## Phase
 
-corrective-implementation-and-evidence
+BLOCKED — corrective-implementation-and-evidence, awaiting a self-hosted binary
+
+## Blocker status (re-verified 2026-08-18)
+
+**The blocker is STILL LIVE.** This lane cannot reach AC-1/2/4/8 without a
+self-hosted `simple` that can run `test`, `run`, `office`, and `ui`.
+
+Do NOT read "the compiler was rebuilt today" as "this blocker cleared."
+`bin/simple` was redeployed THREE times on 2026-08-17 (12:58, 20:10, 20:28) and
+**all three produced the RUST SEED**. Evidence, re-checked independently today:
+
+- `readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`,
+  **59,621,024 bytes**, mtime `2026-08-17 20:28`. The pure-Simple artifact is
+  ~3.46 MB; a 59.6 MB binary is the seed by size alone.
+- It prints the seed warning on startup.
+- `lint` works on it — and per `.claude/rules/commands.md` **only the seed can
+  lint** (`bootstrap/stage3/simple lint` is `unknown command`, exit 1). A
+  working `lint` is therefore positive proof of a seed, not of progress.
+- `bootstrap/stage3/simple` is stale: 3,464,072 bytes, mtime **Aug 11 22:10**.
+
+Consequence for this lane's evidence rules, unchanged: the deployed-process
+gate must record the artifact path, size, digest, and mtime, and must REJECT
+every seed marker. Any run on the current `bin/simple` is inadmissible as
+AC evidence.
+
+## Sibling lane status (verified by content 2026-08-18)
+
+`ide-office-plugin-suite` and `ide_md_counter_office_hardening` are both
+genuinely CLOSED, and the `libreoffice-suite` umbrella has continued to land
+office features (circular refs `8ed78bb0bf7`, dependency-order recalc
+`12e908dd279`, fill series `6ae2baad0ec`, named ranges `5d26fefc65c`). None of
+that clears this lane's blocker — those are source landings verified by content,
+whereas this lane requires a live deployed run.
 
 ## Log
 
@@ -167,3 +199,9 @@ corrective-implementation-and-evidence
   remains red while the generated manual carries its stale banner; after the
   one green deployed SSpec run, docgen must replace that manual, report zero
   stubs, and make the shared pair audit pass without rerunning the Office gate.
+- blocker re-verification (2026-08-18): Re-checked the 2026-08-08/08-11 runtime
+  audits against today's tree. Their conclusion holds unchanged — see the
+  "Blocker status" section above for the current artifact identity. Three
+  redeploys on 2026-08-17 all produced the Rust seed; `bootstrap/stage3/simple`
+  is still the Aug 11 artifact. Nothing in this lane advanced; no AC moved.
+  Documentation-only pass: no spec was run, no source was touched.
