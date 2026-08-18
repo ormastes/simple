@@ -1,0 +1,137 @@
+# Unified Packed UI Scene — Prepared2DBatch CONSTRUCTION (design §2.5).
+#
+# The batch-construction lane deferred by `ui_scene_prepared2d.spl`
+# ("the actual batch construction ... is a later lane"). Pure `common/`
+# code: a resolved DrawIR-v3 command stream in, `Prepared2DBatch` rows out.
+#
+# DrawIR style: capacity is computed up front by a pure counting pass over
+# the same boundary rule the construction pass uses, so construction fills
+# EXACTLY the precomputed envelope — zero per-frame allocation on replay,
+# and reuse is generation-keyed via `Prepared2DCacheKey`.
+#
+# Batch boundary rule (v1, intentionally minimal): consecutive commands
+# belong to one batch iff they share (kind-derived pipeline, clip_id,
+# transform_id). Dirty-range production and damage rects remain a later
+# lane (see doc/01_research/ui/execir_style_command_ir_for_gui_2026-08-18.md).
+
+use common.ui.ui_scene_counts.{UiSceneRange}
+use common.ui.draw_ir_v3.{DrawIrV3Command}
+use common.ui.ui_scene_prepared2d.{
+    Prepared2DBatch, Prepared2DPlan, Prepared2DCacheKey,
+    ui_scene_prepared2d_cache_key_equal, UI_SCENE_PREPARED2D_FLAG_NONE
+}
+
+# Pipeline identity for the boundary rule: derived from command kind only
+# (paint/resource specialization is a later lane).
+fn ui_scene_prepared2d_pipeline_of(cmd: DrawIrV3Command) -> u32:
+    cmd.kind.to_u32()
+
+fn _prepared2d_breaks_batch(prev: DrawIrV3Command, cur: DrawIrV3Command) -> bool:
+    (ui_scene_prepared2d_pipeline_of(prev) != ui_scene_prepared2d_pipeline_of(cur)
+        or prev.clip_id != cur.clip_id
+        or prev.transform_id != cur.transform_id)
+
+# Encode-time capacity: exact number of Prepared2DBatch rows the
+# construction pass will produce for this command stream.
+fn ui_scene_prepared2d_batch_capacity(commands: [DrawIrV3Command]) -> u32:
+    val n = commands.len()
+    if n == 0:
+        return 0u32
+    var count = 1u32
+    var i = 1
+    while i < n:
+        if _prepared2d_breaks_batch(commands[i - 1], commands[i]):
+            count = count + 1u32
+        i = i + 1
+    count
+
+struct Prepared2DBuildResult:
+    plan: Prepared2DPlan
+    batches: [Prepared2DBatch]
+
+fn _prepared2d_batch_row(cmds: [DrawIrV3Command], first: u32, count: u32) -> Prepared2DBatch:
+    val head = cmds[first.to_i64()]
+    Prepared2DBatch(
+        first_command: first,
+        command_count: count,
+        target_surface_id: 0u32,
+        pipeline_id: ui_scene_prepared2d_pipeline_of(head),
+        resource_set_id: 0u32,
+        resolved_clip_id: head.clip_id,
+        resolved_transform_id: head.transform_id,
+        flags: UI_SCENE_PREPARED2D_FLAG_NONE
+    )
+
+# Pure construction: resolved command stream -> Prepared2DBatch rows + plan.
+fn ui_scene_prepared2d_build(commands: [DrawIrV3Command], scene_generation: u32, capability_key: u64) -> Prepared2DBuildResult:
+    val cap = ui_scene_prepared2d_batch_capacity(commands)
+    var batches: [Prepared2DBatch] = []
+    val n = commands.len()
+    var first = 0u32
+    var i = 1
+    while i < n:
+        if _prepared2d_breaks_batch(commands[i - 1], commands[i]):
+            batches.push(_prepared2d_batch_row(commands, first, i.to_u32() - first))
+            first = i.to_u32()
+        i = i + 1
+    if n > 0:
+        batches.push(_prepared2d_batch_row(commands, first, n.to_u32() - first))
+    val built = batches.len().to_u32()
+    if built != cap:
+        # Envelope violation is a construction bug; fail loudly via count 0.
+        return Prepared2DBuildResult(
+            plan: Prepared2DPlan(
+                batches: UiSceneRange(start: 0u32, count: 0u32),
+                dirty_upload: UiSceneRange(start: 0u32, count: 0u32),
+                damage_rect_count: 0u32,
+                capability_key: capability_key,
+                scene_generation: scene_generation
+            ),
+            batches: []
+        )
+    Prepared2DBuildResult(
+        plan: Prepared2DPlan(
+            batches: UiSceneRange(start: 0u32, count: built),
+            dirty_upload: UiSceneRange(start: 0u32, count: 0u32),
+            damage_rect_count: 0u32,
+            capability_key: capability_key,
+            scene_generation: scene_generation
+        ),
+        batches: batches
+    )
+
+# Generation-keyed reuse. `build_count` is the identity proof: it increments
+# only when a real rebuild happened.
+struct Prepared2DBuildCache:
+    valid: bool
+    key: Prepared2DCacheKey
+    result: Prepared2DBuildResult
+    build_count: u32
+
+fn ui_scene_prepared2d_empty_cache() -> Prepared2DBuildCache:
+    Prepared2DBuildCache(
+        valid: false,
+        key: Prepared2DCacheKey(scene_generation: 0u32, capability_key: 0u64, viewport_generation: 0u32),
+        result: ui_scene_prepared2d_build([], 0u32, 0u64),
+        build_count: 0u32
+    )
+
+fn ui_scene_prepared2d_build_cached(cache: Prepared2DBuildCache, commands: [DrawIrV3Command], scene_generation: u32, capability_key: u64, viewport_generation: u32) -> Prepared2DBuildCache:
+    val key = Prepared2DCacheKey(
+        scene_generation: scene_generation,
+        capability_key: capability_key,
+        viewport_generation: viewport_generation
+    )
+    if cache.valid and ui_scene_prepared2d_cache_key_equal(cache.key, key):
+        return cache
+    Prepared2DBuildCache(
+        valid: true,
+        key: key,
+        result: ui_scene_prepared2d_build(commands, scene_generation, capability_key),
+        build_count: cache.build_count + 1u32
+    )
+
+export ui_scene_prepared2d_pipeline_of, ui_scene_prepared2d_batch_capacity,
+    Prepared2DBuildResult, ui_scene_prepared2d_build,
+    Prepared2DBuildCache, ui_scene_prepared2d_empty_cache,
+    ui_scene_prepared2d_build_cached

@@ -1,0 +1,69 @@
+use common.ui.draw_ir_v3.{DrawIrV3Command, draw_ir_v3_empty_command}
+use common.ui.ui_scene_prepared2d_build.{
+    ui_scene_prepared2d_batch_capacity, ui_scene_prepared2d_build,
+    ui_scene_prepared2d_empty_cache, ui_scene_prepared2d_build_cached
+}
+
+fn cmd_of(kind: u16, clip: u32, xform: u32) -> DrawIrV3Command:
+    var c = draw_ir_v3_empty_command()
+    c.kind = kind
+    c.clip_id = clip
+    c.transform_id = xform
+    c
+
+fn small_scene() -> [DrawIrV3Command]:
+    # 5 commands -> 3 batches: [rect,rect] [rect w/ new clip] [text,text]
+    [
+        cmd_of(1u16, 10u32, 20u32),
+        cmd_of(1u16, 10u32, 20u32),
+        cmd_of(1u16, 11u32, 20u32),
+        cmd_of(2u16, 11u32, 20u32),
+        cmd_of(2u16, 11u32, 20u32)
+    ]
+
+describe "ui_scene_prepared2d_build":
+    it "constructs expected batch counts from a small scene":
+        val cmds = small_scene()
+        val r = ui_scene_prepared2d_build(cmds, 7u32, 99u64)
+        expect(r.batches.len()).to_equal(3)
+        expect(r.plan.batches.count).to_equal(3u32)
+        expect(r.plan.scene_generation).to_equal(7u32)
+        expect(r.plan.capability_key).to_equal(99u64)
+        expect(r.batches[0].first_command).to_equal(0u32)
+        expect(r.batches[0].command_count).to_equal(2u32)
+        expect(r.batches[1].first_command).to_equal(2u32)
+        expect(r.batches[1].command_count).to_equal(1u32)
+        expect(r.batches[1].resolved_clip_id).to_equal(11u32)
+        expect(r.batches[2].first_command).to_equal(3u32)
+        expect(r.batches[2].command_count).to_equal(2u32)
+        expect(r.batches[2].pipeline_id).to_equal(2u32)
+
+    it "exact-capacity: constructed size equals precomputed envelope":
+        val cmds = small_scene()
+        val cap = ui_scene_prepared2d_batch_capacity(cmds)
+        val r = ui_scene_prepared2d_build(cmds, 1u32, 1u64)
+        expect(cap).to_equal(3u32)
+        expect(r.batches.len().to_u32()).to_equal(cap)
+        # command coverage is total and disjoint
+        var covered = 0u32
+        for b in r.batches:
+            covered = covered + b.command_count
+        expect(covered).to_equal(5u32)
+
+    it "reuses on same generation and rebuilds on changed generation":
+        val cmds = small_scene()
+        val c0 = ui_scene_prepared2d_empty_cache()
+        val c1 = ui_scene_prepared2d_build_cached(c0, cmds, 1u32, 5u64, 0u32)
+        expect(c1.build_count).to_equal(1u32)
+        val c2 = ui_scene_prepared2d_build_cached(c1, cmds, 1u32, 5u64, 0u32)
+        expect(c2.build_count).to_equal(1u32)   # reused, no rebuild
+        val c3 = ui_scene_prepared2d_build_cached(c2, cmds, 2u32, 5u64, 0u32)
+        expect(c3.build_count).to_equal(2u32)   # generation changed -> rebuild
+        expect(c3.result.plan.scene_generation).to_equal(2u32)
+
+    it "handles the empty scene":
+        val cmds: [DrawIrV3Command] = []
+        expect(ui_scene_prepared2d_batch_capacity(cmds)).to_equal(0u32)
+        val r = ui_scene_prepared2d_build(cmds, 3u32, 4u64)
+        expect(r.batches.len()).to_equal(0)
+        expect(r.plan.batches.count).to_equal(0u32)

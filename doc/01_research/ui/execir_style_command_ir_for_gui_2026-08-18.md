@@ -120,3 +120,17 @@ this file is the vocabulary only"). That is the smallest slice that turns the
 per-frame widget-tree walk into encode-once/replay, and it is pure `common/`
 code, testable without a backend. Cross-check lane status in
 `doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md` before claiming it.
+
+## 5. Slice landed 2026-08-18: Prepared2DBatch construction
+
+`src/lib/common/ui/ui_scene_prepared2d_build.spl` implements the deferred
+construction lane: exact encode-time capacity (`ui_scene_prepared2d_batch_capacity`),
+pure construction (`ui_scene_prepared2d_build`, batch boundary = kind-derived
+pipeline + clip_id + transform_id), and generation-keyed reuse
+(`Prepared2DBuildCache`, `build_count` as rebuild proof). Spec:
+`test/01_unit/lib/ui/ui_scene_prepared2d_build_spec.spl`.
+
+TODO(prepared2d): remainder of the lane — dirty_upload byte-range production
+(hook into `dirty_region.spl`), damage_rect_count, paint/resource-aware
+pipeline specialization, and NEEDS_OFFSCREEN flag derivation from group
+opacity/rotated-clip analysis.
