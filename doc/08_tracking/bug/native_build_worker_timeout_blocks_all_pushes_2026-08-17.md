@@ -44,6 +44,7 @@ this closure is about the infrastructure outage only, not about that gap.
 
 
 **Filed** 2026-08-17. **Status** RESOLVED 2026-08-18 (see note above). **Impact** blocks EVERY guarded push on
+**Filed** 2026-08-17. **Status** OPEN. **Impact** blocks EVERY guarded push on
 this host, for every lane.
 
 ## Symptom
@@ -92,6 +93,91 @@ timeout text are captured to `$ctrl_log` but never surfaced on failure, so the
 operator sees a fabrication-shaped verdict for a timeout. Suggested minimal
 fix: echo the last few lines of `$ctrl_log` on that failure path, the way the
 `[default]`/`[strict]` branches already do for their own logs.
+## Why the verdict line is still a defect — FIXED 2026-08-18
+
+`check-native-extern-fabrication.shs:71-75` ran the control build inside an
+`if !`, discarded its log, and printed only "no longer builds". The 255 and the
+timeout text were captured to `$ctrl_log` but never surfaced on failure, so the
+operator saw a fabrication-shaped verdict for a timeout.
+
+The obvious minimal fix — "echo it the way the `[default]`/`[strict]` branches
+do" — would **not** have worked, and that is worth recording. Those branches
+print `sed -n '1,20p'`, i.e. the HEAD of the log. Measured 2026-08-18: the
+control log is **1178-1181 lines** and the real error is the **last 4**; the
+first 20 lines are nothing but the "this is a bootstrap seed" banner and an
+`export use *` lint warning. A head-print would have surfaced zero diagnostic
+information.
+
+Fixed by adding a dedicated `report_ctrl_failure()` reporter that prints
+`tail -n 25` of the log, the build rc, the log path and line count, and — when
+the log matches `worker timed out after` — an explicit
+`DIAGNOSIS: this is a native-build WORKER TIMEOUT, not extern fabrication` line.
+The build rc is captured on its own line (`|| ctrl_build_rc=$?`), never through
+a pipe. A `--selftest` mode was added (4 fixture assertions: long-log tail is
+surfaced; timeout is diagnosed; short log is surfaced in full; a non-timeout log
+is not falsely diagnosed) — `PASS — selftest: 4 fixture assertion(s) checked, 0
+failed`.
+
+**Still open in the same file (deliberately untouched, narrow scope):** the
+`[default]`/`[strict]` absent-case branches still `sed -n '1,20p'` their own
+logs, which have the same 1178-line shape and the same head-is-worthless
+problem. Whoever next touches those branches should route them through
+`report_ctrl_failure` too.
+
+This changes only the diagnostics. **The push is still blocked** — correctly so.
+
+## The two remedies the error text suggests are BOTH dead (measured 2026-08-18)
+
+The compiler's own error says: *"Raise `--timeout`, shrink `--source`, or use the
+in-process backend."* Both of the first two were tested against the guard's real
+invocation. Neither works, so this cannot be resolved inside the guard.
+
+| experiment | `--source` | `--timeout` | result |
+|---|---|---|---|
+| guard default | `test/fixtures` | 7200 (default) | `rc=255`, timed out |
+| shrink source | `test/fixtures/native_extern_fabrication_probe` (**2 files**) | 900 | `rc=255`, timed out |
+| short-timeout repro | `test/fixtures` | 90 / 60 | `rc=255`, timed out |
+
+Provenance caveat on the 900s row: its worker died with code 143 (SIGTERM),
+which on this host can also mean earlyoom rather than a real failure. It is
+counted here only because `native-build` itself printed
+`[TIMEOUT: Process killed after 900s]` — i.e. *its own* timer fired and sent the
+signal. The 60s and 90s runs are unambiguous on the same point.
+
+**Shrinking `--source` does not help, and the error text's own explanation says
+why:** the interpreted worker "loads the whole compiler + LLVM import graph
+before any codegen". That cost is paid regardless of how small the user source
+set is — a 2-file `--source` dir is as slow as the whole fixture tree. The
+error's suggestion to shrink `--source` is misleading for any small-input build;
+it only ever applied to the `src/os + src/lib` case named in its own text.
+
+**Raising `--timeout` does not help either:** the guard already runs at the 7200s
+(2 hour) default and still times out. There is no evidence the worker is making
+progress toward completion rather than hung, so raising the budget further is
+guessing, not a fix.
+
+Neither the `--timeout` value nor the `--source` set is therefore a legitimate
+knob for this guard. Changing them would only convert a 2-hour red into a longer
+red. The guard was **not** weakened to pass.
+
+## What a native-build owner must do
+
+The fix is in `native-build`, not in any guard:
+
+1. Determine whether the interpreted worker is *slow* or *hung*. It fails
+   identically at 60s, 90s, 900s and 7200s with a 2-file source set — a fixed
+   cost that scales with the compiler + LLVM import graph, not with user input.
+   A 2-hour budget for a 2-file program is not a budget problem.
+2. Make the worker not re-load the whole compiler + LLVM import graph per build,
+   or route small host-target builds through the in-process backend (the third
+   suggestion in the error text, which is the only one not yet ruled out and
+   which this lane has no authority to switch on).
+3. Fix the error text: telling the operator to "shrink `--source`" is actively
+   misleading when a 2-file `--source` behaves identically to the full tree.
+
+Until then **every guarded push on this host stays blocked**, and that is the
+correct outcome — the control fixture exists precisely so this gate cannot be
+vacuously green while `native-build` is broken.
 
 ## Scope note
 
