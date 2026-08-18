@@ -16,6 +16,7 @@
 
 use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
+use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_binop_code}
 use compiler.common.diagnostics.span.{Span}
 
 # Cohesion split (2026-08-18): class-independent pieces live in sibling
@@ -77,6 +78,17 @@ class MirInterpreter:
     # (in _take_*) so no value can leak between sibling or successive calls.
     frame_locals_pool: [{i64: i64}]
     frame_blocks_pool: [{i64: MirBlock}]
+    # ExecIR tier-0.5 (Phase E): memoized flat-code fast path. Keyed by a
+    # shallow fingerprint (name + shape + entry-block kind/const fold) so two
+    # same-name same-shape functions with different consts never collide.
+    # Verdict 1 = encodable (module+arena present), 0 = memoized nil (probe
+    # once, then always tree-walk). Arena is created ONCE per module and
+    # reused across runs (memory efficiency). Kill switch: SIMPLE_EXECIR=0.
+    execir_enabled: bool
+    execir_modules: {text: ExecIrModule}
+    execir_arenas: {text: ExecIrArenaCtx}
+    execir_verdicts: {text: i64}
+    execir_probe_count: i64
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -110,8 +122,22 @@ impl MirInterpreter:
             cached_call_name: "",
             cached_call_fn: nil,
             frame_locals_pool: [],
-            frame_blocks_pool: []
+            frame_blocks_pool: [],
+            # Read once at startup (default ON); never re-read per call.
+            execir_enabled: (rt_env_get("SIMPLE_EXECIR") ?? "") != "0",
+            execir_modules: {},
+            execir_arenas: {},
+            execir_verdicts: {},
+            execir_probe_count: 0
         )
+
+    fn execir_memo_size() -> i64:
+        """Number of memoized ExecIR verdicts (encodable AND nil)."""
+        self.execir_verdicts.len()
+
+    fn execir_probe_count_value() -> i64:
+        """Number of encode attempts actually performed (memo misses)."""
+        self.execir_probe_count
 
     fn is_debug_log_enabled() -> bool:
         """Accessor: is per-run debug logging active? Cached once at create."""
@@ -206,6 +232,11 @@ impl MirInterpreter:
         # Invalidate the direct-call cache: entries may have changed.
         self.cached_call_name = ""
         self.cached_call_fn = nil
+        # Invalidate the ExecIR memo: encoded CALL targets bind to a table
+        # snapshot, so a new table must force re-probe.
+        self.execir_modules = {}
+        self.execir_arenas = {}
+        self.execir_verdicts = {}
 
     me _resolve_function(name: text) -> MirFunction?:
         """Resolve a callee by name with a one-entry cache for repeated
@@ -954,8 +985,66 @@ impl MirInterpreter:
     # Function Execution
     # ========================================================================
 
+    fn _execir_key(func: MirFunction) -> text:
+        """Shallow memo key: name + shape + entry-block fingerprint.
+
+        Name + block/local counts alone collide when two functions share both
+        but differ in const payloads, so fold the entry block's instruction
+        kinds and const immediates into the key (cheap, no full encode)."""
+        var key = "{func.name}#{func.blocks.len()}#{func.locals.len()}"
+        val entry_id = func.entry_block.id
+        for block in func.blocks:
+            if block.id.id == entry_id:
+                for inst in block.instructions:
+                    val piece = match inst.kind:
+                        case Const(dest, value, type_):
+                            match value:
+                                case Int(v): "|i{v}"
+                                case Bool(v): if v: "|b1" else: "|b0"
+                                case _: "|c?"
+                        case Copy(dest, src): "|cp"
+                        case Move(dest, src): "|mv"
+                        case BinOp(dest, op, left, right): "|o{execir_binop_code(op)}"
+                        case UnaryOp(dest, op, operand): "|u"
+                        case _: "|x"
+                    key = key + piece
+        key
+
     me execute_function(func: MirFunction) -> (i64?, InterpError?):
-        """Execute a MIR function and return result."""
+        """Execute a MIR function and return result.
+
+        Tier 0.5: if ExecIR can encode this function (memoized, including nil
+        verdicts so unencodable functions are probed exactly once), run it in
+        the create-once arena and return the identical (result, error) tuple.
+        Otherwise fall through to the tree-walk unchanged. SIMPLE_EXECIR=0
+        disables the tier entirely (env read once at create)."""
+        if self.execir_enabled:
+            val ekey = self._execir_key(func)
+            var verdict = self.execir_verdicts[ekey] ?? -1
+            if verdict < 0:
+                self.execir_probe_count = self.execir_probe_count + 1
+                val em = execir_encode_call(func, self.function_table)
+                if em.?:
+                    val m = em.unwrap()
+                    self.execir_modules[ekey] = m
+                    self.execir_arenas[ekey] = ExecIrArenaCtx.create(m)
+                    verdict = 1
+                else:
+                    verdict = 0
+                self.execir_verdicts[ekey] = verdict
+            if verdict == 1:
+                self.current_function = func.name
+                self.error_frames = []
+                val m = self.execir_modules[ekey]
+                var ctx = self.execir_arenas[ekey]
+                val r = ctx.run(m)
+                if (r[1]).?:
+                    self._record_error_frame()
+                    return (nil, r[1])
+                self.return_value = r[0]
+                self.has_returned = true
+                self.current_block = nil
+                return (r[0], nil)
         if self.debug_enabled:
             debug("interp", "Executing function: {func.name} ({func.blocks.len()} blocks, {func.locals.len()} locals)")
         self.current_function = func.name

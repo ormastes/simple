@@ -1,0 +1,185 @@
+# ExecIR tier-0.5 dispatch spec (startup-perf Phase E, wiring).
+#
+# MirInterpreter.execute_function now probes ExecIR (memoized, incl. nil
+# verdicts) and runs encodable functions in a create-once arena, falling
+# back to the tree-walk otherwise. SIMPLE_EXECIR=0 (read once at create)
+# disables the tier. This spec proves:
+#   (a) differential result identity for an encodable arithmetic loop,
+#       SIMPLE_EXECIR on vs off;
+#   (b) unencodable (string const) function falls back and stays correct;
+#   (c) memoization: repeated runs add one memo entry and probe once — and
+#       two same-name same-shape functions with different consts get
+#       DISTINCT memo entries (fingerprinted key, no collision);
+#   (d) div-by-zero error message parity, tier on vs off.
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter, InterpError}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn xt_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId.new(-1),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.new(0),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: nil
+    )
+
+fn xt_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn xt_blk(id: i64, insts: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: insts, terminator: term)
+
+fn xt_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+# fn sum_loop() = sum of i for i in 0..n-1 (encodable: consts + binops + If/Goto/Ret)
+fn xt_sum_loop_fn(n: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var), xt_local(2, LocalKind.Temp)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(0), MirType.i64())),
+        xt_inst(MirInstKind.Const(xt_lid(1), MirConstValue.Int(0), MirType.i64()))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b1 = xt_blk(1, [
+        xt_inst(MirInstKind.BinOp(xt_lid(2), MirBinOp.Lt, mir_operand_copy(xt_lid(0)), mir_operand_const_int(n)))
+    ], MirTerminator.If(mir_operand_copy(xt_lid(2)), BlockId.new(2), BlockId.new(3)))
+    val b2 = xt_blk(2, [
+        xt_inst(MirInstKind.BinOp(xt_lid(1), MirBinOp.Add, mir_operand_copy(xt_lid(1)), mir_operand_copy(xt_lid(0)))),
+        xt_inst(MirInstKind.BinOp(xt_lid(0), MirBinOp.Add, mir_operand_copy(xt_lid(0)), mir_operand_const_int(1)))
+    ], MirTerminator.Goto(BlockId.new(1)))
+    val b3 = xt_blk(3, [], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("sum_loop", locals, [b0, b1, b2, b3])
+
+# Same name + same shape as xt_const_fn(k) below, only the const differs.
+fn xt_const_fn(k: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("twin", locals, [b0])
+
+# Unencodable: string const forces nil-encode -> tree-walk fallback.
+fn xt_string_fn() -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Str("hello"), MirType.i64())),
+        xt_inst(MirInstKind.Const(xt_lid(1), MirConstValue.Int(7), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("stringy", locals, [b0])
+
+# fn dz() = 10 / 0
+fn xt_div_zero_fn() -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.BinOp(xt_lid(0), MirBinOp.Div, mir_operand_const_int(10), mir_operand_const_int(0)))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("dz", locals, [b0])
+
+fn xt_interp_on() -> MirInterpreter:
+    rt_env_set("SIMPLE_EXECIR", "1")
+    MirInterpreter.create()
+
+fn xt_interp_off() -> MirInterpreter:
+    rt_env_set("SIMPLE_EXECIR", "0")
+    val i = MirInterpreter.create()
+    rt_env_set("SIMPLE_EXECIR", "1")
+    i
+
+describe "MirInterpreter ExecIR tier-0.5 dispatch":
+    it "(a) encodable arithmetic loop: identical result, tier on vs off":
+        val f = xt_sum_loop_fn(100)
+        var on = xt_interp_on()
+        var off = xt_interp_off()
+        val ron = on.execute_function(f)
+        val roff = off.execute_function(f)
+        expect(ron[0] ?? -1).to_equal(4950)
+        expect(ron[0] ?? -1).to_equal(roff[0] ?? -2)
+        assert_true(ron[1] == nil)
+        assert_true(roff[1] == nil)
+        # the on-interpreter actually took the ExecIR path (memoized encodable)
+        expect(on.execir_memo_size()).to_equal(1)
+        # the off-interpreter never probed
+        expect(off.execir_memo_size()).to_equal(0)
+        expect(off.execir_probe_count_value()).to_equal(0)
+
+    it "(b) unencodable (string const) falls back to tree-walk, correct result":
+        val f = xt_string_fn()
+        var on = xt_interp_on()
+        val r = on.execute_function(f)
+        expect(r[0] ?? -1).to_equal(7)
+        assert_true(r[1] == nil)
+        # nil verdict is memoized too
+        expect(on.execir_memo_size()).to_equal(1)
+        expect(on.execir_probe_count_value()).to_equal(1)
+
+    it "(c) memoization: repeated runs probe once; twin consts do not collide":
+        var on = xt_interp_on()
+        val f = xt_sum_loop_fn(50)
+        var i = 0
+        while i < 5:
+            val r = on.execute_function(f)
+            expect(r[0] ?? -1).to_equal(1225)
+            i = i + 1
+        expect(on.execir_memo_size()).to_equal(1)
+        expect(on.execir_probe_count_value()).to_equal(1)
+        # unencodable probed once as well, even across repeats
+        val s = xt_string_fn()
+        val r1 = on.execute_function(s)
+        val r2 = on.execute_function(s)
+        expect(r1[0] ?? -1).to_equal(7)
+        expect(r2[0] ?? -1).to_equal(7)
+        expect(on.execir_memo_size()).to_equal(2)
+        expect(on.execir_probe_count_value()).to_equal(2)
+        # collision case: same name, same block/local shape, different const
+        val ta = xt_const_fn(11)
+        val tb = xt_const_fn(22)
+        val ra = on.execute_function(ta)
+        val rb = on.execute_function(tb)
+        expect(ra[0] ?? -1).to_equal(11)
+        expect(rb[0] ?? -1).to_equal(22)
+        # distinct memo entries -> no shared entry, both encoded
+        expect(on.execir_memo_size()).to_equal(4)
+        expect(on.execir_probe_count_value()).to_equal(4)
+
+    it "(d) div-by-zero: error message parity, tier on vs off":
+        val f = xt_div_zero_fn()
+        var on = xt_interp_on()
+        var off = xt_interp_off()
+        val ron = on.execute_function(f)
+        val roff = off.execute_function(f)
+        assert_true(ron[0] == nil)
+        assert_true(roff[0] == nil)
+        assert_true(ron[1].?)
+        assert_true(roff[1].?)
+        expect(ron[1].unwrap().message()).to_equal(roff[1].unwrap().message())
+        expect(ron[1].unwrap().message()).to_equal("Division by zero: Integer division")

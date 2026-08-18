@@ -119,12 +119,16 @@ Probes: scratchpad `execir_probe_spec.spl`, `jit_probe.spl` (session
 scratchpad, not committed). Related: `execir_slice_spec.spl`,
 `execir_slice2_spec.spl` (landed, source of the BENCH lines).
 
-## Decision (2026-08-18, user)
+## Decision (2026-08-18, final — supersedes the interim rejection)
 
-**ExecIR integration is REJECTED — memory efficiency judged insufficient.**
-The tier-0.5 wiring into MirInterpreter was stopped mid-implementation and its
-partial edits reverted; the memory/predictability analysis lane was cancelled.
-The landed encode/run slices (1–3, incl. the arena) remain in
-`src/compiler/95.interp/execir.spl` as standalone, UNWIRED code with green
-specs — nothing in the interpreter or JIT paths calls them. Do not wire ExecIR
-into any execution path without a new decision reversing this one.
+**ADOPTED as tier-0.5 via the arena path.** An interim rejection over memory
+efficiency was reconsidered after the slice-3 arena landed: the envelope is
+computed exactly at encode time (typical fixtures 5-9 i64 slots; recursion-capped
+worst case 1,402 slots ~= 11 KB), allocated ONCE per memoized module and reused
+across runs — zero per-run allocation. Wired into MirInterpreter.execute_function
+with memoized encode (incl. nil verdicts and a const-immediate entry-block
+fingerprint in the memo key to prevent same-name/same-shape collisions), kill
+switch `SIMPLE_EXECIR=0`. Acceptance spec
+`test/01_unit/compiler/interp/mir_interp_execir_tier_spec.spl` 4/4 (differential,
+fallback, memo-collision, div/0 message parity), sabotage green->red->green; all
+prior ExecIR/interp suites stay green (6/6, 8/8, 9/9, 11/11, 12/12).
