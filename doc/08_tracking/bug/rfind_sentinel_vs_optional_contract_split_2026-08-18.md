@@ -1,3 +1,25 @@
+> **RESOLVED 2026-08-18.** The split is closed in favour of the SENTINEL
+> contract, which is what `find`/`rfind`/`index_of` have always actually
+> implemented (`-1` = miss) and what the interpreter deliberately kept. A
+> repo-wide audit found exactly **6** wrong consumers, all of them the three
+> copies of `std.path`: `src/lib/nogc_sync_mut/path.spl:23,37`,
+> `src/lib/gc_async_mut/path.spl:23,37`,
+> `src/lib/nogc_async_mut_noalloc/path/baremetal_path.spl:54,71`. Each matched
+> `Some(idx)/nil` on the sentinel, so the `Some` arm always won and bound
+> `idx = -1`, leaving the `nil` arm dead. Every other stdlib consumer
+> (`dependency_tracker/graph.spl`, `test_runner_execute.spl`,
+> `editor/extensions/contract.spl`, `web/browser_session.spl`,
+> `blink/layout/block_flow.spl`) already tested `< 0` correctly, so no
+> repo-wide migration was needed and no MIR lowering change was made.
+>
+> RED: `dirname("foo.txt")=[]`, `extension("README")=[README]`,
+> `stem("README")=[]`. GREEN: `Results: 4 total, 4 passed, 0 failed` on both
+> `test/01_unit/lib/path/path_rfind_sentinel_not_found_spec.spl` (independently
+> proven RED at `4 total, 1 passed, 3 failed` with the fix stashed — the single
+> pass is its positive control) and
+> `test/01_unit/lib/path/text_search_sentinel_contract_spec.spl`.
+> TODO-DB row 559 closed.
+
 # rfind: sentinel (-1) vs Optional contract split across stdlib call sites
 
 - Date: 2026-08-18

@@ -1,0 +1,51 @@
+"""
+# std.path: `rfind` not-found must mean "no separator/dot", not index -1
+
+## Overview
+
+`text.rfind` returns a RAW i64 sentinel (`-1` when not found), it does NOT
+return an `Optional`. `std.path` nevertheless matched it as one:
+
+```simple
+val sep_idx = match clean_path.rfind("/"):
+    Some(idx): idx
+    nil: return "."
+```
+
+The `Some` arm always won and bound `idx = -1`, so the `nil` arm was dead and
+`dirname("foo.txt")` fell through to `substring(0, -1)` -- the empty string --
+instead of `"."`. `extension` had the mirror defect: `substring(-1 + 1)` handed
+back the whole name.
+
+Observed before the fix (bin/simple run):
+
+```
+dirname(foo.txt)=[]        extension(README)=[README]     stem(README)=[]
+```
+
+TODO-DB row 559.
+"""
+
+use std.spec
+use std.path
+
+describe("std.path rfind sentinel not-found"):
+    it("dirname of a separator-less path is \".\", not the empty string"):
+        assert_equal(path.dirname("foo.txt"), ".")
+        assert_equal(path.dirname("README"), ".")
+
+    it("extension of a dot-less name is empty, not the whole name"):
+        assert_equal(path.extension("README"), "")
+        assert_equal(path.extension("Makefile"), "")
+
+    it("stem of a dot-less name is the name itself"):
+        assert_equal(path.stem("README"), "README")
+
+    # POSITIVE CONTROL: the found path must still work, proving std.path really
+    # loaded and computes rather than returning defaults for everything.
+    it("still resolves paths that DO contain a separator and a dot"):
+        assert_equal(path.dirname("a/b"), "a")
+        assert_equal(path.dirname("/usr/lib/x.so"), "/usr/lib")
+        assert_equal(path.extension("a.txt"), "txt")
+        assert_equal(path.stem("a.txt"), "a")
+        assert_equal(path.basename("/usr/lib/x.so"), "x.so")

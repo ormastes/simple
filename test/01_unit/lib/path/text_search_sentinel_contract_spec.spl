@@ -1,0 +1,85 @@
+"""
+# DEFECT CLASS: raw i64 sentinel search results must never be matched as Optional
+
+## Overview
+
+`text.find`, `text.rfind` and `text.index_of` all return a RAW `i64`: the index
+on a hit, `-1` on a miss. None of them returns an `Optional`. Consuming one with
+
+```simple
+match haystack.rfind(needle):
+    Some(i): ...
+    nil: ...
+```
+
+is therefore always wrong: the `Some` arm wins unconditionally and binds
+`i = -1`, making the `nil` arm dead code and pushing `-1` into arithmetic and
+`substring` calls downstream. Row 559's `std.path` bug was one instance; this
+file pins the CLASS so a sibling cannot regress the same way.
+
+The correct consumption is an explicit sentinel test (`if i < 0`), which is what
+every other stdlib consumer already does (`dependency_tracker/graph.spl`,
+`test_runner_execute.spl`, `editor/extensions/contract.spl`,
+`web/browser_session.spl`, `blink/layout/block_flow.spl`).
+
+TODO-DB row 559.
+"""
+
+use std.spec
+use std.path
+
+# The class invariant, stated directly against the three search APIs.
+
+fn miss_rfind() -> i64:
+    return "abc".rfind("z")
+
+fn miss_find() -> i64:
+    return "abc".find("z")
+
+fn miss_index_of() -> i64:
+    return "abc".index_of("z")
+
+# The exact mis-consumption shape, isolated. If `rfind` ever DID return an
+# Optional this would yield 0 via the nil arm; while it returns a sentinel it
+# must yield -1 through the Some arm. Either way the caller must not treat the
+# `nil` arm as the not-found path.
+fn optional_match_on_sentinel() -> i64:
+    val r = "abc".rfind("z")
+    val v = match r:
+        Some(i):
+            i
+        nil:
+            0
+    return v
+
+describe("text search sentinel contract"):
+    it("every text search API reports a miss as the raw sentinel -1"):
+        assert_equal(miss_rfind(), -1)
+        assert_equal(miss_find(), -1)
+        assert_equal(miss_index_of(), -1)
+
+    it("matching a sentinel result as Optional does NOT take the nil arm"):
+        assert_equal(optional_match_on_sentinel(), -1)
+
+    it("no std.path accessor leaks a negative index into its result"):
+        # Each of these has a miss on at least one internal rfind.
+        assert_equal(path.dirname("plain"), ".")
+        assert_equal(path.extension("plain"), "")
+        assert_equal(path.stem("plain"), "plain")
+        assert_equal(path.extension("archive.tar.gz"), "gz")
+        assert_equal(path.stem("archive.tar.gz"), "archive.tar")
+        # A leading-dot name has its only dot at index 0: still "no extension".
+        assert_equal(path.extension(".gitignore"), "")
+        # A name ending in a dot has the dot at len-1: still "no extension".
+        assert_equal(path.extension("trailing."), "")
+
+    # POSITIVE CONTROL: the modules under test really loaded and compute.
+    # Without this, a scanner that silently returned "" for everything would
+    # sail through the assertions above.
+    it("positive control: hits are reported at their real indices"):
+        assert_equal("abc".rfind("b"), 1)
+        assert_equal("abc".index_of("c"), 2)
+        assert_equal("abcabc".rfind("a"), 3)
+        assert_equal(path.dirname("/usr/lib/x.so"), "/usr/lib")
+        assert_equal(path.basename("/usr/lib/x.so"), "x.so")
+        assert_equal(path.extension("x.so"), "so")
