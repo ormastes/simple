@@ -14,15 +14,17 @@
 # this migration unit — the existing kernel already satisfies the
 # "independent of the extern" bar the plan requires.
 #
-# KNOWN SEMANTIC DIVERGENCE (documented, not papered over): for x < 0 the
-# oracle returns NaN (correct IEEE-754 behavior — Rust's `f64::sqrt` of a
-# negative number is NaN by spec); `sqrt_f64`'s domain contract
-# (special.spl:421-427) states x >= 0 is required and negative input is "NOT
-# guarded" -- it does NOT converge to NaN, it returns finite garbage (Newton
-# iteration on a negative radicand does not diverge to NaN in this kernel).
-# Verified live: sqrt_f64(-4.0) == 6.070281514079917 (finite, wrong) while
-# rt_math_sqrt(-4.0) is NaN. This spec asserts that divergence explicitly
-# below rather than hiding it.
+# RESOLVED 2026-08-18 (was: KNOWN SEMANTIC DIVERGENCE): for x < 0 the oracle
+# returns NaN (correct IEEE-754 behavior — Rust's `f64::sqrt` of a negative
+# number is NaN by spec). Pre-fix, `sqrt_f64` was NOT guarded for x < 0 and
+# returned finite garbage instead of NaN (Newton iteration on a negative
+# radicand does not diverge to NaN in this kernel). Verified live pre-fix:
+# sqrt_f64(-4.0) == 6.070281514079917 (finite, wrong) while rt_math_sqrt(-4.0)
+# is NaN. Fixed in special.spl's `_sqrt_f64` (guards NaN input and x < 0.0,
+# returns NaN; preserves -0.0's sign). See
+# doc/08_tracking/bug/sqrt_f64_unguarded_negative_domain_2026-08-18.md.
+# This spec now asserts AGREEMENT with the oracle on negative input, and adds
+# further boundary coverage (-0.0, +0.0, +infinity, NaN input).
 
 use std.spec.{describe, it, assert_equal, assert_true}
 use std.math.special.{sqrt_f64}
@@ -58,17 +60,74 @@ describe "sqrt_f64 — pure-Simple vs C/Rust oracle (rt_math_sqrt)":
         assert_true(_approx(sqrt_f64(1.0e10), rt_math_sqrt(1.0e10), 1.0e-6))
         assert_true(_approx(sqrt_f64(1.0e-8), rt_math_sqrt(1.0e-8), 1.0e-12))
 
-    it "diverges from the oracle on negative input (documented, not hidden)":
+    it "agrees with the oracle on negative input (NaN, post-fix)":
         val oracle = rt_math_sqrt(-4.0)
         val simple = sqrt_f64(-4.0)
         # Oracle: correct IEEE-754 NaN for a negative radicand.
         assert_true(oracle != oracle)
-        # Simple kernel: NOT guarded per its own docstring -- returns finite
-        # garbage instead of NaN. This is a real, filed divergence, not a
-        # test bug: the two sides genuinely disagree outside the documented
-        # domain (x >= 0).
-        assert_true(simple == simple)
-        assert_true(simple != oracle)
+        # Simple kernel: now guarded (fixed 2026-08-18) -- also NaN.
+        # NaN != NaN by IEEE-754 spec, so "simple != simple" is the
+        # NaN-safe way to assert simple IS NaN.
+        assert_true(simple != simple)
+
+    it "matches the oracle on other domain-boundary values":
+        # -0.0 -> -0.0 (sign bit preserved through the x == 0.0 branch).
+        val neg_zero_s = sqrt_f64(-0.0)
+        val neg_zero_c = rt_math_sqrt(-0.0)
+        assert_equal(neg_zero_s, neg_zero_c)
+        assert_equal(neg_zero_s, -0.0)
+
+        # +0.0 -> +0.0.
+        assert_equal(sqrt_f64(0.0), rt_math_sqrt(0.0))
+        assert_equal(sqrt_f64(0.0), 0.0)
+
+        # +infinity -> +infinity.
+        val big = 1.0e308
+        val pos_inf = big * 10.0
+        val inf_s = sqrt_f64(pos_inf)
+        val inf_c = rt_math_sqrt(pos_inf)
+        assert_equal(inf_s, inf_c)
+        assert_equal(inf_s, pos_inf)
+
+        # NaN input -> NaN (checked NaN-safely, since NaN != NaN).
+        val nan_in = pos_inf - pos_inf
+        val nan_s = sqrt_f64(nan_in)
+        val nan_c = rt_math_sqrt(nan_in)
+        assert_true(nan_s != nan_s)
+        assert_true(nan_c != nan_c)
+
+        # Smallest negative denormal -> NaN, matching the oracle.
+        val tiny_neg = 0.0 - 4.9e-324
+        val tiny_s = sqrt_f64(tiny_neg)
+        val tiny_c = rt_math_sqrt(tiny_neg)
+        assert_true(tiny_s != tiny_s)
+        assert_true(tiny_c != tiny_c)
+
+        # -1.0 -> NaN, matching the oracle.
+        val neg1_s = sqrt_f64(-1.0)
+        val neg1_c = rt_math_sqrt(-1.0)
+        assert_true(neg1_s != neg1_s)
+        assert_true(neg1_c != neg1_c)
+
+        # Largest finite value: NOT asserted equal to the oracle here.
+        # Discovered while writing this spec (separate from the
+        # negative-domain guard this bug is about): the 40-iteration
+        # Newton loop starting at g = x does not converge for x this large
+        # -- g needs ~log2(sqrt(x)) ~= 512 halvings before quadratic
+        # convergence kicks in, so 40 iterations leaves g still close to x
+        # itself (measured live: sqrt_f64(1.7976931348623157e308) returns
+        # ~1.63e308, not the correct ~1.34e154). This is a real, PRE-EXISTING
+        # accuracy limitation for extreme-magnitude input, out of scope for
+        # this fix (which only guards the negative/NaN/infinity domain
+        # boundary and leaves the valid-domain Newton kernel bit-identical).
+        # Filed separately -- see
+        # doc/08_tracking/bug/sqrt_f64_unguarded_negative_domain_2026-08-18.md
+        # "Related, separately filed" section.
+        val max_finite = 1.7976931348623157e308
+        val max_s = sqrt_f64(max_finite)
+        val max_c = rt_math_sqrt(max_finite)
+        assert_true(max_s == max_s)
+        assert_true(max_c == max_c)
 
     it "single-bit input corruption changes the result (discrimination)":
         assert_true(sqrt_f64(4.0) != sqrt_f64(4.0000001))
@@ -114,3 +173,28 @@ describe "sqrt_f64 — pure-Simple vs C/Rust oracle (rt_math_sqrt)":
             i = i + 1
         print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
         assert_true(simple_us >= 0 and c_us >= 0)
+
+    it "matches the oracle on a second shared loop covering the negative domain":
+        # Separate loop (not merged into the non-negative 100-vector loop
+        # above) so that loop's `_approx` equality assertion is not
+        # disturbed by NaN-safe comparison logic. Same seeded-LCG generator,
+        # negated, plus forced negative-zero/negative-boundary values.
+        var j = 0
+        while j < 40:
+            var seed = (j * 2654435761 + 12345) % 4294967296
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            var x = 0.0 - ((seed % 1000000) as f64 / 1000.0)
+            if j % 11 == 0:
+                x = -0.0
+            else if j % 7 == 0:
+                x = -1.0
+
+            val s = sqrt_f64(x)
+            val c = rt_math_sqrt(x)
+            if x == 0.0:
+                assert_equal(s, c)
+            else:
+                # x < 0.0 (strictly): both sides must be NaN.
+                assert_true(s != s)
+                assert_true(c != c)
+            j = j + 1

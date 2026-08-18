@@ -70,10 +70,39 @@ fn _ln_f64(x: f64) -> f64:
         k = k + 2
     2.0 * sum + e.to_f64() * 0.6931471805599453
 
+fn _sqrt_nan() -> f64:
+    """NaN sentinel, built the same way as distributions.spl/financial.spl's
+    `_nan()`: a literal `0.0 / 0.0` is const-folded and rejected by the
+    compiler, and the interpreter traps runtime float division by zero, so
+    NaN is produced via plain IEEE overflow (inf - inf) instead."""
+    var big = 1.0e308
+    val inf = big * 10.0
+    inf - inf
+
 fn _sqrt_f64(x: f64) -> f64:
-    """Square root via Newton's method. Assumes x >= 0."""
+    """Square root via Newton's method. Domain: x >= 0.
+
+    Boundary handling (IEEE-754 parity with the `rt_math_sqrt` oracle):
+    - NaN input -> NaN (checked first via x != x, since NaN compares
+      unequal to itself and to everything else, including 0.0).
+    - x < 0.0 (including negative non-zero values) -> NaN.
+    - x == 0.0 -> x unchanged, so +0.0 -> +0.0 and -0.0 -> -0.0 (the sign
+      bit survives an `x == 0.0` branch returning `x` itself).
+    - +infinity -> +infinity, checked explicitly. Without this guard the
+      Newton loop's first iteration starts at g = x = +inf, and
+      x / g = inf / inf = NaN (IEEE 754 defines inf/inf as NaN, not 1),
+      poisoning every subsequent iterate to NaN -- verified live pre-guard.
+      """
+    if x != x:
+        return _sqrt_nan()
+    if x < 0.0:
+        return _sqrt_nan()
     if x == 0.0:
-        return 0.0
+        return x
+    var big = 1.0e308
+    val pos_inf = big * 10.0
+    if x == pos_inf:
+        return x
     var g = x
     var i = 0
     while i < 40:
@@ -422,9 +451,11 @@ pub fn sqrt_f64(x: f64) -> f64:
     """Square root via Newton's method (40 iterations). Same kernel
     formula.spl and this module use internally (`_sqrt_f64`).
 
-    Domain: x >= 0. Behavior on invalid input: NOT guarded — negative x
-    does not converge; callers must range-check first (matches the internal
-    kernel's contract)."""
+    Domain: x >= 0, matching IEEE-754 / the `rt_math_sqrt` oracle. Negative
+    x (and NaN input) return NaN; -0.0 returns -0.0; +infinity returns
+    +infinity. Guarded as of 2026-08-18 (was previously unguarded and
+    returned finite garbage for negative input — see
+    doc/08_tracking/bug/sqrt_f64_unguarded_negative_domain_2026-08-18.md)."""
     _sqrt_f64(x)
 
 # --- power / factorial / combinatorics ---
