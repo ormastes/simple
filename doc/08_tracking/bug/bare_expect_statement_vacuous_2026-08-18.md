@@ -1,75 +1,130 @@
-# INVALIDATED CLAIM: bare `expect <bool-expr>` is NOT a silent no-op
+# A matcher-form `expect(...)` silently swallows genuine assertion failures in the same example
 
 - Date: 2026-08-18
-- Status: **NOT A BUG** (claim disproven by direct execution). Filed as a
-  negative result so the claim is not re-raised.
-- Reporter claim under investigation: in
-  `test/perf/ui_access/ui_access_hot_paths_spec.spl`, the statement
-  `expect elapsed_ms < hard_ms` did not fail despite `elapsed_ms = 135449`
-  and `hard_ms = 2000`, and the file reported `Results: 3 total, 3 passed, 0 failed`.
+- Status: **CONFIRMED BUG, OPEN.** Fail-open assertion loss. Not fixed here.
+- Severity: HIGH — green tests that assert nothing.
+- Component: `src/lib/nogc_sync_mut/spec.spl` (pure Simple stdlib — **not** the
+  Rust seed; no bootstrap needed to fix).
+- Found via: `test/perf/ui_access/ui_access_hot_paths_spec.spl` reporting
+  `3 passed` while a 106,627 ms measurement blew a 2,000 ms budget.
 
-## Verdict
+> **Correction notice.** An earlier revision of this file (commit `14ccb6a20c8`)
+> concluded "NOT A BUG" from probes that did not reproduce the real spec's
+> shape, and attributed the report to a microsecond/millisecond misreading.
+> **That conclusion was wrong and is retracted.** The perf spec was
+> subsequently run to completion and blew its budget by 53x while still
+> reporting all examples passed. The retracted reasoning is preserved in
+> "Retracted hypothesis" below so the mistake is not repeated.
 
-**NO.** The bare `expect <boolean-expression>` statement form is a real,
-fully-wired assertion. It fails the example when the expression is false, in
-every shape tested: inline in an `it` block, inside a plain top-level helper
-`fn` called from an example, and under an `it`-forwarding wrapper (`slow_it`).
-Zero assertions in `test/` are vacuous on account of this form.
+## The bug in one sentence
+
+If an example calls the matcher form `expect(x).to_...()` **anywhere**, then a
+failing bare `expect <bool-expr>` in that same example is silently discarded and
+the example reports PASS.
+
+## Trigger conditions (established by bisection)
+
+| example contains | failing assertion honoured? |
+|---|---|
+| bare `expect` only (one or many) | YES — correct |
+| matcher `expect(x).to_…()` only (any mix of pass/fail, any order) | YES — correct |
+| **matcher form AND bare form, in either order** | **NO — failure discarded** |
+
+Both orders lose the failure: a bare failure *before* the matcher is retroactively
+erased, and a bare failure *after* the matcher never registers. Two consecutive
+bare failures after one matcher are both lost.
 
 ## Proof (verbatim runner output)
 
 Binary: `bin/simple` -> `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple` (shared Rust seed).
 
-### Probe A — the bare form itself (`test/temp_bare_expect/probe_a_spec.spl`, not committed)
+### The originating case — real spec, real numbers
 
-Body: `expect false`; `expect 1 == 2`; and the exact perf-spec shape
-`val elapsed_ms = 135449; val hard_ms = 2000; expect elapsed_ms < hard_ms`.
-
-```
-  ✗ bare expect false
-  ✗ bare expect 1 == 2
-  ✗ bare expect comparison like perf spec
-SPEC FILE VERDICT: test/temp_bare_expect/probe_a_spec.spl outcome=OK declared>=3 executed=3 passed=0 failed=3 skipped=0 dropped=0
-spec failure: 3 of 3 example(s) failed (exit 1)
-error: test-runner: spec failed
-Results: 3 total, 0 passed, 3 failed
-```
-
-All three failed. The third is the literal statement and literal values from
-the report — it fails.
-
-### Probe B — matcher-form control (`probe_b_spec.spl`)
-
-Body: `expect(false).to_be_true()`.
+`bin/simple test test/perf/ui_access/ui_access_hot_paths_spec.spl`:
 
 ```
-  ✗ matcher form must fail
-SPEC FILE VERDICT: test/temp_bare_expect/probe_b_spec.spl outcome=OK declared>=1 executed=1 passed=0 failed=1 skipped=0 dropped=0
-Results: 1 total, 0 passed, 1 failed
+[perf] ui_access snapshot route: 106627227 us for 100 iterations (avg=1066272 us/iter)
+[perf] Warning: ui_access snapshot route took 106627ms (target: <100ms)
+[perf] ui_access query route: 78003694 us for 100 iterations (avg=780036 us/iter)
+[perf] Warning: ui_access query route took 78003ms (target: <100ms)
+[perf] ui_access ensure-style state route: 79377350 us for 100 iterations (avg=793773 us/iter)
+[perf] Warning: ui_access ensure-style state route took 79377ms (target: <100ms)
+SPEC FILE VERDICT: test/perf/ui_access/ui_access_hot_paths_spec.spl outcome=OK declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
 ```
 
-Control behaves as expected; the bare form is not weaker than it.
+`elapsed_ms = 106627`, `hard_ms = 2000` — the spec's own warning line prints the
+millisecond value, so there is no unit ambiguity. `expect elapsed_ms < hard_ms`
+is false by 53x and the example still passed. Each of these three examples calls
+`expect(preflight.0).to_equal(200)` before reaching `_check_budget`.
 
-### Probe C — the perf spec's exact indirection (`probe_c_spec.spl`)
+### Minimal bisection — probe F (`test/tmp_probe_e/probe_f_spec.spl`, scratch, not committed)
 
-Reproduces the two structural features the perf spec has and probe A did not:
-the assertion lives in a plain top-level `fn _check_budget(...)`, and examples
-are declared through a wrapper `fn slow_it(name, block): it(name, block)`.
+Every example asserts something false; every one is marked `MUST FAIL`.
+F1–F4 have a preceding matcher call, F5 does not. Nothing else differs.
 
 ```
-  ✗ bare expect inside a plain helper fn
-  ✗ matcher expect inside a plain helper fn
-  ✗ bare expect via slow_it wrapper, inline
-  ✗ bare expect via slow_it wrapper, in helper
-SPEC FILE VERDICT: test/temp_bare_expect/probe_c_spec.spl outcome=OK declared>=4 executed=4 passed=0 failed=4 skipped=0 dropped=0
-Results: 4 total, 0 passed, 4 failed
+  ✓ F1 one to_equal then bare expect -- MUST FAIL
+  ✓ F2 to_contain then bare expect -- MUST FAIL
+  ✓ F3 three matchers (perf-spec shape) then bare expect -- MUST FAIL
+  ✓ F4 matcher then inline bare expect -- MUST FAIL
+  ✗ F5 no preceding matcher, control -- MUST FAIL
+SPEC FILE VERDICT: test/tmp_probe_e/probe_f_spec.spl outcome=OK declared>=5 executed=5 passed=4 failed=1 skipped=0 dropped=0
+Results: 5 total, 4 passed, 1 failed
 ```
 
-Neither the helper-fn indirection nor the `it`-wrapper suppresses the failure.
+A ✓ here is the bug: four false assertions reported as passing. F5 is the
+control that proves the bare form works on its own.
 
-## Mechanism — why the bare form works
+### Characterisation — probe G
 
-`src/lib/nogc_sync_mut/spec.spl`:
+```
+  ✓ G1 matcher then TWO failing bare expects -- MUST FAIL
+  ✗ G2 passing bare expect then failing bare expect -- MUST FAIL
+  ✓ G3 failing bare expect FIRST, then a passing matcher -- MUST FAIL
+  ✓ G4 bool-subject matcher then failing bare expect -- MUST FAIL
+  ✗ G5 control: single failing bare expect -- MUST FAIL
+Results: 5 total, 3 passed, 2 failed
+```
+
+G3 is the worst shape: the failure is recorded **first** and a later, entirely
+unrelated *passing* matcher erases it. G1 shows more than one failure can be
+lost. G2/G5 confirm bare-only examples are sound.
+
+### Bound on blast radius — probe H (matcher-only examples)
+
+```
+  ✗ H1 failing matcher then PASSING matcher -- MUST FAIL
+  ✗ H2 control: single failing matcher -- MUST FAIL
+  ✗ H3 two failing matchers -- MUST FAIL
+  ✗ H4 passing to_be_true then failing to_be_true -- MUST FAIL
+  ✗ H5 failing to_be_true then passing to_be_true -- MUST FAIL
+Results: 5 total, 0 passed, 5 failed
+```
+
+All correct. **Matcher-only examples are not affected**, which is what keeps
+this from implicating the whole suite.
+
+### Non-triggers ruled out (probes A, C, E)
+
+Bare `expect false`, `expect 1 == 2`, `expect elapsed_ms < hard_ms`, the same
+inside a plain top-level helper `fn`, under an `it`-forwarding wrapper
+(`slow_it`), with the division `elapsed_us / 1000`, with a preceding
+`if`/`print`, with literal or runtime-derived operands — all fail correctly when
+no matcher form is present. Probe E ran the perf spec's `_check_budget` verbatim
+across five variants: `Results: 5 total, 0 passed, 5 failed`.
+
+## Mechanism
+
+`src/lib/nogc_sync_mut/spec.spl`. Failures are recorded by appending to a
+module-level list:
+
+```
+pub fn fail_assertion(message: text):
+    current_test_errors.push(message)
+```
+
+The bare form asserts eagerly and correctly:
 
 ```
 pub fn expect(value: bool) -> i64:
@@ -78,21 +133,17 @@ pub fn expect(value: bool) -> i64:
     _stable_expect_helper(value, false, not value)
 ```
 
-The `bool` overload asserts EAGERLY: it records the failure the moment
-`expect` is called, before any matcher could be chained. Because
-`fail_assertion` is just
+The non-bool form pushes a provisional error so that an unconsumed `expect(x)`
+cannot be silent:
 
 ```
-pub fn fail_assertion(message: text):
-    current_test_errors.push(message)
+pub fn expect(value) -> i64:
+    fail_assertion("vacuous expect: expect(...) was never consumed by a matcher — chain .to_equal(...)/.to_contain(...) or use assert_true(...)")
+    _stable_expect_helper(value, false, true)
 ```
 
-— a push onto a module-level global — it works from any call depth, which is
-why the helper-fn and wrapper shapes in probe C all fail correctly.
-
-If a matcher IS chained afterwards, the eagerly-pushed error is popped back
-off by `_expect_begin_matcher`, which every matcher calls first
-(`spec.spl:715`):
+Every matcher then retracts that provisional error before deciding
+(`spec.spl:715`) — and this is the defect:
 
 ```
 fn _expect_begin_matcher(implicit_error: bool):
@@ -100,101 +151,115 @@ fn _expect_begin_matcher(implicit_error: bool):
         val _ = current_test_errors.pop()
 ```
 
-So `expect(x)` alone is a hard assertion, and `expect(x).to_equal(y)` retracts
-the provisional error and re-decides. A non-bool subject with no matcher is
-also NOT silent — the generic overload pushes an explicit diagnostic
-(`spec.spl:701-708`):
+Two compounding faults:
 
-```
-pub fn expect(value) -> i64:
-    fail_assertion("vacuous expect: expect(...) was never consumed by a matcher — chain .to_equal(...)/.to_contain(...) or use assert_true(...)")
-```
+1. **The retraction is an untargeted LIFO `pop()`.** It removes *the most recent
+   error in the list*, with no check that the popped entry is the provisional
+   one this `expect` pushed. Any genuine failure sitting on top is destroyed
+   instead. This is what G3 shows.
+2. **`implicit_error` is read from a single mutable global that is never reset
+   per example.** `_expect_helper_slots` holds one `ExpectHelper` reused and
+   mutated in place by `_stable_expect_helper`; every `expect(...)` overwrites
+   `helper.implicit_error`. Once any call leaves it `true`, later matcher
+   invocations keep popping. Combined with the bare form's own
+   `implicit_error = not value` (i.e. `true` exactly when the assertion FAILED),
+   a failing bare `expect` arms the very flag that authorises the next pop.
 
-The vacuous-expect hazard this bug was filed against is therefore already
-designed for and already guarded, in both directions.
+The `pop()` is guarded only by `current_test_errors.len() > 0`, so it cannot
+detect that it is discarding someone else's failure. The design comment at
+`spec.spl:640-648` notes that an "arm early, auto-check at the end" scheme was
+already tried and rejected for being fail-open; this pop is the same fail-open
+hazard in a different place.
 
-## Actual explanation of the reported perf-spec observation
+## Census — blast radius
 
-`_bench_request` returns **microseconds**, not milliseconds:
+Exhaustive scan with `/usr/bin/grep` over `test/`:
 
-```
-val elapsed = rt_time_now_unix_micros() - start
-print "[perf] {label}: {elapsed} us for {iterations} iterations (avg={avg} us/iter)"
-elapsed
-```
-
-and `_check_budget` converts before comparing:
-
-```
-fn _check_budget(label: text, elapsed_us: i64, soft_ms: i64, hard_ms: i64):
-    val elapsed_ms = elapsed_us / 1000
-```
-
-The reported `135449` is the printed `[perf] ... us` figure, i.e. 135 ms, not
-135449 ms. `135 < 2000` is true, so the assertion passed **correctly**. The
-report misread the unit; there is no missed failure.
-
-## Census of the bare form in `test/`
-
-Exhaustive scan (`/usr/bin/grep -rE '^[[:space:]]*expect[[:space:]]+[^(]' --include=*.spl test/`):
-
-| shape | count |
+| measure | count |
 |---|---|
-| bare `expect <expr>` statements, total | 27,239 |
-| ...of which carry a comparison/logical operator (`==`, `!=`, `<`, `>`, `and`, `or`, `in`) | 16,457 |
-| ...of which use the `expect X to_<matcher> Y` infix shape | 5,011 |
+| `*_spec.spl` files | 20,550 |
+| files using matcher form `expect(x).to_…` | 18,785 |
+| files using bare form `expect <expr>` | 1,099 |
+| **files using BOTH (at risk)** | **80** |
+| bare `expect` statement sites (all `.spl` under `test/`) | 27,239 |
+| ...with a comparison/logical operator | 16,457 |
+| ...in the `expect X to_… Y` infix shape | 5,011 |
 
-Top files by occurrence:
+**80 files can currently contain vacuous assertions.** That is a file-level
+upper bound: the trigger is per-EXAMPLE, so a file counted here is only actually
+affected where both forms appear inside the same `it`. It is not a lower bound
+either — one such file can hide many lost assertions (G1: two in one example).
 
+The 27,239 bare sites are NOT all vacuous. The bare form is the repo's dominant
+assertion idiom and is sound on its own; only its co-occurrence with the matcher
+form inside one example is dangerous.
+
+Confirmed affected: `test/perf/ui_access/ui_access_hot_paths_spec.spl` — three
+perf budgets, all vacuous, currently reporting green while running 39x-53x over
+budget. Enumerate the rest with:
+
+```sh
+/usr/bin/grep -rlZ --include=*_spec.spl -E '^[[:space:]]*expect\(.*\)\.to_' test/ \
+  | xargs -0 /usr/bin/grep -lE '^[[:space:]]*expect[[:space:]]+[^(]'
 ```
-test/01_unit/lib/skia/shaper_spec.spl:206
-test/unit/app/tooling/command_dispatch_spec.spl:163
-test/01_unit/app/tooling/command_dispatch_spec.spl:160
-test/03_system/feature/app/easy_fix_rules_spec.spl:140
-test/unit/lib/std/json_spec.spl:138
-test/01_unit/lib/std/json_spec.spl:138
-test/unit/app/ui/widget_panel_text_divider_spec.spl:123
-test/01_unit/app/ui/widget_panel_text_divider_spec.spl:123
-test/unit/app/tooling/url_utils_spec.spl:120
-test/01_unit/app/tooling/url_utils_spec.spl:120
-test/unit/compiler/parser/error_recovery_intensive_spec.spl:114
-test/01_unit/compiler/parser/error_recovery_intensive_spec.spl:114
-test/unit/std/dashboard_spec.spl:113
-test/unit/lib/common/dashboard_spec.spl:113
-test/01_unit/std/dashboard_spec.spl:113
-```
 
-**The vacuous-assertion count attributable to this form is 0.** The bare form
-is the dominant assertion idiom in this repo (27k sites) and it is load-bearing,
-not decorative. Had it been a no-op, essentially the entire suite would have
-been vacuous — which is itself a reason the original claim deserved this level
-of disproof rather than a code read.
+## Proposed fix
 
-## Residual item (separate, real, NOT this bug)
+The fix is in pure Simple (`src/lib/nogc_sync_mut/spec.spl`); the Rust seed is
+not involved, and per `.claude/rules/commands.md` a `src/lib/**` edit needs no
+build. Preferred option 1, in order:
 
-The perf spec does not currently run at all in the perf shard. From a full
-perf-shard log in this lane's scratchpad:
+1. **Make the retraction targeted instead of LIFO.** Have the provisional push
+   return its index (or a token), store it on the `ExpectHelper`, and have
+   `_expect_begin_matcher` remove *that specific entry*, and only if it is still
+   the entry it pushed. A pop that cannot identify what it is removing must not
+   remove anything. This alone fixes G3 and F1–F4.
+2. **Reset the expectation state per example.** Clear `_expect_helper_slots`
+   (or at minimum `implicit_error`) at the start of each `it`, so a stale `true`
+   from a previous statement or example cannot authorise a pop. Note the
+   documented constraint at `spec.spl:640-648` that module-level spec state does
+   not persist across examples under this runner — the reset therefore belongs
+   in the per-example entry path, not a file-level hook.
+3. **Fail closed if a retraction would remove a non-provisional error.** Rather
+   than dropping it, record a framework-level failure ("assertion bookkeeping
+   lost a real failure"). A test framework must never silently reduce the
+   failure count.
+
+Additionally, and independent of the fix, a lint should reject mixing the two
+`expect` forms within one example until the runtime fix lands, since that is the
+exact trigger and it is statically detectable.
+
+## Pinning spec — NOT committed, deliberately
+
+A spec pinning the correct behaviour was written and proven to reproduce
+(probe F above), but it **fails on today's runner** and would land the tree red,
+so it is not committed per instruction. Commit it together with the fix. It is
+exactly probe F/G: examples that each contain one matcher-form `expect` and one
+failing bare `expect`, asserted to FAIL. Suggested home:
+`test/01_unit/lib/std/spec_expect_failure_retention_spec.spl`. Until the runner
+is fixed, that spec cannot be green, and no existing test was skipped, weakened,
+or deleted in the course of this investigation.
+
+## Retracted hypothesis (for the record)
+
+The first revision argued the report was a microsecond/millisecond misreading:
+`_bench_request` does return microseconds and `_check_budget` does divide by
+1000. That is all true and still irrelevant — the spec's own
+`[perf] Warning: ... took 106627ms` line prints the already-converted value, and
+`106627 < 2000` is false. The error was concluding from probes (A/C) that shared
+the helper-fn and wrapper shape but omitted the preceding matcher call, and
+treating "the mechanism reads correct in source" as evidence. The lesson: the
+bisection must vary one thing at a time against the REAL failing artifact, and a
+"not a bug" verdict needs the original artifact reproduced green-to-red, not
+just a lookalike.
+
+## Related, separate
+
+Under the full perf shard the same file is dropped before execution:
 
 ```
 SPEC FILE VERDICT: test/perf/ui_access/ui_access_hot_paths_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=unresolved-module
 ```
 
-`reason=unresolved-module` — the file is dropped before any example executes.
-That is a genuine defect in its own right (a perf budget that never runs), and
-it is orthogonal to `expect` semantics. It should be tracked separately.
-
-## Pinning spec
-
-No new spec is committed. A spec pinning "bare `expect false` fails" would be
-GREEN today (probes A/B/C already demonstrate it) and would duplicate coverage
-that the framework's own behaviour already provides at 27,239 call sites; the
-probe files used here were scratch and are not part of the suite. Nothing needs
-the runner fixed, so there is no failing spec to withhold.
-
-## Fix required
-
-**None.** No change to the runner, the spec library, or the Rust seed. The
-one action item is documentation: the reporter's confusion came from the
-`[perf] ... us` print being read as milliseconds. Worth considering (not filed
-as a blocking change) is making `_bench_request`'s print state both units, or
-naming the parameter `elapsed_us` at the call site.
+`reason=unresolved-module` in the shard, but it runs standalone. Different
+defect, needs its own record.
