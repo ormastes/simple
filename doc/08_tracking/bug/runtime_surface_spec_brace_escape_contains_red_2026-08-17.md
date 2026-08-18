@@ -57,3 +57,12 @@
   way: the language contract is Python-fstring-style collapse in ALL
   double-quoted literals; literal `{{`/`}}` must be written doubled (or via
   raw strings/concatenation).
+
+## Redeploy (2026-08-18)
+
+- Seed rebuilt (`cargo build --release --bin simple`) and deployed to
+  `bin/release/x86_64-unknown-linux-gnu/simple` (59,581,296 B, 2026-08-18
+  00:21). On the DEPLOYED binary: probe `"a{{b}}c"` prints `a{b}c` len=5;
+  `lexer_brace_escape_spec.spl` `Results: 4 total, 4 passed, 0 failed`;
+  `runtime_surface_spec.spl` `Results: 3 total, 3 passed, 0 failed`.
+  Status: FIXED AND DEPLOYED.
