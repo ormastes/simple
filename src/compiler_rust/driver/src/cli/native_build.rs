@@ -638,6 +638,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         builder = builder.source_dir(dir);
     }
 
+    let build_start = std::time::SystemTime::now();
     match builder.build() {
         Ok(result) => {
             println!(
@@ -668,8 +669,28 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 }
             }
 
+            // Fail closed. Three independent conditions, every one of which
+            // used to be reported as SUCCESS by the unconditional `0` below:
+            //   1. one or more files failed to compile;
+            //   2. the declared artifact is missing, empty, or carries no code;
+            //   3. a link step ran but the artifact on disk is stale.
             if result.failed > 0 {
-                eprintln!("\nWarning: {} files failed to compile", result.failed);
+                eprintln!(
+                    "\nerror: {} file(s) failed to compile -- build did NOT succeed",
+                    result.failed
+                );
+                return 1;
+            }
+            let freshness_floor = if result.link_time > std::time::Duration::ZERO {
+                Some(build_start)
+            } else {
+                None
+            };
+            if let ArtifactVerdict::Reject(why) =
+                verify_emitted_artifact(&result.output, freshness_floor)
+            {
+                eprintln!("\nerror: native-build reported success but {}", why);
+                return 1;
             }
 
             0
@@ -681,9 +702,299 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     }
 }
 
+/// Verdict from the emitted-artifact gate.
+///
+/// `native-build` used to return 0 on any `Ok(result)` from the builder, so a
+/// link that produced a function-less ELF (294 `FILE` symbols, 0 `FUNC`) was
+/// still reported as `Build complete`. A false green is worse than a failure:
+/// it destroys the evidence that something went wrong. See
+/// `doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md`.
+///
+/// This gate NEVER fabricates anything to make a check pass -- it only reads
+/// what was actually emitted and refuses to call an empty artifact a success.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ArtifactVerdict {
+    /// Artifact exists and carries real content.
+    Ok,
+    /// Artifact is missing, empty, or contains no code.
+    Reject(String),
+}
+
+fn rd_u16(b: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(off..off + 2)?.try_into().ok()?))
+}
+fn rd_u32(b: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?))
+}
+fn rd_u64(b: &[u8], off: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(b.get(off..off + 8)?.try_into().ok()?))
+}
+
+/// Counts (defined FUNC symbols, total .text bytes) in an ELF64 LE image.
+/// Returns `None` when the image is not an ELF64 LE we can parse.
+fn elf64_code_census(buf: &[u8]) -> Option<(usize, u64, bool)> {
+    if buf.len() < 64 || &buf[0..4] != b"\x7fELF" {
+        return None;
+    }
+    // EI_CLASS == ELFCLASS64, EI_DATA == ELFDATA2LSB
+    if buf[4] != 2 || buf[5] != 1 {
+        return None;
+    }
+    let e_shoff = rd_u64(buf, 0x28)? as usize;
+    let e_shentsize = rd_u16(buf, 0x3a)? as usize;
+    let e_shnum = rd_u16(buf, 0x3c)? as usize;
+    let e_shstrndx = rd_u16(buf, 0x3e)? as usize;
+    if e_shoff == 0 || e_shnum == 0 || e_shentsize < 64 || e_shstrndx >= e_shnum {
+        return None;
+    }
+    let sh = |i: usize| -> Option<(u32, u32, u64, u64, u64)> {
+        let o = e_shoff.checked_add(i.checked_mul(e_shentsize)?)?;
+        Some((
+            rd_u32(buf, o)?,          // sh_name
+            rd_u32(buf, o + 4)?,      // sh_type
+            rd_u64(buf, o + 0x18)?,   // sh_offset
+            rd_u64(buf, o + 0x20)?,   // sh_size
+            rd_u64(buf, o + 0x38)?,   // sh_entsize
+        ))
+    };
+    let (_, _, shstr_off, shstr_size, _) = sh(e_shstrndx)?;
+    let shstr = buf.get(shstr_off as usize..(shstr_off + shstr_size) as usize)?;
+    let name_at = |n: u32| -> &str {
+        let s = n as usize;
+        match shstr.get(s..) {
+            Some(rest) => {
+                let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
+                std::str::from_utf8(&rest[..end]).unwrap_or("")
+            }
+            None => "",
+        }
+    };
+
+    let mut text_bytes: u64 = 0;
+    let mut func_syms: usize = 0;
+    let mut saw_symtab = false;
+    for i in 0..e_shnum {
+        let (nm, sh_type, off, size, entsize) = match sh(i) {
+            Some(v) => v,
+            None => continue,
+        };
+        let name = name_at(nm);
+        // SHT_PROGBITS(1) with SHF_EXECINSTR is code; keep it simple and look
+        // at the canonical text sections the linker emits.
+        if name == ".text" || name.starts_with(".text.") {
+            text_bytes = text_bytes.saturating_add(size);
+        }
+        // SHT_SYMTAB == 2, SHT_DYNSYM == 11
+        if sh_type == 2 || sh_type == 11 {
+            if sh_type == 2 {
+                saw_symtab = true;
+            }
+            if entsize < 24 {
+                continue;
+            }
+            let count = (size / entsize) as usize;
+            for k in 0..count {
+                let so = off as usize + k * entsize as usize;
+                let st_info = match buf.get(so + 4) {
+                    Some(v) => *v,
+                    None => break,
+                };
+                let st_shndx = match rd_u16(buf, so + 6) {
+                    Some(v) => v,
+                    None => break,
+                };
+                // STT_FUNC == 2, defined means st_shndx != SHN_UNDEF(0)
+                if (st_info & 0xf) == 2 && st_shndx != 0 {
+                    func_syms += 1;
+                }
+            }
+        }
+    }
+    Some((func_syms, text_bytes, saw_symtab))
+}
+
+/// Fail-closed check that a declared build artifact actually exists and is
+/// non-trivial. Never mutates or creates the artifact.
+/// `not_older_than`: when `Some(t)`, the artifact must have been written at
+/// or after `t`. Callers pass the build start time ONLY when a link step
+/// actually ran -- a link that ran must have rewritten its output, so an older
+/// mtime means the file on disk is a STALE artifact left by a previous run and
+/// an existence check on it is a false green. Cached, no-link builds pass
+/// `None` so they cannot be failed for not rewriting a file they never touched.
+pub(crate) fn verify_emitted_artifact(
+    path: &std::path::Path,
+    not_older_than: Option<std::time::SystemTime>,
+) -> ArtifactVerdict {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            return ArtifactVerdict::Reject(format!(
+                "declared output '{}' does not exist ({})",
+                path.display(),
+                e
+            ))
+        }
+    };
+    if meta.len() == 0 {
+        return ArtifactVerdict::Reject(format!("declared output '{}' is empty", path.display()));
+    }
+    if let Some(floor) = not_older_than {
+        match meta.modified() {
+            Ok(mtime) => {
+                // 2s slack for coarse filesystem timestamp granularity.
+                let floor = floor
+                    .checked_sub(std::time::Duration::from_secs(2))
+                    .unwrap_or(floor);
+                if mtime < floor {
+                    return ArtifactVerdict::Reject(format!(
+                        "declared output '{}' is STALE -- a link step ran but the file on disk predates this build",
+                        path.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return ArtifactVerdict::Reject(format!(
+                    "declared output '{}' has no readable mtime, cannot prove it is fresh ({})",
+                    path.display(),
+                    e
+                ))
+            }
+        }
+    }
+    let buf = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            return ArtifactVerdict::Reject(format!(
+                "declared output '{}' is unreadable ({})",
+                path.display(),
+                e
+            ))
+        }
+    };
+    match elf64_code_census(&buf) {
+        // Not an ELF64 LE image (archive, wasm, mach-o, ELF32): the only claim
+        // we can make is non-emptiness, already established above.
+        None => ArtifactVerdict::Ok,
+        Some((funcs, text_bytes, saw_symtab)) => {
+            if funcs > 0 {
+                return ArtifactVerdict::Ok;
+            }
+            if !saw_symtab {
+                // Stripped image: fall back to "there is executable content".
+                if text_bytes > 0 {
+                    return ArtifactVerdict::Ok;
+                }
+                return ArtifactVerdict::Reject(format!(
+                    "declared output '{}' is a stripped ELF with an empty .text -- no code was emitted",
+                    path.display()
+                ));
+            }
+            ArtifactVerdict::Reject(format!(
+                "declared output '{}' has a symbol table with zero defined FUNC symbols (.text = {} bytes) -- no function was emitted",
+                path.display(),
+                text_bytes
+            ))
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_runtime_bundle, normalize_backend};
+    use super::{
+        is_allowed_runtime_bundle, normalize_backend, verify_emitted_artifact, ArtifactVerdict,
+    };
+
+    /// Regression pins for
+    /// `doc/08_tracking/bug/native_build_reports_success_for_functionless_artifact_2026-08-10.md`.
+    /// Fixtures are real ELF images -- no stub or empty object is ever
+    /// fabricated to make a check pass.
+    fn fixture_dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nb_gate_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rejects_missing_and_empty_artifacts() {
+        let d = fixture_dir();
+        let missing = d.join("no_such_file.out");
+        let _ = std::fs::remove_file(&missing);
+        assert!(matches!(
+            verify_emitted_artifact(&missing, None),
+            ArtifactVerdict::Reject(_)
+        ));
+
+        let empty = d.join("empty.out");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(matches!(
+            verify_emitted_artifact(&empty, None),
+            ArtifactVerdict::Reject(_)
+        ));
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    #[test]
+    fn accepts_real_binary_and_rejects_functionless_elf() {
+        let d = fixture_dir();
+        // Positive control: the test binary itself is a real ELF with
+        // functions, so no toolchain invocation is needed for this half.
+        let me = std::env::current_exe().unwrap();
+        assert_eq!(verify_emitted_artifact(&me, None), ArtifactVerdict::Ok);
+
+        // Negative control: an ELF64 with a symtab and zero defined FUNC
+        // symbols -- the shape the incident produced.
+        let asm = d.join("nofunc.s");
+        std::fs::write(&asm, ".section .data\n.globl datum\ndatum: .quad 42\n").unwrap();
+        let obj = d.join("nofunc.o");
+        let cc = std::process::Command::new("cc")
+            .arg("-c")
+            .arg(&asm)
+            .arg("-o")
+            .arg(&obj)
+            .status();
+        if !matches!(cc, Ok(st) if st.success()) {
+            eprintln!("SKIP: no working `cc` to build the 0-FUNC fixture");
+            return;
+        }
+        let out = d.join("nofunc.out");
+        let ld = std::process::Command::new("ld")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&out)
+            .status();
+        if !matches!(ld, Ok(st) if st.success()) {
+            eprintln!("SKIP: no working `ld` to link the 0-FUNC fixture");
+            return;
+        }
+        match verify_emitted_artifact(&out, None) {
+            ArtifactVerdict::Reject(why) => {
+                assert!(why.contains("FUNC"), "unexpected reason: {}", why)
+            }
+            ArtifactVerdict::Ok => panic!("0-FUNC ELF was accepted -- the false green is back"),
+        }
+    }
+
+    #[test]
+    fn rejects_stale_artifact_left_by_a_previous_run() {
+        let d = fixture_dir();
+        // A valid binary from a PREVIOUS run: it exists, is non-empty, and has
+        // functions, so an existence check passes it. Only the freshness floor
+        // catches that this build did not produce it.
+        let stale = d.join("stale.out");
+        std::fs::copy(std::env::current_exe().unwrap(), &stale).unwrap();
+        let floor = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        match verify_emitted_artifact(&stale, Some(floor)) {
+            ArtifactVerdict::Reject(why) => {
+                assert!(why.contains("STALE"), "unexpected reason: {}", why)
+            }
+            ArtifactVerdict::Ok => panic!("a stale artifact was accepted as a fresh build product"),
+        }
+        // Same file, no freshness claim (cached build, no link ran) -> accepted.
+        assert_eq!(verify_emitted_artifact(&stale, None), ArtifactVerdict::Ok);
+        let _ = std::fs::remove_file(&stale);
+    }
+
 
     #[test]
     fn permits_rust_hosted_only_for_bootstrap() {

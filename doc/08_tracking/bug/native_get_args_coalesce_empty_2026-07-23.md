@@ -56,3 +56,54 @@ the Some direction — `(ret_some(42) ?? 0) == 42` is `true` interpreted and `fa
 on the JIT (rc=0 both). So `??` has a payload-representation defect independent of
 the non-Optional-left guard proposed here. See the 2026-08-17 CRIT-C4 note in
 native_inlined_option_return_representation_mismatch_2026-08-02.md.
+
+## 2026-08-18 — fix shape INDEPENDENTLY RE-DERIVED and CONFIRMED; landing DEFERRED (verification structurally unobtainable in this lane)
+
+Re-derived from source without assuming the prior lane's hypothesis, then
+compared. **The derivation agrees**, and one extra constraint was found that
+is the reason this is not landed blind.
+
+Derivation: `HirTypeKind` (`src/compiler/20.hir/hir_types.spl:915-931`) makes
+`Optional(inner)` a distinct variant from `Array(element, size)`,
+`Slice(element)`, `Dict(key, value)` and `Tuple(elements)`. An expression whose
+HIR type is positively one of those aggregate variants can never hold nil, so
+`x ?? d` is *statically* `x`, and any nil-discrimination on it is dead code
+that can only take the wrong arm. Reading the whole
+`case NullCoalesce(left, right):` arm (`expr_dispatch.spl:3518-3600`) confirms
+there is no such test: it computes `result_struct_name` provenance and then
+unconditionally builds the `MirConstValue.Str("rt_is_some")` call plus
+`then_block`/`else_block`/`merge_block`. Correct guard: yield `left_local`
+directly when `left.has_type_` **and** `left.type_.kind` is
+`Array`/`Slice`/`Dict`/`Tuple`.
+
+Agreeing with the prior lane: the guard must be **positive**.
+`hir_expr_is_optional_type` (`expr_dispatch.spl:103-110`) returns `false` for
+an expression with no recorded type, so `not hir_expr_is_optional_type(left)`
+would also fire on the documented "raw migration form" where a genuine Option
+carries no `local_hir_types` entry, silently breaking it.
+
+**New constraint no prior lane stated:** the guard is a *no-op* unless the HIR
+type is actually recorded on the `get_args()` call expression
+(`has_type_ == true`). If it is not, the fix compiles, changes nothing, and
+would be reported as a fix — precisely the false-green class this campaign
+exists to stop. That premise is **unverified**.
+
+**Why verification is structurally unobtainable here, not merely slow.** The
+defect is in `src/compiler/50.mir/**`, i.e. pure-Simple *compiler* source.
+Unlike `src/lib/**` (read as source every run), compiler source only takes
+effect through a **deployed self-hosted binary**. `bin/simple` is currently the
+Rust seed (it prints the seed banner), and this lane is forbidden to rebuild or
+redeploy `bin/simple` / `bin/release/**` while a bootstrap is running. So no
+engine available here executes the edited lowering: `bin/simple test` is the
+tree-walk interpreter and `run` is the Cranelift JIT — neither runs `50.mir`
+lowering at all, so an interpreted spec cannot exercise this defect however it
+is written. The two prior timeouts (7 min at load 302; no output in 25 min at
+load 66-90) are symptoms of the same thing: only a full self-hosted
+native-build exercises it.
+
+Status: **fix shape CONFIRMED by derivation, NOT landed, NOT verified.** Next
+lane needs (a) a deployed self-hosted binary and (b) to first establish whether
+`get_args()`'s call expression carries a recorded `Array` HIR type — check that
+BEFORE writing the guard, because the whole fix hinges on it. Family the
+reproducer must cover once an engine exists: zero args, one arg, many args, and
+the `?? []` coalescing path itself.
