@@ -449,6 +449,29 @@ impl MirLowering:
                     match decl_field_types[field_idx].kind:
                         case HirTypeKind.Dict(_, _):
                             self.runtime_dict_locals[result.id] = true
+                        # Array/Slice half of the SAME defect. The Dict arm
+                        # above was landed alone, but an ARRAY-declared class
+                        # field has exactly the same shape: the projection
+                        # temp is typed i64 with no HIR type, so
+                        # `local_is_runtime_array` misses and `.clear()` /
+                        # `.len()` / `.contains()` on it fall into the string
+                        # arm silently. The pre-existing array registration a
+                        # few lines above fires only via
+                        # `struct_field_array_element_type_name`, which
+                        # records an entry only when the element type has a
+                        # NAME (a `Named` type or the `__runtime_array__`
+                        # nested-array sentinel) -- so a field declared
+                        # `[i64]`, `[text]`, `[bool]` or `[f64]` got NOTHING
+                        # and stayed misdispatched. Keying off the declared
+                        # HIR type covers every array-typed field regardless
+                        # of element kind. Marking is idempotent with the
+                        # element-name path above.
+                        case HirTypeKind.Array(_, _):
+                            self.runtime_array_locals[result.id] = true
+                            self.mark_runtime_value_local(result.id)
+                        case HirTypeKind.Slice(_):
+                            self.runtime_array_locals[result.id] = true
+                            self.mark_runtime_value_local(result.id)
                         case _: ()
 
     fn mir_type_is_integer(t: MirType) -> bool:
