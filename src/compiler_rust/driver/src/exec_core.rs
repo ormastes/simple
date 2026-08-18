@@ -955,6 +955,18 @@ impl ExecCore {
                             if jit_err.contains("SIMPLE_JIT_STRICT:") {
                                 return Err(jit_err);
                             }
+                            // Strict mode must be fail-closed for EVERY JIT failure,
+                            // not only the tagged unresolved-import family: a compile
+                            // failure that silently de-JITs under SIMPLE_JIT_STRICT=1
+                            // makes codegen-lane verdicts read as passes (measured
+                            // 2026-08-18: `print(<int>)` fails to compile and fell
+                            // back with exit 0 under strict).
+                            if jit_strict_env_enabled() {
+                                return Err(format!(
+                                    "SIMPLE_JIT_STRICT=1: refusing interpreter fallback after JIT failure: {}",
+                                    jit_err
+                                ));
+                            }
                             eprintln!(
                                 "[INFO] JIT compilation failed, falling back to interpreter: {}",
                                 jit_err
@@ -962,6 +974,12 @@ impl ExecCore {
                             self.run_file_interpreted_with_args(path, args)
                         }
                         Err(payload) => {
+                            if jit_strict_env_enabled() {
+                                return Err(format!(
+                                    "SIMPLE_JIT_STRICT=1: refusing interpreter fallback after JIT panic: {}",
+                                    panic_payload_to_string(payload.as_ref())
+                                ));
+                            }
                             eprintln!(
                                 "[INFO] JIT panicked, falling back to interpreter: {}",
                                 panic_payload_to_string(payload.as_ref())
@@ -1350,6 +1368,10 @@ fn is_parenless_container_accessor(msg: &str) -> bool {
 /// file, so a drop in a deep import could not be attributed without compiling
 /// one file at a time (Finding 2 of the bug doc above). `path` is appended
 /// whenever the caller knows it.
+fn jit_strict_env_enabled() -> bool {
+    std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0")
+}
+
 fn jit_strict_fallback_error_for(kind: &str, err: &impl std::fmt::Display, path: Option<&Path>) -> String {
     let where_ = match path {
         Some(p) => format!(" [in {}]", p.display()),

@@ -329,3 +329,16 @@ as coverage. Review all seven scores and REQ-to-test mappings. Confirm exact
 approval/rollback for applied fixes and rule/owner/reason/bounded-scope for
 suppressions. Use `--suppressions` with reviewed
 `RULE_ID|owner|reason|optional-fingerprint` records; blockers cannot be suppressed.
+
+## Runtime-boundary gate (added 2026-08-18)
+
+`sh scripts/check/check-no-direct-rt.shs` must PASS before claiming production
+readiness for any change touching `src/**/*.spl`. It is a fail-closed,
+measured-count ratchet on direct `rt_*` call sites in product Simple code
+(baseline `scripts/check/no_direct_rt_baseline.txt`, currently 20,961 —
+the baseline may only go DOWN; a FAIL means the change added new direct rt_
+usage and must route through a `std.*` semantic API or a sanctioned provider
+alias from `scripts/check/no_direct_rt_allowlist.txt` instead). Verdict is the
+last stdout line; `ERROR — nothing was checked` (exit 2) is never a pass.
+Selftest: `--selftest-only`. Context:
+`doc/03_plan/infra/binary_runtime_hardening/plan.md`.
