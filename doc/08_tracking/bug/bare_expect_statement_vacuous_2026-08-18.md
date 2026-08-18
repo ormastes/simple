@@ -105,6 +105,27 @@ Results: 5 total, 0 passed, 5 failed
 All correct. **Matcher-only examples are not affected**, which is what keeps
 this from implicating the whole suite.
 
+### Infix matcher form is sound — probe I
+
+The repo also uses an infix shape, `expect X to_contain Y` (5,011 sites). It
+behaves correctly on its own:
+
+```
+  ✗ I1 infix to_contain, substring ABSENT -- MUST FAIL
+  ✗ I2 infix to_equal, wrong value -- MUST FAIL
+  ✓ I3 infix to_contain, substring PRESENT -- must pass
+  ✗ I4 control: bare expect false -- MUST FAIL
+SPEC FILE VERDICT: test/tmp_probe_i/.spipe_matchers_922178_1787047304062025_probe_i_spec.spl outcome=OK declared>=4 executed=4 passed=1 failed=3 skipped=0 dropped=0
+Results: 4 total, 1 passed, 3 failed
+```
+
+**But note the rewritten filename in the verdict** — `.spipe_matchers_…`. The
+infix form is DESUGARED into matcher-form calls by a preprocessor before
+execution. It therefore **arms the swallow exactly like a literal
+`expect(x).to_…()` does**, and any census that greps only for the literal
+parenthesised form undercounts the at-risk set. The table below accounts for
+this.
+
 ### Non-triggers ruled out (probes A, C, E)
 
 Bare `expect false`, `expect 1 == 2`, `expect elapsed_ms < hard_ms`, the same
@@ -178,14 +199,34 @@ Exhaustive scan with `/usr/bin/grep` over `test/`:
 | measure | count |
 |---|---|
 | `*_spec.spl` files | 20,550 |
-| files using matcher form `expect(x).to_…` | 18,785 |
-| files using bare form `expect <expr>` | 1,099 |
-| **files using BOTH (at risk)** | **80** |
+| files that ARM the bug (literal `expect(x).to_…` **or** infix `expect X to_… Y`, which desugars to it) | 18,942 |
+| files using the plain bare form `expect <expr>` (infix excluded) | 931 |
+| **files with BOTH — at risk** | **71** |
 | bare `expect` statement sites (all `.spl` under `test/`) | 27,239 |
 | ...with a comparison/logical operator | 16,457 |
-| ...in the `expect X to_… Y` infix shape | 5,011 |
+| ...in the infix `expect X to_… Y` shape (arms, does not trigger) | 5,011 |
 
-**80 files can currently contain vacuous assertions.** That is a file-level
+Top at-risk files by plain-bare-`expect` count:
+
+```
+48 test/unit/std/collections_spec.spl
+48 test/01_unit/std/collections_spec.spl
+46 test/03_system/feature/language/placeholder_lambda_spec.spl
+42 test/01_unit/os/userlib/process_spawn_path_spec.spl
+37 test/feature/usage/parser_syntax_validation_spec.spl
+37 test/03_system/feature/usage/parser_syntax_validation_spec.spl
+36 test/feature/usage/parser_error_recovery_spec.spl
+36 test/03_system/feature/usage/parser_error_recovery_spec.spl
+33 test/unit/lib/database/database_stats_spec.spl
+33 test/01_unit/lib/database/database_stats_spec.spl
+30 test/unit/app/tooling/algorithm_utils_spec.spl
+30 test/01_unit/app/tooling/algorithm_utils_spec.spl
+29 test/shared/types/union_impl_spec.spl
+29 test/feature/usage/treesitter_parser_spec.spl
+29 test/03_system/feature/usage/treesitter_parser_spec.spl
+```
+
+**71 files can currently contain vacuous assertions.** That is a file-level
 upper bound: the trigger is per-EXAMPLE, so a file counted here is only actually
 affected where both forms appear inside the same `it`. It is not a lower bound
 either — one such file can hide many lost assertions (G1: two in one example).
@@ -199,8 +240,11 @@ perf budgets, all vacuous, currently reporting green while running 39x-53x over
 budget. Enumerate the rest with:
 
 ```sh
-/usr/bin/grep -rlZ --include=*_spec.spl -E '^[[:space:]]*expect\(.*\)\.to_' test/ \
-  | xargs -0 /usr/bin/grep -lE '^[[:space:]]*expect[[:space:]]+[^(]'
+/usr/bin/grep -rlE '^[[:space:]]*expect\(.*\)\.to_|^[[:space:]]*expect[[:space:]]+.*[[:space:]]to_' \
+  --include=*_spec.spl test/ | sort -u > /tmp/armers.txt
+/usr/bin/grep -rE '^[[:space:]]*expect[[:space:]]+[^(]' --include=*_spec.spl test/ \
+  | /usr/bin/grep -vE '[[:space:]]to_' | cut -d: -f1 | sort -u > /tmp/bareplain.txt
+comm -12 /tmp/armers.txt /tmp/bareplain.txt
 ```
 
 ## Proposed fix
