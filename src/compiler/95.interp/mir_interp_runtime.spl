@@ -1,0 +1,61 @@
+# MIR Interpreter — Runtime Bridge & Value Helpers
+#
+# Split from mir_interpreter.spl (cohesion refactor 2026-08-18). Contains the
+# class-independent helpers: the async-runtime SFFI bridge and value/operand
+# conversion free functions. mir_interpreter.spl re-exports the public names
+# (f64_to_bits, f64_from_bits), so existing imports keep working.
+
+use compiler.mir.mir_data.*
+
+# Async runtime SFFI bindings
+extern fn rt_actor_spawn(handler: i64) -> i64
+extern fn rt_actor_send(target: i64, message: i64) -> i64
+extern fn rt_actor_recv(timeout: i64) -> i64
+extern fn rt_thread_yield() -> i64
+
+# ============================================================================
+# Async Runtime Support
+# ============================================================================
+
+fn mir_interp_call_runtime_fn(name: text, args: [i64]) -> i64:
+    """Call a runtime function by name, mirroring LLVM backend."""
+    match name:
+        case "__simple_runtime_create_promise":
+            if args.len() > 0: args[0] else: 0
+        case "__simple_runtime_await":
+            if args.len() > 0: args[0] else: 0
+        case "__simple_runtime_spawn":
+            if args.len() > 0: rt_actor_spawn(args[0]) else: 0
+        case "__simple_runtime_send":
+            if args.len() >= 2: rt_actor_send(args[0], args[1]) else: 0
+        case "__simple_runtime_receive":
+            if args.len() > 0: rt_actor_recv(args[0]) else: rt_actor_recv(-1)
+        case "__simple_runtime_yield":
+            rt_thread_yield()
+        case _:
+            0
+
+# ============================================================================
+# Value Helpers
+# ============================================================================
+
+fn f64_to_bits(v: f64) -> i64:
+    """Convert f64 to IEEE 754 bit representation.
+    Approximation: proper bit reinterpretation requires SFFI (rt_f64_to_bits).
+    Current fallback truncates to integer which loses fractional data."""
+    v as i64
+
+fn f64_from_bits(bits: i64) -> f64:
+    """Convert IEEE 754 bit representation to f64.
+    Approximation: proper bit reinterpretation requires SFFI (rt_f64_from_bits).
+    Current fallback casts integer to float which is not a bitwise reinterpret."""
+    bits as f64
+
+fn _extract_func_name(op: MirOperand) -> text?:
+    """Extract function name from a Const operand with Str value."""
+    match op.kind:
+        case Const(value, type_):
+            match value:
+                case Str(name): Some(name)
+                case _: nil
+        case _: nil

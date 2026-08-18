@@ -18,58 +18,16 @@ use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
 use compiler.common.diagnostics.span.{Span}
 
-# Async runtime SFFI bindings
-extern fn rt_actor_spawn(handler: i64) -> i64
-extern fn rt_actor_send(target: i64, message: i64) -> i64
-extern fn rt_actor_recv(timeout: i64) -> i64
-extern fn rt_thread_yield() -> i64
+# Cohesion split (2026-08-18): class-independent pieces live in sibling
+# modules; re-exported here so the public surface of this module is unchanged.
+export use compiler.interp.mir_interp_error.{InterpError, CallFrame}
+export use compiler.interp.mir_interp_runtime.{mir_interp_call_runtime_fn, f64_to_bits, f64_from_bits, _extract_func_name}
 
 # Miri-mode: dynamic UB checks too expensive for normal runs, gated behind
 # SIMPLE_STRICT_INTERP=1 so default interpreter perf/behavior is untouched.
 # Read once at interpreter creation (see MirInterpreter.strict_mode).
 extern fn rt_env_get(key: text) -> text
 
-
-# ============================================================================
-# Interpreter Errors
-# ============================================================================
-
-enum InterpError:
-    """Interpreter runtime errors."""
-    DivisionByZero(message: text)
-    InvalidCast(from_ty: text, to_ty: text)
-    UnsupportedOperation(op: text)
-    InvalidRegister(vreg: i64)
-    OutOfBounds(index: i64, size: i64)
-    RuntimeError(message: text)
-
-impl InterpError:
-    fn message() -> text:
-        match self:
-            case DivisionByZero(msg): "Division by zero: {msg}"
-            case InvalidCast(from, to): "Invalid cast from {from} to {to}"
-            case UnsupportedOperation(op): "Unsupported operation: {op}"
-            case InvalidRegister(vreg): "Invalid virtual register: v{vreg}"
-            case OutOfBounds(idx, size): "Index {idx} out of bounds (size: {size})"
-            case RuntimeError(msg): "Runtime error: {msg}"
-
-# ============================================================================
-# Call Frame (for nested function calls)
-# ============================================================================
-
-struct CallFrame:
-    """Saved state for nested function calls."""
-    # Name of the function that was executing when this frame was pushed (the
-    # CALLER). Without it the frame stack exists but cannot NAME anything, so a
-    # runtime error could never render a `Call stack:` section -- see
-    # doc/08_tracking/bug/runtime_error_stack_absent_on_live_interpreter_2026-08-17.md
-    function_name: text
-    locals: {i64: i64}
-    current_block: i64?
-    previous_block: i64?
-    return_value: i64?
-    has_returned: bool
-    blocks: {i64: MirBlock}
 
 # ============================================================================
 # MIR Interpreter
@@ -469,14 +427,14 @@ impl MirInterpreter:
 
             case CreatePromise(dest, body, result_type):
                 # Mirrors LLVM: call ptr @__simple_runtime_create_promise(ptr null)
-                val result = self._call_runtime_fn("__simple_runtime_create_promise", [0])
+                val result = mir_interp_call_runtime_fn("__simple_runtime_create_promise", [0])
                 self.set_local(dest, result)
                 nil
 
             case Await(dest, promise):
                 # Mirrors LLVM: call i64 @__simple_runtime_await(ptr promise)
                 val prom_val = self.get_operand(promise)
-                val result = self._call_runtime_fn("__simple_runtime_await", [prom_val])
+                val result = mir_interp_call_runtime_fn("__simple_runtime_await", [prom_val])
                 self.set_local(dest, result)
                 nil
 
@@ -484,15 +442,15 @@ impl MirInterpreter:
                 # Mirrors LLVM: call void @__simple_runtime_yield(i64 value)
                 if value.?:
                     val val_int = self.get_operand(value.unwrap())
-                    self._call_runtime_fn("__simple_runtime_yield", [val_int])
+                    mir_interp_call_runtime_fn("__simple_runtime_yield", [val_int])
                 else:
-                    self._call_runtime_fn("__simple_runtime_yield", [0])
+                    mir_interp_call_runtime_fn("__simple_runtime_yield", [0])
                 nil
 
             case Spawn(dest, handler, args):
                 # Mirrors LLVM: call ptr @__simple_runtime_spawn(ptr handler)
                 val handler_val = self.get_operand(handler)
-                val result = self._call_runtime_fn("__simple_runtime_spawn", [handler_val])
+                val result = mir_interp_call_runtime_fn("__simple_runtime_spawn", [handler_val])
                 self.set_local(dest, result)
                 nil
 
@@ -500,7 +458,7 @@ impl MirInterpreter:
                 # Mirrors LLVM: call void @__simple_runtime_send(ptr target, i64 message)
                 val target_val = self.get_operand(target)
                 val msg_val = self.get_operand(message)
-                self._call_runtime_fn("__simple_runtime_send", [target_val, msg_val])
+                mir_interp_call_runtime_fn("__simple_runtime_send", [target_val, msg_val])
                 nil
 
             case Receive(dest, timeout):
@@ -508,7 +466,7 @@ impl MirInterpreter:
                 var timeout_val: i64 = -1
                 if timeout.?:
                     timeout_val = self.get_operand(timeout.unwrap())
-                val result = self._call_runtime_fn("__simple_runtime_receive", [timeout_val])
+                val result = mir_interp_call_runtime_fn("__simple_runtime_receive", [timeout_val])
                 self.set_local(dest, result)
                 nil
 
@@ -889,28 +847,6 @@ impl MirInterpreter:
         nil
 
     # ========================================================================
-    # Async Runtime Support
-    # ========================================================================
-
-    fn _call_runtime_fn(name: text, args: [i64]) -> i64:
-        """Call a runtime function by name, mirroring LLVM backend."""
-        match name:
-            case "__simple_runtime_create_promise":
-                if args.len() > 0: args[0] else: 0
-            case "__simple_runtime_await":
-                if args.len() > 0: args[0] else: 0
-            case "__simple_runtime_spawn":
-                if args.len() > 0: rt_actor_spawn(args[0]) else: 0
-            case "__simple_runtime_send":
-                if args.len() >= 2: rt_actor_send(args[0], args[1]) else: 0
-            case "__simple_runtime_receive":
-                if args.len() > 0: rt_actor_recv(args[0]) else: rt_actor_recv(-1)
-            case "__simple_runtime_yield":
-                rt_thread_yield()
-            case _:
-                0
-
-    # ========================================================================
     # Function Execution
     # ========================================================================
 
@@ -1037,27 +973,5 @@ impl MirInterpreter:
                 self.current_block = Some(normal.id)
                 nil
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-fn f64_to_bits(v: f64) -> i64:
-    """Convert f64 to IEEE 754 bit representation.
-    Approximation: proper bit reinterpretation requires SFFI (rt_f64_to_bits).
-    Current fallback truncates to integer which loses fractional data."""
-    v as i64
-
-fn f64_from_bits(bits: i64) -> f64:
-    """Convert IEEE 754 bit representation to f64.
-    Approximation: proper bit reinterpretation requires SFFI (rt_f64_from_bits).
-    Current fallback casts integer to float which is not a bitwise reinterpret."""
-    bits as f64
-
-fn _extract_func_name(op: MirOperand) -> text?:
-    """Extract function name from a Const operand with Str value."""
-    match op.kind:
-        case Const(value, type_):
-            match value:
-                case Str(name): Some(name)
-                case _: nil
-        case _: nil
+# Helper functions (f64_to_bits, f64_from_bits, _extract_func_name) moved to
+# mir_interp_runtime.spl and re-exported at the top of this file.
