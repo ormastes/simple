@@ -51,3 +51,11 @@ text` — each carries the full generation double-check inline; callers
 needing pairing re-read the generation after (the atlas producer does).
 The double-read staleness guarantee is preserved per projection, not per
 pair. See `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
+
+## interface_digest_of: first callers landed (2026-08-18)
+
+Commit 1310d8790466 gave `interface_digest_of` (action_key.spl) its first real
+callers: manifest recording and a level-gated verify diagnostic. Prior notes
+describing it as defined-but-never-called are superseded on that point; full
+dependency-aware rebuild wiring (simple.sdn traversal, SmfManifest
+load-verification) remains open.

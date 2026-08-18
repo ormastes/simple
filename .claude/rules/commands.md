@@ -152,6 +152,14 @@ bin/simple --version 2>&1 | head -2
   Open: the superlinear term has not been located — attach-based profiling is
   blocked on this host (`ptrace_scope=1`, `perf_event_paranoid=4`). See
   `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
+  **Dated note (2026-08-18): the table above predates the 2026-08-18 06:12 seed
+  redeploy (env-cache + parser fixes) and MUST be re-measured before use.** The
+  root cause tracked in that bug is now fixed and deployed; remeasured on the
+  new binary, a 501-line / 125-fn generated arithmetic file lints in ~76s (vs
+  the pre-fix 436s for a smaller 90-fn fixture), and a tracked fixture went
+  49s -> 14s. Old rows are retained for history only; do NOT delete them. Fresh
+  numbers:
+  `doc/10_metrics/startup/cross_language_compute_compile_benchmark_2026-08-18.md`.
 - No pure-Simple binary can lint: `bootstrap/stage3/simple lint` is
   `unknown command` (exit 1). `simple test` GREEN does not prove self-hosted.
 - Detail: `doc/07_guide/tooling/build_fast_path.md`

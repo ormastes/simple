@@ -104,34 +104,14 @@ SIGTERMs `simple`; the host is at ~103/125 GB with zero swap. rc 143 and a
 timeout are statements about the host, never verdicts about the unit — treat both
 as UNVERIFIED.
 
-**Since landed** (the older "in flight" note below is superseded — re-grep before
-assuming anything further): outcome accumulation in
-`driver_aot_native_output.spl` (`driver_native_record_module_failure` /
-`driver_native_report_module_outcomes_v1`), and `ParallelBuilder.build_supervised`
-in `driver_build/parallel.spl`, which compiles each unit in its own child process,
-reads the wait status directly into a local, bounds concurrency to
-`effective_threads()`, and records every never-reached unit as `NOT_RUN`. Note
-`ParallelBuilder.build()` is still in-process and SAYS SO when unstable mode is
-requested — it cannot honour it, because `compile_fn` closes over in-memory MIR
-capsules that no child can receive.
-
-**R9 — bounded accumulation (2026-08-18).** Collect-all must not OOM the run it
-is reporting on: a stage-3 build was measured at 2,926 accumulated errors by file
-124 of 619 with RSS climbing ~1 GB / 30s. `BuildUnitOutcome` therefore carries
-`diagnostic_total` (EXACT, never capped) alongside `diagnostic_retained` (bounded
-by `build_outcome_retained_line_cap()`, default 10, env
-`SIMPLE_BUILD_DIAG_RETAIN`). Discarded text is spilled by
-`build_outcome_retain_diagnostics` to `build_outcome_spill_log_path()`
-(`build/build_diagnostics.log`, env `SIMPLE_BUILD_DIAG_LOG`) — the log, never the
-heap — and `summary()` prints `shown=N retained=N total=M` whenever text was
-dropped. **Never derive the count from the retained text**: a truncated count
-lies about the SIZE of the problem, which is strictly worse than truncated text.
-Spec: `test/01_unit/compiler/driver/build_outcome_bounded_accumulation_spec.spl`.
-
-**Still open:** R6 (per-unit resume). It needs `interface_digest_of`
-(`action_key.spl:197-204`), which has zero callers today; the pure-Simple
-`cache_scope_root` hashes the whole loaded source closure, so a one-line edit
-drops reuse to 0 for every module.
+**Extension points, in flight and separately owned** (re-grep before assuming any
+of it landed — as of this writing both files contain zero `BuildOutcome`
+references): outcome accumulation in `driver_aot_native_output.spl`, and
+separate-process "unstable mode" in `driver_build/parallel.spl`. `ParallelBuilder`
+already fans out uncached modules via `ParallelBuildConfig` (`num_threads` /
+`parallel_threshold` / `deterministic` / `verbose`); what the layer lacks is
+process isolation and outcome classification — today a worker's death is the
+parent's death.
 
 Layer rules this introduces:
 - Read a child's wait status **directly**; never through a pipe (`cmd | tail`
@@ -144,3 +124,12 @@ Layer rules this introduces:
 Requirements: `doc/02_requirements/compiler/supervised_builder.md`.
 Feature expert: `../../feature_expert/supervised_build/skill.md`.
 Lane state: `.spipe/supervised-crash-safe-build/state.md`.
+
+## interface_digest_of has first callers (2026-08-18)
+
+As of commit 1310d8790466, `interface_digest_of`
+(`src/compiler/80.driver/cache/action_key.spl`) is no longer caller-less: it is
+now invoked for manifest recording plus a level-gated verify diagnostic. The
+long-standing "zero callers — never computed" status quoted elsewhere (e.g.
+`.claude/rules/commands.md`) is stale as of that commit; dependency-aware
+partial rebuild is still NOT wired.

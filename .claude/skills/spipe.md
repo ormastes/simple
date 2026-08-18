@@ -482,6 +482,16 @@ Two harness facts that cost lanes hours:
 bin/simple test test/01_unit/infra/counterpart/<spec>.spl --no-session-daemon --timeout 60
 ```
 
+- **Lint cost picture changed materially (2026-08-18).** The 2026-08-18 06:12
+  seed redeploy (env-cache + parser fixes; root cause in
+  `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`) cut lint
+  fixture cost sharply (e.g. a tracked fixture 49s -> 14s; a 501-line /
+  125-fn arithmetic file lints in ~76s vs the pre-fix ~436s for a smaller
+  90-fn file). Any lint-budget numbers dated 2026-08-17 or earlier in this
+  skill or in `.claude/rules/commands.md` predate the fix — re-measure before
+  relying on them. Fresh cross-language numbers:
+  `doc/10_metrics/startup/cross_language_compute_compile_benchmark_2026-08-18.md`.
+
 Every lane must ship a sabotage spec that turns green to red — "the adapter
 ran" is not an acceptance criterion. Add a new provider or plan as a
 **descriptor**, not by editing central registry files. See also Boundary,
@@ -2579,3 +2589,11 @@ do not write ad-hoc hex/bit diff helpers in specs.
 Design/plan: `doc/05_design/infra/sspec/binary_reference_stacked_design.md`,
 `doc/03_plan/infra/binary_runtime_hardening/plan.md`, feature wiki
 `doc/00_llm_process/feature_expert/binary_runtime_hardening/skill.md`.
+
+**What is implemented TODAY (use this, not the planned macros above):**
+`src/lib/common/spec/evidence/format/binary_layout.spl` — `BinaryLayout`,
+`compare_word` (mask-aware, exact reserved-overrides-dont_care precedence),
+`stacked_rows`/`stacked_compare_rows`. Practical usage guide with verified
+line-cited semantics, domain recipes (protocol/cipher/checksum/register), and
+pitfalls (fixed 64-bit hex rendering, no endianness conversion in
+`field_extract`): `doc/07_guide/infra/sspec/binary_sspec_usage.md`.
