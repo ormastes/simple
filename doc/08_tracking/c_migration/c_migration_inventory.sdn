@@ -56,16 +56,33 @@ c_migrations:
       2x PERF-finding threshold; left visible in perf_evidence output per
       C-migration test standard step 1 rather than hidden.
     shared_corpus: 100
-    perf_codegen: "PERF FINDING (codegen lane) — ratio 3.18x, WORSE than the
-      interpreter-lane 2.01x. Measured codegen-lane 2026-08-18, binary
-      bin/release/x86_64-unknown-linux-gnu/simple (Rust bootstrap seed) mtime
-      2026-08-18 01:08:42, size 59620392. bin/simple run +
-      SIMPLE_JIT_STRICT=1, exit 0 (no strict refusal), KAT-verified before
-      timing. 30 reps x 100-vector shared corpus: simple_us=265627
-      c_us=83431. See
+    perf_codegen: "ARTIFACT (isolated 2026-08-18) — the 3.18x codegen /
+      2.01x interpreter split is a clock-probe-overhead artifact, not a
+      real JIT regression on the arithmetic. Isolation harnesses (KAT-
+      guarded, same binary bin/release/x86_64-unknown-linux-gnu/simple,
+      mtime 2026-08-18 01:08:42, size 59620392) on this measurement pass:
+      (1) bare time_now_unix_micros() back-to-back, N=10000 pairs:
+      interp 0.033us/call, codegen 0.045us/call (codegen probe cost
+      1.36x interp, but both sub-0.05us — negligible in isolation);
+      (2) batch-timed 10000 iters of
+      from_components+add_days+diff_days with ONE clock pair around the
+      whole loop (no per-call probe): interp 0.095us/iter, codegen
+      0.0599us/iter — codegen is FASTER, not slower, once probe reads
+      are taken out of the hot path; (3) per-call-probe replica of the
+      original harness shape (3 probe pairs per iteration, N=3000):
+      interp 0.0593us/call, codegen 0.0371us/call — again codegen
+      faster. All three isolations contradict the original 'JIT made it
+      worse' reading. Root cause: time_utils has no loop/allocation, so
+      its true per-call cost (tens of nanoseconds) is the same order of
+      magnitude as the clock-probe/syscall cost itself and highly
+      sensitive to scheduler/syscall noise on a shared, loaded box —
+      exactly the regime where a probe-dominated ratio is unreliable.
+      The original 265627us/83431us=3.18x number is not reproduced by a
+      probe-free measurement of the same functions; treat the original
+      per-call-probe methodology as unreliable for this class of
+      function, not the codegen backend as regressed. Detail:
       doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
-      finding 3 for suspected cause (per-call/clock-probe overhead at this
-      scale, not confirmed) — still open."
+      finding 3, updated verdict section."
 
   - id: C-MIG-0013
     path: src/runtime/runtime_mcp_core.c
