@@ -80,7 +80,18 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        for byte in std::fs::read(runtime_root.join(input)).ok()? {
+        let bytes = std::fs::read(runtime_root.join(input)).map_err(|e| {
+            // A silent None here surfaces far away as "could not build the
+            // core-C runtime archive" with no compile ever attempted (seen
+            // 2026-08-18: a stale staged compiler listed the since-deleted
+            // runtime_mcp_core.c). Name the offending input.
+            eprintln!(
+                "native-build: core-C runtime input `{}` unreadable in {}: {e}",
+                input,
+                runtime_root.display()
+            );
+        }).ok()?;
+        for byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -334,7 +345,6 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_framebuffer.c",
         "runtime_directx_core.c",
         "runtime_legacy_core.c",
-        "runtime_mcp_core.c",
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
