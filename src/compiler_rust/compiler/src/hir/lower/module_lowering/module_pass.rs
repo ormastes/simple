@@ -785,6 +785,24 @@ impl Lowerer {
                         TypeId::I64
                     } else if matches!(&l.value, Some(Expr::String(_)) | Some(Expr::FString { .. })) {
                         TypeId::STRING
+                    } else if let Some(Expr::Call { callee, .. }) = &l.value {
+                        // `val TABLE = make_table()`: inherit the callee's
+                        // declared return type instead of ANY. An ANY-typed
+                        // module val forces every read through the boxed
+                        // dispatch path, and its indexed elements were being
+                        // consumed as raw i64 WITHOUT unboxing — silently
+                        // wrong values in the JIT lane (measured: CRC-32 KAT
+                        // failing with tagged garbage; see doc/08_tracking/bug/
+                        // jit_module_val_array_indexing_15x_slow_2026-08-18.md).
+                        // Declaration-order dependency: the callee must be
+                        // declared before the val for its ret_ty to be
+                        // registered — same bounded contract as the dynamic
+                        // init ordering comment below.
+                        if let Expr::Identifier(fn_name) = callee.as_ref() {
+                            self.globals.get(fn_name.as_str()).copied().unwrap_or(TypeId::ANY)
+                        } else {
+                            TypeId::ANY
+                        }
                     } else {
                         TypeId::ANY
                     };

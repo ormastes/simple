@@ -79,3 +79,20 @@ measured zero-reads — treat only KAT-verified numbers as real.
 The `_table_copy()` mitigation in gzip/crc.spl is therefore load-bearing
 for CORRECTNESS, not just speed. Do not remove it until this bug is fixed
 and the crosslang KAT passes under strict JIT with direct module-val reads.
+
+## COMPILER FIX #2 (same day): fn-call initializer return-type inference — KAT now PASSES with direct reads
+
+module_pass.rs: `val TABLE = make_table()` now inherits the callee's declared
+return type instead of ANY (declaration-order bounded, same contract as the
+dynamic-init ordering). Measured on the fixed build, strict JIT:
+- direct module-val KAT: FAIL (tagged garbage) -> **KAT-OK**
+- crc32-shaped loop with direct table reads: 12,988 us per 500x2KB
+  => 2.25x vs C (from 19,544 us with the copy mitigation; 82,911 at session
+  start — a 6.4x total improvement, 14.4x -> 2.25x).
+
+DEPLOYMENT DEPENDENCY: gzip/crc.spl keeps `_table_copy()` until a compiler
+carrying this fix is DEPLOYED — on the current deployed binary, direct
+module-val reads still produce silently wrong values in the JIT lane. Also
+requires the callee to declare its return type: `fn crc32_table():` (untyped)
+must become `-> [i64]` when the switch happens. Prereqs also include the
+all-dynamic-inits fix (previous section) for multi-module units.
