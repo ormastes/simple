@@ -1,0 +1,118 @@
+# @req REQ-C-MIG-PARSEI64
+#
+# C-MIG-0021 (binary_runtime_hardening Wave 4): pure-Simple decimal integer
+# parsing (`std.common.text.parse_i64`, `s.trim().parse_int() ?? -1`) vs the
+# C oracle `rt_string_to_int` (`strtoll(buf, NULL, 10)` in
+# src/runtime/runtime_native.c:5093). This spec freezes the C behavior as a
+# differential oracle so C-MIG-0021 can mark the C unit
+# `retained_as_test_oracle` and, eventually, migrate remaining native-build
+# `extern fn rt_string_to_int` callers onto the pure-Simple implementation.
+#
+# Scope note: the two sides have DIFFERENT failure sentinels on malformed or
+# empty input. `rt_string_to_int` as actually dispatched through this
+# interpreter's extern table (`interpreter_extern/sffi_string.rs`'s
+# `rt_string_to_int_fn`, a strict `text.trim().parse::<i64>().unwrap_or(0)`)
+# returns 0 on any non-numeric/empty input — e.g. "" -> 0, "42abc" -> 0,
+# "abc" -> 0 (measured directly; this is NOT the leading-numeric-prefix
+# `strtoll` semantics of the C source at runtime_native.c:5093 — see caller
+# note in the inventory entry for why the two diverge). `parse_i64` is
+# `s.trim().parse_int() ?? -1`, so it returns -1 on the same failing inputs.
+# This spec therefore differentially compares the two ONLY on well-formed
+# decimal integer strings (optional leading sign/whitespace, digits only),
+# where both sides genuinely agree, and separately documents (without
+# asserting cross-side equality) the failure-sentinel divergence (0 vs -1)
+# so it is not silently glossed over.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.text.{parse_i64 as simple_parse_i64}
+
+# C oracle (test-only; never production-linked from Simple product code here).
+extern fn rt_string_to_int(s: text) -> i64
+
+describe "decimal integer parsing — pure-Simple parse_i64 vs C oracle (well-formed inputs)":
+    it "matches the C oracle on well-formed KAT integers":
+        assert_equal(simple_parse_i64("0"), rt_string_to_int("0"))
+        assert_equal(simple_parse_i64("0"), 0)
+        assert_equal(simple_parse_i64("42"), rt_string_to_int("42"))
+        assert_equal(simple_parse_i64("42"), 42)
+        assert_equal(simple_parse_i64("-1"), rt_string_to_int("-1"))
+        assert_equal(simple_parse_i64("-1"), -1)
+        assert_equal(simple_parse_i64("123456789"), rt_string_to_int("123456789"))
+
+    it "matches the C oracle across representative differential vectors":
+        val vectors = [
+            "0", "1", "-1", "42", "-42", "007", "-007",
+            "9223372036854775807", "-9223372036854775807",
+            "  42", "42  ", "  -42  "
+        ]
+        var i = 0
+        while i < vectors.len():
+            val simple = simple_parse_i64(vectors[i])
+            val oracle = rt_string_to_int(vectors[i])
+            assert_equal(simple, oracle)
+            i = i + 1
+
+    it "diverges by design on the empty string (documented, not asserted equal)":
+        # Different failure sentinels: Simple's `?? -1` vs the oracle's `unwrap_or(0)`.
+        assert_equal(simple_parse_i64(""), -1)
+        assert_equal(rt_string_to_int(""), 0)
+
+    it "diverges by design on malformed input (documented, not asserted equal)":
+        assert_equal(rt_string_to_int("42abc"), 0)
+        assert_equal(simple_parse_i64("42abc"), -1)
+        assert_equal(rt_string_to_int("abc"), 0)
+        assert_equal(simple_parse_i64("abc"), -1)
+
+    it "single-char corruption changes the parsed value (discrimination)":
+        val a = simple_parse_i64("123")
+        val b = simple_parse_i64("124")
+        assert_true(a != b)
+        assert_true(rt_string_to_int("123") != rt_string_to_int("124"))
+
+    it "is deterministic on both sides":
+        assert_equal(simple_parse_i64("777"), simple_parse_i64("777"))
+        assert_equal(rt_string_to_int("777"), rt_string_to_int("777"))
+
+    it "matches the C oracle on 100 shared branch-covering well-formed vectors, with perf evidence":
+        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
+        # deterministic generator feeds the SAME input to BOTH sides inside
+        # this loop — the loop is the shared logic. Branch coverage: digit
+        # count 0..99 (empty, single-digit, multi-digit, wide magnitudes),
+        # a deterministic sign toggle, and leading/trailing whitespace
+        # padding of 0/1/2 chars cycling by index — all still well-formed so
+        # both sides genuinely agree.
+        use std.io_runtime.{time_now_unix_micros}
+        var simple_us = 0
+        var c_us = 0
+        var i = 0
+        while i < 100:
+            var digits = ""
+            var seed = i * 2654435761 % 4294967296
+            var digit_count = i % 18
+            var j = 0
+            while j < digit_count:
+                seed = (seed * 1103515245 + 12345) % 2147483648
+                val d = seed % 10
+                digits = digits + "{d}"
+                j = j + 1
+            if digits == "":
+                digits = "0"
+            val sign = if i % 2 == 0: "" else: "-"
+            val pad_n = i % 3
+            var pad = ""
+            var k = 0
+            while k < pad_n:
+                pad = pad + " "
+                k = k + 1
+            val body = pad + sign + digits + pad
+            val t0 = time_now_unix_micros()
+            val s = simple_parse_i64(body)
+            val t1 = time_now_unix_micros()
+            val c = rt_string_to_int(body)
+            val t2 = time_now_unix_micros()
+            simple_us = simple_us + (t1 - t0)
+            c_us = c_us + (t2 - t1)
+            assert_equal(s, c)
+            i = i + 1
+        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
+        assert_true(simple_us >= 0 and c_us >= 0)

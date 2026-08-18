@@ -1,0 +1,81 @@
+# @req REQ-BUG-STR-TO-LOWER-UPPER-UTF8
+#
+# Regression spec for
+# doc/08_tracking/bug/str_to_lower_upper_crash_on_multibyte_utf8_2026-08-18.md:
+# `str_to_lower`/`str_to_upper` (src/lib/common/string_core.spl) used to loop
+# `while i < s.len(): val ch = s[i]` — `.len()` is BYTE length but `s[i]` is
+# CODEPOINT-indexed single-bracket access, so any multibyte UTF-8 input past
+# the codepoint count crashed with `semantic: string index out of bounds`.
+#
+# There is no C oracle to differentially compare against here: the C-MIG-0026
+# era found `rt_text_to_lower_ascii` is not reachable from this Simple path in
+# a way that keeps the evidence honest (see the bug doc), so this spec is
+# pure-Simple only, asserting the documented byte-passthrough contract: ASCII
+# A-Z/a-z shift by 32, every other byte/codepoint passes through unchanged.
+#
+# Fix: single-bracket `s[i]` replaced with byte-range slice `s[i:i+1]`,
+# matching the pattern already used by every other function in the file
+# (str_slice, str_index_of, str_last_index_of, ...). Same defect-class fix
+# also applied to str_trim_left, str_trim_right, str_replace_all, str_split
+# (empty-separator branch), and str_reverse — see the bug doc's audit list.
+
+use std.spec.{describe, it, assert_equal}
+use std.common.string_core.{str_to_lower, str_to_upper, str_trim, str_replace_all, str_reverse}
+
+describe "str_to_lower / str_to_upper — multibyte UTF-8 safety":
+    it "lowercases an accented word without crashing (reproduces the bug)":
+        assert_equal(str_to_lower("CAF\u{e9}"), "caf\u{e9}")
+
+    it "uppercases an accented word without crashing":
+        assert_equal(str_to_upper("caf\u{e9}"), "CAF\u{e9}")
+
+    it "passes an emoji (4-byte codepoint) through str_to_lower untouched":
+        assert_equal(str_to_lower("HI\u{1F600}BYE"), "hi\u{1F600}bye")
+
+    it "passes an emoji through str_to_upper untouched":
+        assert_equal(str_to_upper("hi\u{1F600}bye"), "HI\u{1F600}BYE")
+
+    it "handles multibyte at position 0":
+        assert_equal(str_to_lower("\u{e9}ABC"), "\u{e9}abc")
+        assert_equal(str_to_upper("\u{e9}abc"), "\u{e9}ABC")
+
+    it "handles multibyte at the last position":
+        assert_equal(str_to_lower("ABC\u{e9}"), "abc\u{e9}")
+        assert_equal(str_to_upper("abc\u{e9}"), "ABC\u{e9}")
+
+    it "handles a pure-multibyte string":
+        assert_equal(str_to_lower("\u{e9}\u{e8}\u{ea}"), "\u{e9}\u{e8}\u{ea}")
+        assert_equal(str_to_upper("\u{e9}\u{e8}\u{ea}"), "\u{e9}\u{e8}\u{ea}")
+
+    it "handles mixed ASCII+multibyte with case letters both before and after":
+        assert_equal(str_to_lower("A\u{e9}B\u{e8}C"), "a\u{e9}b\u{e8}c")
+        assert_equal(str_to_upper("a\u{e9}b\u{e8}c"), "A\u{e9}B\u{e8}C")
+
+    it "handles the empty string":
+        assert_equal(str_to_lower(""), "")
+        assert_equal(str_to_upper(""), "")
+
+describe "same defect class — sibling s[i]-vs-byte-len functions in string_core.spl":
+    it "str_trim no longer crashes on leading/trailing multibyte-adjacent whitespace":
+        assert_equal(str_trim("  caf\u{e9}  "), "caf\u{e9}")
+
+    it "str_replace_all no longer crashes walking a multibyte subject":
+        assert_equal(str_replace_all("caf\u{e9} caf\u{e9}", "caf", "COFFEE"), "COFFEE\u{e9} COFFEE\u{e9}")
+
+    # str_split(s, "") is NOT fixed here: unlike the other siblings, its
+    # empty-separator branch is documented to split into per-CHARACTER
+    # elements, and a byte-range `s[k:k+1]` one-liner would silently change
+    # that data contract (splitting a multibyte codepoint into invalid
+    # partial-byte elements) rather than merely stop the crash. Left OPEN
+    # and recorded as a remaining instance in the bug doc — needs real
+    # UTF-8 lead-byte-width detection, not this one-liner.
+
+    it "str_reverse no longer crashes on multibyte content":
+        # Byte-level reversal of a multibyte codepoint does not produce a
+        # readable result (the codepoint's bytes get re-ordered relative to
+        # the rest of the string) -- that reordering is a pre-existing,
+        # documented limitation of this byte-oriented helper, not something
+        # this fix is responsible for. What the fix guarantees is: no crash,
+        # and byte-length is preserved.
+        val r = str_reverse("caf\u{e9}")
+        assert_equal(r.len(), 5)

@@ -1,0 +1,188 @@
+#!/bin/sh
+# check-binary-sspec-evidence.shs — fail-closed gate on the binary SSpec evidence suite.
+# Runs each binary_*_spec.spl under test/01_unit/lib/common/spec/evidence/ via
+# `bin/simple test`, parses its "Results: N total, N passed, 0 failed" line,
+# and asserts (a) non-vacuity — every spec contributes >0 examples and the
+# combined total clears a recorded floor — and (b) that the suite still
+# exercises negative/fail-closed cases (a reserved-bit violation assertion
+# and a corruption/FAIL-render assertion), not just happy paths.
+#
+# Verdict is ALWAYS the last stdout line:
+#   PASS — <n> spec(s) checked, <total> example(s), 0 vacuous, negative cases present
+#   FAIL — <reason>
+#   ERROR — nothing was checked
+# exit 0 / 1 / 2 respectively. Counts are measured, never assumed.
+# --selftest (fatal) runs first, always, proving the parser/vacuity logic
+# on synthetic fixtures before any real spec is run.
+#
+# Usage: sh scripts/check/check-binary-sspec-evidence.shs [--selftest-only] [--root DIR] [--timeout SECS]
+
+set -u
+
+ROOT="$(pwd)"
+SELFTEST_ONLY=0
+TIMEOUT=600
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest-only) SELFTEST_ONLY=1 ;;
+    --root) shift; ROOT="$1" ;;
+    --timeout) shift; TIMEOUT="$1" ;;
+    *) echo "ERROR — unknown argument: $1"; exit 2 ;;
+  esac
+  shift
+done
+
+SPEC_DIR="$ROOT/test/01_unit/lib/common/spec/evidence"
+SPECS="binary_compare_spec binary_domains_spec binary_protocol_domains_spec binary_algorithm_domains_spec binary_embedded_domains_spec binary_layout_schema_spec"
+
+# Ratchet floor: recorded from the last measured healthy total (measured
+# 2026-08-18: 6 specs, 37 examples — compare=8, domains=6, protocol=5,
+# algorithm=4, embedded=8, layout_schema=6). Update only when you have
+# re-measured a real passing run and are raising the floor.
+FLOOR_TOTAL=37
+
+# parse_results <output-file>
+# stdout: "<total> <passed> <failed>" or "NONE" if no Results line found.
+parse_results() {
+  pr_file="$1"
+  line=$(grep -E '^Results: [0-9]+ total, [0-9]+ passed, [0-9]+ failed' "$pr_file" | tail -1)
+  if [ -z "$line" ]; then
+    echo "NONE"
+    return
+  fi
+  total=$(printf '%s\n' "$line" | sed -E 's/^Results: ([0-9]+) total.*/\1/')
+  passed=$(printf '%s\n' "$line" | sed -E 's/^Results: [0-9]+ total, ([0-9]+) passed.*/\1/')
+  failed=$(printf '%s\n' "$line" | sed -E 's/^Results: [0-9]+ total, [0-9]+ passed, ([0-9]+) failed.*/\1/')
+  echo "$total $passed $failed"
+}
+
+# ---- selftest (runs first, always, fatal) ----
+selftest() {
+  st_dir=$(mktemp -d)
+
+  # fixture 1: healthy Results line -> parsed correctly, non-vacuous
+  printf 'Session setup...\nRunning...\nResults: 12 total, 12 passed, 0 failed\n' > "$st_dir/healthy.out"
+  r=$(parse_results "$st_dir/healthy.out")
+  set -- $r
+  if [ "${1:-x}" != "12" ] || [ "${2:-x}" != "12" ] || [ "${3:-x}" != "0" ]; then
+    echo "ERROR — selftest failed: healthy fixture not parsed correctly (got '$r')"; rm -rf "$st_dir"; exit 2
+  fi
+
+  # fixture 2: 0-example Results line -> parsed but must be treated as vacuous by caller
+  printf 'Results: 0 total, 0 passed, 0 failed\n' > "$st_dir/zero.out"
+  r=$(parse_results "$st_dir/zero.out")
+  set -- $r
+  if [ "${1:-x}" != "0" ]; then
+    echo "ERROR — selftest failed: zero-example fixture not parsed as 0 (got '$r')"; rm -rf "$st_dir"; exit 2
+  fi
+
+  # fixture 3: missing Results line entirely -> NONE (vacuous/ERROR, not a pass)
+  printf 'Session setup...\nsome crash before results\n' > "$st_dir/missing.out"
+  r=$(parse_results "$st_dir/missing.out")
+  if [ "$r" != "NONE" ]; then
+    echo "ERROR — selftest failed: missing-Results fixture not detected (got '$r')"; rm -rf "$st_dir"; exit 2
+  fi
+
+  # fixture 4: negative-case grep — reserved-bit + corruption markers present/absent
+  printf 'it "rejects reserved-bit violation":\n    expect(x).to_be(false)\n' > "$st_dir/neg_present.spl"
+  if ! grep -qi "reserved" "$st_dir/neg_present.spl"; then
+    echo "ERROR — selftest failed: reserved-bit marker not detected in positive fixture"; rm -rf "$st_dir"; exit 2
+  fi
+  printf 'it "happy path only":\n    expect(x).to_be(true)\n' > "$st_dir/neg_absent.spl"
+  if grep -qi "reserved" "$st_dir/neg_absent.spl"; then
+    echo "ERROR — selftest failed: reserved-bit marker false-detected in negative fixture"; rm -rf "$st_dir"; exit 2
+  fi
+
+  rm -rf "$st_dir"
+}
+
+selftest
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only, 4 fixture(s) checked"; exit 0; }
+
+# ---- negative-case contract check (static, over committed spec source) ----
+NEG_RESERVED_OK=0
+NEG_CORRUPT_OK=0
+for s in $SPECS; do
+  f="$SPEC_DIR/$s.spl"
+  [ -f "$f" ] || continue
+  if grep -qi "reserved" "$f"; then NEG_RESERVED_OK=1; fi
+  if grep -qiE "corrupt|fail.*render|render.*fail" "$f"; then NEG_CORRUPT_OK=1; fi
+done
+
+# ---- enumerate + run ----
+CHECKED=0
+TOTAL_EX=0
+VACUOUS=0
+EXECUTED=""
+SKIPPED=""
+FAIL_REASON=""
+
+for s in $SPECS; do
+  f="$SPEC_DIR/$s.spl"
+  if [ ! -f "$f" ]; then
+    SKIPPED="$SKIPPED $s(missing-file)"
+    continue
+  fi
+  CHECKED=$((CHECKED + 1))
+  out=$(mktemp)
+  echo "== running $s (timeout ${TIMEOUT}s) ==" >&2
+  timeout "$TIMEOUT" bin/simple test "$f" > "$out" 2>&1
+  rc=$?
+  if [ $rc -eq 124 ]; then
+    SKIPPED="$SKIPPED $s(timeout)"
+    rm -f "$out"
+    continue
+  fi
+  r=$(parse_results "$out")
+  rm -f "$out"
+  if [ "$r" = "NONE" ]; then
+    FAIL_REASON="$s printed no Results line (vacuous)"
+    break
+  fi
+  set -- $r
+  total="${1:-0}"; failed="${3:-0}"
+  if [ "$total" -eq 0 ]; then
+    VACUOUS=1
+    FAIL_REASON="$s executed 0 examples (vacuous)"
+    break
+  fi
+  if [ "$failed" -ne 0 ]; then
+    FAIL_REASON="$s reported $failed failed example(s)"
+    break
+  fi
+  TOTAL_EX=$((TOTAL_EX + total))
+  EXECUTED="$EXECUTED $s($total)"
+done
+
+if [ -n "$FAIL_REASON" ]; then
+  echo "FAIL — $FAIL_REASON (executed:$EXECUTED skipped:$SKIPPED)"
+  exit 1
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no specs found under $SPEC_DIR)"
+  exit 2
+fi
+
+if [ -z "$EXECUTED" ]; then
+  echo "ERROR — nothing was checked (all specs skipped:$SKIPPED)"
+  exit 2
+fi
+
+if [ "$TOTAL_EX" -lt "$FLOOR_TOTAL" ]; then
+  echo "FAIL — total examples $TOTAL_EX below recorded floor $FLOOR_TOTAL (executed:$EXECUTED skipped:$SKIPPED)"
+  exit 1
+fi
+
+if [ "$NEG_RESERVED_OK" -ne 1 ]; then
+  echo "FAIL — no reserved-bit-violation assertion found across target specs"
+  exit 1
+fi
+
+if [ "$NEG_CORRUPT_OK" -ne 1 ]; then
+  echo "FAIL — no corruption/FAIL-render assertion found across target specs"
+  exit 1
+fi
+
+echo "PASS — $CHECKED spec(s) checked, $TOTAL_EX example(s) total, 0 vacuous, negative cases present (executed:$EXECUTED skipped:$SKIPPED)"
+exit 0

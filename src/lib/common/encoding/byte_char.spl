@@ -1,0 +1,25 @@
+# Byte-value-to-one-character-text conversion matching the C/Rust runtime
+# extern `rt_byte_char` (src/compiler_rust/compiler/src/interpreter_extern/
+# conversion.rs::rt_byte_char_fn): `byte_val as char` in Rust treats an `u8`
+# as a Latin-1 (ISO-8859-1) codepoint directly (Unicode scalar values 0..255
+# are identical to Latin-1 codepoints by definition) and UTF-8 encodes it.
+# Deliberately independent of std.common.string_core (see C-MIG-0028) --
+# reimplements the UTF-8 encoding directly: bytes 0x00..0x7F encode as
+# themselves (1 byte), bytes 0x80..0xFF encode as the 2-byte UTF-8 sequence
+# for U+0080..U+00FF (0xC2/0xC3 lead byte + 0x80-set continuation byte).
+#
+# `rt_bytes_to_text` is used only as a raw byte-array -> text primitive (a
+# memcpy, not a reimplementation of this algorithm) -- the same non-algorithmic
+# role it plays in string_core.spl's own char_from_code_inline.
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+fn byte_char(byte_val: i64) -> text:
+    val b: u64 = (byte_val & 0xFF).to_u64()
+    if b < 0x80u64:
+        rt_bytes_to_text([b.to_u8()])
+    else:
+        val lead: u64 = 0xC0u64 | (b >> 6u64)
+        val cont: u64 = 0x80u64 | (b & 0x3Fu64)
+        rt_bytes_to_text([lead.to_u8(), cont.to_u8()])
+
+export byte_char

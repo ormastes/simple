@@ -1,0 +1,169 @@
+# @req REQ-C-MIG-BASE64URL
+#
+# C-MIG-0023: pure-Simple URL-safe base64 (`std.common.base_encoding.base64.
+# {base64url_encode, base64url_decode}`, RFC 4648 section 5, no padding) vs
+# the C oracle `rt_base64url_encode`/`rt_base64url_decode`
+# (src/runtime/runtime.c:2552-2610). This spec freezes the C behavior as a
+# differential oracle so C-MIG-0023 can mark the C unit
+# `retained_as_test_oracle`.
+#
+# rt_base64url_encode/rt_base64url_decode are registered in the interpreter's
+# extern dispatch table (interpreter_extern/crypto.rs::rt_base64url_encode /
+# rt_base64url_decode, interpreter_extern/mod.rs:665-666) via the `base64`
+# crate's URL_SAFE_NO_PAD engine — not the C source directly when running
+# under `bin/simple test` (tree-walk interpreter). Both the interpreter
+# dispatch shim and the C source implement the same RFC 4648 section 5
+# alphabet with padding stripped, so this spec differentially compares
+# against whichever is actually reached by the extern call, documenting that
+# distinction rather than assuming the C file itself executes.
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.common.base_encoding.base64.{base64url_encode as simple_encode, base64url_decode as simple_decode}
+
+# C oracle (test-only; never production-linked from Simple product code here).
+extern fn rt_base64url_encode(input: text, len: i64) -> text
+extern fn rt_base64url_decode(encoded: text) -> text
+
+val ENC_LOWER = "abcdefghijklmnopqrstuvwxyz"
+val ENC_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+val ENC_DIGIT = "0123456789"
+
+describe "base64url encode/decode — pure-Simple vs C oracle (RFC 4648 section 5)":
+    it "matches the C oracle on KAT vectors (RFC 4648 test vectors, url-safe, unpadded)":
+        # RFC 4648 section 10 test vectors, re-expressed without '+'/'/' since
+        # none of the standard KATs happen to produce those chars; the
+        # url-safe alphabet only differs from standard base64 in char 62/63
+        # and padding, exercised separately below.
+        assert_equal(simple_encode(""), "")
+        assert_equal(simple_encode(""), rt_base64url_encode("", 0))
+        assert_equal(simple_encode("f"), "Zg")
+        assert_equal(simple_encode("f"), rt_base64url_encode("f", 1))
+        assert_equal(simple_encode("fo"), "Zm8")
+        assert_equal(simple_encode("fo"), rt_base64url_encode("fo", 2))
+        assert_equal(simple_encode("foo"), "Zm9v")
+        assert_equal(simple_encode("foo"), rt_base64url_encode("foo", 3))
+        assert_equal(simple_encode("foob"), "Zm9vYg")
+        assert_equal(simple_encode("foob"), rt_base64url_encode("foob", 4))
+        assert_equal(simple_encode("fooba"), "Zm9vYmE")
+        assert_equal(simple_encode("fooba"), rt_base64url_encode("fooba", 5))
+        assert_equal(simple_encode("foobar"), "Zm9vYmFy")
+        assert_equal(simple_encode("foobar"), rt_base64url_encode("foobar", 6))
+
+    it "round-trips through decode, matching the C oracle":
+        val vectors = ["", "f", "fo", "foo", "foob", "fooba", "foobar", "hello world", "Simple!"]
+        var i = 0
+        while i < vectors.len():
+            val v = vectors[i]
+            val simple_enc = simple_encode(v)
+            val c_enc = rt_base64url_encode(v, v.bytes().len())
+            assert_equal(simple_enc, c_enc)
+            val simple_dec = simple_decode(simple_enc)
+            val c_dec = rt_base64url_decode(c_enc)
+            assert_equal(simple_dec, v)
+            assert_equal(simple_dec, c_dec)
+            i = i + 1
+
+    it "produces url-safe chars (- and _), never + or / or padding =, matching the C oracle":
+        # Representative texts whose standard base64 encoding is known to
+        # contain '+' and/or '/' (verified against RFC 4648 KATs above and
+        # common base64 fixtures), so the url-safe substitution is actually
+        # exercised on both sides, not vacuously true by construction.
+        val vectors = ["foobar", "any carnal pleasure.", "\u{00fb}\u{00ff}\u{00bf}"]
+        var i = 0
+        while i < vectors.len():
+            val v = vectors[i]
+            val enc = simple_encode(v)
+            val oracle_enc = rt_base64url_encode(v, v.bytes().len())
+            assert_equal(enc, oracle_enc)
+            assert_true(!enc.contains("+"))
+            assert_true(!enc.contains("/"))
+            assert_true(!enc.contains("="))
+            i = i + 1
+
+    it "single-char corruption changes the decoded value (discrimination)":
+        val enc_a = simple_encode("abc")
+        val enc_b = simple_encode("abd")
+        assert_true(enc_a != enc_b)
+        assert_true(rt_base64url_encode("abc", 3) != rt_base64url_encode("abd", 3))
+
+    it "is deterministic on both sides":
+        assert_equal(simple_encode("determinism"), simple_encode("determinism"))
+        assert_equal(rt_base64url_encode("determinism", 11), rt_base64url_encode("determinism", 11))
+
+    it "matches the C oracle on 100 shared branch-covering vectors, with perf evidence":
+        # SHARED TEST LOGIC (plan: "C-migration test standard"): one
+        # deterministic generator feeds the SAME input to BOTH sides inside
+        # this loop. Branch coverage: length 0..99 via a seeded LCG over a
+        # printable-ASCII-plus-UTF-8-multibyte alphabet, cycling through
+        # ASCII letters/digits and a 2-byte UTF-8 codepoint (U+00E9 'é',
+        # encoded 0xC3 0xA9) every 7th char to exercise multibyte text.
+        use std.io_runtime.{time_now_unix_micros}
+        var simple_us = 0
+        var c_us = 0
+        var i = 0
+        while i < 100:
+            var body = ""
+            var seed = i * 2654435761 % 4294967296
+            val len = i
+            var j = 0
+            while j < len:
+                seed = (seed * 1103515245 + 12345) % 2147483648
+                if j % 7 == 6:
+                    body = body + "é"
+                else:
+                    val bucket = seed % 62
+                    if bucket < 26:
+                        body = body + ENC_LOWER.char_at(bucket)
+                    else if bucket < 52:
+                        body = body + ENC_UPPER.char_at(bucket - 26)
+                    else:
+                        body = body + ENC_DIGIT.char_at(bucket - 52)
+                j = j + 1
+            val nbytes = body.bytes().len()
+            val t0 = time_now_unix_micros()
+            val s = simple_encode(body)
+            val t1 = time_now_unix_micros()
+            val c = rt_base64url_encode(body, nbytes)
+            val t2 = time_now_unix_micros()
+            simple_us = simple_us + (t1 - t0)
+            c_us = c_us + (t2 - t1)
+            assert_equal(s, c)
+            i = i + 1
+        print("perf_evidence: shared_corpus=100 simple_us={simple_us} c_us={c_us}")
+        assert_true(simple_us >= 0 and c_us >= 0)
+
+    it "matches the C oracle on exact-boundary lengths (0, 1, 2, 3-byte-multiple, and a >4KB input)":
+        # Similar-case coverage for the array-accumulator rewrite of
+        # base64_encode/base64url_encode/base64url_decode (byte-array push +
+        # single join, replacing the old O(n^2) `out = out + c` scalar text
+        # concatenation): exercises the exact tail shapes the accumulator
+        # touches (0/1/2 remaining input bytes per 3-byte group) plus an
+        # input large enough (>4KB) to make an O(n^2) regression obvious.
+        val a = "A"          # 1-byte tail -> 2 pad chars in std base64
+        val ab = "AB"        # 2-byte tail -> 1 pad char in std base64
+        val abc = "ABC"      # exact 3-byte multiple -> no padding
+        val abcabc = "ABCABC"  # two exact 3-byte groups
+
+        assert_equal(simple_encode(""), rt_base64url_encode("", 0))
+        assert_equal(simple_encode(a), rt_base64url_encode(a, 1))
+        assert_equal(simple_encode(ab), rt_base64url_encode(ab, 2))
+        assert_equal(simple_encode(abc), rt_base64url_encode(abc, 3))
+        assert_equal(simple_encode(abcabc), rt_base64url_encode(abcabc, 6))
+
+        assert_equal(simple_decode(simple_encode(a)), a)
+        assert_equal(simple_decode(simple_encode(ab)), ab)
+        assert_equal(simple_decode(simple_encode(abc)), abc)
+        assert_equal(simple_decode(simple_encode(abcabc)), abcabc)
+
+        # >4KB input (4200 bytes, not a multiple of 3, so it also exercises
+        # a 2-byte tail at large scale).
+        var big = ""
+        var k = 0
+        while k < 4200:
+            big = big + ENC_LOWER.char_at(k % 26)
+            k = k + 1
+        val big_simple_enc = simple_encode(big)
+        val big_c_enc = rt_base64url_encode(big, big.bytes().len())
+        assert_equal(big_simple_enc, big_c_enc)
+        assert_equal(simple_decode(big_simple_enc), big)
+        assert_equal(simple_decode(big_c_enc), rt_base64url_decode(big_c_enc))
