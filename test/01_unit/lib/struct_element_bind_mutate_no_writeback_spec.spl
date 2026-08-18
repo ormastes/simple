@@ -1,0 +1,129 @@
+# @cover src/app/dap/hooks.spl
+# @cover src/lib/nogc_sync_mut/dap/hooks.spl
+# @cover src/lib/nogc_async_mut/dap/hooks.spl
+# @cover src/runtime/hooks.spl
+# @cover src/lib/nogc_async_mut/actors/actor.spl
+# @cover src/compiler/30.types/type_system/checker.spl
+"""
+# Defect class: bind a STRUCT element out of a collection, mutate it, never write it back
+
+Structs are value types by design, so `val x = coll[k]` yields a COPY on every
+engine — interpreter, JIT and native alike. A following `x.field = ...` then
+mutates the copy and the write is silently lost. This is an ordinary code bug,
+not the interpreter class-aliasing defect recorded in
+`doc/08_tracking/bug/interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`
+— and it must NOT be confused with it: adding write-backs to CLASS-typed sites
+is explicitly rejected there.
+
+The defect is the PATTERN, not one call site. This spec scans the owned source
+that carried it so a reintroduction anywhere in these files fails, not merely a
+regression at the six sites that were fixed. A positive control proves the
+detector still fires on the defective shape, so a clean sweep cannot silently
+mean a broken scanner.
+"""
+
+describe "defect class: struct element bind-then-mutate with no write-back":
+    extern fn rt_file_read_text(path: text) -> text
+
+    fn source_of(path: text) -> text:
+        rt_file_read_text(path) ?? ""
+
+    # A defect is a `val` (immutable, therefore never re-assigned and never
+    # deliberately written back) binding whose whole RHS is a subscript read,
+    # followed inside the same block by a field assignment on that binding,
+    # with no `COLL[IDX] = NAME` write-back anywhere after it. Comment lines
+    # are skipped so prose naming the anti-pattern is not a hit.
+    fn binding_name(t: text) -> text:
+        # "val NAME = REST" -> NAME, or "" when the line is not such a binding
+        if not t.starts_with("val "):
+            return ""
+        val rest = t.substring(4, t.len())
+        val eq = rest.find("=")
+        if eq == nil:
+            return ""
+        val at = eq.unwrap()
+        val name = rest.substring(0, at).trim()
+        val rhs = rest.substring(at + 1, rest.len()).trim()
+        # whole RHS must be a subscript read, and the name a plain identifier
+        if not rhs.ends_with("]"):
+            return ""
+        if not rhs.contains("["):
+            return ""
+        if name.contains(" ") or name.contains(":") or name == "":
+            return ""
+        name
+
+    fn detects(s: text) -> bool:
+        var pending = ""
+        var mutated = false
+        for line in s.split("\n"):
+            val t = line.trim()
+            if t.starts_with("#"):
+                continue
+            if pending != "":
+                if mutated and t.contains("= " + pending) and t.contains("]"):
+                    # write-back found; this binding is protected
+                    pending = ""
+                    mutated = false
+                    continue
+                if t.starts_with(pending + "."):
+                    val after = t.substring(pending.len() + 1, t.len())
+                    if after.contains("=") and not after.contains("=="):
+                        mutated = true
+                        continue
+                if t.starts_with("val ") or t.starts_with("var "):
+                    if mutated:
+                        return true
+                    pending = ""
+                    mutated = false
+            val name = binding_name(t)
+            if name != "":
+                pending = name
+                mutated = false
+        mutated
+
+    fn has_unprotected_site(path: text) -> bool:
+        val s = source_of(path)
+        if s == "":
+            return false
+        detects(s)
+
+    it "control: the detector fires on the defective shape":
+        # Without this, a clean sweep below could mean the detector is broken.
+        val bad = "val bp = line_map[line]\nbp.hit_count = bp.hit_count + 1\n"
+        assert_true(detects(bad))
+
+    it "control: the detector accepts a written-back binding and ignores prose":
+        val good = "val bp = line_map[line]\nbp.hit_count = bp.hit_count + 1\nline_map[line] = bp\n"
+        assert_false(detects(good))
+        assert_false(detects("# val bp = line_map[line]\n# bp.hit_count = 1\n"))
+        # a mutable `var` binding read back into the collection is the fixed form
+        assert_false(detects("var ctx = self.actors[actor_id]\nctx.error_count = 1\nself.actors[actor_id] = ctx\n"))
+
+    it "control: the scan can see the files it claims to scan":
+        # Guards against an absence check that silently scanned nothing.
+        expect(source_of("src/app/dap/hooks.spl")).to_contain("struct Breakpoint")
+        expect(source_of("src/lib/nogc_async_mut/actors/actor.spl")).to_contain("struct ActorContext")
+        expect(source_of("src/compiler/30.types/type_system/checker.spl")).to_contain("struct TraitImplRegistry")
+
+    it "the DAP hook copies write the Breakpoint hit count back":
+        assert_false(has_unprotected_site("src/app/dap/hooks.spl"))
+        assert_false(has_unprotected_site("src/lib/nogc_sync_mut/dap/hooks.spl"))
+        assert_false(has_unprotected_site("src/lib/nogc_async_mut/dap/hooks.spl"))
+        assert_false(has_unprotected_site("src/runtime/hooks.spl"))
+
+    it "all four DAP hook copies carry the two-level write-back":
+        # Nested Dict<text, Dict<i64, Breakpoint>>: both levels must be stored.
+        for path in ["src/app/dap/hooks.spl", "src/lib/nogc_sync_mut/dap/hooks.spl",
+                     "src/lib/nogc_async_mut/dap/hooks.spl", "src/runtime/hooks.spl"]:
+            val s = source_of(path)
+            expect(s).to_contain("line_map[line] = bp")
+            expect(s).to_contain("self.breakpoints[file] = line_map")
+
+    it "the actor runtime writes the mutated ActorContext back":
+        assert_false(has_unprotected_site("src/lib/nogc_async_mut/actors/actor.spl"))
+        expect(source_of("src/lib/nogc_async_mut/actors/actor.spl")).to_contain("self.actors[actor_id] = ctx")
+
+    it "trait impl registration writes the TraitImplRegistry back":
+        assert_false(has_unprotected_site("src/compiler/30.types/type_system/checker.spl"))
+        expect(source_of("src/compiler/30.types/type_system/checker.spl")).to_contain("self.trait_impls[trait_name] = registry")

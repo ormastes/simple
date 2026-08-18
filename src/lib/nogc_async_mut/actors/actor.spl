@@ -416,20 +416,25 @@ impl ActorRuntime:
         if not self.actors.contains_key(actor_id):
             return false
 
-        val ctx = self.actors[actor_id]
-        val msg = ctx.mailbox.pop()
-        if msg == nil:
-            return false
+        # ActorContext is a struct, so this binding is a COPY on every engine.
+        # Every mutation below (mailbox.pop, counters, last_error) must be
+        # written back to self.actors or it is silently discarded.
+        var ctx = self.actors[actor_id]
 
-        val the_msg = msg
-
-        # Guard: do not dispatch to stopped actors
+        # Guard: do not dispatch to stopped actors. Checked BEFORE the pop so a
+        # stopped actor's message is not consumed and thrown away.
         val is_stopped = ctx.state == ActorState.Stopped
         val is_stopping = ctx.state == ActorState.Stopping
         if is_stopped:
             return false
         if is_stopping:
             return false
+
+        val msg = ctx.mailbox.pop()
+        if msg == nil:
+            return false
+
+        val the_msg = msg
 
         # Dispatch: look up method in handler table and invoke. Wrap with
         # std.log's current-context so any logging the handler does is
@@ -451,6 +456,9 @@ impl ActorRuntime:
         else:
             ctx.error_count = ctx.error_count + 1
             ctx.last_error = dispatch_result.error_msg
+
+        # Write the mutated copy back (see struct note above)
+        self.actors[actor_id] = ctx
 
         # Return whether more messages remain
         val is_empty = ctx.mailbox.is_empty()
@@ -513,18 +521,12 @@ impl ActorRuntime:
     me stop_actor(actor_id: i64):
         """Stop an actor gracefully.
 
-        Sets state to Stopping, drains remaining messages, then
-        sets state to Stopped and removes from the runtime.
+        Removes the actor and its remaining messages from the runtime.
         """
-        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
-        # returns a corrupt payload under native codegen.
-        if self.actors.contains_key(actor_id):
-            val ctx = self.actors[actor_id]
-            ctx.state = ActorState.Stopping
-            # Drain remaining messages
-            while not ctx.mailbox.is_empty():
-                ctx.mailbox.pop()
-            ctx.state = ActorState.Stopped
+        # ActorContext is a struct, so a `val ctx = self.actors[actor_id]`
+        # binding here would be a COPY: the old Stopping/drain/Stopped sequence
+        # mutated that copy and was discarded, and the entry is dropped
+        # immediately anyway. Removing the entry drops the mailbox with it.
         self.actors.remove(actor_id)
 
     fn get_reply(reply_id: ActorId) -> text?:
