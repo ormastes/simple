@@ -289,7 +289,36 @@ fn parser_init_with_path(source: text, path: text):
     lex_init_with_path(source, path)
     parser_advance()
 
+# Per-token timing probe (level-gated, DEFAULT OFF; SIMPLE_PARSE_PROFILE=1).
+# Same idiom as lint_prof_now/lint_prof_mark; see the block comment in
+# parser_decls_use.spl. NOT a throwaway probe — do not delete during cleanup.
+extern fn rt_time_now_unix_micros() -> i64
+var par_prof_enabled_cached: i64 = -1
+fn par_prof_enabled() -> bool:
+    if par_prof_enabled_cached < 0:
+        par_prof_enabled_cached = if (rt_env_get("SIMPLE_PARSE_PROFILE") ?? "") == "": 0 else: 1
+    par_prof_enabled_cached == 1
+
 fn parser_advance():
+    if par_prof_enabled():
+        val t0 = rt_time_now_unix_micros()
+        val kind_p = lex_next()
+        val t1 = rt_time_now_unix_micros()
+        par_kind_set(kind_p)
+        val ta = rt_time_now_unix_micros()
+        val txt_p = parser_current_token_text(kind_p)
+        val tb = rt_time_now_unix_micros()
+        par_text_set(txt_p)
+        val tc = rt_time_now_unix_micros()
+        par_line_set(lex_token_line())
+        par_col_set(lex_token_col())
+        val t2 = rt_time_now_unix_micros()
+        print("PARSEPROF\ttok:lex_next\t{t1 - t0}")
+        print("PARSEPROF\ttok:kind_set\t{ta - t1}")
+        print("PARSEPROF\ttok:cur_text\t{tb - ta}")
+        print("PARSEPROF\ttok:text_set\t{tc - tb}")
+        print("PARSEPROF\ttok:line_col\t{t2 - tc}")
+        return
     val kind = lex_next()
     par_kind_set(kind)
     par_text_set(parser_current_token_text(kind))

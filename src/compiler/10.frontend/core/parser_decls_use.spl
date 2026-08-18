@@ -35,6 +35,33 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
 use compiler.core.ast.{decl_set_param_defaults, decl_set_param_muts}
 use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
+use std.nogc_sync_mut.io_runtime.{env_get, time_now_unix_micros}
+
+# ---------------------------------------------------------------------------
+# Per-declaration parse timing probe (level-gated, DEFAULT OFF).
+#
+# With SIMPLE_PARSE_PROFILE unset, `parse_prof_now()` returns 0 and every
+# `parse_prof_mark()` short-circuits on `t0 == 0` — no clock read, no output,
+# no behaviour change. Set SIMPLE_PARSE_PROFILE=1 to emit one `PARSEPROF`
+# line per sub-phase of a method/fn declaration parse. Same idiom as
+# lint_prof_now/lint_prof_mark (lint_checks.spl); attach-based profiling is
+# refused on this host, so these counters are the only view inside a parse.
+#
+# Per .claude/rules/code-style.md these are level-gated diagnostics, NOT
+# throwaway probes: do not delete them during cleanup.
+# See doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md
+# ---------------------------------------------------------------------------
+fn parse_prof_now() -> i64:
+    if env_get("SIMPLE_PARSE_PROFILE") == "":
+        return 0
+    time_now_unix_micros()
+
+fn parse_prof_mark(label: text, t0: i64) -> i64:
+    if t0 == 0:
+        return 0
+    val now = time_now_unix_micros()
+    print("PARSEPROF\t{label}\t{now - t0}")
+    now
 
 # ===== Use/Export Declarations =====
 
@@ -497,6 +524,7 @@ fn parse_var_decl() -> i64:
 # ===== Class/Impl Method Parsing =====
 
 fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i64:
+    var _pp = parse_prof_now()
     # Advance past leading keyword (static fn / fn / me)
     if is_static:
         if par_kind_get() == 30:
@@ -590,10 +618,12 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
         ret_type = parser_parse_type()
 
     # Signature-only methods (trait declarations) have no `:` body.
+    _pp = parse_prof_mark("method:signature", _pp)
     var body: [i64] = []
     if par_kind_get() == 161:
         parser_advance()
         body = parse_block()
+    _pp = parse_prof_mark("method:body", _pp)
 
     val mangled_name: text = struct_name + "__" + method_name
     # static_flag: 0=fn (immutable self), 1=static (no self), 2=me (mutable self)
@@ -658,6 +688,7 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
     val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
     decl_set_param_defaults(mid, param_defaults)
     decl_set_param_muts(mid, param_muts)
+    _pp = parse_prof_mark("method:declreg", _pp)
     return mid
 
 fn skip_impl_where_clause():

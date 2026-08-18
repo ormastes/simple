@@ -1,4 +1,22 @@
-# Lint timeout (>600s) on src/compiler/50.mir/hwir/zca_rows.spl
+# Lint cost on src/compiler/50.mir/hwir/zca_rows.spl — dominant term is an interpreted frontend, not a superlinear parser
+
+> **2026-08-18 — CAUSE FOUND, and it is not the one this row hunts for.**
+> `simple lint` never JITs: `src/app/cli/lint_entry.spl` imports
+> `std.cli.cli_util (get_cli_args)`, which trips the entry-file text-grep in
+> `should_prefer_interpreter_for_source`
+> (`src/compiler_rust/driver/src/exec_core.rs:1412`) and pins the WHOLE program
+> — the entire pure-Simple compiler frontend included — to the seed's
+> tree-walking interpreter. Force the JIT on and it still drops the whole module
+> for a second, independent reason: two structs named `Span`
+> (`00.common/diagnostics/span.spl` vs `10.frontend/core/lexer_types.spl`)
+> collide in HIR lowering's global by-bare-name struct resolution.
+> The documented cost of that state is 100-1000x.
+> Measured in-process, the lexer is **linear** in token count (exponent 1.09
+> over a 2.8x range) at ~21 ms/token — a constant factor, not a quadratic pass.
+> The "superlinear parser" framing below is therefore **not supported** and
+> should not drive optimisation work. Full evidence, all three arms, and the
+> fix options:
+> `doc/08_tracking/bug/lint_dejits_whole_program_span_struct_collision_2026-08-18.md`.
 
 - Date: 2026-08-17
 - Status: **OPEN (bounded, guarded)** — DUPLICATE of
@@ -182,3 +200,55 @@ Conclusions:
 - zca_rows.spl (30 such functions, hundreds of Hw* ctor entries against many-method hwir classes)
   is exactly the worst case of this model; no single construct removal fixes it — the per-decl and
   per-call constants must drop.
+
+## 2026-08-18 — parse-phase attribution: the cost is the SEED INTERPRETER's per-call env rebuild, not a pure-Simple hotspot
+
+Instrumented the declaration parse path (level-gated on `SIMPLE_PARSE_PROFILE=1`, default off,
+same idiom as `lint_prof_now`/`lint_prof_mark`; probes live in
+`src/compiler/10.frontend/core/parser_decls_use.spl` (`parse_prof_now`/`parse_prof_mark`,
+per-method sub-phases) and `src/compiler/10.frontend/core/parser.spl` (`parser_advance`
+per-token split)). PARSEPROF aggregate on `fx_m5_c10.spl` (5 static methods, 25 lines, 1103 bytes):
+
+| PARSEPROF label | total | n | avg |
+|---|---|---|---|
+| method:signature | 5.4s | 5 | ~1.1s |
+| method:body | 12.0s | 5 | ~2.4s |
+| method:declreg (decl_fn + side tables) | 0.1s | 5 | 25ms |
+| tok:lex_next | 4.6s | 351 | 13.2ms |
+| tok:kind_set (one slot write) | 1.4s | 351 | 4.0ms |
+| tok:cur_text (2-deep slot read) | 1.5s | 351 | 4.3ms |
+| tok:text_set | 1.3s | 351 | 3.8ms |
+| tok:line_col (2 accessors) | 4.5s | 351 | 12.9ms |
+
+Every sub-phase is uniformly slow: a trivial one-array-slot write costs ~4ms; parse cost is
+~48ms/token, entirely accounted for by per-CALL overhead, not by any algorithm in the parser.
+
+Isolation experiments (decisive):
+- Plain interpreted 10k calls to a local slot-setting fn: **0.08µs/call** (`bin/simple run`, JIT'd)
+  and ~0.9µs/call interpreted.
+- Same call INSIDE a process that imported `compiler.core.parser`: local fn 8.7µs/call, but
+  **cross-module `par_kind_get()` = 1.38 ms/call** (1k calls = 1.38s), a ~160x cross-module penalty.
+- `parse_module_silent_checked` on the 1103-byte fixture outside lint: 16.7s — reproduces the whole
+  cost with zero lint code involved.
+
+Root cause (named, in the Rust seed): `captured_env_with_live_globals_inner`
+(`src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:59`) rebuilds the callee's
+environment on EVERY interpreted call — cloning the owner module's full globals map
+(`MODULE_GLOBALS_BY_OWNER ... .clone()`), resolving and cloning every imported global binding, and
+re-`bind_global`ing each name. `compiler.core.parser`'s module has hundreds of globals/imports, so
+each cross-module call into it costs ~1.4ms. The parser makes a few such hops per token
+(`parser_advance` -> `lex_next` -> accessors), giving the measured ~1.2s per 2-line declaration.
+
+Verdict per this bug's fix-direction note above: the earlier "memoize per-class method tables"
+suspicion is WRONG for the parse phase — there is **no single pure-Simple hotspot**; the parser's
+own algorithms are fine (decl registration is 25ms/decl). The fix belongs in the seed interpreter
+(cache the built env per (owner, globals-generation) instead of rebuilding per call), or in not
+running lint interpreted at all. Behavior-identical pure-Simple mitigation would require merging
+the parser's modules to eliminate cross-module hops — rejected as a rewrite, not a fix.
+
+Verified after instrumenting (probes off by default, no behavior change):
+- `fx_m5_c10` lint 39s / `fx_m20_c10` 49s (same-or-better vs 44s/~55s baseline, shared box).
+- `lexer_brace_escape_spec.spl`: Results: 4 total, 4 passed, 0 failed.
+- `parser_contextual_keyword_named_arg_spec.spl`: Results: 8 total, 8 passed, 0 failed.
+- `parser_move_contextual_keyword_spec.spl`: Results: 4 total, 4 passed, 0 failed.
+- `bin/simple lint src/lib/common/base_encoding.spl`: "Lint passed: all files clean".
