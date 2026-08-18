@@ -19,6 +19,16 @@ Parent initiative unifying: SSpec binary reference (stacked layout), direct `rt_
 ## Canonical registries
 `binary_reference_layouts.sdn`, `runtime_boundary_inventory.sdn`, `c_migration_inventory.sdn`, `cross_language_perf_results.sdn`, `binary_test_coverage.sdn` — one merge owner; Markdown lists are generated projections.
 
+## Usage guide (goal 4/6, spec authors)
+- `doc/07_guide/infra/sspec/binary_sspec_usage.md` — practical usage guide for
+  `binary_layout.spl` (word-table vs plain assert, layout definition, exact
+  `compare_word` precedence rules with line citations, reading a
+  `stacked_compare_rows` failure, domain recipes, verified pitfalls). Read
+  this before writing a new binary/protocol/cipher/register spec; it is the
+  IMPLEMENTED surface (mask-aware comparator + stacked table), distinct from
+  the not-yet-landed `reference Type` / `.to_binary()` authoring sugar in the
+  design doc above.
+
 ## Landed so far (2026-08-18)
 - Gate: `scripts/check/check-no-direct-rt.shs` — ratchet mode (baseline
   `no_direct_rt_baseline.txt`, only goes down) + `--critical`/`SIMPLE_RT_CRITICAL=1`
