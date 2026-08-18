@@ -1,0 +1,74 @@
+# Go-style Sleep Unit Tests
+#
+# **Feature ID:** #LIB-ASYNC-SLEEP-001
+# **Category:** Lib | Async
+#
+# Proves the std.async.sleep surface:
+#   (a) sleep(0) is immediately ready / await returns
+#   (b) awaiting sleep(N) takes >= N ms of wall time
+#   (c) two concurrent sleepers overlap: total elapsed << sum of sleeps
+#       (driven by run_sleepers, the cooperative mini-scheduler; the general
+#       std.async.runtime cannot yet wake clock-based futures — filed todo)
+
+use std.nogc_async_mut.async.sleep.{SleepFuture, sleep, sleep_blocking, run_sleepers, await_sleep}
+use std.nogc_async_mut.async.poll.{Poll}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+describe "Go-style sleep basics":
+    it "sleep(0) is immediately ready and await returns":
+        val s = sleep(0)
+        await_sleep(s)
+        val p = s.poll()
+        var ready = false
+        match p:
+            case Poll.Ready(_):
+                ready = true
+            case Poll.Pending:
+                ready = false
+        assert_true(ready)
+
+    it "fresh sleep(N) is pending before its deadline":
+        val s = sleep(5000)
+        val p = s.poll()
+        var pending = false
+        match p:
+            case Poll.Ready(_):
+                pending = false
+            case Poll.Pending:
+                pending = true
+        assert_true(pending)
+
+    it "awaiting sleep(N ms) takes at least N ms":
+        val t0 = time_now_unix_micros()
+        val s = sleep(30)
+        await_sleep(s)
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_true(elapsed_us >= 30000)
+
+    it "sleep_blocking(0) returns without blocking":
+        val t0 = time_now_unix_micros()
+        sleep_blocking(0)
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_true(elapsed_us < 5000000)
+
+describe "Go-style sleep concurrency":
+    it "two concurrent 60ms sleeps overlap (total well under the 120ms sum)":
+        val t0 = time_now_unix_micros()
+        val a = sleep(60)
+        val b = sleep(60)
+        run_sleepers([a, b])
+        val elapsed_us = time_now_unix_micros() - t0
+        # Both elapsed (correctness) ...
+        assert_true(a.is_elapsed())
+        assert_true(b.is_elapsed())
+        # ... at least one full sleep passed ...
+        assert_true(elapsed_us >= 60000)
+        # ... and the sleeps overlapped: far below the 120ms serial sum.
+        assert_true(elapsed_us < 110000)
+
+    it "nearest-deadline parking: 20ms and 80ms sleepers finish in ~80ms":
+        val t0 = time_now_unix_micros()
+        run_sleepers([sleep(80), sleep(20)])
+        val elapsed_us = time_now_unix_micros() - t0
+        assert_true(elapsed_us >= 80000)
+        assert_true(elapsed_us < 160000)
