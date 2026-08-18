@@ -135,9 +135,16 @@ fn freestanding_unresolved_mode() -> FreestandingUnresolvedMode {
 // ---------------------------------------------------------------------------
 // Fabricated-stub ratchet
 //
-// This is the guard at the site where fabrication ACTUALLY happens. The weak
-// nil-returning bodies emitted below (`__attribute__((weak)) __stub_i64
-// {wrap}(void) { return 0; }`) are the mechanism that once shipped a
+// This guards ONE of the TWO fabrication sites: the FREESTANDING one
+// (`generate_stub_object_freestanding`). The hosted twin `generate_stub_object`
+// is a separate site that this ratchet has never seen -- it emits ASSEMBLY, not
+// C, and its bodies return the TAGGED-NIL sentinel 3, not 0 (see
+// `asm_helpers::asm_ret_nil`: `movq $3, %rax; retq`). Do not read the wording
+// below as covering that path. It is now fail-closed on its own terms via
+// SIMPLE_ALLOW_INTERNAL_STUBS.
+//
+// The weak nil-returning C bodies emitted below in THIS freestanding path
+// (`__attribute__((weak)) __stub_i64 {wrap}(void) { return 0; }`) are the mechanism that once shipped a
 // nil-returning `rt_array_copy` into a guest and silently shredded every array
 // copy nine steps downstream.
 //
@@ -316,7 +323,8 @@ fn check_fabricated_stub_ratchet(project_root: &Path, output: &Path, fabricated:
     if !new_syms.is_empty() {
         return Err(format!(
             "freestanding link would FABRICATE {} symbol(s) not in the baseline for entry '{}': {}. \
-             These get weak bodies that return 0, which silently corrupts every caller. \
+             These get weak bodies that return 0 on this freestanding path (the hosted \
+             path returns the tagged-nil sentinel 3 instead), which silently corrupts every caller. \
              Implement them, or -- only if nil is genuinely the correct answer -- re-baseline with \
              SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1 and justify it in {}.",
             new_syms.len(),
@@ -432,7 +440,8 @@ fn stale_module_move_report(
 defined in this same link under a different module prefix.\n{}\n\
 This means a cached object compiled against the OLD provider module was reused \
 after the function moved modules. Linking it would fabricate a weak nil stub for \
-the dead name and every call site would silently return 0/false.\n\
+the dead name and every call site would silently return nil (0 on the freestanding \
+path, the tagged-nil sentinel 3 on the hosted path)/false.\n\
 Fix: rebuild with a clean object cache (--clean, or delete the native cache \
 objects directory). If this survives a clean build the reference is genuinely \
 dangling and the source must be repaired.",
@@ -994,13 +1003,39 @@ pub(crate) fn generate_stub_object(
     let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
     let is_freestanding = effective_target().os == simple_common::target::TargetOS::None;
     if !is_bootstrap && !strict_no_stub_fallback && !is_freestanding && !internal_missing.is_empty() {
+        // FAIL CLOSED. These are Simple-level symbols (including `extern fn`
+        // declarations) with no implementation anywhere in the linked object
+        // set, the runtime libraries, or the system libraries. This hosted path
+        // fabricates ASSEMBLY (`_stubs.s`), not C: `asm_helpers::asm_ret_nil`
+        // emits `movq $3, %rax; retq` on x86_64 -- the TAGGED-NIL sentinel 3,
+        // not 0. Fabricating that body produced a binary that ran and printed
+        // garbage with exit 0 — a silent wrong answer, not a build. The
+        // freestanding path guards this with `check_fabricated_stub_ratchet`;
+        // this hosted path only ever warned, so the ratchet never saw these
+        // symbols. Escape hatch mirrors the freestanding one.
+        let allow = std::env::var("SIMPLE_ALLOW_INTERNAL_STUBS").as_deref() == Ok("1");
         let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
-        eprintln!(
-            "Warning: {} internal Simple symbol(s) will be stubbed: {}{}",
-            internal_missing.len(),
-            preview,
-            if internal_missing.len() > 12 { " ..." } else { "" }
-        );
+        let ellipsis = if internal_missing.len() > 12 { " ..." } else { "" };
+        if allow {
+            eprintln!(
+                "Warning: {} internal Simple symbol(s) will be stubbed: {}{}",
+                internal_missing.len(),
+                preview,
+                ellipsis
+            );
+        } else {
+            return Err(format!(
+                "{} internal Simple symbol(s) have no implementation and would be \
+fabricated as weak stubs returning the tagged-nil sentinel 3: {}{}\n\
+  An `extern fn` (or other Simple declaration) with no definition in any linked \
+object, runtime library, or system library cannot be linked into a correct \
+binary. Implement the symbol, or set SIMPLE_ALLOW_INTERNAL_STUBS=1 to restore \
+the old fabricating behaviour.",
+                internal_missing.len(),
+                preview,
+                ellipsis
+            ));
+        }
     }
 
     // The object scan runs before the final linker's section GC, so it also sees

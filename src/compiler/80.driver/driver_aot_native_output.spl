@@ -420,6 +420,121 @@ fn driver_native_success_with_launch_metadata(ctx: CompileContext, output: text)
     # when the byte-range file API is unavailable in the pure Simple runtime.
     CompileResult.Success(output)
 
+# ============================================================================
+# Unimplemented-extern link diagnostic
+# ============================================================================
+#
+# An `extern fn` that nothing implements is a CORRECTNESS-clean failure on the
+# native lane -- the link fails, no binary is produced, exit 1 -- but the only
+# user-visible text used to be raw linker output:
+#
+#   error: LLVM native linking failed: Linking failed: cc linking failed:
+#   ld.lld: error: undefined symbol: lane_definitely_absent_probe
+#
+# which names a mangled object file, not the DECLARATION the developer wrote,
+# and which the native-build entry's stderr truncation can hide entirely.
+# The interpreter lane already says `semantic: unknown extern function: X`;
+# these helpers give the native lane an equivalent compiler-level message
+# WITHOUT swallowing the raw linker output, which stays appended verbatim.
+#
+# Why this maps AFTER the link rather than checking before it: on this lane an
+# extern's implementation may legitimately come from any of several link
+# inputs that only exist at link time -- the freshly compiled C runtime
+# objects, libsimple_native_all.a, or an external provider archive configured
+# via llvm_configured_external_link_objects. Deciding "implemented nowhere"
+# before the link would mean re-running nm over every one of those inputs and
+# reimplementing archive-member resolution, i.e. redoing the linker's own job
+# less accurately. The linker already computes the exact answer; this only
+# translates its symbol name back to the declaration site.
+
+fn driver_native_link_symbol_token(payload: text) -> text:
+    val head = payload.split(" ")[0]
+    head.replace("`", "").replace("'", "").replace("\"", "").replace(",", "").replace(";", "").trim()
+
+pub fn driver_native_link_undefined_symbols(err: text) -> [text]:
+    """Extract undefined-symbol names from linker stderr (lld and GNU ld)."""
+    var names: [text] = []
+    for line in err.split("\n"):
+        val trimmed = line.trim()
+        var payload = ""
+        if trimmed.contains("undefined symbol: "):
+            val parts = trimmed.split("undefined symbol: ")
+            if parts.len() > 1:
+                payload = parts[parts.len() - 1].trim()
+        elif trimmed.contains("undefined reference to "):
+            val parts = trimmed.split("undefined reference to ")
+            if parts.len() > 1:
+                payload = parts[parts.len() - 1].trim()
+        if payload == "":
+            continue
+        val name = driver_native_link_symbol_token(payload)
+        if name == "":
+            continue
+        var seen = false
+        for existing in names:
+            if existing == name:
+                seen = true
+        if not seen:
+            names = names.push(name)
+    names
+
+pub fn driver_native_extern_decl_matches(rest: text, name: text) -> bool:
+    """`rest` is a declaration line with the leading `extern fn ` removed."""
+    if not rest.starts_with(name):
+        return false
+    if rest.len() == name.len():
+        return true
+    val tail = rest.substring(name.len(), name.len() + 1)
+    tail == "(" or tail == " " or tail == ":" or tail == "<"
+
+fn driver_native_extern_decl_site(ctx: CompileContext, name: text) -> text:
+    """Locate `extern fn <name>` in the loaded sources; "" when not found.
+
+    Source CONTENT may already be evicted (CompileContext.evict_sources keeps
+    only path metadata), so re-read from disk when the in-memory copy is empty.
+    """
+    for source in ctx.sources:
+        var content = source.content
+        if content == "" and source.path != "" and rt_file_exists(source.path):
+            content = rt_file_read_text(source.path)
+        if content == "":
+            continue
+        if not content.contains("extern fn " + name):
+            continue
+        var line_no = 0
+        for line in content.split("\n"):
+            line_no = line_no + 1
+            val trimmed = line.trim()
+            if not trimmed.starts_with("extern fn "):
+                continue
+            if driver_native_extern_decl_matches(trimmed.substring(10, trimmed.len()), name):
+                val shown = if source.authored_path != "": source.authored_path else: source.path
+                return "{shown}:{line_no}"
+    ""
+
+fn driver_native_link_failure_result(ctx: CompileContext, kind: text, err: text) -> CompileResult:
+    """Render a link failure, upgrading undefined-symbol errors that name a
+    declared `extern fn` into a compiler-level diagnostic. The original linker
+    text is ALWAYS preserved verbatim at the end -- never swallowed."""
+    var found: [text] = []
+    for name in driver_native_link_undefined_symbols(err):
+        val site = driver_native_extern_decl_site(ctx, name)
+        if site != "":
+            # Keep the literal "error:" on THIS line: native_build_main's
+            # eprint_bounded preserves only diagnostic-looking LINES through
+            # stderr truncation, so a bare continuation line would be the
+            # first thing dropped -- taking the declaration site with it.
+            found = found.push("  error: extern fn {name} is declared but not implemented anywhere -- declared at {site}")
+    if found.len() == 0:
+        return CompileResult.CodegenError("{kind}: {err}")
+    var out = "{kind}: unimplemented extern function(s)\n"
+    for entry in found:
+        out = out + entry + "\n"
+    out = out + "  An `extern fn` needs a definition in something the link sees: the C/Rust\n"
+    out = out + "  runtime, an external provider archive, or an implementation in this program.\n"
+    out = out + "  raw linker output follows (preserved for debugging):\n"
+    CompileResult.CodegenError(out + err)
+
 pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
     """Bootstrap-stable native output path.
 
@@ -464,7 +579,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                     case Ok(_):
                         return driver_native_success_with_launch_metadata(ctx, output)
                     case Err(e):
-                        return CompileResult.CodegenError("LLVM native linking failed: {e}")
+                        return driver_native_link_failure_result(ctx, "LLVM native linking failed", e)
             val hosted_opts = NativeLinkOptions(
                 debug: ctx.options.debug_info,
                 verbose: ctx.options.verbose,
@@ -478,7 +593,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                 case Ok(_):
                     return driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
-                    return CompileResult.CodegenError("Hosted native linking failed: {e}")
+                    return driver_native_link_failure_result(ctx, "Hosted native linking failed", e)
         case Err(e):
             return CompileResult.CodegenError(e)
 
@@ -851,7 +966,7 @@ impl CompilerDriver:
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
                     return driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
-                    CompileResult.CodegenError("LLVM native linking failed: {e}")
+                    driver_native_link_failure_result(ctx, "LLVM native linking failed", e)
         else:
             # Hosted native binaries need the same runtime objects and C `main`
             # entry shim regardless of which backend produced user objects.
@@ -872,7 +987,7 @@ impl CompilerDriver:
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
                     driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
-                    CompileResult.CodegenError("Hosted native linking failed: {e}")
+                    driver_native_link_failure_result(ctx, "Hosted native linking failed", e)
 
     # --------------------------------------------------------------------------
     # Linker Helper (legacy - kept for compatibility, delegates to linker_wrapper)

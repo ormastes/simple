@@ -83,6 +83,73 @@ report_build_failure() {
     fi
 }
 
+# --- Symbol classification (2026-08-18 fail-open fix).
+#
+# The previous matcher was `nm -S "$bin" | grep " $SYM\$"`, which is fail-open
+# in TWO independent ways, both reproduced on this host:
+#
+#   1. NAME MANGLING. The in-process Rust native lane
+#      (`SIMPLE_NATIVE_BUILD_RUST=1`) emits the fabricated definition under a
+#      module-qualified name:
+#        0000000000401364 0000000000000006 T
+#          native_extern_fabrication_probe__main__lane_definitely_absent_probe
+#      `" lane_definitely_absent_probe$"` requires a SPACE immediately before
+#      the probe name, so a mangled definition never matched -- the guard fell
+#      into its "UNEXPECTED third outcome" FAIL. That FAIL was ACCIDENTAL, not
+#      a detection: it fired because the guard could not see the very thing it
+#      exists to catch.
+#   2. WEAK DEFINITIONS. The header text above records the symbol as STRONG
+#      (`T`), but the fabricated stub is emitted `W` (weak defined) on other
+#      lanes. A weak DEFINITION satisfies the link and runs a fabricated body
+#      exactly like a strong one, so `W`/`V` must count as fabrication.
+#
+# Classification rule, by nm's own semantics (`man nm`): a symbol is
+# FABRICATED iff it is DEFINED in the binary. Uppercase classes (T W V D B R
+# S ...) are definitions; lowercase `u`/`w`/`v` and `U` are UNDEFINED and must
+# NOT count -- an undefined symbol is the CORRECT, non-fabricated state. We
+# therefore ask nm directly with `--defined-only` rather than maintaining a
+# hand-written letter allowlist that can silently drop a class again.
+#
+# Matching is suffix-based (`name == SYM` or `name` ends in `<sep>SYM` for the
+# `_`/`.`/`$` separators real manglers use), never a bare substring, so an
+# unrelated symbol that merely CONTAINS the probe name is not miscounted.
+find_defined_symbol_line() {
+    _bin="$1"
+    _sym="$2"
+    nm -S --defined-only "$_bin" 2>/dev/null | awk -v s="$_sym" '
+        {
+            n = $NF
+            if (n == s) { print; exit }
+            L = length(n); M = length(s)
+            if (L > M && substr(n, L - M + 1) == s) {
+                c = substr(n, L - M, 1)
+                if (c == "_" || c == "." || c == "$") { print; exit }
+            }
+        }'
+}
+
+# The class letter is the field immediately before the name -- reported in the
+# verdict so an operator sees WHICH kind of definition was fabricated (a weak
+# `W` stub and a strong `T` stub are the same defect but different evidence).
+symbol_class_of_line() {
+    printf '%s\n' "$1" | awk '{ print $(NF - 1) }'
+}
+
+find_undefined_symbol_line() {
+    _bin="$1"
+    _sym="$2"
+    nm -u "$_bin" 2>/dev/null | awk -v s="$_sym" '
+        {
+            n = $NF
+            if (n == s) { print; exit }
+            L = length(n); M = length(s)
+            if (L > M && substr(n, L - M + 1) == s) {
+                c = substr(n, L - M, 1)
+                if (c == "_" || c == "." || c == "$") { print; exit }
+            }
+        }'
+}
+
 # --- Selftest (FATAL, runs before any scan).
 #     Fixtures prove the control-failure path actually surfaces the real error.
 if [ "${1:-}" = "--selftest" ]; then
@@ -191,6 +258,136 @@ if [ "${1:-}" = "--selftest" ]; then
         *) echo "SELFTEST FAIL — [strict] fixture: report did not name the branch"; st_fail=1 ;;
     esac
 
+    # --- Fixtures 5..11: symbol classification (2026-08-18).
+    #     These synthesize real ELF objects with a C compiler -- no working
+    #     Simple compiler and no native-build lane is required, deliberately:
+    #     a guard's selftest must not depend on the toolchain it is fencing.
+    #     They exist so the two reproduced fail-open holes (weak class dropped,
+    #     mangled name unmatched) cannot silently return.
+    st_cc=""
+    for _c in cc clang gcc; do
+        if command -v "$_c" >/dev/null 2>&1; then st_cc="$_c"; break; fi
+    done
+    if [ -z "$st_cc" ]; then
+        # Absence of a compiler is absence of evidence, never a pass.
+        echo "ERROR — nothing was checked: no C compiler (cc/clang/gcc) to build the"
+        echo "        symbol-classification fixtures; their assertions would be vacuous."
+        exit 2
+    fi
+
+    st_sym="lane_definitely_absent_probe"
+
+    # Fixture 5: WEAK (`W`) defined stub, unmangled. This is the exact shape
+    # the old `nm -S | grep " sym$"` matcher... did match, but which a
+    # letter-allowlist refactor could drop; asserting the class letter keeps
+    # `W` pinned as fabrication.
+    cat >"$st_dir/weak.c" <<EOF
+__attribute__((weak)) int $st_sym(void) { return 3; }
+int main(void) { return $st_sym(); }
+EOF
+    "$st_cc" -o "$st_dir/weak.bin" "$st_dir/weak.c" >/dev/null 2>&1
+    w_line="$(find_defined_symbol_line "$st_dir/weak.bin" "$st_sym")"
+    st_checked=$((st_checked + 1))
+    if [ -z "$w_line" ]; then
+        echo "SELFTEST FAIL — weak fixture: a WEAK ('W') DEFINITION of '$st_sym' was not"
+        echo "                classified as fabrication. A weak definition satisfies the link"
+        echo "                and runs a fabricated body exactly like a strong one."
+        st_fail=1
+    else
+        st_checked=$((st_checked + 1))
+        case "$(symbol_class_of_line "$w_line")" in
+            W|w) ;;
+            *) echo "SELFTEST FAIL — weak fixture: class letter not reported as W (got '$(symbol_class_of_line "$w_line")')"; st_fail=1 ;;
+        esac
+    fi
+
+    # Fixture 6: WEAK definition under a MODULE-MANGLED name -- the reproduced
+    # in-process-Rust-lane shape (`<module>__<entry>__<sym>`). The old
+    # space-anchored grep could never match this.
+    cat >"$st_dir/mangled_weak.c" <<EOF
+__attribute__((weak)) int probe_module__main__$st_sym(void) { return 3; }
+int main(void) { return probe_module__main__$st_sym(); }
+EOF
+    "$st_cc" -o "$st_dir/mangled_weak.bin" "$st_dir/mangled_weak.c" >/dev/null 2>&1
+    st_checked=$((st_checked + 1))
+    if [ -z "$(find_defined_symbol_line "$st_dir/mangled_weak.bin" "$st_sym")" ]; then
+        echo "SELFTEST FAIL — mangled-weak fixture: a module-mangled WEAK definition of"
+        echo "                '$st_sym' was not classified as fabrication (the exact"
+        echo "                fail-open reproduced 2026-08-18 on SIMPLE_NATIVE_BUILD_RUST=1)."
+        st_fail=1
+    fi
+
+    # Fixture 7: STRONG (`T`) definition under a mangled name.
+    cat >"$st_dir/mangled_strong.c" <<EOF
+int probe_module__main__$st_sym(void) { return 3; }
+int main(void) { return probe_module__main__$st_sym(); }
+EOF
+    "$st_cc" -o "$st_dir/mangled_strong.bin" "$st_dir/mangled_strong.c" >/dev/null 2>&1
+    ms_line="$(find_defined_symbol_line "$st_dir/mangled_strong.bin" "$st_sym")"
+    st_checked=$((st_checked + 1))
+    case "${ms_line:+$(symbol_class_of_line "$ms_line")}" in
+        T|t) ;;
+        *) echo "SELFTEST FAIL — mangled-strong fixture: 'T' definition not classified (got '${ms_line:-<none>}')"; st_fail=1 ;;
+    esac
+
+    # Fixture 8: WEAK OBJECT (`V`) definition -- a fabricated data symbol.
+    cat >"$st_dir/weakobj.c" <<EOF
+__attribute__((weak)) int $st_sym = 3;
+int main(void) { return $st_sym; }
+EOF
+    "$st_cc" -o "$st_dir/weakobj.bin" "$st_dir/weakobj.c" >/dev/null 2>&1
+    st_checked=$((st_checked + 1))
+    if [ -z "$(find_defined_symbol_line "$st_dir/weakobj.bin" "$st_sym")" ]; then
+        echo "SELFTEST FAIL — weak-object fixture: a 'V' (weak object) DEFINITION of"
+        echo "                '$st_sym' was not classified as fabrication."
+        st_fail=1
+    fi
+
+    # Fixture 9 (must NOT match): an UNDEFINED reference is the CORRECT,
+    # non-fabricated state. If this ever classifies as fabrication the gate
+    # would report a fix as the bug.
+    cat >"$st_dir/undef.c" <<EOF
+extern int $st_sym(void);
+int main(void) { return $st_sym(); }
+EOF
+    "$st_cc" -c -o "$st_dir/undef.o" "$st_dir/undef.c" >/dev/null 2>&1
+    st_checked=$((st_checked + 1))
+    if [ -n "$(find_defined_symbol_line "$st_dir/undef.o" "$st_sym")" ]; then
+        echo "SELFTEST FAIL — undefined fixture: a 'U' (undefined) reference to '$st_sym'"
+        echo "                was miscounted as a fabricated DEFINITION."
+        st_fail=1
+    fi
+    st_checked=$((st_checked + 1))
+    if [ -z "$(find_undefined_symbol_line "$st_dir/undef.o" "$st_sym")" ]; then
+        echo "SELFTEST FAIL — undefined fixture: 'nm -u' lookup failed to see the undefined '$st_sym'"
+        st_fail=1
+    fi
+
+    # Fixture 10 (must NOT match): a different symbol that merely CONTAINS the
+    # probe name -- proves the suffix match is not a bare substring match.
+    cat >"$st_dir/similar.c" <<EOF
+int ${st_sym}_helper(void) { return 3; }
+int main(void) { return ${st_sym}_helper(); }
+EOF
+    "$st_cc" -o "$st_dir/similar.bin" "$st_dir/similar.c" >/dev/null 2>&1
+    st_checked=$((st_checked + 1))
+    if [ -n "$(find_defined_symbol_line "$st_dir/similar.bin" "$st_sym")" ]; then
+        echo "SELFTEST FAIL — similar-name fixture: '${st_sym}_helper' was miscounted as '$st_sym'"
+        st_fail=1
+    fi
+
+    # Fixture 11 (non-vacuity): a binary with NO such symbol at all must yield
+    # nothing, so the must-match fixtures above cannot be passing by accident.
+    cat >"$st_dir/clean.c" <<EOF
+int main(void) { return 0; }
+EOF
+    "$st_cc" -o "$st_dir/clean.bin" "$st_dir/clean.c" >/dev/null 2>&1
+    st_checked=$((st_checked + 1))
+    if [ -n "$(find_defined_symbol_line "$st_dir/clean.bin" "$st_sym")" ]; then
+        echo "SELFTEST FAIL — clean fixture: matcher reports a symbol in a binary that has none"
+        st_fail=1
+    fi
+
     if [ "$st_checked" -eq 0 ]; then
         echo "ERROR — nothing was checked"
         exit 2
@@ -291,8 +488,8 @@ check_absent_case() {
         return 0
     fi
 
-    defined_line="$(nm -S "$bin_path" 2>/dev/null | grep " $ABSENT_SYMBOL\$" || true)"
-    undefined_line="$(nm -u "$bin_path" 2>/dev/null | grep " $ABSENT_SYMBOL\$" || true)"
+    defined_line="$(find_defined_symbol_line "$bin_path" "$ABSENT_SYMBOL")"
+    undefined_line="$(find_undefined_symbol_line "$bin_path" "$ABSENT_SYMBOL")"
 
     if [ -z "$defined_line" ]; then
         echo "FAIL — [$label] native-build exited 0, no fabricated symbol found by nm, and no"
@@ -303,9 +500,11 @@ check_absent_case() {
         return 0
     fi
 
+    defined_class="$(symbol_class_of_line "$defined_line")"
     run_out="$(timeout 20 "$bin_path" 2>>"$log_path" || true)"
-    echo "KNOWN-OPEN — [$label] native-build fabricates a DEFINED symbol for the"
-    echo "             never-implemented extern '$ABSENT_SYMBOL' instead of failing:"
+    echo "KNOWN-OPEN — [$label] native-build fabricates a DEFINED symbol (nm class"
+    echo "             '$defined_class') for the never-implemented extern"
+    echo "             '$ABSENT_SYMBOL' instead of failing:"
     echo "             nm -S: $defined_line"
     echo "             nm -u: ${undefined_line:-<none -- symbol is NOT undefined, confirming fabrication>}"
     echo "             program ran to completion: $run_out"

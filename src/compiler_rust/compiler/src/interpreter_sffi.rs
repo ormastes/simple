@@ -622,11 +622,25 @@ fn report_unbacked_extern(name: &str, argc: usize) {
     };
 
     if strict_extern_enabled() {
-        eprintln!(
+        // Deliberately NOT `abort()`: aborting raises SIGABRT, so the shell
+        // reports "dumped core" (exit 134), writes a core file, and trips
+        // crash-detection tooling -- none of which is true here. This is a
+        // clean, fully-diagnosed refusal, so it must look like one: flush the
+        // diagnostic ourselves (process::exit does not run destructors and
+        // will not flush a buffered writer) and exit 1, matching the plain
+        // interpreter lane's `error: semantic: unknown extern function: ...`
+        // exit status.
+        use std::io::Write;
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
             "error: extern `{name}` (argc={argc}) is declared in Simple but backed by no \
              implementation; SIMPLE_STRICT_EXTERN=1 refuses to substitute nil for it."
         );
-        std::process::abort();
+        let _ = err.flush();
+        drop(err);
+        let _ = std::io::stdout().flush();
+        std::process::exit(1);
     }
 
     if first_time && !extern_warn_silenced() {

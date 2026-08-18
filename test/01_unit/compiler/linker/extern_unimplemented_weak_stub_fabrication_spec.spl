@@ -1,0 +1,114 @@
+# @req REQ-LINKER-EXTERN-001
+"""
+# Unimplemented `extern fn` must fail the build, never fabricate a value
+
+**Category:** Runtime
+**Status:** In Progress (RED — compiler-side fix not landed as of 2026-08-18)
+
+## Purpose and Audience
+
+For anyone declaring an `extern fn`. An `extern fn` is a promise that a symbol
+exists somewhere outside Simple source. When that promise is false the only
+honest outcome is a build failure that names the symbol. Silently linking a
+weak stub turns a missing implementation into a plausible-looking wrong answer
+that no test, log, or exit code can distinguish from a correct one.
+
+## Scope and Preconditions
+
+Hosted x86_64 Linux, in-process native lane only. The spec drives
+`bin/simple native-build` under `SIMPLE_NATIVE_BUILD_RUST=1` deliberately: the
+DEFAULT (pure-Simple) native-build lane OOMs on this host — its worker has been
+observed killed between 11 GB and 36 GB RSS — so a spec that shelled out to a
+plain `native-build` would TIME OUT rather than produce a clean verdict, and a
+timeout is not evidence about extern resolution. The in-process Rust lane
+completes in ~8s per fixture and is the lane on which the defect was
+reproduced.
+
+## Primary Workflow
+
+Two fixtures, both built the same way:
+
+- `test/fixtures/extern_unimplemented_weak_stub/negative/main.spl` declares
+  `lane_definitely_absent_probe`, which is defined nowhere in the tree. The
+  build MUST fail, MUST name the symbol, MUST NOT emit a binary, and MUST NOT
+  yield a program that prints `got 3`.
+- `test/fixtures/extern_unimplemented_weak_stub/positive/main.spl` declares
+  `rt_string_len`, a real exported runtime symbol. It MUST build and print
+  `got 4`. This positive control is what stops the negative assertions from
+  passing vacuously: a compiler that rejected every `extern fn` would satisfy
+  the negative case alone, and this spec would still be wrong to go green.
+
+## Observed defect (reproduced 2026-08-18, in-process lane)
+
+The negative fixture builds with exit 0. The build log even prints
+`Unresolved symbol preview: __cpu_indicator_init, __cpu_model,
+lane_definitely_absent_probe` and then links anyway. `nm` on the product shows
+`0000000000402eac W lane_definitely_absent_probe` — a WEAK stub — and running
+it prints `got 3` and exits 0. There is no signal at compile, link, or run
+time.
+
+## Recovery and Troubleshooting
+
+If this spec is RED, an unimplemented extern still fabricates values; do not
+trust any `extern fn` result until it is GREEN. If only the POSITIVE case is
+red, the fix over-corrected and now rejects legitimate externs.
+
+## Compatibility and Limitations
+
+Linux/hosted only; the weak-stub emission is a hosted-link behaviour. Baremetal
+and cross-target lanes are out of scope here.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+# The build+run harness is a single `sh -c` script so that the build's own exit
+# status is read on the line after the command (never through a pipe — a pipe
+# would report the status of the last pipeline stage, which has produced false
+# greens in this repo before). It emits labelled lines that the assertions
+# below match exactly. Deliberately quote-free so the script survives embedding
+# in a Simple text literal; all paths are space-free.
+fn build_and_run(fixture_dir: text) -> text:
+    val script = "set -u; OUT=$(mktemp -d); " +
+        "SIMPLE_NATIVE_BUILD_RUST=1 timeout 900 bin/simple native-build " +
+        "--source " + fixture_dir + " --entry " + fixture_dir + "/main.spl " +
+        "--output $OUT/probe.bin > $OUT/build.log 2>&1; " +
+        "rc=$?; echo BUILD_RC=$rc; " +
+        "if [ -f $OUT/probe.bin ]; then echo BINARY=yes; " +
+        "$OUT/probe.bin > $OUT/run.log 2>&1; echo RUN_RC=$?; " +
+        "echo RUN_OUT=$(cat $OUT/run.log); else echo BINARY=no; fi; " +
+        "echo ---BUILD-LOG---; cat $OUT/build.log; rm -rf $OUT"
+    val result = process_run("sh", ["-c", script])
+    return result.0 + result.1
+
+
+describe "extern fn with no implementation":
+    it "fails the build instead of linking a fabricating weak stub":
+        step("build the negative fixture on the in-process native lane")
+        val out = build_and_run("test/fixtures/extern_unimplemented_weak_stub/negative")
+
+        step("the build must not succeed")
+        expect(out.contains("BUILD_RC=0")).to_equal(false)
+
+        step("the diagnostic must name the missing symbol")
+        expect(out.contains("lane_definitely_absent_probe")).to_equal(true)
+
+        step("no binary may be produced")
+        expect(out.contains("BINARY=no")).to_equal(true)
+
+        step("and therefore no fabricated value may ever be printed")
+        expect(out.contains("RUN_OUT=got 3")).to_equal(false)
+
+    # Positive control — without this, a compiler that rejected EVERY extern fn
+    # would make the case above green while being just as broken.
+    it "still builds and returns the real value when the extern is implemented":
+        step("build the positive fixture, whose extern is a real runtime symbol")
+        val out = build_and_run("test/fixtures/extern_unimplemented_weak_stub/positive")
+
+        step("the build must succeed and emit a binary")
+        expect(out.contains("BUILD_RC=0")).to_equal(true)
+        expect(out.contains("BINARY=yes")).to_equal(true)
+
+        step("and the program must return the runtime's real answer, not a stub")
+        expect(out.contains("RUN_RC=0")).to_equal(true)
+        expect(out.contains("RUN_OUT=got 4")).to_equal(true)

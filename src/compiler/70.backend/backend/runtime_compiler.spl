@@ -198,11 +198,39 @@ fn _find_c_compiler_windows() -> text:
 # Runtime Source Directory Discovery
 # ============================================================================
 
-fn find_runtime_source_dir() -> text:
-    """Find the runtime source directory.
+fn _runtime_dir_walk_up(start: text) -> text:
+    """Walk upward from an absolute path looking for src/runtime/runtime.c.
 
-    Tries SIMPLE_PROJECT_ROOT first, then src/runtime/ relative to cwd,
-    then (on Unix) resolves via /proc/self/exe.
+    Returns the matching `<root>/src/runtime` or "" when no ancestor holds it.
+    Used for both the executable location and the cwd so that resolution does
+    not depend on how deep inside (or outside) the tree the tool was invoked.
+    """
+    if start.len() == 0 or not start.starts_with("/"):
+        return ""
+    val parts = start.split("/")
+    var depth = parts.len()
+    while depth > 0:
+        var prefix = ""
+        var i = 0
+        while i < depth:
+            if parts[i] != "":
+                prefix = "{prefix}/{parts[i]}"
+            i = i + 1
+        if prefix != "":
+            if rt_file_exists("{prefix}/src/runtime/runtime.c"):
+                return "{prefix}/src/runtime"
+        depth = depth - 1
+    ""
+
+fn find_runtime_source_dir() -> text:
+    """Find the runtime source directory, independent of the current directory.
+
+    Order: SIMPLE_PROJECT_ROOT, then src/runtime/ directly under cwd, then an
+    upward walk from the running executable's own path, then an upward walk
+    from cwd. The executable walk is what makes this cwd-independent: the
+    deployed binary lives at <root>/bin/release/<triple>/simple, so any
+    fixed-depth `dirname` chain (the previous approach) lands on <root>/bin and
+    misses the tree entirely.
     Returns the path or empty string if not found.
     """
     # Try SIMPLE_PROJECT_ROOT env var first so tests and callers can force
@@ -217,21 +245,35 @@ fn find_runtime_source_dir() -> text:
     if rt_file_exists("src/runtime/runtime.c"):
         return "src/runtime"
 
-    # Unix-only: try relative to executable location
+    # Unix-only: walk up from the executable location.
     if not _is_windows():
         # Canonicalize in-process. Inside `sh -c`, /proc/self is the shell, so
         # a shell-out here reports the shell's path, not ours (2026-07-25).
-        val exe_dir = rt_path_absolute("/proc/self/exe") ?? ""
-        if exe_dir.len() > 0 and exe_dir != "/proc/self/exe":
-            # Go up from a bin/simple or bin/release/<platform>/simple wrapper to project root
-            val (pr_out, pr_err, pr_code) = backend_shell_tuple("dirname $(dirname $(dirname {exe_dir})) 2>/dev/null")
-            if pr_code == 0:
-                val pr = pr_out.trim()
-                val rt_path = "{pr}/src/runtime/runtime.c"
-                if rt_file_exists(rt_path):
-                    return "{pr}/src/runtime"
+        val exe_path = rt_path_absolute("/proc/self/exe") ?? ""
+        if exe_path.len() > 0 and exe_path != "/proc/self/exe":
+            val from_exe = _runtime_dir_walk_up(exe_path)
+            if from_exe != "":
+                return from_exe
+
+    # Walk up from the current working directory: covers running from a nested
+    # subdirectory of the tree.
+    val cwd = rt_path_absolute(".") ?? ""
+    val from_cwd = _runtime_dir_walk_up(cwd)
+    if from_cwd != "":
+        return from_cwd
 
     ""
+
+fn _runtime_dir_not_found_message() -> text:
+    """Honest diagnostic for a failed runtime-source lookup."""
+    val cwd = rt_path_absolute(".") ?? "<unknown>"
+    val exe_path = rt_path_absolute("/proc/self/exe") ?? "<unknown>"
+    val project_root = rt_env_get("SIMPLE_PROJECT_ROOT")
+    val pr = if project_root != "" and project_root != nil: project_root else: "<unset>"
+    var msg = "Runtime source directory not found: no src/runtime/runtime.c under the current directory ({cwd}), "
+    msg = msg + "under any ancestor of it, or under any ancestor of the running executable ({exe_path}). "
+    msg = msg + "SIMPLE_PROJECT_ROOT={pr} - set SIMPLE_PROJECT_ROOT to the repository root to resolve this explicitly."
+    msg
 
 # ============================================================================
 # Runtime Compilation
@@ -259,7 +301,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     if trace:
         print "[RT-COMPILE] rt_dir={rt_dir}"
     if rt_dir == "":
-        return Err("Runtime source directory not found. Expected src/runtime/runtime.c")
+        return Err(_runtime_dir_not_found_message())
 
     # runtime_sdl2 joins the default set now that it dlopens SDL2 at first use
     # instead of binding it at link time: it needs no SDL2 headers to compile and

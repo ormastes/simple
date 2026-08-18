@@ -361,7 +361,7 @@ a genuine error raised *inside* a backed extern. Only the former is reported.
 - **default:** one warning per distinct name per process, naming the symbol,
   the arg count, and the fact that nil was substituted. Return value and exit
   status are **unchanged** — this is warn-only on purpose.
-- `SIMPLE_STRICT_EXTERN=1`: abort instead of substituting nil.
+- `SIMPLE_STRICT_EXTERN=1`: fail cleanly (diagnostic on stderr, exit 1 -- NOT `abort()`/SIGABRT/core dump) instead of substituting nil. Changed 2026-08-18: it used to `std::process::abort()`, which produced exit 134 and "dumped core" for a fully-diagnosed refusal.
 - `SIMPLE_QUIET_EXTERN_WARN=1`: silence the warning without changing any value.
 
 Deliberately **not** promoted to fatal by default: ~919 symbols are unbacked on
@@ -375,6 +375,10 @@ Control = the *same* source tree at the *same* tip with only
 command. Control: no warning, rc=0, `ghost returned: 3`, and
 `SIMPLE_STRICT_EXTERN=1` has **zero** effect. Fixed: warning present; strict
 mode aborts (rc=134). The delta is attributable to the change, not to drift.
+(As of 2026-08-18 strict mode exits 1 cleanly instead of aborting; re-measured
+on the fixture `lane_definitely_absent_probe`: default rc=0 `got 3` + warning,
+strict rc=1 with the `error: extern ... refuses to substitute nil` line and no
+core dump.)
 
 ### Measured fallout of the warning — 0
 
