@@ -168,6 +168,88 @@ fn cli_classify_with_registry_v1(table: SimpleCliOptionRouteTableV1, tokens: [te
         i = i + 1
     Ok(out)
 
+fn _availability_text(a: i64) -> text:
+    if a == CLI_AVAILABILITY_OPTIONAL: return "optional"
+    "required"
+
+fn _missing_policy_text(p: i64) -> text:
+    if p == CLI_MISSING_WARN_SKIP: return "warn_skip"
+    if p == CLI_MISSING_SILENT_SKIP: return "silent_skip"
+    "error"
+
+# Sorted copy of the registered namespace names (lexicographic, stable output
+# regardless of registration order).
+fn _sorted_namespace_names(table: SimpleCliOptionRouteTableV1) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < table.namespaces.len():
+        names.push(table.namespaces[i].namespace)
+        i = i + 1
+    # insertion sort (small n, no stdlib dependency)
+    var j = 1
+    while j < names.len():
+        val cur = names[j]
+        var k = j
+        while k > 0 and names[k - 1] > cur:
+            names[k] = names[k - 1]
+            k = k - 1
+        names[k] = cur
+        j = j + 1
+    names
+
+# Deterministic help section for config-registered --x extension namespaces.
+# One grammar line per namespace, sorted by namespace name. Non-default
+# availability/missing_policy are shown; the empty registry yields an explicit
+# marker line, never an empty string.
+fn cli_extension_help_text_v1(table: SimpleCliOptionRouteTableV1) -> text:
+    var out = "extension namespaces:\n"
+    val names = _sorted_namespace_names(table)
+    if names.len() == 0:
+        return out + "  (no extension namespaces registered)\n"
+    var i = 0
+    while i < names.len():
+        val lookup = cli_lookup_namespace_v1(table, names[i])
+        val rec = lookup.record
+        var line = "  --x" + rec.namespace + "-<key>[=<value>]  provider: " + rec.provider_id
+        if rec.availability != CLI_AVAILABILITY_REQUIRED or rec.missing_policy != CLI_MISSING_ERROR:
+            line = line + "  [availability: " + _availability_text(rec.availability) + ", missing_policy: " + _missing_policy_text(rec.missing_policy) + "]"
+        out = out + line + "\n"
+        i = i + 1
+    out
+
+# Completion candidates for a partial --x token. The candidate pool is the
+# declared namespace spellings (`--x<ns>-`) plus the built-in top-level
+# spellings; reserved spellings (--help/--version/--) are filtered and never
+# suggested. Sorted, deterministic; unknown prefixes yield an empty list.
+fn cli_extension_completions_v1(table: SimpleCliOptionRouteTableV1, prefix: text) -> [text]:
+    var pool: [text] = []
+    val names = _sorted_namespace_names(table)
+    var i = 0
+    while i < names.len():
+        pool.push("--x" + names[i] + "-")
+        i = i + 1
+    # top-level spellings enter the pool but reserved ones are filtered below
+    pool.push("--help")
+    pool.push("--version")
+    pool.push("--")
+    var out: [text] = []
+    var j = 0
+    while j < pool.len():
+        val cand = pool[j]
+        if not _completion_reserved(cand) and cand.starts_with(prefix):
+            out.push(cand)
+        j = j + 1
+    out
+
+# Reserved spellings that must never be SUGGESTED. Note this is deliberately
+# not cli_spelling_reserved_v1: that predicate reserves the whole --x prefix
+# against route REGISTRATION, which would wrongly filter every namespace
+# spelling here.
+fn _completion_reserved(spelling: text) -> bool:
+    if spelling == "-h" or spelling == "--help": return true
+    if spelling == "-V" or spelling == "--version": return true
+    spelling == "--"
+
 # One-call entrypoint for a hosting app: SDN config source + argv in, parsed
 # extension values out. Zero .spl changes needed to add a new namespace/key.
 fn cli_extension_parse_argv_v1(config_source: text, tokens: [text]) -> Result<CliExtensionParsedArgsV1, text>:

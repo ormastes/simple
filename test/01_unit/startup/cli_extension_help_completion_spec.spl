@@ -1,0 +1,74 @@
+# WP-C Phase C: help/completion generation for config-registered --x
+# extension namespaces. Help is deterministic and never empty; completions
+# never suggest reserved spellings (--help/--version/--).
+use std.nogc_sync_mut.composition.{
+    cli_extension_registry_from_sdn_v1,
+    cli_extension_help_text_v1, cli_extension_completions_v1,
+    SimpleCliOptionRouteTableV1
+}
+
+fn fixture_sdn() -> text:
+    val a = "schema: simple.cli_extension/1\n"
+    val b = "namespaces:\n"
+    # deliberately registered out of lexicographic order to prove stable sort
+    val c = "  - namespace: office\n    provider_id: provider.office\n    availability: optional\n    missing_policy: warn_skip\n"
+    val d = "  - namespace: llvm\n    provider_id: provider.llvm\n"
+    a + b + c + d
+
+fn fixture_table() -> SimpleCliOptionRouteTableV1:
+    match cli_extension_registry_from_sdn_v1(fixture_sdn()):
+        case Ok(t): t
+        case Err(_): SimpleCliOptionRouteTableV1.create()
+
+describe "cli_extension_help_text_v1":
+    it "lists both registered namespaces in stable sorted order":
+        val help = cli_extension_help_text_v1(fixture_table())
+        val li = help.index_of("--xllvm-<key>[=<value>]")
+        val oi = help.index_of("--xoffice-<key>[=<value>]")
+        expect(li >= 0).to_equal(true)
+        expect(oi >= 0).to_equal(true)
+        expect(li < oi).to_equal(true)
+        expect(help.contains("provider: provider.llvm")).to_equal(true)
+        expect(help.contains("provider: provider.office")).to_equal(true)
+
+    it "shows non-default availability and missing_policy":
+        val help = cli_extension_help_text_v1(fixture_table())
+        expect(help.contains("availability: optional")).to_equal(true)
+        expect(help.contains("missing_policy: warn_skip")).to_equal(true)
+
+    it "yields an explicit line for an empty registry, never an empty string":
+        val help = cli_extension_help_text_v1(SimpleCliOptionRouteTableV1.create())
+        expect(help.contains("(no extension namespaces registered)")).to_equal(true)
+        expect(help.len() > 0).to_equal(true)
+
+describe "cli_extension_completions_v1":
+    it "completes a partial namespace to its declared spelling":
+        val out = cli_extension_completions_v1(fixture_table(), "--xl")
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal("--xllvm-")
+
+    it "completes an exact namespace to the declared spelling":
+        val out = cli_extension_completions_v1(fixture_table(), "--xoffice")
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal("--xoffice-")
+
+    it "offers all namespaces sorted for the bare --x prefix":
+        val out = cli_extension_completions_v1(fixture_table(), "--x")
+        expect(out.len()).to_equal(2)
+        expect(out[0]).to_equal("--xllvm-")
+        expect(out[1]).to_equal("--xoffice-")
+
+    it "returns an empty list for an unknown prefix":
+        val out = cli_extension_completions_v1(fixture_table(), "--xzz")
+        expect(out.len()).to_equal(0)
+
+    it "never suggests reserved spellings":
+        val out = cli_extension_completions_v1(fixture_table(), "--")
+        var i = 0
+        var saw_reserved = false
+        while i < out.len():
+            if out[i] == "--help" or out[i] == "--version" or out[i] == "--":
+                saw_reserved = true
+            i = i + 1
+        expect(saw_reserved).to_equal(false)
+        expect(out.len()).to_equal(2)
