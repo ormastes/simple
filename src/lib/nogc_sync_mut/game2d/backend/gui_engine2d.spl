@@ -1,0 +1,112 @@
+# std.game2d.backend.gui_engine2d — game2d frames through Engine2D (GUI lane).
+#
+# Routes a game2d pixel-buffer frame into the shared Engine2D renderer
+# (`create_with_backend` software lane): each presented frame is blitted with
+# `draw_image` (verbatim, non-blending), presented via `present()`, and read
+# back with `read_pixels()` as presentation evidence.
+#
+# Command-buffer rendering (`gb_execute_commands`) composes a
+# `HeadlessBackend` rasterizer; `gb_end_frame` presents the rasterized
+# framebuffer through Engine2D. Frame-hash evidence mirrors the headless
+# backend: `frame_hash()` is FNV-1a over the PRESENTED (read-back) pixel
+# words, so byte parity through the pipeline is directly checkable.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.engine.render.command.{RenderCommandBuffer}
+use std.nogc_sync_mut.game2d.backend.trait.{GameBackend, WindowConfig, Window, Event}
+use std.nogc_sync_mut.game2d.backend.headless.{HeadlessBackend}
+use std.nogc_sync_mut.game2d.backend.frame_hash.{frame_hash}
+use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
+use std.nogc_sync_mut.game2d.render.image.{Image, RenderError}
+use std.nogc_sync_mut.game2d.audio.{Sound, AudioError}
+use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
+
+
+class GuiEngine2dBackend:
+    raster: HeadlessBackend
+    engine: Engine2D
+    width: i64
+    height: i64
+    presented: [i64]
+    frames_presented: i64
+    last_render_ok: bool
+
+    static fn create(width: i64, height: i64) -> GuiEngine2dBackend:
+        val n = width * height
+        val presented: [i64] = [0; n]
+        GuiEngine2dBackend(
+            raster: HeadlessBackend.create(width, height),
+            engine: Engine2D.create_with_backend(width as i32, height as i32, "software"),
+            width: width,
+            height: height,
+            presented: presented,
+            frames_presented: 0,
+            last_render_ok: false
+        )
+
+    me present_frame(self, fb: [i64]) -> bool:
+        """Blit one pixel-buffer frame into Engine2D, present, read back.
+
+        Returns true only when the read-back framebuffer is full-size.
+        """
+        if (fb.len() as i64) != self.width * self.height:
+            self.last_render_ok = false
+            return false
+        val n = fb.len()
+        val px: [u32] = [0; n]
+        var i: i64 = 0
+        while i < n:
+            px[i] = fb[i] as u32
+            i = i + 1
+        self.engine.draw_image(0, 0, self.width as i32, self.height as i32, px)
+        self.engine.present()
+        val out = self.engine.read_pixels()
+        self.frames_presented = self.frames_presented + 1
+        if (out.len() as i64) != self.width * self.height:
+            self.last_render_ok = false
+            return false
+        var j: i64 = 0
+        val m = out.len()
+        while j < m:
+            self.presented[j] = out[j] as i64
+            j = j + 1
+        self.last_render_ok = true
+        true
+
+    fn frame_hash(self) -> i64:
+        """FNV-1a hash over the PRESENTED (read-back) pixel words."""
+        frame_hash(self.presented)
+
+    fn presented_pixels(self) -> [i64]:
+        self.presented
+
+
+# GameBackend surface implementation — composition only.
+impl GuiEngine2dBackend:
+    me gb_create_window(self, cfg: WindowConfig) -> Window:
+        Window(raw: 0, width: cfg.width, height: cfg.height)
+
+    fn poll_native_events(self, events_out: [Event]) -> i64:
+        val _ = events_out
+        0  # engine2d lane produces no native events here
+
+    fn gb_begin_frame(self) -> Canvas:
+        Canvas.create(self.width, self.height)
+
+    fn gb_end_frame(self):
+        self.present_frame(self.raster.fb)
+
+    me gb_execute_commands(self, cmds: RenderCommandBuffer):
+        self.raster.gb_execute_commands(cmds)
+
+    fn gb_load_image(self, path: text) -> Result<Image, RenderError>:
+        Image.new(path)
+
+    fn gb_load_sound(self, path: text) -> Result<Sound, AudioError>:
+        Sound.new(path)
+
+    me gb_shutdown(self):
+        self.engine.shutdown()
+
+    fn gb_current_input(self) -> InputSnapshot:
+        self.raster.last_input

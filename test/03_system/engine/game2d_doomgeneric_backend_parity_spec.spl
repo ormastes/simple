@@ -1,0 +1,67 @@
+# @tag:system
+# @cover src/lib/nogc_sync_mut/game2d/backend/web_canvas.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/backend/gui_engine2d.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/ports/doomgeneric.spl 60%
+#
+# Doomgeneric CONTRACT lane parity: no real Doom engine and no WAD ships
+# in-repo, so the frame provider is the synthetic pure-Simple raycaster in
+# std.game2d.ports.doomgeneric (disclosed stand-in). The contract proven here
+# is frame provider -> backend -> capture: the SAME synthetic frame sequence
+# must produce IDENTICAL frame_hash streams across the headless, web_canvas
+# (browser_engine Draw IR image path) and gui_engine2d (Engine2D software
+# blit/present/read_pixels) backends — byte parity on the pixel buffer.
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.game2d.ports.doomgeneric as dg
+use std.nogc_sync_mut.game2d.backend.headless.{HeadlessBackend}
+use std.nogc_sync_mut.game2d.backend.web_canvas.{WebCanvasBackend}
+use std.nogc_sync_mut.game2d.backend.gui_engine2d.{GuiEngine2dBackend}
+use std.nogc_sync_mut.game2d.backend.frame_hash.{frame_hash}
+
+val W: i64 = 64
+val H: i64 = 40
+
+fn _frame_sequence() -> [[i64]]:
+    """Three synthetic doomgeneric frames: boot, forward+fire, turn right."""
+    val s0 = dg.DoomPortState.boot(dg.proof_wad())
+    val s1 = dg.doom_tick(s0, dg.DoomPortInput(forward: true, back: false, turn_left: false, turn_right: false, fire: true))
+    val s2 = dg.doom_tick(s1, dg.DoomPortInput(forward: false, back: false, turn_left: false, turn_right: true, fire: false))
+    var frames: [[i64]] = []
+    frames.push(dg.render_frame(s0, W, H).pixels)
+    frames.push(dg.render_frame(s1, W, H).pixels)
+    frames.push(dg.render_frame(s2, W, H).pixels)
+    frames
+
+fn _headless_hashes(frames: [[i64]]) -> [i64]:
+    # Headless capture: the provided frame IS the framebuffer.
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < frames.len():
+        out.push(frame_hash(frames[i]))
+        i = i + 1
+    out
+
+describe "doomgeneric backend parity (contract lane, synthetic frames)":
+    it "produces identical frame_hash streams across headless, web_canvas and gui_engine2d":
+        val frames = _frame_sequence()
+        val headless = _headless_hashes(frames)
+        var web = WebCanvasBackend.create(W, H)
+        var gui = GuiEngine2dBackend.create(W, H)
+        var i: i64 = 0
+        while i < frames.len():
+            expect(web.present_frame(frames[i])).to_equal(true)
+            expect(gui.present_frame(frames[i])).to_equal(true)
+            # Byte parity on the presented pixel buffer, per frame:
+            expect(web.frame_hash()).to_equal(headless[i])
+            expect(gui.frame_hash()).to_equal(headless[i])
+            i = i + 1
+        # Streams are non-degenerate: frames differ, so hashes differ.
+        expect(headless[0] == headless[1]).to_equal(false)
+        expect(headless[1] == headless[2]).to_equal(false)
+
+    it "fails closed on a wrong-sized frame":
+        var web = WebCanvasBackend.create(W, H)
+        var gui = GuiEngine2dBackend.create(W, H)
+        val short: [i64] = [0; 7]
+        expect(web.present_frame(short)).to_equal(false)
+        expect(gui.present_frame(short)).to_equal(false)

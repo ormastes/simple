@@ -11,6 +11,15 @@ use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
 use common.ui.wm_app_process_contract.{graphics_2d_showcase_window_title}
 use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, active_arch_text, active_feature_text}
+use std.nogc_sync_mut.game2d.render.draw_batcher.{DrawBatcher}
+use std.nogc_sync_mut.game2d.render.image.{Image}
+use std.nogc_sync_mut.game2d.backend.headless.{HeadlessBackend}
+use std.nogc_sync_mut.engine.render.command.{RenderCommandBuffer}
+use std.nogc_sync_mut.engine.sprite.sprite.{Sprite}
+use std.common.engine.ids.{TextureId}
+use std.common.engine.units.{ZIndex}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.color.{EngineColor}
 
 # Design-space reference dimensions (scaling denominators). The gallery is
 # authored at 800x600 and scaled up to the resolved render resolution.
@@ -273,7 +282,70 @@ fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, tr: bool, include_
     e.draw_engine(sx(38, rw), sy(495, rh), child)
     e.draw_engine_opacity(sx(138, rw), sy(495, rh), child, 450)
     child.shutdown()
+
+    # game2d draw batcher: animated sprite over a tilemap. Six fixed steps of
+    # a bouncing sprite plus a 4x3 tinted tilemap are batched per frame via
+    # DrawBatcher (sorted by z/texture, batch stats tracked), rasterized in a
+    # game2d HeadlessBackend, and the FINAL animation frame is blitted here.
+    e.draw_rect_filled(sx(591, rw), sy(452, rh), sx(191, rw), sy(125, rh), PANEL)
+    e = label(e, rw, rh, dpi, 601, 460, "GAME2D BATCH")
+    e = draw_game2d_sprite_segment(e, rw, rh, tr)
+    showcase_trace(tr, "game2d_batch_done")
     showcase_trace(tr, "draw_end")
+    e
+
+# Animated sprite/tilemap segment exercising the game2d DrawBatcher.
+# Return-threaded like draw_showcase (param-detach class).
+fn draw_game2d_sprite_segment(mut e: Engine2D, rw: i32, rh: i32, tr: bool) -> Engine2D:
+    val seg_w: i64 = 96
+    val seg_h: i64 = 72
+    var backend = HeadlessBackend.create(seg_w, seg_h)
+    var batcher = DrawBatcher.create()
+    val tile_img = Image.from_sprite(
+        Sprite.create(TextureId(raw: 1), Rect2(x: 0.0, y: 0.0, width: 16.0, height: 16.0)), 16, 16)
+    val hero_img = Image.from_sprite(
+        Sprite.create(TextureId(raw: 2), Rect2(x: 0.0, y: 0.0, width: 12.0, height: 12.0)), 12, 12)
+    val tile_a = EngineColor(r: 0.13, g: 0.25, b: 0.42, a: 1.0)
+    val tile_b = EngineColor(r: 0.18, g: 0.55, b: 0.45, a: 1.0)
+    val hero = EngineColor(r: 0.96, g: 0.62, b: 0.10, a: 1.0)
+    var step: i64 = 0
+    while step < 6:
+        backend.clear_buffer(EngineColor(r: 0.06, g: 0.08, b: 0.13, a: 1.0))
+        batcher.begin_frame()
+        var ty: i64 = 0
+        while ty < 3:
+            var tx: i64 = 0
+            while tx < 4:
+                val tint = if (tx + ty) % 2 == 0: tile_a else: tile_b
+                val dst = Rect2(x: (tx * 24) as f64, y: (24 + ty * 16) as f64, width: 24.0, height: 16.0)
+                batcher.submit_tinted(tile_img, dst, tint, ZIndex(value: 0))
+                tx = tx + 1
+            ty = ty + 1
+        # Bouncing sprite: deterministic 6-step arc across the tilemap.
+        val bounce = if step % 3 == 0: 0 else: if step % 3 == 1: 8 else: 4
+        val hero_dst = Rect2(x: (6 + step * 14) as f64, y: (10 + bounce) as f64, width: 12.0, height: 12.0)
+        batcher.submit_tinted(hero_img, hero_dst, hero, ZIndex(value: 1))
+        var buf = RenderCommandBuffer.create()
+        batcher.end_frame(buf)
+        backend.gb_execute_commands(buf)
+        step = step + 1
+    val stats = batcher.last_stats()
+    print "game2d_batch: {stats.summary()}"
+    # Blit the final animation frame. Headless packs ABGR; Engine2D consumes
+    # ARGB — swap R/B during conversion so panel colors are true.
+    val n = backend.fb.len()
+    val px: [u32] = [0; n]
+    var i: i64 = 0
+    while i < n:
+        val w = backend.fb[i]
+        val a = (w / 16777216) & 0xff
+        val b = (w / 65536) & 0xff
+        val g = (w / 256) & 0xff
+        val r = w & 0xff
+        px[i] = ((a * 16777216) + (r * 65536) + (g * 256) + b) as u32
+        i = i + 1
+    e.draw_image(sx(640, rw), sy(485, rh), seg_w as i32, seg_h as i32, px)
+    showcase_trace(tr, "game2d_batch_blit_done")
     e
 
 fn pack_rgb(pixels: [u32]) -> [i64]:
