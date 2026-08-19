@@ -1,6 +1,6 @@
 # hwir_foundation_spec residual failures after missing std.spec import fix (2026-08-16)
 
-Status: OPEN (P2) — residual 21 confirmed live 2026-08-17; the *infra* half had been silently clobbered and was re-applied, see the bottom section
+Status: RESOLVED 2026-08-19 (was OPEN P2) — residual 21 confirmed live 2026-08-17; the *infra* half had been silently clobbered and was re-applied, see the bottom section
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 ## Context
@@ -93,3 +93,54 @@ above is unchanged.
 
 Identical to the recorded baseline (29/50 passing, 21 failing). The seed rebuild
 changed nothing here. Status unchanged: OPEN (P2).
+
+## 2026-08-19 — RESOLVED: both specs fully GREEN (50/50 and 55/55)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59773320 bytes,
+2026-08-19 15:14:28 (fixed seed with the 2026-08-19 interpreter repairs).
+Baseline re-confirmed first on that binary: still 29/50 and 41/55 — the
+interpreter fixes alone healed nothing. The 21+14 residuals decomposed into:
+
+**Product defects fixed (src/compiler/50.mir/hwir/):**
+- `mir_to_hwir.spl`: the canonical `and` fixture named its output port `out`,
+  a VHDL reserved word, so `shape_diagnostic()` failed HWIR-E-PORT before every
+  assertion; renamed to `out_c` (spec fixtures updated to match). This alone
+  took foundation 29→35.
+- `sequential.spl` `readable_width`: guards referencing an "all"-kind output
+  binding (`fetch_ready`, `dispatch_valid` — pure combinational one-bit
+  conjunctions, readable per VHDL-2008 out-port readback) resolved to -1, so
+  the entire stateful frontend failed HWIR-E-SEQUENTIAL-GUARD and all 6
+  stateful/sequential foundation tests were unreachable.
+- `zca_rows.spl` C.LUI row: summary declared `comb_op_count: 22` but the row
+  holds 13 comb + 5 compare + 5 select = 23, failing HWIR-E-MODULE-COUNT and
+  poisoning the whole migrating-predecode composition (decoder → stateful
+  frontend product). Corrected to 23; extract spec's pinned 22 updated.
+
+**Spec-side repairs (intent preserved, no assertion weakened):**
+- The interpreter rejects `xs[i].field = v` and returns COPIES for indexed
+  reads; every mutation test rewritten as bind → mutate → write back
+  (`val e = xs[i]; e.field = v; xs[i] = e`), including the
+  `for local in function.locals: local.type_ = word` fixture loop (loop vars
+  are copies too — rebuilt the list).
+- Stale emitter expectations: constants are now explicit binary literals
+  (`"00...01111111111111111"`), not `std_logic_vector(to_unsigned(...))`;
+  constants keep the MIR local's own name (`shift`, not `shift_amount`;
+  `mask`, not `field_mask`); the two-stage field graph keeps `field` as an
+  internal signal (2 signals / 3 comb ops); `cbreak_parcel` typo →
+  `cebreak_parcel`.
+- Fixture profile mismatches: `parcel_mask`/`bad_select` summaries carried
+  `"rv32"`/`"rv32-zca-critical"` against configs whose profiles are
+  `"rv32-zca"`/`"riscv-gen2-rv32-zca-critical"`, tripping HWIR-E-MODULE-SUMMARY
+  before the check under test.
+- Diagnostic-order updates where the fail-closed behavior is unchanged but a
+  broader check legitimately fires first: serializer-unsafe module name ⇒
+  HWIR-E-VHDL-IDENTIFIER; altered decoder pin ⇒
+  HWIR-E-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE. The C.J / C.BEQZ reject tests
+  mutated only the signature (leaving Arg locals stale), so the generic
+  HWIR-E-MIR-LOCAL check fired; fixtures now mutate the matching local and the
+  intrinsic-specific HWIR-E-MIR-SIGNATURE rejections under test fire.
+
+Final: `hwir_foundation_spec` **50/50**, `hwir_mir_function_extract_spec`
+**55/55**. The full stateful frontend product now compiles end-to-end
+(`compile_strict_zca_single_outstanding_frontend_product` emits VHDL).
+Status: RESOLVED.
