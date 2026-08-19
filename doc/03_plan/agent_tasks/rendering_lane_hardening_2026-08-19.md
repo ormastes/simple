@@ -87,7 +87,7 @@ guard-verified):
 - Phase 3 ✓ srenderdoc↔RenderDoc compare+analysis (LCS drawcall alignment,
   6/6). Real .rdc capture still blocked on renderdoccmd install (honest
   blocked-skip wired).
-- Phase 4 ✓ chrome counter-component IO harness (real clicks both engines,
+- Phase 4 ✓ component harness: 9 components (counter/button/input/checkbox/list/table/float/css_zoo/dom_zoo), real IO both engines, shrink-only pins. Coverage MEASURED 61.6→67.9% (foundation module 81%); 80% goal not met — residue is CSS value forms + filed features (implicit tbody, li ::marker), which matter more than more fixtures.
   5/5, fail-closed divergence pins). Coverage HONESTLY 61.6% (<80% goal);
   gap list in the spec header — needs more components through the harness.
 - Phase 5 partial: vector_font_diff 10 glyphs/0 findings; chrome text-metric
