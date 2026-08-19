@@ -21,6 +21,11 @@ extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_bytes(addr: i64, offset: i64, bytes: [u8]) -> i64
+extern fn rt_call_ptr_0(addr: i64) -> i64
+extern fn rt_call_ptr_1(addr: i64, a1: i64) -> i64
+extern fn rt_call_ptr_2(addr: i64, a1: i64, a2: i64) -> i64
+extern fn rt_call_ptr_3(addr: i64, a1: i64, a2: i64, a3: i64) -> i64
 
 # ============================================================================
 # Constants (libc values)
@@ -161,11 +166,30 @@ fn native_free_exec_memory(address: i64, size: i64) -> bool:
     rt_munmap_raw(address, size) == 0
 
 fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
-    # NOTE: uses the extern rt_ptr_write_u8 wrapper, not an `as *u8` unsafe
-    # cast -- that cast form is rejected by this interpreter/seed with
-    # "unsupported cast target type: Pointer" (compile-time, not a runtime
-    # skip -- it fails the whole file). The extern form is the one already
-    # proven to work under `bin/simple test` by native_mmap_byte_read_spec.spl.
+    # MEASURED 2026-08-19: the per-byte rt_ptr_write_u8 loop below is FASTER
+    # than the bulk rt_ptr_write_bytes extern, by 6.6x-11.5x:
+    #
+    #   section   per-byte loop        one bulk call
+    #   4 KiB     21.7us (189 MB/s)    143.5us (28.5 MB/s)
+    #   64 KiB     308us (213 MB/s)    3.09ms  (21 MB/s)
+    #   1 MiB     5.00ms (210 MB/s)    57.4ms  (18 MB/s)
+    #
+    # Counter-intuitive, and the cost is NOT the C memcpy: a no-op extern
+    # handed the same 1 MiB array costs 60ns, so argument passing is free, and
+    # writing straight through the destination pointer with no intermediate
+    # Vec changed nothing. The cost is JIT<->interpreter marshalling at the
+    # extern boundary -- a `[u8]`-typed extern cannot be JIT-linked, while
+    # rt_ptr_write_u8(i64,i64,i64) can.
+    #
+    # So the loop stays until a JIT-linkable ALL-I64 form exists (an
+    # array-data-pointer extern feeding rt_ptr_write_bytes_raw, which is
+    # already implemented in src/runtime/runtime_memory.c and waiting).
+    # ponytail: O(bytes) SFFI calls, still the fastest available; replace when
+    # the all-i64 path lands, and re-measure rather than assuming.
+    #
+    # NOTE this means the segment-mapper lane's "one mapping per segment is
+    # faster" claim is STILL not established -- it saves syscalls but pays
+    # O(bytes) SFFI calls. See doc/03_plan/compiler/aspect_dynload/.
     if address == 0 or offset < 0:
         return 0
     var i = 0
@@ -215,38 +239,30 @@ fn native_get_function_pointer(address: i64) -> i64:
     address  # Function pointer is same as address
 
 fn native_call_function_0(fn_ptr: i64) -> i64:
-    # No supported mechanism exists to invoke an arbitrary i64 code address
-    # as a function from this interpreter: `fn_ptr as fn() -> i64` is
-    # rejected at compile time ("unsupported cast target type: Pointer",
-    # confirmed empirically against this seed/interpreter), and there is no
-    # `rt_call_*` extern in the C runtime for an unknown-arity raw pointer
-    # call either (checked src/runtime/*.c). Calling truly executable code
-    # this way is therefore only reachable in COMPILED (JIT) mode, matching
-    # the existing documented limitation in
-    # test/02_integration/app/loader_exec_memory_spec.spl ("native exec
-    # memory functions require compiled mode (not interpreter)"). Returning
-    # 0 here is an honest "not executable from this engine", not a silent
-    # simulation -- see doc/09_report/segment_loader_wiring_2026-08-18.md.
-    val _ = fn_ptr
-    0
+    # Real zero-argument call into mapped code via the rt_call_ptr_0 extern
+    # added to the C runtime. `fn_ptr as fn() -> i64` is still rejected at
+    # compile time ("unsupported cast target type: Pointer"), so the extern is
+    # the only route -- but it is a real route: the address must already have
+    # been made executable by native_make_executable (mprotect RX) first, which
+    # is the RW-write-then-RX sequence segment_mapper.spl follows.
+    if fn_ptr <= 0:
+        return 0
+    rt_call_ptr_0(fn_ptr)
 
 fn native_call_function_1(fn_ptr: i64, arg1: i64) -> i64:
-    val _ = fn_ptr
-    val _ = arg1
-    0
+    if fn_ptr <= 0:
+        return 0
+    rt_call_ptr_1(fn_ptr, arg1)
 
 fn native_call_function_2(fn_ptr: i64, arg1: i64, arg2: i64) -> i64:
-    val _ = fn_ptr
-    val _ = arg1
-    val _ = arg2
-    0
+    if fn_ptr <= 0:
+        return 0
+    rt_call_ptr_2(fn_ptr, arg1, arg2)
 
 fn native_call_function_3(fn_ptr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64:
-    val _ = fn_ptr
-    val _ = arg1
-    val _ = arg2
-    val _ = arg3
-    0
+    if fn_ptr <= 0:
+        return 0
+    rt_call_ptr_3(fn_ptr, arg1, arg2, arg3)
 
 # ============================================================================
 # Exports

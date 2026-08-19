@@ -1,0 +1,298 @@
+# Join-point patchpoints: the slot-cell table.
+#
+# WHY THIS EXISTS
+# ---------------
+# `doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md`
+# §A establishes that NO join-point slot table exists in the tree, while the two
+# hard primitives it needs are already proven in production: safe runtime code
+# rewrite with correct W^X + icache handling
+# (`loader/module_loader.spl:400-421`) and indirect-call codegen
+# (`70.backend/backend/llvm_ir_builder.spl:486`). Its recommendation is
+# BUILD-NOW, narrowly scoped to a slot-cell indirect-call table. This module is
+# exactly that scope and nothing else.
+#
+# THE DESIGN, IN ONE LINE
+# -----------------------
+# One naturally-aligned 8-byte function-pointer CELL per join point, in a
+# page-aligned table. A join-point call is an indirect call through its cell.
+# Binding advice = overwriting one cell. Nothing in the instruction stream is
+# ever rewritten.
+#
+# EXPLICITLY OUT OF SCOPE (scoping doc: DO-NOT-BUILD-YET): general inline
+# instruction-stream patching / self-modifying code, and anything gated on a
+# signing authority.
+#
+# SAFETY INVARIANTS
+# -----------------
+# * W^X, never RWX. The table is allocated RW with `native_alloc_rw_memory`
+#   (PROT_READ|PROT_WRITE -- deliberately NOT `native_alloc_exec_memory`, which
+#   maps RWX). It is sealed with `native_make_executable` (RX). A patch flips
+#   the containing page RX->RW, writes, and flips it back RW->RX. There is no
+#   window in which the mapping is simultaneously writable and executable, and
+#   `patch_cell` re-protects on EVERY exit path including the failure paths.
+#   This is the SAME protection path the loader already uses -- no second one is
+#   introduced here.
+# * icache flush after every patch, via the existing `native_flush_icache`.
+#   That helper is a deliberate no-op on x86/x64 (hardware cache coherence) and
+#   is the hook for ARM/RISC-V `__clear_cache`; this module calls it
+#   unconditionally rather than branching on architecture, matching every
+#   existing call site.
+#
+# ATOMICITY ARGUMENT FOR THE SINGLE-CELL UPDATE (required reading before
+# changing anything below)
+# ------------------------------------------------------------------------
+# A torn write to a live call cell is a crash: a reader that observes 4 bytes of
+# the old pointer and 4 of the new jumps to a synthesised address. This design
+# rests on ONE property, which is enforced mechanically here rather than
+# assumed:
+#
+#   A naturally-aligned 8-byte store is a single indivisible memory operation on
+#   every backend this compiler targets (x86-64: aligned quadword store is
+#   atomic per SDM Vol.3A 8.1.1; AArch64: single-copy atomic for aligned
+#   64-bit accesses per ARMv8 ARM B2.2.1; RISC-V RV64: an aligned SD is a single
+#   memory operation per the RVWMO base). A reader therefore observes either the
+#   whole old pointer or the whole new pointer, never a mixture.
+#
+# The premise is "naturally aligned", so alignment is a CHECKED CONTRACT, not a
+# comment:
+#   * `SLOT_CELL_SIZE` is 8 and every cell offset is `slot_id * 8`, so cell
+#     addresses are 8-byte aligned relative to the base;
+#   * the base comes from mmap and is page-aligned, hence 8-byte aligned;
+#   * `jpslot_alloc_table` REFUSES a base that is not 8-byte aligned rather than
+#     proceeding with a table whose cells could tear.
+# `patch_cell` performs the update as ONE `rt_ptr_write_i64`, never as a
+# byte/word sequence, so the aligned-8-byte-store premise actually holds of the
+# emitted access.
+#
+# What this argument does NOT claim: it is not a claim of ORDERING. A concurrent
+# reader may observe the old target for an unbounded window after the store.
+# Advice binding is idempotent-by-construction (bind installs a complete target,
+# never a partially-built one), so a stale-but-whole pointer is a correctness-
+# preserving outcome; publication ordering across generations is design §14.6's
+# single-activation-per-generation rule, not this module's job.
+
+use .smf_mmap_native.{
+    native_alloc_rw_memory,
+    native_free_exec_memory,
+    native_make_executable,
+    native_make_rw,
+    native_flush_icache,
+    native_call_function_0
+}
+
+# The one write primitive. Same extern the loader's relocation path uses; this
+# module introduces no new way to touch memory.
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+
+# mprotect granularity. 4096 matches `SEGMENT_MAX_ALIGNMENT` in
+# `segment_mapper.spl` and is the minimum page size on every supported target;
+# a host with LARGER pages still works, because mprotect rounds the range down
+# to the containing page itself -- this constant only has to be a divisor of
+# the real page size, never an overestimate.
+val PAGE_SIZE: i64 = 4096
+
+"""Bytes per join-point cell. Load-bearing: see the atomicity argument."""
+val SLOT_CELL_SIZE: i64 = 8
+
+"""Sentinel slot id meaning `no slot`. Never a valid index."""
+val SLOT_ID_NONE: i64 = -1
+
+"""One join point's reserved cell.
+
+`unadvised_target` is the address the join point calls when nothing is bound;
+it is what `unbind` restores, so unbinding is a restore rather than a reset to
+zero."""
+struct JoinpointSlot:
+    key: text
+    slot_id: i64
+    unadvised_target: i64
+    bound_target: i64
+    bound: bool
+    bind_count: i64
+
+"""The slot table: one page-aligned region of cells plus its directory."""
+struct JoinpointSlotTable:
+    base: i64
+    capacity: i64
+    used: i64
+    by_key: Dict<text, i64>
+    slots: Dict<i64, JoinpointSlot>
+    patch_count: i64
+    protection_transitions: i64
+    sealed: bool
+
+"""Stable slot key.
+
+Deterministic from (owner module id, symbol, site index) so the same join point
+gets the same key across builds and across processes -- the property the aspect
+catalog needs to route a `joinpoint_slot_id` without carrying raw addresses."""
+fn joinpoint_key(owner_id: text, symbol: text, site_index: i64) -> text:
+    owner_id + "::" + symbol + "#" + site_index.to_string()
+
+impl JoinpointSlotTable:
+    """Allocate a slot table with room for `capacity` join points.
+
+    Never maps RWX: RW now, RX at seal time."""
+    static fn alloc(capacity: i64) -> Result<JoinpointSlotTable, text>:
+        if capacity <= 0:
+            return Err("Join-point slot table capacity must be positive, got {capacity}")
+        val size = capacity * SLOT_CELL_SIZE
+        val base = native_alloc_rw_memory(size)
+        if base == 0:
+            return Err("Join-point slot table allocation failed ({size} bytes)")
+        # Alignment is the whole premise of the atomicity argument above --
+        # refuse rather than build a table whose cells could tear.
+        if (base % SLOT_CELL_SIZE) != 0:
+            _ = native_free_exec_memory(base, size)
+            return Err("Join-point slot table base is not 8-byte aligned")
+        Ok(JoinpointSlotTable(
+            base: base,
+            capacity: capacity,
+            used: 0,
+            by_key: {},
+            slots: {},
+            patch_count: 0,
+            protection_transitions: 0,
+            sealed: false
+        ))
+
+    me cell_address(slot_id: i64) -> i64:
+        self.base + slot_id * SLOT_CELL_SIZE
+
+    """Read a cell straight back out of mapped memory, little-endian.
+
+    Deliberately NOT a read of the Simple-side `JoinpointSlot` record: the
+    specs must be able to prove the pointer actually landed in the mapped
+    page, not just in bookkeeping."""
+    me read_cell_raw(slot_id: i64) -> Result<i64, text>:
+        if slot_id < 0 or slot_id >= self.used:
+            return Err("Join-point slot id {slot_id} out of range")
+        val addr = self.cell_address(slot_id)
+        var value = 0i64
+        var i = 0i64
+        while i < SLOT_CELL_SIZE:
+            val byte = rt_ptr_read_u8(addr, i)
+            value = value | ((byte & 0xFF) << (i * 8))
+            i = i + 1
+        Ok(value)
+
+    """Reserve one cell for a join point and initialise it to the unadvised
+    target. Runs before sealing: the table is still RW, so this is a plain
+    store with no protection flip. Refuses a duplicate key and refuses to
+    overflow the table."""
+    me reserve(key: text, unadvised_target: i64) -> Result<i64, text>:
+        if self.sealed:
+            return Err("Cannot reserve join-point slot '{key}': table already sealed")
+        if key == "":
+            return Err("Join-point slot key must not be empty")
+        if self.by_key.has(key):
+            return Err("Join-point slot already reserved: {key}")
+        if self.used >= self.capacity:
+            return Err("Join-point slot table full")
+        if unadvised_target == 0:
+            return Err("Join-point slot '{key}' needs a non-null unadvised target")
+
+        val slot_id = self.used
+        rt_ptr_write_i64(self.base, slot_id * SLOT_CELL_SIZE, unadvised_target)
+        self.by_key[key] = slot_id
+        self.slots[slot_id] = JoinpointSlot(
+            key: key,
+            slot_id: slot_id,
+            unadvised_target: unadvised_target,
+            bound_target: unadvised_target,
+            bound: false,
+            bind_count: 0
+        )
+        self.used = self.used + 1
+        Ok(slot_id)
+
+    """Seal the table: RW -> RX. After this every write goes through
+    `patch_cell`."""
+    me seal() -> Result<i64, text>:
+        if self.sealed:
+            return Err("Join-point slot table already sealed")
+        val size = self.capacity * SLOT_CELL_SIZE
+        if not native_make_executable(self.base, size):
+            return Err("Failed to seal join-point slot table RW->RX")
+        self.protection_transitions = self.protection_transitions + 1
+        native_flush_icache(self.base, size)
+        self.sealed = true
+        Ok(self.used)
+
+    """Look up a slot id by stable key. Unknown key is REFUSED, not
+    defaulted."""
+    me lookup(key: text) -> Result<i64, text>:
+        if not self.by_key.has(key):
+            return Err("Unknown join-point slot key: {key}")
+        Ok(self.by_key[key])
+
+    """Read the current dispatch target for a slot -- the address an indirect
+    call through this cell would land on."""
+    me dispatch_target(slot_id: i64) -> Result<i64, text>:
+        if slot_id < 0 or slot_id >= self.used:
+            return Err("Join-point slot id {slot_id} out of range")
+        self.read_cell_raw(slot_id)
+
+    """Overwrite ONE cell under W^X.
+
+    The single-cell variant of the loader's whole-symbol
+    RW -> patch -> RX -> icache-flush sequence
+    (`loader/module_loader.spl:400-421`). mprotect's granularity is a page, so
+    the containing page is what flips -- the scoping doc calls this out as a
+    real per-bind cost rather than something to assume away. The DATA written
+    is one aligned 8-byte store (see the atomicity argument at the top of this
+    file).
+
+    Re-protection is unconditional: no exit path leaves a writable executable
+    mapping behind."""
+    me patch_cell(slot_id: i64, target: i64) -> Result<i64, text>:
+        if slot_id < 0 or slot_id >= self.used:
+            return Err("Join-point slot id {slot_id} out of range")
+        if target == 0:
+            return Err("Refusing to patch join-point slot {slot_id} to a null target")
+        if not self.sealed:
+            # Unsealed table is still RW; a plain store is correct and cheaper.
+            rt_ptr_write_i64(self.base, slot_id * SLOT_CELL_SIZE, target)
+            self.patch_count = self.patch_count + 1
+            return Ok(target)
+
+        val page = PAGE_SIZE
+        val cell = self.cell_address(slot_id)
+        val page_base = cell - (cell % page)
+        val page_span = (cell + SLOT_CELL_SIZE) - page_base
+
+        if not native_make_rw(page_base, page_span):
+            return Err("Failed RX->RW for join-point slot {slot_id}")
+        self.protection_transitions = self.protection_transitions + 1
+
+        rt_ptr_write_i64(cell, 0, target)
+        self.patch_count = self.patch_count + 1
+
+        if not native_make_executable(page_base, page_span):
+            return Err("Failed RW->RX for join-point slot {slot_id} -- mapping left writable")
+        self.protection_transitions = self.protection_transitions + 1
+        native_flush_icache(page_base, page_span)
+        Ok(target)
+
+    """Perform the join point's indirect call: load the cell, call what it
+    names. This is the ONLY dispatch path, so an unadvised join point and an
+    advised one execute the identical instruction sequence and differ solely
+    in the cell's contents. Out-of-range slots are refused rather than
+    dispatched to garbage."""
+    me call_through_0(slot_id: i64) -> Result<i64, text>:
+        match self.dispatch_target(slot_id):
+            case Ok(target):
+                if target == 0:
+                    return Err("Join-point slot {slot_id} holds a null target")
+                Ok(native_call_function_0(target))
+            case Err(e):
+                Err(e)
+
+    """Release the table's mapping."""
+    me free() -> bool:
+        if self.base == 0:
+            return false
+        val ok = native_free_exec_memory(self.base, self.capacity * SLOT_CELL_SIZE)
+        self.base = 0
+        ok

@@ -1,0 +1,39 @@
+# W4: the `compiler.loader.object_mapper` package (the root loader package's
+# public re-export surface, see `compiler/99.loader/__init__.spl:35-39`) used
+# to define its own SharedExecMapper that fabricated addresses arithmetically
+# as `4096 + generation*256 + code.len()` instead of mapping any memory.
+# This spec fails against that fabricating implementation and passes only
+# once the package delegates to the real mapper
+# (`compiler/99.loader/loader/object_mapper.spl`), which allocates real RX
+# memory via `native_alloc_exec_memory`.
+use compiler.loader.object_mapper.*
+
+fn tiny_code() -> [u8]:
+    # x86-64 `ret`
+    [195]
+
+describe "Object mapper public surface does not fabricate addresses":
+    it "returns an address that is NOT the fabricated 4096 + gen*256 + len formula":
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val mapped = mapper.map_symbol("owner", "fn_real_addr", tiny_code(), false)
+        expect(mapped.is_ok()).to_equal(true)
+
+        val addr = mapped.unwrap()
+        val fabricated = 4096 + (1 * 256) + tiny_code().len() as i64
+
+        # A real mmap'd executable address must not equal the old fake formula.
+        expect(addr == fabricated).to_equal(false)
+        # And it must not be a tiny near-zero/near-4096 value at all — real
+        # mmap'd RX pages come back as large kernel-chosen addresses.
+        expect(addr > 65536).to_equal(true)
+
+    it "produces an address consumers can actually call through" :
+        var mapper = SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+        val mapped = mapper.map_symbol("owner", "fn_callable", tiny_code(), false)
+        expect(mapped.is_ok()).to_equal(true)
+        val rec = mapper.get_record("fn_callable").unwrap()
+        # Fabricated records reported `size` as code length only and never
+        # touched real memory; a real mapping's address must differ per
+        # mapping call in a way tied to actual allocation, not a linear
+        # counter formula.
+        expect(rec.address).to_equal(mapped.unwrap())

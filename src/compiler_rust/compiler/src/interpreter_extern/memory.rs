@@ -1121,6 +1121,118 @@ pub fn rt_ptr_write_u8(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Bulk-write a byte array at addr+offset in ONE extern call.
+///
+/// Callable from Simple as:
+/// `rt_ptr_write_bytes(addr: i64, offset: i64, bytes: [u8]) -> i64`
+/// Returns the number of bytes written. Mirrors the C runtime's
+/// `rt_ptr_write_bytes` (src/runtime/runtime_memory.c). Exists because the SMF
+/// segment loader used to write executable sections one byte per SFFI call.
+pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 3 {
+        return Err(CompileError::runtime(
+            "rt_ptr_write_bytes requires 3 arguments (addr, offset, bytes)",
+        ));
+    }
+    let addr = args[0].as_int()?;
+    let offset = args[1].as_int()?;
+    if addr == 0 || offset < 0 {
+        return Ok(Value::Int(0));
+    }
+    let dst = unsafe { (addr as usize as *mut u8).offset(offset as isize) };
+    match &args[2] {
+        // Fast path: contiguous bytes already -- one memcpy, no per-element work.
+        Value::ByteArray(v) | Value::FrozenByteArray(v) => {
+            if v.is_empty() {
+                return Ok(Value::Int(0));
+            }
+            unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), dst, v.len()) };
+            Ok(Value::Int(v.len() as i64))
+        }
+        // Boxed-element arrays: write straight through the destination pointer
+        // rather than materialising an intermediate Vec first.
+        Value::Array(v) | Value::FrozenArray(v) => {
+            if v.is_empty() {
+                return Ok(Value::Int(0));
+            }
+            for (i, item) in v.iter().enumerate() {
+                let b = match item {
+                    Value::Int(n) => *n as u8,
+                    Value::UInt { value, .. } => *value as u8,
+                    other => other.as_int()? as u8,
+                };
+                unsafe { dst.add(i).write(b) };
+            }
+            Ok(Value::Int(v.len() as i64))
+        }
+        _ => Err(CompileError::runtime(
+            "rt_ptr_write_bytes expects a byte array as its third argument",
+        )),
+    }
+}
+
+/// Call a raw code address as a zero-argument function returning i64.
+///
+/// Callable from Simple as: `rt_call_ptr_0(addr: i64) -> i64`
+/// The caller is responsible for the address being mapped executable; the
+/// loader writes into an RW mapping and mprotects it RX before calling, so
+/// W^X is preserved.
+pub fn rt_call_ptr_0(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_call_ptr_0 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()?;
+    if addr <= 0 {
+        return Ok(Value::Int(0));
+    }
+    let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
+    Ok(Value::Int(f()))
+}
+
+fn call_ptr_args(name: &str, args: &[Value], arity: usize) -> Result<(i64, Vec<i64>), CompileError> {
+    if args.len() < arity + 1 {
+        return Err(CompileError::runtime(format!("{name} requires {} arguments", arity + 1)));
+    }
+    let addr = args[0].as_int()?;
+    let mut out = Vec::with_capacity(arity);
+    for a in &args[1..=arity] {
+        out.push(a.as_int()?);
+    }
+    Ok((addr, out))
+}
+
+/// `rt_call_ptr_1(addr: i64, a1: i64) -> i64`
+pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, a) = call_ptr_args("rt_call_ptr_1", args, 1)?;
+    if addr <= 0 {
+        return Ok(Value::Int(0));
+    }
+    let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
+    Ok(Value::Int(f(a[0])))
+}
+
+/// `rt_call_ptr_2(addr: i64, a1: i64, a2: i64) -> i64`
+pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, a) = call_ptr_args("rt_call_ptr_2", args, 2)?;
+    if addr <= 0 {
+        return Ok(Value::Int(0));
+    }
+    let f: extern "C" fn(i64, i64) -> i64 =
+        unsafe { std::mem::transmute(addr as usize as *const ()) };
+    Ok(Value::Int(f(a[0], a[1])))
+}
+
+/// `rt_call_ptr_3(addr: i64, a1: i64, a2: i64, a3: i64) -> i64`
+pub fn rt_call_ptr_3(args: &[Value]) -> Result<Value, CompileError> {
+    let (addr, a) = call_ptr_args("rt_call_ptr_3", args, 3)?;
+    if addr <= 0 {
+        return Ok(Value::Int(0));
+    }
+    let f: extern "C" fn(i64, i64, i64) -> i64 =
+        unsafe { std::mem::transmute(addr as usize as *const ()) };
+    Ok(Value::Int(f(a[0], a[1], a[2])))
+}
+
 /// Fill memory with a byte value.
 ///
 /// Callable from Simple as: `rt_memset(addr: i64, value: i64, n: i64) -> i64`

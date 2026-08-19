@@ -1,0 +1,149 @@
+# Reproducing spec for design §15 (Mapping and I/O policy) and §14.1
+# (AspectPackIndexCache), per
+# doc/04_architecture/compiler/aspect_dynload/blocking_infrastructure_interfaces_2026-08-19.md.
+#
+# The load-bearing property is that a pack can be read PARTIALLY. Before this
+# module the only working path was a whole-file read: native_mmap_file hands
+# the caller's offset straight to mmap(2), which rejects any offset that is not
+# page-aligned, so "map only the directory" was not expressible at all.
+#
+# Two assertions carry the whole claim:
+#   1. a range at a deliberately UNALIGNED offset returns exactly the same
+#      bytes as the corresponding slice of a whole-file read;
+#   2. the index cache reads strictly FEWER bytes than the pack file contains
+#      -- i.e. it demonstrably did not touch the payload.
+#
+# The §15 half deliberately uses a RAW byte file rather than a built pack: the
+# range reader is format-agnostic, and building a pack costs a deflate pass per
+# fixture, which is what made the first version of this spec exceed the runner
+# budget.
+
+use std.spec.{describe, it, assert_true, assert_eq}
+use std.io_runtime.{file_write_bytes, file_read_bytes, file_delete, dir_create_all}
+use std.common.aspect_pack.{ApkModuleSourceV1, apk_build_pack_v1}
+use std.common.string_core.{text_to_bytes}
+use compiler.loader.aspect_pack_io.{
+    pack_window_map, pack_window_bytes, pack_window_unmap, pack_window_willneed,
+    pack_read_range, pack_read_trailer, pack_file_size
+}
+use compiler.loader.aspect_pack_index_cache.{
+    pack_index_cache_new, pack_index_get, pack_index_invalidate, pack_index_evict_all
+}
+
+val TMP_DIR: text = "build/test/aspect_pack_io"
+val RAW_PATH: text = "build/test/aspect_pack_io/raw.bin"
+val PACK_PATH: text = "build/test/aspect_pack_io/fixture.apk"
+
+# A > 2-page file whose byte at index i is a known function of i, so any
+# misread offset is detectable without comparing against a second read.
+fn _write_raw() -> [u8]:
+    dir_create_all(TMP_DIR)
+    var bytes: [u8] = []
+    var i = 0
+    while i < 12000:
+        bytes.push(((i * 7 + 13) & 0xFF).to_u8())
+        i = i + 1
+    file_delete(RAW_PATH)
+    _ = file_write_bytes(RAW_PATH, bytes)
+    bytes
+
+fn _write_pack():
+    dir_create_all(TMP_DIR)
+    var s = ""
+    var i = 0
+    while i < 24:
+        s = s + "aspect advice body line {i} filler filler filler filler; "
+        i = i + 1
+    var mods: [ApkModuleSourceV1] = []
+    mods.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: text_to_bytes(s)))
+    mods.push(ApkModuleSourceV1(module_id: "trace.spans", aspect_id: "trace", payload: text_to_bytes(s)))
+    val built = apk_build_pack_v1(mods)
+    file_delete(PACK_PATH)
+    _ = file_write_bytes(PACK_PATH, built.bytes)
+
+describe("aspect pack I/O policy (design §15)", fn():
+
+    it("reads an UNALIGNED range byte-identically to the whole file", fn():
+        val whole = _write_raw()
+        assert_true(whole.len() > 8192, "fixture spans more than two pages")
+
+        # 4101 is deliberately not a multiple of any page size and lands past
+        # the first page. A mapper that forwards this offset to mmap(2) fails.
+        val off = 4101
+        val len = 777
+        val got = pack_read_range(RAW_PATH, off, len)
+        assert_eq(got.len(), len, "partial read returned the requested length")
+        var i = 0
+        var mismatches = 0
+        while i < len:
+            if got[i] != whole[off + i]:
+                mismatches = mismatches + 1
+            i = i + 1
+        assert_eq(mismatches, 0, "unaligned partial read matches the file byte for byte")
+    )
+
+    it("records a nonzero intra-page delta and covers the range", fn():
+        val w = pack_window_map(RAW_PATH, 4101, 100)
+        assert_true(w.ok, "unaligned window mapped: {w.error_code}")
+        assert_true(w.data_offset > 0, "unaligned request records an intra-page delta")
+        assert_true(w.address > 0, "window has a real mapping base")
+        assert_true(w.map_length >= w.data_offset + w.want_length, "aligned map covers the requested range")
+        assert_eq(pack_window_bytes(w).len(), 100, "window yields exactly the requested bytes")
+        # WILLNEED is opt-in (§15); the map itself never issues readahead.
+        assert_true(pack_window_willneed(w), "explicit WILLNEED accepted")
+        assert_true(pack_window_unmap(w), "window unmapped")
+    )
+
+    it("reads the fixed trailer without knowing the layout", fn():
+        val whole = file_read_bytes(RAW_PATH)
+        val tail = pack_read_trailer(RAW_PATH, 16)
+        assert_eq(tail.len(), 16, "trailer read returned the requested size")
+        var i = 0
+        var mismatches = 0
+        while i < 16:
+            if tail[i] != whole[whole.len() - 16 + i]:
+                mismatches = mismatches + 1
+            i = i + 1
+        assert_eq(mismatches, 0, "trailer bytes match the end of the file")
+        file_delete(RAW_PATH)
+    )
+)
+
+describe("AspectPackIndexCache (design §14.1)", fn():
+
+    it("reads header+directory only, never the payload", fn():
+        _write_pack()
+        val fsize = pack_file_size(PACK_PATH)
+        assert_true(fsize > 0, "pack fixture written")
+        val c = pack_index_cache_new()
+        val e = pack_index_get(c, PACK_PATH)
+        assert_true(e.ok, "index read succeeded: {e.error_code} {e.error_message}")
+        assert_eq(e.module_count, 2, "directory reports the two fixture modules")
+        assert_eq(e.file_size, fsize, "entry records the real file size")
+        assert_eq(e.index_bytes.len(), 32 + e.dir_size, "cached bytes are exactly header+directory")
+        assert_true(c.index_bytes_read < fsize, "index read {c.index_bytes_read} bytes of a {fsize}-byte pack -- payload untouched")
+        assert_eq(c.payload_bytes_read, 0, "no payload byte was read")
+    )
+
+    it("serves a second lookup from cache without re-reading", fn():
+        val c = pack_index_cache_new()
+        val first = pack_index_get(c, PACK_PATH)
+        assert_true(first.ok, "first lookup ok: {first.error_code}")
+        val after_first = c.index_bytes_read
+        val second = pack_index_get(c, PACK_PATH)
+        assert_true(second.ok, "second lookup ok")
+        assert_eq(c.hits, 1, "second lookup was a cache hit")
+        assert_eq(c.misses, 1, "only the first lookup missed")
+        assert_eq(c.index_bytes_read, after_first, "a cache hit reads no further bytes")
+    )
+
+    it("invalidates and evicts", fn():
+        val c = pack_index_cache_new()
+        _ = pack_index_get(c, PACK_PATH)
+        assert_true(pack_index_invalidate(c, PACK_PATH), "invalidate removed the live entry")
+        assert_true(not pack_index_invalidate(c, PACK_PATH), "invalidate of an absent entry reports false")
+        _ = pack_index_get(c, PACK_PATH)
+        assert_eq(pack_index_evict_all(c), 1, "evict_all reports the number dropped")
+        file_delete(PACK_PATH)
+    )
+)

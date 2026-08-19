@@ -590,6 +590,45 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
     *(int64_t*)((char*)(uintptr_t)addr + offset) = value;
 }
 
+/* Bulk write: copy `len` bytes from `src` into `addr + offset` in ONE call.
+ * Exists because the SMF segment loader previously wrote executable sections
+ * one byte per SFFI call (rt_ptr_write_u8 in a while loop), which turned an
+ * O(symbols)-syscall loader into an O(bytes)-SFFI-call loader. Returns the
+ * number of bytes written, or 0 on a rejected argument. */
+int64_t rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, int64_t len) {
+    if (addr == 0 || src == NULL || offset < 0 || len <= 0) return 0;
+    memcpy((char*)(uintptr_t)addr + offset, src, (size_t)len);
+    return len;
+}
+
+/* Call a raw code address as a zero-argument function returning int64_t.
+ * The caller is responsible for the address being mapped executable (the
+ * loader does RW-write-then-mprotect-RX; W^X is preserved). */
+int64_t rt_call_ptr_0(int64_t addr) {
+    typedef int64_t (*rt_call_ptr_0_fn)(void);
+    if (addr <= 0) return 0;
+    rt_call_ptr_0_fn f = (rt_call_ptr_0_fn)(uintptr_t)addr;
+    return f();
+}
+
+int64_t rt_call_ptr_1(int64_t addr, int64_t a1) {
+    typedef int64_t (*rt_call_ptr_1_fn)(int64_t);
+    if (addr <= 0) return 0;
+    return ((rt_call_ptr_1_fn)(uintptr_t)addr)(a1);
+}
+
+int64_t rt_call_ptr_2(int64_t addr, int64_t a1, int64_t a2) {
+    typedef int64_t (*rt_call_ptr_2_fn)(int64_t, int64_t);
+    if (addr <= 0) return 0;
+    return ((rt_call_ptr_2_fn)(uintptr_t)addr)(a1, a2);
+}
+
+int64_t rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3) {
+    typedef int64_t (*rt_call_ptr_3_fn)(int64_t, int64_t, int64_t);
+    if (addr <= 0) return 0;
+    return ((rt_call_ptr_3_fn)(uintptr_t)addr)(a1, a2, a3);
+}
+
 int64_t spl_f64_to_bits(double value) {
     int64_t bits;
     memcpy(&bits, &value, sizeof(bits));

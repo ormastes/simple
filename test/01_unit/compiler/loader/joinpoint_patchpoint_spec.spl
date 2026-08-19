@@ -1,0 +1,184 @@
+# Acceptance spec for join-point patchpoints (slot-cell design).
+#
+# Scope: `doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md` §A.
+#
+# The oracle is deliberately the MAPPED CELL, read back byte-by-byte out of the
+# mmap'd page (`read_cell_raw` / `dispatch_target`), not
+# the Simple-side `AdviceBinding` record. A bookkeeping-only implementation --
+# one that updated the struct but never patched memory -- passes a
+# struct-reading spec and fails every assertion here, which is the point.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_eq, assert_contains}
+use compiler.loader.joinpoint_slots.{JoinpointSlotTable, joinpoint_key}
+use compiler.loader.advice_binding_registry.{AdviceBindingRegistry}
+
+# Distinct, non-zero, 8-byte-aligned stand-ins for code addresses. They are
+# never executed in this spec -- what is under test is that the right VALUE
+# reaches the right CELL. Execution through a patched cell is covered by
+# joinpoint_patchpoint_execution_spec.spl.
+val UNADVISED: i64 = 0x4001000
+val ADVICE_A: i64 = 0x4002000
+val ADVICE_B: i64 = 0x4003000
+
+fn ok_i64(r: Result<i64, text>) -> i64:
+    match r:
+        case Ok(v):
+            v
+        case Err(e):
+            print "unexpected Err: {e}"
+            -1
+
+fn is_err_i64(r: Result<i64, text>) -> bool:
+    match r:
+        case Ok(_):
+            false
+        case Err(_):
+            true
+
+fn err_text(r: Result<i64, text>) -> text:
+    match r:
+        case Ok(_):
+            ""
+        case Err(e):
+            e
+
+describe "join-point slot table", fn():
+
+    it "reserves a cell whose stable key is derived from owner, symbol and site", fn():
+        val key = joinpoint_key("mod.a", "process", 3)
+        assert_eq(key, "mod.a::process#3")
+        # Same inputs must always give the same key -- the catalog routes on it.
+        assert_eq(key, joinpoint_key("mod.a", "process", 3))
+        assert_true(key != joinpoint_key("mod.a", "process", 4))
+
+    it "routes to the unadvised target by default", fn():
+        var table = ok_table(4)
+        val key = joinpoint_key("mod.a", "process", 0)
+        val slot = ok_i64(table.reserve(key, UNADVISED))
+        assert_eq(slot, 0)
+        _ = table.seal()
+        # Read straight out of the mapped page.
+        assert_eq(ok_i64(table.read_cell_raw(slot)), UNADVISED)
+        assert_eq(ok_i64(table.dispatch_target(slot)), UNADVISED)
+        _ = table.free()
+
+    it "patches one sealed cell without disturbing its neighbours", fn():
+        var table = ok_table(4)
+        val k0 = joinpoint_key("mod.a", "f", 0)
+        val k1 = joinpoint_key("mod.a", "g", 0)
+        val s0 = ok_i64(table.reserve(k0, UNADVISED))
+        val s1 = ok_i64(table.reserve(k1, UNADVISED))
+        _ = table.seal()
+        _ = table.patch_cell(s0, ADVICE_A)
+        assert_eq(ok_i64(table.read_cell_raw(s0)), ADVICE_A)
+        assert_eq(ok_i64(table.read_cell_raw(s1)), UNADVISED)
+        _ = table.free()
+
+    it "keeps the mapping executable after a patch (W^X round trip)", fn():
+        var table = ok_table(2)
+        val k = joinpoint_key("mod.a", "f", 0)
+        val s = ok_i64(table.reserve(k, UNADVISED))
+        _ = table.seal()
+        val before = table.protection_transitions
+        _ = table.patch_cell(s, ADVICE_A)
+        # A patch is exactly two transitions: RX->RW and RW->RX. An
+        # implementation that left the page RW would record one.
+        assert_eq(table.protection_transitions - before, 2)
+        _ = table.free()
+
+describe "AdviceBindingRegistry", fn():
+
+    it "dispatches a registered join point to its unadvised target before any bind", fn():
+        var reg = ok_reg(4)
+        val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
+        _ = reg.seal()
+        assert_eq(ok_i64(reg.dispatch_target(key)), UNADVISED)
+        assert_false(reg.is_active(key))
+        _ = reg.free()
+
+    it "routes the SAME join point to the advice after binding", fn():
+        var reg = ok_reg(4)
+        val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
+        _ = reg.seal()
+        val slot_before = ok_i64(reg.slot_of(key))
+        assert_eq(ok_i64(reg.dispatch_target(key)), UNADVISED)
+
+        _ = reg.bind(key, ADVICE_A)
+
+        # Same key, same slot id -- the call SITE did not move; only its target.
+        assert_eq(ok_i64(reg.slot_of(key)), slot_before)
+        assert_eq(ok_i64(reg.dispatch_target(key)), ADVICE_A)
+        assert_true(reg.is_active(key))
+        _ = reg.free()
+
+    it "makes rebinding observable", fn():
+        var reg = ok_reg(4)
+        val key = ok_key(reg.register("mod.a", "process", 0, UNADVISED))
+        _ = reg.seal()
+        _ = reg.bind(key, ADVICE_A)
+        assert_eq(reg.rebind_count(key), 1)
+        _ = reg.bind(key, ADVICE_B)
+        assert_eq(ok_i64(reg.dispatch_target(key)), ADVICE_B)
+        assert_eq(reg.rebind_count(key), 2)
+        # Unbind restores the unadvised target -- it is a restore, not a reset.
+        assert_eq(ok_i64(reg.unbind(key)), UNADVISED)
+        assert_eq(ok_i64(reg.dispatch_target(key)), UNADVISED)
+        assert_false(reg.is_active(key))
+        assert_eq(reg.rebind_count(key), 3)
+        _ = reg.free()
+
+describe "join-point refusals (fail-closed)", fn():
+
+    it "refuses an out-of-range slot id instead of silently ignoring it", fn():
+        var table = ok_table(4)
+        val s = ok_i64(table.reserve(joinpoint_key("m", "f", 0), UNADVISED))
+        _ = table.seal()
+        assert_true(is_err_i64(table.patch_cell(99, ADVICE_A)))
+        assert_true(is_err_i64(table.patch_cell(-1, ADVICE_A)))
+        # `capacity` is 4 but only 1 slot is USED -- an unreserved in-capacity
+        # id must still be refused.
+        assert_true(is_err_i64(table.patch_cell(2, ADVICE_A)))
+        assert_true(is_err_i64(table.dispatch_target(2)))
+        # The one real slot is untouched by all of that.
+        assert_eq(ok_i64(table.read_cell_raw(s)), UNADVISED)
+        _ = table.free()
+
+    it "refuses an unknown join-point key instead of defaulting", fn():
+        var reg = ok_reg(4)
+        _ = reg.register("mod.a", "process", 0, UNADVISED)
+        _ = reg.seal()
+        val ghost = joinpoint_key("mod.a", "nosuch", 0)
+        assert_true(is_err_i64(reg.slot_of(ghost)))
+        assert_true(is_err_i64(reg.dispatch_target(ghost)))
+        assert_true(is_err_i64(reg.bind(ghost, ADVICE_A)))
+        assert_true(is_err_i64(reg.unbind(ghost)))
+        assert_contains(err_text(reg.bind(ghost, ADVICE_A)), "unregistered")
+        _ = reg.free()
+
+# On allocation failure these return a degenerate zero-capacity value rather
+# than a sentinel that could pass: every assertion downstream then fails, which
+# is the correct outcome -- an unusable table must never look green.
+fn ok_table(cap: i64) -> JoinpointSlotTable:
+    match JoinpointSlotTable.alloc(cap):
+        case Ok(t):
+            t
+        case Err(e):
+            print "table alloc failed: {e}"
+            JoinpointSlotTable(base: 0, capacity: 0, used: 0, by_key: {}, slots: {},
+                               patch_count: 0, protection_transitions: 0, sealed: false)
+
+fn ok_reg(cap: i64) -> AdviceBindingRegistry:
+    match AdviceBindingRegistry.alloc(cap):
+        case Ok(r):
+            r
+        case Err(e):
+            print "registry alloc failed: {e}"
+            AdviceBindingRegistry(table: ok_table(0), bindings: {}, bind_count: 0, unbind_count: 0)
+
+fn ok_key(r: Result<text, text>) -> text:
+    match r:
+        case Ok(k):
+            k
+        case Err(e):
+            print "register failed: {e}"
+            ""

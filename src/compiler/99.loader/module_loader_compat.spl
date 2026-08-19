@@ -14,6 +14,8 @@ use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use compiler.loader.segment_mapper.{SegmentMapper, SegmentMapperStats, segment_load_plan, segment_load_receipt}
 use compiler.loader.smf_segment_load.{SmfSectionExtent, smf_section_extent, smf_section_bytes}
+use compiler.loader.aspect_pack_section.{smf_register_aspect_pack}
+use std.common.aspect_pack.{apk_loader_new, apk_load_facet, apk_try_facet, ApkFacetLoadV1}
 use app.startup.load_plan_receipt.{LoadReceiptV1, load_receipt_check_against_plan, load_receipt_to_sdn}
 use std.io_runtime.{file_read_bytes}
 
@@ -213,6 +215,13 @@ struct ModuleLoader:
     last_load_protection_transitions: i64
     last_load_receipt_sdn: text
     last_load_plan_ok: bool
+    # Aspect-facet dynload design §12.1/§23. `aspect_loader` is the handle of
+    # the aspect-pack loader every `.aspect_pack` section found on the load
+    # path is registered into; `last_load_aspect_pack_modules` is the module
+    # count of the pack the last load registered (-1 = the module carried no
+    # aspect pack), so the wiring is observable evidence, not a side effect.
+    aspect_loader: i64
+    last_load_aspect_pack_modules: i64
 
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
@@ -228,6 +237,15 @@ impl ModuleLoader:
             jit_stats: {"cached_count": self.jit.jit_cache.keys().len() as i64},
             cache_stats: {"template_count": 0, "instance_count": 0}
         )
+
+    # Aspect-facet acquisition (design 6.7, 14.3) against the packs THIS
+    # loader registered from `.aspect_pack` sections during load().
+    fn aspect_facet(catalog: [u8], facet_key: text) -> ApkFacetLoadV1:
+        apk_load_facet(self.aspect_loader, catalog, facet_key)
+
+    """Resident-only acquisition: never opens a pack, never does I/O."""
+    fn resident_aspect_facet(facet_key: text) -> ApkFacetLoadV1:
+        apk_try_facet(self.aspect_loader, facet_key)
 
     fn is_loaded(path: text) -> bool:
         self.modules.has(path)
@@ -263,11 +281,21 @@ impl ModuleLoader:
                 # compat loader contract, register it as a source-only
                 # module: no native symbols, but tracked as loaded so JIT
                 # metadata can still rehydrate from its sidecar.
+                self.last_load_aspect_pack_modules = -1
                 val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
                 self.modules[path] = m
                 val _ = self.jit.load_smf_metadata(path)
                 return LoadResult.Success(module: m)
             case Ok(reader):
+                # Aspect-pack routing (design §12.1, §23 "Existing SMF and
+                # loader"): a `.aspect_pack` section is registered with the
+                # aspect-pack provider BEFORE ordinary segment mapping, so a
+                # facet acquired later routes through a pack this load path
+                # actually opened. A module without the section is unaffected
+                # (registration returns -1 and nothing else changes).
+                self.last_load_aspect_pack_modules = smf_register_aspect_pack(
+                    self.aspect_loader, path, reader)
+
                 # ONE MAPPING PER SEGMENT (startup_perf_architecture §8.4).
                 # Every exported symbol of a section shares that section's
                 # single executable mapping; a symbol is an OFFSET into it,
@@ -613,7 +641,9 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             last_load_bytes_mapped: 0,
             last_load_protection_transitions: 0,
             last_load_receipt_sdn: "",
-            last_load_plan_ok: false
+            last_load_plan_ok: false,
+            aspect_loader: apk_loader_new(),
+            last_load_aspect_pack_modules: -1
     )
 
 fn moduleloader_with_defaults() -> ModuleLoader:

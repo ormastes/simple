@@ -11,6 +11,11 @@ extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_bytes(addr: i64, offset: i64, bytes: [u8]) -> i64
+extern fn rt_call_ptr_0(addr: i64) -> i64
+extern fn rt_call_ptr_1(addr: i64, a1: i64) -> i64
+extern fn rt_call_ptr_2(addr: i64, a1: i64, a2: i64) -> i64
+extern fn rt_call_ptr_3(addr: i64, a1: i64, a2: i64, a3: i64) -> i64
 
 # Low-level syscall SFFI (raw address-based wrappers in C runtime)
 extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
@@ -103,24 +108,18 @@ fn native_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:
 
 fn native_mmap_read_string(address: i64, offset: i64, max_length: i64) -> text:
     """Read string from mapped memory."""
+    # Address-based. The old body cast the address to a raw pointer, a form
+    # this seed/interpreter rejects at COMPILE time ("unsupported cast target
+    # type: Pointer"), which failed the whole file and every importer with it.
     if address == 0 or offset < 0 or max_length < 0:
         return ""
-    unsafe:
-        val ptr = (address + offset) as *u8
-
-        # Find string length (until null terminator or max_length)
-        var len = 0i64
-        val max_len = if max_length == 0: 4096 else: max_length
-
-        while len < max_len:
-            val byte = ptr_read_u8(ptr, len)
-            if byte == 0:
-                break
-            len = len + 1
-
-        # Create slice and convert to string
-        val slice = slice_from_raw_parts(ptr, len)
-        str_from_utf8_lossy(slice)
+    var len = 0i64
+    val max_len = if max_length == 0: 4096 else: max_length
+    while len < max_len:
+        if (rt_ptr_read_u8(address, offset + len) & 0xFF) == 0:
+            break
+        len = len + 1
+    str_from_utf8_lossy(native_mmap_read_bytes(address, offset, len))
 
 fn native_madvise(address: i64, size: i64, advice: i64) -> bool:
     """Give kernel memory advice."""
@@ -193,23 +192,23 @@ fn native_free_exec_memory(address: i64, size: i64) -> bool:
 
     if result == 0:
         # Remove from tracking
-        exec_memory_allocs_remove(address)
+        EXEC_MEMORY_ALLOCS = EXEC_MEMORY_ALLOCS.remove(address)
         true
     else:
         false
 
 fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
-    """Write code to executable memory."""
+    """Write code into mapped memory in ONE bulk SFFI call (memcpy)."""
+    # Replaces a raw-pointer cast plus a per-byte ptr_write_u8 loop: the cast
+    # does not compile on this seed, and the loop was O(bytes) SFFI calls.
+    # rt_ptr_write_bytes lives in src/runtime/runtime_memory.c.
+    # W^X is unchanged: the mapping is RW here and only made RX afterwards by
+    # native_make_executable.
     if address == 0 or offset < 0:
         return 0
-    unsafe:
-        val dest_ptr = (address + offset) as *u8
-
-        for i in 0..code_bytes_len(code):
-            val _asv_1 = i as i64
-            ptr_write_u8(dest_ptr, _asv_1, code[i])
-
-        code_bytes_len(code) as i64
+    if code.len() == 0:
+        return 0
+    rt_ptr_write_bytes(address, offset, code)
 
 fn native_make_executable(address: i64, size: i64) -> bool:
     """Change protection to read-execute (W^X security)."""
@@ -244,37 +243,31 @@ fn native_get_function_pointer(address: i64) -> i64:
     address  # Function pointer is same as address
 
 fn native_call_function_0(fn_ptr: i64) -> i64:
-    """Call function with no arguments."""
-    if fn_ptr == 0:
+    """Call a zero-argument function at a raw code address."""
+    # `fn_ptr as fn() -> i64` is rejected by this seed; rt_call_ptr_0 is the
+    # extern that performs the indirect call for real. The address must already
+    # be RX via native_make_executable -- the mapping is never RWX.
+    if fn_ptr <= 0:
         return 0
-    unsafe:
-        # Cast pointer to function type and call
-        val func = fn_ptr as fn() -> i64
-        func()
+    rt_call_ptr_0(fn_ptr)
 
 fn native_call_function_1(fn_ptr: i64, arg1: i64) -> i64:
-    """Call function with one argument."""
-    if fn_ptr == 0:
+    """Call a one-argument function at a raw code address."""
+    if fn_ptr <= 0:
         return 0
-    unsafe:
-        val func = fn_ptr as fn(i64) -> i64
-        func(arg1)
+    rt_call_ptr_1(fn_ptr, arg1)
 
 fn native_call_function_2(fn_ptr: i64, arg1: i64, arg2: i64) -> i64:
-    """Call function with two arguments."""
-    if fn_ptr == 0:
+    """Call a two-argument function at a raw code address."""
+    if fn_ptr <= 0:
         return 0
-    unsafe:
-        val func = fn_ptr as fn(i64, i64) -> i64
-        func(arg1, arg2)
+    rt_call_ptr_2(fn_ptr, arg1, arg2)
 
 fn native_call_function_3(fn_ptr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64:
-    """Call a System V/native function with three pointer-sized arguments."""
-    if fn_ptr == 0:
+    """Call a three-argument System V function at a raw code address."""
+    if fn_ptr <= 0:
         return 0
-    unsafe:
-        val func = fn_ptr as fn(i64, i64, i64) -> i64
-        func(arg1, arg2, arg3)
+    rt_call_ptr_3(fn_ptr, arg1, arg2, arg3)
 
 fn native_exec_memory_total() -> i64:
     """Get total executable memory allocated."""
@@ -287,7 +280,7 @@ fn native_exec_memory_total() -> i64:
 
 fn native_exec_memory_count() -> i64:
     """Get number of executable memory allocations."""
-    exec_memory_allocs_len() as i64
+    EXEC_MEMORY_ALLOCS.len() as i64
 
 # ============================================================================
 # Unsafe Syscall Wrappers (Platform-specific)
@@ -295,31 +288,21 @@ fn native_exec_memory_count() -> i64:
 #
 # NOTE: legacy unsafe_* stubs removed in favor of runtime SFFI (rt_mmap, etc.).
 
-fn ptr_read_u8(ptr: *u8, offset: i64) -> u8:
-    """Read byte from pointer with offset."""
-    if (ptr as i64) == 0 or offset < 0:
+fn ptr_read_u8(addr: i64, offset: i64) -> u8:
+    """Read byte from a raw address with offset."""
+    if addr == 0 or offset < 0:
         return 0 as u8
-    (rt_ptr_read_u8(ptr as i64, offset) & 0xFF) as u8
+    (rt_ptr_read_u8(addr, offset) & 0xFF) as u8
 
-fn ptr_write_u8(ptr: *u8, offset: i64, value: u8):
-    """Write byte to pointer with offset."""
-    val addr = ptr as i64
+fn ptr_write_u8(addr: i64, offset: i64, value: u8):
+    """Write byte to a raw address with offset."""
     if addr == 0 or offset < 0:
         return
     rt_ptr_write_u8(addr, offset, value as i64)
 
-fn slice_from_raw_parts(ptr: *u8, len: usize) -> [u8]:
-    """Copy bytes from raw pointer into a Simple array."""
-    if (ptr as i64) == 0:
-        return []
-    unsafe:
-        var result: [u8] = []
-        var i: i64 = 0
-        while i < len:
-            val byte = ptr_read_u8(ptr, i)
-            result.push(byte)
-            i = i + 1
-        result
+fn slice_from_raw_parts(addr: i64, len: i64) -> [u8]:
+    """Copy bytes from a raw address into a Simple array."""
+    native_mmap_read_bytes(addr, 0, len)
 
 pub fn str_from_utf8_lossy(bytes: [u8]) -> text:
     """Convert bytes to string, replacing invalid UTF-8."""

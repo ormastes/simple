@@ -1,0 +1,160 @@
+# REPRODUCING SPEC for the aspect-pack wiring gap (design
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# §12.1 "SMF header compatibility" and §23 "Existing SMF and loader").
+#
+# Before this change `std.common.aspect_pack` was a standalone byte-array
+# container with ZERO product callers: no SMF section type was registered for
+# it, the SMF writer could not emit one, and nothing on any load path ever
+# looked for one. The catalog was unreachable from a real module load.
+#
+# Every assertion below fails if any link of the chain is removed:
+#   SmfWriter.add_aspect_pack_section  (writes SectionType.AspectPackDirectory,
+#                                       wire byte 16, and stamps
+#                                       SMF_FLAG_ASPECT_PACK)
+#   -> SmfReaderMemory header flag + section table
+#   -> smf_register_aspect_pack        (loader-side section -> provider bridge)
+#   -> ModuleLoader.load               (registers the pack during load)
+#   -> ModuleLoader.aspect_facet       (routes a facet THROUGH the catalog into
+#                                       the pack this load path opened)
+#
+# In particular: delete the registration call in ModuleLoader.load and
+# "REQ-APKW-04" reports APK_PACK_MISSING instead of the module payload, and
+# "REQ-APKW-03" sees -1 instead of the pack's module count.
+
+use std.spec.{describe, it}
+use compiler.loader.module_loader_compat.{ModuleLoader, LoadResult}
+use compiler.loader.aspect_pack_section.{
+    smf_find_section_by_wire_type, smf_has_aspect_pack, smf_aspect_pack_bytes,
+    smf_register_aspect_pack, SMF_SECTION_ASPECT_PACK_DIRECTORY
+}
+use compiler.backend.linker.smf_writer.{smf_build_aspect_pack_image, SectionType}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use std.common.aspect_pack.{
+    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2,
+    APK_ENTRY_FACET, APK_ACT_LAZY_FACET, apk_loader_new, apk_load_facet,
+    apk_loader_packs_opened
+}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.io_runtime.{file_write_bytes, file_read_bytes, mkdir_p}
+
+fn _read_smf() -> [u8]:
+    file_read_bytes(_pack_path())
+
+fn _pack_path() -> text:
+    "build/test/aspect_pack_wiring.smf"
+
+fn _payload(tag: text) -> [u8]:
+    var s = ""
+    var i = 0
+    while i < 20:
+        s = s + "aspect module {tag} body line {i}; "
+        i = i + 1
+    text_to_bytes(s)
+
+fn _pack_bytes() -> [u8]:
+    var mods: [ApkModuleSourceV2] = []
+    mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+        module_abi_hash: "abi-debug-1", required_core_public_abi_hash: "",
+        variant_fingerprint: "", payload: _payload("debug.core")))
+    mods.push(ApkModuleSourceV2(module_id: "trace.spans", aspect_id: "trace",
+        module_abi_hash: "abi-trace-1", required_core_public_abi_hash: "",
+        variant_fingerprint: "", payload: _payload("trace.spans")))
+    val built = apk_build_pack_v2(mods)
+    built.bytes
+
+fn _catalog_bytes() -> [u8]:
+    var entries: [ApkCatalogEntryV2] = []
+    entries.push(ApkCatalogEntryV2(facet_key: "Widget/Debuggable",
+        pack_path: _pack_path(), module_id: "debug.core",
+        entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: "abi-debug-1"))
+    val built = apk_build_catalog_v2(entries)
+    built.bytes
+
+"""Write a real SMF file whose section table carries `.aspect_pack`."""
+fn _write_pack_smf() -> bool:
+    val _d = mkdir_p("build/test")
+    match smf_build_aspect_pack_image(_pack_bytes()):
+        case Err(e):
+            false
+        case Ok(img):
+            file_write_bytes(_pack_path(), img)
+
+describe "aspect pack is a registered SMF section reachable from the load path":
+
+    it "REQ-APKW-01 SmfWriter emits SectionType.AspectPackDirectory as wire byte 16":
+        expect(SectionType.AspectPackDirectory.to_wire_u8() as i64).to_equal(SMF_SECTION_ASPECT_PACK_DIRECTORY)
+        expect(SectionType.AspectPackDirectory.name()).to_equal(".aspect_pack")
+
+    it "REQ-APKW-02 the written SMF sets SMF_FLAG_ASPECT_PACK and carries the section":
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = match SmfReaderMemory.from_data(_read_smf()):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        # header flag (design §12.1: an old loader must reject this file)
+        expect(reader.header.flags.aspect_pack).to_equal(true)
+        # section table entry, found by wire type -- not by index convention
+        expect(smf_find_section_by_wire_type(reader, SMF_SECTION_ASPECT_PACK_DIRECTORY) >= 0).to_equal(true)
+        expect(smf_has_aspect_pack(reader)).to_equal(true)
+        # the section payload is the SMFAPK1 container, byte-exact
+        val extracted = match smf_aspect_pack_bytes(reader):
+            case Ok(b): b
+            case Err(e): panic("extract: {e}")
+        expect(extracted.len()).to_equal(_pack_bytes().len())
+
+    it "REQ-APKW-03 ModuleLoader.load registers the pack it found in the section table":
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case Error(msg): panic("load failed: {msg}")
+            case _: pass
+        # -1 means "no aspect pack registered by this load" -- i.e. unwired.
+        expect(loader.last_load_aspect_pack_modules).to_equal(2)
+
+    it "REQ-APKW-04 a facet routes through the catalog into the pack that load() opened":
+        expect(_write_pack_smf()).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(_pack_path()):
+            case Error(msg): panic("load failed: {msg}")
+            case _: pass
+        val got = loader.aspect_facet(_catalog_bytes(), "Widget/Debuggable")
+        # Without the load-path registration this is APK_PACK_MISSING.
+        expect(got.error_code).to_equal("")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(true)
+        expect(got.module_id).to_equal("debug.core")
+        expect(got.pack_path).to_equal(_pack_path())
+        expect(bytes_to_text(got.payload)).to_equal(bytes_to_text(_payload("debug.core")))
+
+    it "REQ-APKW-05 a module with no aspect-pack section registers nothing":
+        var loader = ModuleLoader.with_defaults()
+        # A plain .spl source: no SMF, hence no .aspect_pack section.
+        match loader.load("test/01_unit/compiler/loader/aspect_pack_smf_section_wiring_spec.spl"):
+            case Error(msg): panic("load failed: {msg}")
+            case _: pass
+        expect(loader.last_load_aspect_pack_modules).to_equal(-1)
+        val miss = loader.resident_aspect_facet("Widget/Debuggable")
+        expect(miss.found).to_equal(false)
+
+    it "REQ-APKW-06 the section bridge registers the pack with an aspect-pack loader":
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = match SmfReaderMemory.from_data(_read_smf()):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        val ld = apk_loader_new()
+        # -1 = nothing registered, i.e. the section -> provider bridge is gone.
+        expect(smf_register_aspect_pack(ld, _pack_path(), reader)).to_equal(2)
+
+    it "REQ-APKW-07 a facet routes through the catalog into the SMF-registered pack":
+        expect(_write_pack_smf()).to_equal(true)
+        val reader = match SmfReaderMemory.from_data(_read_smf()):
+            case Ok(r): r
+            case Err(e): panic("reader: {e}")
+        val ld = apk_loader_new()
+        expect(smf_register_aspect_pack(ld, _pack_path(), reader)).to_equal(2)
+        val got = apk_load_facet(ld, _catalog_bytes(), "Widget/Debuggable")
+        # Without the registration above this is APK_PACK_MISSING.
+        expect(got.error_code).to_equal("")
+        expect(got.found).to_equal(true)
+        expect(got.module_id).to_equal("debug.core")
+        expect(bytes_to_text(got.payload)).to_equal(bytes_to_text(_payload("debug.core")))
+        expect(apk_loader_packs_opened(ld)).to_be_greater_than(0)

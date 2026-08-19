@@ -1,0 +1,91 @@
+# EXECUTION spec for join-point patchpoints: the call actually happens.
+#
+# The sibling `joinpoint_patchpoint_spec.spl` proves the right ADDRESS reaches
+# the right CELL. This spec proves the remaining half -- that an indirect call
+# through the cell REALLY LANDS on that address -- by emitting two tiny x86-64
+# functions into executable memory and calling through the slot.
+#
+# ARCHITECTURE NOTE: the emitted bytes are x86-64 (`mov eax, imm32; ret`).
+# On another host architecture these bodies will not execute; the mechanism
+# under test (`JoinpointSlotTable.call_through_0`) is architecture-neutral, only this
+# spec's fixture is not.
+#
+# KNOWN BLOCKER: this interpreter has historically been unable to invoke a raw
+# i64 code address -- see
+# `doc/08_tracking/bug/loader_interpreter_cannot_call_raw_code_address_2026-08-18.md`.
+# The unblock is the `rt_call_ptr_0` extern behind
+# `native_call_function_0`. If that extern is not yet present in the C runtime
+# this spec is legitimately RED. Do NOT weaken these assertions to make it
+# green: a green execution spec that never executed anything is worse than a
+# red one.
+
+use std.spec.{describe, it, assert_true, assert_eq}
+use compiler.loader.joinpoint_slots.{JoinpointSlotTable, joinpoint_key}
+use compiler.loader.smf_mmap_native.{
+    native_alloc_rw_memory, native_write_exec_memory, native_make_executable,
+    native_flush_icache
+}
+
+# x86-64: b8 <imm32 LE>  mov eax, imm32
+#         c3             ret
+fn const_fn_bytes(value: i64) -> [u8]:
+    var out: [u8] = []
+    out.push(0xB8u8)
+    out.push((value & 0xFF) as u8)
+    out.push(((value >> 8) & 0xFF) as u8)
+    out.push(((value >> 16) & 0xFF) as u8)
+    out.push(((value >> 24) & 0xFF) as u8)
+    out.push(0xC3u8)
+    out
+
+"""Emit a zero-arg function returning `value`, RW then RX. Never RWX."""
+fn emit_const_fn(value: i64) -> i64:
+    val bytes = const_fn_bytes(value)
+    val addr = native_alloc_rw_memory(4096)
+    if addr == 0:
+        return 0
+    _ = native_write_exec_memory(addr, bytes, 0)
+    if not native_make_executable(addr, 4096):
+        return 0
+    native_flush_icache(addr, 4096)
+    addr
+
+fn ok_i64(r: Result<i64, text>) -> i64:
+    match r:
+        case Ok(v):
+            v
+        case Err(e):
+            print "unexpected Err: {e}"
+            -1
+
+describe "join-point call through a slot cell", fn():
+
+    it "executes the unadvised target, then the advice, from the same call site", fn():
+        val unadvised = emit_const_fn(11)
+        val advice = emit_const_fn(22)
+        assert_true(unadvised != 0)
+        assert_true(advice != 0)
+        assert_true(unadvised != advice)
+
+        match JoinpointSlotTable.alloc(4):
+            case Ok(table0):
+                var table = table0
+                val key = joinpoint_key("mod.exec", "target", 0)
+                val slot = ok_i64(table.reserve(key, unadvised))
+                _ = table.seal()
+
+                # (a) default routing: the cell names the unadvised target.
+                assert_eq(ok_i64(table.call_through_0(slot)), 11)
+
+                # (b) after binding, the SAME call site reaches the advice.
+                _ = table.patch_cell(slot, advice)
+                assert_eq(ok_i64(table.call_through_0(slot)), 22)
+
+                # (c) rebinding back is observable in what actually runs.
+                _ = table.patch_cell(slot, unadvised)
+                assert_eq(ok_i64(table.call_through_0(slot)), 11)
+
+                _ = table.free()
+            case Err(e):
+                print "table alloc failed: {e}"
+                assert_true(false)

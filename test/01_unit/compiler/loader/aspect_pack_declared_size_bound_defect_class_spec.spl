@@ -1,0 +1,118 @@
+# DEFECT-CLASS spec: declared-size bounds on the aspect-pack index path.
+#
+# The defect class is "trust a size the FILE declares". A pack header declares
+# its directory size, and a range request declares its own length; either can
+# be an attacker-chosen value orders of magnitude larger than anything real.
+# The bound must be checked against the CAP first, so an absurd declaration is
+# refused on the declaration alone -- before any mapping, allocation, or
+# inflation is attempted.
+#
+# WHY THIS SPEC FAILS IF THE BOUND IS REMOVED: each assertion pins the SPECIFIC
+# error code the cap produces. With the cap removed, control falls through to
+# the later end-of-file check and the code becomes APKIDX_TRUNCATED_PACK /
+# APKIO_RANGE_PAST_EOF instead. The request is still refused, but for the wrong
+# reason and only because this fixture happens to be small -- on a large pack
+# the same declaration would be honoured. Asserting the code, not merely
+# "it failed", is what makes the cap load-bearing.
+
+use std.spec.{describe, it, assert_true, assert_eq}
+use std.io_runtime.{file_write_bytes, file_delete, dir_create_all}
+use std.common.aspect_pack.{ApkModuleSourceV1, apk_build_pack_v1}
+use std.common.string_core.{text_to_bytes}
+use compiler.loader.aspect_pack_io.{pack_window_map, pack_read_range, APKIO_MAX_RANGE_BYTES}
+use compiler.loader.aspect_pack_index_cache.{
+    pack_index_cache_new, pack_index_get, APKIDX_MAX_DIRECTORY_BYTES
+}
+
+val TMP_DIR: text = "build/test/aspect_pack_bound"
+
+fn _payload(tag: text) -> [u8]:
+    var s = ""
+    var i = 0
+    while i < 20:
+        s = s + "module {tag} line {i} filler; "
+        i = i + 1
+    text_to_bytes(s)
+
+fn _build_bytes() -> [u8]:
+    var mods: [ApkModuleSourceV1] = []
+    mods.push(ApkModuleSourceV1(module_id: "a.one", aspect_id: "a", payload: _payload("a.one")))
+    mods.push(ApkModuleSourceV1(module_id: "b.two", aspect_id: "b", payload: _payload("b.two")))
+    apk_build_pack_v1(mods).bytes
+
+fn _write(name: text, bytes: [u8]) -> text:
+    dir_create_all(TMP_DIR)
+    val path = "{TMP_DIR}/{name}.apk"
+    file_delete(path)
+    _ = file_write_bytes(path, bytes)
+    path
+
+# Overwrite the little-endian u64 at `offset` with `value`.
+fn _patch_u64(bytes: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        bytes[offset + i] = ((value >> (i * 8)) & 0xFF).to_u8()
+        i = i + 1
+
+describe("aspect-pack declared-size bound (defect class: trusting a declared size)", fn():
+
+    it("refuses an over-declared directory size on the DECLARATION", fn():
+        var bytes = _build_bytes()
+        assert_true(bytes.len() > 32, "fixture pack built")
+        # dir_size lives at header offset 16. Declare far more than the cap.
+        _patch_u64(bytes, 16, APKIDX_MAX_DIRECTORY_BYTES + 4096)
+        val path = _write("huge_dir", bytes)
+
+        val c = pack_index_cache_new()
+        val e = pack_index_get(c, path)
+        assert_true(not e.ok, "an over-declared directory is refused")
+        assert_eq(e.error_code, "APKIDX_DIRECTORY_TOO_LARGE",
+            "refused BY THE CAP -- if this reads APKIDX_TRUNCATED_PACK the declared-size bound was removed")
+        assert_eq(c.index_bytes_read, 32,
+            "only the 32-byte header was ever read; the huge directory was never mapped")
+        file_delete(path)
+    )
+
+    it("refuses an over-declared range length on the DECLARATION", fn():
+        val path = _write("small", _build_bytes())
+        val w = pack_window_map(path, 0, APKIO_MAX_RANGE_BYTES + 1)
+        assert_true(not w.ok, "an over-declared range is refused")
+        assert_eq(w.error_code, "APKIO_RANGE_TOO_LARGE",
+            "refused BY THE CAP -- if this reads APKIO_RANGE_PAST_EOF the range bound was removed")
+        assert_eq(w.address, 0, "nothing was mapped")
+        file_delete(path)
+    )
+
+    it("still refuses a within-cap range that runs past end of file", fn():
+        # The cap is not a substitute for the EOF check: a SHORT map would hand
+        # back the wrong bytes silently.
+        val path = _write("eof", _build_bytes())
+        val w = pack_window_map(path, 0, 1048576)
+        assert_true(not w.ok, "a range past EOF is refused")
+        assert_eq(w.error_code, "APKIO_RANGE_PAST_EOF", "refused by the end-of-file bound")
+        assert_eq(pack_read_range(path, 0, 1048576).len(), 0, "and yields no bytes")
+        file_delete(path)
+    )
+
+    it("refuses a declared total_size that disagrees with the file", fn():
+        var bytes = _build_bytes()
+        _patch_u64(bytes, 24, bytes.len() + 512)   # total_size at offset 24
+        val path = _write("bad_total", bytes)
+        val c = pack_index_cache_new()
+        val e = pack_index_get(c, path)
+        assert_true(not e.ok, "a truncated pack is refused")
+        assert_eq(e.error_code, "APKIDX_TRUNCATED_PACK", "declared total_size is checked against the real file size")
+        file_delete(path)
+    )
+
+    it("refuses zero and negative declared directory sizes", fn():
+        var bytes = _build_bytes()
+        _patch_u64(bytes, 16, 0)
+        val path = _write("zero_dir", bytes)
+        val c = pack_index_cache_new()
+        val e = pack_index_get(c, path)
+        assert_true(not e.ok, "a zero-sized directory is refused")
+        assert_eq(e.error_code, "APKIDX_DIRECTORY_TOO_LARGE", "the same bound rejects a nonsensical low declaration")
+        file_delete(path)
+    )
+)

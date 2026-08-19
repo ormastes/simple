@@ -1,0 +1,68 @@
+# Aspect-pack SMF section -> aspect-pack provider (design
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# §12.1, §23 "Existing SMF and loader").
+#
+# `.aspect_pack` (SectionType.AspectPackDirectory, wire byte 16) is a REGISTERED
+# SMF section type, written by compiler.backend.linker.smf_writer and carried in
+# the ordinary 64-byte section table. This module is the loader-side half: it
+# finds that section in an already-parsed SmfReaderMemory and hands its payload
+# to std.common.aspect_pack, so the aspect catalog is reachable from the real
+# module load path rather than from a standalone byte array in a spec.
+#
+# It deliberately adds no second format: the section payload IS the SMFAPK1
+# container that apk_open_pack_v1 already validates.
+
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.loader.smf_segment_load.{smf_section_extent, smf_section_bytes}
+use std.common.aspect_pack.{apk_loader_register_pack, apk_open_pack_v1}
+
+val SMF_SECTION_ASPECT_PACK_DIRECTORY: i64 = 16
+val SMF_SECTION_ENTRY_SIZE_APK: i64 = 64
+
+"""Index of the first section whose wire section_type byte equals `wire_type`,
+or -1. The section_type byte is byte 0 of each 64-byte section-table entry
+(the layout smf_writer.smf_build_section_entry_bytes emits)."""
+fn smf_find_section_by_wire_type(reader: SmfReaderMemory, wire_type: i64) -> i32:
+    var i = 0i64
+    val count = reader.header.section_count as i64
+    while i < count:
+        val entry_off = reader.sections_offset + i * SMF_SECTION_ENTRY_SIZE_APK
+        if entry_off + SMF_SECTION_ENTRY_SIZE_APK <= reader.data.len():
+            if reader.data[entry_off] as i64 == wire_type:
+                return i as i32
+        i = i + 1
+    -1
+
+"""True when this SMF carries an aspect pack. Both the header flag
+(SMF_FLAG_ASPECT_PACK) and the `.aspect_pack` section must agree: a flagged
+file with no section, or a section with no flag, is a malformed pack and is
+NOT loaded as one."""
+fn smf_has_aspect_pack(reader: SmfReaderMemory) -> bool:
+    val idx = smf_find_section_by_wire_type(reader, SMF_SECTION_ASPECT_PACK_DIRECTORY)
+    reader.header.flags.aspect_pack and idx >= 0
+
+"""Raw `.aspect_pack` section payload (an SMFAPK1 container)."""
+fn smf_aspect_pack_bytes(reader: SmfReaderMemory) -> Result<[u8], text>:
+    if not reader.header.flags.aspect_pack:
+        return Err("SMF does not set SMF_FLAG_ASPECT_PACK")
+    val idx = smf_find_section_by_wire_type(reader, SMF_SECTION_ASPECT_PACK_DIRECTORY)
+    if idx < 0:
+        return Err("SMF sets SMF_FLAG_ASPECT_PACK but has no .aspect_pack section")
+    val extent = smf_section_extent(reader, idx)?
+    smf_section_bytes(reader, extent)
+
+"""Register the SMF's aspect pack with an aspect-pack loader (apk_loader_new),
+keyed by the module path. Returns the number of modules the pack contains, or
+-1 when this SMF carries no usable aspect pack. This is the whole bridge from
+the SMF section table to the facet-routing loader."""
+fn smf_register_aspect_pack(ld: i64, path: text, reader: SmfReaderMemory) -> i64:
+    match smf_aspect_pack_bytes(reader):
+        case Err(_):
+            -1
+        case Ok(payload):
+            val handle = apk_open_pack_v1(payload)
+            if not handle.ok:
+                return -1
+            if not apk_loader_register_pack(ld, path, payload):
+                return -1
+            handle.module_count

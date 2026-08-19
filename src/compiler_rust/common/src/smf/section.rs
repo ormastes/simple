@@ -32,6 +32,13 @@ pub enum SectionType {
     /// decoded by `std.driver.loader::decode_manifest`. Kept in sync with
     /// the spl `SectionType` in `70.backend/linker/smf_writer.spl`.
     DrvManifest = 14,
+    /// Startup launch metadata section (SDN text), wire byte 15.
+    LaunchMeta = 15,
+    /// Aspect-facet dynload design §12.1: `.aspect_pack` carries an
+    /// aspect-pack container (SMFAPK1 directory + independently deflated
+    /// module chunks). Kept in sync with the spl `SectionType` in
+    /// `70.backend/linker/smf_writer.spl`.
+    AspectPackDirectory = 16,
 }
 
 impl SmfSection {
