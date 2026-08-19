@@ -402,13 +402,22 @@ fn ctrl_apply_selected_lsp_selection_range(ctrl: mut EditorController) -> Editor
     if row.icon != "selection":
         ctrl.status_msg = "no selection range"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
-    val buffer = ctrl.session.active_buffer()
+    var buffer = ctrl.session.active_buffer()
     if buffer == nil:
         ctrl.status_msg = "no file open"
         return EditorAction(redraw: true, quit: false, status_msg: ctrl.status_msg)
     val end_line = _editor_parse_i64(_editor_payload_part(row.command_payload, 0), row.line)
     val end_col = _editor_parse_i64(_editor_payload_part(row.command_payload, 1), row.col)
+    var preserved_ranges: [SelectionRangeDeco] = []
+    for existing in buffer.selection_ranges:
+        # Preserve only multi-selection ranges on OTHER line spans; a range on
+        # the same span is the previous expand/shrink step being replaced.
+        val same_span = existing.start_row == row.line and existing.end_row == end_line
+        if not same_span:
+            preserved_ranges.push(existing)
     buffer.set_primary_selection_range(row.line, row.col, end_line, end_col)
+    for preserved in preserved_ranges:
+        buffer.add_selection_range(preserved.start_row, preserved.start_col, preserved.end_row, preserved.end_col)
     buffer.move_cursor(row.line, row.col)
     ctrl.session.update_active_buffer(buffer)
     ctrl.status_msg = "selection range: " + (row.line + 1).to_text() + ":" + (row.col + 1).to_text() + "-" + (end_line + 1).to_text() + ":" + (end_col + 1).to_text()

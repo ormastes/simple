@@ -10,7 +10,7 @@
 
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect, widget_store_revision}
 use common.ui.widget.{UIMode}
-use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
+use common.layout.box_model.{BlockLayoutBox, BoxKind, BoxModel}
 use common.ui.semantic_contract.{SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, SemanticUiSnapshot, semantic_ui_snapshot_from_state_with_capabilities, semantic_ui_snapshot_to_json}
 use common.ui.semantic_contract.{semantic_ui_snapshot_transport_json}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrComposition}
@@ -519,7 +519,7 @@ class BrowserBackend:
         val dom = widget_to_dom(root_node)
 
         # Step 2: Compute layout (block layout)
-        val layout = compute_layout(dom, self.width, self.height)
+        val layout = browser_dom_compute_layout(dom, self.width, self.height)
 
         # Step 3: Cache layout for hit testing
         self.layout_cache = collect_layout_entries(layout, [])
@@ -796,7 +796,7 @@ class LayoutEntryCollector:
     static fn create(seed: [LayoutEntry]) -> LayoutEntryCollector:
         LayoutEntryCollector(entries: seed)
 
-    me collect(box: LayoutBox):
+    me collect(box: BlockLayoutBox):
         self.entries = self.entries.push(LayoutEntry(
             id: "{box.node_id}",
             x: box.x,
@@ -821,8 +821,8 @@ fn framebuffer_from_argb_pixels(width: i32, height: i32, pixels: [u32]) -> Frame
         i = i + 1
     fb
 
-fn collect_layout_entries(box: LayoutBox, acc: [LayoutEntry]) -> [LayoutEntry]:
-    """Flatten a LayoutBox tree into a list of entries for hit testing."""
+fn collect_layout_entries(box: BlockLayoutBox, acc: [LayoutEntry]) -> [LayoutEntry]:
+    """Flatten a BlockLayoutBox tree into a list of entries for hit testing."""
     val collector = LayoutEntryCollector.create(acc)
     collector.collect(box)
     return collector.entries
@@ -915,7 +915,7 @@ fn widget_kind_to_tag(kind: text) -> text:
 # Layout Engine — simple block layout
 # =========================================================================
 
-fn compute_layout(dom: DomNode, viewport_w: i32, viewport_h: i32) -> LayoutBox:
+fn browser_dom_compute_layout(dom: DomNode, viewport_w: i32, viewport_h: i32) -> BlockLayoutBox:
     """Compute block layout for a DOM tree.
 
     This is a simplified block layout: each child is stacked vertically,
@@ -924,7 +924,7 @@ fn compute_layout(dom: DomNode, viewport_w: i32, viewport_h: i32) -> LayoutBox:
     val root = layout_node(dom, 0.0, 0.0, viewport_w.to_f64(), viewport_h.to_f64(), 0)
     return root
 
-fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_counter: i64) -> LayoutBox:
+fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_counter: i64) -> BlockLayoutBox:
     """Layout a single DOM node and its children."""
     var box_kind = BoxKind.Block
     if dom.tag == "span" or dom.tag == "#text":
@@ -936,7 +936,7 @@ fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_coun
     if dom.tag == "#text":
         val text_height: f64 = 20.0
         val text_width = avail_w
-        return LayoutBox(
+        return BlockLayoutBox(
             node_id: node_id, kind: box_kind,
             x: x, y: y, width: text_width, height: text_height,
             box_model: BoxModel.zero(),
@@ -945,7 +945,7 @@ fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_coun
 
     # Container elements: layout children vertically
     var child_y = y
-    var child_boxes: [LayoutBox] = []
+    var child_boxes: [BlockLayoutBox] = []
     var next_id = id_counter + 1
 
     for child_dom in dom.children:
@@ -957,7 +957,7 @@ fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_coun
     val total_height = child_y - y
     val final_height = if total_height > 0.0: total_height else: 0.0
 
-    return LayoutBox(
+    return BlockLayoutBox(
         node_id: node_id, kind: box_kind,
         x: x, y: y, width: avail_w, height: final_height,
         box_model: BoxModel.zero(),
@@ -968,7 +968,7 @@ fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_coun
 # Paint — rasterize layout boxes to framebuffer
 # =========================================================================
 
-fn paint_layout(fb: Framebuffer, box: LayoutBox) -> Framebuffer:
+fn paint_layout(fb: Framebuffer, box: BlockLayoutBox) -> Framebuffer:
     """Paint a layout box tree into a framebuffer."""
     var out = fb
     match box.kind:

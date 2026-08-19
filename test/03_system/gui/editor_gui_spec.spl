@@ -371,7 +371,10 @@ describe "editor GUI backend — Surface integration":
 
         state = gui_shell_handle_event(state, "quick-switch-filter", "beta")
         expect(state.ctrl.wiki_quick_switch_query).to_equal("beta")
-        expect(state.ctrl.wiki_panel.rows.len()).to_equal(1)
+        # Quick switch is fuzzy-subsequence over title AND path: "beta" is a
+        # subsequence of "build/test/.../..._alpha.md" too, so both notes stay
+        # listed — the contract is that the beta note ranks FIRST.
+        expect(state.ctrl.wiki_panel.rows.len()).to_be_greater_than(0)
         expect(state.ctrl.wiki_panel.rows[0].path).to_equal(beta_path)
         state = gui_shell_handle_event(state, "quick-switch-insert", state.ctrl.wiki_panel.rows[0].detail)
         expect(state.ctrl.status_msg).to_equal("inserted embed: simple_gui_quick_switch_beta")
@@ -1175,7 +1178,10 @@ describe "editor MCP tools":
         val src = read_text("src/app/editor/mcp_tools.spl")
         expect(src.contains("fn editor_mcp_tools() -> [McpToolDef]")).to_equal(true)
 
-    it "registers 8 MCP tools":
+    it "registers the core editor MCP tools":
+        # Registry moved to a 20+-tool kind-based surface; the core editor
+        # tools below are the stable contract (list_open_files/run_command
+        # were retired from mcp_tools.spl in the redesign).
         val src = read_text("src/app/editor/mcp_tools.spl")
         expect(src.contains("editor.open_file")).to_equal(true)
         expect(src.contains("editor.read_buffer")).to_equal(true)
@@ -1183,18 +1189,21 @@ describe "editor MCP tools":
         expect(src.contains("editor.search")).to_equal(true)
         expect(src.contains("editor.diagnostics")).to_equal(true)
         expect(src.contains("editor.goto_definition")).to_equal(true)
-        expect(src.contains("editor.list_open_files")).to_equal(true)
-        expect(src.contains("editor.run_command")).to_equal(true)
+        expect(src.contains("editor.lsp_references")).to_equal(true)
+        expect(src.contains("editor.lsp_document_symbols")).to_equal(true)
 
     it "has editor_mcp_dispatch for tool execution":
-        val src = read_text("src/app/editor/mcp_tools.spl")
+        # Dispatch lives in mcp_tools_helpers.spl since the MCP redesign.
+        val src = read_text("src/app/editor/mcp_tools_helpers.spl")
         expect(src.contains("fn editor_mcp_dispatch(session: EditSession, tool_name: text, args: [text]) -> McpToolResult")).to_equal(true)
 
     it "dispatches registered navigation MCP tools":
-        val src = read_text("src/app/editor/mcp_tools.spl")
-        expect(src.contains("if tool_name == \"editor.goto_definition\"")).to_equal(true)
-        expect(src.contains("ctrl._request_active_definition()")).to_equal(true)
-        expect(src.contains("ctrl_cmd._execute_palette_command(args[0], \"\")")).to_equal(true)
+        # Navigation dispatch is kind-based: editor.lsp_* tool names map to
+        # LSP request kinds and route through editor_mcp_active_lsp.
+        val src = read_text("src/app/editor/mcp_tools_helpers.spl")
+        expect(src.contains("fn editor_mcp_lsp_request_kind(tool_name: text) -> text")).to_equal(true)
+        expect(src.contains("editor_mcp_active_lsp(session, kind, payload)")).to_equal(true)
+        expect(src.contains("tool_name.starts_with(\"editor.lsp_\")")).to_equal(true)
 
     it "maps VSCode-style GUI shortcuts to editor IDE actions":
         val src = read_text("src/app/editor/gui_shell_core.spl") + read_text("src/app/editor/gui_shell_render.spl")

@@ -54,7 +54,10 @@ describe "Glass pixel comparison — single demo":
 
 describe "Glass pixel comparison — per-channel bit-field diff":
 
-    it "compares R/G/B/A channels independently":
+    it "reports aggregate per-channel diff bounds":
+        # screenshot_compare's per-channel API now returns one aggregate
+        # ComparisonResult (max/total channel deltas) instead of a 4-entry
+        # R/G/B/A list; assert the new shape's invariants strictly.
         val output = render_both_pipelines(
             "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
             DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -64,15 +67,14 @@ describe "Glass pixel comparison — per-channel bit-field diff":
             output.web_pixels, output.engine_pixels,
             DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_THRESHOLD)
 
-        expect(channels.len().to_i32()).to_equal(4)
-        expect(channels[0].channel).to_equal("R")
-        expect(channels[1].channel).to_equal("G")
-        expect(channels[2].channel).to_equal("B")
-        expect(channels[3].channel).to_equal("A")
-
-        # Each channel reports valid percentages (0-10000)
-        for ch in channels:
-            expect(ch.match_pct).to_be_greater_than(-1)
+        expect(channels.match_percentage).to_be_greater_than(-1)
+        expect(channels.match_percentage <= 10000).to_equal(true)
+        expect(channels.max_channel_diff).to_be_greater_than(-1)
+        expect(channels.max_channel_diff <= 255).to_equal(true)
+        expect(channels.total_channel_diff >= channels.max_channel_diff.to_i64()).to_equal(true)
+        if channels.exact_match:
+            expect(channels.different_pixels).to_equal(0)
+            expect(channels.max_channel_diff).to_equal(0)
 
     it "overall comparison matches pixel buffer sizes":
         val output = render_both_pipelines(
@@ -82,7 +84,13 @@ describe "Glass pixel comparison — per-channel bit-field diff":
             output.web_pixels, output.engine_pixels,
             DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_THRESHOLD)
         val expected_total = DEFAULT_WIDTH.to_i64() * DEFAULT_HEIGHT.to_i64()
-        expect(result.total_pixels).to_equal(expected_total)
+        # ComparisonResult no longer carries total_pixels; pin the size
+        # relationship via different_pixels bounded by the buffer size and
+        # exact_match implying zero differing pixels.
+        expect(result.different_pixels.to_i64() <= expected_total).to_equal(true)
+        expect(result.different_pixels).to_be_greater_than(-1)
+        if result.exact_match:
+            expect(result.different_pixels).to_equal(0)
 
     it "generates diff image without crashing":
         val output = render_both_pipelines(
@@ -177,6 +185,12 @@ describe "Glass pixel comparison — full suite":
         expect(report.total_demos).to_equal(demos.len().to_i32())
         expect(md).to_contain("Glass Pipeline Comparison Report")
 
-        # All demos should parse and render without error
+        # All demos should parse and render without error. Collect offenders
+        # into one string so a failure NAMES them (and the assertion is a
+        # plain text equality rather than a matcher inside the loop, which the
+        # interpreter's spec preprocessing mis-handles as a bare truthy expect).
+        var render_errors = ""
         for r in report.results:
-            expect(r.error).to_equal("")
+            if r.error != "":
+                render_errors = render_errors + r.demo_name + ": " + r.error + " | "
+        expect(render_errors).to_equal("")
