@@ -274,11 +274,49 @@ bootstrap_stage3_transcript_explicit_env_value() {
     printf '%s\n' "${bootstrap_stage3_explicit_payload#*=}"
 }
 
+bootstrap_stage3_transcript_argv_value_after() {
+    bootstrap_stage3_argv_transcript=$1
+    bootstrap_stage3_argv_key=$2
+    case "$bootstrap_stage3_argv_key" in
+        --*) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_argv_key_count=$(
+        awk -F: -v key="$bootstrap_stage3_argv_key" '
+            $1 == "argv" && $2 ~ /^[0-9]+$/ && $3 == key {
+                print NR
+            }
+        ' "$bootstrap_stage3_argv_transcript" || true
+    )
+    [ -n "$bootstrap_stage3_argv_key_count" ] || return 1
+    [ "$(printf '%s\n' "$bootstrap_stage3_argv_key_count" | wc -l | tr -d ' ')" = 1 ] ||
+        return 1
+    bootstrap_stage3_argv_key_line=${bootstrap_stage3_argv_key_count%%:*}
+    bootstrap_stage3_argv_key_payload_line=$(
+        sed -n "$((bootstrap_stage3_argv_key_line + 1))p" \
+            "$bootstrap_stage3_argv_transcript"
+    ) || return 1
+    echo "$bootstrap_stage3_argv_key_payload_line" |
+        grep -Eq '^argv:[0-9]+:[^:]' || return 1
+    bootstrap_stage3_argv_key_payload=$(
+        printf '%s\n' "$bootstrap_stage3_argv_key_payload_line" |
+            sed -n 's/^argv:[0-9][0-9]*://p'
+    ) || return 1
+    bootstrap_stage3_argv_key_declared=${bootstrap_stage3_argv_key_payload_line#argv:}
+    bootstrap_stage3_argv_key_declared=${bootstrap_stage3_argv_key_declared%%:*}
+    [ "${#bootstrap_stage3_argv_key_payload}" = \
+        "$bootstrap_stage3_argv_key_declared" ] || return 1
+    printf '%s\n' "$bootstrap_stage3_argv_key_payload"
+}
+
 # One independent byte/link-target pass. The public wrapper performs this
 # twice and accepts only byte-identical, independently hashed results.
 bootstrap_stage3_source_snapshot_once() {
     bootstrap_stage3_snapshot=$1
     bootstrap_stage3_root=$2
+    bootstrap_stage3_root=$(
+        bootstrap_stage3_canonical_path "$bootstrap_stage3_root"
+    ) || return 1
     bootstrap_stage3_tmp="${bootstrap_stage3_snapshot}.tmp.$$"
     perl -MDigest::SHA=sha256_hex -MFile::Find -MFcntl=O_RDONLY -e '
         use strict;
