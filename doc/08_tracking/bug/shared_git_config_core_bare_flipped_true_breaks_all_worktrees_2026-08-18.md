@@ -82,3 +82,33 @@ Suggested follow-up, not done here:
   `/mnt/data/worktrees/simple-main/.git/` is shared state and must never be
   written, in the same way `bin/simple` is already called out as a shared
   binary that must not be rebuilt or replaced.
+
+## CORRECTION 2026-08-19 — attribution above is WRONG
+
+The "What is NOT established" section speculates that one of a session's
+subagents wrote `core.bare = true`. That is incorrect and is corrected here.
+
+**The push path itself does it.** Reproduced repeatedly: `core.bare` is `false`,
+a `git push` is run, and immediately afterwards `core.bare` is `true` again.
+This happened on every push attempt of the session — via `land.shs` and via
+plain `git push` alike — with no subagent running at all.
+
+Mechanism, already documented by this repo's own
+`scripts/check/check-core-bare-sanity.shs`: a `git` invocation with `GIT_DIR`
+set to a **relative** path, unable to infer an adjacent work tree, writes
+`core.bare = true`. The pre-push hook runs guard scripts under exactly that
+condition in a linked worktree.
+
+**Consequence — the hook sabotages its own guards.** Once `core.bare` flips
+mid-run, every subsequent guard sees no work tree and correctly fail-closes with
+`ERROR — nothing was checked` (exit 2). Observed blocking, in sequence across
+attempts: `check-no-conflict-markers-push`, `check-seed-builds-push`,
+`check-runtime-api-regression-push`, `check-implicit-self-field-assignment`.
+Every block was status 2 (ERROR / environmental), never status 1 (FAIL /
+content). The guards are behaving correctly; the environment they run in is
+corrupted by the push that invoked them.
+
+This makes `git push` effectively impossible from a linked worktree without
+either resetting `core.bare` between guards or bypassing the hook — which is a
+far more serious finding than a stray agent write, because it blocks every lane
+that works from a worktree rather than the primary clone.
