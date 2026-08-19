@@ -1,0 +1,85 @@
+# REGRESSION SPEC for the W2 bulk exec-memory write.
+#
+# History this pins. The loader used to write a section one byte per SFFI call
+# (rt_ptr_write_u8). A `[u8]`-typed bulk extern (rt_ptr_write_bytes) was tried
+# and measured 6.6x-11.5x SLOWER, because a `[u8]` extern cannot be JIT-linked:
+# every call crosses the JIT<->interpreter bridge, which boxes the array element
+# by element (~49ns/byte). The fix is an ALL-I64 pair -- rt_array_data_ptr to
+# obtain the array's contiguous byte pointer, then rt_ptr_write_bytes_raw to
+# memcpy -- which stays in the JIT's direct SFFI table. Measured 2026-08-19:
+# 34.1 GB/s at 4 KiB, 41.4 GB/s at 64 KiB, 12.7 GB/s at 1 MiB, versus the
+# loop's 250/252/263 MB/s.
+#
+# The defect class this guards is silent WRONG BYTES, not slowness: a memcpy
+# path that misses a byte, writes at the wrong offset, or -- worst -- treats
+# rt_array_data_ptr's 0 return (an array with no contiguous byte storage) as an
+# address, would still "succeed". So every assertion here is about content.
+use std.spec.{describe, it, assert_true, assert_eq}
+use compiler.loader.smf_mmap_native.{
+    native_alloc_rw_memory, native_write_exec_memory, native_mmap_read_bytes, native_munmap
+}
+
+fn ramp(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0i64
+    while i < n:
+        out.push((i & 0xFF) as u8)
+        i = i + 1
+    out
+
+describe "bulk exec-memory write":
+    it "writes every byte of a page-sized section, not just the first":
+        val size = 4096i64
+        val addr = native_alloc_rw_memory(size)
+        assert_true(addr != 0)
+        val code = ramp(size)
+        assert_eq(native_write_exec_memory(addr, code, 0), size)
+        val got = native_mmap_read_bytes(addr, 0, size)
+        assert_eq(got.len(), size)
+        # Sample the whole span, including the last byte -- a truncated copy
+        # that only wrote the head would still pass a first-byte-only check.
+        assert_eq(got[0] as i64, 0)
+        assert_eq(got[1] as i64, 1)
+        assert_eq(got[255] as i64, 255)
+        assert_eq(got[256] as i64, 0)
+        assert_eq(got[2048] as i64, 0)
+        assert_eq(got[size - 1] as i64, (size - 1) & 0xFF)
+        assert_true(native_munmap(addr, size))
+
+    it "honours a non-zero destination offset and leaves the head untouched":
+        val addr = native_alloc_rw_memory(4096)
+        assert_true(addr != 0)
+        # Zero the head so an off-by-offset copy is visible.
+        assert_eq(native_write_exec_memory(addr, ramp(16), 0), 16)
+        val payload: [u8] = [0xAA, 0xBB, 0xCC, 0xDD]
+        assert_eq(native_write_exec_memory(addr, payload, 64), 4)
+        val head = native_mmap_read_bytes(addr, 0, 4)
+        assert_eq(head[0] as i64, 0)
+        assert_eq(head[3] as i64, 3)
+        val got = native_mmap_read_bytes(addr, 64, 4)
+        assert_eq(got[0] as i64, 0xAA)
+        assert_eq(got[1] as i64, 0xBB)
+        assert_eq(got[2] as i64, 0xCC)
+        assert_eq(got[3] as i64, 0xDD)
+        assert_true(native_munmap(addr, 4096))
+
+    it "rejects invalid arguments before dereferencing anything":
+        assert_eq(native_write_exec_memory(0, ramp(4), 0), 0)
+        assert_eq(native_write_exec_memory(1, ramp(4), -1), 0)
+        val empty: [u8] = []
+        val addr = native_alloc_rw_memory(4096)
+        assert_true(addr != 0)
+        assert_eq(native_write_exec_memory(addr, empty, 0), 0)
+        assert_true(native_munmap(addr, 4096))
+
+    it "reproduces the size at which the old boxed path was pathological":
+        # 64 KiB was 10x slower through the `[u8]` extern than through the
+        # per-byte loop. Content must be exact at that size too.
+        val size = 65536i64
+        val addr = native_alloc_rw_memory(size)
+        assert_true(addr != 0)
+        assert_eq(native_write_exec_memory(addr, ramp(size), 0), size)
+        val tail = native_mmap_read_bytes(addr, size - 4, 4)
+        assert_eq(tail[0] as i64, (size - 4) & 0xFF)
+        assert_eq(tail[3] as i64, (size - 1) & 0xFF)
+        assert_true(native_munmap(addr, size))

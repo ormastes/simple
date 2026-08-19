@@ -21,7 +21,8 @@ extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
-extern fn rt_ptr_write_bytes(addr: i64, offset: i64, bytes: [u8]) -> i64
+extern fn rt_array_data_ptr(array: [u8]) -> i64
+extern fn rt_ptr_write_bytes_raw(addr: i64, offset: i64, src: i64, len: i64) -> i64
 extern fn rt_call_ptr_0(addr: i64) -> i64
 extern fn rt_call_ptr_1(addr: i64, a1: i64) -> i64
 extern fn rt_call_ptr_2(addr: i64, a1: i64, a2: i64) -> i64
@@ -166,37 +167,47 @@ fn native_free_exec_memory(address: i64, size: i64) -> bool:
     rt_munmap_raw(address, size) == 0
 
 fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
-    # MEASURED 2026-08-19: the per-byte rt_ptr_write_u8 loop below is FASTER
-    # than the bulk rt_ptr_write_bytes extern, by 6.6x-11.5x:
+    # MEASURED 2026-08-19 (binary 59701088 bytes, 2026-08-19 01:11:51; medians
+    # of 5 reps, same mapping, last-byte verified every rep). Three ways to put
+    # a section into an RW mapping:
     #
-    #   section   per-byte loop        one bulk call
-    #   4 KiB     21.7us (189 MB/s)    143.5us (28.5 MB/s)
-    #   64 KiB     308us (213 MB/s)    3.09ms  (21 MB/s)
-    #   1 MiB     5.00ms (210 MB/s)    57.4ms  (18 MB/s)
+    #   section   per-byte rt_ptr_write_u8   one rt_ptr_write_bytes([u8])   data-ptr + rt_ptr_write_bytes_raw
+    #   4 KiB     16.4us (250 MB/s)          136.2us (30 MB/s)              0.12us (34.1 GB/s)
+    #   64 KiB     260us (252 MB/s)          2.20ms  (30 MB/s)              1.58us (41.4 GB/s)
+    #   1 MiB     3.98ms (263 MB/s)          48.9ms  (21 MB/s)              82.3us (12.7 GB/s)
     #
-    # Counter-intuitive, and the cost is NOT the C memcpy: a no-op extern
-    # handed the same 1 MiB array costs 60ns, so argument passing is free, and
-    # writing straight through the destination pointer with no intermediate
-    # Vec changed nothing. The cost is JIT<->interpreter marshalling at the
-    # extern boundary -- a `[u8]`-typed extern cannot be JIT-linked, while
-    # rt_ptr_write_u8(i64,i64,i64) can.
+    # The all-i64 raw path is 136x / 164x / 48x faster than the loop.
     #
-    # So the loop stays until a JIT-linkable ALL-I64 form exists (an
-    # array-data-pointer extern feeding rt_ptr_write_bytes_raw, which is
-    # already implemented in src/runtime/runtime_memory.c and waiting).
-    # ponytail: O(bytes) SFFI calls, still the fastest available; replace when
-    # the all-i64 path lands, and re-measure rather than assuming.
+    # Why the `[u8]` extern was SLOWER than the loop it replaced: it cannot be
+    # JIT-linked, so every call crosses the JIT<->interpreter bridge, which
+    # boxes the array element by element (~49ns/byte). rt_array_data_ptr and
+    # rt_ptr_write_bytes_raw are all-i64 and therefore sit in the JIT's direct
+    # SFFI table, so the whole write is one memcpy with no marshalling.
     #
-    # NOTE this means the segment-mapper lane's "one mapping per segment is
-    # faster" claim is STILL not established -- it saves syscalls but pays
-    # O(bytes) SFFI calls. See doc/03_plan/compiler/aspect_dynload/.
+    # rt_array_data_ptr returns 0 when the array has no contiguous byte storage
+    # (a boxed element array). That is not an address, so fall back to the
+    # per-byte loop rather than writing to 0.
     if address == 0 or offset < 0:
         return 0
+    val n = code.len()
+    if n <= 0:
+        return 0
+    # Both externs are checked by RESULT, not by presence. A binary that lacks
+    # either one returns nil, which reads back as neither 0 nor n, so the loop
+    # below still runs and the bytes still land -- the fast path is an
+    # optimisation, never a correctness dependency. (Measured: on a seed built
+    # before these externs existed, an unchecked version of this fast path
+    # silently wrote nothing and took segment_symbol_resolution_spec from
+    # 8/8 to 2/8.)
+    val src = rt_array_data_ptr(code)
+    if src != 0:
+        if rt_ptr_write_bytes_raw(address, offset, src, n) == n:
+            return n
     var i = 0
-    while i < code.len():
+    while i < n:
         rt_ptr_write_u8(address, offset + i, code[i] as i64)
         i = i + 1
-    code.len()
+    n
 
 fn native_make_executable(address: i64, size: i64) -> bool:
     if address == 0 or size <= 0:

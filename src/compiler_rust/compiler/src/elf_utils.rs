@@ -456,6 +456,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_bytes_u64_le_at" => value::rt_bytes_u64_le_at as *const () as usize,
         "rt_bytes_u8_set" => value::rt_bytes_u8_set as *const () as usize,
         "rt_array_data_ptr" => value::rt_array_data_ptr as *const () as usize,
+        "rt_ptr_write_bytes_raw" => value::rt_ptr_write_bytes_raw_shim as *const () as usize,
         "rt_array_data_ptr_text" => value::rt_array_data_ptr_text as *const () as usize,
         "rt_array_header_ptr" => value::rt_array_header_ptr as *const () as usize,
         "rt_array_set_len_known" => value::rt_array_set_len_known as *const () as usize,

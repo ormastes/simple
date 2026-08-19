@@ -664,6 +664,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_data_ptr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ptr_write_bytes_raw", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_data_ptr_text", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_header_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set_len_known", &[I64, I64], &[I8]),

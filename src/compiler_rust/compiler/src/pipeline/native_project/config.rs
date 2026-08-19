@@ -71,6 +71,99 @@ pub(super) fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
         && path.as_ref().and_then(|p| p.file_name()).and_then(|name| name.to_str()) == Some("bootstrap_main.spl")
 }
 
+/// Provision the hosted `libsimple_native_all.a` authority for the bootstrap
+/// CLI entry.
+///
+/// `src/app/cli/bootstrap_main.spl:2` declares `extern fn rt_native_build`, and
+/// the ONLY implementation of that symbol in the tree is the hosted Rust
+/// `simple-native-all` crate (`src/compiler_rust/native_all/src/lib.rs:143`).
+/// There is no C body and there cannot be one -- it IS the native-build driver.
+/// So this is a runtime-lane SELECTION requirement, never a reason to widen the
+/// Simple/C core ABI with a symbol the core lane cannot implement.
+///
+/// `selected_runtime_library` already authorised the hosted archive for exactly
+/// this entry (`is_bootstrap_main_entry`), but the branch was reachable only
+/// when an explicit `--runtime-path` was supplied. The bare `build bootstrap`
+/// stage driver never supplies one, so Stage 1 fell through to the
+/// core-c-bootstrap lane and died with `undefined reference to rt_native_build`.
+/// This resolves the authority rather than leaving it unset.
+///
+/// Deliberately NOT a cwd-relative scan of `src/compiler_rust/target` --
+/// `find_native_all_library` returns `None` on purpose and a test pins that.
+/// Every source here is an EXPLICIT authority (operator-supplied path, env
+/// override, the running seed's own install dir) or an archive this function
+/// builds itself from the crate that owns the symbol.
+fn bootstrap_hosted_native_all_runtime(
+    runtime_path: Option<&Path>,
+    native_all_name: &str,
+    temp_dir: &Path,
+) -> Option<PathBuf> {
+    fn usable(path: PathBuf) -> Option<PathBuf> {
+        // An empty placeholder archive is not an authority.
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() > 0 => Some(path),
+            _ => None,
+        }
+    }
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(rp) = runtime_path {
+        roots.push(rp.to_path_buf());
+    }
+    if let Some(dir) = super::RUNTIME_PATH_OVERRIDE.get() {
+        roots.push(dir.clone());
+    }
+    if let Ok(env_path) = std::env::var("SIMPLE_RUNTIME_PATH") {
+        if !env_path.is_empty() {
+            roots.push(PathBuf::from(env_path));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+            roots.push(dir.join("runtime-authority"));
+        }
+    }
+
+    for root in &roots {
+        for dir in runtime_authority_search_dirs(root) {
+            if let Some(found) = usable(dir.join(native_all_name)) {
+                return Some(found);
+            }
+        }
+    }
+
+    build_bootstrap_hosted_native_all_archive(native_all_name, temp_dir).and_then(usable)
+}
+
+/// Last resort for `bootstrap_hosted_native_all_runtime`: build the hosted
+/// archive from the crate that defines `rt_native_build`, into a build dir of
+/// our own. Mirrors `build_core_c_runtime_library`'s "provision it yourself"
+/// contract for the core lane, one level up.
+fn build_bootstrap_hosted_native_all_archive(native_all_name: &str, temp_dir: &Path) -> Option<PathBuf> {
+    let repo_root = find_core_c_runtime_source_root()?.parent()?.parent()?.to_path_buf();
+    let manifest = repo_root.join("src").join("compiler_rust").join("Cargo.toml");
+    if !manifest.is_file() {
+        return None;
+    }
+    let target_dir = temp_dir.join("hosted_native_all");
+    let status = std::process::Command::new("cargo")
+        .arg("build")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("-p")
+        .arg("simple-native-all")
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let built = target_dir.join("release").join(native_all_name);
+    if built.is_file() { Some(built) } else { None }
+}
+
 fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
     runtime_path.is_some_and(|path| {
         ["simple-core", "simple_core"].iter().any(|lane_dir| {
@@ -253,11 +346,10 @@ impl NativeProjectBuilder {
         let (native_all_name, runtime_name) = runtime_archive_names(super::effective_target().linker_flavor());
 
         if is_bootstrap_main_entry(&self.entry_file) {
-            if let Some(ref rp) = self.config.runtime_path {
-                let native_all = rp.join(native_all_name);
-                if native_all.exists() {
-                    return Ok(Some((native_all, true)));
-                }
+            if let Some(native_all) =
+                bootstrap_hosted_native_all_runtime(self.config.runtime_path.as_deref(), native_all_name, temp_dir)
+            {
+                return Ok(Some((native_all, true)));
             }
         }
 

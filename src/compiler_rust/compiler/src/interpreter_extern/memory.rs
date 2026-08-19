@@ -1171,6 +1171,52 @@ pub fn rt_ptr_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Data pointer of a packed byte array, or 0 when there is none.
+///
+/// Callable from Simple as: `rt_array_data_ptr(arr: [u8]) -> i64`
+/// Only `ByteArray`/`FrozenByteArray` have contiguous byte storage; a boxed
+/// `Array` has no byte data pointer, so this returns 0 and callers MUST fall
+/// back to a per-byte path rather than treating 0 as an address.
+pub fn rt_array_data_ptr(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_array_data_ptr requires 1 argument (array)"));
+    }
+    Ok(Value::Int(match &args[0] {
+        Value::ByteArray(v) | Value::FrozenByteArray(v) if !v.is_empty() => v.as_ptr() as i64,
+        _ => 0,
+    }))
+}
+
+/// All-i64 bulk copy: `memcpy(addr + offset, src, len)`.
+///
+/// Callable from Simple as:
+/// `rt_ptr_write_bytes_raw(addr: i64, offset: i64, src: i64, len: i64) -> i64`
+/// The all-i64 signature is the point: it is JIT-linkable, so the call does not
+/// cross the JIT->interpreter bridge that boxes a `[u8]` argument element by
+/// element. Mirrors `rt_ptr_write_bytes_raw` in src/runtime/runtime_memory.c.
+pub fn rt_ptr_write_bytes_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 4 {
+        return Err(CompileError::runtime(
+            "rt_ptr_write_bytes_raw requires 4 arguments (addr, offset, src, len)",
+        ));
+    }
+    let addr = args[0].as_int()?;
+    let offset = args[1].as_int()?;
+    let src = args[2].as_int()?;
+    let len = args[3].as_int()?;
+    if addr == 0 || src == 0 || offset < 0 || len <= 0 {
+        return Ok(Value::Int(0));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            src as usize as *const u8,
+            (addr as usize as *mut u8).offset(offset as isize),
+            len as usize,
+        )
+    };
+    Ok(Value::Int(len))
+}
+
 /// Call a raw code address as a zero-argument function returning i64.
 ///
 /// Callable from Simple as: `rt_call_ptr_0(addr: i64) -> i64`

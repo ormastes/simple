@@ -278,6 +278,9 @@ pub(crate) fn evaluate_expr(
         return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
     }
 
+    // Phase D dispatch profiler: default OFF (one relaxed atomic load when off).
+    crate::interpreter::dispatch_profile::record(expr);
+
     // Fast path: O(1) discriminant-based dispatch — avoids up to 4 sequential
     // full-enum matches when the previous cascade approach returned None.
     if let Some(result) = route_expr(expr, env, functions, classes, enums, impl_methods) {
