@@ -1,0 +1,89 @@
+# Vector outline tier: glyph command streams from font_vector_data,
+# rasterized at two sizes through the pure-Simple scanline rasterizer.
+# Ink must be nonzero, grow monotonically with size, and the ink box must
+# scale proportionally within integer rounding.
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{rasterize_vector}
+
+fn ink_count(pixels: [u8]) -> i32:
+    var n = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i].to_i32() > 0:
+            n = n + 1
+        i = i + 1
+    n
+
+# ink bounding box as [min_x, min_y, max_x, max_y, count] over a w-wide grid
+fn ink_bbox(pixels: [u8], w: i32, h: i32) -> [i32]:
+    var min_x = w
+    var min_y = h
+    var max_x = -1
+    var max_y = -1
+    var count = 0
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            if pixels[y * w + x].to_i32() > 0:
+                count = count + 1
+                if x < min_x: min_x = x
+                if y < min_y: min_y = y
+                if x > max_x: max_x = x
+                if y > max_y: max_y = y
+            x = x + 1
+        y = y + 1
+    [min_x, min_y, max_x, max_y, count]
+
+describe "vector font outline rasterization":
+    it "provides a non-empty command stream and positive width for 'A'":
+        val cmds = vf_glyph_commands(65)
+        assert_true(cmds.len() > 0)
+        assert_true(vf_glyph_width(65) > 0)
+
+    it "rasterizes 'A' at size 16 with nonzero ink inside the cell":
+        val cmds = vf_glyph_commands(65)
+        val g = rasterize_vector(cmds, 65, 16)
+        assert_true(g.width > 0)
+        assert_true(g.height > 0)
+        assert_true(g.advance > 0)
+        expect(g.pixels.len()).to_equal(g.width * g.height)
+        assert_true(ink_count(g.pixels) > 0)
+
+    it "grows ink and metrics monotonically from size 16 to 32":
+        val cmds = vf_glyph_commands(65)
+        val g16 = rasterize_vector(cmds, 65, 16)
+        val g32 = rasterize_vector(cmds, 65, 32)
+        assert_true(g32.width > g16.width)
+        assert_true(g32.height > g16.height)
+        assert_true(g32.advance > g16.advance)
+        assert_true(ink_count(g32.pixels) > ink_count(g16.pixels))
+
+    it "scales the ink box proportionally within integer rounding":
+        val cmds = vf_glyph_commands(65)
+        val g16 = rasterize_vector(cmds, 65, 16)
+        val g32 = rasterize_vector(cmds, 65, 32)
+        val bb16 = ink_bbox(g16.pixels, g16.width, g16.height)
+        val bb32 = ink_bbox(g32.pixels, g32.width, g32.height)
+        assert_true(bb16[4] > 0)
+        assert_true(bb32[4] > 0)
+        val w16 = bb16[2] - bb16[0] + 1
+        val h16 = bb16[3] - bb16[1] + 1
+        val w32 = bb32[2] - bb32[0] + 1
+        val h32 = bb32[3] - bb32[1] + 1
+        # 2x size: ink box within [1.5x, 2.5x] of the small box (rounding slack)
+        assert_true(w32 * 2 >= w16 * 3)
+        assert_true(w32 * 2 <= w16 * 5)
+        assert_true(h32 * 2 >= h16 * 3)
+        assert_true(h32 * 2 <= h16 * 5)
+
+    it "rasterizes a second glyph ('O') with interior hole ink pattern":
+        val cmds = vf_glyph_commands(79)
+        assert_true(cmds.len() > 0)
+        val g = rasterize_vector(cmds, 79, 24)
+        val bb = ink_bbox(g.pixels, g.width, g.height)
+        assert_true(bb[4] > 0)
+        # 'O' has a counter: fewer ink pixels than its full ink box area
+        val box_area = (bb[2] - bb[0] + 1) * (bb[3] - bb[1] + 1)
+        assert_true(bb[4] < box_area)

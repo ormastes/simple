@@ -1,0 +1,108 @@
+# Placement: rendering a string into an ARGB pixel buffer must put ink at
+# the expected location/size, accumulate per-glyph advances, scale with the
+# font size, paint nothing for an empty string, and clip out-of-bounds
+# placement without corrupting the buffer.
+use std.spec.*
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+
+fn zero_buffer(n: i32) -> [u32]:
+    var buf: [u32] = []
+    var i = 0
+    while i < n:
+        buf = buf.push(0)
+        i = i + 1
+    buf
+
+# ink bounding box as [min_x, min_y, max_x, max_y, count]
+fn ink_bbox(buf: [u32], w: i32, h: i32) -> [i32]:
+    var min_x = w
+    var min_y = h
+    var max_x = -1
+    var max_y = -1
+    var count = 0
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            if buf[y * w + x] != 0:
+                count = count + 1
+                if x < min_x: min_x = x
+                if y < min_y: min_y = y
+                if x > max_x: max_x = x
+                if y > max_y: max_y = y
+            x = x + 1
+        y = y + 1
+    [min_x, min_y, max_x, max_y, count]
+
+fn ink_in_x_range(buf: [u32], w: i32, h: i32, x0: i32, x1: i32) -> i32:
+    var count = 0
+    var y = 0
+    while y < h:
+        var x = x0
+        while x < x1:
+            if buf[y * w + x] != 0:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
+describe "font renderer text placement into a pixel buffer":
+    it "places 'AB' at (4,8) size 16 inside the expected two glyph cells":
+        val r = FontRenderer.bitmap_only()
+        var buf = zero_buffer(64 * 40)
+        buf = r.render_text(buf, 64, 40, 4, 8, "AB", 0xFFFFFFFF, 16)
+        val bb = ink_bbox(buf, 64, 40)
+        assert_true(bb[4] > 0)
+        # ink stays inside the two 8x16 cells starting at (4,8)
+        assert_true(bb[0] >= 4)
+        assert_true(bb[2] <= 4 + 16 - 1)
+        assert_true(bb[1] >= 8)
+        assert_true(bb[3] <= 8 + 16 - 1)
+        # advance accumulation: both glyph cells carry ink
+        assert_true(ink_in_x_range(buf, 64, 40, 4, 12) > 0)
+        assert_true(ink_in_x_range(buf, 64, 40, 12, 20) > 0)
+        # nothing left of x or right of the second cell
+        expect(ink_in_x_range(buf, 64, 40, 0, 4)).to_equal(0)
+        expect(ink_in_x_range(buf, 64, 40, 20, 64)).to_equal(0)
+
+    it "doubles the occupied box at 2x scale (size 32)":
+        val r = FontRenderer.bitmap_only()
+        var buf16 = zero_buffer(80 * 40)
+        buf16 = r.render_text(buf16, 80, 40, 0, 0, "AB", 0xFFFFFFFF, 16)
+        val bb16 = ink_bbox(buf16, 80, 40)
+        var buf32 = zero_buffer(80 * 40)
+        buf32 = r.render_text(buf32, 80, 40, 0, 0, "AB", 0xFFFFFFFF, 32)
+        val bb32 = ink_bbox(buf32, 80, 40)
+        assert_true(bb32[4] > 0)
+        # box position and size scale by 2 exactly (pixel doubling)
+        expect(bb32[0]).to_equal(bb16[0] * 2)
+        expect(bb32[1]).to_equal(bb16[1] * 2)
+        expect(bb32[2]).to_equal(bb16[2] * 2 + 1)
+        expect(bb32[3]).to_equal(bb16[3] * 2 + 1)
+        # second glyph advance doubled: ink present beyond x=16
+        assert_true(ink_in_x_range(buf32, 80, 40, 16, 32) > 0)
+
+    it "paints nothing for an empty string":
+        val r = FontRenderer.bitmap_only()
+        var buf = zero_buffer(32 * 32)
+        buf = r.render_text(buf, 32, 32, 5, 5, "", 0xFFFFFFFF, 16)
+        expect(ink_bbox(buf, 32, 32)[4]).to_equal(0)
+        expect(buf.len()).to_equal(32 * 32)
+
+    it "clips out-of-bounds placement instead of corrupting the buffer":
+        val r = FontRenderer.bitmap_only()
+        var buf = zero_buffer(32 * 32)
+        buf = r.render_text(buf, 32, 32, -100, -100, "A", 0xFFFFFFFF, 16)
+        buf = r.render_text(buf, 32, 32, 1000, 1000, "A", 0xFFFFFFFF, 16)
+        expect(buf.len()).to_equal(32 * 32)
+        expect(ink_bbox(buf, 32, 32)[4]).to_equal(0)
+
+    it "partially clips a glyph straddling the buffer edge":
+        val r = FontRenderer.bitmap_only()
+        var buf = zero_buffer(8 * 8)
+        buf = r.render_text(buf, 8, 8, 4, -8, "A", 0xFFFFFFFF, 16)
+        expect(buf.len()).to_equal(8 * 8)
+        val bb = ink_bbox(buf, 8, 8)
+        # any ink drawn must be within the visible region right of x=4
+        if bb[4] > 0:
+            assert_true(bb[0] >= 4)
