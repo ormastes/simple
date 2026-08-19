@@ -1,0 +1,130 @@
+# Executable gap ledger for the aspect-pack / facet dynload lane.
+#
+# Every remaining unimplemented item of
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# is declared HERE as an acceptance test, so the gap is executable rather than
+# only prose. Items that cannot run yet use `pending_skip(name, deps)` — the
+# framework's native pending mechanism — with `deps` naming the exact blocker.
+#
+# HOW TO CLOSE ONE: delete its `pending_skip(...)` line and write the `it`
+# block described in the ACCEPTANCE comment directly above it. The acceptance
+# criterion is already fixed here, so the implementer does not get to redefine
+# "done" after the fact.
+#
+# Blocker wording is taken verbatim from, and must not be re-derived from:
+#   doc/04_architecture/compiler/aspect_dynload/blocking_infrastructure_interfaces_2026-08-19.md
+#   doc/04_architecture/compiler/aspect_dynload/patchpoint_and_signing_prerequisites_2026-08-19.md
+#   doc/04_architecture/compiler/aspect_dynload/binding_plan_id_resolution_2026-08-19.md
+#   doc/04_architecture/compiler/aspect_dynload/aspect_pack_key_custody_2026-08-19.md
+#   doc/04_architecture/compiler/aspect_dynload/forbidden_io_diagnostic_scope_2026-08-19.md
+
+use std.nogc_sync_mut.atomic.{MemoryOrdering, atomic_i64_new}
+
+# -- inline pending helpers (cannot be imported: see src/lib/nogc_sync_mut/spec.spl
+#    "pending_on / pending_skip (inline-only due to runtime limitation)") --
+
+fn pending_skip(name: text, deps: text):
+    print "    it {name} ... pending (waiting on: {deps})"
+
+
+describe "aspect-pack lane gap ledger — compression and signing":
+
+    # ACCEPTANCE (design §12.2, zstd dictionary emission)
+    # Build one aspect pack twice from the SAME module set: once with a
+    # trained dictionary, once without. Then assert all three of:
+    #   1. the dictionary-compressed pack byte length is STRICTLY SMALLER
+    #      than the no-dictionary pack byte length (not equal, not "<=");
+    #   2. the compressed frame's Frame_Header_Descriptor has the
+    #      Dictionary_ID flag SET, and the recorded id equals the id of the
+    #      dictionary that was used;
+    #   3. the pack ROUND-TRIPS through the existing in-tree decoder —
+    #      every module loads byte-exactly, matching the payload that went in.
+    # (3) is what stops this being satisfied by emitting a smaller broken frame.
+    pending_skip("REQ-APK-P01 §12.2 a dictionary-compressed pack is strictly smaller and round-trips", "zstd compressed-block writer: src/lib/common/compress/zstd.spl:108 zstd_compress_frame emits only raw/RLE blocks, and _zstd_single_segment_fhd (zstd.spl:70) never sets the Dictionary_ID flag")
+
+    # ACCEPTANCE (E-APACK003 signature verification under a REAL trust root)
+    # NOT the fail-closed plumbing and NOT the disjoint content-hash codes —
+    # both already exist and are green; do not duplicate them. This is
+    # specifically the trust-root case, and needs all three verdicts:
+    #   1. a pack signed by the TRUSTED key verifies (ok, no diagnostic);
+    #   2. that same pack with ONE payload byte flipped is REFUSED;
+    #   3. a pack signed by an UNTRUSTED key is REFUSED — and refused with
+    #      E-APACK003 (bad signature / untrusted signer), NOT with the
+    #      content-hash code, so the two failure modes stay distinguishable.
+    pending_skip("REQ-APK-P02 E-APACK003 verifies under a real trust root and refuses flipped-byte and untrusted-key packs", "aspect-pack key custody: no trust root exists — no key generation, storage, distribution or rotation owner is defined (aspect_pack_key_custody_2026-08-19.md); the cryptographic primitive is not the blocker")
+
+
+describe "aspect-pack lane gap ledger — binding and language surface":
+
+    # ACCEPTANCE (design §11.1, binding_plan_id)
+    # A joinpoint route returned by the catalog carries a binding plan id,
+    # and that id RESOLVES: looking it up against the packaging output yields
+    # a binding plan record that packaging actually emitted. Both halves are
+    # required — an id that resolves to nothing is the current state dressed
+    # up. An unknown id must produce a clean typed miss, never a scan
+    # fallback, matching apk_catalog_route_v1's existing miss contract.
+    pending_skip("REQ-APK-P03 §11.1 a joinpoint route carries a binding plan id that resolves to an emitted plan record", "BLOCKED-ON-BINDING-IR: the design mentions binding_plan_id exactly once (line 963) with no defining sentence, so neither the id's contents nor the plan record's shape is specified (binding_plan_id_resolution_2026-08-19.md §4)")
+
+    # ACCEPTANCE (design §6.7, facet<T>() language surface)
+    #   1. `facet<T>()` written in Simple source COMPILES and resolves through
+    #      the Aspect Catalog to a loaded module — same (pack, module) target
+    #      the existing apk_catalog_route_v1 path reaches, reached via the
+    #      sugar rather than via a hand-written catalog call;
+    #   2. `try_facet<T>()` resolves WITHOUT I/O: on a miss it returns a typed
+    #      absent result and the loader's packs-opened / modules-decompressed
+    #      counters are UNCHANGED across the call (that counter delta is the
+    #      observable proof of "no I/O", not an inspection of the code).
+    pending_skip("REQ-APK-P04 §6.7 facet<T>() resolves through the catalog and try_facet<T>() resolves without I/O", "compiler frontend work: ZERO facet<T>() call sites exist anywhere in the tree — the sugar has no parser, resolver or lowering support yet")
+
+
+describe "aspect-pack lane gap ledger — runtime state machine and activation":
+
+    # ACCEPTANCE (design §14.2, late runtime-state-machine states)
+    # Drive a facet through the LATE states the slot substrate cannot yet
+    # reach and assert the transitions are observable via the existing
+    # apk_facet_state_v1 / apk_facet_refcount_v1 accessors: each late state is
+    # entered only from its designated predecessor, an illegal transition is
+    # REFUSED rather than silently ignored, and the terminal state leaves
+    # refcount at zero with apk_loader_unloads incremented exactly once.
+    pending_skip("REQ-APK-P05 §14.2 late runtime-state-machine states are entered, refused illegally, and terminate at refcount zero", "runtime loader: the slot substrate now exists (APK_FC_BOUND/QUIESCING/UNLOADED are live), but the late states have no runtime loader to drive them")
+
+    # ACCEPTANCE (design §14.6, activation future)
+    # Two concurrent activations of the same facet must produce exactly ONE
+    # winner: the loser observes the winner's result rather than activating
+    # again, so modules-decompressed increments exactly once. That mutual
+    # exclusion rests on a real compare-and-swap, whose semantics are pinned
+    # ACTIVELY below (REQ-APK-P06) — the CAS is no longer the blocker.
+    pending_skip("REQ-APK-P06b §14.6 concurrent activation of one facet decompresses exactly once", "runtime loader: the activation future needs the same runtime loader as §14.2; its CAS prerequisite is now satisfied and pinned by REQ-APK-P06 below")
+
+    # ACTIVE — not pending. The §14.6 activation future was blocked on there
+    # being no verified compare-and-swap. A real CAS now exists end to end:
+    # AtomicI64.compare_exchange (src/lib/nogc_sync_mut/atomic.spl:79) over
+    # rt_atomic_int_compare_exchange, backed by all three runtimes
+    # (src/runtime/runtime.c:1395, src/runtime/runtime_native.c:532,
+    # src/compiler_rust/runtime/src/value/sffi/atomic.rs:120). The
+    # nogc_async_mut/atomic.spl 13-line re-export shim is a facade over this
+    # same owner, not a stub. This test pins the semantics the activation
+    # future depends on: a matching CAS succeeds and publishes, a mismatching
+    # CAS fails and leaves the value untouched (no lost update).
+    it "REQ-APK-P06 §14.6 prerequisite: CAS succeeds on match and leaves the value untouched on mismatch":
+        val slot = atomic_i64_new(0)
+        val won = slot.compare_exchange(0, 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
+        expect(won).to_equal(true)
+        expect(slot.load(MemoryOrdering.SeqCst)).to_equal(1)
+        val lost = slot.compare_exchange(0, 2, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
+        expect(lost).to_equal(false)
+        expect(slot.load(MemoryOrdering.SeqCst)).to_equal(1)
+
+
+describe "aspect-pack lane gap ledger — performance targets":
+
+    # ACCEPTANCE (design §20 numeric perf targets)
+    # This gap is DIFFERENT IN KIND: it is in the DESIGN, not the code.
+    # §20.1-20.5 state no numeric acceptance target anywhere, so there is
+    # nothing a test could assert against and any number invented here would
+    # be fabricated. Once §20 states targets, this becomes: measure cold facet
+    # activation latency, warm route latency, and pack open cost, and assert
+    # each measured value is at or under the number §20 states — with the
+    # section and its stated number quoted in the failure message so a moved
+    # goalpost is visible in the diff.
+    pending_skip("REQ-APK-P07 §20 facet activation, route and pack-open costs meet the design's stated numeric targets", "design gap first: the design states NO numeric acceptance targets anywhere in §20.1-20.5, so §20 must state them before this test can assert anything")
