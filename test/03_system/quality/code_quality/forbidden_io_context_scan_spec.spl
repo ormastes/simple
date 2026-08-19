@@ -1,0 +1,58 @@
+# forbidden_io_context_scan_spec
+#
+# Verifies the forbidden-I/O context scan runs check_all_forbidden_io_fns for
+# real against source text under src/lib/nogc_async_mut_noalloc and
+# src/compiler/99.loader, and that a genuine E-APACK008 violation (a
+# real-time/interrupt/noalloc-tagged function directly calling a lazy facet
+# acquisition entry point) is caught end-to-end through the real driver
+# (scripts/audit/forbidden_io_context_scan.spl) — not merely through the
+# hand-built manifest forbidden_io_checker_spec.spl uses. This is the proof
+# that distinguishes "wired" from "inert": before this driver existed,
+# check_forbidden_io_violations / check_all_forbidden_io_fns
+# (src/compiler/35.semantics/forbidden_io_checker.spl) had zero production
+# callers.
+
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Direct-acquire fixture: an @interrupt-context function calling
+# apk_load_facet directly. Placed under NOALLOC_ROOT (one of
+# forbidden_io_context_scan.SCAN_ROOTS) since that root is where @noalloc /
+# @realtime / @interrupt annotations already live in this tree.
+val DIRECT_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_direct_probe_spec_fixture.spl"
+val DIRECT_PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\n@interrupt\nfn probe_forbidden_io_direct_spec_fixture() -> i64:\n    apk_load_facet(0, [], \"x\")\n    1\n"
+
+# Transitive-acquire fixture: a @noalloc-context function calling a
+# non-tagged helper that itself directly calls apk_load_aspect_manual.
+val TRANSITIVE_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_forbidden_io_transitive_probe_spec_fixture.spl"
+val TRANSITIVE_PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\nfn helper_acquires_directly_spec_fixture() -> i64:\n    apk_load_aspect_manual(0, [])\n    1\n\n@noalloc\nfn probe_forbidden_io_transitive_spec_fixture() -> i64:\n    helper_acquires_directly_spec_fixture()\n"
+
+describe "forbidden-io context scan":
+
+    it "reports a clean run when no forbidden-context I/O violation exists":
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        expect(result.2).to_equal(0)
+
+    it "catches a real direct-acquire violation (interrupt-context fn calling apk_load_facet) end-to-end":
+        file_write(DIRECT_PROBE_PATH, DIRECT_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(DIRECT_PROBE_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("E-APACK008")
+        expect(result.0).to_contain("direct-acquire")
+        expect(result.0).to_contain("probe_forbidden_io_direct_spec_fixture")
+        expect(result.0).to_contain("apk_load_facet")
+
+    it "catches a real transitive-acquire violation (@noalloc fn calling a helper that directly acquires) end-to-end":
+        file_write(TRANSITIVE_PROBE_PATH, TRANSITIVE_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/forbidden_io_context_scan.spl"])
+        file_delete(TRANSITIVE_PROBE_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("E-APACK008")
+        expect(result.0).to_contain("transitive-acquire")
+        expect(result.0).to_contain("probe_forbidden_io_transitive_spec_fixture")
+        expect(result.0).to_contain("apk_load_aspect_manual")

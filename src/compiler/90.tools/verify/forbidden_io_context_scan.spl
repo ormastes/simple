@@ -1,0 +1,196 @@
+# Forbidden-I/O context scan — populates a real ForbiddenIoContextManifest
+# from source text and runs it through
+# forbidden_io_checker.check_all_forbidden_io_fns for real.
+#
+# Companion to `noalloc_manifest_scan.spl` (same file, same shape, same
+# honesty tier — see that file's header for the reasoning this one reuses
+# verbatim). Before this file, `check_forbidden_io_violations` and
+# `check_all_forbidden_io_fns` (src/compiler/35.semantics/forbidden_io_checker.spl)
+# had ZERO production callers — only their own spec, which hand-builds a
+# `ForbiddenIoContextManifest` in-memory rather than deriving one from real
+# source. This is the first genuinely-reachable driver for
+# `check_all_forbidden_io_fns`.
+#
+# SCOPE (stated plainly, do not overclaim):
+#   - TEXT-based fact extraction, not an AST/HIR/MIR pass — same constraint
+#     `noalloc_manifest_scan.spl` states, unchanged here: no self-hosted
+#     Simple binary in this tree to drive a real parse.
+#   - Context tags (@realtime / @interrupt / @noalloc) are read directly off
+#     source annotations immediately preceding a `fn`/`me`/`static fn`
+#     declaration — the same "pending annotation" scan
+#     `noalloc_manifest_scan._` uses for `@noalloc`, extended to the other
+#     two tags design §19 folds into the same deny rule (see
+#     `forbidden_io_checker.spl`'s `ForbiddenIoFnEntry` docstring).
+#   - The call graph is real: every direct callee identifier reachable from
+#     each scanned function's body (name-token immediately followed by `(`),
+#     scoped to `SCAN_ROOTS` below.
+#   - SCAN_ROOTS is the loader-facing surface named by
+#     `forbidden_io_checker.spl`'s own header as where the acquisition entry
+#     points it tracks (`FORBIDDEN_IO_ACQUIRE_FNS`) are actually called from
+#     today: `src/lib/nogc_async_mut_noalloc` (where `@noalloc` contexts
+#     live) and `src/compiler/99.loader` (where `ModuleLoader.aspect_facet`
+#     wraps `apk_load_facet`). As the design doc's own gap note says, there
+#     are zero `facet<T>()` call sites anywhere in the tree yet, so a clean
+#     scan run today reporting 0 tagged fns (or 0 violations among any that
+#     exist) is an honest, expected result — not evidence the pass is inert;
+#     see `run_forbidden_io_context_scan`'s two distinctly-reported outcomes.
+
+use compiler.semantics.forbidden_io_checker.{
+    ForbiddenIoContextManifest, check_all_forbidden_io_fns, format_forbidden_io_violations
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val SCAN_ROOTS: [text] = ["src/lib/nogc_async_mut_noalloc", "src/compiler/99.loader"]
+
+struct ScannedIoFn:
+    """One function found by the text scan, with its raw context tags and
+    the direct callees found in its body (unfiltered — every callee, not
+    only acquisition entry points, so the checker can walk the real call
+    graph rather than a pre-filtered one)."""
+    name: text
+    is_realtime: bool
+    is_interrupt: bool
+    is_noalloc: bool
+    callees: [text]
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn _is_fn_decl(line: text) -> bool:
+    val t = line.trim()
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+fn _fn_name(line: text) -> text:
+    val t = line.trim()
+    var rest = t
+    if rest.starts_with("static fn "):
+        rest = rest[10:rest.len()]
+    else if rest.starts_with("fn "):
+        rest = rest[3:rest.len()]
+    else if rest.starts_with("me "):
+        rest = rest[3:rest.len()]
+    var idx = 0
+    while idx < rest.len() and rest[idx:idx + 1] != "(":
+        idx = idx + 1
+    rest[0:idx]
+
+fn _extract_callees(line: text) -> [text]:
+    var callees: [text] = []
+    var ident = ""
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_alpha or (is_digit and ident != ""):
+            ident = ident + ch
+        else:
+            if ch == "(" and ident != "":
+                callees.push(ident)
+            ident = ""
+        i = i + 1
+    callees
+
+fn scan_forbidden_io_functions() -> [ScannedIoFn]:
+    """Walk SCAN_ROOTS, recording every function together with whichever of
+    @realtime / @interrupt / @noalloc immediately precede its declaration
+    (order-independent, any subset, matching how `noalloc_manifest_scan`
+    reads a lone `@noalloc`)."""
+    var results: [ScannedIoFn] = []
+    for root in SCAN_ROOTS:
+        for path in dir_walk(root):
+            if not path.ends_with(".spl"):
+                continue
+            if path.ends_with("_spec.spl"):
+                continue
+            val content = file_read(path)
+            val lines = content.split("\n")
+            var i = 0
+            var pending_realtime = false
+            var pending_interrupt = false
+            var pending_noalloc = false
+            while i < lines.len():
+                val line = lines[i]
+                val trimmed = line.trim()
+                if trimmed.starts_with("@realtime"):
+                    pending_realtime = true
+                    i = i + 1
+                    continue
+                if trimmed.starts_with("@interrupt"):
+                    pending_interrupt = true
+                    i = i + 1
+                    continue
+                if trimmed.starts_with("@noalloc"):
+                    pending_noalloc = true
+                    i = i + 1
+                    continue
+                if _is_fn_decl(line):
+                    val is_realtime = pending_realtime
+                    val is_interrupt = pending_interrupt
+                    val is_noalloc = pending_noalloc
+                    pending_realtime = false
+                    pending_interrupt = false
+                    pending_noalloc = false
+                    val name = _fn_name(line)
+                    val header_indent = _indent_of(line)
+                    var callees: [text] = []
+                    var j = i + 1
+                    while j < lines.len():
+                        val body_line = lines[j]
+                        val body_trim = body_line.trim()
+                        if body_trim != "" and _indent_of(body_line) <= header_indent:
+                            break
+                        for callee in _extract_callees(body_line):
+                            callees.push(callee)
+                        j = j + 1
+                    results.push(ScannedIoFn(
+                        name: name,
+                        is_realtime: is_realtime,
+                        is_interrupt: is_interrupt,
+                        is_noalloc: is_noalloc,
+                        callees: callees
+                    ))
+                    i = j
+                    continue
+                pending_realtime = false
+                pending_interrupt = false
+                pending_noalloc = false
+                i = i + 1
+    results
+
+fn run_forbidden_io_context_scan() -> [text]:
+    """Build a real ForbiddenIoContextManifest from scanned source and check
+    it through the real checker. Returns formatted violation strings (empty
+    means clean or no tagged fns found at all — both reported distinctly by
+    `main`, same convention as `noalloc_manifest_scan`)."""
+    val scanned = scan_forbidden_io_functions()
+    val manifest = ForbiddenIoContextManifest.new()
+    for entry in scanned:
+        manifest.register(entry.name, entry.is_realtime, entry.is_interrupt, entry.is_noalloc)
+        manifest.set_callees(entry.name, entry.callees)
+
+    val violations = check_all_forbidden_io_fns(manifest)
+    format_forbidden_io_violations(violations)
+
+extern fn rt_exit(code: i64)
+
+fn main():
+    val scanned = scan_forbidden_io_functions()
+    var tagged_count = 0
+    for entry in scanned:
+        if entry.is_realtime or entry.is_interrupt or entry.is_noalloc:
+            tagged_count = tagged_count + 1
+    val messages = run_forbidden_io_context_scan()
+    if tagged_count == 0:
+        print "forbidden-io context scan: found 0 real-time/interrupt/noalloc-tagged functions under {SCAN_ROOTS}"
+        return
+    if messages.len() == 0:
+        print "forbidden-io context scan: {tagged_count} tagged fn(s) checked, 0 violations"
+        return
+    for message in messages:
+        print message
+    rt_exit(1)
