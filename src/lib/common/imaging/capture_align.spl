@@ -1,0 +1,83 @@
+# Capture Alignment — integer shift-alignment search for captured screenshots
+#
+# Aligns two same-size ARGB buffers by sweeping integer (dx, dy) offsets and
+# scoring each by matching-pixel count over the overlapping window. Used to
+# compensate window borders / scroll offsets in CDP or WM screenshots before
+# handing the buffers to the exact-diff engine.
+#
+# Pure functions, no IO.
+
+class ShiftAlignment:
+    """Best shift found by align_buffers.
+
+    dx/dy: offset applied to buffer `b` relative to `a` — pixel a[x, y] is
+    compared against b[x + dx, y + dy].
+    score: matching-pixel count at the best offset.
+    overlap: pixels compared at the best offset.
+    differing_pixels: overlap - score at the best offset.
+    """
+    dx: i32
+    dy: i32
+    score: i32
+    overlap: i32
+    differing_pixels: i32
+
+fn _shift_score(a: [u32], b: [u32], width: i32, height: i32, dx: i32, dy: i32) -> (i32, i32):
+    """(matching pixels, overlap size) comparing a[x,y] with b[x+dx, y+dy]."""
+    val x0 = if dx < 0: -dx else: 0
+    val x1 = if dx > 0: width - dx else: width
+    val y0 = if dy < 0: -dy else: 0
+    val y1 = if dy > 0: height - dy else: height
+    if x1 <= x0 or y1 <= y0:
+        return (0, 0)
+    var matches = 0
+    var y = y0
+    while y < y1:
+        val row_a = y * width
+        val row_b = (y + dy) * width + dx
+        var x = x0
+        while x < x1:
+            if a[row_a + x] == b[row_b + x]:
+                matches = matches + 1
+            x = x + 1
+        y = y + 1
+    (matches, (x1 - x0) * (y1 - y0))
+
+fn align_buffers(a: [u32], b: [u32], width: i32, height: i32, max_shift: i32) -> ShiftAlignment:
+    """Sweep integer offsets in [-max_shift, +max_shift]^2 and return the best.
+
+    Score is the matching-pixel count over the overlap window. Ties are broken
+    toward the smaller |dx| + |dy| (then smaller dy, then smaller dx), so an
+    unshifted pair always reports (0, 0).
+    """
+    var best_dx = 0
+    var best_dy = 0
+    var best_score = -1
+    var best_overlap = 0
+    var best_dist = 0
+    if width <= 0 or height <= 0 or a.len() != width * height or b.len() != width * height:
+        return ShiftAlignment(dx: 0, dy: 0, score: 0, overlap: 0, differing_pixels: 0)
+    val limit = if max_shift < 0: 0 else: max_shift
+    var dy = -limit
+    while dy <= limit:
+        var dx = -limit
+        while dx <= limit:
+            val (score, overlap) = _shift_score(a, b, width, height, dx, dy)
+            val adx = if dx < 0: -dx else: dx
+            val ady = if dy < 0: -dy else: dy
+            val dist = adx + ady
+            if score > best_score or (score == best_score and dist < best_dist):
+                best_score = score
+                best_overlap = overlap
+                best_dx = dx
+                best_dy = dy
+                best_dist = dist
+            dx = dx + 1
+        dy = dy + 1
+    ShiftAlignment(
+        dx: best_dx, dy: best_dy,
+        score: best_score, overlap: best_overlap,
+        differing_pixels: best_overlap - best_score)
+
+export ShiftAlignment
+export align_buffers

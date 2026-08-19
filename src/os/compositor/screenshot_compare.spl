@@ -16,6 +16,8 @@ class DiffRegion:
     y: i32
     width: i32
     height: i32
+    pixel_count: i32
+    max_channel_diff: i32
 
 fn _abs_i32(v: i32) -> i32:
     if v < 0: -v else: v
@@ -70,17 +72,102 @@ fn compare_with_profile(a: [u32], b: [u32], width: i32, height: i32, profile: To
 fn compare_per_channel(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> ComparisonResult:
     compare_pixel_buffers(a, b, width, height, threshold)
 
+fn _pixel_max_channel_diff(pa: u32, pb: u32) -> i32:
+    val ar = _channel_diff(pa, pb, 16)
+    val ag = _channel_diff(pa, pb, 8)
+    val ab = _channel_diff(pa, pb, 0)
+    val aa = _channel_diff(pa, pb, 24)
+    if ar > ag and ar > ab and ar > aa: ar elif ag > ab and ag > aa: ag elif ab > aa: ab else: aa
+
 fn find_diff_regions(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> [DiffRegion]:
-    []
+    """Connected-region (4-connectivity) bounding boxes over the diff mask.
+
+    A pixel is in the mask when its max per-channel delta exceeds `threshold`.
+    Each region carries its pixel count and the max channel delta inside it.
+    """
+    if width <= 0 or height <= 0:
+        return []
+    val total = width * height
+    if a.len() != total or b.len() != total:
+        return []
+    # Per-pixel diff mask (max channel delta, or -1 if not differing)
+    var mask: [i32] = []
+    var i = 0
+    while i < total:
+        val d = _pixel_max_channel_diff(a[i], b[i])
+        if d > threshold:
+            mask.push(d)
+        else:
+            mask.push(-1)
+        i = i + 1
+    var visited: [bool] = []
+    i = 0
+    while i < total:
+        visited.push(false)
+        i = i + 1
+    var regions: [DiffRegion] = []
+    var start = 0
+    while start < total:
+        if mask[start] >= 0 and not visited[start]:
+            # flood fill with explicit stack
+            var stack: [i32] = [start]
+            visited[start] = true
+            var min_x = start % width
+            var max_x = min_x
+            var min_y = start / width
+            var max_y = min_y
+            var count = 0
+            var max_delta = 0
+            while stack.len() > 0:
+                val idx = stack[stack.len() - 1]
+                stack.pop()
+                val px = idx % width
+                val py = idx / width
+                count = count + 1
+                if mask[idx] > max_delta: max_delta = mask[idx]
+                if px < min_x: min_x = px
+                if px > max_x: max_x = px
+                if py < min_y: min_y = py
+                if py > max_y: max_y = py
+                if px > 0 and mask[idx - 1] >= 0 and not visited[idx - 1]:
+                    visited[idx - 1] = true
+                    stack.push(idx - 1)
+                if px < width - 1 and mask[idx + 1] >= 0 and not visited[idx + 1]:
+                    visited[idx + 1] = true
+                    stack.push(idx + 1)
+                if py > 0 and mask[idx - width] >= 0 and not visited[idx - width]:
+                    visited[idx - width] = true
+                    stack.push(idx - width)
+                if py < height - 1 and mask[idx + width] >= 0 and not visited[idx + width]:
+                    visited[idx + width] = true
+                    stack.push(idx + width)
+            regions.push(DiffRegion(
+                x: min_x, y: min_y,
+                width: max_x - min_x + 1, height: max_y - min_y + 1,
+                pixel_count: count, max_channel_diff: max_delta))
+        start = start + 1
+    regions
 
 fn print_comparison_report(result: ComparisonResult):
-    ()
+    print "=== Screenshot Comparison ==="
+    print "Exact match:      {result.exact_match}"
+    print "Match percentage: {format_percentage(result.match_percentage)}%"
+    print "Different pixels: {result.different_pixels}"
+    print "Max channel diff: {result.max_channel_diff}"
+    print "Verdict:          {if result.passed: \"PASS\" else: \"FAIL\"}"
 
 fn print_channel_report(result: ComparisonResult):
-    ()
+    print "--- Channel Diff ---"
+    print "Max channel diff:   {result.max_channel_diff}"
+    print "Total channel diff: {result.total_channel_diff}"
+    print "Pixels over threshold: {result.different_pixels}"
 
 fn format_percentage(value: i32) -> text:
-    value.to_text()
+    """Format a basis-point match value (10000 == 100.00) as 'NN.NN'."""
+    val whole = value / 100
+    val frac = _abs_i32(value % 100)
+    val frac_text = if frac < 10: "0{frac}" else: "{frac}"
+    "{whole}.{frac_text}"
 
 fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
     if width <= 0 or height <= 0:
