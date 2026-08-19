@@ -1,9 +1,10 @@
 #!/bin/sh
-# Chrome<->Simple per-component IO differential driver (counter component).
+# Chrome<->Simple per-component IO differential driver (component SET).
 #
 #   sh tools/component_diff/run_component_diff.shs [--chrome <path>]
-#       [--width N] [--height N] [--component <name>]
+#       [--width N] [--height N] [--component <name>]     # default: ALL fixtures
 #
+# Per component: out/<name>/{chrome,simple}/ plus out/<name>/summary.txt.
 # Fail-closed: no chrome -> exit 4; a failed extraction or a differ that
 # compared nothing -> non-zero. Never reports a pass over 0 compared lines.
 set -e
@@ -12,15 +13,15 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 DIR="$ROOT/tools/component_diff"
 WIDTH=800
 HEIGHT=600
-COMPONENT=counter
+ONLY=
 CHROME="${COMPONENT_DIFF_CHROME:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --chrome)    CHROME="$2";    shift 2 ;;
-    --width)     WIDTH="$2";     shift 2 ;;
-    --height)    HEIGHT="$2";    shift 2 ;;
-    --component) COMPONENT="$2"; shift 2 ;;
+    --chrome)    CHROME="$2";  shift 2 ;;
+    --width)     WIDTH="$2";   shift 2 ;;
+    --height)    HEIGHT="$2";  shift 2 ;;
+    --component) ONLY="$2";    shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -41,36 +42,76 @@ if [ -z "$CHROME" ] || [ ! -x "$CHROME" ]; then
   exit 4
 fi
 
-FIXTURE="$DIR/fixtures/$COMPONENT.html"
-if [ ! -f "$FIXTURE" ]; then
-  echo "FATAL: fixture not found: $FIXTURE" >&2
-  exit 2
+# state count per component = interaction steps + 1 (must mirror
+# component_steps in simple_component_dump.spl and the fixtures' metas)
+states_of() {
+  case "$1" in
+    counter|checkbox|list) echo 3 ;;
+    button|text_input)     echo 2 ;;
+    table|float_text)      echo 1 ;;
+    *) echo 1 ;;
+  esac
+}
+
+if [ -n "$ONLY" ]; then
+  COMPONENTS="$ONLY"
+else
+  COMPONENTS=$(ls "$DIR/fixtures" | sed -n 's/\.html$//p')
 fi
+[ -n "$COMPONENTS" ] || { echo "FATAL: no fixtures found" >&2; exit 2; }
 
-rm -rf "$DIR/out"
-mkdir -p "$DIR/out/chrome" "$DIR/out/simple"
+FAILED=""
+RUN=0
+for COMPONENT in $COMPONENTS; do
+  FIXTURE="$DIR/fixtures/$COMPONENT.html"
+  if [ ! -f "$FIXTURE" ]; then
+    echo "FATAL: fixture not found: $FIXTURE" >&2
+    exit 2
+  fi
+  STATES=$(states_of "$COMPONENT")
+  LAST=$((STATES - 1))
+  OUT="$DIR/out/$COMPONENT"
+  rm -rf "$OUT"
+  mkdir -p "$OUT/chrome" "$OUT/simple"
 
-echo "== chrome extraction (real click IO path) =="
-node "$DIR/chrome_component_dump.js" --chrome "$CHROME" --out "$DIR/out/chrome" \
-     --width "$WIDTH" --height "$HEIGHT" "$FIXTURE"
+  echo "== [$COMPONENT] chrome extraction (real IO path) =="
+  node "$DIR/chrome_component_dump.js" --chrome "$CHROME" --out "$OUT/chrome" \
+       --width "$WIDTH" --height "$HEIGHT" "$FIXTURE"
 
-echo "== simple extraction (session event path) =="
-RAW="$DIR/out/simple/$COMPONENT.raw.txt"
-COMPONENT_HTML="$FIXTURE" COMPONENT_W="$WIDTH" COMPONENT_H="$HEIGHT" \
-  SIMPLE_MODULE_LIMIT=4000 timeout 900 "$ROOT/bin/simple" run \
-  "$DIR/simple_component_dump.spl" 2>/dev/null > "$RAW" || true
-if ! grep -q "COMPONENT_STATE_2_END" "$RAW"; then
-  echo "FAIL simple extraction: no complete state output" >&2
-  exit 5
-fi
-# Split states and IO evidence out of the raw stream.
-for k in 0 1 2; do
-  sed -n "/<<<COMPONENT_STATE_${k}_BEGIN>>>/,/<<<COMPONENT_STATE_${k}_END>>>/p" "$RAW" \
-    | grep -v "COMPONENT_STATE" | grep -v '^$' > "$DIR/out/simple/$COMPONENT.state$k.txt"
+  echo "== [$COMPONENT] simple extraction (session event path) =="
+  RAW="$OUT/simple/$COMPONENT.raw.txt"
+  COMPONENT_HTML="$FIXTURE" COMPONENT_NAME="$COMPONENT" \
+    COMPONENT_W="$WIDTH" COMPONENT_H="$HEIGHT" \
+    SIMPLE_MODULE_LIMIT=4000 timeout 900 "$ROOT/bin/simple" run \
+    "$DIR/simple_component_dump.spl" 2>/dev/null > "$RAW" || true
+  if ! grep -q "COMPONENT_STATE_${LAST}_END" "$RAW"; then
+    echo "FAIL [$COMPONENT] simple extraction: no complete state output" >&2
+    exit 5
+  fi
+  k=0
+  while [ $k -le $LAST ]; do
+    sed -n "/<<<COMPONENT_STATE_${k}_BEGIN>>>/,/<<<COMPONENT_STATE_${k}_END>>>/p" "$RAW" \
+      | grep -v "COMPONENT_STATE" | grep -v '^$' > "$OUT/simple/$COMPONENT.state$k.txt"
+    k=$((k + 1))
+  done
+  grep '^IO ' "$RAW" > "$OUT/simple/$COMPONENT.io.txt" || true
+
+  echo "== [$COMPONENT] diff (layout_text_diff) =="
+  if COMPONENT_OUT="$OUT" COMPONENT_NAME="$COMPONENT" COMPONENT_STATES="$STATES" \
+    SIMPLE_MODULE_LIMIT=4000 timeout 900 "$ROOT/bin/simple" run \
+    "$DIR/component_geom_diff.spl" 2>/dev/null; then
+    RUN=$((RUN + 1))
+  else
+    FAILED="$FAILED $COMPONENT"
+  fi
 done
-grep '^IO ' "$RAW" > "$DIR/out/simple/$COMPONENT.io.txt"
 
-echo "== diff (layout_text_diff) =="
-COMPONENT_OUT="$DIR/out" COMPONENT_NAME="$COMPONENT" COMPONENT_STATES=3 \
-  SIMPLE_MODULE_LIMIT=4000 timeout 900 "$ROOT/bin/simple" run \
-  "$DIR/component_geom_diff.spl" 2>/dev/null
+if [ -n "$FAILED" ]; then
+  echo "component-set verdict: FAIL —$FAILED"
+  exit 1
+fi
+if [ "$RUN" -eq 0 ]; then
+  echo "component-set verdict: ERROR — nothing was compared"
+  exit 3
+fi
+echo "component-set verdict: OK — $RUN component(s) compared"

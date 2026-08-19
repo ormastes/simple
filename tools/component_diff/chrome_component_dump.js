@@ -150,16 +150,36 @@ async function main() {
     const capture = async () => geometryText(await cdp.send('DOMSnapshot.captureSnapshot', {
       computedStyles: [], includeTextBoxes: false, includePaintOrder: false, includeDOMRects: false,
     }));
-    const displayText = async () => page.evaluate(
-      () => document.getElementById('display').textContent);
+
+    // Per-fixture interaction script, declared IN the fixture:
+    //   <meta name="component-actions" content="click:#id,fill:#id:value">
+    //   <meta name="component-observe" content="idOfObservedElement">
+    const meta = await page.evaluate(() => {
+      const g = (n) => {
+        const m = document.querySelector('meta[name="' + n + '"]');
+        return m ? m.getAttribute('content') || '' : '';
+      };
+      return { actions: g('component-actions'), observe: g('component-observe') };
+    });
+    const actions = meta.actions === '' ? [] : meta.actions.split(',');
+    const observeId = meta.observe;
+    const displayText = async () => observeId === '' ? '' : page.evaluate(
+      (id) => document.getElementById(id).textContent, observeId);
 
     const states = [];
     const displays = [];
     states.push(await capture()); displays.push(await displayText());
-    await page.click('#inc');            // REAL browser event path
-    states.push(await capture()); displays.push(await displayText());
-    await page.click('#dec');
-    states.push(await capture()); displays.push(await displayText());
+    for (const action of actions) {
+      const parts = action.split(':');
+      if (parts[0] === 'click') {
+        await page.click(parts[1]);                        // REAL browser event path
+      } else if (parts[0] === 'fill') {
+        await page.fill(parts[1], parts.slice(2).join(':')); // REAL input pipeline (fires input events)
+      } else {
+        console.error('FATAL: unknown action: ' + action); process.exit(6);
+      }
+      states.push(await capture()); displays.push(await displayText());
+    }
 
     for (let s = 0; s < states.length; s++) {
       fs.writeFileSync(path.join(args.outDir, base + '.state' + s + '.txt'), states[s]);
@@ -169,7 +189,7 @@ async function main() {
       viewport: { w: args.width, h: args.height }, displays,
     }, null, 1));
     if (!version.includes('Chrome/')) { console.error('FATAL: not a real chrome'); process.exit(5); }
-    console.log('OK ' + base + ' 3 states, displays: ' + JSON.stringify(displays));
+    console.log('OK ' + base + ' ' + states.length + ' states, displays: ' + JSON.stringify(displays));
   } finally {
     await browser.close();
   }

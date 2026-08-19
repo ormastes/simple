@@ -3,8 +3,40 @@
 Per-COMPONENT harness on top of the per-stage tools (`tools/layout_diff` et
 al.): one interactive widget fixture is loaded by both engines, its IO is
 driven through each engine's REAL event path, and the resulting box geometry
-is compared per interaction state as canonical text. First component:
-`fixtures/counter.html` (display + increment/decrement buttons).
+is compared per interaction state as canonical text.
+
+## Component set
+
+The driver iterates EVERY `fixtures/*.html` (or one via `--component`),
+writing per-component evidence to `out/<name>/{chrome,simple}/` plus
+`out/<name>/summary.txt`. Interactions are declared IN each fixture
+(`<meta name="component-actions" content="click:#id,fill:#id:value">`,
+`<meta name="component-observe" content="<idOfObservedElement>">`); the
+Simple side mirrors them per-component in `simple_component_dump.spl`
+(`component_step`/`component_steps`/`component_observe`) and the driver's
+`states_of` table must agree.
+
+| component | states | exercises |
+|---|---|---|
+| counter | 3 | click dispatch, set-text/set-attr, re-layout, roundtrip |
+| button | 2 | click default action, label mutation (hover deliberately skipped: the typed-route path has no hover pipeline) |
+| text_input | 2 | `input` event route, value attr, echo text, caret-area class widening |
+| checkbox | 3 | `input-checkbox-toggle` default action, checked attr toggle, roundtrip |
+| list | 3 | class-toggled `display:none` add/remove of an item → REFLOW of following siblings, roundtrip (the production applier has no append-child/remove-child action, recorded limitation) |
+| table | 1 | static 2x3 table layout — currently a REAL divergence, see bug below |
+| float_text | 1 | left float + wrapping text — currently a REAL divergence, see bug below |
+
+Two REAL layout defects (not pixel classes) surfaced by the set and filed:
+`doc/08_tracking/bug/browser_engine_table_layout_cells_stacked_vertically_2026-08-19.md`
+(td/tr laid out as stacked blocks) and
+`doc/08_tracking/bug/browser_engine_float_no_inline_wrap_beside_float_2026-08-19.md`
+(no line-box wrapping beside a float). Their full-divergence baselines are
+pinned fail-closed until fixed.
+
+Retention nuance: Chrome's DOMSnapshot layout tree OMITS `display:none`
+subtrees; Simple's engine produces a positioned 0x0 box for them, so the
+Simple extractor drops nodes whose computed `display` is `none` (ancestor
+walk) to match.
 
 Chrome under measurement: Google Chrome for Testing 151.0.7922.34, headless,
 viewport 800×600, `deviceScaleFactor: 1`, `--force-device-scale-factor=1`,
@@ -25,7 +57,7 @@ The Simple side goes through the engine's production event machinery:
 be_dom_dispatch_event_to_route` (capture/target/bubble phases; the dispatch
 must collect the fixture's REAL inline `onclick` source and yield the
 `button-activate` default action — both are recorded as `dispatch_*` keys in
-`out/summary.txt` and asserted by the spec). The DOM update is applied with
+`out/<name>/summary.txt` and asserted by the spec). The DOM update is applied with
 the production applier `script_host_apply_action_to_route`
 (`set-text:`/`set-attr:` listener actions).
 
@@ -68,7 +100,7 @@ One line per retained node, lexicographically sorted (order-insensitive):
 
 Differ: `component_geom_diff.spl` via the std debugging tool
 `layout_text_diff` (`src/lib/common/ui/layout_text_render.spl`); each state's
-diff is retained at `out/counter.stateK.diff.txt`.
+diff is retained at `out/counter/counter.stateK.diff.txt`.
 
 ## Measured baseline (counter, Chrome 151.0.7922.34)
 

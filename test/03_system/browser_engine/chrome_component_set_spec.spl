@@ -1,0 +1,226 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 62%
+#
+# Branch coverage, MEASURED (not estimated) on 2026-08-19 by running the
+# Simple extractor for ALL SEVEN components under the deployed seed with
+# SIMPLE_COVERAGE=1 / SIMPLE_COVERAGE_OUTPUT, unioning DecisionProbe rows by
+# decision id across runs, and counting each decision's true/false branches:
+#
+#   simple_web_html_layout_renderer_layout.spl        118/188 = 62%   (was 58% counter-only)
+#   simple_web_html_layout_renderer_core.spl          400/594 = 67%
+#   simple_web_html_layout_renderer_foundation.spl    233/302 = 77%
+#   simple_web_html_layout_renderer_decl_apply.spl    263/496 = 53%
+#   simple_web_html_layout_renderer_declarations.spl  146/240 = 60%
+#   simple_web_html_layout_renderer_style.spl          25/38  = 65%
+#   dom_accessors.spl                                  93/146 = 63%
+#   dom_identity_index.spl                             47/66  = 71%
+#   dom.spl                                             8/14  = 57%
+#   dom_api.spl                                         6/8   = 75%
+#   script/script_host.spl                             16/20  = 80%
+#   html_tree_builder.spl                             128/194 = 65%
+#   html_tokenizer.spl                                 87/120 = 72%
+#   simple_web_css_property_id.spl                     45/72  = 62%
+#   simple_web_css_box_effects.spl                     13/26  = 50%
+#   layout_m14_types.spl                                7/8   = 87%
+#   paint_primitives.spl                                1/2   = 50%
+#   ALL exercised browser_engine modules            1636/2534 = 64.6%   (was 1424/2310 = 61.6%)
+#
+# The >=80% goal is NOT met; the number is reported honestly. Remaining
+# uncovered branches (module:count): decl_apply:233, core:194,
+# declarations:94, layout:70, foundation:69, html_tree_builder:66,
+# dom_accessors:53, tokenizer:33, css_property_id:27, identity_index:19,
+# style:13, css_box_effects:13, dom:6, script_host:4, dom_api:2, m14:1,
+# paint_primitives:1. The largest blocks are declaration-application
+# branches for CSS properties these fixtures never set (decl_apply,
+# declarations) and the layout module's table/float code paths, which cannot
+# execute until the two REAL defects filed below are fixed — the table and
+# float fixtures reach the block-layout fallback instead of the table/float
+# branches. Closing to 80% needs those fixes plus fixtures exercising more
+# CSS properties, not a different oracle.
+"""
+# Chrome <-> Simple Component-Set IO Differential
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+Scales the phase-4 per-component harness from one counter widget to a
+component SET: button, text_input, checkbox, list (reflow), table, and
+float_text (float + line wrap). Each fixture is loaded by Chrome and by
+Simple's browser_engine; interactive components drive their IO through each
+engine's REAL event path; geometry is compared per state as canonical text.
+Audience: anyone changing browser_engine layout, dispatch, or DOM mutation.
+
+## Scope and Preconditions
+
+Requires Chrome/Chromium and node. Driver (all components):
+`sh tools/component_diff/run_component_diff.shs`. This spec gates on the
+per-component retained evidence `tools/component_diff/out/<name>/summary.txt`,
+fail-closed: missing/stale evidence or a fake chrome FAILS. The counter
+component keeps its own spec (`chrome_counter_component_spec.spl`).
+
+## Primary Workflow
+
+1. Run the driver; read each component's `out/<name>/summary.txt`.
+2. Assert non-vacuity (expected state count, >0 node lines compared).
+3. Interactive components: assert the dispatch evidence and display-text
+   agreement with Chrome's real JS; assert geometry changed / roundtrip.
+4. Pin each component's measured divergence fail-closed (shrink-only).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Component set | 7 fixtures; interactions declared in fixture metas, mirrored per component in simple_component_dump.spl |
+| Pixel divergence classes | body margin/height resolution, button text centering, text line height 17 vs 20 — same classes as counter |
+| REAL defects pinned | table: cells stacked vertically; float_text: no wrap beside float — see bug records |
+
+## Related Specifications
+
+- [Component IO differential contract](../../../tools/component_diff/CONTRACT.md)
+- [Counter component](chrome_counter_component_spec.spl)
+
+## Evidence and Provenance
+
+Measured against Google Chrome for Testing 151.0.7922.34, viewport 800x600,
+2026-08-19. Bug records:
+`doc/08_tracking/bug/browser_engine_table_layout_cells_stacked_vertically_2026-08-19.md`,
+`doc/08_tracking/bug/browser_engine_float_no_inline_wrap_beside_float_2026-08-19.md`.
+
+## Recovery and Troubleshooting
+
+`UNAVAILABLE: no chrome executable found` — pass `--chrome` or set
+`COMPONENT_DIFF_CHROME`. Stale evidence — re-run the driver.
+
+## Compatibility and Limitations
+
+Simple does not execute inline JS; each fixture's handler is mirrored by the
+extractor AFTER the real typed-route dispatch (stated gap, CONTRACT.md).
+The production applier has no append-child action, so the list component
+adds/removes its item via a class-toggled `display:none` (still a real
+reflow). Hover is deliberately not driven (no hover pipeline on this route).
+"""
+
+use std.spec.*
+use std.io_runtime.{shell_output, file_exists}
+
+val TOOL_DIR: text = "tools/component_diff"
+
+fn summary_path(component: text) -> text:
+    TOOL_DIR + "/out/" + component + "/summary.txt"
+
+fn summary_value(component: text, key: text) -> text:
+    shell_output(
+        "sed -n 's/^" + key + "=//p' " + summary_path(component) +
+        " | head -1 | tr -d '\\n'"
+    )
+
+fn summary_i64(component: text, key: text) -> i64:
+    val raw = summary_value(component, key)
+    if raw == "":
+        return -1
+    raw.to_i64()
+
+fn evidence_is_stale(component: text) -> bool:
+    if not file_exists(summary_path(component)):
+        return true
+    val newer = shell_output(
+        "find " + TOOL_DIR + "/fixtures/" + component + ".html " +
+        TOOL_DIR + "/simple_component_dump.spl " +
+        TOOL_DIR + "/chrome_component_dump.js " +
+        TOOL_DIR + "/component_geom_diff.spl " +
+        TOOL_DIR + "/run_component_diff.shs " +
+        "-newer " + summary_path(component) +
+        " 2>/dev/null | head -1 | tr -d '\\n'"
+    )
+    newer != ""
+
+# Shared fail-closed gate: fresh evidence, real chrome, expected states,
+# nonzero node lines, divergence pinned at the measured baseline.
+fn assert_component(component: text, states: i64, nodes: i64, pin_per_state: [i64]):
+    step("Evidence for " + component + " must exist and be fresh")
+    expect(evidence_is_stale(component)).to_equal(false)  # oracle: missing/stale FAILS; run sh tools/component_diff/run_component_diff.shs
+    step("A real Chrome must have produced the chrome side")
+    expect(summary_value(component, "chrome_version").contains("Chrome/")).to_equal(true)
+    step("All states compared over a nonzero node-line count")
+    expect(summary_i64(component, "states_compared")).to_equal(states)
+    expect(summary_i64(component, "nodes_compared")).to_equal(nodes)  # oracle: pin cannot be gamed by dropping nodes
+    step("Measured divergence baseline per state: shrink-only ratchet")
+    expect(summary_i64(component, "divergent_total") >= 0).to_equal(true)  # oracle: missing summary reads -1, FAILS
+    var k: i64 = 0
+    var total: i64 = 0
+    while k < states:
+        expect(summary_i64(component, "divergent_s" + k.to_string()) <= pin_per_state[k]).to_equal(true)
+        total = total + pin_per_state[k]
+        k = k + 1
+    expect(summary_i64(component, "divergent_total") <= total).to_equal(true)
+
+fn assert_io_roundtrip(component: text):
+    step("Interaction must CHANGE geometry in BOTH engines, then return EXACTLY to the initial state")
+    expect(summary_i64(component, "geometry_changed_chrome")).to_equal(1)
+    expect(summary_i64(component, "geometry_changed_simple")).to_equal(1)
+    expect(summary_i64(component, "roundtrip_chrome")).to_equal(1)
+    expect(summary_i64(component, "roundtrip_simple")).to_equal(1)
+
+describe "Chrome to Simple component-set IO differential":
+    it "button: click through the real event path relabels and re-layouts like Chrome":
+        assert_component("button", 2, 7, [6, 6])
+        step("Dispatch collected the fixture's REAL inline onclick and the button default action")
+        expect(summary_i64("button", "dispatch_btn_actions")).to_equal(1)
+        expect(summary_value("button", "dispatch_btn_inline_onclick")).to_equal("yes")
+        expect(summary_value("button", "dispatch_btn_default")).to_equal("button-activate")
+        step("Click must change geometry in both engines; label text must agree at both states")
+        expect(summary_i64("button", "geometry_changed_chrome")).to_equal(1)
+        expect(summary_i64("button", "geometry_changed_simple")).to_equal(1)
+        expect(summary_value("button", "display_s0_chrome")).to_equal("default")
+        expect(summary_value("button", "display_s1_chrome")).to_equal("clicked")
+        expect(summary_i64("button", "display_match")).to_equal(2)
+        expect(summary_i64("button", "display_total")).to_equal(2)
+
+    it "text_input: typing through the session input route echoes value and widens the caret area":
+        assert_component("text_input", 2, 7, [4, 4])
+        step("The input-event dispatch collected the fixture's REAL inline oninput")
+        expect(summary_i64("text_input", "dispatch_field_actions")).to_equal(1)
+        expect(summary_value("text_input", "dispatch_field_inline_onclick")).to_equal("yes")
+        step("Typing must change geometry (echo text + caret-area class) in both engines")
+        expect(summary_i64("text_input", "geometry_changed_chrome")).to_equal(1)
+        expect(summary_i64("text_input", "geometry_changed_simple")).to_equal(1)
+        step("Echoed value agrees with Chrome's real JS at both states")
+        expect(summary_value("text_input", "display_s0_chrome")).to_equal("empty")
+        expect(summary_value("text_input", "display_s1_chrome")).to_equal("hello")
+        expect(summary_i64("text_input", "display_match")).to_equal(2)
+        expect(summary_i64("text_input", "display_total")).to_equal(2)
+
+    it "checkbox: toggling exercises the input-checkbox-toggle default action and roundtrips":
+        assert_component("checkbox", 3, 6, [4, 4, 4])
+        step("Both clicks must yield the checkbox toggle default action and the REAL inline flip()")
+        expect(summary_i64("checkbox", "dispatch_cb_actions")).to_equal(1)
+        expect(summary_value("checkbox", "dispatch_cb_inline_onclick")).to_equal("yes")
+        expect(summary_value("checkbox", "dispatch_cb_default")).to_equal("input-checkbox-toggle")
+        assert_io_roundtrip("checkbox")
+        step("State text agrees with Chrome's real JS at every state")
+        expect(summary_value("checkbox", "display_s0_chrome")).to_equal("off")
+        expect(summary_value("checkbox", "display_s1_chrome")).to_equal("on")
+        expect(summary_value("checkbox", "display_s2_chrome")).to_equal("off")
+        expect(summary_i64("checkbox", "display_match")).to_equal(3)
+        expect(summary_i64("checkbox", "display_total")).to_equal(3)
+
+    it "list: adding and removing an item reflows following siblings and roundtrips":
+        assert_component("list", 3, 14, [20, 22, 20])
+        step("Both button dispatches collected the REAL inline show() and the button default action")
+        expect(summary_i64("list", "dispatch_add_actions")).to_equal(1)
+        expect(summary_value("list", "dispatch_add_inline_onclick")).to_equal("yes")
+        expect(summary_i64("list", "dispatch_rm_actions")).to_equal(1)
+        expect(summary_value("list", "dispatch_rm_default")).to_equal("button-activate")
+        assert_io_roundtrip("list")
+
+    it "table: static 2x3 table layout is compared and its REAL divergence is pinned":
+        # Simple stacks cells vertically — a REAL defect, filed:
+        # doc/08_tracking/bug/browser_engine_table_layout_cells_stacked_vertically_2026-08-19.md
+        # All 18 node pairs diverge today; the pin may only shrink as the fix lands.
+        assert_component("table", 1, 18, [36])
+
+    it "float_text: float plus wrapping text is compared and its REAL divergence is pinned":
+        # Simple pushes the paragraph fully below the float — a REAL defect, filed:
+        # doc/08_tracking/bug/browser_engine_float_no_inline_wrap_beside_float_2026-08-19.md
+        assert_component("float_text", 1, 8, [14])

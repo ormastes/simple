@@ -54,6 +54,12 @@ use std.io_runtime.{env_get, read_file}
 
 val DROP_TAGS: [text] = ["head", "meta", "style", "script", "title", "link", "base"]
 
+fn env_text_or(name: text, fallback: text) -> text:
+    val raw = "" + env_get(name)
+    if raw == "" or raw == "nil":
+        return fallback
+    raw
+
 fn env_i32(name: text, fallback: i32) -> i32:
     val raw = "" + env_get(name)
     if raw == "" or raw == "nil":
@@ -108,6 +114,12 @@ fn geometry_text(html: text, css_html: text, width: i32, height: i32) -> text:
         var a = i
         while a >= 0:
             if is_drop_tag(nodes[a].tag):
+                drop = true
+                break
+            # display:none subtrees have no layout object in Chrome's
+            # DOMSnapshot layout tree; mirror that here (the engine still
+            # produces a positioned 0x0 box for them).
+            if styles[a].display == "none":
                 drop = true
                 break
             a = nodes[a].parent
@@ -175,45 +187,46 @@ fn geometry_text(html: text, css_html: text, width: i32, height: i32) -> text:
         s = s + 1
     lines.join("\n") + "\n"
 
-# Apply the display text/attr update through the PRODUCTION applier
+# Apply one listener action through the PRODUCTION applier
 # (script_host_apply_action_to_route, non-default listener-action branch).
-fn apply_display_actions(
-    root: BeDomNode, index: DomIdentityIndex,
-    new_text: text, new_count: i64
+fn apply_to(
+    root: BeDomNode, index: DomIdentityIndex, author_id: text, action: text
 ) -> BeDomNode:
-    val route = match index.route_for_author_id("display"):
+    val route = match index.route_for_author_id(author_id):
         Some(value): value
         nil: return root
-    var next = script_host_apply_action_to_route(
-        root, index, route, "set-text:" + new_text, false
-    )
-    next = script_host_apply_action_to_route(
-        next, index, route, "set-attr:data-count=" + new_count.to_string(),
-        false
-    )
-    next
+    script_host_apply_action_to_route(root, index, route, action, false)
 
-# Click one button through the engine's typed-route event path, then apply
-# the counter model (the same arithmetic as the fixture's bump()/setCount()).
+# Dispatch one event through the engine's typed-route event path and print
+# the IO evidence (collected listener actions, default action, whether the
+# fixture's REAL inline handler source was collected).
+fn dispatch_route(
+    root: BeDomNode, index: DomIdentityIndex, target_id: text,
+    event_type: text, inline_marker: text
+) -> bool:
+    val route = match index.route_for_author_id(target_id):
+        Some(value): value
+        nil:
+            print "IO dispatch_" + target_id + "_actions=-1"
+            return false
+    val dispatch = be_dom_dispatch_event_to_route(
+        root, index, route, event_type, true, true, true
+    )
+    print "IO dispatch_" + target_id + "_actions=" + dispatch.actions.len().to_string()
+    print "IO dispatch_" + target_id + "_default=" + dispatch.default_action
+    var inline_seen = false
+    for action in dispatch.actions:
+        if action.contains(inline_marker):
+            inline_seen = true
+    print "IO dispatch_" + target_id + "_inline_onclick=" + (if inline_seen: "yes" else: "no")
+    true
+
+# Counter model, mirroring the fixture JS bump()/setCount() exactly.
 fn click_and_bump(
     root: BeDomNode, index: DomIdentityIndex, button_id: text, delta: i64
 ) -> BeDomNode:
-    val route = match index.route_for_author_id(button_id):
-        Some(value): value
-        nil:
-            print "IO dispatch_" + button_id + "_actions=-1"
-            return root
-    val dispatch = be_dom_dispatch_event_to_route(
-        root, index, route, "click", true, true, true
-    )
-    print "IO dispatch_" + button_id + "_actions=" + dispatch.actions.len().to_string()
-    print "IO dispatch_" + button_id + "_default=" + dispatch.default_action
-    var inline_seen = false
-    for action in dispatch.actions:
-        if action.contains("bump("):
-            inline_seen = true
-    print "IO dispatch_" + button_id + "_inline_onclick=" + (if inline_seen: "yes" else: "no")
-    # counter model, mirroring the fixture JS
+    if not dispatch_route(root, index, button_id, "click", "bump("):
+        return root
     val display_path = be_dom_find_path_to_id(root, "display")
     if display_path.len() == 0:
         return root
@@ -224,10 +237,11 @@ fn click_and_bump(
     while k < count:
         s = s + " #"
         k = k + 1
-    apply_display_actions(root, index, s, count)
+    var next = apply_to(root, index, "display", "set-text:" + s)
+    apply_to(next, index, "display", "set-attr:data-count=" + count.to_string())
 
-fn display_text_of(root: BeDomNode) -> text:
-    val path = be_dom_find_path_to_id(root, "display")
+fn text_of_id(root: BeDomNode, id: text) -> text:
+    val path = be_dom_find_path_to_id(root, id)
     if path.len() == 0:
         return ""
     be_dom_get_text_content(path[path.len() - 1])
@@ -237,17 +251,79 @@ fn print_state(k: i64, geom: text):
     print geom
     print "<<<COMPONENT_STATE_" + k.to_string() + "_END>>>"
 
+# Per-component interaction models. Each mirrors the fixture's own inline JS
+# exactly, applied AFTER the real typed-route dispatch (the JS-execution step
+# is the harness's one stated modelled link, see CONTRACT.md). Returns the
+# mutated root for interaction step `step` (0-based).
+fn component_step(
+    name: text, root: BeDomNode, index: DomIdentityIndex, step: i64
+) -> BeDomNode:
+    if name == "counter":
+        if step == 0:
+            return click_and_bump(root, index, "inc", 1)
+        return click_and_bump(root, index, "dec", -1)
+    if name == "button":
+        # press(): label text + data-state
+        dispatch_route(root, index, "btn", "click", "press(")
+        var next = apply_to(root, index, "label", "set-text:clicked")
+        return apply_to(next, index, "label", "set-attr:data-state=clicked")
+    if name == "text_input":
+        # fill '#field' with "hello": input event, value attr, echo, caret class
+        dispatch_route(root, index, "field", "input", "echoIt(")
+        var next = apply_to(root, index, "field", "set-attr:value=hello")
+        next = apply_to(next, index, "echo", "set-text:hello")
+        return apply_to(next, index, "caret", "add-class:active")
+    if name == "checkbox":
+        # flip(): checked toggles via the click default action; state text follows
+        dispatch_route(root, index, "cb", "click", "flip(")
+        if step == 0:
+            var next = apply_to(root, index, "cb", "set-attr:checked=checked")
+            return apply_to(next, index, "state", "set-text:on")
+        var next = apply_to(root, index, "cb", "remove-attr:checked")
+        return apply_to(next, index, "state", "set-text:off")
+    if name == "list":
+        # show(true/false): reveal/hide #extra via the .hidden class (reflow)
+        if step == 0:
+            dispatch_route(root, index, "add", "click", "show(")
+            return apply_to(root, index, "extra", "remove-class:hidden")
+        dispatch_route(root, index, "rm", "click", "show(")
+        return apply_to(root, index, "extra", "add-class:hidden")
+    print "ERROR: unknown interactive component: " + name
+    root
+
+# component -> (interaction step count, observed element id)
+fn component_steps(name: text) -> i64:
+    if name == "counter" or name == "checkbox" or name == "list":
+        return 2
+    if name == "button" or name == "text_input":
+        return 1
+    0
+
+fn component_observe(name: text) -> text:
+    if name == "counter":
+        return "display"
+    if name == "button":
+        return "label"
+    if name == "text_input":
+        return "echo"
+    if name == "checkbox":
+        return "state"
+    ""
+
 fn main() -> i64:
     val fixture = env_get("COMPONENT_HTML")
     if fixture == "":
         print "ERROR: COMPONENT_HTML not set"
         return 2
+    val name = env_text_or("COMPONENT_NAME", "counter")
     val width = env_i32("COMPONENT_W", 800)
     val height = env_i32("COMPONENT_H", 600)
     val html = read_file(fixture)
     if html == "":
         print "ERROR: empty or unreadable fixture: " + fixture
         return 2
+    val steps = component_steps(name)
+    val observe = component_observe(name)
 
     # State 0: layout of the pristine document.
     print_state(0, geometry_text(html, html, width, height))
@@ -264,13 +340,16 @@ fn main() -> i64:
         Err(reason):
             print "ERROR: identity index: " + reason
             return 3
-    print "IO display_0=" + display_text_of(root)
+    print "IO display_0=" + (if observe == "": "" else: text_of_id(root, observe))
 
-    root = click_and_bump(root, index, "inc", 1)
-    print "IO display_1=" + display_text_of(root)
-    print_state(1, geometry_text(be_dom_serialize_html(root), html, width, height))
-
-    root = click_and_bump(root, index, "dec", -1)
-    print "IO display_2=" + display_text_of(root)
-    print_state(2, geometry_text(be_dom_serialize_html(root), html, width, height))
+    var step: i64 = 0
+    while step < steps:
+        root = component_step(name, root, index, step)
+        print "IO display_" + (step + 1).to_string() + "=" +
+            (if observe == "": "" else: text_of_id(root, observe))
+        print_state(
+            step + 1,
+            geometry_text(be_dom_serialize_html(root), html, width, height)
+        )
+        step = step + 1
     0
