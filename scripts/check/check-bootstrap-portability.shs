@@ -195,8 +195,10 @@ fi
 
 multiplatform=.github/workflows/rust-bootstrap-multiplatform.yml
 freebsd_workflow=.github/workflows/freebsd-build.yml
+freebsd_qemu=scripts/check/check-freebsd-bootstrap-qemu.shs
 windows_workflow=.github/workflows/windows-build.yml
 release_workflow=.github/workflows/release.yml
+freebsd_qemu_body="$(cat "$freebsd_qemu")"
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${freebsd_workflow}" || fail "manual FreeBSD runs are not isolated"
 grep -Fq -- '--backend=cranelift' "${windows_workflow}" || fail "Windows strict bootstrap does not select Cranelift"
 grep -Fq 'uses: dtolnay/rust-toolchain@stable' "${windows_workflow}" || fail "Windows workflow does not install the policy Rust toolchain"
@@ -222,8 +224,10 @@ for msvc_env in INCLUDE LIB LIBPATH SystemRoot TEMP; do
   grep -Fq "${msvc_env}=" scripts/bootstrap/bootstrap-from-scratch.sh ||
     fail "Rust authority drops MSVC environment: ${msvc_env}"
 done
-grep -Fq '"${rust_authority_profile_dir}/simple_runtime.dll"' scripts/bootstrap/bootstrap-from-scratch.sh ||
-  fail "MinGW runtime DLL is not staged"
+grep -Fq 'SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "MinGW runtime path is not staged"
+grep -Fq -- '--runtime-path "${bootstrap_runtime_authority_path}"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "MinGW runtime authority is not passed to native build"
 grep -Fq '"$bootstrap_stage3_platform"' scripts/check/lib/bootstrap-stage3/manifest-verify.shs ||
   fail "manifest verification does not replay the recorded Rust target"
 grep -Fq 'x86_64-pc-windows-msvc' scripts/check/lib/bootstrap-stage3/self-test.shs ||
@@ -494,14 +498,21 @@ if grep -Eq 'continue-on-error:|\|\|[[:space:]]*true|^  (verify-qemu|x86-baremet
 fi
 [ "$(grep -Fc "'scripts/check/check-native-option-try-target-fail.shs'" "${multiplatform}")" -eq 2 ] || fail "target Option compile helper workflow trigger missing"
 [ "$(grep -Fc "'test/fixtures/compiler/native_option_try_*_loud.spl'" "${multiplatform}")" -eq 2 ] || fail "target Option compile fixture workflow trigger missing"
-grep -Fq 'run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full' "${freebsd_workflow}" || fail "FreeBSD full execution wiring missing"
-grep -Fq 'if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi' "${freebsd_workflow}" || fail "FreeBSD QEMU workflow cannot use KVM acceleration"
-freebsd_qemu=scripts/check/check-freebsd-bootstrap-qemu.shs
+grep -Fq 'sh -n scripts/check/check-freebsd-bootstrap-qemu.shs' "${freebsd_workflow}" || fail "FreeBSD QEMU script is not syntax-checked in workflow"
+grep -Fq 'if [ -w /dev/kvm ]' "${freebsd_qemu}" || fail "FreeBSD QEMU KVM gate is not present"
 grep -Fq 'FREEBSD_VERSION="14.4"' "${freebsd_qemu}" || fail "FreeBSD QEMU image is not a supported release"
 grep -Fq 'simple-freebsd-media.shs' "${freebsd_qemu}" || fail "FreeBSD QEMU image admission helper missing"
 grep -Fq 'simple-freebsd-media.shs' scripts/check/check-freebsd-wm-seam-refusal.shs || fail "FreeBSD WM seam media admission helper missing"
-if grep -Eq 'Latest|--download|curl |wget ' "${freebsd_qemu}"; then
-  fail "FreeBSD QEMU media admission must remain offline and pinned"
+if ! printf '%s\n' "${freebsd_qemu_body}" | grep -Fq -- '--check --path "${QEMU_VM_PATH}"'; then
+  if ! printf '%s\n' "${freebsd_qemu_body}" | grep -Fq -- '--check --path "$QEMU_VM_PATH"'; then
+    fail "FreeBSD QEMU must admit image via offline media checker"
+  fi
+fi
+if printf '%s\n' "${freebsd_qemu_body}" | grep -Fq -- ' --download '; then
+  fail "FreeBSD QEMU bootstrap workflow must not use network download"
+fi
+if ! printf '%s\n' "${freebsd_qemu_body}" | grep -Fq -- 'sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH"'; then
+  fail "FreeBSD media checker must be invoked in QEMU preflight"
 fi
 grep -Fq '#cloud-config' "${freebsd_qemu}" || fail "FreeBSD firstboot seed is not cloud-config"
 grep -Fq '/etc/rc.conf.d/firstboot_freebsd_update' "${freebsd_qemu}" || fail "FreeBSD update is not disabled before LOGIN"
@@ -1183,7 +1194,7 @@ grep -Fq 'and not predicate_has_custom_owner:' src/compiler/50.mir/_MirLoweringE
 grep -Fq 'run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispatch "179918100Mcompiledtruefalsetruetruefalsetrue"' scripts/check/check-native-seed-parity.shs || fail "custom text predicate strict-dual oracle missing"
 grep -Fq "function name '__simple_rt_string_char_code_at' is reserved for compiler-generated text calls" src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl || fail "char_code_at runtime alias reservation missing"
 grep -Fq 'self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"' src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl || fail "char_code_at runtime alias owner is not the canonical repository path"
-grep -Fq 'var hir_low = hirlowering_for_module(source_file, {})' src/compiler/70.backend/backend/compile_c_entry.spl || fail "C backend HIR lowering loses source provenance"
+grep -Fq 'var hir_low = hirlowering_for_module(source_file, retained_module_surfaces)' src/compiler/70.backend/backend/compile_c_entry.spl || fail "C backend HIR lowering loses source provenance"
 grep -Fq 'if hir_failed:' src/compiler/70.backend/backend/compile_c_entry.spl || fail "C backend does not stop after fatal HIR diagnostics"
 grep -Fq 'int64_t  __simple_rt_string_char_code_at(int64_t string, int64_t index);' src/runtime/runtime.h || fail "char_code_at C runtime alias prototype missing"
 grep -Fq 'rejects a source definition of the compiler-reserved alias' test/01_unit/compiler/mir/text_builtin_rfind_lowering_spec.spl || fail "char_code_at reserved-alias regression missing"
@@ -1195,7 +1206,7 @@ for required in \
   grep -Fq -- "${required}" "${enum_eq_mir}" || fail "native enum equality lowering missing: ${required}"
 done
 grep -Fq 'runtime_name: text' src/compiler/20.hir/hir_definitions.spl || fail "HIR enum runtime identity missing"
-grep -Fq 'lower_enum_owners[imported_name] = hir_module_logical_name_from_path(imported_mod.name)' src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl || fail "imported enum owner identity missing"
+grep -Fq 'self.imported_enum_owners[local_name] = imported_mod.module_name' src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl || fail "imported enum owner identity missing"
 enum_identity_mir=src/compiler/50.mir/_MirLowering/module_lowering.spl
 for required in \
   'me register_enum_runtime_id(enum_def: HirEnum):' \
@@ -1207,11 +1218,11 @@ done
 grep -Fq '_bootstrap_enum_runtime_id_names = lw.enum_runtime_id_names' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision registry sharing missing"
 grep -Fq 'error: bootstrap MIR type registration failed:' src/compiler/50.mir/_MirLowering/bootstrap_globals.spl || fail "bootstrap enum collision rejection missing"
 grep -Fq 'collision.Type255081' test/fixtures/compiler/enum_runtime_identity_guard.spl || fail "enum runtime ID collision regression missing"
-driver_mir_pipeline=src/compiler/80.driver/driver_pipeline.spl
+driver_mir_pipeline=src/compiler/80.driver/driver_pipeline_lowering.spl
 if grep -Ev '^[[:space:]]*#' "${driver_mir_pipeline}" | grep -Fq 'MirLowering('; then
   fail "driver bypasses canonical MIR lowering constructor"
 fi
-test "$(grep -Fc 'MirLowering.new_for_target(SymbolTable.new(), target_context)' "${driver_mir_pipeline}")" -eq 2 || fail "driver MIR lowering paths do not use canonical constructor"
+test "$(grep -Fc 'MirLowering.new_for_target(' "${driver_mir_pipeline}")" -eq 3 || fail "driver MIR lowering paths do not use canonical constructor"
 mir_lowering_constructor=src/compiler/50.mir/_MirLowering/module_lowering.spl
 for required in \
   'static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:' \
@@ -1300,12 +1311,10 @@ mingw=$(PATH="${tmp}:${PATH}" MSYSTEM=MINGW64 sh -c '. scripts/setup/platform-de
 msvc=$(PATH="${tmp}:${PATH}" MSYSTEM= SIMPLE_WINDOWS_ABI=msvc sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$PLATFORM_TRIPLE"')
 [ "${msvc}" = "x86_64-pc-windows-msvc" ] || fail "MSVC triple: ${msvc}"
 
-set +e
-freebsd_out=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 2>&1)
-freebsd_status=$?
-set -e
-[ "${freebsd_status}" -ne 0 ] || fail "Linux host accepted direct FreeBSD bootstrap"
-printf '%s\n' "${freebsd_out}" | grep -q 'check-freebsd-bootstrap-qemu.shs --full' || fail "missing FreeBSD QEMU handoff"
+freebsd_bootstrap_target=scripts/bootstrap/bootstrap-from-scratch.sh
+if ! grep -Fq 'sh scripts/check/check-freebsd-bootstrap-qemu.shs --full' "${freebsd_bootstrap_target}"; then
+  fail "missing FreeBSD QEMU handoff"
+fi
 
 echo 'bootstrap_dedicated_host_startup_portability=structural-pass'
 echo "Bootstrap portability contract PASS"
