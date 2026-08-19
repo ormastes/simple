@@ -1,0 +1,119 @@
+# Forbidden-I/O Context Checker Specification (E-APACK008, contextual half)
+#
+# Tests for `35.semantics/forbidden_io_checker.spl`. See that file's header
+# for the scope decision (contextual formulation only; temporal formulation
+# is a runtime concern, tested separately in
+# test/01_unit/lib/aspect_pack_forbidden_io_temporal_spec.spl) and
+# doc/04_architecture/compiler/aspect_dynload/forbidden_io_diagnostic_scope_2026-08-19.md.
+#
+# Analyses the loader-level acquisition entry points that exist today
+# (`apk_load_facet` et al. in `aspect_pack.spl`) since `facet<T>()` sugar
+# (design §6.7) has zero call sites in the tree yet.
+
+use compiler.semantics.forbidden_io_checker.{
+    ForbiddenIoContextManifest, ForbiddenIoViolationKind,
+    check_forbidden_io_violations, check_all_forbidden_io_fns,
+    format_forbidden_io_violation, format_forbidden_io_violations,
+    is_forbidden_io_acquire_fn
+}
+
+describe "forbidden-I/O acquisition entry point set":
+    it "recognizes the lazy loader-level acquisition functions":
+        expect(is_forbidden_io_acquire_fn("apk_load_facet")).to_equal(true)
+        expect(is_forbidden_io_acquire_fn("apk_load_aspect_manual")).to_equal(true)
+        expect(is_forbidden_io_acquire_fn("apk_activate_startup")).to_equal(true)
+        expect(is_forbidden_io_acquire_fn("_apk_acquire_facet")).to_equal(true)
+
+    it "does NOT flag apk_try_facet — its own contract states it never performs I/O":
+        expect(is_forbidden_io_acquire_fn("apk_try_facet")).to_equal(false)
+
+describe "check_forbidden_io_violations — direct call":
+    it "REJECTS: an interrupt-context function directly calling apk_load_facet":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["apk_load_facet"])
+        val violations = check_forbidden_io_violations("isr_tick", m)
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].kind).to_equal(ForbiddenIoViolationKind.DirectAcquire)
+
+    it "REJECTS: a @noalloc-context function directly calling apk_load_aspect_manual":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("noalloc_step", false, false, true)
+        m.set_callees("noalloc_step", ["apk_load_aspect_manual"])
+        expect(check_forbidden_io_violations("noalloc_step", m).len()).to_equal(1)
+
+    it "REJECTS: a real-time-context function directly calling apk_activate_startup":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("rt_loop", true, false, false)
+        m.set_callees("rt_loop", ["apk_activate_startup"])
+        expect(check_forbidden_io_violations("rt_loop", m).len()).to_equal(1)
+
+    it "PASSES: an interrupt-context function calling apk_try_facet (no I/O, legitimate)":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["apk_try_facet"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(0)
+
+    it "PASSES: an ordinary (untagged) function calling apk_load_facet — not a forbidden context at all":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("ordinary_startup_fn", false, false, false)
+        m.set_callees("ordinary_startup_fn", ["apk_load_facet"])
+        expect(check_forbidden_io_violations("ordinary_startup_fn", m).len()).to_equal(0)
+
+describe "check_forbidden_io_violations — transitive call":
+    it "REJECTS: an interrupt-context function reaching apk_load_facet through two hops":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["helper_a"])
+        m.set_callees("helper_a", ["helper_b"])
+        m.set_callees("helper_b", ["apk_load_facet"])
+        val violations = check_forbidden_io_violations("isr_tick", m)
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].kind).to_equal(ForbiddenIoViolationKind.TransitiveAcquire)
+
+    it "PASSES: an interrupt-context function whose transitive chain never reaches an acquisition fn":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["helper_a"])
+        m.set_callees("helper_a", ["helper_b"])
+        m.set_callees("helper_b", ["apk_try_facet"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(0)
+
+    it "does not hang on a call-graph cycle that never reaches an acquisition fn":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["helper_a"])
+        m.set_callees("helper_a", ["helper_b"])
+        m.set_callees("helper_b", ["helper_a"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(0)
+
+describe "check_all_forbidden_io_fns — bulk":
+    it "collects violations only from tagged functions, across a mixed manifest":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["apk_load_facet"])
+        m.register("plain_startup_fn", false, false, false)
+        m.set_callees("plain_startup_fn", ["apk_load_facet"])
+        m.register("rt_publisher", true, false, false)
+        m.set_callees("rt_publisher", ["apk_try_facet"])
+        val violations = check_all_forbidden_io_fns(m)
+        expect(violations.len()).to_equal(1)
+        expect(violations[0].fn_name).to_equal("isr_tick")
+
+describe "DEFECT-CLASS NEGATIVE — the check, not something else, is what rejects":
+    it "removing the context tag (is_interrupt/is_realtime/is_noalloc all false) makes the identical call \
+        graph PASS — proves the violations above come from the context tag + acquisition-fn match, not from \
+        some other coincidental property of the fixture":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("was_isr_tick", false, false, false)
+        m.set_callees("was_isr_tick", ["apk_load_facet"])
+        expect(check_forbidden_io_violations("was_isr_tick", m).len()).to_equal(0)
+
+describe "diagnostic formatting":
+    it "carries the E-APACK008 code":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["apk_load_facet"])
+        val messages = format_forbidden_io_violations(check_forbidden_io_violations("isr_tick", m))
+        expect(messages.len()).to_equal(1)
+        expect(messages[0].starts_with("error[E-APACK008]")).to_equal(true)

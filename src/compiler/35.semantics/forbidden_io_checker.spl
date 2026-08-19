@@ -1,0 +1,293 @@
+# Forbidden-I/O Context Checker (E-APACK008, contextual formulation)
+#
+# Compiler-owned semantic pass, structured as a close mirror of
+# `35.semantics/noalloc_checker.spl` (see that file's header) rather than a
+# new parallel mechanism -- it already models "context violations" on the
+# allocation axis; this pass models the same shape on the I/O axis.
+#
+# Scope decision (recorded, not re-litigated here -- see
+# `doc/04_architecture/compiler/aspect_dynload/forbidden_io_diagnostic_scope_2026-08-19.md`
+# §1): design §19 states E-APACK008 two non-identical ways:
+#   (a) TEMPORAL   -- `lazy_io_after_start: deny` (a runtime phase question)
+#   (b) CONTEXTUAL -- "no first-use disk I/O in real-time/interrupt/noalloc
+#                      contexts" (a static call-graph property)
+# THIS FILE implements ONLY (b). (a) is out of scope for this pass by
+# construction: whether a given call executes before or after "operational
+# state" is not decidable from the call graph alone (the scope doc's §3
+# makes this explicit -- the same function can run in both phases), so no
+# static pass can honestly emit an unconditional reject for it. (a) is
+# handled at runtime instead -- see `apk_loader_seal_operational_state` /
+# `apk_loader_is_operational_sealed` in `src/lib/common/aspect_pack.spl` and
+# the E-APACK008 check inside `_apk_acquire_facet`.
+#
+# Surface-level gap, stated rather than hidden: there are zero `facet<T>()`
+# call sites anywhere in the tree today -- the language sugar from design
+# §6.7 does not exist yet. This checker therefore analyses the LOADER-LEVEL
+# acquisition entry points that DO exist in `aspect_pack.spl`
+# (`FORBIDDEN_IO_ACQUIRE_FNS` below). When `facet<T>()` sugar lands, it will
+# desugar to one of these entry points (almost certainly `apk_load_facet`,
+# design's "may load" path) and this checker keeps working unchanged; a
+# sugar-level convenience wrapper (e.g. resolving the desugared callee name
+# automatically) awaits that landing -- design §6.7.
+
+# ============================================================================
+# Violation Kind
+# ============================================================================
+
+enum ForbiddenIoViolationKind:
+    """Classification of why a forbidden-I/O-context violation was found.
+
+    - DirectAcquire:     the context-tagged function calls a lazy facet
+                          acquisition entry point directly.
+    - TransitiveAcquire: the context-tagged function calls (through one or
+                          more intermediate functions) a lazy facet
+                          acquisition entry point.
+    """
+    DirectAcquire
+    TransitiveAcquire
+
+# ============================================================================
+# Violation
+# ============================================================================
+
+struct ForbiddenIoViolation:
+    """A single forbidden-I/O violation inside a real-time/interrupt/noalloc
+    context function.
+
+    Fields:
+        fn_name:  The context-tagged function where the violation was found.
+        kind:     DirectAcquire | TransitiveAcquire.
+        detail:   Human-readable description (callee name / chain).
+        line:     Source line number (0 when unavailable).
+    """
+    fn_name: text
+    kind: ForbiddenIoViolationKind
+    detail: text
+    line: i64
+
+# ============================================================================
+# I/O-Capable Acquisition Entry Points
+# ============================================================================
+
+# design §14.3: entry points that MAY perform first-use pack I/O (open a
+# pack, inflate a module frame) on a miss. `apk_try_facet` is deliberately
+# NOT in this list -- its own docstring in `aspect_pack.spl` states the
+# contract this checker relies on: "NEVER performs I/O. Returns an
+# already-bound facet or a clean miss." A checker that flagged
+# `apk_try_facet` would be flagging a call that provably cannot violate the
+# rule, which is exactly the kind of false positive the noalloc checker's
+# own `Unknown`-vs-`None` split was built to avoid on the allocation axis.
+val FORBIDDEN_IO_ACQUIRE_FNS: [text] = [
+    "apk_load_facet",
+    "apk_load_aspect_manual",
+    "apk_activate_startup",
+    "_apk_acquire_facet",
+    "_apk_acquire_facet_body",
+]
+
+fn is_forbidden_io_acquire_fn(callee: text) -> bool:
+    """True when `callee` is one of the loader-level entry points that can
+    perform first-use pack I/O on a miss."""
+    for f in FORBIDDEN_IO_ACQUIRE_FNS:
+        if callee == f:
+            return true
+    false
+
+# ============================================================================
+# Context Capability Manifest
+# ============================================================================
+
+struct ForbiddenIoFnEntry:
+    """Per-function forbidden-I/O-context record.
+
+    Fields:
+        name:          Fully-qualified function name.
+        is_realtime:    true when tagged as a real-time-deadline context.
+        is_interrupt:   true when tagged as an interrupt/ISR context.
+        is_noalloc:     true when annotated `@noalloc` (design §19 folds the
+                        noalloc context into the same deny rule as
+                        real-time/interrupt -- one manifest, three tags,
+                        because a function reachable from any one of them is
+                        equally forbidden from performing first-use I/O).
+    """
+    name: text
+    is_realtime: bool
+    is_interrupt: bool
+    is_noalloc: bool
+
+impl ForbiddenIoFnEntry:
+    fn is_forbidden_context() -> bool:
+        """True when this function is tagged with ANY of the three contexts
+        design §19 names -- real-time, interrupt, or noalloc."""
+        self.is_realtime or self.is_interrupt or self.is_noalloc
+
+class ForbiddenIoContextManifest:
+    """Registry of per-function context tags plus a caller-supplied call
+    graph (name -> direct callees), built once per compilation unit by the
+    driver -- same shape as `noalloc_checker.NoallocCapabilityManifest`."""
+    entries: [ForbiddenIoFnEntry]
+    index: {text: i64}
+    callees: {text: [text]}
+
+impl ForbiddenIoContextManifest:
+    static fn new() -> ForbiddenIoContextManifest:
+        """Create an empty manifest."""
+        ForbiddenIoContextManifest(entries: [], index: {}, callees: {})
+
+    me register(name: text, is_realtime: bool, is_interrupt: bool, is_noalloc: bool):
+        """Register a function's context tags."""
+        val idx = self.entries.len()
+        self.entries.push(ForbiddenIoFnEntry(
+            name: name, is_realtime: is_realtime, is_interrupt: is_interrupt, is_noalloc: is_noalloc
+        ))
+        self.index[name] = idx
+
+    me set_callees(name: text, callee_names: [text]):
+        """Record the direct-callee set for `name`, used for transitive
+        reachability from a context-tagged function to a forbidden I/O
+        acquisition entry point."""
+        self.callees[name] = callee_names
+
+    fn lookup(name: text) -> ForbiddenIoFnEntry:
+        """Look up a function's context tags. An unregistered name gets all
+        tags false -- untagged code is not a forbidden context by default;
+        it is the ABSENCE of a real-time/interrupt/noalloc tag, which is
+        real information here (unlike the noalloc checker's `Unknown`
+        callee case, there is no "this function's context is unknowable"
+        state -- context tags are assigned by the annotation/scheduler
+        surface that calls `register`, never inferred)."""
+        if self.index.has(name):
+            val idx = self.index[name]
+            return self.entries[idx]
+        ForbiddenIoFnEntry(name: name, is_realtime: false, is_interrupt: false, is_noalloc: false)
+
+    fn direct_callees(name: text) -> [text]:
+        if self.callees.has(name):
+            return self.callees[name]
+        []
+
+    fn get_context_fns() -> [text]:
+        """Return names of all functions tagged real-time/interrupt/noalloc."""
+        var result: [text] = []
+        for entry in self.entries:
+            if entry.is_forbidden_context():
+                result.push(entry.name)
+        result
+
+# ============================================================================
+# Checker -- Main Entry Point
+# ============================================================================
+
+fn _find_io_reachable_chain(manifest: ForbiddenIoContextManifest, callee: text, visited: [text], depth: i64) -> text:
+    """Depth-first search from `callee` for a path to a forbidden I/O
+    acquisition entry point. Returns the acquisition fn name if reachable,
+    "" if not. `visited` guards against a call-graph cycle looping forever
+    (mirrors design §21 E-APACK007's own cycle-guard discipline, applied
+    here to the STATIC call graph rather than a runtime activation stack).
+    `depth` is a hard bound (256) as a second, unconditional guard -- a
+    caller-supplied call graph is untrusted input to this checker, and a
+    malformed one (e.g. `visited` bypassed by an equal-but-differently-cased
+    name) must not hang the compiler."""
+    if depth > 256:
+        return ""
+    if is_forbidden_io_acquire_fn(callee):
+        return callee
+    for v in visited:
+        if v == callee:
+            return ""
+    var next_visited: [text] = []
+    for v in visited:
+        next_visited.push(v)
+    next_visited.push(callee)
+    for grandchild in manifest.direct_callees(callee):
+        val found = _find_io_reachable_chain(manifest, grandchild, next_visited, depth + 1)
+        if found != "":
+            return found
+    ""
+
+fn check_forbidden_io_violations(fn_name: text, manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
+    """Check a single real-time/interrupt/noalloc-tagged function for
+    forbidden-I/O-context violations (design §19 E-APACK008, contextual
+    formulation only -- see file header).
+
+    Rejects when `fn_name` can reach a forbidden I/O acquisition entry point
+    (`FORBIDDEN_IO_ACQUIRE_FNS`), directly or transitively, through the
+    caller-supplied call graph. Returns an empty list when `fn_name` is not
+    itself tagged as a forbidden context (nothing to check) or when no such
+    path exists.
+
+    sdoctest:
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["apk_load_facet"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(1)
+        val m2 = ForbiddenIoContextManifest.new()
+        m2.register("isr_tick", false, true, false)
+        m2.set_callees("isr_tick", ["apk_try_facet"])
+        expect(check_forbidden_io_violations("isr_tick", m2).len()).to_equal(0)
+    """
+    var violations: [ForbiddenIoViolation] = []
+    val entry = manifest.lookup(fn_name)
+    if not entry.is_forbidden_context():
+        return violations
+
+    for callee in manifest.direct_callees(fn_name):
+        if is_forbidden_io_acquire_fn(callee):
+            violations.push(ForbiddenIoViolation(
+                fn_name: fn_name,
+                kind: ForbiddenIoViolationKind.DirectAcquire,
+                detail: "call to lazy facet acquisition '{callee}' from a forbidden execution context",
+                line: 0
+            ))
+        else:
+            var visited: [text] = [fn_name]
+            val found = _find_io_reachable_chain(manifest, callee, visited, 0)
+            if found != "":
+                violations.push(ForbiddenIoViolation(
+                    fn_name: fn_name,
+                    kind: ForbiddenIoViolationKind.TransitiveAcquire,
+                    detail: "call to '{callee}' transitively reaches lazy facet acquisition '{found}' from a forbidden execution context",
+                    line: 0
+                ))
+
+    violations
+
+fn check_all_forbidden_io_fns(manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
+    """Check every real-time/interrupt/noalloc-tagged function in a
+    compilation unit. Returns all violations across all of them."""
+    var all_violations: [ForbiddenIoViolation] = []
+    for fn_name in manifest.get_context_fns():
+        for v in check_forbidden_io_violations(fn_name, manifest):
+            all_violations.push(v)
+    all_violations
+
+# ============================================================================
+# Formatting
+# ============================================================================
+
+fn format_forbidden_io_violation(v: ForbiddenIoViolation) -> text:
+    """Format a single violation as a compiler diagnostic string, carrying
+    the E-APACK008 code so it is greppable alongside the runtime-side error
+    code emitted by `_apk_acquire_facet`.
+
+    sdoctest:
+        val v = ForbiddenIoViolation(fn_name: "isr_tick", kind: ForbiddenIoViolationKind.DirectAcquire, detail: "call to lazy facet acquisition 'apk_load_facet' from a forbidden execution context", line: 7)
+        expect(format_forbidden_io_violation(v).starts_with("error[E-APACK008]")).to_equal(true)
+    """
+    var kind_label = "direct-acquire"
+    match v.kind:
+        ForbiddenIoViolationKind.DirectAcquire:
+            kind_label = "direct-acquire"
+        ForbiddenIoViolationKind.TransitiveAcquire:
+            kind_label = "transitive-acquire"
+
+    if v.line > 0:
+        return "error[E-APACK008]: in forbidden-context fn '{v.fn_name}' (line {v.line}): {kind_label} — {v.detail}"
+    "error[E-APACK008]: in forbidden-context fn '{v.fn_name}': {kind_label} — {v.detail}"
+
+fn format_forbidden_io_violations(violations: [ForbiddenIoViolation]) -> [text]:
+    """Format all violations as diagnostic strings."""
+    var messages: [text] = []
+    for v in violations:
+        messages.push(format_forbidden_io_violation(v))
+    messages

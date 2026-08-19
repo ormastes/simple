@@ -59,6 +59,9 @@ use std.common.string_core.{text_to_bytes, bytes_to_text}
 use std.common.compress.gzip.{gzip_crc32}
 use std.common.compress.deflate.{deflate_compress, deflate_decompress}
 
+use std.common.crypto.sha256.{sha256_u8_hex}
+use lib.common.crypto.ed25519.{pure_ed25519_verify}
+
 val APK_MAGIC_V1: text = "SMFAPK1\0"
 val APK_CATALOG_MAGIC_V1: text = "SMFACAT1"
 val APK_SCHEMA_V1: i64 = 1
@@ -1344,6 +1347,17 @@ var _pk_pool: [u8] = []
 var _stk_ld: [i64] = []
 var _stk_key: [text] = []
 
+# design §19 E-APACK008, temporal formulation (`lazy_io_after_start: deny`):
+# per-loader "operational state" seal. `false` until something calls
+# `apk_loader_seal_operational_state` — see that fn's docstring for the
+# SEAM this is meant to be driven from (scheduler/publication layer, not
+# this module). Nothing in-tree calls the setter yet (no scheduler/
+# publication component exists), so this gate is INERT BY CONSTRUCTION today
+# — it cannot fire until a caller wires the seam. It is still implemented now
+# (not deferred) so the wiring is a one-line call, not a design exercise, once
+# that owner exists.
+var _ld_operational_sealed: [bool] = []
+
 fn apk_loader_new() -> i64:
     """Create a loader with zeroed counters. Returns its handle."""
     val id = _ld_packs_opened.len()
@@ -1358,7 +1372,26 @@ fn apk_loader_new() -> i64:
     _ld_expected_core_layout = _ld_expected_core_layout.push("")
     _ld_profile = _ld_profile.push("")
     _ld_unloads = _ld_unloads.push(0)
+    _ld_operational_sealed = _ld_operational_sealed.push(false)
     id
+
+fn apk_loader_seal_operational_state(ld: i64):
+    """design §19 `lazy_io_after_start: deny` — SEAM: call this exactly once,
+    from the runtime/scheduler component that owns application publication,
+    right after it publishes the application (the same point
+    `forbidden_io_diagnostic_scope_2026-08-19.md` §3 names as the natural
+    site, immediately after `apk_activate_startup` succeeds). This module
+    cannot observe "operational state" itself — it only accepts the bit.
+    Irreversible: there is no unseal, matching the design's "fixed before
+    operational state" framing (a resealed loader would let a violation slip
+    through the gap)."""
+    _ld_operational_sealed[ld] = true
+
+fn apk_loader_is_operational_sealed(ld: i64) -> bool:
+    """True once `apk_loader_seal_operational_state` has been called for this
+    loader. Exposed so callers/specs can observe the flag without depending
+    on its error-path side effect."""
+    _ld_operational_sealed[ld]
 
 fn apk_loader_generation(ld: i64) -> i64:
     """design §5.7: the loader's activation epoch — the number of facets
@@ -1568,6 +1601,19 @@ fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -
     val cached = apk_try_facet(ld, facet_key)
     if cached.found:
         return cached
+    # design §19 E-APACK008 (temporal formulation): a MISS means this
+    # acquisition would perform first-use I/O (open a pack / inflate a
+    # frame). `facet<T>()` (lazy, `explicit == false`) is denied once the
+    # loader's operational state is sealed; `try_facet<T>()` already
+    # returned above without I/O, and `aspect.load` (`explicit == true`) is
+    # an explicit request the design does not fold into this deny rule (§19
+    # rule 3: "`try_facet<T>()` is permitted after startup; lazy-loading
+    # `facet<T>()` is not" — silent about explicit manual loads). See
+    # `apk_loader_seal_operational_state` for why this is inert until a
+    # scheduler/publication layer calls it.
+    if not explicit and _ld_operational_sealed[ld]:
+        _ld_last_error[ld] = "E-APACK008 attempted lazy I/O in forbidden execution context: operational state is sealed, cannot lazy-load {facet_key}"
+        return _apk_facet_error("E-APACK008", _ld_last_error[ld])
     if not apk_activation_stack_enter_v1(ld, facet_key):
         return _apk_facet_error("APK_ACTIVATION_CYCLE", _ld_last_error[ld])
     val result = _apk_acquire_facet_body(ld, catalog, facet_key, explicit)
@@ -1816,3 +1862,110 @@ fn apk_unload_facet_v1(ld: i64, facet_key: text) -> ApkUnloadResultV1:
     ApkUnloadResultV1(ok: true, error_code: "", error_message: "",
         facet_key: facet_key, quiescing: false, released: true,
         refcount: 0, generation: gen)
+
+# ---------------------------------------------------------------------------
+# §11.2 PackRef.content_hash / .index_hash + SignatureTable verification.
+#
+# Two DELIBERATELY SEPARATE checks, with DISJOINT error-code namespaces so a
+# hash-check pass can never be misread as a signature-check pass (or vice
+# versa):
+#
+#   1. CONTENT-HASH verification (apk_verify_content_hash_v1) — sha256 over
+#      the pack bytes, compared against PackRef.content_hash. This is
+#      INTEGRITY, not AUTHENTICITY: it detects corruption and accidental
+#      mismatch. It says nothing about who produced the bytes, because
+#      anyone can recompute a sha256 of anything they wrote.
+#
+#   2. SIGNATURE verification (apk_verify_signature_v1) — ed25519 over the
+#      pack bytes, checked against a caller-supplied trust-root public key.
+#      This is the only check that can speak to AUTHENTICITY, and only when
+#      the trust root reaches the verifier through a channel independent of
+#      the pack distribution itself (see
+#      doc/04_architecture/compiler/aspect_dynload/aspect_pack_key_custody_2026-08-19.md).
+#      A verifier with no configured trust root MUST NOT report a pass: this
+#      code fails closed to APK_SIGNATURE_NO_TRUST_ROOT /
+#      APK_SIGNATURE_CHECK_DISABLED rather than silently treating an
+#      unverifiable pack as accepted. There is no key material and no trust
+#      root shipped in this repo; policy defaults to disabled everywhere.
+
+struct ApkContentHashResultV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    computed_hash: text
+
+fn apk_compute_content_hash_v1(data: [u8]) -> text:
+    """PackRef.content_hash: sha256 hex digest of the whole pack byte stream."""
+    sha256_u8_hex(data)
+
+fn apk_verify_content_hash_v1(data: [u8], expected_hash: text) -> ApkContentHashResultV1:
+    """Verify pack bytes against a PackRef.content_hash (design §11.2).
+
+    Integrity only — corruption/mismatch detection, NOT a signature check.
+    `error_code` is always one of APK_CONTENT_HASH_* and is never shared with
+    any APK_SIGNATURE_* code."""
+    val computed = sha256_u8_hex(data)
+    if expected_hash == "":
+        return ApkContentHashResultV1(ok: false, error_code: "APK_CONTENT_HASH_MISSING",
+            error_message: "no content_hash was supplied to verify against",
+            computed_hash: computed)
+    if computed != expected_hash:
+        return ApkContentHashResultV1(ok: false, error_code: "APK_CONTENT_HASH_MISMATCH",
+            error_message: "pack content_hash mismatch: expected {expected_hash}, computed {computed}",
+            computed_hash: computed)
+    ApkContentHashResultV1(ok: true, error_code: "", error_message: "",
+        computed_hash: computed)
+
+struct ApkSignaturePolicyV1:
+    has_trust_root: bool
+    trust_root_pubkey: [u8]
+    require_signature: bool
+
+fn apk_signature_policy_disabled() -> ApkSignaturePolicyV1:
+    """Default policy everywhere in this repo: no trust root is configured,
+    so signature checking is DISABLED. This is the honest default until the
+    operational questions in
+    doc/04_architecture/compiler/aspect_dynload/aspect_pack_key_custody_2026-08-19.md
+    are answered — never silently upgraded to "signature absent -> pass"."""
+    ApkSignaturePolicyV1(has_trust_root: false, trust_root_pubkey: [], require_signature: false)
+
+fn apk_signature_policy_with_trust_root(trust_root_pubkey: [u8], require_signature: bool) -> ApkSignaturePolicyV1:
+    """Opt a caller into signature checking against an explicit trust-root
+    public key that reached them OUTSIDE the pack distribution channel. See
+    the key-custody doc for how that channel must be built before this is
+    used for anything but tests."""
+    ApkSignaturePolicyV1(has_trust_root: true, trust_root_pubkey: trust_root_pubkey,
+        require_signature: require_signature)
+
+struct ApkSignatureVerifyResultV1:
+    ok: bool
+    error_code: text
+    error_message: text
+
+fn apk_verify_signature_v1(data: [u8], signature: [u8], policy: ApkSignaturePolicyV1) -> ApkSignatureVerifyResultV1:
+    """Verify a pack's ed25519 signature (SignatureTable, design §11.2)
+    against `policy`. Fail-closed: a missing trust root REFUSES rather than
+    passing, including when the pack itself claims a signature.
+
+    error_code is always one of APK_SIGNATURE_* — disjoint from every
+    APK_CONTENT_HASH_* code, so the two checks can never be confused."""
+    if not policy.has_trust_root:
+        if signature.len() > 0:
+            return ApkSignatureVerifyResultV1(ok: false, error_code: "APK_SIGNATURE_NO_TRUST_ROOT",
+                error_message: "pack carries a signature but no trust root is configured; refusing rather than treating it as unsigned")
+        return ApkSignatureVerifyResultV1(ok: false, error_code: "APK_SIGNATURE_CHECK_DISABLED",
+            error_message: "no trust root configured; signature checking is disabled for this pack")
+    if signature.len() == 0:
+        if policy.require_signature:
+            return ApkSignatureVerifyResultV1(ok: false, error_code: "APK_SIGNATURE_REQUIRED_MISSING",
+                error_message: "policy requires a signature but the pack carries none")
+        return ApkSignatureVerifyResultV1(ok: false, error_code: "APK_SIGNATURE_CHECK_DISABLED",
+            error_message: "pack carries no signature; nothing to verify")
+    if signature.len() != 64:
+        return ApkSignatureVerifyResultV1(ok: false, error_code: "APK_SIGNATURE_MALFORMED",
+            error_message: "signature must be exactly 64 bytes (R || S), got {signature.len()}")
+    val valid = pure_ed25519_verify(public_key: policy.trust_root_pubkey, message: data, signature: signature)
+    if not valid:
+        return ApkSignatureVerifyResultV1(ok: false, error_code: "APK_SIGNATURE_INVALID",
+            error_message: "ed25519 signature does not verify against the configured trust root")
+    ApkSignatureVerifyResultV1(ok: true, error_code: "", error_message: "")

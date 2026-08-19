@@ -1,0 +1,94 @@
+# E-APACK008 (temporal formulation, `lazy_io_after_start: deny`) — reproduces
+# design §19's after-start deny rule at the loader level (design
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# §19), per the scope analysis
+# doc/04_architecture/compiler/aspect_dynload/forbidden_io_diagnostic_scope_2026-08-19.md.
+#
+# `apk_loader_seal_operational_state` is the SEAM a scheduler/publication
+# layer is meant to call once it publishes the application; nothing in-tree
+# calls it today (no such layer exists yet), so this spec drives the seam
+# directly, the way a future scheduler component would. It proves the check
+# is REAL (fires, rejects, and is not vacuously true) even though nothing
+# calls it in production yet.
+
+use std.common.aspect_pack.{
+    ApkModuleSourceV1, ApkCatalogEntryV1, apk_build_pack_v1, apk_build_catalog_v1,
+    apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_load_aspect_manual,
+    apk_try_facet, apk_loader_seal_operational_state, apk_loader_is_operational_sealed,
+    apk_loader_packs_opened
+}
+
+fn _module() -> [ApkModuleSourceV1]:
+    var out: [ApkModuleSourceV1] = []
+    out.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: [1u8, 2u8, 3u8]))
+    out
+
+fn _catalog_bytes() -> [u8]:
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk", module_id: "debug.core"))
+    apk_build_catalog_v1(entries).bytes
+
+describe "E-APACK008 temporal deny — apk_loader_seal_operational_state":
+    it "the flag starts unset and can be observed before sealing":
+        val ld = apk_loader_new()
+        expect(apk_loader_is_operational_sealed(ld)).to_equal(false)
+
+    it "sealing flips the observable flag":
+        val ld = apk_loader_new()
+        apk_loader_seal_operational_state(ld)
+        expect(apk_loader_is_operational_sealed(ld)).to_equal(true)
+
+    it "REJECTS a lazy facet<T>() acquisition (apk_load_facet) once sealed — violating call graph":
+        val pack = apk_build_pack_v1(_module())
+        val ld = apk_loader_new()
+        apk_loader_register_pack(ld, "aspect/obs.apk", pack.bytes)
+        apk_loader_seal_operational_state(ld)
+        val got = apk_load_facet(ld, _catalog_bytes(), "debug/Debuggable")
+        expect(got.ok).to_equal(false)
+        expect(got.error_code).to_equal("E-APACK008")
+        # fail-closed: the rejected acquisition must not have opened the pack
+        expect(apk_loader_packs_opened(ld)).to_equal(0)
+
+    it "PASSES the identical lazy acquisition BEFORE sealing — legitimate call graph":
+        val pack = apk_build_pack_v1(_module())
+        val ld = apk_loader_new()
+        apk_loader_register_pack(ld, "aspect/obs.apk", pack.bytes)
+        val got = apk_load_facet(ld, _catalog_bytes(), "debug/Debuggable")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(true)
+        expect(apk_loader_packs_opened(ld)).to_equal(1)
+
+    it "PASSES try_facet<T>() after sealing — design §19 rule 3 explicitly permits it (never performs I/O)":
+        val pack = apk_build_pack_v1(_module())
+        val ld = apk_loader_new()
+        apk_loader_register_pack(ld, "aspect/obs.apk", pack.bytes)
+        # already-bound BEFORE sealing, matching "aspects fixed before operational state"
+        val warm = apk_load_facet(ld, _catalog_bytes(), "debug/Debuggable")
+        expect(warm.ok).to_equal(true)
+        apk_loader_seal_operational_state(ld)
+        val got = apk_try_facet(ld, "debug/Debuggable")
+        expect(got.ok).to_equal(true)
+        expect(got.found).to_equal(true)
+        expect(got.error_code).to_equal("")
+
+    it "a repeat apk_load_facet after sealing still PASSES once already bound — cache hit needs no I/O":
+        val pack = apk_build_pack_v1(_module())
+        val ld = apk_loader_new()
+        apk_loader_register_pack(ld, "aspect/obs.apk", pack.bytes)
+        val warm = apk_load_facet(ld, _catalog_bytes(), "debug/Debuggable")
+        expect(warm.ok).to_equal(true)
+        apk_loader_seal_operational_state(ld)
+        val got = apk_load_facet(ld, _catalog_bytes(), "debug/Debuggable")
+        expect(got.ok).to_equal(true)
+        expect(got.error_code).to_equal("")
+
+    it "DEFECT-CLASS NEGATIVE: without the seal, the same call graph is NOT rejected — proves the check, not \
+        some unrelated failure, is what rejects the sealed case above (removing the check would make the \
+        sealed-case REJECT test above silently pass with ok:true instead of failing loudly)":
+        val pack = apk_build_pack_v1(_module())
+        val ld = apk_loader_new()
+        apk_loader_register_pack(ld, "aspect/obs.apk", pack.bytes)
+        # no seal call at all
+        val got = apk_load_facet(ld, _catalog_bytes(), "debug/Debuggable")
+        expect(got.ok).to_equal(true)
+        expect(got.error_code).to_equal("")
