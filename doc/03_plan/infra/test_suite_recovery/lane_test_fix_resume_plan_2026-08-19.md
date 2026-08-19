@@ -102,3 +102,71 @@ One agent was still resuming the `test/05_perf/browser` cluster (4 specs,
 extension method whose `impl` module the worker's graph never imports. It was
 instructed to judge each abandoned edit on evidence and revert what it cannot
 prove. Its work was NOT pushed — re-verify before trusting anything it left.
+
+---
+
+## 7. Session close addendum (final state at wrap-up)
+
+### What was VERIFIED vs merely BELIEVED
+
+**Verified** — reproduced with a quoted RED and GREEN `Results:` line, or by
+symbol-grep against `main@origin`:
+
+- Class field/method dispatch fix. `browser_engine` 520 → 96 failed,
+  `hardware` 165 → 118, measured *after* the binary-resolution fix so the
+  numbers reflect the binary actually under test.
+- Binary-resolution fix. `1147 passed, 615 failed` → `1589 passed, 222 failed`,
+  with an independent `SIMPLE_RUNTIME` control at `1594 passed` and a 6/6
+  regression spec.
+- Discovery O(n²) fix. Reindex 88 590 ms → 3 316 ms; `test/01_unit` 5 361 ms.
+- Seed dedupe. `cargo check --release --bin simple` → `Finished`, 0 errors.
+- All landed fixes present at `origin/main`, checked by **content**, not id.
+
+**NOT verified — treat as open questions:**
+
+- **A full-tree `bin/simple test test/` run has never completed in this
+  session.** The O(n²) fix makes it plausible; it is *unproven*. Do not claim a
+  suite-wide pass or failure count until one completes with a `Results:` line.
+- **The post-fix failure total for the repo is unknown.** Only `hardware`,
+  `browser_engine`, and one `app/ui` directory were re-measured on a correct
+  binary. Every other count in this repo's tracking docs predates the
+  binary-resolution fix and is suspect.
+- The `05_perf` "flake" verdict for `cli_dispatch_perf_spec` rests on a single
+  clean re-run; not established as genuinely load-induced.
+- `test/01_unit/browser_engine` was once observed hanging with no `Results:`
+  line under the fixed binary; a later run completed at `673 passed, 96 failed`.
+  The earlier hang was never explained.
+
+### Corrections made during the session (recorded so they are not re-litigated)
+
+1. Claimed the `ClassInstance` regression explained the bulk of failures —
+   **correct**.
+2. Retracted that claim after a taxonomy and a self-run both showed no
+   improvement — **the retraction was wrong**; both were directory-target runs
+   measuring the stale deployed binary.
+3. Re-confirmed the original claim once the binary-resolution defect was found.
+   The `268/118` figure first reported for `hardware`, which was briefly
+   dismissed as unreproducible, was right all along.
+
+Lesson for the next session: **check which binary a run actually spawned before
+trusting any A/B comparison.** `ps` during the run is sufficient.
+
+### In flight at close — NOT pushed, re-verify before trusting
+
+An agent resuming the `test/05_perf/browser` cluster was still running when the
+session closed. It left staged, unreported work in the lane worktree:
+
+- new: `doc/08_tracking/bug/browser_composition_revision_counters_never_increment_2026-08-19.md`
+- new: `doc/08_tracking/bug/rt_browser_renderer_externs_missing_in_rust_seed_2026-08-19.md`
+- new: `doc/08_tracking/bug/paren_tail_after_block_match_val_parsed_as_call_2026-08-18.md`
+- new spec: `test/01_unit/gpu/engine2d_invalidate_damage_mirror_spec.spl`
+- edits: `engine2d/{engine,backend_software}.spl`, `web/browser_session.spl`,
+  `os/hosted/hosted_browser_renderer_worker.spl`, two `05_perf/browser` specs
+
+**None of this was verified or pushed**, deliberately: the agent never reported
+a RED/GREEN pair. The last measurement I took of that cluster was
+`Results: 10 total, 0 passed, 10 failed`. Judge each edit on evidence and revert
+what cannot be proven — an unverified half-fix is worse than none. The two new
+bug-record titles suggest it found real defects (renderer externs missing from
+the Rust seed; composition revision counters never incrementing), but that is
+**inference from filenames, not a verified finding.**
