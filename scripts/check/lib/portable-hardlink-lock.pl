@@ -87,10 +87,11 @@ if ($command eq 'identity') {
 }
 
 if ($command eq 'owner-snapshot') {
-    @ARGV == 0 or fail_usage();
-    my $owner = getppid();
+    @ARGV <= 1 or fail_usage();
+    my $owner = shift(@ARGV) // getppid();
+    $owner =~ /\A[1-9][0-9]*\z/ or exit 1;
     my ($start, $pgid) = process_snapshot($owner);
-    defined($start) && getppid() == $owner or exit 1;
+    defined($start) or exit 1;
     print "pid=$owner\nstart_hex=$start\npgid=$pgid\n";
     exit 0;
 }

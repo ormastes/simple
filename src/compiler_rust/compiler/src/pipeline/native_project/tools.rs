@@ -422,7 +422,8 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     for source in runtime_inputs.iter().copied().filter(|input| input.ends_with(".c")) {
         let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
         let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-        let status = std::process::Command::new(&cc)
+        let mut compile_command = std::process::Command::new(&cc);
+        let status = compile_command
             .arg("-c")
             .arg("-Os")
             .arg("-ffunction-sections")
@@ -439,9 +440,48 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg(runtime_root.join(source))
             .arg("-o")
             .arg(&object)
-            .status()
-            .ok()?;
-        if !status.success() {
+            .output();
+        let compile_status = match status {
+            Ok(output) => output,
+            Err(error) => {
+                if native_project_rust_trace_enabled() {
+                    eprintln!(
+                        "[core-c-probe] compile command could not start source={source} object={}\n\
+                         [core-c-probe]   compiler={cc}\n\
+                         [core-c-probe]   build_dir={}\n\
+                         [core-c-probe]   command={:?}\n\
+                         [core-c-probe]   error={}",
+                        object.display(),
+                        build_dir.display(),
+                        compile_command,
+                        error,
+                    );
+                }
+                return None;
+            }
+        };
+
+        if !compile_status.status.success() {
+            if native_project_rust_trace_enabled() {
+                let stdout = String::from_utf8_lossy(&compile_status.stdout);
+                let stderr = String::from_utf8_lossy(&compile_status.stderr);
+                eprintln!(
+                    "[core-c-probe] compile failed source={source} object={}\n\
+                     [core-c-probe]   build_dir={}\n\
+                     [core-c-probe]   command={:?}\n\
+                     [core-c-probe]   status={}\n\
+                     [core-c-probe]   stdout={}\n\
+                     [core-c-probe]   stderr={}\n\
+                     [core-c-probe]   riscv_vector={}",
+                    object.display(),
+                    build_dir.display(),
+                    compile_command,
+                    compile_status.status,
+                    stdout.trim(),
+                    stderr.trim(),
+                    riscv_vector,
+                );
+            }
             if native_project_rust_trace_enabled() {
                 #[cfg(unix)]
                 let ino_now: u64 = {
@@ -486,10 +526,46 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         objects.push(object);
     }
 
-    let status = archive_create_command(&ar, &archive, &objects, false, false)
-        .status()
-        .ok()?;
-    if status.success() && has_nonempty_archive_payload(&archive) {
+    let mut archive_command = archive_create_command(&ar, &archive, &objects, false, false);
+    let status = archive_command.output();
+    if let Ok(output) = status {
+        if !output.status.success() || !has_nonempty_archive_payload(&archive) {
+            if native_project_rust_trace_enabled() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "[core-c-probe] archive create failed archive={}\n\
+                     [core-c-probe]   tool={}\n\
+                     [core-c-probe]   command= {:?}\n\
+                     [core-c-probe]   status={}\n\
+                     [core-c-probe]   stdout={}\n\
+                     [core-c-probe]   stderr={}\n\
+                     [core-c-probe]   objects={:?}",
+                    archive.display(),
+                    ar,
+                    archive_command,
+                    output.status,
+                    stdout.trim(),
+                    stderr.trim(),
+                    objects.iter().map(|o| o.display().to_string()).collect::<Vec<_>>()
+                );
+            }
+            return None;
+        }
+    } else {
+        if native_project_rust_trace_enabled() {
+            eprintln!(
+                "[core-c-probe] archive create command could not start archive={}\n\
+                 [core-c-probe]   tool={}\n\
+                 [core-c-probe]   command={:?}",
+                archive.display(),
+                ar,
+                archive_command
+            );
+        }
+        return None;
+    }
+    if has_nonempty_archive_payload(&archive) {
         std::fs::write(fingerprint_path, fingerprint).ok()?;
         Some(archive)
     } else {
