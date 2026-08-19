@@ -1,0 +1,67 @@
+# The test runner must spawn spec children with the RUNNING executable
+#
+# Regression guard for
+# doc/08_tracking/bug/directory_test_runs_spawn_deployed_bin_simple_not_binary_under_test_2026-08-19.md
+# — `find_simple_binary()` trusted `cli_get_args()[0]` as the running
+# executable. It is not: on the `run`/`test` paths argv[0] is the SCRIPT or the
+# target, never the binary, so the branch never fired and resolution fell
+# through to the literal `bin/simple` candidate. Every spec in a DIRECTORY run
+# was therefore executed by the DEPLOYED binary rather than the one under test,
+# which silently attributed another build's failures to the build being
+# measured.
+
+use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.sffi.cli.{cli_get_args}
+use std.io.{file_exists}
+
+describe "cli_get_args() does not report the executable — the defect's premise":
+    it "never yields a path that ends in /simple as argv[0]":
+        # This is the observation that invalidates the argv[0] branch. If this
+        # ever becomes false the branch starts working and this spec should be
+        # revisited — but it must never be the ONLY thing standing between a
+        # measurement and the wrong binary.
+        val args = cli_get_args()
+        if args.len() > 0:
+            assert_false(args[0].ends_with("/simple"))
+
+describe "find_simple_binary — reproducing case":
+    it "resolves to a real, existing executable, not an unresolvable literal":
+        val binary = find_simple_binary()
+        assert_true(binary != "")
+        # Pre-fix this returned the literal "bin/simple" even when the running
+        # binary lived elsewhere. The point of the assertion is that whatever
+        # comes back must actually exist on disk from the current working
+        # directory, so a spawn cannot silently fail or hit a stale build.
+        assert_true(file_exists(binary))
+
+    it "prefers the running executable over the deployed bin/simple path":
+        # On any host with /proc, resolution must land on the CANONICALISED
+        # self-exe path — an absolute path, never the literal link. Handing the
+        # link itself to the spawner made every child exit 125, because the
+        # children are launched via `timeout ... <binary> run <spec>` and
+        # /proc/self/exe there belongs to `timeout`.
+        if file_exists("/proc/self/exe"):
+            val resolved = find_simple_binary()
+            assert_true(resolved.starts_with("/"))
+            assert_false(resolved.contains("/proc/self/exe"))
+            assert_true(resolved.ends_with("/simple"))
+
+describe "defect class — self-exe resolution invariants":
+    it "returns a stable answer across repeated calls":
+        # `_cached_binary_path` memoizes the first answer; a first call that
+        # resolved wrongly poisons every later spawn in the process.
+        val first = find_simple_binary()
+        assert_equal(find_simple_binary(), first)
+        assert_equal(find_simple_binary(), first)
+
+    it "positive control: the self-exe link exists and is usable where /proc is present":
+        # Guards against the fix degenerating into a vacuous branch: if this
+        # control ever fails on Linux, the resolution above is falling through
+        # to the candidate list again.
+        if file_exists("/proc/version"):
+            assert_true(file_exists("/proc/self/exe"))
+
+    it "positive control: an obviously absent path is still reported absent":
+        # Proves file_exists is discriminating, so the assertions above are not
+        # trivially true.
+        assert_false(file_exists("/proc/self/definitely-not-an-exe-link"))

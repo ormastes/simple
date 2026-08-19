@@ -13,6 +13,11 @@ use std.io.{env_get}
 use std.sffi.cli.{cli_get_args}
 use std.string_core.{char_code}
 
+# std::fs::canonicalize — resolves a symlink chain in-process.
+# Declared locally, mirroring std.spec.engine_probe, which uses the same symbol
+# for the same /proc/self/exe resolution.
+extern fn rt_path_absolute(path: text) -> text
+
 fn _tp_get_temp_dir() -> text:
     val tmpdir = env_get("TMPDIR")
     if tmpdir != "" and tmpdir != nil:
@@ -122,6 +127,36 @@ fn find_simple_binary() -> text:
         if file_exists(env_path):
             _cached_binary_path = env_path
             return env_path
+
+    # argv[0] is NOT the executable on the paths that matter. Measured
+    # 2026-08-19: `simple run probe.spl extra1` reports
+    # cli_get_args() == ["probe.spl", "extra1"] — the SCRIPT, never the binary
+    # — and `simple test <dir>` is the same shape, so the branch above never
+    # fires. Resolution then fell through to the literal "bin/simple" candidate
+    # below, i.e. the DEPLOYED binary, so every spec in a directory run was
+    # executed by a build other than the one under test. Verified by `ps`
+    # during `/mnt/data/tmp/classfix/release/simple test test/01_unit/app/ui`:
+    #   timeout --kill-after=5s 120s bin/simple run .../color_spec.spl
+    # See doc/08_tracking/bug/
+    #   directory_test_runs_spawn_deployed_bin_simple_not_binary_under_test_2026-08-19.md
+    #
+    # The kernel's own answer for "which executable is this process" is the
+    # /proc self-exe link. It must be CANONICALISED here, in the parent, and
+    # never handed to the spawner verbatim: children are launched through
+    # `timeout ... <binary> run <spec>`, where /proc/self/exe belongs to
+    # `timeout`, so passing the literal link made every child exit 125.
+    # `rt_path_absolute` is std::fs::canonicalize — it resolves the symlink
+    # chain in-process — and this is the same resolution
+    # `std.spec.engine_probe.simple_binary()` already uses for the same reason.
+    # Checked before the candidate list so a stale deployed binary can never
+    # shadow the running one; an explicit SIMPLE_RUNTIME above still wins.
+    # Hosts without /proc (macOS, Windows) fall through unchanged.
+    for self_link in ["/proc/self/exe", "/proc/curproc/file"]:
+        if file_exists(self_link):
+            val resolved = rt_path_absolute(self_link) ?? ""
+            if resolved.len() > 0 and resolved != self_link and file_exists(resolved):
+                _cached_binary_path = resolved
+                return resolved
 
     # Fallback: try multiple known locations.
     val candidates = [

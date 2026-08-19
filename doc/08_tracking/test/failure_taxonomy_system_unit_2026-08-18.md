@@ -8,6 +8,18 @@ class-resolution-fix binary `/mnt/data/tmp/classfix/release/simple`
 
 Format mirrors `doc/08_tracking/test/failure_taxonomy_2026-08-18.md`.
 
+> **RETRACTED 2026-08-19 — section 0 and both `OBJECT_TYPE_ERASURE` rows are
+> measurement artifacts.** Every shard here was a DIRECTORY target, and a
+> directory run spawns one child per spec as literal `bin/simple run <spec>` —
+> the DEPLOYED pre-fix binary, not the class-fix binary named below. Proof, the
+> defect, and the fix:
+> `doc/08_tracking/bug/directory_test_runs_spawn_deployed_bin_simple_not_binary_under_test_2026-08-19.md`.
+> Run individually on the class-fix binary,
+> `test/01_unit/app/ui/ratatui_backend_spec.spl` is `24 total, 24 passed, 0
+> failed` and `test/03_system/coverage/coverage_core_spec.spl` is `26 total, 26
+> passed, 0 failed`. The counts below must be re-measured; the record is kept
+> unaltered for history.
+
 ## 0. HEADLINE — `object` type erasure is NOT fixed by the class-resolution fix
 
 The parent lane expected `OBJECT_TYPE_ERASURE` to be near zero under the fixed
