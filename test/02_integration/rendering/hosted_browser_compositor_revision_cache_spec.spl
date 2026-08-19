@@ -1,8 +1,9 @@
 use std.spec.{describe, it, expect}
 use std.common.web.browser_renderer_protocol.{
-    BrowserRendererMessage,
-    browser_renderer_decoder_feed,
-    browser_renderer_decoder_new,
+    BrowserRendererCapabilityMessage,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_capability_payload_message,
     browser_renderer_frame_decode
 }
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
@@ -12,9 +13,11 @@ use os.hosted.hosted_browser_renderer_worker.{
 
 fn decode_worker_frame(wire: text):
     browser_renderer_frame_decode(
-        browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(7), wire
-        ).message,
+        browser_renderer_capability_payload_message(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(7), wire
+            ).message
+        ),
         16,
         16
     )
@@ -22,17 +25,21 @@ fn decode_worker_frame(wire: text):
 describe "hosted browser compositor revision reuse":
     it "reuses an unchanged frame and renders a changed revision":
         var worker = HostedBrowserRendererWorkerSession.create(16, 16)
-        val initial = worker.handle(BrowserRendererMessage(
+        val initial = worker.handle(BrowserRendererCapabilityMessage(
             kind: "init",
             generation: 7,
             request_id: 2,
+            root_command_request_id: 2,
+            command_capability: "11111111111111111111111111111111",
             payload: "<main style='width:16px;height:16px;background:#2563eb'></main>"
         ))
-        val unchanged = worker.handle(BrowserRendererMessage(
+        val unchanged = worker.handle(BrowserRendererCapabilityMessage(
             kind: "advance",
             generation: 7,
             request_id: 3,
-            payload: "16"
+            root_command_request_id: 3,
+            command_capability: "22222222222222222222222222222222",
+            payload: "A1\t16"
         ))
         val initial_frame = decode_worker_frame(initial.wire)
         val unchanged_frame = decode_worker_frame(unchanged.wire)
@@ -57,11 +64,13 @@ describe "hosted browser compositor revision reuse":
         expect(worker.browser.eval_script(
             "document.body.innerHTML = '<main style=\"width:16px;height:16px;background:#dc2626\"></main>'"
         ).is_ok()).to_equal(true)
-        val changed = worker.handle(BrowserRendererMessage(
+        val changed = worker.handle(BrowserRendererCapabilityMessage(
             kind: "advance",
             generation: 7,
             request_id: 4,
-            payload: "32"
+            root_command_request_id: 4,
+            command_capability: "33333333333333333333333333333333",
+            payload: "A1\t32"
         ))
         val changed_frame = decode_worker_frame(changed.wire)
         expect(changed_frame.composition_revision).to_be_greater_than(

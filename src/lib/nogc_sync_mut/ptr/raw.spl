@@ -10,7 +10,7 @@ pub extern fn rt_free(ptr: i64)
 pub extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
 pub extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 pub extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
-pub extern fn rt_write_u32s_to_raw_checksum(addr: i64, values: [u32], count: i64) -> i64
+pub extern fn rt_write_u32s_to_raw(addr: i64, values: [u32]) -> i64
 pub extern fn rt_write_fill_u32s_to_raw_checksum(addr: i64, values: [u32], count: i64, expected: i64) -> i64
 pub extern fn f32_from_bits(bits: u32) -> f32
 pub extern fn spl_f64_to_bits(value: f64) -> i64
@@ -29,13 +29,33 @@ pub fn raw_write_i64(addr: i64, offset: i64, value: i64):
     rt_ptr_write_i64(addr, offset, value)
 
 pub fn raw_write_u32s_checksum(addr: i64, values: [u32], count: i64) -> i64:
-    rt_write_u32s_to_raw_checksum(addr, values, count)
+    # Copy via the runtime-backed bulk write, then compute the wire checksum
+    # here. The interpreter's extern dispatcher backs rt_write_u32s_to_raw but
+    # not rt_write_u32s_to_raw_checksum, so the fused extern died with
+    # "unknown extern function" under interpretation (2026-08-19).
+    if addr == 0 or count < 0 or count > values.len().to_i64():
+        return 0
+    var vals = values
+    if count < values.len().to_i64():
+        var trimmed: [u32] = []
+        var i = 0
+        while i.to_i64() < count:
+            trimmed.push(values[i])
+            i = i + 1
+        vals = trimmed
+    rt_write_u32s_to_raw(addr, vals)
+    var checksum: i64 = 0
+    var j = 0
+    while j.to_i64() < count:
+        checksum = (checksum + (vals[j] & 0x7fffffffu32).to_i64()) % 2147483647
+        j = j + 1
+    if checksum == 0: 1 else: checksum
 
 pub fn raw_write_fill_u32s_checksum(addr: i64, values: [u32], count: i64, expected: u32) -> i64:
     rt_write_fill_u32s_to_raw_checksum(addr, values, count, expected.to_i64())
 
 export rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_read_i32, rt_ptr_write_i64
-export rt_write_u32s_to_raw_checksum, f32_from_bits, spl_f64_to_bits, spl_bits_to_f64
+export rt_write_u32s_to_raw, f32_from_bits, spl_f64_to_bits, spl_bits_to_f64
 export rt_write_fill_u32s_to_raw_checksum
 export raw_alloc, raw_free, raw_read_i32, raw_write_i64, raw_write_u32s_checksum
 export raw_write_fill_u32s_checksum
