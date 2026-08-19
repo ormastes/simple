@@ -164,3 +164,119 @@ the cheap path — not that it is fast. aspect_pack is additionally in-memory on
 2. W3 (`rt_call_ptr_0`) — turns the red positive control green honestly.
 3. W4 (stop exporting the fabricating mapper) — a correctness trap for consumers.
 4. Then wiring (gap #1 above), then W6 measurement against §20.
+
+## Update 2 (2026-08-19, later) — W-items closed, and what the work actually found
+
+Binary redeployed TWICE this session: 59645008 (2026-08-18 10:12:23) ->
+59695432 (00:53:46) -> 59701088 (01:32:05). Both old binaries backed up beside
+the deployed path. Every verdict below is stamped against 59701088 unless said
+otherwise.
+
+### W-item status
+
+| item | status |
+|---|---|
+| W1 W^X (RWX mapping) | **DONE** — maps RW, mprotect RX after write |
+| W2 byte-at-a-time write | **DONE, and it inverted twice** — see below |
+| W3 mapped code cannot execute | **DONE** — `rt_call_ptr_0`; positive control 8/8, returns 11/22/33 from real mapped code |
+| W4 fabricating exported mapper | **DONE** — delegates to the real mapper; 6/6 + 2/2 |
+| W5 "82 .spl opens" anchor | **RESOLVED as a scope mismatch, not a contradiction** — the 0-opens trace was an import-free program; stdlib loading is lazy, so opens scale with imports. The universal phrasing is what was wrong |
+| W6 §20 never measured | **MEASURED** — and §20 states NO numeric targets anywhere, so there is nothing to measure against. None were invented |
+
+### W2 is the cautionary tale of this lane
+
+The claim "one mapping per SEGMENT beats one per SYMBOL" went: unproven ->
+apparently an 11.5x REGRESSION -> finally a 48-164x WIN. Sequence:
+1. Per-byte `rt_ptr_write_u8` loop: ~250 MB/s.
+2. Bulk `[u8]` extern: **6.6-11.5x SLOWER** (1 MiB: 5.00ms -> 57.4ms). Shipped by
+   an agent WITH the measurement recorded; reverted here.
+3. All-i64 (`rt_array_data_ptr` + `rt_ptr_write_bytes_raw`): **12.7-41.4 GB/s**,
+   48-164x over the loop.
+The first attribution ("a no-op extern costs 60ns, so marshalling is free") was
+WRONG: `Value::Array` is Arc-wrapped so cloning is O(1); the real cost was the
+JIT->interpreter bridge BOXING the array element by element. Only a signature
+with no `[u8]` avoids it. **A measured number can be right and its explanation
+still wrong** — the fix followed the corrected explanation, not the number.
+
+### The finding that outranks the lane: the interpreter has no threads
+
+`interpreter_extern/concurrency.rs:245-360` runs the closure INLINE and returns a
+fake handle. Proven behaviourally: a worker sleeping 500ms had already
+incremented before spawn returned. **Every concurrency test on the interpreter
+path is vacuous** — a deliberately racy control could not be made to fail. The
+native path (real pthreads) does not build here (`llc-20: multiple definition of
+local value named 'l11'`), and the two paths take incompatible ABIs for the same
+extern. Filed:
+`doc/08_tracking/bug/interpreter_thread_spawn_runs_inline_all_concurrency_tests_vacuous_2026-08-19.md`.
+This is why §14.6 is NOT built: it would look thread-safe and not be.
+
+### Six pieces of code that looked alive and were not
+
+This is the lane's dominant defect class, not any single feature:
+1. `smf_mmap_native.spl` — Dict-simulated fake (`_g_fake_memory`,
+   `native_call_function_0` -> `return 0`) behind a header claiming otherwise.
+2. `object_mapper.spl` — FABRICATED addresses (`4096 + gen*256 + len`) and was
+   the mapper the package publicly re-exported.
+3. `loader/smf_mmap_native.spl` — called `exec_memory_allocs_remove/_len`,
+   defined NOWHERE, masked because the file never compiled.
+4. A "did not read payload" assertion **vacuously true** at `0 < 264` because
+   struct-by-value copying discarded the counters it asserted on.
+5. `forbidden_io_checker.spl` — spec-green 13/13, **zero callers**, protects
+   nothing in a real compile. Found hours after being written.
+6. `AtomicBool.compare_exchange` — self-admitted fake, "small race window".
+**In every case the specs were green.** Green specs are not evidence of
+reachability; only a caller is.
+
+### Duplicate modules are the mechanism
+
+Four duplicate-implementation findings: two `smf_mmap_native.spl` copies, the
+`99.loader/loader/` shadow tree (which caused THREE separate defects, including
+duplicate `JitInstantiator` type names that made `ModuleLoader` entirely
+unrunnable — the interpreter keys registries by BARE TYPE NAME, not module), and
+two independent zstd implementations where the "decoder-only" one hid the fact
+that the other has an encoder. Unifying the loader trees is still an open
+decision and now has three independent pieces of evidence behind it.
+
+### Built since Update 1
+
+§12.1+§23 SMF aspect-pack section, mutation-proven (deleting
+`apk_loader_register_pack` flips REQ-APKW-07 red) — `aspect_pack` HAS product
+callers now, traced through `module_loader_compat.spl`. §17 ABI gates that SKIP
+rather than silently pass when no expectation is set. §5.7 epochs. §5.4-5.5
+uniqueness. §9.6 profiles. §12.2 co-load clusters. §14.7 unload with pin/quiesce.
+§15 pread I/O + §14.1 index cache. Joinpoint slot-cell patchpoints with a real
+atomicity argument (single naturally-aligned 8-byte store; alignment CHECKED not
+assumed; ordering explicitly NOT claimed). Content-hash verification with codes
+DISJOINT from signature codes. E-APACK008 static checker + temporal seal.
+Zip-bomb bound before inflation. Specs: 70+ examples green.
+
+### Not built, and why building would be worse
+
+zstd dictionaries (encoder emits raw/RLE blocks — a dictionary costs 4 bytes and
+saves nothing); signature verification under a real trust root (a key shipped
+beside the packs is green on attacker-controlled input, strictly worse than no
+check); `binding_plan_id` (design names it once, defines it never); `facet<T>()`
+sugar (frontend layer; ZERO call sites exist anywhere); §14.2 late states
+(needs the runtime loader); §14.6 activation future (see threads, above).
+All eight carry acceptance tests naming their blocker in
+`test/01_unit/lib/aspect_pack_acceptance_pending_spec.spl`.
+
+### Infrastructure defects found on the way out
+
+- `land.shs` FAILS OPEN: it ran 31 gates, printed "both gates PASS — proceeding
+  to push", then ran `jj bookmark set` / `jj git push` which BOTH failed with
+  "There is no jj repo in ." — and exited 0. It never checks their exit status.
+- The shared `.git/config` is being rewritten with `core.bare = true` (and
+  sometimes `core.worktree` pointing at another lane) every few seconds by
+  something on this box. While flipped, every lane's guards cannot determine what
+  they are checking. The pre-push hook correctly REFUSES; `land.shs` does not.
+- The direct-`rt_*` ratchet correctly caught this lane adding 40 call sites in
+  non-provider code. Resolved by classifying four FFI-boundary FILES (not the
+  directory) as providers.
+
+### Still open
+
+Bootstrap (nothing here is compiled into a pure-Simple compiler — everything is
+source-level and seed-interpreted); unifying the duplicate loader trees; signing
+key custody; wiring `forbidden_io_checker` into a semantic pass; and the push
+itself, blocked repeatedly by the config corruption above.
