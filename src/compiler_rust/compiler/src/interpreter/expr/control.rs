@@ -185,6 +185,8 @@ pub(super) fn eval_control_expr(
                         }
                     }
                     let mut arm_env = env.clone();
+                    let binding_names: std::collections::HashSet<String> =
+                        arm_bindings.keys().cloned().collect();
                     for (name, value) in arm_bindings {
                         arm_env.insert(name.clone(), value);
                         // Mark the arm binding LOCAL so reads don't prefer
@@ -270,8 +272,18 @@ pub(super) fn eval_control_expr(
                             }
                         }
                     }
-                    // Write back pre-existing variables from arm_env to env
+                    // Write back pre-existing variables from arm_env to env.
+                    // Arm PATTERN BINDINGS are arm-local and must never be
+                    // written back: `Some(value): value` leaked `value` (a
+                    // BeDomNode) past its arm whenever the enclosing frame's
+                    // base env happened to contain a same-named key, shadowing
+                    // a later `val value` — "method `len` not found on type
+                    // `BeDomNode`" in browser_session_runtime (5th match-arm
+                    // leak site, 2026-08-19).
                     for (key, value) in &arm_env {
+                        if binding_names.contains(key) {
+                            continue;
+                        }
                         if env.contains_key(key) {
                             env.insert(key.clone(), value.clone());
                         }

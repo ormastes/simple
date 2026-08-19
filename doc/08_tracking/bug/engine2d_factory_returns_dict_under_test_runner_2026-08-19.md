@@ -126,3 +126,35 @@ basenames.
   vs `use ...engine2d.color`, and a `for` / `if-let` pattern binding variant.
 - After fix: `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl`
   (2/2), `vulkan_strict_spec.spl`, `cuda_strict_spec.spl` stay green.
+
+## FIFTH site (found 2026-08-19, after the four-site fix): match-EXPRESSION write-back leaks arm bindings
+
+The four-site fix scoped arm bindings correctly, but `interpreter/expr/control.rs`
+(`Expr::Match` in `eval_control_expr`) has a **write-back loop** after the arm
+body runs: `for (key, value) in &arm_env { if env.contains_key(key) { env.insert(...) } }`.
+`CowEnv::contains_key` consults the shared **base** env, so whenever the enclosing
+frame's base happened to contain a same-named key, the arm PATTERN BINDING itself
+was written back into the enclosing env — leaking past its arm despite the
+block-local marking (which only guards the MODULE_GLOBALS-preference read path,
+not this copy).
+
+Repro (real): `browser_session_runtime.spl set_dom_text_selection_route` —
+`Some(value): value` (a `BeDomNode`) leaked and shadowed the later
+`val value: text`, failing `value.len()` with
+``semantic: method `len` not found on type `BeDomNode` `` in
+`browser_session_textarea_lifecycle_spec.spl`. Confirmed by an env-insert trace:
+6 `[match-writeback] value <- object` events, zero MODULE_GLOBALS involvement.
+
+Fix: the write-back loop now skips every arm pattern-binding name
+(`binding_names` HashSet collected before binding). Verified: the BeDomNode
+error class is gone from the textarea spec (its residual failure,
+"expected subject to be truthy, got 0", reproduces identically with the old
+binding-rename workaround, so it is an unrelated rendering assertion);
+engine2d_drawing 2/2, vulkan_strict 17/17, base_encoding_utf8_guard 5/5,
+probe6 PASS. The binding-rename workaround in `set_dom_text_selection_route`
+was reverted. Deployed to `bin/release/x86_64-unknown-linux-gnu/simple` via
+`.new` + `mv` (2026-08-19 14:10 UTC).
+
+Note: the SECOND dict-decay shape (struct receivers decaying to `{}` dict in
+`test/03_system/gui/editor_controller_spec.spl` et al.) is UNCHANGED by this
+fix (92 total, 73 failed before and after) — distinct mechanism, still open.
