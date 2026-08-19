@@ -164,6 +164,19 @@ fn detect_simd_level() -> SimdLevel:
     _simd_detected = true
     _cached_simd_level
 
+pub fn host_simd_level() -> SimdLevel:
+    # The REAL host ISA, ignoring any SIMPLE_2D_SIMD forcing. Used to keep
+    # evidence honest when a foreign ISA name is forced on this host.
+    if engine2d_simd_has_avx2():
+        return SimdLevel.Avx2
+    if engine2d_simd_has_sse():
+        return SimdLevel.Sse42
+    if engine2d_simd_has_neon():
+        return SimdLevel.Neon
+    if engine2d_simd_has_rvv():
+        return SimdLevel.Rvv
+    SimdLevel.None_
+
 fn active_feature_text() -> text:
     detect_simd_level().feature_text()
 
@@ -208,7 +221,17 @@ impl CpuSimdRuntimeEvidence:
 
 fn cpu_simd_required_evidence_valid(evidence: CpuSimdRuntimeEvidence, expected_arch: text, fallback_calls: i64) -> bool:
     """Fail closed for a strict architecture-specific SIMD render lane."""
-    (evidence.arch == expected_arch and evidence.executed_all() and
+    # Fail closed when the reported arch was FORCED via SIMPLE_2D_SIMD on a
+    # foreign host: the per-arch *_available flags reflect the REAL host, so
+    # require the flag matching the expected arch to be true.
+    var host_backed = false
+    if expected_arch == "x86_64":
+        host_backed = evidence.x86_available
+    if expected_arch == "aarch64":
+        host_backed = evidence.arm_available
+    if expected_arch == "riscv64":
+        host_backed = evidence.riscv_available
+    (evidence.arch == expected_arch and host_backed and evidence.executed_all() and
         evidence.native_simd_executed and evidence.native_simd_bit_exact and
         evidence.native_simd_hits > 0 and fallback_calls == 0)
 
@@ -321,7 +344,14 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val executed_alpha = alpha_delta > 0
     val executed_scroll = scroll_delta > 0
     val native = native_simd_pixel_evidence()
-    val reason = if feature == "scalar":
+    # Honesty gate: a forced foreign ISA (SIMPLE_2D_SIMD=neon on x86 etc.)
+    # must never masquerade as that ISA actually executing. Compare the
+    # forced/reported level against the REAL host ISA and disclose.
+    val host = host_simd_level()
+    val forced_mismatch = level != host and _forced_simd_level(simd_config_mode()) != SimdLevel.None_
+    val host_arch = host.arch_text()
+    val host_feature = host.feature_text()
+    val base_reason = if feature == "scalar":
         "runtime reported scalar fallback; SIMD feature unavailable"
     else if native.executed and native.bit_exact:
         "native SIMD kernels executed (hits={native.hits}) and matched scalar bit-for-bit"
@@ -329,13 +359,18 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
         "native SIMD kernels executed but diverged from scalar reference"
     else:
         "SIMD feature reported but native kernels did not take the vectorized path"
+    val reason = if forced_mismatch:
+        "{base_reason}; DISCLOSURE: SIMPLE_2D_SIMD forced '{feature}' but this host executes {host_feature} ({host_arch}) — forced ISA did NOT run"
+    else:
+        base_reason
+    # *_available report the REAL host capability, never the forced label.
     CpuSimdRuntimeEvidence(
         arch: arch,
         feature: feature,
         level: level.to_text(),
-        x86_available: arch == "x86_64" and (feature == "sse42" or feature == "avx2"),
-        arm_available: arch == "aarch64" and feature == "neon",
-        riscv_available: arch == "riscv64" and feature == "rvv",
+        x86_available: host_arch == "x86_64" and (host_feature == "sse42" or host_feature == "avx2"),
+        arm_available: host_arch == "aarch64" and host_feature == "neon",
+        riscv_available: host_arch == "riscv64" and host_feature == "rvv",
         executed_fill: executed_fill,
         executed_copy: executed_copy,
         executed_alpha: executed_alpha,

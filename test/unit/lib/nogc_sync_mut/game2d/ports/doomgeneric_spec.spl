@@ -3,10 +3,64 @@
 use std.spec.{describe, it, expect}
 use std.nogc_sync_mut.game2d.ports.doomgeneric as dg
 
-describe "doomgeneric port proof":
-    it "boots from a WAD-like byte buffer":
+fn _truncated(b: [u8], n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < b.len() - n:
+        out.push(b[i])
+        i = i + 1
+    out
+
+describe "doomgeneric WAD parsing":
+    it "parses a valid IWAD header and lump directory":
+        val wad = dg.wad_parse(dg.proof_wad())
+        expect(wad.ok).to_equal(true)
+        expect(wad.is_iwad).to_equal(true)
+        expect(wad.lumps.len()).to_equal(4)
+
+    it "fails closed on bad magic":
+        var b = dg.proof_wad()
+        b[0] = 88u8   # "XWAD"
+        expect(dg.wad_parse(b).ok).to_equal(false)
+
+    it "fails closed on a truncated header":
+        val hdr: [u8] = [73u8, 87u8, 65u8, 68u8, 1u8, 0u8]
+        expect(dg.wad_parse(hdr).ok).to_equal(false)
+
+    it "fails closed on a truncated directory":
+        val b = _truncated(dg.proof_wad(), 1)
+        expect(dg.wad_parse(b).ok).to_equal(false)
+
+    it "extracts MAP01 lumps and parses records":
+        val b = dg.proof_wad()
+        val map = dg.load_map(b, dg.name_map01())
+        expect(map.ok).to_equal(true)
+        expect(map.vertexes.len()).to_equal(6)
+        expect(map.linedefs.len()).to_equal(5)
+        expect(map.things.len()).to_equal(1)
+        expect(map.vertexes[1].x).to_equal(256)
+        expect(map.linedefs[4].v2).to_equal(5)
+        expect(map.things[0].ttype).to_equal(1)
+
+    it "fails closed on a missing map marker":
+        var other: [u8] = [77u8, 65u8, 80u8, 48u8, 50u8, 0u8, 0u8, 0u8]  # "MAP02"
+        expect(dg.load_map(dg.proof_wad(), other).ok).to_equal(false)
+
+    it "rejects linedefs with dangling vertex refs":
+        val lr = dg.parse_linedefs([0u8; 14], 0)   # v1=0 but 0 vertexes
+        expect(lr[0]).to_equal(false)
+
+    it "rejects misaligned lump payloads":
+        expect(dg.parse_vertexes([0u8; 5])[0]).to_equal(false)
+        expect(dg.parse_things([0u8; 9])[0]).to_equal(false)
+
+describe "doomgeneric port gameplay":
+    it "boots player from the THINGS player start":
         val state = dg.DoomPortState.boot(dg.proof_wad())
-        expect(state.wad_bytes).to_equal(12)
+        expect(state.map.ok).to_equal(true)
+        expect(state.x as i64).to_equal(128)
+        expect(state.y as i64).to_equal(128)
+        expect(state.angle).to_equal(0)
         expect(state.tick).to_equal(0)
 
     it "advances deterministic ticks and input movement":
@@ -17,15 +71,42 @@ describe "doomgeneric port proof":
         expect(s1.shots).to_equal(1)
         expect(s1.x > s0.x).to_equal(true)
 
+    it "blocks movement through a linedef":
+        var s = dg.DoomPortState.boot(dg.proof_wad())
+        val fwd = dg.DoomPortInput(forward: true, back: false, turn_left: false, turn_right: false, fire: false)
+        var i: i64 = 0
+        while i < 40:
+            s = dg.doom_tick(s, fwd)
+            i = i + 1
+        # Inner wall runs x=176 from y=96..192; player started at (128,128) facing east.
+        expect(s.x < 176.0).to_equal(true)
+
     it "turns without host APIs":
         val s0 = dg.DoomPortState.boot(dg.proof_wad())
         val input = dg.DoomPortInput(forward: false, back: false, turn_left: false, turn_right: true, fire: false)
         val s1 = dg.doom_tick(s0, input)
-        expect(s1.angle).to_equal(1)
+        expect(s1.angle).to_equal(3)
 
+describe "doomgeneric 2.5D linedef renderer":
     it "renders deterministic non-black software frames":
         val state = dg.DoomPortState.boot(dg.proof_wad())
         val frame1 = dg.render_frame(state, 160, 100)
         val frame2 = dg.render_frame(state, 160, 100)
         expect(frame1.non_black_count()).to_equal(160 * 100)
         expect(frame1.hash()).to_equal(frame2.hash())
+
+    it "projects a wall column from linedef geometry":
+        val state = dg.DoomPortState.boot(dg.proof_wad())
+        val frame = dg.render_frame(state, 160, 100)
+        # Facing east at (128,128): center column hits inner wall (x=176),
+        # dist 48 -> full-height wall column, so mid pixel is wall not floor.
+        val mid = frame.pixels[70 * 160 + 80]
+        expect(mid != 0x302820).to_equal(true)
+        expect(mid != 0x101820).to_equal(true)
+
+    it "renders no walls (sky/floor only) when the map failed to load":
+        val state = dg.DoomPortState.boot([73u8, 87u8, 65u8, 68u8])
+        expect(state.map.ok).to_equal(false)
+        val frame = dg.render_frame(state, 32, 20)
+        expect(frame.pixels[0]).to_equal(0x101820)
+        expect(frame.pixels[19 * 32]).to_equal(0x302820)

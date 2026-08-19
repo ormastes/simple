@@ -1188,7 +1188,31 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     # Fresh layout pass: no float band carries over from a previous document.
     g_float_band_bottom = -2147483648
     g_float_band_indent = 0
-    layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
+    val flow = layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
+    # ::marker box post-pass (bug browser_engine_no_list_marker_boxes_
+    # 2026-08-19). list-style-position outside default: the marker box sits
+    # in the li's start margin, 16px left of the content edge (Chrome UA
+    # metrics) — a 6px disc slot for ul/menu, a 16px number slot for ol.
+    # Scope: geometry only, disc/decimal defaults; marker box height follows
+    # the li box (Chrome uses the first line box — identical for one-line lis).
+    var out_bx = flow.bx
+    var out_by = flow.by
+    var out_bw = flow.bw
+    var out_bh = flow.bh
+    var marker_i = 0
+    val marker_n = nodes.len() as i32
+    while marker_i < marker_n:  # cpu-lane-loop-ok: one pass per full layout
+        if nodes[marker_i].tag == "::marker" and styles[marker_i].display == "marker":
+            val marker_li = nodes[marker_i].parent as i32
+            if marker_li >= 0:
+                val marker_list = nodes[marker_li].parent as i32
+                val marker_ordered = marker_list >= 0 and nodes[marker_list].tag == "ol"
+                out_bx[marker_i] = out_bx[marker_li] - 16
+                out_by[marker_i] = out_by[marker_li]
+                out_bw[marker_i] = if marker_ordered: 16 else: 6
+                out_bh[marker_i] = out_bh[marker_li]
+        marker_i = marker_i + 1
+    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: flow.wrap_starts, wrap_ends: flow.wrap_ends, intrinsic_widths: flow.intrinsic_widths, height: flow.height)
 
 # =========================================================================
 # `contain: layout` fast path for layout_selected. See containment.spl for
@@ -2770,6 +2794,21 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val avail_inline = iw - inline_x
                     if avail_inline > 0 and inline_w > avail_inline:
                         inline_w = avail_inline
+                # text-align: paint aligns each wrapped line within the #text
+                # BOX, so a shrink-to-fit lone text run can never center/right.
+                # Give a sole #text child of an aligned block the full content
+                # width; the paint-side text_line_aligned_x does the rest.
+                # Scope, stated honestly: single-#text-child runs only —
+                # multi-child inline runs still need run-level shifting.
+                if (
+                    nodes[c].tag == "#text" and
+                    (st.text_align == "center" or st.text_align == "right") and
+                    child_index.child_count[i] == 1 and
+                    not cst.white_space_nowrap
+                ):
+                    val full_inline = iw - inline_x
+                    if full_inline > inline_w:
+                        inline_w = full_inline
                 val inline_outer_w = (
                     inline_margin_l + inline_w + inline_margin_r
                 )

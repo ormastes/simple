@@ -1,4 +1,15 @@
-# std.game2d.ports.doomgeneric — pure Simple Doom-style port proof.
+# std.game2d.ports.doomgeneric — pure Simple doomgeneric-style port (real WAD subset).
+#
+# HONEST SCOPE: this port parses REAL WAD structure (IWAD/PWAD header, lump
+# directory, MAPxx THINGS/LINEDEFS/VERTEXES lumps, little-endian, fail-closed
+# on truncation) and renders wall geometry from actual LINEDEFS/VERTEXES via a
+# 2.5D column raycaster (per-column ray vs linedef segment intersection,
+# wall height from perpendicular distance). Player spawn comes from THINGS
+# (type 1). STILL ABSENT vs real doomgeneric: SECTORS/SIDEDEFS (floor/ceiling
+# heights), BSP/NODES traversal (we brute-force all linedefs), textures &
+# flats (palette is synthetic deterministic), things rendering/AI, sound,
+# demos. No IWAD ships in-repo; proof_wad() builds a synthetic but
+# structurally VALID one-map WAD.
 
 class DoomPortInput:
     forward: bool
@@ -9,17 +20,6 @@ class DoomPortInput:
 
     static fn empty() -> DoomPortInput:
         DoomPortInput(forward: false, back: false, turn_left: false, turn_right: false, fire: false)
-
-class DoomPortState:
-    x: f64
-    y: f64
-    angle: i64
-    tick: i64
-    wad_bytes: i64
-    shots: i64
-
-    static fn boot(wad_bytes: [u8]) -> DoomPortState:
-        DoomPortState(x: 3.5, y: 3.5, angle: 0, tick: 0, wad_bytes: wad_bytes.len() as i64, shots: 0)
 
 class DoomFrame:
     width: i64
@@ -66,19 +66,343 @@ class DoomFrame:
             i = i + 1
         h
 
-fn proof_wad() -> [u8]:
-    [73u8, 87u8, 65u8, 68u8, 1u8, 0u8, 0u8, 0u8, 12u8, 0u8, 0u8, 0u8]
+# ---------------------------------------------------------------------------
+# WAD structures + little-endian readers (bounds-checked, fail-closed)
+# ---------------------------------------------------------------------------
 
-fn _map_cell(mx: i64, my: i64) -> i64:
-    if mx < 0 or my < 0 or mx >= 8 or my >= 8:
-        return 1
-    if mx == 0 or my == 0 or mx == 7 or my == 7:
-        return 1
-    if mx == 4 and my >= 2 and my <= 6:
-        return 2
-    if my == 5 and mx >= 2 and mx <= 5:
-        return 3
-    0
+class WadLump:
+    filepos: i64
+    size: i64
+    name: [u8]     # exactly 8 bytes, zero-padded
+
+class WadFile:
+    ok: bool
+    is_iwad: bool
+    lumps: [WadLump]
+
+    static fn bad() -> WadFile:
+        var none: [WadLump] = []
+        WadFile(ok: false, is_iwad: false, lumps: none)
+
+fn _rd_u16(b: [u8], off: i64) -> i64:
+    (b[off] as i64) + ((b[off + 1] as i64) << 8)
+
+fn _rd_i16(b: [u8], off: i64) -> i64:
+    var v = _rd_u16(b, off)
+    if v >= 32768:
+        v = v - 65536
+    v
+
+fn _rd_u32(b: [u8], off: i64) -> i64:
+    (b[off] as i64) + ((b[off + 1] as i64) << 8) + ((b[off + 2] as i64) << 16) + ((b[off + 3] as i64) << 24)
+
+fn _name_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != 8 or b.len() != 8:
+        return false
+    var i: i64 = 0
+    while i < 8:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# 8-byte lump-name constants (ASCII, zero-padded) — no string APIs needed.
+fn name_map01() -> [u8]:
+    [77u8, 65u8, 80u8, 48u8, 49u8, 0u8, 0u8, 0u8]          # "MAP01"
+
+fn name_things() -> [u8]:
+    [84u8, 72u8, 73u8, 78u8, 71u8, 83u8, 0u8, 0u8]         # "THINGS"
+
+fn name_linedefs() -> [u8]:
+    [76u8, 73u8, 78u8, 69u8, 68u8, 69u8, 70u8, 83u8]       # "LINEDEFS"
+
+fn name_vertexes() -> [u8]:
+    [86u8, 69u8, 82u8, 84u8, 69u8, 88u8, 69u8, 83u8]       # "VERTEXES"
+
+fn wad_parse(b: [u8]) -> WadFile:
+    """Parse WAD header + lump directory. Fail-closed: any truncation,
+    bad magic, or out-of-bounds lump yields ok=false."""
+    if b.len() < 12:
+        return WadFile.bad()
+    val m0 = b[0] as i64
+    var is_iwad = false
+    # "IWAD" = 73 87 65 68, "PWAD" = 80 87 65 68
+    if m0 == 73:
+        is_iwad = true
+    elif m0 != 80:
+        return WadFile.bad()
+    if (b[1] as i64) != 87 or (b[2] as i64) != 65 or (b[3] as i64) != 68:
+        return WadFile.bad()
+    val numlumps = _rd_u32(b, 4)
+    val diroff = _rd_u32(b, 8)
+    if numlumps < 0 or diroff < 0:
+        return WadFile.bad()
+    if diroff + numlumps * 16 > b.len():
+        return WadFile.bad()
+    var lumps: [WadLump] = []
+    var i: i64 = 0
+    while i < numlumps:
+        val e = diroff + i * 16
+        val filepos = _rd_u32(b, e)
+        val size = _rd_u32(b, e + 4)
+        if filepos < 0 or size < 0 or filepos + size > b.len():
+            return WadFile.bad()
+        var name: [u8] = []
+        var j: i64 = 0
+        while j < 8:
+            name.push(b[e + 8 + j])
+            j = j + 1
+        lumps.push(WadLump(filepos: filepos, size: size, name: name))
+        i = i + 1
+    WadFile(ok: true, is_iwad: is_iwad, lumps: lumps)
+
+fn wad_map_lump(wad: WadFile, b: [u8], map_name: [u8], lump_name: [u8]) -> (bool, [u8]):
+    """Extract the bytes of lump_name belonging to the map marker map_name.
+    Scans the directory for the marker, then the following lumps up to the
+    next zero-size marker. Fail-closed on anything missing."""
+    var empty: [u8] = []
+    if not wad.ok:
+        return (false, empty)
+    var mi: i64 = -1
+    var i: i64 = 0
+    while i < wad.lumps.len():
+        if _name_eq(wad.lumps[i].name, map_name):
+            mi = i
+        i = i + 1
+    if mi < 0:
+        return (false, empty)
+    var k = mi + 1
+    while k < wad.lumps.len():
+        val lump = wad.lumps[k]
+        if lump.size == 0 and k > mi + 1:
+            return (false, empty)   # hit next map marker
+        if _name_eq(lump.name, lump_name):
+            var out: [u8] = []
+            var p: i64 = 0
+            while p < lump.size:
+                out.push(b[lump.filepos + p])
+                p = p + 1
+            return (true, out)
+        k = k + 1
+    (false, empty)
+
+# ---------------------------------------------------------------------------
+# Map lump record parsers (record-size validated, fail-closed)
+# ---------------------------------------------------------------------------
+
+class Vertex:
+    x: i64
+    y: i64
+
+class LineDef:
+    v1: i64
+    v2: i64
+    flags: i64
+
+class Thing:
+    x: i64
+    y: i64
+    angle: i64
+    ttype: i64
+
+class DoomMap:
+    ok: bool
+    vertexes: [Vertex]
+    linedefs: [LineDef]
+    things: [Thing]
+
+    static fn bad() -> DoomMap:
+        var vs: [Vertex] = []
+        var ls: [LineDef] = []
+        var ts: [Thing] = []
+        DoomMap(ok: false, vertexes: vs, linedefs: ls, things: ts)
+
+fn parse_vertexes(b: [u8]) -> (bool, [Vertex]):
+    var out: [Vertex] = []
+    if b.len() % 4 != 0:
+        return (false, out)
+    var off: i64 = 0
+    while off < b.len():
+        out.push(Vertex(x: _rd_i16(b, off), y: _rd_i16(b, off + 2)))
+        off = off + 4
+    (true, out)
+
+fn parse_linedefs(b: [u8], vertex_count: i64) -> (bool, [LineDef]):
+    var out: [LineDef] = []
+    if b.len() % 14 != 0:
+        return (false, out)
+    var off: i64 = 0
+    while off < b.len():
+        val v1 = _rd_u16(b, off)
+        val v2 = _rd_u16(b, off + 2)
+        if v1 >= vertex_count or v2 >= vertex_count:
+            return (false, out)   # dangling vertex ref: fail closed
+        out.push(LineDef(v1: v1, v2: v2, flags: _rd_u16(b, off + 4)))
+        off = off + 14
+    (true, out)
+
+fn parse_things(b: [u8]) -> (bool, [Thing]):
+    var out: [Thing] = []
+    if b.len() % 10 != 0:
+        return (false, out)
+    var off: i64 = 0
+    while off < b.len():
+        out.push(Thing(x: _rd_i16(b, off), y: _rd_i16(b, off + 2), angle: _rd_u16(b, off + 4), ttype: _rd_u16(b, off + 6)))
+        off = off + 10
+    (true, out)
+
+fn load_map(b: [u8], map_name: [u8]) -> DoomMap:
+    val wad = wad_parse(b)
+    if not wad.ok:
+        return DoomMap.bad()
+    val vr = wad_map_lump(wad, b, map_name, name_vertexes())
+    val lr = wad_map_lump(wad, b, map_name, name_linedefs())
+    val tr = wad_map_lump(wad, b, map_name, name_things())
+    if not vr[0] or not lr[0] or not tr[0]:
+        return DoomMap.bad()
+    val vp = parse_vertexes(vr[1])
+    if not vp[0]:
+        return DoomMap.bad()
+    val lp = parse_linedefs(lr[1], vp[1].len())
+    if not lp[0]:
+        return DoomMap.bad()
+    val tp = parse_things(tr[1])
+    if not tp[0]:
+        return DoomMap.bad()
+    DoomMap(ok: true, vertexes: vp[1], linedefs: lp[1], things: tp[1])
+
+# ---------------------------------------------------------------------------
+# Synthetic-but-VALID one-map WAD (no IWAD ships in-repo)
+# ---------------------------------------------------------------------------
+
+fn _push_u16(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    var u = v
+    if u < 0:
+        u = u + 65536
+    b.push((u & 0xFF) as u8)
+    b.push(((u >> 8) & 0xFF) as u8)
+    b
+
+fn _push_u32(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    b.push((v & 0xFF) as u8)
+    b.push(((v >> 8) & 0xFF) as u8)
+    b.push(((v >> 16) & 0xFF) as u8)
+    b.push(((v >> 24) & 0xFF) as u8)
+    b
+
+fn _push_name(buf: [u8], name: [u8]) -> [u8]:
+    var b = buf
+    var i: i64 = 0
+    while i < 8:
+        b.push(name[i])
+        i = i + 1
+    b
+
+fn proof_wad() -> [u8]:
+    """Build a structurally valid IWAD: MAP01 with THINGS (player start at
+    (128,128) facing east), 6 VERTEXES, 6 LINEDEFS (square room + inner
+    wall). Layout: header, THINGS, LINEDEFS, VERTEXES payloads, then the
+    4-entry directory (MAP01 marker + 3 lumps)."""
+    # THINGS: one record, 10 bytes: x=128 y=128 angle=0 type=1 flags=7
+    var things: [u8] = []
+    things = _push_u16(things, 128)
+    things = _push_u16(things, 128)
+    things = _push_u16(things, 0)
+    things = _push_u16(things, 1)
+    things = _push_u16(things, 7)
+    # VERTEXES: 6 records, 4 bytes each
+    # 0:(0,0) 1:(256,0) 2:(256,256) 3:(0,256) 4:(176,96) 5:(176,192)
+    var verts: [u8] = []
+    verts = _push_u16(verts, 0)
+    verts = _push_u16(verts, 0)
+    verts = _push_u16(verts, 256)
+    verts = _push_u16(verts, 0)
+    verts = _push_u16(verts, 256)
+    verts = _push_u16(verts, 256)
+    verts = _push_u16(verts, 0)
+    verts = _push_u16(verts, 256)
+    verts = _push_u16(verts, 176)
+    verts = _push_u16(verts, 96)
+    verts = _push_u16(verts, 176)
+    verts = _push_u16(verts, 192)
+    # LINEDEFS: 5 records, 14 bytes each: v1 v2 flags special tag side0 side1
+    var lines: [u8] = []
+    var li: i64 = 0
+    val l_v1: [i64] = [0, 1, 2, 3, 4]
+    val l_v2: [i64] = [1, 2, 3, 0, 5]
+    while li < 5:
+        lines = _push_u16(lines, l_v1[li])
+        lines = _push_u16(lines, l_v2[li])
+        lines = _push_u16(lines, 1)      # flags: blocking
+        lines = _push_u16(lines, 0)      # special
+        lines = _push_u16(lines, 0)      # tag
+        lines = _push_u16(lines, 0)      # right sidedef
+        lines = _push_u16(lines, 65535)  # no left sidedef
+        li = li + 1
+    # Assemble: header(12) + payloads + directory
+    val things_pos: i64 = 12
+    val lines_pos = things_pos + things.len()
+    val verts_pos = lines_pos + lines.len()
+    val dir_pos = verts_pos + verts.len()
+    var b: [u8] = [73u8, 87u8, 65u8, 68u8]   # "IWAD"
+    b = _push_u32(b, 4)                       # numlumps
+    b = _push_u32(b, dir_pos)                 # infotableofs
+    var i: i64 = 0
+    while i < things.len():
+        b.push(things[i])
+        i = i + 1
+    i = 0
+    while i < lines.len():
+        b.push(lines[i])
+        i = i + 1
+    i = 0
+    while i < verts.len():
+        b.push(verts[i])
+        i = i + 1
+    # Directory: MAP01 marker (size 0), THINGS, LINEDEFS, VERTEXES
+    b = _push_u32(b, 0)
+    b = _push_u32(b, 0)
+    b = _push_name(b, name_map01())
+    b = _push_u32(b, things_pos)
+    b = _push_u32(b, things.len())
+    b = _push_name(b, name_things())
+    b = _push_u32(b, lines_pos)
+    b = _push_u32(b, lines.len())
+    b = _push_name(b, name_linedefs())
+    b = _push_u32(b, verts_pos)
+    b = _push_u32(b, verts.len())
+    b = _push_name(b, name_vertexes())
+    b
+
+# ---------------------------------------------------------------------------
+# Player state + tick (movement in map units, linedef collision)
+# ---------------------------------------------------------------------------
+
+class DoomPortState:
+    x: f64
+    y: f64
+    angle: i64      # cardinal: 0=east 1=north 2=west 3=south
+    tick: i64
+    wad_bytes: i64
+    shots: i64
+    map: DoomMap
+
+    static fn boot(wad_bytes: [u8]) -> DoomPortState:
+        val map = load_map(wad_bytes, name_map01())
+        var px: f64 = 0.0
+        var py: f64 = 0.0
+        var pa: i64 = 0
+        if map.ok:
+            var ti: i64 = 0
+            while ti < map.things.len():
+                if map.things[ti].ttype == 1:
+                    px = map.things[ti].x as f64
+                    py = map.things[ti].y as f64
+                    pa = (map.things[ti].angle / 90) % 4
+                ti = ti + 1
+        DoomPortState(x: px, y: py, angle: pa, tick: 0, wad_bytes: wad_bytes.len() as i64, shots: 0, map: map)
 
 fn _dir_x(angle: i64) -> f64:
     val a = angle % 4
@@ -97,10 +421,31 @@ fn _dir_y(angle: i64) -> f64:
     0.0
 
 fn _turn_left(angle: i64) -> i64:
-    (angle + 3) % 4
+    (angle + 1) % 4
 
 fn _turn_right(angle: i64) -> i64:
-    (angle + 1) % 4
+    (angle + 3) % 4
+
+fn _segs_cross(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64, dx: f64, dy: f64) -> bool:
+    """True when segment a->b crosses segment c->d (proper intersection)."""
+    val d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    val d2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax)
+    val d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx)
+    val d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx)
+    if ((d1 > 0.0 and d2 < 0.0) or (d1 < 0.0 and d2 > 0.0)) and ((d3 > 0.0 and d4 < 0.0) or (d3 < 0.0 and d4 > 0.0)):
+        return true
+    false
+
+fn _move_blocked(map: DoomMap, x0: f64, y0: f64, x1: f64, y1: f64) -> bool:
+    var i: i64 = 0
+    while i < map.linedefs.len():
+        val ld = map.linedefs[i]
+        val a = map.vertexes[ld.v1]
+        val b = map.vertexes[ld.v2]
+        if _segs_cross(x0, y0, x1, y1, a.x as f64, a.y as f64, b.x as f64, b.y as f64):
+            return true
+        i = i + 1
+    false
 
 fn doom_tick(state: DoomPortState, input: DoomPortInput) -> DoomPortState:
     var next_angle = state.angle
@@ -110,63 +455,91 @@ fn doom_tick(state: DoomPortState, input: DoomPortInput) -> DoomPortState:
         next_angle = _turn_right(next_angle)
     var next_x = state.x
     var next_y = state.y
-    val dx = _dir_x(next_angle) * 0.18
-    val dy = _dir_y(next_angle) * 0.18
+    val speed: f64 = 14.0   # not a divisor-aligned step: avoids landing exactly ON a linedef
+    val dx = _dir_x(next_angle) * speed
+    val dy = _dir_y(next_angle) * speed
     if input.forward:
         val tx = next_x + dx
         val ty = next_y + dy
-        if _map_cell(tx as i64, ty as i64) == 0:
+        if not _move_blocked(state.map, next_x, next_y, tx, ty):
             next_x = tx
             next_y = ty
     if input.back:
         val tx = next_x - dx
         val ty = next_y - dy
-        if _map_cell(tx as i64, ty as i64) == 0:
+        if not _move_blocked(state.map, next_x, next_y, tx, ty):
             next_x = tx
             next_y = ty
     val shot_inc = if input.fire: 1 else: 0
-    DoomPortState(x: next_x, y: next_y, angle: next_angle, tick: state.tick + 1, wad_bytes: state.wad_bytes, shots: state.shots + shot_inc)
+    DoomPortState(x: next_x, y: next_y, angle: next_angle, tick: state.tick + 1, wad_bytes: state.wad_bytes, shots: state.shots + shot_inc, map: state.map)
 
-fn _wall_distance(state: DoomPortState, column: i64, width: i64) -> (i64, i64):
-    val center = width / 2
-    val spread = (column - center) / 18
-    var ray_angle = state.angle
-    if spread < 0:
-        ray_angle = _turn_left(ray_angle)
-    elif spread > 0:
-        ray_angle = _turn_right(ray_angle)
-    val dx = _dir_x(ray_angle)
-    val dy = _dir_y(ray_angle)
-    var dist: i64 = 1
-    while dist < 12:
-        val fx = state.x + dx * (dist as f64) * 0.35
-        val fy = state.y + dy * (dist as f64) * 0.35
-        val cell = _map_cell(fx as i64, fy as i64)
-        if cell != 0:
-            return (dist, cell)
-        dist = dist + 1
-    (12, 1)
+# ---------------------------------------------------------------------------
+# 2.5D renderer: per-column ray vs LINEDEF segments, height from perp distance
+# ---------------------------------------------------------------------------
 
-fn _wall_color(cell: i64, dist: i64) -> i64:
-    val shade = if dist < 3: 0xCC else: if dist < 7: 0x88 else: 0x44
-    if cell == 2:
-        return 0xFF0000 + (shade << 8)
-    if cell == 3:
-        return 0x00FF00 + shade
-    shade
+fn _cast_column(state: DoomPortState, camx: f64) -> (f64, i64):
+    """Ray dir = dir + plane*camx; returns (perp distance, linedef index)
+    of the nearest crossed linedef, or (-1.0, -1) on no hit."""
+    val dirx = _dir_x(state.angle)
+    val diry = _dir_y(state.angle)
+    val planex = 0.0 - diry * 0.66
+    val planey = dirx * 0.66
+    val rdx = dirx + planex * camx
+    val rdy = diry + planey * camx
+    var best_t: f64 = -1.0
+    var best_i: i64 = -1
+    var i: i64 = 0
+    while i < state.map.linedefs.len():
+        val ld = state.map.linedefs[i]
+        val a = state.map.vertexes[ld.v1]
+        val b = state.map.vertexes[ld.v2]
+        val ex = (b.x - a.x) as f64
+        val ey = (b.y - a.y) as f64
+        val denom = rdx * ey - rdy * ex
+        if denom != 0.0:
+            val wx = (a.x as f64) - state.x
+            val wy = (a.y as f64) - state.y
+            val t = (wx * ey - wy * ex) / denom
+            val s = (wx * rdy - wy * rdx) / denom
+            if t > 0.001 and s >= 0.0 and s <= 1.0:
+                if best_t < 0.0 or t < best_t:
+                    best_t = t
+                    best_i = i
+        i = i + 1
+    (best_t, best_i)
+
+fn _wall_color(line_index: i64, dist: f64) -> i64:
+    # Continuous distance shading (deterministic integer quantization) so
+    # small player movements visibly change the frame.
+    var shade: i64 = 255 - ((dist as i64) * 3) / 4
+    if shade < 0x30:
+        shade = 0x30
+    if shade > 0xFF:
+        shade = 0xFF
+    val kind = line_index % 3
+    if kind == 0:
+        return (shade << 16)            # red-ish
+    if kind == 1:
+        return (shade << 8)             # green-ish
+    (shade << 16) + (shade << 8) + shade  # gray
 
 fn render_frame(state: DoomPortState, width: i64, height: i64) -> DoomFrame:
     var frame = DoomFrame.create(width, height)
-    frame.fill_rect(0, 0, width, height / 2, 0x101820)
-    frame.fill_rect(0, height / 2, width, height / 2, 0x302820)
-    var col: i64 = 0
-    while col < width:
-        val hit = _wall_distance(state, col, width)
-        val dist = hit[0]
-        val cell = hit[1]
-        val wall_h = (height * 2) / (dist + 1)
-        val y0 = (height - wall_h) / 2
-        frame.fill_rect(col, y0, 1, wall_h, _wall_color(cell, dist))
-        col = col + 1
+    frame.fill_rect(0, 0, width, height / 2, 0x101820)          # sky
+    frame.fill_rect(0, height / 2, width, height / 2, 0x302820) # floor
+    if state.map.ok:
+        var col: i64 = 0
+        while col < width:
+            val camx = (2.0 * (col as f64)) / (width as f64) - 1.0
+            val hit = _cast_column(state, camx)
+            val dist = hit[0]
+            val li = hit[1]
+            if li >= 0 and dist > 0.0:
+                var wall_h = ((height as f64) * 96.0 / dist) as i64
+                if wall_h > height:
+                    wall_h = height
+                val y0 = (height - wall_h) / 2
+                frame.fill_rect(col, y0, 1, wall_h, _wall_color(li, dist))
+            col = col + 1
     frame.fill_rect(width / 2 - 4, height / 2 - 1, 8, 2, 0xD8D080)
     frame

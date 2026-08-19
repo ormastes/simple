@@ -1,0 +1,98 @@
+# @tag: rendering, backend, directx, metal, emulation, parity
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl 30%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl 10%
+
+# Backend Emulation — DirectX software-emulation lane + Metal availability
+#
+# Regression spec for the backend-resolve defect where a real browser launch
+# logged:
+#   "[backend-resolve] directx rejected: init_failed: fell back to
+#    directx-software-emulation"
+# even though DirectXBackend.init() had SUCCEEDED on Linux and merely renamed
+# itself honestly (its name() returns "directx-software-emulation" off
+# Windows by design). probe_backend_viable() must not describe an honest
+# rename as an init failure. Auto-resolve still skips the lane (it is CPU
+# raster and would shadow cpu_simd), but the reason must be truthful.
+#
+# Metal has no Linux emulation lane in engine2d (probe_metal() is hard-gated
+# on is_macos()); on non-macOS hosts it must report UNAVAILABLE with the
+# exact "Metal requires macOS" evidence — blocked, tracked in
+# doc/08_tracking/bug/metal_backend_no_linux_emulation_lane_2026-08-19.md.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+
+fn emu_pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn render_emulation_scene(backend_name: text) -> [u32]:
+    var engine = Engine2D.create_with_backend(32, 24, backend_name)
+    engine.clear(rgb(3, 5, 7))
+    engine.draw_rect_filled(1, 1, 8, 5, rgb(40, 70, 100))
+    engine.draw_rect(11, 1, 9, 6, rgb(120, 20, 80))
+    engine.draw_line(0, 12, 31, 12, rgb(220, 220, 40), 1)
+    engine.draw_circle_filled(6, 18, 3, rgb(200, 60, 20))
+    engine.set_clip(25, 0, 7, 7)
+    engine.draw_rect_filled(22, 0, 10, 10, rgb(8, 180, 200))
+    engine.clear_clip()
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+describe "Backend emulation lanes — DirectX software emulation and Metal availability":
+
+    context "directx software-emulation lane (Linux compatibility path)":
+
+        it "initializes via explicit request and reports an honest name":
+            val probe = Engine2D.probe_backend(1, 1, "directx")
+            # Either windows-native "directx" or the honest Linux
+            # "directx-software-emulation" — both are initialized lanes.
+            expect(probe.is_ok()).to_equal(true)
+            var engine = Engine2D.create_with_backend(8, 8, "directx")
+            val name = engine.backend_name()
+            val honest = name == "directx" or name == "directx-software-emulation"
+            expect(honest).to_equal(true)
+            engine.shutdown()
+
+        it "matches the cpu reference pixel-for-pixel on the core scene":
+            val reference = render_emulation_scene("cpu")
+            val dx = render_emulation_scene("directx")
+            expect(dx.len()).to_equal(reference.len())
+            expect(emu_pixels_equal(dx, reference)).to_equal(true)
+
+        it "deep viability probe never claims init_failed for the honest rename":
+            var engine = Engine2D.create_with_backend(8, 8, "directx")
+            val created = engine.backend_name()
+            engine.shutdown()
+            val deep = Engine2D.probe_backend_viable("directx")
+            if created == "directx-software-emulation":
+                # Honest software lane: auto-resolve may defer to CPU lanes,
+                # but the reason must state software emulation, not a lie
+                # about a failed init.
+                expect(deep.reason.contains("init_failed")).to_equal(false)
+                expect(deep.reason.contains("software_emulation")).to_equal(true)
+            else:
+                # Windows native lane: probe outcome is host-dependent; only
+                # require that a rejection is not blamed on a fallback that
+                # did not happen.
+                expect(deep.reason.contains("fell back")).to_equal(false)
+
+    context "metal availability (no Linux emulation lane exists)":
+
+        it "reports the exact macOS gate evidence when unavailable":
+            val probe = Engine2D.probe_backend(1, 1, "metal")
+            if probe.is_ok():
+                # macOS host: lane is real, nothing to gate here.
+                expect(probe.backend_name).to_equal("metal")
+            else:
+                expect(probe.reason.contains("Metal requires macOS")).to_equal(true)
