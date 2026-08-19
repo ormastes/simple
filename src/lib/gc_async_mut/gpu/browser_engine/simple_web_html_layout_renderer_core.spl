@@ -656,7 +656,13 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
         # selector, emit it. Preserve every enclosing @-ancestor so an inner
         # @layer cannot escape a false outer @supports/@media condition.
         val is_wrapper = opener.lower().starts_with("@")
-        if (not is_wrapper) and opener.len() > 0 and out < cap:
+        # Fail-closed on an unterminated rule: a leaf block whose segment
+        # carries no "}" never closed before the next "{" or EOF. The old
+        # character-walk rejected it (`close < 0` -> break); the native-split
+        # rewrite silently auto-closed it at EOF. Pinned by
+        # simple_web_layout_child_index_spec "keeps malformed CSS rule
+        # admission stable with pre-counted rules".
+        if (not is_wrapper) and opener.len() > 0 and out < cap and nsubs > 1:
             wrapper_starts[out] = wrapper_kinds.len()
             var wrapper_count = 0
             var wrapper_depth = 0
@@ -1059,7 +1065,39 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
         if case_insensitive:
             return attr_value(attrs, name).lower() == want.lower()
         return attr_value(attrs, name) == want
-    attr_value(attrs, raw).len() > 0
+    # Bare [name]: CSS presence semantics. A valueless boolean attribute
+    # (`<div data-tone>`) and an empty-valued one (`data-tone=""`) both
+    # match; attr_value alone cannot see either, so check for the name
+    # token with proper boundaries.
+    attr_value(attrs, raw).len() > 0 or attr_name_present(attrs, raw)
+
+fn attr_name_present(attrs: text, name: text) -> bool:
+    val name_len = name.len()
+    if name_len == 0:
+        return false
+    val attrs_len = attrs.len()
+    var pos = 0
+    var guard = 0
+    while guard < 200:  # cpu-lane-loop-ok: walks occurrences of ONE attribute name inside ONE tag's attribute text via native find_from, capped at 200 probes
+        guard = guard + 1
+        val hit = find_from(attrs, name, pos)
+        if hit < 0:
+            return false
+        val before_ok = if hit == 0:
+            true
+        else:
+            val b = attrs[hit - 1:hit - 1 + 1]
+            b == " " or b == "\t" or b == "\n" or b == "\r"
+        val after = hit + name_len
+        val after_ok = if after >= attrs_len:
+            true
+        else:
+            val a = attrs[after:after + 1]
+            a == " " or a == "\t" or a == "\n" or a == "\r" or a == "=" or a == "/" or a == ">"
+        if before_ok and after_ok:
+            return true
+        pos = hit + 1
+    false
 
 fn class_words_has(words: [text], want: text) -> bool:
     var i = 0
@@ -3280,6 +3318,8 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return st.background_gradient_from.to_string()
             if field == "background_gradient_to":
                 return st.background_gradient_to.to_string()
+            if field == "background_image_uri":
+                return st.background_image_uri
             if field == "background_layers_raw":
                 return st.bg_layers_raw
             if field == "backdrop_filter_raw":
