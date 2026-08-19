@@ -78,13 +78,22 @@ stage2_backend=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --backend) || exit 1
 stage2_threads=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --threads) || exit 1
-stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
-  "$stage2_transcript" --compile-stack-mib) || exit 1
+stage2_compile_stack_mib=$(
+  bootstrap_stage3_transcript_argv_value_after \
+    "$stage2_transcript" --compile-stack-mib 2>/dev/null || true
+)
+if [ -n "$stage2_compile_stack_mib" ]; then
+  case "$stage2_compile_stack_mib" in
+    ''|*[!0-9]*|0) exit 1 ;;
+  esac
+  stage2_compile_stack_arg="--compile-stack-mib $stage2_compile_stack_mib"
+else
+  stage2_compile_stack_arg=
+fi
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
-case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) exit 1 ;; esac
 stage2_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -93,7 +102,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   native-build --target "$platform" --backend "$stage2_backend" \
   --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
   --source src/lib --entry-closure --threads "$stage2_threads" \
-  --compile-stack-mib "$stage2_compile_stack_mib" \
+  $stage2_compile_stack_arg \
   --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
   --runtime-path "$runtime" -o "$stage2")
 bootstrap_stage3_verify_sanity_evidence_receipt \
