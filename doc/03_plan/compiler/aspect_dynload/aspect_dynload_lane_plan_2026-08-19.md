@@ -99,3 +99,68 @@ the no-direct-rt ratchet (197 below baseline is a deliberate reviewed action, no
 a drive-by); weaken the positive control to make the board green; or commit any
 out-of-lane file (jit_typed_ir, doc_coverage option-route, gui_web reports, Rust
 `dispatch_profile`, `persistent_code_cache`) that other lanes authored.
+
+## Update 2026-08-19 — research findings folded in as work items
+
+Source: `doc/01_research/compiler/startup_perf/aspect_dynload_startup_loader_perf_research_2026-08-19.md`
+(static reading only, no compiler run). Each item below was re-verified by me at
+file:line before being written down.
+
+### W1. W^X violation — DONE this session
+
+`native_alloc_exec_memory` mapped `PROT_READ|PROT_WRITE|PROT_EXEC`, handing out a
+simultaneously writable+executable page. Forbidden by startup_perf §8.5. The
+alloc -> write -> `native_make_executable` sequence
+(`segment_mapper.spl:124,129,134`) already grants RX by `mprotect` afterwards, so
+`PROT_EXEC` at map time bought nothing. Now maps RW only.
+
+### W2. The segment win is plausibly cancelled by a byte-at-a-time copy — OPEN, highest priority
+
+`native_write_exec_memory` (`smf_mmap_native.spl:157-170`) writes **one byte per
+SFFI call** in a `while` loop over `rt_ptr_write_u8`, and `smf_section_bytes`
+copies byte-by-byte again before it. So the lane traded O(symbols) syscalls for
+O(bytes) SFFI calls. The headline claim — that one-mapping-per-segment is FASTER
+— is therefore **not established**, and could be a regression on large sections.
+`rt_memcpy` exists but is pointer-typed and unreachable from an `i64` address.
+Fix: a bulk `rt_ptr_write_bytes(addr, offset, [u8])`-style extern. **This must be
+measured, not assumed, before the lane claims a perf win.**
+
+### W3. Mapped code still cannot execute — OPEN
+
+All four `native_call_function_N` return 0 unconditionally; no `rt_call_ptr_*`
+extern exists anywhere in `src/runtime/*.c`. The RED positive control in
+`segment_symbol_resolution_spec` is CORRECT and stays red. Cheapest route is an
+`rt_call_ptr_0(addr: i64) -> i64` extern. Same root cause as W2: no way to reach
+a raw address from Simple except one byte at a time.
+
+### W4. Duplicate loader trees, and the FABRICATING one is the exported one — OPEN
+
+`99.loader/object_mapper.spl:31-58` fabricates addresses arithmetically
+(`4096 + gen*256 + len`) rather than mapping anything, and it is the mapper that
+`99.loader/__init__.spl:34-38` re-exports. The real one (`segment_mapper.spl`) is
+reached only by `module_loader_compat.spl` importing it directly. Any consumer
+going through the package's public surface therefore gets the fake. This is the
+same class as the `smf_mmap_native` Dict fake fixed this session.
+
+### W5. The "82 .spl opens per run" anchor is REFUTED for the traced case
+
+`doc/10_metrics/startup/startup_perf_check_2026-08-17.md` records `src/lib opens: 0`,
+`openat 14`. `.claude/rules/commands.md` states 82 opens / 0 `.smf`. Both cannot be
+right; the traced evidence wins for that case. Do not quote the 82 figure as
+current without re-tracing the specific program.
+
+### W6. Perf contract §20 has never been measured
+
+§20.1-20.5 (cold-aspect startup, hot path, first use, steady state, config) plus
+§15 mapping/I-O policy are this lane's, and there is **no measured number for any
+of them**. What exists is instrumentation (`packs_opened`,
+`modules_decompressed`, `bytes_decompressed`, `cache_hits`) proving the code takes
+the cheap path — not that it is fast. aspect_pack is additionally in-memory only
+(no mmap/open) with zero production consumers.
+
+### Revised order
+
+1. W2 (bulk write extern) + measure — without it the lane's perf claim is unproven.
+2. W3 (`rt_call_ptr_0`) — turns the red positive control green honestly.
+3. W4 (stop exporting the fabricating mapper) — a correctness trap for consumers.
+4. Then wiring (gap #1 above), then W6 measurement against §20.
