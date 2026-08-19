@@ -70,6 +70,70 @@ fn vulkan_validate_entry_arguments(signature: MirSignature, locals: [MirLocal]) 
         index = index + 1
     Ok(())
 
+fn vulkan_block_successor_ids(term: MirTerminator) -> [i64]:
+    match term:
+        case Goto(target):
+            [target.id]
+        case If(_, true_target, false_target):
+            [true_target.id, false_target.id]
+        case _:
+            []
+
+fn vulkan_block_emission_order(func: MirFunction) -> [MirBlock]:
+    """Reverse post-order (true branch first) over the block graph.
+
+    MIR lowering may place the merge/return block BEFORE the branch targets in
+    `func.blocks` (observed: entry, ret, then, else). SPIR-V structured control
+    flow is emitted in array order here, so that layout misreads a plain
+    if-without-else as a back-edge/else-form and gets rejected. RPO restores a
+    forward layout for acyclic control flow without changing block contents;
+    genuinely cyclic graphs still surface their back-edges and are rejected by
+    compile_terminator exactly as before. Unreachable blocks keep their
+    original relative order at the tail."""
+    if func.blocks.len() == 0:
+        return func.blocks
+    var index_of: Dict<i64, i64> = {}
+    var i = 0
+    while i < func.blocks.len():
+        index_of[func.blocks[i].id.id] = i
+        i = i + 1
+    var visited: Dict<i64, bool> = {}
+    var post: [i64] = []
+    var stack_block: [i64] = [0]
+    var stack_cursor: [i64] = [0]
+    visited[0] = true
+    while stack_block.len() > 0:
+        val top = stack_block.len() - 1
+        val bi = stack_block[top]
+        val cursor = stack_cursor[top]
+        val succs = vulkan_block_successor_ids(func.blocks[bi].terminator)
+        if cursor < succs.len():
+            stack_cursor[top] = cursor + 1
+            # Visit successors last-to-first so the FIRST successor (the true
+            # branch) lands earliest in the reversed post-order.
+            val succ_id = succs[succs.len() - 1 - cursor]
+            if index_of.has(succ_id):
+                val si = index_of[succ_id]
+                if not visited.has(si):
+                    visited[si] = true
+                    stack_block.push(si)
+                    stack_cursor.push(0)
+        else:
+            stack_block.pop()
+            stack_cursor.pop()
+            post.push(bi)
+    var ordered: [MirBlock] = []
+    var pi = post.len() - 1
+    while pi >= 0:
+        ordered.push(func.blocks[post[pi]])
+        pi = pi - 1
+    i = 0
+    while i < func.blocks.len():
+        if not visited.has(i):
+            ordered.push(func.blocks[i])
+        i = i + 1
+    ordered
+
 # ============================================================================
 # Vulkan Backend
 # ============================================================================
@@ -480,7 +544,8 @@ class VulkanCodegenBackend:
         var block_labels: Dict<i64, i64> = {}
         var block_positions: Dict<i64, i64> = {}
         var block_position = 0
-        for block in func.blocks:
+        val ordered_blocks = vulkan_block_emission_order(func)
+        for block in ordered_blocks:
             if block_labels.has(block.id.id):
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V block ids must be unique"))
             block_labels[block.id.id] = builder.alloc_id()
@@ -492,7 +557,7 @@ class VulkanCodegenBackend:
 
         # Emit entry block. Labels are allocated before emission so forward
         # branches can reference their targets without accepting back-edges.
-        builder.emit("{builder.id_str(block_labels[func.blocks[0].id.id])} = OpLabel")
+        builder.emit("{builder.id_str(block_labels[ordered_blocks[0].id.id])} = OpLabel")
         if uses_push_constant:
             for local in func.locals:
                 if push_arg_locals.has(local.id.id):
@@ -501,7 +566,7 @@ class VulkanCodegenBackend:
 
         # Compile function body
         var emitted_block_position = 0
-        for block in func.blocks:
+        for block in ordered_blocks:
             if emitted_block_position > 0:
                 builder.emit("{builder.id_str(block_labels[block.id.id])} = OpLabel")
 

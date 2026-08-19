@@ -801,6 +801,20 @@ impl RenderBackend for VulkanBackend:
             val pixels: [u32] = [color; w * h]
             self.draw_image_blend(x, y, w, h, pixels)
             return
+        if self.mask_buf.len() > 0:
+            # The rect compute kernel packs clip state but has no mask plane,
+            # so a device dispatch would paint straight through an active
+            # stencil mask (observed as vulkan-vs-software mask parity
+            # divergence in native_shader_backend_readback_matrix_spec).
+            # Route through the host image path, which applies clip AND mask.
+            if w <= 0 or h <= 0:
+                return
+            if _i64(w) * _i64(h) > 2147483647:
+                self.mark_cpu_fallback("masked-rect-size-overflow")
+                return
+            val masked_pixels: [u32] = [color; w * h]
+            self.draw_image(x, y, w, h, masked_pixels)
+            return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
