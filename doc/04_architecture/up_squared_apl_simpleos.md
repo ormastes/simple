@@ -14,8 +14,10 @@ and prerecorded logs cannot become a board PASS.
 2. **Admitted build** — the board build wrapper binds the self-hosted compiler,
    freestanding runtime capsule, linker, kernel hash, and provenance receipt.
 3. **UEFI package** — the UP2 image wrapper embeds that exact kernel in
-   `EFI/BOOT/BOOTX64.EFI`, verifies GPT/FAT32 structure, and emits an image
-   receipt. It has no block-device write authority.
+   `EFI/BOOT/BOOTX64.EFI`, uses Multiboot2 for the ELF64 contract, verifies
+   GPT/FAT32 structure and embedded loader markers, and emits an image receipt.
+   It has no block-device write authority. The open OVMF transition blocker
+   must close before this layer can be called boot-capable.
 4. **Media admission** — the separate writer accepts only an explicit
    `/dev/disk/by-id` whole USB disk whose serial, removability, capacity,
    mount/holder state, and non-system status pass. Write authority requires an

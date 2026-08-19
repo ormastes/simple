@@ -34,6 +34,23 @@ _multiboot_header:
     .long 768                 /* framebuffer height */
     .long 32                  /* framebuffer depth */
 
+/* Multiboot2 is the admitted loader contract for ELF64 UEFI images.  Keep the
+ * Multiboot1 header above for legacy BIOS/QEMU lanes; both remain within their
+ * mandated early-file search windows. */
+.align 8
+.set MB2_MAGIC, 0xE85250D6
+.set MB2_ARCH, 0
+.global _multiboot2_header
+_multiboot2_header:
+    .long MB2_MAGIC
+    .long MB2_ARCH
+    .long _multiboot2_header_end - _multiboot2_header
+    .long -(MB2_MAGIC + MB2_ARCH + (_multiboot2_header_end - _multiboot2_header))
+    .short 0                 /* required end tag */
+    .short 0
+    .long 8
+_multiboot2_header_end:
+
 /* ==================================================================
  * 32-bit entry point
  * ================================================================== */

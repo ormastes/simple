@@ -76,8 +76,10 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Current build state (2026-08-20):** the UP2 wrapper binds the canonical x86
   freestanding `simple-core` runtime capsule plus Multiboot CRT and board serial
   input provider. The admitted build produced a 68,936-byte ELF and a 256 MiB
-  GPT/FAT32 UEFI image that passed seven structural checks. Physical F7 boot is
-  still pending because the USB stick is attached to UP2, not the writer host.
+  GPT/FAT32 UEFI image that passes eight structural/embedded-loader checks.
+  OVMF reaches the GRUB loader-ready and kernel-admitted markers, but the
+  Multiboot2 transition still does not reach `_entry32`; physical F7 boot is
+  also pending because the USB stick is attached to UP2, not the writer host.
 - **Canonical tooling:** build the exact-kernel image receipt with
   `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
   `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through

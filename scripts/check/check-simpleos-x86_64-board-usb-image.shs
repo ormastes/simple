@@ -90,5 +90,22 @@ esac
 [ "$BOOTX64_SIZE" -gt 1024 ] || fail "BOOTX64.EFI is only $BOOTX64_SIZE bytes (< 1024 floor)"
 CHECKS=$((CHECKS + 1))
 
+# 6. The standalone loader contains the admitted ELF64 Multiboot2 contract and
+#    serial phase markers. Merely finding a PE file does not prove it embeds the
+#    intended loader command.
+EFI_COPY=$(mktemp "${TMPDIR:-/tmp}/simpleos-bootx64.XXXXXX")
+trap 'rm -f "$EFI_COPY"' EXIT HUP INT TERM
+mcopy -i "${DISK}@@${OFFSET_BYTES}" "::EFI/BOOT/BOOTX64.EFI" "$EFI_COPY" >/dev/null 2>&1 \
+    || fail "could not extract BOOTX64.EFI for loader-contract verification"
+strings "$EFI_COPY" | grep -Fq 'multiboot2 /boot/kernel.elf' \
+    || fail "BOOTX64.EFI does not embed the Multiboot2 kernel command"
+strings "$EFI_COPY" | grep -Fq 'UP2 loader-ready' \
+    || fail "BOOTX64.EFI does not embed the serial loader-ready marker"
+strings "$EFI_COPY" | grep -Fq 'UP2 kernel-admitted' \
+    || fail "BOOTX64.EFI does not embed the serial kernel-admitted marker"
+rm -f "$EFI_COPY"
+trap - EXIT HUP INT TERM
+CHECKS=$((CHECKS + 1))
+
 [ "$CHECKS" -gt 0 ] || err "no checks executed"
 printf 'PASS — %d check(s) passed, image structurally sound\n' "$CHECKS"

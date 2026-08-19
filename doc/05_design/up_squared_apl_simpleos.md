@@ -6,7 +6,9 @@
 the admitted self-hosted compiler and real simple-core/C/ASM runtime providers.
 `build-simpleos-up-squared-usb-image.shs` verifies the kernel receipt, invokes
 the generic GPT/FAT32 x64 UEFI packager, checks the image, then records kernel,
-BOOTX64.EFI, and whole-image hashes.
+BOOTX64.EFI, and whole-image hashes. The kernel retains a legacy Multiboot1
+header but also publishes the required Multiboot2 header for its ELF64 UEFI
+lane. GRUB emits loader-ready and kernel-admitted markers around `multiboot2`.
 
 ## Removable-media admission
 

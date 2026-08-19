@@ -31,6 +31,9 @@ archive, native runtime members, board serial provider, and Multiboot crt0.
 The resulting x86_64 ELF and GPT/FAT32 UEFI image pass their offline checks.
 Physical completion still requires an admitted removable-media receipt and a
 fresh UP2 UART transcript; retained historical logs are not accepted.
+The OVMF preflight now proves USB discovery, standalone GRUB startup, and
+Multiboot2 ELF admission, but `boot` does not reach `_entry32`; see
+`doc/08_tracking/bug/up2_grub_multiboot2_transition_2026-08-20.md`.
 
 ## External prerequisites still pending
 

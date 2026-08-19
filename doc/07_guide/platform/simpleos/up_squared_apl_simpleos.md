@@ -18,7 +18,14 @@ sh scripts/os/build-simpleos-up-squared-usb-image.shs
 
 The kernel build binds the canonical `simple-core` runtime capsule, native x86
 runtime members, Multiboot CRT, and the UP2 serial-input provider. The packaged
-disk is GPT with one FAT32 ESP and `EFI/BOOT/BOOTX64.EFI`.
+disk is GPT with one FAT32 ESP and `EFI/BOOT/BOOTX64.EFI`. The ELF64 removable
+lane uses Multiboot2; the image checker requires the embedded command plus
+`UP2 loader-ready` and `UP2 kernel-admitted` serial markers.
+
+Current OVMF evidence reaches both loader markers but not `_entry32`. Treat this
+as a release blocker documented in
+`doc/08_tracking/bug/up2_grub_multiboot2_transition_2026-08-20.md`; image
+structure and loader admission are not kernel-boot PASS.
 
 ## Media safety and boot
 
