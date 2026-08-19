@@ -1070,12 +1070,20 @@ transcript must show a fresh BootROM/OpenSBI/U-Boot sequence. For immutable
 packaged roots, a VFS-owned manifest is valid evidence when the shell calls
 public `readdir`; names must not be embedded in the shell output path.
 
-If SBI injection is impossible because the selected hart is unexaminable, a
-JH7110-specific fallback may pulse RISC-V Debug Module `ndmreset` with
-`dmactive` retained. It is successful only when a fresh OpenOCD session can
-halt and resume the intended U74 hart and UART shows the firmware restart.
-Otherwise classify BLOCKED and require one physical reset/power-cycle; never
-repeat an unverified software-reset loop.
+On JH7110, declare all five harts on the U74 Debug Module before examination.
+Keep them out of an SMP halt group for staging/reset automation: a firmware-
+running boot hart 1 may reject halt while parked secondary hart 2 remains fully
+examinable. The canonical SBI helper uses hart 2, explicitly writes debug
+resume privilege `S`, and verifies a new session returns hart 2 to the OpenSBI
+machine-mode window. That is JTAG proof of firmware re-entry; physical boot
+acceptance still requires the UART firmware sequence. Stage the ELF file via
+hart 2, then let U-Boot on hart 1 perform the reviewed `bootelf` handoff.
+
+If SBI injection is impossible even through the parked secondary hart, an
+`ndmreset` pulse remains diagnostic only until a fresh session proves firmware
+re-entry and UART shows restart. Otherwise classify BLOCKED and require probe
+reconnection or one physical reset/power-cycle; never repeat an unverified
+software-reset loop.
 
 For StarFive VisionFive 2 NVMe work, separate PCI identity, NVMe Identify, and
 destructive provisioning. The M.2 socket is JH7110 PCIe1/domain 1; DT parsing,

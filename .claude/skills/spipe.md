@@ -2491,6 +2491,14 @@ the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
 
+JH7110 exposes five harts through the U74 Debug Module. Declare the full
+topology but do not form an SMP halt group for automation: boot hart 1 may
+reject halt while parked hart 2 remains examinable. Use hart 2 for the fixed
+SBI trampoline and RAM staging, set debug resume privilege to supervisor before
+the `ecall`, and verify a fresh session observes OpenSBI machine-mode re-entry.
+This proves the software-reset phase; UART remains mandatory for the later
+physical boot verdict. U-Boot on hart 1 still owns the final ELF handoff.
+
 ## 2026-08-17 — run-to-end phases, silent green, reserved words
 
 **Per-phase run-to-end loop.** Each bootstrap phase runs to completion and

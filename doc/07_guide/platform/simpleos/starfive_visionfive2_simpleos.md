@@ -61,12 +61,17 @@ established together.
 
 After SimpleOS replaces U-Boot, use
 `scripts/os/starfive-jtag-sbi-reset.shs` to request an OpenSBI cold reboot. It
-writes a three-instruction `ecall` trampoline only to scratch RAM, invokes SBI
-SRST, restores Tigard channel B, and has been verified to reboot BootROM, DDR,
-OpenSBI, peripherals, and U-Boot. Generic OpenOCD `reset run` is insufficient.
-If the hart is unexaminable, the helper pulses Debug Module `ndmreset` while
-retaining `dmactive`, then requires halt+resume in a fresh session. Failure of
-that verification is BLOCKED and requires one physical reset; do not loop it.
+writes a three-instruction `ecall` trampoline only to scratch RAM, selects
+parked U74 hart 2, sets supervisor resume privilege, invokes SBI SRST, and
+restores Tigard channel B. A fresh session must observe hart 2 back in the
+OpenSBI machine-mode window. Generic OpenOCD `reset run` is insufficient.
+
+The target configuration declares all five U74 Debug Module harts but does not
+join them into an SMP halt group. On the current board boot hart 1 rejects halt
+requests while harts 2--4 remain examinable; hart 2 therefore performs RAM
+staging and reset injection, while U-Boot on hart 1 owns `bootelf`. A UART
+firmware sequence is still required for physical boot PASS. Missing UART or an
+unverified `ndmreset` is BLOCKED; do not loop reset attempts.
 
 On the tested U-Boot 2021.10 build, `bootelf -p` faults while processing this
 ELF's program headers. `bootelf -s 0x48000000` is the proven loader and reaches
@@ -113,6 +118,19 @@ firmware configuration limitation, not SSD absence. NVMe model, serial,
 firmware and namespace geometry require a real NVMe Identify command with DMA.
 Never copy an example device ID from web documentation into an authorization
 receipt.
+
+Pre-provisioning Linux check (on the installed VF2 Linux/SDK image):
+
+- `lspci -nn`
+- `lspci -nn -s 0001:01:00.0`
+- `cat /sys/bus/pci/devices/0001:01:00.0/{vendor,device,class}`
+- `nvme list`
+- `nvme id-ctrl /dev/nvme0`
+- `nvme id-ns /dev/nvme0n1`
+- `lsblk --bytes /dev/nvme0`
+
+Save the exact command outputs and use them as the immutable preflight identity
+report before running `--provision-live`.
 
 Provisioning is intentionally separate. It requires an immutable identify
 receipt bound to exact serial, NSID, capacity and image hash, rejects mounted,

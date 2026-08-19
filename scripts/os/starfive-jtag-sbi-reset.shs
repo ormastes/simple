@@ -26,60 +26,60 @@ if test "$WAS_BOUND" -eq 1; then
 fi
 
 # SBI SRST: EID 0x53525354, FID 0, reset_type 1 (cold reboot), reason 0.
-# The reviewed scratch contains only: ecall; wfi; jump-to-wfi.
+# The reviewed scratch contains only: ecall; wfi; jump-to-wfi.  Hart 2 is a
+# parked OpenSBI secondary hart and remains examinable when boot hart 1 rejects
+# halt requests.  Resume it in supervisor mode so the ecall uses the SBI ABI.
 set +e
 timeout 20 openocd \
     -f interface/ftdi/tigard.cfg \
     -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
     -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
-    -c init -c 'targets jh7110.u74_hart1' -c halt \
+    -c init -c 'targets jh7110.u74_hart2' -c halt \
     -c "mww $SCRATCH 0x00000073" \
     -c "mww 0x48000004 0x10500073" \
     -c "mww 0x48000008 0xffdff06f" \
     -c 'reg a7 0x53525354' -c 'reg a6 0' -c 'reg a0 1' -c 'reg a1 0' \
-    -c "reg pc $SCRATCH" -c resume -c shutdown > "$OUTPUT" 2>&1
+    -c "reg pc $SCRATCH" -c 'reg priv 1' -c resume -c shutdown > "$OUTPUT" 2>&1
 RC=$?
 set -e
-RESET_METHOD=sbi-srst
-if test "$RC" -ne 0 -a "$RC" -ne 124; then
-    # A faulting MMIO access can leave a hart unexaminable, which prevents the
-    # SBI trampoline from being injected.  The RISC-V Debug Module's ndmreset
-    # bit resets the platform without requiring a halt or touching flash.
-    # Keep dmactive asserted, pulse ndmreset, then release it.
-    set +e
-    timeout 20 openocd \
-        -f interface/ftdi/tigard.cfg \
-        -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
-        -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
-        -c init \
-        -c 'riscv dmi_write 0x10 0x00000003' \
-        -c 'sleep 100' \
-        -c 'riscv dmi_write 0x10 0x00000001' \
-        -c shutdown >> "$OUTPUT" 2>&1
-    RC=$?
-    set -e
-    test "$RC" -eq 0 || { echo "starfive_status=fail"; echo "starfive_reason=jtag-software-reset-failed"; exit 1; }
-    sleep 1
-    set +e
-    timeout 15 openocd \
-        -f interface/ftdi/tigard.cfg \
-        -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
-        -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
-        -c init -c 'targets jh7110.u74_hart1' -c halt -c resume -c shutdown >> "$OUTPUT" 2>&1
-    VERIFY_RC=$?
-    set -e
-    test "$VERIFY_RC" -eq 0 || {
+test "$RC" -eq 0 || {
+    echo "starfive_status=blocked"
+    echo "starfive_reason=jtag-sbi-reset-hart2-unavailable"
+    echo "jtag_software_reset_method=sbi-srst-hart2-unverified"
+    echo "jtag_flash_writes=0"
+    echo "openocd_log=$OUTPUT"
+    exit 2
+}
+
+# Reattach through an independent session.  A PC back in the JH7110 OpenSBI
+# firmware window and machine privilege proves that execution left the scratch
+# trampoline and the firmware reset path restarted.  UART remains the stronger
+# end-to-end boot oracle and is collected by the live checker.
+sleep 1
+set +e
+timeout 20 openocd \
+    -f interface/ftdi/tigard.cfg \
+    -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+    -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+    -c init -c 'targets jh7110.u74_hart2' -c halt \
+    -c 'reg pc' -c 'reg priv' -c resume -c shutdown >> "$OUTPUT" 2>&1
+VERIFY_RC=$?
+set -e
+test "$VERIFY_RC" -eq 0 \
+    && grep -Eq 'pc \(/64\): 0x0000000040[0-9a-fA-F]{6}' "$OUTPUT" \
+    && grep -Eq 'priv \(/8\): 0x03' "$OUTPUT" || {
         echo "starfive_status=blocked"
-        echo "starfive_reason=jtag-ndmreset-did-not-recover-hart"
-        echo "jtag_software_reset_method=debug-module-ndmreset-unverified"
+        echo "starfive_reason=jtag-sbi-reset-firmware-reentry-unverified"
+        echo "jtag_software_reset_method=sbi-srst-hart2-unverified"
         echo "jtag_flash_writes=0"
         echo "openocd_log=$OUTPUT"
         exit 2
     }
-    RESET_METHOD=debug-module-ndmreset
-fi
-echo "jtag_sbi_reset_status=issued"
+
+echo "jtag_sbi_reset_status=verified"
 echo "jtag_sbi_reset_type=cold-reboot"
-echo "jtag_software_reset_method=$RESET_METHOD"
+echo "jtag_software_reset_method=sbi-srst-hart2"
+echo "jtag_reset_hart=2"
+echo "jtag_reset_oracle=opensbi-machine-mode-reentry"
 echo "jtag_flash_writes=0"
 echo "openocd_log=$OUTPUT"

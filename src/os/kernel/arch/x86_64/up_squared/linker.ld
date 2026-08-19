@@ -1,5 +1,6 @@
 /* Minimal Multiboot1 layout for the UP Squared first-light kernel. */
 ENTRY(_entry32)
+EXTERN(_entry32)
 
 SECTIONS
 {
@@ -14,8 +15,7 @@ SECTIONS
         *(.text)
         *(.text.*)
     }
-    _entry32 = ADDR(.text) + 28;
-    _start = _entry32;
+    spl_start = __simple_entry_start;
 
     .rodata ALIGN(4K) : { *(.rodata) *(.rodata.*) }
     .data ALIGN(4K) : { *(.data) *(.data.*) }

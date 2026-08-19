@@ -5,13 +5,16 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 . "$ROOT_DIR/scripts/lib/simple-compiler-select.shs"
 
-TARGET=x86_64-unknown-none
+TARGET=x86_64-unknown-simpleos
 BOARD_TARGET=x86_64-up-squared-apollo-lake
 ENTRY=src/os/kernel/arch/x86_64/up_squared/entry.spl
 LINKER=src/os/kernel/arch/x86_64/up_squared/linker.ld
 OUTPUT=${UP2_ELF:-build/os/up-squared-apollo-lake/simpleos.elf}
 RECEIPT="$OUTPUT.receipt"
 BACKEND=${SIMPLE_NATIVE_BACKEND:-cranelift}
+CORE_DIR=build/os/up-squared-apollo-lake/simple-core
+CORE_RUNTIME="$CORE_DIR/libsimple_runtime.a"
+SYSROOT=build/os/sysroot
 
 COMPILER="$(simple_compiler_select --root "$ROOT_DIR" --builder-target "$TARGET")" || {
     echo "error: no admitted self-hosted compiler for $TARGET" >&2
@@ -33,10 +36,42 @@ test "$(awk -F= '/^stage3_sha256=/ {print $2}' "$PROVENANCE")" = "$(sha256sum "$
 }
 
 mkdir -p "$(dirname "$OUTPUT")" build/os/generated
-timeout 300 "$COMPILER" native-build \
+
+# Reuse the admitted x86 SimpleOS runtime capsule.  The board entry is small,
+# but text, arrays, Result values, and serial input still require their real
+# runtime owners; changing the target triple cannot supply those symbols.
+if test ! -s "$SYSROOT/lib/libsimple_runtime_native.a"; then
+    SIMPLEOS_TARGET_TRIPLE="$TARGET" sh src/os/port/llvm/sysroot.shs
+fi
+SIMPLE_BINARY="$COMPILER" \
+SIMPLE_CORE_BUILD_DIR="$CORE_DIR" \
+SIMPLE_CORE_BACKEND="$BACKEND" \
+BUILD_DIR="$CORE_DIR/work" \
+ARCHIVE_ONLY=1 TARGET="$TARGET" \
+    sh scripts/check/check-simple-core-runtime-smoke.shs
+test -s "$CORE_RUNTIME" || { echo "error: missing UP2 simple-core archive" >&2; exit 1; }
+
+mkdir -p "$CORE_DIR/runtime-members"
+rm -f "$CORE_DIR/runtime-members"/*.o
+(cd "$CORE_DIR/runtime-members" && "${AR:-llvm-ar}" x "../../../sysroot/lib/libsimple_runtime_native.a")
+"${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/runtime-members"/*.o
+clang --target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-builtin \
+    -mno-red-zone -fno-stack-protector -ffunction-sections -fdata-sections -O2 \
+    -c src/os/kernel/arch/x86_64/up_squared/serial_runtime.c \
+    -o "$CORE_DIR/up2_serial_runtime.o"
+"${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/up2_serial_runtime.o"
+clang --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+    -c examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s \
+    -o "$CORE_DIR/up2_multiboot_crt0.o"
+"${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/up2_multiboot_crt0.o"
+cp "$CORE_RUNTIME" "$SYSROOT/lib/libsimple_runtime.a"
+
+SIMPLE_SIMPLE_CORE_PATH="$CORE_RUNTIME" \
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$COMPILER" native-build \
     --source build/os/generated --source src/os --source src/lib \
     --source examples/09_embedded/simple_os/arch/x86_64 \
     --backend "$BACKEND" --cpu x86-64-v1 --opt-level=aggressive --log off \
+    --runtime-bundle simple-core \
     --entry-closure --entry "$ENTRY" --target "$TARGET" \
     --linker-script "$LINKER" -o "$OUTPUT"
 
@@ -56,6 +91,9 @@ trap 'rm -f "$TMP"' EXIT HUP INT TERM
     echo compiler="$COMPILER"
     echo compiler_sha256="$(sha256sum "$COMPILER" | awk '{print $1}')"
     echo compiler_provenance="$PROVENANCE"
+    echo runtime_bundle=simple-core
+    echo runtime_archive="$CORE_RUNTIME"
+    echo runtime_archive_sha256="$(sha256sum "$CORE_RUNTIME" | awk '{print $1}')"
     echo entry_source="$ENTRY"
     echo entry_source_sha256="$(sha256sum "$ENTRY" | awk '{print $1}')"
     echo linker="$LINKER"

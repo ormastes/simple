@@ -73,21 +73,27 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Verdict rule:** offline image structure, Tigard enumeration, or retained
   partial source is not live board evidence. PASS requires ordered UART boot
   markers and a command-correlated VFS-backed `ls /` response.
-- **Current build blocker:** the UP2 wrapper omits the canonical x86
-  freestanding `simple-core` runtime-capsule binding; target-name retries do not
-  resolve the missing runtime/serial symbols.
+- **Current build state (2026-08-20):** the UP2 wrapper binds the canonical x86
+  freestanding `simple-core` runtime capsule plus Multiboot CRT and board serial
+  input provider. The admitted build produced a 68,936-byte ELF and a 256 MiB
+  GPT/FAT32 UEFI image that passed seven structural checks. Physical F7 boot is
+  still pending because the USB stick is attached to UP2, not the writer host.
 
 ## StarFive JH7110 software reset over Tigard JTAG
 
 - **Canonical command:** `scripts/os/starfive-jtag-sbi-reset.shs`.
 - **Meaning:** load a fixed, reviewed SBI SRST cold-reboot trampoline into an
-  allowlisted RAM scratch address through Tigard JTAG, select the proven U74
-  hart, and execute the supervisor-mode `ecall`.
+  allowlisted RAM scratch address through Tigard JTAG, select parked U74 hart 2,
+  set debug resume privilege to supervisor, and execute the SBI `ecall`.
 - **Why:** generic OpenOCD `reset run` controls a debug hart but did not restore
   the complete JH7110 firmware/SoC state on the tested VisionFive 2.
-- **PASS evidence:** a retained UART transcript shows a fresh BootROM, OpenSBI,
-  peripheral initialization, and U-Boot sequence; Tigard channel B's kernel
-  driver is restored. The `ecall` or OpenOCD exit status alone is not proof.
+- **Reset-phase evidence:** a fresh JTAG session sees hart 2 back in the OpenSBI
+  address window at machine privilege and Tigard channel B's driver is restored.
+  Physical boot PASS additionally requires UART to show fresh BootROM/OpenSBI/
+  U-Boot output; the `ecall` or OpenOCD exit status alone is not proof.
+- **Topology:** declare U74 Debug Module harts 0--4 independently. Do not create
+  an SMP halt group: firmware-running boot hart 1 can reject halt while hart 2
+  remains usable for reset and RAM staging.
 - **Safety boundary:** never accept arbitrary instructions, payload files, or
   RAM addresses. Use the reviewed fixed trampoline and scratch address; do not
   write QSPI, eMMC, environment, or other persistent storage.
@@ -99,8 +105,8 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 When asked to software-reset or reboot a StarFive JH7110 through Tigard, use
 the SBI SRST helper and capture UART concurrently. Do not substitute OpenOCD
 `reset run`, a direct PC write, or hardware-reset claims. If the expected fresh
-firmware sequence is absent, report reset as failed or blocked rather than
-PASS.
+firmware sequence is absent, report physical boot as blocked even when the
+separate JTAG firmware-reentry oracle passes.
 
 ## StarFive VisionFive 2 NVMe storage
 
@@ -119,10 +125,9 @@ PASS.
 - **Recovery:** if OpenOCD cannot examine the selected U74 hart after a failed
   high-address access, do not loop software reset; request one physical reset or
   power-cycle.
-- **Reset escalation:** try the fixed SBI SRST trampoline first. If the hart
-  cannot be examined, pulse Debug Module `ndmreset` while retaining `dmactive`,
-  then open a fresh OpenOCD session and require halt+resume proof. An
-  unverified `ndmreset` is BLOCKED, not reset success; never loop it.
+- **Reset escalation:** try the fixed SBI SRST trampoline on parked hart 2 first.
+  An `ndmreset` pulse without fresh firmware-reentry and UART evidence is
+  BLOCKED, not reset success; never loop it.
 - **Implemented offline path (2026-08-17):** the common driver parses NVMe
   SN/MN/FR and namespace geometry, carries non-coherent DMA handles through SQ,
   CQ, Identify, and filesystem bounce buffers, creates mirrored GPT plus FAT32

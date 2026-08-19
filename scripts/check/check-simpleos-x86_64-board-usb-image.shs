@@ -31,21 +31,27 @@ command -v mdir >/dev/null 2>&1 || err "mtools (mdir) not installed"
 
 CHECKS=0
 
-# 1. GPT signature present.
-sgdisk --print "$DISK" >/tmp/simpleos_usb_gpt_check.$$ 2>&1 || fail "sgdisk could not read GPT from $DISK"
-grep -q "GPT: present" /tmp/simpleos_usb_gpt_check.$$ || fail "no valid GPT signature in $DISK"
+# 1. Primary/backup GPT structures and CRCs verify, then retain the partition
+# listing. `sgdisk --print` does not emit the legacy `GPT: present` phrase on
+# current gdisk releases, so successful structured verification is the oracle.
+GPT_CHECK=$(mktemp "${TMPDIR:-/tmp}/simpleos-usb-gpt.XXXXXX")
+trap 'rm -f "$GPT_CHECK"' EXIT HUP INT TERM
+sgdisk --verify "$DISK" >"$GPT_CHECK" 2>&1 || fail "sgdisk could not verify GPT from $DISK"
+grep -q "No problems found" "$GPT_CHECK" || fail "GPT verification did not report a clean primary/backup table"
+sgdisk --print "$DISK" >"$GPT_CHECK" 2>&1 || fail "sgdisk could not read GPT from $DISK"
 CHECKS=$((CHECKS + 1))
 
 # 2. Exactly one partition, typed EF00 (EFI System Partition).
-PART_LINE=$(grep -E "^   1 " /tmp/simpleos_usb_gpt_check.$$ || true)
+PART_LINE=$(grep -E "^   1 " "$GPT_CHECK" || true)
 [ -n "$PART_LINE" ] || fail "no partition 1 found in GPT of $DISK"
 echo "$PART_LINE" | grep -qi "EF00" || fail "partition 1 is not typed EF00 (EFI System): $PART_LINE"
 CHECKS=$((CHECKS + 1))
 
-PART2_LINE=$(grep -E "^   2 " /tmp/simpleos_usb_gpt_check.$$ || true)
+PART2_LINE=$(grep -E "^   2 " "$GPT_CHECK" || true)
 [ -z "$PART2_LINE" ] || fail "expected exactly one partition, found a second: $PART2_LINE"
 CHECKS=$((CHECKS + 1))
-rm -f /tmp/simpleos_usb_gpt_check.$$
+rm -f "$GPT_CHECK"
+trap - EXIT HUP INT TERM
 
 # 3. Partition starts at sector 2048 (matches the builder's fixed offset,
 #    so `dd ... seek=2048` in the builder actually lands inside it).
@@ -75,7 +81,9 @@ CHECKS=$((CHECKS + 1))
 
 # 5. BOOTX64.EFI is non-trivially sized (a truncated/zero-byte write must not
 #    read as success).
-BOOTX64_SIZE=$(echo "$EFI_LISTING" | grep -i "BOOTX64" | awk '{print $2}' | head -1)
+# mtools prints the 8.3 basename and extension as separate columns:
+# `BOOTX64  EFI  <size> ...`.
+BOOTX64_SIZE=$(echo "$EFI_LISTING" | awk 'toupper($1)=="BOOTX64" && toupper($2)=="EFI" {print $3; exit}')
 case "$BOOTX64_SIZE" in
     ''|*[!0-9]*) fail "could not parse BOOTX64.EFI size from mdir output" ;;
 esac

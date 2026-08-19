@@ -6,10 +6,11 @@ The operator first runs `scripts/check/check-starfive-nvme-storage.shs --contrac
 and `--self-test`. These modes inspect code and policy only; they do not access
 the board or storage media.
 
-`--identify-live` is exclusively read-only. Until SimpleOS implements NVMe admin
-queues and real Identify Controller/Namespace commands, it exits 2 with
-`starfive_nvme_status=blocked`. PCI vendor/device/class/BAR discovery is not an
-NVMe identity receipt.
+`--identify-live` is read-only only. NVMe `nvme identify` command plumbing now
+exists in board firmware, so this mode no longer blocks on “command not
+implemented.” It still exits 2 (`starfive_nvme_status=blocked`) until physical
+UART evidence is collected from a live StarFive session. PCI vendor/device/class/
+BAR discovery is not itself an identity receipt.
 
 `--provision-live` is a different authority boundary. It requires the exact
 environment authorization phrase and an immutable identity receipt path, then

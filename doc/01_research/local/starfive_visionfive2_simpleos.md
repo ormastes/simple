@@ -3,9 +3,13 @@
 
 ## Scope and current evidence
 
-The requested lane is not implemented. No owned source, script, test, or selected requirement mentions `StarFive`, `VisionFive`, or `JH7110`; existing mentions describe the board as planned or unavailable.
+Initial boot and live-capture work on StarFive is implemented and documented; current evidence includes:
+- JTAG scan, UART capture, and RAM-only boot/load flows from a stable Tigard connection
+- preserved DTB-aware SimpleOS entry
+- VFS-mounted `/` and shell listing evidence
 
-The host currently exposes neither a USB UART nor a USB JTAG probe: `lsusb` contains only root hubs, the integrated camera, and Bluetooth; `/dev/serial/by-id`, `/dev/ttyUSB*`, and `/dev/ttyACM*` are absent. No OpenOCD/J-Link/serial process or tool is active. Therefore the exact board and physical boot state are not yet proven.
+The host USB visibility still changes between sessions and depends on physical wiring and permissions.
+When this local machine lacks a connected probe, the exact board and live state are not proven, and hardware-specific steps stay BLOCKED.
 
 ## Reusable implementation surfaces
 

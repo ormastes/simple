@@ -2,7 +2,10 @@
 
 Mainline Linux DT/bindings and drivers identify the VisionFive 2 M.2 socket as JH7110 PCIe1/domain 1. Its ECAM is `0x9c0000000` (16 MiB), bridge/APB is `0x2c000000`, non-prefetchable memory is `0x38000000` (128 MiB), 64-bit prefetchable memory is `0x980000000` (1 GiB), and PHY1 is `0x10220000`.
 
-The board port must validate the preserved DT, initialize or validate clocks/resets/PHY/PLDA/link, and initially use NVMe polling. The common driver receives normalized ECAM, windows, BAR and DMA resources. Destructive provisioning must be tied to controller/namespace identity, never adapter presence or a password.
+The board port must validate the preserved DT, initialize or validate clocks/resets/PHY/PLDA/link,
+and initially use NVMe polling. The common driver receives normalized ECAM, windows, BAR and DMA
+resources. Destructive provisioning must be tied to controller/namespace identity, never adapter
+presence or a password.
 
 Primary references: Linux `jh7110.dtsi`, `starfive,jh7110-pcie.yaml`, `pcie-starfive.c`, `pcie-plda-host.c`, and `phy-jh7110-pcie.c`.
 
@@ -23,7 +26,33 @@ Direct ECAM display from the old U-Boot is a secondary diagnostic only: its PCIe
 
 An upstream U-Boot VisionFive 2 fix confirms that having the PCI driver in the defconfig was insufficient: PCI was not enumerated at boot until `CONFIG_PCI_INIT_R` and a preboot NVMe scan were added. Therefore the observed missing commands are a firmware-build limitation, not evidence that the installed SSD or PCIe link is absent. Safe firmware diagnostics are limited to `version`, `help pci`, `help nvme`, and `printenv preboot`; never `saveenv`.
 
-JTAG can provide PCI identity only when the debug module reports an SBA width of at least 40 bits and firmware has already initialized the link. NVMe model, serial, firmware revision and namespace geometry require an NVMe Identify admin command with queues and DMA; they cannot be inferred from ECAM. Avoid full PCI configuration dumps because pciutils documents that some devices can crash on them.
+JTAG can provide PCI identity only when the debug module reports an SBA width of at least 40 bits and
+firmware has already initialized the link. NVMe model, serial, firmware revision and namespace geometry
+require an NVMe Identify admin command with queues and DMA; they cannot be inferred from ECAM. Avoid full PCI
+configuration dumps because pciutils documents that some devices can crash on them.
+
+## Linux identity capture checklist for an installed SSD
+
+Capture this before SimpleOS destructive provisioning:
+
+1. Confirm endpoint location and binding:
+   - `dmesg | grep -Ei 'pcie|nvme|starfive'`
+   - `lspci -nn`
+   - `lspci -nn -s 0001:01:00.0`
+   - `cat /sys/bus/pci/devices/0001:01:00.0/{vendor,device,class}`
+   - `cat /sys/bus/pci/devices/0001:01:00.0/resource`
+2. Collect identity from Linux and NVMe utilities:
+   - `nvme list`
+   - `nvme id-ctrl /dev/nvme0`
+   - `nvme id-ns /dev/nvme0n1`
+   - `nvme list-ns /dev/nvme0`
+   - `lsblk --bytes /dev/nvme0`
+3. Capture as immutable preflight artifacts:
+   - save command output that includes model, serial, firmware revision, and namespace NSID/geometry
+   - pair with kernel boot image hash and SimpleOS image hash in a single review file
+   - use the preflight file with `SIMPLEOS_NVME_PREFLIGHT_REPORT` for production checker paths
+
+If Linux does not expose `pci`/`nvme` shell helpers in U-Boot, capture the identity from Linux instead of inferring from ECAM or sample PCI IDs.
 
 Sources:
 

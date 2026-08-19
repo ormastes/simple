@@ -1,22 +1,22 @@
 # Local research: StarFive VisionFive 2 NVMe storage
 
-The repository already has shared PCI enumeration, a pure-Simple NVMe controller/queue implementation, namespace identities, partition leases, FAT32, and VFS block adapters. The current RISC-V PCI path is QEMU-specific (`0x30000000` ECAM), while `NvmeDriver.init_baremetal` accepts an already mapped BAR and uses polling.
+The repository already has shared PCI enumeration and a pure-Simple NVMe controller/queue stack with namespace identity, partition leasing, FAT32, and VFS adapters. The current StarFive host seam still uses firmware-aware constants to build a `PciHostDescriptor` (not a parsed DT path yet), while `NvmeDriver.init_baremetal` accepts an already-mapped BAR and uses polling.
 
 The portable seam is a normalized PCI host descriptor consumed by common enumeration. JH7110 DT parsing, PHY/clocks/resets/GPIO/PLDA quirks, link training, and CPU/PCI address translation belong to the StarFive port. NVMe command and filesystem logic must contain no JH7110 constants.
 
-Safety gaps found: partial block writes were zero-padded, lease addition lacked an overflow guard, no production GPT formatter/validator is wired into boot, and the live StarFive entry does not yet enumerate NVMe.
-
-Hardware status on 2026-08-16: Tigard UART/JTAG is enumerated and JTAG previously matched TAP `0x07110cfd`, but the latest UART capture was silent. No NVMe identity or write proof exists yet.
+Safety gaps found: provisioning authorization is still incomplete for this objective, and live acceptance still requires immutable evidence (read-only identify receipt, boot-safe authorization checks, and proof of durable filesystem write/remount). Some early notes still reflect earlier pre-proof runs.
 
 ## Linux-aligned implementation update
 
 `src/os/kernel/arch/riscv64/starfive/nvme_probe.spl` now mirrors Linux's ownership boundary: it checks the JH7110 PCIe1 link-status bit at `0x10240368`, uses a bounded 16 MiB ECAM descriptor for domain 1, and scans only for PCI class `01:08:02`. It performs no PCI configuration, BAR, NVMe controller, or media writes. The StarFive image builds through the admitted Stage 3 compiler.
 
-Live execution is currently blocked before image staging because hart 1 remains unexaminable after the earlier failed >4 GiB OpenOCD memory access. The board needs a physical reset/power-cycle; repeated software-reset attempts must not be treated as useful retries.
+Current hardware update (2026-08-20): boot hart 1 still rejects halt, but full
+five-hart declaration shows parked harts 2--4 are examinable. A fixed SBI SRST
+trampoline on hart 2, resumed at supervisor privilege, returned hart 2 to the
+OpenSBI machine-mode window and therefore proved software reset without flash
+writes. RAM staging also uses hart 2. The 366,520-byte load completed, but the
+100 kHz readback exceeded the old timeout and the TAP became unstable on later
+sessions; UART remained silent. Physical NVMe identity and boot remain BLOCKED
+until the Tigard signal path/UART wiring is stable again.
 
-The first live SimpleOS PCI probe reached `STARFIVE console-ready` and then
-hung because it treated PLDA root bus 0 as ordinary ECAM. Linux routes root-port
-configuration through the PLDA host's special path and exposes the M.2 endpoint
-on domain 1, bus 1. The corrected first-light probe therefore checks link state
-and reads only downstream bus 1; generic enumeration must later receive a host
-operation that distinguishes root and downstream configuration.
+The first live SimpleOS probe path now reports only downstream `domain 1 / bus 1` enumeration (class `01:08:02`) and no longer enumerates PCIe1 root bus ECAM directly. Linux also treats PLDA root-port configuration as a board-specific path and leaves only downstream PCI functions exposed here.

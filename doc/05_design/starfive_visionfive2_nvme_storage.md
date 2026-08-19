@@ -1,11 +1,17 @@
 # Detail design: StarFive VisionFive 2 NVMe storage
 
-1. Validate preserved DTB PCIe1 `compatible`, `status`, `reg`, `ranges`, `dma-ranges`, and aperture bounds.
-2. Prepare/validate JH7110 PCIe1 and train link; normalize resources into `PciHostDescriptor`.
-3. Enumerate class `01:08:02`, map a validated BAR0, allocate DMA, and call common polling NVMe initialization.
-4. Identify controller/namespace and emit a read-only receipt plus identity-bound challenge.
-5. After exact authorization, create partition 1 at LBA 2048, write/validate both GPT copies, format only the bounded partition FAT32 as `SIMPLEOS`, and flush.
-6. Mount at `/nvme`, persist a nonce file, flush/unmount/remount/read/hash, then correlate `ls /nvme` output with the command nonce.
+1. Operator precondition for physical provisioning: on Linux booted with SSD installed, run non-destructive PCI/NVMe discovery (`lspci`, `nvme list`, `nvme id-ctrl`, `nvme id-ns`, `lsblk`) and persist exact outputs plus image hash. This receipt is mandatory input before any destructive format command in SimpleOS.
+2. Normalize PCI host inputs by first building a minimal, validated `PciHostDescriptor` from known-good constants for VisionFive 2; then, when firmware-visible DT is present and safe, override only explicit, validated fields (`ecam`, `ranges`, `dma-ranges`, `bus-range`, clocks/resets/PERST references) without introducing StarFive-only constants in shared layers.
+3. Initialize host (`pcie_init`) and verify link; if firmware already trained/link-down evidence exists, proceed without reprogramming unsafe PLL/PHY fields. Then probe for class `01:08:02` on expected bus/function; if no endpoint appears, report blocked state.
+4. Map one NVMe BAR0 candidate from common PCI flow, allocate DMA, and invoke shared polling NVMe init path; no media writes occur during this step.
+5. Perform read-only Identify Controller/Namespace, compute identity receipt, and build exact-match challenge bindings (serial/nsid/lba_count + identify hash + image hash).
+6. Provisioning is allowed only when:
+   - `starfive_nvme_format_challenge` challenge matches exactly,
+   - device is not mounted/in-use by a running FS contract,
+   - boot-source ambiguity is rejected,
+   - stable identity replay checks pass.
+7. After authorization: create partition 1 at LBA 2048, mirror GPT metadata, format only bounded partition as FAT32 `SIMPLEOS`, verify partition/GPT, and flush write cache.
+8. Mount at `/nvme` through the VFS adapter, write a nonce proof file, flush, unmount/remount, reread hash, and verify `ls /nvme` includes expected proof artifact as durable success evidence.
 
 All arithmetic checks overflow before addition. Sector writes require exactly one sector. Any reset, link, identify, GPT, FAT, flush, remount, or hash error aborts; no QSPI writes are permitted.
 
