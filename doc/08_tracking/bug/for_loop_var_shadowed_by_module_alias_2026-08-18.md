@@ -1,7 +1,7 @@
 # `for` loop variable does not shadow a same-named module-namespace alias
 
 Date: 2026-08-18
-Status: OPEN (compiler defect; worked around in library code)
+Status: FIXED 2026-08-19 — `exec_for` now marks loop-pattern bindings block-local (interpreter_control.rs); see struct_receiver_decays_to_empty_dict_under_test_runner_2026-08-19.md for the mechanism and verdicts
 Component: Rust seed compiler / interpreter name resolution
 
 ## Symptom

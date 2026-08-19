@@ -896,6 +896,12 @@ pub(super) fn eval_call_expr(
                             ) {
                                 Ok(result) => Ok(result),
                                 Err(_) => {
+                                    if std::env::var("SIMPLE_DEBUG_DICT_FIELD").is_ok() {
+                                        eprintln!(
+                                            "[dict-field-debug] field={field} receiver={receiver:?} dict_keys={:?}",
+                                            map.keys().take(8).collect::<Vec<_>>()
+                                        );
+                                    }
                                     let ctx = ErrorContext::new()
                                         .with_code(codes::UNDEFINED_FIELD)
                                         .with_help("available properties: len, is_empty; or use method() syntax");

@@ -3322,7 +3322,24 @@ pub(super) fn exec_for(
         })
         .collect();
 
+    // The loop variable is a genuine local for the duration of the loop.
+    // Without this, an identifier read of the loop var inside the body loses
+    // to a same-named entry in flat MODULE_GLOBALS (e.g. a module-namespace
+    // dict bound under its basename by any `use pkg.manifest.*` elsewhere in
+    // the program) via the "prefer live module global on non-local reads"
+    // rule in interpreter/expr/literals.rs — the struct/class element decays
+    // to the module dict. See
+    // doc/08_tracking/bug/for_loop_var_shadowed_by_module_alias_2026-08-18.md
+    // and struct_receiver_decays_to_empty_dict_under_test_runner_2026-08-19.md.
+    for (name, _) in &saved {
+        env.enter_block_local(name.clone());
+    }
+
     let result = exec_for_inner(for_stmt, env, functions, classes, enums, impl_methods);
+
+    for (name, _) in &saved {
+        env.exit_block_local(name);
+    }
 
     // Restore unconditionally — including on the error path and on every early
     // `return` a fast path takes. `break`/`continue`/`return` inside the body all
