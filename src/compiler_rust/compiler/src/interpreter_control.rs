@@ -4848,6 +4848,11 @@ pub(crate) fn exec_match_core(
             let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
             for (name, value) in bindings {
                 let prev = env.insert(name.clone(), value);
+                // Mark the arm binding LOCAL: without this, reads of the
+                // binding prefer MODULE_GLOBALS (see literals.rs stale-read
+                // path), so `case Ok(engine):` resolved `engine` to an
+                // imported module's namespace dict instead of the payload.
+                env.enter_block_local(name.clone());
                 shadowed.push((name, prev));
             }
 
@@ -4856,6 +4861,7 @@ pub(crate) fn exec_match_core(
 
             // Restore shadowed values (or remove arm-only bindings) even on error
             for (name, prev) in shadowed.into_iter().rev() {
+                env.exit_block_local(&name);
                 match prev {
                     Some(v) => {
                         env.insert(name, v);

@@ -686,6 +686,10 @@ pub(super) fn exec_block_closure_into(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
+                            // Mark the arm binding LOCAL so reads don't prefer
+                            // MODULE_GLOBALS (e.g. `case Ok(engine):` resolving
+                            // `engine` to an imported module's namespace dict).
+                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -697,6 +701,7 @@ pub(super) fn exec_block_closure_into(
                             impl_methods,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
+                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);
@@ -1446,6 +1451,10 @@ fn exec_block_closure_mut_inner(
                         let mut shadowed: Vec<(String, Option<Value>)> = Vec::with_capacity(bindings.len());
                         for (name, value) in bindings {
                             let prev = local_env.insert(name.clone(), value);
+                            // Mark the arm binding LOCAL so reads don't prefer
+                            // MODULE_GLOBALS (e.g. `case Ok(engine):` resolving
+                            // `engine` to an imported module's namespace dict).
+                            local_env.enter_block_local(name.clone());
                             shadowed.push((name, prev));
                         }
                         let arm_result = exec_block_closure_mut(
@@ -1457,6 +1466,7 @@ fn exec_block_closure_mut_inner(
                             impl_methods,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
+                            local_env.exit_block_local(&name);
                             match prev {
                                 Some(v) => {
                                     local_env.insert(name, v);

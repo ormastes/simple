@@ -186,7 +186,11 @@ pub(super) fn eval_control_expr(
                     }
                     let mut arm_env = env.clone();
                     for (name, value) in arm_bindings {
-                        arm_env.insert(name, value);
+                        arm_env.insert(name.clone(), value);
+                        // Mark the arm binding LOCAL so reads don't prefer
+                        // MODULE_GLOBALS (match-expression form of the
+                        // `case Ok(engine):` module-dict bug).
+                        arm_env.enter_block_local(name);
                     }
                     let mut result = Value::Nil;
                     let stmt_count = arm.body.statements.len();
