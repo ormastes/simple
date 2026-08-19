@@ -1,7 +1,7 @@
 # browser_engine: tree builder does not synthesize implicit `<tbody>` for `<table><tr>`
 
 - **Date:** 2026-08-19
-- **Status:** OPEN
+- **Status:** FIXED (2026-08-19 — verified: dom_zoo node-path sets identical to Chrome, comm -3 = 0; unit reproduce specs green in test/01_unit/browser_engine/html_tree_builder_spec.spl and chrome_component_set_spec dom_zoo pin re-measured 64/139 -> 70/145 with structural parity)
 - **Severity:** medium (DOM structure diverges from every real browser; selectors/JS walking `table.tBodies`/`children` see a different tree)
 - **Module:** `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl`
 

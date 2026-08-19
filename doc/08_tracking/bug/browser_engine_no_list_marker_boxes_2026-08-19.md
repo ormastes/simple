@@ -1,7 +1,7 @@
 # browser_engine: no `::marker` boxes generated for `<li>` (list bullets/numbers never rendered)
 
 - **Date:** 2026-08-19
-- **Status:** OPEN
+- **Status:** FIXED (2026-08-19 — verified: dom_zoo node-path sets identical to Chrome, comm -3 = 0; unit reproduce specs green in test/01_unit/browser_engine/html_tree_builder_spec.spl and chrome_component_set_spec dom_zoo pin re-measured 64/139 -> 70/145 with structural parity)
 - **Severity:** medium (every `<ul>`/`<ol>` renders without bullets or numbers; visual + geometry divergence from Chrome)
 - **Module:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl` (box generation) — list-item display type produces no marker box
 
