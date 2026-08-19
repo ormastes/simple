@@ -1,7 +1,7 @@
 # UP Squared Apollo Lake SimpleOS handoff
 
 Updated: 2026-08-17
-Status: RESUMED — runtime capsule and board-side media transport pending
+Status: IMPLEMENTED OFFLINE — physical media write, boot, and UART proof pending
 
 ## Objective retained
 
@@ -18,25 +18,19 @@ This lane is not complete and must not be reported as a physical-board PASS.
 - CN22 is CPLD/BIOS-update JTAG at 1.8 V, not a documented Apollo Lake CPU
   debug port. Never drive it for SimpleOS debugging.
 - `mtools` was installed on the Linux host.
-- Partial board-owned entry, console, immutable root, VFS listing, minimal
-  linker, and provenance-gated build wrapper are retained in the worktree.
+- Board-owned entry, console, immutable root, VFS listing, linker, and
+  provenance-gated build wrapper produce an admitted x86_64 ELF.
+- The exact-kernel UEFI image wrapper, fail-closed stable-by-id removable-media
+  writer, one-session live UART checker, architecture/detail design, test plan,
+  executable SSpec, and manual are implemented.
 
-## Current failure evidence
+## Current evidence
 
-Three bounded build/fix cycles were used. The final build reached the linker
-but failed because the minimal entry closure did not link the x86 freestanding
-runtime provider (`rt_string_*`, allocation/array/enum helpers,
-`serial_println`, and `rt_serial_readline`). Objects were retained at
-`.simple/native-objects-Lz0pcQ` when present. Do not repeat the identical
-command without changing the runtime-bundle contract.
-
-The 2026-08-17 resume repeated the failure once, then tested explicit
-`SIMPLE_NATIVE_BUILD_TARGET` propagation and the documented
-`simpleos_x86_64` output discriminator. Both still reached the generic linker
-with the same unresolved runtime surface; the last retained objects were under
-`.simple/native-objects-Xf8peY`. Both ineffective wrapper experiments were
-reverted. The next change must fix or explicitly bind the admitted compiler's
-x86 freestanding linker/provider capsule, not retry wrapper naming.
+The runtime blocker is closed: the wrapper now binds the admitted simple-core
+archive, native runtime members, board serial provider, and Multiboot crt0.
+The resulting x86_64 ELF and GPT/FAT32 UEFI image pass their offline checks.
+Physical completion still requires an admitted removable-media receipt and a
+fresh UP2 UART transcript; retained historical logs are not accepted.
 
 ## External prerequisites still pending
 
@@ -57,20 +51,16 @@ identity-gated writer. Do not infer remote access from Micro-B OTG or UART.
 
 ## Resume sequence
 
-1. Finalize selected requirements; delete the unchosen option documents.
-2. Fix the x86 build wrapper by binding the existing freestanding runtime
-   bundle/C+ASM providers without fabricated stubs.
-3. Add the dedicated catalog/hardening row and focused contract tests.
-4. Build the ELF and exact UEFI image; retain compiler/image receipts.
-5. Choose physical-move, existing Linux/SSH, or isolated PXE RAM Linux. On the
+1. Add the dedicated catalog/hardening row and focused contract tests.
+2. Build the ELF and exact UEFI image; retain compiler/image receipts.
+3. Choose physical-move, existing Linux/SSH, or isolated PXE RAM Linux. On the
    actual writer host, admit one stable by-id plus serial/capacity; reject
    root/swap/mounted/internal media; stage+hash, write locally, sync, recheck
    identity, and verify exact-length SHA-256 readback.
-6. Use F7 for one-time UEFI boot and retain one stateful UART transcript.
-7. Inject `ls /`; require output between `ls-begin` and `ls-end` from public
+4. Use F7 for one-time UEFI boot and retain one stateful UART transcript.
+5. Inject `ls /`; require output between `ls-begin` and `ls-end` from public
    VFS `readdir`.
-8. Update guide, executable/manual SPipe spec, skills, and LLM wiki; verify and
-   push the completion change.
+6. Verify and push the completion evidence change.
 
 ## Cooperative ownership
 

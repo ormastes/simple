@@ -47,8 +47,8 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 
 ## UP Squared Apollo Lake SimpleOS bring-up
 
-- **Current status:** paused partial implementation; no physical boot or `ls`
-  PASS yet.
+- **Current status:** offline implementation complete; no physical boot or
+  `ls` PASS yet.
 - **Canonical handoff:**
   `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
 - **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
@@ -78,6 +78,11 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   input provider. The admitted build produced a 68,936-byte ELF and a 256 MiB
   GPT/FAT32 UEFI image that passed seven structural checks. Physical F7 boot is
   still pending because the USB stick is attached to UP2, not the writer host.
+- **Canonical tooling:** build the exact-kernel image receipt with
+  `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
+  `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through
+  `scripts/check/check-simpleos-up-squared-apollo-lake.shs --live` with the
+  full-readback media receipt.
 
 ## StarFive JH7110 software reset over Tigard JTAG
 
@@ -97,6 +102,10 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Safety boundary:** never accept arbitrary instructions, payload files, or
   RAM addresses. Use the reviewed fixed trampoline and scratch address; do not
   write QSPI, eMMC, environment, or other persistent storage.
+- **Signal integrity:** `STARFIVE_JTAG_KHZ` may be reduced within 1..1000, but
+  both TAPs must report exact `0x07110cfd` in the same session before reset or
+  RAM access. Random/shifted IDs mean stop and inspect VTref, ground, TDO, and
+  cable contact; they are not a software-reset result.
 - **Primary guide:**
   `doc/07_guide/platform/simpleos/starfive_visionfive2_simpleos.md`.
 

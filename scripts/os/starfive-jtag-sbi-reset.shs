@@ -4,6 +4,9 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 OUTPUT="${STARFIVE_OPENOCD_RESET_LOG:-$ROOT_DIR/build/test-artifacts/starfive-jh7110/openocd-sbi-reset.log}"
 SCRATCH=0x48000000
+JTAG_KHZ="${STARFIVE_JTAG_KHZ:-100}"
+case "$JTAG_KHZ" in ''|*[!0-9]*) echo "error: invalid JTAG clock" >&2; exit 1;; esac
+test "$JTAG_KHZ" -ge 1 -a "$JTAG_KHZ" -le 1000 || { echo "error: JTAG clock out of range" >&2; exit 1; }
 
 DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
 JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
@@ -34,6 +37,7 @@ timeout 20 openocd \
     -f interface/ftdi/tigard.cfg \
     -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
     -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+    -c "adapter speed $JTAG_KHZ" \
     -c init -c 'targets jh7110.u74_hart2' -c halt \
     -c "mww $SCRATCH 0x00000073" \
     -c "mww 0x48000004 0x10500073" \
@@ -61,6 +65,7 @@ timeout 20 openocd \
     -f interface/ftdi/tigard.cfg \
     -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
     -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+    -c "adapter speed $JTAG_KHZ" \
     -c init -c 'targets jh7110.u74_hart2' -c halt \
     -c 'reg pc' -c 'reg priv' -c resume -c shutdown >> "$OUTPUT" 2>&1
 VERIFY_RC=$?
@@ -80,6 +85,7 @@ echo "jtag_sbi_reset_status=verified"
 echo "jtag_sbi_reset_type=cold-reboot"
 echo "jtag_software_reset_method=sbi-srst-hart2"
 echo "jtag_reset_hart=2"
+echo "jtag_clock_khz=$JTAG_KHZ"
 echo "jtag_reset_oracle=opensbi-machine-mode-reentry"
 echo "jtag_flash_writes=0"
 echo "openocd_log=$OUTPUT"

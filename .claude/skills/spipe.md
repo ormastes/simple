@@ -1850,6 +1850,16 @@ reader may discard or fail to expose such bytes on a tty; use a byte-streaming
 captures data but the wrapper reports silence, fail the wrapper and fix it
 before attributing the result to board wiring.
 
+For original UP Squared Apollo Lake, first light is a removable x64 UEFI image
+at `EFI/BOOT/BOOTX64.EFI`, not an eMMC/NVMe install or firmware update. Use the
+separate image builder, stable-by-id removable-media writer, and one-session
+checker under `scripts/{os,check}/*up-squared*`. The media writer must remain
+read-only until exact serial/capacity/image-bound authorization, then require a
+full image-length readback receipt. CN16 is 3.3 V TTL; CN22 is a 1.8 V CPLD/BIOS
+service connector and is never a CPU-JTAG shortcut. Board-attached USB is not
+host-addressable unless a trusted board-side Linux/PXE environment is already
+running.
+
 ## GPU / notebook remote lanes (planned, 2026-08-07)
 
 `cuda` and `vulkan` are planned composite remote backends at the same grammar depth as
@@ -2498,6 +2508,11 @@ SBI trampoline and RAM staging, set debug resume privilege to supervisor before
 the `ecall`, and verify a fresh session observes OpenSBI machine-mode re-entry.
 This proves the software-reset phase; UART remains mandatory for the later
 physical boot verdict. U-Boot on hart 1 still owns the final ELF handoff.
+Tigard/JH7110 scan integrity can be clock-sensitive. Automation may lower the
+validated `STARFIVE_JTAG_KHZ` value (1..1000), but it must require both exact
+`0x07110cfd` TAP IDs in the same session before any reset or RAM operation.
+Random or bit-shifted IDs are electrical/signal-integrity evidence, not a target
+identity; stop without writing and inspect VTref, ground, TDO, and cable contact.
 
 ## 2026-08-17 — run-to-end phases, silent green, reserved words
 

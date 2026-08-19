@@ -3,6 +3,35 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 OUTPUT="${STARFIVE_OPENOCD_LOG:-build/test-artifacts/starfive-jh7110/openocd.log}"
+JTAG_KHZ="${STARFIVE_JTAG_KHZ:-100}"
+case "$JTAG_KHZ" in ''|*[!0-9]*) echo "error: invalid JTAG clock" >&2; exit 1;; esac
+test "$JTAG_KHZ" -ge 1 -a "$JTAG_KHZ" -le 1000 || { echo "error: JTAG clock out of range" >&2; exit 1; }
+
+scan_log_valid() {
+    log=$1
+    found="$(grep -Eic 'tap/device found: 0x07110cfd([^0-9a-fA-F]|$)' "$log" || true)"
+    test "$found" -eq 2 \
+        && ! grep -qE 'UNEXPECTED:|IR capture error|Trying to use configured scan chain anyway' "$log"
+}
+
+if test "${1:-}" = --self-test; then
+    FIXTURE_DIR="$(mktemp -d)"
+    trap 'rm -rf "$FIXTURE_DIR"' EXIT HUP INT TERM
+    printf '%s\n' \
+        'Info : JTAG tap: jh7110.e24 tap/device found: 0x07110cfd' \
+        'Info : JTAG tap: jh7110.u74 tap/device found: 0x07110cfd' > "$FIXTURE_DIR/pass.log"
+    printf '%s\n' \
+        'Warn : JTAG tap: jh7110.e24 UNEXPECTED: 0x874bc781' \
+        'Error: expected 1 of 1: 0x07110cfd' \
+        'Warn : JTAG tap: jh7110.u74 UNEXPECTED: 0x3f38807f' \
+        'Error: expected 1 of 1: 0x07110cfd' > "$FIXTURE_DIR/false-positive.log"
+    scan_log_valid "$FIXTURE_DIR/pass.log" || exit 1
+    if scan_log_valid "$FIXTURE_DIR/false-positive.log"; then exit 1; fi
+    echo jtag_scan_self_test_status=pass
+    echo expected_id_error_text_cannot_pass=1
+    exit 0
+fi
+test "$#" -eq 0 || { echo "usage: $0 [--self-test]" >&2; exit 1; }
 DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
 JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
 JTAG_TTY="$(basename "$JTAG_PATH")"
@@ -41,15 +70,19 @@ timeout 15 $AS_ROOT openocd \
     -f interface/ftdi/tigard.cfg \
     -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
     -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110.cfg" \
+    -c "adapter speed $JTAG_KHZ" \
     -c init -c scan_chain -c shutdown > "$OUTPUT" 2>&1
 RC=$?
 set -e
 if grep -q 'all ones' "$OUTPUT"; then
     echo "starfive_status=blocked"; echo "starfive_reason=jtag-all-ones"; echo "openocd_log=$OUTPUT"; exit 2
 fi
-if test "$RC" -ne 0 || ! grep -qi '0x07110cfd' "$OUTPUT"; then
+FOUND_TAPS="$(grep -Eic 'tap/device found: 0x07110cfd([^0-9a-fA-F]|$)' "$OUTPUT" || true)"
+if test "$RC" -ne 0 || ! scan_log_valid "$OUTPUT"; then
     echo "starfive_status=fail"; echo "starfive_reason=jtag-unexpected-tap"; echo "openocd_log=$OUTPUT"; exit 1
 fi
 echo "jtag_status=pass"
 echo "jtag_tap=0x07110cfd"
+echo "jtag_tap_count=$FOUND_TAPS"
+echo "jtag_clock_khz=$JTAG_KHZ"
 echo "openocd_log=$OUTPUT"

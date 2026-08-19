@@ -16,6 +16,11 @@ The admitted adapter is FTDI `0403:6010`, serial `tiBMLHE7`, with EEPROM product
 JTAG. Scripts resolve stable `/dev/serial/by-id` identities and sysfs interface
 metadata, never fixed tty numbers. JH7110 UART0 uses GPIO5 TX and GPIO6 RX;
 connect grounds and the Tigard voltage reference to the powered target.
+If signal integrity is marginal, set `STARFIVE_JTAG_KHZ` within the validated
+1..1000 kHz range. A scan passes only when the log contains two actual
+`tap/device found: 0x07110cfd` records and no unexpected-ID or IR-capture error.
+The expected ID repeated inside an OpenOCD error message is not evidence. Run
+`scripts/os/starfive-jtag-scan.shs --self-test` to verify this oracle.
 
 Run the canonical live workflow with:
 

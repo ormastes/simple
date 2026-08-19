@@ -1,0 +1,59 @@
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008
+"""# SimpleOS on UP Squared Apollo Lake
+
+Keep offline build/media contracts separate from one-session physical UART
+acceptance. Missing physical prerequisites remain BLOCKED, never PASS.
+"""
+
+use std.spec.*
+use app.io.mod.{process_run_timeout}
+
+fn run_up2_check(mode: text) -> (text, text, i64):
+    process_run_timeout(
+        "/bin/sh",
+        ["scripts/check/check-simpleos-up-squared-apollo-lake.shs", mode],
+        150000
+    )
+
+fn classify_up2_result(out: text, code: i64) -> text:
+    if code == 0 and out.contains("up2_status=pass"):
+        return "pass"
+    if code == 2 and out.contains("up2_status=blocked"):
+        return "blocked"
+    "fail"
+
+fn require_up2_pass(out: text, code: i64, phase: text):
+    val result = classify_up2_result(out, code)
+    if result == "blocked":
+        pending("BLOCKED: UP2 physical evidence unavailable ({phase})")
+    if result != "pass":
+        fail("FAIL: UP2 physical evidence ({phase})")
+
+describe "SimpleOS UP Squared Apollo Lake removable UEFI boot":
+    it "publishes the build, media, and VFS contracts":
+        val (out, err, code) = run_up2_check("--contract")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("up2_contract_status=pass")
+        expect(out).to_contain("board_target=x86_64-up-squared-apollo-lake")
+        expect(out).to_contain("persistent_writes=selected-removable-usb-only")
+        expect(out).to_contain("ls_source=vfs")
+
+    it "proves unsafe media and stale evidence fail closed":
+        val (out, err, code) = run_up2_check("--self-test")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("up2_self_test_status=pass")
+        expect(out).to_contain("root_or_swap_target=fail")
+        expect(out).to_contain("identity_race=fail")
+        expect(out).to_contain("stale_ls_output=fail")
+
+    # @capture(log)
+    # @capture(artifact)
+    it "boots the admitted removable image and runs VFS ls in one session":
+        val (out, err, code) = run_up2_check("--live")
+        expect(err).to_equal("")
+        require_up2_pass(out, code, "physical-boot-and-ls")
+        expect(out).to_contain("marker_order=pass")
+        expect(out).to_contain("ls_status=pass")
+        expect(out).to_contain("ls_entries=bin,etc,README.txt")

@@ -188,6 +188,14 @@ explicit serial/capacity confirmation, write locally, sync, recheck identity,
 and hash the exact image-length readback. Never stream SSH directly into a raw
 device. UEFI Shell, UART, USB OTG gadget mode, and PXE availability must each be
 proven rather than inferred; firmware flashing is a separate forbidden lane.
+The canonical tools are
+`scripts/os/build-simpleos-up-squared-usb-image.shs`,
+`scripts/os/write-simpleos-up-squared-usb.shs`, and
+`scripts/check/check-simpleos-up-squared-apollo-lake.shs`. The writer is
+read-only until `--write-media` plus the exact identity/image SHA-256 challenge
+are supplied; a media receipt with full image-length readback is mandatory
+input to `--live`. The live checker must keep one UART session open from boot
+markers through the freshly injected public-VFS `ls /` window.
 
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo

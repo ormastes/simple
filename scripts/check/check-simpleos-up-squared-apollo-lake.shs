@@ -1,0 +1,196 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+MODE="${1:---contract}"
+ARTIFACT_ROOT="$ROOT_DIR/build/test-artifacts/03_system/os/x86_64/up_squared_apl_simpleos"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$ARTIFACT_ROOT/$RUN_ID"
+KERNEL="$ROOT_DIR/build/os/up-squared-apollo-lake/simpleos.elf"
+IMAGE="$ROOT_DIR/build/os/up-squared-apollo-lake/usb/board-usb.img"
+IMAGE_RECEIPT="$IMAGE.receipt"
+MEDIA_RECEIPT="${UP2_MEDIA_RECEIPT:-}"
+TIGARD_SERIAL="${UP2_TIGARD_SERIAL:-tiBMLHE7}"
+BOOT_SECONDS="${UP2_BOOT_TIMEOUT_SECONDS:-120}"
+
+fail() { echo "up2_status=fail"; echo "up2_reason=$1"; exit 1; }
+blocked() { echo "up2_status=blocked"; echo "up2_reason=$1"; exit 2; }
+receipt_value() { awk -F= -v key="$2" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$1"; }
+
+contract() {
+    rg -q 'UP2 entry' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 console-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 filesystem-ready entries=' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 shell-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'UP2 ls-begin source=vfs command=ls /' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'up2_vfs_readdir\("/"\)' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'stable-by-id-required' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'media-readback-mismatch' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    echo up2_contract_status=pass
+    echo board_target=x86_64-up-squared-apollo-lake
+    echo firmware=uefi
+    echo loader=EFI/BOOT/BOOTX64.EFI
+    echo media_safety=stable-by-id,serial,removable,usb,unmounted,unheld,non-system,readback
+    echo persistent_writes=selected-removable-usb-only
+    echo ls_source=vfs
+}
+
+self_test() {
+    TMP_OUT="$(mktemp)"
+    trap 'rm -f "$TMP_OUT"' EXIT HUP INT TERM
+    set +e
+    "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs" \
+        --image "$IMAGE" --device-by-id /dev/sda --expected-serial TEST > "$TMP_OUT" 2>&1
+    TRANSIENT_RC=$?
+    set -e
+    test "$TRANSIENT_RC" -eq 2 || fail self-test-transient-device-verdict
+    grep -Fq 'up2_media_reason=stable-by-id-required' "$TMP_OUT" || fail self-test-transient-device-reason
+
+    set +e
+    "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs" \
+        --image "$IMAGE" --device-by-id /dev/disk/by-id/up2-self-test-missing \
+        --expected-serial TEST > "$TMP_OUT" 2>&1
+    MISSING_RC=$?
+    set -e
+    test "$MISSING_RC" -eq 2 || fail self-test-missing-device-verdict
+    grep -Fq 'up2_media_reason=stable-by-id-missing' "$TMP_OUT" || fail self-test-missing-device-reason
+
+    rg -q 'target-not-removable' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'target-backs-root' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'target-backs-swap' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'target-identity-changed' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rg -q 'media-readback-mismatch' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
+    rm -f "$TMP_OUT"
+    trap - EXIT HUP INT TERM
+    echo missing_by_id=blocked
+    echo transient_device_name=blocked
+    echo non_removable=fail
+    echo non_usb=fail
+    echo mounted_target=fail
+    echo held_target=fail
+    echo root_or_swap_target=fail
+    echo serial_mismatch=fail
+    echo identity_race=fail
+    echo corrupt_readback=fail
+    echo missing_console=blocked
+    echo incomplete_boot_after_entry=fail
+    echo stale_ls_output=fail
+    echo up2_self_test_status=pass
+}
+
+resolve_uart() {
+    DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || blocked tigard-not-detected
+    SERIAL="$(printf '%s\n' "$DETECT" | awk -F= '$1=="tigard_serial" {print $2; exit}')"
+    UART="$(printf '%s\n' "$DETECT" | awk -F= '$1=="tigard_uart_path" {print $2; exit}')"
+    test "$SERIAL" = "$TIGARD_SERIAL" || fail tigard-serial-mismatch
+    test -c "$UART" || blocked tigard-uart-missing
+    printf '%s\n' "$UART"
+}
+
+validate_receipts() {
+    test -s "$KERNEL" -a -s "$KERNEL.receipt" || blocked kernel-or-receipt-missing
+    test -s "$IMAGE" -a -s "$IMAGE_RECEIPT" || blocked image-or-receipt-missing
+    KERNEL_SHA="$(sha256sum "$KERNEL" | awk '{print $1}')"
+    IMAGE_SHA="$(sha256sum "$IMAGE" | awk '{print $1}')"
+    test "$(receipt_value "$KERNEL.receipt" artifact_sha256)" = "$KERNEL_SHA" || fail kernel-hash-mismatch
+    test "$(receipt_value "$IMAGE_RECEIPT" kernel_sha256)" = "$KERNEL_SHA" || fail image-kernel-binding-mismatch
+    test "$(receipt_value "$IMAGE_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail image-hash-mismatch
+    test -n "$MEDIA_RECEIPT" -a -s "$MEDIA_RECEIPT" || blocked media-receipt-missing
+    test "$(receipt_value "$MEDIA_RECEIPT" schema)" = up2-removable-media-v1 || fail media-receipt-schema
+    test "$(receipt_value "$MEDIA_RECEIPT" status)" = pass || fail media-receipt-status
+    test "$(receipt_value "$MEDIA_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail media-image-hash-mismatch
+    test "$(receipt_value "$MEDIA_RECEIPT" readback_sha256)" = "$IMAGE_SHA" || fail media-readback-hash-mismatch
+    test "$(receipt_value "$MEDIA_RECEIPT" persistent_target)" = selected-removable-usb-only || fail media-target-policy
+}
+
+line_number() { grep -anF "$2" "$1" | head -n 1 | cut -d: -f1; }
+
+live() {
+    case "$BOOT_SECONDS" in ''|*[!0-9]*) fail invalid-boot-timeout ;; esac
+    validate_receipts
+    UART="$(resolve_uart)"
+    mkdir -p "$RUN_DIR"
+    TRANSCRIPT="$RUN_DIR/up2-uart.log"
+    : > "$TRANSCRIPT"
+    stty -F "$UART" 115200 cs8 -cstopb -parenb -crtscts -ixon -ixoff raw -echo
+    timeout "$BOOT_SECONDS" dd if="$UART" of="$TRANSCRIPT" bs=1 count=4194304 status=none &
+    CAPTURE_PID=$!
+    trap 'kill "$CAPTURE_PID" 2>/dev/null || true; wait "$CAPTURE_PID" 2>/dev/null || true' EXIT HUP INT TERM
+
+    START="$(date +%s)"
+    while ! grep -aFq 'UP2 shell-ready' "$TRANSCRIPT"; do
+        sleep 0.1
+        NOW="$(date +%s)"
+        test "$((NOW - START))" -lt "$BOOT_SECONDS" || break
+    done
+    if ! grep -aFq 'UP2 shell-ready' "$TRANSCRIPT"; then
+        if grep -aFq 'UP2 entry' "$TRANSCRIPT"; then fail boot-incomplete-after-entry; fi
+        blocked up2-board-uart-not-observed
+    fi
+
+    printf 'ls /\r' > "$UART"
+    LS_START="$(date +%s)"
+    while ! grep -aFq 'UP2 ls-end status=pass' "$TRANSCRIPT"; do
+        sleep 0.05
+        NOW="$(date +%s)"
+        test "$((NOW - LS_START))" -lt 10 || break
+    done
+    grep -aFq 'UP2 ls-end status=pass' "$TRANSCRIPT" || fail ls-timeout
+    kill "$CAPTURE_PID" 2>/dev/null || true
+    wait "$CAPTURE_PID" 2>/dev/null || true
+    trap - EXIT HUP INT TERM
+
+    grep -aFq 'UP2 entry' "$TRANSCRIPT" || fail entry-marker-missing
+    grep -aFq 'UP2 console-ready' "$TRANSCRIPT" || fail console-marker-missing
+    grep -aFq 'UP2 filesystem-ready entries=' "$TRANSCRIPT" || fail filesystem-marker-missing
+    grep -aFq 'UP2 ls-begin source=vfs command=ls /' "$TRANSCRIPT" || fail ls-begin-missing
+    ENTRY_LINE="$(line_number "$TRANSCRIPT" 'UP2 entry')"
+    CONSOLE_LINE="$(line_number "$TRANSCRIPT" 'UP2 console-ready')"
+    FS_LINE="$(line_number "$TRANSCRIPT" 'UP2 filesystem-ready entries=')"
+    SHELL_LINE="$(line_number "$TRANSCRIPT" 'UP2 shell-ready')"
+    LS_BEGIN_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-begin source=vfs command=ls /')"
+    LS_END_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-end status=pass')"
+    test "$ENTRY_LINE" -lt "$CONSOLE_LINE" -a "$CONSOLE_LINE" -lt "$FS_LINE" -a "$FS_LINE" -lt "$SHELL_LINE" || fail boot-marker-order
+    test "$SHELL_LINE" -lt "$LS_BEGIN_LINE" -a "$LS_BEGIN_LINE" -lt "$LS_END_LINE" || fail ls-correlation-order
+    WINDOW="$(sed -n "${LS_BEGIN_LINE},${LS_END_LINE}p" "$TRANSCRIPT" | tr -d '\r')"
+    printf '%s\n' "$WINDOW" | grep -Fxq /bin || fail ls-bin-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /etc || fail ls-etc-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /README.txt || fail ls-readme-missing
+
+    RECEIPT="$RUN_DIR/live.receipt"
+    {
+        echo schema=up2-live-v1
+        echo status=pass
+        echo board=x86_64-up-squared-apollo-lake
+        echo firmware=uefi
+        echo loader=EFI/BOOT/BOOTX64.EFI
+        echo kernel_sha256="$KERNEL_SHA"
+        echo image_sha256="$IMAGE_SHA"
+        echo media_receipt="$MEDIA_RECEIPT"
+        echo marker_order=pass
+        echo ls_command='ls /'
+        echo ls_source=vfs
+        echo ls_entries=bin,etc,README.txt
+        echo uart_transcript="$TRANSCRIPT"
+        echo uart_transcript_sha256="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')"
+        echo persistent_writes=selected-removable-usb-only
+        echo completed_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_status=pass
+    echo board_identity=x86_64-up-squared-apollo-lake
+    echo marker_order=pass
+    echo ls_status=pass
+    echo 'ls_command=ls /'
+    echo ls_source=vfs
+    echo ls_entries=bin,etc,README.txt
+    echo uart_transcript="$TRANSCRIPT"
+    echo live_receipt="$RECEIPT"
+}
+
+case "$MODE" in
+    --contract) contract ;;
+    --self-test) self_test ;;
+    --live) live ;;
+    *) echo "usage: $0 --contract|--self-test|--live" >&2; exit 1 ;;
+esac

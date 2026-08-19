@@ -13,11 +13,7 @@ Use an admitted self-hosted compiler with adjacent provenance:
 ```sh
 SIMPLE_BUILD_COMPILER=/path/to/admitted/stage3/simple \
   sh scripts/os/build-simpleos-up-squared-apollo-lake.shs
-KERNEL_ELF=$PWD/build/os/up-squared-apollo-lake/simpleos.elf \
-OUT_DIR=$PWD/build/os/up-squared-apollo-lake/usb \
-  sh scripts/os/build-simpleos-x86_64-board-usb.shs
-DISK=$PWD/build/os/up-squared-apollo-lake/usb/board-usb.img \
-  sh scripts/check/check-simpleos-x86_64-board-usb-image.shs
+sh scripts/os/build-simpleos-up-squared-usb-image.shs
 ```
 
 The kernel build binds the canonical `simple-core` runtime capsule, native x86
@@ -31,7 +27,17 @@ in UP2 is not remotely visible to this workstation merely because UART is
 connected. If UP2 already runs trusted Linux over SSH or a RAM/PXE environment,
 copy and hash the image there, then admit one stable `/dev/disk/by-id` identity,
 serial, capacity, removable flag, mount/holder state, and root/swap exclusion.
-Otherwise move the stick to the writer host.
+Otherwise move the stick to the writer host. Admit it without writing first:
+
+```sh
+scripts/os/write-simpleos-up-squared-usb.shs \
+  --device-by-id /dev/disk/by-id/usb-EXACT_ID \
+  --expected-serial EXACT_SERIAL
+```
+
+Verify the printed model, serial, capacity, and image hash. Only then rerun as
+root with `--write-media --confirmation EXACT_SHA256`; retain the emitted media
+receipt. The confirmation is bound to the exact device identity and image.
 
 Never execute a generic `dd ... /dev/sdX` example. Never write UP2 eMMC/SATA,
 BIOS/SPI, UEFI variables, or CN22. After an admitted full-image write, read back
@@ -47,3 +53,10 @@ with ordered `UP2 entry`, `console-ready`, `filesystem-ready`, and `shell-ready`
 markers followed by a command-correlated `ls /` response containing `/bin`,
 `/etc`, and `/README.txt` from the public VFS path. A structurally valid image or
 historical transcript does not prove the current board boot.
+
+Run the physical oracle with the retained media receipt:
+
+```sh
+UP2_MEDIA_RECEIPT=/absolute/path/to/media.receipt \
+  scripts/check/check-simpleos-up-squared-apollo-lake.shs --live
+```
