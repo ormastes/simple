@@ -2900,13 +2900,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 inline_baseline_margin_bs = []
             if child_count > 0:
                 cy = cy + st.gap_px
+            val prev_margin_b_before_child = prev_margin_b
             val resolved_cst_margin_t = resolve_vertical_margin_px(cst.margin_t, viewport_h)
             val collapsed_margin = collapse_margins_signed(prev_margin_b, resolved_cst_margin_t)
+            var child_top_advance = 0
             if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
                 val resolved_st_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
                 val collapsed_body_top = collapse_margins_signed(resolved_st_margin_t, resolved_cst_margin_t)
-                cy = cy - resolved_st_margin_t + collapsed_body_top
+                child_top_advance = collapsed_body_top - resolved_st_margin_t
+                cy = cy + child_top_advance
             else:
+                child_top_advance = collapsed_margin
                 cy = cy + collapsed_margin
             var child_inner_w = iw
             if st.overflow_auto_y and content_height_limit > 0:
@@ -2950,7 +2954,32 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
             cy = cy + child.height
-            prev_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            val resolved_cst_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
+            # border, padding, height, or content collapses its own top and
+            # bottom margins into ONE margin that then collapses with the
+            # adjacent siblings'. Without this, every blank markdown line in
+            # the office WYSIWYG preview (an empty <p> with 1em margins)
+            # pushed later blocks ~20px below where Chromium/WebKitGTK put
+            # them (three-host office capture diff, 2026-08-19).
+            # child.height <= 1: an empty block is floored to 1px by the
+            # min-size clamp, so 0 and 1 both mean "no content"; a real 1px
+            # box declares height:1px and is excluded by height_px == 0.
+            val self_collapsing = child.height <= 1 and
+                nodes[c].tag != "#text" and
+                cst.border_t == 0 and cst.border_b == 0 and
+                cst.pad_t == 0 and cst.pad_b == 0 and
+                cst.height_px == 0 and cst.min_height_px == 0
+            if self_collapsing:
+                # Pull back the top-margin advance and carry the collapsed
+                # (prev_bottom, own top, own bottom) margin to the next sibling.
+                cy = cy - child_top_advance - child.height
+                out_by[c] = cy
+                prev_margin_b = collapse_margins_signed(
+                    prev_margin_b_before_child,
+                    collapse_margins_signed(resolved_cst_margin_t, resolved_cst_margin_b))
+            else:
+                prev_margin_b = resolved_cst_margin_b
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:

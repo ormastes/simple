@@ -1,0 +1,73 @@
+"""Empty-Block Margin Self-Collapse Spec
+
+CSS 2.2 §8.3.1: a block with no border, padding, or content collapses its own
+top and bottom margins into a single margin, which then collapses with the
+adjacent siblings' margins. Chromium (Electron) and WebKitGTK (Tauri2's Linux
+engine) both do this; the pure-Simple web lane did not, so every blank markdown
+line in the office WYSIWYG preview (an empty <p> with 1em margins) pushed the
+following blocks ~20px lower per blank line than the Electron/Tauri hosts —
+found by three-host office capture diff (build/office_parity, 2026-08-19).
+
+@tag: rendering, simple-web, layout, margin-collapse, office
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 5%
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val W = 40
+val H = 120
+
+fn _first_row_of(pixels: [u32], color: u32) -> i32:
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            if pixels[y * W + x] == color:
+                return y
+            x = x + 1
+        y = y + 1
+    -1
+
+fn _render_rows(mid: text) -> (i32, i32):
+    val html = "<html><head><style>" +
+        "html,body{margin:0;padding:0;background:#fff}" +
+        "</style></head><body>" +
+        "<p style=\"height:10px;background:#ef4444;margin:0 0 16px 0\"></p>" +
+        mid +
+        "<p style=\"height:10px;background:#3b82f6;margin:16px 0 0 0\"></p>" +
+        "</body></html>"
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, "software")
+    (_first_row_of(pixels, 0xffef4444u32), _first_row_of(pixels, 0xff3b82f6u32))
+
+describe "empty block margin self-collapse":
+    it "renders an empty margined block as contributing no extra vertical space":
+        step("Render red/blue blocks with 16px margins and no empty block between")
+        val base = _render_rows("")
+        step("Render the same pair with an empty 16px-margined <p> between them")
+        val with_empty = _render_rows(
+            "<p style=\"margin-top:16px;margin-bottom:16px\"></p>")
+        step("Both layouts must be identical: the empty block self-collapses")
+        expect(base.0).to_equal(0)
+        expect(with_empty.0).to_equal(0)
+        expect(base.1 >= 0).to_equal(true)
+        expect(with_empty.1).to_equal(base.1)
+
+    it "collapses a run of empty blocks the same as one":
+        step("Render with three consecutive empty margined paragraphs")
+        val trio = _render_rows(
+            "<p style=\"margin:16px 0\"></p><p style=\"margin:16px 0\"></p>" +
+            "<p style=\"margin:16px 0\"></p>")
+        val base = _render_rows("")
+        step("The run must add no vertical space either")
+        expect(trio.1).to_equal(base.1)
+
+    it "does not self-collapse an empty block with padding":
+        step("An empty block with 4px vertical padding keeps its box")
+        val padded = _render_rows(
+            "<p style=\"margin-top:16px;margin-bottom:16px;padding:4px 0\"></p>")
+        val base = _render_rows("")
+        step("Blue block must sit lower than the collapsed baseline")
+        expect(padded.1 > base.1).to_equal(true)

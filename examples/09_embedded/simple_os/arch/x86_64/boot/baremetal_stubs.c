@@ -20027,7 +20027,15 @@ RuntimeValue rt_engine2d_simd_blend_span_u32(RuntimeValue dst, int64_t dst_offse
     RuntimeValue *si = runtime_array_items(s);
     if (!di || !si) return dst;
 
-    for (int64_t i = 0; i < n; i++) {
+    /* Same-array overlapping span with dst ahead of src: a forward walk
+     * would re-read source pixels already blended into this iteration's
+     * output (dst writes land on later src reads). Mirror the hosted
+     * reference (src/runtime/runtime_simd_dispatch.c
+     * rt_engine2d_simd_blend_span_u32): walk backwards so every source
+     * pixel is read before its slot is overwritten. */
+    int backwards = (di == si && d_off > s_off && d_off - s_off < n);
+    for (int64_t step = 0; step < n; step++) {
+        int64_t i = backwards ? n - 1 - step : step;
         uint32_t sp = _bm_unbox_pixel(si[s_off + i]);
         uint32_t dp = _bm_unbox_pixel(di[d_off + i]);
         di[d_off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
