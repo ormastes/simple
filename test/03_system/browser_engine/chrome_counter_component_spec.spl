@@ -1,0 +1,182 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 58%
+#
+# Branch coverage, MEASURED (not estimated) on 2026-08-19 by running the
+# harness's Simple extractor under the deployed seed with SIMPLE_COVERAGE=1
+# and SIMPLE_COVERAGE_OUTPUT set, then classifying every DecisionProbe row
+# (true_count/false_count) for the exercised browser_engine modules:
+#
+#   SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<artifact> \
+#     COMPONENT_HTML=tools/component_diff/fixtures/counter.html \
+#     bin/simple run tools/component_diff/simple_component_dump.spl
+#
+#   simple_web_html_layout_renderer_layout.spl       100/172 =  58%
+#   simple_web_html_layout_renderer_core.spl         313/510 =  61%
+#   simple_web_html_layout_renderer_foundation.spl   216/284 =  76%
+#   dom_accessors.spl                                 87/142 =  61%
+#   dom_identity_index.spl                             47/66 =  71%
+#   script/script_host.spl                             10/14 =  71%
+#   html_tree_builder.spl                            119/192 =  62%
+#   all exercised browser_engine modules            1424/2310 = 61.6%
+#
+# The >=80% aspiration is NOT met and the number is reported honestly rather
+# than inflated. What a counter component cannot reach in the layout module:
+# float placement, table layout, inline-wrap/line-breaking beyond a single
+# line, percent/auto edge branches, scroll offsetting, and overlay paths.
+# Closing the gap needs more components (wrapping text list, floated layout,
+# table widget) through this same harness, not a different oracle.
+"""
+# Chrome <-> Simple Counter Component IO Differential
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+Phase-4 per-COMPONENT harness: one interactive counter widget is loaded by
+Chrome and by Simple's browser_engine, its IO is driven through each engine's
+REAL event path (Chrome: `page.click` + real inline JS; Simple:
+`be_dom_dispatch_event_to_route` + `script_host_apply_action_to_route`), and
+box geometry is compared per interaction state as canonical sorted text via
+the std `layout_text_diff` tool. Audience: anyone changing the browser_engine
+layout, DOM event dispatch, or DOM mutation paths.
+
+## Scope and Preconditions
+
+Requires Chrome/Chromium and node. Driver:
+`sh tools/component_diff/run_component_diff.shs` (runs 2 `bin/simple run`
+extractions; cannot be nested inside `bin/simple test`). This spec gates on
+the driver's retained evidence (`tools/component_diff/out/summary.txt`),
+fail-closed: missing evidence, evidence older than fixture/extractors/differ,
+or a chrome side without a real `Chrome/<version>` string all FAIL. There is
+deliberately no "chrome absent, therefore pass" path.
+
+## Primary Workflow
+
+1. Run the driver; read `out/summary.txt`.
+2. Assert non-vacuity (3 states, >0 node lines compared).
+3. Assert the IO chain on the Simple side: click dispatch collected the real
+   inline onclick and the button-activate default action; display text then
+   matches Chrome's real-JS display text at every state.
+4. Assert per-engine IO invariants: increment CHANGES geometry, decrement
+   returns it EXACTLY to the initial state.
+5. Pin the measured geometry divergence fail-closed (may shrink, not grow).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Canonical geometry text | `<key> [x,y wxh] "text"`, sorted; keys per layout_diff CONTRACT |
+| Counter model | Simple does not execute inline JS; the extractor mirrors bump()/setCount() after real dispatch — see tools/component_diff/CONTRACT.md |
+| Divergence pin | 8 diff lines/state, 24 total (body box, button text centering, line height) |
+
+## Related Specifications
+
+- [Component IO differential contract](../../../tools/component_diff/CONTRACT.md)
+- [Layout differential](chrome_layout_differential_spec.spl)
+
+## Evidence and Provenance
+
+Measured against Google Chrome for Testing 151.0.7922.34, viewport 800x600.
+Retained evidence: `tools/component_diff/out/summary.txt` and per-state
+diffs `tools/component_diff/out/counter.stateK.diff.txt`.
+
+## Recovery and Troubleshooting
+
+`UNAVAILABLE: no chrome executable found` — pass `--chrome` or set
+`COMPONENT_DIFF_CHROME`. A missing `node_modules` under
+`tools/pixel_compare/` can be symlinked from the main worktree.
+
+## Compatibility and Limitations
+
+Two engine defects are recorded in the contract: the path-based
+`be_dom_dispatch_event_path` family is unusable (`BeDomEvent.create` arity
+mismatch), and `be_dom_serialize_html` drops `<style>` text content, so
+mutated states re-layout with the pristine fixture's static CSS.
+"""
+
+use std.spec.*
+use std.io_runtime.{shell_output, file_exists}
+
+val TOOL_DIR: text = "tools/component_diff"
+val SUMMARY: text = "tools/component_diff/out/summary.txt"
+
+fn summary_value(key: text) -> text:
+    shell_output(
+        "sed -n 's/^" + key + "=//p' " + SUMMARY + " | head -1 | tr -d '\\n'"
+    )
+
+fn summary_i64(key: text) -> i64:
+    val raw = summary_value(key)
+    if raw == "":
+        return -1
+    raw.to_i64()
+
+fn evidence_is_stale() -> bool:
+    # Fail-closed freshness gate: summary must exist AND be newer than the
+    # fixture and every extractor/differ source.
+    if not file_exists(SUMMARY):
+        return true
+    val newer = shell_output(
+        "find " + TOOL_DIR + "/fixtures " + TOOL_DIR + "/simple_component_dump.spl " +
+        TOOL_DIR + "/chrome_component_dump.js " + TOOL_DIR + "/component_geom_diff.spl " +
+        TOOL_DIR + "/run_component_diff.shs " +
+        "-newer " + SUMMARY + " 2>/dev/null | head -1 | tr -d '\\n'"
+    )
+    newer != ""
+
+describe "Chrome to Simple counter component IO differential":
+    it "has fresh component evidence produced against a real Chrome":
+        step("The summary must exist and be newer than the fixture and every extractor source")
+        expect(evidence_is_stale()).to_equal(false)  # oracle: missing/stale FAILS; run sh tools/component_diff/run_component_diff.shs
+        step("A real Chrome must have produced the chrome side")
+        expect(summary_value("chrome_version").contains("Chrome/")).to_equal(true)  # oracle: never a vacuous pass
+        step("All three interaction states must have been compared")
+        expect(summary_i64("states_compared")).to_equal(3)
+        step("A nonzero node-line count must have been compared")
+        expect(summary_i64("nodes_compared") > 0).to_equal(true)  # oracle: 0 divergences over 0 lines is not a pass
+
+    # @prev("has fresh component evidence produced against a real Chrome")
+    it "drives the click through the real Simple session event path":
+        step("The inc click dispatch must collect exactly the fixture's inline onclick action")
+        expect(summary_i64("dispatch_inc_actions")).to_equal(1)
+        expect(summary_value("dispatch_inc_inline_onclick")).to_equal("yes")
+        step("The button default action must be button-activate")
+        expect(summary_value("dispatch_inc_default")).to_equal("button-activate")
+        step("Same for the dec click")
+        expect(summary_i64("dispatch_dec_actions")).to_equal(1)
+        expect(summary_value("dispatch_dec_inline_onclick")).to_equal("yes")
+        expect(summary_value("dispatch_dec_default")).to_equal("button-activate")
+
+    # @prev("has fresh component evidence produced against a real Chrome")
+    it "updates the DOM text exactly as Chrome's real JS does at every state":
+        step("Chrome (real JS) and Simple (session event path + counter model) must agree on display text")
+        expect(summary_value("display_s0_chrome")).to_equal("count 0")
+        expect(summary_value("display_s0_simple")).to_equal("count 0")
+        expect(summary_value("display_s1_chrome")).to_equal("count 1 #")
+        expect(summary_value("display_s1_simple")).to_equal("count 1 #")
+        expect(summary_value("display_s2_chrome")).to_equal("count 0")
+        expect(summary_value("display_s2_simple")).to_equal("count 0")
+        step("All three states must match, counted, not vacuously")
+        expect(summary_i64("display_match")).to_equal(3)
+        expect(summary_i64("display_total")).to_equal(3)
+
+    # @prev("has fresh component evidence produced against a real Chrome")
+    it "re-layouts after the click the way Chrome does":
+        step("Clicking inc must CHANGE geometry in BOTH engines (the display text box grows)")
+        expect(summary_i64("geometry_changed_chrome")).to_equal(1)
+        expect(summary_i64("geometry_changed_simple")).to_equal(1)
+        step("Clicking dec must return geometry EXACTLY to the initial state in BOTH engines")
+        expect(summary_i64("roundtrip_chrome")).to_equal(1)
+        expect(summary_i64("roundtrip_simple")).to_equal(1)
+
+    # @prev("has fresh component evidence produced against a real Chrome")
+    it "holds the geometry divergence at or below the recorded baseline":
+        step("Absent evidence reads as -1 and must FAIL rather than satisfy the ratchet")
+        expect(summary_i64("divergent_total") >= 0).to_equal(true)  # oracle: missing summary is not a pass
+        step("Measured baseline: 4 divergent node pairs = 8 diff lines per state (body box, button text centering, text line height); may shrink, must not grow")
+        expect(summary_i64("divergent_s0") <= 8).to_equal(true)  # oracle: ratchet, see tools/component_diff/CONTRACT.md
+        expect(summary_i64("divergent_s1") <= 8).to_equal(true)
+        expect(summary_i64("divergent_s2") <= 8).to_equal(true)
+        expect(summary_i64("divergent_total") <= 24).to_equal(true)
+        step("The five exact pairs (counter, display, inc, dec, html) imply at most 4 divergent pairs over 9 lines; nodes_compared must stay 9 so the pin cannot be gamed by dropping nodes")
+        expect(summary_i64("nodes_compared")).to_equal(9)

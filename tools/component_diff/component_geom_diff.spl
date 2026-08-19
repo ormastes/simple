@@ -1,0 +1,178 @@
+# Differ for the per-component chrome-alignment IO harness.
+#
+# Reads the retained per-state geometry texts produced by
+# chrome_component_dump.js and simple_component_dump.spl (split by the
+# driver), diffs each state pair with the std layout->text debugging tool
+# layout_text_diff (src/lib/common/ui/layout_text_render.spl), and writes
+# tools/component_diff/out/summary.txt with fail-closed keys. A run that
+# compared zero lines writes states_compared=0 and exits 3.
+#
+# Env: COMPONENT_OUT (default tools/component_diff/out), COMPONENT_NAME
+# (default counter), COMPONENT_STATES (default 3).
+
+use std.common.ui.layout_text_render.{layout_text_diff}
+use std.io_runtime.{env_get, read_file, write_file}
+
+fn env_text(name: text, fallback: text) -> text:
+    val raw = "" + env_get(name)
+    if raw == "" or raw == "nil":
+        return fallback
+    raw
+
+fn count_diff_lines(diff: text) -> i64:
+    # layout_text_diff returns "" for identical inputs, else a header
+    # "diff: -<removed> +<added>" followed by the diff body.
+    if diff == "":
+        return 0
+    var n: i64 = 0
+    for line in diff.split("\n"):
+        if line.starts_with("- ") or line.starts_with("+ "):
+            n = n + 1
+    n
+
+fn line_count(s: text) -> i64:
+    var n: i64 = 0
+    for line in s.split("\n"):
+        if line.trim() != "":
+            n = n + 1
+    n
+
+fn json_field(json: text, key: text) -> text:
+    # Minimal extractor for "key": "value" in the chrome meta json.
+    val marker = "\"" + key + "\": \""
+    val at = json.index_of(marker)
+    if at < 0:
+        return ""
+    val start = at + marker.len()
+    val rest = json.substring(start, json.len())
+    val end = rest.index_of("\"")
+    if end < 0:
+        return ""
+    rest.substring(0, end)
+
+fn main() -> i64:
+    val out_dir = env_text("COMPONENT_OUT", "tools/component_diff/out")
+    val name = env_text("COMPONENT_NAME", "counter")
+    val state_count = env_text("COMPONENT_STATES", "3").to_i64()
+
+    val meta = read_file(out_dir + "/chrome/" + name + ".meta.json")
+    val chrome_version = json_field(meta, "chrome_version")
+
+    var summary: [text] = []
+    summary = summary.push("component=" + name)
+    summary = summary.push("chrome_version=" + chrome_version)
+
+    var states_compared: i64 = 0
+    var nodes_compared: i64 = 0
+    var total_divergent: i64 = 0
+    var chrome_states: [text] = []
+    var simple_states: [text] = []
+    var k: i64 = 0
+    while k < state_count:
+        val chrome_geom = read_file(
+            out_dir + "/chrome/" + name + ".state" + k.to_string() + ".txt"
+        )
+        val simple_geom = read_file(
+            out_dir + "/simple/" + name + ".state" + k.to_string() + ".txt"
+        )
+        chrome_states = chrome_states.push(chrome_geom)
+        simple_states = simple_states.push(simple_geom)
+        if chrome_geom == "" or simple_geom == "":
+            summary = summary.push(
+                "divergent_s" + k.to_string() + "=-1"
+            )
+            k = k + 1
+            continue
+        states_compared = states_compared + 1
+        if k == 0:
+            nodes_compared = line_count(simple_geom)
+        val diff = layout_text_diff(chrome_geom.trim(), simple_geom.trim())
+        val divergent = count_diff_lines(diff)
+        total_divergent = total_divergent + divergent
+        summary = summary.push(
+            "divergent_s" + k.to_string() + "=" + divergent.to_string()
+        )
+        write_file(
+            out_dir + "/" + name + ".state" + k.to_string() + ".diff.txt",
+            diff
+        )
+        k = k + 1
+
+    summary = summary.push("states_compared=" + states_compared.to_string())
+    summary = summary.push("nodes_compared=" + nodes_compared.to_string())
+    summary = summary.push("divergent_total=" + total_divergent.to_string())
+
+    # IO invariants, per engine: clicking #inc must CHANGE geometry, and
+    # clicking #dec must return it exactly to the initial state.
+    if state_count >= 3 and states_compared == state_count:
+        val chrome_changed = chrome_states[0] != chrome_states[1]
+        val simple_changed = simple_states[0] != simple_states[1]
+        val chrome_roundtrip = chrome_states[0] == chrome_states[2]
+        val simple_roundtrip = simple_states[0] == simple_states[2]
+        summary = summary.push(
+            "geometry_changed_chrome=" + (if chrome_changed: "1" else: "0")
+        )
+        summary = summary.push(
+            "geometry_changed_simple=" + (if simple_changed: "1" else: "0")
+        )
+        summary = summary.push(
+            "roundtrip_chrome=" + (if chrome_roundtrip: "1" else: "0")
+        )
+        summary = summary.push(
+            "roundtrip_simple=" + (if simple_roundtrip: "1" else: "0")
+        )
+
+    # Display-text IO agreement: chrome's real JS counter vs Simple's
+    # session-event-path counter must show the same text at every state.
+    val io = read_file(out_dir + "/simple/" + name + ".io.txt")
+    var display_match: i64 = 0
+    var display_total: i64 = 0
+    var k2: i64 = 0
+    while k2 < state_count:
+        # chrome displays live in meta.json "displays": ["a","b","c"]
+        val displays_at = meta.index_of("\"displays\": [")
+        var chrome_display = ""
+        if displays_at >= 0:
+            var seg = meta.substring(displays_at + 13, meta.len())
+            var idx: i64 = 0
+            for part in seg.split("\""):
+                # parts: junk, v0, sep, v1, sep, v2 ...
+                if idx == 1 + k2 * 2:
+                    chrome_display = part
+                idx = idx + 1
+        var simple_display = ""
+        for line in io.split("\n"):
+            if line.starts_with("IO display_" + k2.to_string() + "="):
+                simple_display = line.substring(
+                    ("IO display_" + k2.to_string() + "=").len(), line.len()
+                )
+        display_total = display_total + 1
+        if chrome_display != "" and chrome_display == simple_display:
+            display_match = display_match + 1
+        summary = summary.push(
+            "display_s" + k2.to_string() + "_chrome=" + chrome_display
+        )
+        summary = summary.push(
+            "display_s" + k2.to_string() + "_simple=" + simple_display
+        )
+        k2 = k2 + 1
+    summary = summary.push("display_match=" + display_match.to_string())
+    summary = summary.push("display_total=" + display_total.to_string())
+
+    # Dispatch evidence copied through for the spec.
+    for line in io.split("\n"):
+        if line.starts_with("IO dispatch_"):
+            summary = summary.push(line.substring(3, line.len()))
+
+    val verdict = if states_compared == 0 or nodes_compared == 0:
+        "ERROR — nothing was compared"
+    else:
+        "OK — " + states_compared.to_string() + " state(s), " +
+        nodes_compared.to_string() + " node line(s), " +
+        total_divergent.to_string() + " divergent line(s)"
+    summary = summary.push("verdict=" + verdict)
+    write_file(out_dir + "/summary.txt", summary.join("\n") + "\n")
+    print summary.join("\n")
+    if states_compared == 0 or nodes_compared == 0:
+        return 3
+    0

@@ -1,0 +1,276 @@
+# Simple-side extractor for the per-component chrome-alignment IO harness.
+#
+# Mirrors tools/component_diff/chrome_component_dump.js: renders the SAME
+# counter fixture through the browser_engine layout pipeline and emits the
+# SAME canonical geometry text form for three states:
+#   state 0 — initial document
+#   state 1 — after clicking #inc through the engine's DOM event path
+#   state 2 — after clicking #dec through the engine's DOM event path
+#
+# The click goes through the REAL session event machinery:
+#   html_tree_builder_build -> dom_identity_index_build -> route_for_author_id
+#   -> be_dom_dispatch_event_to_route
+# (capture/target/bubble phases, inline onclick collection, default action;
+# the typed-route path, the same one ScriptHost/BrowserSession use — the
+# older path-based be_dom_dispatch_event_path is unusable from `bin/simple
+# run`: its be_dom_create_event calls BeDomEvent.create with 7 args against
+# a 4-arg signature) and the DOM text update is applied with the production
+# applier script_host_apply_action_to_route ("set-text:"/"set-attr:"
+# listener actions). Simple's engine deliberately does
+# NOT execute arbitrary inline JS; the counter's next display string is
+# computed here from the DOM's data-count attribute, mirroring the fixture's
+# own bump()/setCount() JS exactly. That modelling step is the harness's
+# stated capability gap (see CONTRACT.md), not a hidden one: the dispatch is
+# asserted to have collected the real inline onclick source and the
+# button-activate default action before the model is applied.
+#
+# Env: COMPONENT_HTML (required), COMPONENT_W/COMPONENT_H (default 800x600).
+# Output between sentinels, per state:
+#   <<<COMPONENT_STATE_k_BEGIN>>> ... geometry lines ... <<<COMPONENT_STATE_k_END>>>
+# plus IO evidence lines: "IO display_k=<text>", "IO dispatch_<id>_actions=<n>",
+# "IO dispatch_<id>_default=<action>".
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    parse_html, extract_css_vw, build_child_index, compute_styles,
+    zero_i32_list, empty_i32_lists, neg_one_i32_list, layout
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+# BeDomEvent must be imported even though it is only used inside
+# dom_accessors' dispatch path — the interpreter resolves its static
+# `create` through the caller's import set.
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomEvent, BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_path_to_id, be_dom_dispatch_event_to_route, be_dom_get_attr,
+    be_dom_get_text_content, be_dom_serialize_html
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{
+    script_host_apply_action_to_route
+}
+use std.io_runtime.{env_get, read_file}
+
+val DROP_TAGS: [text] = ["head", "meta", "style", "script", "title", "link", "base"]
+
+fn env_i32(name: text, fallback: i32) -> i32:
+    val raw = "" + env_get(name)
+    if raw == "" or raw == "nil":
+        return fallback
+    val parsed = raw.to_i64()
+    if parsed <= 0:
+        return fallback
+    parsed as i32
+
+fn norm_text(s: text) -> text:
+    # Collapse runs of whitespace to single spaces, trim, truncate to 40.
+    var out = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    while out.contains("  "):
+        out = out.replace("  ", " ")
+    out = out.trim()
+    if out.len() > 40:
+        return out.substring(0, 40) + "..."
+    out
+
+fn is_drop_tag(tag: text) -> bool:
+    var i = 0
+    while i < DROP_TAGS.len():
+        if DROP_TAGS[i] == tag:
+            return true
+        i = i + 1
+    false
+
+# Emit the canonical geometry text (sorted lines) for one HTML document.
+# CSS is taken from `css_html` (always the pristine fixture): the engine's
+# be_dom_serialize_html drops <style> text content, so re-serialized DOM
+# states must re-use the fixture's static stylesheet. The fixture's CSS is
+# static by construction (no style mutation in the counter), so this is
+# faithful, and the asymmetry is recorded in CONTRACT.md.
+fn geometry_text(html: text, css_html: text, width: i32, height: i32) -> text:
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(css_html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val boxes = layout(
+        nodes, styles, child_index, 0, 0, 0, width, height,
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        empty_i32_lists(node_count), empty_i32_lists(node_count),
+        neg_one_i32_list(node_count)
+    )
+    # retained flags: not under a dropped tag, not whitespace-only text.
+    var retained: [bool] = [false; node_count]
+    var i = 0
+    while i < node_count:
+        var drop = false
+        var a = i
+        while a >= 0:
+            if is_drop_tag(nodes[a].tag):
+                drop = true
+                break
+            a = nodes[a].parent
+        if not drop and nodes[i].tag == "#text":
+            if norm_text(nodes[i].text_data) == "":
+                drop = true
+        retained[i] = not drop
+        i = i + 1
+    # keys per CONTRACT.md pairing rules
+    var keys: [text] = [""; node_count]
+    var ord_buckets: [text] = []
+    var ord_counts: [i32] = []
+    i = 0
+    while i < node_count:
+        if retained[i]:
+            val node = nodes[i]
+            if node.tag == "#root" or node.tag == "#document":
+                keys[i] = "#root"
+            elif node.id_attr != "":
+                keys[i] = "#" + node.id_attr
+            else:
+                var pk = "#root"
+                var p = node.parent
+                while p >= 0:
+                    if retained[p] and keys[p] != "":
+                        pk = keys[p]
+                        break
+                    p = nodes[p].parent
+                val bucket = pk + "/" + node.tag
+                var b = 0
+                var ord = 0
+                var found = false
+                while b < ord_buckets.len():
+                    if ord_buckets[b] == bucket:
+                        ord = ord_counts[b]
+                        ord_counts[b] = ord + 1
+                        found = true
+                        break
+                    b = b + 1
+                if not found:
+                    ord_buckets = ord_buckets.push(bucket)
+                    ord_counts = ord_counts.push(1)
+                keys[i] = bucket + "[" + ord.to_string() + "]"
+        i = i + 1
+    var lines: [text] = []
+    i = 0
+    while i < node_count:
+        if retained[i] and keys[i] != "#root":
+            val txt = if nodes[i].tag == "#text": norm_text(nodes[i].text_data) else: ""
+            lines = lines.push(
+                keys[i] + " [" + boxes.bx[i].to_string() + "," +
+                boxes.by[i].to_string() + " " + boxes.bw[i].to_string() + "x" +
+                boxes.bh[i].to_string() + "] \"" + txt + "\""
+            )
+        i = i + 1
+    # lexicographic sort (insertion; component docs are small)
+    var s = 1
+    while s < lines.len():
+        val cur = lines[s]
+        var j = s - 1
+        while j >= 0 and lines[j] > cur:
+            lines[j + 1] = lines[j]
+            j = j - 1
+        lines[j + 1] = cur
+        s = s + 1
+    lines.join("\n") + "\n"
+
+# Apply the display text/attr update through the PRODUCTION applier
+# (script_host_apply_action_to_route, non-default listener-action branch).
+fn apply_display_actions(
+    root: BeDomNode, index: DomIdentityIndex,
+    new_text: text, new_count: i64
+) -> BeDomNode:
+    val route = match index.route_for_author_id("display"):
+        Some(value): value
+        nil: return root
+    var next = script_host_apply_action_to_route(
+        root, index, route, "set-text:" + new_text, false
+    )
+    next = script_host_apply_action_to_route(
+        next, index, route, "set-attr:data-count=" + new_count.to_string(),
+        false
+    )
+    next
+
+# Click one button through the engine's typed-route event path, then apply
+# the counter model (the same arithmetic as the fixture's bump()/setCount()).
+fn click_and_bump(
+    root: BeDomNode, index: DomIdentityIndex, button_id: text, delta: i64
+) -> BeDomNode:
+    val route = match index.route_for_author_id(button_id):
+        Some(value): value
+        nil:
+            print "IO dispatch_" + button_id + "_actions=-1"
+            return root
+    val dispatch = be_dom_dispatch_event_to_route(
+        root, index, route, "click", true, true, true
+    )
+    print "IO dispatch_" + button_id + "_actions=" + dispatch.actions.len().to_string()
+    print "IO dispatch_" + button_id + "_default=" + dispatch.default_action
+    var inline_seen = false
+    for action in dispatch.actions:
+        if action.contains("bump("):
+            inline_seen = true
+    print "IO dispatch_" + button_id + "_inline_onclick=" + (if inline_seen: "yes" else: "no")
+    # counter model, mirroring the fixture JS
+    val display_path = be_dom_find_path_to_id(root, "display")
+    if display_path.len() == 0:
+        return root
+    val display = display_path[display_path.len() - 1]
+    val count = be_dom_get_attr(display, "data-count").to_i64() + delta
+    var s = "count " + count.to_string()
+    var k: i64 = 0
+    while k < count:
+        s = s + " #"
+        k = k + 1
+    apply_display_actions(root, index, s, count)
+
+fn display_text_of(root: BeDomNode) -> text:
+    val path = be_dom_find_path_to_id(root, "display")
+    if path.len() == 0:
+        return ""
+    be_dom_get_text_content(path[path.len() - 1])
+
+fn print_state(k: i64, geom: text):
+    print "<<<COMPONENT_STATE_" + k.to_string() + "_BEGIN>>>"
+    print geom
+    print "<<<COMPONENT_STATE_" + k.to_string() + "_END>>>"
+
+fn main() -> i64:
+    val fixture = env_get("COMPONENT_HTML")
+    if fixture == "":
+        print "ERROR: COMPONENT_HTML not set"
+        return 2
+    val width = env_i32("COMPONENT_W", 800)
+    val height = env_i32("COMPONENT_H", 600)
+    val html = read_file(fixture)
+    if html == "":
+        print "ERROR: empty or unreadable fixture: " + fixture
+        return 2
+
+    # State 0: layout of the pristine document.
+    print_state(0, geometry_text(html, html, width, height))
+
+    # IO: DOM tree + typed-route identity index + engine event path.
+    var root = html_tree_builder_build(html)
+    val generation = match DomDocumentGeneration.create(1):
+        Ok(value): value
+        Err(reason):
+            print "ERROR: generation: " + reason
+            return 3
+    val index = match dom_identity_index_build(root, generation):
+        Ok(value): value
+        Err(reason):
+            print "ERROR: identity index: " + reason
+            return 3
+    print "IO display_0=" + display_text_of(root)
+
+    root = click_and_bump(root, index, "inc", 1)
+    print "IO display_1=" + display_text_of(root)
+    print_state(1, geometry_text(be_dom_serialize_html(root), html, width, height))
+
+    root = click_and_bump(root, index, "dec", -1)
+    print "IO display_2=" + display_text_of(root)
+    print_state(2, geometry_text(be_dom_serialize_html(root), html, width, height))
+    0
