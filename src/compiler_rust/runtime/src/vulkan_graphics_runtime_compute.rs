@@ -908,4 +908,5 @@ pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
 pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
     0
 }
+#[cfg(not(feature = "vulkan"))]
 use crate::value::{byte_array_bytes, RuntimeValue};
