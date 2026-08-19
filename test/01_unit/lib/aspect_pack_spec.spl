@@ -3,7 +3,7 @@
 # A facet routes THROUGH the catalog to its pack and module, and the module
 # loads correctly (byte-exact payload) from the kind=aspect_pack container.
 
-use std.common.aspect_pack.{ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_catalog_route_joinpoint_v1, apk_catalog_startup_keys_v1, apk_activate_startup, APK_ENTRY_FACET, APK_ENTRY_JOINPOINT, APK_ACT_LAZY_FACET, APK_ACT_LAZY_PATCHABLE, APK_ACT_STARTUP, apk_build_pack_v1, apk_open_pack_v1, apk_load_module_v1, apk_build_catalog_v1, apk_open_catalog_v1, apk_catalog_route_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_loader_packs_opened, apk_loader_modules_decompressed, APK_FLAG_ASPECT_PACK, APK_HEADER_SIZE_V1}
+use std.common.aspect_pack.{ApkModuleSourceV3, ApkProfileRecordV1, apk_build_pack_v3, apk_build_catalog_v3, APK_CHUNK_DEBUG, apk_catalog_profile_ids_v1, apk_catalog_select_profile_v1, apk_catalog_route_in_profile_v1, apk_loader_select_profile, apk_loader_profile, apk_load_cluster_v1, apk_cluster_member_v1, apk_pack_cluster_of_v1, apk_pack_chunk_of_v1, apk_loader_set_expected_core_layout, apk_unload_facet_v1, apk_facet_pin_v1, apk_facet_unpin_v1, apk_facet_state_v1, apk_facet_refcount_v1, apk_loader_unloads, apk_try_facet, APK_CHUNK_CODE, APK_CHUNK_FLAG_NONE, APK_CHUNK_FLAG_STORED, APK_FC_BOUND, APK_FC_QUIESCING, APK_FC_UNLOADED, ApkModuleSourceV1, ApkModuleSourceV2, ApkCatalogEntryV1, ApkCatalogEntryV2, apk_build_pack_v2, apk_build_catalog_v2, apk_build_catalog_v2_checked, apk_catalog_route_joinpoint_v1, apk_catalog_startup_keys_v1, apk_activate_startup, APK_ENTRY_FACET, APK_ENTRY_JOINPOINT, APK_ACT_LAZY_FACET, APK_ACT_LAZY_PATCHABLE, APK_ACT_STARTUP, apk_build_pack_v1, apk_open_pack_v1, apk_load_module_v1, apk_build_catalog_v1, apk_open_catalog_v1, apk_catalog_route_v1, apk_loader_new, apk_loader_register_pack, apk_load_facet, apk_loader_packs_opened, apk_loader_modules_decompressed, apk_loader_generation, apk_loader_set_expected_core_abi, apk_loader_set_expected_variant_fingerprint, apk_facet_key_parts_v1, apk_try_facet_binding_v1, APK_FLAG_ASPECT_PACK, APK_HEADER_SIZE_V1}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
 
 fn _payload(tag: text, repeats: i64) -> [u8]:
@@ -126,3 +126,346 @@ describe "aspect-pack SMF container and Aspect Catalog":
         expect(load.module_abi_hash).to_equal("abi-debug-1")
         expect(load.required_core_public_abi_hash).to_equal("core-7")
         expect(load.variant_fingerprint).to_equal("vfp-a")
+
+    it "REQ-APK-08 §5.7 atomic activation: the loader generation advances exactly once per successful bind":
+        var mods: [ApkModuleSourceV2] = []
+        mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+            module_abi_hash: "abi-1", required_core_public_abi_hash: "core-1",
+            variant_fingerprint: "vfp-1", payload: _payload("debug.core", 40)))
+        mods.push(ApkModuleSourceV2(module_id: "trace.spans", aspect_id: "trace",
+            module_abi_hash: "abi-2", required_core_public_abi_hash: "core-1",
+            variant_fingerprint: "vfp-1", payload: _payload("trace.spans", 50)))
+        val built = apk_build_pack_v2(mods)
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "trace/Traceable", pack_path: "aspect/obs.apk",
+            module_id: "trace.spans", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", built.bytes)).to_equal(true)
+        expect(apk_loader_generation(ld)).to_equal(0)
+        val first = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(first.ok).to_equal(true)
+        expect(first.generation).to_equal(1)
+        expect(apk_loader_generation(ld)).to_equal(1)
+        val second = apk_load_facet(ld, cat.bytes, "trace/Traceable")
+        expect(second.ok).to_equal(true)
+        expect(second.generation).to_equal(2)
+        expect(apk_loader_generation(ld)).to_equal(2)
+        # a repeat acquisition is a cache hit: it reports the SAME generation
+        # it was originally bound under, and does not bump the epoch again
+        val again = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(again.from_cache).to_equal(true)
+        expect(again.generation).to_equal(1)
+        expect(apk_loader_generation(ld)).to_equal(2)
+
+    it "REQ-APK-09 §17 core-ABI and variant-fingerprint gates: SKIPPED when unset, ENFORCED when set":
+        var mods: [ApkModuleSourceV2] = []
+        mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+            module_abi_hash: "abi-1", required_core_public_abi_hash: "core-7",
+            variant_fingerprint: "vfp-a", payload: _payload("debug.core", 40)))
+        val built = apk_build_pack_v2(mods)
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        # branch 1: nothing expected -> gate is SKIPPED, load succeeds
+        val ld_skip = apk_loader_new()
+        expect(apk_loader_register_pack(ld_skip, "aspect/obs.apk", built.bytes)).to_equal(true)
+        val skipped = apk_load_facet(ld_skip, cat.bytes, "debug/Debuggable")
+        expect(skipped.ok).to_equal(true)
+        # branch 2: matching expectation -> gate is ENFORCED and passes
+        val ld_match = apk_loader_new()
+        expect(apk_loader_register_pack(ld_match, "aspect/obs.apk", built.bytes)).to_equal(true)
+        apk_loader_set_expected_core_abi(ld_match, "core-7")
+        apk_loader_set_expected_variant_fingerprint(ld_match, "vfp-a")
+        val matched = apk_load_facet(ld_match, cat.bytes, "debug/Debuggable")
+        expect(matched.ok).to_equal(true)
+
+    it "REQ-APK-10 §14.1 FacetBindingRegistry key: (concrete_type_id, facet_interface_id, generation)":
+        val parts = apk_facet_key_parts_v1("debug/Debuggable")
+        expect(parts.ok).to_equal(true)
+        expect(parts.concrete_type_id).to_equal("debug")
+        expect(parts.facet_interface_id).to_equal("Debuggable")
+        var mods: [ApkModuleSourceV2] = []
+        mods.push(ApkModuleSourceV2(module_id: "debug.core", aspect_id: "debug",
+            module_abi_hash: "abi-1", required_core_public_abi_hash: "core-1",
+            variant_fingerprint: "vfp-1", payload: _payload("debug.core", 40)))
+        val built = apk_build_pack_v2(mods)
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", built.bytes)).to_equal(true)
+        val loaded = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(loaded.ok).to_equal(true)
+        val by_binding = apk_try_facet_binding_v1(ld, "debug", "Debuggable")
+        expect(by_binding.found).to_equal(true)
+        expect(by_binding.module_id).to_equal("debug.core")
+        expect(by_binding.generation).to_equal(loaded.generation)
+
+    it "REQ-APK-11 §5.4 binding completeness: apk_build_catalog_v2_checked accepts a route to a declared module":
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        val checked = apk_build_catalog_v2_checked(entries, ["debug.core", "trace.spans"])
+        expect(checked.ok).to_equal(true)
+        expect(checked.module_count).to_equal(1)
+
+    it "REQ-APK-12 §9.6 a multi-profile catalog resolves a key inside the SELECTED profile only":
+        var entries: [ApkCatalogEntryV2] = []
+        # profile "minimal" owns entries [0,1); profile "full" owns [1,3)
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "metrics.counters", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "trace/Traceable", pack_path: "aspect/obs.apk",
+            module_id: "trace.spans", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        var profiles: [ApkProfileRecordV1] = []
+        profiles.push(ApkProfileRecordV1(profile_id: "minimal", entry_start: 0, entry_count: 1))
+        profiles.push(ApkProfileRecordV1(profile_id: "full", entry_start: 1, entry_count: 2))
+        val cat = apk_build_catalog_v3(entries, profiles)
+        expect(cat.ok).to_equal(true)
+        val ch = apk_open_catalog_v1(cat.bytes)
+        expect(ch.ok).to_equal(true)
+        expect(ch.profile_count).to_equal(2)
+        expect(apk_catalog_profile_ids_v1(cat.bytes, ch).len()).to_equal(2)
+        # selection stops at the FIRST matching record: "must not evaluate
+        # every profile" is measured, not promised.
+        val sel = apk_catalog_select_profile_v1(cat.bytes, ch, "minimal")
+        expect(sel.ok).to_equal(true)
+        expect(sel.found).to_equal(true)
+        expect(sel.entry_start).to_equal(0)
+        expect(sel.entry_count).to_equal(1)
+        expect(sel.profiles_examined).to_equal(1)
+        # the SAME key resolves to a DIFFERENT module per profile
+        val in_min = apk_catalog_route_in_profile_v1(cat.bytes, ch, "minimal", "debug/Debuggable")
+        expect(in_min.found).to_equal(true)
+        expect(in_min.module_id).to_equal("debug.core")
+        val in_full = apk_catalog_route_in_profile_v1(cat.bytes, ch, "full", "debug/Debuggable")
+        expect(in_full.found).to_equal(true)
+        expect(in_full.module_id).to_equal("metrics.counters")
+        # a key owned only by "full" is a clean MISS inside "minimal"
+        val absent = apk_catalog_route_in_profile_v1(cat.bytes, ch, "minimal", "trace/Traceable")
+        expect(absent.ok).to_equal(true)
+        expect(absent.found).to_equal(false)
+
+    it "REQ-APK-13 §9.6 a loader routes through its selected profile":
+        var mods: [ApkModuleSourceV1] = []
+        mods.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: _payload("debug.core", 20)))
+        mods.push(ApkModuleSourceV1(module_id: "trace.spans", aspect_id: "trace", payload: _payload("trace.spans", 25)))
+        val built = apk_build_pack_v1(mods)
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "x/Facet", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        entries.push(ApkCatalogEntryV2(facet_key: "x/Facet", pack_path: "aspect/obs.apk",
+            module_id: "trace.spans", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        var profiles: [ApkProfileRecordV1] = []
+        profiles.push(ApkProfileRecordV1(profile_id: "small", entry_start: 0, entry_count: 1))
+        profiles.push(ApkProfileRecordV1(profile_id: "big", entry_start: 1, entry_count: 1))
+        val cat = apk_build_catalog_v3(entries, profiles)
+        expect(cat.ok).to_equal(true)
+        val ld_small = apk_loader_new()
+        expect(apk_loader_register_pack(ld_small, "aspect/obs.apk", built.bytes)).to_equal(true)
+        apk_loader_select_profile(ld_small, "small")
+        expect(apk_loader_profile(ld_small)).to_equal("small")
+        val got_small = apk_load_facet(ld_small, cat.bytes, "x/Facet")
+        expect(got_small.ok).to_equal(true)
+        expect(got_small.module_id).to_equal("debug.core")
+        val ld_big = apk_loader_new()
+        expect(apk_loader_register_pack(ld_big, "aspect/obs.apk", built.bytes)).to_equal(true)
+        apk_loader_select_profile(ld_big, "big")
+        val got_big = apk_load_facet(ld_big, cat.bytes, "x/Facet")
+        expect(got_big.ok).to_equal(true)
+        expect(got_big.module_id).to_equal("trace.spans")
+
+    it "REQ-APK-14 §12.2 a co-load cluster is ONE frame: three members, one inflate":
+        var mods: [ApkModuleSourceV3] = []
+        mods.push(ApkModuleSourceV3(module_id: "units.mm", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.mm", 8)))
+        mods.push(ApkModuleSourceV3(module_id: "units.kg", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.kg", 11)))
+        mods.push(ApkModuleSourceV3(module_id: "units.s", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.s", 6)))
+        mods.push(ApkModuleSourceV3(module_id: "trace.spans", aspect_id: "trace",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("trace.spans", 40)))
+        val built = apk_build_pack_v3(mods)
+        expect(built.ok).to_equal(true)
+        val h = apk_open_pack_v1(built.bytes)
+        expect(h.ok).to_equal(true)
+        # cluster membership is decidable from the UNCOMPRESSED directory
+        expect(apk_pack_cluster_of_v1(built.bytes, h, "units.kg")).to_equal("tiny")
+        expect(apk_pack_cluster_of_v1(built.bytes, h, "trace.spans")).to_equal("")
+        val cl = apk_load_cluster_v1(built.bytes, h, "tiny")
+        expect(cl.ok).to_equal(true)
+        expect(cl.found).to_equal(true)
+        expect(cl.member_count).to_equal(3)
+        # THE claim: three modules cost exactly one inflate
+        expect(cl.frames_inflated).to_equal(1)
+        expect(bytes_to_text(apk_cluster_member_v1(cl, "units.kg"))).to_equal(bytes_to_text(_payload("units.kg", 11)))
+        expect(bytes_to_text(apk_cluster_member_v1(cl, "units.s"))).to_equal(bytes_to_text(_payload("units.s", 6)))
+        # and §12.3 still holds: the cluster frame is smaller than the pack
+        expect(cl.bytes_decompressed < built.bytes.len()).to_equal(true)
+
+    it "REQ-APK-15 §12.2 a clustered module still loads standalone, byte-exactly":
+        var mods: [ApkModuleSourceV3] = []
+        mods.push(ApkModuleSourceV3(module_id: "units.mm", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.mm", 8)))
+        mods.push(ApkModuleSourceV3(module_id: "units.kg", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.kg", 11)))
+        val built = apk_build_pack_v3(mods)
+        val h = apk_open_pack_v1(built.bytes)
+        val load = apk_load_module_v1(built.bytes, h, "units.kg")
+        expect(load.ok).to_equal(true)
+        expect(load.found).to_equal(true)
+        expect(bytes_to_text(load.payload)).to_equal(bytes_to_text(_payload("units.kg", 11)))
+        # still exactly one inflate, of the cluster frame, never the pack
+        expect(load.modules_decompressed).to_equal(1)
+        expect(load.bytes_decompressed < built.bytes.len()).to_equal(true)
+
+    it "REQ-APK-16 §11.2 ChunkEntry: cluster members share one chunk, an outsider does not":
+        var mods: [ApkModuleSourceV3] = []
+        mods.push(ApkModuleSourceV3(module_id: "units.mm", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.mm", 8)))
+        mods.push(ApkModuleSourceV3(module_id: "units.kg", aspect_id: "units",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "tiny", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("units.kg", 11)))
+        mods.push(ApkModuleSourceV3(module_id: "dbg.syms", aspect_id: "debug",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "", chunk_kind: APK_CHUNK_DEBUG,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("dbg.syms", 30)))
+        val built = apk_build_pack_v3(mods)
+        val h = apk_open_pack_v1(built.bytes)
+        val c1 = apk_pack_chunk_of_v1(built.bytes, h, "units.mm")
+        val c2 = apk_pack_chunk_of_v1(built.bytes, h, "units.kg")
+        val c3 = apk_pack_chunk_of_v1(built.bytes, h, "dbg.syms")
+        expect(c1.found).to_equal(true)
+        expect(c1.chunk_id).to_equal(c2.chunk_id)
+        expect(c1.file_offset).to_equal(c2.file_offset)
+        expect(c1.content_crc32).to_equal(c2.content_crc32)
+        expect(c3.found).to_equal(true)
+        expect(c3.chunk_id != c1.chunk_id).to_equal(true)
+        # the design's separately-split COLD chunk is recorded as such
+        expect(c3.kind).to_equal(APK_CHUNK_DEBUG)
+        expect(c1.kind).to_equal(APK_CHUNK_CODE)
+        # an absent module is a clean miss, not an error
+        val c4 = apk_pack_chunk_of_v1(built.bytes, h, "nope")
+        expect(c4.ok).to_equal(true)
+        expect(c4.found).to_equal(false)
+
+    it "REQ-APK-17 §12.2 a STORED, page-aligned hot chunk costs ZERO decompression":
+        var mods: [ApkModuleSourceV3] = []
+        mods.push(ApkModuleSourceV3(module_id: "startup.hot", aspect_id: "startup",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_STORED, alignment: 4096, payload: _payload("startup.hot", 30)))
+        mods.push(ApkModuleSourceV3(module_id: "cold.rest", aspect_id: "cold",
+            module_abi_hash: "", required_core_public_abi_hash: "", required_core_layout_hash: "",
+            variant_fingerprint: "", cluster_id: "", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1, payload: _payload("cold.rest", 30)))
+        val built = apk_build_pack_v3(mods)
+        expect(built.ok).to_equal(true)
+        val h = apk_open_pack_v1(built.bytes)
+        val chunk = apk_pack_chunk_of_v1(built.bytes, h, "startup.hot")
+        expect(chunk.alignment).to_equal(4096)
+        expect((chunk.file_offset % 4096)).to_equal(0)
+        expect(chunk.compressed_size).to_equal(chunk.uncompressed_size)
+        val hot = apk_load_module_v1(built.bytes, h, "startup.hot")
+        expect(hot.ok).to_equal(true)
+        expect(bytes_to_text(hot.payload)).to_equal(bytes_to_text(_payload("startup.hot", 30)))
+        # nothing was decompressed at all — that is what "direct mapping" buys
+        expect(hot.modules_decompressed).to_equal(0)
+        expect(hot.bytes_decompressed).to_equal(0)
+        # the neighbouring ordinary chunk is still deflated
+        val cold = apk_load_module_v1(built.bytes, h, "cold.rest")
+        expect(cold.modules_decompressed).to_equal(1)
+
+    it "REQ-APK-18 §11.2 required_core_layout_hash is carried and gated on opt-in":
+        var mods: [ApkModuleSourceV3] = []
+        mods.push(ApkModuleSourceV3(module_id: "debug.core", aspect_id: "debug",
+            module_abi_hash: "", required_core_public_abi_hash: "",
+            required_core_layout_hash: "layout-9", variant_fingerprint: "",
+            cluster_id: "", chunk_kind: APK_CHUNK_CODE, chunk_flags: APK_CHUNK_FLAG_NONE,
+            alignment: 1, payload: _payload("debug.core", 20)))
+        val built = apk_build_pack_v3(mods)
+        val h = apk_open_pack_v1(built.bytes)
+        expect(apk_load_module_v1(built.bytes, h, "debug.core").required_core_layout_hash).to_equal("layout-9")
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "debug.core", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        val cat = apk_build_catalog_v2(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", built.bytes)).to_equal(true)
+        apk_loader_set_expected_core_layout(ld, "layout-9")
+        val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(got.ok).to_equal(true)
+
+    it "REQ-APK-19 §14.7 unloading an unpinned facet releases it and retires its generation":
+        var mods: [ApkModuleSourceV1] = []
+        mods.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: _payload("debug.core", 20)))
+        val built = apk_build_pack_v1(mods)
+        var entries: [ApkCatalogEntryV1] = []
+        entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk", module_id: "debug.core"))
+        val cat = apk_build_catalog_v1(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", built.bytes)).to_equal(true)
+        val first = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(first.ok).to_equal(true)
+        expect(apk_facet_state_v1(ld, "debug/Debuggable")).to_equal(APK_FC_BOUND)
+        expect(apk_loader_unloads(ld)).to_equal(0)
+        val un = apk_unload_facet_v1(ld, "debug/Debuggable")
+        expect(un.ok).to_equal(true)
+        expect(un.released).to_equal(true)
+        expect(un.quiescing).to_equal(false)
+        expect(apk_loader_unloads(ld)).to_equal(1)
+        expect(apk_facet_state_v1(ld, "debug/Debuggable")).to_equal(APK_FC_UNLOADED)
+        # the resident registry no longer answers for it
+        expect(apk_try_facet(ld, "debug/Debuggable").found).to_equal(false)
+        # a re-acquisition is a REAL load again, under a NEW activation epoch
+        val opened_before = apk_loader_packs_opened(ld)
+        val again = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        expect(again.ok).to_equal(true)
+        expect(again.from_cache).to_equal(false)
+        expect(again.generation > first.generation).to_equal(true)
+        expect(apk_loader_packs_opened(ld)).to_equal(opened_before + 1)
+
+    it "REQ-APK-20 §14.7 a PINNED facet is not freed until its last reference goes":
+        var mods: [ApkModuleSourceV1] = []
+        mods.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: _payload("debug.core", 20)))
+        val built = apk_build_pack_v1(mods)
+        var entries: [ApkCatalogEntryV1] = []
+        entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk", module_id: "debug.core"))
+        val cat = apk_build_catalog_v1(entries)
+        val ld = apk_loader_new()
+        expect(apk_loader_register_pack(ld, "aspect/obs.apk", built.bytes)).to_equal(true)
+        expect(apk_load_facet(ld, cat.bytes, "debug/Debuggable").ok).to_equal(true)
+        expect(apk_facet_pin_v1(ld, "debug/Debuggable")).to_equal(true)
+        expect(apk_facet_refcount_v1(ld, "debug/Debuggable")).to_equal(1)
+        val un = apk_unload_facet_v1(ld, "debug/Debuggable")
+        expect(un.ok).to_equal(true)
+        expect(un.quiescing).to_equal(true)
+        # NOT freed while a reference is still held
+        expect(un.released).to_equal(false)
+        expect(apk_loader_unloads(ld)).to_equal(0)
+        expect(apk_facet_state_v1(ld, "debug/Debuggable")).to_equal(APK_FC_QUIESCING)
+        # the release happens on the final unpin, and only then
+        expect(apk_facet_unpin_v1(ld, "debug/Debuggable")).to_equal(true)
+        expect(apk_loader_unloads(ld)).to_equal(1)
+        expect(apk_facet_state_v1(ld, "debug/Debuggable")).to_equal(APK_FC_UNLOADED)

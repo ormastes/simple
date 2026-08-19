@@ -66,6 +66,16 @@ val APK_FLAG_ASPECT_PACK: i64 = 1
 val APK_HEADER_SIZE_V1: i64 = 32
 val APK_CATALOG_HEADER_SIZE_V1: i64 = 24
 
+# design §21 E-APACK004 decompression limit (zip-bomb guard). deflate_decompress
+# has no streaming/max-output form, so this cannot cap in-flight inflation of a
+# frame that LIES about its own declared size — but every ModuleEntry already
+# carries `uncomp_size` uncompressed in the directory (§11.2), read BEFORE the
+# frame is inflated, so an oversized DECLARATION is refused before a single
+# byte is decompressed. Combined with the existing post-inflate
+# `payload.len() != uncomp_size` check, no module can be materialized larger
+# than this cap through this loader.
+val APK_MAX_MODULE_UNCOMPRESSED_SIZE: i64 = 268435456
+
 # Catalog record kinds (design §11.1: FacetRoute / JoinpointRoute / StartupAspect)
 val APK_ENTRY_FACET: i64 = 0
 val APK_ENTRY_JOINPOINT: i64 = 1
@@ -79,6 +89,26 @@ val APK_ACT_LAZY_FACET: i64 = 3
 val APK_ACT_MANUAL: i64 = 4
 val APK_ACT_LAZY_PATCHABLE: i64 = 5
 val APK_ACT_HOT: i64 = 6
+
+# Facet binding lifecycle (design §14.7 unload). A binding is BOUND when
+# published, QUIESCING once unload has been requested while references are
+# still pinned (new acquisitions are refused, existing pins stay valid), and
+# UNLOADED only after the last reference is released.
+val APK_FC_BOUND: i64 = 0
+val APK_FC_QUIESCING: i64 = 1
+val APK_FC_UNLOADED: i64 = 2
+
+# design §11.2 ChunkEntry.kind: a pack frame is either ordinary code/data or
+# the design's separately-split COLD debug/source metadata chunk (§12.2).
+val APK_CHUNK_CODE: i64 = 0
+val APK_CHUNK_DEBUG: i64 = 1
+
+# design §11.2 ChunkEntry.flags / §12.2 "hot/startup code may remain
+# page-aligned and uncompressed for direct mapping". A STORED frame holds its
+# bytes verbatim: loading it performs ZERO decompression, which is exactly
+# what the loader counters then show.
+val APK_CHUNK_FLAG_NONE: i64 = 0
+val APK_CHUNK_FLAG_STORED: i64 = 1
 
 # ---------------------------------------------------------------- structs
 
@@ -96,6 +126,96 @@ struct ApkModuleSourceV2:
     required_core_public_abi_hash: text
     variant_fingerprint: text
     payload: [u8]
+
+# design §12.2 co-load clusters: modules that share a non-empty `cluster_id`
+# are packed into ONE deflate frame, in declaration order. An empty cluster_id
+# (the default, and what V1/V2 sources produce) means "own independent frame",
+# which is the design's default policy.
+struct ApkModuleSourceV3:
+    module_id: text
+    aspect_id: text
+    module_abi_hash: text
+    required_core_public_abi_hash: text
+    # design §11.2 ModuleEntry.required_core_layout_hash — "zero when
+    # public-only", i.e. an empty string here means the module binds against
+    # the core's PUBLIC surface only and no layout compatibility is claimed.
+    required_core_layout_hash: text
+    variant_fingerprint: text
+    cluster_id: text
+    # design §11.2 ChunkEntry.kind / .flags / .alignment. These describe the
+    # FRAME the module lands in; every member of one co-load cluster must
+    # declare the same three, otherwise the cluster is contradictory and the
+    # build fails closed.
+    chunk_kind: i64
+    chunk_flags: i64
+    alignment: i64
+    payload: [u8]
+
+# design §11.2 ChunkEntry as READ from the uncompressed pack directory. Every
+# field here is recorded by the builder and consulted by the loader; nothing
+# is carried for decoration.
+struct ApkChunkEntryV1:
+    ok: bool
+    found: bool
+    chunk_id: i64
+    kind: i64
+    flags: i64
+    file_offset: i64
+    compressed_size: i64
+    uncompressed_size: i64
+    alignment: i64
+    content_crc32: i64
+    cluster_id: text
+
+# design §12.2: the result of inflating ONE co-load cluster frame. `blob` is
+# the cluster's whole uncompressed content; each member is the slice
+# [member_offs[i], member_offs[i] + member_lens[i]). `frames_inflated` is 1 by
+# construction — that is the point of a cluster.
+struct ApkClusterLoadV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    cluster_id: text
+    module_ids: [text]
+    member_offs: [i64]
+    member_lens: [i64]
+    blob: [u8]
+    member_count: i64
+    frames_inflated: i64
+    bytes_decompressed: i64
+
+# design §9.6 multi-profile deployments: a fat catalog carries several
+# PRE-RESOLVED profiles. A ProfileRecord names a contiguous slice of the
+# catalog's entry array; startup selects exactly one by profile id and routes
+# only inside that slice — it never evaluates the other profiles' entries.
+struct ApkProfileRecordV1:
+    profile_id: text
+    entry_start: i64
+    entry_count: i64
+
+struct ApkProfileSelectV1:
+    ok: bool
+    found: bool
+    error_code: text
+    error_message: text
+    profile_id: text
+    entry_start: i64
+    entry_count: i64
+    profiles_examined: i64
+
+# design §14.7 unload result. `released` is true only when the binding was
+# actually freed; `quiescing` is true when unload was accepted but the binding
+# is still pinned and therefore MUST NOT be freed yet.
+struct ApkUnloadResultV1:
+    ok: bool
+    error_code: text
+    error_message: text
+    facet_key: text
+    quiescing: bool
+    released: bool
+    refcount: i64
+    generation: i64
 
 struct ApkBuildResultV1:
     ok: bool
@@ -123,6 +243,7 @@ struct ApkModuleLoadV1:
     aspect_id: text
     module_abi_hash: text
     required_core_public_abi_hash: text
+    required_core_layout_hash: text
     variant_fingerprint: text
     payload: [u8]
     modules_decompressed: i64
@@ -151,6 +272,11 @@ struct ApkCatalogHandleV1:
     schema_version: i64
     entry_count: i64
     total_size: i64
+    # design §9.6: number of ProfileRecords in this catalog (0 = single
+    # profile), and the byte offset at which the entry array begins (i.e.
+    # after the fixed header and the profile table).
+    profile_count: i64
+    body_off: i64
 
 struct ApkCatalogRouteV1:
     ok: bool
@@ -176,6 +302,19 @@ struct ApkFacetLoadV1:
     activation: i64
     from_cache: bool
     payload: [u8]
+    # design §5.7 atomic activation: the loader-wide activation epoch this
+    # binding was published under. A failed bind never advances it (see
+    # apk_loader_generation); a successful one always does, exactly once.
+    generation: i64
+
+# design §14.1 FacetBindingRegistry key: (concrete_type_id, facet_interface_id,
+# generation). facet_key is already "{concrete_type_id}/{facet_interface_id}"
+# by convention (see every catalog entry in this module's specs), so the
+# registry key is reconstructible without a runtime type registry.
+struct ApkFacetKeyPartsV1:
+    ok: bool
+    concrete_type_id: text
+    facet_interface_id: text
 
 # ---------------------------------------------------------------- LE helpers
 
@@ -252,16 +391,48 @@ fn apk_build_pack_v1(modules: [ApkModuleSourceV1]) -> ApkBuildResultV1:
     apk_build_pack_v2(upgraded)
 
 fn apk_build_pack_v2(modules: [ApkModuleSourceV2]) -> ApkBuildResultV1:
-    """Build a kind=aspect_pack SMF container. The directory is uncompressed;
-    each module payload becomes an INDEPENDENT deflate frame."""
+    """Build a pack in which every module is its OWN independent, deflated,
+    unaligned code frame (design §12.2 default policy) — no co-load cluster,
+    no layout-hash claim."""
+    var upgraded: [ApkModuleSourceV3] = []
+    var i = 0
+    while i < modules.len():
+        upgraded.push(ApkModuleSourceV3(module_id: modules[i].module_id,
+            aspect_id: modules[i].aspect_id, module_abi_hash: modules[i].module_abi_hash,
+            required_core_public_abi_hash: modules[i].required_core_public_abi_hash,
+            required_core_layout_hash: "",
+            variant_fingerprint: modules[i].variant_fingerprint,
+            cluster_id: "", chunk_kind: APK_CHUNK_CODE,
+            chunk_flags: APK_CHUNK_FLAG_NONE, alignment: 1,
+            payload: modules[i].payload))
+        i = i + 1
+    apk_build_pack_v3(upgraded)
+
+fn apk_build_pack_v3(modules: [ApkModuleSourceV3]) -> ApkBuildResultV1:
+    """Build a kind=aspect_pack SMF container.
+
+    design §12.2 compression policy, in full for the parts this container can
+    honour: the directory is uncompressed; each module payload becomes an
+    INDEPENDENT deflate frame; modules sharing a non-empty `cluster_id` are
+    CO-LOADED into one shared frame; a frame flagged STORED is written
+    verbatim (no deflate) and may be aligned, which is how §12.2's
+    page-aligned hot/startup chunks are expressed; a frame whose kind is
+    APK_CHUNK_DEBUG is the design's separately-split cold chunk.
+
+    NOT implemented, and refused rather than faked: a pack-level Zstandard
+    dictionary. The in-tree zstd support is a DECODER only
+    (src/lib/nogc_sync_mut/compression/zstd/) and it explicitly rejects
+    dictionary frames, so there is no way to produce one honestly."""
     var empty: [u8] = []
     val n = modules.len()
     if n == 0:
         return ApkBuildResultV1(ok: false, error_code: "APK_EMPTY",
             error_message: "an aspect pack must hold at least one module", bytes: empty, module_count: 0)
-    # duplicate module ids fail closed
     var i = 0
     while i < n:
+        if modules[i].alignment < 1:
+            return ApkBuildResultV1(ok: false, error_code: "APK_BAD_ALIGNMENT",
+                error_message: "module {modules[i].module_id} declares alignment {modules[i].alignment}; alignment must be at least 1", bytes: empty, module_count: 0)
         var j = i + 1
         while j < n:
             if modules[i].module_id == modules[j].module_id:
@@ -270,65 +441,113 @@ fn apk_build_pack_v2(modules: [ApkModuleSourceV2]) -> ApkBuildResultV1:
             j = j + 1
         i = i + 1
 
-    # compress every payload independently
-    var frames: [u8] = []
-    var frame_off: [i64] = []
-    var frame_len: [i64] = []
-    var frame_crc: [i64] = []
+    # design §12.2: assign each module to a frame. An empty cluster_id always
+    # gets a frame of its own; a non-empty one joins the frame already opened
+    # for that cluster id. Every member of a cluster must agree on the frame's
+    # kind/flags/alignment — a cluster that contradicts itself is a build
+    # error, never a silently-picked winner.
+    var mod_frame: [i64] = []
+    var mod_moff: [i64] = []
+    var f_cluster: [text] = []
+    var f_size: [i64] = []
+    var f_kind: [i64] = []
+    var f_flags: [i64] = []
+    var f_align: [i64] = []
     i = 0
     while i < n:
-        val comp = deflate_compress(modules[i].payload)
-        if comp.len() == 0 and modules[i].payload.len() > 0:
-            return ApkBuildResultV1(ok: false, error_code: "APK_COMPRESS_FAILED",
-                error_message: "deflate failed for module {modules[i].module_id}", bytes: empty, module_count: 0)
-        frame_off.push(frames.len())
-        frame_len.push(comp.len())
-        var crc_i = 0
-        crc_i = _apk_crc(comp)
-        frame_crc.push(crc_i)
-        _apk_push_bytes(frames, comp)
+        var fi = -1
+        if modules[i].cluster_id != "":
+            var k = 0
+            while k < f_cluster.len():
+                if f_cluster[k] == modules[i].cluster_id:
+                    fi = k
+                k = k + 1
+        if fi < 0:
+            fi = f_cluster.len()
+            f_cluster.push(modules[i].cluster_id)
+            f_size.push(0)
+            f_kind.push(modules[i].chunk_kind)
+            f_flags.push(modules[i].chunk_flags)
+            f_align.push(modules[i].alignment)
+        if f_kind[fi] != modules[i].chunk_kind or f_flags[fi] != modules[i].chunk_flags or f_align[fi] != modules[i].alignment:
+            return ApkBuildResultV1(ok: false, error_code: "APK_CLUSTER_CHUNK_CONFLICT",
+                error_message: "co-load cluster {modules[i].cluster_id} is contradictory: module {modules[i].module_id} declares kind/flags/alignment {modules[i].chunk_kind}/{modules[i].chunk_flags}/{modules[i].alignment}, the cluster already declares {f_kind[fi]}/{f_flags[fi]}/{f_align[fi]}",
+                bytes: empty, module_count: 0)
+        mod_frame.push(fi)
+        mod_moff.push(f_size[fi])
+        f_size[fi] = f_size[fi] + modules[i].payload.len()
         i = i + 1
 
-    # directory (payload_off is absolute; compute dir size first via a dry build)
+    # build every FRAME independently. A whole-pack stream remains forbidden
+    # (§12.3): there is no compressor call that spans two frames.
+    val fn_count = f_cluster.len()
+    var bodies: [u8] = []
+    var f_boff: [i64] = []
+    var f_blen: [i64] = []
+    var f_crc: [i64] = []
+    var fi2 = 0
+    while fi2 < fn_count:
+        var raw: [u8] = []
+        var m = 0
+        while m < n:
+            if mod_frame[m] == fi2:
+                _apk_push_bytes(raw, modules[m].payload)
+            m = m + 1
+        var body: [u8] = []
+        if (f_flags[fi2] & APK_CHUNK_FLAG_STORED) != 0:
+            body = raw
+        else:
+            body = deflate_compress(raw)
+            if body.len() == 0 and raw.len() > 0:
+                return ApkBuildResultV1(ok: false, error_code: "APK_COMPRESS_FAILED",
+                    error_message: "deflate failed for frame {fi2}", bytes: empty, module_count: 0)
+        f_boff.push(bodies.len())
+        f_blen.push(body.len())
+        f_crc.push(_apk_crc(body))
+        _apk_push_bytes(bodies, body)
+        fi2 = fi2 + 1
+
+    # directory pass 1 (placeholder offsets) only to learn the directory size
     var dir: [u8] = []
-    # first pass with placeholder offsets to learn dir size
     i = 0
     while i < n:
-        val idb = text_to_bytes(modules[i].module_id)
-        val asb = text_to_bytes(modules[i].aspect_id)
-        _apk_push_u32(dir, idb.len())
-        _apk_push_bytes(dir, idb)
-        _apk_push_u32(dir, asb.len())
-        _apk_push_bytes(dir, asb)
-        _apk_push_text(dir, modules[i].module_abi_hash)
-        _apk_push_text(dir, modules[i].required_core_public_abi_hash)
-        _apk_push_text(dir, modules[i].variant_fingerprint)
-        _apk_push_u64(dir, 0)
-        _apk_push_u64(dir, frame_len[i])
-        _apk_push_u64(dir, modules[i].payload.len())
-        _apk_push_u32(dir, frame_crc[i])
+        _apk_push_dir_entry(dir, modules[i], f_cluster[mod_frame[i]], 0,
+            f_blen[mod_frame[i]], f_size[mod_frame[i]], mod_moff[i], mod_frame[i],
+            f_kind[mod_frame[i]], f_flags[mod_frame[i]], f_align[mod_frame[i]], f_crc[mod_frame[i]])
         i = i + 1
     val dir_size = dir.len()
     val data_base = APK_HEADER_SIZE_V1 + dir_size
 
-    # second pass with real absolute offsets
+    # lay the frames out, honouring each frame's declared alignment (§12.2
+    # direct mapping): a frame with alignment A begins at an absolute file
+    # offset that is a multiple of A.
+    var frames: [u8] = []
+    var f_abs: [i64] = []
+    fi2 = 0
+    while fi2 < fn_count:
+        var abs_off = data_base + frames.len()
+        val al = f_align[fi2]
+        if al > 1:
+            while (abs_off % al) != 0:
+                frames.push(0 as u8)
+                abs_off = data_base + frames.len()
+        f_abs.push(abs_off)
+        var t = 0
+        while t < f_blen[fi2]:
+            frames.push(bodies[f_boff[fi2] + t])
+            t = t + 1
+        fi2 = fi2 + 1
+
     var dir2: [u8] = []
     i = 0
     while i < n:
-        val idb = text_to_bytes(modules[i].module_id)
-        val asb = text_to_bytes(modules[i].aspect_id)
-        _apk_push_u32(dir2, idb.len())
-        _apk_push_bytes(dir2, idb)
-        _apk_push_u32(dir2, asb.len())
-        _apk_push_bytes(dir2, asb)
-        _apk_push_text(dir2, modules[i].module_abi_hash)
-        _apk_push_text(dir2, modules[i].required_core_public_abi_hash)
-        _apk_push_text(dir2, modules[i].variant_fingerprint)
-        _apk_push_u64(dir2, data_base + frame_off[i])
-        _apk_push_u64(dir2, frame_len[i])
-        _apk_push_u64(dir2, modules[i].payload.len())
-        _apk_push_u32(dir2, frame_crc[i])
+        _apk_push_dir_entry(dir2, modules[i], f_cluster[mod_frame[i]], f_abs[mod_frame[i]],
+            f_blen[mod_frame[i]], f_size[mod_frame[i]], mod_moff[i], mod_frame[i],
+            f_kind[mod_frame[i]], f_flags[mod_frame[i]], f_align[mod_frame[i]], f_crc[mod_frame[i]])
         i = i + 1
+    if dir2.len() != dir_size:
+        return ApkBuildResultV1(ok: false, error_code: "APK_DIR_UNSTABLE",
+            error_message: "directory size changed between layout passes", bytes: empty, module_count: 0)
 
     val total = data_base + frames.len()
     var out: [u8] = []
@@ -341,6 +560,29 @@ fn apk_build_pack_v2(modules: [ApkModuleSourceV2]) -> ApkBuildResultV1:
     _apk_push_bytes(out, dir2)
     _apk_push_bytes(out, frames)
     ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: out, module_count: n)
+
+fn _apk_push_dir_entry(dir: [u8], m: ApkModuleSourceV3, cluster_id: text,
+        payload_off: i64, comp_size: i64, uncomp_size: i64, member_off: i64,
+        chunk_id: i64, kind: i64, flags: i64, alignment: i64, crc: i64):
+    """One uncompressed §11.2 directory entry: the ModuleEntry identity fields
+    followed by the ChunkEntry fields of the frame the module lives in."""
+    _apk_push_text(dir, m.module_id)
+    _apk_push_text(dir, m.aspect_id)
+    _apk_push_text(dir, m.module_abi_hash)
+    _apk_push_text(dir, m.required_core_public_abi_hash)
+    _apk_push_text(dir, m.required_core_layout_hash)
+    _apk_push_text(dir, m.variant_fingerprint)
+    _apk_push_text(dir, cluster_id)
+    _apk_push_u64(dir, payload_off)
+    _apk_push_u64(dir, comp_size)
+    _apk_push_u64(dir, uncomp_size)
+    _apk_push_u64(dir, member_off)
+    _apk_push_u64(dir, m.payload.len())
+    _apk_push_u64(dir, chunk_id)
+    _apk_push_u32(dir, kind)
+    _apk_push_u32(dir, flags)
+    _apk_push_u32(dir, alignment)
+    _apk_push_u32(dir, crc)
 
 # ---------------------------------------------------------------- pack open
 
@@ -385,13 +627,46 @@ fn _apk_load_error(code: text, message: text, examined: i64) -> ApkModuleLoadV1:
     var empty: [u8] = []
     ApkModuleLoadV1(ok: false, found: false, error_code: code, error_message: message,
         module_id: "", aspect_id: "", module_abi_hash: "",
-        required_core_public_abi_hash: "", variant_fingerprint: "", payload: empty,
+        required_core_public_abi_hash: "", required_core_layout_hash: "",
+        variant_fingerprint: "", payload: empty,
         modules_decompressed: 0, bytes_decompressed: 0, entries_examined: examined)
+
+fn _apk_dir_next(data: [u8], off: i64, dir_end: i64) -> [i64]:
+    """Parse ONE uncompressed §11.2 directory entry at `off`. Returns an empty
+    array when the entry is structurally corrupt. Result layout:
+    [id_off,id_len, as_off,as_len, mabi_off,mabi_len, cabi_off,cabi_len,
+     lay_off,lay_len, vfp_off,vfp_len, cl_off,cl_len, fix_off, next_off].
+    The 64-byte fixed block at fix_off is: payload_off u64, comp_size u64,
+    uncomp_size u64 (whole FRAME), member_off u64, member_len u64,
+    chunk_id u64, kind u32, flags u32, alignment u32, frame crc32 u32 (64 B)."""
+    var bad: [i64] = []
+    var out: [i64] = []
+    var cur = off
+    var t = 0
+    while t < 7:
+        if cur + 4 > dir_end:
+            return bad
+        val ln = _apk_read_u32(data, cur)
+        if ln < 0 or cur + 4 + ln > dir_end:
+            return bad
+        out.push(cur + 4)
+        out.push(ln)
+        cur = cur + 4 + ln
+        t = t + 1
+    if cur + 64 > dir_end:
+        return bad
+    out.push(cur)
+    out.push(cur + 64)
+    out
 
 fn apk_load_module_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkModuleLoadV1:
     """Load EXACTLY ONE module from the pack. Walks only the uncompressed
-    directory; decompresses only the selected module's frame. The counters
-    (modules_decompressed, bytes_decompressed) measure that claim."""
+    directory; touches only the selected module's frame. When the module
+    belongs to a co-load cluster (design §12.2) that frame is the cluster's
+    single shared frame and the module's bytes are the recorded slice of it —
+    still exactly one inflate, never the whole pack. When the frame is STORED
+    (§12.2 page-aligned hot/startup chunk) nothing is decompressed at all, and
+    `modules_decompressed` / `bytes_decompressed` stay at 0 to say so."""
     var empty: [u8] = []
     if not handle.ok:
         return _apk_load_error("APK_BAD_HANDLE", "load on an unopened pack", 0)
@@ -400,62 +675,217 @@ fn apk_load_module_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkMo
     var examined = 0
     var slot = 0
     while slot < handle.module_count:
-        if off + 4 > dir_end:
-            return _apk_load_error("APK_DIR_CORRUPT", "directory entry extends past directory end", examined)
-        val id_len = _apk_read_u32(data, off)
-        if off + 4 + id_len + 4 > dir_end:
-            return _apk_load_error("APK_DIR_CORRUPT", "module id span escapes the directory", examined)
-        val mid = _apk_read_text(data, off + 4, id_len)
-        val as_off = off + 4 + id_len
-        val aspect_len = _apk_read_u32(data, as_off)
-        val mabi_off = as_off + 4 + aspect_len
-        if mabi_off + 4 > dir_end:
-            return _apk_load_error("APK_DIR_CORRUPT", "module abi span escapes the directory", examined)
-        val mabi_len = _apk_read_u32(data, mabi_off)
-        val cabi_off = mabi_off + 4 + mabi_len
-        if cabi_off + 4 > dir_end:
-            return _apk_load_error("APK_DIR_CORRUPT", "core abi span escapes the directory", examined)
-        val cabi_len = _apk_read_u32(data, cabi_off)
-        val vfp_off = cabi_off + 4 + cabi_len
-        if vfp_off + 4 > dir_end:
-            return _apk_load_error("APK_DIR_CORRUPT", "variant fingerprint span escapes the directory", examined)
-        val vfp_len = _apk_read_u32(data, vfp_off)
-        val fix_off = vfp_off + 4 + vfp_len
-        if fix_off + 28 > dir_end:
-            return _apk_load_error("APK_DIR_CORRUPT", "directory entry fixed fields truncated", examined)
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return _apk_load_error("APK_DIR_CORRUPT", "directory entry escapes the directory", examined)
+        val mid = _apk_read_text(data, f[0], f[1])
         examined = examined + 1
         if mid == module_id:
-            val aspect_id = _apk_read_text(data, as_off + 4, aspect_len)
-            val module_abi_hash = _apk_read_text(data, mabi_off + 4, mabi_len)
-            val core_abi_hash = _apk_read_text(data, cabi_off + 4, cabi_len)
-            val variant_fp = _apk_read_text(data, vfp_off + 4, vfp_len)
+            val fix_off = f[14]
             val payload_off = _apk_read_u64(data, fix_off)
             val comp_size = _apk_read_u64(data, fix_off + 8)
             val uncomp_size = _apk_read_u64(data, fix_off + 16)
-            val want_crc = _apk_read_u32(data, fix_off + 24)
+            val member_off = _apk_read_u64(data, fix_off + 24)
+            val member_len = _apk_read_u64(data, fix_off + 32)
+            val flags = _apk_read_u32(data, fix_off + 52)
+            val alignment = _apk_read_u32(data, fix_off + 56)
+            val want_crc = _apk_read_u32(data, fix_off + 60)
             if payload_off < dir_end or payload_off + comp_size > data.len():
                 return _apk_load_error("APK_TRUNCATED_PACK", "module payload lies outside the pack data area", examined)
+            if alignment > 1 and (payload_off % alignment) != 0:
+                return _apk_load_error("APK_CHUNK_MISALIGNED", "chunk declares alignment {alignment} but starts at {payload_off}", examined)
+            if member_off < 0 or member_len < 0 or member_off + member_len > uncomp_size:
+                return _apk_load_error("APK_CLUSTER_CORRUPT", "module slice lies outside its frame", examined)
             var comp: [u8] = []
             var i = 0
             while i < comp_size:
                 comp.push(data[payload_off + i])
                 i = i + 1
             if _apk_crc(comp) != want_crc:
-                return _apk_load_error("APK_MODULE_CORRUPT", "compressed frame failed its checksum", examined)
-            val payload = deflate_decompress(comp)
-            if payload.len() != uncomp_size:
-                return _apk_load_error("APK_MODULE_CORRUPT", "decompressed size does not match directory", examined)
+                return _apk_load_error("APK_MODULE_CORRUPT", "frame failed its checksum", examined)
+            var frame: [u8] = []
+            var did_decompress = 0
+            var decompressed_bytes = 0
+            if (flags & APK_CHUNK_FLAG_STORED) != 0:
+                if comp_size != uncomp_size:
+                    return _apk_load_error("APK_MODULE_CORRUPT", "stored chunk declares a different uncompressed size", examined)
+                frame = comp
+            else:
+                if uncomp_size > APK_MAX_MODULE_UNCOMPRESSED_SIZE:
+                    return _apk_load_error("APK_MODULE_TOO_LARGE", "declared uncompressed size {uncomp_size} exceeds the {APK_MAX_MODULE_UNCOMPRESSED_SIZE}-byte decompression limit; refusing to inflate", examined)
+                frame = deflate_decompress(comp)
+                did_decompress = 1
+                decompressed_bytes = comp_size
+            if frame.len() != uncomp_size:
+                return _apk_load_error("APK_MODULE_CORRUPT", "frame size does not match directory", examined)
+            var payload: [u8] = []
+            var mm = 0
+            while mm < member_len:
+                payload.push(frame[member_off + mm])
+                mm = mm + 1
             return ApkModuleLoadV1(ok: true, found: true, error_code: "", error_message: "",
-                module_id: mid, aspect_id: aspect_id, module_abi_hash: module_abi_hash,
-                required_core_public_abi_hash: core_abi_hash, variant_fingerprint: variant_fp,
+                module_id: mid, aspect_id: _apk_read_text(data, f[2], f[3]),
+                module_abi_hash: _apk_read_text(data, f[4], f[5]),
+                required_core_public_abi_hash: _apk_read_text(data, f[6], f[7]),
+                required_core_layout_hash: _apk_read_text(data, f[8], f[9]),
+                variant_fingerprint: _apk_read_text(data, f[10], f[11]),
                 payload: payload,
-                modules_decompressed: 1, bytes_decompressed: comp_size, entries_examined: examined)
-        off = fix_off + 28
+                modules_decompressed: did_decompress, bytes_decompressed: decompressed_bytes,
+                entries_examined: examined)
+        off = f[15]
         slot = slot + 1
     ApkModuleLoadV1(ok: true, found: false, error_code: "", error_message: "",
         module_id: "", aspect_id: "", module_abi_hash: "",
-        required_core_public_abi_hash: "", variant_fingerprint: "", payload: empty,
+        required_core_public_abi_hash: "", required_core_layout_hash: "",
+        variant_fingerprint: "", payload: empty,
         modules_decompressed: 0, bytes_decompressed: 0, entries_examined: examined)
+
+fn apk_pack_chunk_of_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkChunkEntryV1:
+    """design §11.2 ChunkEntry, read from the UNCOMPRESSED directory: which
+    chunk a module lives in and every recorded property of that chunk. Opens
+    no frame and decompresses nothing."""
+    var miss = ApkChunkEntryV1(ok: true, found: false, chunk_id: -1, kind: 0, flags: 0,
+        file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+        content_crc32: 0, cluster_id: "")
+    if not handle.ok:
+        return ApkChunkEntryV1(ok: false, found: false, chunk_id: -1, kind: 0, flags: 0,
+            file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+            content_crc32: 0, cluster_id: "")
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var slot = 0
+    while slot < handle.module_count:
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return ApkChunkEntryV1(ok: false, found: false, chunk_id: -1, kind: 0, flags: 0,
+                file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+                content_crc32: 0, cluster_id: "")
+        if _apk_read_text(data, f[0], f[1]) == module_id:
+            val fx = f[14]
+            return ApkChunkEntryV1(ok: true, found: true,
+                chunk_id: _apk_read_u64(data, fx + 40),
+                kind: _apk_read_u32(data, fx + 48),
+                flags: _apk_read_u32(data, fx + 52),
+                file_offset: _apk_read_u64(data, fx),
+                compressed_size: _apk_read_u64(data, fx + 8),
+                uncompressed_size: _apk_read_u64(data, fx + 16),
+                alignment: _apk_read_u32(data, fx + 56),
+                content_crc32: _apk_read_u32(data, fx + 60),
+                cluster_id: _apk_read_text(data, f[12], f[13]))
+        off = f[15]
+        slot = slot + 1
+    miss
+
+fn apk_pack_cluster_of_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> text:
+    """design §12.2: the co-load cluster id a module belongs to, read from the
+    UNCOMPRESSED directory. Empty means the module has its own frame (or is
+    absent) — nothing is decompressed either way."""
+    apk_pack_chunk_of_v1(data, handle, module_id).cluster_id
+
+fn _apk_cluster_error(code: text, message: text, cluster_id: text) -> ApkClusterLoadV1:
+    var empty: [u8] = []
+    var ids: [text] = []
+    var offs: [i64] = []
+    var lens: [i64] = []
+    ApkClusterLoadV1(ok: false, found: false, error_code: code, error_message: message,
+        cluster_id: cluster_id, module_ids: ids, member_offs: offs, member_lens: lens,
+        blob: empty, member_count: 0, frames_inflated: 0, bytes_decompressed: 0)
+
+fn apk_load_cluster_v1(data: [u8], handle: ApkHandleV1, cluster_id: text) -> ApkClusterLoadV1:
+    """design §12.2 co-load cluster: touch the cluster's ONE shared frame
+    exactly once and return every member of it. That is the whole point of
+    clustering — N small related modules cost one inflate, not N — while
+    §12.3 still holds, because the frame is the cluster's, never the pack's."""
+    var empty: [u8] = []
+    if not handle.ok:
+        return _apk_cluster_error("APK_BAD_HANDLE", "cluster load on an unopened pack", cluster_id)
+    if cluster_id == "":
+        return _apk_cluster_error("APK_CLUSTER_EMPTY_ID", "an empty cluster id names no cluster; unclustered modules have their own frames", cluster_id)
+    val dir_end = APK_HEADER_SIZE_V1 + handle.dir_size
+    var off = APK_HEADER_SIZE_V1
+    var slot = 0
+    var ids: [text] = []
+    var offs: [i64] = []
+    var lens: [i64] = []
+    var payload_off = -1
+    var comp_size = 0
+    var uncomp_size = 0
+    var want_crc = 0
+    var flags = 0
+    while slot < handle.module_count:
+        val f = _apk_dir_next(data, off, dir_end)
+        if f.len() == 0:
+            return _apk_cluster_error("APK_DIR_CORRUPT", "directory entry escapes the directory", cluster_id)
+        if _apk_read_text(data, f[12], f[13]) == cluster_id:
+            val fx = f[14]
+            val p = _apk_read_u64(data, fx)
+            if payload_off < 0:
+                payload_off = p
+                comp_size = _apk_read_u64(data, fx + 8)
+                uncomp_size = _apk_read_u64(data, fx + 16)
+                flags = _apk_read_u32(data, fx + 52)
+                want_crc = _apk_read_u32(data, fx + 60)
+            if p != payload_off:
+                return _apk_cluster_error("APK_CLUSTER_CORRUPT", "cluster {cluster_id} spans more than one frame", cluster_id)
+            ids.push(_apk_read_text(data, f[0], f[1]))
+            offs.push(_apk_read_u64(data, fx + 24))
+            lens.push(_apk_read_u64(data, fx + 32))
+        off = f[15]
+        slot = slot + 1
+    if payload_off < 0:
+        var nids: [text] = []
+        var noffs: [i64] = []
+        var nlens: [i64] = []
+        return ApkClusterLoadV1(ok: true, found: false, error_code: "", error_message: "",
+            cluster_id: cluster_id, module_ids: nids, member_offs: noffs, member_lens: nlens,
+            blob: empty, member_count: 0, frames_inflated: 0, bytes_decompressed: 0)
+    if payload_off < dir_end or payload_off + comp_size > data.len():
+        return _apk_cluster_error("APK_TRUNCATED_PACK", "cluster frame lies outside the pack data area", cluster_id)
+    var comp: [u8] = []
+    var i = 0
+    while i < comp_size:
+        comp.push(data[payload_off + i])
+        i = i + 1
+    if _apk_crc(comp) != want_crc:
+        return _apk_cluster_error("APK_MODULE_CORRUPT", "cluster frame failed its checksum", cluster_id)
+    var blob: [u8] = []
+    var inflated = 0
+    var decompressed_bytes = 0
+    if (flags & APK_CHUNK_FLAG_STORED) != 0:
+        blob = comp
+    else:
+        if uncomp_size > APK_MAX_MODULE_UNCOMPRESSED_SIZE:
+            return _apk_cluster_error("APK_MODULE_TOO_LARGE", "declared cluster size {uncomp_size} exceeds the decompression limit; refusing to inflate", cluster_id)
+        blob = deflate_decompress(comp)
+        inflated = 1
+        decompressed_bytes = comp_size
+    if blob.len() != uncomp_size:
+        return _apk_cluster_error("APK_MODULE_CORRUPT", "decompressed cluster size does not match directory", cluster_id)
+    var k = 0
+    while k < ids.len():
+        if offs[k] < 0 or lens[k] < 0 or offs[k] + lens[k] > uncomp_size:
+            return _apk_cluster_error("APK_CLUSTER_CORRUPT", "member {ids[k]} lies outside its cluster frame", cluster_id)
+        k = k + 1
+    ApkClusterLoadV1(ok: true, found: true, error_code: "", error_message: "",
+        cluster_id: cluster_id, module_ids: ids, member_offs: offs, member_lens: lens,
+        blob: blob, member_count: ids.len(), frames_inflated: inflated,
+        bytes_decompressed: decompressed_bytes)
+
+fn apk_cluster_member_v1(load: ApkClusterLoadV1, module_id: text) -> [u8]:
+    """Slice one member out of an already-materialised cluster. No frame is
+    touched and nothing is decompressed here — apk_load_cluster_v1 already
+    did that exactly once for the whole cluster."""
+    var out: [u8] = []
+    var k = 0
+    while k < load.module_ids.len():
+        if load.module_ids[k] == module_id:
+            var m = 0
+            while m < load.member_lens[k]:
+                out.push(load.blob[load.member_offs[k] + m])
+                m = m + 1
+            return out
+        k = k + 1
+    out
 
 # ---------------------------------------------------------------- catalog
 
@@ -472,21 +902,97 @@ fn apk_build_catalog_v1(entries: [ApkCatalogEntryV1]) -> ApkBuildResultV1:
     apk_build_catalog_v2(upgraded)
 
 fn apk_build_catalog_v2(entries: [ApkCatalogEntryV2]) -> ApkBuildResultV1:
-    """Build the uncompressed application Aspect Catalog section. Duplicate
-    (kind, key) pairs fail closed (routing must be unambiguous)."""
+    """Build a single-profile uncompressed Aspect Catalog section."""
+    var none: [ApkProfileRecordV1] = []
+    apk_build_catalog_v3(entries, none)
+
+fn apk_build_catalog_v3(entries: [ApkCatalogEntryV2], profiles: [ApkProfileRecordV1]) -> ApkBuildResultV1:
+    """Build the uncompressed application Aspect Catalog section, optionally
+    carrying several PRE-RESOLVED profiles (design §9.6). Each ProfileRecord
+    names a contiguous slice of the entry array, so startup selects one
+    profile by id and routes only inside its slice — it never evaluates the
+    other profiles\' entries and never scans packs. Duplicate (kind, key)
+    pairs fail closed (routing must be unambiguous); with several profiles a
+    key may legitimately repeat ACROSS profiles, so the duplicate check runs
+    per profile slice rather than globally.
+
+    NOTE the deliberate limit: the design speaks of a fat installation
+    carrying several CATALOGS. This carries several profiles inside one
+    catalog section, which is the same selection semantics without inventing a
+    multi-file installation layout that no deployment code in-tree produces."""
     var empty: [u8] = []
-    val n = entries.len()
-    var i = 0
+    val pn = profiles.len()
+    if pn > 65535:
+        return ApkBuildResultV1(ok: false, error_code: "APK_TOO_MANY_PROFILES",
+            error_message: "a catalog carries at most 65535 profiles", bytes: empty, module_count: 0)
+    var pi = 0
+    while pi < pn:
+        if profiles[pi].profile_id == "":
+            return ApkBuildResultV1(ok: false, error_code: "APK_PROFILE_EMPTY_ID",
+                error_message: "a profile record must carry a non-empty profile id", bytes: empty, module_count: 0)
+        if profiles[pi].entry_start < 0 or profiles[pi].entry_count < 0 or profiles[pi].entry_start + profiles[pi].entry_count > entries.len():
+            return ApkBuildResultV1(ok: false, error_code: "APK_PROFILE_RANGE",
+                error_message: "profile {profiles[pi].profile_id} names entries [{profiles[pi].entry_start}, {profiles[pi].entry_start + profiles[pi].entry_count}) outside the {entries.len()}-entry catalog", bytes: empty, module_count: 0)
+        var pj = pi + 1
+        while pj < pn:
+            if profiles[pi].profile_id == profiles[pj].profile_id:
+                return ApkBuildResultV1(ok: false, error_code: "APK_DUP_PROFILE",
+                    error_message: "duplicate profile id: {profiles[pi].profile_id}", bytes: empty, module_count: 0)
+            pj = pj + 1
+        pi = pi + 1
+    if pn > 0:
+        pi = 0
+        while pi < pn:
+            val dup = _apk_check_slice_unique(entries, profiles[pi].entry_start, profiles[pi].entry_count)
+            if not dup.ok:
+                return dup
+            pi = pi + 1
+    else:
+        val dup0 = _apk_check_slice_unique(entries, 0, entries.len())
+        if not dup0.ok:
+            return dup0
+    var ptab: [u8] = []
+    pi = 0
+    while pi < pn:
+        var pjoined: [u8] = []
+        _apk_push_text(pjoined, profiles[pi].profile_id)
+        _apk_push_u64(pjoined, profiles[pi].entry_start)
+        _apk_push_u64(pjoined, profiles[pi].entry_count)
+        _apk_push_bytes(ptab, pjoined)
+        _apk_push_u32(ptab, _apk_crc(pjoined))
+        pi = pi + 1
+    _apk_build_catalog_body(entries, ptab, pn)
+
+fn _apk_check_slice_unique(entries: [ApkCatalogEntryV2], start: i64, count: i64) -> ApkBuildResultV1:
+    var empty: [u8] = []
+    val n = start + count
+    var i = start
     while i < n:
         var j = i + 1
         while j < n:
             if entries[i].facet_key == entries[j].facet_key and entries[i].entry_kind == entries[j].entry_kind:
                 return ApkBuildResultV1(ok: false, error_code: "APK_DUP_FACET",
                     error_message: "duplicate facet key: {entries[i].facet_key}", bytes: empty, module_count: 0)
+            # design §5.4-5.5 binding-level uniqueness: two routes of the same
+            # kind pointing at the SAME (pack_path, module_id) must not claim
+            # DIFFERENT non-empty contract ABI hashes for it — that would be
+            # two incompatible bindings for one module, not a duplicate route.
+            if (entries[i].entry_kind == entries[j].entry_kind and
+                entries[i].pack_path == entries[j].pack_path and
+                entries[i].module_id == entries[j].module_id and
+                entries[i].abi_hash != "" and entries[j].abi_hash != "" and
+                entries[i].abi_hash != entries[j].abi_hash):
+                return ApkBuildResultV1(ok: false, error_code: "APK_BINDING_ABI_CONFLICT",
+                    error_message: "module {entries[i].module_id} is bound with conflicting contract ABI hashes: {entries[i].abi_hash} vs {entries[j].abi_hash}",
+                    bytes: empty, module_count: 0)
             j = j + 1
         i = i + 1
+    ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: empty, module_count: 0)
+
+fn _apk_build_catalog_body(entries: [ApkCatalogEntryV2], ptab: [u8], profile_count: i64) -> ApkBuildResultV1:
+    val n = entries.len()
     var body: [u8] = []
-    i = 0
+    var i = 0
     while i < n:
         val kb = text_to_bytes(entries[i].facet_key)
         val pb = text_to_bytes(entries[i].pack_path)
@@ -514,15 +1020,41 @@ fn apk_build_catalog_v2(entries: [ApkCatalogEntryV2]) -> ApkBuildResultV1:
     var out: [u8] = []
     _apk_push_bytes(out, text_to_bytes(APK_CATALOG_MAGIC_V1))
     _apk_push_u16(out, APK_SCHEMA_V1)
-    _apk_push_u16(out, 0)
+    # design §9.6: the previously-reserved u16 now carries the ProfileRecord
+    # count. 0 is exactly what every single-profile catalog wrote before.
+    _apk_push_u16(out, profile_count)
     _apk_push_u32(out, n)
-    _apk_push_u64(out, APK_CATALOG_HEADER_SIZE_V1 + body.len())
+    _apk_push_u64(out, APK_CATALOG_HEADER_SIZE_V1 + ptab.len() + body.len())
+    _apk_push_bytes(out, ptab)
     _apk_push_bytes(out, body)
     ApkBuildResultV1(ok: true, error_code: "", error_message: "", bytes: out, module_count: n)
 
+fn apk_build_catalog_v2_checked(entries: [ApkCatalogEntryV2], known_module_ids: [text]) -> ApkBuildResultV1:
+    """design §5.4 binding completeness: like apk_build_catalog_v2, but ALSO
+    verifies at build time that every route's module_id is one of the
+    modules the caller declares it is packing (`known_module_ids`) — a
+    dangling binding is rejected BEFORE it ships, rather than only being
+    discovered lazily as APK_ROUTE_DANGLING on first load."""
+    var empty: [u8] = []
+    var i = 0
+    while i < entries.len():
+        var found = false
+        var j = 0
+        while j < known_module_ids.len():
+            if known_module_ids[j] == entries[i].module_id:
+                found = true
+            j = j + 1
+        if not found:
+            return ApkBuildResultV1(ok: false, error_code: "APK_DANGLING_BINDING",
+                error_message: "facet {entries[i].facet_key} routes to module {entries[i].module_id}, which is not among the declared modules",
+                bytes: empty, module_count: 0)
+        i = i + 1
+    apk_build_catalog_v2(entries)
+
 fn _apk_cat_open_error(code: text, message: text) -> ApkCatalogHandleV1:
     ApkCatalogHandleV1(ok: false, error_code: code, error_message: message,
-        schema_version: 0, entry_count: 0, total_size: 0)
+        schema_version: 0, entry_count: 0, total_size: 0, profile_count: 0,
+        body_off: APK_CATALOG_HEADER_SIZE_V1)
 
 fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
     if data.len() < APK_CATALOG_HEADER_SIZE_V1:
@@ -536,14 +1068,28 @@ fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
     val schema = _apk_read_u16(data, 8)
     if schema != APK_SCHEMA_V1:
         return _apk_cat_open_error("APK_CATALOG_BAD_VERSION", "unsupported catalog schema version")
+    val profile_count = _apk_read_u16(data, 10)
     val entry_count = _apk_read_u32(data, 12)
     val total_size = _apk_read_u64(data, 16)
     if entry_count < 0 or entry_count > 1048576:
         return _apk_cat_open_error("APK_CATALOG_BAD_GEOMETRY", "unreasonable entry_count")
     if total_size != data.len():
         return _apk_cat_open_error("APK_CATALOG_TRUNCATED", "declared total_size does not match available bytes")
+    # design §9.6: walk the (uncompressed) profile table so the entry array
+    # start is known. Its records are fixed-shape, so this is bounded.
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var p = 0
+    while p < profile_count:
+        if off + 4 > total_size:
+            return _apk_cat_open_error("APK_CATALOG_CORRUPT", "profile record extends past section end")
+        val id_len = _apk_read_u32(data, off)
+        if id_len < 0 or off + 4 + id_len + 20 > total_size:
+            return _apk_cat_open_error("APK_CATALOG_CORRUPT", "profile record escapes the section")
+        off = off + 4 + id_len + 20
+        p = p + 1
     ApkCatalogHandleV1(ok: true, error_code: "", error_message: "",
-        schema_version: schema, entry_count: entry_count, total_size: total_size)
+        schema_version: schema, entry_count: entry_count, total_size: total_size,
+        profile_count: profile_count, body_off: off)
 
 fn _apk_route_error(code: text, message: text) -> ApkCatalogRouteV1:
     ApkCatalogRouteV1(ok: false, found: false, error_code: code, error_message: message,
@@ -560,6 +1106,77 @@ fn apk_catalog_route_joinpoint_v1(data: [u8], handle: ApkCatalogHandleV1, slot_k
     join-point lookup and vice versa."""
     _apk_catalog_route_kind(data, handle, slot_key, APK_ENTRY_JOINPOINT)
 
+fn apk_catalog_profile_ids_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]:
+    """design §9.6: the profile ids this catalog carries, in record order. An
+    empty result means the catalog is single-profile."""
+    var out: [text] = []
+    if not handle.ok:
+        return out
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var p = 0
+    while p < handle.profile_count:
+        val id_len = _apk_read_u32(data, off)
+        out.push(_apk_read_text(data, off + 4, id_len))
+        off = off + 4 + id_len + 20
+        p = p + 1
+    out
+
+fn _apk_profile_error(code: text, message: text, profile_id: text, examined: i64) -> ApkProfileSelectV1:
+    ApkProfileSelectV1(ok: false, found: false, error_code: code, error_message: message,
+        profile_id: profile_id, entry_start: 0, entry_count: 0, profiles_examined: examined)
+
+fn apk_catalog_select_profile_v1(data: [u8], handle: ApkCatalogHandleV1, profile_id: text) -> ApkProfileSelectV1:
+    """design §9.6: select ONE pre-resolved profile by id and return the
+    catalog-entry slice it owns. Stops at the first matching record — the
+    number of records it actually looked at is reported as
+    `profiles_examined`, which is what makes "must not evaluate every
+    profile" a checkable claim rather than a promise."""
+    if not handle.ok:
+        return _apk_profile_error("APK_CATALOG_BAD_HANDLE", "profile selection on an unopened catalog", profile_id, 0)
+    if profile_id == "":
+        return _apk_profile_error("APK_PROFILE_EMPTY_ID", "profile id must not be empty", profile_id, 0)
+    if handle.profile_count == 0:
+        return _apk_profile_error("APK_PROFILE_UNKNOWN", "catalog carries no profiles; {profile_id} cannot be selected", profile_id, 0)
+    var off = APK_CATALOG_HEADER_SIZE_V1
+    var p = 0
+    var examined = 0
+    while p < handle.profile_count:
+        if off + 4 > handle.body_off:
+            return _apk_profile_error("APK_CATALOG_CORRUPT", "profile record extends past the profile table", profile_id, examined)
+        val id_len = _apk_read_u32(data, off)
+        if off + 4 + id_len + 20 > handle.body_off:
+            return _apk_profile_error("APK_CATALOG_CORRUPT", "profile record escapes the profile table", profile_id, examined)
+        val pid = _apk_read_text(data, off + 4, id_len)
+        examined = examined + 1
+        if pid == profile_id:
+            val start = _apk_read_u64(data, off + 4 + id_len)
+            val count = _apk_read_u64(data, off + 4 + id_len + 8)
+            var joined: [u8] = []
+            _apk_push_text(joined, pid)
+            _apk_push_u64(joined, start)
+            _apk_push_u64(joined, count)
+            if _apk_crc(joined) != _apk_read_u32(data, off + 4 + id_len + 16):
+                return _apk_profile_error("APK_CATALOG_CORRUPT", "selected profile record failed its checksum", profile_id, examined)
+            if start < 0 or count < 0 or start + count > handle.entry_count:
+                return _apk_profile_error("APK_PROFILE_RANGE", "profile {profile_id} names entries outside the catalog", profile_id, examined)
+            return ApkProfileSelectV1(ok: true, found: true, error_code: "", error_message: "",
+                profile_id: pid, entry_start: start, entry_count: count, profiles_examined: examined)
+        off = off + 4 + id_len + 20
+        p = p + 1
+    ApkProfileSelectV1(ok: true, found: false, error_code: "", error_message: "",
+        profile_id: profile_id, entry_start: 0, entry_count: 0, profiles_examined: examined)
+
+fn apk_catalog_route_in_profile_v1(data: [u8], handle: ApkCatalogHandleV1, profile_id: text, facet_key: text) -> ApkCatalogRouteV1:
+    """design §9.6: route a FacetRoute key WITHIN one selected profile. A key
+    that lives only in another profile is a clean miss here — that is the
+    whole point of shipping several profiles in one image."""
+    val sel = apk_catalog_select_profile_v1(data, handle, profile_id)
+    if not sel.ok:
+        return _apk_route_error(sel.error_code, sel.error_message)
+    if not sel.found:
+        return _apk_route_error("APK_PROFILE_UNKNOWN", "no such profile in this catalog: {profile_id}")
+    _apk_catalog_route_slice(data, handle, facet_key, APK_ENTRY_FACET, sel.entry_start, sel.entry_count)
+
 fn _apk_catalog_route_kind(data: [u8], handle: ApkCatalogHandleV1, facet_key: text, want_kind: i64) -> ApkCatalogRouteV1:
     """Exact (kind, key) match over the uncompressed catalog only — never opens
     a pack, never scans a directory. A corrupt SELECTED entry is an explicit
@@ -568,9 +1185,20 @@ fn _apk_catalog_route_kind(data: [u8], handle: ApkCatalogHandleV1, facet_key: te
         return _apk_route_error("APK_CATALOG_BAD_HANDLE", "route on an unopened catalog")
     if facet_key == "":
         return _apk_route_error("APK_CATALOG_EMPTY_KEY", "facet key must not be empty")
-    var off = APK_CATALOG_HEADER_SIZE_V1
+    _apk_catalog_route_slice(data, handle, facet_key, want_kind, 0, handle.entry_count)
+
+fn _apk_catalog_route_slice(data: [u8], handle: ApkCatalogHandleV1, facet_key: text, want_kind: i64, start: i64, count: i64) -> ApkCatalogRouteV1:
+    """Exact (kind, key) match over the entries [start, start+count) of the
+    uncompressed catalog only — never opens a pack, never scans a directory.
+    A corrupt SELECTED entry is an explicit APK_CATALOG_CORRUPT error, never a
+    silent fallback."""
+    if not handle.ok:
+        return _apk_route_error("APK_CATALOG_BAD_HANDLE", "route on an unopened catalog")
+    if facet_key == "":
+        return _apk_route_error("APK_CATALOG_EMPTY_KEY", "facet key must not be empty")
+    var off = handle.body_off
     var slot = 0
-    while slot < handle.entry_count:
+    while slot < start + count:
         if off + 4 > handle.total_size:
             return _apk_route_error("APK_CATALOG_CORRUPT", "catalog entry extends past section end")
         val key_len = _apk_read_u32(data, off)
@@ -592,7 +1220,7 @@ fn _apk_catalog_route_kind(data: [u8], handle: ApkCatalogHandleV1, facet_key: te
         val crc_off = k_off + 12 + abi_len
         if crc_off + 4 > handle.total_size:
             return _apk_route_error("APK_CATALOG_CORRUPT", "contract abi span escapes the section")
-        if key == facet_key and entry_kind == want_kind:
+        if key == facet_key and entry_kind == want_kind and slot >= start:
             val pack_path = _apk_read_text(data, p_off + 4, pack_len)
             val module_id = _apk_read_text(data, m_off + 4, mod_len)
             val abi_hash = _apk_read_text(data, k_off + 12, abi_len)
@@ -623,7 +1251,7 @@ fn apk_catalog_startup_keys_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]
     var out: [text] = []
     if not handle.ok:
         return out
-    var off = APK_CATALOG_HEADER_SIZE_V1
+    var off = handle.body_off
     var slot = 0
     while slot < handle.entry_count:
         if off + 4 > handle.total_size:
@@ -662,6 +1290,22 @@ var _ld_modules_decompressed: [i64] = []
 var _ld_bytes_decompressed: [i64] = []
 var _ld_cache_hits: [i64] = []
 var _ld_last_error: [text] = []
+# design §5.7 atomic activation: bumped exactly once per SUCCESSFUL publish,
+# never on a failed bind, so it is an observable activation epoch.
+var _ld_generation: [i64] = []
+# design §17: expected core-ABI / variant-fingerprint, set explicitly by the
+# deployer. Empty (default) means "nothing to compare against" and the gate
+# is SKIPPED, not silently passed — see apk_loader_set_expected_core_abi.
+var _ld_expected_core_abi: [text] = []
+var _ld_expected_variant_fingerprint: [text] = []
+# design §11.2 ModuleEntry.required_core_layout_hash. Same opt-in rule as the
+# two gates above: empty means the deployer stated no expectation, so the gate
+# is SKIPPED rather than silently passed.
+var _ld_expected_core_layout: [text] = []
+# design §9.6: the profile this loader has selected. Empty = single-profile.
+var _ld_profile: [text] = []
+# design §14.7: number of bindings this loader has actually RELEASED.
+var _ld_unloads: [i64] = []
 
 # Already-bound facet registry (design §14.3 step 3): a second acquisition of
 # the same facet must not reopen its pack nor inflate its frame again, and is
@@ -675,12 +1319,30 @@ var _fc_pack: [text] = []
 var _fc_off: [i64] = []
 var _fc_len: [i64] = []
 var _fc_pool: [u8] = []
+var _fc_generation: [i64] = []
+# design §14.7 unload: per-binding lifecycle state and pin count. A binding is
+# freed only when nothing still holds it.
+var _fc_state: [i64] = []
+var _fc_refs: [i64] = []
 
 var _pk_ld: [i64] = []
 var _pk_path: [text] = []
 var _pk_off: [i64] = []
 var _pk_len: [i64] = []
 var _pk_pool: [u8] = []
+
+# design §14.6 / §21 E-APACK007 activation cycle guard: a flat per-process
+# stack of (loader, facet_key) pairs CURRENTLY being activated. This module
+# has no facet-to-facet dependency graph of its own (a module is opaque
+# payload bytes; "aspect A requires facet B" is a caller-level relationship),
+# so the guard is exposed as an explicit push/pop pair that _apk_acquire_facet
+# always wraps its body in, and that a caller resolving nested facet
+# dependencies (e.g. a facet's own init code acquiring another facet) must
+# also wrap around ITS acquisitions for the cycle to be observable across
+# that caller-level chain — re-entering with a key still on the stack is the
+# cycle. A deep but acyclic chain (distinct keys nested) is unaffected.
+var _stk_ld: [i64] = []
+var _stk_key: [text] = []
 
 fn apk_loader_new() -> i64:
     """Create a loader with zeroed counters. Returns its handle."""
@@ -690,7 +1352,51 @@ fn apk_loader_new() -> i64:
     _ld_bytes_decompressed = _ld_bytes_decompressed.push(0)
     _ld_cache_hits = _ld_cache_hits.push(0)
     _ld_last_error = _ld_last_error.push("")
+    _ld_generation = _ld_generation.push(0)
+    _ld_expected_core_abi = _ld_expected_core_abi.push("")
+    _ld_expected_variant_fingerprint = _ld_expected_variant_fingerprint.push("")
+    _ld_expected_core_layout = _ld_expected_core_layout.push("")
+    _ld_profile = _ld_profile.push("")
+    _ld_unloads = _ld_unloads.push(0)
     id
+
+fn apk_loader_generation(ld: i64) -> i64:
+    """design §5.7: the loader's activation epoch — the number of facets
+    successfully published so far. Never advances on a failed bind."""
+    _ld_generation[ld]
+
+fn apk_loader_set_expected_core_abi(ld: i64, expected_core_public_abi_hash: text):
+    """design §17: opt in to enforcing `required_core_public_abi_hash`. Leave
+    unset (default "") to SKIP the gate — this module cannot invent a value
+    to check against, and comparing against a made-up one would be a fake
+    gate; nothing in-tree publishes a real core ABI hash yet."""
+    _ld_expected_core_abi[ld] = expected_core_public_abi_hash
+
+fn apk_loader_set_expected_variant_fingerprint(ld: i64, expected_variant_fingerprint: text):
+    """design §17: opt in to enforcing `variant_fingerprint`. Leave unset
+    (default "") to SKIP the gate, same rationale as the core-ABI gate."""
+    _ld_expected_variant_fingerprint[ld] = expected_variant_fingerprint
+
+fn apk_loader_set_expected_core_layout(ld: i64, expected_core_layout_hash: text):
+    """design §11.2/§17: opt in to enforcing `required_core_layout_hash` — the
+    hash a module claims for the core\'s PRIVATE layout when it binds against
+    more than the public surface. Leave unset ("") to SKIP the gate; the
+    design itself says this field is "zero when public-only"."""
+    _ld_expected_core_layout[ld] = expected_core_layout_hash
+
+fn apk_loader_select_profile(ld: i64, profile_id: text):
+    """design §9.6: select the deployment profile this process runs. Every
+    subsequent routed acquisition resolves ONLY inside this profile\'s slice
+    of the catalog. Empty ("") restores single-profile routing."""
+    _ld_profile[ld] = profile_id
+
+fn apk_loader_profile(ld: i64) -> text:
+    _ld_profile[ld]
+
+fn apk_loader_unloads(ld: i64) -> i64:
+    """design §14.7: how many bindings this loader has RELEASED. A quiescing
+    unload that could not free its binding does not move this counter."""
+    _ld_unloads[ld]
 
 fn apk_loader_packs_opened(ld: i64) -> i64:
     _ld_packs_opened[ld]
@@ -733,13 +1439,64 @@ fn _apk_facet_error(code: text, message: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
     ApkFacetLoadV1(ok: false, found: false, error_code: code, error_message: message,
         facet_key: "", pack_path: "", module_id: "", aspect_id: "",
-        activation: APK_ACT_OFF, from_cache: false, payload: empty)
+        activation: APK_ACT_OFF, from_cache: false, payload: empty, generation: 0)
+
+fn apk_activation_stack_enter_v1(ld: i64, facet_key: text) -> bool:
+    """design §21 E-APACK007: push (ld, facet_key) onto the activation stack.
+    Returns false — a detected cycle — when the exact same key is already on
+    it for this loader; the caller must not proceed with activation."""
+    var i = 0
+    while i < _stk_ld.len():
+        if _stk_ld[i] == ld and _stk_key[i] == facet_key:
+            _ld_last_error[ld] = "activation cycle detected: {facet_key} is already being activated"
+            return false
+        i = i + 1
+    _stk_ld = _stk_ld.push(ld)
+    _stk_key = _stk_key.push(facet_key)
+    true
+
+fn apk_activation_stack_exit_v1(ld: i64, facet_key: text):
+    """Pop the top of the activation stack. Callers use enter/exit in strict
+    LIFO nesting, matching how _apk_acquire_facet wraps its own body."""
+    if _stk_ld.len() > 0:
+        _stk_ld.pop()
+        _stk_key.pop()
 
 fn _apk_facet_miss(facet_key: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
     ApkFacetLoadV1(ok: true, found: false, error_code: "", error_message: "",
         facet_key: facet_key, pack_path: "", module_id: "", aspect_id: "",
-        activation: APK_ACT_OFF, from_cache: false, payload: empty)
+        activation: APK_ACT_OFF, from_cache: false, payload: empty, generation: 0)
+
+fn _apk_split_facet_key(facet_key: text) -> ApkFacetKeyPartsV1:
+    """Split "{concrete_type_id}/{facet_interface_id}" at the FIRST '/'. Every
+    catalog entry in this module follows that convention."""
+    val raw = text_to_bytes(facet_key)
+    var cut = -1
+    var i = 0
+    while i < raw.len():
+        if cut < 0 and raw[i] == (47 as u8):
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return ApkFacetKeyPartsV1(ok: false, concrete_type_id: "", facet_interface_id: "")
+    ApkFacetKeyPartsV1(ok: true,
+        concrete_type_id: _apk_read_text(raw, 0, cut),
+        facet_interface_id: _apk_read_text(raw, cut + 1, raw.len() - cut - 1))
+
+fn apk_facet_key_parts_v1(facet_key: text) -> ApkFacetKeyPartsV1:
+    """design §14.1 FacetBindingRegistry key, part 1/2: decompose a facet key
+    into (concrete_type_id, facet_interface_id). `ok` is false when the key
+    carries no '/' separator."""
+    _apk_split_facet_key(facet_key)
+
+fn apk_try_facet_binding_v1(ld: i64, concrete_type_id: text, facet_interface_id: text) -> ApkFacetLoadV1:
+    """design §14.1 FacetBindingRegistry key, part 2/2: look up an
+    already-bound facet by the full (concrete_type_id, facet_interface_id)
+    pair, same no-I/O contract as apk_try_facet. The returned `generation`
+    field is the third element of the design's key — the activation epoch
+    this exact binding was published under."""
+    apk_try_facet(ld, "{concrete_type_id}/{facet_interface_id}")
 
 fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
     """Design §6.7 `try_facet`: NEVER performs I/O. Returns an already-bound
@@ -748,7 +1505,7 @@ fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
     var i = 0
     val n = _fc_ld.len()
     while i < n:
-        if _fc_ld[i] == ld and _fc_key[i] == facet_key:
+        if _fc_ld[i] == ld and _fc_key[i] == facet_key and _fc_state[i] == APK_FC_BOUND:
             var payload: [u8] = []
             var j = 0
             val base = _fc_off[i]
@@ -761,7 +1518,7 @@ fn apk_try_facet(ld: i64, facet_key: text) -> ApkFacetLoadV1:
             return ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
                 facet_key: facet_key, pack_path: _fc_pack[i], module_id: _fc_module[i],
                 aspect_id: _fc_aspect[i], activation: _fc_activation[i],
-                from_cache: true, payload: payload)
+                from_cache: true, payload: payload, generation: _fc_generation[i])
         i = i + 1
     _apk_facet_miss(facet_key)
 
@@ -808,15 +1565,33 @@ fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -
     compressed size. A repeat acquisition moves none of them. Every failure is
     an explicit typed error; there is no directory-scanning fallback path in
     this module at all."""
-    var empty: [u8] = []
     val cached = apk_try_facet(ld, facet_key)
     if cached.found:
         return cached
+    if not apk_activation_stack_enter_v1(ld, facet_key):
+        return _apk_facet_error("APK_ACTIVATION_CYCLE", _ld_last_error[ld])
+    val result = _apk_acquire_facet_body(ld, catalog, facet_key, explicit)
+    apk_activation_stack_exit_v1(ld, facet_key)
+    result
+
+fn _apk_acquire_facet_body(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -> ApkFacetLoadV1:
+    var empty: [u8] = []
     val cat = apk_open_catalog_v1(catalog)
     if not cat.ok:
         _ld_last_error[ld] = cat.error_message
         return _apk_facet_error(cat.error_code, cat.error_message)
-    val route = apk_catalog_route_v1(catalog, cat, facet_key)
+    # design §14.7 step 2: while a binding is quiescing, NEW acquisitions are
+    # refused. Existing pinned references stay valid; this is what makes an
+    # unload ordered rather than a race.
+    var q = 0
+    while q < _fc_ld.len():
+        if _fc_ld[q] == ld and _fc_key[q] == facet_key and _fc_state[q] == APK_FC_QUIESCING:
+            _ld_last_error[ld] = "aspect is quiescing and cannot be re-acquired: {facet_key}"
+            return _apk_facet_error("APK_ASPECT_QUIESCING", "aspect is quiescing and cannot be re-acquired: {facet_key}")
+        q = q + 1
+    var route = apk_catalog_route_v1(catalog, cat, facet_key)
+    if _ld_profile[ld] != "":
+        route = apk_catalog_route_in_profile_v1(catalog, cat, _ld_profile[ld], facet_key)
     if not route.ok:
         _ld_last_error[ld] = route.error_message
         return _apk_facet_error(route.error_code, route.error_message)
@@ -870,9 +1645,28 @@ fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -
     if route.abi_hash != "" and route.abi_hash != load.module_abi_hash:
         _ld_last_error[ld] = "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}"
         return _apk_facet_error("APK_ABI_MISMATCH", "facet contract ABI mismatch for {facet_key}: catalog {route.abi_hash} vs module {load.module_abi_hash}")
+    # design §17: required_core_public_abi_hash and variant_fingerprint are
+    # carried by every module and are readable above (load.*), but a deployer
+    # must OPT IN with the expected value before either is enforced — with
+    # nothing set the gate is SKIPPED, not silently passed.
+    if _ld_expected_core_abi[ld] != "" and _ld_expected_core_abi[ld] != load.required_core_public_abi_hash:
+        _ld_last_error[ld] = "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}"
+        return _apk_facet_error("APK_CORE_ABI_MISMATCH", "core public ABI mismatch for {facet_key}: expected {_ld_expected_core_abi[ld]} vs module {load.required_core_public_abi_hash}")
+    if _ld_expected_core_layout[ld] != "" and _ld_expected_core_layout[ld] != load.required_core_layout_hash:
+        _ld_last_error[ld] = "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}"
+        return _apk_facet_error("APK_CORE_LAYOUT_MISMATCH", "core layout hash mismatch for {facet_key}: expected {_ld_expected_core_layout[ld]} vs module {load.required_core_layout_hash}")
+    if _ld_expected_variant_fingerprint[ld] != "" and _ld_expected_variant_fingerprint[ld] != load.variant_fingerprint:
+        _ld_last_error[ld] = "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}"
+        return _apk_facet_error("APK_VARIANT_MISMATCH", "variant fingerprint mismatch for {facet_key}: expected {_ld_expected_variant_fingerprint[ld]} vs module {load.variant_fingerprint}")
     _ld_modules_decompressed[ld] = _ld_modules_decompressed[ld] + load.modules_decompressed
     _ld_bytes_decompressed[ld] = _ld_bytes_decompressed[ld] + load.bytes_decompressed
     _ld_last_error[ld] = ""
+
+    # design §5.7 atomic activation: the epoch advances exactly once, here,
+    # only on the success path that is about to publish. Every prior return
+    # in this function is a failure and left the generation untouched.
+    val gen = _ld_generation[ld] + 1
+    _ld_generation[ld] = gen
 
     # publish into the already-bound registry so the next acquisition is I/O-free
     _fc_ld = _fc_ld.push(ld)
@@ -883,6 +1677,9 @@ fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -
     _fc_pack = _fc_pack.push(route.pack_path)
     _fc_off = _fc_off.push(_fc_pool.len())
     _fc_len = _fc_len.push(load.payload.len())
+    _fc_generation = _fc_generation.push(gen)
+    _fc_state = _fc_state.push(APK_FC_BOUND)
+    _fc_refs = _fc_refs.push(0)
     var k = 0
     while k < load.payload.len():
         _fc_pool = _fc_pool.push(load.payload[k])
@@ -891,4 +1688,131 @@ fn _apk_acquire_facet(ld: i64, catalog: [u8], facet_key: text, explicit: bool) -
     ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
         facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
         aspect_id: load.aspect_id, activation: route.activation, from_cache: false,
-        payload: load.payload)
+        payload: load.payload, generation: gen)
+
+# ---------------------------------------------------------------- unload
+#
+# design §14.7. The design lists five steps; four of them are expressible in
+# this container and are implemented here:
+#   1. mark the generation quiescing               -> APK_FC_QUIESCING
+#   2. prevent new acquisitions                    -> APK_ASPECT_QUIESCING
+#   3. remove the binding entry                    -> APK_FC_UNLOADED
+#   4. wait for active references                  -> pin/unpin refcount
+#   5. release sidecar state and executable maps   -> NOT expressible here:
+#      this module holds payload BYTES, not mappings or sidecar state, so the
+#      release step frees the cached bytes and nothing else. It is not claimed
+#      to unmap anything.
+# The design also says hot unload is not required for the initial release;
+# what is implemented is the ordering discipline, so that a later hot-unload
+# path cannot free a module that is still bound and resident.
+
+fn _apk_fc_index(ld: i64, facet_key: text) -> i64:
+    """Index of the LIVE (bound or quiescing) registry row for a key, or -1."""
+    var i = 0
+    while i < _fc_ld.len():
+        if _fc_ld[i] == ld and _fc_key[i] == facet_key and _fc_state[i] != APK_FC_UNLOADED:
+            return i
+        i = i + 1
+    -1
+
+fn apk_facet_state_v1(ld: i64, facet_key: text) -> i64:
+    """design §14.7: APK_FC_BOUND / APK_FC_QUIESCING for a live binding,
+    APK_FC_UNLOADED when it has been released, and -1 when this loader never
+    bound the key at all."""
+    val i = _apk_fc_index(ld, facet_key)
+    if i >= 0:
+        return _fc_state[i]
+    var j = 0
+    while j < _fc_ld.len():
+        if _fc_ld[j] == ld and _fc_key[j] == facet_key:
+            return APK_FC_UNLOADED
+        j = j + 1
+    -1
+
+fn apk_facet_refcount_v1(ld: i64, facet_key: text) -> i64:
+    """Number of outstanding pins on a live binding; -1 when there is none."""
+    val i = _apk_fc_index(ld, facet_key)
+    if i < 0:
+        return -1
+    _fc_refs[i]
+
+fn apk_facet_pin_v1(ld: i64, facet_key: text) -> bool:
+    """design §14.7 / §6.7: take a reference on a bound facet, the container
+    analogue of holding a `FacetRef` — while it is held the binding must not
+    be freed. A quiescing or unloaded binding refuses a NEW pin."""
+    val i = _apk_fc_index(ld, facet_key)
+    if i < 0:
+        _ld_last_error[ld] = "cannot pin an unbound facet: {facet_key}"
+        return false
+    if _fc_state[i] != APK_FC_BOUND:
+        _ld_last_error[ld] = "cannot pin a quiescing facet: {facet_key}"
+        return false
+    _fc_refs[i] = _fc_refs[i] + 1
+    _ld_last_error[ld] = ""
+    true
+
+fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
+    """Drop one reference. When the last reference on a QUIESCING binding goes
+    away, the unload that was waiting on it completes here — design §14.7
+    step 4 followed by step 5."""
+    val i = _apk_fc_index(ld, facet_key)
+    if i < 0:
+        _ld_last_error[ld] = "cannot unpin an unbound facet: {facet_key}"
+        return false
+    if _fc_refs[i] <= 0:
+        _ld_last_error[ld] = "unbalanced unpin for {facet_key}"
+        return false
+    val remaining = _fc_refs[i] - 1
+    _fc_refs[i] = remaining
+    if remaining == 0 and _fc_state[i] == APK_FC_QUIESCING:
+        _apk_release_binding(ld, i)
+    _ld_last_error[ld] = ""
+    true
+
+fn _apk_release_binding(ld: i64, i: i64):
+    """design §14.7 step 5: free the binding. Only ever reached with a zero
+    refcount, so a resident, still-referenced module can never be freed."""
+    _fc_state[i] = APK_FC_UNLOADED
+    _fc_len[i] = 0
+    _ld_unloads[ld] = _ld_unloads[ld] + 1
+
+fn apk_unload_facet_v1(ld: i64, facet_key: text) -> ApkUnloadResultV1:
+    """design §14.7: request unload of one bound facet.
+
+    Fail-closed ordering, in this order:
+      - a key that is not bound is an explicit APK_UNLOAD_NOT_BOUND, never a
+        silent success;
+      - a key currently being ACTIVATED (on the activation stack) is refused
+        with APK_UNLOAD_ACTIVATING — unloading mid-bind would free a module
+        the bind is still using;
+      - a PINNED binding is marked quiescing and is NOT freed: new
+        acquisitions are refused from here on, existing references stay valid,
+        and the release happens on the final unpin;
+      - only an unpinned binding is released immediately.
+    Releases are counted in apk_loader_unloads."""
+    var i = 0
+    while i < _stk_ld.len():
+        if _stk_ld[i] == ld and _stk_key[i] == facet_key:
+            _ld_last_error[ld] = "cannot unload a facet that is currently activating: {facet_key}"
+            return ApkUnloadResultV1(ok: false, error_code: "APK_UNLOAD_ACTIVATING",
+                error_message: "cannot unload a facet that is currently activating: {facet_key}",
+                facet_key: facet_key, quiescing: false, released: false, refcount: -1, generation: 0)
+        i = i + 1
+    val idx = _apk_fc_index(ld, facet_key)
+    if idx < 0:
+        _ld_last_error[ld] = "no such bound facet: {facet_key}"
+        return ApkUnloadResultV1(ok: false, error_code: "APK_UNLOAD_NOT_BOUND",
+            error_message: "no such bound facet: {facet_key}",
+            facet_key: facet_key, quiescing: false, released: false, refcount: -1, generation: 0)
+    val gen = _fc_generation[idx]
+    if _fc_refs[idx] > 0:
+        _fc_state[idx] = APK_FC_QUIESCING
+        _ld_last_error[ld] = ""
+        return ApkUnloadResultV1(ok: true, error_code: "", error_message: "",
+            facet_key: facet_key, quiescing: true, released: false,
+            refcount: _fc_refs[idx], generation: gen)
+    _apk_release_binding(ld, idx)
+    _ld_last_error[ld] = ""
+    ApkUnloadResultV1(ok: true, error_code: "", error_message: "",
+        facet_key: facet_key, quiescing: false, released: true,
+        refcount: 0, generation: gen)
