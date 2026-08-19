@@ -1,7 +1,7 @@
 # StarFive firmware-preserved UART shell for the RAM-boot MVP.
 
 use os.kernel.arch.riscv64.starfive.vfs.{g_vfs_readdir}
-use os.kernel.arch.riscv64.starfive.nvme_storage.{starfive_nvme_format_challenge, starfive_nvme_provision_fat32}
+use os.kernel.arch.riscv64.starfive.nvme_storage.{starfive_nvme_format_challenge, starfive_nvme_identity_summary, starfive_nvme_provision_fat32}
 
 extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_starfive_uart_read() -> i64
@@ -19,13 +19,14 @@ fn _writeln(text_value: text):
     rt_riscv_uart_put(13)
     rt_riscv_uart_put(10)
 
-fn _list_path(path: text):
+fn _list_path(path: text) -> i64:
     val entries = g_vfs_readdir(path)
     for entry in entries:
         _write(path)
         if path != "/":
             _write("/")
         _writeln(entry.name)
+    entries.len()
 
 fn starfive_serial_shell_main():
     _writeln("SimpleOS StarFive JH7110")
@@ -41,10 +42,18 @@ fn starfive_serial_shell_main():
                 if command == "ls" or command == "ls /":
                     _list_path("/")
                 else if command == "ls /nvme":
-                    _list_path("/nvme")
+                    _writeln("nvme_ls_begin source=vfs-mounted-fat32 command=ls /nvme")
+                    val listed = _list_path("/nvme")
+                    if listed > 0:
+                        _writeln("nvme_ls_end status=pass entries=" + listed.to_text())
+                    else:
+                        _writeln("nvme_ls_end status=fail reason=empty-or-unmounted")
                 else if command == "nvme identify":
                     val challenge = starfive_nvme_format_challenge()
                     if challenge.is_ok():
+                        val identity = starfive_nvme_identity_summary()
+                        if identity.is_ok():
+                            _writeln(identity.unwrap())
                         _writeln("nvme_format_challenge=" + challenge.unwrap())
                         _writeln("WARNING: next command destroys the identified NVMe namespace")
                     else:

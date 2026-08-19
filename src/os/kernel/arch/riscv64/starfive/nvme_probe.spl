@@ -73,6 +73,7 @@ fn starfive_find_nvme_read_only() -> Result<StarFiveNvmePciIdentity, text>:
     if host_result.is_err():
         return Err(host_result.unwrap_err())
     val host = host_result.unwrap()
+    var found: StarFiveNvmePciIdentity? = nil
     var bus: u16 = 1u16
     while bus <= 1u16:
         var device: u8 = 0u8
@@ -95,14 +96,19 @@ fn starfive_find_nvme_read_only() -> Result<StarFiveNvmePciIdentity, text>:
                             val bar1 = _starfive_pci_read32(host, PciConfigTarget(bus: bus.to_u8(), device: device, func: 0u8, offset: 0x14u16))
                             if bar0.is_err() or bar1.is_err():
                                 return Err("starfive-nvme-bar-read-failed")
-                            return Ok(StarFiveNvmePciIdentity(
+                            val candidate = StarFiveNvmePciIdentity(
                                 domain: host.domain, bus: bus.to_u8(), device: device, func: 0u8,
                                 vendor_id: vendor, device_id: ((id_raw >> 16) & 0xFFFFu32).to_u16(),
                                 class_code: class_code, subclass: subclass, prog_if: prog_if,
                                 bar0_raw: bar0.unwrap(), bar1_raw: bar1.unwrap()
-                            ))
+                            )
+                            if found != nil:
+                                return Err("starfive-nvme-pci-function-ambiguous")
+                            found = candidate
             device = device + 1u8
         bus = bus + 1u16
+    if found != nil:
+        return Ok(found.unwrap())
     Err("starfive-nvme-pci-function-not-found")
 
 fn starfive_prepare_nvme_controller(identity: StarFiveNvmePciIdentity) -> Result<StarFiveNvmeControllerResource, text>:

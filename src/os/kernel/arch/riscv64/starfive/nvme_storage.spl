@@ -68,6 +68,27 @@ fn starfive_nvme_format_challenge() -> Result<text, text>:
     val device = g_starfive_nvme_device.unwrap()
     Ok("FORMAT:" + device.serial + ":" + device.nsid.to_text() + ":" + device.lba_count.to_text())
 
+fn starfive_nvme_identity_summary() -> Result<text, text>:
+    """Return the exact live identity used by the host-side admission receipt."""
+    if g_starfive_nvme_device == nil:
+        return Err("starfive-nvme-not-identified")
+    val device = g_starfive_nvme_device.unwrap()
+    val lba_bytes = device.lba_size.to_u64()
+    if lba_bytes == 0u64 or device.lba_count > 0xFFFFFFFFFFFFFFFFu64 / lba_bytes:
+        return Err("starfive-nvme-capacity-overflow")
+    val capacity = device.lba_count * lba_bytes
+    Ok(
+        "nvme_identity_status=pass" +
+        " model=" + device.model +
+        " serial=" + device.serial +
+        " firmware=" + device.firmware +
+        " nsid=" + device.nsid.to_text() +
+        " lba_size=" + device.lba_size.to_text() +
+        " lba_count=" + device.lba_count.to_text() +
+        " capacity_bytes=" + capacity.to_text() +
+        " completion=polling media_writes=0"
+    )
+
 fn _starfive_nvme_adapter(device: StarFiveNvmeLiveDevice, base_lba: u64, lba_count: u64) -> Result<NvmeBlockAdapter, text>:
     var adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
         device.driver,
@@ -98,6 +119,8 @@ fn starfive_nvme_provision_fat32(challenge: text) -> Result<text, text>:
     val expected = starfive_nvme_format_challenge()
     if expected.is_err() or challenge != expected.unwrap():
         return Err("starfive-nvme-format-challenge-mismatch")
+    if g_starfive_nvme_mounted_core != nil:
+        return Err("starfive-nvme-already-mounted")
     val device = g_starfive_nvme_device.unwrap()
     if device.lba_size != 512u32 and device.lba_size != 4096u32:
         return Err("starfive-nvme-format-unsupported-lba-size")
@@ -145,6 +168,9 @@ fn starfive_nvme_provision_fat32(challenge: text) -> Result<text, text>:
     val formatted = fat32_format(partition_dev, fat_plan_result.unwrap(), authority, device.nsid ^ device.lba_count.to_u32(), "SIMPLEOS")
     if formatted.is_err():
         return Err(formatted.unwrap_err())
+    val format_flushed = partition_adapter.flush()
+    if format_flushed.is_err() or not format_flushed.unwrap():
+        return Err("starfive-nvme-format-flush")
 
     var writer = Fat32Core.new(partition_adapter)
     val mounted = writer.mount()
@@ -161,6 +187,9 @@ fn starfive_nvme_provision_fat32(challenge: text) -> Result<text, text>:
     val closed = writer.close(handle)
     if closed.is_err():
         return Err("starfive-nvme-proof-close:" + closed.unwrap_err())
+    val proof_flushed = partition_adapter.flush()
+    if proof_flushed.is_err() or not proof_flushed.unwrap():
+        return Err("starfive-nvme-proof-flush")
     val unmounted = writer.unmount()
     if unmounted.is_err():
         return Err("starfive-nvme-proof-unmount:" + unmounted.unwrap_err())
@@ -180,7 +209,7 @@ fn starfive_nvme_provision_fat32(challenge: text) -> Result<text, text>:
     if read_result.is_err() or read_result.unwrap() != proof.len() or not _starfive_bytes_equal(readback, proof):
         return Err("starfive-nvme-proof-readback-mismatch")
     g_starfive_nvme_mounted_core = reader
-    Ok("partition=1 filesystem=fat32 label=SIMPLEOS mount=/nvme write=/nvme/proof.txt durable_remount=1")
+    Ok("partition=1 filesystem=fat32 label=SIMPLEOS mount=/nvme write=/nvme/proof.txt format_flush=pass data_flush=pass durable_remount=1 read_after_remount_match=1")
 
 fn starfive_nvme_readdir(path: text) -> Result<[DirEntry], text>:
     if g_starfive_nvme_mounted_core == nil:
@@ -188,4 +217,4 @@ fn starfive_nvme_readdir(path: text) -> Result<[DirEntry], text>:
     var core = g_starfive_nvme_mounted_core.unwrap()
     core.readdir(path)
 
-export StarFiveNvmeLiveDevice, starfive_nvme_identify, starfive_nvme_remember, starfive_nvme_format_challenge, starfive_nvme_provision_fat32, starfive_nvme_readdir
+export StarFiveNvmeLiveDevice, starfive_nvme_identify, starfive_nvme_remember, starfive_nvme_format_challenge, starfive_nvme_identity_summary, starfive_nvme_provision_fat32, starfive_nvme_readdir

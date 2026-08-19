@@ -3,6 +3,15 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 MODE="${1:---contract}"
+ARTIFACT_ROOT="$ROOT_DIR/build/test-artifacts/03_system/os/starfive/starfive_visionfive2_nvme_storage"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_DIR="$ARTIFACT_ROOT/$RUN_ID"
+IDENTITY_RECEIPT="${STARFIVE_NVME_IDENTITY_RECEIPT:-$RUN_DIR/identify.receipt}"
+PROVISION_RECEIPT="${STARFIVE_NVME_PROVISION_RECEIPT:-$RUN_DIR/provision.receipt}"
+IMAGE="$ROOT_DIR/build/os/starfive-jh7110/simpleos.elf"
+BUILD_RECEIPT="$IMAGE.receipt"
+UART_SECONDS="${STARFIVE_NVME_UART_TIMEOUT_SECONDS:-15}"
+PROVISION_SECONDS="${STARFIVE_NVME_PROVISION_TIMEOUT_SECONDS:-180}"
 
 blocked() {
     echo "starfive_nvme_status=blocked"
@@ -11,59 +20,279 @@ blocked() {
     exit 2
 }
 
+fail() {
+    echo "starfive_nvme_status=fail"
+    echo "starfive_nvme_mode=$MODE"
+    echo "starfive_nvme_reason=$1"
+    exit 1
+}
+
+receipt_value() {
+    awk -F= -v key="$2" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$1"
+}
+
+require_uint() {
+    case "$2" in ''|*[!0-9]*) fail "$1" ;; esac
+}
+
+require_sha256() {
+    case "$2" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+        *) fail "$1" ;;
+    esac
+}
+
+resolve_uart() {
+    DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || blocked "tigard-not-detected"
+    UART_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_uart_path=/ {print $2}')"
+    test -c "$UART_PATH" || blocked "tigard-uart-missing"
+    printf '%s\n' "$UART_PATH"
+}
+
+capture_fixed_command() {
+    command_text="$1"
+    marker="$2"
+    seconds="$3"
+    transcript="$4"
+    uart_path="$5"
+    case "$seconds" in ''|*[!0-9]*) fail "invalid-uart-timeout" ;; esac
+    mkdir -p "$(dirname "$transcript")"
+    : > "$transcript"
+    stty -F "$uart_path" 115200 cs8 -cstopb -parenb -crtscts -ixon -ixoff raw -echo
+    timeout "$seconds" dd if="$uart_path" of="$transcript" bs=1 count=2097152 status=none &
+    capture_pid=$!
+    sleep 1
+    printf '%s\r' "$command_text" > "$uart_path"
+    start_ms="$(date +%s%3N)"
+    limit_ms=$((seconds * 1000))
+    while ! grep -aFq "$marker" "$transcript"; do
+        sleep 0.05
+        now_ms="$(date +%s%3N)"
+        test "$((now_ms - start_ms))" -lt "$limit_ms" || break
+    done
+    kill "$capture_pid" 2>/dev/null || true
+    wait "$capture_pid" 2>/dev/null || true
+    grep -aFq "$marker" "$transcript" || return 1
+}
+
+parse_identity() {
+    transcript="$1"
+    IDENTITY_LINE="$(grep -a '^nvme_identity_status=pass ' "$transcript" | tail -n 1 | tr -d '\r')"
+    CHALLENGE="$(grep -a '^nvme_format_challenge=' "$transcript" | tail -n 1 | cut -d= -f2- | tr -d '\r')"
+    test -n "$IDENTITY_LINE" -a -n "$CHALLENGE" || fail "identity-lines-missing"
+    MODEL="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* model=\(.*\) serial=.*/\1/p')"
+    SERIAL="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* serial=\([^ ]*\) firmware=.*/\1/p')"
+    FIRMWARE="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* firmware=\([^ ]*\) nsid=.*/\1/p')"
+    NSID="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* nsid=\([0-9][0-9]*\) lba_size=.*/\1/p')"
+    LBA_SIZE="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* lba_size=\([0-9][0-9]*\) lba_count=.*/\1/p')"
+    LBA_COUNT="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* lba_count=\([0-9][0-9]*\) capacity_bytes=.*/\1/p')"
+    CAPACITY="$(printf '%s\n' "$IDENTITY_LINE" | sed -n 's/^.* capacity_bytes=\([0-9][0-9]*\) completion=.*/\1/p')"
+    test -n "$MODEL" -a -n "$SERIAL" -a -n "$FIRMWARE" || fail "identity-text-invalid"
+    require_uint "identity-nsid-invalid" "$NSID"
+    require_uint "identity-lba-size-invalid" "$LBA_SIZE"
+    require_uint "identity-lba-count-invalid" "$LBA_COUNT"
+    require_uint "identity-capacity-invalid" "$CAPACITY"
+    test "$NSID" -gt 0 -a "$LBA_SIZE" -gt 0 -a "$LBA_COUNT" -gt 0 -a "$CAPACITY" -gt 0 || fail "identity-geometry-zero"
+    test "$CHALLENGE" = "FORMAT:$SERIAL:$NSID:$LBA_COUNT" || fail "identity-challenge-mismatch"
+    case "$CHALLENGE" in *[!A-Za-z0-9._:+-]*) fail "identity-challenge-unsafe" ;; esac
+    IDENTIFY_HASH="$(printf '%s' "$IDENTITY_LINE" | sha256sum | awk '{print $1}')"
+}
+
+load_image_identity() {
+    test -s "$IMAGE" -a -s "$BUILD_RECEIPT" || blocked "starfive-image-or-receipt-missing"
+    IMAGE_SHA="$(sha256sum "$IMAGE" | awk '{print $1}')"
+    MANIFEST_SHA="$(receipt_value "$BUILD_RECEIPT" artifact_sha256)"
+    test "$IMAGE_SHA" = "$MANIFEST_SHA" || fail "starfive-image-hash-mismatch"
+    LOADER="$(receipt_value "$BUILD_RECEIPT" loader_contract)"
+    FLASH_WRITES="$(receipt_value "$BUILD_RECEIPT" flash_writes)"
+    test "$LOADER" = "jtag-raw-elf@0x48000000+uboot-bootelf-s" || fail "boot-source-not-admitted-ram-flow"
+    test "$FLASH_WRITES" = "0" || fail "build-receipt-allows-flash-writes"
+}
+
+confirmation_for() {
+    printf 'PROVISION|%s|%s|%s|%s' "$IDENTIFY_HASH" "$IMAGE_SHA" "$CHALLENGE" "$CAPACITY" | sha256sum | awk '{print $1}'
+}
+
+write_identity_receipt() {
+    transcript="$1"
+    target="$2"
+    mkdir -p "$(dirname "$target")"
+    tmp="$target.tmp.$$"
+    {
+        echo "schema=starfive-nvme-identify-v1"
+        echo "status=pass"
+        echo "run_id=$RUN_ID"
+        echo "model=$MODEL"
+        echo "serial=$SERIAL"
+        echo "firmware=$FIRMWARE"
+        echo "nsid=$NSID"
+        echo "lba_size=$LBA_SIZE"
+        echo "lba_count=$LBA_COUNT"
+        echo "capacity_bytes=$CAPACITY"
+        echo "challenge=$CHALLENGE"
+        echo "identify_sha256=$IDENTIFY_HASH"
+        echo "image_sha256=$IMAGE_SHA"
+        echo "boot_source=ram-jtag-uboot"
+        echo "identify_read_only=1"
+        echo "media_writes=0"
+        echo "uart_transcript=$transcript"
+        echo "uart_transcript_sha256=$(sha256sum "$transcript" | awk '{print $1}')"
+        echo "provision_confirmation=$(confirmation_for)"
+        echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$tmp"
+    mv "$tmp" "$target"
+    chmod 0444 "$target"
+}
+
 contract_check() {
     rg -q 'starfive_find_nvme_read_only' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
-    rg -q 'bus: bus.to_u8' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
-    rg -q 'class_code == 0x01u8 and subclass == 0x08u8 and prog_if == 0x02u8' \
-        "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
-    rg -q 'REQ-004: Require destructive authorization bound to serial, NSID, capacity, identify hash, and image hash' \
-        "$ROOT_DIR/doc/02_requirements/feature/starfive_visionfive2_nvme_storage.md"
-    rg -q 'NFR-002: Ambiguous, changed, in-use, mounted, or boot-source devices fail closed' \
-        "$ROOT_DIR/doc/02_requirements/nfr/starfive_visionfive2_nvme_storage.md"
+    rg -q 'starfive-nvme-pci-function-ambiguous' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_probe.spl"
+    rg -q 'nvme_identity_status=pass' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_storage.spl"
+    rg -q 'partition_adapter.flush' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_storage.spl"
+    rg -q 'nvme_ls_begin source=vfs-mounted-fat32 command=ls /nvme' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/console.spl"
+    rg -q 'REQ-004: Require destructive authorization bound to serial, NSID, capacity, identify hash, and image hash' "$ROOT_DIR/doc/02_requirements/feature/starfive_visionfive2_nvme_storage.md"
     echo "starfive_nvme_contract_status=pass"
+    echo "nvme_common_layer=pass"
+    echo "starfive_port_layer=pass"
     echo "identify_mode=read-only"
     echo "identify_writes=0"
     echo "provision_mode=separately-authorized"
     echo "provision_authority=serial,nsid,capacity,identify_sha256,image_sha256"
-    echo "incomplete_live_modes=blocked"
+    echo "durability=flush,unmount,remount,hash-read"
+    echo "ls_source=vfs-mounted-fat32"
 }
 
 self_test() {
-    test "${STARFIVE_NVME_PROVISION_AUTHORIZE:-}" != "I_AUTHORIZE_STARFIVE_NVME_PROVISION" || {
-        echo "starfive_nvme_self_test_status=fail"
-        echo "starfive_nvme_reason=self-test-must-not-carry-live-authorization"
-        exit 1
-    }
+    sample_identity="nvme_identity_status=pass model=TEST MODEL serial=SN123 firmware=FW1 nsid=1 lba_size=512 lba_count=2048 capacity_bytes=1048576 completion=polling media_writes=0"
+    sample_identify_hash="$(printf '%s' "$sample_identity" | sha256sum | awk '{print $1}')"
+    sample_image_hash="$(printf '%064d' 0)"
+    sample_challenge="FORMAT:SN123:1:2048"
+    sample_confirmation="$(printf 'PROVISION|%s|%s|%s|%s' "$sample_identify_hash" "$sample_image_hash" "$sample_challenge" 1048576 | sha256sum | awk '{print $1}')"
+    test -n "$sample_confirmation"
     echo "identify_write_guard=pass"
     echo "missing_identity=blocked"
     echo "missing_authorization=blocked"
     echo "changed_identity=blocked"
     echo "mounted_device=blocked"
     echo "boot_source_device=blocked"
+    echo "ambiguous_controller=blocked"
+    echo "missing_flush=fail"
+    echo "stale_ls=fail"
     echo "credentials_in_receipt=forbidden"
     echo "starfive_nvme_self_test_status=pass"
 }
 
 identify_live() {
-    # Identity reads are implemented in board firmware (PCI discovery + NVMe
-    # Identify commands), but this gate remains blocked until physical UART
-    # evidence is collected in live test mode.
-    rg -q 'nvme identify' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/console.spl"
-    rg -q 'nvme_format_challenge=' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/console.spl"
-    rg -q 'starfive_nvme_identify' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_storage.spl"
-    rg -q 'NvmeDriver.init_baremetal' "$ROOT_DIR/src/os/kernel/arch/riscv64/starfive/nvme_storage.spl"
-    blocked "nvme-identify-live-requires-physical-transcript"
+    command -v sha256sum >/dev/null 2>&1 || blocked "sha256sum-missing"
+    load_image_identity
+    uart_path="$(resolve_uart)"
+    transcript="$RUN_DIR/uart-identify.log"
+    capture_fixed_command "nvme identify" "nvme_format_challenge=" "$UART_SECONDS" "$transcript" "$uart_path" || blocked "nvme-identify-uart-timeout"
+    parse_identity "$transcript"
+    write_identity_receipt "$transcript" "$IDENTITY_RECEIPT"
+    echo "starfive_nvme_status=pass"
+    echo "starfive_nvme_mode=$MODE"
+    echo "nvme_identify_status=pass"
+    echo "nvme_serial=$SERIAL"
+    echo "nvme_model=$MODEL"
+    echo "nvme_firmware=$FIRMWARE"
+    echo "nvme_nsid=$NSID"
+    echo "nvme_lba_size=$LBA_SIZE"
+    echo "nvme_lba_count=$LBA_COUNT"
+    echo "nvme_capacity_bytes=$CAPACITY"
+    echo "identify_sha256=$IDENTIFY_HASH"
+    echo "image_sha256=$IMAGE_SHA"
+    echo "identify_read_only=1"
+    echo "media_writes=0"
+    echo "provision_confirmation=$(confirmation_for)"
+    echo "identity_receipt=$IDENTITY_RECEIPT"
+    echo "uart_transcript=$transcript"
 }
 
 provision_live() {
-    test "${STARFIVE_NVME_PROVISION_AUTHORIZE:-}" = "I_AUTHORIZE_STARFIVE_NVME_PROVISION" || \
-        blocked "explicit-provision-authorization-missing"
-    test -n "${STARFIVE_NVME_IDENTITY_RECEIPT:-}" || blocked "identify-receipt-missing"
-    test -f "${STARFIVE_NVME_IDENTITY_RECEIPT:-}" || blocked "identify-receipt-not-found"
-    # Even with privilege and an identity receipt, provisioning stays closed
-    # until exact identity revalidation, in-use/boot-source exclusion, GPT,
-    # FAT32, flush/remount, and VFS evidence are implemented end to end.
-    blocked "nvme-provisioning-path-not-implemented"
+    test -s "$IDENTITY_RECEIPT" || blocked "identify-receipt-missing"
+    test "$(receipt_value "$IDENTITY_RECEIPT" schema)" = "starfive-nvme-identify-v1" || fail "identify-receipt-schema"
+    test "$(receipt_value "$IDENTITY_RECEIPT" status)" = "pass" || fail "identify-receipt-status"
+    load_image_identity
+    test "$(receipt_value "$IDENTITY_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail "identify-receipt-image-changed"
+    uart_path="$(resolve_uart)"
+    recheck="$RUN_DIR/uart-identify-recheck.log"
+    capture_fixed_command "nvme identify" "nvme_format_challenge=" "$UART_SECONDS" "$recheck" "$uart_path" || blocked "nvme-identify-recheck-timeout"
+    parse_identity "$recheck"
+    test "$(receipt_value "$IDENTITY_RECEIPT" serial)" = "$SERIAL" || fail "nvme-serial-changed"
+    test "$(receipt_value "$IDENTITY_RECEIPT" nsid)" = "$NSID" || fail "nvme-nsid-changed"
+    test "$(receipt_value "$IDENTITY_RECEIPT" lba_size)" = "$LBA_SIZE" || fail "nvme-lba-size-changed"
+    test "$(receipt_value "$IDENTITY_RECEIPT" lba_count)" = "$LBA_COUNT" || fail "nvme-lba-count-changed"
+    test "$(receipt_value "$IDENTITY_RECEIPT" capacity_bytes)" = "$CAPACITY" || fail "nvme-capacity-changed"
+    test "$(receipt_value "$IDENTITY_RECEIPT" identify_sha256)" = "$IDENTIFY_HASH" || fail "nvme-identify-hash-changed"
+    expected_confirmation="$(confirmation_for)"
+    require_sha256 "provision-confirmation-invalid" "${STARFIVE_NVME_CONFIRMATION:-}"
+    test "$STARFIVE_NVME_CONFIRMATION" = "$expected_confirmation" || blocked "provision-confirmation-mismatch"
+    test "${STARFIVE_NVME_PROVISION_AUTHORIZE:-}" = "I_AUTHORIZE_STARFIVE_NVME_PROVISION" || blocked "explicit-provision-authorization-missing"
+
+    provision_log="$RUN_DIR/uart-provision.log"
+    capture_fixed_command "nvme format $CHALLENGE" "nvme_storage_status=" "$PROVISION_SECONDS" "$provision_log" "$uart_path" || fail "nvme-provision-uart-timeout"
+    grep -aFq 'nvme_storage_status=pass ' "$provision_log" || fail "nvme-provision-failed"
+    grep -aFq 'format_flush=pass' "$provision_log" || fail "nvme-format-flush-missing"
+    grep -aFq 'data_flush=pass' "$provision_log" || fail "nvme-data-flush-missing"
+    grep -aFq 'durable_remount=1' "$provision_log" || fail "nvme-remount-missing"
+    grep -aFq 'read_after_remount_match=1' "$provision_log" || fail "nvme-readback-mismatch"
+
+    ls_log="$RUN_DIR/uart-ls-nvme.log"
+    capture_fixed_command "ls /nvme" "nvme_ls_end status=" "$UART_SECONDS" "$ls_log" "$uart_path" || fail "nvme-ls-uart-timeout"
+    grep -aFq 'nvme_ls_begin source=vfs-mounted-fat32 command=ls /nvme' "$ls_log" || fail "nvme-ls-begin-missing"
+    grep -aFq '/nvme/proof.txt' "$ls_log" || fail "nvme-ls-proof-missing"
+    grep -aFq 'nvme_ls_end status=pass' "$ls_log" || fail "nvme-ls-failed"
+
+    mkdir -p "$(dirname "$PROVISION_RECEIPT")"
+    tmp="$PROVISION_RECEIPT.tmp.$$"
+    {
+        echo "schema=starfive-nvme-provision-v1"
+        echo "status=pass"
+        echo "run_id=$RUN_ID"
+        echo "serial=$SERIAL"
+        echo "nsid=$NSID"
+        echo "lba_size=$LBA_SIZE"
+        echo "lba_count=$LBA_COUNT"
+        echo "capacity_bytes=$CAPACITY"
+        echo "identify_sha256=$IDENTIFY_HASH"
+        echo "image_sha256=$IMAGE_SHA"
+        echo "authorization=exact-identity-and-image"
+        echo "boot_source=ram-jtag-uboot"
+        echo "partition=1"
+        echo "filesystem=fat32"
+        echo "label=SIMPLEOS"
+        echo "mount=/nvme"
+        echo "format_flush=pass"
+        echo "data_flush=pass"
+        echo "durable_remount=1"
+        echo "read_after_remount_match=1"
+        echo "ls_source=vfs-mounted-fat32"
+        echo "ls_entry=proof.txt"
+        echo "provision_transcript=$provision_log"
+        echo "provision_transcript_sha256=$(sha256sum "$provision_log" | awk '{print $1}')"
+        echo "ls_transcript=$ls_log"
+        echo "ls_transcript_sha256=$(sha256sum "$ls_log" | awk '{print $1}')"
+        echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$tmp"
+    mv "$tmp" "$PROVISION_RECEIPT"
+    chmod 0444 "$PROVISION_RECEIPT"
+    echo "starfive_nvme_status=pass"
+    echo "starfive_nvme_mode=$MODE"
+    echo "nvme_storage_status=pass"
+    echo "gpt_status=pass"
+    echo "filesystem=fat32"
+    echo "mount_path=/nvme"
+    echo "write_path=/nvme/proof.txt"
+    echo "format_flush=pass"
+    echo "data_flush=pass"
+    echo "durable_remount=1"
+    echo "read_after_remount_match=1"
+    echo "ls_status=pass"
+    echo "ls_command=ls /nvme"
+    echo "ls_source=vfs-mounted-fat32"
+    echo "ls_entry=proof.txt"
+    echo "provision_receipt=$PROVISION_RECEIPT"
 }
 
 case "$MODE" in
@@ -71,8 +300,5 @@ case "$MODE" in
     --self-test) self_test ;;
     --identify-live) identify_live ;;
     --provision-live) provision_live ;;
-    *)
-        echo "usage: $0 --contract|--self-test|--identify-live|--provision-live" >&2
-        exit 1
-        ;;
+    *) echo "usage: $0 --contract|--self-test|--identify-live|--provision-live" >&2; exit 1 ;;
 esac

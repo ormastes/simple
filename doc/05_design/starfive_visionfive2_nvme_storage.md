@@ -1,6 +1,11 @@
 # Detail design: StarFive VisionFive 2 NVMe storage
 
-1. Operator precondition for physical provisioning: on Linux booted with SSD installed, run non-destructive PCI/NVMe discovery (`lspci`, `nvme list`, `nvme id-ctrl`, `nvme id-ns`, `lsblk`) and persist exact outputs plus image hash. This receipt is mandatory input before any destructive format command in SimpleOS.
+1. Operator precondition for physical provisioning: run checker mode
+   `--identify-live`. It sends only `nvme identify`, captures exact controller
+   and namespace geometry over Tigard UART, binds it to the admitted image, and
+   emits an atomic read-only receipt plus an exact SHA-256 confirmation. A Linux
+   `lspci`/`nvme id-*` audit is useful corroboration but is not trusted in place
+   of the fresh SimpleOS identity receipt.
 2. Normalize PCI host inputs by first building a minimal, validated `PciHostDescriptor` from known-good constants for VisionFive 2; then, when firmware-visible DT is present and safe, override only explicit, validated fields (`ecam`, `ranges`, `dma-ranges`, `bus-range`, clocks/resets/PERST references) without introducing StarFive-only constants in shared layers.
 3. Initialize host (`pcie_init`) and verify link; if firmware already trained/link-down evidence exists, proceed without reprogramming unsafe PLL/PHY fields. Then probe for class `01:08:02` on expected bus/function; if no endpoint appears, report blocked state.
 4. Map one NVMe BAR0 candidate from common PCI flow, allocate DMA, and invoke shared polling NVMe init path; no media writes occur during this step.
@@ -10,8 +15,15 @@
    - device is not mounted/in-use by a running FS contract,
    - boot-source ambiguity is rejected,
    - stable identity replay checks pass.
+   - the operator supplies both the receipt-bound SHA-256 confirmation and the
+     fixed explicit provisioning phrase; neither is a password or credential.
 7. After authorization: create partition 1 at LBA 2048, mirror GPT metadata, format only bounded partition as FAT32 `SIMPLEOS`, verify partition/GPT, and flush write cache.
 8. Mount at `/nvme` through the VFS adapter, write a nonce proof file, flush, unmount/remount, reread hash, and verify `ls /nvme` includes expected proof artifact as durable success evidence.
+
+The host checker retains separate identify, provision, and correlated `ls`
+UART transcripts. Provisioning fails closed if identity changes, a flush or
+remount marker is missing, or the proof entry appears outside the fresh
+`nvme_ls_begin`/`nvme_ls_end` command window.
 
 All arithmetic checks overflow before addition. Sector writes require exactly one sector. Any reset, link, identify, GPT, FAT, flush, remount, or hash error aborts; no QSPI writes are permitted.
 

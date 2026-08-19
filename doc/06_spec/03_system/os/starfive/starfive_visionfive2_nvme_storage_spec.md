@@ -6,17 +6,18 @@ The operator first runs `scripts/check/check-starfive-nvme-storage.shs --contrac
 and `--self-test`. These modes inspect code and policy only; they do not access
 the board or storage media.
 
-`--identify-live` is read-only only. NVMe `nvme identify` command plumbing now
-exists in board firmware, so this mode no longer blocks on “command not
-implemented.” It still exits 2 (`starfive_nvme_status=blocked`) until physical
-UART evidence is collected from a live StarFive session. PCI vendor/device/class/
-BAR discovery is not itself an identity receipt.
+`--identify-live` sends only `nvme identify` over the resolved Tigard UART. It
+requires a fresh machine-readable controller/namespace identity, binds it to the
+admitted RAM-boot image, and writes an atomic read-only receipt. UART absence or
+silence is BLOCKED, never PASS. PCI vendor/device/class/BAR discovery alone is
+not an identity receipt.
 
-`--provision-live` is a different authority boundary. It requires the exact
-environment authorization phrase and an immutable identity receipt path, then
-still exits BLOCKED until identity revalidation, mounted/in-use/boot-source
-exclusion, GPT, FAT32, flush/remount verification, and public-VFS `ls /nvme`
-are implemented. A contract PASS never means a device was identified or written.
+`--provision-live` is a different authority boundary. It requires the immutable
+identity receipt, re-identifies the same namespace, verifies the image and exact
+SHA-256 confirmation, then requires the explicit provisioning phrase. Success
+requires GPT/FAT32 creation, controller flushes, unmount/remount hash readback,
+and a fresh command-correlated public-VFS `ls /nvme` containing `proof.txt`.
+A contract PASS never means a device was identified or written.
 
 Expected safe checks:
 
