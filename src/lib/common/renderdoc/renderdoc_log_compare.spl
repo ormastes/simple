@@ -1,0 +1,395 @@
+# Pure srenderdoc <-> RenderDoc render-log alignment and analysis.
+# Adapts RenderDoc replay XML actions into BackendRenderRecord fields, aligns
+# two records' command sequences (LCS), classifies per-call differences, and
+# renders a text report. No IO — file ingestion stays with callers.
+
+use common.renderdoc.backend_render_record.{
+    BackendRenderField,
+    BackendRenderRecord,
+    BackendRenderRecordDiff,
+    backend_render_field,
+    backend_render_record_finalize,
+    compare_backend_render_records
+}
+
+struct RenderCallEntry:
+    index: i64
+    kind: text
+    call: text
+    params: text
+
+struct RenderCallFinding:
+    finding_class: text
+    kind: text
+    call: text
+    expected_index: i64
+    actual_index: i64
+    detail: text
+
+struct RenderLogCompareResult:
+    equal: bool
+    aligned_count: i64
+    missing_count: i64
+    extra_count: i64
+    drift_count: i64
+    swap_count: i64
+    findings: [RenderCallFinding]
+    record_diff: BackendRenderRecordDiff
+
+fn _pad3(index: i64) -> text:
+    if index < 10:
+        return "00" + index.to_text()
+    if index < 100:
+        return "0" + index.to_text()
+    index.to_text()
+
+fn _is_digit(c: text) -> bool:
+    "0123456789".contains(c)
+
+# ---------------------------------------------------------------------------
+# (a) RenderDoc replay XML -> BackendRenderField adapter
+# ---------------------------------------------------------------------------
+
+fn renderdoc_call_kind(call: text) -> text:
+    """Classify one RenderDoc chunk/action name into a command kind."""
+    if call.len() >= 9 and call[0:9] == "vkCmdDraw":
+        return "draw"
+    if call.len() >= 13 and call[0:13] == "vkCmdDispatch":
+        return "dispatch"
+    if call.len() >= 9 and call[0:9] == "vkCmdBind":
+        return "bind"
+    if call == "vkCreateGraphicsPipelines" or call == "vkCreateComputePipelines":
+        return "pipeline"
+    if call == "vkCreateBuffer" or call == "vkCreateImage" or call == "vkCreateShaderModule":
+        return "resource"
+    ""
+
+fn renderdoc_xml_chunk_names(xml: text) -> [text]:
+    """Extract every <chunk name="..."> attribute value in document order."""
+    var names: [text] = []
+    val marker = "<chunk name=\""
+    var offset = 0
+    while offset < xml.len():
+        val relative = xml[offset:xml.len()].index_of(marker)
+        if relative < 0:
+            return names
+        val start = offset + relative + marker.len()
+        val tail = xml[start:xml.len()]
+        val end = tail.index_of("\"")
+        if end < 0:
+            return names
+        names = names.push(tail[0:end])
+        offset = start + end + 1
+    names
+
+fn renderdoc_xml_command_fields(xml: text) -> [BackendRenderField]:
+    """Map RenderDoc replay XML actions into BackendRenderField command paths."""
+    var fields: [BackendRenderField] = []
+    var index = 0
+    for name in renderdoc_xml_chunk_names(xml):
+        val kind = renderdoc_call_kind(name)
+        if kind != "":
+            val prefix = "commands." + _pad3(index) + "."
+            fields = fields.push(backend_render_field(prefix + "call", name, "text", true))
+            fields = fields.push(backend_render_field(prefix + "kind", kind, "text", true))
+            index = index + 1
+    fields = fields.push(backend_render_field("commands.count", index.to_text(), "i64", true))
+    fields
+
+fn renderdoc_xml_to_record(xml: text, producer_id: text) -> BackendRenderRecord:
+    """Turn a RenderDoc replay XML into a comparable BackendRenderRecord."""
+    backend_render_record_finalize(producer_id, renderdoc_xml_command_fields(xml))
+
+# ---------------------------------------------------------------------------
+# Command-sequence extraction from a record
+# ---------------------------------------------------------------------------
+
+fn extract_render_calls(record: BackendRenderRecord) -> [RenderCallEntry]:
+    """Collect ordered command entries from commands.NNN.* fields."""
+    var max_index = -1
+    for field in record.fields:
+        val path = field.path
+        if path.len() >= 12 and path[0:9] == "commands." and _is_digit(path[9:10]):
+            val idx = path[9:12].to_i64()
+            if idx > max_index:
+                max_index = idx
+    var entries: [RenderCallEntry] = []
+    var i = 0
+    while i <= max_index:
+        val prefix = "commands." + _pad3(i) + "."
+        var kind = ""
+        var call = ""
+        var params = ""
+        for field in record.fields:
+            if field.path.len() > prefix.len() and field.path[0:prefix.len()] == prefix:
+                val suffix = field.path[prefix.len():field.path.len()]
+                if suffix == "kind":
+                    kind = field.value
+                else if suffix == "call":
+                    call = field.value
+                else if suffix.len() > 6 and suffix[0:6] == "param.":
+                    params = params + suffix[6:suffix.len()] + "=" + field.value + ";"
+        entries = entries.push(RenderCallEntry(index: i, kind: kind, call: call, params: params))
+        i = i + 1
+    entries
+
+fn _contains_i64(values: [i64], value: i64) -> bool:
+    for candidate in values:
+        if candidate == value:
+            return true
+    false
+
+fn _entry_key(entry: RenderCallEntry) -> text:
+    entry.kind + "/" + entry.call + "/" + entry.params
+
+# ---------------------------------------------------------------------------
+# (b) Alignment (LCS) + classification
+# ---------------------------------------------------------------------------
+
+fn _lcs_matched_flags(a: [text], b: [text]) -> ([bool], [bool]):
+    """LCS over keys; return matched flags for each side."""
+    val n = a.len()
+    val m = b.len()
+    var rows: [[i64]] = []
+    var zero_row: [i64] = []
+    var j = 0
+    while j <= m:
+        zero_row = zero_row.push(0)
+        j = j + 1
+    rows = rows.push(zero_row)
+    var i = 1
+    while i <= n:
+        var row: [i64] = [0]
+        j = 1
+        while j <= m:
+            if a[i - 1] == b[j - 1]:
+                row = row.push(rows[i - 1][j - 1] + 1)
+            else:
+                val up = rows[i - 1][j]
+                val left = row[j - 1]
+                row = row.push(if up >= left: up else: left)
+            j = j + 1
+        rows = rows.push(row)
+        i = i + 1
+    var matched_a: [bool] = []
+    var matched_b: [bool] = []
+    i = 0
+    while i < n:
+        matched_a = matched_a.push(false)
+        i = i + 1
+    j = 0
+    while j < m:
+        matched_b = matched_b.push(false)
+        j = j + 1
+    i = n
+    j = m
+    var pairs: [(i64, i64)] = []
+    while i > 0 and j > 0:
+        if a[i - 1] == b[j - 1]:
+            pairs = pairs.push((i - 1, j - 1))
+            i = i - 1
+            j = j - 1
+        else if rows[i - 1][j] >= rows[i][j - 1]:
+            i = i - 1
+        else:
+            j = j - 1
+    var rebuilt_a: [bool] = []
+    var rebuilt_b: [bool] = []
+    i = 0
+    while i < n:
+        var hit = false
+        for pair in pairs:
+            val (pa, _pb) = pair
+            if pa == i: hit = true
+        rebuilt_a = rebuilt_a.push(hit)
+        i = i + 1
+    j = 0
+    while j < m:
+        var hit = false
+        for pair in pairs:
+            val (_pa, pb) = pair
+            if pb == j: hit = true
+        rebuilt_b = rebuilt_b.push(hit)
+        j = j + 1
+    (rebuilt_a, rebuilt_b)
+
+fn _split_params(params: text) -> [text]:
+    var out: [text] = []
+    var start = 0
+    var i = 0
+    while i < params.len():
+        if params[i] == ';':
+            if i > start:
+                out = out.push(params[start:i])
+            start = i + 1
+        i = i + 1
+    if start < params.len():
+        out = out.push(params[start:params.len()])
+    out
+
+fn _param_name(pair: text) -> text:
+    val eq = pair.index_of("=")
+    if eq < 0: return pair
+    pair[0:eq]
+
+fn _param_value(pair: text, pairs: [text]) -> text:
+    val name = _param_name(pair)
+    for candidate in pairs:
+        if _param_name(candidate) == name:
+            val eq = candidate.index_of("=")
+            if eq >= 0:
+                return candidate[eq + 1:candidate.len()]
+    "<missing>"
+
+fn _drift_detail(expected: RenderCallEntry, actual: RenderCallEntry) -> text:
+    """Name every parameter whose value differs between two same-kind calls."""
+    var detail = ""
+    val expected_pairs = _split_params(expected.params)
+    val actual_pairs = _split_params(actual.params)
+    for pair in expected_pairs:
+        val other = _param_value(pair, actual_pairs)
+        val own = _param_value(pair, expected_pairs)
+        if own != other:
+            if detail != "": detail = detail + ","
+            detail = detail + _param_name(pair)
+    for pair in actual_pairs:
+        if _param_value(pair, expected_pairs) == "<missing>":
+            if detail != "": detail = detail + ","
+            detail = detail + _param_name(pair)
+    if expected.call != actual.call:
+        if detail != "": detail = detail + ","
+        detail = detail + "call"
+    detail
+
+fn compare_render_logs(expected: BackendRenderRecord, actual: BackendRenderRecord) -> RenderLogCompareResult:
+    """Align two records' command sequences and classify every difference."""
+    val expected_calls = extract_render_calls(expected)
+    val actual_calls = extract_render_calls(actual)
+    var expected_keys: [text] = []
+    for entry in expected_calls:
+        expected_keys = expected_keys.push(_entry_key(entry))
+    var actual_keys: [text] = []
+    for entry in actual_calls:
+        actual_keys = actual_keys.push(_entry_key(entry))
+    val (matched_a, matched_b) = _lcs_matched_flags(expected_keys, actual_keys)
+    var aligned = 0
+    for flag in matched_a:
+        if flag: aligned = aligned + 1
+
+    # Leftover indexes on each side, in order.
+    var left_a: [i64] = []
+    var i = 0
+    while i < expected_calls.len():
+        if not matched_a[i]: left_a = left_a.push(i)
+        i = i + 1
+    var left_b: [i64] = []
+    i = 0
+    while i < actual_calls.len():
+        if not matched_b[i]: left_b = left_b.push(i)
+        i = i + 1
+
+    var findings: [RenderCallFinding] = []
+    # Consumed indexes (record positions), tracked as membership lists because
+    # arrays here support push but not in-place set.
+    var used_b: [i64] = []
+    var claimed_a: [i64] = []
+
+    # Pass 1: identical key present on both leftover sides -> order_swap.
+    for ia in left_a:
+        var bi = 0
+        while bi < left_b.len():
+            val ib = left_b[bi]
+            if not _contains_i64(used_b, ib) and expected_keys[ia] == actual_keys[ib]:
+                val entry = expected_calls[ia]
+                findings = findings.push(RenderCallFinding(
+                    finding_class: "order_swap", kind: entry.kind, call: entry.call,
+                    expected_index: ia, actual_index: ib,
+                    detail: "same call at different position"))
+                used_b = used_b.push(ib)
+                claimed_a = claimed_a.push(ia)
+                bi = left_b.len()
+            else:
+                bi = bi + 1
+
+    # Pass 2: same kind, different params -> param_drift with field names.
+    for ia in left_a:
+        if not _contains_i64(claimed_a, ia):
+            var bi = 0
+            while bi < left_b.len():
+                val ib = left_b[bi]
+                if not _contains_i64(used_b, ib) and actual_calls[ib].kind == expected_calls[ia].kind:
+                    val exp_entry = expected_calls[ia]
+                    val act_entry = actual_calls[ib]
+                    findings = findings.push(RenderCallFinding(
+                        finding_class: "param_drift", kind: exp_entry.kind, call: exp_entry.call,
+                        expected_index: ia, actual_index: ib,
+                        detail: _drift_detail(exp_entry, act_entry)))
+                    used_b = used_b.push(ib)
+                    claimed_a = claimed_a.push(ia)
+                    bi = left_b.len()
+                else:
+                    bi = bi + 1
+
+    # Pass 3: unmatched leftovers -> missing_call / extra_call.
+    for ia in left_a:
+        if not _contains_i64(claimed_a, ia):
+            val entry = expected_calls[ia]
+            findings = findings.push(RenderCallFinding(
+                finding_class: "missing_call", kind: entry.kind, call: entry.call,
+                expected_index: ia, actual_index: -1,
+                detail: "expected call absent from actual log"))
+    for ib in left_b:
+        if not _contains_i64(used_b, ib):
+            val entry = actual_calls[ib]
+            findings = findings.push(RenderCallFinding(
+                finding_class: "extra_call", kind: entry.kind, call: entry.call,
+                expected_index: -1, actual_index: ib,
+                detail: "actual log has a call the expected log lacks"))
+
+    var missing = 0
+    var extra = 0
+    var drift = 0
+    var swaps = 0
+    for finding in findings:
+        if finding.finding_class == "missing_call": missing = missing + 1
+        else if finding.finding_class == "extra_call": extra = extra + 1
+        else if finding.finding_class == "param_drift": drift = drift + 1
+        else if finding.finding_class == "order_swap": swaps = swaps + 1
+    RenderLogCompareResult(
+        equal: findings.len() == 0,
+        aligned_count: aligned,
+        missing_count: missing,
+        extra_count: extra,
+        drift_count: drift,
+        swap_count: swaps,
+        findings: findings,
+        record_diff: compare_backend_render_records(expected, actual)
+    )
+
+fn render_log_compare_report(result: RenderLogCompareResult, max_details: i64) -> text:
+    """Render a text report: counts by class, then first N detailed findings."""
+    var out = "render-log-compare: " + (if result.equal: "MATCH" else: "MISMATCH") + "\n"
+    out = out + "aligned={result.aligned_count} missing_call={result.missing_count} extra_call={result.extra_count} param_drift={result.drift_count} order_swap={result.swap_count}\n"
+    var shown = 0
+    for finding in result.findings:
+        if shown < max_details:
+            val exp_idx = if finding.expected_index >= 0: finding.expected_index.to_text() else: "-"
+            val act_idx = if finding.actual_index >= 0: finding.actual_index.to_text() else: "-"
+            out = out + "  [{finding.finding_class}] kind={finding.kind} call={finding.call} expected_index={exp_idx} actual_index={act_idx} detail={finding.detail}\n"
+            shown = shown + 1
+    if result.findings.len() > max_details:
+        out = out + "  ... {result.findings.len() - max_details} more finding(s)\n"
+    out
+
+# ---------------------------------------------------------------------------
+# (c) chrome-web vs gui entry
+# ---------------------------------------------------------------------------
+
+fn compare_chrome_web_vs_gui(web: BackendRenderRecord, gui: BackendRenderRecord) -> RenderLogCompareResult:
+    """Compare the web/browser_engine render path against the GUI widget path."""
+    compare_render_logs(web, gui)
+
+fn chrome_web_vs_gui_report(web: BackendRenderRecord, gui: BackendRenderRecord, max_details: i64) -> text:
+    val result = compare_chrome_web_vs_gui(web, gui)
+    "chrome-web-vs-gui (web={web.producer_id} gui={gui.producer_id})\n" +
+        render_log_compare_report(result, max_details)

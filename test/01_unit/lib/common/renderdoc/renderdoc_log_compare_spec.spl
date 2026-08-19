@@ -1,0 +1,142 @@
+"""# RenderDoc Log Compare
+
+Aligns two backend render command logs (srenderdoc vs RenderDoc replay, or
+chrome-web vs gui), classifies per-call differences, and reports them.
+"""
+
+use std.spec.*
+use common.renderdoc.backend_render_record.{
+    BackendRenderField,
+    BackendRenderRecord,
+    backend_render_field,
+    backend_render_record_finalize
+}
+use common.renderdoc.renderdoc_log_compare.{
+    compare_render_logs,
+    compare_chrome_web_vs_gui,
+    render_log_compare_report,
+    renderdoc_xml_command_fields,
+    renderdoc_xml_to_record,
+    extract_render_calls
+}
+
+fn cmd_fields(index: text, kind: text, call: text, params: [text]) -> [BackendRenderField]:
+    var fields: [BackendRenderField] = []
+    val prefix = "commands." + index + "."
+    fields = fields.push(backend_render_field(prefix + "call", call, "text", true))
+    fields = fields.push(backend_render_field(prefix + "kind", kind, "text", true))
+    for pair in params:
+        val eq = pair.index_of("=")
+        fields = fields.push(backend_render_field(prefix + "param." + pair[0:eq], pair[eq + 1:pair.len()], "text", true))
+    fields
+
+fn record_of(producer: text, command_sets: [[BackendRenderField]]) -> BackendRenderRecord:
+    var fields: [BackendRenderField] = []
+    for set in command_sets:
+        for field in set:
+            fields = fields.push(field)
+    fields = fields.push(backend_render_field("commands.count", command_sets.len().to_text(), "i64", true))
+    backend_render_record_finalize(producer, fields)
+
+fn baseline_record(producer: text) -> BackendRenderRecord:
+    record_of(producer, [
+        cmd_fields("000", "bind", "vkCmdBindPipeline", ["pipeline=7"]),
+        cmd_fields("001", "draw", "vkCmdDraw", ["vertex_count=6", "instance_count=1"]),
+        cmd_fields("002", "draw", "vkCmdDrawIndexed", ["index_count=36", "instance_count=1"])
+    ])
+
+describe "RenderDoc render-log compare":
+    it "should report zero findings for identical command logs":
+        step("Compare two identical three-command logs")
+        val result = compare_render_logs(baseline_record("gui-widget"), baseline_record("chrome-web"))
+        expect(result.equal).to_equal(true)
+        expect(result.findings.len()).to_equal(0)
+        expect(result.aligned_count).to_equal(3)
+        expect(result.missing_count).to_equal(0)
+
+    it "should name a missing draw as missing_call":
+        step("Drop the indexed draw from the actual log")
+        val expected = baseline_record("gui-widget")
+        val actual = record_of("chrome-web", [
+            cmd_fields("000", "bind", "vkCmdBindPipeline", ["pipeline=7"]),
+            cmd_fields("001", "draw", "vkCmdDraw", ["vertex_count=6", "instance_count=1"])
+        ])
+        val result = compare_render_logs(expected, actual)
+        expect(result.equal).to_equal(false)
+        expect(result.missing_count).to_equal(1)
+        expect(result.extra_count).to_equal(0)
+        expect(result.findings.len()).to_equal(1)
+        expect(result.findings[0].finding_class).to_equal("missing_call")
+        expect(result.findings[0].call).to_equal("vkCmdDrawIndexed")
+        expect(result.findings[0].kind).to_equal("draw")
+
+    it "should classify a changed parameter as param_drift naming the field":
+        step("Change vertex_count on the plain draw")
+        val expected = baseline_record("gui-widget")
+        val actual = record_of("chrome-web", [
+            cmd_fields("000", "bind", "vkCmdBindPipeline", ["pipeline=7"]),
+            cmd_fields("001", "draw", "vkCmdDraw", ["vertex_count=4", "instance_count=1"]),
+            cmd_fields("002", "draw", "vkCmdDrawIndexed", ["index_count=36", "instance_count=1"])
+        ])
+        val result = compare_render_logs(expected, actual)
+        expect(result.drift_count).to_equal(1)
+        expect(result.missing_count).to_equal(0)
+        expect(result.extra_count).to_equal(0)
+        var drift_detail = ""
+        for finding in result.findings:
+            if finding.finding_class == "param_drift":
+                drift_detail = finding.detail
+        expect(drift_detail.contains("vertex_count")).to_equal(true)
+        expect(drift_detail.contains("instance_count")).to_equal(false)
+
+    it "should detect swapped call order as order_swap":
+        step("Swap the two draws in the actual log")
+        val expected = baseline_record("gui-widget")
+        val actual = record_of("chrome-web", [
+            cmd_fields("000", "bind", "vkCmdBindPipeline", ["pipeline=7"]),
+            cmd_fields("001", "draw", "vkCmdDrawIndexed", ["index_count=36", "instance_count=1"]),
+            cmd_fields("002", "draw", "vkCmdDraw", ["vertex_count=6", "instance_count=1"])
+        ])
+        val result = compare_render_logs(expected, actual)
+        expect(result.swap_count > 0).to_equal(true)
+        expect(result.missing_count).to_equal(0)
+        expect(result.extra_count).to_equal(0)
+
+    it "should adapt RenderDoc replay XML chunks into command field paths":
+        step("Feed a small synthetic RDC-XML fragment to the adapter")
+        val xml = "<rdc><chunks version=\"1\">" +
+            "<chunk name=\"vkCreateShaderModule\"></chunk>" +
+            "<chunk name=\"vkCmdBindPipeline\"></chunk>" +
+            "<chunk name=\"vkCmdDraw\"></chunk>" +
+            "<chunk name=\"vkQueueSubmit\"></chunk>" +
+            "</chunks></rdc>"
+        val fields = renderdoc_xml_command_fields(xml)
+        # 3 relevant chunks x 2 fields + commands.count; vkQueueSubmit skipped.
+        expect(fields.len()).to_equal(7)
+        expect(fields[0].path).to_equal("commands.000.call")
+        expect(fields[0].value).to_equal("vkCreateShaderModule")
+        expect(fields[1].path).to_equal("commands.000.kind")
+        expect(fields[1].value).to_equal("resource")
+        expect(fields[3].value).to_equal("bind")
+        expect(fields[4].path).to_equal("commands.002.call")
+        expect(fields[4].value).to_equal("vkCmdDraw")
+        expect(fields[6].path).to_equal("commands.count")
+        expect(fields[6].value).to_equal("3")
+        step("Round-trip through a record and extraction")
+        val record = renderdoc_xml_to_record(xml, "renderdoc-replay")
+        val calls = extract_render_calls(record)
+        expect(calls.len()).to_equal(3)
+        expect(calls[2].kind).to_equal("draw")
+
+    it "should render a text report with counts and detailed findings":
+        step("Compare chrome-web vs gui with one missing draw")
+        val gui = baseline_record("gui-widget")
+        val web = record_of("chrome-web", [
+            cmd_fields("000", "bind", "vkCmdBindPipeline", ["pipeline=7"]),
+            cmd_fields("001", "draw", "vkCmdDraw", ["vertex_count=6", "instance_count=1"])
+        ])
+        val result = compare_chrome_web_vs_gui(gui, web)
+        val report = render_log_compare_report(result, 5)
+        expect(report.contains("MISMATCH")).to_equal(true)
+        expect(report.contains("missing_call=1")).to_equal(true)
+        expect(report.contains("vkCmdDrawIndexed")).to_equal(true)
