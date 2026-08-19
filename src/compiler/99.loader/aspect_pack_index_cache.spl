@@ -1,0 +1,184 @@
+# AspectPackIndexCache (design §14.1, on top of the §15 I/O policy).
+#
+# "Caches only pack trailer/directory mappings. It does not imply loading
+# payload chunks." -- design §14.1.
+#
+# std.common.aspect_pack already parses a pack, but its entry point takes
+# `data: [u8]`, i.e. the WHOLE FILE resident in memory, which is exactly the
+# policy §15 forbids for large cold packs. This module is the file-backed front
+# door: it reads the 32-byte header, learns dir_size from it, then reads only
+# header+directory. The payload is never touched.
+#
+# The proof that this is real, and not a whole-file read wearing a cache, is
+# the `index_bytes_read` counter: it must stay far below the sum of the pack
+# file sizes. A spec asserts exactly that.
+
+use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size, APKIO_MAX_RANGE_BYTES}
+use std.common.string_core.{text_to_bytes}
+
+val APKIDX_MAGIC_V1: text = "SMFAPK1\0"
+val APKIDX_HEADER_SIZE_V1: i64 = 32
+val APKIDX_SCHEMA_V1: i64 = 1
+val APKIDX_FLAG_ASPECT_PACK: i64 = 1
+
+# Declared-size bound on the directory (design §21 E-APACK004 family, applied
+# at the INDEX layer). A pack header that CLAIMS a multi-gigabyte directory is
+# refused on the declaration, before any mapping or inflation is attempted --
+# the same discipline aspect_pack.spl applies to a module's declared
+# uncompressed size. Removing this check is a defect, and a spec fails if it
+# is removed.
+val APKIDX_MAX_DIRECTORY_BYTES: i64 = 16777216
+
+struct PackIndexEntry:
+    pack_path: text
+    file_size: i64
+    index_bytes: [u8]      # header + directory ONLY, never payload
+    dir_size: i64
+    module_count: i64
+    ok: bool
+    error_code: text
+    error_message: text
+
+# CLASS, not struct, and deliberately so: a struct is a VALUE here, so
+# `c.hits = c.hits + 1` inside a function that took `c: PackIndexCache` by
+# value is discarded at return. The first version of this module was a struct,
+# and its counters read 0 after two lookups -- which silently made the spec's
+# "the index read fewer bytes than the file holds" assertion vacuously true
+# (0 < any size). The counters are the ONLY evidence that this cache does not
+# read payload, so they must be observable from the caller.
+class PackIndexCache:
+    entries: Dict<text, PackIndexEntry>
+    hits: i64
+    misses: i64
+    index_bytes_read: i64
+    payload_bytes_read: i64   # structurally always 0; asserted by spec
+
+fn pack_index_cache_new() -> PackIndexCache:
+    var d: Dict<text, PackIndexEntry> = {}
+    PackIndexCache(entries: d, hits: 0, misses: 0, index_bytes_read: 0, payload_bytes_read: 0)
+
+fn _apkidx_error(path: text, code: text, message: text) -> PackIndexEntry:
+    var empty: [u8] = []
+    PackIndexEntry(pack_path: path, file_size: 0, index_bytes: empty,
+        dir_size: 0, module_count: 0, ok: false, error_code: code, error_message: message)
+
+fn _apkidx_read_u16(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _apkidx_read_u32(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 4:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _apkidx_read_u64(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 8:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn pack_index_read(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
+    """Read header + directory from the file, bounded. Never reads payload."""
+    val fsize = pack_file_size(pack_path)
+    if fsize < APKIDX_HEADER_SIZE_V1:
+        return _apkidx_error(pack_path, "APKIDX_TRUNCATED_HEADER",
+            "pack shorter than the fixed {APKIDX_HEADER_SIZE_V1}-byte header")
+
+    val header = pack_read_range(pack_path, 0, APKIDX_HEADER_SIZE_V1)
+    c.index_bytes_read = c.index_bytes_read + header.len()
+    if header.len() != APKIDX_HEADER_SIZE_V1:
+        return _apkidx_error(pack_path, "APKIDX_HEADER_READ_FAILED",
+            "could not map the pack header of {pack_path}")
+
+    val magic = text_to_bytes(APKIDX_MAGIC_V1)
+    var i = 0
+    while i < 8:
+        if header[i] != magic[i]:
+            return _apkidx_error(pack_path, "APKIDX_BAD_MAGIC", "pack magic is not SMFAPK1")
+        i = i + 1
+    val schema = _apkidx_read_u16(header, 8)
+    if schema != APKIDX_SCHEMA_V1:
+        return _apkidx_error(pack_path, "APKIDX_BAD_VERSION", "unsupported aspect pack schema version")
+    val flags = _apkidx_read_u16(header, 10)
+    if (flags & APKIDX_FLAG_ASPECT_PACK) == 0:
+        return _apkidx_error(pack_path, "APKIDX_NOT_ASPECT_PACK",
+            "SMF_FLAG_ASPECT_PACK is not set; refusing to treat an ordinary module as a pack")
+    val module_count = _apkidx_read_u32(header, 12)
+    val dir_size = _apkidx_read_u64(header, 16)
+    val total_size = _apkidx_read_u64(header, 24)
+
+    if module_count <= 0 or module_count > 1048576:
+        return _apkidx_error(pack_path, "APKIDX_BAD_GEOMETRY", "unreasonable module_count")
+    if total_size != fsize:
+        return _apkidx_error(pack_path, "APKIDX_TRUNCATED_PACK",
+            "declared total_size {total_size} does not match the {fsize}-byte file")
+
+    # DECLARED-SIZE BOUND. Checked against the cap BEFORE the file, so a header
+    # that lies about a huge directory is refused on the declaration alone.
+    if dir_size <= 0 or dir_size > APKIDX_MAX_DIRECTORY_BYTES:
+        return _apkidx_error(pack_path, "APKIDX_DIRECTORY_TOO_LARGE",
+            "declared directory size {dir_size} exceeds the {APKIDX_MAX_DIRECTORY_BYTES}-byte index limit; refusing to map")
+    if APKIDX_HEADER_SIZE_V1 + dir_size > fsize:
+        return _apkidx_error(pack_path, "APKIDX_TRUNCATED_PACK",
+            "directory extends past the end of the pack")
+
+    val dir_bytes = pack_read_range(pack_path, APKIDX_HEADER_SIZE_V1, dir_size)
+    c.index_bytes_read = c.index_bytes_read + dir_bytes.len()
+    if dir_bytes.len() != dir_size:
+        return _apkidx_error(pack_path, "APKIDX_DIRECTORY_READ_FAILED",
+            "could not map the pack directory of {pack_path}")
+
+    var index_bytes: [u8] = []
+    var h = 0
+    while h < header.len():
+        index_bytes.push(header[h])
+        h = h + 1
+    var d = 0
+    while d < dir_bytes.len():
+        index_bytes.push(dir_bytes[d])
+        d = d + 1
+
+    PackIndexEntry(pack_path: pack_path, file_size: fsize,
+        index_bytes: index_bytes, dir_size: dir_size, module_count: module_count,
+        ok: true, error_code: "", error_message: "")
+
+fn pack_index_get(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
+    """Cached index read, keyed on file SIZE alone.
+
+    KNOWN GAP, stated rather than papered over: this does not use mtime,
+    because rt_file_stat in this runtime returns the file SIZE, not a
+    modification time (measured: a 264-byte pack reports stat == 264 == size),
+    so folding it in would add a second copy of the same signal and read like
+    a stronger check than it is. Consequence: a rebuild that produces a pack of
+    exactly the same length is NOT detected. Callers that rebuild a pack in
+    place must call pack_index_invalidate. Closing this needs a real
+    mtime extern, which is tracked in the interfaces doc, not worked around
+    here."""
+    val cached = c.entries.get(pack_path)
+    if cached != nil:
+        val e = cached!
+        if e.ok and e.file_size == pack_file_size(pack_path):
+            c.hits = c.hits + 1
+            return e
+    c.misses = c.misses + 1
+    val fresh = pack_index_read(c, pack_path)
+    if fresh.ok:
+        c.entries[pack_path] = fresh
+    fresh
+
+fn pack_index_invalidate(c: PackIndexCache, pack_path: text) -> bool:
+    val cached = c.entries.get(pack_path)
+    if cached == nil:
+        return false
+    c.entries.remove(pack_path)
+    true
+
+fn pack_index_evict_all(c: PackIndexCache) -> i64:
+    val n = c.entries.len()
+    var fresh: Dict<text, PackIndexEntry> = {}
+    c.entries = fresh
+    n

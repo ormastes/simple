@@ -66,3 +66,64 @@ in interpreter mode**. It requires a compiled-mode run to verify.
 2. Make the pointer/fn cast compile so the sibling `loader/smf_mmap_native.spl`
    approach works.
 3. Run this spec under compiled mode in a lane that has a compiled binary.
+
+## Addendum 2026-08-19 (lane-aspect-dynload, W4): same gap now also blocks `object_mapper.spl` mapping itself, not just execution
+
+W4 found a second correctness trap in the same defect class as the
+`smf_mmap_native.spl` Dict-fake above: `src/compiler/99.loader/object_mapper.spl`
+(the root `compiler.loader` package's public surface, re-exported by
+`src/compiler/99.loader/__init__.spl:35-39`) defined its OWN `SharedExecMapper`
+that computed `address = 4096 + generation*256 + code.len()` and never mapped
+any memory, while the real mapper (`src/compiler/99.loader/loader/object_mapper.spl`,
+package `compiler.loader.loader.object_mapper`) sat one directory over and was
+reachable only by files that imported it directly. Worse: the REAL load-time
+JIT path, `src/compiler/99.loader/loader/jit_instantiator.spl:8-12`, imports
+`SharedExecMapper`/`JitMapper` from `compiler.loader.object_mapper` (the fake,
+top-level package) instead of its own sibling `.object_mapper` (the real one) —
+so genuine JIT instantiation was silently getting fabricated, unmapped
+addresses.
+
+Fix applied: `object_mapper.spl` now does
+`export use compiler.loader.loader.object_mapper.{...}` instead of defining
+its own classes, so every consumer of the `compiler.loader.object_mapper` name
+(the public facade and `loader/jit_instantiator.spl`) gets the real,
+`native_alloc_exec_memory`-backed mapper.
+
+Consequence, confirmed by direct measurement: this hits the exact cast gap
+documented above (`(address + offset) as *u8` in
+`loader/smf_mmap_native.spl:native_write_exec_memory`, "unsupported cast
+target type: Pointer"), because `map_symbol` now goes through real
+`native_write_exec_memory`. Both the pre-existing
+`test/01_unit/compiler/loader/object_mapper_spec.spl` (6 examples, previously
+green against the fake) and the new reproduce spec
+`test/01_unit/compiler/loader/object_mapper_no_fabrication_spec.spl` (2
+examples) now fail under interpreter mode with that same error — not because
+the mapping logic is wrong, but because the interpreter cannot execute the
+real native-memory path at all yet. Per the precedent set immediately above
+(the loader positive control staying red rather than reverting to a Dict
+fake) and `.claude/rules/testing.md`, these are left red rather than reverted
+to fabricated addresses. Re-run both specs once fix option 1 or 2 above lands.
+
+## Blocks: join-point patchpoint execution spec (2026-08-19)
+
+`test/01_unit/compiler/loader/joinpoint_patchpoint_execution_spec.spl` is
+legitimately RED because of this defect and must stay RED until it is fixed.
+
+* Symptom, measured 2026-08-19 on `bin/simple`
+  (`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
+  59645008 bytes, 2026-08-18 10:12:23):
+  `error: semantic: unknown extern function: rt_call_ptr_0` — a load-time
+  semantic error, so the whole module is rejected before any `it` body runs.
+  A second missing extern surfaces on the same path:
+  `error: semantic: unknown extern function: rt_ptr_write_bytes`
+  (used by `native_write_exec_memory`).
+* Path: `JoinpointSlotTable.call_through_0`
+  (`src/compiler/99.loader/joinpoint_slots.spl`) -> `native_call_function_0`
+  (`src/compiler/99.loader/loader/smf_mmap_native.spl:245`) -> `rt_call_ptr_0`.
+  The extern is DECLARED at `smf_mmap_native.spl:15`; what is missing is the
+  runtime symbol the interpreter can resolve.
+* Unblock condition: `rt_call_ptr_0` (and `rt_ptr_write_bytes`) resolvable from
+  the interpreter. Then re-run the spec; no spec change is required.
+* NOT blocked by this: the address-level acceptance spec
+  `test/01_unit/compiler/loader/joinpoint_patchpoint_spec.spl`, which reads the
+  patched pointer back out of the mapped page and passes 31/31 checks today.

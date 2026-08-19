@@ -1,0 +1,226 @@
+# bench_aspect_pack_perf_contract.spl — measurement harness for design §20
+# (Exact Performance Contract) of
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md.
+#
+# Scope: only the container/catalog half of §20 is reachable today.
+# aspect_pack.spl (src/lib/common/aspect_pack.spl) is byte-array based; it has
+# no path that invokes a raw i64 code address, so §20.2 "business hot path"
+# (facet<T>() dispatch cost, patchpoint/NOP cost) and §20.4 "steady state"
+# (retained FacetRef<T> witness/vtable invoke cost) are NOT measurable through
+# this module — there is nothing here that executes loaded aspect code, only
+# code that stages its bytes. This harness measures what IS reachable:
+#   - pack open (apk_open_pack_v1)                      -> §20.3 "pack open/index map"
+#   - catalog build + route lookup (apk_catalog_route_v1) -> §20.1 catalog-only read, §20.3 "catalog lookup"
+#   - per-module inflate/copy (apk_load_module_v1)        -> §20.3 "selected dependency-closure decompression"
+#   - full first-use path (apk_load_facet)                -> §20.3 end-to-end
+#   - cache hit vs miss (apk_load_facet repeated)          -> §20.4 "repeated acquisition" (registry only, not dispatch)
+#   - loader counters (packs_opened/modules_decompressed/bytes_decompressed/cache_hits)
+#     as a proxy for "no aspect-pack file opened", "no module payload
+#     decompressed" (§20.1) on the lazy/excluded path.
+#
+# Timing is INTERNAL (rt_time_now_unix_micros via std.io_runtime), so results
+# are comparable across interpreter/SMF launch modes. Each workload runs N
+# times; the harness prints every sample plus median so the caller can judge
+# spread rather than trusting a single number. Record binary identity and
+# `free -g` alongside every run — see doc/10_metrics/startup/aspect_pack_perf_contract_measurements_2026-08-19.md.
+#
+# Run:  bin/simple run src/app/test/bench/bench_aspect_pack_perf_contract.spl
+
+use std.io_runtime.{time_now_unix_micros}
+use std.common.aspect_pack.{
+    ApkModuleSourceV1, ApkCatalogEntryV1,
+    apk_build_pack_v1, apk_open_pack_v1, apk_load_module_v1,
+    apk_build_catalog_v1, apk_open_catalog_v1, apk_catalog_route_v1,
+    apk_loader_new, apk_loader_register_pack, apk_load_facet,
+    apk_loader_packs_opened, apk_loader_modules_decompressed,
+    apk_loader_bytes_decompressed, apk_loader_cache_hits,
+}
+use std.common.string_core.{text_to_bytes}
+
+fn _payload(tag: text, repeats: i64) -> [u8]:
+    var s = ""
+    var i = 0
+    while i < repeats:
+        s = s + "module {tag} advice body line {i} payload filler text; "
+        i = i + 1
+    text_to_bytes(s)
+
+# Larger, more realistic module set: 8 modules, ~400 lines of synthetic
+# payload each, to make decompression/copy cost visible above measurement
+# noise floor (a 3-module x 40-line pack from the unit spec is too small to
+# time meaningfully).
+fn _modules() -> [ApkModuleSourceV1]:
+    var out: [ApkModuleSourceV1] = []
+    out.push(ApkModuleSourceV1(module_id: "debug.core", aspect_id: "debug", payload: _payload("debug.core", 400)))
+    out.push(ApkModuleSourceV1(module_id: "metrics.counters", aspect_id: "metrics", payload: _payload("metrics.counters", 400)))
+    out.push(ApkModuleSourceV1(module_id: "trace.spans", aspect_id: "trace", payload: _payload("trace.spans", 400)))
+    out.push(ApkModuleSourceV1(module_id: "audit.log", aspect_id: "audit", payload: _payload("audit.log", 400)))
+    out.push(ApkModuleSourceV1(module_id: "cache.stats", aspect_id: "cache", payload: _payload("cache.stats", 400)))
+    out.push(ApkModuleSourceV1(module_id: "retry.policy", aspect_id: "retry", payload: _payload("retry.policy", 400)))
+    out.push(ApkModuleSourceV1(module_id: "auth.guard", aspect_id: "auth", payload: _payload("auth.guard", 400)))
+    out.push(ApkModuleSourceV1(module_id: "rate.limit", aspect_id: "rate", payload: _payload("rate.limit", 400)))
+    out
+
+fn _median(samples: [i64]) -> i64:
+    # simple insertion sort — N is small (<=50) in this harness
+    var xs: [i64] = []
+    var i = 0
+    while i < samples.len():
+        xs.push(samples[i])
+        i = i + 1
+    var a = 0
+    while a < xs.len():
+        var b = a + 1
+        while b < xs.len():
+            if xs[b] < xs[a]:
+                val t = xs[a]
+                xs[a] = xs[b]
+                xs[b] = t
+            b = b + 1
+        a = a + 1
+    xs[xs.len() / 2]
+
+fn _print_samples(name: text, samples: [i64]):
+    var line = "SAMPLES|{name}|"
+    var i = 0
+    while i < samples.len():
+        if i > 0:
+            line = line + ","
+        line = line + "{samples[i]}"
+        i = i + 1
+    print(line)
+    print("RESULT|{name}|median_us={_median(samples)}|n={samples.len()}")
+
+# ---------------------------------------------------------------- workloads
+
+fn bench_pack_open(runs: i64):
+    val built = apk_build_pack_v1(_modules())
+    var samples: [i64] = []
+    var i = 0
+    while i < runs:
+        val t0 = time_now_unix_micros()
+        val handle = apk_open_pack_v1(built.bytes)
+        val t1 = time_now_unix_micros()
+        if !handle.ok:
+            print("ERROR|pack_open|open failed")
+        samples.push(t1 - t0)
+        i = i + 1
+    _print_samples("pack_open_v1", samples)
+
+fn bench_catalog_route(runs: i64):
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "app.apk", module_id: "debug.core"))
+    entries.push(ApkCatalogEntryV1(facet_key: "metrics/Countable", pack_path: "app.apk", module_id: "metrics.counters"))
+    entries.push(ApkCatalogEntryV1(facet_key: "trace/Traceable", pack_path: "app.apk", module_id: "trace.spans"))
+    entries.push(ApkCatalogEntryV1(facet_key: "audit/Auditable", pack_path: "app.apk", module_id: "audit.log"))
+    entries.push(ApkCatalogEntryV1(facet_key: "cache/Cacheable", pack_path: "app.apk", module_id: "cache.stats"))
+    val cat = apk_build_catalog_v1(entries)
+    val handle = apk_open_catalog_v1(cat.bytes)
+    if !handle.ok:
+        print("ERROR|catalog_route|catalog open failed")
+    var samples: [i64] = []
+    var i = 0
+    while i < runs:
+        val t0 = time_now_unix_micros()
+        val route = apk_catalog_route_v1(cat.bytes, handle, "cache/Cacheable")
+        val t1 = time_now_unix_micros()
+        if !route.found:
+            print("ERROR|catalog_route|lookup miss")
+        samples.push(t1 - t0)
+        i = i + 1
+    _print_samples("catalog_route_v1", samples)
+
+fn bench_module_inflate(runs: i64):
+    val built = apk_build_pack_v1(_modules())
+    val handle = apk_open_pack_v1(built.bytes)
+    var samples: [i64] = []
+    var i = 0
+    while i < runs:
+        val t0 = time_now_unix_micros()
+        val load = apk_load_module_v1(built.bytes, handle, "rate.limit")
+        val t1 = time_now_unix_micros()
+        if !load.found:
+            print("ERROR|module_inflate|module not found")
+        samples.push(t1 - t0)
+        i = i + 1
+    _print_samples("module_inflate_v1", samples)
+
+# §20.3 first-use path end to end via the loader (pack registration is
+# outside the timed window — it models an already-registered pack, matching
+# "catalog lookup + pack open/index map + ... " starting from an app that has
+# already located its pack).
+fn bench_first_use_facet_load(runs: i64):
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "app.apk", module_id: "debug.core"))
+    val cat = apk_build_catalog_v1(entries)
+    val built = apk_build_pack_v1(_modules())
+    var samples: [i64] = []
+    var i = 0
+    while i < runs:
+        val ld = apk_loader_new()
+        val _reg = apk_loader_register_pack(ld, "app.apk", built.bytes)
+        val t0 = time_now_unix_micros()
+        val got = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        val t1 = time_now_unix_micros()
+        if !got.found:
+            print("ERROR|first_use_facet_load|facet not found")
+        samples.push(t1 - t0)
+        i = i + 1
+    _print_samples("first_use_facet_load_v1", samples)
+
+# §20.4 "repeated acquisition uses ... cache" — proxy: same loader, same
+# facet_key, second call onward should be from_cache=true and (if the
+# registry lookup dominates) cheaper than the first miss.
+fn bench_cache_hit_vs_miss(runs: i64):
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "app.apk", module_id: "debug.core"))
+    val cat = apk_build_catalog_v1(entries)
+    val built = apk_build_pack_v1(_modules())
+    val ld = apk_loader_new()
+    val _reg = apk_loader_register_pack(ld, "app.apk", built.bytes)
+
+    val t0 = time_now_unix_micros()
+    val miss = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+    val t1 = time_now_unix_micros()
+    if miss.from_cache:
+        print("ERROR|cache_hit_vs_miss|first call unexpectedly from_cache")
+    print("RESULT|cache_miss_first_load_us|{t1 - t0}|1")
+
+    var samples: [i64] = []
+    var i = 0
+    while i < runs:
+        val ta = time_now_unix_micros()
+        val hit = apk_load_facet(ld, cat.bytes, "debug/Debuggable")
+        val tb = time_now_unix_micros()
+        if !hit.from_cache:
+            print("ERROR|cache_hit_vs_miss|repeat call not from_cache")
+        samples.push(tb - ta)
+        i = i + 1
+    _print_samples("cache_hit_repeat_load_v1", samples)
+
+# §20.1 "no pack opened / no payload decompressed" on the lazy/excluded path
+# — proxy via loader counters: a loader that never calls apk_load_facet /
+# apk_activate_startup must report packs_opened=0, modules_decompressed=0,
+# bytes_decompressed=0. This does NOT prove "the runtime reads only the
+# catalog" (no full runtime startup path exists to time here) — it proves the
+# loader primitive itself does no eager work at registration time.
+fn bench_cold_aspect_no_eager_work():
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(facet_key: "debug/Debuggable", pack_path: "app.apk", module_id: "debug.core"))
+    val cat = apk_build_catalog_v1(entries)
+    val built = apk_build_pack_v1(_modules())
+    val ld = apk_loader_new()
+    val _reg = apk_loader_register_pack(ld, "app.apk", built.bytes)
+    print("RESULT|cold_no_touch_packs_opened|{apk_loader_packs_opened(ld)}|1")
+    print("RESULT|cold_no_touch_modules_decompressed|{apk_loader_modules_decompressed(ld)}|1")
+    print("RESULT|cold_no_touch_bytes_decompressed|{apk_loader_bytes_decompressed(ld)}|1")
+    print("RESULT|cold_no_touch_cache_hits|{apk_loader_cache_hits(ld)}|1")
+
+fn main():
+    val runs = 30
+    bench_cold_aspect_no_eager_work()
+    bench_pack_open(runs)
+    bench_catalog_route(runs)
+    bench_module_inflate(runs)
+    bench_first_use_facet_load(runs)
+    bench_cache_hit_vs_miss(runs)

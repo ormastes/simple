@@ -1,0 +1,198 @@
+# Aspect-pack mapping and I/O policy (design
+# doc/05_design/language/aop/aspect_facet_dynload_smf_pack_design_2026-08-04.md
+# §15; interface fixed in
+# doc/04_architecture/compiler/aspect_dynload/blocking_infrastructure_interfaces_2026-08-19.md).
+#
+# WHY THIS IS NOT smf_mmap_native.spl / smf_cache.spl: those map the WHOLE file
+# and issue MADV_SEQUENTIAL. §15 states that policy is correct for ordinary
+# modules and WRONG for large cold aspect packs, which must read only the
+# trailer and the uncompressed directory, must not trigger whole-file
+# readahead, and must map only selected chunk ranges.
+#
+# The one thing the existing layer cannot do: `native_mmap_file` passes the
+# caller's offset straight to mmap(2), which rejects any offset that is not a
+# multiple of the page size with EINVAL. So the only offset that works there is
+# 0 -- i.e. whole-file. This module supplies the aligned-window arithmetic that
+# makes a partial read of a pack possible at all.
+#
+# There is no byte-oriented pread extern in the tree (rt_file_read_text_at
+# returns `text`, which is lossy for binary pack bytes), so an aligned mmap
+# window IS the pread here: map, read out, unmap.
+
+# NOTE ON EXTERN CHOICE. Three families were tried against the runtime's
+# extern registry, and only one is universally available:
+#   - rt_open_fd / rt_page_size (declared in 99.loader/loader/smf_mmap_native.spl)
+#     are NOT registered at all -- "unknown extern function".
+#   - rt_mmap / rt_munmap / rt_madvise (the path-based std.io family) are
+#     registered for native codegen but NOT in the interpreter, which is the
+#     engine `bin/simple test` runs on.
+#   - rt_io_file_open / _seek / _read / _close ARE registered in both. They give
+#     a genuine positioned byte read -- a real pread, with no page-alignment
+#     constraint at all -- which is the primary mechanism §15 asks for
+#     ("Map or `pread` only the uncompressed pack directory").
+# rt_mmap_raw / rt_munmap_raw / rt_ptr_read_u8 are also registered in both, so
+# the aligned-window mmap path is kept for callers that want a large range
+# resident without copying it. mmap DOES require an aligned offset, which is
+# what _apkio_page_size and the delta arithmetic below exist for.
+extern fn rt_io_file_open(path: text, mode: i64) -> i64
+extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
+extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_file_close(fd: i64) -> bool
+extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+extern fn rt_file_size(path: text) -> i64
+
+val APKIO_MODE_READ: i64 = 0
+val APKIO_SEEK_SET: i64 = 0
+val APKIO_PROT_READ: i64 = 0x1
+val APKIO_MAP_PRIVATE: i64 = 0x2
+val APKIO_MAP_FAILED: i64 = -1
+
+# Declared-size bound on ANY single range this module will materialize.
+# §15 requires the index path to stay small; a pack whose directory CLAIMS to
+# be gigabytes is a resource-exhaustion input exactly like an over-declared
+# deflate frame, and is refused on the DECLARATION, before any mapping is
+# attempted. 64 MiB is far above any plausible pack directory and far below
+# anything that threatens the process.
+val APKIO_MAX_RANGE_BYTES: i64 = 67108864
+
+struct PackWindow:
+    """An aligned mapping that COVERS [want_offset, want_offset+want_length).
+
+    `address` is the page-aligned mmap base, never the requested offset.
+    `data_offset` is the intra-page delta the caller must add. Callers should
+    use pack_window_bytes rather than doing that arithmetic themselves."""
+    address: i64
+    map_length: i64
+    data_offset: i64
+    want_offset: i64
+    want_length: i64
+    ok: bool
+    error_code: text
+    error_message: text
+
+fn _apkio_window_error(code: text, message: text) -> PackWindow:
+    PackWindow(address: 0, map_length: 0, data_offset: 0, want_offset: 0,
+        want_length: 0, ok: false, error_code: code, error_message: message)
+
+fn _apkio_page_size() -> i64:
+    """Alignment granule for mmap offsets.
+
+    Deliberately 64 KiB, not the host page size. mmap(2) requires the offset to
+    be a multiple of the REAL page size, and 65536 is a multiple of every page
+    size in use on the targets here (4 KiB x86_64/riscv, 16 KiB and 64 KiB
+    aarch64), so a 64 KiB-aligned offset is valid everywhere. Querying the host
+    (rt_page_size) is not an option: that extern is declared in the loader but
+    is not in the runtime's extern registry, so calling it fails at semantic
+    analysis. Over-aligning costs at most 64 KiB of extra mapped virtual
+    address space per window, which is never faulted in."""
+    65536
+
+fn pack_window_map(path: text, want_offset: i64, want_length: i64) -> PackWindow:
+    """Map the smallest page-aligned window covering the requested range.
+
+    Fail-closed on: negative geometry, an over-declared length, a range that
+    runs past end-of-file (a SHORT map would silently hand back the wrong
+    bytes), and mmap failure. No madvise of any kind is issued -- see the note
+    above pack_read_range."""
+    if want_offset < 0 or want_length <= 0:
+        return _apkio_window_error("APKIO_BAD_RANGE", "negative or empty range")
+    if want_length > APKIO_MAX_RANGE_BYTES:
+        return _apkio_window_error("APKIO_RANGE_TOO_LARGE",
+            "declared range of {want_length} bytes exceeds the {APKIO_MAX_RANGE_BYTES}-byte mapping limit; refusing to map")
+    val fsize = rt_file_size(path)
+    if fsize <= 0:
+        return _apkio_window_error("APKIO_NO_FILE", "pack file missing or empty: {path}")
+    if want_offset + want_length > fsize:
+        return _apkio_window_error("APKIO_RANGE_PAST_EOF",
+            "range [{want_offset}, +{want_length}) runs past the {fsize}-byte file")
+
+    val ps = _apkio_page_size()
+    val aligned_base = (want_offset / ps) * ps
+    val delta = want_offset - aligned_base
+    val raw_len = delta + want_length
+    val rounded = ((raw_len + ps - 1) / ps) * ps
+    # Clamp to what the file actually holds so no page beyond EOF is mapped
+    # (touching one would SIGBUS).
+    val remaining = fsize - aligned_base
+    val map_length = if rounded > remaining: remaining else: rounded
+
+    val fd = rt_io_file_open(path, APKIO_MODE_READ)
+    if fd < 0:
+        return _apkio_window_error("APKIO_OPEN_FAILED", "cannot open {path}")
+    val addr = rt_mmap_raw(0, map_length, APKIO_PROT_READ, APKIO_MAP_PRIVATE, fd, aligned_base)
+    _ = rt_io_file_close(fd)
+    if addr == APKIO_MAP_FAILED or addr == 0:
+        return _apkio_window_error("APKIO_MMAP_FAILED",
+            "mmap of {map_length} bytes at aligned offset {aligned_base} failed")
+    PackWindow(address: addr, map_length: map_length, data_offset: delta,
+        want_offset: want_offset, want_length: want_length, ok: true,
+        error_code: "", error_message: "")
+
+fn pack_window_bytes(w: PackWindow) -> [u8]:
+    """Exactly want_length bytes of the requested range, alignment handled."""
+    if not w.ok or w.address == 0:
+        return []
+    var out: [u8] = []
+    var i = 0
+    while i < w.want_length:
+        out.push((rt_ptr_read_u8(w.address, w.data_offset + i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn pack_window_unmap(w: PackWindow) -> bool:
+    if w.address == 0 or w.map_length <= 0:
+        return false
+    rt_munmap_raw(w.address, w.map_length) == 0
+
+# WILLNEED IS DELIBERATELY ABSENT. §15 says "Issue WILLNEED only for explicit
+# startup/preload closures", and there is no such closure to serve yet -- the
+# startup-preload path (§14.2 ChunksLoaded onward) is not implemented. Adding a
+# pack_window_willneed() now would also be untestable: no madvise extern is
+# registered in the interpreter, which is the engine the spec suite runs on, so
+# the function could only ever be asserted to exist, never to do anything. The
+# half of the policy this module DOES enforce is the load-bearing half and is
+# enforced by construction: no madvise call exists here at all, so no
+# whole-file MADV_SEQUENTIAL readahead can be issued on a pack.
+
+fn pack_read_range(path: text, offset: i64, length: i64) -> [u8]:
+    """Positioned read of exactly [offset, offset+length) -- a real pread.
+
+    This is the PRIMARY §15 mechanism and is what the index path uses: no
+    page-alignment constraint, no mapping, and no readahead of any kind. A
+    short read is a failure, not a truncated success: returning fewer bytes
+    than asked for would hand the caller a silently wrong directory.
+
+    Returns [] on any failure -- callers that need the reason should use
+    pack_window_map, which reports an error_code."""
+    if offset < 0 or length <= 0:
+        return []
+    if length > APKIO_MAX_RANGE_BYTES:
+        return []
+    val fsize = rt_file_size(path)
+    if fsize <= 0 or offset + length > fsize:
+        return []
+    val fd = rt_io_file_open(path, APKIO_MODE_READ)
+    if fd < 0:
+        return []
+    if rt_io_file_seek(fd, offset, APKIO_SEEK_SET) != offset:
+        _ = rt_io_file_close(fd)
+        return []
+    val bytes = rt_io_file_read(fd, length)
+    _ = rt_io_file_close(fd)
+    if bytes.len() != length:
+        return []
+    bytes
+
+fn pack_read_trailer(path: text, trailer_size: i64) -> [u8]:
+    """Read the fixed trailer without knowing the pack layout (§15 step 1)."""
+    if trailer_size <= 0:
+        return []
+    val fsize = rt_file_size(path)
+    if fsize < trailer_size:
+        return []
+    pack_read_range(path, fsize - trailer_size, trailer_size)
+
+fn pack_file_size(path: text) -> i64:
+    rt_file_size(path)
