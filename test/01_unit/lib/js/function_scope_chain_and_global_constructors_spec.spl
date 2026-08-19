@@ -1,0 +1,61 @@
+# Reproduce spec for the browser-session inline-handler failure
+# "[browser-session] ReferenceError: i is not defined / all is not defined"
+# (browser_session_textarea_lifecycle_spec, 2026-08-19).
+#
+# Root causes fixed:
+# 1. EnvironmentStack had no parent chain: a `for (var i=...)` inside a
+#    FUNCTION body declared `i` in the function env, but the loop condition
+#    was evaluated in a fresh child env whose lookup only checked itself and
+#    the global env — so `i` (and `all` in the document.getElementById shim)
+#    was "not defined" and loops in functions silently ran 0 iterations.
+# 2. The global String()/Number()/Boolean() conversion functions did not
+#    exist at all (the getElementById shim calls String(id)).
+
+use std.spec.*
+use std.js.engine.runtime.{JsRuntime, js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn eval_num(rt: JsRuntime, src: text) -> f64:
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.Number(n): n
+                _: -777.0
+        Err(e): -888.0
+
+fn eval_text(rt: JsRuntime, src: text) -> text:
+    match rt.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(s): s
+                _: "<non-string>"
+        Err(e): "<err:{e.message}>"
+
+describe "JS engine function scope chain and global constructors":
+
+    it "runs a for loop declared inside a function body":
+        val rt = js_runtime_with_default_logger("scope-spec")
+        val top = eval_num(rt, "var s=0; for (var i=0;i<3;i=i+1){ s=s+i; } s")
+        expect(top).to_equal(3.0)
+        val infn = eval_num(rt, "function h(){ var s=0; for (var i=0;i<3;i=i+1){ s=s+i; } return s; } h()")
+        expect(infn).to_equal(3.0)
+
+    it "resolves outer function locals from nested loop envs (getElementById shim shape)":
+        val rt = js_runtime_with_default_logger("scope-spec2")
+        val found = eval_num(rt,
+            "var q={}; q.f=function(id){ var all=[1,2,3]; " +
+            "for (var i=0;i<all.length;i=i+1){ if(all[i]===id){return i;} } " +
+            "return -1; }; q.f(2)")
+        expect(found).to_equal(1.0)
+
+    it "provides global String/Number/Boolean conversion functions":
+        val rt = js_runtime_with_default_logger("ctor-spec")
+        expect(eval_text(rt, "String(5)")).to_equal("5")
+        expect(eval_num(rt, "Number('4')+1")).to_equal(5.0)
+        val b = rt.eval("Boolean('x')")
+        match b:
+            Ok(v):
+                match v:
+                    JsValue.Boolean(flag): expect(flag).to_equal(true)
+                    _: fail("Boolean('x') did not return a boolean")
+            Err(e): fail("Boolean('x') errored: {e.message}")
