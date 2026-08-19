@@ -1,0 +1,118 @@
+# @cover src/lib/common/ui/layout_text_render.spl 80%
+# @tag: unit, ui, layout, text_render
+
+use std.spec
+use common.ui.access_types.{
+    UI_ACCESS_PROTOCOL_VERSION,
+    UiAccessNode,
+    UiAccessProp,
+    UiAccessSnapshot
+}
+use common.ui.widget_draw_cmds.{DrawCmd}
+use common.ui.layout_text_render.{
+    layout_tree_to_text,
+    draw_cmds_to_text,
+    layout_grid_to_text,
+    layout_text_diff
+}
+
+fn _node(widget_id: text, kind: text, text_value: text, x: i32, y: i32, w: i32, h: i32, child_ids: [text]) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: "main/" + widget_id,
+        surface_id: "main",
+        widget_id: widget_id,
+        kind: kind,
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: text_value,
+        props: [
+            UiAccessProp(key: "x", value: "{x}"),
+            UiAccessProp(key: "y", value: "{y}"),
+            UiAccessProp(key: "w", value: "{w}"),
+            UiAccessProp(key: "h", value: "{h}")
+        ],
+        child_ids: child_ids,
+        action_names: []
+    )
+
+fn _snapshot(nodes: [UiAccessNode]) -> UiAccessSnapshot:
+    UiAccessSnapshot(
+        protocol_version: UI_ACCESS_PROTOCOL_VERSION,
+        snapshot_revision: 0,
+        mode: "test",
+        active_surface: "main",
+        surfaces: [],
+        nodes: nodes,
+        recent_events: []
+    )
+
+fn _rect(id: text, x: i32, y: i32, w: i32, h: i32) -> DrawCmd:
+    DrawCmd(kind: "rect", widget_id: id, x: x, y: y, w: w, h: h, color: 0xFF112233u32, label: "", size: 0)
+
+describe "layout_text_render":
+
+    it "renders a snapshot as a stable indented outline":
+        val snapshot = _snapshot([
+            _node("root", "panel", "", 0, 0, 100, 60, ["main/a", "main/b"]),
+            _node("a", "button", "OK", 10, 30, 40, 20, []),
+            _node("b", "label", "Hello", 10, 5, 40, 10, [])
+        ])
+        val expected = "panel #root [0,0 100x60] \"\"\n" +
+            "  button #a [10,30 40x20] \"OK\"\n" +
+            "  label #b [10,5 40x10] \"Hello\""
+        expect(layout_tree_to_text(snapshot)).to_equal(expected)
+
+    it "orders multiple roots by (y, x) and truncates long content":
+        val long_text = "0123456789012345678901234567890123456789XYZ"
+        val snapshot = _snapshot([
+            _node("low", "panel", "", 0, 50, 10, 10, []),
+            _node("high", "label", long_text, 0, 0, 10, 10, [])
+        ])
+        val expected = "label #high [0,0 10x10] \"0123456789012345678901234567890123456789...\"\n" +
+            "panel #low [0,50 10x10] \"\""
+        expect(layout_tree_to_text(snapshot)).to_equal(expected)
+
+    it "renders draw cmds one normalized line each":
+        val cmds = [
+            _rect("bg", 0, 0, 100, 50),
+            DrawCmd(kind: "text", widget_id: "t", x: 5, y: 25, w: 0, h: 0, color: 0xFFE0E0E0u32, label: "Hi", size: 7)
+        ]
+        val expected = "rect #bg [0,0 100x50] color=#ff112233 \"\" size=0\n" +
+            "text #t [5,25 0x0] color=#ffe0e0e0 \"Hi\" size=7"
+        expect(draw_cmds_to_text(cmds)).to_equal(expected)
+
+    it "paints boxes onto an ascii grid with topmost overlap winning":
+        # World 100x40. A fills all; B covers the right half on top.
+        val cmds = [
+            _rect("a", 0, 0, 100, 40),
+            _rect("b", 50, 0, 50, 40)
+        ]
+        val expected = "AABB\nAABB"
+        expect(layout_grid_to_text(cmds, 4, 2)).to_equal(expected)
+
+    it "grid skips zero-area boxes and leaves empty cells dotted":
+        val cmds = [
+            _rect("a", 0, 0, 50, 20),
+            DrawCmd(kind: "text", widget_id: "t", x: 90, y: 30, w: 0, h: 0, color: 0u32, label: "x", size: 7)
+        ]
+        # World becomes 90x30 from the text cmd's position (max extent),
+        # box A covers x 0..50 of 90 => cols 0..1 of 4, y 0..20 of 30 => row 0 of 2.
+        expect(layout_grid_to_text(cmds, 4, 2)).to_equal("AA..\n....")
+
+    it "diff of identical renderings is empty":
+        val a = "line1\nline2"
+        expect(layout_text_diff(a, a)).to_equal("")
+
+    it "diff reports a moved box as a changed line with counts":
+        val before = "rect #a [0,0 10x10]\nrect #b [0,20 10x10]"
+        val after = "rect #a [0,0 10x10]\nrect #b [5,20 10x10]"
+        val expected = "diff: -1 +1\n" +
+            "- rect #b [0,20 10x10]\n" +
+            "+ rect #b [5,20 10x10]"
+        expect(layout_text_diff(before, after)).to_equal(expected)
+
+    it "diff reports pure additions and removals":
+        expect(layout_text_diff("a\nb", "a\nb\nc")).to_equal("diff: -0 +1\n+ c")
+        expect(layout_text_diff("a\nb\nc", "a\nc")).to_equal("diff: -1 +0\n- b")

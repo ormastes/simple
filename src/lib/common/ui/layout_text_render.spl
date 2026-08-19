@@ -1,0 +1,276 @@
+# layout_text_render.spl — Region/layout -> textual conversion debugging tool.
+#
+# Pure (no IO) helpers that turn a UI layout tree (UiAccessSnapshot) or a
+# flat DrawCmd list into a stable, diffable textual form, for comparing
+# Simple layout against external layout dumps (e.g. Chrome CDP) and for
+# debugging region placement.
+#
+# Public API:
+#   layout_tree_to_text(snapshot)             -> indented outline, one node/line
+#   draw_cmds_to_text(cmds)                   -> one normalized line per DrawCmd
+#   layout_grid_to_text(cmds, cols, rows)     -> coarse ASCII grid of boxes
+#   layout_text_diff(a, b)                    -> line-based diff of two renderings
+
+use common.ui.access_types.{UiAccessNode, UiAccessSnapshot}
+use common.ui.widget_draw_cmds.{DrawCmd}
+
+val LAYOUT_TEXT_MAX_CONTENT: i32 = 40
+val LAYOUT_GRID_LETTERS: text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+# =========================================================================
+# Small pure helpers
+# =========================================================================
+
+fn _layout_text_truncate(s: text, max_len: i32) -> text:
+    if s.len() <= max_len:
+        return s
+    s.substring(0, max_len) + "..."
+
+fn _layout_node_prop(node: UiAccessNode, key: text) -> text:
+    var i = 0
+    while i < node.props.len():
+        if node.props[i].key == key:
+            return node.props[i].value
+        i = i + 1
+    ""
+
+fn _layout_node_prop_int(node: UiAccessNode, key: text) -> i32:
+    val raw = _layout_node_prop(node, key)
+    if raw == "":
+        return 0
+    raw.to_i32()
+
+fn _layout_node_line(node: UiAccessNode, indent: text) -> text:
+    val x = _layout_node_prop_int(node, "x")
+    val y = _layout_node_prop_int(node, "y")
+    val w = _layout_node_prop_int(node, "w")
+    val h = _layout_node_prop_int(node, "h")
+    val content = _layout_text_truncate(node.text_value, LAYOUT_TEXT_MAX_CONTENT)
+    "{indent}{node.kind} #{node.widget_id} [{x},{y} {w}x{h}] \"{content}\""
+
+# =========================================================================
+# layout_tree_to_text
+# =========================================================================
+
+fn _layout_find_node(snapshot: UiAccessSnapshot, canonical_id: text) -> i32:
+    var i = 0
+    while i < snapshot.nodes.len():
+        if snapshot.nodes[i].canonical_id == canonical_id:
+            return i
+        i = i + 1
+    -1
+
+fn _layout_root_indices(snapshot: UiAccessSnapshot) -> [i32]:
+    # Roots are nodes that appear in no other node's child_ids.
+    val node_count = snapshot.nodes.len()
+    var is_child: [bool] = [false; node_count]
+    var i = 0
+    while i < node_count:
+        val node = snapshot.nodes[i]
+        var c = 0
+        while c < node.child_ids.len():
+            val child_idx = _layout_find_node(snapshot, node.child_ids[c])
+            if child_idx >= 0:
+                is_child[child_idx] = true
+            c = c + 1
+        i = i + 1
+    var roots: [i32] = []
+    i = 0
+    while i < node_count:
+        if not is_child[i]:
+            roots = roots.push(i)
+        i = i + 1
+    _layout_sort_indices_by_pos(snapshot, roots)
+
+fn _layout_sort_indices_by_pos(snapshot: UiAccessSnapshot, indices: [i32]) -> [i32]:
+    # Stable insertion sort by (y, x); document order preserved on ties.
+    var out = indices
+    var i = 1
+    while i < out.len():
+        val cur = out[i]
+        val cur_y = _layout_node_prop_int(snapshot.nodes[cur], "y")
+        val cur_x = _layout_node_prop_int(snapshot.nodes[cur], "x")
+        var j = i - 1
+        while j >= 0:
+            val prev = out[j]
+            val prev_y = _layout_node_prop_int(snapshot.nodes[prev], "y")
+            val prev_x = _layout_node_prop_int(snapshot.nodes[prev], "x")
+            if prev_y > cur_y or (prev_y == cur_y and prev_x > cur_x):
+                out[j + 1] = out[j]
+                j = j - 1
+            else:
+                break
+        out[j + 1] = cur
+        i = i + 1
+    out
+
+fn _layout_emit_node(snapshot: UiAccessSnapshot, idx: i32, depth: i32, visited: [bool], lines: [text]) -> [text]:
+    if visited[idx]:
+        return lines
+    visited[idx] = true
+    var indent = ""
+    var d = 0
+    while d < depth:
+        indent = indent + "  "
+        d = d + 1
+    var out = lines.push(_layout_node_line(snapshot.nodes[idx], indent))
+    val node = snapshot.nodes[idx]
+    var c = 0
+    while c < node.child_ids.len():
+        val child_idx = _layout_find_node(snapshot, node.child_ids[c])
+        if child_idx >= 0:
+            out = _layout_emit_node(snapshot, child_idx, depth + 1, visited, out)
+        c = c + 1
+    out
+
+fn layout_tree_to_text(snapshot: UiAccessSnapshot) -> text:
+    """Stable indented outline of a layout snapshot, one node per line.
+
+    Line format: `<kind> #<id> [x,y wxh] "<truncated text>"`, children
+    indented two spaces per level. Document order; root/tie ordering by
+    (y, x). Bounds are read from node props x/y/w/h when present."""
+    val roots = _layout_root_indices(snapshot)
+    var visited: [bool] = [false; snapshot.nodes.len()]
+    var lines: [text] = []
+    var r = 0
+    while r < roots.len():
+        lines = _layout_emit_node(snapshot, roots[r], 0, visited, lines)
+        r = r + 1
+    lines.join("\n")
+
+# =========================================================================
+# draw_cmds_to_text
+# =========================================================================
+
+fn _layout_hex8(value: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val nibble = ((value >> shift) & 0xFu32) as i32
+        out = out + digits.substring(nibble, nibble + 1)
+        shift = shift - 4
+    out
+
+fn draw_cmds_to_text(cmds: [DrawCmd]) -> text:
+    """One normalized line per DrawCmd, in list order.
+
+    Line format: `<kind> #<id> [x,y wxh] color=#aarrggbb "<label>" size=<n>`."""
+    var lines: [text] = []
+    var i = 0
+    while i < cmds.len():
+        val cmd = cmds[i]
+        val label = _layout_text_truncate(cmd.label, LAYOUT_TEXT_MAX_CONTENT)
+        lines = lines.push("{cmd.kind} #{cmd.widget_id} [{cmd.x},{cmd.y} {cmd.w}x{cmd.h}] color=#{_layout_hex8(cmd.color)} \"{label}\" size={cmd.size}")
+        i = i + 1
+    lines.join("\n")
+
+# =========================================================================
+# layout_grid_to_text
+# =========================================================================
+
+fn layout_grid_to_text(cmds: [DrawCmd], cols: i32, rows: i32) -> text:
+    """Coarse ASCII grid: map each cmd's bounding box onto a cols x rows
+    character grid. Box i paints letter A+(i mod 26); later (topmost) cmds
+    overwrite earlier ones. Empty cells are '.'. Zero-area boxes are skipped."""
+    if cols <= 0 or rows <= 0:
+        return ""
+    # World extent = union of boxes (at least 1x1).
+    var world_w = 1
+    var world_h = 1
+    var i = 0
+    while i < cmds.len():
+        val right = cmds[i].x + cmds[i].w
+        val bottom = cmds[i].y + cmds[i].h
+        if right > world_w:
+            world_w = right
+        if bottom > world_h:
+            world_h = bottom
+        i = i + 1
+    var grid: [text] = ["."; cols * rows]
+    i = 0
+    while i < cmds.len():
+        val cmd = cmds[i]
+        if cmd.w > 0 and cmd.h > 0:
+            val letter_idx = i % 26
+            val letter = LAYOUT_GRID_LETTERS.substring(letter_idx, letter_idx + 1)
+            var c0 = cmd.x * cols / world_w
+            var c1 = (cmd.x + cmd.w) * cols / world_w - 1
+            var r0 = cmd.y * rows / world_h
+            var r1 = (cmd.y + cmd.h) * rows / world_h - 1
+            if c1 < c0:
+                c1 = c0
+            if r1 < r0:
+                r1 = r0
+            var row = r0
+            while row <= r1 and row < rows:
+                var col = c0
+                while col <= c1 and col < cols:
+                    grid[row * cols + col] = letter
+                    col = col + 1
+                row = row + 1
+        i = i + 1
+    var lines: [text] = []
+    var row = 0
+    while row < rows:
+        var line = ""
+        var col = 0
+        while col < cols:
+            line = line + grid[row * cols + col]
+            col = col + 1
+        lines = lines.push(line)
+        row = row + 1
+    lines.join("\n")
+
+# =========================================================================
+# layout_text_diff
+# =========================================================================
+
+fn _layout_split_lines(s: text) -> [text]:
+    if s == "":
+        return []
+    s.split("\n")
+
+fn layout_text_diff(a: text, b: text) -> text:
+    """Line-based LCS diff of two textual renderings.
+
+    Identical inputs -> empty text. Otherwise a header
+    `diff: -<removed> +<added>` followed by `- ` / `+ ` lines in order."""
+    if a == b:
+        return ""
+    val la = _layout_split_lines(a)
+    val lb = _layout_split_lines(b)
+    val n = la.len()
+    val m = lb.len()
+    # LCS length table, flat (n+1) x (m+1), built bottom-up.
+    var table: [i32] = [0; (n + 1) * (m + 1)]
+    var i = n - 1
+    while i >= 0:
+        var j = m - 1
+        while j >= 0:
+            if la[i] == lb[j]:
+                table[i * (m + 1) + j] = table[(i + 1) * (m + 1) + j + 1] + 1
+            else:
+                val down = table[(i + 1) * (m + 1) + j]
+                val right = table[i * (m + 1) + j + 1]
+                table[i * (m + 1) + j] = if down > right: down else: right
+            j = j - 1
+        i = i - 1
+    var lines: [text] = []
+    var removed = 0
+    var added = 0
+    var ai = 0
+    var bj = 0
+    while ai < n or bj < m:
+        if ai < n and bj < m and la[ai] == lb[bj]:
+            ai = ai + 1
+            bj = bj + 1
+        elif bj < m and (ai >= n or table[ai * (m + 1) + bj + 1] > table[(ai + 1) * (m + 1) + bj]):
+            lines = lines.push("+ " + lb[bj])
+            added = added + 1
+            bj = bj + 1
+        else:
+            lines = lines.push("- " + la[ai])
+            removed = removed + 1
+            ai = ai + 1
+    "diff: -{removed} +{added}\n" + lines.join("\n")
