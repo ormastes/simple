@@ -77,6 +77,17 @@ SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$COMPILER" native-buil
 
 test -s "$OUTPUT"
 file "$OUTPUT" | grep -Eq 'ELF 64-bit.*x86-64'
+command -v llvm-objcopy >/dev/null 2>&1 || { echo "error: llvm-objcopy missing" >&2; exit 1; }
+command -v nm >/dev/null 2>&1 || { echo "error: nm missing" >&2; exit 1; }
+ENTRY_HEX="$(nm -n "$OUTPUT" | awk '$3=="_entry32" {print $1; exit}')"
+case "$ENTRY_HEX" in ''|*[!0-9A-Fa-f]*) echo "error: missing or invalid _entry32 symbol" >&2; exit 1 ;; esac
+# native-build's simple-core runtime contributes a hosted `_start` and may pass
+# it to the linker after the script's ENTRY directive. Normalize the ELF header
+# to the board's real 32-bit Multiboot entry; the loader and receipt verify the
+# exact symbol/address rather than trusting link-argument order.
+llvm-objcopy --set-start="0x$ENTRY_HEX" "$OUTPUT"
+ELF_ENTRY="$(readelf -h "$OUTPUT" | awk -F: '/Entry point address/ {gsub(/^[[:space:]]+/, "", $2); print $2; exit}')"
+test "$((ELF_ENTRY))" -eq "$((0x$ENTRY_HEX))" || { echo "error: ELF entry normalization failed" >&2; exit 1; }
 
 TMP="$RECEIPT.tmp.$$"
 trap 'rm -f "$TMP"' EXIT HUP INT TERM
@@ -96,6 +107,9 @@ trap 'rm -f "$TMP"' EXIT HUP INT TERM
     echo runtime_archive_sha256="$(sha256sum "$CORE_RUNTIME" | awk '{print $1}')"
     echo entry_source="$ENTRY"
     echo entry_source_sha256="$(sha256sum "$ENTRY" | awk '{print $1}')"
+    echo entry_symbol=_entry32
+    echo elf_entry="$ELF_ENTRY"
+    echo elf_entry_normalized=1
     echo linker="$LINKER"
     echo linker_sha256="$(sha256sum "$LINKER" | awk '{print $1}')"
     echo root_entries=bin,etc,README.txt

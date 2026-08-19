@@ -55,6 +55,9 @@ OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/x86_64_board_usb}
 KERNEL_ELF=${KERNEL_ELF:-$REPO_ROOT/build/os/elfexec/kernel.elf}
 DISK_MB=${DISK_MB:-256}
 ESP_MB=${ESP_MB:-64}
+LOADER_C=$REPO_ROOT/examples/09_embedded/simple_os/arch/x86_64/boot/multiboot2_elf64_loader.c
+LOADER_S=$REPO_ROOT/examples/09_embedded/simple_os/arch/x86_64/boot/multiboot2_elf64_loader.S
+LOADER_LD=$REPO_ROOT/examples/09_embedded/simple_os/arch/x86_64/boot/multiboot2_elf64_loader.ld
 
 die() { printf 'build-x86_64-board-usb: ERROR — %s\n' "$1" >&2; exit 1; }
 
@@ -63,15 +66,39 @@ MKFS=$(command -v mkfs.vfat 2>/dev/null || echo /usr/sbin/mkfs.vfat)
 [ -x "$MKFS" ] || command -v mkfs.vfat >/dev/null 2>&1 || die "mkfs.vfat not available (install dosfstools)"
 command -v sgdisk >/dev/null 2>&1 || die "sgdisk not available (install gdisk)"
 command -v grub-file >/dev/null 2>&1 || die "grub-file missing (install grub2-common)"
+command -v clang >/dev/null 2>&1 || die "clang missing for the ELF32 loader shim"
+command -v ld.lld >/dev/null 2>&1 || die "ld.lld missing for the ELF32 loader shim"
 [ -s "$KERNEL_ELF" ] || die "missing kernel ELF $KERNEL_ELF (set KERNEL_ELF=... or build the x86_64 board kernel lane first)"
 grub-file --is-x86-multiboot2 "$KERNEL_ELF" || die "kernel is not a valid x86 Multiboot2 image"
+[ -s "$LOADER_C" ] && [ -s "$LOADER_S" ] && [ -s "$LOADER_LD" ] || die "ELF32 Multiboot2 loader sources missing"
 
 mkdir -p "$OUT_DIR"
 DISK="$OUT_DIR/board-usb.img"
 ESP_STAGE="$OUT_DIR/esp-stage"
 EFIAPP="$ESP_STAGE/EFI/BOOT/BOOTX64.EFI"
+LOADER_OBJ_DIR="$OUT_DIR/multiboot2-loader-objects"
+LOADER_ELF="$OUT_DIR/multiboot2-elf64-loader.elf"
 
 echo "[usb] kernel  $KERNEL_ELF ($(wc -c <"$KERNEL_ELF") bytes)"
+
+# GRUB's x86_64-efi direct handoff to this ELF64 kernel does not enter the
+# kernel's 32-bit transition stub. Build a minimal ELF32 Multiboot2 payload that
+# validates and loads the ELF64 file supplied as a module, then jumps to its
+# reviewed _entry32 path.
+rm -rf "$LOADER_OBJ_DIR"
+mkdir -p "$LOADER_OBJ_DIR"
+clang --target=i686-unknown-none-elf -m32 -ffreestanding -fno-builtin \
+    -fno-stack-protector -fno-pic -fno-pie -fno-vectorize -fno-slp-vectorize \
+    -Os -Wall -Wextra -Werror -c "$LOADER_C" -o "$LOADER_OBJ_DIR/loader.o" \
+    || die "could not compile ELF32 loader C"
+clang --target=i686-unknown-none-elf -m32 -ffreestanding -fno-pic -fno-pie \
+    -c "$LOADER_S" -o "$LOADER_OBJ_DIR/entry.o" \
+    || die "could not compile ELF32 loader entry"
+ld.lld -m elf_i386 -nostdlib -static -T "$LOADER_LD" \
+    "$LOADER_OBJ_DIR/entry.o" "$LOADER_OBJ_DIR/loader.o" -o "$LOADER_ELF" \
+    || die "could not link ELF32 Multiboot2 loader"
+grub-file --is-x86-multiboot2 "$LOADER_ELF" || die "loader shim is not a valid x86 Multiboot2 image"
+file "$LOADER_ELF" | grep -q 'ELF 32-bit.*Intel 80386' || die "loader shim is not ELF32 i386"
 
 # --- 1. Build the self-contained BOOTX64.EFI (kernel embedded via memdisk,
 #        same recipe scp_retrieve_over_ssh_uefi.shs already proves boots
@@ -80,6 +107,7 @@ rm -rf "$ESP_STAGE"; mkdir -p "$ESP_STAGE/EFI/BOOT"
 MEMDISK_DIR=$(mktemp -d)
 mkdir -p "$MEMDISK_DIR/boot/grub"
 cp "$KERNEL_ELF" "$MEMDISK_DIR/boot/kernel.elf"
+cp "$LOADER_ELF" "$MEMDISK_DIR/boot/loader.elf"
 cat > "$MEMDISK_DIR/boot/grub/grub.cfg" <<EOF
 serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1
 terminal_input serial
@@ -87,7 +115,8 @@ terminal_output serial
 set timeout=0
 set gfxpayload=text
 echo UP2 loader-ready
-multiboot2 /boot/kernel.elf
+multiboot2 /boot/loader.elf
+module2 /boot/kernel.elf simpleos-kernel
 echo UP2 kernel-admitted
 boot
 EOF
@@ -95,6 +124,7 @@ echo "[usb] building self-contained BOOTX64.EFI (embeds kernel via memdisk) ..."
 grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
     --directory=/usr/lib/grub/x86_64-efi \
     "/boot/grub/grub.cfg=$MEMDISK_DIR/boot/grub/grub.cfg" \
+    "/boot/loader.elf=$MEMDISK_DIR/boot/loader.elf" \
     "/boot/kernel.elf=$MEMDISK_DIR/boot/kernel.elf" \
     2>&1 | sed 's/^/[grub-mkstandalone] /' \
     || die "grub-mkstandalone failed"
