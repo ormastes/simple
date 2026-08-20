@@ -1,0 +1,131 @@
+#!/bin/sh
+# Fences: `!` unwrap of an optional CLASS followed by a field access must not
+# crash, and must yield the field.
+#
+# Incident 2026-08-20: `bin/simple run` SEGV'd (rc=139, no output) on this
+# shape, taking `b_class_optional_field` out of the class-identity seed matrix
+# and blocking every push behind
+# `scripts/check/check-class-identity-seed-matrix.shs`
+# (`FAIL — incomplete matrix over 11 discovered case(s)`).
+# Root cause + fix: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
+#
+# WHY A PROBE AND NOT A SPEC. A spec body may not reach the JIT at all: written
+# as a spec, this reproduce printed "0 failures" on a provably broken binary.
+# The defect is in JIT-emitted machine code (gdb put the fault inside
+# `JitCompiler::call_i64_void`'s callee), so the only honest gate runs the
+# fixture through `run` and reads the process exit status.
+#
+# EXIT STATUS IS READ DIRECTLY INTO A VARIABLE ON THE LINE AFTER THE
+# INVOCATION, never through a pipe — a pipeline's `$?` is the last stage's
+# status and has produced false greens in this repo.
+#
+# SCOPE. Checks 1 and 2 (unwrap-then-field, from a local and from a field) are
+# asserted on BOTH engines. Check 3 (the optional holds the REFERENCE) is
+# asserted on the JIT only: the seed interpreter answers COPY here, which is
+# the separately-tracked class-value-identity divergence
+# (doc/08_tracking/bug/interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10.md,
+# canonical record interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md).
+# Asserting it here would make this gate red for someone else's open bug, so
+# the interpreter's reading is REPORTED instead of asserted.
+#
+# Usage: sh scripts/check/check-optional-class-unwrap-field.shs
+#        SIMPLE_BIN=path/to/simple sh scripts/check/check-optional-class-unwrap-field.shs
+# Exit:  0 = PASS, 1 = FAIL, 2 = ERROR (nothing was checked)
+
+set -u
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || exit 2
+
+BIN="${SIMPLE_BIN:-bin/simple}"
+FIXTURE=test/fixtures/repro/compiler/optional_class_unwrap/optional_class_unwrap_field.spl
+TIMEOUT="${SIMPLE_TIMEOUT:-120}"
+
+if [ ! -x "$BIN" ] && ! command -v "$BIN" >/dev/null 2>&1; then
+    printf 'ERROR — nothing was checked (SIMPLE_BIN=%s is not executable)\n' "$BIN"
+    exit 2
+fi
+if [ ! -f "$FIXTURE" ]; then
+    printf 'ERROR — nothing was checked (fixture missing: %s)\n' "$FIXTURE"
+    exit 2
+fi
+
+# Provenance: both readings come from whatever $SIMPLE_BIN is, so a reader must
+# be able to tell WHICH binary was measured.
+printf 'binary:   %s\n' "$BIN"
+printf 'resolved: %s\n' "$(readlink -f "$BIN" 2>/dev/null || printf '%s' "$BIN")"
+printf 'identity: %s\n' "$(stat -c '%s bytes, %y' "$(readlink -f "$BIN" 2>/dev/null || printf '%s' "$BIN")" 2>/dev/null)"
+printf '\n'
+
+CHECKED=0
+OFFENDERS=""
+
+run_engine() {
+    # $1 = engine label, $2 = 1 to assert check 3, else report only
+    label=$1
+    assert_ref=$2
+
+    if [ "$label" = interp ]; then
+        out=$(SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpret \
+              timeout "$TIMEOUT" "$BIN" run "$FIXTURE" 2>&1)
+        rc=$?
+    else
+        out=$(SIMPLE_BOOTSTRAP=1 timeout "$TIMEOUT" "$BIN" run "$FIXTURE" 2>&1)
+        rc=$?
+    fi
+    CHECKED=$((CHECKED + 1))
+
+    # A crash is the incident's exact signature and is never a skip.
+    if [ "$rc" -ge 128 ] || [ "$rc" -eq 124 ]; then
+        printf '%-8s | CRASHED rc=%s (139=SEGV, 134=abort, 124=timeout)\n' "$label" "$rc"
+        OFFENDERS="$OFFENDERS ${label}:crash(rc=$rc)"
+        return
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf '%-8s | non-zero exit rc=%s\n' "$label" "$rc"
+        OFFENDERS="$OFFENDERS ${label}:exit(rc=$rc)"
+        return
+    fi
+    if ! printf '%s\n' "$out" | grep -q '^REPRO OK$'; then
+        printf '%-8s | ran to rc=0 but never printed REPRO OK (truncated run)\n' "$label"
+        OFFENDERS="$OFFENDERS ${label}:no-terminator"
+        return
+    fi
+
+    for check in local-unwrap-field field-unwrap-field; do
+        if printf '%s\n' "$out" | grep -q "^OK $check$"; then
+            printf '%-8s | OK   %s\n' "$label" "$check"
+        else
+            printf '%-8s | FAIL %s -- %s\n' "$label" "$check" \
+                "$(printf '%s\n' "$out" | grep "$check" | head -1)"
+            OFFENDERS="$OFFENDERS ${label}:${check}"
+        fi
+    done
+
+    ref_line=$(printf '%s\n' "$out" | grep 'optional-holds-reference' | head -1)
+    if printf '%s\n' "$out" | grep -q '^OK optional-holds-reference$'; then
+        printf '%-8s | OK   optional-holds-reference\n' "$label"
+    elif [ "$assert_ref" = 1 ]; then
+        printf '%-8s | FAIL optional-holds-reference -- %s\n' "$label" "$ref_line"
+        OFFENDERS="$OFFENDERS ${label}:optional-holds-reference"
+    else
+        printf '%-8s | note optional-holds-reference not held -- %s\n' "$label" "$ref_line"
+        printf '%-8s |      (separately tracked class-value-identity divergence, not asserted here)\n' "$label"
+    fi
+}
+
+printf '%-8s | result\n' "engine"
+printf -- '---------+------------------------------------------------------\n'
+run_engine jit 1
+run_engine interp 0
+printf '\n'
+
+if [ "$CHECKED" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (0 engines executed)\n'
+    exit 2
+fi
+if [ -n "$OFFENDERS" ]; then
+    printf 'FAIL — %s engine(s) executed, offender(s):%s\n' "$CHECKED" "$OFFENDERS"
+    exit 1
+fi
+printf 'PASS — %s engine(s) executed, 0 crashes, unwrap-then-field holds\n' "$CHECKED"
+exit 0

@@ -2386,6 +2386,32 @@ impl Lowerer {
                         ty: TypeId::ANY,
                     });
                 }
+
+                // Same defect class, class/struct pointee (case B of the
+                // class-identity corpus). A nullable CLASS (`CellB?`) is also
+                // `HirType::Pointer { inner }` and is NOT a Result/Option enum
+                // either: its runtime value is the object reference itself,
+                // with nil as the absent case — which is exactly why `m.?`
+                // (a nil test) already worked. Routing it through
+                // `rt_enum_payload` below asked a plain object pointer for an
+                // enum payload; the JIT took whatever word came back as a live
+                // reference, and the next field access dereferenced it and
+                // SEGV'd the process.
+                // Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
+                // Unwrapping is the identity on the value; only the static type
+                // narrows from `T?` to `T`. Report `pointee` (NOT `ANY` as in
+                // the scalar case above): the word is a real object reference,
+                // not a tagged scalar, and the concrete type is what lets the
+                // following `.field` resolve against the right layout.
+                if matches!(
+                    self.module.types.get(pointee),
+                    Some(HirType::Struct { .. })
+                ) {
+                    return Ok(HirExpr {
+                        kind: inner_hir.kind,
+                        ty: pointee,
+                    });
+                }
             }
         }
 

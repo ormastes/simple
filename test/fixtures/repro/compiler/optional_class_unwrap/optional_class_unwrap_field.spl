@@ -1,0 +1,56 @@
+# Reproduce: `!` unwrap of an optional CLASS, followed by a field access.
+#
+# Pre-fix this SEGV'd the process (rc=139) under the seed JIT, with no output
+# at all — the crash is inside JIT-emitted machine code, not in the compiler.
+# `x.?` already worked (it is a nil test), so only the unwrap path was wrong.
+#
+# A nullable class is `HirType::Pointer { inner: Struct }` whose runtime value
+# IS the object reference, with nil as the absent case. `lower_try` only
+# special-cased SCALAR pointees, so a class pointee fell through to the
+# Result/Option enum path and asked a plain object pointer for an
+# `rt_enum_payload` — the returned garbage word was then dereferenced by the
+# field access.
+#
+# Bug: doc/08_tracking/bug/jit_optional_class_unwrap_field_access_segv_2026-08-20.md
+#
+# MUST be run as a PROBE (`simple run`), never wrapped in a spec: a spec body
+# may not reach the JIT at all and will report "0 failures" on a broken binary.
+# Expected stdout, both engines: three OK lines and then "REPRO OK".
+
+class Cell:
+    n: i64
+
+class Holder:
+    maybe: Cell?
+
+fn main():
+    # 1. optional LOCAL: unwrap then read a field
+    val a = Cell(n: 1)
+    val oa: Cell? = a
+    val ra = oa!.n
+    if ra == 1:
+        print "OK local-unwrap-field"
+    else:
+        print "FAIL local-unwrap-field got={ra}"
+
+    # 2. optional FIELD: unwrap then read a field
+    val b = Cell(n: 2)
+    val hb = Holder(maybe: b)
+    val mb = hb.maybe
+    val rb = if mb.? : mb!.n else: -1
+    if rb == 2:
+        print "OK field-unwrap-field"
+    else:
+        print "FAIL field-unwrap-field got={rb}"
+
+    # 3. identity: the optional must hold the REFERENCE, not a copy
+    val c = Cell(n: 3)
+    val hc = Holder(maybe: c)
+    c.n = 33
+    val rc = hc.maybe!.n
+    if rc == 33:
+        print "OK optional-holds-reference"
+    else:
+        print "FAIL optional-holds-reference got={rc}"
+
+    print "REPRO OK"
