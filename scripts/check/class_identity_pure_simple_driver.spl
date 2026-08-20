@@ -132,8 +132,7 @@ use compiler.frontend.core.interpreter.*
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(name: text) -> text
 
 fn main():
     print "[driver] engine = pure-Simple frontend tree-walk interpreter"
@@ -152,11 +151,30 @@ fn main():
         "j_struct_param_binding.spl",
         "k_struct_method_returned.spl",
     ]
+    # ONE CASE PER PROCESS when CLASS_IDENTITY_CASE is set.
+    #
+    # `core_jit_interpret` is NOT re-entrant: a second call in the same process
+    # sees the first call's leftover interpreter globals, and the damage is not
+    # limited to a missing answer -- it silently produces a WRONG one. Measured
+    # 2026-08-20 on this driver: case G alone prints VAL (correct), but running
+    # case C first makes the very same case G print ALIAS(n=10) -- i.e. `got ==
+    # 10` evaluated FALSE while got was 10. Running A first makes G die with
+    # rc=-1, and running B first kills the process outright with
+    # "array index out of bounds: index is 25 but length is 20".
+    #
+    # So the whole-corpus loop below cannot be trusted: it is how the matrix
+    # lost 4 of 11 readings, and the 7 it kept were of unknown validity. The
+    # guard now invokes this driver once per case; each verdict is then produced
+    # by a fresh process, which is the only configuration measured to be
+    # correct. The loop is retained for manual whole-corpus runs.
+    # Re-entrancy is filed as a real interpreter defect, not fixed here.
+    val only = rt_env_get("CLASS_IDENTITY_CASE") ?? ""
     var i = 0
     while i < names.len():
-        val path = dir + names[i]
-        val src = rt_file_read_text(path)
-        val rc = core_jit_interpret(src, path, 999999)
-        print "[case] {names[i]} rc={rc}"
+        if only == "" or only == names[i]:
+            val path = dir + names[i]
+            val src = rt_file_read_text(path)
+            val rc = core_jit_interpret(src, path, 999999)
+            print "[case] {names[i]} rc={rc}"
         i = i + 1
     print "[driver] done"

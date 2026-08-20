@@ -80,14 +80,33 @@ printf '%s\n' "== pure-Simple frontend interpreter lane (this takes a while) =="
 # initialised. Copying out is a WORKAROUND for that defect, not a preference.
 # Filed in the S2 section of
 # doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md.
+#
+# ONE DRIVER PROCESS PER CASE (changed 2026-08-20). The driver used to answer
+# the whole corpus in a single process, and that was measured to be not merely
+# incomplete but UNSOUND: `core_jit_interpret` is not re-entrant, so a second
+# eval in the same process inherits the first's interpreter globals. Case G
+# alone prints VAL; run case C first and the same case G prints ALIAS(n=10)
+# -- `got == 10` evaluating FALSE with got=10. Case B first killed the process
+# with "array index out of bounds". That cost 4 of 11 readings AND left the
+# surviving 7 unverifiable. Each case now gets a fresh process, the only
+# configuration measured to reproduce the single-case answers. The per-case
+# timeout is PURE_TIMEOUT; the re-entrancy defect itself is filed, not papered
+# over here.
 cp "$DRIVER" "$TMP/driver.spl" || exit 2
-SIMPLE_MODULE_LIMIT="$LIMIT" SIMPLE_NO_JIT=1 \
-    timeout "$PURE_TIMEOUT" "$BIN" run "$TMP/driver.spl" > "$TMP/pure.out" 2>&1
-driver_exit=$?
-printf '%s\n' "   driver exit: $driver_exit"
+: > "$TMP/pure.out"
+driver_exit=0
+for f in "$CASE_DIR"/*.spl; do
+    [ -e "$f" ] || continue
+    CLASS_IDENTITY_CASE="$(basename "$f")" SIMPLE_MODULE_LIMIT="$LIMIT" SIMPLE_NO_JIT=1 \
+        timeout "$PURE_TIMEOUT" "$BIN" run "$TMP/driver.spl" >> "$TMP/pure.out" 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] && driver_exit=$rc
+    printf '%s\n' "   $(basename "$f" .spl): exit $rc"
+done
+printf '%s\n' "   worst driver exit: $driver_exit"
 case "$driver_exit" in
-    124) printf '%s\n' "   NOTE: driver hit the ${PURE_TIMEOUT}s timeout — the pure lane is truncated" ;;
-    143) printf '%s\n' "   NOTE: driver took SIGTERM — the pure lane is truncated" ;;
+    124) printf '%s\n' "   NOTE: a driver hit the ${PURE_TIMEOUT}s timeout — the pure lane is truncated" ;;
+    143) printf '%s\n' "   NOTE: a driver took SIGTERM — the pure lane is truncated" ;;
 esac
 
 printf '\n%-28s | %-24s | %-24s | %s\n' "case" "seedJIT" "seedINTERP" "pureSIMPLE"
