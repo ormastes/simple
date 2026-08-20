@@ -90,9 +90,70 @@ dynamic-init ordering). Measured on the fixed build, strict JIT:
   => 2.25x vs C (from 19,544 us with the copy mitigation; 82,911 at session
   start — a 6.4x total improvement, 14.4x -> 2.25x).
 
+## COMPILER FIX #3 (2026-08-20): unannotated array-literal module vals — the LAST slow/wrong literal shape
+
+The remaining "array LITERAL is CORRECT but ~73-80 ns/read" row above was
+mis-attributed: the split is not literal-vs-fn-call, it is **annotated vs
+unannotated**. `val T: [i64] = [...]` was already fast and correct; `val T =
+[...]` (no annotation) registered the global as ANY, which both forces the
+boxed dispatch path AND makes `record_const_array_init` derive
+`element_type = ANY`, so elements are consumed as raw i64 without unboxing.
+
+Fix: `module_pass.rs` now infers a concrete `[i64]`/`[text]` type for an
+unannotated module-level array literal whose elements are all const-evaluable,
+in all three global-registration arms (`Node::Let`, `Node::Static`,
+`Node::Const`). New helper `infer_const_array_type`. Heterogeneous/dynamic
+literals keep the previous ANY behaviour.
+
+A/B on two builds of the same tree differing only by this hunk
+(`SIMPLE_JIT_STRICT=1`, 1M indexed reads, checksum must be 27500000):
+
+| row | before | after |
+|---|---|---|
+| local_control | 4,903 us / OK | 4,637 us / OK |
+| module_val_annotated | 4,901 us / OK | 4,965 us / OK |
+| **module_val_unannotated** | **47,390 us / GARBAGE** | **4,387 us / OK** |
+| module_val_typed_fn_init | 4,367 us / OK | 4,633 us / OK |
+
+=> 10.8x faster and value-correct. Reproduce benchmark shipped at
+`src/app/test/bench/bench_module_val_index.spl`. Regression: 8 targeted
+global/array/const unit specs green on the fixed binary.
+
+STILL OPEN (distinct shape, not fixed here): `val T = make()` where the callee
+has **no declared return type** stays ANY and still returns garbage (measured
+7,396 -> 7,074 us, checksum wrong on both). Fix #2 only inherits a *declared*
+return type; inferring it from the callee's body is a separate change.
+
+NOT DEPLOYED: this fix is in the working tree only. `bin/simple` still carries
+the pre-fix seed, so `gzip/crc.spl`'s `_table_copy()` mitigation must stay.
+
 DEPLOYMENT DEPENDENCY: gzip/crc.spl keeps `_table_copy()` until a compiler
 carrying this fix is DEPLOYED — on the current deployed binary, direct
 module-val reads still produce silently wrong values in the JIT lane. Also
 requires the callee to declare its return type: `fn crc32_table():` (untyped)
 must become `-> [i64]` when the switch happens. Prereqs also include the
 all-dynamic-inits fix (previous section) for multi-module units.
+
+## Exposure scan (2026-08-20, main session)
+
+The garbage-value half of this defect is a CORRECTNESS landmine, not just a
+perf gap, so the exposed population was counted rather than left implicit.
+`/usr/bin/grep -rnE '^(pub )?val [A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*\[' src/ --include=*.spl`
+returns **129 module-level unannotated `val` array literals** (anchored to
+column 0 — the unanchored variant returns 1150, but that sweeps in function
+locals, which are unaffected).
+
+Notable among them, and the reason this is filed as more than a benchmark
+result: `src/lib/common/bcrypt/types.spl:36,49,117,185,253` — the Blowfish
+`P`/`S0`-`S3` init tables. On the currently DEPLOYED (pre-fix) binary those
+read as undecoded raw i64 in the JIT lane, which would silently produce wrong
+hashes rather than fail loudly. Other hits include
+`js/engine/module_loader.spl:27` (`CORE_MODULES`) and
+`notebook/gpu_mode_resolver.spl:69` (`GPU_AUTO_PROBE_ORDER`).
+
+The compiler fix above covers these: all-const-evaluable `i64`/`text` literals
+now infer `[i64]`/`[text]` instead of ANY. They remain exposed only until a
+carrying compiler is deployed — see NOT DEPLOYED above. No source change was
+made to the 129 sites; annotating them is a viable belt-and-braces mitigation
+if a deploy stays blocked, but was not done here (129-site churn against a
+fix that already addresses the class).

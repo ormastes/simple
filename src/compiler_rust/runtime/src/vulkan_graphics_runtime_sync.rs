@@ -42,6 +42,13 @@ pub extern "C" fn rt_vulkan_create_fence() -> i64 {
 pub extern "C" fn rt_vulkan_destroy_fence(fence: i64) -> i64 {
     let mut state = STATE.lock();
     if state.fences.remove(&fence).is_some() {
+        return 1;
+    }
+    // A no-wait submit's fence is owned by the quarantine and must NOT be
+    // destroyed here — the GPU may still be using it. Revoking the caller's
+    // handle is the correct "destroy" for that case; the fence and its command
+    // buffer are freed by `clean_quarantined_compute` once the device is idle.
+    if state.release_quarantined_wait_handle(fence) {
         1
     } else {
         0
@@ -60,7 +67,11 @@ pub extern "C" fn rt_vulkan_destroy_fence(_fence: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_wait_fence(fence: i64, timeout_ns: i64) -> i64 {
     let state = STATE.lock();
-    let f = match state.fences.get(&fence) {
+    // Resolves both plain fences and the pending fence of a non-blocking
+    // `rt_vulkan_submit_no_wait` submission, whose command buffer is still
+    // quarantined. Looking only in `state.fences` made every no-wait handle
+    // unfindable, so the caller's timeout could never be applied to anything.
+    let f = match state.fence_by_handle(fence) {
         Some(f) => f,
         None => return 0,
     };

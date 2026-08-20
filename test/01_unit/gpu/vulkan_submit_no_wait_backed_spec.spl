@@ -1,0 +1,40 @@
+# Device-free contract spec for the non-blocking Vulkan compute submit.
+#
+# Bug: doc/08_tracking/bug/
+# vulkan_submit_and_wait_fence_blocks_unconditionally_no_nonblocking_submit_2026-08-07.md
+#
+# What this CAN prove without a GPU:
+#   1. `rt_vulkan_submit_no_wait` is a REAL, runtime-backed extern. An extern
+#      with no runtime backing silently returns nil in this compiler, so a
+#      concrete i64 result is the evidence that the symbol is wired end to end
+#      (runtime_symbols + runtime_sffi + interpreter_extern + the runtime fn).
+#   2. Its documented invalid-input contract: handle 0 and unknown command
+#      handles yield 0 ("submit failed"), never a hang and never a fence.
+#
+# What this CANNOT prove without a GPU: that a real submitted fence is still
+# PENDING when the handle is returned, i.e. that a tight `timeout_ms` now
+# genuinely fires. That needs a live device and is covered by
+# test/02_integration/gpu_lane/vulkan_lane_session_spec.spl.
+
+use std.spipe.*
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_submit_no_wait}
+
+describe "rt_vulkan_submit_no_wait device-free contract":
+    """
+    Proves the non-blocking submit extern is genuinely runtime-backed and
+    honours its invalid-input contract on a host with no Vulkan device.
+    """
+
+    it "should be a real backed extern returning a concrete failure code for handle 0":
+        step("Submit with the null command handle")
+        val fence = vulkan_sffi_submit_no_wait(0)
+
+        step("A backed extern returns a concrete 0; an unbacked one returns nil")
+        expect(fence).to_equal(0)
+
+    it "should refuse an unknown command handle instead of fabricating a fence":
+        step("Submit a command handle that was never begun")
+        val fence = vulkan_sffi_submit_no_wait(0x7FFF0000)
+
+        step("No fence is issued")
+        expect(fence).to_equal(0)

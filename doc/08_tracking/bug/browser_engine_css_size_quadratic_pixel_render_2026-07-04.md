@@ -325,3 +325,109 @@ pure-Simple scan.
   so it pegs a core after the first paint. Caching the parsed `Rules` keyed on
   the CSS content hash (allowed: parse artifact, NOT final pixels) makes
   frames 2..N instant. High-value follow-up for live smoothness.
+
+## 2026-08-20 — class/id selector gate narrowed; spec de-greenwashed
+
+**Deliverable 1 (heuristic gate).** `_style_block_has_class_or_id_selector`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl:879`)
+returned `true` for ANY `.` or `#` anywhere in a `<style>` selector, so every
+class- or id-styled page was pushed onto the full layout/paint path — even
+though `_style_rule_block_color` (:838-864) already resolves `.class`, `#id`
+and `tag.class` rules itself. The gate now asks whether each class/id selector
+is one the heuristic can actually resolve against the first visual block
+(`_selector_token_is_resolvable` / `_selector_group_is_resolvable`, inserted at
+:879). Anything with a combinator, pseudo-class, attribute or functional form,
+or naming a foreign class/id, still routes to the real renderer — deliberately
+conservative: only the first class name is accepted, matching what
+`_first_class_name` feeds the heuristic.
+
+**Deliverable 2 (spec).** The hard-coded widget-id fast path and
+`_is_production_parity_widget_html` named in the "Critical audit finding"
+section above are **already gone** from the tree (grep: zero hits) — that half
+of the greenwash was removed by a later refactor; the stale `:775-786` routing
+line above refers to attribute-selector code today. What remained was a spec
+that never touched class or id selectors at all.
+`test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl:56-92` adds three
+examples: resolvable `div`/`#hero`/`.card`/`div.card` must stay on the fast
+path, three unresolvable shapes (descendant, foreign class, pseudo-class) must
+route to layout, and a class+id styled page must render a full pixel buffer
+with the resolved body colour. A new routing seam
+(`simple_web_html_needs_selector_layout`, renderer.spl:1041) makes the decision
+directly assertable instead of inferred from wall-clock time.
+
+**Evidence.** `bin/simple test test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl`
+-> `Results: 7 total, 5 passed, 2 failed`. All three new examples pass. The two
+failures are PRE-EXISTING and untouched by this change: `"hip"` alias resolves
+to `software` not `rocm`, and `render_frame` reports `function expects 3
+argument(s), but more were provided`. Pre-fix behaviour was verified by
+temporarily forcing the old blanket gate: the fast-path example then FAILS
+(`7 examples, 3 failures`), so it is a genuine regression oracle.
+
+No regressions: `html_window_spec` 8/8, `render_adapter_spec` 2/2 + 4/4,
+`simple_web_css_vars_spec` 2/2. `simple_web_css_cascade_spec` is
+`11 total, 7 passed, 4 failed` **both with and without** this change (baseline
+measured by stashing the renderer edit in the same tree with the same binary) —
+pre-existing, not introduced here.
+
+**Not done / remaining risk.** No before/after render-timing number was
+captured: the catastrophic case in the table at the top (full ~1990-rule theme
+CSS) still routes to the real renderer by design, and its cost was already
+addressed by the 2026-07-05 lane. This change moves small class/id-styled pages
+off the layout path, not large stylesheets. Risk is a page whose colour the
+heuristic resolves slightly differently from the real cascade now taking the
+fast path; the resolvability test is narrow, but it is a substring heuristic
+either way. The two pre-existing spec failures above are separate defects and
+remain open.
+
+### 2026-08-20 addendum — render timing A/B, and a correctness defect the gate exposed
+
+**Timing A/B (requested; the perf claim now has a measurement).** Controlled:
+one tree, one binary, the SAME probe spec file both sides (it deliberately does
+NOT import the new routing seam, so it loads identically pre- and post-fix),
+renderer edit toggled via `git stash` only. 50 renders of a small
+class-styled page at 96x64, software, interpreter; 3 reps, median:
+
+| | 50 renders | per render |
+|---|---|---|
+| pre-fix (blanket gate) | 55.97s | ~1119ms |
+| post-fix | 6.09s | ~122ms |
+
+**~9.2x faster.** The gain is real, not negligible. Reps were tight both sides
+(pre 55.93/55.97/59.61s, post 6.00/6.09/6.12s). Scope note unchanged: this is
+the small class/id-styled page shape only — large theme sheets still route to
+the real renderer by design.
+
+**A correctness defect found while pinning the residual risk — gate tightened.**
+Writing the requested cascade-agreement example exposed that the fast path
+mis-renders multi-rule pages. `simple_web_engine2d_render_html_pixels:1175-1177`
+paints a phantom SECOND block from the second `background-color` in source
+order (`_second_hex_color_after_from`), assuming the two colours belong to two
+sibling elements. For three rules targeting one element the heuristic therefore
+painted BOTH a wrong block colour and a phantom rect. This is pre-existing
+behaviour, but the narrowed gate made it newly reachable. Fixed by tightening
+rather than by weakening the test: the gate now also routes to the real engine
+when a `<style>` block contains more than one background-setting rule
+(`background_rules` counter, renderer.spl:879). The timing above was
+re-measured after this tightening, on a page that genuinely fast-paths.
+
+**Second finding: the substring heuristic ignores specificity.** For
+`.card{red} #hero{green} .card{blue}` on `<div id='hero' class='card'>`, the
+real layout engine correctly paints **green** — `#hero` (1-0-0) outranks
+`.card` (0-1-0) regardless of source order. The heuristic's
+`_style_rule_block_color` applies id then class in sequence, so it would pick
+the last `.card` (blue). Another reason the multi-rule guard is required, and
+an argument against widening `_selector_token_is_resolvable` to multi-rule
+pages without teaching the heuristic specificity first.
+
+**Spec (final).** `test/01_unit/app/ui/browser_backend_pixel_paths_spec.spl`
+now carries five examples: `.card` / `#hero` / `div.card` single-rule pages stay
+on the fast path; multiple background rules route to layout; unresolvable
+selector shapes route to layout; a class-styled page renders a full buffer; and
+`"never paints an overridden class or id colour"` pins that only the
+specificity-correct winner reaches the framebuffer, so any future widening of
+the gate that reintroduces the phantom rect goes red.
+
+**Verification.** `Results: 9 total, 7 passed, 2 failed` — all seven
+class/id-path examples green; the two failures are the same PRE-EXISTING ones
+(`"hip"` alias -> `software` not `rocm`; `render_frame` arity), untouched and
+out of scope.

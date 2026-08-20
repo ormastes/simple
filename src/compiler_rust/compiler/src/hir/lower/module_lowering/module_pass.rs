@@ -262,6 +262,39 @@ fn try_const_string_array_eval(expr: &Expr) -> Option<Vec<String>> {
     }
 }
 
+/// Infer `[i64]` / `[text]` for an UNANNOTATED module-level array literal.
+///
+/// `val TABLE = [1, 2, 3, 4]` (no `: [i64]`) otherwise registers the global as
+/// ANY. An ANY-typed global array forces every indexed read through the boxed
+/// dispatch path (~73 ns/read vs ~4 ns/read for the identical local array), and
+/// `record_const_array_init` below derives `element_type` from that same ANY,
+/// so the stored elements are consumed as raw i64 WITHOUT unboxing — silently
+/// WRONG values in the JIT lane, not merely slow. Both symptoms are the same
+/// defect and both are fixed by giving the global a concrete array type here.
+/// This is the standard codec lookup-table shape (CRC/base64/AES S-box), so the
+/// inference is deliberately general rather than per-call-site.
+/// See doc/08_tracking/bug/jit_module_val_array_indexing_15x_slow_2026-08-18.md.
+///
+/// Only literal arrays whose elements are ALL const-evaluable are inferred, so
+/// a heterogeneous or dynamic literal keeps its previous ANY behaviour.
+fn infer_const_array_type(types: &mut crate::hir::types::TypeRegistry, expr: &Expr) -> Option<TypeId> {
+    let element = if try_const_array_eval(expr).is_some() {
+        TypeId::I64
+    } else if try_const_string_array_eval(expr).is_some() {
+        TypeId::STRING
+    } else {
+        return None;
+    };
+    // Reuse an existing unsized array type — `register` does not dedupe.
+    if let Some((id, _)) = types
+        .iter()
+        .find(|(_, t)| matches!(t, HirType::Array { element: e, size: None } if *e == element))
+    {
+        return Some(id);
+    }
+    Some(types.register(HirType::Array { element, size: None }))
+}
+
 fn record_const_array_init(
     map: &mut HashMap<String, HirGlobalArrayInit>,
     name: &str,
@@ -635,6 +668,8 @@ impl Lowerer {
                     TypeId::I64
                 } else if matches!(&s.value, Expr::String(_) | Expr::FString { .. }) {
                     TypeId::STRING
+                } else if let Some(inferred) = infer_const_array_type(&mut self.module.types, &s.value) {
+                    inferred
                 } else {
                     TypeId::ANY
                 };
@@ -701,6 +736,8 @@ impl Lowerer {
                     TypeId::I64
                 } else if matches!(&c.value, Expr::String(_) | Expr::FString { .. }) {
                     TypeId::STRING
+                } else if let Some(inferred) = infer_const_array_type(&mut self.module.types, &c.value) {
+                    inferred
                 } else {
                     TypeId::ANY
                 };
@@ -803,6 +840,12 @@ impl Lowerer {
                         } else {
                             TypeId::ANY
                         }
+                    } else if let Some(inferred) = l
+                        .value
+                        .as_ref()
+                        .and_then(|v| infer_const_array_type(&mut self.module.types, v))
+                    {
+                        inferred
                     } else {
                         TypeId::ANY
                     };

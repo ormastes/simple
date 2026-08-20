@@ -297,3 +297,190 @@ grep -E 'START|HEARTBEAT|FATAL' /tmp/kill_simple_monitor.log | tail
 
 Expect a `START ... selftest=ok` line, then `HEARTBEAT ... samples=<n>` with
 `n > 0`. `samples=0` or no heartbeat means the guard is dead again.
+
+---
+
+## 2026-08-20 — quadratic DB update path de-quadratic-ed; guard script UNBLOCKED and run
+
+### 1. `check-test-runner-exits-after-summary.shs` never ran because its ROOT was wrong
+
+The script the previous lane wrote and left unrun could not run at all:
+
+```sh
+ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"   # -> scripts/, not the repo root
+```
+
+so it looked for the runner at `scripts/bin/simple` and always answered
+`ERROR — nothing was checked` (exit 2). Fixed to `/../..`
+(`scripts/check/check-test-runner-exits-after-summary.shs:25`). It now measures.
+
+### 2. MEASURED post-summary tail — the spin does NOT reproduce on a single spec
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed, `bin/simple`).
+
+```
+  passing_run            rc=1   total=23s  post_summary_tail=1s (budget 60s)
+  zero_specs_selected    rc=4   total=151s post_summary_tail=1s (budget 60s)
+PASS — 2 case(s) checked, 0 unverified
+```
+
+`ps` afterwards showed no lingering `simple` process at any CPU. Note the
+original specimens were all **directory / multi-file** targets
+(`test/01_unit/test_runner`, `test/fixtures/_accept_run`); a one-spec run drives
+`update_test_database` with a single file result and is therefore NOT a
+sufficient reproduction. The guard should be re-run with a directory `SPEC_PASS`
+before the spin is called fixed.
+
+### 3. Quadratic shape CONFIRMED and fixed in `test_db_core.spl`
+
+`src/lib/nogc_sync_mut/test_runner/test_db_core.spl` did three full walks of the
+database per `update_test_result`:
+
+- `find_test_index` — linear scan of `self.tests`
+- `cap_timing_runs` — two walks of ALL `self.timing_runs`
+- `collect_timing_runs` — another walk of ALL `self.timing_runs`
+
+i.e. O(n^2) over a whole run. Replaced with indexes maintained alongside the
+existing `_file_index` / `_suite_index` / `_counter_index` / `_timing_index`:
+`_test_index` ("suite_id:name_str" -> index), `_runs_count`, `_runs_by_test`
+(newest <= cap durations), and an amortized `prune_timing_runs` that does one
+full pass per `PRUNE_BATCH` (512) excess entries plus once in `save()`.
+
+### 4. IMPORTANT correction: `test_db_core` is NOT on the live runner path
+
+The previous lane named `test_runner_helpers.spl:238-252` as the prime suspect
+and inferred the class was `RunnerTestDbCore`. It is not. That code holds a
+`RunnerTestDb` from `std.test_runner.test_db_compat`, which wraps
+`std.database.test_extended` (`src/lib/nogc_sync_mut/database/test_extended/
+database.spl`, `tracking.spl`). Those files have their OWN
+`collect_timing_runs` (database.spl:574, tracking.spl:196) — untouched here and
+still the place to look for the live cost.
+
+`RunnerTestDbCore` additionally **cannot be constructed at all** today:
+`test_db_core.spl:9` does `use std.test_runner.string_interner.StringInterner`,
+but that module defines `TestDbStringInterner` — there is no `StringInterner`
+symbol. A direct `RunnerTestDbCore.empty()` fails with
+`semantic: method `empty` not found on type `dict` (receiver value: {})`.
+Verified on the UNMODIFIED file (stashed) as well as the fixed one, so it is
+pre-existing and not caused by this change. That also means the fix in §3 is a
+correct-by-construction improvement that could **not be exercised by a spec**;
+the reproduce spec written for it was withdrawn rather than landed red for an
+unrelated import defect.
+
+### 5. Remaining work
+
+1. Re-run the guard with a DIRECTORY target
+   (`SPEC_PASS=test/01_unit/test_runner sh scripts/check/check-test-runner-exits-after-summary.shs`)
+   — that is the shape all four original specimens had.
+2. Audit `database/test_extended/{database,tracking}.spl` for the same
+   per-update full-walk pattern; that is the live path.
+3. Fix the `StringInterner` -> `TestDbStringInterner` import in
+   `test_db_core.spl:9` so the module is testable at all.
+
+---
+
+## 2026-08-20 (later) — the ACTUAL live path audited and de-quadratic-ed
+
+### 1. POSITIVE result: the same pattern is there, and worse
+
+`src/lib/nogc_sync_mut/database/test_extended/` `update_test_result` fans out to
+SIX full table scans per call, once per spec file:
+
+| step | site | scans |
+|---|---|---|
+| `get_or_create_file` | `database.spl:199`, `core_helpers.spl:11` | all `files` rows |
+| `get_or_create_suite` | `database.spl:228`, `core_helpers.spl:46` | all `suites` rows |
+| `get_or_create_test` | `database.spl:260`, `core_helpers.spl:84` | all `tests` rows |
+| `update_counter` | `database.spl:483` | all `counters` rows |
+| `update_timing` -> `collect_timing_runs` | `database.spl:533` -> `:642`, `tracking.spl:98` -> `:196` | all `timing_runs` rows, then all `timing` rows |
+
+### 2. The unbounded term: `timing_runs` is never capped anywhere
+
+`add_timing_run` (`database.spl:608`, `tracking.spl:172`) appends a row per
+update and **nothing in this module ever caps or prunes that table** — unlike the
+older `test_db_core`, which at least had `cap_timing_runs`. So `timing_runs`
+grows monotonically across every run the repo has ever done, and the per-update
+scan of it grows with it. Only the newest 100 entries per test are ever read
+(`:536`, the widest caller); the rest is pure carrying cost. This is the term
+that makes cost climb run-over-run rather than staying merely quadratic, and it
+matches the symptom shape: a teardown that used to finish and progressively
+stopped finishing.
+
+### 3. Duplicate `impl` blocks — the fix had to be applied twice
+
+`database.spl`'s header says its methods were "consolidated into class body",
+but the pre-consolidation copies were never deleted and `test_extended.spl:27-30`
+still imports them: `core_helpers.spl` re-defines the three `get_or_create_*`,
+`tracking.spl` re-defines `update_test_result`/`update_counter`/`update_timing`/
+`add_timing_run`/`collect_timing_runs`/`is_flaky_test`. Which copy wins dispatch
+is ambiguous — the same co-loaded-same-name hazard `database.spl:102-106` already
+documents for `StringInterner`, where it silently aborted test-result
+persistence right after the summary. A fix in only one copy could be inert, so
+both were patched identically and each says so in a comment.
+
+### 4. Change applied
+
+Indexes on the class, built by one O(rows) `ensure_indexes()` pass and kept
+current on insert: `_file_index`, `_suite_index`, `_test_index` (the three
+`get_or_create_*` scans become O(1)) and `_runs_by_test` (test_id -> newest
+<= `TIMING_RUNS_PER_TEST_CAP` = 100 durations, so `collect_timing_runs` becomes
+O(cap) and never touches the `timing_runs` table). `ensure_indexes()` sets its
+`_indexed` flag BEFORE building so a re-entrant call cannot loop, and is invoked
+from every mutating entry point plus once in
+`factory.spl:load_test_database_extended` right after load — the latter matters
+because the read-only query paths are non-mutating `fn`s and cannot call a `me`.
+
+### 5. Deliberately NOT changed (recorded, not silently skipped)
+
+- `update_counter`'s scan of `counters` and `update_timing`'s scan of `timing`
+  still run: both are O(tests), bounded by DB size rather than growing without
+  bound, and both need the mutable *row object* the scan yields, so indexing them
+  means indexing row positions and risking an aliasing bug for a smaller win.
+- The persisted `timing_runs` table is still not pruned; only the in-memory read
+  path is capped. Pruning on-disk content belongs in its own reviewed change.
+- `factory.spl:30-34` sets `next_file_id`/`next_suite_id`/`next_test_id` to 0 on
+  a LOADED database, which looks like a real id-collision defect. Noted, untouched.
+
+### 6. MEASUREMENT STATUS: the directory-target A/B did NOT complete — NOT VERIFIED
+
+`SPEC_PASS=test/01_unit/test_runner sh
+scripts/check/check-test-runner-exits-after-summary.shs` was attempted three
+times as the BEFORE arm (working tree reverted to baseline via a saved patch, so
+one tree and one binary across both arms). All three attempts died with **rc 143
+/ 144 and no result line**, i.e. an external kill, which per `.claude/rules/
+testing.md` is **UNVERIFIED — neither pass nor fail**. The log never got past its
+header line, so the `passing_run` case never completed even once.
+
+The killer was NOT the resource monitor: `/tmp/kill_simple_monitor.log` shows
+only HEARTBEAT lines over the whole window (`samples=3..9`, no KILL entries), and
+`free -g` showed 106 GB available. The kill source was not identified. Detaching
+with `setsid nohup` did not help.
+
+**Therefore: the spin is NOT demonstrated fixed, and was never reproduced on a
+directory target either.** The single-spec run from earlier today
+(`post_summary_tail=1s`) remains the only completed measurement, and it is
+explicitly insufficient — all four original specimens were directory/multi-file
+targets. The code change above rests on static analysis of the algorithmic shape
+(§1-§2), which is solid on its own terms, but no before/after wall-clock
+evidence exists.
+
+### 7. Next step to close this
+
+Re-run the directory-target A/B on a quieter host, or find and disable whatever
+is sending SIGTERM/SIGSTKFLT to long `bin/simple test` runs here. Until a
+completed BEFORE and AFTER pair exists, this bug stays OPEN.
+
+## Landing status (2026-08-20)
+
+The `test_extended` / `test_db_core` index work described above is **held in the
+working tree and deliberately NOT landed**. Reason: the directory-target guard
+run never completed (three attempts killed at rc 143/144, recorded above), so
+the change is unverified, and it mutates the shared test-DB write path that
+every concurrent session records results through. An unverified change to
+shared state is not worth the blast radius.
+
+The analysis, the six-scan census, and the unbounded-`timing_runs` finding all
+stand and are landed as this record. Re-run
+`SPEC_PASS=test/01_unit/test_runner sh scripts/check/check-test-runner-exits-after-summary.shs`
+(now that its ROOT bug at `:25` is fixed and it can actually measure) before
+landing the code.

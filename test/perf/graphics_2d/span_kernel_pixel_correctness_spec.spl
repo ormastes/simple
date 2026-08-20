@@ -1,0 +1,86 @@
+# test/perf/graphics_2d/span_kernel_pixel_correctness_spec.spl
+#
+# Pixel-correctness pin for the engine2d SIMD span kernels.
+#
+# Guards doc/08_tracking/bug/engine2d_simd_span_kernels_slower_and_fill_colour_corrupt_2026-08-06.md.
+# That bug alleged (section 2) that `rt_engine2d_simd_fill_span_u32` corrupts the
+# fill colour (green byte 0x11 -> 0x13). It was retracted twice as a decimal
+# mis-conversion, and re-verified byte-exact a third time on 2026-08-20. This
+# spec exists so the retraction stays MEASURED rather than remembered: the
+# section 1 perf work rewires which kernel the default lane calls, and a perf
+# change must never be able to reintroduce wrong pixels unnoticed.
+#
+# Every assertion decodes by shift+mask, never by comparing decimal words --
+# comparing decimals is the exact mistake that produced the false positive.
+#
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl
+
+use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{simd_blend_row, _scalar_blend_row, simd_fill_row, _scalar_fill_row, native_pixel_rows_enabled, rt_engine2d_simd_fill_span_u32}
+
+fn a_of(v: u32) -> i64: ((v >> 24) & 0xFF) as i64
+fn r_of(v: u32) -> i64: ((v >> 16) & 0xFF) as i64
+fn g_of(v: u32) -> i64: ((v >> 8) & 0xFF) as i64
+fn b_of(v: u32) -> i64: (v & 0xFF) as i64
+
+describe "engine2d SIMD span kernels — pixel correctness":
+
+    it "fill_span writes the exact colour bytes and touches only the span":
+        var a: [u32] = [0; 8]
+        val out = rt_engine2d_simd_fill_span_u32(a, 2, 4, 0xFF112233 as u32)
+        var i: i64 = 2
+        while i < 6:
+            val p = out[i.to_i32()]
+            expect(a_of(p)).to_equal(255)
+            expect(r_of(p)).to_equal(0x11)
+            expect(g_of(p)).to_equal(0x22)
+            expect(b_of(p)).to_equal(0x33)
+            i = i + 1
+        expect(out[0] as i64).to_equal(0)
+        expect(out[1] as i64).to_equal(0)
+        expect(out[6] as i64).to_equal(0)
+        expect(out[7] as i64).to_equal(0)
+
+    it "simd_fill_row matches the scalar fill byte for byte":
+        var a: [u32] = [0; 16]
+        var b: [u32] = [0; 16]
+        simd_fill_row(a, 3, 9, 0xFF112233 as u32)
+        _scalar_fill_row(b, 3, 9, 0xFF112233)
+        var i: i64 = 0
+        while i < 16:
+            expect(a[i.to_i32()] as i64).to_equal(b[i.to_i32()] as i64)
+            i = i + 1
+
+    it "simd_blend_row matches the scalar blend across the alpha grid":
+        # The section 1 fix repointed this path at the in-place span kernel.
+        # A disagreement here means the perf change is painting wrong pixels.
+        var diffs: i64 = 0
+        var sa: i64 = 0
+        while sa <= 255:
+            var da: i64 = 0
+            while da <= 255:
+                val s = ((sa << 24) | (0x40 << 16) | (0x80 << 8) | 0xC0) as u32
+                val d = ((da << 24) | (0x10 << 16) | (0x20 << 8) | 0x30) as u32
+                var x: [u32] = [d; 1]
+                var y: [u32] = [d; 1]
+                val src: [u32] = [s; 1]
+                simd_blend_row(x, src, 0, 1)
+                _scalar_blend_row(y, src, 0, 1)
+                if x[0] != y[0]:
+                    diffs = diffs + 1
+                da = da + 17
+            sa = sa + 17
+        expect(diffs).to_equal(0)
+
+    it "blends an offset sub-span without disturbing its neighbours":
+        val n = 8
+        var dst: [u32] = [0xFF102030 as u32; n]
+        val src: [u32] = [0x80FFFFFF as u32; n]
+        simd_blend_row(dst, src, 2, 4)
+        expect(a_of(dst[0])).to_equal(255)
+        expect(r_of(dst[0])).to_equal(0x10)
+        expect(a_of(dst[7])).to_equal(255)
+        expect(r_of(dst[7])).to_equal(0x10)
+        # Blended pixels must have moved toward white but stayed opaque.
+        expect(a_of(dst[2])).to_equal(255)
+        expect(r_of(dst[2]) > 0x10).to_equal(true)

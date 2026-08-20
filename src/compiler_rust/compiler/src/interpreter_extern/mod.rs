@@ -137,6 +137,7 @@ pub mod host_wm_bridge;
 pub mod host_gpu_lane;
 pub mod win32_hosted;
 pub mod enum_sffi;
+pub mod vulkan;
 
 // Import parent interpreter types
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -2124,6 +2125,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_submit_and_wait_fence",
         gpu::rt_vulkan_submit_and_wait_fence_fn
     );
+    insert_simple!("rt_vulkan_submit_no_wait", gpu::rt_vulkan_submit_no_wait_fn);
     insert_simple!("rt_vulkan_wait_fence", gpu::rt_vulkan_wait_fence_fn);
     insert_simple!("rt_vulkan_destroy_fence", gpu::rt_vulkan_destroy_fence_fn);
     insert_simple!(
@@ -2229,6 +2231,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_submit_and_wait_fence",
         gpu::rt_vulkan_submit_and_wait_fence_fn
     );
+    insert_simple!("rt_vulkan_submit_no_wait", gpu::rt_vulkan_submit_no_wait_fn);
     insert_simple!(
         "rt_vulkan_submit_graphics_and_wait_fence",
         gpu::rt_vulkan_graphics_unavailable_fn
@@ -2870,6 +2873,13 @@ pub(crate) fn call_extern_function_with_values(
             return result;
         }
         return Err(common::unknown_function(name));
+    }
+
+    // Typed `rt_vulkan_*` marshalling MUST precede `try_call_dynamic`, which
+    // marshals every return as `i64` and would hand back the seven
+    // `*const c_char` returns as raw pointers (observable as `.len() == -1`).
+    if name.starts_with("rt_vulkan_") && vulkan::signature_of(name).is_some() {
+        return vulkan::dispatch(name, &evaluated);
     }
 
     // capability gap. None of these five families has a real native

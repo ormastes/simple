@@ -109,8 +109,18 @@ describe "VulkanLaneSession host-aware arena round-trip":
         # reports "not completed within the budget" before the shader
         # finishes.
         #
-        # KNOWN-RED, filed:
+        # WAS KNOWN-RED, now GREEN on real hardware (2026-08-20). Filed:
         # doc/08_tracking/bug/vulkan_submit_and_wait_fence_blocks_unconditionally_no_nonblocking_submit_2026-08-07.md
+        #
+        # Fixed by adding a genuinely non-blocking submit primitive
+        # (`rt_vulkan_submit_no_wait`) and switching `dispatch_once` onto it,
+        # so this session's own `vulkan_sffi_wait_fence(fence, timeout_ns)` is
+        # now the only place a wait happens and `timeout_ms = 1` genuinely
+        # fires. Verified on an NVIDIA RTX A6000 (Vulkan 1.4.312): dispatch
+        # returns `vulkan-lane-fence-timeout` with sentinel 0xDEAD0000, the
+        # device-idle quarantine retry then recovers cleanly, and shutdown
+        # returns "". The historical analysis below is retained because it
+        # explains why the workload is shaped the way it is.
         #
         # Root-caused (not a test-design bug this time, a real native-runtime
         # gap): `rt_vulkan_submit_and_wait_fence`
@@ -144,11 +154,11 @@ describe "VulkanLaneSession host-aware arena round-trip":
         # unreachable through `dispatch_once`'s current submit call because
         # that call has already fully waited by the time its result is
         # checked. Fixing this needs a new Rust extern (a genuine
-        # non-blocking submit) -- out of scope for this pure-Simple task and
-        # not something to fake around here. Per testing.md ("a correct spec
-        # that fails is a legitimate artifact... leave it RED"), this
-        # assertion is left exactly as the design doc requires and stays RED
-        # until the native gap above is fixed.
+        # non-blocking submit) -- out of scope for that pure-Simple task and
+        # not something to fake around here. That native extern now exists
+        # (`rt_vulkan_submit_no_wait`), which is what turned this assertion
+        # green; it was left RED and unmodified until the gap was genuinely
+        # closed, never weakened to pass.
         step("Probe for a Vulkan-capable device")
         var probe_session = VulkanLaneSession.create()
         val probe_result = probe_session.probe()

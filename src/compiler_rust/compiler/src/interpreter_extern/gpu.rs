@@ -3400,6 +3400,11 @@ mod vulkan_dlopen {
         pub quarantined_commands: Vec<(u64, VkCommandBuffer)>,
         pub accepted_compute_submit_count: i64,
         pub live_fences: Vec<u64>,
+        /// Fences already destroyed by the device-idle quarantine reap in
+        /// `rt_vulkan_wait_idle`. Releasing one of these again must SUCCEED —
+        /// it is genuinely gone — or the caller is stranded in a permanent
+        /// "release pending" state. Observed on a real RTX A6000.
+        pub retired_fences: Vec<u64>,
         pub last_error: String,
         pub selected_device_index: usize,
         pub fns: VkFns,
@@ -3656,6 +3661,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             quarantined_commands: Vec::new(),
             accepted_compute_submit_count: 0,
             live_fences: Vec::new(),
+            retired_fences: Vec::new(),
             last_error: String::new(),
             selected_device_index: 0,
             fns,
@@ -4889,6 +4895,71 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
     Ok(Value::Int(fence as i64))
 }
 
+/// `rt_vulkan_submit_no_wait(cmd) -> fence`
+///
+/// Non-blocking sibling of `rt_vulkan_submit_and_wait_fence_fn`: identical up
+/// to `vkQueueSubmit`, then returns the fence immediately instead of calling
+/// `wait_for_fences(.., u64::MAX)`. This is what lets a caller's own
+/// `rt_vulkan_wait_fence(fence, timeout_ns)` observe a genuine timeout.
+///
+/// The command buffer is quarantined rather than freed, because the GPU may
+/// still be reading it; `rt_vulkan_wait_idle` reaps the quarantine. The fence
+/// is additionally published in `live_fences` so `wait_fence` can find it,
+/// but ownership stays with the quarantine — see `rt_vulkan_destroy_fence_fn`.
+pub fn rt_vulkan_submit_no_wait_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+    use std::ptr;
+    let ch = arg_i64(args, 0, "rt_vulkan_submit_no_wait", 1)? as usize;
+    let mut guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(Value::Int(0)),
+    };
+    if ch == 0 || ch > s.command_buffers.len() {
+        return Ok(Value::Int(0));
+    }
+    let cmd = match s.command_buffers[ch - 1].as_ref() {
+        Some(e) => e.cmd,
+        None => return Ok(Value::Int(0)),
+    };
+    let info = VkFenceCreateInfo {
+        s_type: 8,
+        p_next: ptr::null(),
+        flags: 0,
+    };
+    let mut fence = 0;
+    if unsafe { (s.fns.create_fence)(s.device, &info, ptr::null(), &mut fence) } != VK_SUCCESS {
+        if let Some(e) = s.command_buffers[ch - 1].take() {
+            unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) }
+        }
+        return Ok(Value::Int(0));
+    }
+    let submit = VkSubmitInfo {
+        s_type: 4,
+        p_next: ptr::null(),
+        wait_semaphore_count: 0,
+        p_wait_semaphores: ptr::null(),
+        p_wait_dst_stage_mask: ptr::null(),
+        command_buffer_count: 1,
+        p_command_buffers: &cmd,
+        signal_semaphore_count: 0,
+        p_signal_semaphores: ptr::null(),
+    };
+    if unsafe { (s.fns.queue_submit)(s.queue, 1, &submit, fence) } != VK_SUCCESS {
+        unsafe { (s.fns.destroy_fence)(s.device, fence, ptr::null()) };
+        if let Some(e) = s.command_buffers[ch - 1].take() {
+            unsafe { (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &e.cmd) }
+        }
+        return Ok(Value::Int(0));
+    }
+    s.accepted_compute_submit_count += 1;
+    // Deliberately NO wait_for_fences here.
+    s.command_buffers[ch - 1].take();
+    s.quarantined_commands.push((fence, cmd));
+    s.live_fences.push(fence);
+    Ok(Value::Int(fence as i64))
+}
+
 pub fn rt_vulkan_accepted_compute_submit_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
     let guard = vulkan_dlopen::VK_STATE.lock().unwrap();
     Ok(Value::Int(
@@ -4923,9 +4994,23 @@ pub fn rt_vulkan_destroy_fence_fn(args: &[Value]) -> Result<Value, CompileError>
         None => return Ok(Value::Int(0)),
     };
     let Some(index) = s.live_fences.iter().position(|&candidate| candidate == fence) else {
+        // Already destroyed by the device-idle quarantine reap: the handle IS
+        // released, so report success rather than stranding the caller in a
+        // permanent "release pending" state.
+        if let Some(i) = s.retired_fences.iter().position(|&f| f == fence) {
+            s.retired_fences.swap_remove(i);
+            return Ok(Value::Int(1));
+        }
         return Ok(Value::Int(0));
     };
     s.live_fences.swap_remove(index);
+    // A fence belonging to a quarantined (non-blocking) submission is owned by
+    // the quarantine and destroyed by `rt_vulkan_wait_idle` once the device is
+    // idle. Destroying it here would both double-destroy it and free a fence
+    // the GPU may still be signalling, so only the caller's handle is revoked.
+    if s.quarantined_commands.iter().any(|&(f, _)| f == fence) {
+        return Ok(Value::Int(1));
+    }
     unsafe { (s.fns.destroy_fence)(s.device, fence, ptr::null()) };
     Ok(Value::Int(1))
 }
@@ -4942,6 +5027,13 @@ pub fn rt_vulkan_wait_idle_fn(_args: &[Value]) -> Result<Value, CompileError> {
                 unsafe {
                     (s.fns.free_command_buffers)(s.device, s.command_pool, 1, &cmd);
                     (s.fns.destroy_fence)(s.device, fence, ptr::null());
+                }
+                // Drop any still-published handle for this fence, so a later
+                // `destroy_fence`/`wait_fence` cannot touch destroyed memory,
+                // but REMEMBER it as retired so releasing it still succeeds.
+                if let Some(i) = s.live_fences.iter().position(|&f| f == fence) {
+                    s.live_fences.swap_remove(i);
+                    s.retired_fences.push(fence);
                 }
             }
         }

@@ -161,6 +161,7 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_submit_and_wait", Ret::I, "i"),
     ("rt_vulkan_submit_and_wait_fence", Ret::I, "i"),
     ("rt_vulkan_submit_graphics_and_wait_fence", Ret::I, "i"),
+    ("rt_vulkan_submit_no_wait", Ret::I, "i"),
     ("rt_vulkan_unmap_memory", Ret::I, "i"),
     ("rt_vulkan_wait_fence", Ret::I, "ii"),
     ("rt_vulkan_wait_idle", Ret::I, ""),

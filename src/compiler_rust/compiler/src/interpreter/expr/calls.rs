@@ -115,12 +115,11 @@ pub(super) fn eval_call_expr(
                     // Sync mutating method updates to MODULE_GLOBALS so that
                     // module-level vars (e.g., arrays used as global state)
                     // persist across function calls within an imported module.
-                    MODULE_GLOBALS.with(|cell| {
-                        let mut globals = cell.borrow_mut();
-                        if globals.contains_key(var_name) {
-                            globals.insert(var_name.clone(), new_self);
-                        }
-                    });
+                    if MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(var_name.clone(), new_self);
+                        });
+                    }
                 }
                 Ok(Some(result))
             } else if let Expr::FieldAccess {
@@ -131,6 +130,23 @@ pub(super) fn eval_call_expr(
                 // Handle nested field access like self.instructions.push()
                 // where self.instructions needs to be updated after a mutating method call
                 if let Expr::Identifier(var_name) = outer_receiver.as_ref() {
+                    // Ownership-gated in-place fast path for `obj.field.push(x)` &c.
+                    // The generic path below copies the field into a temp binding,
+                    // which aliases the array Arc and makes every mutator clone the
+                    // whole backing Vec — O(N^2) accumulation into any object field.
+                    if let Some(result) = crate::interpreter::interpreter_helpers::patterns::try_field_array_mutation_in_place(
+                        var_name,
+                        field,
+                        method,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )? {
+                        return Ok(Some(result));
+                    }
                     // Evaluate the outer receiver to get its current value
                     let outer_val = evaluate_expr(outer_receiver, env, functions, classes, enums, impl_methods)?;
                     if let Value::Object { class, fields } = outer_val {
@@ -241,12 +257,11 @@ pub(super) fn eval_call_expr(
                                     new_arr[real_idx as usize] = updated_elem;
                                     let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
-                                    super::super::MODULE_GLOBALS.with(|cell| {
-                                        let mut globals = cell.borrow_mut();
-                                        if globals.contains_key(arr_name) {
-                                            globals.insert(arr_name.clone(), new_arr_val);
-                                        }
-                                    });
+                                    if super::super::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(arr_name)) {
+                                        super::super::MODULE_GLOBALS.with(|cell| {
+                                            cell.borrow_mut().insert(arr_name.clone(), new_arr_val);
+                                        });
+                                    }
                                     return Ok(Some(result));
                                 }
                             }

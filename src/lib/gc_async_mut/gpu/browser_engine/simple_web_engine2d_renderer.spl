@@ -876,7 +876,69 @@ fn _first_block_color(html: text, fallback: u32) -> u32:
             return inline_color
     _style_rule_block_color(html, fallback)
 
+# True when `sel` is a simple selector the `_style_rule_block_color` heuristic
+# can faithfully resolve against the first visual block: a bare tag, `.class`,
+# `#id`, or `tag.class` naming that block's own tag / id / first class. Any
+# combinator, pseudo-class, attribute or functional form is unresolvable.
+fn _selector_token_is_resolvable(sel: text, tag_name: text, id_value: text, class_name: text) -> bool:
+    val s = sel.trim()
+    if s == "":
+        return false
+    if s.contains(" ") or s.contains("\t") or s.contains("\n") or s.contains("\r") or
+       s.contains(">") or s.contains("+") or s.contains("~") or s.contains(":") or
+       s.contains("[") or s.contains("*") or s.contains("("):
+        return false
+    var rest = s
+    if not (rest.starts_with(".") or rest.starts_with("#")):
+        val dot = rest.index_of(".")
+        val hash = rest.index_of("#")
+        var cut = rest.len()
+        if dot >= 0 and dot < cut:
+            cut = dot
+        if hash >= 0 and hash < cut:
+            cut = hash
+        if rest.substring(0, cut).lower() != tag_name.lower():
+            return false
+        rest = rest.substring(cut, rest.len())
+    if rest == "":
+        return true
+    if rest.starts_with("#"):
+        return id_value != "" and rest.substring(1, rest.len()) == id_value
+    if rest.starts_with("."):
+        val cls = rest.substring(1, rest.len())
+        return class_name != "" and cls == class_name
+    false
+
+fn _selector_group_is_resolvable(sel: text, tag_name: text, id_value: text, class_name: text) -> bool:
+    if tag_name == "":
+        return false
+    val parts = sel.split(",")
+    var i = 0
+    val n = parts.len()
+    while i < n:
+        val p = parts[i].trim()
+        if p != "" and (p.contains(".") or p.contains("#")) and
+           not _selector_token_is_resolvable(p, tag_name, id_value, class_name):
+            return false
+        i = i + 1
+    true
+
+# A class/id selector no longer forces the (much slower) full layout path by
+# itself — the heuristic above already resolves `.class` / `#id` / `tag.class`
+# rules for the first visual block. Only selectors it CANNOT resolve route to
+# the real renderer.
 fn _style_block_has_class_or_id_selector(html: text) -> bool:
+    val first_tag = _first_block_tag(html)
+    val tag_name = if first_tag != "": _tag_name_from_tag(first_tag) else: ""
+    val id_value = if first_tag != "": _attr_value(first_tag, "id") else: ""
+    val class_name = if first_tag != "": _first_class_name(_attr_value(first_tag, "class")) else: ""
+    # The paint path below draws a phantom SECOND block from the second
+    # `background-color` it finds in source order (see
+    # `_second_hex_color_after_from`). That heuristic assumes the two colours
+    # belong to two sibling elements, so a style block carrying more than one
+    # background-setting rule is NOT faithfully reproducible here even when
+    # every selector is individually resolvable — route it to the real engine.
+    var background_rules = 0
     var pos = 0
     var guard = 0
     while guard < 1000:
@@ -897,10 +959,15 @@ fn _style_block_has_class_or_id_selector(html: text) -> bool:
             if brace < 0 or brace >= close:
                 break
             if _range_contains_char(html, cp, brace, ".") or _range_contains_char(html, cp, brace, "#"):
-                return true
+                if not _selector_group_is_resolvable(html.substring(cp, brace), tag_name, id_value, class_name):
+                    return true
             val end = _find_char_from(html, "}", brace)
             if end < 0 or end >= close:
                 break
+            if html.substring(brace + 1, end).contains("background"):
+                background_rules = background_rules + 1
+                if background_rules > 1:
+                    return true
             cp = end + 1
         pos = close + 8
     false
@@ -981,6 +1048,13 @@ fn _style_body_rule_color(html: text, fallback: u32) -> u32:
     if body_color != fallback:
         return body_color
     html_color
+
+# Routing seam: true when `<style>` carries a selector the fast heuristic
+# cannot resolve, so the page must go through the full layout/paint engine.
+# Exposed so specs can assert the routing decision directly instead of
+# inferring it from wall-clock time.
+pub fn simple_web_html_needs_selector_layout(html: text) -> bool:
+    _style_block_has_class_or_id_selector(html)
 
 pub fn simple_web_html_background_color(html: text) -> u32:
     val bg = _html_background_color(html)

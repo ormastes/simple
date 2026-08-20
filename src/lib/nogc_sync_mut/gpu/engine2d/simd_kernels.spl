@@ -460,12 +460,16 @@ fn _write_span_bulk(mut dst: any, src: any, dst_off: i64, src_off: i64, count: i
 pub fn simd_fill_row(mut buf: [u32], offset: i64, count: i64, color: u32):
     if count <= 0:
         return
-    if native_pixel_rows_enabled():
-        val row = engine2d_simd_fill_row_u32(count, color)
-        if row.len() == count:
-            # One bulk scatter instead of `count` element stores.
-            _write_span_bulk(buf, row, offset, 0, count)
-            return
+    # No native branch, deliberately (2026-08-20). A fill broadcasts a CONSTANT,
+    # so the native row round trip -- extern call, a fresh `count`-element malloc
+    # in C, `count` boxed stores, then a `count`-element write_span back -- is
+    # ~3x the memory traffic of the scalar store loop it replaces and can never
+    # win. Measured on the same harness (640-px span, 400 iters, 7 fresh procs):
+    # native p50 7 ms vs scalar p50 0 ms. See
+    # doc/08_tracking/bug/engine2d_simd_span_kernels_slower_and_fill_colour_corrupt_2026-08-06.md
+    # section 1. `engine2d_simd_fill_row_u32` stays exported and directly tested;
+    # it is only unfit as the row-fill strategy. copy/blit keep their native
+    # paths -- those are real wins (0 ms vs 13 ms).
     _scalar_fill_row(buf, offset, count, color)
 
 pub fn _scalar_fill_row(mut buf: [u32], offset: i64, count: i64, color: i64):
@@ -483,16 +487,22 @@ pub fn simd_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
     if count <= 0:
         return
     if native_pixel_rows_enabled():
-        # Gather aligned dst/src rows, src-over blend via the native row kernel,
-        # scatter back. Bit-identical to _scalar_blend_row (same floor /255).
+        # Gather dst into an aligned row, blend IN PLACE via the span kernel,
+        # scatter back. Bit-identical to _scalar_blend_row (same floor /255):
+        # the span kernel's sa==255 / sa==0 / opaque-dst fast paths reduce to
+        # exactly the branches below, and its general case is the same
+        # engine2d_blend_pixel the row kernel used.
+        #
+        # 2026-08-20: was `engine2d_simd_blend_row_u32(dst_row, src_row)`, which
+        # needed a second `src_row` gather (blend_row takes no offsets) and made
+        # C malloc TWO scratch buffers and unbox/rebox every pixel into them.
+        # `blend_span` takes a src offset, so `src` is read in place -- one less
+        # allocation and one less write_span here, zero mallocs and no scratch
+        # round trip in C.
         val n = count.to_i32()
         var dst_row: [u32] = [0; n]
-        var src_row: [u32] = [0; n]
-        # Bulk gather + bulk scatter (three write_span calls) instead of
-        # 3*count element ops. Output identical to the element loops.
         _write_span_bulk(dst_row, dst, 0, offset, count)
-        _write_span_bulk(src_row, src, 0, offset, count)
-        val blended_i = engine2d_simd_blend_row_u32(dst_row, src_row)
+        val blended_i = rt_engine2d_simd_blend_span_u32(dst_row, 0, src, offset, count)
         _write_span_bulk(dst, blended_i, offset, 0, count)
         return
     _scalar_blend_row(dst, src, offset, count)

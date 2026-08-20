@@ -2,6 +2,10 @@ use std.spec.*
 use common.ui.builder.{panel, text_widget, build_tree_with_title}
 use common.ui.state.{init_state}
 use app.ui.browser.backend.{BrowserBackend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    simple_web_html_needs_selector_layout,
+    simple_web_engine2d_render_html_pixels
+}
 
 describe "browser backend pixel hot paths":
 
@@ -48,3 +52,90 @@ describe "browser backend pixel hot paths":
         backend.render_frame(state.tree, state)
 
         expect(backend.layout_cache.len()).to_be_greater_than(8)
+
+    it "keeps a page on the fast path when its class and id selectors are resolvable":
+        # Pre-fix, ANY `.` or `#` in <style> forced the slow layout path. This
+        # selector names the first block's own first class, so the substring
+        # heuristic resolves it directly.
+        val resolvable = "<html><body><div id='hero' class='card'>" +
+            "<style>.card { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_false(simple_web_html_needs_selector_layout(resolvable))
+
+        val by_id = "<html><body><div id='hero' class='card'>" +
+            "<style>#hero { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_false(simple_web_html_needs_selector_layout(by_id))
+
+        val tag_qualified = "<html><body><div id='hero' class='card'>" +
+            "<style>div.card { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_false(simple_web_html_needs_selector_layout(tag_qualified))
+
+    it "routes to the real layout engine when several rules set a background":
+        # The heuristic paints a phantom SECOND block from the second
+        # background-color in source order, so it cannot faithfully reproduce a
+        # style block with more than one background-setting rule even when every
+        # selector is individually resolvable.
+        val two_rules = "<html><body><div id='hero' class='card'>" +
+            "<style>#hero { background-color: #202020; } " +
+            ".card { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_true(simple_web_html_needs_selector_layout(two_rules))
+
+    it "routes to the real layout engine when a selector is not resolvable":
+        val descendant = "<html><body><div id='hero' class='card'>" +
+            "<style>body .card { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_true(simple_web_html_needs_selector_layout(descendant))
+
+        val foreign_class = "<html><body><div id='hero' class='card'>" +
+            "<style>.sidebar { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_true(simple_web_html_needs_selector_layout(foreign_class))
+
+        val pseudo = "<html><body><div id='hero' class='card'>" +
+            "<style>.card:hover { background-color: #303030; }</style>" +
+            "</div></body></html>"
+        assert_true(simple_web_html_needs_selector_layout(pseudo))
+
+    it "renders a class styled page to a full pixel buffer":
+        val html = "<html><body style='background-color: #204060'>" +
+            "<div id='hero' class='card'></div>" +
+            "<style>.card { background-color: #a0b0c0; }</style>" +
+            "</body></html>"
+        val pixels = simple_web_engine2d_render_html_pixels(html, 8, 4, "software")
+        expect(pixels.len()).to_equal(32)
+        expect(pixels[0]).to_equal(0xFF204060u32)
+
+    it "never paints an overridden class or id colour":
+        # Three rules target the SAME element. The CSS-correct winner is
+        # `#hero` (id specificity 1-0-0) — NOT the last `.card` rule, since
+        # specificity outranks source order. Only that colour may reach the
+        # framebuffer. The substring heuristic gets this wrong twice: it takes
+        # the last `.card` rule as the block colour AND paints the second
+        # background-color as a phantom sibling block. So if a future widening
+        # of `_selector_token_is_resolvable` (or removal of the multi-background
+        # guard) lets this page onto the fast path, this example goes red.
+        val html = "<html><body style='background-color: #204060'>" +
+            "<div id='hero' class='card'></div>" +
+            "<style>.card { background-color: #ff0000; } " +
+            "#hero { background-color: #00ff00; } " +
+            ".card { background-color: #0000ff; }</style>" +
+            "</body></html>"
+        assert_true(simple_web_html_needs_selector_layout(html))
+
+        val pixels = simple_web_engine2d_render_html_pixels(html, 48, 40, "software")
+        expect(pixels.len()).to_equal(1920)
+        var saw_winner = false
+        var saw_overridden = false
+        var i = 0
+        while i < pixels.len():
+            val p = pixels[i]
+            if p == 0xFF00FF00u32:
+                saw_winner = true
+            if p == 0xFFFF0000u32 or p == 0xFF0000FFu32:
+                saw_overridden = true
+            i = i + 1
+        assert_true(saw_winner)
+        assert_false(saw_overridden)

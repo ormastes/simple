@@ -90,6 +90,12 @@ pub(super) struct QuarantinedComputeSubmission {
     pub fence: Fence,
     pub command_buffer: vk::CommandBuffer,
     pub owners: ComputeCommandOwners,
+    /// Caller-visible fence handle for a submission whose command buffer is
+    /// quarantined but whose fence is still legitimately waitable from Simple
+    /// code (the non-blocking `rt_vulkan_submit_no_wait` path). `0` means the
+    /// submission has no caller-visible fence — the historical
+    /// completion-unknown quarantine case, where nobody may wait on it.
+    pub wait_handle: i64,
 }
 
 #[cfg(feature = "vulkan")]
@@ -152,6 +158,12 @@ pub(super) struct VulkanState {
     pub fences: HashMap<i64, Fence>,
     pub compute_commands: HashMap<i64, ComputeCommandOwners>,
     pub quarantined_compute: Vec<QuarantinedComputeSubmission>,
+    /// Caller-visible fence handles whose fence has already been fully released
+    /// by a quarantine reap (`clean_quarantined_compute`, which only runs after
+    /// device-idle is proven). Releasing such a handle again must SUCCEED: the
+    /// fence is genuinely gone, so reporting failure would strand the caller in
+    /// a permanent "release pending" state it can never clear.
+    pub retired_fence_handles: Vec<i64>,
     pub accepted_compute_submit_count: i64,
     pub graphics_commands: HashMap<i64, GraphicsCommandOwners>,
     pub quarantined_graphics: Vec<QuarantinedGraphicsSubmission>,
@@ -191,6 +203,7 @@ impl VulkanState {
             fences: HashMap::new(),
             compute_commands: HashMap::new(),
             quarantined_compute: Vec::new(),
+            retired_fence_handles: Vec::new(),
             accepted_compute_submit_count: 0,
             graphics_commands: HashMap::new(),
             quarantined_graphics: Vec::new(),
@@ -262,14 +275,69 @@ impl VulkanState {
             .as_ptr()
     }
 
+    /// Resolve a caller-visible fence handle to a waitable `Fence`.
+    ///
+    /// Looks in the plain fence table first, then in the pending-fence
+    /// quarantine — a `rt_vulkan_submit_no_wait` submission keeps its command
+    /// buffer quarantined until the fence is known signaled, but its fence is
+    /// still the thing the caller must be able to wait on. Without this second
+    /// lookup the non-blocking submit hands back a handle that
+    /// `rt_vulkan_wait_fence` can never find.
+    pub fn fence_by_handle(&self, handle: i64) -> Option<&Fence> {
+        if let Some(fence) = self.fences.get(&handle) {
+            return Some(fence);
+        }
+        if handle == 0 {
+            return None;
+        }
+        self.quarantined_compute
+            .iter()
+            .find(|submission| submission.wait_handle == handle)
+            .map(|submission| &submission.fence)
+    }
+
+    /// Drop a caller-visible handle for a quarantined submission. The `Fence`
+    /// itself stays owned by the quarantine (it is freed by
+    /// `clean_quarantined_compute` once the device is idle); this only revokes
+    /// the caller's ability to name it. Returns true if a handle was revoked.
+    pub fn release_quarantined_wait_handle(&mut self, handle: i64) -> bool {
+        if handle == 0 {
+            return false;
+        }
+        for submission in self.quarantined_compute.iter_mut() {
+            if submission.wait_handle == handle {
+                submission.wait_handle = 0;
+                return true;
+            }
+        }
+        // Already reaped: the fence was destroyed by `clean_quarantined_compute`
+        // after device-idle, so the handle IS released and this is a success.
+        if let Some(i) = self.retired_fence_handles.iter().position(|&h| h == handle) {
+            self.retired_fence_handles.swap_remove(i);
+            return true;
+        }
+        false
+    }
+
     pub fn clean_quarantined_compute(&mut self) {
-        for submission in self.quarantined_compute.drain(..) {
+        // Drained into a local first: the loop body needs to push onto
+        // `self.retired_fence_handles`, which it cannot do while a `drain`
+        // iterator still holds a mutable borrow of `self.quarantined_compute`.
+        let drained: Vec<QuarantinedComputeSubmission> = self.quarantined_compute.drain(..).collect();
+        for submission in drained {
             let QuarantinedComputeSubmission {
                 device,
                 fence,
                 command_buffer,
                 owners,
+                wait_handle,
             } = submission;
+            // Remember any caller-visible handle so a later release of it
+            // reports success rather than "not found" — see
+            // `release_quarantined_wait_handle`.
+            if wait_handle != 0 {
+                self.retired_fence_handles.push(wait_handle);
+            }
             device.free_compute_command(command_buffer);
             drop(owners);
             drop(fence);

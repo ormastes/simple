@@ -2177,6 +2177,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_shutdown",
     "rt_vulkan_submit_and_wait",
     "rt_vulkan_submit_and_wait_fence",
+    "rt_vulkan_submit_no_wait",
     "rt_vulkan_unmap_memory",
     "rt_vulkan_wait_fence",
     "rt_vulkan_wait_idle",

@@ -1,6 +1,8 @@
 # No non-blocking Vulkan compute submit exists — `rt_vulkan_submit_and_wait_fence` always blocks on `u64::MAX`, so a host-side fence timeout can never fire
 
-**Status:** OPEN
+**Status:** RESOLVED (2026-08-20) — verified on a live NVIDIA RTX A6000, see
+"Resolution" at the end of this file. Not committed/pushed by the fixing
+session; the changes are in the working tree.
 **Found:** 2026-08-07
 **Component:** `src/compiler_rust/runtime/src/vulkan/device.rs:1047`
 (`Device::submit_compute_command_with_fence`) and its `.spl` caller chain
@@ -125,3 +127,85 @@ expected 'vulkan-lane-fence-timeout' to equal ''  # (or matcher-specific renderi
 i.e. `dispatch_once` legitimately returns `""` (no timeout observed) even
 under `timeout_ms = 1` against a shader that provably takes tens of
 milliseconds of real GPU time.
+
+## Resolution (2026-08-20) — fixed and verified on real hardware
+
+Fixed essentially as suggested above, plus three defects found only by running
+on a device.
+
+**What existed already, and why it never worked.** A committed
+`rt_vulkan_submit_no_wait` and `Device::submit_compute_command_no_wait` were
+already in the tree — but the extern was **registered nowhere**, so it was
+unreachable from Simple code, and its runtime body allocated a fence handle,
+moved the `Fence` into the quarantine, then ran a no-op placeholder and
+returned the handle. Since `rt_vulkan_wait_fence` only looked in
+`state.fences`, that handle could never be resolved. The `Fence` cannot simply
+also live in `state.fences`: it owns its `vk::Fence` and destroys it on drop,
+so two owning copies would double-destroy.
+
+**Changes**
+- `runtime/src/vulkan_graphics_runtime_core.rs` — `QuarantinedComputeSubmission.wait_handle`;
+  `State::fence_by_handle()` (resolves plain fences *and* pending quarantined
+  ones) and `release_quarantined_wait_handle()`.
+- `runtime/src/vulkan_graphics_runtime_compute.rs` — the no-wait success path
+  now records `wait_handle`; placeholder removed.
+- `runtime/src/vulkan_graphics_runtime_sync.rs` — `wait_fence` resolves via
+  `fence_by_handle`; `destroy_fence` revokes a quarantined handle instead of
+  destroying a fence the GPU may still be signalling.
+- Registered the extern in all four tables (`common/src/runtime_symbols.rs`,
+  `codegen/runtime_sffi.rs`, `interpreter_extern/vulkan.rs`,
+  `interpreter_extern/mod.rs`) and implemented the interpreter-path
+  `rt_vulkan_submit_no_wait_fn` in `interpreter_extern/gpu.rs`.
+- `src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl` — extern +
+  `vulkan_sffi_submit_no_wait`.
+- `src/lib/gc_async_mut/gpu_lane/vulkan_lane_session.spl` —
+  `dispatch_once` submits non-blocking; all downstream branches unchanged.
+
+The blocking `submit_and_wait_fence` path is untouched and remains the default
+for every other caller.
+
+**Defect found only on hardware (would not have surfaced by inspection).**
+The first device run got as far as `vulkan-lane-fence-timeout` correctly, then
+failed at teardown with `vulkan-lane-quarantine-fence-release-pending` and an
+unshutdownable session. Cause: `vulkan_sffi_reap_dependency_quarantine()` calls
+`rt_vulkan_wait_idle`, which drains the quarantine and destroys the fence; the
+session's subsequent `destroy_fence(pending_fence)` then found nothing and
+reported failure, which the session reads as "still pending" — permanently.
+Fence release is now **idempotent**: a handle already released by a
+device-idle reap reports success (`retired_fence_handles` in the runtime,
+`retired_fences` in the interpreter path). Both backends had this bug.
+
+**Two pre-existing blockers cleared** (the `vulkan` feature did not compile at
+all, so none of this was buildable): four E0252 duplicate-import errors from
+stray unconditional `use` lines in `vulkan_graphics_runtime_{compute,shader}.rs`,
+and an E0004 non-exhaustive match in `codegen/vulkan/spirv_instructions.rs`
+missing `MirInst::AggregateCopy` (now a clean codegen error, matching the
+sibling arms, not a `todo!()`).
+
+**Evidence — NVIDIA RTX A6000, Vulkan 1.4.312, driver NVIDIA:**
+```
+DISPATCH: 'vulkan-lane-fence-timeout'
+  sentinel=3735879680            # 0xDEAD0000
+  completion_unknown=true  release_pending=true
+RETRY:    'vulkan-lane-quarantine-retry-complete'
+  completion_unknown=false release_pending=false pending_fence=0
+SHUTDOWN: ''
+```
+`test/02_integration/gpu_lane/vulkan_lane_session_spec.spl` — **2/2 passed, 4
+consecutive runs** (both the arena round-trip and this timeout example).
+Device-free contract spec `test/01_unit/gpu/vulkan_submit_no_wait_backed_spec.spl`
+2/2. `cargo check --release --bin simple` clean with and without
+`--features vulkan`. `check-unbacked-extern-ratchet.shs`: `PASS — 1466 …, 0 new,
+0 stale`.
+
+**Caveat — investigated, and it was NOT a Vulkan problem.** `simple run`
+reports `skip:vulkan-physical-device-required` on this host while `simple test`
+drives both GPUs. Root cause: the `run` path corrupts extern-returned `text`
+(`device_type` genuinely returns `"discrete"`, but the consumer observes
+`len() == -1`), so the final `device_type != "discrete"` check in `probe()`
+wrongly fires. Loader, ICD, enumeration (3 devices), and device selection all
+succeed on that path. Because the established spec idiom asserts
+`assert_true(probe_result.starts_with("skip:"))`, that false skip is recorded
+as a PASS with `skipped=0`. Filed separately as
+`doc/08_tracking/bug/run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20.md`.
+All evidence in this record is from the `test` path, which is unaffected.

@@ -399,6 +399,18 @@ impl SpirvModule {
                     inst
                 )));
             }
+
+            // Aggregate copies (not yet implemented). This arm was missing
+            // entirely, which made the whole `vulkan` feature fail to compile
+            // with E0004 once `MirInst::AggregateCopy` was added. Reported as a
+            // clean codegen error, matching the other unimplemented arms above,
+            // rather than a `todo!()` panic.
+            MirInst::AggregateCopy { .. } => {
+                return Err(CompileError::Codegen(format!(
+                    "Aggregate copy not yet implemented in SPIR-V: {:?}",
+                    inst
+                )));
+            }
         }
 
         Ok(())

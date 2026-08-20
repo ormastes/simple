@@ -1,0 +1,60 @@
+# Regression: `self.field.push(x)` in the AST interpreter must mutate the field
+# array IN PLACE when it is uniquely owned, and must still honour value semantics
+# when the array is aliased.
+#
+# Pre-fix, `interpreter/expr/calls.rs` copied the field into a `__nested_field_*__`
+# temp binding, which aliased the array Arc, so every mutator cloned the whole
+# backing Vec — O(N^2) accumulation into any object field. That is the interpreter
+# cost behind doc/08_tracking/bug/interpreter_gc_root_scan_blowup_large_array_2026-07-25.md.
+#
+# This spec pins the SEMANTICS. The cost side is pinned by
+# scripts/check/check-interp-field-array-push-linear.shs.
+
+class Box:
+    var data: Array<i64>
+
+fn main():
+    var b = Box()
+    b.data = [1, 2, 3]
+
+    # An alias taken before the mutation must NOT observe it (value semantics).
+    var alias = b.data
+    var pushed = b.data.push(4)
+    if pushed.len() != 4:
+        print("FAIL push result len ${pushed.len()}")
+        return
+    if b.data.len() != 4:
+        print("FAIL field len after push ${b.data.len()}")
+        return
+    if alias.len() != 3:
+        print("FAIL alias mutated: ${alias.len()}")
+        return
+
+    # `pop` yields the ELEMENT, and shrinks the field.
+    var popped = b.data.pop()
+    if popped != 4 or b.data.len() != 3:
+        print("FAIL pop ${popped} len ${b.data.len()}")
+        return
+
+    b.data.insert(0, 99)
+    if b.data[0] != 99 or b.data.len() != 4:
+        print("FAIL insert")
+        return
+
+    # `remove` yields the REMOVED ELEMENT.
+    var removed = b.data.remove(0)
+    if removed != 99 or b.data.len() != 3:
+        print("FAIL remove ${removed}")
+        return
+
+    b.data.extend([7, 8])
+    if b.data.len() != 5 or b.data[4] != 8:
+        print("FAIL extend")
+        return
+
+    b.data.clear()
+    if b.data.len() != 0 or alias.len() != 3:
+        print("FAIL clear ${b.data.len()} alias ${alias.len()}")
+        return
+
+    print("PASS field array mutation in place")

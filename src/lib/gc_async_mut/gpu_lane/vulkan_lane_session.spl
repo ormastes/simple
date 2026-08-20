@@ -28,7 +28,7 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_dispatch, vulkan_sffi_end_compute,
     vulkan_sffi_discard_command,
     vulkan_sffi_fence_submission_supported,
-    vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
+    vulkan_sffi_submit_no_wait, vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_reap_dependency_quarantine,
     vulkan_sffi_quarantine_dependencies,
     vulkan_sffi_quarantine_unsubmitted_command}
@@ -252,7 +252,14 @@ class VulkanLaneSession:
                     return "vulkan-lane-command-release-unknown"
             vulkan_sffi_destroy_descriptor_set(descriptor)
             return "vulkan-lane-command-record-failed"
-        val fence = vulkan_sffi_submit_and_wait_fence(command)
+        # Non-blocking submit: returns a still-PENDING fence, so the
+        # `vulkan_sffi_wait_fence(fence, timeout_ns)` below is the ONLY place a
+        # wait happens and `self.timeout_ms` is genuinely enforceable. Using
+        # `vulkan_sffi_submit_and_wait_fence` here waited with an infinite
+        # timeout internally, which made the timeout branch below structurally
+        # unreachable. See doc/08_tracking/bug/
+        # vulkan_submit_and_wait_fence_blocks_unconditionally_no_nonblocking_submit_2026-08-07.md
+        val fence = vulkan_sffi_submit_no_wait(command)
         if fence < 0:
             # Submit outcome unknown (possible device loss mid-submit):
             # quarantine and force the timeout sentinel, never a silent pass.

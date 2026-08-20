@@ -246,6 +246,94 @@ fn apply_array_mutation_in_place(
     }
 }
 
+/// Ownership-gated in-place mutation for the `obj.field.push(x)` shape.
+///
+/// The bare-identifier receiver (`arr.push(x)`) already gets in-place mutation via
+/// `Arc::make_mut` further down this file, which is why local list building is O(N).
+/// The FIELD receiver did NOT: `interpreter/expr/calls.rs` copied the field value into
+/// a `__nested_field_*__` temp, so the array Arc was aliased (object + temp) and every
+/// single `push` cloned the whole backing `Vec` — O(N^2) list building on any object
+/// field. That is the cost the font loader pays (`self.glyphs = self.glyphs.push(..)`
+/// style accumulation), and it is why an unrelated large live object appeared to make
+/// font loading explode.
+///
+/// Same discipline as the identifier path: arguments are evaluated FIRST (so an
+/// argument that retains a reference to this array forces the clone branch), then the
+/// array is re-read through `env.get_mut` and mutated via `Arc::make_mut` — uniquely
+/// owned mutates in place, aliased clones-then-mutates, so value semantics are
+/// preserved exactly. `Arc::make_mut` on the field map likewise isolates an aliased
+/// object before its field is touched.
+///
+/// Returns `Ok(None)` when the shape does not apply, leaving the caller on its
+/// previous path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_field_array_mutation_in_place(
+    obj_name: &str,
+    field: &str,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    // `write_span` takes four arguments and is handled by its own path; keep this
+    // helper to the generic item/idx/second mutators.
+    if method == "write_span" || !ARRAY_MUTATING_METHODS.contains(&method) {
+        return Ok(None);
+    }
+    // Only fire for a local object binding whose field is currently a plain array.
+    match env.get(obj_name) {
+        Some(Value::Object { fields, .. }) => match fields.get(field) {
+            Some(Value::Array(_)) => {}
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    }
+
+    let item = match method {
+        "push" | "append" => Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?),
+        "extend" => Some(eval_arg(
+            args,
+            0,
+            Value::array(vec![]),
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?),
+        _ => None,
+    };
+    let (idx, second) = match method {
+        "insert" => (
+            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+            Some(eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?),
+        ),
+        "remove" => (
+            Some(eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?),
+            None,
+        ),
+        _ => (None, None),
+    };
+
+    // Re-read after argument evaluation: an argument may have rebound `obj_name`
+    // or replaced the field, in which case the shape no longer applies.
+    let Some(Value::Object { fields, .. }) = env.get_mut(obj_name) else {
+        return Ok(None);
+    };
+    let Some(Value::Array(arc)) = Arc::make_mut(fields).get_mut(field) else {
+        return Ok(None);
+    };
+    let popped = {
+        let vec = Arc::make_mut(arc);
+        apply_array_mutation_in_place(method, vec, item, idx, second)?
+    };
+    let new_array_val = Value::Array(Arc::clone(arc));
+    Ok(Some(popped.unwrap_or(new_array_val)))
+}
+
 /// Handle method call on object with self-update tracking
 /// Returns (result, optional_updated_self) where updated_self is the object with mutations
 pub(crate) fn handle_method_call_with_self_update(
