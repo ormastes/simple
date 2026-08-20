@@ -6,6 +6,7 @@
  * Apollo Lake LPSS PCI discovery instead.
  */
 #include <stdint.h>
+#include <stddef.h>
 
 extern uint8_t rt_port_inb(uint16_t port);
 extern void rt_port_outb(uint16_t port, uint8_t value);
@@ -22,6 +23,17 @@ static uint8_t up2_serial_getchar(void) {
 static void up2_serial_putchar(uint8_t byte) {
     while ((rt_port_inb((uint16_t)(UP2_COM1_BASE + 5u)) & 0x20u) == 0u) { }
     rt_port_outb((uint16_t)UP2_COM1_BASE, byte);
+}
+
+long write(int descriptor, const void *buffer, size_t count) {
+    if ((descriptor != 1 && descriptor != 2) || buffer == (const void *)0) {
+        return -1;
+    }
+    const uint8_t *bytes = (const uint8_t *)buffer;
+    for (size_t index = 0u; index < count; ++index) {
+        up2_serial_putchar(bytes[index]);
+    }
+    return (long)count;
 }
 
 int64_t rt_string_new_literal(const uint8_t *bytes, uint64_t length) {

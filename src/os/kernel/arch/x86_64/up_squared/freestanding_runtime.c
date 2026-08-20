@@ -1,6 +1,6 @@
 /* Freestanding allocation provider for the UP Squared ring-0 kernel.
  *
- * The x86_64-unknown-simpleos sysroot also contains a userspace malloc whose
+ * The x86_64 SimpleOS sysroot also contains a userspace malloc whose
  * growth path enters the kernel through `syscall`.  A kernel image cannot use
  * that ABI before (or after) entering ring 0.  Keep allocation inside the
  * linker-owned heap and make this object the malloc owner selected by the

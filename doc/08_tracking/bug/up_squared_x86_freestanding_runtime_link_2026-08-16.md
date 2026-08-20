@@ -15,13 +15,13 @@ SimpleOS board builds. Do not add weak fabricated stubs or use the Rust seed.
 After the third bounded cycle the lane stopped per the runaway guard.
 
 Resolution: `build-simpleos-up-squared-apollo-lake.shs` now builds the admitted
-`x86_64-unknown-simpleos` simple-core archive, imports only the required native
+`x86_64-unknown-none` simple-core capsule, imports only the required native
 port-I/O primitive, adds board-owned freestanding runtime and serial providers,
-includes the existing Multiboot CRT, and invokes native-build with
-`--runtime-bundle simple-core` and stub fallback disabled.
-The admitted Stage 3 compiler produced a 68,936-byte x86-64 ELF, which was
-packaged into a 256 MiB GPT/FAT32 removable UEFI image. The structural checker
-passed seven GPT/ESP/BOOTX64 checks. Physical F7 boot remains a separate live
+and emits the Simple closure as an archive. The wrapper directly links that
+archive with the existing Multiboot CRT and the board linker script, with stub
+fallback disabled. The admitted Stage 3 compiler produced a 37,280-byte
+x86-64 ELF and a 256 MiB GPT/FAT32 removable UEFI image. The structural checker
+and OVMF boot/`ls /` gate pass. Physical F7 boot remains a separate live
 criterion.
 
 The later hosted-syscall retention defect is distinct and tracked in

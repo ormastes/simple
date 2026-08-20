@@ -1,6 +1,6 @@
 # UP2 ring-0 image retains hosted SimpleOS syscall trampoline
 
-Status: OPEN — build gate added; kernel link lane still unresolved
+Status: RESOLVED (2026-08-20) — freestanding kernel boots and runs VFS `ls /`
 Owner: UP Squared Apollo Lake SimpleOS lane
 Date: 2026-08-20
 
@@ -33,10 +33,16 @@ libc archive during the UP2 build, limits native-runtime import to port I/O,
 and supplies board freestanding allocation/string/serial primitives. These
 changes are retained as useful isolation work, but they do not close this bug.
 
-The next implementation must select or add a genuine x86_64 freestanding
-kernel link lane that does not synthesize the SimpleOS userspace `_start` and
-does not silently pull the generic legacy boot closure over the board-owned
-Multiboot entry. Then rebuild once and require
-`hosted_syscall_symbols=0`, boot that exact image under OVMF, and require the
-ordered UP2 markers plus command-correlated `ls /` output. Physical board
-evidence remains separate.
+Resolution: the implementation uses the existing `x86_64-unknown-none`
+freestanding kernel link lane, which does not synthesize the SimpleOS userspace
+`_start`. The admitted compiler emits the Simple closure as an archive; the
+board wrapper directly links it with the board-owned Multiboot CRT and
+freestanding runtime capsule. A board-owned `write` implementation sends only
+stdout/stderr bytes to COM1 and rejects other descriptors.
+
+The final 37,280-byte ELF has entry `0x08000038`, binds `spl_start` to the
+UP2 Simple entry, and has no `simpleos_syscall`. Its exact 256 MiB removable
+image passed the structural checker and `--ovmf`: loader admission, ELF32 shim,
+32/64-bit entries, ordered kernel markers, and a freshly injected `ls /` whose
+VFS window contains `/bin`, `/etc`, and `/README.txt`. Physical board evidence
+remains separate.

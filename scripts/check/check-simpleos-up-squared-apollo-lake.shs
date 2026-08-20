@@ -30,6 +30,9 @@ contract() {
     rg -q 'multiboot2 /boot/loader.elf' "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs"
     rg -q 'module2 /boot/kernel.elf simpleos-kernel' "$ROOT_DIR/scripts/os/build-simpleos-x86_64-board-usb.shs"
     rg -q 'hosted simpleos_syscall trampoline leaked' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -q '^TARGET=x86_64-unknown-none$' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -q -- '--emit-archive' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
+    rg -q 'native_target: "x86_64-unknown-none"' "$ROOT_DIR/src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl"
     rg -q 'extern unsigned char __heap_start' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/freestanding_runtime.c"
     echo up2_contract_status=pass
     echo board_target=x86_64-up-squared-apollo-lake
@@ -37,6 +40,7 @@ contract() {
     echo loader=EFI/BOOT/BOOTX64.EFI
     echo loader_contract=elf32-multiboot2-shim+elf64-module
     echo runtime_execution=freestanding-ring0
+    echo native_target=x86_64-unknown-none
     echo hosted_syscall_symbols=0
     echo media_safety=stable-by-id,serial,removable,usb,unmounted,unheld,non-system,readback
     echo persistent_writes=selected-removable-usb-only
@@ -96,13 +100,7 @@ resolve_uart() {
 }
 
 validate_receipts() {
-    test -s "$KERNEL" -a -s "$KERNEL.receipt" || blocked kernel-or-receipt-missing
-    test -s "$IMAGE" -a -s "$IMAGE_RECEIPT" || blocked image-or-receipt-missing
-    KERNEL_SHA="$(sha256sum "$KERNEL" | awk '{print $1}')"
-    IMAGE_SHA="$(sha256sum "$IMAGE" | awk '{print $1}')"
-    test "$(receipt_value "$KERNEL.receipt" artifact_sha256)" = "$KERNEL_SHA" || fail kernel-hash-mismatch
-    test "$(receipt_value "$IMAGE_RECEIPT" kernel_sha256)" = "$KERNEL_SHA" || fail image-kernel-binding-mismatch
-    test "$(receipt_value "$IMAGE_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail image-hash-mismatch
+    validate_image_receipts
     test -n "$MEDIA_RECEIPT" -a -s "$MEDIA_RECEIPT" || blocked media-receipt-missing
     test "$(receipt_value "$MEDIA_RECEIPT" schema)" = up2-removable-media-v1 || fail media-receipt-schema
     test "$(receipt_value "$MEDIA_RECEIPT" status)" = pass || fail media-receipt-status
@@ -111,7 +109,78 @@ validate_receipts() {
     test "$(receipt_value "$MEDIA_RECEIPT" persistent_target)" = selected-removable-usb-only || fail media-target-policy
 }
 
+validate_image_receipts() {
+    test -s "$KERNEL" -a -s "$KERNEL.receipt" || blocked kernel-or-receipt-missing
+    test -s "$IMAGE" -a -s "$IMAGE_RECEIPT" || blocked image-or-receipt-missing
+    KERNEL_SHA="$(sha256sum "$KERNEL" | awk '{print $1}')"
+    IMAGE_SHA="$(sha256sum "$IMAGE" | awk '{print $1}')"
+    test "$(receipt_value "$KERNEL.receipt" artifact_sha256)" = "$KERNEL_SHA" || fail kernel-hash-mismatch
+    test "$(receipt_value "$IMAGE_RECEIPT" kernel_sha256)" = "$KERNEL_SHA" || fail image-kernel-binding-mismatch
+    test "$(receipt_value "$IMAGE_RECEIPT" image_sha256)" = "$IMAGE_SHA" || fail image-hash-mismatch
+}
+
 line_number() { grep -anF "$2" "$1" | head -n 1 | cut -d: -f1; }
+
+ovmf() {
+    validate_image_receipts
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    TRANSCRIPT="$RUN_DIR/ovmf-uart.log"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    set +e
+    (sleep 12; printf 'ls /\r') | timeout 30 qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64 -m 512M -smp 1 \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,readonly=on,id=up2usb,file=$IMAGE" \
+        -device qemu-xhci,id=xhci \
+        -device usb-storage,bus=xhci.0,drive=up2usb,bootindex=0 \
+        -serial stdio > "$TRANSCRIPT" 2>&1
+    QEMU_RC=$?
+    set -e
+    test "$QEMU_RC" -eq 0 -o "$QEMU_RC" -eq 124 || fail ovmf-qemu-failed
+    for marker in \
+        'UP2 loader-ready' 'UP2 kernel-admitted' '[UP2-SHIM] jump' \
+        '[BOOT32] entry' '[BOOT64] entry' 'UP2 entry' \
+        'UP2 console-ready' 'UP2 filesystem-ready entries=bin,etc,README.txt' \
+        'UP2 shell-ready' 'UP2 ls-begin source=vfs command=ls /' \
+        'UP2 ls-end status=pass'; do
+        grep -aFq "$marker" "$TRANSCRIPT" || fail ovmf-marker-missing
+    done
+    LS_BEGIN_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-begin source=vfs command=ls /')"
+    LS_END_LINE="$(line_number "$TRANSCRIPT" 'UP2 ls-end status=pass')"
+    test "$LS_BEGIN_LINE" -lt "$LS_END_LINE" || fail ovmf-ls-order
+    WINDOW="$(sed -n "${LS_BEGIN_LINE},${LS_END_LINE}p" "$TRANSCRIPT" | tr -d '\r')"
+    printf '%s\n' "$WINDOW" | grep -Fxq /bin || fail ovmf-ls-bin-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /etc || fail ovmf-ls-etc-missing
+    printf '%s\n' "$WINDOW" | grep -Fxq /README.txt || fail ovmf-ls-readme-missing
+    RECEIPT="$RUN_DIR/ovmf.receipt"
+    {
+        echo schema=up2-ovmf-v1
+        echo status=pass
+        echo kernel_sha256="$KERNEL_SHA"
+        echo image_sha256="$IMAGE_SHA"
+        echo marker_order=pass
+        echo 'ls_command=ls /'
+        echo ls_source=vfs
+        echo ls_entries=bin,etc,README.txt
+        echo uart_transcript="$TRANSCRIPT"
+        echo uart_transcript_sha256="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')"
+        echo persistent_writes=none
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_status=pass
+    echo marker_order=pass
+    echo ls_status=pass
+    echo ls_source=vfs
+    echo ls_entries=bin,etc,README.txt
+    echo ovmf_receipt="$RECEIPT"
+}
 
 live() {
     case "$BOOT_SECONDS" in ''|*[!0-9]*) fail invalid-boot-timeout ;; esac
@@ -199,6 +268,7 @@ live() {
 case "$MODE" in
     --contract) contract ;;
     --self-test) self_test ;;
+    --ovmf) ovmf ;;
     --live) live ;;
-    *) echo "usage: $0 --contract|--self-test|--live" >&2; exit 1 ;;
+    *) echo "usage: $0 --contract|--self-test|--ovmf|--live" >&2; exit 1 ;;
 esac

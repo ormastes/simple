@@ -12,7 +12,14 @@ scripts/check/check-simpleos-up-squared-apollo-lake.shs --self-test
 
 Build the admitted kernel and image, then move the USB stick to a writer host.
 The offline contract verifies the ELF64 Multiboot2 header and embedded GRUB
-command, but the currently open OVMF transition bug prevents a kernel-boot PASS.
+command. Before writing media, run the exact-image firmware preflight:
+
+```sh
+scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf
+```
+
+It must reach the ELF32 shim, 64-bit kernel, ordered markers, and a fresh
+VFS-backed `ls /`. This is an offline preflight, not physical-board evidence.
 Run `write-simpleos-up-squared-usb.shs` without `--write-media` to obtain the
 identity-bound challenge. After verifying model, serial, and capacity, rerun as
 root with `--write-media` and that exact confirmation. Retain its receipt.

@@ -2,8 +2,13 @@
 
 ## Build and package
 
-`build-simpleos-up-squared-apollo-lake.shs` compiles the dedicated entry with
-the admitted self-hosted compiler and real simple-core/C/ASM runtime providers.
+`build-simpleos-up-squared-apollo-lake.shs` compiles the dedicated entry for
+`x86_64-unknown-none` with the admitted self-hosted compiler. It emits the
+Simple closure as an archive, then links that archive with the board-owned
+Multiboot CRT and the real simple-core/C runtime capsule. The direct kernel
+link must reject any retained `simpleos_syscall`; the
+`x86_64-unknown-simpleos` filesystem-process entry shim is not part of this
+lane.
 `build-simpleos-up-squared-usb-image.shs` verifies the kernel receipt, invokes
 the generic GPT/FAT32 x64 UEFI packager, checks the image, then records kernel,
 BOOTX64.EFI, and whole-image hashes. The kernel retains a legacy Multiboot1

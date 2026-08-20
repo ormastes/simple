@@ -15,8 +15,6 @@ SECTIONS
         *(.text)
         *(.text.*)
     }
-    spl_start = __simple_entry_start;
-
     .rodata ALIGN(4K) : { *(.rodata) *(.rodata.*) }
     .data ALIGN(4K) : { *(.data) *(.data.*) }
 

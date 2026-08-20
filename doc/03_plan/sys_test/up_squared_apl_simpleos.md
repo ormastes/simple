@@ -5,6 +5,10 @@ receipts and `--contract`. REQ-003 and NFR-001/002/004 are covered by the
 separate media writer plus full readback receipt. REQ-004..007 and
 NFR-005..008 require `--live` on the physical board.
 
+`--ovmf` is the reproducible preflight for the exact admitted USB image. It
+must prove the loader transition, ordered kernel markers, command-correlated
+`ls /`, and VFS entries, but it never substitutes for physical `--live`.
+
 Visible steps:
 
 1. Identify UP Squared N4200 and console adapter.
