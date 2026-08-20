@@ -1,6 +1,6 @@
 # UP2 UEFI GRUB Multiboot2 transition does not reach the kernel entry
 
-Status: OPEN — loader transition implementation required
+Status: RESOLVED (2026-08-20) — ELF32 shim reaches the ELF64 kernel entry
 
 The exact UP2 removable image is discovered and started by OVMF. Its standalone
 GRUB emits `UP2 loader-ready`, accepts the structurally validated ELF64
@@ -23,8 +23,12 @@ Retained evidence:
 - `build/test-artifacts/03_system/os/x86_64/up_squared_apl_simpleos/ovmf-loader-markers-20260820/uart.log`
 - `build/test-artifacts/03_system/os/x86_64/up_squared_apl_simpleos/ovmf-multiboot2-gdb-smp1-20260820/uart.log`
 
-Next design decision: either implement a small admitted ELF32 Multiboot2 loader
-shim that loads the ELF64 kernel and performs the reviewed 32→64 transition, or
-provide a native x64 UEFI PE entry that exits boot services and enters a
-UEFI-aware 64-bit kernel path. Do not claim physical UP2 boot until OVMF and the
-board both reach the ordered kernel markers.
+Resolution: the removable image now boots a bounded ELF32 Multiboot2 shim,
+passes the admitted ELF64 kernel as a named module, validates its ELF class,
+machine, program headers, segment bounds, and low physical addresses, copies
+its `PT_LOAD` segments, and jumps to the normalized `_entry32` ELF entry. OVMF
+evidence reaches `[UP2-SHIM] elf64-loaded`, `[BOOT32] entry`, and `[BOOT64]
+entry`. This resolves the firmware/loader transition only. The subsequent
+ring-0 runtime closure is tracked separately, and physical UP2 boot remains
+unproven until the board reaches the ordered kernel and command-correlated
+`ls /` markers.

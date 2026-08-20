@@ -43,6 +43,12 @@ mkdir -p "$(dirname "$OUTPUT")" build/os/generated
 if test ! -s "$SYSROOT/lib/libsimple_runtime_native.a"; then
     SIMPLEOS_TARGET_TRIPLE="$TARGET" sh src/os/port/llvm/sysroot.shs
 fi
+# Refresh the x86 libc archive through its dependency-aware Makefile on every
+# board build. This is cheap when unchanged and ensures CFLAGS/section-policy
+# changes cannot leave a stale monolithic libc in the sysroot.
+make -C src/os/libc >/dev/null
+cp src/os/libc/libsimpleos_c.a "$SYSROOT/lib/libsimpleos_c.a"
+cp src/os/libc/libsimpleos_c.a "$SYSROOT/lib/libm.a"
 SIMPLE_BINARY="$COMPILER" \
 SIMPLE_CORE_BUILD_DIR="$CORE_DIR" \
 SIMPLE_CORE_BACKEND="$BACKEND" \
@@ -53,13 +59,28 @@ test -s "$CORE_RUNTIME" || { echo "error: missing UP2 simple-core archive" >&2; 
 
 mkdir -p "$CORE_DIR/runtime-members"
 rm -f "$CORE_DIR/runtime-members"/*.o
-(cd "$CORE_DIR/runtime-members" && "${AR:-llvm-ar}" x "../../../sysroot/lib/libsimple_runtime_native.a")
-"${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/runtime-members"/*.o
+# The native archive is a hosted compatibility surface.  Import only the
+# privileged port-I/O primitive needed by this board's early console; pulling
+# runtime_native.o or the syscall adapters drags userspace libc/syscalls into
+# the ring-0 image.
+(cd "$CORE_DIR/runtime-members" && \
+    "${AR:-llvm-ar}" x "../../../sysroot/lib/libsimple_runtime_native.a" runtime_port_io.o)
+test -s "$CORE_DIR/runtime-members/runtime_port_io.o" || {
+    echo "error: missing admitted runtime_port_io.o" >&2
+    exit 1
+}
+"${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/runtime-members/runtime_port_io.o"
 clang --target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-builtin \
     -mno-red-zone -fno-stack-protector -ffunction-sections -fdata-sections -O2 \
     -c src/os/kernel/arch/x86_64/up_squared/serial_runtime.c \
     -o "$CORE_DIR/up2_serial_runtime.o"
 "${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/up2_serial_runtime.o"
+clang --target=x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-builtin \
+    -mno-red-zone -fno-stack-protector -ffunction-sections -fdata-sections -O2 \
+    -Wall -Wextra -Werror \
+    -c src/os/kernel/arch/x86_64/up_squared/freestanding_runtime.c \
+    -o "$CORE_DIR/up2_freestanding_runtime.o"
+"${AR:-llvm-ar}" r "$CORE_RUNTIME" "$CORE_DIR/up2_freestanding_runtime.o"
 clang --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
     -c examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s \
     -o "$CORE_DIR/up2_multiboot_crt0.o"
@@ -77,6 +98,10 @@ SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 timeout 300 "$COMPILER" native-buil
 
 test -s "$OUTPUT"
 file "$OUTPUT" | grep -Eq 'ELF 64-bit.*x86-64'
+if nm "$OUTPUT" | awk '$3=="simpleos_syscall" {found=1} END {exit !found}'; then
+    echo "error: hosted simpleos_syscall trampoline leaked into the ring-0 image" >&2
+    exit 1
+fi
 command -v llvm-objcopy >/dev/null 2>&1 || { echo "error: llvm-objcopy missing" >&2; exit 1; }
 command -v nm >/dev/null 2>&1 || { echo "error: nm missing" >&2; exit 1; }
 ENTRY_HEX="$(nm -n "$OUTPUT" | awk '$3=="_entry32" {print $1; exit}')"
@@ -103,6 +128,8 @@ trap 'rm -f "$TMP"' EXIT HUP INT TERM
     echo compiler_sha256="$(sha256sum "$COMPILER" | awk '{print $1}')"
     echo compiler_provenance="$PROVENANCE"
     echo runtime_bundle=simple-core
+    echo runtime_execution=freestanding-ring0
+    echo hosted_syscall_symbols=0
     echo runtime_archive="$CORE_RUNTIME"
     echo runtime_archive_sha256="$(sha256sum "$CORE_RUNTIME" | awk '{print $1}')"
     echo entry_source="$ENTRY"

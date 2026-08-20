@@ -9,6 +9,7 @@
 
 extern uint8_t rt_port_inb(uint16_t port);
 extern void rt_port_outb(uint16_t port, uint8_t value);
+extern int64_t rt_string_new(int64_t bytes, int64_t length);
 extern int64_t rt_string_new_literal(const uint8_t *bytes, uint64_t length);
 
 #define UP2_COM1_BASE 0x3f8u
@@ -21,6 +22,24 @@ static uint8_t up2_serial_getchar(void) {
 static void up2_serial_putchar(uint8_t byte) {
     while ((rt_port_inb((uint16_t)(UP2_COM1_BASE + 5u)) & 0x20u) == 0u) { }
     rt_port_outb((uint16_t)UP2_COM1_BASE, byte);
+}
+
+int64_t rt_string_new_literal(const uint8_t *bytes, uint64_t length) {
+    return rt_string_new((int64_t)(uintptr_t)bytes, (int64_t)length);
+}
+
+void serial_println(int64_t value) {
+    uintptr_t tagged = (uintptr_t)value;
+    if ((tagged & 7u) == 1u) {
+        const uint8_t *object = (const uint8_t *)(tagged & ~(uintptr_t)7u);
+        uint64_t length = *(const uint64_t *)(object + 8u);
+        const uint8_t *bytes = object + 16u;
+        for (uint64_t index = 0u; index < length; ++index) {
+            up2_serial_putchar(bytes[index]);
+        }
+    }
+    up2_serial_putchar('\r');
+    up2_serial_putchar('\n');
 }
 
 int64_t rt_serial_readline(void) {

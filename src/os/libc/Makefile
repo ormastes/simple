@@ -12,6 +12,7 @@ CFLAGS  = -target x86_64-unknown-none-elf \
           -ffreestanding -nostdlib -fno-builtin \
           -mno-red-zone -fno-stack-protector -fno-exceptions \
           -fno-unwind-tables -fno-asynchronous-unwind-tables \
+          -ffunction-sections -fdata-sections \
           -O2 -Wall -Wextra -Wno-unused-parameter \
           -I include
 
@@ -47,6 +48,11 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(AR) rcs $@ $^
+
+# Compiler flags are part of every object's ABI/section contract.  Rebuild
+# objects when this Makefile changes so a stale monolithic .text object cannot
+# bypass the freestanding linker's --gc-sections policy.
+$(OBJS): Makefile
 
 %.o: %.c simpleos_libc.h simpleos_file_internal.h
 	$(CC) $(CFLAGS) -c $< -o $@
