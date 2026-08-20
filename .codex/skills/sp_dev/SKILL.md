@@ -197,6 +197,18 @@ are supplied; a media receipt with full image-length readback is mandatory
 input to `--live`. The live checker must keep one UART session open from boot
 markers through the freshly injected public-VFS `ls /` window.
 
+For original-UP2 Intel DCI requests, distinguish proprietary Intel USB 3.x DCI
+DbC from open xHCI DbC and from USB bridge cables. A qualified SuperSpeed debug
+cable, firmware debug consent, enabled/unlocked architectural debug interface,
+and Intel System Debugger/System Bring-Up Toolkit are mandatory. Smart KM Link
+`0ea0:2211`, Tigard `0403:6010`, CN22, generic GDB, and OpenOCD do not establish
+DCI. Inventory with `scripts/check/check-up-squared-apl-dci.shs --inventory`;
+missing tool, rules, or retained target receipt is BLOCKED. DCI run control and
+physical-memory staging do not authorize BIOS, MSR, or storage writes. Boot the
+existing UEFI image under DCI observation unless a reviewed CPU-state-specific
+RAM trampoline exists; perform persistent writes only through an identity-gated
+target-side storage driver with flush and exact readback evidence.
+
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo
 DB. It may end the coding turn only after code and host-independent tests are

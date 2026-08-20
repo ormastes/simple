@@ -22,10 +22,10 @@ disk is GPT with one FAT32 ESP and `EFI/BOOT/BOOTX64.EFI`. The ELF64 removable
 lane uses Multiboot2; the image checker requires the embedded command plus
 `UP2 loader-ready` and `UP2 kernel-admitted` serial markers.
 
-Current OVMF evidence reaches both loader markers but not `_entry32`. Treat this
-as a release blocker documented in
-`doc/08_tracking/bug/up2_grub_multiboot2_transition_2026-08-20.md`; image
-structure and loader admission are not kernel-boot PASS.
+Current OVMF evidence reaches the loader, 32-bit shim, 64-bit bootstrap, board
+entry, console, filesystem, and shell. A freshly injected `ls /` returns
+`/bin`, `/etc`, and `/README.txt` through the public VFS. This closes the prior
+emulated transition blocker; it still does not prove a physical UP2 boot.
 
 ## Media safety and boot
 
@@ -60,6 +60,11 @@ with ordered `UP2 entry`, `console-ready`, `filesystem-ready`, and `shell-ready`
 markers followed by a command-correlated `ls /` response containing `/bin`,
 `/etc`, and `/README.txt` from the public VFS path. A structurally valid image or
 historical transcript does not prove the current board boot.
+
+Apollo Lake may instead expose proprietary Intel DCI through a qualified USB
+3.x DbC cable when firmware and architectural debug gates permit it. This is
+not CN22, Tigard, Smart KM Link, or generic OpenOCD. See
+`up_squared_apl_intel_dci_debug.md` for the fail-closed debug boundary.
 
 Run the physical oracle with the retained media receipt:
 

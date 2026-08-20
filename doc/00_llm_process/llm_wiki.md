@@ -47,8 +47,8 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 
 ## UP Squared Apollo Lake SimpleOS bring-up
 
-- **Current status:** offline implementation complete; no physical boot or
-  `ls` PASS yet.
+- **Current status:** OVMF boot and VFS-backed `ls /` PASS; physical-board boot
+  and physical DCI remain blocked.
 - **Canonical handoff:**
   `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
 - **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
@@ -73,13 +73,20 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
 - **Verdict rule:** offline image structure, Tigard enumeration, or retained
   partial source is not live board evidence. PASS requires ordered UART boot
   markers and a command-correlated VFS-backed `ls /` response.
-- **Current build state (2026-08-20):** the UP2 wrapper binds the canonical x86
-  freestanding `simple-core` runtime capsule plus Multiboot CRT and board serial
-  input provider. The admitted build produced a 68,936-byte ELF and a 256 MiB
-  GPT/FAT32 UEFI image that passes eight structural/embedded-loader checks.
-  OVMF reaches the GRUB loader-ready and kernel-admitted markers, but the
-  Multiboot2 transition still does not reach `_entry32`; physical F7 boot is
-  also pending because the USB stick is attached to UP2, not the writer host.
+- **Current build state (2026-08-21):** the admitted build produced a
+  37,280-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI image. OVMF reaches
+  loader admission, shim, 32/64-bit bootstrap, entry, console, filesystem, and
+  shell; injected `ls /` returns `/bin`, `/etc`, and `/README.txt`. Physical F7
+  boot is still pending because the board-attached stick is not visible to the
+  writer host.
+- **Intel DCI:** original Apollo Lake UP2 conditionally supports proprietary
+  Intel DCI USB 3.x DbC for JTAG-like run control and physical-memory access.
+  It requires a qualified SuperSpeed debug cable, enabled/unlocked firmware and
+  architectural gates, and Intel System Debugger/System Bring-Up Toolkit. Smart
+  KM Link `0ea0:2211`, Tigard `0403:6010`, CN22, GDB, and OpenOCD are not DCI.
+  DCI can stage RAM but is not a block-storage writer; persistent I/O remains a
+  target-side driver/provisioner operation. Primary guide:
+  `doc/07_guide/platform/simpleos/up_squared_apl_intel_dci_debug.md`.
 - **Canonical tooling:** build the exact-kernel image receipt with
   `scripts/os/build-simpleos-up-squared-usb-image.shs`; admit/write only through
   `scripts/os/write-simpleos-up-squared-usb.shs`; accept hardware only through
