@@ -59,6 +59,59 @@ so the missing kernel is not currently costing anything.
 Status: PARTIALLY RESOLVED / OPEN (P2, downgraded from P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
+## 2026-08-20 — §1 RESOLVED (measured), §2 retraction confirmed a third time, §3 partly done
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, `59773320 2026-08-19
+15:14:28`, md5 `a6dd60aa14b89f259a7cc8b67f374c25` (still the Rust seed). Same
+harness, 7 fresh processes, 640-px span, 400 iters.
+
+**§1 is fixed — no kernel is a pessimisation any more.** Two source-local edits
+in `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`:
+
+- `simd_fill_row` (`:425`) — native branch REMOVED. A fill broadcasts a
+  constant, so the native round trip (extern call + a fresh `count`-element
+  malloc in C + `count` boxed stores + a `count`-element `write_span` back) is
+  ~3x the memory traffic of the scalar store loop and can never win. This is not
+  a re-run of §1's old global mitigation: `copy`/`blit` keep their native paths,
+  which are real wins.
+- `simd_blend_row` (`:452`) — now calls the in-place
+  `rt_engine2d_simd_blend_span_u32` instead of `engine2d_simd_blend_row_u32`.
+  Because the span kernel takes a src offset, `src` is read in place: one fewer
+  Simple allocation and one fewer `write_span` here, and zero `malloc`s plus no
+  unbox/rebox scratch round trip in C (the two mallocs §3 complains about).
+
+| kernel | before (native) | after (native) | scalar |
+|--------|-----------------|----------------|--------|
+| fill   | 7 ms            | **0 ms**       | 0 ms   |
+| copy   | 0 ms            | 0 ms           | 13 ms  |
+| blend  | 30 ms           | **25 ms**      | 28 ms  |
+| blit   | 0 ms            | 0 ms           | 13 ms  |
+
+p50; max RSS 51.9 MB (was 52.1). Blend now BEATS scalar for the first time.
+
+**Correctness.** `test/perf/graphics_2d/blend_parity_probe.spl` reports
+`PARITY_DIFFS=0` on the new blend path. New pin:
+`test/perf/graphics_2d/span_kernel_pixel_correctness_spec.spl` — 4/4 pass,
+decoding every pixel by shift+mask (never by decimal, the mistake that created
+§2). It is verified to DISCRIMINATE: injecting a one-pixel src-offset error into
+the new blend call turns it red (3 passed / 1 failed).
+
+**§2 retracted a third time, now on this lane's code.** The exact repro
+(`rt_engine2d_simd_fill_span_u32(a, 2, 4, 0xFF112233)`) returns `a=255 r=17
+g=34 b=51` = `0xFF112233` byte-exact at indices 2..5, 0/1/6/7 untouched. There
+is no colour corruption and no boxing defect: `engine2d_box_pixel` is
+`pixel << 3` / `>> 3` (`runtime_simd_dispatch.c:663/667`), a tag shift that
+cannot alter a byte. §2 should be treated as closed, not as open work.
+
+**§3 partly closed by the above** — the in-place blend span is now ADOPTED in
+the Simple blend path, and the native `fill` regression is fixed. **Still
+blocked:** `rt_engine2d_simd_blit_row_u32` does not exist, and adding it means
+editing `src/runtime/runtime_simd_dispatch.c`, which cannot be exercised without
+rebuilding and redeploying the shared `bin/release/x86_64-unknown-linux-gnu/simple`
+— the same bootstrap-redeploy blocker §3 recorded on 2026-08-06. No C file was
+touched in this pass. Note that `blit` already measures 0 ms via `write_span`,
+so the missing kernel is not currently costing anything.
+
 ## Live re-run 2026-08-17 (measured, not inspected)
 
 Binary: `readlink -f bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`,
