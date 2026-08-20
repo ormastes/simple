@@ -34,6 +34,27 @@ engine. The C-amalgamation blocker applies only to the SFFI wrappers.
 | **C SQLite via SFFI** | `src/lib/*/io/sqlite_sffi.spl`, `src/app/io/sqlite_ffi.spl` | **needs a C toolchain; cannot run in-guest** |
 | `sqlite3_vfs` contract for a ported C SQLite | `src/os/port/sqlite/sqlite_vfs_contract.spl` | contract; `xShmMap` fails closed → WAL gated on writable shared mmap |
 
+## Three kinds of Simple DB (2026-08-20)
+
+Simple ships **three distinct database implementations** — do not conflate them.
+Canonical map with full module/test/guide links:
+[doc/07_guide/lib/database/db_implementations_map.md](../../../07_guide/lib/database/db_implementations_map.md).
+
+| # | Kind | Role | Entry point |
+|---|---|---|---|
+| 1 | **Textual DB** | SDN-text-file store (atomic writes + WAL); tracking DBs | `database/core.spl` (`SdnDatabase`) |
+| 2 | **Embedded DB** | In-process SQL engine (SQLite-class) | `database/pure_sql/` (`PureDatabase`), C SQLite via SFFI, dbfs_engine |
+| 3 | **DB server** | Networked multi-user tier: sessions, deny-wins capabilities, txns, commit-before-ack durability | `std.database.server` = `database/server/` |
+
+`postgres_mimic` (`src/app/postgres_mimic_server/`, `database/postgres_mimic/`)
+is only a PostgreSQL session/query **compatibility surface** on kind 3, not the
+DB server itself. When a plan says "harden the web/db server with the
+enterprise suite" (see
+`doc/01_research/app/office/office_enterprise_suite_audit_architecture_parallel_plan_2026-08-20.md`),
+the target is the **DB server tier** (`std.database.server`). The embedded DB
+remains for local/dev/test and as the server's store port; the textual DB backs
+tracking data and the `SPLSTORE1` enterprise fallback.
+
 ## Feature Links
 
 - Guide (canonical map): [doc/07_guide/lib/database/sqlite_counterparts.md](../../../07_guide/lib/database/sqlite_counterparts.md)

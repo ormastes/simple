@@ -7,6 +7,25 @@ HTTP core, the durable enterprise store, the guarded-command business
 verticals, and the web app in front of them. Lane state:
 `.spipe/simple_enterprise_suite/state.md`.
 
+## DB target clarification (2026-08-20)
+
+Simple has **three DB implementations** (canonical map:
+`doc/07_guide/lib/database/db_implementations_map.md`): the **textual DB**
+(SDN-file store, `SdnDatabase`), the **embedded DB** (SQLite-like in-process
+store: `database/pure_sql`, `SdnDatabase`, interpreter `rt_sqlite` emulation)
+and the **DB server** (`std.database.server` =
+`src/lib/nogc_sync_mut/database/server/` — sessions, deny-wins capabilities,
+transactions, commit-before-ack durability, framed transport).
+`postgres_mimic` is only a PostgreSQL compatibility surface, not the server.
+Enterprise-suite production hardening targets the **DB server** tier; the
+embedded DB stays for local/dev/test and as the server's store port.
+Hardening landed 2026-08-20: `store_rows` now orders by `id` (deterministic
+reads for audit-chain + last-row-wins consumers), and procurement journal
+posting routes through `journal_post_pair`/`journal_post_allowed` (closed-period
+denial; spec `test/03_system/app/enterprise/procurement_period_seam_spec.spl`).
+Master plan:
+`doc/01_research/app/office/office_enterprise_suite_audit_architecture_parallel_plan_2026-08-20.md`.
+
 ## Module map (current, 2026-08-16)
 
 ### Foundation

@@ -7,6 +7,12 @@ Simple DB is a two-tier database system written in Simple:
   but the recorded implementation is an unfinished skeleton with `pass_todo`;
   it is not a working server and is not present in the current worktree.
 
+Neither of these is what "DB server" means today: the current DB server tier
+is `std.database.server` (`src/lib/nogc_sync_mut/database/server/` — sessions,
+deny-wins capabilities, transactions, commit-before-ack durability, framed
+transport), with the Embedded DB as its store port; `postgres_mimic` is only a
+PostgreSQL compatibility surface on top, not the DB server.
+
 The embedded and planned full tiers share `simple_db_if`. SimpleOS now has a
 bounded persistent boot-service core at
 `src/os/services/database/simple_db_service.spl`. The existing boot HTTP

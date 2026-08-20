@@ -1,0 +1,50 @@
+use std.spec.*
+use app.office.sheets.access_controller.{
+    calc_access_controller_new,
+    calc_access_cell_id,
+    calc_access_formula_input_id
+}
+use common.ui.access.{ui_access_find_node, ui_access_ensure_result}
+
+# Trust-boundary hardening for the Calc semantic access controller.
+# Split from access_controller_spec.spl: that file exceeds the test daemon's
+# per-worker budget on a loaded box, so these guards live in their own fast spec.
+
+describe "Calc access controller input hardening":
+    it "rejects out-of-sheet cell coordinates instead of scrolling off the grid":
+        val controller = calc_access_controller_new()
+        val result = controller.act(calc_access_cell_id("A99999"), "select", "", "oob-row")
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("target_out_of_bounds")
+        val wide = controller.act(calc_access_cell_id("ZZ1"), "select", "", "oob-col")
+        expect(wide.ok).to_equal(false)
+        expect(wide.code).to_equal("target_out_of_bounds")
+        # The model did not move: A1 is still the rendered viewport origin.
+        expect(ui_access_find_node(controller.snapshot(), "main#cell_A1").canonical_id).to_equal("main#cell_A1")
+
+    it "rejects overflow-length and garbage cell selectors gracefully":
+        val controller = calc_access_controller_new()
+        val huge = controller.act("main#cell_ZZZZZZZZZZZZ99999999999999", "select", "", "overflow-ref")
+        expect(huge.ok).to_equal(false)
+        expect(huge.code).to_equal("target_not_found")
+        val garbage = controller.act(calc_access_cell_id("!!"), "select", "", "garbage-ref")
+        expect(garbage.ok).to_equal(false)
+        expect(garbage.code).to_equal("target_not_found")
+        val no_surface = controller.act("no-hash-selector", "select", "", "no-surface")
+        expect(no_surface.ok).to_equal(false)
+        expect(no_surface.code).to_equal("surface_not_found")
+
+    it "rejects an oversized type_text value at the trust boundary":
+        val controller = calc_access_controller_new()
+        var big = "0123456789abcdef"
+        while big.len() <= 4096:
+            big = big + big
+        val result = controller.act(calc_access_formula_input_id(), "type_text", big, "too-long")
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("value_too_long")
+
+    it "fails closed on a non-numeric match_count expectation":
+        val controller = calc_access_controller_new()
+        val verdict = ui_access_ensure_result(controller.snapshot(), "main", "", "cell", "", false, 10, "match_count", "abc")
+        expect(verdict.satisfied).to_equal(false)
+        expect(verdict.reason).to_contain("not a non-negative integer")

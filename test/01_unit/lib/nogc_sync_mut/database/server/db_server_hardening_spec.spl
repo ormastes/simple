@@ -1,0 +1,111 @@
+# @cover src/lib/nogc_sync_mut/database/server/server.spl 60%
+# @cover src/lib/nogc_sync_mut/database/server/protocol.spl 60%
+# @req REQ-DBSERVER-001
+"""
+# Simple DB Server Tier — resource-bound hardening
+
+The server tier already fails closed on malformed frames, unknown ops and
+capability misses.  This spec pins the RESOURCE bounds at the same trust
+boundary: a well-formed, authenticated, authorized request stream must still
+not be able to grow server state without limit.
+
+| Bound | Guard |
+|-------|-------|
+| Open sessions per capsule | `MAX_OPEN_SESSIONS` — OPEN past the bound answers `ERR_LIMIT` |
+| Overlay writes per transaction | `MAX_TXN_WRITES` — PUT/DEL past the bound answers `ERR_LIMIT` |
+"""
+
+use std.spec
+use std.database.core.{ SdnTable, SdnDatabase }
+use std.database.server.protocol.{ MAX_OPEN_SESSIONS, MAX_TXN_WRITES }
+use std.database.server.capability.{ CapabilityTable, capability_with, grant_key }
+use std.database.server.txn.{ TxnState, TxnWrite, WRITE_PUT, overlay_key }
+use std.database.server.server.{ DbServerCapsule }
+
+fn make_server() -> DbServerCapsule:
+    var db = SdnDatabase.new("/tmp/db_server_hardening_spec.sdn")
+    val users = SdnTable.new("users", ["id", "name", "valid"])
+    db.set_table("users", users)
+    var policy = CapabilityTable.new()
+    policy.register_authenticated(capability_with("alice", [
+        grant_key("users", "read"),
+        grant_key("users", "write")
+    ]), "alice-secret")
+    DbServerCapsule.new(db, policy)
+
+# Build a full-to-the-bound overlay directly (values, not 4096 wire round
+# trips) so the spec exercises the guard, not the interpreter's patience.
+fn full_txn(count: i64) -> TxnState:
+    var writes: [TxnWrite] = []
+    var slots: Dict<text, i64> = {}
+    var i = 0
+    while i < count:
+        val key = "k{i}"
+        slots[overlay_key("users", key)] = i
+        writes.push(TxnWrite(
+            table: "users", key: key, kind: WRITE_PUT,
+            fields: {}, base_version: -1
+        ))
+        i = i + 1
+    TxnState(open: true, writes: writes, slots: slots)
+
+describe "DB server tier — resource-bound hardening":
+
+    it "still serves a valid session, write and read (control)":
+        var server = make_server()
+        assert_contains(server.handle_message("OPEN as=alice credential=alice-secret"), "session=1")
+        assert_contains(server.handle_message("BEGIN session=1"), "OK")
+        assert_contains(server.handle_message("PUT session=1 tbl=users id=u1 name=ada"), "OK")
+        assert_contains(server.handle_message("GET session=1 tbl=users id=u1 col=name"), "value=ada")
+
+    it "refuses OPEN once the open-session bound is reached":
+        var server = make_server()
+        val capability = capability_with("alice", [grant_key("users", "read")])
+        var registry = server.registry
+        var i = 0
+        while i < MAX_OPEN_SESSIONS:
+            registry.open_session("alice", capability)
+            i = i + 1
+        server.registry = registry
+        val reply = server.handle_message("OPEN as=alice credential=alice-secret")
+        assert_contains(reply, "ERR")
+        assert_contains(reply, "code=limit")
+
+    it "allows OPEN again after sessions are closed":
+        var server = make_server()
+        val capability = capability_with("alice", [grant_key("users", "read")])
+        var registry = server.registry
+        var i = 0
+        while i < MAX_OPEN_SESSIONS:
+            val id = registry.open_session("alice", capability)
+            registry.close_session(id)
+            i = i + 1
+        server.registry = registry
+        assert_contains(server.handle_message("OPEN as=alice credential=alice-secret"), "session=")
+
+    it "refuses a write once the per-transaction overlay bound is reached":
+        var server = make_server()
+        assert_contains(server.handle_message("OPEN as=alice credential=alice-secret"), "session=1")
+        assert_contains(server.handle_message("BEGIN session=1"), "OK")
+        var registry = server.registry
+        registry.set_txn(1, full_txn(MAX_TXN_WRITES))
+        server.registry = registry
+        val reply = server.handle_message("PUT session=1 tbl=users id=overflow name=x")
+        assert_contains(reply, "ERR")
+        assert_contains(reply, "code=limit")
+        # The bound also fences BATCH_PUT, which fans out through sys_write.
+        val batch = server.handle_message("BATCH_PUT session=1 tbl=users ids=b1,b2 name=x")
+        assert_contains(batch, "code=limit")
+
+    it "keeps the store and txn state intact after a bound refusal":
+        var server = make_server()
+        assert_contains(server.handle_message("OPEN as=alice credential=alice-secret"), "session=1")
+        assert_contains(server.handle_message("BEGIN session=1"), "OK")
+        var registry = server.registry
+        registry.set_txn(1, full_txn(MAX_TXN_WRITES))
+        server.registry = registry
+        server.handle_message("PUT session=1 tbl=users id=overflow name=x")
+        # Refusal must not have corrupted the session: ROLLBACK still works.
+        assert_contains(server.handle_message("ROLLBACK session=1"), "OK")
+        assert_contains(server.handle_message("BEGIN session=1"), "OK")
+        assert_contains(server.handle_message("PUT session=1 tbl=users id=u1 name=ada"), "OK")

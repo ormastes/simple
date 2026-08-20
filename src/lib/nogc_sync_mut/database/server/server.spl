@@ -25,7 +25,7 @@ use std.database.server.protocol.{
     ERR_MALFORMED, ERR_UNKNOWN_OP, ERR_MISSING_ARG, ERR_NO_SESSION,
     ERR_DENIED, ERR_NO_TXN, ERR_TXN_OPEN, ERR_CONFLICT, ERR_NO_TABLE,
     ERR_NOT_FOUND, ERR_DURABILITY, ERR_CRASHED, ERR_SERVE_BOUND, ERR_AUTH, ERR_LIMIT,
-    MAX_RESPONSE_BYTES, CommitIdentity, BoundedQuery,
+    MAX_RESPONSE_BYTES, MAX_OPEN_SESSIONS, MAX_TXN_WRITES, CommitIdentity, BoundedQuery,
     server_query_bounds, validated_commit_identity
 }
 
@@ -59,7 +59,7 @@ use std.database.server.capability.{
 use std.database.server.session.{ SessionRegistry, SessionIdentity }
 use std.database.server.txn.{
     TxnState, TxnWrite,
-    begin_txn, closed_txn, txn_record, txn_lookup,
+    begin_txn, closed_txn, txn_record, txn_lookup, txn_write_count,
     store_read, store_version,
     WRITE_PUT, WRITE_DEL
 }
@@ -115,6 +115,10 @@ class DbServerCapsule:
         val authenticated = self.policy.authenticate_principal(principal, credential)
         if authenticated == nil:
             return err_response(ERR_AUTH, "authentication failed")
+        if self.registry.open_session_count() >= MAX_OPEN_SESSIONS:
+            # Bounded, loud refusal: an OPEN flood must not grow the registry
+            # without limit.
+            return err_response(ERR_LIMIT, "open session bound {MAX_OPEN_SESSIONS} reached")
         val proof: AuthenticatedPrincipal = authenticated ?? AuthenticatedPrincipal(
             principal: "", capability: self.policy.lookup_or_empty(""))
         val capability = proof.capability
@@ -210,6 +214,10 @@ class DbServerCapsule:
             return err_response(ERR_NO_TABLE, "no such table: {table}")
         if not self.registry.has_open_txn(session_id):
             return err_response(ERR_NO_TXN, "{request.op} requires an open transaction")
+        if txn_write_count(self.registry.txn_of(session_id)) >= MAX_TXN_WRITES:
+            # Bounded overlay: an unlimited PUT/DEL stream (including via
+            # BATCH_PUT) must not grow one transaction's overlay without limit.
+            return err_response(ERR_LIMIT, "transaction write bound {MAX_TXN_WRITES} reached")
 
         # Payload = every arg except the routing keys.
         var fields: Dict<text, text> = {}

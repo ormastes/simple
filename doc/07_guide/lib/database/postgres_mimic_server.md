@@ -3,6 +3,12 @@
 Use `std.database.postgres_mimic.PostgresMimicServer` for PostgreSQL-like
 session and simple-query behavior backed by pure-Simple `PureDatabase`.
 
+Terminology: `postgres_mimic` is only a PostgreSQL compatibility surface — it
+is NOT "the DB server". Simple's DB server tier is `std.database.server`
+(`src/lib/nogc_sync_mut/database/server/`: sessions, deny-wins capabilities,
+transactions, commit-before-ack durability, framed transport), and the
+Embedded DB (`pure_sql` `PureDatabase` / `SdnDatabase`) is its store port.
+
 Compatibility currently covers startup metadata, authentication-ok semantics,
 simple queries, row sets, command completion, SQLSTATE errors, transaction
 status, and termination. It is not yet a drop-in network PostgreSQL server.

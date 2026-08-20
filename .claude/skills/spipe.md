@@ -70,6 +70,20 @@ stale PASS artifact.
 
 > **Test runner operational caveats.** Section/directory test runs must be SEQUENTIAL (parallel database access corrupts state); only the final `Results:` summary line is authoritative (intermediate diagnostics mislead); single-file targets use the Rust-embedded runner (reliable), directory targets use the Pure-Simple daemon (known fresh-seed hang). See `doc/07_guide/infra/testing.md` § "Runner Operational Caveats" for F1–F4 facts and remedies.
 
+> **DB evidence: know which of the three Simple DBs you tested.** Simple has a
+> **textual DB** (SDN-file store: `database/core.spl` `SdnDatabase`, WAL,
+> tracking DBs), an **embedded DB** (in-process SQL: `database/pure_sql`,
+> C SQLite via SFFI; interpreter `rt_sqlite` emulation — non-ACID, no ORDER BY
+> semantics, constraints unenforced), and the **DB server**
+> (`std.database.server` = `src/lib/nogc_sync_mut/database/server/` —
+> sessions, capabilities, transactions, commit-before-ack durability;
+> `postgres_mimic` is only its PostgreSQL compatibility surface). Canonical
+> map: `doc/07_guide/lib/database/db_implementations_map.md`. Specs run under
+> `bin/simple test`/`run` exercise the embedded DB's emulation; any
+> durability, ordering, constraint, or transaction claim about the **server**
+> tier needs evidence against the DB server (or real SQLite on a native
+> build), and the spec/receipt must say which backend produced it.
+
 > **Verify which binary produced your evidence.** `bin/simple` resolves through
 > `bin/release/<triple>/simple`, which can be a stale seed rather than the
 > self-hosted binary. Before trusting or attributing test/run evidence: run

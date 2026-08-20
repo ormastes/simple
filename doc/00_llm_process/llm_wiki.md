@@ -514,8 +514,13 @@ build green. Require the positive marker, `nm` for `T` (not `W`), and a
 - `file(1)` reports "dynamically linked" for a `--export-dynamic` static binary.
   Use `readelf -l <bin> | grep -c INTERP` (must be 0) plus `readelf -h`.
 
-## PostgreSQL mimic / Simple DB server
+## PostgreSQL mimic (compatibility surface — NOT the DB server)
 
+- **Not the DB server:** the "DB server" is Simple's PostgreSQL-like server
+  tier `std.database.server` (`src/lib/nogc_sync_mut/database/server/` —
+  sessions, deny-wins capabilities, transactions, commit-before-ack
+  durability, framed transport). `postgres_mimic` is only a PostgreSQL
+  session/query compatibility surface on top of it.
 - **Protocol/session owner:** `std.database.postgres_mimic`.
 - **Execution engine:** `std.database.pure_sql.PureDatabase`.
 - **Compatibility claim:** PostgreSQL-like startup, session, simple-query,

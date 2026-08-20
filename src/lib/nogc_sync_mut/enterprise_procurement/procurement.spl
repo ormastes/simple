@@ -35,8 +35,9 @@ use std.nogc_sync_mut.enterprise_store.store.{
 }
 use std.nogc_sync_mut.enterprise_store.records.{
     idempotency_seen, idempotency_result, idempotency_record,
-    outbox_append, audit_append
+    outbox_append, audit_append, journal_post_allowed, journal_post_pair
 }
+use std.nogc_sync_mut.ffi.system.{time_now}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
     TenantContext, ActorContext, SessionContext, Money,
@@ -167,13 +168,11 @@ fn proc_reconcile(store: EnterpriseStore, tenant_id: text) -> text:
 # Guarded commands
 # =============================================================================
 
-fn post_proc_journal(store: EnterpriseStore, tenant_id: text, po_id: text, amount_cents: i64):
-    store_insert_row(store,
-        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
-        [tenant_id, po_id, "inventory_asset", "debit", "{amount_cents}"])
-    store_insert_row(store,
-        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
-        [tenant_id, po_id, "accounts_payable", "credit", "{amount_cents}"])
+# post_proc_journal routes through the shared period seam
+# (records.journal_post_pair): a posting dated inside a closed period is
+# denied (false) instead of inserted, exactly like goods_sale.post_journal.
+fn post_proc_journal(store: EnterpriseStore, tenant_id: text, po_id: text, amount_cents: i64, posted_at_epoch: i64) -> bool:
+    journal_post_pair(store, tenant_id, po_id, "inventory_asset", "accounts_payable", amount_cents, posted_at_epoch)
 
 fn proc_requisition_create(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, req_id: text, sku: text, qty: i64) -> CommandResult:
     if not session_valid(session, tenant, who):
@@ -282,11 +281,18 @@ fn proc_receive(store: EnterpriseStore, session: SessionContext, tenant: TenantC
         return denied("insufficient-stock", "over-receipt:" + po_id + ":remaining={remaining}:got={qty}")
     if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # Period seam: validate BEFORE the unit of work opens so a denial writes
+    # nothing at all (same pattern as goods_sale — see the finance guide).
+    val posted_at = time_now()
+    if not journal_post_allowed(store, tenant.tenant_id, posted_at):
+        return denied("invalid-transition", po_id)
     uow_begin(store)
     store_insert_row(store,
         "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
         [tenant.tenant_id, po.0, "{qty}", "po-receive", po_id])
-    post_proc_journal(store, tenant.tenant_id, po_id, po.2 * qty)
+    if not post_proc_journal(store, tenant.tenant_id, po_id, po.2 * qty, posted_at):
+        uow_rollback(store)
+        return denied("invalid-transition", po_id)
     outbox_append(store, tenant.tenant_id, "proc.po.received", po_id + ":{qty}")
     audit_append(store, tenant.tenant_id, who.actor_id, "proc.po.receive", po_id + ":{qty}")
     idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, po_id)

@@ -1,0 +1,129 @@
+"""
+# Procurement period seam — receipts must respect finance period close
+
+Hardening spec for the audit finding in
+doc/01_research/app/office/office_enterprise_suite_audit_architecture_parallel_plan_2026-08-20.md:
+`proc_receive` posted its inventory_asset/accounts_payable journal pair via
+RAW `INSERT INTO journal` rows, bypassing the shared period seam
+(`records.journal_post_pair`), so a receipt dated inside a CLOSED period was
+accepted and mutated the frozen ledger. Pre-fix this spec FAILS (receipt
+accepted, journal grows); post-fix the receipt is denied invalid-transition
+and writes nothing at all.
+
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close, store_rows}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, Money
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{sale_setup, sale_add_product, sale_receive_stock, sale_place_order}
+use std.nogc_sync_mut.enterprise_finance.finance.{fin_setup, fin_period_close}
+use std.nogc_sync_mut.enterprise_procurement.procurement.{
+    proc_setup, proc_supplier_add, proc_requisition_create,
+    proc_requisition_approve, proc_po_create, proc_receive
+}
+
+fn usd(amount_cents: i64) -> Money:
+    Money(amount_cents: amount_cents, currency: "USD")
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/proc_period_seam_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+# A period end far in the future (year ~2100): closing through it freezes the
+# ledger, so a "now"-dated posting lands inside the closed period.
+fn far_future() -> i64:
+    4102444800
+
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    sale_setup(store)
+    fin_setup(store)
+    proc_setup(store)
+    store
+
+fn journal_rows(store, tenant_id: text) -> i64:
+    var n: i64 = 0
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            n = n + 1
+    n
+
+describe "procurement receipt vs closed finance period":
+    it "denies a PO receipt dated inside a closed period and writes nothing":
+        step("Seed supplier -> requisition -> approve -> PO (no receipt yet)")
+        val store = fresh_store("closed")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        proc_supplier_add(store, s, t, admin, "sup-1", "Supplier One")
+        proc_requisition_create(store, s, t, admin, envelope("req-1-c", "proc.requisition.create"), "req-1", "SKU-1", 5)
+        proc_requisition_approve(store, s, t, admin, envelope("req-1-a", "proc.requisition.approve"), "req-1")
+        expect(proc_po_create(store, s, t, admin, envelope("po-1-c", "proc.po.create"), "po-1", "req-1", "sup-1", usd(250)).reason).to_equal("accepted")
+
+        step("Close the tenant's books through the far future")
+        val closed = fin_period_close(store, s, t, admin, envelope("close-1", "finance.period.close"), far_future(), 1755000000)
+        expect(closed.reason).to_equal("accepted")
+
+        step("A receipt now lands inside the closed period: denied, journal untouched")
+        val before = journal_rows(store, t.tenant_id)
+        val res = proc_receive(store, s, t, admin, envelope("po-1-r", "proc.po.receive"), "po-1", 5)
+        expect(res.ok).to_equal(false)
+        expect(res.reason).to_equal("invalid-transition")
+        expect(journal_rows(store, t.tenant_id)).to_equal(before)
+        store_close(store)
+
+    it "accepts the same receipt when no period is closed (control)":
+        step("Same flow, no period close")
+        val store = fresh_store("open")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        proc_supplier_add(store, s, t, admin, "sup-1", "Supplier One")
+        proc_requisition_create(store, s, t, admin, envelope("req-1-c", "proc.requisition.create"), "req-1", "SKU-1", 5)
+        proc_requisition_approve(store, s, t, admin, envelope("req-1-a", "proc.requisition.approve"), "req-1")
+        proc_po_create(store, s, t, admin, envelope("po-1-c", "proc.po.create"), "po-1", "req-1", "sup-1", usd(250))
+
+        step("Receipt is accepted and posts the balanced pair (2 journal rows)")
+        val before = journal_rows(store, t.tenant_id)
+        val res = proc_receive(store, s, t, admin, envelope("po-1-r", "proc.po.receive"), "po-1", 5)
+        expect(res.reason).to_equal("accepted")
+        expect(journal_rows(store, t.tenant_id)).to_equal(before + 2)
+        store_close(store)
+
+    it "neighbor: goods_sale order placement is also denied in a closed period":
+        # Defect-class neighbor pin: goods_sale already routes through the seam;
+        # this keeps the whole journal-writer class covered by one spec file.
+        step("Seed product + stock, close the period, then place an order")
+        val store = fresh_store("sale")
+        val t = tenant_a()
+        val admin = admin_a()
+        val s = session_for(admin, t)
+        sale_add_product(store, s, t, admin, "SKU-1", "Widget", usd(2500))
+        sale_receive_stock(store, s, t, admin, "SKU-1", 10)
+        val closed = fin_period_close(store, s, t, admin, envelope("close-1", "finance.period.close"), far_future(), 1755000000)
+        expect(closed.reason).to_equal("accepted")
+        val before = journal_rows(store, t.tenant_id)
+        val res = sale_place_order(store, s, t, admin, envelope("ord-1", "sale.order.place"), "order-1", "SKU-1", 2)
+        expect(res.reason).to_equal("invalid-transition")
+        expect(journal_rows(store, t.tenant_id)).to_equal(before)
+        store_close(store)

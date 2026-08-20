@@ -1,5 +1,10 @@
 # PostgreSQL mimic server architecture
 
+Note: this is the PostgreSQL *compatibility surface*, not Simple's DB server
+tier — that is `std.database.server`
+(`src/lib/nogc_sync_mut/database/server/`), the authoritative multi-user tier
+with sessions, capabilities, transactions, and commit-before-ack durability.
+
 Dependency direction:
 
 `TCP/Unix transport -> PostgreSQL wire codec -> PostgresMimicServer -> PureDatabase`

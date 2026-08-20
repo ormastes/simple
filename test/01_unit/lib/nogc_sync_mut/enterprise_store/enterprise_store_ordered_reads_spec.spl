@@ -1,0 +1,69 @@
+"""
+# Enterprise Store — deterministic ordered reads
+
+## Overview
+
+`store_rows` used to issue `SELECT <cols> FROM <table>` with NO ORDER BY.
+Several enterprise consumers treat the LAST row encountered as current
+state or effective rate (e.g. `hcm_wage_at` tie-break on equal
+`effective_epoch`), but SQL row order without ORDER BY is unspecified on a
+real engine. The store read path now appends `ORDER BY id`, making "last
+row" well-defined as the highest-id (latest-inserted) row.
+
+Note on backends: the interpreter's rt_sqlite emulation returns rows in
+insertion order and ignores ORDER BY, so it cannot reproduce the disorder;
+this spec pins the ordered CONTRACT (ids strictly ascending; tie-break
+picks the highest-id row) which the ORDER BY guarantees on real SQLite.
+
+**Requirements:** N/A
+**Plan:** doc/01_research/app/office/office_enterprise_suite_audit_architecture_parallel_plan_2026-08-20.md
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.enterprise_store.store.{
+    store_open, store_close, store_rows, store_migrate, store_insert_row
+}
+use std.nogc_sync_mut.enterprise_hcm.hcm.{hcm_setup, hcm_wage_at}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+
+describe "enterprise store — store_rows returns rows in ascending id order":
+    it "reads back inserted rows ordered by id":
+        step("Open a store and create a table")
+        val store = store_open(":memory:")
+        expect(store.open_ok).to_be(true)
+        store_migrate(store, "ord_001_events",
+            "CREATE TABLE IF NOT EXISTS ord_events (id INTEGER PRIMARY KEY, tenant_id TEXT, payload TEXT)")
+        step("Insert five rows")
+        var i = 1
+        while i <= 5:
+            store_insert_row(store,
+                "INSERT INTO ord_events (tenant_id, payload) VALUES (?, ?)",
+                ["t1", "p" + i.to_text()])
+            i = i + 1
+        step("Verify ids come back strictly ascending — the ordered-read contract")
+        val rows = store_rows(store, "ord_events", "id, tenant_id, payload")
+        expect(rows.len()).to_equal(5)
+        var prev: i64 = 0
+        for row in rows:
+            val id = int(sqlite_row_get(row, "id"))
+            expect(id > prev).to_be(true)
+            prev = id
+        step("The LAST row is the latest-inserted one")
+        expect(sqlite_row_get(rows[rows.len() - 1], "payload")).to_equal("p5")
+        store_close(store)
+
+describe "enterprise hcm — effective wage tie-break is the latest amendment":
+    it "picks the highest-id contract row when effective_epoch ties":
+        step("Open a store with the HCM schema")
+        val store = store_open(":memory:")
+        expect(hcm_setup(store)).to_be(true)
+        step("Insert two contracts with the SAME effective_epoch (amendment)")
+        store_insert_row(store,
+            "INSERT INTO hcm_contracts (tenant_id, employee_id, effective_epoch, wage_cents_per_hour, weekly_hours) VALUES (?, ?, ?, ?, ?)",
+            ["t1", "emp-1", "1000", "1500", "40"])
+        store_insert_row(store,
+            "INSERT INTO hcm_contracts (tenant_id, employee_id, effective_epoch, wage_cents_per_hour, weekly_hours) VALUES (?, ?, ?, ?, ?)",
+            ["t1", "emp-1", "1000", "1800", "40"])
+        step("The effective wage is the later amendment (highest id), deterministically")
+        expect(hcm_wage_at(store, "t1", "emp-1", 2000)).to_equal(1800)
+        store_close(store)

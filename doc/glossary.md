@@ -22,11 +22,33 @@ interpreting PureDatabase is reserved for an explicitly selected slow
 diagnostic path. A configured artifact path is not evidence that the boundary
 is active; confirm the worker/library invocation.
 
+## Textual DB
+
+The SDN-text-file store: `std.database.core` (`SdnDatabase`/`SdnTable`/`SdnRow`
+in `src/lib/nogc_sync_mut/database/core.spl`) with atomic fsync+lock writes
+(`atomic.spl`) and WAL (`wal.spl`). Backs the tracking DBs under
+`doc/08_tracking/**/*.sdn` and the `SPLSTORE1` enterprise file backend. One of
+Simple's three DB implementations — canonical map:
+`doc/07_guide/lib/database/db_implementations_map.md`.
+
+## DB server (Simple DB)
+
+"DB" / "DB server" means Simple's PostgreSQL-like server tier:
+`std.database.server` = `src/lib/nogc_sync_mut/database/server/{server,session,txn,capability,durability,protocol,transport}.spl`
+— sessions, deny-wins capabilities, transactions, commit-before-ack durability,
+framed transport. This is the authoritative multi-user enterprise tier. Its
+store port is the Textual DB's `SdnDatabase` (see `server.spl`'s capsule
+header); do not confuse the three DB kinds (canonical map:
+`doc/07_guide/lib/database/db_implementations_map.md`), and do not call
+`postgres_mimic` (below) "the DB server".
+
 ## PostgreSQL mimic
 
-The pure-Simple PostgreSQL-compatible session/query server surface at
+The pure-Simple PostgreSQL-compatible session/query **compatibility surface** at
 `std.database.postgres_mimic`, backed by `PureDatabase`. “Mimic” means bounded
-compatibility, not full PostgreSQL parity. Production uses a cached SMF/LSM or
+compatibility, not full PostgreSQL parity — and it is NOT the DB server tier
+(`std.database.server`, above); it is only a compatibility layer on top.
+Production uses a cached SMF/LSM or
 native artifact even when launched from interpreter mode.
 
 ## In-Tree Counterpart Rule
@@ -916,6 +938,8 @@ Architecture-neutral address representation: `struct Address { bits: i32, value:
 ## Simple DB
 
 Two-tier database system written in Simple (formerly codenamed **spostgre**).
+Distinct from the current **DB server** tier `std.database.server` (see "DB
+server (Simple DB)" above), which is the authoritative multi-user tier today.
 
 **Simple DB Embedded** (stdlib) — lightweight embedded database for compiler metadata and app-level table storage. Ships with every Simple installation. SDN format, atomic file I/O, QueryBuilder, string interning. No server required.
 
