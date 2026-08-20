@@ -10,6 +10,7 @@ pub fn native_jit_cleanup_handle(handle: i64) -> i64 {
     interpreter::interpreter_extern::jit_native::cleanup_handle(handle)
 }
 
+pub(crate) mod fs_probe;
 pub mod repl_runner;
 pub mod mock_helper;
 pub mod aop_config;

@@ -1,0 +1,148 @@
+# Fail-closed adjudication of a GPU lane capability probe's `skip:` result.
+#
+# Why this exists: the established spec idiom was
+#
+#     if probe_result.starts_with("skip:"):
+#         step("No usable device on this host: " + probe_result)
+#         assert_true(probe_result.starts_with("skip:"))
+#
+# which makes the assertion succeed BECAUSE the probe skipped. The example is
+# counted green and the file verdict still reports `skipped=0`, so a lane whose
+# device coverage is entirely fictional produces exactly the same verdict as one
+# that genuinely drove the hardware. See
+# doc/08_tracking/bug/run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20.md
+#
+# The rule this module enforces is the repo's standing one: absence of evidence
+# is never a pass. A `skip:` is only legitimate when the host has NO evidence of
+# the device family. When the host demonstrably HAS one (driver nodes / ICD
+# manifests that other code paths can drive), a probe that still skips is a
+# DEFECT in the probe or its value path, and must be reported as a FAILURE.
+#
+# Evidence is deliberately gathered OUT OF BAND from the probe itself: only
+# `file_exists` on fixed absolute paths, no `extern fn ... -> text` call. That
+# matters because the very defect this guards against is corruption of
+# extern-returned `text` on the `run` path -- evidence read through the same
+# broken channel would be worthless.
+
+mod std.gc_async_mut.gpu_lane.lane_probe_verdict
+
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+# Verdict tokens. Kept as plain text (not an enum) so a spec can assert on them
+# with `assert_equal` and get a readable "expected 'fail' to equal 'skip'".
+val GPU_LANE_VERDICT_RUN: text = "run"
+val GPU_LANE_VERDICT_SKIP: text = "skip"
+val GPU_LANE_VERDICT_FAIL: text = "fail"
+
+# True when this host carries an NVIDIA kernel driver, i.e. a CUDA-capable
+# device that other code paths can demonstrably drive.
+fn gpu_lane_host_has_nvidia_driver() -> bool:
+    file_exists("/dev/nvidiactl") or file_exists("/proc/driver/nvidia/version")
+
+# True when this host carries a DRM render node -- the kernel-side prerequisite
+# every Vulkan ICD needs, independent of the loader and of any extern return.
+fn gpu_lane_host_has_drm_render_node() -> bool:
+    (file_exists("/dev/dri/renderD128") or file_exists("/dev/dri/renderD129")
+        or file_exists("/dev/dri/card0") or file_exists("/dev/dri/card1"))
+
+# True when a vendor Vulkan ICD manifest is installed. Checked against the
+# concrete vendor manifests rather than a directory listing, so no extern that
+# returns text is involved.
+fn gpu_lane_host_has_vulkan_icd() -> bool:
+    (file_exists("/usr/share/vulkan/icd.d/nvidia_icd.json")
+        or file_exists("/usr/share/vulkan/icd.d/radeon_icd.json")
+        or file_exists("/usr/share/vulkan/icd.d/intel_icd.json")
+        or file_exists("/usr/share/vulkan/icd.d/nouveau_icd.json")
+        or file_exists("/usr/local/share/vulkan/icd.d/nvidia_icd.json"))
+
+# True when Apple's Metal framework is present, i.e. a macOS host.
+fn gpu_lane_host_has_metal_framework() -> bool:
+    file_exists("/System/Library/Frameworks/Metal.framework/Metal")
+
+# Out-of-band evidence that `lane` ("vulkan" / "cuda" / "metal") has a device
+# this host can actually drive. Unknown lane names yield `false` -- an unknown
+# lane is "no evidence", never "evidence of absence of hardware".
+fn gpu_lane_host_has_device(lane: text) -> bool:
+    if lane == "cuda":
+        return gpu_lane_host_has_nvidia_driver()
+    if lane == "vulkan":
+        return gpu_lane_host_has_vulkan_icd() and gpu_lane_host_has_drm_render_node()
+    if lane == "metal":
+        return gpu_lane_host_has_metal_framework()
+    false
+
+# Human-readable statement of what evidence was found, for the `step()` line so
+# a red lane explains itself in the transcript rather than just asserting.
+fn gpu_lane_host_evidence(lane: text) -> text:
+    if lane == "cuda":
+        if gpu_lane_host_has_nvidia_driver():
+            return "NVIDIA kernel driver present (/dev/nvidiactl or /proc/driver/nvidia/version)"
+        return "no NVIDIA kernel driver on this host"
+    if lane == "vulkan":
+        if gpu_lane_host_has_device("vulkan"):
+            return "vendor Vulkan ICD manifest + DRM render node present"
+        if gpu_lane_host_has_vulkan_icd():
+            return "Vulkan ICD manifest present but no DRM render node"
+        return "no vendor Vulkan ICD manifest on this host"
+    if lane == "metal":
+        if gpu_lane_host_has_metal_framework():
+            return "Metal.framework present (macOS host)"
+        return "no Metal.framework on this host"
+    "unknown gpu lane '" + lane + "': no host evidence gathered"
+
+# Adjudicate a probe result, fail closed.
+#
+#   ""            -> "run"   the lane is usable; the spec must exercise it.
+#   "skip:..." and no host evidence
+#                 -> "skip"  a legitimate skip; report it through the runner's
+#                            skip channel so `skipped=` is non-zero.
+#   "skip:..." and host evidence present
+#                 -> "fail"  the probe skipped on hardware other paths can
+#                            drive. Not a skip -- a defect.
+#
+# Anything else non-empty is a probe ERROR, which is also "fail": a probe that
+# neither succeeded nor issued a well-formed skip has told us nothing, and
+# nothing is never a pass.
+fn gpu_lane_probe_verdict(lane: text, probe_result: text) -> text:
+    if probe_result == "":
+        return GPU_LANE_VERDICT_RUN
+    if not probe_result.starts_with("skip:"):
+        return GPU_LANE_VERDICT_FAIL
+    if gpu_lane_host_has_device(lane):
+        return GPU_LANE_VERDICT_FAIL
+    GPU_LANE_VERDICT_SKIP
+
+# One-line explanation of a verdict, suitable for a `step()` call.
+fn gpu_lane_probe_verdict_reason(lane: text, probe_result: text) -> text:
+    val verdict = gpu_lane_probe_verdict(lane, probe_result)
+    val evidence = gpu_lane_host_evidence(lane)
+    if verdict == GPU_LANE_VERDICT_RUN:
+        return lane + " lane usable: probe returned no skip"
+    if verdict == GPU_LANE_VERDICT_SKIP:
+        return lane + " lane genuinely unavailable (" + probe_result + "); host evidence: " + evidence
+    if not probe_result.starts_with("skip:"):
+        return lane + " lane probe ERROR (neither usable nor a well-formed skip): " + probe_result
+    lane + " lane probe returned " + probe_result + " on a host that HAS the device -- " + evidence + ". A capability probe that skips on drivable hardware is a defect, not a skip"
+
+# Emit the runner-visible SKIP marker for an example that is skipping mid-body.
+#
+# Deliberately a raw `print` of the marker line rather than a call to
+# `std.spec.skip(name, reason)`: `skip` is in the parser's SKIP_TEST_FUNCTIONS
+# list (src/compiler_rust/parser/src/test_analyzer.rs:58) and in the runner's
+# `count_skip_marker_cases` line scan, so calling it from INSIDE an `it` body
+# would register a phantom nested test and can flip a whole file's accounting.
+# The marker text is byte-identical to what `std.spec.skip` prints, which is
+# what `count_real_skips` in src/app/test_runner_new/test_runner_single.spl
+# counts -- so the skip lands in `skipped=` without disturbing test discovery.
+#
+# This is a REPORT, not an assertion. The caller must still assert the verdict,
+# so a `fail` verdict cannot be quietly reported as a skip.
+fn gpu_lane_report_skip(example: text, probe_result: text):
+    print "    it " + example + " ... skipped (" + probe_result + ")"
+
+export gpu_lane_report_skip
+export GPU_LANE_VERDICT_RUN, GPU_LANE_VERDICT_SKIP, GPU_LANE_VERDICT_FAIL
+export gpu_lane_host_has_nvidia_driver, gpu_lane_host_has_drm_render_node
+export gpu_lane_host_has_vulkan_icd, gpu_lane_host_has_metal_framework
+export gpu_lane_host_has_device, gpu_lane_host_evidence
+export gpu_lane_probe_verdict, gpu_lane_probe_verdict_reason

@@ -4,6 +4,7 @@
 //! DirectoryManifest structures, as well as providing methods for working
 //! with capabilities and visibility.
 
+use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use super::types::{ChildModule, DirectoryManifest, ModuleResolver, ResolveResult};
 use simple_dependency_tracker::{
     self as tracker,
@@ -188,7 +189,7 @@ impl ModuleResolver {
             return Ok(cached.clone());
         }
 
-        if !init_path.exists() {
+        if !p_exists(&init_path) {
             return Ok(DirectoryManifest::default());
         }
 

@@ -1,5 +1,6 @@
 //! Module loading and import resolution utilities.
 
+use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -28,7 +29,7 @@ fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) 
                 && resolved.file_name().is_none_or(|name| name != "__init__.spl")
             {
                 let package_init = resolved.with_extension("").join("__init__.spl");
-                if package_init.exists() && package_init.is_file() {
+                if p_exists(&package_init) && p_is_file(&package_init) {
                     return package_init;
                 }
             }
@@ -42,7 +43,7 @@ fn dotted_dir_from(current: &Path, segment: &str) -> Option<PathBuf> {
     let parent = current.parent()?;
     let current_name = current.file_name()?.to_str()?;
     let dotted_dir = parent.join(format!("{}.{}", current_name, segment));
-    if dotted_dir.is_dir() {
+    if p_is_dir(&dotted_dir) {
         Some(dotted_dir)
     } else {
         None
@@ -82,7 +83,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
         resolved = resolved.join(part);
     }
     resolved.set_extension("spl");
-    if resolved.exists() && resolved.is_file() {
+    if p_exists(&resolved) && p_is_file(&resolved) {
         return Some(prefer_package_init_for_member_import(resolved, use_stmt));
     }
 
@@ -93,7 +94,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     let mut dotted_resolved = root.to_path_buf();
     for part in &parts[..parts.len().saturating_sub(1)] {
         let direct = dotted_resolved.join(part);
-        if direct.exists() && direct.is_dir() {
+        if p_exists(&direct) && p_is_dir(&direct) {
             dotted_resolved = direct;
         } else if let Some(dotted_dir) = dotted_dir_from(&dotted_resolved, part) {
             dotted_resolved = dotted_dir;
@@ -108,22 +109,22 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
 
     let last = &parts[parts.len() - 1];
     let dotted_file = dotted_resolved.join(format!("{}.spl", last));
-    if dotted_file.exists() && dotted_file.is_file() {
+    if p_exists(&dotted_file) && p_is_file(&dotted_file) {
         return Some(prefer_package_init_for_member_import(dotted_file, use_stmt));
     }
 
     let dotted_init = dotted_resolved.join(last).join("__init__.spl");
-    if dotted_init.exists() && dotted_init.is_file() {
+    if p_exists(&dotted_init) && p_is_file(&dotted_init) {
         return Some(dotted_init);
     }
 
     if let Some(dotted_dir) = dotted_dir_from(&dotted_resolved, last) {
         let dotted_dir_init = dotted_dir.join("__init__.spl");
-        if dotted_dir_init.exists() && dotted_dir_init.is_file() {
+        if p_exists(&dotted_dir_init) && p_is_file(&dotted_dir_init) {
             return Some(dotted_dir_init);
         }
         let nested_file = dotted_dir.join(format!("{}.spl", last));
-        if nested_file.exists() && nested_file.is_file() {
+        if p_exists(&nested_file) && p_is_file(&nested_file) {
             return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
         }
     }
@@ -184,17 +185,17 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
         if is_last {
             let mut file = current.join(part);
             file.set_extension("spl");
-            if file.is_file() {
+            if p_is_file(&file) {
                 return Some(prefer_package_init_for_member_import(file, use_stmt));
             }
             if let Some(alias) = layered_alias_child_dir(&current, part) {
                 let init = alias.join("__init__.spl");
-                if init.is_file() {
+                if p_is_file(&init) {
                     return Some(init);
                 }
                 let mut nested_file = alias.join(part);
                 nested_file.set_extension("spl");
-                if nested_file.is_file() {
+                if p_is_file(&nested_file) {
                     return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
                 }
             }
@@ -202,7 +203,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                 return Some(prefer_package_init_for_member_import(alias_file, use_stmt));
             }
             for (name, path) in cached_read_dir(&current) {
-                if !path.is_dir() {
+                if !p_is_dir(&path) {
                     continue;
                 }
                 let Some(dot) = name.find('.') else {
@@ -216,12 +217,12 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                     && prefix.chars().all(|c| c.is_ascii_digit())
                 {
                     let init = path.join("__init__.spl");
-                    if init.is_file() {
+                    if p_is_file(&init) {
                         return Some(init);
                     }
                     let mut nested_file = path.join(part);
                     nested_file.set_extension("spl");
-                    if nested_file.is_file() {
+                    if p_is_file(&nested_file) {
                         return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
                     }
                 }
@@ -230,7 +231,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
         }
 
         let direct = current.join(part);
-        if direct.is_dir() {
+        if p_is_dir(&direct) {
             current = direct;
             continue;
         }
@@ -241,7 +242,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
 
         let mut matched = None;
         for (name, path) in cached_read_dir(&current) {
-            if !path.is_dir() {
+            if !p_is_dir(&path) {
                 continue;
             }
             let Some(dot) = name.find('.') else {
@@ -254,7 +255,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                 break;
             }
             let nested = path.join(part);
-            if nested.is_dir() {
+            if p_is_dir(&nested) {
                 matched = Some(nested);
                 break;
             }
@@ -279,7 +280,7 @@ fn layered_dir_alias_name(current: &Path) -> Option<String> {
 fn layered_alias_child_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     let alias_name = layered_dir_alias_name(current)?;
     let nested = current.join(alias_name).join(segment);
-    if nested.is_dir() {
+    if p_is_dir(&nested) {
         Some(nested)
     } else {
         None
@@ -290,7 +291,7 @@ fn layered_alias_child_file(current: &Path, segment: &str) -> Option<PathBuf> {
     let alias_name = layered_dir_alias_name(current)?;
     let mut nested = current.join(alias_name).join(segment);
     nested.set_extension("spl");
-    if nested.is_file() {
+    if p_is_file(&nested) {
         Some(nested)
     } else {
         None
@@ -306,7 +307,7 @@ fn layered_alias_child_file(current: &Path, segment: &str) -> Option<PathBuf> {
 /// — that is what makes `build/worktrees/x` and `.claude/worktrees/y` their own
 /// boundaries rather than a name we have to blacklist.
 fn is_workspace_boundary(dir: &Path) -> bool {
-    dir.join(".git").exists() || dir.join(".jj").is_dir()
+    p_exists(&dir.join(".git")) || p_is_dir(&dir.join(".jj"))
 }
 
 /// `true` for imports that name the project's own standard library.
@@ -345,7 +346,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
     }
     init_resolved = init_resolved.join("__init__");
     init_resolved.set_extension("spl");
-    if init_resolved.exists() && init_resolved.is_file() {
+    if p_exists(&init_resolved) && p_is_file(&init_resolved) {
         return Some(init_resolved);
     }
 
@@ -355,7 +356,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
     }
     mod_resolved = mod_resolved.join("mod");
     mod_resolved.set_extension("spl");
-    if mod_resolved.exists() && mod_resolved.is_file() {
+    if p_exists(&mod_resolved) && p_is_file(&mod_resolved) {
         return Some(mod_resolved);
     }
 
@@ -369,7 +370,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
                 parent_resolved = parent_resolved.join(part);
             }
             parent_resolved.set_extension("spl");
-            if parent_resolved.exists() && parent_resolved.is_file() {
+            if p_exists(&parent_resolved) && p_is_file(&parent_resolved) {
                 return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
             }
 
@@ -381,7 +382,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             }
 
             let parent_src = parent_dir.join("src");
-            if parent_src.is_dir() {
+            if p_is_dir(&parent_src) {
                 if let Some(src_resolved) = resolve_parts_from_root(&parent_src, parts, use_stmt) {
                     return Some(src_resolved);
                 }
@@ -396,7 +397,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             }
             parent_init_resolved = parent_init_resolved.join("__init__");
             parent_init_resolved.set_extension("spl");
-            if parent_init_resolved.exists() && parent_init_resolved.is_file() {
+            if p_exists(&parent_init_resolved) && p_is_file(&parent_init_resolved) {
                 return Some(parent_init_resolved);
             }
 
@@ -406,7 +407,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             }
             parent_mod_resolved = parent_mod_resolved.join("mod");
             parent_mod_resolved.set_extension("spl");
-            if parent_mod_resolved.exists() && parent_mod_resolved.is_file() {
+            if p_exists(&parent_mod_resolved) && p_is_file(&parent_mod_resolved) {
                 return Some(parent_mod_resolved);
             }
 
@@ -434,7 +435,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
         "std_lib/src",
     ] {
         let stdlib_candidate = root.join(stdlib_subpath);
-        if !stdlib_candidate.exists() {
+        if !p_exists(&stdlib_candidate) {
             continue;
         }
 
@@ -451,7 +452,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
         for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
             if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                 let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
-                if compat_init.exists() && compat_init.is_file() {
+                if p_exists(&compat_init) && p_is_file(&compat_init) {
                     return Some(compat_init);
                 }
             }
@@ -461,7 +462,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                 stdlib_path = stdlib_path.join(part);
             }
             stdlib_path.set_extension("spl");
-            if stdlib_path.exists() && stdlib_path.is_file() {
+            if p_exists(&stdlib_path) && p_is_file(&stdlib_path) {
                 return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
             }
 
@@ -471,7 +472,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             }
             stdlib_init_path = stdlib_init_path.join("__init__");
             stdlib_init_path.set_extension("spl");
-            if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+            if p_exists(&stdlib_init_path) && p_is_file(&stdlib_init_path) {
                 return Some(stdlib_init_path);
             }
 
@@ -481,7 +482,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             }
             stdlib_mod_path = stdlib_mod_path.join("mod");
             stdlib_mod_path.set_extension("spl");
-            if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
+            if p_exists(&stdlib_mod_path) && p_is_file(&stdlib_mod_path) {
                 return Some(stdlib_mod_path);
             }
 
@@ -503,7 +504,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                 }
                 sub_init_path = sub_init_path.join("__init__");
                 sub_init_path.set_extension("spl");
-                if sub_init_path.exists() && sub_init_path.is_file() {
+                if p_exists(&sub_init_path) && p_is_file(&sub_init_path) {
                     return Some(sub_init_path);
                 }
 
@@ -512,7 +513,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                     sub_path = sub_path.join(part);
                 }
                 sub_path.set_extension("spl");
-                if sub_path.exists() && sub_path.is_file() {
+                if p_exists(&sub_path) && p_is_file(&sub_path) {
                     return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
                 }
 
@@ -841,7 +842,7 @@ fn load_matching_package_siblings(
                     && path
                         .file_name()
                         .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
-                    && path.is_file()
+                    && p_is_file(&path)
                     && file_might_define_requested_symbol(path, &requested_names)
             })
             .collect(),
@@ -2118,7 +2119,7 @@ fn sibling_package_module_path(resolved: &Path) -> Option<PathBuf> {
     let package_dir = resolved.parent()?;
     let package_name = package_dir.file_name()?.to_str()?;
     let candidate = package_dir.with_file_name(format!("{package_name}.spl"));
-    if candidate.exists() && candidate.is_file() {
+    if p_exists(&candidate) && p_is_file(&candidate) {
         Some(candidate)
     } else {
         None
@@ -2144,7 +2145,7 @@ fn collect_matching_package_sibling_paths(
                     && path
                         .file_name()
                         .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
-                    && path.is_file()
+                    && p_is_file(&path)
                     && file_might_define_requested_symbol(path, &requested_names)
             })
             .collect(),

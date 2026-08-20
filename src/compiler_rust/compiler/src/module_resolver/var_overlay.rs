@@ -9,13 +9,14 @@
 //! projects that don't use it. No new grammar: these are SDN-ish data files read
 //! with a minimal line parser (the resolver precedes the full SDN parser).
 
+use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use std::path::{Path, PathBuf};
 
 /// Candidate variant roots for a project, absolute, in precedence order
 /// (all selected roots, then all group-default roots, then the global default).
 pub(crate) fn compute_var_roots(project_root: &Path) -> Vec<PathBuf> {
     let variants_dir = project_root.join("variants");
-    if !variants_dir.is_dir() {
+    if !p_is_dir(&variants_dir) {
         return Vec::new();
     }
     let cfg = match std::fs::read_to_string(project_root.join("config").join("var.sdn")) {

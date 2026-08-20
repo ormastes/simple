@@ -3,6 +3,7 @@
 //! This module handles resolving module paths to filesystem locations,
 //! including support for both absolute (crate.*) and relative paths.
 
+use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use super::types::{DirectoryManifest, ModuleResolver, ResolveResult, ResolvedModule};
 use simple_dependency_tracker::{
     graph::ImportKind,
@@ -53,7 +54,7 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
                 && prefix.chars().all(|c| c.is_ascii_digit())
             {
                 let path = parent.join(&*name_str);
-                if path.is_dir() {
+                if p_is_dir(&path) {
                     return Some(path);
                 }
             }
@@ -68,7 +69,7 @@ fn find_explicit_numbered_dir(parent: &Path, prefix: &str, suffix: &str) -> Opti
     }
 
     let path = parent.join(format!("{}.{}", prefix, suffix));
-    if path.is_dir() {
+    if p_is_dir(&path) {
         Some(path)
     } else {
         None
@@ -79,7 +80,7 @@ fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<Pat
     let entries = std::fs::read_dir(parent).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !p_is_dir(&path) {
             continue;
         }
         let name = entry.file_name();
@@ -92,7 +93,7 @@ fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<Pat
             continue;
         }
         let nested = path.join(segment);
-        if nested.is_dir() {
+        if p_is_dir(&nested) {
             return Some(nested);
         }
     }
@@ -130,7 +131,7 @@ fn find_dotted_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     let parent = current.parent()?;
     let current_name = current.file_name()?.to_str()?;
     let dotted_dir = parent.join(format!("{}.{}", current_name, segment));
-    if dotted_dir.is_dir() {
+    if p_is_dir(&dotted_dir) {
         Some(dotted_dir)
     } else {
         None
@@ -152,7 +153,7 @@ fn layered_dir_alias_name(current: &Path) -> Option<String> {
 fn layered_alias_child_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     let alias_name = layered_dir_alias_name(current)?;
     let nested = current.join(alias_name).join(segment);
-    if nested.is_dir() {
+    if p_is_dir(&nested) {
         Some(nested)
     } else {
         None
@@ -161,7 +162,7 @@ fn layered_alias_child_dir(current: &Path, segment: &str) -> Option<PathBuf> {
 
 fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> Option<ResolvedModule> {
     let file_path = dir.join(format!("{}.spl", last));
-    if file_path.exists() && file_path.is_file() {
+    if p_exists(&file_path) && p_is_file(&file_path) {
         return Some(ResolvedModule {
             path: file_path,
             module_path: original_path.clone(),
@@ -172,7 +173,7 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
 
     let dir_path = dir.join(last);
     let init_path = dir_path.join("__init__.spl");
-    if init_path.exists() && init_path.is_file() {
+    if p_exists(&init_path) && p_is_file(&init_path) {
         return Some(ResolvedModule {
             path: init_path,
             module_path: original_path.clone(),
@@ -182,7 +183,7 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
     }
 
     let mod_path = dir_path.join("mod.spl");
-    if mod_path.exists() && mod_path.is_file() {
+    if p_exists(&mod_path) && p_is_file(&mod_path) {
         return Some(ResolvedModule {
             path: mod_path,
             module_path: original_path.clone(),
@@ -193,7 +194,7 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
 
     if last == "mod_" {
         let escaped_mod_path = dir.join("mod.spl");
-        if escaped_mod_path.exists() && escaped_mod_path.is_file() {
+        if p_exists(&escaped_mod_path) && p_is_file(&escaped_mod_path) {
             return Some(ResolvedModule {
                 path: escaped_mod_path,
                 module_path: original_path.clone(),
@@ -204,7 +205,7 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
     }
 
     let shs_path = dir.join(format!("{}.shs", last));
-    if shs_path.exists() && shs_path.is_file() {
+    if p_exists(&shs_path) && p_is_file(&shs_path) {
         return Some(ResolvedModule {
             path: shs_path,
             module_path: original_path.clone(),
@@ -214,7 +215,7 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
     }
 
     let smf_path = dir.join(format!("{}.smf", last));
-    if smf_path.exists() && smf_path.is_file() {
+    if p_exists(&smf_path) && p_is_file(&smf_path) {
         return Some(ResolvedModule {
             path: smf_path,
             module_path: original_path.clone(),
@@ -228,7 +229,7 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
 
 fn resolve_exact_directory_module(dir: &Path, original_path: &ModulePath) -> Option<ResolvedModule> {
     let init_path = dir.join("__init__.spl");
-    if init_path.exists() && init_path.is_file() {
+    if p_exists(&init_path) && p_is_file(&init_path) {
         return Some(ResolvedModule {
             path: init_path,
             module_path: original_path.clone(),
@@ -238,7 +239,7 @@ fn resolve_exact_directory_module(dir: &Path, original_path: &ModulePath) -> Opt
     }
 
     let mod_path = dir.join("mod.spl");
-    if mod_path.exists() && mod_path.is_file() {
+    if p_exists(&mod_path) && p_is_file(&mod_path) {
         return Some(ResolvedModule {
             path: mod_path,
             module_path: original_path.clone(),
@@ -258,7 +259,7 @@ fn resolve_module_within_numbered_dirs(
     let entries = std::fs::read_dir(parent).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !p_is_dir(&path) {
             continue;
         }
 
@@ -318,7 +319,7 @@ fn resolve_stdlib_from_root(
 
     for subdir in STDLIB_FAMILY_DIRS {
         let candidate = root.join(subdir);
-        if candidate.is_dir() {
+        if p_is_dir(&candidate) {
             if let Ok(resolved) = resolver.resolve_from_base(&candidate, segments, original_path) {
                 return Ok(resolved);
             }
@@ -335,7 +336,7 @@ fn resolve_stdlib_namespace_from_root(root: &Path, original_path: &ModulePath) -
 
     for subdir in STDLIB_FAMILY_DIRS {
         let candidate = root.join(subdir);
-        if candidate.is_dir() {
+        if p_is_dir(&candidate) {
             if let Some(resolved) = resolve_exact_directory_module(&candidate, original_path) {
                 return Ok(resolved);
             }
@@ -403,12 +404,12 @@ impl ModuleResolver {
                 attempts.push((package_root, &segments[1..]));
             }
         }
-        if package_src.is_dir() {
+        if p_is_dir(&package_src) {
             attempts.push((package_src.as_path(), segments));
         }
 
         if (segments[0] == "std" || segments[0] == "lib") && segments.len() > 1 {
-            if package_src.is_dir() {
+            if p_is_dir(&package_src) {
                 attempts.push((package_src.as_path(), &segments[1..]));
             }
             attempts.push((package_root, &segments[1..]));
@@ -437,7 +438,7 @@ impl ModuleResolver {
             }
         }
 
-        if segments[0] == "core" && segments.len() > 1 && package_src.is_dir() {
+        if segments[0] == "core" && segments.len() > 1 && p_is_dir(&package_src) {
             attempts.push((package_src.as_path(), &segments[1..]));
         }
 
@@ -512,7 +513,7 @@ impl ModuleResolver {
         // shadow the intended `src/lib/x.spl` during entry-closure discovery.
         if segments[0] == "lib" && segments.len() > 1 {
             let project_lib = self.project_root.join("src/lib");
-            if project_lib.is_dir() {
+            if p_is_dir(&project_lib) {
                 return self.resolve_from_base(&project_lib, &segments[1..], path);
             }
         }
@@ -520,7 +521,7 @@ impl ModuleResolver {
         if segments[0] == "compiler_shared" && segments.len() > 2 && segments[1] == "interpreter" {
             for root in ordered_source_roots(self) {
                 let compiler_dir = root.join("compiler");
-                if compiler_dir.is_dir() {
+                if p_is_dir(&compiler_dir) {
                     if let Ok(resolved) = self.resolve_from_base(&compiler_dir, &segments[1..], path) {
                         return Ok(resolved);
                     }
@@ -536,7 +537,7 @@ impl ModuleResolver {
         if segments[0] == "compiler" || segments[0] == "compiler_shared" {
             for root in ordered_source_roots(self) {
                 let namespace_dir = root.join(&segments[0]);
-                if namespace_dir.is_dir() {
+                if p_is_dir(&namespace_dir) {
                     if segments.len() == 1 {
                         if let Some(resolved) = resolve_exact_directory_module(&namespace_dir, path) {
                             return Ok(resolved);
@@ -548,7 +549,7 @@ impl ModuleResolver {
             }
 
             let alt_namespace_dir = self.project_root.join("src").join(&segments[0]);
-            if alt_namespace_dir.is_dir() {
+            if p_is_dir(&alt_namespace_dir) {
                 if segments.len() == 1 {
                     if let Some(resolved) = resolve_exact_directory_module(&alt_namespace_dir, path) {
                         return Ok(resolved);
@@ -655,7 +656,7 @@ impl ModuleResolver {
                     }
 
                     for root in stdlib_roots {
-                        if root.is_dir() {
+                        if p_is_dir(&root) {
                             if stdlib_segments.is_empty() {
                                 for candidate in stdlib_root_candidates(&root) {
                                     if let Ok(resolved) = resolve_stdlib_namespace_from_root(&candidate, path) {
@@ -665,7 +666,7 @@ impl ModuleResolver {
                             } else {
                                 if stdlib_segments.len() == 1 && stdlib_segments[0] == "io" {
                                     let compat_root = root.join("nogc_sync_mut");
-                                    if compat_root.is_dir() {
+                                    if p_is_dir(&compat_root) {
                                         if let Ok(resolved) =
                                             self.resolve_from_base(&compat_root, stdlib_segments, path)
                                         {
@@ -689,7 +690,7 @@ impl ModuleResolver {
                 if segments[0] == "compiler" && segments.len() > 1 {
                     for root in ordered_source_roots(self) {
                         let compiler_dir = root.join("compiler");
-                        if compiler_dir.is_dir() {
+                        if p_is_dir(&compiler_dir) {
                             if let Ok(resolved) = self.resolve_from_base(&compiler_dir, &segments[1..], path) {
                                 return Ok(resolved);
                             }
@@ -697,7 +698,7 @@ impl ModuleResolver {
                     }
                     // Also try project_root/src/compiler/
                     let alt_compiler_dir = self.project_root.join("src").join("compiler");
-                    if alt_compiler_dir.is_dir() {
+                    if p_is_dir(&alt_compiler_dir) {
                         if let Ok(resolved) = self.resolve_from_base(&alt_compiler_dir, &segments[1..], path) {
                             return Ok(resolved);
                         }
@@ -723,7 +724,7 @@ impl ModuleResolver {
                 if segments[0] != "crate" && segments.len() > 1 {
                     for root in ordered_source_roots(self) {
                         let top_dir = root.join(&segments[0]);
-                        if top_dir.is_dir() {
+                        if p_is_dir(&top_dir) {
                             if let Ok(resolved) = self.resolve_from_base(&top_dir, &segments[1..], path) {
                                 return Ok(resolved);
                             }
@@ -735,7 +736,7 @@ impl ModuleResolver {
                 // e.g., "use examples.browser.*" → project_root/examples/browser/
                 if segments[0] != "crate" && segments.len() > 1 {
                     let proj_dir = self.project_root.join(&segments[0]);
-                    if proj_dir.is_dir() {
+                    if p_is_dir(&proj_dir) {
                         if let Ok(resolved) = self.resolve_from_base(&proj_dir, &segments[1..], path) {
                             return Ok(resolved);
                         }
@@ -772,7 +773,7 @@ impl ModuleResolver {
             let segment = &segments[index];
             let direct = current.join(segment);
 
-            if direct.exists() {
+            if p_exists(&direct) {
                 current = direct;
             } else if index + 1 < segments.len() - 1 {
                 if let Some(numbered) = find_explicit_numbered_dir(&current, segment, &segments[index + 1]) {
@@ -875,7 +876,7 @@ impl ModuleResolver {
         // e.g. src/compiler/blocks -> 15.blocks and modules under blocks/value.spl.
         if let Some(alias_name) = layered_dir_alias_name(&current) {
             let nested_alias_dir = current.join(alias_name);
-            if nested_alias_dir.is_dir() {
+            if p_is_dir(&nested_alias_dir) {
                 if let Some(resolved) = resolve_module_in_dir(&nested_alias_dir, last, original_path) {
                     return Ok(resolved);
                 }

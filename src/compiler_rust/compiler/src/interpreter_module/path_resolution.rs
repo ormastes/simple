@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::trace;
 
 use crate::error::CompileError;
+use crate::fs_probe::{clear_fs_probe_cache, p_exists, p_is_dir, p_is_file, STAT_CALLS, STAT_MISSES};
 use crate::stdlib_variant::{active_simd_tier_name, stdlib_root_candidates};
 
 fn normalize_base_dir(base_dir: &Path) -> PathBuf {
@@ -42,8 +43,8 @@ pub fn print_resolve_stats() {
         let dir_lists = DIR_LIST_CALLS.load(Ordering::Relaxed);
         let hit_rate = if calls > 0 { (hits * 100) / calls } else { 0 };
         eprintln!(
-            "[resolve-stats] calls={} cache_hits={} hit_rate={}% dir_list={}",
-            calls, hits, hit_rate, dir_lists
+            "[resolve-stats] calls={} cache_hits={} hit_rate={}% dir_list={} stat_calls={} stat_misses={}",
+            calls, hits, hit_rate, dir_lists, STAT_CALLS.load(Ordering::Relaxed), STAT_MISSES.load(Ordering::Relaxed)
         );
     }
 }
@@ -114,7 +115,7 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
                 && !prefix.is_empty()
                 && prefix.len() <= 3
                 && prefix.chars().all(|c| c.is_ascii_digit())
-                && path.is_dir()
+                && p_is_dir(&path)
             {
                 return Some(path);
             }
@@ -139,10 +140,10 @@ fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
             if !prefix.is_empty()
                 && prefix.len() <= 3
                 && prefix.chars().all(|c| c.is_ascii_digit())
-                && numbered_path.is_dir()
+                && p_is_dir(&numbered_path)
             {
                 let sub = numbered_path.join(segment);
-                if sub.is_dir() {
+                if p_is_dir(&sub) {
                     results.push(sub);
                 }
             }
@@ -157,31 +158,31 @@ fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
 fn try_resolve_last_segment(current: &Path, last: &str) -> Option<PathBuf> {
     // Try .spl file
     let file_path = current.join(format!("{}.spl", last));
-    if file_path.exists() && file_path.is_file() {
+    if p_exists(&file_path) && p_is_file(&file_path) {
         return Some(file_path);
     }
 
     // Try .shs file
     let shs_path = current.join(format!("{}.shs", last));
-    if shs_path.exists() && shs_path.is_file() {
+    if p_exists(&shs_path) && p_is_file(&shs_path) {
         return Some(shs_path);
     }
 
     // Try directory with __init__.spl
     let dir_path = current.join(last);
     let init_path = dir_path.join("__init__.spl");
-    if init_path.exists() && init_path.is_file() {
+    if p_exists(&init_path) && p_is_file(&init_path) {
         return Some(init_path);
     }
 
     // Try numbered directory for the last segment
     if let Some(numbered_dir) = find_numbered_dir(current, last) {
         let numbered_init = numbered_dir.join("__init__.spl");
-        if numbered_init.exists() && numbered_init.is_file() {
+        if p_exists(&numbered_init) && p_is_file(&numbered_init) {
             return Some(numbered_init);
         }
         let numbered_file = numbered_dir.join(format!("{}.spl", last));
-        if numbered_file.exists() && numbered_file.is_file() {
+        if p_exists(&numbered_file) && p_is_file(&numbered_file) {
             return Some(numbered_file);
         }
     }
@@ -264,7 +265,7 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
     // Recursive case: intermediate segment
     // Strategy 1: Try direct path first
     let direct = current.join(segment);
-    if direct.exists() && direct.is_dir() {
+    if p_exists(&direct) && p_is_dir(&direct) {
         if let Some(found) = resolve_with_numbered_dirs_recursive(&direct, parts, depth + 1) {
             return Some(found);
         }
@@ -292,7 +293,7 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
         if let Some(current_name) = current.file_name().and_then(|n| n.to_str()) {
             let dotted = format!("{}.{}", current_name, segment);
             let dotted_dir = parent.join(&dotted);
-            if dotted_dir.exists() && dotted_dir.is_dir() {
+            if p_exists(&dotted_dir) && p_is_dir(&dotted_dir) {
                 if let Some(found) = resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + 1) {
                     return Some(found);
                 }
@@ -323,12 +324,12 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
         for window in (2..=remaining).rev() {
             let dotted = parts[depth..depth + window].join(".");
             let dotted_dir = current.join(&dotted);
-            if !dotted_dir.is_dir() {
+            if !p_is_dir(&dotted_dir) {
                 continue;
             }
             if depth + window == parts.len() {
                 let init_path = dotted_dir.join("__init__.spl");
-                if init_path.is_file() {
+                if p_is_file(&init_path) {
                     return Some(init_path);
                 }
             } else if let Some(found) =
@@ -362,7 +363,7 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 
     let mut dir = start.to_path_buf();
     let result = loop {
-        if dir.join("src").is_dir() || dir.join("Cargo.toml").is_file() {
+        if p_is_dir(&dir.join("src")) || p_is_file(&dir.join("Cargo.toml")) {
             break Some(dir.clone());
         }
         if !dir.pop() {
@@ -402,7 +403,7 @@ fn find_workspace_boundary(start: &Path) -> Option<PathBuf> {
 
     let mut dir = start.to_path_buf();
     let result = loop {
-        if dir.join(".git").exists() || dir.join(".jj").is_dir() {
+        if p_exists(&dir.join(".git")) || p_is_dir(&dir.join(".jj")) {
             break Some(dir.clone());
         }
         if !dir.pop() {
@@ -463,7 +464,7 @@ fn preferred_stdlib_variant(base_dir: &Path) -> Option<&'static str> {
 fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[String]) -> Option<PathBuf> {
     for lib_root in ["src/lib", "src/std"] {
         let base_root = search_root.join(lib_root);
-        if !base_root.is_dir() {
+        if !p_is_dir(&base_root) {
             continue;
         }
 
@@ -479,7 +480,7 @@ fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[St
         // package (see `loads_real_exports_from_std_io_package` /
         // `prefers_variant_std_io_for_nogc_sync_mut_callers`).
         let variant_root = base_root.join(variant);
-        if !variant_root.is_dir() {
+        if !p_is_dir(&variant_root) {
             continue;
         }
 
@@ -497,13 +498,13 @@ fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[St
         // of the package, and its re-exports would come up empty.
         let mut init_path = variant_root.join(&relative);
         init_path.push("__init__.spl");
-        if init_path.is_file() {
+        if p_is_file(&init_path) {
             return Some(init_path);
         }
 
         let mut file_path = variant_root.join(&relative);
         file_path.set_extension("spl");
-        if file_path.is_file() {
+        if p_is_file(&file_path) {
             return Some(file_path);
         }
     }
@@ -550,7 +551,7 @@ fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf
     let default_org = "simple-lang";
     for root in &search_roots {
         let unit_root = root.join("src/unit");
-        if !unit_root.exists() {
+        if !p_exists(&unit_root) {
             continue;
         }
 
@@ -559,9 +560,9 @@ fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf
         let (org_dir, rest): (PathBuf, &[String]) = if let Some(first) = tail.first() {
             let direct = unit_root.join(first);
             let dotcom = unit_root.join(format!("{}.com", first));
-            if direct.is_dir() {
+            if p_is_dir(&direct) {
                 (direct, &tail[1..])
-            } else if dotcom.is_dir() {
+            } else if p_is_dir(&dotcom) {
                 (dotcom, &tail[1..])
             } else {
                 (unit_root.join(default_org), tail)
@@ -570,7 +571,7 @@ fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf
             (unit_root.join(default_org), tail)
         };
 
-        if !org_dir.exists() {
+        if !p_exists(&org_dir) {
             continue;
         }
 
@@ -583,13 +584,13 @@ fn resolve_unit_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf
         // Candidate 1: <org>/<rest>.spl
         let mut cand = org_dir.join(&rel);
         cand.set_extension("spl");
-        if cand.exists() && cand.is_file() {
+        if p_exists(&cand) && p_is_file(&cand) {
             return Ok(cand);
         }
 
         // Candidate 2: <org>/<rest>/__init__.spl
         let init = org_dir.join(&rel).join("__init__.spl");
-        if init.exists() && init.is_file() {
+        if p_exists(&init) && p_is_file(&init) {
             return Ok(init);
         }
     }
@@ -604,6 +605,7 @@ pub fn clear_path_resolution_cache() {
     PATH_RESOLUTION_CACHE.with(|cache| cache.borrow_mut().clear());
     PROJECT_ROOT_CACHE.with(|cache| cache.borrow_mut().clear());
     DIR_LISTING_CACHE.with(|cache| cache.borrow_mut().clear());
+    clear_fs_probe_cache();
 }
 
 /// Resolve module path from segments
@@ -690,20 +692,20 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         // Try resolving from base directory first (sibling files)
         let mut resolved = base_dir.join(&relative);
         resolved.set_extension("spl");
-        if resolved.exists() && resolved.is_file() {
+        if p_exists(&resolved) && p_is_file(&resolved) {
             return Ok(resolved);
         }
 
         // Try .shs extension (Simple shell scripts)
         resolved.set_extension("shs");
-        if resolved.exists() && resolved.is_file() {
+        if p_exists(&resolved) && p_is_file(&resolved) {
             return Ok(resolved);
         }
 
         // Try __init__.spl in directory
         let mut init_resolved = base_dir.join(&relative);
         init_resolved.push("__init__.spl");
-        if init_resolved.exists() && init_resolved.is_file() {
+        if p_exists(&init_resolved) && p_is_file(&init_resolved) {
             return Ok(init_resolved);
         }
 
@@ -725,7 +727,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             // Try module.spl
             let mut parent_resolved = parent_dir.join(&relative);
             parent_resolved.set_extension("spl");
-            if parent_resolved.exists() && parent_resolved.is_file() {
+            if p_exists(&parent_resolved) && p_is_file(&parent_resolved) {
                 trace!(path = ?parent_resolved, "Found module in parent directory");
                 return Ok(parent_resolved);
             }
@@ -733,7 +735,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             // Try __init__.spl
             let mut parent_init_resolved = parent_dir.join(&relative);
             parent_init_resolved.push("__init__.spl");
-            if parent_init_resolved.exists() && parent_init_resolved.is_file() {
+            if p_exists(&parent_init_resolved) && p_is_file(&parent_init_resolved) {
                 trace!(path = ?parent_init_resolved, "Found module __init__.spl in parent directory");
                 return Ok(parent_init_resolved);
             }
@@ -768,12 +770,12 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             for var_root in crate::module_resolver::var_overlay::compute_var_roots(root) {
                 let mut cand = var_root.join(&relative);
                 cand.set_extension("spl");
-                if cand.exists() && cand.is_file() {
+                if p_exists(&cand) && p_is_file(&cand) {
                     return Ok(cand);
                 }
                 let mut init = var_root.join(&relative);
                 init.push("__init__.spl");
-                if init.exists() && init.is_file() {
+                if p_exists(&init) && p_is_file(&init) {
                     return Ok(init);
                 }
             }
@@ -845,7 +847,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     "std_lib/src",
                 ] {
                     let stdlib_candidate = current.join(stdlib_subpath);
-                    if !stdlib_candidate.exists() {
+                    if !p_exists(&stdlib_candidate) {
                         continue;
                     }
 
@@ -854,20 +856,20 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
                         if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                             let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
-                            if compat_init.exists() && compat_init.is_file() {
+                            if p_exists(&compat_init) && p_is_file(&compat_init) {
                                 return Ok(compat_init);
                             }
                         }
 
                         let mut stdlib_path = stdlib_root.join(&stdlib_relative);
                         stdlib_path.set_extension("spl");
-                        if stdlib_path.exists() && stdlib_path.is_file() {
+                        if p_exists(&stdlib_path) && p_is_file(&stdlib_path) {
                             return Ok(stdlib_path);
                         }
 
                         let mut stdlib_init_path = stdlib_root.join(&stdlib_relative);
                         stdlib_init_path.push("__init__.spl");
-                        if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+                        if p_exists(&stdlib_init_path) && p_is_file(&stdlib_init_path) {
                             return Ok(stdlib_init_path);
                         }
 
@@ -888,12 +890,12 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                             // get_exit_code/get_executed_test_count.
                             let mut sub_path = stdlib_root.join(subdir).join(&stdlib_relative);
                             sub_path.set_extension("spl");
-                            if sub_path.exists() && sub_path.is_file() {
+                            if p_exists(&sub_path) && p_is_file(&sub_path) {
                                 return Ok(sub_path);
                             }
                             let mut sub_init = stdlib_root.join(subdir).join(&stdlib_relative);
                             sub_init.push("__init__.spl");
-                            if sub_init.exists() && sub_init.is_file() {
+                            if p_exists(&sub_init) && p_is_file(&sub_init) {
                                 return Ok(sub_init);
                             }
                         }
@@ -907,18 +909,18 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
             // Try src/ directory (for app modules like app.lsp.server)
             let src_candidate = current.join("src");
-            if src_candidate.exists() {
+            if p_exists(&src_candidate) {
                 // Try module.spl in src/
                 let mut src_path = src_candidate.join(&relative);
                 src_path.set_extension("spl");
-                if src_path.exists() && src_path.is_file() {
+                if p_exists(&src_path) && p_is_file(&src_path) {
                     return Ok(src_path);
                 }
 
                 // Try __init__.spl in src/
                 let mut src_init_path = src_candidate.join(&relative);
                 src_init_path.push("__init__.spl");
-                if src_init_path.exists() && src_init_path.is_file() {
+                if p_exists(&src_init_path) && p_is_file(&src_init_path) {
                     return Ok(src_init_path);
                 }
 
@@ -930,7 +932,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 // Strategy: "compiler.*" → src/compiler/ with numbered prefix support
                 if parts.len() > 1 && parts[0] == "compiler" {
                     let compiler_dir = src_candidate.join("compiler");
-                    if compiler_dir.is_dir() {
+                    if p_is_dir(&compiler_dir) {
                         if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
                             return Ok(found);
                         }
@@ -940,7 +942,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 // Strategy: "compiler_shared.*" → src/compiler_shared/ with numbered prefix support
                 if parts.len() > 1 && parts[0] == "compiler_shared" {
                     let compiler_shared_dir = src_candidate.join("compiler_shared");
-                    if compiler_shared_dir.is_dir() {
+                    if p_is_dir(&compiler_shared_dir) {
                         if let Some(found) = resolve_with_numbered_dirs(&compiler_shared_dir, &parts[1..]) {
                             return Ok(found);
                         }
@@ -949,7 +951,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
                 if parts.len() > 1 && parts[0] == "core" {
                     let compiler_dir = src_candidate.join("compiler");
-                    if compiler_dir.is_dir() {
+                    if p_is_dir(&compiler_dir) {
                         if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, parts) {
                             return Ok(found);
                         }
@@ -971,7 +973,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     if parts.len() > 1 && STDLIB_SUBDIRS.contains(&parts[0].as_str()) {
                         for lib_path in &["src/lib", "src/std"] {
                             let lib_candidate = src_candidate.join(lib_path.trim_start_matches("src/"));
-                            if lib_candidate.is_dir() {
+                            if p_is_dir(&lib_candidate) {
                                 if let Some(found) = resolve_with_numbered_dirs(&lib_candidate, parts) {
                                     return Ok(found);
                                 }
@@ -1004,7 +1006,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             if !is_stdlib {
                 for stdlib_subpath in &["src/lib", "src/std"] {
                     let stdlib_candidate = current.join(stdlib_subpath);
-                    if !stdlib_candidate.exists() {
+                    if !p_exists(&stdlib_candidate) {
                         continue;
                     }
 
@@ -1020,14 +1022,14 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                         let non_std_relative: PathBuf = parts.iter().collect();
                         let mut sub_path = stdlib_candidate.join(subdir).join(&non_std_relative);
                         sub_path.set_extension("spl");
-                        if sub_path.exists() && sub_path.is_file() {
+                        if p_exists(&sub_path) && p_is_file(&sub_path) {
                             trace!(path = ?sub_path, "Found non-stdlib import in lib subdirectory");
                             return Ok(sub_path);
                         }
                         // Also try __init__.spl in subdirectory
                         let mut sub_init = stdlib_candidate.join(subdir).join(&non_std_relative);
                         sub_init.push("__init__.spl");
-                        if sub_init.exists() && sub_init.is_file() {
+                        if p_exists(&sub_init) && p_is_file(&sub_init) {
                             trace!(path = ?sub_init, "Found non-stdlib import __init__.spl in lib subdirectory");
                             return Ok(sub_init);
                         }

@@ -6,6 +6,7 @@
 //! - ResolvedModule: Resolved module information
 //! - ModuleResolver: Main resolver struct
 
+use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use simple_dependency_tracker::symbol::ProjectSymbols;
 use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility};
 use std::collections::{HashMap, HashSet};
@@ -308,7 +309,7 @@ impl ModuleResolver {
             .and_then(find_project_root)
             .or_else(|| find_project_root(&normalized_file_path))
             .unwrap_or_else(|| parent.clone());
-        let source_root = if project_root.join("src").is_dir() {
+        let source_root = if p_is_dir(&project_root.join("src")) {
             project_root.join("src")
         } else {
             parent.clone()
@@ -393,14 +394,14 @@ fn normalize_input_path(path: &Path) -> PathBuf {
 
 fn find_project_root(path: &Path) -> Option<PathBuf> {
     let normalized = normalize_input_path(path);
-    let mut current = if normalized.is_dir() {
+    let mut current = if p_is_dir(&normalized) {
         normalized
     } else {
         normalized.parent()?.to_path_buf()
     };
 
     loop {
-        if current.join("src").is_dir() || current.join("Cargo.toml").is_file() {
+        if p_is_dir(&current.join("src")) || p_is_file(&current.join("Cargo.toml")) {
             return Some(current);
         }
         if !current.pop() {
@@ -422,7 +423,7 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
 
     for candidate_path in &stdlib_candidates {
         let candidate = project_root.join(candidate_path);
-        if candidate.exists() {
+        if p_exists(&candidate) {
             return Some(candidate);
         }
     }
@@ -431,7 +432,7 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
     for _ in 0..5 {
         for candidate_path in &stdlib_candidates {
             let candidate = current.join(candidate_path);
-            if candidate.exists() {
+            if p_exists(&candidate) {
                 return Some(candidate);
             }
         }
@@ -440,7 +441,7 @@ fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf
         // project and must not supply this one's stdlib. A nested git worktree
         // marks its root with a `.git` *file*, so `exists()` (not `is_dir()`)
         // is the right test.
-        if current.join(".git").exists() || current.join(".jj").is_dir() {
+        if p_exists(&current.join(".git")) || p_is_dir(&current.join(".jj")) {
             break;
         }
         if let Some(parent) = current.parent() {

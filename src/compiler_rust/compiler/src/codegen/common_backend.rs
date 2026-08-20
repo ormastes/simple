@@ -582,6 +582,10 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_set_args"
             | "rt_function_not_found"
             | "rt_string_new"
+            // Emitted by codegen itself, never named in Simple source: the
+            // decode wrapper `calls.rs` inserts around runtime entry points
+            // that return `*const c_char` (see C_STRING_RETURNING_RUNTIME_FNS).
+            | "rt_cstring_to_text"
             | "rt_string_new_literal"
             | "rt_string_data"
             | "rt_string_len"

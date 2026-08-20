@@ -262,7 +262,14 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
     print "Files: 1"
     print "Passed: {passed}"
     print "Failed: {failed}"
-    print "Results: {passed + failed} total, {passed} passed, {failed} failed"
+    if skipped > 0:
+        # Skips are appended to the AUTHORITATIVE results line, not left to the
+        # separate "Skipped:" line below. A skip that is only visible on a
+        # secondary line is a skip the aggregate verdict does not carry, which
+        # is how capability-probe skips were laundered into passes.
+        print "Results: {passed + failed} total, {passed} passed, {failed} failed, {skipped} skipped"
+    else:
+        print "Results: {passed + failed} total, {passed} passed, {failed} failed"
     if skipped > 0:
         print "Skipped: {skipped}"
     if pending > 0:
@@ -430,6 +437,28 @@ fn count_real_examples(output: text) -> (i64, i64):
     val real_passed = _count_lines_containing(output, "✓") + _count_lines_containing(output, "... ok")
     val real_failed = _count_lines_containing(output, "✗") + _count_lines_containing(output, "... FAILED")
     (real_passed, real_failed)
+
+fn count_real_skips(output: text) -> (i64, i64):
+    """Count REAL skipped / pending examples from the runner's own per-example
+    markers, the mirror image of count_real_examples().
+
+    This existed nowhere before 2026-08-20: `print_summary` was called with a
+    HARDCODED `skipped=0, pending=0` (see its call site below), so no spec on
+    this path could ever report a skip no matter what it printed. That is the
+    runner half of
+    doc/08_tracking/bug/run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20.md
+    -- a capability probe that skipped was recorded as a plain PASS and the file
+    verdict said `skipped=0`, making fictional GPU coverage indistinguishable
+    from real coverage.
+
+    Markers recognised, matching what the interpreter and std.spec actually
+    emit: `○ <name> (skipped)` (interpreter pending(), bdd.rs), `... skipped`
+    (std.spec skip()/skip_it()) and `... pending` (std.spec pending()). Counted
+    separately so a deliberate skip and an unimplemented pending stay
+    distinguishable in the verdict."""
+    val skipped = _count_lines_containing(output, "(skipped)") + _count_lines_containing(output, "... skipped")
+    val pending = _count_lines_containing(output, "... pending")
+    (skipped, pending)
 
 fn parse_child_example_summary(output: text) -> (i64, i64, i64):
     # Sum across ALL per-describe "N examples, M failures" lines. Last-wins
@@ -1220,7 +1249,11 @@ fn main() -> i64:
             failed = 1
         if failed > 0:
             print "error: test-runner: spec failed"
-    print_summary(run.path, passed, failed, 0, 0, duration_ms, if failed == 0: unverified_error else: "")
+    # Real skip channel. These were hardcoded `0, 0` until 2026-08-20, which is
+    # why every spec on this path reported `skipped=0` even when it had plainly
+    # printed a skip marker -- see count_real_skips()'s docstring.
+    val (real_skipped, real_pending) = count_real_skips(combined)
+    print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")
     if cov_on and cov_sdn != "":
         _cov_print_report(run.path, cov_sdn)
     if failed == 0 and unverified_error != "":

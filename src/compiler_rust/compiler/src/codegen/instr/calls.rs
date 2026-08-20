@@ -2528,6 +2528,40 @@ fn needs_runtime_value_result_tagging<M: Module>(ctx: &InstrContext<'_, M>, func
     ctx.tag_runtime_pool_join_result && func_name == "rt_pool_join"
 }
 
+/// Runtime entry points declared `-> text` in Simple whose C ABI actually
+/// returns `*const c_char`, not a tagged RuntimeValue string.
+///
+/// The list is the intersection of two censuses, both taken 2026-08-20:
+/// the 19 `extern "C" fn rt_*(..) -> *const/*mut c_char` definitions under
+/// `src/compiler_rust/runtime/src/`, and the `extern fn .. -> text`
+/// declarations under `src/lib`, `src/compiler`, `src/app`. The 8 c_char
+/// returners with no `-> text` declaration (`rt_diagram_generate_*`,
+/// `rt_screenshot_get_*`, `rt_coverage_dump_sdn_cstr`,
+/// `rt_resource_registry_leak_report`, `rt_host_gpu_queue_last_payload_text_c`)
+/// are deliberately absent — decoding a value the source does not consume as
+/// `text` would be a new bug, not a fix.
+///
+/// Every other `rt_*` text return is already a `RuntimeValue` (e.g.
+/// `rt_env_cwd`, which is why it was always correct on this lane) and must NOT
+/// be double-decoded — hence an explicit list rather than a prefix rule.
+const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
+    "rt_cuda_device_name",
+    "rt_cuda_get_error_string",
+    "rt_metal_device_name",
+    "rt_metal_get_last_error",
+    "rt_vulkan_device_driver_identity",
+    "rt_vulkan_device_name",
+    "rt_vulkan_device_type",
+    "rt_vulkan_get_last_error",
+    "rt_vulkan_selected_device_driver_identity",
+    "rt_vulkan_selected_device_name",
+    "rt_vulkan_selected_device_type",
+];
+
+fn returns_c_string(func_name: &str) -> bool {
+    C_STRING_RETURNING_RUNTIME_FNS.contains(&func_name)
+}
+
 /// Returns which Simple-level argument indices are text parameters for a given
 /// runtime SFFI function. Text arguments are RuntimeValue strings that must be
 /// expanded to (ptr, len) pairs when calling the C-ABI SFFI function.
@@ -3409,6 +3443,29 @@ pub fn compile_call<M: Module>(
                             builder.ins().uextend(types::I64, result)
                         };
                     }
+                }
+
+                // A handful of runtime entry points return a raw `*const
+                // c_char` rather than a tagged RuntimeValue, while their Simple
+                // declaration says `-> text`. Storing the pointer verbatim
+                // makes every consumer read it as a heap-string handle:
+                // `print` renders `<invalid-heap:0x..>` and `.len()` answers
+                // -1. Decode it into a real Simple string here — the
+                // interpreter path already does this (see
+                // `interpreter_extern/vulkan.rs::text_from_ptr`), which is why
+                // `simple test` was correct while `simple run` was not.
+                // See doc/08_tracking/bug/run_path_extern_text_corruption_causes_false_gpu_skip_2026-08-20.md
+                if returns_c_string(sffi_name) {
+                    let Some(&decode_id) = ctx.runtime_funcs.get("rt_cstring_to_text") else {
+                        return Err(format!(
+                            "{sffi_name} returns *const c_char but rt_cstring_to_text was not \
+                             declared; it is a codegen root in \
+                             codegen/common_backend.rs::runtime_symbol_is_codegen_root"
+                        ));
+                    };
+                    let decode_ref = ctx.module.declare_func_in_func(decode_id, builder.func);
+                    let decode_call = builder.ins().call(decode_ref, &[result]);
+                    result = builder.inst_results(decode_call)[0];
                 }
 
                 // Tag the result if needed.
