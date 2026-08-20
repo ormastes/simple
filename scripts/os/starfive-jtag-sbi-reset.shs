@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/os/lib/starfive-jtag-tap-gate.shs"
 OUTPUT="${STARFIVE_OPENOCD_RESET_LOG:-$ROOT_DIR/build/test-artifacts/starfive-jh7110/openocd-sbi-reset.log}"
 SCRATCH=0x48000000
 JTAG_KHZ="${STARFIVE_JTAG_KHZ:-100}"
@@ -28,6 +29,18 @@ if test "$WAS_BOUND" -eq 1; then
     printf '%s' "$USB_IFACE" | tee /sys/bus/usb/drivers/ftdi_sio/unbind >/dev/null
 fi
 
+PREFLIGHT="$OUTPUT.tap-preflight"
+if ! starfive_jtag_tap_preflight "$ROOT_DIR" "$PREFLIGHT" "$JTAG_KHZ"; then
+    echo "starfive_status=blocked"
+    echo "starfive_reason=jtag-tap-identity-not-admitted"
+    echo "jtag_expected_tap=0x07110cfd"
+    echo "jtag_mutating_commands=0"
+    echo "openocd_log=$PREFLIGHT"
+    exit 2
+fi
+echo "jtag_preflight_status=pass" > "$OUTPUT"
+echo "jtag_preflight_tap=0x07110cfd" >> "$OUTPUT"
+
 # SBI SRST: EID 0x53525354, FID 0, reset_type 1 (cold reboot), reason 0.
 # The reviewed scratch contains only: ecall; wfi; jump-to-wfi.  Hart 2 is a
 # parked OpenSBI secondary hart and remains examinable when boot hart 1 rejects
@@ -43,7 +56,7 @@ timeout 20 openocd \
     -c "mww 0x48000004 0x10500073" \
     -c "mww 0x48000008 0xffdff06f" \
     -c 'reg a7 0x53525354' -c 'reg a6 0' -c 'reg a0 1' -c 'reg a1 0' \
-    -c "reg pc $SCRATCH" -c 'reg priv 1' -c resume -c shutdown > "$OUTPUT" 2>&1
+    -c "reg pc $SCRATCH" -c 'reg priv 1' -c resume -c shutdown >> "$OUTPUT" 2>&1
 RC=$?
 set -e
 test "$RC" -eq 0 || {

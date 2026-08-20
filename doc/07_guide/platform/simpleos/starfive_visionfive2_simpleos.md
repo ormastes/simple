@@ -70,6 +70,10 @@ writes a three-instruction `ecall` trampoline only to scratch RAM, selects
 parked U74 hart 2, sets supervisor resume privilege, invokes SBI SRST, and
 restores Tigard channel B. A fresh session must observe hart 2 back in the
 OpenSBI machine-mode window. Generic OpenOCD `reset run` is insufficient.
+The helper first runs the shared scan-only TAP gate and refuses every halt,
+RAM/register write, or resume unless exactly two `0x07110cfd` TAPs are present
+with no extra TAP or IR-capture error. The RAM-stage helper enforces the same
+gate.
 
 The target configuration declares all five U74 Debug Module harts but does not
 join them into an SMP halt group. On the current board boot hart 1 rejects halt

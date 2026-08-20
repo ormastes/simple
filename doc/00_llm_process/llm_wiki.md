@@ -108,6 +108,10 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   both TAPs must report exact `0x07110cfd` in the same session before reset or
   RAM access. Random/shifted IDs mean stop and inspect VTref, ground, TDO, and
   cable contact; they are not a software-reset result.
+- **Enforced gate:** both the SBI reset helper and RAM-stage helper run the
+  shared scan-only TAP preflight before `halt`, `mww`, `load_image`, register
+  writes, or resume. A mismatched/extra TAP, IR-capture error, or all-ones scan
+  exits BLOCKED with `jtag_mutating_commands=0`.
 - **Primary guide:**
   `doc/07_guide/platform/simpleos/starfive_visionfive2_simpleos.md`.
 

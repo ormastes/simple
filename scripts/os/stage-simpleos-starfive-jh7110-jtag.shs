@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/os/lib/starfive-jtag-tap-gate.shs"
 ELF="${STARFIVE_ELF:-$ROOT_DIR/build/os/starfive-jh7110/simpleos.elf}"
 RECEIPT="${STARFIVE_RECEIPT:-$ELF.receipt}"
 SCRATCH=0x48000000
@@ -35,6 +36,18 @@ if test "$WAS_BOUND" -eq 1; then
     printf '%s' "$USB_IFACE" | tee /sys/bus/usb/drivers/ftdi_sio/unbind >/dev/null
 fi
 
+PREFLIGHT="$OUTPUT.tap-preflight"
+if ! starfive_jtag_tap_preflight "$ROOT_DIR" "$PREFLIGHT" "$JTAG_KHZ"; then
+    echo "starfive_status=blocked"
+    echo "starfive_reason=jtag-tap-identity-not-admitted"
+    echo "jtag_expected_tap=0x07110cfd"
+    echo "jtag_mutating_commands=0"
+    echo "openocd_log=$PREFLIGHT"
+    exit 2
+fi
+echo "jtag_preflight_status=pass" > "$OUTPUT"
+echo "jtag_preflight_tap=0x07110cfd" >> "$OUTPUT"
+
 set +e
 # At Tigard's conservative 100 kHz clock, the current 358 KiB image needs about
 # 53 s for each of load and readback verification. Keep the operation bounded
@@ -47,7 +60,7 @@ timeout 180 openocd \
     -c init -c 'targets jh7110.u74_hart2' -c halt \
     -c "load_image $ELF $SCRATCH bin" \
     -c "verify_image $ELF $SCRATCH bin" \
-    -c resume -c shutdown > "$OUTPUT" 2>&1
+    -c resume -c shutdown >> "$OUTPUT" 2>&1
 RC=$?
 set -e
 test "$RC" -eq 0 || { echo "starfive_status=fail"; echo "starfive_reason=jtag-stage-failed"; echo "openocd_log=$OUTPUT"; exit 1; }
