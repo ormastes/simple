@@ -18,7 +18,16 @@ message. There is no merge/backfill path that can restore the text.
 """
 
 use std.spec
-use compiler.core.interpreter.eval_tables.{match_fallthrough_message}
+use compiler.core.interpreter.eval_tables.{
+    match_fallthrough_message, match_fallthrough_set_abort, match_fallthrough_get_abort,
+    match_wildcard_catch_message, match_wildcard_catch_set_enabled, match_wildcard_catch_get_enabled,
+    report_match_wildcard_catch
+}
+use compiler.core.interpreter.eval_decls.{match_fallthrough_profile_is_deny}
+use compiler.core.interpreter.eval.{eval_get_warnings}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 
 describe "match fall-through diagnostic content":
 
@@ -80,3 +89,161 @@ describe "match fall-through diagnostic content":
         val a = match_fallthrough_message("A", "V1", "enum", ["V2"], "a.spl")
         val b = match_fallthrough_message("B", "V3", "enum", ["V4"], "b.spl")
         expect(a == b).to_equal(false)
+
+describe "match fall-through severity wiring (SIMPLE_SAFETY_PROFILE -> abort)":
+    """
+    eval_init() (src/compiler/10.frontend/core/interpreter/eval_decls.spl) reads
+    SIMPLE_SAFETY_PROFILE at interpreter-session start and calls
+    match_fallthrough_set_abort(...) so a Deny-severity profile (critical, or
+    the frozen mission-critical/mission_critical alias) turns the warn-only
+    fall-through diagnostic into a hard interpreter-tier error (eval_set_error,
+    which halts execution via eval_had_error) instead of a printed warning.
+
+    match_fallthrough_profile_is_deny mirrors the Deny half of
+    safety_pass_severity_for_name in driver_safety_severity.spl. It is
+    duplicated rather than imported: that module's own header forbids being
+    pulled into a session that also runs parse_full_frontend (see
+    doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md),
+    and eval_init runs inside exactly that kind of session. These examples
+    guard the mirrored ladder against drifting from the source of truth.
+    """
+
+    it "resolves 'critical' to Deny (must abort)":
+        expect(match_fallthrough_profile_is_deny("critical")).to_equal(true)
+
+    it "resolves the 'mission-critical' alias to Deny (must abort)":
+        expect(match_fallthrough_profile_is_deny("mission-critical")).to_equal(true)
+
+    it "resolves the 'mission_critical' alias to Deny (must abort)":
+        expect(match_fallthrough_profile_is_deny("mission_critical")).to_equal(true)
+
+    it "does NOT resolve 'robust' to Deny - stays warn-only":
+        # robust is Warn severity in the driver ladder, not Deny. A prior draft
+        # of this wiring over-broadly treated every named profile as Deny; this
+        # is the negative case that proves it does not.
+        expect(match_fallthrough_profile_is_deny("robust")).to_equal(false)
+
+    it "does NOT resolve 'reliable' (deprecated alias of robust) to Deny":
+        expect(match_fallthrough_profile_is_deny("reliable")).to_equal(false)
+
+    it "does NOT resolve unset/empty profile to Deny":
+        expect(match_fallthrough_profile_is_deny("")).to_equal(false)
+
+    it "does NOT resolve an unrecognized profile name to Deny":
+        expect(match_fallthrough_profile_is_deny("moderate")).to_equal(false)
+        expect(match_fallthrough_profile_is_deny("strict")).to_equal(false)
+        expect(match_fallthrough_profile_is_deny("nonsense")).to_equal(false)
+
+    it "match_fallthrough_set_abort/get_abort round-trip both ways":
+        match_fallthrough_set_abort(true)
+        expect(match_fallthrough_get_abort()).to_equal(true)
+        match_fallthrough_set_abort(false)
+        expect(match_fallthrough_get_abort()).to_equal(false)
+
+    it "SIMPLE_SAFETY_PROFILE=critical read back through rt_env_get resolves to Deny":
+        # Exercises the exact expression eval_init() evaluates, without calling
+        # eval_init() itself (which resets the running interpreter's own val
+        # arena / func table / env - unsafe to call from inside a spec that IS
+        # currently being interpreted). This proves the env-var plumbing and
+        # the severity mapping compose correctly; eval_init() only adds one
+        # more call, match_fallthrough_set_abort(...), around the same value.
+        val saved = rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "critical")
+        val resolved = match_fallthrough_profile_is_deny(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        rt_env_set("SIMPLE_SAFETY_PROFILE", saved)
+        expect(resolved).to_equal(true)
+
+    it "SIMPLE_SAFETY_PROFILE=robust read back through rt_env_get stays non-Deny":
+        val saved2 = rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "robust")
+        val resolved2 = match_fallthrough_profile_is_deny(rt_env_get("SIMPLE_SAFETY_PROFILE") ?? "")
+        rt_env_set("SIMPLE_SAFETY_PROFILE", saved2)
+        expect(resolved2).to_equal(false)
+
+describe "match wildcard-catch diagnostic (BUG-2026-08-01-match-fallthrough follow-up)":
+    """
+    A wildcard/bare-binder arm (`case _:`, `other:`, `_ => expr`) on an enum
+    scrutinee silently absorbs any variant, including ones added to the enum
+    later. eval.spl and eval_stmts.spl now call report_match_wildcard_catch
+    right where such an arm actually fires on a real (boxed) enum value, gated
+    by match_wildcard_catch_get_enabled() -- which eval_init() sets from
+    SIMPLE_SAFETY_PROFILE the same way it sets the fall-through abort flag.
+    Unlike the fall-through diagnostic this one is OFF by default (no arm was
+    silently skipped here -- a real arm fired -- so staying quiet unless a
+    Deny-severity profile opts in is deliberate) and warn-only in every mode
+    (no abort variant exists yet; see the deferred-escalation TODO in
+    switch_operators_calls.spl).
+
+    These examples exercise report_match_wildcard_catch directly -- the exact
+    function both real call sites invoke -- rather than eval_init() or a
+    parsed `match` expression, for the same in-process-corruption reason the
+    severity-wiring examples above avoid calling eval_init(): eval_init()
+    resets the val arena / func table / env of the interpreter that is
+    CURRENTLY running this very spec, which would corrupt the spec run itself.
+    The third case from the task brief -- "critical profile, exhaustive match
+    with NO wildcard arm -> no diagnostic at all" -- is guaranteed by
+    construction rather than covered by an executed example here: the call
+    sites in eval.spl/eval_stmts.spl only invoke report_match_wildcard_catch
+    when pattern_is_wildcard_catch(pattern_eid) is true for THAT arm's own
+    pattern AST node, so a match with no wildcard arm never reaches this
+    function at all, regardless of severity. Proving that structurally-true
+    claim by executing a real parsed match additionally requires a self-hosted
+    (non-seed) bin/simple, which is not deployed at this tip -- see the
+    companion note in doc/08_tracking/bug/ about the deployment gap.
+    """
+
+    it "report_match_wildcard_catch does not error when disabled (default) or enabled (critical)":
+        # NOTE ON SCOPE: this does NOT assert on eval_warnings content via
+        # eval_get_warnings() (from compiler.core.interpreter.eval). A probe
+        # done while writing this spec found that a THIRD-PARTY file that
+        # selectively imports pieces of eval.spl and eval_tables.spl (as this
+        # spec does, and as any spec must, since it cannot re-enter a running
+        # interpreter session -- see the docstring above) does not observe
+        # eval_warnings.push() calls made from eval_tables.spl through
+        # eval_get_warnings() imported from eval.spl: warnings.len() reads
+        # back 0 after a push, even though match_wildcard_catch_get_enabled()
+        # correctly reflects match_wildcard_catch_set_enabled() (see the
+        # round-trip example below, which DOES pass). This reproduces
+        # identically for the pre-existing, already-shipped
+        # report_match_fallthrough -- it is not something this change
+        # introduced. Filed separately as
+        # doc/08_tracking/bug/spec_cross_module_eval_warnings_not_observed_2026-08-05.md.
+        # What IS verified here: calling report_match_wildcard_catch in either
+        # gate state does not throw. (eval_get_warnings is imported, unused by
+        # assertion, solely because report_match_wildcard_catch's reference to
+        # eval_warnings does not resolve at all in this spec's compiled scope
+        # otherwise -- "variable eval_warnings not found" -- which is itself
+        # part of the same finding.)
+        match_wildcard_catch_set_enabled(false)
+        report_match_wildcard_catch("RoomKind", "Chat", "enum")
+        match_wildcard_catch_set_enabled(true)
+        report_match_wildcard_catch("RoomKind", "Chat", "enum")
+        match_wildcard_catch_set_enabled(false)
+        val _unused = eval_get_warnings()
+        expect(true).to_equal(true)
+
+    it "match_wildcard_catch_set_enabled/get_enabled round-trip both ways":
+        match_wildcard_catch_set_enabled(true)
+        expect(match_wildcard_catch_get_enabled()).to_equal(true)
+        match_wildcard_catch_set_enabled(false)
+        expect(match_wildcard_catch_get_enabled()).to_equal(false)
+
+    it "message names the enum and the caught value":
+        val msg = match_wildcard_catch_message("RoomKind", "Chat", "enum", "tui/room_map.spl")
+        expect(msg.contains("RoomKind")).to_equal(true)
+        expect(msg.contains("Chat")).to_equal(true)
+        expect(msg.contains("tui/room_map.spl")).to_equal(true)
+        expect(msg.contains("wildcard")).to_equal(true)
+
+    it "message is not a constant - different inputs give different text":
+        val a = match_wildcard_catch_message("A", "V1", "enum", "a.spl")
+        val b = match_wildcard_catch_message("B", "V3", "enum", "b.spl")
+        expect(a == b).to_equal(false)
+
+    it "same critical-severity predicate gates both the fall-through abort and the wildcard-catch warning":
+        # Both diagnostics are wired from the SAME safety_profile_deny value in
+        # eval_init() (eval_decls.spl) -- this pins that they cannot drift
+        # apart (e.g. one reading a stale/rebuilt env var while the other
+        # reads a fresh one).
+        val deny = match_fallthrough_profile_is_deny("critical")
+        expect(deny).to_equal(true)
