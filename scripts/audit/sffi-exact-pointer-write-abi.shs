@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Source-only, zero-runtime-cost ABI gate for raw pointer stores. These symbols
-# are implemented by the interpreter and C runtimes as exact void-returning
-# functions. A false return type changes native calling semantics and can turn
-# an ignored register into a fabricated Simple value.
+# Source-only, zero-runtime-cost ABI gate for the original pointer-write family
+# and its paired pointer reads. Writes are exact void functions; reads return
+# their exact width. False result types change native calling semantics, while
+# missing unsafe metadata hides the raw-pointer proof obligation.
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 temp_dir=$(mktemp -d)
@@ -15,7 +15,7 @@ violations="$temp_dir/violations"
 unsafe_violations="$temp_dir/unsafe-violations"
 
 git -C "$root" grep -n -E \
-    '^[[:space:]]*extern fn rt_ptr_write_(u8|i32|i64)\b' \
+    '^[[:space:]]*extern fn rt_ptr_(read|write)_(u8|i32|i64)\b' \
     -- 'src/**/*.spl' > "$declarations" || true
 
 awk '
@@ -39,6 +39,9 @@ function compact(value) {
     if (line ~ /^externfnrt_ptr_write_u8\([^:(),]+:i64,[^:(),]+:i64,[^:(),]+:i64\)$/) valid = 1
     if (line ~ /^externfnrt_ptr_write_i32\([^:(),]+:i64,[^:(),]+:i64,[^:(),]+:i32\)$/) valid = 1
     if (line ~ /^externfnrt_ptr_write_i64\([^:(),]+:i64,[^:(),]+:i64,[^:(),]+:i64\)$/) valid = 1
+    if (line ~ /^externfnrt_ptr_read_u8\([^:(),]+:i64,[^:(),]+:i64\)->i64$/) valid = 1
+    if (line ~ /^externfnrt_ptr_read_i32\([^:(),]+:i64,[^:(),]+:i64\)->i32$/) valid = 1
+    if (line ~ /^externfnrt_ptr_read_i64\([^:(),]+:i64,[^:(),]+:i64\)->i64$/) valid = 1
 
     if (!valid) print source
 }
@@ -49,7 +52,7 @@ find "$root/src" -type f -name '*.spl' \
     ! -path '*/runtime/vendor/*' \
     -exec awk '
         FNR == 1 { previous = "" }
-        /^[[:space:]]*extern fn rt_ptr_write_(u8|i32|i64)[[:space:]]*\(/ {
+        /^[[:space:]]*extern fn rt_ptr_(read|write)_(u8|i32|i64)[[:space:]]*\(/ {
             if (previous !~ /@unsafe\(/ ||
                 previous !~ /capabilities:[[:space:]]*\[[^]]*ffi/ ||
                 previous !~ /raw_ptr/) {
@@ -61,14 +64,14 @@ find "$root/src" -type f -name '*.spl' \
 
 count=$(wc -l < "$declarations" | tr -d ' ')
 if [ -s "$violations" ]; then
-    echo "SFFI pointer-write declarations disagree with the canonical void ABI:" >&2
+    echo "SFFI pointer-memory declarations disagree with the canonical ABI:" >&2
     cat "$violations" >&2
     exit 1
 fi
 if [ -s "$unsafe_violations" ]; then
-    echo "SFFI pointer-write declarations lack explicit ffi/raw_ptr unsafe metadata:" >&2
+    echo "SFFI pointer-memory declarations lack explicit ffi/raw_ptr unsafe metadata:" >&2
     cat "$unsafe_violations" >&2
     exit 1
 fi
 
-echo "SFFI exact pointer-write ABI: PASS ($count declarations)"
+echo "SFFI exact pointer-memory ABI: PASS ($count declarations)"

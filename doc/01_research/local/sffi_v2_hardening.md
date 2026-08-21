@@ -144,3 +144,12 @@ and remains compiler-lowerable to a direct load; no allocation, lookup, hash,
 lock, or generic marshalling is introduced on the call path. An `-O2` object
 inspection confirms the i32/i64 functions compile to two descriptor tests and
 one direct `mov` load, with no call to `memcpy` on the accepted path.
+
+The exact pointer-memory audit now covers all 64 owned read/write declarations
+in one batched scan (about three seconds measured). Every pointer-read
+declaration has the exact two-i64 input and width-correct result contract and
+explicit `unsafe(ffi, raw_ptr)` metadata. Inventory improves to 92
+`unsafe_contract_declared` rows and 13,550 declarations missing both tag and
+contract. As with writes, the tag records the caller-owned allocation/bounds
+obligation; it does not manufacture proof while lexical enforcement remains
+incomplete.
