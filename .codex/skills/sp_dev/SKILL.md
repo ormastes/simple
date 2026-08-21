@@ -197,6 +197,40 @@ are supplied; a media receipt with full image-length readback is mandatory
 input to `--live`. The live checker must keep one UART session open from boot
 markers through the freshly injected public-VFS `ls /` window.
 
+For original-UP2 Intel DCI requests, distinguish proprietary Intel USB 3.x DCI
+DbC from open xHCI DbC and from USB bridge cables. A qualified SuperSpeed debug
+cable, firmware debug consent, enabled/unlocked architectural debug interface,
+and Intel System Debugger/System Bring-Up Toolkit are mandatory. Smart KM Link
+`0ea0:2211`, Tigard `0403:6010`, CN22, generic GDB, and OpenOCD do not establish
+DCI. Inventory with `scripts/check/check-up-squared-apl-dci.shs --inventory`;
+missing tool, rules, or retained target receipt is BLOCKED. DCI run control and
+physical-memory staging do not authorize BIOS, MSR, or storage writes. Boot the
+existing UEFI image under DCI observation unless a reviewed CPU-state-specific
+RAM trampoline exists; perform persistent writes only through an identity-gated
+target-side storage driver with flush and exact readback evidence.
+Intel documents that Apollo Lake OpenRC warm reset can strand cores in an
+undefined state and requires manual reset; reject it rather than treating DCI
+reset as generic. A Power-Good reset is unqualified without exact-board proof.
+Before any proposed RAM load, run
+`scripts/check/inspect-up-squared-apl-dci-elf.shs --inspect`; non-contiguous
+`PT_LOAD` ranges and `p_memsz - p_filesz` zero-fill must be honored. Prefer a
+UEFI-resident mailbox loader over debugger-authored CR/GDT/page-table state.
+For the retained UP2 A+B+D selection, reuse the pure-Simple admission policy in
+`src/os/kernel/arch/x86_64/up_squared/dci_mailbox.spl`: payload-before-commit,
+fresh generation/nonce, SHA-256 binding, physical `PT_LOAD`/BSS validation,
+RAM allowlisting, and exact storage identity/challenge/bounds. Do not promote
+these host-independent checks to physical DCI, boot, or storage-readback PASS.
+Intel's System Bring-Up Toolkit is a CNDA/Registration Center download, not an
+APT package; missing authentic installer or `99-dci.rules` stays BLOCKED.
+When Intel DCI is unavailable, do not claim that OpenOCD, CHIPSEC, KGDB, xHCI
+DbC, or host GDB replaces it. The free UP2 lane is removable UEFI boot plus a
+target-resident debugger over CN16 UART (and later xHCI DbC). Wire CN16 pin 8
+GND, pin 10 board TX to adapter RX, and optionally pin 9 board RX to adapter TX;
+use 3.3-V TTL at 115200 8N1 with no flow control, and never connect 5-V pins 1/5.
+Tigard FTDI interface 00 is Port A/Serial; interface 01 is Port B/JTAG. CN22 is
+1.8-V CPLD/BIOS service, not an Apollo Lake CPU TAP. A zero-byte capture is
+BLOCKED pending power/reset/wiring proof, not a boot FAIL.
+
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo
 DB. It may end the coding turn only after code and host-independent tests are

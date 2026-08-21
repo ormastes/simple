@@ -1,0 +1,103 @@
+# Local research: Intel DCI debugging on original UP Squared
+
+Date: 2026-08-21
+
+## Scope and repository state
+
+This research is specific to original `UPS-APL` Apollo Lake boards. It does not
+generalize to UP Squared Pro, V2, 6000, or later products. The existing
+SimpleOS lane builds a 37,280-byte freestanding ELF and 256 MiB GPT/FAT32 UEFI
+image. Its OVMF oracle reaches the loader, 32-bit shim, 64-bit entry, console,
+VFS, shell, and a command-correlated `ls /` containing `/bin`, `/etc`, and
+`/README.txt`. That is host-side firmware evidence, not a physical-board PASS.
+
+The current kernel ELF enters through `_entry32` at `0x08000038`. Its bootstrap
+expects the Multiboot-style 32-bit protected-mode contract and then establishes
+paging and long mode. Copying the ELF into RAM and setting RIP from an arbitrary
+UEFI/debugger state would violate that contract. A DCI loader must load every
+`PT_LOAD`, zero BSS, park other cores, reserve non-firmware RAM, construct the
+handoff, and establish the documented control-register, segment, stack, and
+entry state before resuming exactly one bootstrap processor.
+
+The artifact's three loadable ranges are:
+
+| File offset | Physical address | File size | Memory size | Flags |
+|---:|---:|---:|---:|:---|
+| `0x1000` | `0x08000000` | `0x4b6f` | `0x4b6f` | R-X |
+| `0x6000` | `0x08005000` | `0x01fe` | `0x01fe` | R-- |
+| `0x7000` | `0x08006000` | `0x008a` | `0x0180d000` | RW- |
+
+Consequently, a direct loader must zero the last segment beyond its 138 file
+bytes up to its memory size. Loading the ELF file contiguously is not loading
+the program image.
+
+## Connected-host inventory
+
+The connected Smart KM Link `0ea0:2211` is a USB 2.0 composite mass-storage and
+HID keyboard/mouse bridge. Its small `SmartKMLink` CD image is read-only. It is
+not a USB 3.x DbC cable and does not expose Intel DCI.
+
+The Tigard `0403:6010` is an FT2232H UART/JTAG adapter. It remains useful for
+CN16 3.3 V TTL UART, but original-UP2 CN22 is a 1.8 V CPLD/BIOS service header,
+not a documented Apollo Lake CPU JTAG chain.
+
+No Intel System Debugger/System Bring-Up Toolkit, Target Connection Agent,
+`99-dci.rules`, DCI device, or xHCI DbC host endpoint is installed or enumerated
+on this workstation. Generic GDB/OpenOCD cannot substitute for Intel's
+proprietary DCI protocol. Therefore physical DCI halt, reset, memory load, and
+SimpleOS boot are currently **blocked**, not failed and not passed.
+
+## Implementation seams
+
+- A read-only checker may inventory USB descriptors, Intel tool presence, and
+  retained debugger receipts. It must never guess DCI from an unknown VID/PID.
+- A future DCI receipt must bind board model/FAB, BIOS version, connection type,
+  debugger/tool version, cable identity, target power state, and the exact
+  observed halt/reset/memory operation.
+- A future RAM loader needs a reviewed bootstrap trampoline and a memory map
+  obtained from the exact boot. It must hash-bound the admitted SimpleOS ELF and
+  reject SMRAM, firmware, ACPI, MMIO, and DMA-owned ranges.
+- Persistent writes must be performed by a trusted target-side USB/eMMC/SATA
+  driver or a RAM-booted Linux provisioner. DCI memory DMA is only a staging
+  channel; direct storage-controller MMIO pokes are outside the safe contract.
+
+## Blockers for physical proof
+
+1. Genuine Intel SVT DCI DbC2/3 or standards-compliant SuperSpeed debug cable.
+2. Exact UP2 board FAB and current firmware identified and recoverable.
+3. Firmware DCI/debug consent and `IA32_DEBUG_INTERFACE` enabled and unlocked.
+4. Licensed Intel System Debugger/System Bring-Up Toolkit plus supported host.
+5. A retained connection receipt proving the target, rather than a USB bridge.
+6. A reviewed DCI bootstrap contract or standard UEFI media for actual boot.
+
+Intel's published 2020 release notes add a reset blocker: Apollo Lake OpenRC
+warm reset may strand cores in an undefined state, with manual reset as the only
+listed recovery. No UP2 automation should select OpenRC warm reset.
+
+## Free-tool physical trial (2026-08-22)
+
+The Ubuntu host already had native x86 GDB; `picocom` 3.1 was installed from
+Ubuntu. While Tigard was connected, its FTDI EEPROM identified interface 00 as
+Port A/Serial (`/dev/ttyUSB0`) and interface 01 as Port B/JTAG
+(`/dev/ttyUSB1`). Both passive 115200 captures were empty. A harmless `ls /`
+probe sent to the actual serial channel at 115200 8N1, raw mode, no hardware
+flow control produced zero response bytes. A subsequent five-minute serial
+capture also contained zero bytes. Tigard was later disconnected and neither
+`/dev/ttyUSB*` node remained.
+
+The official CN16 wiring resolves the next operator check: pin 8 is GND, pin 9
+is board UART RX, and pin 10 is board UART TX, all UART signals at 3.3-V TTL.
+Connect board pin 10 to adapter RX and pin 8 to GND for a safe receive-only
+test; add board pin 9 to adapter TX only for an interactive shell. Never connect
+CN16 5-V pins 1 or 5 to Tigard. The required format is 115200 8N1 with no flow
+control. A fresh physical reset/boot transcript is still missing, so the empty
+capture does not distinguish an unpowered board, crossed/missing wiring, absent
+firmware output, or a SimpleOS legacy-COM1 routing defect.
+
+Local code review found no target-side GDB server: the existing
+`src/lib/nogc_sync_mut/debug/remote/protocol/gdb_rsp.spl` is a host client, and
+the UP2 IDT has no #DB/#BP register-frame/continue/step service. The xHCI driver
+also lacks Debug Capability extended-register/context/ring support. The current
+UP2 serial runtime directly uses legacy COM1 I/O `0x3f8`; compatibility with the
+physical CN16 UART remains unproven. Generic NVMe read/write/flush code exists,
+but the UP2 entry does not initialize it, so no physical storage claim follows.
