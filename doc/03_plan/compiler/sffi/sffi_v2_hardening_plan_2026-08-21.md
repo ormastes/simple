@@ -663,3 +663,14 @@ GHASH, allocation, or valid-path control flow changed, so this adds no runtime
 cost. The remaining 16 `rt_tls13_*` names have no runtime provider definition
 in the inspected Rust/C tree and are not falsely promoted merely because an
 interpreter helper or symbol-list entry exists.
+
+The four raw file-mapping lifecycle providers now have exact compiler-owned
+pointer/u64 ABI contracts, moving coverage to 1,078/712. This removes the
+legacy Simple declaration's 32-bit truncation of mapping lengths and offsets,
+honors the caller's mapping-address hint, and makes the raw declarations and
+Rust exports explicitly unsafe. The provider rejects null lifecycle pointers,
+zero lengths, invalid descriptors, and target-width overflow before entering
+the OS syscall. Four focused lifecycle tests, the legacy Simple file check, and
+the generated runtime-symbol-table build pass. The syscall hot path gained only
+constant-time boundary branches: no allocation, hashing, locking, registry
+lookup, dynamic symbol lookup, or per-byte work was introduced.

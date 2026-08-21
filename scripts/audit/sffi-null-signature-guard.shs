@@ -328,6 +328,31 @@ require_fixed '"rt_atomic_bool_new" => "(initial: bool) -> i64"' \
 require_fixed 'runtime_symbol_table_atomic_contracts_dispatch' \
     src/compiler_rust/runtime/src/lib.rs
 
+# Raw file mappings use exact pointer/u64 ABI declarations in every generated
+# lane. Their provider boundary must reject invalid pointer/size inputs without
+# adding allocation, hashing, registry lookup, or synchronization to syscalls.
+for symbol in rt_file_mmap rt_file_munmap rt_file_madvise rt_file_msync
+do
+    require_fixed "RuntimeFuncSpec::new(\"$symbol\"" \
+        src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+    require_fixed "\"$symbol\" =>" src/compiler_rust/runtime/build.rs
+    require_fixed "pub unsafe extern \"C\" fn $symbol" \
+        src/compiler_rust/runtime/src/value/sffi/file_io/mmap.rs
+done
+require_fixed 'extern fn rt_file_mmap(addr: *void, length: u64' \
+    src/compiler_rust/lib/std/src/file/__init__.spl
+require_fixed 'raw_mapping_lifecycle_rejects_invalid_pointer_and_size' \
+    src/compiler_rust/runtime/src/value/sffi/file_io/mmap.rs
+
+mmap_provider_region=$(sed -n \
+    '/pub unsafe extern "C" fn rt_file_mmap(/,/Wrapper for native_msync/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/file_io/mmap.rs")
+if printf '%s\n' "$mmap_provider_region" | rg -q \
+    'HashMap|Mutex|RwLock|Vec::|sha|dlsym|dlopen'; then
+    echo "SFFI lint: raw mapping hot path gained allocation, hashing, locking, or dynamic lookup" >&2
+    failed=1
+fi
+
 # Cryptographic sign/verify symbols must resolve through the same typed static
 # registry as their checked tri-state/status-payload wrappers.
 for symbol in \

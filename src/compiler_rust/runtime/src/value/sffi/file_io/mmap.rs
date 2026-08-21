@@ -20,13 +20,29 @@
 /// - fd: File descriptor to map
 /// - offset: Offset in file
 #[no_mangle]
-pub extern "C" fn rt_file_mmap(_addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8 {
+pub unsafe extern "C" fn rt_file_mmap(
+    addr: *mut u8,
+    length: u64,
+    prot: i32,
+    flags: i32,
+    fd: i32,
+    offset: u64,
+) -> *mut u8 {
+    let Ok(length) = usize::try_from(length) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(offset) = i64::try_from(offset) else {
+        return std::ptr::null_mut();
+    };
+    if length == 0 || fd < 0 {
+        return std::ptr::null_mut();
+    }
     #[cfg(unix)]
     {
         use libc::mmap;
 
         unsafe {
-            let addr = mmap(std::ptr::null_mut(), length as usize, prot, flags, fd, offset as i64);
+            let addr = mmap(addr.cast(), length, prot, flags, fd, offset);
 
             if addr == libc::MAP_FAILED {
                 std::ptr::null_mut()
@@ -46,12 +62,18 @@ pub extern "C" fn rt_file_mmap(_addr: *mut u8, length: u64, prot: i32, flags: i3
 /// Unmap memory region
 /// Returns 0 on success, -1 on error
 #[no_mangle]
-pub extern "C" fn rt_file_munmap(addr: *mut u8, length: u64) -> i32 {
+pub unsafe extern "C" fn rt_file_munmap(addr: *mut u8, length: u64) -> i32 {
+    let Ok(length) = usize::try_from(length) else {
+        return -1;
+    };
+    if addr.is_null() || length == 0 {
+        return -1;
+    }
     #[cfg(unix)]
     {
         use libc::munmap;
 
-        unsafe { munmap(addr as *mut libc::c_void, length as usize) }
+        unsafe { munmap(addr as *mut libc::c_void, length) }
     }
 
     #[cfg(not(unix))]
@@ -70,12 +92,18 @@ pub extern "C" fn rt_file_munmap(addr: *mut u8, length: u64) -> i32 {
 /// - MADV_WILLNEED: Will need these pages soon
 /// - MADV_DONTNEED: Don't need these pages
 #[no_mangle]
-pub extern "C" fn rt_file_madvise(addr: *mut u8, length: u64, advice: i32) -> i32 {
+pub unsafe extern "C" fn rt_file_madvise(addr: *mut u8, length: u64, advice: i32) -> i32 {
+    let Ok(length) = usize::try_from(length) else {
+        return -1;
+    };
+    if addr.is_null() || length == 0 {
+        return -1;
+    }
     #[cfg(unix)]
     {
         use libc::madvise;
 
-        unsafe { madvise(addr as *mut libc::c_void, length as usize, advice) }
+        unsafe { madvise(addr as *mut libc::c_void, length, advice) }
     }
 
     #[cfg(not(unix))]
@@ -92,12 +120,18 @@ pub extern "C" fn rt_file_madvise(addr: *mut u8, length: u64, advice: i32) -> i3
 /// - MS_SYNC: Synchronous sync
 /// - MS_INVALIDATE: Invalidate other mappings
 #[no_mangle]
-pub extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
+pub unsafe extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
+    let Ok(length) = usize::try_from(length) else {
+        return -1;
+    };
+    if addr.is_null() || length == 0 {
+        return -1;
+    }
     #[cfg(unix)]
     {
         use libc::msync;
 
-        unsafe { msync(addr as *mut libc::c_void, length as usize, flags) }
+        unsafe { msync(addr as *mut libc::c_void, length, flags) }
     }
 
     #[cfg(not(unix))]
@@ -109,8 +143,8 @@ pub extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
 /// Wrapper for native_msync - stdlib compatibility
 /// Returns 0 on success, -1 on error
 #[no_mangle]
-pub extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
-    rt_file_msync(addr, length, flags)
+pub unsafe extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
+    unsafe { rt_file_msync(addr, length, flags) }
 }
 
 // ============================================================================
@@ -212,5 +246,16 @@ mod tests {
         }
 
         drop(file);
+    }
+
+    #[test]
+    fn raw_mapping_lifecycle_rejects_invalid_pointer_and_size() {
+        unsafe {
+            assert!(rt_file_mmap(std::ptr::null_mut(), 0, 0, 0, -1, 0).is_null());
+            assert_eq!(rt_file_munmap(std::ptr::null_mut(), 1), -1);
+            assert_eq!(rt_file_munmap(std::ptr::dangling_mut(), 0), -1);
+            assert_eq!(rt_file_madvise(std::ptr::null_mut(), 1, 0), -1);
+            assert_eq!(rt_file_msync(std::ptr::null_mut(), 1, 0), -1);
+        }
     }
 }

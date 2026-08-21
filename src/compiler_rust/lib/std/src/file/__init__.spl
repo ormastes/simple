@@ -29,9 +29,12 @@ extern fn rt_check_file_path(path: text) -> bool
 extern fn rt_file_open(path: text, mode: i32) -> i32
 extern fn rt_file_get_size(fd: i32) -> i32
 extern fn rt_file_close(fd: i32) -> bool
-extern fn rt_file_mmap(addr: *void, length: i32, prot: i32, flags: i32, fd: i32, offset: i32) -> *u8
-extern fn rt_file_munmap(addr: *u8, length: i32) -> i32
-extern fn rt_file_madvise(addr: *u8, length: i32, advice: i32) -> i32
+@unsafe(reason: "raw mapping pointer is valid only for the admitted file mapping lifetime", capabilities: [ffi, raw_ptr])
+extern fn rt_file_mmap(addr: *void, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *u8
+@unsafe(reason: "raw mapping pointer and exact length must match a live mapping", capabilities: [ffi, raw_ptr])
+extern fn rt_file_munmap(addr: *u8, length: u64) -> i32
+@unsafe(reason: "raw mapping pointer and exact length must match a live mapping", capabilities: [ffi, raw_ptr])
+extern fn rt_file_madvise(addr: *u8, length: u64, advice: i32) -> i32
 
 # Re-export public API
 export file.mmap.*
@@ -135,21 +138,27 @@ fn sys_close(fd: i32):
 
 # Memory map a file
 fn sys_mmap(addr: *void, length: usize, prot: i32, flags: i32, fd: i32, offset: usize) -> Result<*u8, FileError>:
-    val ptr = rt_file_mmap(addr, length as i32, prot, flags, fd, offset as i32)
+    var ptr: *u8 = null
+    unsafe(capabilities: [ffi, raw_ptr]):
+        ptr = rt_file_mmap(addr, length as u64, prot, flags, fd, offset as u64)
     if ptr == null:
         return Err(FileError.MmapFailed("mmap failed"))
     return Ok(ptr)
 
 # Unmap memory region
 fn sys_munmap(addr: *u8, length: usize) -> Result<void, FileError>:
-    val result = rt_file_munmap(addr, length as i32)
+    var result: i32 = -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        result = rt_file_munmap(addr, length as u64)
     if result == -1:
         return Err(FileError.IoError("munmap failed"))
     return Ok(void)
 
 # Advise kernel on memory access pattern
 fn sys_madvise(addr: *u8, length: usize, advice: i32) -> Result<void, FileError>:
-    val result = rt_file_madvise(addr, length as i32, advice)
+    var result: i32 = -1
+    unsafe(capabilities: [ffi, raw_ptr]):
+        result = rt_file_madvise(addr, length as u64, advice)
     if result == -1:
         return Err(FileError.IoError("madvise failed"))
     return Ok(void)

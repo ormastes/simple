@@ -307,6 +307,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_tls13_aes256_gcm_encrypt", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_tls13_aes256_gcm_decrypt", &[I64, I64, I64, I64, I64], &[I64]),
     // =========================================================================
+    // Raw file mapping lifecycle
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_file_mmap", &[I64, I64, I32, I32, I32, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_munmap", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_file_madvise", &[I64, I64, I32], &[I32]),
+    RuntimeFuncSpec::new("rt_file_msync", &[I64, I64, I32], &[I32]),
+    // =========================================================================
     // AOP runtime operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),
