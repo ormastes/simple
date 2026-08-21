@@ -103,6 +103,28 @@ fn module_surface_signature_append(
     builder.dependency_counts = builder.dependency_counts.push(
         builder.dependency_names.len() - dependency_start)
 
+fn module_surface_composite_projection_append(
+    index: ModuleSurfaceCompositeIndex,
+    kind: text,
+    fields: [ParserField]
+):
+    index.kinds = index.kinds.push(kind)
+    index.field_offsets = index.field_offsets.push(index.field_names.len())
+    index.field_counts = index.field_counts.push(fields.len())
+    index.dependency_offsets = index.dependency_offsets.push(
+        index.dependency_names.len())
+    val dependency_start = index.dependency_names.len()
+    for field in fields:
+        val shape = module_surface_projected_type_shape(field.type_)
+        index.field_names = index.field_names.push(field.name)
+        index.field_shapes = index.field_shapes.push(shape)
+        index.field_type_names = index.field_type_names.push(
+            module_surface_projected_type_name(field.type_, shape))
+        for dependency in parser_type_named_dependencies(field.type_):
+            index.dependency_names = index.dependency_names.push(dependency)
+    index.dependency_counts = index.dependency_counts.push(
+        index.dependency_names.len() - dependency_start)
+
 fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
     for param in function_.params:
@@ -268,8 +290,13 @@ pub fn module_surface_from_owner(
             signature_builder, callable, "free", "")
 
     var composites: Dict<text, ModuleSurfaceComposite> = {}
+    var composite_names: [text] = []
+    val composite_index = ModuleSurfaceCompositeIndex.empty()
     for name in owner.value.classes.keys():
         val class_ = owner.value.classes[name]
+        composite_names = composite_names.push(name)
+        module_surface_composite_projection_append(
+            composite_index, "class", class_.fields)
         var fields: [ModuleSurfaceField] = []
         for field in class_.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -280,6 +307,9 @@ pub fn module_surface_from_owner(
         composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
     for name in owner.value.actors.keys():
         val actor = owner.value.actors[name]
+        composite_names = composite_names.push(name)
+        module_surface_composite_projection_append(
+            composite_index, "actor", actor.fields)
         var fields: [ModuleSurfaceField] = []
         for field in actor.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -290,6 +320,9 @@ pub fn module_surface_from_owner(
         composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
     for name in owner.value.structs.keys():
         val struct_ = owner.value.structs[name]
+        composite_names = composite_names.push(name)
+        module_surface_composite_projection_append(
+            composite_index, "struct", struct_.fields)
         var fields: [ModuleSurfaceField] = []
         for field in struct_.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -368,29 +401,6 @@ pub fn module_surface_from_owner(
         source, origin_hints)
     if origin_hints_result.is_err():
         return Err(origin_hints_result.unwrap_err())
-    val composite_names = composites.keys()
-    val composite_index = ModuleSurfaceCompositeIndex.empty()
-    for composite_name in composite_names:
-        val composite = composites[composite_name]
-        composite_index.kinds = composite_index.kinds.push(composite.kind)
-        composite_index.field_offsets = composite_index.field_offsets.push(
-            composite_index.field_names.len())
-        composite_index.field_counts = composite_index.field_counts.push(
-            composite.fields.len())
-        composite_index.dependency_offsets = composite_index.dependency_offsets.push(
-            composite_index.dependency_names.len())
-        val dependency_start = composite_index.dependency_names.len()
-        for field in composite.fields:
-            val shape = module_surface_projected_type_shape(field.type_)
-            composite_index.field_names = composite_index.field_names.push(field.name)
-            composite_index.field_shapes = composite_index.field_shapes.push(shape)
-            composite_index.field_type_names = composite_index.field_type_names.push(
-                module_surface_projected_type_name(field.type_, shape))
-            for dependency in parser_type_named_dependencies(field.type_):
-                composite_index.dependency_names = composite_index.dependency_names.push(
-                    dependency)
-        composite_index.dependency_counts = composite_index.dependency_counts.push(
-            composite_index.dependency_names.len() - dependency_start)
     val enum_names = enums.keys()
     val trait_names = traits.keys()
     val type_alias_names = type_aliases.keys()
