@@ -295,8 +295,8 @@ Current evidence after the thread synchronization boundary migration:
 
 - 3,964 distinct symbols in the current backing census, including 3,962
   compiler-owned canonical symbols;
-- 14,675 declaration sites;
-- 14,133 sites have neither an explicit FFI-unsafe tag nor a local contract;
+- 14,611 declaration sites;
+- 14,069 sites have neither an explicit FFI-unsafe tag nor a local contract;
 - 506 sites declare a typed/documented contract but lack the unsafe tag;
 - 24 declarations now carry explicit FFI authority
   but still require canonical ABI-contract metadata;
@@ -308,7 +308,7 @@ Current evidence after the thread synchronization boundary migration:
 - among `rt_*`/`spl_*` declarations, 1,855 sites reference symbols classified
   genuinely missing and 321 are backed only in owned C runtime source.
 
-These are migration inputs, not 14,675 independent implementations. The audit
+These are migration inputs, not 14,611 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
 rejects the 401 conflict groups, and converts compatibility modules to
@@ -340,8 +340,8 @@ call-site migration ledger at
 `doc/08_tracking/bug/data/sffi_call_authority_2026-08-21.tsv`. It recognizes
 file-local externs and explicit `rt_*`/`spl_*` imports from SFFI modules, tracks
 function and lexical FFI authority by indentation, and can fail CI with
-`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,431
-missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,160
+`SFFI_FAIL_ON_MISSING=1`. The current source/test census contains 22,366
+missing-authority calls, 51 lexical scopes, and 24 function scopes across 3,157
 files. It completed in 24.21 seconds at 7,424 KiB maximum RSS. This is a
 migration index rather than ABI proof; aliases, generated bindings, and
 re-exports still require resolved-HIR identity.
@@ -382,6 +382,13 @@ validation and future evidence now have one owner. SQLite was
 deliberately not collapsed in this batch: its pair contains a real placeholder
 construction algorithm difference, so performance/semantic equivalence must be
 measured before selecting the canonical implementation.
+
+The app compression, FTP, and regex `_ffi` implementations were also redundant
+with their existing `_sffi` facades over no-GC owners. They are now explicit
+safe-surface compatibility modules, removing 64 duplicate declarations and 65
+duplicate raw calls. A shared three-case spec proves the facades contain no
+foreign declarations, wildcard exports, or `rt_*` exposure. All three compile;
+static resolution preserves their prior call-path cost.
 
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
