@@ -373,11 +373,20 @@ pub fn rt_string_builder_finish_fn(args: &[Value]) -> Result<Value, CompileError
     // so the interpreter returns a proper text value (not a raw pointer int).
     let len = rt_string_len(rv);
     if len <= 0 {
-        return Ok(Value::text(String::new()));
+        if len == 0 {
+            return Ok(Value::text(String::new()));
+        }
+        return Err(CompileError::runtime(
+            "rt_string_builder_finish: foreign string result is not a valid runtime string"
+                .to_string(),
+        ));
     }
     let data = rt_string_data(rv);
     if data.is_null() {
-        return Ok(Value::text(String::new()));
+        return Err(CompileError::runtime(
+            "rt_string_builder_finish: foreign text contract returned null with positive length"
+                .to_string(),
+        ));
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
     Ok(Value::text(String::from_utf8_lossy(bytes).into_owned()))
@@ -430,5 +439,23 @@ mod tests {
             Value::Int(3)
         );
         assert_eq!(unsafe { std::slice::from_raw_parts(ptr as *const u8, 3) }, b"mcp");
+    }
+
+    #[test]
+    fn invalid_builder_finish_is_a_contract_error() {
+        let result = rt_string_builder_finish_fn(&[Value::Int(0)]);
+        assert!(result.is_err(), "invalid builder must never become empty text");
+    }
+
+    #[test]
+    fn empty_builder_finish_remains_valid_empty_text() {
+        let handle = match rt_string_builder_new_fn(&[]).unwrap() {
+            Value::Int(handle) => handle,
+            other => panic!("expected builder handle, got {other:?}"),
+        };
+        assert_eq!(
+            rt_string_builder_finish_fn(&[Value::Int(handle)]).unwrap(),
+            Value::text(String::new())
+        );
     }
 }

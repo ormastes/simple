@@ -402,6 +402,13 @@ and capture-path queries as typed errors instead of successful empty paths. Its
 sabotage test passes, while the successful copy-then-provider-free ownership
 path remains unchanged. No new work occurs outside these infrequent getters.
 
+The generic string-builder interpreter finish path no longer maps an invalid
+handle (`RuntimeValue::NIL`, length `-1`) or positive-length NULL data to empty
+text. Empty builders remain valid empty text. All three focused pointer/length,
+invalid-handle, and empty-builder tests pass. The normal positive-length path
+retains its existing `len <= 0` and NULL comparisons with no added hot-path
+lookup, allocation, or hashing.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,
