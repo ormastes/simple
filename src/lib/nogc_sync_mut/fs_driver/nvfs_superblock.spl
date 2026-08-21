@@ -141,9 +141,19 @@ pub fn nvfs_superblock_read_from_disk() -> NvfsSuperblock:
     val sb_a = if buf_a.len() >= 54: _nvfs_sb_from_bytes(buf_a) else: _nvfs_sb_from_bytes([])
     val buf_b = nvfs_raw_read_sector(1u64)
     val sb_b = if buf_b.len() >= 54: _nvfs_sb_from_bytes(buf_b) else: _nvfs_sb_from_bytes([])
-    val a_ok = sb_a.valid and sb_a.checksum == _nvfs_checksum(sb_a)
-    val b_ok = sb_b.valid and sb_b.checksum == _nvfs_checksum(sb_b)
+    val a_ok = sb_a.valid and sb_a.replica_id == 0u8 and sb_a.checksum == _nvfs_checksum(sb_a)
+    val b_ok = sb_b.valid and sb_b.replica_id == 1u8 and sb_b.checksum == _nvfs_checksum(sb_b)
     if a_ok and b_ok:
+        # Never arbitrate records from different volumes.  A higher generation
+        # from a misplaced/stale device must not redirect the mount.
+        if sb_a.uuid_hi != sb_b.uuid_hi or sb_a.uuid_lo != sb_b.uuid_lo:
+            return _nvfs_sb_from_bytes([])
+        # Equal generations are only safe when they describe the same commit.
+        if sb_a.mount_generation == sb_b.mount_generation and
+            (sb_a.feature_bits != sb_b.feature_bits or
+             sb_a.checkpoint_root != sb_b.checkpoint_root or
+             sb_a.version != sb_b.version or sb_a.compat_v1 != sb_b.compat_v1):
+            return _nvfs_sb_from_bytes([])
         if sb_b.mount_generation > sb_a.mount_generation:
             return sb_b
         return sb_a
@@ -152,6 +162,46 @@ pub fn nvfs_superblock_read_from_disk() -> NvfsSuperblock:
     if b_ok:
         return sb_b
     _nvfs_sb_from_bytes([])
+
+fn _nvfs_superblock_for_replica(sb: NvfsSuperblock, replica_id: u8) -> NvfsSuperblock:
+    val unsigned = NvfsSuperblock(
+        magic: sb.magic, version: sb.version,
+        uuid_hi: sb.uuid_hi, uuid_lo: sb.uuid_lo,
+        feature_bits: sb.feature_bits, mount_generation: sb.mount_generation,
+        checkpoint_root: sb.checkpoint_root, replica_id: replica_id,
+        valid: true, checksum: 0u32, compat_v1: sb.compat_v1
+    )
+    NvfsSuperblock(
+        magic: unsigned.magic, version: unsigned.version,
+        uuid_hi: unsigned.uuid_hi, uuid_lo: unsigned.uuid_lo,
+        feature_bits: unsigned.feature_bits, mount_generation: unsigned.mount_generation,
+        checkpoint_root: unsigned.checkpoint_root, replica_id: unsigned.replica_id,
+        valid: true, checksum: _nvfs_checksum(unsigned), compat_v1: unsigned.compat_v1
+    )
+
+pub fn nvfs_superblock_recover_disk() -> bool:
+    """Repair one invalid superblock slot from its validated peer.
+
+    Recovery is deliberately bounded to exactly one bad slot.  Conflicting
+    valid replicas fail closed in nvfs_superblock_read_from_disk and are never
+    rewritten automatically.
+    """
+    if not _nvfs_superblock_has_device():
+        return false
+    val raw_a = nvfs_raw_read_sector(0u64)
+    val raw_b = nvfs_raw_read_sector(1u64)
+    val sb_a = if raw_a.len() >= 54: _nvfs_sb_from_bytes(raw_a) else: _nvfs_sb_from_bytes([])
+    val sb_b = if raw_b.len() >= 54: _nvfs_sb_from_bytes(raw_b) else: _nvfs_sb_from_bytes([])
+    val a_ok = sb_a.valid and sb_a.replica_id == 0u8 and sb_a.checksum == _nvfs_checksum(sb_a)
+    val b_ok = sb_b.valid and sb_b.replica_id == 1u8 and sb_b.checksum == _nvfs_checksum(sb_b)
+    if a_ok == b_ok:
+        return a_ok
+    val source = if a_ok: sb_a else: sb_b
+    val target_id = if a_ok: 1u8 else: 0u8
+    val repaired = _nvfs_superblock_for_replica(source, target_id)
+    if not nvfs_raw_write_sector(target_id as u64, _nvfs_sb_to_bytes(repaired)):
+        return false
+    fs_block_device_owner_flush_acknowledged()
 
 # @tag(uuid_hi=uuid_hi, uuid_lo=uuid_lo)
 pub fn nvfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
@@ -170,34 +220,8 @@ pub fn nvfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
         checksum: 0u32,
         compat_v1: false
     )
-    val replica_a_unsigned = NvfsSuperblock(
-        magic: base.magic, version: base.version,
-        uuid_hi: base.uuid_hi, uuid_lo: base.uuid_lo,
-        feature_bits: base.feature_bits, mount_generation: base.mount_generation,
-        checkpoint_root: base.checkpoint_root, replica_id: 0u8,
-        valid: true, checksum: 0u32, compat_v1: false
-    )
-    val replica_b_unsigned = NvfsSuperblock(
-        magic: base.magic, version: base.version,
-        uuid_hi: base.uuid_hi, uuid_lo: base.uuid_lo,
-        feature_bits: base.feature_bits, mount_generation: base.mount_generation,
-        checkpoint_root: base.checkpoint_root, replica_id: 1u8,
-        valid: true, checksum: 0u32, compat_v1: false
-    )
-    val replica_a = NvfsSuperblock(
-        magic: replica_a_unsigned.magic, version: replica_a_unsigned.version,
-        uuid_hi: replica_a_unsigned.uuid_hi, uuid_lo: replica_a_unsigned.uuid_lo,
-        feature_bits: replica_a_unsigned.feature_bits, mount_generation: replica_a_unsigned.mount_generation,
-        checkpoint_root: replica_a_unsigned.checkpoint_root, replica_id: replica_a_unsigned.replica_id,
-        valid: true, checksum: _nvfs_checksum(replica_a_unsigned), compat_v1: false
-    )
-    val replica_b = NvfsSuperblock(
-        magic: replica_b_unsigned.magic, version: replica_b_unsigned.version,
-        uuid_hi: replica_b_unsigned.uuid_hi, uuid_lo: replica_b_unsigned.uuid_lo,
-        feature_bits: replica_b_unsigned.feature_bits, mount_generation: replica_b_unsigned.mount_generation,
-        checkpoint_root: replica_b_unsigned.checkpoint_root, replica_id: replica_b_unsigned.replica_id,
-        valid: true, checksum: _nvfs_checksum(replica_b_unsigned), compat_v1: false
-    )
+    val replica_a = _nvfs_superblock_for_replica(base, 0u8)
+    val replica_b = _nvfs_superblock_for_replica(base, 1u8)
     # Each replica is published behind its own acknowledged device barrier.
     # A crash after replica A still leaves one complete recoverable copy.
     if not nvfs_raw_write_sector(0u64, _nvfs_sb_to_bytes(replica_a)):

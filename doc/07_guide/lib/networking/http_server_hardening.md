@@ -41,8 +41,22 @@ while incomplete, not after it has been buffered.
 
 ## Deployment rule
 
-Until direct TLS/HTTP2 hardening completes, terminate TLS/H2 at a mature edge
-proxy and expose these servers on private HTTP/1.1 only. See the assessment:
+The synchronous HTTP/2 transport now bounds individual frame payloads, HPACK
+header-block accumulation, request bodies, concurrent stream entries,
+and response bodies. It also strips connection-specific, pseudo, framing, and
+control-bearing application response headers and applies the baseline security
+headers on its canonical response path. Oversized stream material is reset;
+invalid policy fails closed before reading the connection. Per-stream byte
+builders append fragments without repeatedly copying the accumulated body;
+the stream owner retains at most the configured concurrent entries and
+reclaims them on dispatch or reset. Stream-table scans are therefore bounded
+by that explicit admission limit. CONTINUATION ownership, stream-zero rules,
+fixed control-frame sizes, and nonzero WINDOW_UPDATE increments fail closed.
+
+The HTTP/2 implementation still does not provide complete flow-control
+backpressure or production TLS ownership. Until those lifecycle features are
+complete, terminate TLS/H2 at a mature edge proxy and expose these servers on
+private HTTP/1.1 only. See the assessment:
 `doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md` §3.
 
 ## Specs (evidence)
@@ -50,6 +64,8 @@ proxy and expose these servers on private HTTP/1.1 only. See the assessment:
 - `test/01_unit/lib/common/net/http_core_spec.spl` — core policy corpus.
 - `test/01_unit/lib/http_server/{parser_limits,path_safety,chunked_rejection}_spec.spl` — sync transport.
 - `test/01_unit/lib/nogc_async_mut/http_server/async_{parser_limits,path_safety,dynamic_dispatch}_spec.spl` — async transport.
+- `test/01_unit/lib/http/h2/h2_server_resource_policy_spec.spl` — HTTP/2
+  production defaults and overflow-safe accumulation boundaries.
 - `test/03_system/app/enterprise/store_web_harden_spec.spl` — the store web
   app consuming this core live: unauthenticated denial, HTML escaping, shared
   security headers, http_core limit/traversal gating (manual:

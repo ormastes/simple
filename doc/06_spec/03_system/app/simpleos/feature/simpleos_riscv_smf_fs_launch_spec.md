@@ -28,7 +28,7 @@ simpleos_riscv_smf_fs_launch_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -54,10 +54,18 @@ val scenario = scenario_riscv64_virtio_fat32_smf()
 expect(scenario.name).to_equal("riscv64-virtio-fat32-smf")
 expect(scenario.arch).to_equal(Architecture.Riscv64)
 expect(scenario.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
+expect(scenario.qemu_extra).to_contain("-no-user-config")
+expect(scenario.qemu_extra).to_contain("-monitor")
 expect(scenario_test_timeout_ms(scenario)).to_equal(60000)
 ```
 
 </details>
+
+#### boots RV64 through the explicit OpenSBI provider without an interactive monitor
+
+The generated QEMU command must select `qemu-system-riscv64`, request the
+default OpenSBI firmware provider, ignore ambient user configuration, and
+disable the interactive monitor.
 
 #### registers the RV32 filesystem SMF scenario
 
@@ -107,6 +115,12 @@ expect(scenario_target(scenario_riscv32_virtio_fat32_smf()).entry).to_equal("exa
 
 </details>
 
+#### requires the hosted RV64 entry to execute and collect filesystem processes
+
+The hosted acceptance entry uses the RV64 blocking filesystem-exec bridge. A
+tool is accepted only after its user task exits successfully; the receipt also
+records the bounded captured-stdout byte count.
+
 ## At a Glance
 
 | Field | Value |
@@ -114,7 +128,7 @@ expect(scenario_target(scenario_riscv32_virtio_fat32_smf()).entry).to_equal("exa
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_riscv_smf_fs_launch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-21 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -127,8 +141,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

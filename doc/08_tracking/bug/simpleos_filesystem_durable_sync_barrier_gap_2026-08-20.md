@@ -3,8 +3,8 @@
 - Severity: P1 release blocker (REQ-4, REQ-5)
 - Owner: block-device/VFS durability owner
 - Final reviewer: SimpleOS hardening merge owner
-- Status: PARTIAL — portable FAT32/NVFS recovery slice implemented; mounted
-  NVFS/NVFS-POSIX and admitted hardware evidence remain open
+- Status: PARTIAL — portable FAT32/NVFS recovery and mounted device-backed
+  NVFS/NVFS-POSIX delegation implemented; admitted hardware evidence remains open
 
 ## Evidence
 
@@ -75,10 +75,22 @@ the bounded 64-entry compact checkpoint.
   `test/02_integration/storage/fs_recovery_conformance_spec.spl`, with FAT32,
   NVFS, and NVFS-POSIX success/failure rows and no source-text oracle.
 
-This does not promote the mounted stdlib `NvfsDriver` or `NvfsPosixDriver` to
-`DurableSync`: their file namespace/write paths are not yet bound to the
-recoverable arena commit owner. That wiring and admitted self-hosted/QEMU or
-physical power-cut execution remain the release blocker.
+## 2026-08-21 mounted NVFS delegation update
+
+- The stdlib `NvfsDriver` and `NvfsPosixDriver` now delegate `fsync` and
+  `fdatasync` to their device-backed DBFS commit owner. Hosted instances still
+  return `FsError.Unsupported`.
+- Both wrappers advertise `DurableSync` only when that inner owner passes its
+  durability serialization and acknowledged-flush admission check.
+- NVFS disk-superblock arbitration now binds replica IDs to physical slots,
+  rejects cross-volume and equal-generation split-brain pairs, and offers an
+  explicit bounded repair that rewrites exactly one invalid slot from its
+  checksum-valid peer behind a flush barrier.
+- Positioned byte I/O has focused coverage for exact overwrite, sparse growth,
+  negative offsets, overflow, and handle-based size reporting.
+
+Admitted self-hosted/QEMU or physical power-cut execution remains the release
+blocker; this source lane does not claim hardware evidence.
 
 ## Residual evidence blockers
 

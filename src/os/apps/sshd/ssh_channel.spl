@@ -63,6 +63,7 @@ struct SshChannel:
     remote_max_packet: u32
     pty_requested: bool
     shell_requested: bool
+    peer_eof: bool
     env_vars: [(text, text)]
 
 class ChannelTable:
@@ -92,6 +93,7 @@ impl ChannelTable:
             remote_max_packet: remote_max_packet,
             pty_requested: false,
             shell_requested: false,
+            peer_eof: false,
             env_vars: []
         ))
         self.next_id = local_id + 1
@@ -120,6 +122,7 @@ impl ChannelTable:
             remote_max_packet: remote_max_packet,
             pty_requested: false,
             shell_requested: false,
+            peer_eof: false,
             env_vars: []
         )
         self.channels.push(seeded)
@@ -177,6 +180,8 @@ impl ChannelTable:
         val idx = self._find_local_index(local_id)
         if idx < 0:
             return false
+        if self.channels[idx as u64].state != ChannelState.Open or bytes == 0u32:
+            return false
         val current = self.channels[idx as u64].remote_window
         if bytes > 4294967295u32 - current:
             return false
@@ -188,6 +193,8 @@ impl ChannelTable:
         val idx = self._find_local_index(local_id)
         if idx < 0:
             return false
+        if self.channels[idx as u64].state == ChannelState.Closed:
+            return false
         var rw = self.channels[idx as u64].remote_window
         if rw < bytes:
             return false
@@ -195,15 +202,33 @@ impl ChannelTable:
         true
 
     pub me consume_local_window(local_id: u32, bytes: u32) -> bool:
-        """Consume bytes from the local receive window. Returns false if insufficient."""
+        """Admit peer data only on an open, non-EOF channel.
+
+        The peer's string must fit both its remaining window and the maximum
+        packet size that this endpoint advertised.
+        """
         val idx = self._find_local_index(local_id)
         if idx >= 0:
+            if self.channels[idx as u64].state != ChannelState.Open or self.channels[idx as u64].peer_eof:
+                return false
+            if bytes > self.channels[idx as u64].local_max_packet:
+                return false
             var lw = self.channels[idx as u64].local_window
             if lw < bytes:
                 return false
             self.channels[idx as u64].local_window = lw - bytes
             return true
         false
+
+    pub me mark_peer_eof(local_id: u32) -> bool:
+        """Record the peer's receive half-close exactly once."""
+        val idx = self._find_local_index(local_id)
+        if idx < 0 or self.channels[idx as u64].state != ChannelState.Open:
+            return false
+        if self.channels[idx as u64].peer_eof:
+            return false
+        self.channels[idx as u64].peer_eof = true
+        true
 
     pub me remove_closed():
         """Remove all channels in Closed state."""

@@ -271,6 +271,19 @@ describe "DBFS durable device commit":
         dev.power_cut()
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("after-prefix")
 
+    it "flushes unbound passthrough bytes even without a pending checkpoint":
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(
+            Path(raw: "/sync-anchor"), OpenFlags.create_write()).unwrap()
+        driver.fsync(handle).unwrap()
+        val flushes_before = dev.flush_count()
+        expect(driver.write_passthrough([0xA5u8]).unwrap()).to_equal(1)
+        driver.fsync(handle).unwrap()
+        expect(dev.flush_count()).to_equal(flushes_before + 1)
+        dev.power_cut()
+        expect(dev.read_sector(1u64).unwrap()[0]).to_equal(0xA5u8)
+
     it "rejects the SimpleOS no-op mutex provider with a stable blocker":
         expect(dbfs_device_mutex_provider_blocker(
             "x86_64-baremetal-simpleos")).to_equal(

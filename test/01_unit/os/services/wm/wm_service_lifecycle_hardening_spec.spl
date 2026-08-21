@@ -8,7 +8,7 @@
 use std.spec
 use os.services.wm.wm_service.{WmService}
 use os.services.wm.wm_action.{WmAction}
-use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, wm_damage_admit_v1}
+use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, wm_damage_admit_v1, wm_damage_merge_rects_v1}
 use common.window_protocol.geometry.{WindowId, Point}
 use common.window_protocol.window_protocol.{WmInputEvent}
 
@@ -81,6 +81,40 @@ describe "WmService canonical lifecycle hardening":
         expect(wm.accept_input_ingress(0u64, 2u64, event)).to_be(true)
         expect(wm.accept_input_ingress(0u64, 3u64, event)).to_be(false)
         expect(wm.last_rejection_reason).to_equal("input-queue-overflow")
+
+    it "admits input only for the focused owner without consuming a rejected sequence":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 7u64), 70u64)
+        wm.register_window_owner(WindowId(value: 8u64), 80u64)
+        expect(wm.focused_window()).to_equal(7u64)
+        expect(wm.accept_input_ingress(0u64, 1u64, input(8u64))).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unfocused-input-window")
+        expect(wm.last_input_sequence).to_equal(0u64)
+        expect(wm.input_queue_depth).to_equal(0)
+        expect(wm.accept_input_ingress(0u64, 1u64, input(7u64))).to_be(true)
+        expect(wm.complete_input_ingress()).to_be(true)
+        expect(wm.commit_focus(8u64)).to_be(true)
+        expect(wm.focused_window()).to_equal(8u64)
+        expect(wm.accept_input_ingress(0u64, 2u64, input(7u64))).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unfocused-input-window")
+        expect(wm.accept_input_ingress(0u64, 2u64, input(8u64))).to_be(true)
+
+    it "routes outbound admission through the same sequence and queue owner":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 7u64), 70u64)
+        wm.register_window_owner(WindowId(value: 8u64), 80u64)
+        expect(wm.accept_next_input_ingress(8u64, input(8u64))).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unfocused-input-window")
+        expect(wm.last_input_sequence).to_equal(0u64)
+        expect(wm.accept_next_input_ingress(7u64, input(8u64))).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("input-window-mismatch")
+        expect(wm.accept_next_input_ingress(7u64, input(7u64))).to_be(true)
+        expect(wm.last_input_sequence).to_equal(1u64)
+        expect(wm.input_queue_depth).to_equal(1)
+        expect(wm.complete_input_ingress()).to_be(true)
+        wm.last_input_sequence = 18446744073709551615u64
+        expect(wm.accept_next_input_ingress(7u64, input(7u64))).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("input-sequence-exhausted")
 
     it "rejects unknown and non-owned actions and bounds combined action text":
         val wm = WmService.new()
@@ -164,6 +198,43 @@ describe "WmService canonical lifecycle hardening":
         val overflow_result = wm_damage_admit_v1(overflow, 0u64, 1u64)
         expect(overflow_result.accepted).to_be(false)
         expect(overflow_result.reason).to_equal("damage-region-overflow")
+
+    it "clips off-screen damage and transitively coalesces touching regions":
+        val normalized = wm_damage_merge_rects_v1(
+            [
+                WmDamageRectV1(x: -5, y: -4, width: 10, height: 10),
+                WmDamageRectV1(x: 5, y: 0, width: 10, height: 10)
+            ],
+            [
+                WmDamageRectV1(x: 14, y: 0, width: 20, height: 10),
+                WmDamageRectV1(x: 80, y: 80, width: 10, height: 10)
+            ],
+            20,
+            20
+        )
+        expect(normalized.len()).to_equal(1)
+        expect(normalized[0].x).to_equal(0)
+        expect(normalized[0].y).to_equal(0)
+        expect(normalized[0].width).to_equal(20)
+        expect(normalized[0].height).to_equal(10)
+
+        val wm = WmService.new()
+        expect(wm.set_damage_bounds(20, 20)).to_be(true)
+        wm.register_window_owner(WindowId(value: 22u64), 220u64)
+        expect(wm.damage_clip_width).to_equal(20)
+        expect(wm.set_damage_bounds(0, 20)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("invalid-damage-bounds")
+
+    it "keeps lifecycle and owner state intact when restart generation cannot advance":
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 21u64), 210u64)
+        wm.running = true
+        wm.lifecycle_generation = 18446744073709551615u64
+        expect(wm.restart()).to_equal(0u64)
+        expect(wm.running).to_be(true)
+        expect(wm.window_count()).to_equal(1)
+        expect(wm.focused_window()).to_equal(21u64)
+        expect(wm.last_rejection_reason).to_equal("lifecycle-generation-exhausted")
 
     it "fails closed when scene revision reaches its maximum":
         val wm = WmService.new()

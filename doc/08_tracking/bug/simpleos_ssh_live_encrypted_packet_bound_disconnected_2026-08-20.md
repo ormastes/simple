@@ -70,3 +70,17 @@ reader plus its frame validator. Regression: `ssh_session_shell_spec.spl`
 The closure evidence requirement above (production AES-GCM receive path on an
 admitted self-hosted runtime with a target/QEMU receipt) is unchanged and still
 open.
+
+## Channel lifecycle and flow-control closure 2026-08-21
+
+The live channel owner now applies its advertised 32 KiB packet ceiling before
+decrementing the receive window. Data is rejected for unknown, closed, or
+peer-EOF channels. Window adjustments must be nonzero, target an open channel,
+and fit checked `u32` arithmetic. Peer EOF is recorded exactly once as a receive
+half-close; it does not prematurely discard the channel. A CLOSE for an unknown
+recipient fails the session closed instead of emitting a CLOSE for channel 0.
+
+Focused behavioral coverage is in
+`test/01_unit/os/apps/sshd/ssh_channel_open_capacity_spec.spl`. Runtime execution
+remains pending because this isolated non-bootstrap worktree has no admitted
+self-hosted `bin/release/.../simple` executable.

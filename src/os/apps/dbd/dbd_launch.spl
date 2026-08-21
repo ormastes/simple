@@ -1,0 +1,68 @@
+# Filesystem launch admission for the SimpleOS database daemon.
+#
+# The generic loader proves an artifact's bytes and executable format.  This
+# owner adds DBD-specific policy: only the canonical bounded service image is
+# accepted, no command-line secrets are permitted, and an otherwise valid
+# image remains blocked until the protocol module's auth/TLS/DBFS owners are
+# production-ready.
+
+use os.apps.dbd.dbd_protocol.{
+    dbd_production_startup_ready, dbd_production_startup_blocker
+}
+
+pub val DBD_FILESYSTEM_IMAGE_PATH_V1: text = "/sys/services/dbd"
+pub val DBD_MAX_FILESYSTEM_IMAGE_BYTES_V1: i64 = 16 * 1024 * 1024
+
+pub enum DbdFilesystemLaunchStatusV1:
+    Ready
+    ArtifactRejected
+    ArgumentsRejected
+    SecurityOwnersBlocked
+
+pub class DbdFilesystemArtifactEvidenceV1:
+    path: text
+    byte_length: i64
+    executable_format_verified: bool
+    sha256_hex: text
+
+pub class DbdFilesystemLaunchAdmissionV1:
+    status: DbdFilesystemLaunchStatusV1
+    blocker: text
+
+fn _dbd_launch_lower_hex(code: i64) -> bool:
+    (code >= 48 and code <= 57) or (code >= 97 and code <= 102)
+
+fn _dbd_launch_digest_valid(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    var index: i64 = 0
+    while index < digest.len():
+        if not _dbd_launch_lower_hex(digest.char_code_at(index)):
+            return false
+        index = index + 1
+    true
+
+pub fn dbd_admit_filesystem_launch_v1(
+    artifact: DbdFilesystemArtifactEvidenceV1,
+    args: [text]
+) -> DbdFilesystemLaunchAdmissionV1:
+    """Admit a verified canonical image without accepting secret-bearing args."""
+    if artifact.path != DBD_FILESYSTEM_IMAGE_PATH_V1 or
+        artifact.byte_length <= 0 or
+        artifact.byte_length > DBD_MAX_FILESYSTEM_IMAGE_BYTES_V1 or
+        not artifact.executable_format_verified or
+        not _dbd_launch_digest_valid(artifact.sha256_hex):
+        return DbdFilesystemLaunchAdmissionV1(
+            status: DbdFilesystemLaunchStatusV1.ArtifactRejected,
+            blocker: "dbd-filesystem-artifact-rejected")
+    if args.len() != 0:
+        return DbdFilesystemLaunchAdmissionV1(
+            status: DbdFilesystemLaunchStatusV1.ArgumentsRejected,
+            blocker: "dbd-launch-arguments-forbidden")
+    if not dbd_production_startup_ready():
+        return DbdFilesystemLaunchAdmissionV1(
+            status: DbdFilesystemLaunchStatusV1.SecurityOwnersBlocked,
+            blocker: dbd_production_startup_blocker())
+    DbdFilesystemLaunchAdmissionV1(
+        status: DbdFilesystemLaunchStatusV1.Ready,
+        blocker: "")

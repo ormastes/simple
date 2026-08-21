@@ -341,9 +341,20 @@ pub fn elf_admit_executable(data: [u8], arch: Architecture) -> Result<(), text>:
     if image.entry == 0u64:
         return Err("ELF executable entry is zero")
     var entry_is_executable = false
-    for segment in image.segments:
+    var segment_index = 0
+    while segment_index < image.segments.len():
+        val segment = image.segments[segment_index]
         if segment.file_size == 0u64 or segment.mem_size == 0u64:
+            segment_index = segment_index + 1
             continue
+        if (segment.flags & 0xFFFFFFF8u32) != 0u32:
+            return Err("ELF PT_LOAD carries unsupported permission flags")
+        if (segment.flags & 3u32) == 3u32:
+            return Err("ELF PT_LOAD is writable and executable")
+        if segment.align > 1u64 and
+            ((segment.align & (segment.align - 1u64)) != 0u64 or
+             segment.file_offset % segment.align != segment.virt_addr % segment.align):
+            return Err("ELF PT_LOAD alignment is invalid")
         if segment.virt_addr > 18446744073709551615u64 - segment.mem_size:
             return Err("ELF PT_LOAD virtual range overflows")
         # The initial instruction must be backed by admitted artifact bytes,
@@ -352,10 +363,23 @@ pub fn elf_admit_executable(data: [u8], arch: Architecture) -> Result<(), text>:
         # positive from this artifact gate.
         if segment.virt_addr > 18446744073709551615u64 - segment.file_size:
             return Err("ELF PT_LOAD file-backed virtual range overflows")
+        var earlier_index = 0
+        while earlier_index < segment_index:
+            val earlier = image.segments[earlier_index]
+            if earlier.mem_size > 0u64:
+                if earlier.virt_addr > 18446744073709551615u64 - earlier.mem_size:
+                    return Err("ELF PT_LOAD virtual range overflows")
+                val segment_memory_end = segment.virt_addr + segment.mem_size
+                val earlier_memory_end = earlier.virt_addr + earlier.mem_size
+                if segment.virt_addr < earlier_memory_end and
+                    earlier.virt_addr < segment_memory_end:
+                    return Err("ELF PT_LOAD virtual ranges overlap")
+            earlier_index = earlier_index + 1
         val segment_end = segment.virt_addr + segment.file_size
         if (segment.flags & 1u32) != 0u32 and
            image.entry >= segment.virt_addr and image.entry < segment_end:
             entry_is_executable = true
+        segment_index = segment_index + 1
     if not entry_is_executable:
         return Err("ELF entry is not inside an executable PT_LOAD segment")
     Ok(())

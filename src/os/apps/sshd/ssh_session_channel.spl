@@ -286,11 +286,16 @@ impl SshSession:
                 if payload.len() >= 9u64:
                     val recipient = _read_u32_stable(payload, 1u64)
                     val adjustment = _read_u32_stable(payload, 5u64)
-                    self.channels.adjust_remote_window(recipient, adjustment)
+                    if not self.channels.adjust_remote_window(recipient, adjustment):
+                        self.state = SshSessionState.Closed
+                        return
                 continue
             elif msg_type == 96:
                 # Peer EOF is half-close notification; retain the channel
                 # until an explicit SSH_MSG_CHANNEL_CLOSE arrives.
+                if payload.len() < 5u64 or not self.channels.mark_peer_eof(_read_u32_stable(payload, 1u64)):
+                    self.state = SshSessionState.Closed
+                    return
                 continue
             elif msg_type == 97:
                 self._handle_channel_close(payload)
@@ -631,19 +636,15 @@ impl SshSession:
         if payload.len() < 5:
             return
         val recipient = _read_u32_stable(payload, 1)
+        val channel = self.channels.find(recipient)
+        if channel == nil:
+            self.state = SshSessionState.Closed
+            return
         if self.sftp_enabled and recipient == self.sftp_local_channel_id:
             self.sftp = SftpSessionV3.new()
             self.sftp_enabled = false
             self.sftp_local_channel_id = SSH_INVALID_CHANNEL_ID
-        val remote_id =
-            if recipient == 0:
-                self.active_remote_channel_id
-            else:
-                val ch = self.channels.find(recipient)
-                if ch != nil:
-                    ch.remote_id
-                else:
-                    0u32
+        val remote_id = channel.remote_id
         self.send_packet(_build_channel_close_stable(remote_id))
         self.channels.close(recipient)
         self.channels.remove_closed()

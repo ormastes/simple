@@ -105,6 +105,8 @@ pub class WmService:
     damage_regions: [WmDamageRectV1]
     damage_full_redraw: bool
     damage_reason: text
+    damage_clip_width: i32
+    damage_clip_height: i32
     action_queue_depth: i32
     input_queue_depth: i32
     max_action_queue_depth: i32
@@ -148,6 +150,8 @@ impl WmService:
             damage_regions: [],
             damage_full_redraw: false,
             damage_reason: "",
+            damage_clip_width: WM_MAX_WINDOW_DIMENSION,
+            damage_clip_height: WM_MAX_WINDOW_DIMENSION,
             action_queue_depth: 0,
             input_queue_depth: 0,
             max_action_queue_depth: WM_MAX_ACTION_QUEUE_DEPTH,
@@ -219,6 +223,18 @@ impl WmService:
             self.focus_stack_window_ids[last] = window_id
         self.focused_window_id = window_id
         true
+
+    me commit_focus(window_id: u64) -> bool:
+        """Commit one owner-validated focus/z-order revision."""
+        val owner_index = self.find_owner_index(window_id)
+        val record_index = self.find_owner_record_index(window_id)
+        if window_id == 0u64 or (owner_index < 0 and record_index < 0):
+            return self.reject("unowned-focus-window")
+        if window_id == self.focused_window_id:
+            return true
+        if self.next_scene_revision() == 0u64:
+            return false
+        self.raise_focus_stack(window_id)
 
     me remove_from_focus_stack(window_id: u64):
         var found: i32 = -1
@@ -345,6 +361,11 @@ impl WmService:
             return self.reject("invalid-input-window")
         if self.find_owner(event.window_id.value) == 0u64:
             return self.reject("unowned-input-window")
+        # Focus is canonical WmService state. Adapters may propose a hit-tested
+        # target, but cannot deliver to a merely live window. Reject before
+        # consuming the sequence or queue capacity so retry stays deterministic.
+        if event.window_id.value != self.focused_window_id:
+            return self.reject("unfocused-input-window")
         if sequence == 0u64 or sequence <= self.last_input_sequence:
             return self.reject("stale-input-sequence")
         if event.committed_text.bytes().len().to_u64() > WM_INPUT_TEXT_MAX_BYTES.to_u64():
@@ -360,6 +381,18 @@ impl WmService:
             return self.reject("input-queue-underflow")
         self.input_queue_depth = self.input_queue_depth - 1
         true
+
+    me accept_next_input_ingress(window_id: u64, event: WmInputEvent) -> bool:
+        """Reserve canonical delivery for the next service-owned sequence."""
+        if window_id != event.window_id.value:
+            return self.reject("input-window-mismatch")
+        if self.last_input_sequence == 18446744073709551615u64:
+            return self.reject("input-sequence-exhausted")
+        self.accept_input_ingress(
+            self.lifecycle_generation,
+            self.last_input_sequence + 1u64,
+            event
+        )
 
     # Parent-owned presentation commit.  A frame is accepted only when its
     # generation/revision are current and both frame and readback identities
@@ -396,17 +429,20 @@ impl WmService:
         frame_id != 0u64 and readback_hash != 0u64
 
     me restart() -> u64:
-        self.running = false
+        # Validate every fallible prerequisite before changing lifecycle or
+        # owner state. A failed port teardown leaves the live service intact
+        # (apart from its diagnostic) and can be retried safely.
+        if self.lifecycle_generation == 18446744073709551615u64:
+            self.last_rejection_reason = "lifecycle-generation-exhausted"
+            return 0
         if self.initialized and self.port_id != 0u64:
             val destroyed = syscall(SYS_IPC_DESTROY_PORT, self.port_id, 0, 0, 0, 0)
             if destroyed < 0:
                 self.last_rejection_reason = "ipc-port-destroy-failed"
                 return 0
+        self.running = false
         self.initialized = false
         self.port_id = 0
-        if self.lifecycle_generation == 18446744073709551615u64:
-            self.last_rejection_reason = "lifecycle-generation-exhausted"
-            return 0
         self.lifecycle_generation = self.lifecycle_generation + 1u64
         self.scene_revision = 0
         self.focused_window_id = 0

@@ -17,7 +17,8 @@ use std.spec
 use os.kernel.loader.smf.{
     smf_check_magic, smf_has_header, smf_parse_header,
     smf_extract_executable_stub, smf_extract_executable_stub_for_arch,
-    smf_extract_library_stub, smf_executable_entry_point_for_arch
+    smf_extract_library_stub, smf_executable_entry_point_for_arch,
+    smf_admit_explicit_simpleos_executable
 }
 use os.kernel.arch.arch_context.{Architecture}
 
@@ -58,6 +59,20 @@ fn _smf_trailer(entry: i64, stub_size: i64, role: i64, arch: i64, abi: i64) -> [
 # 64-byte ELF stub at offset 0 then a trailer -> header_offset == 64.
 fn _smf_exe(stub_size_field: i64, role: i64, arch: i64, abi: i64) -> [u8]:
     _elf_stub(64) + _smf_trailer(0x1000, stub_size_field, role, arch, abi)
+
+fn _canonical_fake_elf_smf() -> [u8]:
+    # Correct magic/class/machine and canonical SMF metadata are insufficient:
+    # the embedded ELF still lacks a program-header table and executable load.
+    val elf = [
+        0x7F as u8, 0x45 as u8, 0x4C as u8, 0x46 as u8,
+        2 as u8, 1 as u8, 1 as u8
+    ] + _zeros(11) + [62 as u8, 0 as u8] + _zeros(44)
+    var trailer: [u8] = [
+        83 as u8, 77 as u8, 70 as u8, 0 as u8, 1 as u8, 1 as u8
+    ] + _zeros(38)
+    trailer = trailer + _u64le(0x1000) + _u32le(64) + _u32le(64)
+    trailer = trailer + [1 as u8, 1 as u8, 1 as u8] + _zeros(65)
+    elf + trailer
 
 # ---- Result helpers -------------------------------------------------------
 
@@ -155,3 +170,9 @@ describe "smf positive control: a valid envelope extracts cleanly":
         val a = _smf_exe(64, 1, 1, 1)
         assert_true(smf_has_header(a))
         expect(_bytes_ok_len(smf_extract_executable_stub(a))).to_equal(64i64)
+
+describe "smf explicit artifact admission validates the embedded executable":
+    it "rejects a canonical envelope whose ELF is only a matching header":
+        val result = smf_admit_explicit_simpleos_executable(_canonical_fake_elf_smf())
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("SMF_ERR_MISSING_ELF")

@@ -21,7 +21,9 @@ explicit-offset primitive at the shared cursor; positioned operations preserve
 that cursor while committing returned allocation and file-size metadata.
 
 Focused cases cover task scoping, alias lifetime, stale object rejection,
-sequential overwrite, positioned cursor preservation, and metadata extension.
+sequential overwrite, positioned cursor preservation, metadata extension, and
+fail-closed durability acknowledgement through either an fd alias or the
+generation-safe positioned object identity.
 The qualified system gate reruns this spec only with a receipt-bound
 pure-Simple Stage-4 runtime.
 """
@@ -36,7 +38,7 @@ use os.kernel.fs.fat32_fd_table.{
     fat32_fd_object_id, fat32_fd_clear, fat32_fd_clear_task,
     fat32_fd_read_into, fat32_fd_write_from,
     fat32_fd_read_object_at_into, fat32_fd_write_object_at_from,
-    fat32_fd_clear_for_test
+    fat32_fd_sync, fat32_fd_sync_object, fat32_fd_clear_for_test
 }
 
 # ============================================================================
@@ -53,10 +55,11 @@ struct FdtMockSector:
 
 class FdtMockDev:
     sectors: [FdtMockSector]
+    flush_acknowledged: bool
 
 impl FdtMockDev:
     static fn new() -> FdtMockDev:
-        FdtMockDev(sectors: [])
+        FdtMockDev(sectors: [], flush_acknowledged: true)
 
     me fn with_sector(lba: u64, data: [u8]) -> FdtMockDev:
         self.sectors.push(FdtMockSector(lba: lba, data: data))
@@ -79,6 +82,9 @@ impl FdtMockDev:
             i = i + 1
         self.sectors.push(FdtMockSector(lba: lba, data: data))
         Ok(())
+
+    me flush() -> Result<bool, text>:
+        Ok(self.flush_acknowledged)
 
 fn _fdt_zero_sector() -> [u8]:
     var b: [u8] = []
@@ -374,6 +380,39 @@ describe "fat32_fd_table: positioned operations preserve the shared cursor":
         val cursor_read = fat32_fd_read_into(21u64, 8, next_byte)
         assert_true(cursor_read.is_ok())
         expect(cursor_read.unwrap()).to_equal(0u64)
+        fat32_mount_clear()
+
+describe "fat32_fd_table: durability is generation-bound and fail closed":
+
+    it "syncs a live positioned object only after the device acknowledges flush":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        val dev = _fdt_make_dev()
+        val fs = _fdt_fs_from(dev)
+        fat32_mount_publish(fs, dev)
+        fat32_fd_register(30u64, 10, _fdt_handle(15u32, 0u64, 11u64))
+        val object_id = fat32_fd_object_id(30u64, 10)
+        val synced = fat32_fd_sync_object(object_id)
+        assert_true(synced.is_ok())
+        expect(synced.unwrap()).to_equal(true)
+        fat32_mount_clear()
+
+    it "rejects a negative flush acknowledgement and a retired generation":
+        fat32_mount_clear()
+        fat32_fd_clear_for_test()
+        var dev = _fdt_make_dev()
+        dev.flush_acknowledged = false
+        val fs = _fdt_fs_from(dev)
+        fat32_mount_publish(fs, dev)
+        fat32_fd_register(31u64, 11, _fdt_handle(15u32, 0u64, 11u64))
+        val object_id = fat32_fd_object_id(31u64, 11)
+        val refused = fat32_fd_sync(31u64, 11)
+        assert_true(refused.is_err())
+        expect(refused.unwrap_err()).to_equal(-5)
+        fat32_fd_clear(31u64, 11)
+        val stale = fat32_fd_sync_object(object_id)
+        assert_true(stale.is_err())
+        expect(stale.unwrap_err()).to_equal(-9)
         fat32_mount_clear()
 
 describe "fat32_fd_table: sequential writes use the canonical cursor":

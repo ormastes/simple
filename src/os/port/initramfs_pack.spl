@@ -24,6 +24,7 @@ use os.port.initramfs_validate.{
     SIMPLE_LOADER_ROLE_PATHS,
     simple_toolchain_role_paths,
     initramfs_init_artifact_admission,
+    initramfs_tool_role_artifact_admission,
     validate_zstd_toolchain_archive,
 }
 
@@ -350,9 +351,15 @@ fn _validated_toolchain_role(name: text, artifact_path: text, guest_paths: [text
         _toolchain_role_fatal("{name} artifact path contains manifest-unsafe characters")
     if not file_exists(artifact_path):
         _toolchain_role_fatal("missing {name} artifact: {artifact_path}")
-    if file_size(artifact_path) == 0:
-        _toolchain_role_fatal("empty {name} artifact: {artifact_path}")
-    val digest = _sha256_file(artifact_path)
+    val artifact = file_read_bytes(artifact_path)
+    if guest_paths.len() == 0:
+        _toolchain_role_fatal("{name} has no canonical guest path")
+    match initramfs_tool_role_artifact_admission(name, guest_paths[0], artifact):
+        case Ok(()): ()
+        case Err(message): _toolchain_role_fatal(message)
+    val digest = sha256_u8_hex(artifact)
+    if not hash256_hex_valid(digest):
+        _toolchain_role_fatal("pure-Simple SHA-256 returned an invalid digest for {artifact_path}")
     SimpleToolchainRole(
         name: name,
         artifact_path: artifact_path,

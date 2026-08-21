@@ -1,0 +1,178 @@
+# REQ-009/010 guest-native filesystem Clang/LLD hello-world admission.
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_target_v1.{simpleos_target_v1_abi_for_triple}
+use os.port.guest_toolchain_execution_gate.{GuestToolchainFilesystem}
+use os.port.guest_filesystem_hello_receipt.{
+    GuestFilesystemHelloAdmissionErrorV1,
+    GuestFilesystemHelloProjectionV1,
+    GuestFilesystemHelloReceiptV1,
+    guest_filesystem_hello_candidate_project_v1,
+    guest_filesystem_hello_projection_authorizes_guest_execution_v1
+}
+
+fn _machine(target: text) -> i64:
+    if target == "x86_64-unknown-simpleos": return 62
+    if target == "aarch64-unknown-simpleos": return 183
+    243
+
+fn _elf(target: text) -> [u8]:
+    var data: [u8] = []
+    while data.len() < 121: data.push(0u8)
+    data[0] = 0x7fu8
+    data[1] = 0x45u8
+    data[2] = 0x4cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data[16] = 2u8
+    val machine = _machine(target)
+    data[18] = (machine & 0xff).to_u8()
+    data[19] = ((machine >> 8) & 0xff).to_u8()
+    data[20] = 1u8
+    data[26] = 0x40u8
+    data[32] = 64u8
+    data[52] = 64u8
+    data[54] = 56u8
+    data[56] = 1u8
+    data[64] = 1u8
+    data[68] = 5u8
+    data[72] = 120u8
+    data[82] = 0x40u8
+    data[96] = 1u8
+    data[104] = 1u8
+    data[113] = 0x10u8
+    data[120] = 0xc3u8
+    data
+
+fn _prefix(filesystem: GuestToolchainFilesystem) -> text:
+    if filesystem == GuestToolchainFilesystem.Fat32: return "/fat32/work"
+    if filesystem == GuestToolchainFilesystem.Dbfs: return "/dbfs/work"
+    "/nvfs/work"
+
+fn _receipt(
+    target: text,
+    filesystem: GuestToolchainFilesystem,
+    source: [u8], object: [u8], executable: [u8]
+) -> GuestFilesystemHelloReceiptV1:
+    val root = _prefix(filesystem)
+    val source_path = root + "/hello.c"
+    val object_path = root + "/hello.o"
+    val executable_path = root + "/hello.elf"
+    GuestFilesystemHelloReceiptV1(
+        schema_version: 1,
+        receipt_id: "guest-hello-receipt-0001",
+        target_triple: target,
+        target_abi: simpleos_target_v1_abi_for_triple(target),
+        filesystem: filesystem,
+        clang_path: "/usr/bin/clang",
+        lld_path: "/usr/bin/ld.lld",
+        source_path: source_path,
+        object_path: object_path,
+        executable_path: executable_path,
+        clang_argv: [
+            "/usr/bin/clang", "-c", source_path, "-o", object_path,
+            "--target", target
+        ],
+        lld_argv: ["/usr/bin/ld.lld", object_path, "-o", executable_path],
+        run_argv: [executable_path],
+        source_sha256: sha256_u8_hex(source),
+        object_sha256: sha256_u8_hex(object),
+        executable_sha256: sha256_u8_hex(executable),
+        clang_sha256: sha256_u8_hex(executable),
+        lld_sha256: sha256_u8_hex(executable),
+        compile_exit_code: 0,
+        link_exit_code: 0,
+        run_exit_code: 0,
+        observed_stdout: "Hello World\n",
+        observed_stderr: "",
+        executed_in_guest: true,
+        used_path_lookup: false,
+        used_host_process: false
+    )
+
+describe "Guest filesystem hello-world receipt v1":
+    it "projects byte-backed candidates on every target and filesystem":
+        val targets = [
+            "x86_64-unknown-simpleos", "aarch64-unknown-simpleos",
+            "riscv64gc-unknown-simpleos"
+        ]
+        val filesystems = [
+            GuestToolchainFilesystem.Fat32,
+            GuestToolchainFilesystem.Dbfs,
+            GuestToolchainFilesystem.Nvfs
+        ]
+        val source = "#include <stdio.h>\nint main(void){puts(\"Hello World\");}\n".bytes()
+        val object = [1u8, 2u8, 3u8]
+        for target in targets:
+            val executable = _elf(target)
+            for filesystem in filesystems:
+                val receipt = _receipt(target, filesystem, source, object, executable)
+                expect(guest_filesystem_hello_candidate_project_v1(
+                    receipt, executable, executable, source, object,
+                    executable)).to_equal(Ok(
+                    GuestFilesystemHelloProjectionV1.StructurallyConsistentNonAuthorizing))
+
+    it "fails closed when any target artifact is absent":
+        val source = "int main(void){return 0;}\n".bytes()
+        val object = [1u8]
+        val executable = _elf("x86_64-unknown-simpleos")
+        val receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainFilesystem.Fat32,
+            source, object, executable)
+        expect(guest_filesystem_hello_candidate_project_v1(
+            receipt, executable, executable, source, [],
+            executable).unwrap_err()).to_equal(
+            GuestFilesystemHelloAdmissionErrorV1.MissingArtifact)
+
+    it "rejects host execution, PATH lookup, filesystem substitution, and output claims":
+        val source = "int main(void){return 0;}\n".bytes()
+        val object = [1u8]
+        val executable = _elf("x86_64-unknown-simpleos")
+        var receipt = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainFilesystem.Fat32,
+            source, object, executable)
+        receipt.used_host_process = true
+        expect(guest_filesystem_hello_candidate_project_v1(
+            receipt, executable, executable, source, object,
+            executable).unwrap_err()).to_equal(
+            GuestFilesystemHelloAdmissionErrorV1.HostExecutionForbidden)
+
+        receipt.used_host_process = false
+        receipt.used_path_lookup = true
+        expect(guest_filesystem_hello_candidate_project_v1(
+            receipt, executable, executable, source, object,
+            executable).unwrap_err()).to_equal(
+            GuestFilesystemHelloAdmissionErrorV1.PathLookupForbidden)
+
+        receipt.used_path_lookup = false
+        receipt.filesystem = GuestToolchainFilesystem.Dbfs
+        expect(guest_filesystem_hello_candidate_project_v1(
+            receipt, executable, executable, source, object,
+            executable).unwrap_err()).to_equal(
+            GuestFilesystemHelloAdmissionErrorV1.InvalidFilesystem)
+
+        receipt.filesystem = GuestToolchainFilesystem.Fat32
+        receipt.observed_stdout = ""
+        expect(guest_filesystem_hello_candidate_project_v1(
+            receipt, executable, executable, source, object,
+            executable).unwrap_err()).to_equal(
+            GuestFilesystemHelloAdmissionErrorV1.OutputMismatch)
+
+    it "never authorizes a forged caller-asserted in-guest candidate":
+        val source = "int main(void){return 0;}\n".bytes()
+        val object = [1u8]
+        val executable = _elf("x86_64-unknown-simpleos")
+        # Every execution boolean and transcript below is caller-controlled.
+        # Structural consistency must remain non-authorizing even when forged.
+        val forged = _receipt(
+            "x86_64-unknown-simpleos", GuestToolchainFilesystem.Fat32,
+            source, object, executable)
+        val projection = guest_filesystem_hello_candidate_project_v1(
+            forged, executable, executable, source, object, executable).unwrap()
+        expect(projection).to_equal(
+            GuestFilesystemHelloProjectionV1.StructurallyConsistentNonAuthorizing)
+        expect(guest_filesystem_hello_projection_authorizes_guest_execution_v1(
+            projection)).to_be(false)

@@ -275,6 +275,13 @@ device's flush result; hosted DBFS is unsupported and a default/no-op-less
 device fails closed. Logical `SharedWal.flush_wal()` counters are deliberately
 not treated as device durability evidence.
 
+Device dirtiness is tracked independently from pending checkpoint dirtiness.
+Namespace/file-image commits normally set both, while unbound passthrough
+writes set only device dirtiness. `fsync` still issues the device flush for the
+latter and promotes a dual-slot generation only when a pending checkpoint
+exists, so unchanged namespace metadata cannot cause a false durability
+acknowledgement for raw bytes.
+
 The compact namespace's inode/fd/instance state and the commit owner's
 process-global device, cursor, binding, generation, and slot state share one
 raw-mutex transaction facade on audited hosted targets. Every namespace entry

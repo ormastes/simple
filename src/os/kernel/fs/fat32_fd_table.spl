@@ -316,12 +316,9 @@ fn fat32_fd_write_object_at_from(object_id: u64, offset: u64, bytes: [u8]) -> Re
         object_id: object_id, handle: updated)
     Ok(bytes.len() as u64)
 
-fn fat32_fd_sync(task_id: u64, fd: i32) -> Result<bool, i32>:
-    """Commit file metadata, then the backing device cache, in that order."""
-    val idx = _fat32_fd_index(task_id, fd)
-    if idx < 0:
-        return Err(FAT32_FD_EBADF)
-    val object_idx = _fat32_object_index(g_fat32_fd_table[idx as u64].object_id)
+fn _fat32_fd_sync_object(object_id: u64) -> Result<bool, i32>:
+    """Commit metadata and require an acknowledged device durability fence."""
+    val object_idx = _fat32_object_index(object_id)
     if object_idx < 0:
         return Err(FAT32_FD_EBADF)
     if not fat32_mount_ready():
@@ -334,4 +331,17 @@ fn fat32_fd_sync(task_id: u64, fd: i32) -> Result<bool, i32>:
     val durable = dev.flush()
     if durable.is_err():
         return Err(-5)
-    Ok(durable.unwrap())
+    if not durable.unwrap():
+        return Err(-5)
+    Ok(true)
+
+fn fat32_fd_sync_object(object_id: u64) -> Result<bool, i32>:
+    """Durably sync a live generation-safe positioned file object."""
+    _fat32_fd_sync_object(object_id)
+
+fn fat32_fd_sync(task_id: u64, fd: i32) -> Result<bool, i32>:
+    """Durably sync the canonical file object named by one descriptor alias."""
+    val idx = _fat32_fd_index(task_id, fd)
+    if idx < 0:
+        return Err(FAT32_FD_EBADF)
+    _fat32_fd_sync_object(g_fat32_fd_table[idx as u64].object_id)

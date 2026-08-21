@@ -19,7 +19,7 @@ use os.kernel.loader.executable_source.{
     _set_synthetic_vfs_file_for_test,
     _clear_synthetic_vfs_for_test
 }
-use os.kernel.loader.elf_loader.{load_user_executable}
+use os.kernel.loader.elf_loader.{load_user_executable, elf_admit_executable}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.app_registry.{
     app_registry_clear,
@@ -262,6 +262,21 @@ describe "spawn pipeline — ELF parser validation":
         val truncated = _elf_magic_only_payload()
         val result = load_user_executable(truncated, Architecture.X86_64)
         expect(result.is_err()).to_equal(true)
+
+    it "admits a bounded RX executable segment":
+        val image = _minimal_elf64_x86_64()
+        expect(elf_admit_executable(image, Architecture.X86_64).is_ok()).to_equal(true)
+
+    it "rejects a writable executable PT_LOAD segment":
+        var image = _minimal_elf64_x86_64()
+        image[68] = 7.to_u8()  # PF_R | PF_W | PF_X
+        expect(elf_admit_executable(image, Architecture.X86_64).is_err()).to_equal(true)
+
+    it "rejects a non-power-of-two PT_LOAD alignment":
+        var image = _minimal_elf64_x86_64()
+        image[112] = 3.to_u8()
+        image[113] = 0.to_u8()
+        expect(elf_admit_executable(image, Architecture.X86_64).is_err()).to_equal(true)
 
 describe "spawn pipeline — process image builder":
     """build_user_process_image rejects invalid data."""

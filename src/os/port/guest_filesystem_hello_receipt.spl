@@ -1,0 +1,186 @@
+# Guest-native Clang/LLD filesystem hello-world candidate projection.
+#
+# This checks candidate self-consistency only. Caller-supplied execution flags
+# are declarations, never proof. This module has no authority handle and cannot
+# promote a capability-ledger result or prove that execution occurred in guest.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.contracts.execution.simpleos_target_v1.{
+    simpleos_target_v1_abi_for_triple,
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
+    SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
+}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
+use os.port.guest_toolchain_execution_gate.{GuestToolchainFilesystem}
+
+pub const GUEST_FILESYSTEM_HELLO_RECEIPT_V1: i64 = 1
+pub const GUEST_FILESYSTEM_HELLO_MAX_SOURCE_BYTES: i64 = 65536
+pub const GUEST_FILESYSTEM_HELLO_MAX_OBJECT_BYTES: i64 = 16777216
+pub const GUEST_FILESYSTEM_HELLO_MAX_EXECUTABLE_BYTES: i64 = 67108864
+pub const GUEST_FILESYSTEM_HELLO_MAX_TOOL_BYTES: i64 = 536870912
+
+pub enum GuestFilesystemHelloAdmissionErrorV1:
+    InvalidSchema
+    InvalidIdentity
+    InvalidTarget
+    InvalidAbi
+    InvalidFilesystem
+    InvalidPath
+    InvalidCommand
+    PathLookupForbidden
+    HostExecutionForbidden
+    GuestExecutionRequired
+    MissingArtifact
+    InvalidDigest
+    DigestMismatch
+    InvalidExecutable
+    ExitMismatch
+    OutputMismatch
+
+pub enum GuestFilesystemHelloProjectionV1:
+    StructurallyConsistentNonAuthorizing
+
+pub struct GuestFilesystemHelloReceiptV1:
+    schema_version: i64
+    receipt_id: text
+    target_triple: text
+    target_abi: text
+    filesystem: GuestToolchainFilesystem
+    clang_path: text
+    lld_path: text
+    source_path: text
+    object_path: text
+    executable_path: text
+    clang_argv: [text]
+    lld_argv: [text]
+    run_argv: [text]
+    source_sha256: text
+    object_sha256: text
+    executable_sha256: text
+    clang_sha256: text
+    lld_sha256: text
+    compile_exit_code: i64
+    link_exit_code: i64
+    run_exit_code: i64
+    observed_stdout: text
+    observed_stderr: text
+    executed_in_guest: bool
+    used_path_lookup: bool
+    used_host_process: bool
+
+fn _target_arch(target: text) -> Architecture?:
+    if target == SIMPLEOS_TARGET_V1_X86_64_TRIPLE:
+        return Some(Architecture.X86_64)
+    if target == SIMPLEOS_TARGET_V1_AARCH64_TRIPLE:
+        return Some(Architecture.Arm64)
+    if target == SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE:
+        return Some(Architecture.Riscv64)
+    nil
+
+fn _absolute_guest_path(path: text) -> bool:
+    path.len() > 1 and path.len() <= 512 and path.starts_with("/") and
+        not path.contains("//") and not path.contains("/./") and
+        not path.contains("/../") and not path.contains("\\") and
+        not path.contains("\0") and not path.contains("\n")
+
+fn _nonzero_digest(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+fn _bounded_present(bytes: [u8], maximum: i64) -> bool:
+    bytes.len() > 0 and bytes.len() <= maximum
+
+fn _filesystem_path_valid(path: text, filesystem: GuestToolchainFilesystem) -> bool:
+    if filesystem == GuestToolchainFilesystem.Fat32:
+        return path.starts_with("/fat32/")
+    if filesystem == GuestToolchainFilesystem.Dbfs:
+        return path.starts_with("/dbfs/")
+    if filesystem == GuestToolchainFilesystem.Nvfs:
+        return path.starts_with("/nvfs/")
+    false
+
+fn _commands_valid(receipt: GuestFilesystemHelloReceiptV1) -> bool:
+    receipt.clang_argv == [
+        receipt.clang_path, "-c", receipt.source_path,
+        "-o", receipt.object_path, "--target", receipt.target_triple
+    ] and receipt.lld_argv == [
+        receipt.lld_path, receipt.object_path, "-o", receipt.executable_path
+    ] and receipt.run_argv == [receipt.executable_path]
+
+pub fn guest_filesystem_hello_candidate_project_v1(
+    receipt: GuestFilesystemHelloReceiptV1,
+    clang_bytes: [u8],
+    lld_bytes: [u8],
+    source_bytes: [u8],
+    object_bytes: [u8],
+    executable_bytes: [u8]
+) -> Result<GuestFilesystemHelloProjectionV1, GuestFilesystemHelloAdmissionErrorV1>:
+    if receipt.schema_version != GUEST_FILESYSTEM_HELLO_RECEIPT_V1:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidSchema)
+    if receipt.receipt_id.len() < 8 or receipt.receipt_id.len() > 128:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidIdentity)
+    val arch = _target_arch(receipt.target_triple) ??
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidTarget)
+    if receipt.target_abi != simpleos_target_v1_abi_for_triple(receipt.target_triple):
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidAbi)
+    if receipt.clang_path != "/usr/bin/clang" or receipt.lld_path != "/usr/bin/ld.lld":
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidPath)
+    if not _absolute_guest_path(receipt.source_path) or
+       not _absolute_guest_path(receipt.object_path) or
+       not _absolute_guest_path(receipt.executable_path):
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidPath)
+    if not _filesystem_path_valid(receipt.source_path, receipt.filesystem) or
+       not _filesystem_path_valid(receipt.object_path, receipt.filesystem) or
+       not _filesystem_path_valid(receipt.executable_path, receipt.filesystem):
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidFilesystem)
+    if not _commands_valid(receipt):
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidCommand)
+    if receipt.used_path_lookup:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.PathLookupForbidden)
+    if receipt.used_host_process:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.HostExecutionForbidden)
+    if not receipt.executed_in_guest:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.GuestExecutionRequired)
+    if not _bounded_present(clang_bytes, GUEST_FILESYSTEM_HELLO_MAX_TOOL_BYTES) or
+       not _bounded_present(lld_bytes, GUEST_FILESYSTEM_HELLO_MAX_TOOL_BYTES) or
+       not _bounded_present(source_bytes, GUEST_FILESYSTEM_HELLO_MAX_SOURCE_BYTES) or
+       not _bounded_present(object_bytes, GUEST_FILESYSTEM_HELLO_MAX_OBJECT_BYTES) or
+       not _bounded_present(executable_bytes, GUEST_FILESYSTEM_HELLO_MAX_EXECUTABLE_BYTES):
+        return Err(GuestFilesystemHelloAdmissionErrorV1.MissingArtifact)
+    if not _nonzero_digest(receipt.clang_sha256) or
+       not _nonzero_digest(receipt.lld_sha256) or
+       not _nonzero_digest(receipt.source_sha256) or
+       not _nonzero_digest(receipt.object_sha256) or
+       not _nonzero_digest(receipt.executable_sha256):
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidDigest)
+    if sha256_u8_hex(clang_bytes) != receipt.clang_sha256 or
+       sha256_u8_hex(lld_bytes) != receipt.lld_sha256 or
+       sha256_u8_hex(source_bytes) != receipt.source_sha256 or
+       sha256_u8_hex(object_bytes) != receipt.object_sha256 or
+       sha256_u8_hex(executable_bytes) != receipt.executable_sha256:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.DigestMismatch)
+    if elf_admit_executable(clang_bytes, arch).is_err() or
+       elf_admit_executable(lld_bytes, arch).is_err() or
+       elf_admit_executable(executable_bytes, arch).is_err():
+        return Err(GuestFilesystemHelloAdmissionErrorV1.InvalidExecutable)
+    if receipt.compile_exit_code != 0 or receipt.link_exit_code != 0 or
+       receipt.run_exit_code != 0:
+        return Err(GuestFilesystemHelloAdmissionErrorV1.ExitMismatch)
+    if receipt.observed_stdout != "Hello World\n" or receipt.observed_stderr != "":
+        return Err(GuestFilesystemHelloAdmissionErrorV1.OutputMismatch)
+    Ok(GuestFilesystemHelloProjectionV1.StructurallyConsistentNonAuthorizing)
+
+pub fn guest_filesystem_hello_projection_authorizes_guest_execution_v1(
+    projection: GuestFilesystemHelloProjectionV1
+) -> bool:
+    # Deliberately exhaustive: no v1 projection variant carries an authenticated
+    # evidence-service handle or loader-owned consume-once ledger token.
+    match projection:
+        GuestFilesystemHelloProjectionV1.StructurallyConsistentNonAuthorizing: false
+
+export GuestFilesystemHelloAdmissionErrorV1, GuestFilesystemHelloReceiptV1
+export GuestFilesystemHelloProjectionV1
+export guest_filesystem_hello_candidate_project_v1
+export guest_filesystem_hello_projection_authorizes_guest_execution_v1

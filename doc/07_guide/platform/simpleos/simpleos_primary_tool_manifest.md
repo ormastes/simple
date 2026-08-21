@@ -31,8 +31,10 @@ these known files, or 127 for an unknown identity. It never treats that text
 state as an executable-authority token and never falls back to an in-process
 shortcut, PATH lookup, alias expansion, background execution, or pipeline
 execution. The generic `launcher_launch_path_with_args` boundary also rejects
-all four canonical paths before process spawn, so async and non-shell launcher
-callers cannot bypass the tool-specific gates.
+all four canonical paths before process spawn. It compares lexically normalized
+absolute paths, so equivalent spellings with repeated separators, `.` segments,
+or `..` segments cannot bypass the gate. Async and non-shell launcher callers
+therefore cannot bypass the tool-specific gates.
 
 Promotion requires target-native bytes at the exact canonical path, a lower-case
 SHA-256 digest of those bytes, an evidence-service admission receipt, and a live

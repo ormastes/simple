@@ -75,3 +75,26 @@ describe "SSH channel-open allocation is fail-closed":
         val before = table.channels[local_id as u64].remote_window
         expect(table.adjust_remote_window(local_id, 4294967295u32)).to_be(false)
         expect(table.channels[local_id as u64].remote_window).to_equal(before)
+
+    it "rejects zero window adjustments and adjustments after close":
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 71, 100, 100)
+        expect(table.adjust_remote_window(local_id, 0u32)).to_be(false)
+        expect(table.close(local_id)).to_be(true)
+        expect(table.adjust_remote_window(local_id, 1u32)).to_be(false)
+
+    it "enforces receive packet size and EOF lifecycle":
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 72, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.consume_local_window(local_id, DEFAULT_MAX_PACKET)).to_be(true)
+        expect(table.consume_local_window(local_id, DEFAULT_MAX_PACKET + 1u32)).to_be(false)
+        expect(table.mark_peer_eof(local_id)).to_be(true)
+        expect(table.mark_peer_eof(local_id)).to_be(false)
+        expect(table.consume_local_window(local_id, 1u32)).to_be(false)
+
+    it "rejects data on closed or unknown channels":
+        var table = ChannelTable.new()
+        val local_id = table.open(ChannelType.Session, 73, 100, 100)
+        expect(table.close(local_id)).to_be(true)
+        expect(table.consume_local_window(local_id, 1u32)).to_be(false)
+        expect(table.consume_local_window(999u32, 1u32)).to_be(false)

@@ -18,6 +18,7 @@ Verifies the live NVFS driver surfaces still work after the blob-backend refacto
 use std.spipe.*
 use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.types.{Path, OpenFlags, MountOptions}
+use std.fs_driver.error.{FsError}
 use std.fs_driver.nvfs_driver.{NvfsDriver}
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 
@@ -64,16 +65,26 @@ describe "NVFS no-regression — NvfsDriver":
         val stat = d.stat(Path(raw: "/size_test.bin")).unwrap()
         expect(stat.size).to_equal(5)  # oracle: value fixed by the spec contract
 
-    it "NvfsDriver rejects non-append positional overwrite on the native driver":
-        step("Verify: NvfsDriver rejects non-append positional overwrite on the native driver")
+    it "NvfsDriver pwrite updates the requested range without moving data":
+        step("Verify: NvfsDriver pwrite updates the requested range without moving data")
         # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
         val fh = d.open(Path(raw: "/append_only.bin"), OpenFlags(bits: 2)).unwrap()
         val payload: [u8] = [1, 2, 3, 4]
         d.write(fh, 0, payload).unwrap()
         val patch: [u8] = [9]
-        val res = d.pwrite(fh, 1, patch)
-        expect(res.is_err()).to_equal(true)
+        expect(d.pwrite(fh, 1, patch).unwrap()).to_equal(1)
+        var got: [u8] = [0, 0, 0, 0]
+        expect(d.pread(fh, 0, got).unwrap()).to_equal(4)
+        expect(got).to_equal([1u8, 9u8, 3u8, 4u8])
+        expect(d.fstat(fh).unwrap().size).to_equal(4u64)
+
+    it "NvfsDriver rejects negative and overflowing positioned ranges":
+        val d = make_nvfs()
+        val fh = d.open(Path(raw: "/range.bin"), OpenFlags(bits: 2)).unwrap()
+        var one: [u8] = [0]
+        expect(d.pread(fh, -1, one).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(d.pwrite(fh, 9223372036854775807, [1u8]).unwrap_err()).to_equal(FsError.InvalidArg)
 
 describe "NVFS no-regression — NvfsPosixDriver":
     it "NvfsPosixDriver mounts and exposes the root inode":
@@ -121,3 +132,18 @@ describe "NVFS no-regression — NvfsPosixDriver":
         d.ftruncate(fh, 10).unwrap()
         val stat = d.fstat(fh).unwrap()
         expect(stat.size).to_equal(10)  # oracle: value fixed by the spec contract
+
+    it "NvfsPosixDriver preserves sparse positioned-write semantics":
+        val d = make_nvfs_posix()
+        val fh = d.open(Path(raw: "/sparse.bin"), OpenFlags.write_only().with_create()).unwrap()
+        expect(d.pwrite(fh, 3, [0xAAu8]).unwrap()).to_equal(1)
+        var got: [u8] = [9, 9, 9, 9]
+        expect(d.pread(fh, 0, got).unwrap()).to_equal(4)
+        expect(got).to_equal([0u8, 0u8, 0u8, 0xAAu8])
+
+    it "NvfsPosixDriver rejects negative and overflowing positioned ranges":
+        val d = make_nvfs_posix()
+        val fh = d.open(Path(raw: "/range-posix.bin"), OpenFlags.write_only().with_create()).unwrap()
+        var one: [u8] = [0]
+        expect(d.pread(fh, -1, one).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(d.pwrite(fh, 9223372036854775807, [1u8]).unwrap_err()).to_equal(FsError.InvalidArg)

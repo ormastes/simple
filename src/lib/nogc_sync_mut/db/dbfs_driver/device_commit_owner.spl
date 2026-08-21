@@ -64,6 +64,7 @@ var _owner_durable_slots: [i32] = []
 var _owner_pending_generations: [i64] = []
 var _owner_pending_slots: [i32] = []
 var _owner_pending_dirty: [bool] = []
+var _owner_device_dirty: [bool] = []
 var _owner_quarantined: bool = false
 
 var _owner_blob_inst_ids: [i64] = []
@@ -179,6 +180,7 @@ fn _device_register_locked(inst_id: i64, dev: BlockDevice) -> Result<bool, FsErr
     _owner_pending_generations.push(0)
     _owner_pending_slots.push(-1)
     _owner_pending_dirty.push(false)
+    _owner_device_dirty.push(false)
     Ok(true)
 
 fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
@@ -193,6 +195,7 @@ fn _device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
     _owner_pending_generations.remove(idx)
     _owner_pending_slots.remove(idx)
     _owner_pending_dirty.remove(idx)
+    _owner_device_dirty.remove(idx)
     var blob_idx = _owner_blob_inst_ids.len() as i32 - 1
     while blob_idx >= 0:
         if _owner_blob_inst_ids[blob_idx] == inst_id:
@@ -298,6 +301,10 @@ fn _write_bytes(inst_id: i64, base_block: i64, block_count: i64, offset: i64, da
         val write_result = _owner_devices[idx].write_sector(lba, sector)
         if write_result.is_err() or not write_result.unwrap():
             return Err(FsError.IoError(code: 0u32))
+        # Any accepted device write requires a real flush before durability can
+        # be acknowledged.  This includes unbound passthrough writes, which do
+        # not publish a namespace generation.
+        _owner_device_dirty[idx] = true
     Ok(written)
 
 fn _device_read_bytes_locked(inst_id: i64, base_block: i64, block_count: i64, offset: i64, length: i64) -> Result<[u8], FsError>:
@@ -508,6 +515,7 @@ fn _device_recover_locked(inst_id: i64, base_block: i64, block_count: i64) -> Re
     _owner_pending_generations[idx] = 0
     _owner_pending_slots[idx] = -1
     _owner_pending_dirty[idx] = false
+    _owner_device_dirty[idx] = false
     _owner_next_offsets[idx] = chosen.next_offset
     for entry in chosen.entries:
         if not entry.is_dir:
@@ -534,6 +542,7 @@ fn _device_persist_namespace_locked(inst_id: i64, base_block: i64, block_count: 
     val write_result = _owner_devices[idx].write_sector(_namespace_lba(base_block, block_count, slot), encoded.unwrap())
     if write_result.is_err() or not write_result.unwrap():
         return Err(FsError.IoError(code: 0u32))
+    _owner_device_dirty[idx] = true
     _owner_pending_generations[idx] = generation
     _owner_pending_slots[idx] = slot
     _owner_pending_dirty[idx] = true
@@ -543,16 +552,18 @@ fn _device_flush_locked(inst_id: i64) -> Result<bool, FsError>:
     val idx = _owner_idx(inst_id)
     if idx < 0:
         return Err(FsError.Unsupported)
-    if not _owner_pending_dirty[idx]:
+    if not _owner_device_dirty[idx]:
         return Ok(true)
     val flush_result = _owner_devices[idx].flush()
     if flush_result.is_err() or not flush_result.unwrap():
         return Err(FsError.IoError(code: 0u32))
-    _owner_durable_generations[idx] = _owner_pending_generations[idx]
-    _owner_durable_slots[idx] = _owner_pending_slots[idx]
-    _owner_pending_generations[idx] = 0
-    _owner_pending_slots[idx] = -1
-    _owner_pending_dirty[idx] = false
+    if _owner_pending_dirty[idx]:
+        _owner_durable_generations[idx] = _owner_pending_generations[idx]
+        _owner_durable_slots[idx] = _owner_pending_slots[idx]
+        _owner_pending_generations[idx] = 0
+        _owner_pending_slots[idx] = -1
+        _owner_pending_dirty[idx] = false
+    _owner_device_dirty[idx] = false
     Ok(true)
 
 # Public owner boundary. Each entry acquires the same runtime mutex exactly

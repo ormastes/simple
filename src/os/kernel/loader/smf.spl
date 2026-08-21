@@ -11,6 +11,7 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.loader.elf64.{elf64_load}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
 use os.kernel.loader.byte_utils.{byte_at, lb_read_u32_le, lb_read_u64_le, has_magic, in_range}
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 
@@ -137,6 +138,16 @@ fn _smf_explicit_arch_matches_elf(bytes: [u8], arch: i64, stub_size: i64) -> boo
         (arch == 5 and machine == 243 and class == 2) or
         (arch == 6 and machine == 243 and class == 1)
 
+fn _smf_architecture_for_code(arch: i64) -> Architecture?:
+    match arch:
+        case 1: Some(Architecture.X86_64)
+        case 2: Some(Architecture.X86)
+        case 3: Some(Architecture.Arm64)
+        case 4: Some(Architecture.Arm32)
+        case 5: Some(Architecture.Riscv64)
+        case 6: Some(Architecture.Riscv32)
+        case _: nil
+
 fn smf_admit_explicit_simpleos_executable(bytes: [u8]) -> Result<(), text>:
     """Admit one canonical v1.1 SimpleOS executable envelope without exposing header internals."""
     val parsed = smf_parse_header(bytes)
@@ -157,6 +168,12 @@ fn smf_admit_explicit_simpleos_executable(bytes: [u8]) -> Result<(), text>:
        header.smf_data_offset != header.stub_size:
         return Err(SMF_ERR_MALFORMED)
     if not _smf_explicit_arch_matches_elf(bytes, header.arch, header.stub_size):
+        return Err(SMF_ERR_MISSING_ELF)
+    val architecture = _smf_architecture_for_code(header.arch)
+    if not architecture.?:
+        return Err(SMF_ERR_WRONG_ARCH)
+    val stub = _smf_copy_range(bytes, 0, header.stub_size)
+    if elf_admit_executable(stub, architecture.unwrap()).is_err():
         return Err(SMF_ERR_MISSING_ELF)
     Ok(())
 

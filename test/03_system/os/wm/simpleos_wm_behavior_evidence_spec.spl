@@ -30,7 +30,7 @@ use common.window_protocol.window_protocol.{WmInputEvent}
 use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.host_compositor_entry.{HostCompositor}
 use os.compositor.host_gui_event_router.{HostGuiEventRouter}
-use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, wm_damage_admit_v1}
+use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, wm_damage_admit_v1, wm_damage_merge_rects_v1}
 use os.services.wm.wm_service.{WmService}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
 
@@ -160,6 +160,17 @@ describe "REQ-017 host-fixture WM behavior":
         expect(wm_damage_admit_v1(invalid, 7u64, 9u64).reason).to_equal(
             "invalid-damage-geometry")
 
+        step("Clip and coalesce overlapping exposure before presentation")
+        val clipped = wm_damage_merge_rects_v1(
+            [WmDamageRectV1(x: -10, y: 5, width: 30, height: 20)],
+            [WmDamageRectV1(x: 20, y: 5, width: 30, height: 20)],
+            40,
+            30
+        )
+        expect(clipped.len()).to_equal(1)
+        expect(clipped[0].x).to_equal(0)
+        expect(clipped[0].width).to_equal(40)
+
     # @capture(protocol)
     it "should route committed input only through the focused production window":
         step("Create two compositor windows and one canonical client UI session")
@@ -182,6 +193,19 @@ describe "REQ-017 host-fixture WM behavior":
         compositor.handle_left_button(false)
         expect(router_a.route(event, compositor, session, "refocused")).to_be(true)
         expect(router_b.route(event, compositor, session, "stale-target")).to_be(false)
+
+        step("Reject adapter-bypass input at the canonical WM owner")
+        val wm = WmService.new()
+        wm.register_window_owner(WindowId(value: 41u64), 410u64)
+        wm.register_window_owner(WindowId(value: 42u64), 420u64)
+        val bypass = WmInputEvent.mouse_move(WindowId(value: 42u64), Point.xy(3, 4))
+        expect(wm.accept_next_input_ingress(42u64, bypass)).to_be(false)
+        expect(wm.last_rejection_reason).to_equal("unfocused-input-window")
+        expect(wm.last_input_sequence).to_equal(0u64)
+        val focused = WmInputEvent.mouse_move(WindowId(value: 41u64), Point.xy(3, 4))
+        expect(wm.accept_next_input_ingress(41u64, focused)).to_be(true)
+        expect(wm.last_input_sequence).to_equal(1u64)
+        expect(wm.complete_input_ingress()).to_be(true)
 
     # @capture(gui)
     # @capture(protocol)

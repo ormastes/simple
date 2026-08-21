@@ -1,0 +1,73 @@
+# @cover src/os/apps/dbd/dbd_launch.spl 95%
+"""
+# DBD filesystem launch admission
+
+Proves that filesystem presence alone cannot start DBD: the canonical image
+must carry loader verification evidence, arguments are forbidden so secrets
+cannot enter process metadata, and production security owners remain the final
+readiness gate.
+"""
+
+use std.spec
+use os.apps.dbd.dbd_launch.{
+    DbdFilesystemArtifactEvidenceV1, DbdFilesystemLaunchStatusV1,
+    DBD_FILESYSTEM_IMAGE_PATH_V1, DBD_MAX_FILESYSTEM_IMAGE_BYTES_V1,
+    dbd_admit_filesystem_launch_v1
+}
+use os.apps.dbd.dbd_protocol.{DBD_BOOT_CREDENTIAL_OWNER_BLOCKER}
+
+fn _digest() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn _artifact() -> DbdFilesystemArtifactEvidenceV1:
+    DbdFilesystemArtifactEvidenceV1(
+        path: DBD_FILESYSTEM_IMAGE_PATH_V1,
+        byte_length: 4096,
+        executable_format_verified: true,
+        sha256_hex: _digest())
+
+describe "DBD canonical filesystem artifact":
+    it "reaches the security-owner gate only with complete loader evidence":
+        val admission = dbd_admit_filesystem_launch_v1(_artifact(), [])
+        expect(admission.status).to_equal(
+            DbdFilesystemLaunchStatusV1.SecurityOwnersBlocked)
+        expect(admission.blocker).to_equal(DBD_BOOT_CREDENTIAL_OWNER_BLOCKER)
+
+    it "rejects aliases, empty images, oversized images, and unverified format":
+        var alias = _artifact()
+        alias.path = "/tmp/dbd"
+        expect(dbd_admit_filesystem_launch_v1(alias, []).status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArtifactRejected)
+        var empty = _artifact()
+        empty.byte_length = 0
+        expect(dbd_admit_filesystem_launch_v1(empty, []).status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArtifactRejected)
+        var oversized = _artifact()
+        oversized.byte_length = DBD_MAX_FILESYSTEM_IMAGE_BYTES_V1 + 1
+        expect(dbd_admit_filesystem_launch_v1(oversized, []).status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArtifactRejected)
+        var unverified = _artifact()
+        unverified.executable_format_verified = false
+        expect(dbd_admit_filesystem_launch_v1(unverified, []).status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArtifactRejected)
+
+    it "requires one canonical lowercase SHA-256 receipt":
+        var short_digest = _artifact()
+        short_digest.sha256_hex = "abcd"
+        expect(dbd_admit_filesystem_launch_v1(
+            short_digest, []).status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArtifactRejected)
+        var uppercase_digest = _artifact()
+        uppercase_digest.sha256_hex =
+            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(dbd_admit_filesystem_launch_v1(
+            uppercase_digest, []).status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArtifactRejected)
+
+describe "DBD filesystem launch arguments":
+    it "rejects every argument before production readiness admission":
+        val admission = dbd_admit_filesystem_launch_v1(
+            _artifact(), ["--credential=must-not-enter-process-metadata"])
+        expect(admission.status).to_equal(
+            DbdFilesystemLaunchStatusV1.ArgumentsRejected)
+        expect(admission.blocker).to_equal("dbd-launch-arguments-forbidden")

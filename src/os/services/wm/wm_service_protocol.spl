@@ -373,9 +373,7 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        if self.next_scene_revision() == 0u64:
-            return wm_action_none()
-        if not self.raise_focus_stack(window_id):
+        if not self.commit_focus(window_id):
             return wm_action_none()
         WmAction(kind: "focus", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -586,7 +584,7 @@ impl WmService:
 
     # -- Outbound Event Delivery ---------------------------------------------
 
-    me send_input_to_owner(window_id: u64, event: WmInputEvent):
+    me send_input_to_owner(window_id: u64, event: WmInputEvent) -> bool:
         """Send an input event to the app that owns this window via IPC.
 
         Called by the compositor when a remote window receives input.
@@ -595,10 +593,20 @@ impl WmService:
           key_code(u32) | mouse_x(i32) | mouse_y(i32) | modifiers(u32) |
           text_len(u32) | committed_utf8(text_len)
         """
+        # WmService is the one focus/sequence/queue authority. The compositor
+        # proposes a target; no direct IPC delivery occurs until the canonical
+        # owner reserves it against the current lifecycle generation.
+        if not self.accept_next_input_ingress(window_id, event):
+            return false
         val owner = self.find_owner(window_id)
         if owner == 0:
-            return
-        self.send_input_to_port(owner, event)
+            self.complete_input_ingress()
+            return self.reject("input-owner-disappeared")
+        val sent = self.send_input_to_port(owner, event)
+        self.complete_input_ingress()
+        if not sent:
+            return self.reject("input-delivery-failed")
+        true
 
     me send_close_request(window_id: u64):
         """Send a close request to the app that owns this window.
@@ -634,7 +642,7 @@ impl WmService:
         buf.push(focused_byte)
         _ipc_send(owner, self.port_id, buf)
 
-    me send_input_to_port(dst_port: u64, event: WmInputEvent):
+    me send_input_to_port(dst_port: u64, event: WmInputEvent) -> bool:
         """Send an input event to a specific IPC port.
 
         Called by the shell to deliver input events to remote app windows.
@@ -643,7 +651,7 @@ impl WmService:
         val text_bytes = event.committed_text.bytes()
         if text_bytes.len() > WM_INPUT_TEXT_MAX_BYTES.to_i64():
             log_raw_println("[wm-service] rejected oversized committed text event")
-            return
+            return false
         var buf: [u8] = []
         # Method header
         _push_u32(buf, COMP_INPUT_EVENT)
@@ -666,4 +674,4 @@ impl WmService:
         _push_u32(buf, text_bytes.len().to_u32())
         for byte in text_bytes:
             buf.push(byte.to_u8())
-        _ipc_send(dst_port, self.port_id, buf)
+        _ipc_send(dst_port, self.port_id, buf) >= 0

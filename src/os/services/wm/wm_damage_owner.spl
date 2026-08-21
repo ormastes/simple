@@ -4,9 +4,18 @@
 # projects bounded damage candidates into the owner's existing fields.
 
 use os.services.wm.wm_service_core.{WmService}
-use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, WmRedrawDecisionV1, WM_DAMAGE_MAX_REGIONS, wm_damage_admit_v1}
+use os.services.wm.wm_damage.{WmDamageRectV1, WmDamageRegionV1, WmRedrawDecisionV1, WM_DAMAGE_MAX_REGIONS, WM_DAMAGE_MAX_DIMENSION, wm_damage_admit_v1, wm_damage_merge_rects_v1}
 
 impl WmService:
+    me set_damage_bounds(width: i32, height: i32) -> bool:
+        if width <= 0 or height <= 0:
+            return self.reject("invalid-damage-bounds")
+        if width > WM_DAMAGE_MAX_DIMENSION or height > WM_DAMAGE_MAX_DIMENSION:
+            return self.reject("invalid-damage-bounds")
+        self.damage_clip_width = width
+        self.damage_clip_height = height
+        true
+
     fn window_damage_rect(self, window_id: u64) -> WmDamageRectV1?:
         if window_id == 0u64:
             return nil
@@ -26,17 +35,20 @@ impl WmService:
         val candidate_count = candidate.rects.len().to_u64()
         if candidate_count > max_regions:
             return self.reject("damage-region-overflow")
+        val candidate_decision = wm_damage_admit_v1(
+            candidate, self.lifecycle_generation, self.scene_revision
+        )
+        if not candidate_decision.accepted:
+            return self.reject(candidate_decision.reason)
         val existing_count = self.damage_regions.len().to_u64()
         if existing_count > max_regions:
             return self.reject("damage-region-overflow")
-        val remaining_capacity = max_regions - existing_count
-        if candidate_count > remaining_capacity:
+        val rects = wm_damage_merge_rects_v1(
+            self.damage_regions, candidate_decision.rects,
+            self.damage_clip_width, self.damage_clip_height
+        )
+        if rects.len().to_u64() > max_regions:
             return self.reject("damage-region-overflow")
-        var rects: [WmDamageRectV1] = []
-        for rect in self.damage_regions:
-            rects = rects.push(rect)
-        for rect in candidate.rects:
-            rects = rects.push(rect)
         val merged = WmDamageRegionV1(
             generation: candidate.generation,
             scene_revision: candidate.scene_revision,

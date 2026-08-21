@@ -143,6 +143,30 @@ Generated/authenticated host keys and configured credential providers replace ha
 
 ## WM design
 
+Input delivery is a parent-authoritative commit. The adapter submits a copied
+`WmInputEvent` plus lifecycle generation and monotonic sequence. `WmService`
+checks generation, nonzero/owned target, equality with the canonical focused
+window, sequence freshness, committed-text size, and bounded queue capacity in
+that order. Only then does it advance `last_input_sequence` and reserve one
+queue slot. This ordering makes retry after a stale focus target deterministic.
+`send_input_to_owner` is the production wrapper around this reservation; it
+always releases the slot after synchronous IPC, while a send failure consumes
+the sequence as an anti-replay fence and records `input-delivery-failed`.
+
+Focus changes reorder the fixed-capacity bottom-to-top stack and damage both
+old and new window regions. Owner death removes the window, exposes its damaged
+region, and focuses the surviving stack top. Restart advances the lifecycle
+generation and clears focus, damage, queues, input sequence, presentation
+receipt, ECS windows, and owner registries. Host/manual evidence labels its
+domain; unavailable live guest, architecture, or physical rows remain BLOCKED.
+
+The shell configures damage bounds from the compositor framebuffer once.
+Admission first rejects malformed/stale candidates, then clips each rectangle,
+coalesces touching/overlapping regions transitively, and commits only if the
+normalized result remains within 64 regions. Restart preflights generation
+exhaustion and destroys the old IPC port before changing canonical state;
+either teardown fails with the old owner intact or the reset commits fully.
+
 `WmService` owns window identity/owner, geometry, focus/z-order, input dispatch, lifecycle generation, and restart. Raw input adapters submit bounded typed events. Accepted actions mutate once and publish an immutable revisioned scene. Renderer consumes a frozen scene, returns a generation/revision/frame receipt, and presentation succeeds only after scanout/readback correlation.
 
 Create/focus/move/resize/redraw/close and owner-death cleanup are real service transitions. Pointer capture and keyboard focus are separate. Restart closes old ingress/resources, increments generation, rebuilds state, and requires a new first-frame receipt. Host seams and stores are adapters/projections only.
@@ -155,7 +179,7 @@ Environment is an exact enum: `QemuSystem`, `NativeHost`, or `PhysicalBoard`. Ph
 
 The primary-tool manifest is declaration-only and closed over seven categories. Administration, archive/compression, networking, and package management are `Unavailable`. Checksums (`/usr/bin/sha256sum`, `/usr/bin/md5sum`), text processing (`/usr/bin/grep`), and process monitoring (`/usr/bin/ps`) are `Blocked`: their real pure-Simple/VFS implementations and canonical launcher gates exist, while target bytes, digests, loader tokens, and admitted FAT32/DBFS/NVFS execution receipts do not. One shared launcher result contract carries the canonical path plus empty digest/receipt and explicit absent loader-authority state; this copied diagnostic record is never authority. Direct, alias, background, pipeline, `which`, and PATH paths must resolve through those gates. Promotion still requires an artifact digest, exact three-target and three-filesystem bindings, representative operation/error evidence, evidence-owner admission, and consumption of the live loader-owned token.
 
-Performance receipts contain warmup, at least ten raw timing samples paired with raw RSS samples, p50/p95/p99/max, a recomputed maximum RSS, exact centered CV evidence, CPU/frequency/noise metadata, and applicability. Their bounded verified artifact set contains the distinct fixture, configuration, binary, image, and baseline identities. The ledger rejects a native budget claim from TCG or a comparable claim with CV >5%.
+Performance receipts contain warmup, at least ten raw timing samples paired with raw RSS samples, p50/p95/p99/max, a recomputed maximum RSS, exact centered CV evidence, CPU/frequency/noise metadata, and applicability. Their bounded verified artifact set contains the distinct fixture, configuration, binary, image, and baseline identities. A read-only projection reports performance applicability and contract admission for dashboards, but carries no cryptographic or ledger authority and fails closed when runtime inputs are absent. The ledger rejects a native budget claim from TCG or a comparable claim with CV >5%.
 
 Counters:
 

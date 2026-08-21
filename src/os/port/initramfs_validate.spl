@@ -256,6 +256,22 @@ fn _expected_toolchain_role(path: text) -> text:
             return "loader"
     ""
 
+fn initramfs_tool_role_artifact_admission(role: text, path: text, data: [u8]) -> Result<(), text>:
+    if role != "compiler" and role != "interpreter" and role != "loader":
+        return Err("toolchain-role-name-invalid")
+    if path == "" or not path.starts_with("/") or path.contains("\0") or
+       path.contains("\n") or path.contains("\r") or path.contains("\t") or
+       path.contains("//") or path.contains("/./") or path.contains("/../") or
+       path.ends_with("/.") or path.ends_with("/.."):
+        return Err("toolchain-role-path-invalid")
+    if _expected_toolchain_role(path) != role:
+        return Err("toolchain-role-path-mismatch")
+    if data.len() < 64 or data.len() > MAX_INIT_ARTIFACT_BYTES:
+        return Err("toolchain-role-size-invalid")
+    if not _native_elf_prefix(data, data.len()) and not _canonical_executable_smf(data):
+        return Err("toolchain-role-native-format-invalid")
+    Ok(())
+
 fn _validate_toolchain_manifest(entries: [CpioEntry], init_digest: text) -> Result<(), text>:
     val manifest_entry = _archive_entry(entries, "SYS/SIMPLETOOL.SDN") ??
         return Err("toolchain-manifest-missing")
@@ -293,6 +309,10 @@ fn _validate_toolchain_manifest(entries: [CpioEntry], init_digest: text) -> Resu
             return Err("toolchain-role-payload-missing")
         if (payload.mode.to_i64() & 0xF000) != 0x8000 or payload.data.len() == 0:
             return Err("toolchain-role-payload-invalid")
+        match initramfs_tool_role_artifact_admission(
+            binding.role, binding.guest_path, payload.data):
+            case Ok(()): ()
+            case Err(message): return Err(message)
         if sha256_u8_hex(payload.data) != binding.digest:
             return Err("toolchain-role-payload-digest-mismatch")
         if role_digests.has(binding.role):
@@ -436,4 +456,5 @@ fn validate_zstd_toolchain_archive(compressed: [u8]) -> Result<(), text>:
 export MAX_INITRAMFS_COMPRESSED_BYTES, MAX_INITRAMFS_EXPANDED_BYTES
 export SIMPLE_COMPILER_ROLE_PATHS, SIMPLE_INTERPRETER_ROLE_PATHS, SIMPLE_LOADER_ROLE_PATHS
 export simple_toolchain_role_paths, initramfs_init_artifact_admission
+export initramfs_tool_role_artifact_admission
 export validate_cpio_toolchain_archive, validate_zstd_toolchain_archive

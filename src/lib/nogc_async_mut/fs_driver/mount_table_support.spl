@@ -1,0 +1,107 @@
+"""Bounded-handle, canonical-path, and positioned-I/O helpers for MountTable."""
+
+use std.fs_driver.error.{FsError}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{FileHandle}
+use common.string_core.{str_char_at}
+
+val POSITIONED_DRIVER_MAX_BYTES: u64 = 0x7fffffffu64
+val MOUNT_TABLE_MAX_PATH_BYTES: i64 = 4096
+
+enum PositionedDriverKind:
+    Fat32
+    Nvfs
+    Dbfs
+
+fn mount_handle_encode(slot: i32, generation: u32) -> u64:
+    (generation.to_u64() << 32) | (slot + 1).to_u64()
+
+fn mount_handle_slot(handle: u64) -> i32:
+    val slot_number = (handle & 0xFFFFFFFFu64).to_u32()
+    if slot_number == 0u32:
+        return -1
+    (slot_number - 1u32).to_i32()
+
+fn mount_handle_generation(handle: u64) -> u32:
+    ((handle >> 32) & 0xFFFFFFFFu64).to_u32()
+
+fn mount_path_canonical(path: text) -> bool:
+    if path.len() == 0 or path.len() > MOUNT_TABLE_MAX_PATH_BYTES or
+        not path.starts_with("/") or path.contains("\\") or
+        path.contains("\0") or path.contains("\n") or path.contains("\r"):
+        return false
+    if path == "/": return true
+    if path.ends_with("/") or path.contains("//") or path.contains("/./") or
+        path.ends_with("/.") or path.contains("/../") or path.ends_with("/.."):
+        return false
+    true
+
+fn text_has_mount_prefix(source: text, prefix: text) -> bool:
+    if prefix == "/": return source.starts_with("/")
+    if source == prefix: return true
+    if prefix.len() > source.len(): return false
+    var idx: i64 = 0
+    while idx < prefix.len():
+        if str_char_at(source, idx) != str_char_at(prefix, idx): return false
+        idx = idx + 1
+    if source.len() <= prefix.len(): return false
+    str_char_at(source, prefix.len()) == "/"
+
+fn _positioned_prefix(buf: [u8], count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count and i < buf.len() as i64:
+        out.push(buf[i as i32])
+        i = i + 1
+    out
+
+fn driver_positioned_read_bytes(driver: DriverInstance, kind: PositionedDriverKind,
+                                handle: FileHandle, offset: i64, length: i64) -> Result<[u8], FsError>:
+    match kind:
+        case PositionedDriverKind.Fat32:
+            match driver:
+                case DriverInstance.Fat32(d):
+                    var buf = alloc_zeroed_bytes(length)
+                    val n = d.pread(handle, offset, buf)?
+                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
+                    Ok(_positioned_prefix(buf, n))
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Nvfs:
+            match driver:
+                case DriverInstance.Nvfs(d):
+                    var buf = alloc_zeroed_bytes(length)
+                    val n = d.pread(handle, offset, buf)?
+                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
+                    Ok(_positioned_prefix(buf, n))
+                case DriverInstance.NvfsPosix(d):
+                    var buf = alloc_zeroed_bytes(length)
+                    val n = d.pread(handle, offset, buf)?
+                    if n < 0 or n > length: return Err(FsError.IoError(code: 0u32))
+                    Ok(_positioned_prefix(buf, n))
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Dbfs:
+            match driver:
+                case DriverInstance.DbFs(d): d.pread_bytes_handle(handle, offset, length)
+                case _: Err(FsError.Unsupported)
+
+fn driver_positioned_write_bytes(driver: DriverInstance, kind: PositionedDriverKind,
+                                 handle: FileHandle, offset: i64, data: [u8]) -> Result<i64, FsError>:
+    match kind:
+        case PositionedDriverKind.Fat32:
+            match driver:
+                case DriverInstance.Fat32(d): d.pwrite(handle, offset, data)
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Nvfs:
+            match driver:
+                case DriverInstance.Nvfs(d): d.pwrite(handle, offset, data)
+                case DriverInstance.NvfsPosix(d): d.pwrite(handle, offset, data)
+                case _: Err(FsError.Unsupported)
+        case PositionedDriverKind.Dbfs:
+            match driver:
+                case DriverInstance.DbFs(d): d.pwrite_bytes_handle(handle, offset, data)
+                case _: Err(FsError.Unsupported)
+
+export PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES
+export mount_handle_encode, mount_handle_slot, mount_handle_generation
+export mount_path_canonical, text_has_mount_prefix
+export driver_positioned_read_bytes, driver_positioned_write_bytes

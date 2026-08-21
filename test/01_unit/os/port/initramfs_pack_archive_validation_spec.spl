@@ -1,6 +1,7 @@
 use std.spec
 use os.port.initramfs_validate.{
     initramfs_init_artifact_admission,
+    initramfs_tool_role_artifact_admission,
     validate_cpio_toolchain_archive,
     validate_zstd_toolchain_archive,
 }
@@ -113,8 +114,8 @@ fn _manifest(compiler: [u8], interpreter: [u8], loader: [u8], corrupt_digest: bo
 
 fn _archive(attack: text, corrupt_digest: bool, duplicate_roles: bool) -> [u8]:
     val compiler = _elf_fixture(2u8)
-    val interpreter: [u8] = if duplicate_roles: compiler else: [5u8, 6u8, 7u8]
-    val loader: [u8] = [8u8, 9u8, 10u8]
+    val interpreter: [u8] = if duplicate_roles: compiler else: _elf_fixture(3u8)
+    val loader: [u8] = _elf_fixture(4u8)
     var writer = NewcArchiveWriter(data: [], inode: 1)
     val init_data: [u8] = if attack == "placeholder-init": _script_fixture() else: if attack == "init-role-reuse": compiler else: _elf_fixture(1u8)
     writer.entry("sbin/init", 0x81ED, init_data)
@@ -175,6 +176,16 @@ describe "SimpleOS initramfs archive role validation":
             "build/os/init.shs", _script_fixture()).is_ok()).to_equal(false)
         expect(initramfs_init_artifact_admission(
             "build/os/placeholder", _script_fixture()).is_ok()).to_equal(false)
+
+    it "admits only native executables at the exact path for each tool role":
+        expect(initramfs_tool_role_artifact_admission(
+            "compiler", COMPILER_PATHS[0], _elf_fixture(2u8)).is_ok()).to_equal(true)
+        expect(initramfs_tool_role_artifact_admission(
+            "interpreter", INTERPRETER_PATHS[0], _smf_fixture(3u8)).is_ok()).to_equal(true)
+        expect(initramfs_tool_role_artifact_admission(
+            "loader", LOADER_PATHS[0], [8u8, 9u8, 10u8]).is_ok()).to_equal(false)
+        expect(initramfs_tool_role_artifact_admission(
+            "loader", INTERPRETER_PATHS[0], _elf_fixture(4u8)).is_ok()).to_equal(false)
 
     it "rejects SMF init envelopes with ambiguous role, arch, ABI, or stub metadata":
         var wrong_role = _smf_fixture(1u8)
@@ -279,6 +290,10 @@ describe "SimpleOS initramfs archive role validation":
     it "rejects traversal and symlink entries before extraction":
         expect(validate_cpio_toolchain_archive(_archive("traversal", false, false)).unwrap_err()).to_equal("archive-path-traversal")
         expect(validate_cpio_toolchain_archive(_archive("symlink", false, false)).unwrap_err()).to_equal("archive-entry-type-unsafe")
+        expect(cpio_parse_bounded(
+            _archive("traversal", false, false), 131072, 4096, 536870912).unwrap_err()).to_equal("cpio-path-not-canonical")
+        expect(cpio_parse_bounded(
+            _archive("symlink", false, false), 131072, 4096, 536870912).unwrap_err()).to_equal("cpio-entry-type-unsafe")
 
     it "rejects manifest digests that do not match archived bytes":
         expect(validate_cpio_toolchain_archive(_archive("", true, false)).unwrap_err()).to_equal("toolchain-role-payload-digest-mismatch")

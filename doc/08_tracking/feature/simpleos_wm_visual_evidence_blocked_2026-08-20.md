@@ -12,6 +12,17 @@ fencing in
 `test/03_system/os/wm/simpleos_wm_behavior_evidence_spec.spl`. They are not
 SimpleOS guest or physical-display evidence.
 
+The canonical service owner also rejects input addressed to a live but
+unfocused window before consuming its monotonic sequence or bounded queue
+capacity. `send_input_to_owner` uses that same owner to allocate the next
+sequence, reserve bounded ingress, deliver synchronously, and release the queue
+slot. This closes the production adapter-bypass ownership gap but remains
+host/system contract evidence, not a live-guest visual PASS.
+
+Host contracts additionally cover framebuffer-bound clipping, transitive
+damage coalescing, and fail-atomic restart preflight. They do not satisfy the
+missing guest/architecture/physical restart and pixel receipts below.
+
 ## Missing evidence
 
 - admitted pure-Simple SSpec runtime and current SimpleOS WM image;

@@ -197,6 +197,33 @@ Workers return bounded results. DB mutation stays with one durable owner. HTTP r
 
 ## Window-manager capsule
 
+`WmService` is the sole mutable authority for lifecycle generation, scene
+revision, focus stack, bounded damage, input admission, and presentation
+receipts. Platform adapters carry copied/encoded events and may propose a
+hit-tested target; admission validates the current generation, owner, focused
+window, monotonic sequence, payload bound, and queue capacity before committing
+input state. A rejected unfocused target consumes neither sequence nor queue
+capacity. Focus order is bottom-to-top and close fallback selects the surviving
+stack top. Restart invalidates old-generation input/presentation receipts and
+clears owner state deterministically.
+
+The production shell calls `send_input_to_owner`, which allocates its sequence
+through that same admission owner, reserves one bounded slot, performs the IPC
+copy, and releases the slot. Pointer-down focus first commits through
+`WmService.commit_focus`; keyboard/text delivery cannot invent focus locally.
+
+Host fixtures prove owner transitions and pixel composition only. The live
+guest row stays `BLOCKED[REQ-017-LIVE-GUEST]` until one fresh canonical bundle
+correlates guest input, scene mutation, presentation, framebuffer readback, and
+QMP pixels; architecture and physical-board rows remain independent.
+
+Damage candidates are validated before normalization, clipped to the
+shell-configured framebuffer bounds, and transitively coalesced under the
+64-region owner budget. Fully off-screen regions disappear; malformed geometry
+still fails closed. Restart validates generation capacity and completes IPC
+port teardown before mutating running/lifecycle/window state, so teardown
+failure leaves the prior owner state retryable.
+
 `WmService` owns window IDs/ownership, geometry, focus/z-order, input dispatch, lifecycle generation, and restart. The flow is:
 
 `InputBackend` → bounded `HostInputEvent` → `WmService` → frozen revisioned scene → `Engine2dWmFrameExecutor` → compositor/framebuffer → readback receipt.
@@ -209,7 +236,7 @@ Workers return bounded results. DB mutation stays with one durable owner. HTTP r
 
 `SimpleOsCapabilityLedgerV1` is the sole mutable capability-status owner. Runners cannot mutate it. A blocked row retains reason, TODO, prerequisite, exact resume command, artifacts, owner, and final reviewer. QEMU system-emulation, native-host, and physical-board rows are three separate environment classes; no combined `physical/native` status exists.
 
-The source implementation at `src/os/services/evidence/verifier_owner.spl` now keeps all trust-root, nonce, generation, challenge, verified-handle, admitted-row-expiry, and canonical ledger state behind one private canonical raw Mutex. Public values are registry references or ledger snapshots, never owner authority; conflicting initialization and duplicate nonce issuance linearize to one winner. Every unlock result is checked: failure permanently quarantines the owner, retains any already-applied mutation to prevent replay, and suppresses every success handle or ledger payload because its linearization is indeterminate. `artifact_snapshot.spl` re-hashes bounded source-manifest, image, binary, configuration, fixture, and ordered artifact bytes rather than accepting caller digest outcomes. A minted registry entry retains the SHA-256 of the complete canonical unsigned receipt, so consume cannot substitute a different internally valid receipt while replaying the same signature text and row key. `ledger_transition.spl` only prepares a non-authorizing value; consume validates the registry handle, constructs the next handle/admission/ledger roots off-root, then assigns all three under the same lock. Separate false release gates cover privileged boot trust-root ownership, service-owned campaign policy, and canonical freshness time, so first-writer structural initialization and copyable performance/time inputs cannot become authority. Cryptographic admission remains disabled until Ed25519 passes authoritative executable vectors and native constant-work review, so no verified handle is currently minted and caller booleans, prepared ledger values, or copied handles cannot promote a row. Self-hosted concurrent runtime evidence for this mutex path is still required before release admission.
+The source implementation at `src/os/services/evidence/verifier_owner.spl` now keeps all trust-root, nonce, generation, challenge, verified-handle, admitted-row-expiry, and canonical ledger state behind one private canonical raw Mutex. Public values are registry references or ledger snapshots, never owner authority; conflicting initialization and duplicate nonce issuance linearize to one winner. Every unlock result is checked: failure permanently quarantines the owner, retains any already-applied mutation to prevent replay, and suppresses every success handle or ledger payload because its linearization is indeterminate. `artifact_snapshot.spl` re-hashes bounded source-manifest, image, binary, configuration, fixture, and ordered artifact bytes rather than accepting caller digest outcomes. A minted registry entry retains the SHA-256 of the complete canonical unsigned receipt, so consume cannot substitute a different internally valid receipt while replaying the same signature text and row key. `ledger_transition.spl` only prepares a non-authorizing value; consume validates the registry handle, constructs the next handle/admission/ledger roots off-root, then assigns all three under the same lock. Separate false release gates cover privileged boot trust-root ownership, service-owned campaign policy, canonical freshness time, cryptographic runtime presence, and verifier admission, so first-writer structural initialization and copyable performance/time inputs cannot become authority. Cryptographic admission remains disabled until Ed25519 passes authoritative executable vectors and native constant-work review, so no verified handle is currently minted and caller booleans, prepared ledger values, copied handles, or a positive read-only performance projection cannot promote a row. The projection fails closed when fixture, baseline, or runtime measurements are unavailable. Self-hosted concurrent runtime evidence for this mutex path is still required before release admission.
 
 ## Current implementation boundary (2026-08-20)
 

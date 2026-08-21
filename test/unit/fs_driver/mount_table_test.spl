@@ -166,13 +166,26 @@ describe "MountTable — execute-open policy and ownership":
         expect(r.is_err()).to_be(true)
         expect(mt.mounts[0].namespace_generation).to_equal(0xFFFFFFFFFFFFFFFFu64)
 
-    it "fails handle allocation before opening at exhaustion":
+    it "reuses bounded slots with a new generation and rejects the stale handle":
         var mt = MountTable.new()
         mt.mount("/", real_driver(), MountOptions.default())
-        mt.next_file_handle = 0xFFFFFFFFFFFFFFFFu64
-        expect(mt.open("/blocked", OpenFlags.read_only()).is_err()).to_be(true)
-        mt.next_dir_handle = 0xFFFFFFFFFFFFFFFFu64
-        expect(mt.opendir("/").is_err()).to_be(true)
+        val first = mt.open("/first", OpenFlags.read_only()).unwrap()
+        expect(mt.close(first).is_ok()).to_be(true)
+        val second = mt.open("/second", OpenFlags.read_only()).unwrap()
+        expect(first.id != second.id).to_be(true)
+        expect((first.id & 0xFFFFFFFFu64)).to_equal(second.id & 0xFFFFFFFFu64)
+        expect(mt.read(first, 1).unwrap_err()).to_equal(FsError.StaleHandle)
+        expect(mt.read(second, 1).is_ok()).to_be(true)
+
+    it "rejects exhausted directory admission before backend opendir":
+        var mt = MountTable.new()
+        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
+        mt.dir_capacity_limit = 0
+        expect(mt.opendir("/").unwrap_err()).to_equal(FsError.TooLarge)
+        match mt.mounts[0].driver:
+            case DriverInstance.RamFs(driver): expect(driver.fd_table.len()).to_equal(0)
+            case _: fail("test mount did not retain the RamFs backend")
+        expect(mt.unmount("/").is_ok()).to_be(true)
 
     it "fails mount allocation before registering at exhaustion":
         var mt = MountTable.new()

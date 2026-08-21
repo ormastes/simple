@@ -38,3 +38,16 @@ runs the literal guest version/emit-object/link/execute flow before shutdown and
 emits the separate desktop/guest receipt. The frozen commands, helper names,
 aliases, receipt fields, and fail-closed policy live in the canonical x86_64
 plan; the wrapper remains B-DESKTOP-LIVE until implemented.
+# Guest filesystem Hello World evidence boundary
+
+`os.port.guest_filesystem_hello_receipt` is a typed non-authorizing projection for the
+guest-native C smoke workflow. It binds Clang and LLD to absolute guest paths,
+binds all intermediate paths to the selected FAT32, DBFS, or NVFS mount, and
+requires the actual target Clang, LLD, source, object, and target ELF bytes
+alongside their digests. Missing artifacts, PATH lookup, host execution, cross-filesystem path
+substitution, wrong-machine ELF output, non-zero exits, and output substitution
+are hard failures. Caller booleans and transcripts are not authenticated
+evidence: even a structurally consistent forged candidate cannot authorize
+guest execution. Only the external evidence-service owner may combine its
+authenticated handle with a loader-owned consume-once token and commit a ledger
+result.

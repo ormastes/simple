@@ -9,7 +9,8 @@ use std.spec
 use std.fs_driver.nvfs_superblock.{
     nvfs_superblock_set_device, nvfs_superblock_has_device,
     nvfs_superblock_format_disk, nvfs_superblock_probe_disk,
-    nvfs_superblock_read_from_disk, NvfsSuperblock, NVFS_MAGIC, NVFS_VERSION,
+    nvfs_superblock_read_from_disk, nvfs_superblock_recover_disk,
+    NvfsSuperblock, NVFS_MAGIC, NVFS_VERSION,
     nvfs_raw_write_sector, nvfs_raw_read_sector
 }
 use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
@@ -92,6 +93,31 @@ describe "NVFS superblock disk I/O":
         expect(recovered.valid).to_be(true)
         expect(recovered.replica_id).to_equal(1u8)
         expect(recovered.uuid_hi).to_equal(0x3333u64)
+
+    it "repairs a corrupt slot from the intact validated peer":
+        var dev = _make_device()
+        nvfs_superblock_set_device(dev)
+        expect(nvfs_superblock_format_disk(0x7777u64, 0x8888u64)).to_be(true)
+        var replica_a = nvfs_raw_read_sector(0u64)
+        replica_a[8] = replica_a[8] ^ 0x5Au8
+        expect(nvfs_raw_write_sector(0u64, replica_a)).to_be(true)
+        expect(nvfs_superblock_recover_disk()).to_be(true)
+        val recovered_a = nvfs_raw_read_sector(0u64)
+        expect(recovered_a[48]).to_equal(0u8)
+        val recovered = nvfs_superblock_read_from_disk()
+        expect(recovered.valid).to_be(true)
+        expect(recovered.uuid_hi).to_equal(0x7777u64)
+
+    it "rejects valid replicas stored in the wrong physical slots":
+        var dev = _make_device()
+        nvfs_superblock_set_device(dev)
+        expect(nvfs_superblock_format_disk(0x9999u64, 0xAAAAu64)).to_be(true)
+        val replica_a = nvfs_raw_read_sector(0u64)
+        val replica_b = nvfs_raw_read_sector(1u64)
+        expect(nvfs_raw_write_sector(0u64, replica_b)).to_be(true)
+        expect(nvfs_raw_write_sector(1u64, replica_a)).to_be(true)
+        expect(nvfs_superblock_probe_disk()).to_be(false)
+        expect(nvfs_superblock_recover_disk()).to_be(false)
 
     it "fails closed when both replicas are corrupt":
         var dev = _make_device()

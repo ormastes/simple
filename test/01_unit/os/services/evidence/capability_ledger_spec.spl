@@ -17,6 +17,7 @@ use os.services.evidence.capability_ledger.{
     simpleos_capability_ledger_v1,
     simpleos_capability_ledger_commit,
     simpleos_capability_ledger_commit_with_admission,
+    simpleos_capability_performance_projection,
     simpleos_capability_candidate_validate,
     simpleos_capability_row_key
 }
@@ -246,12 +247,11 @@ describe "SimpleOS capability ledger owner":
         expect(result.reason).to_contain("verification-outcome")
 
     it "rejects a substituted hash and leaves the parent ledger unchanged":
-        var candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-2")
-        var candidate_row = candidate.row
-        candidate_row.image_hash = HASH_A
-        candidate.row = candidate_row
+        val candidate = pass_candidate("REQ-001", "ledger", "x86_64", "r-2")
+        var admission = admission_for(candidate.receipt)
+        admission.current_image_hash = HASH_A
         val result = simpleos_capability_ledger_commit_with_admission(
-            simpleos_capability_ledger_v1(), [candidate], [admission_for(candidate.receipt)])
+            simpleos_capability_ledger_v1(), [candidate], [admission])
         expect(result.ok).to_equal(false)
         expect(result.ledger.rows.len()).to_equal(0)
         expect(result.reason).to_contain("current-hash-binding")
@@ -303,7 +303,7 @@ describe "SimpleOS capability ledger owner":
         expect(first_result.reason).to_contain("cryptographic-verifier-unavailable")
         expect(first_result.ledger.consumed_nonces.len()).to_equal(0)
 
-    it "rejects replayed receipt nonces even for a different row key":
+    it "does not inspect batch nonce replay before cryptographic admission":
         val first = pass_candidate("REQ-001", "ledger", "x86_64", "r-3")
         var second = pass_candidate("REQ-002", "ledger", "x86_64", "r-4")
         var second_receipt = second.receipt
@@ -316,8 +316,9 @@ describe "SimpleOS capability ledger owner":
             simpleos_capability_ledger_v1(), [first, second],
             [admission_for(first.receipt), admission_for(second.receipt)])
         expect(result.ok).to_equal(false)
-        expect(result.reason).to_equal("duplicate-nonce")
+        expect(result.reason).to_contain("cryptographic-verifier-unavailable")
         expect(result.ledger.rows.len()).to_equal(0)
+        expect(result.ledger.consumed_nonces.len()).to_equal(0)
 
     it "rejects a performance promotion without ten samples":
         val candidate = pass_candidate("NFR-002", "performance", "x86_64", "r-perf")
@@ -464,3 +465,28 @@ describe "SimpleOS capability ledger owner":
             simpleos_capability_ledger_v1(), [candidate], [admission])
         expect(result.ok).to_equal(false)
         expect(result.reason).to_contain("cryptographic-verifier-unavailable")
+
+    it "projects performance without granting ledger admission authority":
+        val candidate = native_performance_candidate(
+            "r-perf-projection", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_external_comparability_verified = true
+        val projection = simpleos_capability_performance_projection(
+            candidate, admission)
+        expect(projection.applicable).to_be(true)
+        expect(projection.admissible).to_be(true)
+        val commit = simpleos_capability_ledger_commit_with_admission(
+            simpleos_capability_ledger_v1(), [candidate], [admission])
+        expect(commit.ok).to_be(false)
+        expect(commit.reason).to_contain("cryptographic-verifier-unavailable")
+
+    it "fails a performance projection closed when runtime inputs are absent":
+        val candidate = native_performance_candidate(
+            "r-perf-projection-missing", 1000, 1000)
+        var admission = admission_for(candidate.receipt)
+        admission.performance_fixture_hash = ""
+        val projection = simpleos_capability_performance_projection(
+            candidate, admission)
+        expect(projection.applicable).to_be(true)
+        expect(projection.admissible).to_be(false)
+        expect(projection.reason).to_equal("performance-evidence")
