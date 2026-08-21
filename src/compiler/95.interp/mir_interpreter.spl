@@ -18,6 +18,7 @@ use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
 use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_binop_code}
 use compiler.common.diagnostics.span.{Span}
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 # Cohesion split (2026-08-18): class-independent pieces live in sibling
 # modules; re-exported here so the public surface of this module is unchanged.
@@ -57,6 +58,7 @@ class MirInterpreter:
     next_aggregate_id: i64   # Counter for aggregate base addresses
     aggregate_sizes: {i64: i64}  # Aggregate base address -> element count
     string_table: {i64: text}
+    last_error: InterpError?  # Lane C8: deferred diagnostic from i64-returning helpers (const/intrinsic)
     next_string_id: i64
     strict_mode: bool       # Miri-mode: SIMPLE_STRICT_INTERP=1, read once at create()
     current_function: text  # Name of the function currently executing
@@ -112,6 +114,7 @@ impl MirInterpreter:
             next_aggregate_id: 100000,
             aggregate_sizes: {},
             string_table: {},
+            last_error: nil,
             next_string_id: -1,
             # Read once at startup so default (unset) perf/behavior is untouched;
             # never re-read per instruction.
@@ -222,7 +225,7 @@ impl MirInterpreter:
                     case Int(v): v
                     case Float(v): f64_to_bits(v)
                     case Bool(v): if v: 1 else: 0
-                    case _: 0  # Stub for complex constants
+                    case _: self._eval_const(value)  # Lane C8: aggregates/strings materialise like execute_const (was a silent 0)
 
     me set_function_table(table: {text: MirFunction}):
         """Set the function table for cross-function calls."""
@@ -261,7 +264,9 @@ impl MirInterpreter:
         match inst.kind:
             case Const(dest, value, type_):
                 self.execute_const(dest, value)
-                nil
+                val const_err = self.last_error
+                self.last_error = nil
+                const_err
 
             case Copy(dest, src):
                 if self.strict_mode and not self.is_local_set(src):
@@ -432,7 +437,9 @@ impl MirInterpreter:
                 val result = self._execute_intrinsic(name, args)
                 if dest.?:
                     self.set_local(dest.unwrap(), result)
-                nil
+                val intrinsic_err = self.last_error
+                self.last_error = nil
+                intrinsic_err
 
             case DecisionProbe(_, semantic_id, _, _, _, _):
                 Some(InterpError.UnsupportedOperation(
@@ -538,15 +545,15 @@ impl MirInterpreter:
                 nil
 
             case TransferOut(_, _, _, _, _, _):
-                Some(InterpError.UnsupportedOperation(op: "transfer envelope"))
+                self._unsupported_inst("TransferOut", inst.span)
             case TransferIn(_, _, _, _):
-                Some(InterpError.UnsupportedOperation(op: "transfer receipt"))
+                self._unsupported_inst("TransferIn", inst.span)
             case FreezeRegion(_):
-                Some(InterpError.UnsupportedOperation(op: "freeze region"))
+                self._unsupported_inst("FreezeRegion", inst.span)
             case AcquireSnapshot(_, _):
-                Some(InterpError.UnsupportedOperation(op: "snapshot"))
+                self._unsupported_inst("AcquireSnapshot", inst.span)
             case CommitUpdates(_, _, _):
-                Some(InterpError.UnsupportedOperation(op: "parent commit"))
+                self._unsupported_inst("CommitUpdates", inst.span)
 
             case CheckedBinOp(dest, op, left, right):
                 # Miri-mode: real overflow checking under SIMPLE_STRICT_INTERP;
@@ -556,8 +563,208 @@ impl MirInterpreter:
                 else:
                     self.execute_binop(dest, op, left, right)
 
+            # ----------------------------------------------------------------
+            # Lane C8 (interpreter coverage, hardening plan 2026-08-21 sections
+            # 11.3-11.6). Every remaining MirInstKind variant gets an EXPLICIT
+            # arm, even the ones this interpreter does not execute. Before this
+            # block all of them reached `case _:` and were reported as the
+            # unnamed "unknown instruction" -- the operator learned that
+            # SOMETHING was unsupported, not WHAT, and could not grep for it.
+            # Each arm now raises a stable, spanned E-INTERP-INST-<Variant>.
+            # Universe: spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn;
+            # table: spec/compiler_schema/transitions/mir_inst_to_interp.sdn.
+            # ----------------------------------------------------------------
+            case GpuAtomicCas(_, _, _, _):
+                self._unsupported_inst("GpuAtomicCas", inst.span)
+            case GpuAtomicOp(_, _, _, _):
+                self._unsupported_inst("GpuAtomicOp", inst.span)
+            case GpuBarrier(_):
+                self._unsupported_inst("GpuBarrier", inst.span)
+            case GpuBlockDim(_, _):
+                self._unsupported_inst("GpuBlockDim", inst.span)
+            case GpuBlockId(_, _):
+                self._unsupported_inst("GpuBlockId", inst.span)
+            case GpuGlobalId(_, _):
+                self._unsupported_inst("GpuGlobalId", inst.span)
+            case GpuGridDim(_, _):
+                self._unsupported_inst("GpuGridDim", inst.span)
+            case GpuKernelDef(_):
+                self._unsupported_inst("GpuKernelDef", inst.span)
+            case GpuLaunch(_):
+                self._unsupported_inst("GpuLaunch", inst.span)
+            case GpuLocalId(_, _):
+                self._unsupported_inst("GpuLocalId", inst.span)
+            case GpuMemFence(_):
+                self._unsupported_inst("GpuMemFence", inst.span)
+            case GpuSharedAlloc(_, _, _):
+                self._unsupported_inst("GpuSharedAlloc", inst.span)
+            case HostGpuLaneBegin(_, _):
+                self._unsupported_inst("HostGpuLaneBegin", inst.span)
+            case HostGpuLaneEnd(_):
+                self._unsupported_inst("HostGpuLaneEnd", inst.span)
+            case InlineAsm(_, _, _, _, _, _, _):
+                self._unsupported_inst("InlineAsm", inst.span)
+            case LoadGlobal(_, _):
+                self._unsupported_inst("LoadGlobal", inst.span)
+            case MaskedAdd(_, _, _, _):
+                self._unsupported_inst("MaskedAdd", inst.span)
+            case MaskedFma(_, _, _, _, _):
+                self._unsupported_inst("MaskedFma", inst.span)
+            case MaskedMul(_, _, _, _):
+                self._unsupported_inst("MaskedMul", inst.span)
+            case MaskFromCmp(_, _, _, _):
+                self._unsupported_inst("MaskFromCmp", inst.span)
+            case MirSimdBinop(_, _, _, _):
+                self._unsupported_inst("MirSimdBinop", inst.span)
+            case MirSimdCmp(_, _, _, _):
+                self._unsupported_inst("MirSimdCmp", inst.span)
+            case MirSimdGather(_, _, _, _):
+                self._unsupported_inst("MirSimdGather", inst.span)
+            case MirSimdLoad(_, _, _, _):
+                self._unsupported_inst("MirSimdLoad", inst.span)
+            case MirSimdMaskOp(_, _, _, _):
+                self._unsupported_inst("MirSimdMaskOp", inst.span)
+            case MirSimdPermute(_, _, _):
+                self._unsupported_inst("MirSimdPermute", inst.span)
+            case MirSimdReduce(_, _, _):
+                self._unsupported_inst("MirSimdReduce", inst.span)
+            case MirSimdScalableVsetvl(_, _, _):
+                self._unsupported_inst("MirSimdScalableVsetvl", inst.span)
+            case MirSimdScatter(_, _, _):
+                self._unsupported_inst("MirSimdScatter", inst.span)
+            case MirSimdSelect(_, _, _, _):
+                self._unsupported_inst("MirSimdSelect", inst.span)
+            case MirSimdShuffle(_, _, _, _):
+                self._unsupported_inst("MirSimdShuffle", inst.span)
+            case MirSimdSplat(_, _, _):
+                self._unsupported_inst("MirSimdSplat", inst.span)
+            case MirSimdStore(_, _, _):
+                self._unsupported_inst("MirSimdStore", inst.span)
+            case MirSimdTernop(_, _, _, _, _):
+                self._unsupported_inst("MirSimdTernop", inst.span)
+            case MirSimdUnop(_, _, _):
+                self._unsupported_inst("MirSimdUnop", inst.span)
+            case MirWarpActivesMask(_):
+                self._unsupported_inst("MirWarpActivesMask", inst.span)
+            case MirWarpBallot(_, _, _):
+                self._unsupported_inst("MirWarpBallot", inst.span)
+            case MirWarpReduce(_, _, _, _):
+                self._unsupported_inst("MirWarpReduce", inst.span)
+            case MirWarpShfl(_, _, _, _, _):
+                self._unsupported_inst("MirWarpShfl", inst.span)
+            case MirWarpSync(_):
+                self._unsupported_inst("MirWarpSync", inst.span)
+            case PredicatedAdd(_, _, _, _, _, _):
+                self._unsupported_inst("PredicatedAdd", inst.span)
+            case PredicatedFma(_, _, _, _, _, _, _):
+                self._unsupported_inst("PredicatedFma", inst.span)
+            case PredicatedMul(_, _, _, _, _, _):
+                self._unsupported_inst("PredicatedMul", inst.span)
+            case ResultMatchSemantic(_, _, _, _, _, _, _):
+                self._unsupported_inst("ResultMatchSemantic", inst.span)
+            case ScalableVecFence(_):
+                self._unsupported_inst("ScalableVecFence", inst.span)
+            case SimdAddF32x4(_, _, _):
+                self._unsupported_inst("SimdAddF32x4", inst.span)
+            case SimdAddF32x8(_, _, _):
+                self._unsupported_inst("SimdAddF32x8", inst.span)
+            case SimdAddF64x4(_, _, _):
+                self._unsupported_inst("SimdAddF64x4", inst.span)
+            case SimdAddI32x4(_, _, _):
+                self._unsupported_inst("SimdAddI32x4", inst.span)
+            case SimdAddI32x8(_, _, _):
+                self._unsupported_inst("SimdAddI32x8", inst.span)
+            case SimdAndI32x4(_, _, _):
+                self._unsupported_inst("SimdAndI32x4", inst.span)
+            case SimdAndI32x8(_, _, _):
+                self._unsupported_inst("SimdAndI32x8", inst.span)
+            case SimdDivF32x4(_, _, _):
+                self._unsupported_inst("SimdDivF32x4", inst.span)
+            case SimdDivF32x8(_, _, _):
+                self._unsupported_inst("SimdDivF32x8", inst.span)
+            case SimdDivF64x4(_, _, _):
+                self._unsupported_inst("SimdDivF64x4", inst.span)
+            case SimdFmaF32x4(_, _, _, _):
+                self._unsupported_inst("SimdFmaF32x4", inst.span)
+            case SimdFmaF32x8(_, _, _, _):
+                self._unsupported_inst("SimdFmaF32x8", inst.span)
+            case SimdFmaF64x4(_, _, _, _):
+                self._unsupported_inst("SimdFmaF64x4", inst.span)
+            case SimdHaddF32x4(_, _):
+                self._unsupported_inst("SimdHaddF32x4", inst.span)
+            case SimdHmaxF32x4(_, _):
+                self._unsupported_inst("SimdHmaxF32x4", inst.span)
+            case SimdHminF32x4(_, _):
+                self._unsupported_inst("SimdHminF32x4", inst.span)
+            case SimdMulF32x4(_, _, _):
+                self._unsupported_inst("SimdMulF32x4", inst.span)
+            case SimdMulF32x8(_, _, _):
+                self._unsupported_inst("SimdMulF32x8", inst.span)
+            case SimdMulF64x4(_, _, _):
+                self._unsupported_inst("SimdMulF64x4", inst.span)
+            case SimdMulI32x4(_, _, _):
+                self._unsupported_inst("SimdMulI32x4", inst.span)
+            case SimdMulI32x8(_, _, _):
+                self._unsupported_inst("SimdMulI32x8", inst.span)
+            case SimdOrI32x4(_, _, _):
+                self._unsupported_inst("SimdOrI32x4", inst.span)
+            case SimdOrI32x8(_, _, _):
+                self._unsupported_inst("SimdOrI32x8", inst.span)
+            case SimdShlI32x4(_, _, _):
+                self._unsupported_inst("SimdShlI32x4", inst.span)
+            case SimdShlI32x8(_, _, _):
+                self._unsupported_inst("SimdShlI32x8", inst.span)
+            case SimdShrI32x4(_, _, _):
+                self._unsupported_inst("SimdShrI32x4", inst.span)
+            case SimdShrI32x8(_, _, _):
+                self._unsupported_inst("SimdShrI32x8", inst.span)
+            case SimdSubF32x4(_, _, _):
+                self._unsupported_inst("SimdSubF32x4", inst.span)
+            case SimdSubF32x8(_, _, _):
+                self._unsupported_inst("SimdSubF32x8", inst.span)
+            case SimdSubF64x4(_, _, _):
+                self._unsupported_inst("SimdSubF64x4", inst.span)
+            case SimdSubI32x4(_, _, _):
+                self._unsupported_inst("SimdSubI32x4", inst.span)
+            case SimdSubI32x8(_, _, _):
+                self._unsupported_inst("SimdSubI32x8", inst.span)
+            case SimdXorI32x4(_, _, _):
+                self._unsupported_inst("SimdXorI32x4", inst.span)
+            case SimdXorI32x8(_, _, _):
+                self._unsupported_inst("SimdXorI32x8", inst.span)
+            case StoreGlobal(_, _):
+                self._unsupported_inst("StoreGlobal", inst.span)
+            case VhdlConcat(_, _):
+                self._unsupported_inst("VhdlConcat", inst.span)
+            case VhdlPortMap(_, _, _):
+                self._unsupported_inst("VhdlPortMap", inst.span)
+            case VhdlProcess(_, _):
+                self._unsupported_inst("VhdlProcess", inst.span)
+            case VhdlResize(_, _, _, _):
+                self._unsupported_inst("VhdlResize", inst.span)
+            case VhdlSignalAssign(_, _, _):
+                self._unsupported_inst("VhdlSignalAssign", inst.span)
+            case VhdlSlice(_, _, _, _):
+                self._unsupported_inst("VhdlSlice", inst.span)
+            case VhdlVarAssign(_, _):
+                self._unsupported_inst("VhdlVarAssign", inst.span)
+
             case _:
-                Some(InterpError.UnsupportedOperation(op: "unknown instruction"))
+                # Not a variant: every MirInstKind has an arm above, so this is
+                # reachable only by a NEW upstream variant with no arm here, or a
+                # mis-decoded enum handle. Either way it is named and spanned.
+                val unknown_inst_disc = rt_enum_discriminant(inst.kind)
+                eprint("[mir-interp] E-INTERP-INST-Unknown disc={unknown_inst_disc} at={self._format_span(inst.span)}\n")
+                Some(InterpError.UnsupportedOperation(op: "E-INTERP-INST-Unknown: no interpreter arm for MIR instruction kind (discriminant {unknown_inst_disc}) at {self._format_span(inst.span)}"))
+
+    me _unsupported_inst(variant: text, span: Span?) -> InterpError?:
+        """NAMED, spanned diagnostic for a MirInstKind variant that has an
+        explicit arm but no interpreter implementation (lane C8). The code
+        `E-INTERP-INST-<Variant>` is stable and greppable; the previous shared
+        wildcard only said "unknown instruction"."""
+        val code = "E-INTERP-INST-{variant}"
+        eprint("[mir-interp] {code} at={self._format_span(span)}\n")
+        Some(InterpError.UnsupportedOperation(op: "{code}: MIR interpreter does not execute {variant} at {self._format_span(span)}"))
 
     # ========================================================================
     # Helper Methods
@@ -598,7 +805,14 @@ impl MirInterpreter:
                     elems.push(fields[key])
                 self._store_const_aggregate(elems)
             case Zero: 0
-            case _: 0
+            case _:
+                # Lane C8: all eight MirConstValue variants have arms above; this
+                # is reachable only by a new upstream variant or a mis-decoded
+                # handle. It used to yield 0 silently.
+                val unknown_const_disc = rt_enum_discriminant(value)
+                eprint("[mir-interp] E-INTERP-CONST-Unknown disc={unknown_const_disc}\n")
+                self.last_error = Some(InterpError.UnsupportedOperation(op: "E-INTERP-CONST-Unknown: no interpreter arm for MIR constant kind (discriminant {unknown_const_disc})"))
+                0
 
     me _store_const_aggregate(elements: [MirConstValue]) -> i64:
         """Materialize a constant aggregate; returns its base address."""
@@ -672,7 +886,11 @@ impl MirInterpreter:
             case BroadcastPow: l ** r
             case Offset: l + r
             case _:
-                return Some(InterpError.UnsupportedOperation(op: "unknown binop"))
+                # Lane C8: all 23 MirBinOp variants have arms above; reachable
+                # only by a new upstream variant or a mis-decoded handle.
+                val unknown_binop_disc = rt_enum_discriminant(op)
+                eprint("[mir-interp] E-INTERP-BINOP-Unknown disc={unknown_binop_disc}\n")
+                return Some(InterpError.UnsupportedOperation(op: "E-INTERP-BINOP-Unknown: no interpreter arm for MIR binop (discriminant {unknown_binop_disc})"))
 
         self.set_local(dest, result)
         nil
@@ -730,8 +948,9 @@ impl MirInterpreter:
             case Not: if v == 0: 1 else: 0
             case BitNot: ~v
             case Transpose:
-                # Stub: Transpose needs matrix support
-                v
+                # Lane C8: was a silent identity stub; matrices are not modelled here.
+                eprint("[mir-interp] E-INTERP-UNOP-Transpose\n")
+                return Some(InterpError.UnsupportedOperation(op: "E-INTERP-UNOP-Transpose: MIR interpreter does not execute matrix transpose"))
 
         self.set_local(dest, result)
         nil
@@ -810,7 +1029,9 @@ impl MirInterpreter:
                 case Arg(index):
                     if index < arg_values.len():
                         init_val = arg_values[index]
-                case _: pass
+                case Var: pass    # Lane C8: explicit -- zero-initialised
+                case Temp: pass
+                case Return: pass
             self.locals[local.id.id] = init_val
 
         # Start at entry block
@@ -911,7 +1132,7 @@ impl MirInterpreter:
                 elif args.len() > 0:
                     self.get_operand(args[0])
                 else:
-                    0
+                    self._intrinsic_arity_error(name, args.len())
             case "print":
                 if args.len() > 0:
                     val v = self.get_operand(args[0])
@@ -929,12 +1150,12 @@ impl MirInterpreter:
                     val v = self.get_operand(args[0])
                     v  # Length stored as value
                 else:
-                    0
+                    self._intrinsic_arity_error(name, args.len())
             case "sizeof":
                 if args.len() > 0:
                     8  # Default word size
                 else:
-                    0
+                    self._intrinsic_arity_error(name, args.len())
             case "typeof":
                 0  # Type info not available at interpreter level
             case "abort":
@@ -945,26 +1166,36 @@ impl MirInterpreter:
                     val b = self.get_operand(args[1])
                     if a < b: a else: b
                 else:
-                    0
+                    self._intrinsic_arity_error(name, args.len())
             case "max":
                 if args.len() >= 2:
                     val a = self.get_operand(args[0])
                     val b = self.get_operand(args[1])
                     if a > b: a else: b
                 else:
-                    0
+                    self._intrinsic_arity_error(name, args.len())
             case "abs":
                 if args.len() > 0:
                     val v = self.get_operand(args[0])
                     if v < 0: -v else: v
                 else:
-                    0
+                    self._intrinsic_arity_error(name, args.len())
             # NOTE: "bounds_check" is intercepted in execute_instruction's
             # Intrinsic case (_execute_bounds_check) so OOB traps loudly
             # instead of returning a value lowering may discard.
             case _:
-                # Unknown intrinsic - return 0
+                # Lane C8: an unknown intrinsic used to return 0 silently.
+                eprint("[mir-interp] E-INTERP-INTRINSIC-Unknown name={name}\n")
+                self.last_error = Some(InterpError.UnsupportedOperation(op: "E-INTERP-INTRINSIC-Unknown: MIR interpreter has no implementation for intrinsic '{name}'"))
                 0
+
+    me _intrinsic_arity_error(name: text, got: i64) -> i64:
+        """Lane C8: an intrinsic invoked with too few operands used to yield a
+        silent 0. Records a deferred, named diagnostic and returns 0 so the
+        i64-returning evaluator keeps its shape; execute_instruction raises it."""
+        eprint("[mir-interp] E-INTERP-INTRINSIC-Arity name={name} got={got}\n")
+        self.last_error = Some(InterpError.UnsupportedOperation(op: "E-INTERP-INTRINSIC-Arity: intrinsic '{name}' received {got} operand(s), fewer than it requires"))
+        0
 
     me _execute_bounds_check(dest: LocalId?, args: [MirOperand]) -> InterpError?:
         """Loud OOB trap — parity with runtime.c __simple_intrinsic_bounds_check
