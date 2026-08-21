@@ -780,3 +780,12 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
   census compares a different population and reads as a phantom shrink. Zero evaluated
   gates is `ERROR`, never `PASS`. `status: planned` lanes report `SKIPPED — NOT VERIFIED`
   and may never report PASS.
+
+## Mandatory-check tiers
+
+Interactive pushes run only the bounded checks in
+`scripts/check/check-push-must-pass.shs`. Compiler phases, full sdoctest
+discovery, Caret launch coverage, and other expensive requirements run through
+`scripts/check/check-bootstrap-must-pass.shs`. Their textual SDN ledger binds
+each PASS and its evidence to the exact source fingerprint; changed source
+returns the row to TODO until a successful bootstrap refreshes it.

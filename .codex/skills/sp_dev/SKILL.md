@@ -1116,3 +1116,12 @@ resources. Flush SQ/data buffers before ringing a doorbell and synchronize CQ,
 Identify, and read buffers before CPU inspection. A linked image or clean
 Identify parser test without those ownership transitions is not live NVMe
 evidence.
+
+## Mandatory-check hook setup
+
+At lane startup, run `sh scripts/setup/install-must-check-hooks.shs --check`.
+If it reports absent or outdated, run the same script with `--install`. On
+Windows use `scripts/setup/install-must-check-hooks.ps1 -Check` and then
+`-Install`. Keep interactive checks in `check-push-must-pass.shs`; register
+expensive checks in `check-bootstrap-must-pass.shs` so a successful ad-hoc
+bootstrap refreshes the source-bound SDN evidence consumed by the next push.
