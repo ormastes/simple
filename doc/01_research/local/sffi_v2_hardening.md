@@ -272,6 +272,16 @@ fallbacks have been removed from this module. A focused sabotage test passes,
 and `cranelift-sffi-fail-closed.shs` permanently gates these source invariants
 without adding runtime work.
 
+The interpreter rustls client boundary previously converted missing or
+wrong-typed hosts, SNI names, payloads, ports, connection handles, sizes, and
+timeouts into nil runtime strings or integer zero. All nine handlers now reject
+those arguments before calling the provider. Runtime input strings and copied
+text outputs are scoped and released, removing the prior per-call allocation
+leak; valid network operations remain single provider calls. Four focused tests
+pass, including malformed arguments, null-positive-length output, valid empty
+text, and scoped string ownership. A source-only TLS audit prevents permissive
+fallbacks or unowned runtime strings from returning.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may
