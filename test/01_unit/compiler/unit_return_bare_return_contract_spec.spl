@@ -1,0 +1,76 @@
+# Reproduce spec: a bare `return` in a `-> unit` function must not trip the
+# SFFI non-optional return contract.
+#
+# Bug (2026-08-21, native-build blocker): `native-build` of the app closure
+# aborted during parse with
+#   error: semantic: nil is forbidden by the non-optional return contract of
+#   'parser_validate_unit_suffix'
+# for src/compiler/10.frontend/core/_ParserPrimary/asm_match_suffix.spl, whose
+# signature is `fn parser_validate_unit_suffix(suf_name: text) -> unit:` with
+# early bare `return` statements.
+#
+# Root cause: `sffi_return_contract`
+# (src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs)
+# recognised only `None`, the empty tuple, and the literal spelling `()` as the
+# Unit contract. The keyword spellings `unit` and `void` fell through to
+# `Some(_) => NonOptional`, so the Value::Nil produced by a bare `return` was
+# rejected. Everywhere else in the compiler all three spellings already map to
+# the same void type (`"void" | "unit" | "()" => TypeId::VOID` in both
+# type_inference_config.rs and hir/lower/type_resolver.rs), so this classifier
+# was the lone outlier.
+
+use std.io.{process_run, env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+
+describe "unit-returning functions accept a bare return":
+    it "a bare return in a `-> unit` fn is not a contract violation (repro)":
+        # Exactly the shape of parser_validate_unit_suffix: guard clauses that
+        # bail out early with a bare `return`, then fall off the end.
+        fn validate_suffix(name: text) -> unit:
+            if name == "":
+                return
+            if name == "i64":
+                return
+            ()
+        validate_suffix("")
+        validate_suffix("i64")
+        validate_suffix("meters")
+        assert_true(true)
+
+    it "a bare return in a `-> void` fn is not a contract violation (generalization)":
+        fn early_void(flag: bool) -> void:
+            if flag:
+                return
+            ()
+        early_void(true)
+        early_void(false)
+        assert_true(true)
+
+    it "a bare return in a `-> ()` fn stays accepted (regression fence)":
+        # The one spelling that always worked; it must keep working.
+        fn early_paren(flag: bool) -> ():
+            if flag:
+                return
+            ()
+        early_paren(true)
+        early_paren(false)
+        assert_true(true)
+
+    it "a `-> unit` fn with no return statement at all still works":
+        fn no_return(x: i64) -> unit:
+            val _ = x + 1
+            ()
+        no_return(3)
+        assert_true(true)
+
+    it "the non-optional contract still fires for a real non-unit return type":
+        # The fix must not disarm the contract: `unit`/`void` are void
+        # spellings, not a blanket exemption for every declared return type.
+        val src = "fn f() -> i64:\n    return nil\n\nfn main() -> i64:\n    f()\n"
+        val path = "/tmp/unit_return_contract_negative.spl"
+        val _ = file_write(path, src)
+        var bin = env_get("SIMPLE_BIN") ?? ""
+        if bin.len() == 0:
+            bin = "bin/simple"
+        val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", bin + " run " + path + " 2>&1"])
+        expect(stdout + stderr).to_contain("non-optional return contract")

@@ -48,7 +48,16 @@ fn sffi_return_contract(return_type: Option<&Type>) -> SffiReturnContract {
     match return_type {
         None => SffiReturnContract::Unit,
         Some(Type::Tuple(elements)) if elements.is_empty() => SffiReturnContract::Unit,
-        Some(Type::Simple(name)) if name == "()" => SffiReturnContract::Unit,
+        // All three void spellings must classify as Unit. `unit` and `void`
+        // are the keyword forms; the compiler already maps all of
+        // "void" | "unit" | "()" to TypeId::VOID (type_inference_config.rs,
+        // hir/lower/type_resolver.rs). Missing them here made a bare
+        // `return` in a `-> unit` fn yield Value::Nil under a NonOptional
+        // contract, faulting with "nil is forbidden by the non-optional
+        // return contract".
+        Some(Type::Simple(name)) if name == "()" || name == "unit" || name == "void" => {
+            SffiReturnContract::Unit
+        }
         Some(Type::Optional(_)) => SffiReturnContract::Optional,
         // Explicit generic spelling `Option<T>` / `Optional<T>` is equivalent
         // to the `T?` sugar (which parses to `Type::Optional`) and must be
