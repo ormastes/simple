@@ -1,0 +1,203 @@
+#!/bin/sh
+# check-flat-ast-codec-complete.shs — every flat-AST pool must be both encoded
+# and decoded by the per-module front-end cache codec.
+#
+# WHY THIS EXISTS
+# The core parser's AST is held in module-level flat POOLS across four files.
+# The front-end cache dumps those pools and restores them on a hit. A pool that
+# is never dumped comes back EMPTY after a restore, which does not crash and
+# does not warn — it silently produces a different ParserModule, i.e. a SILENT
+# MISCOMPILE of the bootstrap compiler. Review cannot be the control for that:
+# the pools are added by unrelated parser work, one line at a time, in files
+# nobody reads alongside the codec.
+#
+# So the pool list is DERIVED FROM THE SOURCE on every run, never hardcoded. A
+# pool added tomorrow is covered the day it lands: it appears in the derived
+# list, is absent from the codec, and this guard fails.
+#
+# Verdict convention (matches the other scripts/check guards; the verdict line
+# is always the LAST line of stdout):
+#   PASS — <n> pool(s) checked, all encoded and decoded   exit 0
+#   FAIL — ...naming every offending pool                 exit 1
+#   ERROR — nothing was checked                           exit 2
+# A run that checked 0 pools is ERROR, never a pass: absence of a pool list is
+# absence of evidence, and a broken extraction regex would otherwise read as
+# green. --selftest runs before every scan and is fatal.
+
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+CODEC_GLOB_DEFAULT="$ROOT/src/compiler/10.frontend/core/flat_pool_codec.spl
+$ROOT/src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+$ROOT/src/compiler/10.frontend/core/_AstExpr/nodes.spl
+$ROOT/src/compiler/10.frontend/core/ast_stmt.spl
+$ROOT/src/compiler/10.frontend/core/types.spl"
+
+POOL_FILES_DEFAULT="$ROOT/src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+$ROOT/src/compiler/10.frontend/core/_AstExpr/nodes.spl
+$ROOT/src/compiler/10.frontend/core/ast_stmt.spl
+$ROOT/src/compiler/10.frontend/core/types.spl"
+
+# Pools deliberately NOT round-tripped, each with a stated reason. This list is
+# an allowlist of EXCLUSIONS and is itself checked: an entry naming a pool that
+# no longer exists is a stale allowlist and fails, the same way a stale baseline
+# fails in the divergence guard. Keep it tiny and justified.
+#   decl_empty_* — immutable empty sentinels returned for missing fields; they
+#     are never written, so restoring them is a no-op by construction.
+# NOTE: the lazy env-mode caches (ast_decl_mode_ready/_cached,
+# expr_mode_slots_ready, expr_env_mirror_cached, expr_trace_tags_cached,
+# stmt_mode_ready, stmt_env_mirror_cached) need no entry here — they are
+# SCALARS, and extract_pools only yields array-typed vars. Listing them was the
+# first thing this guard's own stale-exclusion check caught.
+#
+# NOT covered by this guard: `current_scope_depth` (types.spl) is real scalar
+# state that reset_all_pools resets, so the types.spl dump/restore must carry it
+# explicitly. It is scalar, so it cannot appear in an array-derived pool list.
+EXCLUDE_RE='^(decl_empty_i64|decl_empty_text|decl_empty_text_lists)$'
+
+extract_pools() {
+    # Module-level array-typed `var` declarations are the pools. Anchored at
+    # column 0 so locals inside functions are never picked up.
+    for f in $1; do
+        [ -f "$f" ] || continue
+        grep -hoE '^var [a-z_0-9]+ *: *\[' "$f" 2>/dev/null \
+            | sed 's/^var //; s/ *: *\[.*//'
+    done | sort -u
+}
+
+run_scan() {
+    _pool_files="$1"
+    _codec_files="$2"
+    _pools=$(extract_pools "$_pool_files")
+    _checked=0
+    _missing=""
+    _stale=""
+
+    # Stale-exclusion check: an excluded name that no longer exists as a pool.
+    for ex in $(printf '%s\n' "$EXCLUDE_RE" | tr '|' '\n' | sed 's/[^a-z_0-9]//g'); do
+        [ -n "$ex" ] || continue
+        if ! printf '%s\n' "$_pools" | grep -qx "$ex"; then
+            _stale="$_stale $ex"
+        fi
+    done
+
+    _codec_text=""
+    for f in $_codec_files; do
+        [ -f "$f" ] && _codec_text="$_codec_text
+$(cat "$f")"
+    done
+
+    for p in $_pools; do
+        printf '%s\n' "$p" | grep -qE "$EXCLUDE_RE" && continue
+        _checked=$((_checked + 1))
+        # Encoded: appears as an argument to an enc_ helper.
+        # Decoded: appears on the left of an assignment from a dec_ helper.
+        _enc=$(printf '%s\n' "$_codec_text" | grep -cE "flat_pool_enc_[a-z_0-9]+\($p\)")
+        _dec=$(printf '%s\n' "$_codec_text" | grep -cE "^ *$p *= *flat_pool_dec_")
+        if [ "$_enc" -eq 0 ] || [ "$_dec" -eq 0 ]; then
+            _why=""
+            [ "$_enc" -eq 0 ] && _why="not-encoded"
+            [ "$_dec" -eq 0 ] && _why="${_why:+$_why,}not-decoded"
+            _missing="$_missing $p($_why)"
+        fi
+    done
+
+    SCAN_CHECKED="$_checked"
+    SCAN_MISSING="$_missing"
+    SCAN_STALE="$_stale"
+}
+
+selftest() {
+    _tmp=$(mktemp -d)
+    _fail=0
+
+    # Fixture A: one pool, encoded and decoded -> must be clean.
+    mkdir -p "$_tmp/a"
+    printf 'var good_pool: [i64] = []\n' > "$_tmp/a/pools.spl"
+    printf 'good_pool = flat_pool_dec_i64(r)\nout = flat_pool_enc_i64(good_pool)\n' > "$_tmp/a/codec.spl"
+    run_scan "$_tmp/a/pools.spl" "$_tmp/a/codec.spl"
+    if [ "$SCAN_CHECKED" -ne 1 ] || [ -n "$SCAN_MISSING" ]; then
+        echo "selftest: clean fixture should pass (checked=$SCAN_CHECKED missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+
+    # Fixture B: a pool that is encoded but never decoded -> must FAIL. This is
+    # the asymmetric case, which is nastier than a wholly-missing pool: the dump
+    # looks complete and only the restore is short.
+    mkdir -p "$_tmp/b"
+    printf 'var good_pool: [i64] = []\nvar half_pool: [text] = []\n' > "$_tmp/b/pools.spl"
+    printf 'good_pool = flat_pool_dec_i64(r)\nout = flat_pool_enc_i64(good_pool)\nout = flat_pool_enc_text(half_pool)\n' > "$_tmp/b/codec.spl"
+    run_scan "$_tmp/b/pools.spl" "$_tmp/b/codec.spl"
+    case "$SCAN_MISSING" in
+        *half_pool*not-decoded*) : ;;
+        *) echo "selftest: encoded-but-not-decoded pool must FAIL (missing=$SCAN_MISSING)"; _fail=1 ;;
+    esac
+
+    # Fixture C: a pool absent from the codec entirely -> must FAIL. This is the
+    # real-world shape: parser work adds a pool and never touches the codec.
+    mkdir -p "$_tmp/c"
+    printf 'var good_pool: [i64] = []\nvar new_pool: [i64] = []\n' > "$_tmp/c/pools.spl"
+    printf 'good_pool = flat_pool_dec_i64(r)\nout = flat_pool_enc_i64(good_pool)\n' > "$_tmp/c/codec.spl"
+    run_scan "$_tmp/c/pools.spl" "$_tmp/c/codec.spl"
+    case "$SCAN_MISSING" in
+        *new_pool*) : ;;
+        *) echo "selftest: pool missing from codec must FAIL (missing=$SCAN_MISSING)"; _fail=1 ;;
+    esac
+
+    # Fixture D: a local array var inside a function must NOT be treated as a
+    # pool (it is indented, so the column-0 anchor excludes it).
+    mkdir -p "$_tmp/d"
+    printf 'var good_pool: [i64] = []\nfn f():\n    var local_tmp: [i64] = []\n' > "$_tmp/d/pools.spl"
+    printf 'good_pool = flat_pool_dec_i64(r)\nout = flat_pool_enc_i64(good_pool)\n' > "$_tmp/d/codec.spl"
+    run_scan "$_tmp/d/pools.spl" "$_tmp/d/codec.spl"
+    if [ "$SCAN_CHECKED" -ne 1 ]; then
+        echo "selftest: function-local var must not be counted as a pool (checked=$SCAN_CHECKED)"
+        _fail=1
+    fi
+
+    # Fixture E: no pools at all -> must yield 0, forcing the caller to ERROR.
+    mkdir -p "$_tmp/e"
+    printf '# no pools here\n' > "$_tmp/e/pools.spl"
+    printf '# nothing\n' > "$_tmp/e/codec.spl"
+    run_scan "$_tmp/e/pools.spl" "$_tmp/e/codec.spl"
+    if [ "$SCAN_CHECKED" -ne 0 ]; then
+        echo "selftest: empty tree must check 0 pools (checked=$SCAN_CHECKED)"
+        _fail=1
+    fi
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+case "${1:-}" in
+    --selftest)
+        selftest
+        echo "PASS — 5 selftest fixture(s) checked, all behaved as specified"
+        exit 0
+        ;;
+esac
+
+selftest
+run_scan "$POOL_FILES_DEFAULT" "$CODEC_GLOB_DEFAULT"
+
+if [ "$SCAN_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no flat-AST pools found; extraction is broken or the files moved)"
+    exit 2
+fi
+
+if [ -n "$SCAN_STALE" ]; then
+    echo "FAIL — $SCAN_CHECKED pool(s) checked, stale exclusion(s) naming pools that no longer exist:$SCAN_STALE"
+    exit 1
+fi
+
+if [ -n "$SCAN_MISSING" ]; then
+    _n=$(printf '%s\n' "$SCAN_MISSING" | tr ' ' '\n' | grep -c '(')
+    echo "FAIL — $SCAN_CHECKED pool(s) checked, $_n not round-tripped by the codec:$SCAN_MISSING"
+    exit 1
+fi
+
+echo "PASS — $SCAN_CHECKED pool(s) checked, all encoded and decoded"
+exit 0
