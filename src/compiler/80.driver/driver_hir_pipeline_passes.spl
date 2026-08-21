@@ -23,6 +23,15 @@ use compiler.semantics.safety_checker.{
 }
 use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
 use compiler.driver.driver_source_loading.{_format_type_infer_error}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
+use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
+use compiler.semantics.enum_contract.{enum_contract_check}
+use compiler.verify.post_mono_verify.{
+    post_mono_verify_modules,
+    post_mono_report_total,
+    post_mono_report_diagnostics
+}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -71,12 +80,64 @@ impl CompilerDriver:
         if skip_mono == "1" or bootstrap_mode == "1":
             print "[bootstrap] skipping monomorphization"
             return true
-        val (mono_modules, mono_stats) = run_monomorphization(
-            self.ctx.hir_modules)
+        val (mono_modules, _mono_stats, mono_diags) =
+            run_monomorphization_with_diagnostics(self.ctx.hir_modules)
         # BUG-001 diagnostic: verify module count survives monomorphization
         log_debug("monomorphization output ready")
         self.ctx.hir_modules = mono_modules
+        # Phase 3 (critical_hardening_plan_2026-08-21): the mono pass emits a
+        # loud, coded diagnostic (E-MONO-030 / E-MONO-032) for every generic
+        # call site it could NOT rewrite. Those used to be dropped on the floor
+        # by `run_monomorphization`, so a non-monomorphic HIR reached MIR at
+        # rc=0. They are errors now: an unspecialized generic call is not a
+        # style nit, it is a program the backend cannot lower correctly.
+        var mono_pass_errors = 0
+        for md in mono_diags:
+            mono_pass_errors = mono_pass_errors + 1
+            self.ctx.add_error(md)
+        val _mono_pass_receipt = record_pass_receipt(PassReceipt(
+            pass_name: "monomorphize",
+            profile: self.ctx.assurance_policy.strictness.name(),
+            executed: true,
+            modules_checked: self.ctx.hir_modules.len(),
+            diagnostics: mono_diags.len(),
+            errors_raised: mono_pass_errors
+        ))
+        if mono_pass_errors > 0:
+            print "error[E-MONO-033]: monomorphization left {mono_pass_errors} generic call site(s) unspecialized; refusing to lower non-monomorphic HIR to MIR"
+            return false
+        # Section 9.5 post-monomorphization invariants (E-MONO-031). Runs on
+        # the MONOMORPHIZED modules -- the whole point is that nothing generic,
+        # unsubstituted, or type-erased survived, so it cannot run before this
+        # assignment. Under `critical` ANY non-zero counter is fatal; every
+        # other profile warns, so the inventory is visible during migration.
+        val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
+        val mono_total = post_mono_report_total(mono_report)
+        val mono_strictness = self.ctx.assurance_policy.strictness
+        # Phase 3: enforcement now starts at `robust`, not only `critical`.
+        # This RAISES the bar (robust used to warn); no gate is relaxed.
+        val mono_critical = mono_strictness.at_least(AssuranceStrictness.Robust)
+        var mono_errors = 0
+        for d in post_mono_report_diagnostics(mono_report):
+            # `d` already carries its own E-MONO-031 code (section 17.5).
+            val mmsg = d
+            if mono_critical:
+                mono_errors = mono_errors + 1
+                self.ctx.add_error(mmsg)
+            else:
+                self.ctx.add_warning(mmsg)
+        val _mono_receipt = record_pass_receipt(PassReceipt(
+            pass_name: "post_mono_verify",
+            profile: mono_strictness.name(),
+            executed: true,
+            modules_checked: self.ctx.hir_modules.len(),
+            diagnostics: mono_total,
+            errors_raised: mono_errors
+        ))
         log_debug("monomorphization done")
+        if mono_critical and mono_total > 0:
+            print "error[E-MONO-031]: post-monomorphization invariants violated: {mono_total} diagnostic(s) across {self.ctx.hir_modules.len()} module(s) under profile {mono_strictness.name()}; refusing to lower to MIR"
+            return false
         true
 
 pub fn run_typecheck_warn_pass(
@@ -219,4 +280,97 @@ pub fn run_safety_warn_pass(
                 case _:
                     pass
             t_idx = t_idx + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Hardening passes (integrator I0, 2026-08-21)
+#
+# Both follow `run_safety_warn_pass` exactly: walk `hir_modules`, turn each
+# checker diagnostic into a message, and route it to ctx.add_warning /
+# ctx.add_error by profile. `critical` denies; every other profile warns.
+# Unlike the safety pass there is no Advisory (log-only) rung: these checkers
+# exist because the corresponding defect class was shipping silently, so the
+# quietest setting they have is a visible warning.
+#
+# Every invocation records a receipt (driver_pass_receipt.spl), including the
+# zero-diagnostic case, so "the checker is advisory because it never ran" is
+# distinguishable from "it ran and found nothing".
+# ---------------------------------------------------------------------------
+
+pub fn run_any_escape_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """REQ-MC-ANY-001: `Any` origin/escape analysis over every HIR module."""
+    val strictness = ctx.assurance_policy.strictness
+    val is_critical = match strictness:
+        case AssuranceStrictness.Critical: true
+        case _: false
+    # No HIR node carries `@unsafe(capabilities: [type_erasure])` yet
+    # (unsafe_capabilities_not_carried_into_hir_2026-08-21), so no function can
+    # be granted the capability from here. An empty grant list is the
+    # fail-CLOSED direction: it can only produce findings, never hide one.
+    val profile = if is_critical:
+        AnyEscapeProfile.critical([])
+    else:
+        AnyEscapeProfile.census([])
+    var out: [text] = []
+    var errors_raised = 0
+    var modules_checked = 0
+    for name in hir_modules.keys():
+        modules_checked = modules_checked + 1
+        for d in any_escape_check(hir_modules[name], profile):
+            var msg = "[{d.code}] {name}::{d.function_name}: {d.message} at {d.span.line}:{d.span.col}"
+            if d.origin_note != "":
+                msg = msg + " (" + d.origin_note + ")"
+            out = out.push(msg)
+            if is_critical:
+                errors_raised = errors_raised + 1
+                ctx.add_error(msg)
+            else:
+                ctx.add_warning(msg)
+    val _receipt = record_pass_receipt(PassReceipt(
+        pass_name: "any_escape",
+        profile: strictness.name(),
+        executed: true,
+        modules_checked: modules_checked,
+        diagnostics: out.len(),
+        errors_raised: errors_raised
+    ))
+    out
+
+pub fn run_enum_contract_pass(
+    ctx: CompileContext,
+    hir_modules: Dict<text, HirModule>
+) -> [text]:
+    """S2/S3: `@closed` / `@evolving` enum declaration contracts.
+
+    Match-coverage half (`enum_contract_check_matches`) is driven from MIR
+    lowering, which is where ResolvedMatchCoverage records are built; this pass
+    owns the DECLARATION half, which only needs HIR."""
+    val strictness = ctx.assurance_policy.strictness
+    val is_critical = match strictness:
+        case AssuranceStrictness.Critical: true
+        case _: false
+    var out: [text] = []
+    var errors_raised = 0
+    var modules_checked = 0
+    for name in hir_modules.keys():
+        modules_checked = modules_checked + 1
+        for d in enum_contract_check(hir_modules[name], strictness):
+            val msg = "[{d.code}] {name}: {d.message} ({d.enum_name}: {d.detail})"
+            out = out.push(msg)
+            if is_critical:
+                errors_raised = errors_raised + 1
+                ctx.add_error(msg)
+            else:
+                ctx.add_warning(msg)
+    val _receipt = record_pass_receipt(PassReceipt(
+        pass_name: "enum_contract",
+        profile: strictness.name(),
+        executed: true,
+        modules_checked: modules_checked,
+        diagnostics: out.len(),
+        errors_raised: errors_raised
+    ))
     out

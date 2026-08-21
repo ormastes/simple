@@ -100,6 +100,16 @@ The numeric block 015–022 is left reserved and untouched.
   projections → const generics/layout params → closures/drop glue/witnesses.
 - **Exit gate:** `sh scripts/check/check-post-mono-invariants.shs` →
   `PASS — <n> module(s) checked, unresolved-typeparam=0 generic-call=0 any-erasure=0 error-type=0`.
+- **Integrator status (2026-08-21):** `monomorphize_impl` now calls
+  `run_monomorphization_with_diagnostics`, routes every E-MONO-030/E-MONO-032 finding to
+  `ctx.add_error`, and returns `false` under a named `E-MONO-033` message rather than lowering
+  non-monomorphic HIR to MIR. `post_mono_verify_modules` still runs before MIR and its enforcement
+  threshold was RAISED from `critical`-only to `robust`+ (`strictness.at_least(Robust)`); no gate was
+  relaxed. Both passes now record a `PassReceipt`. Exit gate green:
+  `check-post-mono-invariants.shs` → `PASS — 10 fixture(s) checked, 0 unexpected`.
+  Regression spec: `test/01_unit/compiler/driver/mono_pipeline_surfaces_unresolved_generic_spec.spl`.
+  **Caveat:** `bin/simple` is still the Rust seed, which does NOT execute this pure-Simple driver
+  path, so end-to-end `simple run` results do not exercise the wiring — only the pure-Simple specs do.
 - **See also:** `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md`.
 
 ### Phase 4 — Sum types and closed-match enforcement — `partial` (S2/S3 landed 2026-08-21)
