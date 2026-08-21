@@ -341,6 +341,20 @@ success-sized count without writing. A display-independent provider contract
 test passes. These checks are constant-time metadata comparisons around the
 existing allocation/copy and add no extra native call.
 
+The `spl_winit` loader now supports one-time cryptographic artifact admission.
+When `SIMPLE_SPL_WINIT_REQUIRE_SIGNATURE=1`, or any seal evidence is present,
+it reads the exact provider bytes before `dlopen`, checks the adjacent
+`<artifact>.sha256`, and verifies `<artifact>.sig` as an Ed25519 signature over
+`"SIMPLE-SPL-WINIT-ARTIFACT-V1\\0" || SHA256(artifact)` using the trusted
+32-byte hex key in `SIMPLE_SPL_WINIT_ED25519_PUBKEY`. Partial, malformed,
+mismatched, and tampered evidence fails closed. A generated-key test proves
+valid admission and both artifact/signature sabotage rejection. Verification
+is confined to the cached load path, so there is no per-call hash, signature,
+file I/O, or lookup. Development loading without evidence remains permitted
+but explicitly unsafe. Because path-based `dlopen` still has a check/use race,
+even sealed mode is not yet classified as critical-safe; immutable-handle load
+remains required for that assurance tier.
+
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:
 verification collapses malformed bridge input into `0`, while signing may

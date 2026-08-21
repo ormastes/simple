@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::CompileError;
@@ -64,6 +65,65 @@ struct LoadedLib {
 fn checked_cstring(value: String, symbol: &str, argument: &str) -> Result<CString, CompileError> {
     CString::new(value).map_err(|_| CompileError::runtime(format!("{symbol}: {argument} contains an embedded NUL")))
 }
+
+fn decode_hex<const N: usize>(input: &str, label: &str) -> Result<[u8; N], String> {
+    let input = input.trim();
+    if input.len() != N * 2 {
+        return Err(format!("{label} must contain exactly {} hexadecimal characters", N * 2));
+    }
+    let mut output = [0u8; N];
+    for (index, pair) in input.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(pair).map_err(|_| format!("{label} is not ASCII hexadecimal"))?;
+        output[index] = u8::from_str_radix(text, 16).map_err(|_| format!("{label} is not hexadecimal"))?;
+    }
+    Ok(output)
+}
+
+fn artifact_seal_message(bytes: &[u8]) -> ([u8; 32], Vec<u8>) {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    let mut digest_bytes = [0u8; 32];
+    digest_bytes.copy_from_slice(digest.as_ref());
+    let mut message = b"SIMPLE-SPL-WINIT-ARTIFACT-V1\0".to_vec();
+    message.extend_from_slice(&digest_bytes);
+    (digest_bytes, message)
+}
+
+fn verify_artifact_seal(
+    bytes: &[u8],
+    expected_digest_hex: &str,
+    signature_hex: &str,
+    public_key_hex: &str,
+) -> Result<(), String> {
+    let expected_digest = decode_hex::<32>(expected_digest_hex, "spl_winit SHA-256")?;
+    let signature = decode_hex::<64>(signature_hex, "spl_winit Ed25519 signature")?;
+    let public_key = decode_hex::<32>(public_key_hex, "spl_winit Ed25519 public key")?;
+    let (actual_digest, message) = artifact_seal_message(bytes);
+    if actual_digest != expected_digest {
+        return Err("spl_winit artifact SHA-256 mismatch".to_string());
+    }
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
+        .verify(&message, &signature)
+        .map_err(|_| "spl_winit Ed25519 signature verification failed".to_string())
+}
+
+fn admit_provider(path: &str) -> Result<(), String> {
+    let digest_path = format!("{path}.sha256");
+    let signature_path = format!("{path}.sig");
+    let public_key = std::env::var("SIMPLE_SPL_WINIT_ED25519_PUBKEY").ok();
+    let required = std::env::var("SIMPLE_SPL_WINIT_REQUIRE_SIGNATURE").is_ok_and(|value| value == "1");
+    let evidence_present =
+        public_key.is_some() || Path::new(&digest_path).exists() || Path::new(&signature_path).exists();
+    if !required && !evidence_present {
+        return Ok(());
+    }
+    let public_key = public_key.ok_or_else(|| "SIMPLE_SPL_WINIT_ED25519_PUBKEY is required".to_string())?;
+    let bytes = std::fs::read(path).map_err(|error| format!("cannot read provider artifact: {error}"))?;
+    let expected_digest =
+        std::fs::read_to_string(&digest_path).map_err(|error| format!("cannot read {digest_path}: {error}"))?;
+    let signature =
+        std::fs::read_to_string(&signature_path).map_err(|error| format!("cannot read {signature_path}: {error}"))?;
+    verify_artifact_seal(&bytes, &expected_digest, &signature, &public_key)
+}
 // Raw fn-pointer addresses (usize) are Send+Sync; the Mutex only guards the
 // HashMap's interior mutability during population, never re-entered after.
 unsafe impl Send for LoadedLib {}
@@ -86,6 +146,14 @@ fn candidate_paths() -> Vec<String> {
 fn load_library() -> Result<LoadedLib, String> {
     let mut tried = Vec::new();
     for path in candidate_paths() {
+        if !Path::new(&path).exists() {
+            tried.push(format!("{path}: artifact not found"));
+            continue;
+        }
+        if let Err(error) = admit_provider(&path) {
+            tried.push(format!("{path}: provider admission failed: {error}"));
+            continue;
+        }
         let cpath = CString::new(path.clone())
             .map_err(|_| format!("spl_winit candidate path contains an embedded NUL: {path:?}"))?;
         let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
@@ -371,6 +439,11 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ring::signature::KeyPair;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
 
     #[test]
     fn cstring_arguments_reject_embedded_nul() {
@@ -382,5 +455,25 @@ mod tests {
                 .to_bytes(),
             b"valid.bmp"
         );
+    }
+
+    #[test]
+    fn artifact_seal_rejects_tampering() {
+        let bytes = b"exact spl_winit provider bytes";
+        let random = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+        let key = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let (digest, message) = artifact_seal_message(bytes);
+        let signature = key.sign(&message);
+        let digest_hex = hex(&digest);
+        let signature_hex = hex(signature.as_ref());
+        let public_key_hex = hex(key.public_key().as_ref());
+
+        assert!(verify_artifact_seal(bytes, &digest_hex, &signature_hex, &public_key_hex).is_ok());
+        assert!(verify_artifact_seal(b"tampered", &digest_hex, &signature_hex, &public_key_hex).is_err());
+
+        let mut tampered_signature = signature.as_ref().to_vec();
+        tampered_signature[0] ^= 1;
+        assert!(verify_artifact_seal(bytes, &digest_hex, &hex(&tampered_signature), &public_key_hex).is_err());
     }
 }
