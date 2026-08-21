@@ -17,6 +17,8 @@ fn print_help():
     print "Regenerate recent_bugs.md from bug_db.sdn."
     print ""
     print "Options:"
+    print "  --db PATH    Read the bug database from PATH"
+    print "  -o DIR       Write the generated index into DIR"
     print "  --json       Output summary as JSON"
     for line in log_options_help():
         print "  {line}"
@@ -47,23 +49,43 @@ struct BugItem:
     updated_at: text
     valid: bool
 
-fn load_bugs() -> [BugItem]:
-    if not file_exists(BUG_DB_PATH):
-        return []
+struct BugLoad:
+    bugs: [BugItem]
+    # 1-based source line numbers of rows inside the `bugs` table that are
+    # present but did NOT fully parse. bug-gen must never regenerate an index
+    # from a partial parse: a dropped row silently deletes a real bug from
+    # recent_bugs.md, which is the same lossy-regenerate defect class as
+    # clobbering a record file. Fail closed instead.
+    unparsed_lines: [i64]
 
-    val content = file_read(BUG_DB_PATH)
+fn load_bugs(db_path: text) -> BugLoad:
+    if not file_exists(db_path):
+        return BugLoad(bugs: [], unparsed_lines: [])
+
+    val content = file_read(db_path)
     val lines = content.split("\n")
     var bugs: [BugItem] = []
+    var unparsed: [i64] = []
     var in_table = false
+    var line_no = 0
 
     for line in lines:
+        line_no = line_no + 1
         val trimmed = line.trim()
         if trimmed.starts_with("bugs |"):
             in_table = true
             continue
+        # End of the `bugs` table: the next unindented, non-empty, non-comment
+        # line starts a different table. The previous form of this test asked
+        # `trimmed != ""` inside a branch that already required `trimmed == ""`,
+        # so it was dead: `in_table` never went back to false and every row of
+        # the *following* tables (`bug_investigation_logs`, `bug_fix_strategies`)
+        # was fed to the row parser. That was harmless only because unparseable
+        # rows were silently dropped; once the parse fails closed it must be
+        # correct, or bug-gen refuses to run on a perfectly valid database.
+        if in_table and trimmed != "" and not trimmed.starts_with("#") and not line.starts_with(" ") and not line.starts_with("\t"):
+            in_table = false
         if not in_table or trimmed == "" or trimmed.starts_with("#"):
-            if in_table and trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with(" "):
-                in_table = false
             continue
 
         val fields = parse_csv_fields(trimmed)
@@ -81,8 +103,10 @@ fn load_bugs() -> [BugItem]:
                 updated_at: fields[8],
                 valid: valid_str == "true"
             ))
+        else:
+            unparsed.push(line_no)
 
-    bugs
+    BugLoad(bugs: bugs, unparsed_lines: unparsed)
 
 fn is_open(status: text) -> bool:
     status == "Open" or status == "Investigating" or status == "Confirmed" or status == "open"
@@ -156,6 +180,8 @@ fn main() -> i64:
         return 1
 
     var as_json = log_opts.log_mode == "json"
+    var db_path = BUG_DB_PATH
+    var md_path = BUG_MD_PATH
     var ai = 0
     while ai < args.len():
         val arg = args[ai]
@@ -164,22 +190,48 @@ fn main() -> i64:
             return 0
         elif arg == "--json" or arg == "--log-mode=json":
             as_json = true
+        elif arg == "--db":
+            if ai + 1 < args.len():
+                db_path = args[ai + 1]
+            ai = ai + 1
+        elif arg.starts_with("--db="):
+            db_path = arg.substring(5, arg.len())
+        elif arg == "-o" or arg == "--out":
+            # -o names a DIRECTORY. bug-gen only ever writes its own generated
+            # index inside it — never a per-bug record file, and never a delete.
+            if ai + 1 < args.len():
+                md_path = args[ai + 1] + "/recent_bugs.md"
+            ai = ai + 1
         elif arg == "--log-mode" or arg == "--surface" or arg == "--progress":
             ai = ai + 1
         elif _is_log_option(arg):
             pass
         ai = ai + 1
 
-    val bugs = load_bugs()
+    val loaded = load_bugs(db_path)
+    if loaded.unparsed_lines.len() > 0:
+        # Fail closed: leave every existing file exactly as it was.
+        var refs: [text] = []
+        for n in loaded.unparsed_lines:
+            refs.push(db_path + ":" + n.to_string())
+        val msg = "refusing to regenerate from a partial parse: " +
+            loaded.unparsed_lines.len().to_string() +
+            " row(s) in the `bugs` table did not fully parse (" +
+            refs.join(", ") + "); nothing was written"
+        print "error[bug-gen]: {msg}"
+        error("bug-gen", msg)
+        return 1
+
+    val bugs = loaded.bugs
     val md = generate_md(bugs)
-    file_write(BUG_MD_PATH, md)
+    file_write(md_path, md)
     if log_opts.progress != "summary":
         val progress_line = render_progress(log_opts.progress, bugs.len(), bugs.len(), "bug-gen")
         if progress_line != "":
             print progress_line
     if as_json:
-        val md_json = _json_escape(BUG_MD_PATH)
+        val md_json = _json_escape(md_path)
         print "{\"command\":\"bug-gen\",\"status\":\"ok\",\"bugs\":{bugs.len()},\"output\":\"{md_json}\"}"
     else:
-        print "Generated {BUG_MD_PATH} ({bugs.len()} bugs)"
+        print "Generated {md_path} ({bugs.len()} bugs)"
     0

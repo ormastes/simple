@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Purpose: This spec proves `bug-gen` never rewrites, truncates or deletes a bug
+record file under `doc/08_tracking/bug/`, and refuses to regenerate its index
+from a partially-parsed database instead of silently dropping rows.
+Audience: Maintainers of the tracking CLI.
+
+Bug: doc/08_tracking/bug/bug_gen_truncates_unrelated_records_2026-08-21.md
+"""
+# @req: REQ-BUGGENSAFETY-001
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_bug_gen_clobber_fixture"
+
+# A hand-written record that is NOT referenced by the database at all, and a
+# second record with an unusual body (conflict-marker-like text, tabs, a lone
+# CR, and no trailing newline). Both must survive byte-identically.
+fn _setup_fixture(extra_row: text):
+    val (_o, _e, _c) = rt_process_run("/bin/sh", [
+        "-c",
+        "set -e; rm -rf " + FIXTURE_DIR + "; mkdir -p " + FIXTURE_DIR + "/doc/08_tracking/bug; " +
+        "cd " + FIXTURE_DIR + "/doc/08_tracking/bug; " +
+        "printf '# Orphan record\\n\\nNot in the database at all.\\n' > orphan_record_2026-08-21.md; " +
+        "printf '# Odd body\\n\\n\\ttabbed\\n<<<<<<< not a conflict\\nno trailing newline' > odd_body_2026-08-21.md; " +
+        "{ printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\\n'; " +
+        "printf '    BUG-1, P1, Open, \"fixture bug\", src/main.spl, 7, test, 2026-05-24, 2026-05-24, true\\n'; " +
+        "" + extra_row + " } > bug_db.sdn; " +
+        "md5sum orphan_record_2026-08-21.md odd_body_2026-08-21.md > /tmp/simple_bug_gen_clobber_sums.txt"
+    ])
+
+fn _run_bug_gen(args: [text]) -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/bug_gen/main.spl\" " + args.join(" ") + " 2>&1"
+    ])
+
+fn _records_unchanged() -> (text, text, i64):
+    rt_process_run("/bin/sh", [
+        "-c",
+        "cd " + FIXTURE_DIR + "/doc/08_tracking/bug && md5sum -c --status /tmp/simple_bug_gen_clobber_sums.txt && echo IDENTICAL || echo CHANGED"
+    ])
+
+fn _record_count() -> text:
+    val (out, _e, _c) = rt_process_run("/bin/sh", [
+        "-c", "ls " + FIXTURE_DIR + "/doc/08_tracking/bug/*_2026-08-21.md | wc -l"
+    ])
+    out.trim()
+
+describe "bug-gen never clobbers bug record files":
+    it "leaves unrelated records byte-identical on a clean run":
+        # @req: REQ-BUGGENSAFETY-001
+        step("regenerate the index over a directory holding two hand-written records")
+        _setup_fixture("")
+        val (_out, _err, code) = _run_bug_gen([])
+        expect(code).to_equal(0)
+        step("both record files are still present and byte-identical")
+        expect(_record_count()).to_equal("2")
+        val (same, _e2, _c2) = _records_unchanged()
+        expect(same).to_contain("IDENTICAL")
+
+    it "refuses to regenerate from a partially-parsed database":
+        # @req: REQ-BUGGENSAFETY-001
+        step("a bugs row with too few fields must fail closed, not be dropped")
+        _setup_fixture("printf '    BUG-2, P2, Open, \\\"truncated row\\\"\\n'; ")
+        val (out, _err, code) = _run_bug_gen([])
+        expect(code).to_equal(1)
+        expect(out).to_contain("partial parse")
+        step("nothing was written and every record is untouched")
+        expect(_record_count()).to_equal("2")
+        val (same, _e2, _c2) = _records_unchanged()
+        expect(same).to_contain("IDENTICAL")
+
+    it "writes only its own index file when given -o":
+        # @req: REQ-BUGGENSAFETY-001
+        step("-o names a directory; only recent_bugs.md may appear in it")
+        _setup_fixture("")
+        val (_out, _err, code) = _run_bug_gen(["-o", "doc/08_tracking/bug"])
+        expect(code).to_equal(0)
+        expect(_record_count()).to_equal("2")
+        val (same, _e2, _c2) = _records_unchanged()
+        expect(same).to_contain("IDENTICAL")
