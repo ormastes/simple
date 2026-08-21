@@ -27,6 +27,8 @@ use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityErrorV1, ExecutableAuthorityRegistryV1,
     ExecutableAuthorityTokenV1, ExecutableAuthorityCloseLeaseV1,
     executable_authority_loader_owner_initialize,
+    executable_authority_loader_owner,
+    executable_authority_issue_verified,
     executable_authority_commit, executable_authority_retrieve_once,
     executable_authority_begin_release_or_retry,
     executable_authority_begin_revoke_or_retry,
@@ -241,12 +243,25 @@ pub fn executable_loader_admit_open_binding(
     if not table.execute_binding_is_current(binding):
         return _loader_close_rejection(
             table, binding, ExecutableLoaderAdmissionErrorV1.StaleBinding)
-    # Cryptographic identity is now established above, but publication still
-    # fails closed until this entry point consumes the initialized authority
-    # owner and mints a package-private token for the exact open handle.
-    _loader_close_rejection(
-        table, binding,
-        ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+    val owner = executable_authority_loader_owner()
+    if owner.is_err():
+        return _loader_close_rejection(
+            table, binding,
+            ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+    val issued = executable_authority_issue_verified(owner.unwrap(), candidate)
+    match issued:
+        case Err(ExecutableAuthorityErrorV1.SerializationUnavailable):
+            _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
+        case Err(_):
+            _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.AuthorityTokenInvalid)
+        case Ok(token):
+            Ok(ExecutableLoaderAdmissionResultV1(
+                authority_token: token,
+                namespace_generation: binding.namespace_generation))
 
 pub fn executable_loader_authority_owner_initialize(
     slot_limit: i64,

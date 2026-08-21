@@ -356,8 +356,11 @@ verifies the canonical manifest/image bytes before constructing an executable
 handle. Its verification receipt is package-private; caller-provided booleans
 remain rejection hints and cannot become authority. The interpreter gained
 checked mutex counterparts so the owner capsule does not depend on fabricated
-zero/false synchronization results. Authority-token publication remains the
-next fail-closed seam, and the native fixture compile-cost blocker is recorded
+zero/false synchronization results. After successful verification the pipeline
+now retrieves the already-initialized loader authority owner and issues the
+package-private token for the exact open handle; missing/invalid owner state
+still closes the handle and rejects admission. The privileged bounded mapping
+consumer remains intentionally blocked. The native fixture compile-cost blocker is recorded
 in `doc/08_tracking/bug/sffi_manifest_signature_native_test_compile_cost_2026-08-21.md`.
 
 ## Requirement decision
