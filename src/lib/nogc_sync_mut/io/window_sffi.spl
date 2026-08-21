@@ -69,15 +69,15 @@ extern fn rt_sdl2_event_wheel_x() -> i64
 extern fn rt_sdl2_event_wheel_y() -> i64
 
 # --- Keyboard State (polled) ---
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider or invalid scancode", capabilities: [ffi])
 extern fn rt_sdl2_is_key_pressed(scancode: i64) -> i64
 
 # --- Mouse State (polled) ---
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; INT64_MIN sentinel means unavailable provider", capabilities: [ffi])
 extern fn rt_sdl2_get_mouse_x() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; INT64_MIN sentinel means unavailable provider", capabilities: [ffi])
 extern fn rt_sdl2_get_mouse_y() -> i64
-@unsafe(reason: "raw SDL2 provider ABI", capabilities: [ffi])
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider or invalid button", capabilities: [ffi])
 extern fn rt_sdl2_is_mouse_button_pressed(button: i64) -> i64
 
 # --- Time ---
@@ -174,6 +174,24 @@ fn window_destroy_event_loop(event_loop: EventLoop) -> bool:
 fn window_run_event_loop(event_loop: EventLoop) -> bool:
     # SDL2 does not have a blocking run loop; polling is done per-frame.
     event_loop.is_valid
+
+# Polled input preserves provider/argument failure as typed absence. Each
+# wrapper performs exactly the same single SDL query as the raw ABI.
+fn window_is_key_pressed(scancode: i64) -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_is_key_pressed(scancode)
+    if state < 0:
+        return nil
+    state != 0
+
+fn window_is_mouse_button_pressed(button: i64) -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_is_mouse_button_pressed(button)
+    if state < 0:
+        return nil
+    state != 0
 
 struct EventBatch:
     handle: i64
@@ -302,6 +320,17 @@ struct Size:
 struct Position:
     x: i64
     y: i64
+
+fn window_mouse_position() -> Position?:
+    val invalid_coordinate: i64 = -9223372036854775807 - 1
+    var x: i64 = invalid_coordinate
+    var y: i64 = invalid_coordinate
+    unsafe(capabilities: [ffi]):
+        x = rt_sdl2_get_mouse_x()
+        y = rt_sdl2_get_mouse_y()
+    if x == invalid_coordinate or y == invalid_coordinate:
+        return nil
+    Position(x: x, y: y)
 
 @unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn window_get_size(window: Window) -> Size:
@@ -963,6 +992,7 @@ fn rt_winit_window_request_redraw(window: i64) -> bool:
 export EventLoop, EventBatch, WindowConfig, Window, Size, Position
 export Event, KeyboardEvent, MouseButtonEvent, MousePosition, MouseWheel, Monitor
 export sdl2_normalize_modifiers
+export window_is_key_pressed, window_mouse_position, window_is_mouse_button_pressed
 export rt_sdl2_init, rt_sdl2_quit
 export rt_sdl2_create_window, rt_sdl2_destroy_window
 export rt_sdl2_get_window_width, rt_sdl2_get_window_height, rt_sdl2_set_window_title

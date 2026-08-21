@@ -92,3 +92,7 @@ passing placeholder.
     no extra native call. Next distinguish SDL wait timeout from SDL internal
     error and replace the remaining integer compatibility adapter with a typed
     result before treating event admission as safe.
+15. SDL2 polled key/button/coordinate functions now use disjoint failure
+    sentinels and safe optional wrappers with unchanged native-call counts.
+    Continue through time, quit-state, and window-property declarations, then
+    bind signed provider and sanitizer receipts before verification status.

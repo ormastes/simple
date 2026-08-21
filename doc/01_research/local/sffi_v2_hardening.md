@@ -487,3 +487,19 @@ unsafe declarations because poll/wait were already documented in the previous
 slice. SDL internal wait errors are still indistinguishable from timeouts, and
 the raw compatibility adapter still exposes integer status, so this boundary
 is fail-closed for provider absence but not fully verified.
+
+SDL2 polled keyboard and mouse state previously returned `0` for unavailable
+providers, invalid key/button identifiers, and valid false/coordinate-zero
+results. The C provider now uses `-1` for boolean/status failure and
+`INT64_MIN` for unavailable coordinates. Three safe Simple wrappers lift those
+sentinels to `bool?` and `Position?`, confine raw calls to lexical
+`unsafe(ffi)` scopes, and are exported through both sync and async facades.
+Raw integer entry points remain exported only as explicitly unsafe ABI access.
+
+The change adds no native query: key/button wrappers make one existing SDL
+call, while position still requires the existing x and y calls. There is no
+allocation, lock, hash, map, error lookup, or retry. The optimized warnings-as-
+errors C build, Simple checks for both facades, and a dedicated sentinel and
+performance-shape audit pass. Inventory now records 177 contracted and 299
+uncontracted unsafe declarations. SDL artifact signing and runtime sanitizer
+receipts remain absent, so these functions are fail-closed but not verified.

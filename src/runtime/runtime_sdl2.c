@@ -994,10 +994,10 @@ int64_t rt_sdl2_event_wheel_y(void) {
  * ================================================================ */
 
 int64_t rt_sdl2_is_key_pressed(int64_t scancode) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
     int numkeys = 0;
     const Uint8* state = SDL_GetKeyboardState(&numkeys);
-    if (scancode < 0 || scancode >= numkeys) return 0;
+    if (!state || scancode < 0 || scancode >= numkeys) return -1;
     return (int64_t)state[scancode];
 }
 
@@ -1006,28 +1006,28 @@ int64_t rt_sdl2_is_key_pressed(int64_t scancode) {
  * ================================================================ */
 
 int64_t rt_sdl2_get_mouse_x(void) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(INT64_MIN);
     int x = 0, y = 0;
     SDL_GetMouseState(&x, &y);
     return (int64_t)x;
 }
 
 int64_t rt_sdl2_get_mouse_y(void) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(INT64_MIN);
     int x = 0, y = 0;
     SDL_GetMouseState(&x, &y);
     return (int64_t)y;
 }
 
 int64_t rt_sdl2_is_mouse_button_pressed(int64_t button) {
-    SDL2_REQUIRE(0);
+    SDL2_REQUIRE(-1);
     Uint32 state = SDL_GetMouseState(NULL, NULL);
     /* button: 0=left, 1=right, 2=middle (matching our event mapping) */
     switch (button) {
         case 0: return (state & SDL_BUTTON_LMASK)  ? 1 : 0;
         case 1: return (state & SDL_BUTTON_RMASK)  ? 1 : 0;
         case 2: return (state & SDL_BUTTON_MMASK)  ? 1 : 0;
-        default: return 0;
+        default: return -1;
     }
 }
 
