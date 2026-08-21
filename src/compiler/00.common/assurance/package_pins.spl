@@ -1,0 +1,607 @@
+# Package assurance pins — hardening plan 2026-08-21 Phase 8
+# ("Critical islands -> whole compiler").
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md
+#         (Phase 8, package pin order + the four pin preconditions)
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §15 (migration by executable gates), §16.1-16.3 (assurance config
+#         examples), §20.9 (per-package migration shards), §8.2 (profile matrix)
+#
+# WHAT THIS MODULE IS
+#   The typed model behind the Phase 8 exit gate. It answers exactly one
+#   question, per package: may this package carry a `critical` pin *today*?
+#   The plan states four preconditions and this file encodes all four, with no
+#   escape and no wildcard match arm:
+#
+#     1. no waiver lacks owner + expiry (and none has expired)
+#     2. the package's DEPENDENCY CLOSURE is >= robust
+#     3. every critical check covering the package actually EXECUTES
+#        (mandatory, not advisory)
+#     4. differential tests cover the package
+#
+# WHAT THIS MODULE IS NOT
+#   It does not compile anything, does not run any gate, and does not decide
+#   whether a gate is honest. Precondition 3 is answered from a declared
+#   manifest (`spec/compiler_schema/critical_checks.sdn`) that records each
+#   `scripts/check/check-*.shs` gate's CURRENT enforcement status as recorded
+#   in `.claude/rules/vcs.md`. A manifest row is a claim about the tree, not a
+#   measurement of it; keeping the two apart is deliberate, because a model
+#   that inferred "mandatory" from the mere existence of a script would launder
+#   the two advisory (and honestly RED) guards straight into a green pin.
+#
+# THE PIN KEY, DEFINED HERE
+#   A package manifest (`simple.sdn`) may declare, additively:
+#
+#       project:
+#         profile: critical      # or moderate | strict | robust | verified
+#
+#   `critical: true` is accepted as sugar for `profile: critical`. When NEITHER
+#   key is present the package is `robust` — robust-at-warning is the plan's
+#   stated default for the migration period, so an unpinned package is never
+#   silently treated as critical and never as unconstrained. Waivers live in a
+#   sibling top-level block:
+#
+#       assurance:
+#         waivers:
+#           - rule: MC-ANY-001
+#             owner: compiler-core
+#             expires: 2026-12-31
+#
+#   The key is additive: every existing manifest in the tree parses unchanged
+#   and lands on the `robust` default.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
+
+# --------------------------------------------------------------------------
+# Profile rank
+# --------------------------------------------------------------------------
+
+# Strictness-ascending rank of a CANONICAL profile name, or -1 when the name
+# is not a profile at all. -1 rather than 0 so that "unknown" can never
+# accidentally compare >= robust.
+pub fn profile_rank(canonical: text) -> i64:
+    if canonical == "moderate":
+        return 0
+    if canonical == "strict":
+        return 1
+    if canonical == "robust":
+        return 2
+    if canonical == "critical":
+        return 3
+    if canonical == "verified":
+        return 4
+    -1
+
+pub fn default_profile_name() -> text:
+    "robust"
+
+pub fn is_at_least_robust(canonical: text) -> bool:
+    profile_rank(canonical) >= profile_rank("robust")
+
+# --------------------------------------------------------------------------
+# Typed model
+# --------------------------------------------------------------------------
+
+# One recorded exemption from a hardening rule. `owner` and `expires` are
+# plain text here on purpose: an EMPTY string is the "missing" case the gate
+# must be able to name, and an option would let a caller write the check
+# fail-open by pattern-matching only the Some arm.
+pub class Waiver:
+    rule: text
+    owner: text
+    # ISO `YYYY-MM-DD`. Compared lexicographically, which is exact for that
+    # fixed-width format and needs no date library in 00.common.
+    expires: text
+
+# A dependency edge as DECLARED. `simple.sdn` writes `- project: ../lib`
+# (a path relative to the manifest's own directory); fixtures and future
+# manifests may instead write `- package: simple-std` naming a package
+# directly. Both are carried verbatim and resolved by `resolve_edges`.
+pub class DepEdge:
+    # relative path form, "" when this edge names a package instead
+    project_path: text
+    # package-name form, "" when this edge is a path
+    package_name: text
+
+pub class PackagePin:
+    package: text
+    # Directory the manifest lives in, normalised, no trailing slash. Used to
+    # resolve `project:` path edges to other packages.
+    dir: text
+    # Canonical profile name. Never "" for a successfully parsed manifest:
+    # an unrecognised spelling is a parse error, not a silent downgrade.
+    profile: text
+    # True when the manifest declared the key explicitly. A package that only
+    # inherits the default is NOT a pinned package, and the gate must not
+    # count it toward its non-vacuity floor.
+    explicit: bool
+    waivers: [Waiver]
+    dependencies: [DepEdge]
+
+# One `scripts/check/check-*.shs` gate, as recorded in the checks manifest.
+pub class CriticalCheck:
+    name: text
+    # "mandatory" | "advisory" — validated at parse time against that closed
+    # pair, so a typo cannot read as mandatory.
+    status: text
+    # Package names this gate covers. A gate covering nothing constrains
+    # nothing, which is why the report counts coverage explicitly.
+    covers: [text]
+    # True when this gate compares two independent implementations/engines
+    # (seed vs self-host, interpreter vs JIT vs native). Precondition 4.
+    differential: bool
+
+pub fn check_is_mandatory(c: CriticalCheck) -> bool:
+    c.status == "mandatory"
+
+pub fn check_covers(c: CriticalCheck, package: text) -> bool:
+    var hit = false
+    for p in c.covers:
+        if p == package:
+            hit = true
+    hit
+
+# --------------------------------------------------------------------------
+# Closed reason set. Every arm of every match over this enum is written out;
+# there is no `case _` in this file and none may be added.
+# --------------------------------------------------------------------------
+
+pub enum PinReason:
+    # package, rule
+    WaiverWithoutOwner(text, text)
+    # package, rule
+    WaiverWithoutExpiry(text, text)
+    # package, rule, expires
+    WaiverExpired(text, text, text)
+    # package, dependency, dependency-profile ("unknown" when unresolvable)
+    DependencyBelowRobust(text, text, text)
+    # package, check name
+    AdvisoryCheckInCritical(text, text)
+    # package
+    NoDifferentialCoverage(text)
+
+pub fn pin_reason_code(r: PinReason) -> text:
+    match r:
+        case WaiverWithoutOwner(_, _): "E-PIN-001"
+        case WaiverWithoutExpiry(_, _): "E-PIN-002"
+        case WaiverExpired(_, _, _): "E-PIN-003"
+        case DependencyBelowRobust(_, _, _): "E-PIN-004"
+        case AdvisoryCheckInCritical(_, _): "E-PIN-005"
+        case NoDifferentialCoverage(_): "E-PIN-006"
+
+pub fn pin_reason_package(r: PinReason) -> text:
+    match r:
+        case WaiverWithoutOwner(pkg, _): pkg
+        case WaiverWithoutExpiry(pkg, _): pkg
+        case WaiverExpired(pkg, _, _): pkg
+        case DependencyBelowRobust(pkg, _, _): pkg
+        case AdvisoryCheckInCritical(pkg, _): pkg
+        case NoDifferentialCoverage(pkg): pkg
+
+pub fn pin_reason_text(r: PinReason) -> text:
+    match r:
+        case WaiverWithoutOwner(pkg, rule):
+            "E-PIN-001: " + pkg + ": waiver `" + rule + "` has no owner"
+        case WaiverWithoutExpiry(pkg, rule):
+            "E-PIN-002: " + pkg + ": waiver `" + rule + "` has no expiry"
+        case WaiverExpired(pkg, rule, expires):
+            "E-PIN-003: " + pkg + ": waiver `" + rule + "` expired on " + expires
+        case DependencyBelowRobust(pkg, dep, prof):
+            "E-PIN-004: " + pkg + ": dependency `" + dep + "` is " + prof + ", below robust"
+        case AdvisoryCheckInCritical(pkg, check):
+            "E-PIN-005: " + pkg + ": critical check `" + check + "` is advisory, not enforced"
+        case NoDifferentialCoverage(pkg):
+            "E-PIN-006: " + pkg + ": no differential test coverage"
+
+# --------------------------------------------------------------------------
+# Path handling for `project:` dependency edges
+# --------------------------------------------------------------------------
+
+fn _strip_trailing_slash(p: text) -> text:
+    var out = p
+    while out.len() > 1 and out.ends_with("/"):
+        out = out.substring(0, out.len() - 1)
+    out
+
+# Lexical normalisation only — no filesystem access, because 00.common must
+# stay usable where there is no filesystem. `.` is dropped, `..` pops, and a
+# `..` that would escape the root is kept literally rather than silently
+# swallowed (swallowing it would make two different edges resolve equal).
+pub fn normalize_path(p: text) -> text:
+    var parts: [text] = []
+    for seg in p.split("/"):
+        if seg == "" or seg == ".":
+            parts = parts
+        elif seg == "..":
+            if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                var next: [text] = []
+                var i: i64 = 0
+                while i < parts.len() - 1:
+                    next = next + [parts[i]]
+                    i = i + 1
+                parts = next
+            else:
+                parts = parts + [".."]
+        else:
+            parts = parts + [seg]
+    parts.join("/")
+
+pub fn join_path(dir: text, rel: text) -> text:
+    if rel.starts_with("/"):
+        return normalize_path(rel)
+    normalize_path(_strip_trailing_slash(dir) + "/" + rel)
+
+# --------------------------------------------------------------------------
+# Manifest parsing
+# --------------------------------------------------------------------------
+
+pub enum PinDocError:
+    ParseFailed(text, text)
+    MissingField(text, text)
+    WrongShape(text, text)
+    UnknownProfile(text, text)
+    UnknownCheckStatus(text, text)
+
+pub fn pin_doc_error_text(e: PinDocError) -> text:
+    match e:
+        case ParseFailed(path, detail): "E-PINDOC-001: " + path + ": SDN parse failed: " + detail
+        case MissingField(path, field): "E-PINDOC-002: " + path + ": required field missing: " + field
+        case WrongShape(path, detail): "E-PINDOC-003: " + path + ": " + detail
+        case UnknownProfile(path, raw): "E-PINDOC-004: " + path + ": unknown profile name `" + raw + "`"
+        case UnknownCheckStatus(path, raw): "E-PINDOC-005: " + path + ": check status must be `mandatory` or `advisory`, got `" + raw + "`"
+
+fn _text_at(v: SdnValue, key: text) -> text?:
+    match v.get(key):
+        case Some(item): item.as_str()
+        case None: None
+
+fn _opt_text(v: SdnValue, key: text, fallback: text) -> text:
+    match _text_at(v, key):
+        case Some(s): s
+        case None: fallback
+
+fn _opt_bool(v: SdnValue, key: text, fallback: bool) -> bool:
+    match v.get(key):
+        case None: fallback
+        case Some(item):
+            match item.as_bool():
+                case Some(b): b
+                case None: fallback
+
+fn _string_list(v: SdnValue, key: text) -> [text]:
+    var out: [text] = []
+    match v.get(key):
+        case None: out
+        case Some(lv):
+            match lv.as_array():
+                case None: out
+                case Some(items):
+                    for item in items:
+                        match item.as_str():
+                            case Some(s): out = out + [s]
+                            case None: out = out
+                    out
+
+fn _parse_waivers(root: SdnValue, path: text, mut errors: [PinDocError]) -> [Waiver]:
+    var out: [Waiver] = []
+    match root.get("assurance"):
+        case None: out
+        case Some(av):
+            match av.get("waivers"):
+                case None: out
+                case Some(wv):
+                    match wv.as_array():
+                        case None:
+                            errors.push(PinDocError.WrongShape(path, "`assurance.waivers:` must be a sequence"))
+                            out
+                        case Some(items):
+                            for item in items:
+                                val rule = _opt_text(item, "rule", "")
+                                if rule == "":
+                                    errors.push(PinDocError.MissingField(path, "assurance.waivers.rule"))
+                                out = out + [Waiver(
+                                    rule: rule,
+                                    owner: _opt_text(item, "owner", ""),
+                                    expires: _opt_text(item, "expires", "")
+                                )]
+                            out
+
+fn _parse_deps(project: SdnValue, path: text, mut errors: [PinDocError]) -> [DepEdge]:
+    var out: [DepEdge] = []
+    match project.get("dependencies"):
+        case None: out
+        case Some(dv):
+            match dv.as_array():
+                case None:
+                    errors.push(PinDocError.WrongShape(path, "`project.dependencies:` must be a sequence"))
+                    out
+                case Some(items):
+                    for item in items:
+                        val proj = _opt_text(item, "project", "")
+                        val pkg = _opt_text(item, "package", "")
+                        if proj == "" and pkg == "":
+                            errors.push(PinDocError.WrongShape(path,
+                                "`project.dependencies` entry declares neither `project:` nor `package:`"))
+                        else:
+                            out = out + [DepEdge(project_path: proj, package_name: pkg)]
+                    out
+
+# `dir` is the directory the manifest was read from; it is supplied by the
+# caller rather than derived from `path`, so a census can feed a fixture from
+# anywhere without the model guessing at layout.
+pub fn parse_package_pin(source: text, path: text, dir: text) -> Result<PackagePin, [PinDocError]>:
+    var errors: [PinDocError] = []
+    match parse(source):
+        case Err(msg):
+            errors.push(PinDocError.ParseFailed(path, msg))
+            Err(errors)
+        case Ok(root):
+            var project = root
+            match root.get("project"):
+                case Some(pv): project = pv
+                case None:
+                    errors.push(PinDocError.MissingField(path, "project"))
+            val name = _opt_text(project, "name", "")
+            if name == "":
+                errors.push(PinDocError.MissingField(path, "project.name"))
+
+            # `profile:` wins over the `critical: true` sugar when both appear;
+            # they cannot disagree silently because the sugar only ever RAISES
+            # to critical and an explicit lower `profile:` alongside it is a
+            # contradiction the reader reports as a wrong shape.
+            var profile = default_profile_name()
+            var explicit = false
+            val raw_profile = _opt_text(project, "profile", "")
+            val sugar = _opt_bool(project, "critical", false)
+            if raw_profile != "":
+                val canon = normalize_profile_name(raw_profile)
+                if canon == "":
+                    errors.push(PinDocError.UnknownProfile(path, raw_profile))
+                else:
+                    profile = canon
+                    explicit = true
+                if sugar and normalize_profile_name(raw_profile) != "critical":
+                    errors.push(PinDocError.WrongShape(path,
+                        "`project.critical: true` contradicts `project.profile: " + raw_profile + "`"))
+            elif sugar:
+                profile = "critical"
+                explicit = true
+
+            val deps = _parse_deps(project, path, errors)
+            val waivers = _parse_waivers(root, path, errors)
+            if errors.len() > 0:
+                return Err(errors)
+            Ok(PackagePin(
+                package: name,
+                dir: normalize_path(dir),
+                profile: profile,
+                explicit: explicit,
+                waivers: waivers,
+                dependencies: deps
+            ))
+
+pub fn parse_critical_checks(source: text, path: text) -> Result<[CriticalCheck], [PinDocError]>:
+    var errors: [PinDocError] = []
+    match parse(source):
+        case Err(msg):
+            errors.push(PinDocError.ParseFailed(path, msg))
+            Err(errors)
+        case Ok(root):
+            var out: [CriticalCheck] = []
+            match root.get("checks"):
+                case None:
+                    errors.push(PinDocError.MissingField(path, "checks"))
+                case Some(cv):
+                    match cv.as_array():
+                        case None:
+                            errors.push(PinDocError.WrongShape(path, "`checks:` must be a sequence"))
+                        case Some(items):
+                            for item in items:
+                                val nm = _opt_text(item, "name", "")
+                                if nm == "":
+                                    errors.push(PinDocError.MissingField(path, "checks.name"))
+                                val st = _opt_text(item, "status", "")
+                                if st != "mandatory" and st != "advisory":
+                                    errors.push(PinDocError.UnknownCheckStatus(path, st))
+                                out = out + [CriticalCheck(
+                                    name: nm,
+                                    status: st,
+                                    covers: _string_list(item, "covers"),
+                                    differential: _opt_bool(item, "differential", false)
+                                )]
+            if errors.len() > 0:
+                return Err(errors)
+            if out.len() == 0:
+                errors.push(PinDocError.WrongShape(path, "`checks:` is empty; a vacuous manifest is not evidence"))
+                return Err(errors)
+            Ok(out)
+
+# --------------------------------------------------------------------------
+# Dependency closure
+# --------------------------------------------------------------------------
+
+fn _find_by_name(pins: [PackagePin], name: text) -> PackagePin?:
+    for p in pins:
+        if p.package == name:
+            return Some(p)
+    None
+
+fn _find_by_dir(pins: [PackagePin], dir: text) -> PackagePin?:
+    for p in pins:
+        if p.dir == dir:
+            return Some(p)
+    None
+
+# Marker prefix for a declared edge that resolves to no known package. Such an
+# edge is CARRIED, never dropped: a dependency the model cannot see is exactly
+# the hole a critical pin must not be granted through, and the marker keeps the
+# offending package + edge text in the diagnostic instead of a bare "unknown".
+pub fn unresolved_marker() -> text:
+    "?"
+
+pub fn is_unresolved(name: text) -> bool:
+    name.starts_with(unresolved_marker())
+
+fn _unresolved(owner: text, edge: text) -> text:
+    unresolved_marker() + owner + " -> " + edge
+
+# Resolve one package's declared edges to package NAMES.
+pub fn resolve_edges(pins: [PackagePin], p: PackagePin) -> [text]:
+    var out: [text] = []
+    for e in p.dependencies:
+        if e.package_name != "":
+            match _find_by_name(pins, e.package_name):
+                case Some(dep): out = out + [dep.package]
+                case None: out = out + [_unresolved(p.package, "package: " + e.package_name)]
+        else:
+            match _find_by_dir(pins, join_path(p.dir, e.project_path)):
+                case Some(dep): out = out + [dep.package]
+                case None: out = out + [_unresolved(p.package, "project: " + e.project_path)]
+    out
+
+fn _contains(xs: [text], k: text) -> bool:
+    var hit = false
+    for x in xs:
+        if x == k:
+            hit = true
+    hit
+
+# Transitive closure of `p`'s dependencies, EXCLUDING `p` itself. Fixpoint over
+# the resolved edge set; a cycle terminates because a name already in `seen` is
+# never expanded twice.
+pub fn dependency_closure(pins: [PackagePin], p: PackagePin) -> [text]:
+    var seen: [text] = []
+    var frontier: [text] = resolve_edges(pins, p)
+    while frontier.len() > 0:
+        var next: [text] = []
+        for name in frontier:
+            if not _contains(seen, name) and name != p.package:
+                seen = seen + [name]
+                match _find_by_name(pins, name):
+                    case Some(dep):
+                        for e in resolve_edges(pins, dep):
+                            next = next + [e]
+                    case None: next = next
+        frontier = next
+    seen
+
+# --------------------------------------------------------------------------
+# The gate
+# --------------------------------------------------------------------------
+
+pub class PinReport:
+    # packages that declared the key explicitly, at any profile
+    pinned: i64
+    # of those, how many declared `critical`
+    critical: i64
+    waivers_examined: i64
+    dependencies_examined: i64
+    checks_examined: i64
+    reasons: [PinReason]
+
+pub fn reasons_with_code(rs: [PinReason], code: text) -> [PinReason]:
+    var out: [PinReason] = []
+    for r in rs:
+        if pin_reason_code(r) == code:
+            out = out + [r]
+    out
+
+pub fn count_with_code(rs: [PinReason], code: text) -> i64:
+    reasons_with_code(rs, code).len()
+
+# Waiver hygiene applies at EVERY profile, not just critical: a waiver with no
+# owner is unattributable wherever it sits, and the plan's precondition reads
+# "no waiver lacks owner+expiry" without qualifying it by profile. Expiry is
+# compared against `today` as ISO text; an empty `today` disables only the
+# EXPIRED check (the presence checks still run), so a caller that forgets to
+# pass a date gets fewer findings, never a silent pass on a missing field.
+pub fn check_waivers(p: PackagePin, today: text) -> [PinReason]:
+    var out: [PinReason] = []
+    for w in p.waivers:
+        if w.owner == "":
+            out = out + [PinReason.WaiverWithoutOwner(p.package, w.rule)]
+        if w.expires == "":
+            out = out + [PinReason.WaiverWithoutExpiry(p.package, w.rule)]
+        elif today != "" and w.expires < today:
+            out = out + [PinReason.WaiverExpired(p.package, w.rule, w.expires)]
+    out
+
+# Preconditions 2-4, which apply ONLY to a package asking for `critical`.
+pub fn check_critical_preconditions(pins: [PackagePin], p: PackagePin,
+        checks: [CriticalCheck]) -> [PinReason]:
+    var out: [PinReason] = []
+
+    for dep_name in dependency_closure(pins, p):
+        if is_unresolved(dep_name):
+            out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, "unresolved")]
+        else:
+            match _find_by_name(pins, dep_name):
+                case None:
+                    out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, "unknown")]
+                case Some(dep):
+                    if not is_at_least_robust(dep.profile):
+                        out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, dep.profile)]
+
+    var differential = false
+    for c in checks:
+        if check_covers(c, p.package):
+            if not check_is_mandatory(c):
+                out = out + [PinReason.AdvisoryCheckInCritical(p.package, c.name)]
+            if c.differential and check_is_mandatory(c):
+                differential = true
+    if not differential:
+        out = out + [PinReason.NoDifferentialCoverage(p.package)]
+    out
+
+# The whole gate. Runs every check over every package before returning, so a
+# caller sees the complete finding set rather than the first failure.
+pub fn check_package_pins(pins: [PackagePin], checks: [CriticalCheck],
+        today: text) -> PinReport:
+    var reasons: [PinReason] = []
+    var pinned: i64 = 0
+    var critical: i64 = 0
+    var waivers: i64 = 0
+    var deps: i64 = 0
+    var covering: i64 = 0
+
+    for p in pins:
+        if p.explicit:
+            pinned = pinned + 1
+        waivers = waivers + p.waivers.len()
+        for r in check_waivers(p, today):
+            reasons = reasons + [r]
+        if p.profile == "critical":
+            critical = critical + 1
+            deps = deps + dependency_closure(pins, p).len()
+            for c in checks:
+                if check_covers(c, p.package):
+                    covering = covering + 1
+            for r in check_critical_preconditions(pins, p, checks):
+                reasons = reasons + [r]
+
+    PinReport(
+        pinned: pinned,
+        critical: critical,
+        waivers_examined: waivers,
+        dependencies_examined: deps,
+        checks_examined: covering,
+        reasons: reasons
+    )
+
+# Would `package` be admissible at critical if it asked today? Used by the
+# census's `--why <package>` mode to report the blockers for a package that is
+# deliberately still pinned robust, which is the honest state of the first
+# island during Phase 8.
+pub fn blockers_for_critical(pins: [PackagePin], package: text,
+        checks: [CriticalCheck], today: text) -> [PinReason]:
+    match _find_by_name(pins, package):
+        case None: []
+        case Some(p):
+            var out: [PinReason] = []
+            for r in check_waivers(p, today):
+                out = out + [r]
+            for r in check_critical_preconditions(pins, p, checks):
+                out = out + [r]
+            out

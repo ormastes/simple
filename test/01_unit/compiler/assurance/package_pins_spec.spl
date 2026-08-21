@@ -1,0 +1,281 @@
+# Phase 8 package-pin model — hardening plan
+# doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md
+#
+# Covers the typed model behind `scripts/check/check-critical-package-pins.shs`:
+# the pin key and its default, waiver hygiene, the transitive dependency
+# closure, the advisory-check and differential-coverage preconditions, and the
+# closed reason set.
+#
+# @req REQ-HARDENING-PHASE8-PINS
+
+use std.spec.*
+use compiler.common.assurance.package_pins.{
+    PackagePin,
+    CriticalCheck,
+    Waiver,
+    DepEdge,
+    PinReason,
+    parse_package_pin,
+    parse_critical_checks,
+    profile_rank,
+    default_profile_name,
+    is_at_least_robust,
+    normalize_path,
+    join_path,
+    is_unresolved,
+    resolve_edges,
+    dependency_closure,
+    check_waivers,
+    check_critical_preconditions,
+    check_package_pins,
+    blockers_for_critical,
+    pin_reason_code,
+    pin_reason_text,
+    count_with_code
+}
+
+fn pin_of(source: text, dir: text) -> PackagePin:
+    match parse_package_pin(source, dir + "/simple.sdn", dir):
+        case Ok(p): p
+        case Err(_): PackagePin(package: "<parse-error>", dir: dir, profile: "",
+            explicit: false, waivers: [], dependencies: [])
+
+fn checks_of(source: text) -> [CriticalCheck]:
+    match parse_critical_checks(source, "<fixture>"):
+        case Ok(cs): cs
+        case Err(_): []
+
+val CLEAN_CHECKS = checks_of(
+    "checks:\n"
+    + "  - name: check-structure.shs\n    status: mandatory\n    differential: false\n    covers:\n      - core\n"
+    + "  - name: check-parity.shs\n    status: mandatory\n    differential: true\n    covers:\n      - core\n")
+
+val BASE = pin_of("project:\n  name: base\n  profile: robust\n", "fx/base")
+
+fn core_with(extra: text) -> PackagePin:
+    pin_of("project:\n  name: core\n  profile: critical\n  dependencies:\n    - package: base\n" + extra, "fx/core")
+
+describe("package pin profile key", fn():
+    it("defaults an unpinned manifest to robust and marks it not explicit", fn():
+        val p = pin_of("project:\n  name: plain\n", "fx/plain")
+        assert_equal(p.profile, default_profile_name())
+        assert_equal(p.profile, "robust")
+        assert_false(p.explicit)
+    )
+
+    it("records an explicit profile pin", fn():
+        val p = pin_of("project:\n  name: pinned\n  profile: critical\n", "fx/pinned")
+        assert_equal(p.profile, "critical")
+        assert_true(p.explicit)
+    )
+
+    it("accepts `critical: true` as sugar for profile: critical", fn():
+        val p = pin_of("project:\n  name: sugar\n  critical: true\n", "fx/sugar")
+        assert_equal(p.profile, "critical")
+        assert_true(p.explicit)
+    )
+
+    it("rejects an unknown profile spelling instead of silently downgrading", fn():
+        match parse_package_pin("project:\n  name: bad\n  profile: paranoid\n", "p", "d"):
+            case Ok(_): assert_true(false)
+            case Err(errs): expect(errs.len()).to_be_greater_than(0)
+    )
+
+    it("ranks profiles strictness-ascending and gives an unknown name -1", fn():
+        expect(profile_rank("moderate")).to_be_less_than(profile_rank("robust"))
+        expect(profile_rank("robust")).to_be_less_than(profile_rank("critical"))
+        assert_equal(profile_rank("nonsense"), -1)
+        assert_false(is_at_least_robust("nonsense"))
+        assert_false(is_at_least_robust("moderate"))
+        assert_true(is_at_least_robust("robust"))
+        assert_true(is_at_least_robust("critical"))
+    )
+)
+
+describe("waiver hygiene", fn():
+    it("accepts a waiver with an owner and a future expiry", fn():
+        val p = core_with("\nassurance:\n  waivers:\n    - rule: R1\n      owner: team\n      expires: 2099-01-01\n")
+        assert_equal(check_waivers(p, "2026-08-21").len(), 0)
+    )
+
+    it("flags a waiver with no owner as E-PIN-001", fn():
+        val p = core_with("\nassurance:\n  waivers:\n    - rule: R1\n      expires: 2099-01-01\n")
+        val rs = check_waivers(p, "2026-08-21")
+        assert_equal(rs.len(), 1)
+        assert_equal(pin_reason_code(rs[0]), "E-PIN-001")
+    )
+
+    it("flags a waiver with no expiry as E-PIN-002", fn():
+        val p = core_with("\nassurance:\n  waivers:\n    - rule: R1\n      owner: team\n")
+        val rs = check_waivers(p, "2026-08-21")
+        assert_equal(rs.len(), 1)
+        assert_equal(pin_reason_code(rs[0]), "E-PIN-002")
+    )
+
+    it("flags an expired waiver as E-PIN-003", fn():
+        val p = core_with("\nassurance:\n  waivers:\n    - rule: R1\n      owner: team\n      expires: 2020-01-01\n")
+        val rs = check_waivers(p, "2026-08-21")
+        assert_equal(rs.len(), 1)
+        assert_equal(pin_reason_code(rs[0]), "E-PIN-003")
+    )
+
+    it("still reports a MISSING owner when no date is supplied", fn():
+        # An empty `today` disables only the expiry comparison. A caller that
+        # forgets the date must get fewer findings, never a silent pass on a
+        # field that is absent outright.
+        val p = core_with("\nassurance:\n  waivers:\n    - rule: R1\n      expires: 2020-01-01\n")
+        val rs = check_waivers(p, "")
+        assert_equal(rs.len(), 1)
+        assert_equal(pin_reason_code(rs[0]), "E-PIN-001")
+    )
+)
+
+describe("dependency closure", fn():
+    it("normalizes and joins relative project paths", fn():
+        assert_equal(normalize_path("src/compiler/00.common/../../lib"), "src/lib")
+        assert_equal(join_path("src/compiler/00.common", "../../lib"), "src/lib")
+        assert_equal(join_path("src/lib", "./."), "src/lib")
+    )
+
+    it("resolves a path edge to the package whose manifest sits in that directory", fn():
+        val lib = pin_of("project:\n  name: simple-std\n", "src/lib")
+        val common = pin_of("project:\n  name: common\n  profile: critical\n"
+            + "  dependencies:\n    - project: ../../lib\n", "src/compiler/00.common")
+        assert_equal(resolve_edges([lib, common], common), ["simple-std"])
+    )
+
+    it("carries an unresolvable edge instead of dropping it", fn():
+        val orphan = pin_of("project:\n  name: orphan\n  profile: critical\n"
+            + "  dependencies:\n    - project: ../nowhere\n", "fx/orphan")
+        val edges = resolve_edges([orphan], orphan)
+        assert_equal(edges.len(), 1)
+        assert_true(is_unresolved(edges[0]))
+    )
+
+    it("is transitive and terminates on a cycle", fn():
+        val a = pin_of("project:\n  name: a\n  dependencies:\n    - package: b\n", "fx/a")
+        val b = pin_of("project:\n  name: b\n  dependencies:\n    - package: c\n", "fx/b")
+        val c = pin_of("project:\n  name: c\n  dependencies:\n    - package: a\n", "fx/c")
+        val closure = dependency_closure([a, b, c], a)
+        assert_equal(closure.len(), 2)
+        assert_true(closure.contains("b"))
+        assert_true(closure.contains("c"))
+    )
+
+    it("rejects a critical pin whose closure holds a below-robust package as E-PIN-004", fn():
+        val weak = pin_of("project:\n  name: base\n  profile: moderate\n", "fx/base")
+        val core = core_with("")
+        val rs = check_critical_preconditions([weak, core], core, CLEAN_CHECKS)
+        assert_equal(count_with_code(rs, "E-PIN-004"), 1)
+    )
+
+    it("rejects a critical pin whose closure cannot be resolved as E-PIN-004", fn():
+        val orphan = pin_of("project:\n  name: core\n  profile: critical\n"
+            + "  dependencies:\n    - project: ../nowhere\n", "fx/core")
+        val rs = check_critical_preconditions([orphan], orphan, CLEAN_CHECKS)
+        assert_equal(count_with_code(rs, "E-PIN-004"), 1)
+    )
+)
+
+describe("critical check enforcement", fn():
+    it("accepts a critical pin when every covering check is mandatory and one is differential", fn():
+        val core = core_with("")
+        assert_equal(check_critical_preconditions([BASE, core], core, CLEAN_CHECKS).len(), 0)
+    )
+
+    it("rejects an advisory covering check as E-PIN-005", fn():
+        val advisory = checks_of(
+            "checks:\n"
+            + "  - name: check-structure.shs\n    status: advisory\n    differential: false\n    covers:\n      - core\n"
+            + "  - name: check-parity.shs\n    status: mandatory\n    differential: true\n    covers:\n      - core\n")
+        val core = core_with("")
+        val rs = check_critical_preconditions([BASE, core], core, advisory)
+        assert_equal(count_with_code(rs, "E-PIN-005"), 1)
+    )
+
+    it("rejects a package with no differential coverage as E-PIN-006", fn():
+        val nodiff = checks_of(
+            "checks:\n"
+            + "  - name: check-structure.shs\n    status: mandatory\n    differential: false\n    covers:\n      - core\n")
+        val core = core_with("")
+        val rs = check_critical_preconditions([BASE, core], core, nodiff)
+        assert_equal(count_with_code(rs, "E-PIN-006"), 1)
+    )
+
+    it("does not count an ADVISORY differential check as coverage", fn():
+        # Precondition 4 is satisfied by a differential gate that RUNS. An
+        # advisory one proves nothing, so it must trigger both E-PIN-005 and
+        # E-PIN-006 rather than laundering itself into coverage.
+        val advisory_diff = checks_of(
+            "checks:\n"
+            + "  - name: check-parity.shs\n    status: advisory\n    differential: true\n    covers:\n      - core\n")
+        val core = core_with("")
+        val rs = check_critical_preconditions([BASE, core], core, advisory_diff)
+        assert_equal(count_with_code(rs, "E-PIN-005"), 1)
+        assert_equal(count_with_code(rs, "E-PIN-006"), 1)
+    )
+
+    it("rejects a check manifest with an unknown status instead of reading it as mandatory", fn():
+        match parse_critical_checks("checks:\n  - name: c.shs\n    status: maybe\n", "<f>"):
+            case Ok(_): assert_true(false)
+            case Err(errs): expect(errs.len()).to_be_greater_than(0)
+    )
+
+    it("rejects an empty check manifest as non-evidence", fn():
+        match parse_critical_checks("checks: []\n", "<f>"):
+            case Ok(_): assert_true(false)
+            case Err(errs): expect(errs.len()).to_be_greater_than(0)
+    )
+)
+
+describe("whole-report gate", fn():
+    it("counts explicit pins only, not inherited defaults", fn():
+        val plain = pin_of("project:\n  name: plain\n", "fx/plain")
+        val core = core_with("")
+        val rep = check_package_pins([plain, BASE, core], CLEAN_CHECKS, "2026-08-21")
+        # BASE and core declare `profile:`; plain does not.
+        assert_equal(rep.pinned, 2)
+        assert_equal(rep.critical, 1)
+        assert_equal(rep.reasons.len(), 0)
+    )
+
+    it("applies critical preconditions only to critical packages", fn():
+        # `base` is robust and covered by nothing; that is fine. Only `core`'s
+        # pin is subject to preconditions 2-4.
+        val core = core_with("")
+        val rep = check_package_pins([BASE, core], CLEAN_CHECKS, "2026-08-21")
+        assert_equal(rep.reasons.len(), 0)
+    )
+
+    it("reports blockers for a package that is deliberately still robust", fn():
+        val nodiff = checks_of(
+            "checks:\n"
+            + "  - name: check-structure.shs\n    status: mandatory\n    differential: false\n    covers:\n      - core\n")
+        val core = pin_of("project:\n  name: core\n  profile: robust\n"
+            + "  dependencies:\n    - package: base\n", "fx/core")
+        val rep = check_package_pins([BASE, core], nodiff, "2026-08-21")
+        # Still-robust: the gate itself is clean...
+        assert_equal(rep.reasons.len(), 0)
+        # ...but `--why` names exactly what would block a critical pin.
+        val blockers = blockers_for_critical([BASE, core], "core", nodiff, "2026-08-21")
+        assert_equal(count_with_code(blockers, "E-PIN-006"), 1)
+    )
+
+    it("gives every closed reason a distinct code and a non-empty message", fn():
+        val rs: [PinReason] = [
+            PinReason.WaiverWithoutOwner("p", "r"),
+            PinReason.WaiverWithoutExpiry("p", "r"),
+            PinReason.WaiverExpired("p", "r", "2020-01-01"),
+            PinReason.DependencyBelowRobust("p", "d", "moderate"),
+            PinReason.AdvisoryCheckInCritical("p", "c.shs"),
+            PinReason.NoDifferentialCoverage("p")
+        ]
+        var codes: [text] = []
+        for r in rs:
+            val code = pin_reason_code(r)
+            assert_false(codes.contains(code))
+            codes = codes + [code]
+            expect(pin_reason_text(r)).to_start_with(code)
+        assert_equal(codes.len(), 6)
+    )
+)

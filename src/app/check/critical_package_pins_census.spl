@@ -1,0 +1,144 @@
+# Critical package-pin census (Phase 8 gate, 2026-08-21).
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md (Phase 8)
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §15 (migrate by executable gates), §16.1-16.3 (config), §20.9 (shards)
+#
+# Reads package manifests (`simple.sdn`) and the critical-check enforcement
+# manifest, runs the real `check_package_pins` from
+# `compiler.common.assurance.package_pins`, and prints a machine-readable
+# census. Driven by `scripts/check/check-critical-package-pins.shs`, which
+# turns the census into a verdict.
+#
+# Every decision is made by the model module. Nothing here inspects manifest
+# text to reach a verdict — a text scan cannot compute a transitive dependency
+# closure and cannot tell an explicit pin from an inherited default.
+#
+# Usage:
+#   bin/simple run src/app/check/critical_package_pins_census.spl \
+#       --checks <critical_checks.sdn> --today <YYYY-MM-DD> \
+#       --package <path/to/simple.sdn> ... [--why <package-name>]
+#
+# Output contract (stdout, one record per line):
+#   PARSE-FAIL <path> <detail>
+#   PIN <package> <profile> explicit=<true|false> deps=<n> waivers=<n>
+#   REJECT <code> <package> <detail>
+#   BLOCK <code> <package> <detail>          (only for --why)
+#   WHY <package> blockers=<n>               (only for --why)
+#   SUMMARY packages=<n> pinned=<p> critical=<c> waivers=<w> \
+#           dependencies=<d> checks=<k> advisory_in_critical=<a> \
+#           waiver_without_owner=<o> waiver_without_expiry=<e> \
+#           waiver_expired=<x> dependency_below_robust=<b> \
+#           no_differential=<f> parse_fail=<pf> check_rows=<cr>
+
+use std.io_runtime.{read_file}
+use std.nogc_sync_mut.cli.{get_cli_args}
+use compiler.common.assurance.package_pins.{
+    PackagePin,
+    CriticalCheck,
+    PinReason,
+    parse_package_pin,
+    parse_critical_checks,
+    pin_doc_error_text,
+    pin_reason_code,
+    pin_reason_package,
+    pin_reason_text,
+    check_package_pins,
+    blockers_for_critical,
+    dependency_closure,
+    count_with_code
+}
+
+fn dirname_of(path: text) -> text:
+    var cut: i64 = -1
+    var i: i64 = 0
+    while i < path.len():
+        if path.substring(i, i + 1) == "/":
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return "."
+    if cut == 0:
+        return "/"
+    path.substring(0, cut)
+
+fn main():
+    val args = get_cli_args()
+    var paths: [text] = []
+    var checks_path = ""
+    var today = ""
+    var why = ""
+    var mode = ""
+    for a in args:
+        if a == "--package":
+            mode = "package"
+        elif a == "--checks":
+            mode = "checks"
+        elif a == "--today":
+            mode = "today"
+        elif a == "--why":
+            mode = "why"
+        elif mode == "package":
+            paths = paths + [a]
+        elif mode == "checks":
+            checks_path = a
+            mode = ""
+        elif mode == "today":
+            today = a
+            mode = ""
+        elif mode == "why":
+            why = a
+            mode = ""
+
+    var parse_fail = 0
+    var checks: [CriticalCheck] = []
+    if checks_path == "":
+        parse_fail = parse_fail + 1
+        print("PARSE-FAIL <checks> no --checks manifest supplied")
+    else:
+        match parse_critical_checks(read_file(checks_path), checks_path):
+            case Ok(cs): checks = cs
+            case Err(errs):
+                parse_fail = parse_fail + 1
+                for e in errs:
+                    print("PARSE-FAIL " + checks_path + " " + pin_doc_error_text(e))
+
+    var pins: [PackagePin] = []
+    for p in paths:
+        match parse_package_pin(read_file(p), p, dirname_of(p)):
+            case Ok(pin): pins = pins + [pin]
+            case Err(errs):
+                parse_fail = parse_fail + 1
+                for e in errs:
+                    print("PARSE-FAIL " + p + " " + pin_doc_error_text(e))
+
+    for pin in pins:
+        print("PIN " + pin.package + " " + pin.profile
+            + " explicit=" + pin.explicit.to_text()
+            + " deps=" + dependency_closure(pins, pin).len().to_text()
+            + " waivers=" + pin.waivers.len().to_text())
+
+    val report = check_package_pins(pins, checks, today)
+    for r in report.reasons:
+        print("REJECT " + pin_reason_code(r) + " " + pin_reason_package(r) + " " + pin_reason_text(r))
+
+    if why != "":
+        val blockers = blockers_for_critical(pins, why, checks, today)
+        for r in blockers:
+            print("BLOCK " + pin_reason_code(r) + " " + pin_reason_package(r) + " " + pin_reason_text(r))
+        print("WHY " + why + " blockers=" + blockers.len().to_text())
+
+    print("SUMMARY packages=" + pins.len().to_text()
+        + " pinned=" + report.pinned.to_text()
+        + " critical=" + report.critical.to_text()
+        + " waivers=" + report.waivers_examined.to_text()
+        + " dependencies=" + report.dependencies_examined.to_text()
+        + " checks=" + report.checks_examined.to_text()
+        + " advisory_in_critical=" + count_with_code(report.reasons, "E-PIN-005").to_text()
+        + " waiver_without_owner=" + count_with_code(report.reasons, "E-PIN-001").to_text()
+        + " waiver_without_expiry=" + count_with_code(report.reasons, "E-PIN-002").to_text()
+        + " waiver_expired=" + count_with_code(report.reasons, "E-PIN-003").to_text()
+        + " dependency_below_robust=" + count_with_code(report.reasons, "E-PIN-004").to_text()
+        + " no_differential=" + count_with_code(report.reasons, "E-PIN-006").to_text()
+        + " parse_fail=" + parse_fail.to_text()
+        + " check_rows=" + checks.len().to_text())

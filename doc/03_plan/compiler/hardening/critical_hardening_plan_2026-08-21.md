@@ -182,7 +182,7 @@ The numeric block 015–022 is left reserved and untouched.
   `.claude/rules/vcs.md` (`check-stage-binaries-runnable.shs`, advisory/RED) and
   `doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`.
 
-### Phase 8 — Critical islands → whole compiler — `not started`
+### Phase 8 — Critical islands → whole compiler — `partial` (model + exit gate landed 2026-08-21; **zero packages pinnable today**)
 - Package pin order: `00.common` → `10.frontend` → `20.hir` → `30.types`/`35.semantics` → `40.mono`
   → `50.mir` → `55.borrow` → `70.backend` → `80.driver` → `90.tools` → `95.interp` → `99.loader` →
   runtime/stdlib → SimpleOS/firmware.
@@ -191,6 +191,50 @@ The numeric block 015–022 is left reserved and untouched.
   tests cover its semantics.
 - **Exit gate:** `sh scripts/check/check-critical-package-pins.shs` →
   `PASS — <n> pinned package(s) checked, advisory-in-critical=0 waiver-without-expiry=0`.
+- **Status 2026-08-21:** the typed model landed as
+  `src/compiler/00.common/assurance/package_pins.spl` (`PackagePin`/`Waiver`/
+  `DepEdge`/`CriticalCheck`, the `project.profile:` pin key with `critical: true`
+  sugar and a `robust` default, lexical path resolution, transitive dependency
+  closure with unresolvable edges CARRIED not dropped, and the closed
+  `PinReason` enum: `WaiverWithoutOwner` `E-PIN-001`, `WaiverWithoutExpiry`
+  `E-PIN-002`, `WaiverExpired` `E-PIN-003`, `DependencyBelowRobust` `E-PIN-004`,
+  `AdvisoryCheckInCritical` `E-PIN-005`, `NoDifferentialCoverage` `E-PIN-006` —
+  no wildcard arms), plus `src/app/check/critical_package_pins_census.spl`, the
+  enforcement manifest `spec/compiler_schema/critical_checks.sdn` (20 rows,
+  seeded from `.claude/rules/vcs.md`), and the exit gate
+  `scripts/check/check-critical-package-pins.shs` (fatal `--selftest`, 7 fixtures
+  under `test/fixtures/package_pins/`, ERROR exit 2 on 0 explicit pins / 0 check
+  rows / any manifest parse failure). 26 specs green
+  (`test/01_unit/compiler/assurance/package_pins_spec.spl`, mirrored to
+  `test/unit/`).
+- **The first island is pinned `robust`, NOT `critical`, and that is the honest
+  result.** `src/compiler/00.common/simple.sdn` was created with
+  `profile: robust`; `--why simple-compiler-common` reports **4 blockers**, and
+  flipping that file to `critical` really does turn the gate red (measured:
+  `FAIL — 1 pinned package(s) checked (1 critical), advisory-in-critical=2 …
+  dependency-below-robust=1 no-differential=1`, exit 1). The blockers:
+  - `E-PIN-005` ×2 — `check-stage-binaries-runnable.shs` and
+    `check-no-unresolved-runtime-symbols.shs` are ADVISORY (and honestly RED);
+    both cover every package compiled into a stage binary. Cleared by the
+    bootstrap redeploy in
+    `doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`.
+  - `E-PIN-006` — no differential coverage anywhere in the tree. The only planned
+    differential gate is Phase 7's `check-seed-selfhost-parity.shs`, which does
+    not exist; it is deliberately NOT listed in the manifest, because listing an
+    unwritten gate would satisfy the precondition with a file that never ran.
+  - `E-PIN-004` — a **new finding**: `src/lib/simple.sdn` declares
+    `- project: ../../rust`, which resolves to `rust/` and matches no package in
+    this tree (`src/compiler_rust/` is the real path). Every package whose
+    closure passes through `simple-std` therefore has an unestablishable closure.
+    Not fixed here — `src/lib/simple.sdn` is a shared manifest owned elsewhere.
+- **No package in the tree is pinnable critical today**, and the pin order below
+  cannot start until at least the two advisory guards go mandatory-green and one
+  differential gate exists. Both unblocks are Phase 7's, not Phase 8's.
+- **Scope, stated plainly:** precondition 3 ("every critical check actually
+  executes") is answered from the DECLARED `critical_checks.sdn`, not measured.
+  This gate does not run the other gates and cannot prove one is wired; the
+  manifest is written down rather than inferred precisely because "the script
+  exists" is not evidence that it enforces anything.
 
 ### Phase 9 — Release evidence and default escalation — `not started`
 - Critical release requires all of: static coverage 100%, selected-complete coverage 100%, missing
@@ -215,12 +259,12 @@ SDN block (`id/allow/deny/inputs/outputs/red_tests/exit_gate`) and CI rejects ou
 |---|---|---|
 | **0** serial contract lock | Architect A0 + reviewer R0 freeze closure schema, linkage/activation axes, extension identity, `CoverageState`, required operation interfaces, Any capability + escape rules, mono keys, aspect seal/lifecycle, diagnostics, registry format, evidence receipt format. No feature agent starts until both reviewers sign the contract hash. | `not started` |
 | **1** independent foundations | A1 schema generator, A2 exhaustiveness, A3 transition model, A4 dynamic identity, A5 unsafe capability, A6 test harness, A7 perf baseline. Shared driver/parser files denied. | `partial` — A1–A6 landed 2026-08-21 (see Lane status below); A7 perf baseline `not started` |
-| **2A** compiler path completeness | C1 grammar registry, C2 FlatAst bridge, C3 AST visitors, C4 HIR visitors, C5 HIR→MIR types, C6 HIR→MIR expr/stmt, C7 backend coverage, C8 interpreter coverage. Generated fragments merged by I0. | `partial` — C2, C5 landed 2026-08-21 |
+| **2A** compiler path completeness | C1 grammar registry, C2 FlatAst bridge, C3 AST visitors, C4 HIR visitors, C5 HIR→MIR types, C6 HIR→MIR expr/stmt, C7 backend coverage, C8 interpreter coverage. Generated fragments merged by I0. | `partial` — C1 (reporting-only cross-check), C2, C5 landed 2026-08-21 |
 | **2B** Any hardening | Y1 inventory, Y2 HIR checker, Y3 RuntimeValue ABI (**locks before Y4/Y5**), Y4 seed parity, Y5 self-hosted boxing parity, Y6 migration wrappers, Y7 boundary tests. | `partial` — Y1/Y2 landed 2026-08-21 (`35.semantics/any_escape/**`, `check-any-escape-census.shs`) |
 | **2C** typed monomorphization | M1 types/table, M2 type substitution, M3 HIR substitution, M4 collector, M5 rewriter, M6 layout/type instances, M7 post-mono verifier, M8 seed parity, M9 code-size/cache. Integrator alone touches `driver_hir_pipeline_passes.spl` and relaxes gates after M1–M7. | `partial` — M1 (`table.spl:29,39`), M2 (`type_subst.spl:74-128`) and most of M5 (`monomorphize_integration.spl:457,527`) already landed |
 | **2D** sum types / enum contracts | S1 payload preservation, S2 `@closed`, S3 `@evolving`, S4 union normalization, S5 layout/serialization, S6 Any→sum migration. | `partial` — S2/S3 landed 2026-08-21 (generated attributes on `HirEnum` + `35.semantics/enum_contract/**`) |
 | **2E** complete/dyn + aspects | D1 extension grammar, D2 manifest generator, D3 sealer, D4 loader admission, D5 atomic registry, D6 facet grammar/HIR, D7 witness/sidecar, D8 pointcut/weave plan, D9 typed weaver, D10 aspect-pack integration, D11 critical aspect policy, D12 aspect evidence. | `partial` — D2/D3/D4/D5 landed 2026-08-21 (`99.loader/completeness_seal/**`, `check-completeness-seal.shs`); catalog/container/routed-load slice exists (`doc/09_report/aspect_pack_design_coverage_2026-08-18.md`) |
-| **3** migration | P1..P12 package shards, one agent per package: census → convert → pin → engine+negative tests → no shared-root edits. | `not started` |
+| **3** migration | P1..P12 package shards, one agent per package: census → convert → pin → engine+negative tests → no shared-root edits. | `partial` — the pin MECHANISM landed 2026-08-21 (model + census + exit gate, see Lane status); no package is pinnable critical yet |
 | **4** parallel validation | V1 structural mutation, V2 Any red-team, V3 mono red-team, V4 dynamic red-team, V5 aspect red-team, V6 engine differential, V7 bootstrap parity, V8 fuzz/property, V9 perf/memory, V10 evidence forgery, V11 formal, V12 parallel ownership. | `not started` |
 | **5** serial integration + release gate | I0 owns root exports, shared parser dispatch, driver ordering, profile severity table, registry inclusion, release aggregate, default escalation. R1 independently verifies: generated files reproducible, no out-of-scope edits, no bypass env flag honoured in critical, no checker ran advisory under critical, every receipt fresh and bound to artifact+seal hash. | `not started` |
 
@@ -256,6 +300,7 @@ last stdout line of each guard; every guard has a fatal `--selftest` and is ERRO
 | A4 dynamic identity | `done` | `00.common/dynamic_identity/**` — `freeze_universe`, `dyn_tag`, `claim_of`, `deserialize_to_dense`, `critical_admits` |
 | A5 unsafe capability | `partial` | HIR side unlanded — `doc/08_tracking/bug/unsafe_capability_block_syntax_not_parsed_2026-08-21.md` and `unsafe_capabilities_not_carried_into_hir_2026-08-21.md` both OPEN |
 | A6 test harness | `done` | `check-hardening-mutation.shs` → `PASS — <n> row(s) checked, 0 missing` (mutation must kill a guard) |
+| C1 grammar registry | `partial` | `src/app/compiler_schema/grammar_extract.spl` + `grammar` subcommand -> `spec/compiler_schema/registry/compiler.frontend.Grammar.sdn` (123 productions, 103 flat-AST tags) and the grammar block in `index.sdn`; gate `check-compiler-schema-fresh.shs` -> `PASS — 365 variant(s) across 12 enum(s), 123 production(s) (19 orphan tag(s), 11 dead production(s)), registry fresh`, `selftest: 4/4 fixtures OK`. Specs `test/01_unit/app/compiler_schema/compiler_schema_grammar_spec.spl` -> `Results: 16 total, 16 passed, 0 failed`. `partial` because the cross-check is REPORTED, not fatal: 19 flat-AST tags are stamped by no core production (`STMT_ASSIGN`, `STMT_CONTRACT_*`, `EXPR_PASS*`, `DECL_CLASS`, ...) and 11 productions stamp no tag and have no in-tree caller — a real backlog, frozen in the registry rather than hidden |
 | C2 FlatAst bridge | `done` | `10.frontend/_FlatAstBridge/{convert_nodes,module_assembly}.spl` — silent fallbacks replaced with loud diagnostics |
 | C5 HIR→MIR types | `done` | explicit arm per `HirTypeKind` in `50.mir/mir_lowering_types.spl` + `_MirLoweringExpr/expr_dispatch.spl`; gated by `check-critical-wildcard-ban.shs` → `PASS — <n> site(s) checked, forbidden=<k> (baseline <k>)` |
 | D2 manifest generator | `done` | `99.loader/completeness_seal/{manifest,axis_parse,required_interfaces}.spl` — `parse_manifest_text`, `required_operations`, `missing_module_interfaces` |
@@ -266,6 +311,8 @@ last stdout line of each guard; every guard has a fatal `--selftest` and is ERRO
 | M7 post-mono verifier | `partial` | `40.mono/verify/post_mono_verify.spl` + template pruning in `monomorphize_integration.spl`; `check-post-mono-invariants.shs` → `PASS — 9 fixture(s) checked, 0 unexpected` — **fixtures only**, `doc/08_tracking/bug/hir_generic_templates_unconsumed_by_mono_pass_2026-08-21.md` OPEN |
 | S2 `@closed` / S3 `@evolving` | `done` | generated attributes on `HirEnum` (`20.hir/hir_definitions.spl`) consumed by `35.semantics/enum_contract/{contract_model,declaration_check,match_check,attribute_source,check}.spl` |
 | decorators → HIR | `partial` | filed and being carried: `doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md` |
+| Phase 8 pin model + exit gate | `done` (model/gate), `blocked` (first pin) | `src/compiler/00.common/assurance/package_pins.spl` + `src/app/check/critical_package_pins_census.spl` + `spec/compiler_schema/critical_checks.sdn` (20 rows) + `scripts/check/check-critical-package-pins.shs` → `PASS — 1 pinned package(s) checked, advisory-in-critical=0 waiver-without-expiry=0`; `--selftest` → `PASS — 7 selftest fixture(s) checked, scanner accepts a clean pin and detects all six rejection classes`. Decisions come from the real pure-Simple model via `bin/simple run`, never from grepping a manifest. Negative proof on the REAL tree: flipping `src/compiler/00.common/simple.sdn` to `profile: critical` yields `FAIL — 1 pinned package(s) checked (1 critical), advisory-in-critical=2 waiver-without-owner=0 waiver-without-expiry=0 waiver-expired=0 dependency-below-robust=1 no-differential=1` (exit 1). `--why simple-compiler-common` → `WHY simple-compiler-common blockers=4`. Specs: `test/01_unit/compiler/assurance/package_pins_spec.spl` → `Results: 26 total, 26 passed, 0 failed` (mirrored to `test/unit/`) |
+| P1 shard — `00.common` critical pin | `blocked` | Pinned `robust`, not `critical`. Blocked by 2×`E-PIN-005` (`check-stage-binaries-runnable.shs`, `check-no-unresolved-runtime-symbols.shs` are advisory + RED), `E-PIN-006` (no differential gate exists — Phase 7's `check-seed-selfhost-parity.shs` unwritten), and `E-PIN-004` (`src/lib/simple.sdn` declares `- project: ../../rust`, a path that matches no package in this tree). First two clear with the bootstrap redeploy; the third is a one-line manifest fix in a shared file this lane did not own |
 | step 12 (Any census) | `done` | `35.semantics/any_escape/{checker,types}.spl` (`any_escape_check`) + `check-any-escape-census.shs` → `PASS — <n> module(s) checked, <a> Any site(s), <e> escape(s), <u> unanalyzable (baseline …)` — ratchet baseline, not zero |
 
 Supporting gate added in the same pass: `check-duplicate-pub-fn-names.shs` →
