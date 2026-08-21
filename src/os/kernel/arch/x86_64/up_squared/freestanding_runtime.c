@@ -126,3 +126,70 @@ void *realloc(void *pointer, size_t size) {
     }
     return result;
 }
+
+/* Minimal ring-0 providers required by the shared NVMe/storage closure. */
+int64_t syscall(uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
+                uint64_t arg3, uint64_t arg4) {
+    (void)id; (void)arg0; (void)arg1; (void)arg2; (void)arg3; (void)arg4;
+    return -38;
+}
+
+uint64_t unsafe_addr_of(int64_t value) { return (uint64_t)value; }
+
+int64_t rt_volatile_read_u8(int64_t address) {
+    return *(volatile uint8_t *)(uintptr_t)address;
+}
+int64_t rt_volatile_read_u32(int64_t address) {
+    return *(volatile uint32_t *)(uintptr_t)address;
+}
+int64_t rt_volatile_read_u64(int64_t address) {
+    return (int64_t)*(volatile uint64_t *)(uintptr_t)address;
+}
+void rt_volatile_write_u8(int64_t address, int64_t value) {
+    *(volatile uint8_t *)(uintptr_t)address = (uint8_t)value;
+}
+void rt_volatile_write_u32(int64_t address, int64_t value) {
+    *(volatile uint32_t *)(uintptr_t)address = (uint32_t)value;
+}
+void rt_volatile_write_u64(int64_t address, int64_t value) {
+    *(volatile uint64_t *)(uintptr_t)address = (uint64_t)value;
+}
+
+int64_t rt_text_slice_audit_note_range(int64_t source, int64_t source_length,
+                                       int64_t begin, int64_t finish) {
+    (void)source; (void)source_length; (void)begin; (void)finish;
+    return 0;
+}
+
+extern int64_t rt_array_len_safe(int64_t value);
+extern int64_t rt_array_data_ptr(int64_t value);
+extern int64_t rt_string_new(int64_t bytes, int64_t length);
+
+int64_t rt_bytes_to_text(int64_t value) {
+    int64_t length = rt_array_len_safe(value);
+    if (value == 0 || length <= 0) {
+        return rt_string_new(0, 0);
+    }
+    return rt_string_new(rt_array_data_ptr(value), length);
+}
+
+long long strtoll(const char *text, char **end, int base) {
+    const char *cursor = text;
+    long long sign = 1;
+    unsigned long long value = 0;
+    if (base != 0 && base != 10) {
+        if (end != (char **)0) *end = (char *)text;
+        return 0;
+    }
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n') cursor++;
+    if (*cursor == '-' || *cursor == '+') {
+        if (*cursor == '-') sign = -1;
+        cursor++;
+    }
+    while (*cursor >= '0' && *cursor <= '9') {
+        value = value * 10u + (unsigned long long)(*cursor - '0');
+        cursor++;
+    }
+    if (end != (char **)0) *end = (char *)cursor;
+    return sign < 0 ? -(long long)value : (long long)value;
+}

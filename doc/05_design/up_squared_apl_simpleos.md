@@ -36,3 +36,19 @@ The first-light console remains explicitly a live-unproven legacy-COM1
 candidate. If CN16 firmware routing does not expose that port, the next board
 provider must discover the Apollo Lake LPSS UART; no marker may claim the
 candidate proven before physical evidence.
+
+## Shared NVMe provisioning
+
+`up_squared/nvme_storage.spl` is a board adapter, not a second NVMe driver. It
+uses `pcimgr` for x86 PCI discovery/grant and delegates controller state,
+queues, DMA, sector I/O, GPT, and FAT32 to common modules. `nvme identify` is
+read-only and prints the exact `FORMAT:<serial>:<nsid>:<lba-count>` token.
+Only `nvme format <exact-token>` commits. The commit writes mirrored GPT,
+formats the partition lease, creates a valid `PROOF.TXT` FAT chain/directory
+entry, flushes, opens a fresh adapter, and verifies the file bytes. `ls /nvme`
+rechecks the on-media boot signature, directory entry, and payload.
+
+The UP2 freestanding runtime supplies coherent x86 DMA pool/sync primitives
+and volatile MMIO, while `NvmeDriver` stays the canonical mutable owner. The
+Identify fields use an exact hex representation so the serial challenge does
+not depend on hosted UTF-8 conversion.

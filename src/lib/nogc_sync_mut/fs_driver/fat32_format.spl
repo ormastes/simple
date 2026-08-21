@@ -5,7 +5,6 @@
 # constructing a plan or inspecting geometry never writes media.
 
 use std.fs_driver.block_device.{BlockDevice}
-use std.fs_driver.bytes_util.{text_to_bytes_pure}
 
 val FAT32_MIN_CLUSTERS: u64 = 65525u64
 val FAT32_RESERVED_SECTORS: u32 = 32u32
@@ -48,10 +47,9 @@ fn _fat32_put_u32(data: [u8], off: i64, value: u32) -> [u8]:
 
 fn _fat32_put_text(data: [u8], off: i64, value: text, width: i64) -> [u8]:
     var out = data
-    val bytes = text_to_bytes_pure(value)
     var i: i64 = 0
     while i < width:
-        out[off + i] = if i < bytes.len(): bytes[i] else: 0x20u8
+        out[off + i] = if i < value.len(): value.char_code_at(i).to_u8() else: 0x20u8
         i = i + 1
     out
 
@@ -102,6 +100,21 @@ fn fat32_format_plan(sector_size: u32, sector_count: u64, sectors_per_cluster: u
         else:
             fat_sectors = required_sectors
             iteration = iteration + 1
+    # Some geometries alternate between adjacent FAT sizes rather than
+    # reaching an exact fixed point. Select the larger safe value and
+    # recompute the final data-cluster count from that committed geometry.
+    var final_overhead = FAT32_RESERVED_SECTORS.to_u64() + FAT32_FAT_COUNT.to_u64() * fat_sectors
+    if sector_count <= final_overhead:
+        return Err("fat32-format-device-too-small")
+    cluster_count = (sector_count - final_overhead) / sectors_per_cluster.to_u64()
+    val final_required_bytes = (cluster_count + 2u64) * 4u64
+    val final_required_sectors = (final_required_bytes + sector_size.to_u64() - 1u64) / sector_size.to_u64()
+    if final_required_sectors > fat_sectors:
+        fat_sectors = final_required_sectors
+        final_overhead = FAT32_RESERVED_SECTORS.to_u64() + FAT32_FAT_COUNT.to_u64() * fat_sectors
+        if sector_count <= final_overhead:
+            return Err("fat32-format-device-too-small")
+        cluster_count = (sector_count - final_overhead) / sectors_per_cluster.to_u64()
     if cluster_count < FAT32_MIN_CLUSTERS:
         return Err("fat32-format-not-fat32-cluster-count")
     if fat_sectors > 0xffffffffu64:

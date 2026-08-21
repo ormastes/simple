@@ -825,3 +825,14 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
   census compares a different population and reads as a phantom shrink. Zero evaluated
   gates is `ERROR`, never `PASS`. `status: planned` lanes report `SKIPPED — NOT VERIFIED`
   and may never report PASS.
+
+## UP Squared free NVMe provisioning
+
+- Common owners: `os.drivers.nvme.NvmeDriver`, `NvmeBlockAdapter`, GPT, FAT32.
+- UP2 owns PCI grant and x86 freestanding DMA/MMIO only; StarFive retains its
+  PCIe-host/PHY/cache-coherency adapter.
+- Boot Identify is read-only. Format authority is the exact live
+  `FORMAT:<serial>:<nsid>:<lba-count>` token, never a password.
+- Storage proof is GPT + bounded FAT32 + flush + fresh-adapter byte readback +
+  `ls /nvme`; emulator interoperability additionally requires host `mdir` and
+  `mtype` on a dedicated scratch image. Never point this proof at host NVMe.

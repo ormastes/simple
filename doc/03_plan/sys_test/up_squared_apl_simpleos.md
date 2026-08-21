@@ -8,6 +8,9 @@ NFR-005..008 require `--live` on the physical board.
 `--ovmf` is the reproducible preflight for the exact admitted USB image. It
 must prove the loader transition, ordered kernel markers, command-correlated
 `ls /`, and VFS entries, but it never substitutes for physical `--live`.
+`--ovmf-storage` adds a dedicated 64 MiB scratch NVMe and covers REQ-008..012
+and NFR-009..010 with read-only Identify, exact-challenge GPT/FAT32 creation,
+fresh-adapter readback, and independent host `fdisk`/`mdir`/`mtype` checks.
 
 Visible steps:
 

@@ -61,6 +61,24 @@ markers followed by a command-correlated `ls /` response containing `/bin`,
 `/etc`, and `/README.txt` from the public VFS path. A structurally valid image or
 historical transcript does not prove the current board boot.
 
+## Free NVMe provisioning path
+
+No Intel System Studio or proprietary DCI toolkit is required. Boot SimpleOS,
+then run `nvme identify`. Confirm model, serial, NSID, LBA size/count, and
+capacity. The command prints an exact challenge and warns that the next action
+destroys that namespace. Enter exactly:
+
+```text
+nvme format FORMAT:<printed-serial>:<printed-nsid>:<printed-lba-count>
+ls /nvme
+```
+
+Success reports GPT partition 1, FAT32 label `SIMPLEOS`, flushed write and
+fresh-adapter readback, followed by `/nvme/proof.txt`. Never reuse a challenge
+after reboot or device replacement. Identify alone writes nothing. Physical
+UP2 success remains pending until the board and CN16/Tigard are connected; use
+`--ovmf-storage` for the reproducible scratch-device proof.
+
 Run the physical oracle with the retained media receipt:
 
 ```sh

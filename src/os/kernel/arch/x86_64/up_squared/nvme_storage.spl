@@ -1,0 +1,290 @@
+# UP Squared adapter for the host-neutral Pure-Simple NVMe stack.
+#
+# PCI discovery/grant is the board boundary. NvmeDriver remains the sole owner
+# of controller queues and DMA state. Media writes require an identity-bound
+# challenge and are confined first to the namespace lease, then to the GPT
+# partition lease.
+
+use os.drivers.nvme.nvme_driver.{NvmeDriver}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_nvme_storage, pcimgr_find_by_class_i64, pcimgr_find_qemu_nvme, pcimgr_grant_device}
+use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
+use os.kernel.types.capability_types.{SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.gpt_partition.{GptSinglePartitionRequest, gpt_format_plan, gpt_create_single_partition}
+use std.fs_driver.fat32_format.{Fat32FormatAuthorization, Fat32FormatPlan, fat32_format_plan, fat32_format}
+
+var g_up2_nvme_device: Up2NvmeLiveDevice? = nil
+var g_up2_nvme_partition_first_lba: u64 = 0u64
+var g_up2_nvme_partition_lba_count: u64 = 0u64
+
+struct Up2NvmeLiveDevice:
+    driver: NvmeDriver
+    pci_vendor: u16
+    pci_device: u16
+    bus: u8
+    device: u8
+    func: u8
+    nsid: u32
+    model: text
+    serial: text
+    firmware: text
+    lba_size: u32
+    lba_count: u64
+
+fn up2_nvme_init_read_only() -> Result<text, text>:
+    """Discover, grant, and Identify the first NVMe controller; never write media."""
+    pcimgr_init()
+    var index = pcimgr_find_nvme_storage()
+    if index < 0:
+        index = pcimgr_find_by_class_i64(1, 8)
+    if index < 0:
+        index = pcimgr_find_qemu_nvme()
+    if index < 0:
+        return Err("up2-nvme-not-found")
+    val grant_result = pcimgr_grant_device(index.to_u64(), 0u64)
+    if grant_result.is_err():
+        return Err("up2-nvme-grant:" + grant_result.unwrap_err())
+    val grant = grant_result.unwrap()
+    var driver = NvmeDriver.new()
+    val initialized = driver.init_from_grant(grant)
+    if initialized.is_err():
+        return Err("up2-nvme-init:" + initialized.unwrap_err())
+    if not driver.is_initialized() or driver.sector_count == 0u64 or driver.sector_size == 0u32:
+        return Err("up2-nvme-identify-incomplete")
+    val device = Up2NvmeLiveDevice(
+        driver: driver,
+        pci_vendor: grant.pci_vendor,
+        pci_device: grant.pci_device,
+        bus: grant.pci_bus,
+        device: grant.pci_dev,
+        func: grant.pci_func,
+        nsid: driver.identified_nsid,
+        model: driver.controller_model,
+        serial: driver.controller_serial,
+        firmware: driver.controller_firmware,
+        lba_size: driver.sector_size,
+        lba_count: driver.sector_count
+    )
+    g_up2_nvme_device = device
+    Ok("model=" + device.model + " serial=" + device.serial + " nsid=" + device.nsid.to_text() + " lba_size=" + device.lba_size.to_text() + " lba_count=" + device.lba_count.to_text() + " media_writes=0")
+
+fn up2_nvme_format_challenge() -> Result<text, text>:
+    if g_up2_nvme_device == nil:
+        return Err("up2-nvme-not-identified")
+    val device = g_up2_nvme_device.unwrap()
+    Ok("FORMAT:" + device.serial + ":" + device.nsid.to_text() + ":" + device.lba_count.to_text())
+
+fn up2_nvme_identity_summary() -> Result<text, text>:
+    if g_up2_nvme_device == nil:
+        return Err("up2-nvme-not-identified")
+    val device = g_up2_nvme_device.unwrap()
+    val lba_bytes = device.lba_size.to_u64()
+    if lba_bytes == 0u64 or device.lba_count > 0xffffffffffffffffu64 / lba_bytes:
+        return Err("up2-nvme-capacity-overflow")
+    Ok(
+        "nvme_identity_status=pass" +
+        " pci=" + device.pci_vendor.to_text() + ":" + device.pci_device.to_text() +
+        " bdf=" + device.bus.to_text() + ":" + device.device.to_text() + "." + device.func.to_text() +
+        " model=" + device.model +
+        " serial=" + device.serial +
+        " firmware=" + device.firmware +
+        " nsid=" + device.nsid.to_text() +
+        " lba_size=" + device.lba_size.to_text() +
+        " lba_count=" + device.lba_count.to_text() +
+        " capacity_bytes=" + (device.lba_count * lba_bytes).to_text() +
+        " completion=polling media_writes=0"
+    )
+
+fn _up2_nvme_adapter(device: Up2NvmeLiveDevice, base_lba: u64, lba_count: u64) -> Result<NvmeBlockAdapter, text>:
+    var adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+        device.driver,
+        device.nsid,
+        SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        base_lba,
+        lba_count,
+        device.lba_size,
+        "fat32"
+    )
+    val initialized = adapter.init_bounce_buffer()
+    if initialized.is_err():
+        return Err(initialized.unwrap_err())
+    Ok(adapter)
+
+fn _up2_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _up2_put_u16(data: [u8], offset: i64, value: u32) -> [u8]:
+    var out = data
+    out[offset] = (value & 0xffu32).to_u8()
+    out[offset + 1] = ((value >> 8) & 0xffu32).to_u8()
+    out
+
+fn _up2_put_u32(data: [u8], offset: i64, value: u32) -> [u8]:
+    var out = _up2_put_u16(data, offset, value)
+    _up2_put_u16(out, offset + 2, value >> 16)
+
+fn _up2_zero_sector(size: u32) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < size.to_i64():
+        out.push(0u8)
+        index = index + 1
+    out
+
+fn _up2_write_verify(dev: BlockDevice, lba: u64, sector: [u8]) -> Result<bool, text>:
+    val wrote = dev.write_sector(lba, sector)
+    if wrote.is_err() or not wrote.unwrap():
+        return Err("up2-nvme-sector-write")
+    val readback = dev.read_sector(lba)
+    if readback.is_err() or not _up2_bytes_equal(sector, readback.unwrap()):
+        return Err("up2-nvme-sector-readback")
+    Ok(true)
+
+fn _up2_write_fat32_proof(dev: BlockDevice, fat_plan: Fat32FormatPlan, proof: [u8]) -> Result<bool, text>:
+    # Allocate cluster 3 in both FAT copies.
+    var fat_index: u32 = 0u32
+    while fat_index < fat_plan.fat_count:
+        val fat_lba = fat_plan.reserved_sectors.to_u64() + fat_index.to_u64() * fat_plan.fat_sectors.to_u64()
+        val fat_result = dev.read_sector(fat_lba)
+        if fat_result.is_err():
+            return Err("up2-nvme-proof-fat-read")
+        var fat = fat_result.unwrap()
+        fat = _up2_put_u32(fat, 12, 0x0fffffffu32)
+        val fat_write = _up2_write_verify(dev, fat_lba, fat)
+        if fat_write.is_err():
+            return Err(fat_write.unwrap_err())
+        fat_index = fat_index + 1u32
+
+    val proof_lba = fat_plan.data_start_lba + fat_plan.sectors_per_cluster.to_u64()
+    var data = _up2_zero_sector(fat_plan.sector_size)
+    var index: i64 = 0
+    while index < proof.len():
+        data[index] = proof[index]
+        index = index + 1
+    val data_write = _up2_write_verify(dev, proof_lba, data)
+    if data_write.is_err():
+        return Err(data_write.unwrap_err())
+
+    var root = _up2_zero_sector(fat_plan.sector_size)
+    val name: [u8] = [80u8, 82u8, 79u8, 79u8, 70u8, 32u8, 32u8, 32u8, 84u8, 88u8, 84u8]
+    index = 0
+    while index < name.len():
+        root[index] = name[index]
+        index = index + 1
+    root[11] = 0x20u8
+    root = _up2_put_u16(root, 20, 0u32)
+    root = _up2_put_u16(root, 26, 3u32)
+    root = _up2_put_u32(root, 28, proof.len().to_u32())
+    val root_write = _up2_write_verify(dev, fat_plan.data_start_lba, root)
+    if root_write.is_err():
+        return Err(root_write.unwrap_err())
+    val flushed = dev.flush()
+    if flushed.is_err() or not flushed.unwrap():
+        return Err("up2-nvme-proof-flush")
+    Ok(true)
+
+fn up2_nvme_provision_fat32(challenge: text) -> Result<text, text>:
+    """Create GPT/FAT32, write a file, flush, remount, and verify readback."""
+    val expected = up2_nvme_format_challenge()
+    if expected.is_err() or challenge != expected.unwrap():
+        return Err("up2-nvme-format-challenge-mismatch")
+    if g_up2_nvme_partition_lba_count != 0u64:
+        return Err("up2-nvme-already-mounted")
+    val device = g_up2_nvme_device.unwrap()
+    if device.lba_size != 512u32 and device.lba_size != 4096u32:
+        return Err("up2-nvme-format-unsupported-lba-size")
+    val namespace_adapter_result = _up2_nvme_adapter(device, 0u64, device.lba_count)
+    if namespace_adapter_result.is_err():
+        return Err(namespace_adapter_result.unwrap_err())
+    val namespace_adapter = namespace_adapter_result.unwrap()
+    val namespace_dev: BlockDevice = namespace_adapter
+    val gpt_plan_result = gpt_format_plan(device.lba_size, device.lba_count, 128u32)
+    if gpt_plan_result.is_err():
+        return Err(gpt_plan_result.unwrap_err())
+    val gpt_plan = gpt_plan_result.unwrap()
+    val alignment_lbas = 1048576u64 / device.lba_size.to_u64()
+    if alignment_lbas < gpt_plan.first_usable_lba or alignment_lbas >= gpt_plan.last_usable_lba:
+        return Err("up2-nvme-partition-geometry-invalid")
+    val request = GptSinglePartitionRequest(
+        first_lba: alignment_lbas,
+        last_lba: gpt_plan.last_usable_lba,
+        type_guid_lo: 0x4433b9e5ebd0a0a2u64,
+        type_guid_hi: 0xc79926b7b668c087u64,
+        unique_guid_lo: 0x55503253494d504cu64,
+        unique_guid_hi: device.lba_count ^ device.nsid.to_u64(),
+        disk_guid_lo: 0x41504c5550324e56u64,
+        disk_guid_hi: device.lba_count ^ 0x53494d504c454f53u64
+    )
+    val created = gpt_create_single_partition(namespace_dev, gpt_plan, request)
+    if created.is_err():
+        return Err(created.unwrap_err())
+    val partition = created.unwrap()
+    val partition_count = partition.last_lba - partition.first_lba + 1u64
+    val partition_adapter_result = _up2_nvme_adapter(device, partition.first_lba, partition_count)
+    if partition_adapter_result.is_err():
+        return Err(partition_adapter_result.unwrap_err())
+    val partition_adapter = partition_adapter_result.unwrap()
+    val partition_dev: BlockDevice = partition_adapter
+    val fat_plan = fat32_format_plan(device.lba_size, partition_count, 1u32)
+    if fat_plan.is_err():
+        return Err(fat_plan.unwrap_err())
+    val authority = Fat32FormatAuthorization(
+        approved: true,
+        identity_hash: device.serial + ":" + device.nsid.to_text() + ":" + device.lba_count.to_text(),
+        challenge: challenge
+    )
+    val formatted = fat32_format(partition_dev, fat_plan.unwrap(), authority, device.nsid ^ device.lba_count.to_u32(), "SIMPLEOS")
+    if formatted.is_err():
+        return Err(formatted.unwrap_err())
+
+    val proof: [u8] = [115u8, 105u8, 109u8, 112u8, 108u8, 101u8, 111u8, 115u8, 45u8, 117u8, 112u8, 50u8, 45u8, 110u8, 118u8, 109u8, 101u8]
+    val proof_write = _up2_write_fat32_proof(partition_dev, fat_plan.unwrap(), proof)
+    if proof_write.is_err():
+        return Err(proof_write.unwrap_err())
+    g_up2_nvme_partition_first_lba = partition.first_lba
+    g_up2_nvme_partition_lba_count = partition_count
+    val verified = up2_nvme_verify_proof()
+    if verified.is_err():
+        g_up2_nvme_partition_first_lba = 0u64
+        g_up2_nvme_partition_lba_count = 0u64
+        return Err(verified.unwrap_err())
+    Ok("partition=1 filesystem=fat32 label=SIMPLEOS mount=/nvme write=/nvme/proof.txt format_flush=pass data_flush=pass durable_remount=1 read_after_remount_match=1")
+
+fn up2_nvme_verify_proof() -> Result<text, text>:
+    if g_up2_nvme_device == nil or g_up2_nvme_partition_lba_count == 0u64:
+        return Err("up2-nvme-not-mounted")
+    val device = g_up2_nvme_device.unwrap()
+    val adapter_result = _up2_nvme_adapter(device, g_up2_nvme_partition_first_lba, g_up2_nvme_partition_lba_count)
+    if adapter_result.is_err():
+        return Err(adapter_result.unwrap_err())
+    val adapter = adapter_result.unwrap()
+    val dev: BlockDevice = adapter
+    val plan = fat32_format_plan(device.lba_size, g_up2_nvme_partition_lba_count, 1u32)
+    if plan.is_err():
+        return Err(plan.unwrap_err())
+    val fat = plan.unwrap()
+    val boot = dev.read_sector(0u64)
+    if boot.is_err() or boot.unwrap()[510] != 0x55u8 or boot.unwrap()[511] != 0xaau8:
+        return Err("up2-nvme-mount-boot-signature")
+    val root = dev.read_sector(fat.data_start_lba)
+    if root.is_err() or root.unwrap()[0] != 80u8 or root.unwrap()[8] != 84u8:
+        return Err("up2-nvme-proof-directory-entry")
+    val data = dev.read_sector(fat.data_start_lba + fat.sectors_per_cluster.to_u64())
+    val proof: [u8] = [115u8, 105u8, 109u8, 112u8, 108u8, 101u8, 111u8, 115u8, 45u8, 117u8, 112u8, 50u8, 45u8, 110u8, 118u8, 109u8, 101u8]
+    if data.is_err():
+        return Err("up2-nvme-proof-read")
+    var index: i64 = 0
+    while index < proof.len():
+        if data.unwrap()[index] != proof[index]:
+            return Err("up2-nvme-proof-readback-mismatch")
+        index = index + 1
+    Ok("/nvme/proof.txt")
+
+export Up2NvmeLiveDevice, up2_nvme_init_read_only, up2_nvme_format_challenge, up2_nvme_identity_summary, up2_nvme_provision_fat32, up2_nvme_verify_proof

@@ -67,3 +67,21 @@ The UP2 wrapper also bypasses the proven x86 runtime capsule in
 sysroot/runtime-native archives or pass the runtime bundle. This matches the
 unresolved runtime and serial symbols. Adapt that capsule while preserving the
 freestanding linker contract; do not retry target-name variables.
+
+## 2026-08-22 shared NVMe result
+
+The repository already contained the common Pure-Simple controller,
+lease-backed `NvmeBlockAdapter`, mirrored GPT writer, and FAT32 formatter used
+by the StarFive lane. UP2 needed only PCI-manager admission, freestanding x86
+DMA/MMIO providers, and its shell policy. A Q35 OVMF run attached a dedicated
+64 MiB QEMU NVMe (`serial=UP2TEST0001`), performed read-only Identify, accepted
+the exact challenge, created GPT/FAT32, flushed `PROOF.TXT`, reopened through a
+fresh adapter, and read `simpleos-up2-nvme` back. Independent `fdisk`, `mdir`,
+and `mtype` recognized the GPT, listed the 17-byte file, and returned the same
+payload. This proves the free emulator path, not the currently disconnected
+physical board.
+
+The independent check found and fixed a shared FAT planner edge case where a
+geometry alternated between adjacent FAT sizes; choosing the larger safe size
+prevents a one-sector under-allocation. FAT fixed-width text encoding now uses
+`char_code_at`, which works in the freestanding runtime.

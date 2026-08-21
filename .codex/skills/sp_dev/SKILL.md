@@ -1161,3 +1161,12 @@ resources. Flush SQ/data buffers before ringing a doorbell and synchronize CQ,
 Identify, and read buffers before CPU inspection. A linked image or clean
 Identify parser test without those ownership transitions is not live NVMe
 evidence.
+
+For UP Squared NVMe work, reuse the host-neutral `NvmeDriver`, lease-backed
+`NvmeBlockAdapter`, GPT, and FAT32 owners; the board leaf owns only PCI
+discovery/grant, freestanding x86 DMA/MMIO providers, and shell admission.
+Identify must remain write-free. Destructive format requires the exact live
+serial/NSID/LBA-count challenge and two bounded leases (namespace for GPT,
+partition for FAT32). Verify flush plus fresh-adapter readback and an external
+FAT reader on a dedicated scratch image before claiming interoperability.
+Never test against the development host's system NVMe.

@@ -20,6 +20,8 @@ scripts/check/check-simpleos-up-squared-apollo-lake.shs --ovmf
 
 It must reach the ELF32 shim, 64-bit kernel, ordered markers, and a fresh
 VFS-backed `ls /`. This is an offline preflight, not physical-board evidence.
+Run `--ovmf-storage` separately to provision only its generated scratch NVMe;
+PASS also requires external GPT/FAT32 listing and exact proof-file readback.
 Run `write-simpleos-up-squared-usb.shs` without `--write-media` to obtain the
 identity-bound challenge. After verifying model, serial, and capacity, rerun as
 root with `--write-media` and that exact confirmation. Retain its receipt.

@@ -3,6 +3,7 @@
 
 use os.kernel.arch.x86_64.up_squared.vfs.{up2_vfs_readdir}
 use os.kernel.arch.x86_64.up_squared.gdb_rsp_uart.{up2_gdb_rsp_uart_main}
+use os.kernel.arch.x86_64.up_squared.nvme_storage.{up2_nvme_format_challenge, up2_nvme_identity_summary, up2_nvme_provision_fat32, up2_nvme_verify_proof}
 
 extern fn serial_println(msg: text)
 extern fn rt_serial_readline() -> text
@@ -12,6 +13,15 @@ fn _up2_print_root():
     for entry in entries:
         serial_println("/" + entry.name)
 
+fn _up2_print_nvme():
+    val proof = up2_nvme_verify_proof()
+    if proof.is_err():
+        serial_println("UP2 nvme-ls-failed reason=" + proof.unwrap_err())
+        return
+    serial_println("UP2 nvme-ls-begin source=fat32 command=ls /nvme")
+    serial_println(proof.unwrap())
+    serial_println("UP2 nvme-ls-end status=pass")
+
 fn up2_serial_shell_main():
     while true:
         serial_println("simpleos:/$ ")
@@ -20,13 +30,32 @@ fn up2_serial_shell_main():
             serial_println("UP2 ls-begin source=vfs command=ls /")
             _up2_print_root()
             serial_println("UP2 ls-end status=pass")
+        elif command == "ls /nvme":
+            _up2_print_nvme()
+        elif command == "nvme identify":
+            val identity = up2_nvme_identity_summary()
+            val challenge = up2_nvme_format_challenge()
+            if identity.is_ok() and challenge.is_ok():
+                serial_println(identity.unwrap())
+                serial_println("nvme_format_challenge=" + challenge.unwrap())
+                serial_println("WARNING: next command destroys the identified NVMe namespace")
+            else:
+                serial_println("nvme identify blocked")
         elif command == "help":
-            serial_println("commands: ls /, gdb, help")
+            serial_println("commands: ls /, ls /nvme, nvme identify, gdb, help")
         elif command == "gdb":
             serial_println("UP2 gdb-rsp-ready range=0x0a000000+0x01000000 max=1024")
             up2_gdb_rsp_uart_main()
             serial_println("UP2 gdb-rsp-detached")
         elif command != "":
-            serial_println("command-not-found")
+            val challenge = up2_nvme_format_challenge()
+            if challenge.is_ok() and command == "nvme format " + challenge.unwrap():
+                val provisioned = up2_nvme_provision_fat32(challenge.unwrap())
+                if provisioned.is_ok():
+                    serial_println("nvme_storage_status=pass " + provisioned.unwrap())
+                else:
+                    serial_println("nvme_storage_status=fail reason=" + provisioned.unwrap_err())
+            else:
+                serial_println("command-not-found")
 
 export up2_serial_shell_main

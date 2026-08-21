@@ -38,6 +38,10 @@ contract() {
     rg -q 'UP2 shell-ready' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
     rg -q 'UP2 ls-begin source=vfs command=ls /' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
     rg -q 'up2_vfs_readdir\("/"\)' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'up2_nvme_init_read_only' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/entry.spl"
+    rg -q 'up2_nvme_format_challenge' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/console.spl"
+    rg -q 'gpt_create_single_partition' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/nvme_storage.spl"
+    rg -q 'fat32_format' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/nvme_storage.spl"
     rg -q 'stable-by-id-required' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
     rg -q 'media-readback-mismatch' "$ROOT_DIR/scripts/os/write-simpleos-up-squared-usb.shs"
     rg -q '_multiboot2_header' "$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s"
@@ -46,7 +50,7 @@ contract() {
     rg -q 'hosted simpleos_syscall trampoline leaked' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
     rg -q '^TARGET=x86_64-unknown-none$' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
     rg -q -- '--emit-archive' "$ROOT_DIR/scripts/os/build-simpleos-up-squared-apollo-lake.shs"
-    rg -q 'native_target: "x86_64-unknown-none"' "$ROOT_DIR/src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl"
+    rg -q 'native_target: "x86_64-unknown-none"' "$ROOT_DIR/src/os/port/_SimpleosMultiplatformBuild/x86_platform_targets.spl"
     rg -q 'extern unsigned char __heap_start' "$ROOT_DIR/src/os/kernel/arch/x86_64/up_squared/freestanding_runtime.c"
     echo up2_contract_status=pass
     echo board_target=x86_64-up-squared-apollo-lake
@@ -57,7 +61,7 @@ contract() {
     echo native_target=x86_64-unknown-none
     echo hosted_syscall_symbols=0
     echo media_safety=stable-by-id,serial,removable,usb,unmounted,unheld,non-system,readback
-    echo persistent_writes=selected-removable-usb-only
+    echo persistent_writes=selected-removable-usb-or-identity-bound-nvme-only
     echo ls_source=vfs
 }
 
@@ -213,6 +217,73 @@ ovmf() {
     echo ovmf_receipt="$RECEIPT"
 }
 
+ovmf_storage() {
+    validate_image_receipts
+    command -v qemu-system-x86_64 >/dev/null 2>&1 || blocked qemu-system-x86_64-missing
+    command -v truncate >/dev/null 2>&1 || blocked truncate-missing
+    command -v fdisk >/dev/null 2>&1 || blocked fdisk-missing
+    command -v mdir >/dev/null 2>&1 || blocked mdir-missing
+    command -v mtype >/dev/null 2>&1 || blocked mtype-missing
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    test -s "$OVMF_CODE" -a -s "$OVMF_VARS_SRC" || blocked ovmf-firmware-missing
+    mkdir -p "$RUN_DIR"
+    OVMF_VARS="$RUN_DIR/OVMF_VARS_4M.fd"
+    SCRATCH_NVME="$RUN_DIR/up2-scratch-nvme.img"
+    TRANSCRIPT="$RUN_DIR/ovmf-storage-uart.log"
+    cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+    truncate -s 64M "$SCRATCH_NVME"
+    CHALLENGE='FORMAT:hex:5550325445535430303031202020202020202020:1:131072'
+    set +e
+    (sleep 15; printf 'nvme format %s\r' "$CHALLENGE"; sleep 40; \
+        printf 'ls /nvme\r'; sleep 4) | \
+        timeout 65 qemu-system-x86_64 \
+        -no-user-config -monitor none -display none -no-reboot -net none \
+        -machine q35 -cpu qemu64 -m 512M -smp 1 \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+        -drive "if=none,format=raw,readonly=on,id=up2usb,file=$IMAGE" \
+        -device qemu-xhci,id=xhci \
+        -device usb-storage,bus=xhci.0,drive=up2usb,bootindex=0 \
+        -drive "if=none,format=raw,id=up2nvme,file=$SCRATCH_NVME" \
+        -device nvme,drive=up2nvme,serial=UP2TEST0001 \
+        -serial stdio > "$TRANSCRIPT" 2>&1
+    QEMU_RC=$?
+    set -e
+    test "$QEMU_RC" -eq 0 -o "$QEMU_RC" -eq 124 || fail ovmf-storage-qemu-failed
+    grep -aFq 'UP2 nvme-identify-ready' "$TRANSCRIPT" || fail ovmf-storage-identify-missing
+    grep -aFq 'media_writes=0' "$TRANSCRIPT" || fail ovmf-storage-readonly-identify-missing
+    grep -aFq 'nvme_storage_status=pass partition=1 filesystem=fat32' "$TRANSCRIPT" || fail ovmf-storage-provision-failed
+    grep -aFq 'read_after_remount_match=1' "$TRANSCRIPT" || fail ovmf-storage-readback-missing
+    grep -aFq '/nvme/proof.txt' "$TRANSCRIPT" || fail ovmf-storage-ls-missing
+    fdisk -l "$SCRATCH_NVME" | grep -q 'Disklabel type: gpt' || fail ovmf-storage-gpt-invalid
+    mdir -i "$SCRATCH_NVME"@@1048576 :: | grep -q 'PROOF.*TXT.*17' || fail ovmf-storage-fat32-list-invalid
+    test "$(mtype -i "$SCRATCH_NVME"@@1048576 ::PROOF.TXT)" = simpleos-up2-nvme || fail ovmf-storage-proof-mismatch
+    RECEIPT="$RUN_DIR/ovmf-storage.receipt"
+    {
+        echo schema=up2-ovmf-storage-v1
+        echo status=pass
+        echo controller_serial=UP2TEST0001
+        echo namespace_lba_count=131072
+        echo partition=1
+        echo filesystem=fat32
+        echo proof_path=/nvme/proof.txt
+        echo proof_payload_sha256="$(printf %s simpleos-up2-nvme | sha256sum | awk '{print $1}')"
+        echo external_gpt_check=pass
+        echo external_fat32_list=pass
+        echo external_file_read=pass
+        echo persistent_writes=dedicated-qemu-scratch-nvme-only
+        echo uart_transcript="$TRANSCRIPT"
+    } > "$RECEIPT"
+    chmod 0444 "$RECEIPT"
+    echo up2_ovmf_storage_status=pass
+    echo nvme_identify_writes=0
+    echo gpt_status=pass
+    echo fat32_status=pass
+    echo proof_readback=pass
+    echo ovmf_storage_receipt="$RECEIPT"
+}
+
 live() {
     case "$BOOT_SECONDS" in ''|*[!0-9]*) fail invalid-boot-timeout ;; esac
     validate_receipts
@@ -300,6 +371,7 @@ case "$MODE" in
     --contract) contract ;;
     --self-test) self_test ;;
     --ovmf) ovmf ;;
+    --ovmf-storage) ovmf_storage ;;
     --live) live ;;
-    *) echo "usage: $0 --contract|--self-test|--ovmf|--live" >&2; exit 1 ;;
+    *) echo "usage: $0 --contract|--self-test|--ovmf|--ovmf-storage|--live" >&2; exit 1 ;;
 esac

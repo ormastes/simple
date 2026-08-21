@@ -25,9 +25,16 @@ and prerecorded logs cannot become a board PASS.
 5. **Physical oracle** — one bounded Tigard UART session observes ordered
    entry/console/filesystem/shell markers, sends `ls /`, and accepts entries
    only inside the fresh VFS command window.
+6. **Storage adapter** — the UP2 leaf owns PCI discovery and `DeviceGrant`.
+   The shared Pure-Simple `NvmeDriver` owns queues and DMA; lease-backed
+   `NvmeBlockAdapter`, GPT, and FAT32 modules own host-neutral storage work.
+   Boot performs Identify only. A serial/NSID/LBA-count challenge creates a
+   separate destructive authority, first for the namespace GPT and then for
+   the bounded partition filesystem.
 
-The lane never writes eMMC, SATA/NVMe, BIOS/SPI, UEFI variables, or CN22. F7
-one-time boot selection is an operator action, not persistent firmware state.
+The lane never writes eMMC, BIOS/SPI, UEFI variables, or CN22. NVMe writes are
+possible only after the exact destructive shell challenge; F7 one-time boot
+selection is an operator action, not persistent firmware state.
 
 ## Failure semantics
 

@@ -1,7 +1,7 @@
 # NvmeDriver lifecycle, controller/admin setup, bounded queue ownership, and DMA helpers.
 use os.drivers.nvme.nvme_driver.*
 use os.kernel.types.device_mem_types.{DeviceGrant}
-use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_write32, mmio_read64, mmio_write64}
 use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use os.drivers.nvme.nvme_queue_notify.*
 use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_from_resources, nvme_cq_doorbell_addr, nvme_dstrd_to_doorbell_stride_bytes}
@@ -18,6 +18,36 @@ extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
 extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
 
 val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
+
+fn _nvme_identity_hex_digit(value: u8) -> text:
+    match value & 0x0fu8:
+        case 0u8: "0"
+        case 1u8: "1"
+        case 2u8: "2"
+        case 3u8: "3"
+        case 4u8: "4"
+        case 5u8: "5"
+        case 6u8: "6"
+        case 7u8: "7"
+        case 8u8: "8"
+        case 9u8: "9"
+        case 10u8: "a"
+        case 11u8: "b"
+        case 12u8: "c"
+        case 13u8: "d"
+        case 14u8: "e"
+        case _: "f"
+
+fn _nvme_identify_ascii(base: u64, offset: u64, length: u64) -> text:
+    # Encode the exact fixed-width Identify field without hosted UTF-8 helpers.
+    # Hex remains identity-preserving and safe in serial challenge tokens.
+    var out = "hex:"
+    var index: u64 = 0u64
+    while index < length:
+        val byte = mmio_read8(base + offset + index)
+        out = out + _nvme_identity_hex_digit(byte >> 4) + _nvme_identity_hex_digit(byte)
+        index = index + 1u64
+    out
 val NVME_DRIVER_MAX_TRACKED_QUEUE_OWNERS: u64 = 8
 val NVME_DRIVER_MAX_SYSTEM_NAMESPACES: u64 = 8
 var g_nvme_user_queue_owner_count: u64 = 0
