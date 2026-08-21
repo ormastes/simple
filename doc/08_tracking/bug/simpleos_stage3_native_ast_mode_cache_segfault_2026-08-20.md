@@ -1284,3 +1284,38 @@ fields with the registry copy. This is the final aggregate ABI boundary on the
 route. The queued owner correction changes the root API to accept only the
 scalar physical index and wanted name, then loads and validates the canonical
 surface from the retained registry. It remains unclaimed until a fresh session.
+
+## Scalar re-export root Cycle 1 (2026-08-22)
+
+The fresh admitted run rebuilt Stage 2, passed compiler sanity and the
+struct-receiver/runtime capability gate, then reproduced the same source-1
+unresolved facade cascade and exited 139. Failed queries still emitted no hop,
+so passing the scalar extracted at the caller was insufficient. Cycle 2 labels
+every remaining pre-walk return independently: registry alignment, legacy memo
+alignment, scalar index bounds, canonical physical-index equality, and
+generation equality. This preserves fail-fast diagnosis without weakening any
+registry invariant.
+
+Cycle 2 identified the exact pre-walk rejection: `reason=memo-misaligned` for
+every failed query, including source-1 `CompileOptions`. Root memo reads and
+writes had already been disabled because those arrays are not retained
+authority, but generation reset and the legacy alignment guard remained. After
+the first lowering transition their transient fields diverged and the obsolete
+guard rejected every live scalar-route query. Cycle 3 removes root-memo
+clearing and alignment validation entirely. Registry alignment, scalar physical
+identity, generation, per-root cycle state, and live route traversal remain
+fail-closed and authoritative.
+
+## Scalar re-export root Cycle 3 (2026-08-22)
+
+The admitted run again rebuilt Stage 2 and passed compiler sanity plus the
+struct-receiver/runtime capability gate. Removing the obsolete memo gate moved
+Stage 3 HIR from the prior source-1 facade failure through source 178 of 666.
+The process then exited 139 while lowering the return type of
+`detect_llvm_capabilities` in
+`src/compiler/backend/backend/llvm_capability.spl`. The log also records an
+accumulating unresolved-type/name cascade before that crash, including the
+first local export-index failures at source 177. This is real forward progress,
+but not a trusted Stage 3 compiler. The session's three-cycle verification cap
+is exhausted; the next owner fix and rerun must start in a fresh session before
+ARM64 or QEMU evidence can be claimed.
