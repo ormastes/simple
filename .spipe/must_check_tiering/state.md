@@ -148,3 +148,15 @@ implementation-blocked-by-bootstrap-authority
   lifecycle regression invokes the production dispatcher. Bootstrap rerun is
   deferred to a fresh session because this session reached its verification
   cycle cap.
+- verify: A fresh admitted Stage 2 confirmed production Stage 3 now selects
+  streaming HIR. The remaining 197-file imported-type cascade was traced to
+  eager package-sibling signatures whose owner-private named/glob import routes
+  were read from copied `ModuleSurface` aggregates. Dependency resolution now
+  reads the canonical frozen surface, accepts only unambiguous explicit glob
+  terminals, and has a focused glob plus named-reexport sibling regression.
+- blocker: Two subsequent cache-preserving Stage-3 attempts crashed with
+  signal 11 during Phase-2 streaming surface parsing at different files (after
+  40 and 5 released surfaces). An isolated 28-module HWIR closure compiled and
+  ran successfully, disproving the last progress file as a deterministic source
+  failure. The three-cycle cap is exhausted; see
+  `stage3_streaming_surface_parse_nondeterministic_segv_2026-08-21.md`.
