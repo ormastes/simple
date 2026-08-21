@@ -338,3 +338,45 @@ Seed: `/mnt/data/.cargo-target-epc/release/simple` (pristine origin/main build,
 enforces the contract). Shards run ≤2 concurrent, output grepped for
 `non-optional return contract` and `E-SFFI-016`.
 
+| shard | spec output lines | `non-optional return contract` / `E-SFFI-016` hits |
+|---|---|---|
+| test/01_unit/compiler/frontend | 3460 | 0 |
+| test/01_unit/compiler/hir | 3520 | 0 |
+| test/01_unit/compiler/driver | 3171 | 0 |
+| test/01_unit/lib/common | 3859 | 0 |
+| test/01_unit/lib/nogc_sync_mut | 3260 | 0 |
+
+**Zero dynamic hits.** Two caveats stated rather than glossed: `compiler/hir`
+was cut off by the shard's own 3000s `timeout` (rc=143) after 3520 lines, and
+the non-zero shard exit codes (rc=1, rc=42) are the **pre-existing SSPEC
+documentization score gate** ("SSPEC score gate: 38 below 80"), not contract
+aborts — every shard log greps to 0 for both the message and the code.
+
+A green sweep is consistent with, but weaker than, the static guard: these
+directories simply never drove any of the 10 wrappers down its nil path. The
+guard is the load-bearing evidence; the sweep only confirms no *additional*
+shape was missed by the static scan in these five trees.
+
+## Guard
+
+`scripts/check/check-non-optional-nil-return.shs` — fail-closed, `--selftest`
+(5 fixtures: the incident shape must FAIL; an optional return, a `??`-total
+body, and a wrapper forwarding a total extern must all PASS; an empty tree must
+yield 0 wrappers so the caller is forced to ERROR), verdict as the last stdout
+line, ERROR on 0 items in either derived set.
+
+    PASS — 1572 wrapper(s) checked against 138 nil-capable extern(s), 0 returning nil through a non-optional type
+
+Scope is `--root`-based (`src/compiler` + `src/lib`), not a commit range:
+this is a property of a tree, and a newly nil-capable *extern impl* can break a
+wrapper the push never touched. Widen it to all of `src/` once the out-of-scope
+class-(b) sites above are fixed.
+
+## Reproduce spec
+
+`test/01_unit/lib/nogc_sync_mut/non_optional_nil_return_contract_spec.spl`
+(mirrored byte-identically at `test/unit/...`) — 5 examples driving
+`file_read_lines` down two distinct read-failure paths and `try_recv` /
+`channel_try_recv_by_id` down the empty-channel path, plus a neighbor case
+proving a real value still round-trips after a nil poll. On the strict seed
+pre-fix the first two examples aborted the whole file; post-fix 5/5 pass.
