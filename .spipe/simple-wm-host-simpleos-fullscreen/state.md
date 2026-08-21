@@ -185,3 +185,9 @@ arch-done
 ## 2026-08-21 Phase 2 continuation
 
 Phase 2 was exhausted through compiler-native and QEMU-host infrastructure checks. ARM64/HVF/RAMFB readiness and focused host-GPU contracts pass. The production shared-WM pixel-buffer probe fails at link because `_rt_u32s_from_raw` is outside the Stage 2 `core-c-bootstrap` ABI. No real guest boot was claimed: Stage 2 cannot run `os build`, and no newly attested kernel was produced. Resume at Phase 3 artifact production, or first extend the admitted Stage 2 ABI/producer path.
+
+Follow-up extended the Stage 2 C ABI with `rt_u32s_from_raw`; the production
+probe now links and returns exact framebuffer words. Direct ARM64 guest
+production proceeds further but stops because this Stage 2 binary predates the
+checked-in optional-float nil lowering fix. Do not change `parse_f64()` failure
+semantics: rebuild the compiler, then retry the canonical guest build.

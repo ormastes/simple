@@ -10150,6 +10150,29 @@ int64_t rt_bytes_from_raw(int64_t ptr, int64_t len) {
     return (int64_t)(uintptr_t)result;
 }
 
+/* Construct the canonical packed `[u32]` runtime array from a native pixel
+ * buffer.  This is the C-bootstrap owner used before the pure-Simple
+ * `simple-core` archive is available; keep the returned array in this
+ * runtime's registry so normal array length/index lowering can consume it. */
+int64_t rt_u32s_from_raw(int64_t ptr, int64_t count) {
+    if (ptr == 0 || count <= 0) {
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    }
+    /* The bootstrap compiler's generic `[u32]` IndexGet decodes tagged array
+     * elements. Use the ordinary array representation here; the typed push
+     * helper applies the tag and typed accessors decode it symmetrically. */
+    SplArray* result = rt_array_new(count);
+    if (!result) return 0;
+    const uint32_t* source = (const uint32_t*)(uintptr_t)ptr;
+    for (int64_t i = 0; i < count; i++) {
+        if (!rt_typed_words_u32_push(result, (int64_t)source[i])) {
+            rt_array_free(result);
+            return (int64_t)(uintptr_t)rt_array_new(0);
+        }
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
 /* ================================================================
  * Directory Operations (bridge to spl_ or direct libc)
  * ================================================================ */

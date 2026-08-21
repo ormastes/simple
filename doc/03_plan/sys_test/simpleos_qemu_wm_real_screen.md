@@ -1227,3 +1227,15 @@ accepted full CLI before invoking the ARM64 attested producer.
 - The aggregate host-GPU self-test was killed inside candidate frontend admission while compiling its probe; focused constituent checks above remain green.
 - A production native probe reaches the linker but `SharedWmPixelBufferBackend` readback needs `_rt_u32s_from_raw`, absent from the Stage 2 `core-c-bootstrap` ABI. Three compile/fix attempts were exhausted, so this lane stops here per the runaway guard.
 - Real QEMU boot/readback still needs an attested guest artifact. The Stage 2 compiler has no `os build` command, and its direct production readback closure currently cannot link; Phase 3 (or an explicit Stage 2 ABI/producer extension) is the remaining producer boundary.
+
+### Continued producer work
+
+- Added the missing C-bootstrap `rt_u32s_from_raw` owner and proved bit-exact
+  production WM readback (`0xFF101010`, `0xFF3366CC`) with the Stage 2 compiler.
+- The direct freestanding ARM64 guest build now advances into the real Web
+  closure, but the installed Stage 2 executable predates the repository's
+  optional-nil lowering fix and emits illegal `icmp_imm.f32` for `f64? != nil`.
+  Parsing can fail, so the parser must not erase the optional; rebuild the
+  compiler with the existing `rt_is_none`/`rt_is_some` lowering before retrying.
+- Corrected stale compositor imports from removed `common.ui.theme_package` to
+  the canonical `nogc_sync_mut.ui.theme_package` owner.
