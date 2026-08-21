@@ -474,6 +474,32 @@ build (`SIMPLE_PARSE_SHARDING=0 SIMPLE_FRONTEND_CACHE=0`), verified with
   (+ mirror): cold split then `parses=0`; byte-identical to unsharded; and the
   same shard owns the same modules across two independent runs.
 
+### OPEN: two measurements this session did NOT finish
+Stated plainly rather than left implied, because an unrun probe is not a green
+one:
+
+1. **The full-closure round-trip run is still in flight.**
+   `check-flat-ast-roundtrip.shs` over the real `src/app --entry-closure`
+   (662 modules) was launched from a private worktree at `00ecd3367c1` and had
+   round-tripped **150 modules with 0 mismatches** (`reset=true ok=true
+   stable=true` on every line) when this session ended. Throughput on this
+   shared, heavily-loaded box is ~3 modules/min, so the run needs ~3.7h. Its
+   verdict line is the acceptance evidence for step 2; treat the codec as
+   round-trip-verified over 150 real modules and 4 fixture modules, NOT over
+   the whole closure, until that verdict lands. Rerun with:
+   `sh scripts/check/check-flat-ast-roundtrip.shs`
+2. **The real-closure run-1-vs-run-2 parse-phase wall was not measured.** It is
+   a second heavy probe and the rule on this box is one at a time. The numbers
+   quoted above (`hits=3 misses=0 parses=0`, byte-identical sharded output) are
+   all from the 3-module fixture, which proves the mechanism but says nothing
+   about the speedup on 662 modules. The `+<ms> dt=<ms>` stamps that
+   `146d987b1c0` added to every `[build] parse i/n` line are how to recover it:
+   compare the last parse stamp of run 1 against run 2 under
+   `SIMPLE_CACHE_SCOPE=fecache`. Also still unattributed: the 57.6s the closure
+   spends BEFORE `parse 1/662` (source load + closure + lint), which the
+   front-end cache does not touch at all and which now bounds any warm-build
+   win.
+
 Still to do:  (incl. dict encoders), then the full-closure round-trip gate (parse a real module, dump, reset,
 restore, rebuild through the bridge, compare), the cache wiring at the `:379`
 hook, and parse sharding across `--threads` worker processes.
