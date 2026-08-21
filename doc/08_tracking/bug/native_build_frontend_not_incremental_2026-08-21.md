@@ -128,15 +128,33 @@ boundary markers with no source edits:
 `[frontend] parse_and_build:start` -> `[flat-bridge] path=` (start of
 `flat_ast_to_module`) -> `[frontend] parse_and_build:done`.
 
-Note for anyone repeating this: **`stdbuf -oL -eL` is mandatory.** Without it
-stdout is block-buffered while stderr is not, and the markers interleave out of
-order — a first attempt showed every `[flat-bridge]` line apparently preceding
-every `[frontend]` line, which is a buffering artifact, not a real ordering.
-Also note `bin/simple compile` does **not** exercise this path at all: `bin/simple`
-is the Rust seed, and the interpreted self-hosted frontend only runs under
-`native-build`.
+**Result: NOT MEASURABLE from outside the process. Do not retry the obvious way.**
+Three attempts failed, each for a different reason, and the last one is
+fundamental:
 
-Result: PENDING — see Status.
+1. `bin/simple compile <file>` emits no frontend traces at all — `bin/simple` is
+   the **Rust seed**, and the interpreted self-hosted frontend only runs under
+   `native-build`. Do not use `compile` to probe this path.
+2. Piping the run through `awk`/`date` to timestamp lines produced an ordering
+   that is physically impossible (every `[flat-bridge]` line apparently preceding
+   every `[frontend]` line). That was a stdout-block-buffered / stderr-unbuffered
+   interleaving artifact, not real ordering. `stdbuf -oL -eL` fixes the ordering.
+3. But `stdbuf` does **not** fix the timestamps, and this is the blocker:
+   Simple's `print` goes through the runtime's own internally-buffered writer,
+   which `stdbuf`'s libc interposition cannot reach. Only lines explicitly
+   followed by `rt_stdout_flush()` — i.e. the `[build]` progress receipts, and
+   nothing else — escape promptly. Every `SIMPLE_COMPILER_TRACE` marker sits in
+   that buffer until process exit and then arrives in a burst, so an external
+   timestamp on it measures the flush, not the work. (This also explains why
+   `[build]` receipts stream in a stage log while traces do not.)
+
+Consequence: getting the split requires a **flushed, self-timestamped marker
+emitted from inside the frontend** — one `log_phase`-style line (it already
+carries a monotonic `+Nms` and is flushed) on either side of
+`flat_ast_to_module` in `module_assembly.spl:1080`. That is a ~4-line additive
+change in `src/compiler/10.frontend/**`, which was out of scope for this session
+because another lane was actively working in that tree. It is the first thing to
+do before writing any codec.
 
 ## Status
 **Not fixed.** Instrumentation only (`146d987b1c0`). The front-end cache and the
@@ -144,7 +162,10 @@ parse sharding are designed and sited above but not implemented: the codec must
 live in `src/compiler/10.frontend/core/**`, which was out of scope for this
 session, and the parse-vs-bridge split that gates the design's value was still
 being measured when the session ended. Implement in this order:
-1. Measure the split. If the bridge dominates, this design is not worth 1000 lines.
+1. Add the two flushed `log_phase` markers around `flat_ast_to_module`
+   (`module_assembly.spl:1080`) and measure the split. If the bridge dominates,
+   this design is not worth 1000 lines and the effort belongs in per-file parse
+   cost instead.
 2. Land the flat-pool codec alone, gated by round-trip equality over the whole
    `src/app` closure, before any cache or shard mode is wired.
 3. Then the per-module front-end cache at the `:379` hook.
