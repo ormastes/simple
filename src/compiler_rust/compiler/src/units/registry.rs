@@ -329,9 +329,24 @@ pub fn populate_thread_local_state(reg: &UnitRegistry) {
 // Filesystem scan
 // ---------------------------------------------------------------------------
 
-/// Locate `src/unit/simple-lang/` by walking up from CARGO_MANIFEST_DIR. The
-/// crate at `src/compiler_rust/compiler/` lives two ancestors below the repo
-/// root, so a fixed offset works in dev. Falls back to env override or CWD.
+/// Locate `src/unit/simple-lang/`.
+///
+/// PRECEDENCE (fixed 2026-08-21, see
+/// `doc/08_tracking/bug/deployed_seed_resolves_stdlib_from_foreign_worktree_2026-08-20.md`):
+/// explicit override, then the INVOKING worktree (cwd climb), and only then
+/// the compile-time `CARGO_MANIFEST_DIR` of the tree this binary happened to
+/// be BUILT in.
+///
+/// The baked path used to come first. A deployed binary is routinely built in
+/// one worktree and run from another (this repo keeps many side by side), so
+/// leading with it means a binary silently reads another session's source tree
+/// while the operator edits their own and sees no effect — the exact failure
+/// measured for `src/lib` resolution, where a seed built in
+/// `/mnt/data/worktrees/render-harden` opened that tree's copy of a module 138
+/// times in one run and the local edit never took effect. The baked path is
+/// kept as a LAST resort because it is genuinely useful in `cargo test`, where
+/// cwd is a crate directory rather than the repo root; it is only ever
+/// consulted when the invoking tree has no unit tree of its own.
 fn find_unit_tree_root() -> Option<PathBuf> {
     if let Ok(custom) = std::env::var("SIMPLE_UNIT_TREE_ROOT") {
         let p = PathBuf::from(custom);
@@ -339,29 +354,28 @@ fn find_unit_tree_root() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let candidates: Vec<PathBuf> = {
-        let mut v = Vec::new();
-        if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-            // src/compiler_rust/compiler -> walk up to repo root.
-            let mut p = PathBuf::from(manifest);
-            for _ in 0..6 {
-                v.push(p.join("src/unit/simple-lang"));
-                if !p.pop() {
-                    break;
-                }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // 1. The invoking worktree.
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut p = cwd;
+        for _ in 0..6 {
+            candidates.push(p.join("src/unit/simple-lang"));
+            if !p.pop() {
+                break;
             }
         }
-        if let Ok(cwd) = std::env::current_dir() {
-            let mut p = cwd;
-            for _ in 0..6 {
-                v.push(p.join("src/unit/simple-lang"));
-                if !p.pop() {
-                    break;
-                }
+    }
+    // 2. Last resort: the tree this binary was compiled in.
+    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+        // src/compiler_rust/compiler -> walk up to repo root.
+        let mut p = PathBuf::from(manifest);
+        for _ in 0..6 {
+            candidates.push(p.join("src/unit/simple-lang"));
+            if !p.pop() {
+                break;
             }
         }
-        v
-    };
+    }
     candidates.into_iter().find(|p| p.is_dir())
 }
 
