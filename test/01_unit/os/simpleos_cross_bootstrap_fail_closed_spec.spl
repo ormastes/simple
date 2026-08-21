@@ -1,0 +1,76 @@
+"""
+Regression contract for the SimpleOS cross-bootstrap stage builder.
+
+The lane must produce target-native compiler artifacts, retain its per-stage
+cache, and reject unresolved-symbol stub generation. A host seed wrapper is
+not a SimpleOS compiler and must never be emitted as a bootstrap stage.
+"""
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.port.bootstrap_cross.{host_seed_identity_matches}
+
+val STAGES = "src/os/port/_BootstrapCross/cross_bootstrap_pipeline.spl"
+val CONFIG = "src/os/port/_BootstrapCross/cross_compile_stages.spl"
+
+describe "SimpleOS cross-bootstrap is target-bound and fail-closed":
+    it "keeps bootstrap compilers host-runnable and disables stub fallback":
+        val source = file_read(STAGES)
+        expect(source.contains(" --target " + "{" + "config.target}")).to_equal(false)
+        expect(source).to_contain("process.run(output, [\"--version\"])")
+        expect(source).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+
+    it "preserves an isolated cache for every stage":
+        val source = file_read(STAGES)
+        expect(source).to_contain("/host-tools/stage" + "{" + "stage}/native-cache")
+        expect(source).to_contain(" --cache-dir " + "{" + "cache_dir}")
+        expect(source.contains("\" --clean\"")).to_equal(false)
+
+    it "contains no seed-wrapper bootstrap fallback":
+        val source = file_read(CONFIG)
+        expect(source.contains("emit_stage_seed_wrapper")).to_equal(false)
+        expect(source.contains("seed_wrapper.c")).to_equal(false)
+
+    it "separates target artifacts and fails closed before packaging":
+        val config = file_read(CONFIG)
+        val stages = file_read(STAGES)
+        expect(config).to_contain("fn target_artifact_path")
+        expect(config).to_contain("/target/stage")
+        expect(stages).to_contain("host bootstrap compilers cannot be installed into SimpleOS")
+
+    it "builds the host seed before stage 1 and never executes the target seed":
+        val config = file_read(CONFIG)
+        val stages = file_read(STAGES)
+        expect(config).to_contain("fn host_seed_output_path")
+        expect(config).to_contain("fn target_seed_output_path")
+        expect(config).to_contain("fn build_host_seed")
+        expect(config).to_contain("fn build_target_seed")
+        expect(config).to_contain("{" + "RUST_SEED_DIR}/target/bootstrap/simple")
+        expect(config).to_contain("Ready at " + "{" + "output} (not host-executed)")
+        expect(config).to_contain("process.run(\"file\", [supplied])")
+        expect(config).to_contain("host_seed_identity_matches(")
+        val host_seed_build = stages.index_of("build_host_seed(config)")
+        val stage1_build = stages.index_of("build_stage_cross_with_retry(config, 1, seed)")
+        val target_seed_build = stages.index_of("build_target_seed(config)")
+        expect(host_seed_build).to_be_greater_than(-1)
+        expect(stage1_build).to_be_greater_than(host_seed_build)
+        expect(target_seed_build).to_be_greater_than(stage1_build)
+
+    it "propagates package failure and advertises only a published archive":
+        val stages = file_read(STAGES)
+        expect(stages).to_contain("if not package_bootstrap(config):")
+        expect(stages).to_contain("print \"FAILED: Packaging failed\"")
+        expect(stages).to_contain("package_succeeded = true")
+        expect(stages).to_contain(
+            "if package_succeeded and path_exists(config.archive_path()):")
+        expect(stages.contains("print \"WARNING: Packaging failed\"")).to_equal(false)
+
+    it "admits static host x86 and rejects dynamic foreign architectures":
+        expect(host_seed_identity_matches(
+            "ELF 64-bit LSB executable, x86-64, statically linked",
+            "Linux", "x86_64")).to_equal(true)
+        expect(host_seed_identity_matches(
+            "ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked",
+            "Linux", "x86_64")).to_equal(false)
+        expect(host_seed_identity_matches(
+            "ELF 64-bit LSB executable, UCB RISC-V, 64-bit, dynamically linked",
+            "Linux", "x86_64")).to_equal(false)

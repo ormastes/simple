@@ -48,13 +48,14 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
     #
     val native_backend = if stage == 1: "cranelift" else: "llvm-lib"
     val opt_level = "standard"
+    val cache_dir = "{config.build_dir}/{target_selector_name(config.target)}/host-tools/stage{stage}/native-cache"
     var args = "native-build" +
         " --backend {native_backend}" +
+        " --cache-dir {cache_dir}" +
         " --source {src}/src/compiler"
     args = args + " --source {src}/src/lib"
     args = args +
         " --source {src}/src/app" +
-        " --clean" +
         " --entry-closure" +
         " --entry {src}/src/app/cli/bootstrap_main.spl" +
         " --runtime-path {src}/src/compiler_rust/target/bootstrap" +
@@ -65,7 +66,7 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
         args = args + " --strip"
 
     # Environment
-    var env = "SIMPLE_LIB={src}/src"
+    var env = "SIMPLE_LIB={src}/src SIMPLE_NO_STUB_FALLBACK=1"
 
     if stage == 1:
         env = env + " SIMPLE_BOOTSTRAP=1"
@@ -91,6 +92,13 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
 
     if not path_exists(output):
         print "[stage {stage}] ERROR: Output binary not found"
+        return false
+
+    # Bootstrap stages are host tools. Never feed a SimpleOS/ARM/RISC-V target
+    # executable to the next host-side stage.
+    val runnable = process.run(output, ["--version"])
+    if runnable.exit_code != 0:
+        print "[stage {stage}] ERROR: compiler is not host-runnable; target-native phase 2 requires an admitted in-guest runner"
         return false
 
     val size_bytes_opt = file_size_bytes(output)
@@ -126,9 +134,10 @@ fn package_bootstrap(config: CrossConfig) -> bool:
     - src/                          -- source tree (for self-hosting)
     - bootstrap_verify.spl          -- verification script
     """
-    val stage3 = config.stage_path(3)
+    val stage3 = config.target_artifact_path(3)
     if not path_exists(stage3):
-        print "[package] ERROR: Stage 3 binary not found at {stage3}"
+        print "[package] ERROR: target-native Stage 3 artifact unavailable at {stage3}"
+        print "[package] ERROR: host bootstrap compilers cannot be installed into SimpleOS; use an admitted in-guest target runner"
         return false
 
     val archive = config.archive_path()
@@ -205,6 +214,7 @@ fn run_cross_bootstrap(config: CrossConfig) -> bool:
     print "  Sysroot:    {config.sysroot_dir}"
     print "  Package:    {config.package}"
     print ""
+    var package_succeeded = false
 
     # Step 0: Sysroot
     print "--- Step 0: Sysroot ---"
@@ -212,14 +222,14 @@ fn run_cross_bootstrap(config: CrossConfig) -> bool:
         print "FAILED: Could not build sysroot"
         return false
 
-    # Step 1: Cross-compile Rust seed
+    # Step 1: Build the host seed. Target-native seeds are never host commands.
     print ""
-    print "--- Step 1: Cross-compile Rust seed ---"
-    if not cross_compile_seed(config):
-        print "FAILED: Could not cross-compile Rust seed"
+    print "--- Step 1: Build host-runnable Rust seed ---"
+    if not build_host_seed(config):
+        print "FAILED: Could not build host Rust seed"
         return false
 
-    val seed = config.seed_output_path()
+    val seed = config.host_seed_output_path()
 
     # Step 2: Stage 1 (seed -> Stage 1) -- retry transient cross-link fails.
     print ""
@@ -269,19 +279,24 @@ fn run_cross_bootstrap(config: CrossConfig) -> bool:
     if config.package:
         print ""
         print "--- Step 6: Package ---"
+        if not build_target_seed(config):
+            print "WARNING: Target seed build failed"
+            return false
         if not package_bootstrap(config):
-            print "WARNING: Packaging failed"
+            print "FAILED: Packaging failed"
+            return false
+        package_succeeded = true
 
     # Summary
     print ""
     print "=== Cross-Bootstrap Summary ==="
     print "  Sysroot:     READY"
-    print "  Seed:        BUILT ({config.seed_output_path()})"
+    print "  Host seed:   BUILT ({config.host_seed_output_path()})"
     print "  Stage 1:     BUILT ({config.stage_path(1)})"
     print "  Stage 2:     BUILT ({config.stage_path(2)})"
     print "  Stage 3:     BUILT ({config.stage_path(3)})"
     print "  Convergence: {if converged: \"PASS\" else: \"CHECK STUB COUNTS\"}"
-    if config.package:
+    if package_succeeded and path_exists(config.archive_path()):
         print "  Archive:     {config.archive_path()}"
     print ""
 

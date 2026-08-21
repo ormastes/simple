@@ -17,8 +17,13 @@
 use std.fs
 use std.process
 use std.io_runtime.{ dir_create_all }
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.sosix.qemu_fs_toolchain_evidence_v1.*
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_text_to_bytes(value: text) -> [u8]
 
 val HELLO_C = "/usr/share/test/hello.c"
 val HELLO_OBJ = "/tmp/hello.o"
@@ -28,10 +33,17 @@ val SIMPLE_BIN = "/usr/bin/simple"
 val STAGE2_OUT = "/build/stage2_native/simple"
 val STAGE3_OUT = "/build/stage3_native/simple"
 
-val TRIVIAL_SRC_DIR = "/tmp/selfhost_test"
-val TRIVIAL_SRC_FILE = "/tmp/selfhost_test/hello.spl"
-val TRIVIAL_OUTPUT = "/tmp/selfhost_test/hello.elf"
-val TRIVIAL_EXPECTED_OUTPUT = "hello from self-host"
+val TRIVIAL_SRC_DIR = "/tmp"
+val TRIVIAL_SRC_FILE = "/tmp/sosix-hello.spl"
+val TRIVIAL_OUTPUT = "/tmp/sosix-hello"
+val SOSIX_EVIDENCE_HOST = "linux"
+val SOSIX_EVIDENCE_ARCH = "x86_64"
+
+fn _toolchain_nonce() -> text:
+    env_get("SOSIX_QEMU_NONCE")
+
+fn _hello_output(nonce: text) -> text:
+    "hello-" + nonce
 
 fn banner():
     print "SIMPLEOS_SMOKE_INIT_STARTED"
@@ -148,20 +160,46 @@ fn step_trivial_self_host(have_exec: bool):
     if not fs.exists(SIMPLE_BIN):
         print "TRIVIAL_SELFHOST_SKIP reason=missing-simple"
         return
+    val nonce = _toolchain_nonce()
+    if nonce == "":
+        print "TRIVIAL_SELFHOST_FAIL phase=nonce"
+        return
+    val version_result = process.run(SIMPLE_BIN, ["--version"])
+    if version_result.exit_code != 0 or version_result.stdout.trim() == "":
+        print "TRIVIAL_SELFHOST_FAIL phase=version exit={version_result.exit_code}"
+        return
+    val version_atom = version_result.stdout.trim().replace(" ", "-")
+    val expected_output = _hello_output(nonce)
+    print sosix_fs_toolchain_begin_v1(SOSIX_EVIDENCE_HOST, SOSIX_EVIDENCE_ARCH, nonce)
+    print sosix_fs_compiler_version_v1(SIMPLE_BIN, version_atom, nonce)
     # Create the source directory and write the trivial program.
     if not dir_create_all(TRIVIAL_SRC_DIR):
         print "TRIVIAL_SELFHOST_FAIL phase=mkdir"
         return
-    val src_content = "fn main():\n    print \"hello from self-host\"\n"
+    val src_content = "fn main():\n    print \"" + expected_output + "\"\n"
     if not rt_file_write_text(TRIVIAL_SRC_FILE, src_content):
         print "TRIVIAL_SELFHOST_FAIL phase=write-src"
         return
+    val interpreted_source_bytes = rt_file_read_bytes(TRIVIAL_SRC_FILE)
+    val interpreted_source_sha = sha256_u8_hex(interpreted_source_bytes)
+    print sosix_fs_source_read_v1("interpreter", TRIVIAL_SRC_FILE, interpreted_source_sha)
     # Prove the filesystem-loaded interpreter before exercising native build.
     val interpreted = process.run(SIMPLE_BIN, [TRIVIAL_SRC_FILE])
-    if interpreted.exit_code != 0:
+    val interpreted_stdout = interpreted.stdout.trim()
+    if interpreted.exit_code != 0 or interpreted_stdout != expected_output:
         print "TRIVIAL_SELFHOST_FAIL phase=interpret exit={interpreted.exit_code}"
         return
+    val interpreted_stdout_sha = sha256_u8_hex(rt_text_to_bytes(interpreted_stdout))
+    print interpreted_stdout
+    print sosix_fs_interpreter_hello_v1(
+        nonce, interpreted_source_sha, interpreted_stdout, interpreted_stdout_sha)
     print "TRIVIAL_INTERPRETER_OK"
+    val compiler_source_bytes = rt_file_read_bytes(TRIVIAL_SRC_FILE)
+    val compiler_source_sha = sha256_u8_hex(compiler_source_bytes)
+    if compiler_source_sha != interpreted_source_sha:
+        print "TRIVIAL_SELFHOST_FAIL phase=source-changed"
+        return
+    print sosix_fs_source_read_v1("compiler", TRIVIAL_SRC_FILE, compiler_source_sha)
     # Compile the trivial program to a filesystem ELF using the installed target toolchain.
     val compile_args: [text] = [
         "compile",
@@ -177,11 +215,29 @@ fn step_trivial_self_host(have_exec: bool):
     if not fs.exists(TRIVIAL_OUTPUT):
         print "TRIVIAL_SELFHOST_FAIL phase=missing-binary"
         return
+    val compiled_bytes = rt_file_read_bytes(TRIVIAL_OUTPUT)
+    val compiled_sha = sha256_u8_hex(compiled_bytes)
+    print sosix_fs_compiler_output_v1(TRIVIAL_OUTPUT, compiler_source_sha, compiled_sha)
+    val loader_bytes = rt_file_read_bytes(TRIVIAL_OUTPUT)
+    val loader_sha = sha256_u8_hex(loader_bytes)
+    if loader_sha != compiled_sha:
+        print "TRIVIAL_SELFHOST_FAIL phase=executable-changed"
+        return
+    print sosix_fs_exec_read_v1(TRIVIAL_OUTPUT, loader_sha)
     # Run the compiled binary and check its output.
-    val rr = process.run(SIMPLE_BIN, [TRIVIAL_OUTPUT])
-    if rr.exit_code != 0:
+    val rr = process.run(TRIVIAL_OUTPUT, [])
+    val loader_stdout = rr.stdout.trim()
+    if rr.exit_code != 0 or loader_stdout != expected_output:
         print "TRIVIAL_SELFHOST_FAIL phase=run exit={rr.exit_code}"
         return
+    val loader_stdout_sha = sha256_u8_hex(rt_text_to_bytes(loader_stdout))
+    print loader_stdout
+    print sosix_fs_loader_hello_v1(nonce, loader_sha, loader_stdout, loader_stdout_sha)
+    print "TRIVIAL_LOADER_OK"
+    print sosix_fs_compiled_hello_v1(nonce, compiled_sha, loader_stdout, loader_stdout_sha)
+    print sosix_fs_toolchain_end_v1(
+        SOSIX_EVIDENCE_HOST, SOSIX_EVIDENCE_ARCH, nonce,
+        compiler_source_sha, compiled_sha)
     print "TRIVIAL_SELFHOST_OK"
 
 fn halt():

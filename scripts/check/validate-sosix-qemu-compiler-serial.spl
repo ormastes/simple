@@ -1,0 +1,148 @@
+# codex-impl
+# Fail-closed validator for architecture-neutral, filesystem-resident Simple
+# interpreter/loader/compiler hello-world evidence emitted by a live guest.
+
+use std.cli.cli_util (get_cli_args)
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_text_to_bytes(value: text) -> [u8]
+
+fn safe_atom(value: text) -> bool:
+    value.len() > 0 and value.len() <= 512 and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains(" ") and not value.contains("=")
+
+fn sha256_value(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not "0123456789abcdef".contains("{ch}"):
+            return false
+    true
+
+fn one_line(lines: [text], prefix: text) -> text:
+    var found = ""
+    var count = 0
+    for line in lines:
+        if line.starts_with(prefix):
+            found = line
+            count = count + 1
+    if count == 1: found else: ""
+
+fn field(line: text, key: text) -> text:
+    for item in line.split(" "):
+        val parts = item.split("=")
+        if parts.len() == 2 and parts[0] == key:
+            return parts[1]
+    ""
+
+fn line_index(lines: [text], exact: text) -> i64:
+    var index = 0
+    for line in lines:
+        if line == exact:
+            return index
+        index = index + 1
+    -1
+
+fn reject(reason: text) -> i64:
+    print "sosix_fs_toolchain_serial=reject reason={reason}"
+    1
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val args = if raw_args.len() > 0 and raw_args[0] == "--": raw_args[1:] else: raw_args
+    if args.len() != 11:
+        print "usage: validate-sosix-qemu-compiler-serial <serial> <host> <arch> <nonce> <compiler-path> <compiler-version> <source-path> <executable-path> <expected-stdout> <version-receipt> <hello-receipt>"
+        return 2
+    val serial_path = args[0]
+    val host = args[1]
+    val arch = args[2]
+    val nonce = args[3]
+    val compiler_path = args[4]
+    val compiler_version = args[5]
+    val source_path = args[6]
+    val executable_path = args[7]
+    val expected_stdout = args[8]
+    if not safe_atom(host) or not safe_atom(arch) or not safe_atom(nonce) or
+        not safe_atom(compiler_path) or not safe_atom(compiler_version) or
+        not safe_atom(source_path) or not safe_atom(executable_path) or
+        not safe_atom(expected_stdout):
+        return reject("unsafe-argument")
+
+    val serial = rt_file_read_text(serial_path)
+    if serial.len() == 0:
+        return reject("empty-serial")
+    val lines = serial.split("\n")
+    val begin = "SOSIX_FS_TOOLCHAIN_BEGIN schema=1 host={host} arch={arch} nonce={nonce}"
+    val version = "SOSIX_FS_COMPILER_VERSION path={compiler_path} version={compiler_version} nonce={nonce}"
+    if one_line(lines, "SOSIX_FS_TOOLCHAIN_BEGIN ") != begin or
+        one_line(lines, "SOSIX_FS_COMPILER_VERSION ") != version:
+        return reject("begin-or-version-missing-or-duplicate")
+    val interpreter_read = one_line(lines, "SOSIX_FS_SOURCE_READ role=interpreter ")
+    val interpreter_run = one_line(lines, "SOSIX_FS_INTERPRETER_HELLO ")
+    val compiler_read = one_line(lines, "SOSIX_FS_SOURCE_READ role=compiler ")
+    val compiler_output = one_line(lines, "SOSIX_FS_COMPILER_OUTPUT ")
+    val loader_read = one_line(lines, "SOSIX_FS_EXEC_READ role=loader ")
+    val loader_run = one_line(lines, "SOSIX_FS_LOADER_HELLO ")
+    val compiled_run = one_line(lines, "SOSIX_FS_COMPILED_HELLO ")
+    val end = one_line(lines, "SOSIX_FS_TOOLCHAIN_END ")
+    if interpreter_read == "" or interpreter_run == "" or compiler_read == "" or
+        compiler_output == "" or loader_read == "" or loader_run == "" or
+        compiled_run == "" or end == "":
+        return reject("required-marker-missing-or-duplicate")
+
+    val source_digest = field(interpreter_read, "sha256")
+    val executable_digest = field(compiler_output, "sha256")
+    if not sha256_value(source_digest) or not sha256_value(executable_digest):
+        return reject("invalid-artifact-digest")
+    if field(interpreter_read, "path") != source_path or
+        field(compiler_read, "path") != source_path or
+        field(compiler_read, "sha256") != source_digest or
+        field(interpreter_run, "source_sha256") != source_digest:
+        return reject("source-artifact-binding")
+    if field(compiler_output, "path") != executable_path or
+        field(compiler_output, "source_sha256") != source_digest or
+        field(loader_read, "path") != executable_path or
+        field(loader_read, "sha256") != executable_digest or
+        field(loader_run, "executable_sha256") != executable_digest or
+        field(compiled_run, "executable_sha256") != executable_digest:
+        return reject("executable-artifact-binding")
+    if field(interpreter_run, "nonce") != nonce or field(loader_run, "nonce") != nonce or
+        field(compiled_run, "nonce") != nonce or field(end, "nonce") != nonce or
+        field(end, "host") != host or field(end, "arch") != arch:
+        return reject("transaction-binding")
+    val expected_stdout_sha = sha256_u8_hex(rt_text_to_bytes(expected_stdout))
+    if field(interpreter_run, "stdout") != expected_stdout or
+        field(loader_run, "stdout") != expected_stdout or
+        field(compiled_run, "stdout") != expected_stdout or
+        field(interpreter_run, "stdout_sha256") != expected_stdout_sha or
+        field(loader_run, "stdout_sha256") != expected_stdout_sha or
+        field(compiled_run, "stdout_sha256") != expected_stdout_sha or
+        field(end, "source_sha256") != source_digest or
+        field(end, "executable_sha256") != executable_digest or
+        field(end, "status") != "pass":
+        return reject("oracle-mismatch")
+
+    val i0 = line_index(lines, begin)
+    val i1 = line_index(lines, version)
+    val i2 = line_index(lines, interpreter_read)
+    val i3 = line_index(lines, interpreter_run)
+    val i4 = line_index(lines, compiler_read)
+    val i5 = line_index(lines, compiler_output)
+    val i6 = line_index(lines, loader_read)
+    val i7 = line_index(lines, loader_run)
+    val i8 = line_index(lines, compiled_run)
+    val i9 = line_index(lines, end)
+    if not (i0 < i1 and i1 < i2 and i2 < i3 and i3 < i4 and i4 < i5 and
+        i5 < i6 and i6 < i7 and i7 < i8 and i8 < i9):
+        return reject("marker-order")
+
+    val version_receipt = "schema_version=1\nhost={host}\narch={arch}\nnonce={nonce}\ncompiler_path={compiler_path}\ncompiler_version={compiler_version}\nsource_sha256={source_digest}\n"
+    val hello_receipt = "schema_version=1\nhost={host}\narch={arch}\nnonce={nonce}\nsource_path={source_path}\nsource_sha256={source_digest}\nexecutable_path={executable_path}\nexecutable_sha256={executable_digest}\ninterpreter_stdout={expected_stdout}\nloader_stdout={expected_stdout}\ncompiled_stdout={expected_stdout}\nstatus=pass\n"
+    if not rt_file_write_text(args[9], version_receipt) or
+        not rt_file_write_text(args[10], hello_receipt):
+        return reject("receipt-write")
+    print "sosix_fs_toolchain_serial=pass arch={arch} nonce={nonce} source_sha256={source_digest} executable_sha256={executable_digest}"
+    0

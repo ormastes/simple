@@ -19,7 +19,6 @@ use os.port.simpleos_multiplatform_build.{simpleos_platform_userland_target}
 
 extern fn sys_get_args() -> [text]
 extern fn rt_env_get(key: text) -> text?
-extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_exit(code: i32) -> void
 
 # ============================================================================
@@ -324,36 +323,28 @@ impl CrossConfig:
         else:
             "unknown"
 
-    fn seed_output_path() -> text:
-        """Path where the cross-compiled Rust seed will be placed."""
+    fn host_seed_output_path() -> text:
+        """Path of the host-runnable Rust seed consumed by Stage 1."""
         if self.seed_path != "":
             return self.seed_path
-        "{self.build_dir}/{target_selector_name(self.target)}/seed/simple"
+        "{self.build_dir}/{target_selector_name(self.target)}/host-tools/seed/simple"
+
+    fn target_seed_output_path() -> text:
+        """Path of the target-native seed reserved for in-guest use."""
+        "{self.build_dir}/{target_selector_name(self.target)}/target/seed/simple"
 
     fn stage_path(stage: i64) -> text:
-        """Path for a stage binary."""
-        "{self.build_dir}/{target_selector_name(self.target)}/stage{stage}/simple"
+        """Path for a host-runnable compiler used by the next bootstrap stage."""
+        "{self.build_dir}/{target_selector_name(self.target)}/host-tools/stage{stage}/simple"
+
+    fn target_artifact_path(stage: i64) -> text:
+        """Path reserved for a target-native SimpleOS compiler artifact."""
+        "{self.build_dir}/{target_selector_name(self.target)}/target/stage{stage}/simple"
 
     fn archive_path() -> text:
         """Path for the deployable archive."""
         val selector = target_selector_name(self.target)
         "{self.build_dir}/{selector}/simple-{selector}.tar.gz"
-
-fn emit_stage_seed_wrapper(config: CrossConfig, stage: i64, output: text) -> bool:
-    """Emit a deterministic bootstrap wrapper for post-stage1 handoff checks."""
-    val seed_path = config.stage_path(1)
-    val c_path = output + ".seed_wrapper.c"
-    val c_src = "#include <errno.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\n#if defined(__APPLE__) || defined(__MACH__)\n#define SIMPLE_BOOTSTRAP_PAD_SECTION __attribute__((section(\"__DATA,__data\")))\n#else\n#define SIMPLE_BOOTSTRAP_PAD_SECTION __attribute__((section(\".data\")))\n#endif\nstatic volatile unsigned char simple_bootstrap_pad[1572864] SIMPLE_BOOTSTRAP_PAD_SECTION;\nint main(int argc, char **argv) {\n  const char *seed = getenv(\"SIMPLE_BOOTSTRAP_SEED\");\n  if (!seed || seed[0] == '\\0') seed = \"" + seed_path + "\";\n  if (argc > 0) argv[0] = (char *)seed;\n  if (simple_bootstrap_pad[0] == 255) fprintf(stderr, \"pad\\n\");\n  execv(seed, argv);\n  perror(seed);\n  return 127;\n}\n"
-    if not rt_file_write_text(c_path, c_src):
-        print "[stage {stage}] ERROR: could not write seed wrapper C source"
-        return false
-    val result = process.run("cc", [c_path, "-Wl,--build-id=none", "-o", output])
-    if result.exit_code != 0:
-        print "[stage {stage}] BUILD FAILED"
-        if result.stderr.len() > 0:
-            print result.stderr
-        return false
-    true
 
 # ============================================================================
 # Argument Parsing
@@ -447,7 +438,8 @@ fn print_status(config: CrossConfig):
         var tc = config
         tc.target = normalize_target_selector(listed_target)
 
-        val seed = tc.seed_output_path()
+        val seed = tc.host_seed_output_path()
+        val target_seed = tc.target_seed_output_path()
         val s1 = tc.stage_path(1)
         val s2 = tc.stage_path(2)
         val s3 = tc.stage_path(3)
@@ -457,7 +449,8 @@ fn print_status(config: CrossConfig):
         print "  {listed_target}:"
         if listed_target != lane:
             print "    guest lane: {lane}"
-        print "    seed:     {bootstrap_artifact_status(seed)}"
+        print "    host seed:   {bootstrap_artifact_status(seed)}"
+        print "    target seed: {bootstrap_artifact_status(target_seed)}"
         print "    stage 1:  {bootstrap_artifact_status(s1)}"
         print "    stage 2:  {bootstrap_artifact_status(s2)}"
         print "    stage 3:  {bootstrap_artifact_status(s3)}"
@@ -505,35 +498,93 @@ fn ensure_sysroot(config: CrossConfig) -> bool:
 # Cross-Compile Rust Seed
 # ============================================================================
 
-fn cross_compile_seed(config: CrossConfig) -> bool:
-    """Cross-compile the Rust seed binary for SimpleOS target.
+fn host_seed_identity_matches(identity: text, host_os: text, host_arch: text) -> bool:
+    """Validate `file(1)` output without executing an untrusted seed."""
+    if not identity.contains("executable"):
+        return false
+    val os_ok =
+        if host_os == "Linux": identity.contains("ELF")
+        elif host_os == "Darwin": identity.contains("Mach-O")
+        elif host_os.starts_with("MINGW") or host_os.starts_with("MSYS"):
+            identity.contains("PE32+") or identity.contains("PE32 executable")
+        else: false
+    if not os_ok:
+        return false
+    if host_arch == "x86_64" or host_arch == "amd64":
+        return identity.contains("x86-64") or identity.contains("x86_64")
+    if host_arch == "aarch64" or host_arch == "arm64":
+        return identity.contains("aarch64") or identity.contains("arm64")
+    if host_arch.starts_with("riscv64"):
+        return identity.contains("RISC-V") and identity.contains("64-bit")
+    false
 
-    Uses cargo with -Z build-std to compile core/alloc for the custom target,
-    and links against the SimpleOS sysroot.
-    """
+fn build_host_seed(config: CrossConfig) -> bool:
+    """Build the host-runnable Rust seed used by host bootstrap stages."""
     if config.skip_seed:
-        print "[seed] Skipping Rust seed build (using {config.seed_output_path()})"
-        return path_exists(config.seed_output_path())
+        print "[host-seed] Skipping build (using {config.host_seed_output_path()})"
+        val supplied = config.host_seed_output_path()
+        if not path_exists(supplied):
+            return false
+        # Inspect, do not execute, an externally supplied seed. SimpleOS target
+        # seeds and foreign dynamic binaries must never reach a host command slot.
+        val identity = process.run("file", [supplied])
+        val host_os_result = process.run("uname", ["-s"])
+        val host_arch_result = process.run("uname", ["-m"])
+        if identity.exit_code != 0 or host_os_result.exit_code != 0 or
+            host_arch_result.exit_code != 0 or not host_seed_identity_matches(
+                identity.stdout, host_os_result.stdout.trim(), host_arch_result.stdout.trim()):
+            print "[host-seed] ERROR: supplied seed is not admitted as a hosted executable"
+            return false
+        return true
 
-    val output = config.seed_output_path()
-    print "[seed] Cross-compiling Rust seed for {config.target}..."
-    print "[seed] Output: {output}"
+    val output = config.host_seed_output_path()
+    print "[host-seed] Building host-runnable Rust seed..."
+    print "[host-seed] Output: {output}"
 
     # Ensure output directory
     val output_dir = parent_dir(output)
     if output_dir != nil:
         if not ensure_dir(output_dir):
-            print "[seed] ERROR: could not create output directory"
+            print "[host-seed] ERROR: could not create output directory"
             return false
+
+    val cargo_cmd =
+        "cargo +nightly build --manifest-path {RUST_SEED_DIR}/Cargo.toml --profile bootstrap " +
+        "-p simple-driver -p simple-native-all --features driver-compat"
+    if config.verbose:
+        print "[host-seed] Command: {cargo_cmd}"
+    val result = process.run("sh", ["-c", cargo_cmd])
+    if result.exit_code != 0:
+        print "[host-seed] Build failed"
+        return false
+    val cargo_output = "{RUST_SEED_DIR}/target/bootstrap/simple"
+    if not path_exists(cargo_output):
+        print "[host-seed] ERROR: cargo output missing: {cargo_output}"
+        return false
+    fs.copy(cargo_output, output)
+    val runnable = process.run(output, ["--version"])
+    if runnable.exit_code != 0:
+        print "[host-seed] ERROR: produced seed is not host-runnable"
+        return false
+    true
+
+fn build_target_seed(config: CrossConfig) -> bool:
+    """Build a target-native seed for packaging/in-guest execution only."""
+    val output = config.target_seed_output_path()
+    val output_dir = parent_dir(output)
+    if output_dir != nil and not ensure_dir(output_dir):
+        print "[target-seed] ERROR: could not create output directory"
+        return false
 
     # Build target spec path
     val target_spec = "src/os/toolchain/rust/{rust_target_spec_name(config.target)}.json"
     if not path_exists(target_spec):
         # Fallback: use the triple directly and hope rustc knows it
-        print "[seed] WARNING: target spec {target_spec} not found, using triple directly"
+        print "[target-seed] ERROR: target spec unavailable: {target_spec}"
+        return false
     val cargo_target_dir = "{config.build_dir}/{target_selector_name(config.target)}/cargo-targets"
     if not ensure_dir(cargo_target_dir):
-        print "[seed] ERROR: could not create cargo target-spec directory"
+        print "[target-seed] ERROR: could not create cargo target-spec directory"
         return false
     val cargo_target_alias = rust_cargo_target_alias(config.target)
     val cargo_target_spec = "{cargo_target_dir}/{cargo_target_alias}.json"
@@ -567,11 +618,11 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
         "-Z build-std=core,alloc"
 
     if config.verbose:
-        print "[seed] Command: {cargo_cmd}"
+        print "[target-seed] Command: {cargo_cmd}"
 
     val result = process.run("sh", ["-c", cargo_cmd])
     if result.exit_code != 0:
-        print "[seed] Cross-compilation failed:"
+        print "[target-seed] Cross-compilation failed:"
         if result.stderr.len() > 0:
             print result.stderr
         return false
@@ -584,13 +635,13 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
         val alt_path = "{RUST_SEED_DIR}/target/{base}/bootstrap/simple"
         if path_exists(alt_path):
             fs.copy(alt_path, output)
-            print "[seed] Cross-compiled seed ready at {output}"
+            print "[target-seed] Ready at {output} (not host-executed)"
             return true
-        print "[seed] ERROR: Could not find cargo output binary"
+        print "[target-seed] ERROR: Could not find cargo output binary"
         return false
 
     fs.copy(cargo_output, output)
-    print "[seed] Cross-compiled seed ready at {output}"
+    print "[target-seed] Ready at {output} (not host-executed)"
     true
 
 # ============================================================================

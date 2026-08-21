@@ -18,10 +18,10 @@ use os.qemu_runner.{boot_disk_image_serial}
 val MARKER_STARTED = "SIMPLEOS_SMOKE_INIT_STARTED"
 val MARKER_VERSION = "SIMPLE_FROM_FS_VERSION_OK"
 val MARKER_INTERPRETER = "TRIVIAL_INTERPRETER_OK"
+val MARKER_LOADER = "TRIVIAL_LOADER_OK"
 val MARKER_NATIVE = "TRIVIAL_SELFHOST_OK"
 val MARKER_DONE = "SIMPLEOS_SMOKE_INIT_DONE"
 val VERSION_OUTPUT = "Simple v1.0.0-RC"
-val HELLO_OUTPUT = "hello from self-host"
 
 var _serial_cache: text = ""
 var _boot_attempted: bool = false
@@ -34,6 +34,12 @@ fn _disk_image_path() -> text:
     if override == "":
         return "build/os/simpleos_disk.img"
     override
+
+fn _expected_hello_output() -> text:
+    val nonce = env_get("SOSIX_QEMU_NONCE")
+    if nonce == "":
+        return "[missing-sosix-qemu-nonce]"
+    "hello-" + nonce
 
 fn _marker_line_index(serial: text, marker: text) -> i64:
     var line_index: i64 = 0
@@ -101,14 +107,16 @@ describe "E2E: Simple compiler runs from the SimpleOS filesystem":
         step("Reuse the live SimpleOS serial capture")
         val serial = ensure_serial()
         step("Observe the exact interpreter success marker")
-        val interpreted_output_line = _line_index_after(serial, HELLO_OUTPUT, -1)
+        val interpreted_output_line = _line_index_after(serial, _expected_hello_output(), -1)
         expect(interpreted_output_line).to_be_greater_than(-1)
         val interpreter_line = _marker_line_index(serial, MARKER_INTERPRETER)
         expect(interpreter_line).to_be_greater_than(interpreted_output_line)
         step("Observe the exact native compile-and-run success marker")
-        val native_output_line = _line_index_after(serial, HELLO_OUTPUT, interpreter_line)
+        val native_output_line = _line_index_after(serial, _expected_hello_output(), interpreter_line)
         expect(native_output_line).to_be_greater_than(interpreter_line)
+        val loader_line = _marker_line_index(serial, MARKER_LOADER)
+        expect(loader_line).to_be_greater_than(native_output_line)
         val native_line = _marker_line_index(serial, MARKER_NATIVE)
-        expect(native_line).to_be_greater_than(native_output_line)
+        expect(native_line).to_be_greater_than(loader_line)
         step("Observe the exact smoke-init completion marker")
         expect(_marker_line_index(serial, MARKER_DONE)).to_be_greater_than(native_line)
