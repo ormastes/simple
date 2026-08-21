@@ -1,7 +1,7 @@
 <!-- codex-research -->
 # Domain Research: SFFI v2 Hardening
 
-**Date:** 2026-08-21  
+**Date:** 2026-08-21
 **Canonical synthesis:** `doc/01_research/platform/sffi_v2_hardening_2026-08-21.md`
 
 This companion preserves the external reasoning behind the selected SFFI v2
@@ -39,4 +39,3 @@ remain enabled by default. Unverifiable in-process providers remain unsafe or
 are isolated behind a validated process/Wasm protocol.
 
 Primary references and URLs are maintained in the canonical synthesis.
-

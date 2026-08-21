@@ -1,7 +1,8 @@
 # System Test Plan: SFFI v2 Hardening
 
-**P0 executable:** `test/03_system/compiler/sffi_v2_p0_fail_closed_spec.spl`  
-**Manual mirror:** `doc/06_spec/03_system/compiler/sffi_v2_p0_fail_closed_spec.md`  
+**P0 executable:** `test/03_system/compiler/sffi_v2_p0_fail_closed_spec.spl`
+
+**Manual mirror:** `doc/06_spec/03_system/compiler/sffi_v2_p0_fail_closed_spec.md`
 **Status:** P0 executable authored by a parallel implementation lane; broader
 P0/P1 coverage remains planned. The current executable's provisional
 `REQ-SFFI-V2-P0-001/002` labels must be aligned during merge to canonical

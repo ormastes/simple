@@ -1,7 +1,8 @@
 # SFFI v2 Hardening — Feature Requirements
 
-**Status:** Selected and final for P0/P1  
-**Research:** `doc/01_research/platform/sffi_v2_hardening_2026-08-21.md`  
+**Status:** Selected and final for P0/P1
+
+**Research:** `doc/01_research/platform/sffi_v2_hardening_2026-08-21.md`
 **Selection:** User-selected recommended SFFI v2 architecture, 2026-08-21
 
 ## P0 — Fail closed
@@ -65,4 +66,3 @@
 P2 lexical enforcement, P3 typed provider admission, P4 cryptographic evidence,
 P5 provider migration, and P6 full conformance/performance are planned. Their
 presence in architecture does not claim implementation or verification.
-

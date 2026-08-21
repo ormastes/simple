@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # Architecture: SFFI v2 Hardening
 
-**Status:** P0/P1 normative; P2–P6 planned  
+**Status:** P0/P1 normative; P2–P6 planned
 **Requirements:** `doc/02_requirements/feature/sffi_v2_hardening.md`
 
 ## Decision
@@ -95,4 +95,3 @@ Legacy declarations may be inventoried during migration but never retain
 fabricated values. P0 changes are intentionally fail-closed. Safe public APIs
 expose only generated/reviewed wrappers. Pure-Simple counterparts remain
 preferred and foreign ownership remains in canonical no-GC sync owners.
-

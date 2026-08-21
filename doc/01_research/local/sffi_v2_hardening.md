@@ -1,8 +1,9 @@
 <!-- codex-research -->
 # Local Research: SFFI v2 Hardening
 
-**Date:** 2026-08-21  
-**Baseline:** `2624da57f05e7ad1865b56493bbcb3a04e2b0dd3`  
+**Date:** 2026-08-21
+
+**Baseline:** `2624da57f05e7ad1865b56493bbcb3a04e2b0dd3`
 **Canonical synthesis:** `doc/01_research/platform/sffi_v2_hardening_2026-08-21.md`
 
 This companion indexes the repository evidence behind the supplied assessment.
@@ -62,4 +63,3 @@ P0 must repair each execution/link lane as one defect class. P1 must establish
 one compiler-owned typed contract and generated lift path. A grep inventory,
 per-lane registry, wrapper convention, or signature field alone cannot prove
 the boundary.
-
