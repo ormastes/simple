@@ -280,3 +280,7 @@ implementation-blocked-by-bootstrap-authority
   expression tag 18 in `module_import_registration.spl`. Tag 18 is the general
   `EXPR_BLOCK`; the bridge now converts it through the existing block helper
   instead of reserving that support for if/lambda callers. Cycle count is 1/3.
+- cycle-1-review: Parallel review found that general `EXPR_BLOCK` nodes may
+  carry both expanded statements and a tail expression. The shared block
+  converter now preserves both; the interrupted pre-admission Stage 2 build
+  produced no verdict and was discarded before this correction.
