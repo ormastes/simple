@@ -22,13 +22,16 @@ const METHOD_SELF: &str = "self";
 // interpreting the driver (a 23 KB file took 128 s to parse). The copy is now
 // a post-pass over the bound map with a by-name lookup per Object argument.
 fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<ClassDef>>) {
+    crate::perf_counters::bump(&crate::perf_counters::VT_CALLS, 1);
     match value {
         Value::Object { class, fields } => {
             if classes.get(class.as_str()).is_some_and(|def| def.is_value_type) {
+                crate::perf_counters::bump(&crate::perf_counters::VT_OBJECT_FIELD_CLONES, 1);
                 *fields = Arc::new((**fields).clone());
             }
         }
         Value::Array(items) => {
+            crate::perf_counters::bump(&crate::perf_counters::VT_ARRAY_ELEMS_SCANNED, items.len() as u64);
             // Recurse only when an element is itself a VALUE-type object: the
             // pre-2026-08-21 code never touched arrays, so cloning an array of
             // reference-class objects here would change aliasing semantics.
@@ -36,6 +39,8 @@ fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<Cla
                 matches!(item, Value::Object { class, .. }
                     if classes.get(class.as_str()).is_some_and(|def| def.is_value_type))
             }) {
+                crate::perf_counters::bump(&crate::perf_counters::VT_ARRAY_CLONES, 1);
+                crate::perf_counters::bump(&crate::perf_counters::VT_ARRAY_ELEMS_CLONED, items.len() as u64);
                 let mut copied: Vec<Value> = (**items).clone();
                 for item in copied.iter_mut() {
                     copy_value_type_in_place(item, classes);

@@ -952,6 +952,14 @@ fn handle_method_call_with_self_update_inner(
                     // check there). Not a regression to fix; documented so a future reader doesn't
                     // mistake it for an oversight.
                     if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
+                        crate::perf_counters::bump(&crate::perf_counters::ARR_MUT_CALLS, 1);
+                        if crate::perf_counters::enabled() && Arc::strong_count(arc) > 1 {
+                            crate::perf_counters::bump(&crate::perf_counters::ARR_MUT_COW_CLONES, 1);
+                            crate::perf_counters::bump(
+                                &crate::perf_counters::ARR_MUT_COW_ELEMS_CLONED,
+                                arc.len() as u64,
+                            );
+                        }
                         let popped = {
                             let vec = Arc::make_mut(arc);
                             apply_array_mutation_in_place(m, vec, item, idx, second)?
