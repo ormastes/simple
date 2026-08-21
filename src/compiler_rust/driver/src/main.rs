@@ -1165,6 +1165,11 @@ fn flush_coverage_before_exit() -> i32 {
 }
 
 fn real_main() {
+    // Emit the allocation census at end of run when SIMPLE_MEM_TRACE=1.
+    // Installed here, on the simple-main thread, because the per-module cost
+    // tables in mem_trace are thread-local; a no-op when the env var is unset.
+    let _mem_report = simple_compiler::mem_trace::ExitReport::install();
+
     // Initialize metrics and startup tracking
     let (metrics_enabled, mut metrics) = init_metrics();
 
@@ -1289,6 +1294,13 @@ fn real_main() {
     // exiting 0 with no file is the defect being fixed and must not recur.
     let coverage_exit = flush_coverage_before_exit();
     let exit_code = if coverage_exit != 0 { coverage_exit } else { exit_code };
+
+    // Both arms below call std::process::exit, which does NOT run destructors,
+    // so the ExitReport guard installed at the top of real_main would never
+    // fire on the dominant CLI path (lint / native-build / run). Emit the
+    // census explicitly here; report() is idempotent enough to double-print
+    // only on paths that also unwind, and is a no-op unless SIMPLE_MEM_TRACE=1.
+    simple_compiler::mem_trace::report("process exit");
 
     if metrics_enabled {
         exit_with_metrics(exit_code, &metrics);

@@ -1,0 +1,250 @@
+#!/bin/sh
+# check-memory-budget.shs — fail-closed peak-RSS budget gate for the compiler.
+#
+# Pins the memory numbers measured on 2026-08-21 (seed 5020e8f3f45) and recorded
+# in doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md
+# so that the fixes behind them cannot silently regress.
+#
+# Why a gate and not a note: the two headline cases in that record (12-13.6 GB
+# interpreter lint, 4.5 GB parse) were each fixed once and then re-reported later
+# by a different lane, because nothing measured them on an ongoing basis. Peak
+# RSS is cheap to measure and is the number that actually decides whether eight
+# concurrent shard workers fit in host memory.
+#
+# Budgets are ~2x the measured post-fix value: tight enough that a real
+# regression (which historically means 5-20x, not 20%) trips them, loose enough
+# to survive a shared box under concurrent load.
+#
+#   (a) lint driver_types.spl (JIT)            <= 1024 MB   (measured 453 MB)
+#   (b) lint switch_operators_calls.spl        <= 2048 MB   (measured 692 MB)
+#       under SIMPLE_EXECUTION_MODE=interpret
+#   (c) stage1 worker parse retention          <= 2.0 MB/module (measured 0.95)
+#
+# (c) needs a full stage1 native-build (~1h) so it runs only under --full; (a)
+# and (b) run by default and cost ~6 min combined.
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS  — <n> budget(s) checked, 0 exceeded            exit 0
+#   FAIL  — <n> budget(s) checked, <k> exceeded: <names> exit 1
+#   ERROR — nothing was checked (<reason>)               exit 2
+#
+# A run that measured 0 budgets is ERROR, never a pass: absence of a measurement
+# is absence of evidence. Missing /usr/bin/time or a missing binary is likewise
+# ERROR, not a skip.
+#
+# Usage:
+#   sh scripts/check/check-memory-budget.shs [--full] [--binary PATH]
+#   sh scripts/check/check-memory-budget.shs --selftest
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BINARY="$ROOT/bin/simple"
+FULL=0
+SELFTEST_ONLY=0
+
+BUDGET_A_MB=1024
+BUDGET_B_MB=2048
+BUDGET_C_MB_PER_MODULE=2.0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --full) FULL=1 ;;
+        --binary) shift; BINARY="$1" ;;
+        --selftest) SELFTEST_ONLY=1 ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+    shift
+done
+
+CHECKED=0
+EXCEEDED=0
+OFFENDERS=""
+
+# Peak RSS in MB for a command, or empty on failure to measure.
+# The exit status is read DIRECTLY into a variable on the line after the
+# invocation, never through a pipe: a pipeline's $? is the last stage's status
+# and has produced false greens in this repo before.
+peak_rss_mb() {
+    _prm_out=$(mktemp)
+    /usr/bin/time -v "$@" >/dev/null 2>"$_prm_out"
+    _prm_rc=$?
+    _prm_kb=$(awk '/Maximum resident set size/{print $NF}' "$_prm_out")
+    rm -f "$_prm_out"
+    if [ -z "$_prm_kb" ]; then
+        echo ""
+        return 1
+    fi
+    # Report the measurement even when the command itself failed; the caller
+    # decides. A crashed run's peak RSS is not evidence of a passing budget.
+    if [ "$_prm_rc" -ne 0 ]; then
+        echo ""
+        return 1
+    fi
+    echo $((_prm_kb / 1024))
+}
+
+record() {
+    _r_name=$1; _r_got=$2; _r_budget=$3
+    CHECKED=$((CHECKED + 1))
+    if [ "$_r_got" -gt "$_r_budget" ]; then
+        EXCEEDED=$((EXCEEDED + 1))
+        OFFENDERS="$OFFENDERS $_r_name(${_r_got}MB>${_r_budget}MB)"
+        echo "  FAIL $_r_name peak=${_r_got}MB budget=${_r_budget}MB"
+    else
+        echo "  ok   $_r_name peak=${_r_got}MB budget=${_r_budget}MB"
+    fi
+}
+
+# --------------------------------------------------------------------------
+# selftest — runs before every scan and is fatal.
+# --------------------------------------------------------------------------
+selftest() {
+    _st_fail=0
+
+    # 1. record() must FAIL a value over budget.
+    CHECKED=0; EXCEEDED=0; OFFENDERS=""
+    record "fixture-over" 4096 1024 >/dev/null
+    if [ "$EXCEEDED" -ne 1 ]; then
+        echo "selftest: over-budget fixture did not fail" >&2; _st_fail=1
+    fi
+
+    # 2. record() must PASS a value under budget.
+    CHECKED=0; EXCEEDED=0; OFFENDERS=""
+    record "fixture-under" 100 1024 >/dev/null
+    if [ "$EXCEEDED" -ne 0 ]; then
+        echo "selftest: under-budget fixture did not pass" >&2; _st_fail=1
+    fi
+
+    # 3. A value exactly at budget must PASS (boundary is inclusive).
+    CHECKED=0; EXCEEDED=0; OFFENDERS=""
+    record "fixture-exact" 1024 1024 >/dev/null
+    if [ "$EXCEEDED" -ne 0 ]; then
+        echo "selftest: at-budget fixture must pass" >&2; _st_fail=1
+    fi
+
+    # 4. peak_rss_mb must report empty for a command that fails, so a crashed
+    #    run can never be mistaken for a cheap one.
+    _st_got=$(peak_rss_mb false)
+    if [ -n "$_st_got" ]; then
+        echo "selftest: failing command yielded a measurement ($_st_got)" >&2; _st_fail=1
+    fi
+
+    # 5. peak_rss_mb must produce a number for a command that succeeds.
+    _st_got=$(peak_rss_mb true)
+    if [ -z "$_st_got" ]; then
+        echo "selftest: successful command yielded no measurement" >&2; _st_fail=1
+    fi
+
+    CHECKED=0; EXCEEDED=0; OFFENDERS=""
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 5 selftest fixture(s) checked, 0 failed"
+    exit 0
+fi
+
+if ! command -v /usr/bin/time >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked (/usr/bin/time not available)"
+    exit 2
+fi
+if [ ! -x "$BINARY" ]; then
+    echo "ERROR — nothing was checked (no executable compiler at $BINARY)"
+    exit 2
+fi
+
+echo "memory budget gate — binary: $(readlink -f "$BINARY")"
+
+# (a) JIT lint
+FILE_A="$ROOT/src/compiler/80.driver/driver_types.spl"
+if [ -f "$FILE_A" ]; then
+    GOT_A=$(peak_rss_mb "$BINARY" lint "$FILE_A")
+    if [ -n "$GOT_A" ]; then
+        record "lint-driver_types-jit" "$GOT_A" "$BUDGET_A_MB"
+    else
+        echo "ERROR — nothing was checked (case (a) failed to run)"
+        exit 2
+    fi
+fi
+
+# (b) interpreter lint of the historically 12-13.6 GB file.
+# NOTE the spelling: SIMPLE_EXECUTION_MODE=interp is NOT recognised and falls
+# back to JIT, which would make this budget vacuous. It must be "interpret".
+FILE_B="$ROOT/src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+if [ -f "$FILE_B" ]; then
+    # Set/unset explicitly rather than as a `VAR=x func` prefix: applying an
+    # assignment prefix to a shell FUNCTION is not portable (it can persist
+    # after the call), and silently losing this variable would downgrade the
+    # case to a JIT run and make the budget vacuous.
+    SIMPLE_EXECUTION_MODE=interpret
+    export SIMPLE_EXECUTION_MODE
+    GOT_B=$(peak_rss_mb "$BINARY" lint "$FILE_B")
+    unset SIMPLE_EXECUTION_MODE
+    if [ -n "$GOT_B" ]; then
+        record "lint-switch_operators_calls-interpret" "$GOT_B" "$BUDGET_B_MB"
+    else
+        echo "ERROR — nothing was checked (case (b) failed to run)"
+        exit 2
+    fi
+fi
+
+# (c) stage1 worker parse retention per module — opt-in, ~1h.
+if [ "$FULL" -eq 1 ]; then
+    OUT_C=$(mktemp -d)/stage1.budget
+    LOG_C=$(mktemp)
+    SIMPLE_NATIVE_BUILD_WORKER=1 SIMPLE_CACHE_SCOPE=membudget \
+        "$BINARY" native-build --source "$ROOT/src/app" --entry-closure \
+        --entry "$ROOT/src/app/cli/bootstrap_main.spl" -o "$OUT_C" --threads 1 \
+        > "$LOG_C" 2>&1 &
+    C_PID=$!
+    C_FIRST_MOD=""; C_FIRST_RSS=""; C_LAST_MOD=""; C_LAST_RSS=""
+    while kill -0 "$C_PID" 2>/dev/null; do
+        C_RSS=$(awk '/VmRSS/{print $2}' "/proc/$C_PID/status" 2>/dev/null)
+        C_MOD=$(grep -oE 'parse [0-9]+/[0-9]+' "$LOG_C" | tail -1 | sed 's:parse ::; s:/.*::')
+        if [ -n "$C_RSS" ] && [ -n "$C_MOD" ]; then
+            if [ -z "$C_FIRST_MOD" ] && [ "$C_MOD" -ge 100 ]; then
+                C_FIRST_MOD=$C_MOD; C_FIRST_RSS=$C_RSS
+            fi
+            C_LAST_MOD=$C_MOD; C_LAST_RSS=$C_RSS
+        fi
+        # Measure the parse phase only; stop once it is done.
+        if grep -q 'step 2/6' "$LOG_C" 2>/dev/null; then break; fi
+        sleep 30
+    done
+    kill "$C_PID" 2>/dev/null
+    wait "$C_PID" 2>/dev/null
+    if [ -n "$C_FIRST_MOD" ] && [ -n "$C_LAST_MOD" ] && [ "$C_LAST_MOD" -gt "$C_FIRST_MOD" ]; then
+        PER=$(awk -v r1="$C_FIRST_RSS" -v r2="$C_LAST_RSS" -v m1="$C_FIRST_MOD" -v m2="$C_LAST_MOD" \
+            'BEGIN{printf "%.3f", ((r2-r1)/1024.0)/(m2-m1)}')
+        CHECKED=$((CHECKED + 1))
+        OVER=$(awk -v p="$PER" -v b="$BUDGET_C_MB_PER_MODULE" 'BEGIN{print (p>b)?1:0}')
+        if [ "$OVER" -eq 1 ]; then
+            EXCEEDED=$((EXCEEDED + 1))
+            OFFENDERS="$OFFENDERS stage1-parse-per-module(${PER}MB>${BUDGET_C_MB_PER_MODULE}MB)"
+            echo "  FAIL stage1-parse-per-module ${PER}MB/module budget=${BUDGET_C_MB_PER_MODULE}MB/module"
+        else
+            echo "  ok   stage1-parse-per-module ${PER}MB/module budget=${BUDGET_C_MB_PER_MODULE}MB/module"
+        fi
+    else
+        rm -f "$LOG_C"
+        echo "ERROR — nothing was checked (case (c) produced no usable parse samples)"
+        exit 2
+    fi
+    rm -f "$LOG_C"
+fi
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no budget case could be measured)"
+    exit 2
+fi
+if [ "$EXCEEDED" -gt 0 ]; then
+    echo "FAIL — $CHECKED budget(s) checked, $EXCEEDED exceeded:$OFFENDERS"
+    exit 1
+fi
+echo "PASS — $CHECKED budget(s) checked, 0 exceeded"
+exit 0

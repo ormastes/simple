@@ -4,6 +4,23 @@
 RESOLVED 2026-08-21 — 47ee75c7cf5 measured and refuted the cache-cap hypothesis; e73a0bec647 removed the per-call env-rebuild mechanism entirely. Evidence: driver_types 90s/2GB -> 23s/0.42GB, switch_operators_calls 759s/12GB -> 159s/0.66GB.
 
 
+> **2026-08-21, third update — the OPEN root cause is now ANSWERED.** The
+> residual root cause recorded here as open ("the cloned Env's Arc graph is
+> retained elsewhere") is moot: there is no longer a cloned Env graph. Verified
+> by census on the deployed seed `5020e8f3f45`, not by inspection —
+> `SIMPLE_MEM_TRACE=1` reports `captured_env_with_live_globals: calls=0`, i.e.
+> the per-call env-rebuild mechanism removed by `e73a0bec647` is gone rather
+> than merely cheaper. Re-measured end to end: `switch_operators_calls.spl` under
+> `SIMPLE_EXECUTION_MODE=interpret` peaks at **0.69 GB / 338s** against the 12-13.6
+> GB recorded below. Note the spelling: `SIMPLE_EXECUTION_MODE=interp` is not a
+> recognised value and silently falls back to JIT (it reports 0.86 GB / 15.4s,
+> a JIT number under an interpreter label).
+>
+> What remains is a *different* retainer, filed separately: per-module env/export
+> materialisation, ~330 env entries and ~300 import bindings per module, 48,646
+> import bindings across 161 module envs. See
+> `doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md`.
+
 > **2026-08-21 update, read the Numbers section first.** This was filed against
 > the unbounded env-template cache. That hypothesis has since been MEASURED AND
 > REFUTED: capping the cache (even to 64 entries) does not change peak RSS.

@@ -530,6 +530,8 @@ fn report_inner(label: &str) {
         CEWLG_NET_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
         CEWLG_GROSS_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
     );
+    crate::interpreter::report_globals_census();
+
     let mut rows: Vec<(String, ModuleCost)> =
         MODULE_COSTS.with(|m| m.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect());
     rows.sort_by_key(|(_, c)| -(c.self_bytes + c.parse_bytes));
@@ -546,5 +548,39 @@ fn report_inner(label: &str) {
             c.loads,
             name,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// End-of-run report
+// ---------------------------------------------------------------------------
+
+/// RAII guard that emits the full census when the driver's main work finishes.
+///
+/// Why this exists: before it, the only caller of [`report`] was
+/// `clear_module_cache`, which the `lint` and `native-build` paths never reach.
+/// Measured 2026-08-21: `SIMPLE_MEM_TRACE=1 simple lint <file>` printed **zero**
+/// `[mem]` lines on the JIT path and one on the interpret path, so the census
+/// was effectively dead on exactly the two paths worth profiling.
+///
+/// Must be constructed on the thread that runs the compile (`simple-main`, the
+/// 64 MB-stack thread spawned by `main`), because `MODULE_COSTS` / `PHASES` are
+/// thread-local — installing it on the process's original thread would report
+/// empty tables.
+///
+/// A no-op unless `SIMPLE_MEM_TRACE=1`: [`report`] gates on [`enabled`] itself,
+/// so the default path costs one env lookup at exit and nothing else.
+pub struct ExitReport;
+
+impl ExitReport {
+    /// Install the end-of-run census reporter for the current thread.
+    pub fn install() -> Self {
+        ExitReport
+    }
+}
+
+impl Drop for ExitReport {
+    fn drop(&mut self) {
+        report("process exit");
     }
 }
