@@ -1,0 +1,219 @@
+# Loader-owned Ed25519 verification for SimpleArtifactManifest v1.
+#
+# Trust roots are installed once into a private serialized capsule. Verification
+# produces a package-private receipt; callers cannot turn a boolean or an
+# arbitrary public key into executable authority. All work is load-time only.
+
+use std.common.contracts.execution.simpleos_executable_v1.{SimpleArtifactManifest}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+val EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS: i64 = 16
+val EXECUTABLE_MANIFEST_MAX_KEY_ID_BYTES: i64 = 128
+val _EXECUTABLE_MANIFEST_TRUST_MUTEX: i64 = mutex_raw_create()
+
+pub struct ExecutableManifestTrustedSignerV1:
+    key_id: text
+    public_key: [u8]
+
+pub enum ExecutableManifestSignatureErrorV1:
+    None
+    SerializationUnavailable
+    TrustRootsInvalid
+    TrustRootsAlreadyInitialized
+    TrustRootsUnavailable
+    SignatureEnvelopeInvalid
+    SignerUnknown
+    TrustRootMismatch
+    SigningBytesInvalid
+    SignatureInvalid
+
+pub struct ExecutableManifestSignatureCheckV1:
+    ok: bool
+    reason: text
+
+pub(package) struct ExecutableManifestVerificationReceiptV1:
+    key_id: text
+    trust_root_hash: text
+    image_hash: text
+
+var _executable_manifest_trusted_key_ids: [text] = []
+var _executable_manifest_trusted_public_keys: [[u8]] = []
+var _executable_manifest_trust_initialized: bool = false
+var _executable_manifest_trust_quarantined: bool = false
+
+fn _manifest_key_id_valid(value: text) -> bool:
+    if value.len() == 0 or value.len() > EXECUTABLE_MANIFEST_MAX_KEY_ID_BYTES:
+        return false
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 33 or code > 126 or code == 58:
+            return false
+        i = i + 1
+    true
+
+fn _manifest_trust_roots_valid(roots: [ExecutableManifestTrustedSignerV1]) -> bool:
+    if roots.len() == 0 or roots.len() > EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS:
+        return false
+    var i: i64 = 0
+    while i < roots.len():
+        if not _manifest_key_id_valid(roots[i].key_id) or
+            roots[i].public_key.len() != 32:
+            return false
+        var j: i64 = 0
+        while j < i:
+            if roots[j].key_id == roots[i].key_id:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
+fn _manifest_copy_bytes(value: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in value:
+        copied = copied.push(byte)
+    copied
+
+fn _manifest_roots_match_locked(roots: [ExecutableManifestTrustedSignerV1]) -> bool:
+    if roots.len() != _executable_manifest_trusted_key_ids.len():
+        return false
+    var i: i64 = 0
+    while i < roots.len():
+        if roots[i].key_id != _executable_manifest_trusted_key_ids[i] or
+            roots[i].public_key != _executable_manifest_trusted_public_keys[i]:
+            return false
+        i = i + 1
+    true
+
+fn _manifest_unlock_result(
+    result: Result<(), ExecutableManifestSignatureErrorV1>
+) -> Result<(), ExecutableManifestSignatureErrorV1>:
+    if not mutex_raw_unlock(_EXECUTABLE_MANIFEST_TRUST_MUTEX):
+        _executable_manifest_trust_quarantined = true
+        return Err(ExecutableManifestSignatureErrorV1.SerializationUnavailable)
+    result
+
+pub fn executable_manifest_trust_owner_initialize(
+    roots: [ExecutableManifestTrustedSignerV1]
+) -> Result<(), ExecutableManifestSignatureErrorV1>:
+    if not _manifest_trust_roots_valid(roots):
+        return Err(ExecutableManifestSignatureErrorV1.TrustRootsInvalid)
+    if _executable_manifest_trust_quarantined or
+        _EXECUTABLE_MANIFEST_TRUST_MUTEX <= 0 or
+        not mutex_raw_lock(_EXECUTABLE_MANIFEST_TRUST_MUTEX):
+        return Err(ExecutableManifestSignatureErrorV1.SerializationUnavailable)
+    if _executable_manifest_trust_initialized:
+        if _manifest_roots_match_locked(roots):
+            return _manifest_unlock_result(Ok(()))
+        return _manifest_unlock_result(
+            Err(ExecutableManifestSignatureErrorV1.TrustRootsAlreadyInitialized))
+    var key_ids: [text] = []
+    var public_keys: [[u8]] = []
+    for root in roots:
+        key_ids = key_ids.push(root.key_id)
+        public_keys = public_keys.push(_manifest_copy_bytes(root.public_key))
+    _executable_manifest_trusted_key_ids = key_ids
+    _executable_manifest_trusted_public_keys = public_keys
+    _executable_manifest_trust_initialized = true
+    _manifest_unlock_result(Ok(()))
+
+fn _manifest_hex_nibble(value: text) -> i64:
+    if value >= "0" and value <= "9": return value.char_code_at(0) - 48
+    if value >= "a" and value <= "f": return value.char_code_at(0) - 87
+    if value >= "A" and value <= "F": return value.char_code_at(0) - 55
+    -1
+
+fn _manifest_signature_decode(value: text) -> [u8]:
+    if value.len() != 128:
+        return []
+    var decoded: [u8] = []
+    var i: i64 = 0
+    while i < value.len():
+        val high = _manifest_hex_nibble(value.substring(i, i + 1))
+        val low = _manifest_hex_nibble(value.substring(i + 1, i + 2))
+        if high < 0 or low < 0:
+            return []
+        decoded = decoded.push((high * 16 + low).to_u8())
+        i = i + 2
+    decoded
+
+fn _manifest_find_key_locked(key_id: text) -> i64:
+    var i: i64 = 0
+    while i < _executable_manifest_trusted_key_ids.len():
+        if _executable_manifest_trusted_key_ids[i] == key_id:
+            return i
+        i = i + 1
+    -1
+
+pub(package) fn executable_manifest_signature_verify(
+    manifest: SimpleArtifactManifest,
+    image_hash: text,
+    expected_trust_root_hash: text
+) -> Result<ExecutableManifestVerificationReceiptV1, ExecutableManifestSignatureErrorV1>:
+    val envelope = manifest.signature.split(":")
+    if envelope.len() != 3 or envelope[0] != "ed25519" or
+        not _manifest_key_id_valid(envelope[1]):
+        return Err(ExecutableManifestSignatureErrorV1.SignatureEnvelopeInvalid)
+    val signature = _manifest_signature_decode(envelope[2])
+    if signature.len() != 64:
+        return Err(ExecutableManifestSignatureErrorV1.SignatureEnvelopeInvalid)
+    val signing = encode_simple_artifact_manifest_v1_signing_bytes(manifest, image_hash)
+    if not signing.ok:
+        return Err(ExecutableManifestSignatureErrorV1.SigningBytesInvalid)
+    if _executable_manifest_trust_quarantined or
+        _EXECUTABLE_MANIFEST_TRUST_MUTEX <= 0 or
+        not mutex_raw_lock(_EXECUTABLE_MANIFEST_TRUST_MUTEX):
+        return Err(ExecutableManifestSignatureErrorV1.SerializationUnavailable)
+    if not _executable_manifest_trust_initialized:
+        val ignored = mutex_raw_unlock(_EXECUTABLE_MANIFEST_TRUST_MUTEX)
+        if not ignored: _executable_manifest_trust_quarantined = true
+        return Err(ExecutableManifestSignatureErrorV1.TrustRootsUnavailable)
+    val key_index = _manifest_find_key_locked(envelope[1])
+    if key_index < 0:
+        val ignored = mutex_raw_unlock(_EXECUTABLE_MANIFEST_TRUST_MUTEX)
+        if not ignored: _executable_manifest_trust_quarantined = true
+        return Err(ExecutableManifestSignatureErrorV1.SignerUnknown)
+    val public_key = _manifest_copy_bytes(_executable_manifest_trusted_public_keys[key_index])
+    if not mutex_raw_unlock(_EXECUTABLE_MANIFEST_TRUST_MUTEX):
+        _executable_manifest_trust_quarantined = true
+        return Err(ExecutableManifestSignatureErrorV1.SerializationUnavailable)
+    val trust_root_hash = sha256_u8_hex(public_key)
+    if trust_root_hash != expected_trust_root_hash:
+        return Err(ExecutableManifestSignatureErrorV1.TrustRootMismatch)
+    if not pure_ed25519_verify(public_key, signing.bytes, signature):
+        return Err(ExecutableManifestSignatureErrorV1.SignatureInvalid)
+    Ok(ExecutableManifestVerificationReceiptV1(
+        key_id: envelope[1],
+        trust_root_hash: trust_root_hash,
+        image_hash: image_hash))
+
+pub fn executable_manifest_signature_check(
+    manifest: SimpleArtifactManifest,
+    image_hash: text,
+    expected_trust_root_hash: text
+) -> ExecutableManifestSignatureCheckV1:
+    match executable_manifest_signature_verify(
+        manifest, image_hash, expected_trust_root_hash):
+        case Ok(_):
+            ExecutableManifestSignatureCheckV1(ok: true, reason: "")
+        case Err(error):
+            val reason = match error:
+                case ExecutableManifestSignatureErrorV1.SerializationUnavailable: "serialization-unavailable"
+                case ExecutableManifestSignatureErrorV1.TrustRootsInvalid: "trust-roots-invalid"
+                case ExecutableManifestSignatureErrorV1.TrustRootsAlreadyInitialized: "trust-roots-already-initialized"
+                case ExecutableManifestSignatureErrorV1.TrustRootsUnavailable: "trust-roots-unavailable"
+                case ExecutableManifestSignatureErrorV1.SignatureEnvelopeInvalid: "signature-envelope-invalid"
+                case ExecutableManifestSignatureErrorV1.SignerUnknown: "signer-unknown"
+                case ExecutableManifestSignatureErrorV1.TrustRootMismatch: "trust-root-mismatch"
+                case ExecutableManifestSignatureErrorV1.SigningBytesInvalid: "signing-bytes-invalid"
+                case ExecutableManifestSignatureErrorV1.SignatureInvalid: "signature-invalid"
+                case _: "none"
+            ExecutableManifestSignatureCheckV1(ok: false, reason: reason)
+
+export EXECUTABLE_MANIFEST_MAX_TRUSTED_SIGNERS
+export EXECUTABLE_MANIFEST_MAX_KEY_ID_BYTES

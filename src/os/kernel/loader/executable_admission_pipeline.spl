@@ -19,6 +19,10 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
 use os.kernel.loader.artifact_manifest.{
     manifest_validate_for_target, manifest_kind_is_known
 }
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestSignatureErrorV1,
+    executable_manifest_signature_verify
+}
 use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityErrorV1, ExecutableAuthorityRegistryV1,
     ExecutableAuthorityTokenV1, ExecutableAuthorityCloseLeaseV1,
@@ -178,6 +182,35 @@ pub fn executable_loader_admit_open_binding(
         inputs.manifest_hash != admission.manifest_hash:
         return _loader_close_rejection(
             table, binding, ExecutableLoaderAdmissionErrorV1.DigestInvalid)
+    # Caller-supplied booleans above are rejection hints only. The loader now
+    # verifies the canonical manifest/image payload against its one-time private
+    # trust-root capsule before constructing an executable handle.
+    match executable_manifest_signature_verify(
+        inputs.manifest, admission.image_hash, admission.trust_root_hash):
+        case Err(ExecutableManifestSignatureErrorV1.SerializationUnavailable):
+            return _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootsUnavailable):
+            return _loader_close_rejection(
+                table, binding,
+                ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootsInvalid):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootsAlreadyInitialized):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(ExecutableManifestSignatureErrorV1.SignerUnknown):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(ExecutableManifestSignatureErrorV1.TrustRootMismatch):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.TrustRootInvalid)
+        case Err(_):
+            return _loader_close_rejection(
+                table, binding, ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
+        case Ok(_): ()
     if (inputs.manifest.required_capabilities & admission.effective_capabilities) !=
         inputs.manifest.required_capabilities:
         return _loader_close_rejection(
@@ -208,13 +241,12 @@ pub fn executable_loader_admit_open_binding(
     if not table.execute_binding_is_current(binding):
         return _loader_close_rejection(
             table, binding, ExecutableLoaderAdmissionErrorV1.StaleBinding)
-    # Every boolean above is caller-constructible diagnostic input. It can
-    # reject a candidate but can never mint authority. Until the loader owns a
-    # cryptographic signature/trust-root verifier result bound to these exact
-    # hashes and generations, structurally valid candidates fail closed here.
+    # Cryptographic identity is now established above, but publication still
+    # fails closed until this entry point consumes the initialized authority
+    # owner and mints a package-private token for the exact open handle.
     _loader_close_rejection(
         table, binding,
-        ExecutableLoaderAdmissionErrorV1.CryptographicVerifierUnavailable)
+        ExecutableLoaderAdmissionErrorV1.AuthoritySerializationUnavailable)
 
 pub fn executable_loader_authority_owner_initialize(
     slot_limit: i64,

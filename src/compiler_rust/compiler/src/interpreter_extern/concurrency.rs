@@ -10,7 +10,7 @@ use crate::interpreter::interpreter_state::{get_concurrent_registry, set_concurr
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::collections::HashMap;
@@ -23,6 +23,7 @@ type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 type ChannelRegistry = Arc<Mutex<HashMap<i64, (Option<Sender<Value>>, Arc<Mutex<Receiver<Value>>>)>>>;
+type InterpreterMutex = Arc<(Mutex<bool>, Condvar)>;
 
 // Global storage for thread handles, channels, and results
 lazy_static::lazy_static! {
@@ -38,6 +39,9 @@ lazy_static::lazy_static! {
     static ref TLS_REGISTRY: Arc<Mutex<HashMap<i64, HashMap<String, Value>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     static ref NEXT_TLS_HANDLE: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
+    static ref SFFI_MUTEXES: Mutex<HashMap<i64, InterpreterMutex>> =
+        Mutex::new(HashMap::new());
+    static ref NEXT_SFFI_MUTEX_ID: Mutex<i64> = Mutex::new(1);
 }
 
 /// Clear all concurrency registries and reset ID counters.
@@ -48,6 +52,108 @@ pub fn clear_concurrency_registries() {
     CHANNELS.lock().unwrap().clear();
     *NEXT_HANDLE_ID.lock().unwrap() = 1;
     *NEXT_CHANNEL_ID.lock().unwrap() = 1;
+    SFFI_MUTEXES.lock().unwrap().clear();
+    *NEXT_SFFI_MUTEX_ID.lock().unwrap() = 1;
+}
+
+fn sffi_mutex_arg(args: &[Value], operation: &str) -> Result<i64, CompileError> {
+    match args {
+        [Value::Int(handle)] if *handle > 0 => Ok(*handle),
+        _ => Err(CompileError::Runtime(format!(
+            "{operation} expects one positive mutex handle"
+        ))),
+    }
+}
+
+fn sffi_mutex_lookup(handle: i64) -> Result<InterpreterMutex, CompileError> {
+    SFFI_MUTEXES
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex registry poisoned".to_string()))?
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| CompileError::Runtime("unknown SFFI mutex handle".to_string()))
+}
+
+/// Interpreter counterpart for the native runtime mutex ABI.
+pub fn spl_mutex_create(_args: &[Value]) -> Result<Value, CompileError> {
+    let mut next = NEXT_SFFI_MUTEX_ID
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex id registry poisoned".to_string()))?;
+    let handle = *next;
+    *next = next
+        .checked_add(1)
+        .ok_or_else(|| CompileError::Runtime("SFFI mutex handles exhausted".to_string()))?;
+    SFFI_MUTEXES
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex registry poisoned".to_string()))?
+        .insert(handle, Arc::new((Mutex::new(false), Condvar::new())));
+    Ok(Value::Int(handle))
+}
+
+pub fn spl_mutex_lock(args: &[Value]) -> Result<Value, CompileError> {
+    let mutex = sffi_mutex_lookup(sffi_mutex_arg(args, "spl_mutex_lock")?)?;
+    let (state, wake) = &*mutex;
+    let mut locked = state
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+    while *locked {
+        locked = wake
+            .wait(locked)
+            .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+    }
+    *locked = true;
+    Ok(Value::Bool(true))
+}
+
+pub fn spl_mutex_try_lock(args: &[Value]) -> Result<Value, CompileError> {
+    let mutex = sffi_mutex_lookup(sffi_mutex_arg(args, "spl_mutex_try_lock")?)?;
+    let (state, _) = &*mutex;
+    let mut locked = state
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+    if *locked {
+        return Ok(Value::Bool(false));
+    }
+    *locked = true;
+    Ok(Value::Bool(true))
+}
+
+pub fn spl_mutex_unlock(args: &[Value]) -> Result<Value, CompileError> {
+    let mutex = sffi_mutex_lookup(sffi_mutex_arg(args, "spl_mutex_unlock")?)?;
+    let (state, wake) = &*mutex;
+    let mut locked = state
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?;
+    if !*locked {
+        return Err(CompileError::Runtime(
+            "spl_mutex_unlock called for an unlocked mutex".to_string(),
+        ));
+    }
+    *locked = false;
+    wake.notify_one();
+    Ok(Value::Bool(true))
+}
+
+pub fn spl_mutex_destroy(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = sffi_mutex_arg(args, "spl_mutex_destroy")?;
+    let mutex = sffi_mutex_lookup(handle)?;
+    if *mutex
+        .0
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex poisoned".to_string()))?
+    {
+        return Err(CompileError::Runtime(
+            "cannot destroy a locked SFFI mutex".to_string(),
+        ));
+    }
+    let removed = SFFI_MUTEXES
+        .lock()
+        .map_err(|_| CompileError::Runtime("SFFI mutex registry poisoned".to_string()))?
+        .remove(&handle);
+    if removed.is_none() {
+        return Err(CompileError::Runtime("unknown SFFI mutex handle".to_string()));
+    }
+    Ok(Value::Nil)
 }
 
 // ============================================================================
@@ -975,5 +1081,30 @@ mod backend_aware_spawn_tests {
         }
 
         set_concurrent_registry(ConcurrentProviderRegistry::new(ConcurrentBackend::PureStd));
+    }
+
+    #[test]
+    fn sffi_mutex_handles_are_checked_and_stateful() {
+        clear_concurrency_registries();
+        let handle = match spl_mutex_create(&[]).expect("mutex create must succeed") {
+            Value::Int(handle) if handle > 0 => handle,
+            other => panic!("mutex create fabricated an invalid handle: {other:?}"),
+        };
+        assert_eq!(
+            spl_mutex_try_lock(&[Value::Int(handle)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            spl_mutex_try_lock(&[Value::Int(handle)]).unwrap(),
+            Value::Bool(false)
+        );
+        assert!(spl_mutex_destroy(&[Value::Int(handle)]).is_err());
+        assert_eq!(
+            spl_mutex_unlock(&[Value::Int(handle)]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(spl_mutex_destroy(&[Value::Int(handle)]).unwrap(), Value::Nil);
+        assert!(spl_mutex_lock(&[Value::Int(handle)]).is_err());
+        assert!(spl_mutex_lock(&[Value::Int(0)]).is_err());
     }
 }

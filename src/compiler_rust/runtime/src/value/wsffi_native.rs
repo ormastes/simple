@@ -8,6 +8,32 @@
 use super::core::RuntimeValue;
 use super::collections::{byte_array_bytes, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
 
+const WFFI_OK: i64 = 0;
+const WFFI_INVALID_ARGUMENT: i64 = 1;
+const WFFI_NULL_FUNCTION: i64 = 2;
+const WFFI_UNSUPPORTED_SIGNATURE: i64 = 3;
+const WFFI_INVALID_OUTPUT: i64 = 4;
+
+fn store_i64_output(out: RuntimeValue, value: i64) -> bool {
+    if rt_array_len(out) < 1 {
+        return false;
+    }
+    super::collections::rt_array_set(out, 0, RuntimeValue::from_int(value))
+}
+
+fn checked_i64_result(status: i64, value: i64) -> RuntimeValue {
+    let result = super::collections::rt_array_new(2);
+    if result.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    if !super::collections::rt_array_push(result, RuntimeValue::from_int(status))
+        || !super::collections::rt_array_push(result, RuntimeValue::from_int(value))
+    {
+        return RuntimeValue::NIL;
+    }
+    result
+}
+
 fn raw_text_cstring(ptr: *const u8, len: i64) -> Option<std::ffi::CString> {
     if ptr.is_null() || len <= 0 || len > 1024 * 1024 {
         return None;
@@ -185,14 +211,50 @@ pub extern "C" fn spl_dlclose(handle: i64) -> i64 {
 /// integer tag width.
 #[no_mangle]
 pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> i64 {
+    try_call_i64_value(fptr, args_rv, nargs).unwrap_or(0)
+}
+
+/// Checked integer WFFI transport.
+///
+/// Returns a bridge status and writes the foreign result to `out[0]` only on
+/// success. This keeps a legitimate foreign zero distinct from a bridge error.
+#[no_mangle]
+pub extern "C" fn spl_wffi_try_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64, out: RuntimeValue) -> i64 {
+    let result = match try_call_i64_value(fptr, args_rv, nargs) {
+        Ok(result) => result,
+        Err(status) => return status,
+    };
+    if store_i64_output(out, result) {
+        WFFI_OK
+    } else {
+        WFFI_INVALID_OUTPUT
+    }
+}
+
+#[inline]
+fn try_call_i64_value(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> Result<i64, i64> {
     if fptr == 0 {
-        return 0;
+        return Err(WFFI_NULL_FUNCTION);
+    }
+    let Ok(n) = usize::try_from(nargs) else {
+        return Err(WFFI_INVALID_ARGUMENT);
+    };
+    let Ok(available) = usize::try_from(rt_array_len(args_rv)) else {
+        return Err(WFFI_INVALID_ARGUMENT);
+    };
+    if n > 8 {
+        return Err(WFFI_UNSUPPORTED_SIGNATURE);
+    }
+    if n > available {
+        return Err(WFFI_INVALID_ARGUMENT);
     }
 
-    let n = nargs as usize;
     let mut raw_args: [i64; 8] = [0; 8];
-    for (i, slot) in raw_args.iter_mut().enumerate().take(n.min(8)) {
+    for (i, slot) in raw_args.iter_mut().enumerate().take(n) {
         let val = rt_array_get(args_rv, i as i64);
+        if !val.is_int() {
+            return Err(WFFI_INVALID_ARGUMENT);
+        }
         *slot = val.as_int();
     }
 
@@ -206,7 +268,7 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     type Fn7 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
     type Fn8 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64;
 
-    unsafe {
+    Ok(unsafe {
         match n {
             0 => std::mem::transmute::<usize, Fn0>(fptr as usize)(),
             1 => std::mem::transmute::<usize, Fn1>(fptr as usize)(raw_args[0]),
@@ -247,8 +309,18 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
                 raw_args[6],
                 raw_args[7],
             ),
-            _ => 0,
+            _ => unreachable!("argument count validated above"),
         }
+    })
+}
+
+/// Interpreter/native-equivalent checked transport returning `[status, value]`.
+/// The value slot is meaningful only when status is `WFFI_OK`.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i64_checked(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> RuntimeValue {
+    match try_call_i64_value(fptr, args_rv, nargs) {
+        Ok(value) => checked_i64_result(WFFI_OK, value),
+        Err(status) => checked_i64_result(status, 0),
     }
 }
 
@@ -299,26 +371,43 @@ pub extern "C" fn spl_wffi_call_i64_with_bytes(
     length: i64,
     suffix_args: RuntimeValue,
 ) -> i64 {
-    if fptr == 0 {
+    let checked = spl_wffi_call_i64_with_bytes_checked(fptr, prefix_args, bytes, offset, length, suffix_args);
+    if checked.is_nil() || rt_array_get(checked, 0).as_int() != WFFI_OK {
         return 0;
+    }
+    rt_array_get(checked, 1).as_int()
+}
+
+/// Checked byte-descriptor dispatch returning `[status, value]`.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i64_with_bytes_checked(
+    fptr: i64,
+    prefix_args: RuntimeValue,
+    bytes: RuntimeValue,
+    offset: i64,
+    length: i64,
+    suffix_args: RuntimeValue,
+) -> RuntimeValue {
+    if fptr == 0 {
+        return checked_i64_result(WFFI_NULL_FUNCTION, 0);
     }
     let Some(owner) = byte_array_bytes(bytes) else {
-        return 0;
+        return checked_i64_result(WFFI_INVALID_ARGUMENT, 0);
     };
     let (Ok(offset), Ok(length)) = (usize::try_from(offset), usize::try_from(length)) else {
-        return 0;
+        return checked_i64_result(WFFI_INVALID_ARGUMENT, 0);
     };
     let Some(end) = offset.checked_add(length) else {
-        return 0;
+        return checked_i64_result(WFFI_INVALID_ARGUMENT, 0);
     };
     if end > owner.len() {
-        return 0;
+        return checked_i64_result(WFFI_INVALID_ARGUMENT, 0);
     }
     let (Some(mut args), Some(suffix)) = (runtime_i64_values(prefix_args), runtime_i64_values(suffix_args)) else {
-        return 0;
+        return checked_i64_result(WFFI_INVALID_ARGUMENT, 0);
     };
     if args.len() + 2 + suffix.len() > 8 {
-        return 0;
+        return checked_i64_result(WFFI_UNSUPPORTED_SIGNATURE, 0);
     }
     let ptr = if length == 0 {
         0
@@ -328,7 +417,7 @@ pub extern "C" fn spl_wffi_call_i64_with_bytes(
     args.push(ptr);
     args.push(length as i64);
     args.extend_from_slice(&suffix);
-    unsafe { call_i64_raw(fptr, &args) }
+    checked_i64_result(WFFI_OK, unsafe { call_i64_raw(fptr, &args) })
 }
 
 #[no_mangle]
@@ -375,15 +464,48 @@ pub extern "C" fn spl_fonts_call_layout_text(fptr: i64, text: RuntimeValue, size
 /// spl_wffi_call_f64(fptr: i64, args: RuntimeValue_array, nargs: i64) -> f64
 #[no_mangle]
 pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> f64 {
+    try_call_f64_value(fptr, args_rv, nargs).unwrap_or(0.0)
+}
+
+/// Interpreter/native-equivalent checked float transport. The second element
+/// is the exact IEEE-754 bit pattern and is meaningful only for status zero.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_f64_checked(
+    fptr: i64,
+    args_rv: RuntimeValue,
+    nargs: i64,
+) -> RuntimeValue {
+    match try_call_f64_value(fptr, args_rv, nargs) {
+        Ok(value) => checked_i64_result(WFFI_OK, value.to_bits() as i64),
+        Err(status) => checked_i64_result(status, 0),
+    }
+}
+
+#[inline]
+fn try_call_f64_value(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> Result<f64, i64> {
     if fptr == 0 {
-        return 0.0;
+        return Err(WFFI_NULL_FUNCTION);
     }
 
-    let n = nargs as usize;
+    let Ok(n) = usize::try_from(nargs) else {
+        return Err(WFFI_INVALID_ARGUMENT);
+    };
+    let Ok(available) = usize::try_from(rt_array_len(args_rv)) else {
+        return Err(WFFI_INVALID_ARGUMENT);
+    };
+    if n > 8 {
+        return Err(WFFI_UNSUPPORTED_SIGNATURE);
+    }
+    if n > available {
+        return Err(WFFI_INVALID_ARGUMENT);
+    }
     let mut raw_args: [f64; 8] = [0.0; 8];
-    for (i, slot) in raw_args.iter_mut().enumerate().take(n.min(8)) {
+    for (i, slot) in raw_args.iter_mut().enumerate().take(n) {
         let val = rt_array_get(args_rv, i as i64);
-        *slot = runtime_value_to_f64(val);
+        let Some(value) = runtime_value_to_f64(val) else {
+            return Err(WFFI_INVALID_ARGUMENT);
+        };
+        *slot = value;
     }
 
     type Fn0 = unsafe extern "C" fn() -> f64;
@@ -396,7 +518,7 @@ pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     type Fn7 = unsafe extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64;
     type Fn8 = unsafe extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64;
 
-    unsafe {
+    Ok(unsafe {
         match n {
             0 => std::mem::transmute::<usize, Fn0>(fptr as usize)(),
             1 => std::mem::transmute::<usize, Fn1>(fptr as usize)(raw_args[0]),
@@ -437,19 +559,19 @@ pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64
                 raw_args[6],
                 raw_args[7],
             ),
-            _ => 0.0,
+            _ => unreachable!("argument count validated above"),
         }
-    }
+    })
 }
 
-fn runtime_value_to_f64(value: RuntimeValue) -> f64 {
+fn runtime_value_to_f64(value: RuntimeValue) -> Option<f64> {
     if value.is_float() {
-        return value.as_float();
+        return Some(value.as_float());
     }
     if value.0 & 0x7 == 0 {
-        return value.as_int() as f64;
+        return Some(value.as_int() as f64);
     }
-    0.0
+    None
 }
 
 /// spl_str_ptr(s: text) -> i64
@@ -491,6 +613,10 @@ mod tests {
         a + b
     }
 
+    unsafe extern "C" fn i64_zero() -> i64 {
+        0
+    }
+
     #[test]
     fn spl_wffi_call_i64_decodes_tagged_integer_arguments() {
         let args = rt_array_new(2);
@@ -502,14 +628,48 @@ mod tests {
         assert_eq!(result, 0x24c_746f);
     }
 
+    #[test]
+    fn checked_i64_transport_distinguishes_zero_from_bridge_failure() {
+        let args = rt_array_new(0);
+        let ok = spl_wffi_call_i64_checked(i64_zero as usize as i64, args, 0);
+        assert_eq!(rt_array_len(ok), 2);
+        assert_eq!(rt_array_get(ok, 0).as_int(), WFFI_OK);
+        assert_eq!(rt_array_get(ok, 1).as_int(), 0);
+
+        let rejected = spl_wffi_call_i64_checked(0, args, 0);
+        assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_NULL_FUNCTION);
+    }
+
+    #[test]
+    fn checked_i64_transport_rejects_count_beyond_array_without_calling() {
+        let args = rt_array_new(0);
+        let rejected = spl_wffi_call_i64_checked(i64_zero as usize as i64, args, 1);
+        assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_INVALID_ARGUMENT);
+    }
+
     unsafe extern "C" fn f64_no_args() -> f64 {
         6.25
+    }
+
+    unsafe extern "C" fn f64_zero() -> f64 {
+        0.0
     }
 
     #[test]
     fn spl_wffi_call_f64_invokes_no_arg_function_pointer() {
         let result = spl_wffi_call_f64(f64_no_args as usize as i64, RuntimeValue::NIL, 0);
         assert_eq!(result, 6.25);
+    }
+
+    #[test]
+    fn checked_f64_transport_distinguishes_zero_from_bridge_failure() {
+        let args = rt_array_new(0);
+        let ok = spl_wffi_call_f64_checked(f64_zero as usize as i64, args, 0);
+        assert_eq!(rt_array_get(ok, 0).as_int(), WFFI_OK);
+        assert_eq!(f64::from_bits(rt_array_get(ok, 1).as_int() as u64), 0.0);
+
+        let rejected = spl_wffi_call_f64_checked(0, args, 0);
+        assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_NULL_FUNCTION);
     }
 
     #[test]

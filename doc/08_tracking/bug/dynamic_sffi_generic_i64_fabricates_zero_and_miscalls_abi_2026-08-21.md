@@ -68,6 +68,19 @@ All exact/adjacent tests pass, cross-lane unknown/null errors agree, and
 sabotaging either fallible conversion or null-pointer guard makes the relevant
 test red.
 
+## 2026-08-21 checked-transport implementation update
+
+The native and interpreter lanes now expose `spl_wffi_call_i64_checked` as a
+portable `[transport_status, foreign_value]` result and the native lane also
+exposes status/out `spl_wffi_try_call_i64`. The byte-descriptor family has the
+same checked pair transport. Argument counts are validated against both the
+eight-argument ABI ceiling and the actual argument array before indexing.
+
+`std.sffi.dynamic.DynLib.call_checked` is the canonical `Result<i64, text>`
+lift. Legacy value-returning functions remain only for source compatibility and
+must be migrated by provider family; they are not evidence of robust/critical
+admission. Focused Rust tests prove that a legitimate foreign zero has status
+zero while a null pointer or short argument array has a nonzero status.
 
 ## Resolution evidence (2026-08-21)
 
@@ -100,7 +113,9 @@ regressions this record asked for: `generic_dispatch_rejects_values_without_type
 Seed rebuilt clean with these in place (`cargo build --release --bin simple`,
 rc=0, 2026-08-21 14:53).
 
-**Still open, deliberately:** `spl_wffi_call_i64` / `spl_wffi_call_f64` in
+**Still open, deliberately (see the checked-transport update above, which
+supersedes part of this):** the LEGACY value-returning `spl_wffi_call_i64` /
+`spl_wffi_call_f64` in
 `src/compiler_rust/runtime/src/value/wsffi_native.rs` still return zero for a
 null pointer / unsupported arity / invalid descriptor. As this record already
 states, that cannot be repaired by picking another sentinel and needs a

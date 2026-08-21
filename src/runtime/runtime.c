@@ -2237,7 +2237,7 @@ SplArray* rt_dir_list_array(const char* path) {
 
 /* spl_wffi_call_i64 is now provided by Rust (wffi_native.rs) which accepts
  * tagged RuntimeValues. This C version is kept for C-only tests. */
-int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
+int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, int64_t* out) {
     typedef int64_t (*fn0)(void);
     typedef int64_t (*fn1)(int64_t);
     typedef int64_t (*fn2)(int64_t, int64_t);
@@ -2247,19 +2247,27 @@ int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
     typedef int64_t (*fn6)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
     typedef int64_t (*fn7)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
     typedef int64_t (*fn8)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-    if (!fptr) return 0;
+    if (!out || !fptr || nargs < 0 || nargs > 8 || (nargs > 0 && !args)) return -1;
+    int64_t result;
     switch (nargs) {
-        case 0: return ((fn0)fptr)();
-        case 1: return ((fn1)fptr)(args[0]);
-        case 2: return ((fn2)fptr)(args[0], args[1]);
-        case 3: return ((fn3)fptr)(args[0], args[1], args[2]);
-        case 4: return ((fn4)fptr)(args[0], args[1], args[2], args[3]);
-        case 5: return ((fn5)fptr)(args[0], args[1], args[2], args[3], args[4]);
-        case 6: return ((fn6)fptr)(args[0], args[1], args[2], args[3], args[4], args[5]);
-        case 7: return ((fn7)fptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-        case 8: return ((fn8)fptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
-        default: return 0;
+        case 0: result = ((fn0)fptr)(); break;
+        case 1: result = ((fn1)fptr)(args[0]); break;
+        case 2: result = ((fn2)fptr)(args[0], args[1]); break;
+        case 3: result = ((fn3)fptr)(args[0], args[1], args[2]); break;
+        case 4: result = ((fn4)fptr)(args[0], args[1], args[2], args[3]); break;
+        case 5: result = ((fn5)fptr)(args[0], args[1], args[2], args[3], args[4]); break;
+        case 6: result = ((fn6)fptr)(args[0], args[1], args[2], args[3], args[4], args[5]); break;
+        case 7: result = ((fn7)fptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]); break;
+        case 8: result = ((fn8)fptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]); break;
+        default: return -1;
     }
+    *out = result;
+    return 0;
+}
+
+int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs) {
+    int64_t result = 0;
+    return spl_wffi_try_call_i64_c(fptr, args, nargs, &result) == 0 ? result : 0;
 }
 
 /* ================================================================

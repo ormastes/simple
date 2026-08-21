@@ -550,7 +550,10 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
         "spl_dlclose" => value::spl_dlclose as *const () as usize,
         "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
+        "spl_wffi_call_f64_checked" => value::spl_wffi_call_f64_checked as *const () as usize,
+        "spl_wffi_call_i64_checked" => value::spl_wffi_call_i64_checked as *const () as usize,
         "spl_wffi_call_i64_with_bytes" => value::spl_wffi_call_i64_with_bytes as *const () as usize,
+        "spl_wffi_call_i64_with_bytes_checked" => value::spl_wffi_call_i64_with_bytes_checked as *const () as usize,
         "spl_fonts_call_init_blob" => value::spl_fonts_call_init_blob as *const () as usize,
         "spl_fonts_call_init_path" => value::spl_fonts_call_init_path as *const () as usize,
         "spl_fonts_call_layout_text" => value::spl_fonts_call_layout_text as *const () as usize,
@@ -951,6 +954,9 @@ mod tests {
             "spl_fonts_call_init_path",
             "spl_fonts_call_layout_text",
             "spl_wffi_call_i64_with_bytes",
+            "spl_wffi_call_i64_with_bytes_checked",
+            "spl_wffi_call_i64_checked",
+            "spl_wffi_call_f64_checked",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }
