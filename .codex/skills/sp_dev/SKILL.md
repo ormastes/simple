@@ -230,6 +230,11 @@ use 3.3-V TTL at 115200 8N1 with no flow control, and never connect 5-V pins 1/5
 Tigard FTDI interface 00 is Port A/Serial; interface 01 is Port B/JTAG. CN22 is
 1.8-V CPLD/BIOS service, not an Apollo Lake CPU TAP. A zero-byte capture is
 BLOCKED pending power/reset/wiring proof, not a boot FAIL.
+For legacy-COM1 first light, initialize the UART before the first marker and
+consume any loopback-test byte before normal input. Writing `0xAE` while MCR
+loopback is enabled without reading DATA afterward contaminates the first
+command (`0xAEls /`). Require an emulator transcript proving the first clean
+command, while retaining physical CN16 as a separate evidence gate.
 
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo
