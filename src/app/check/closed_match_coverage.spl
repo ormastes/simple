@@ -10,7 +10,8 @@
 #   MATCH <enum> <fn> line=<n> exhaustive=<0|1> wildcard=<0|1> contracted=<0|1>
 #   DIAG <code> <enum> <detail>
 #   PARSE-FAIL <path>
-#   SUMMARY modules=<n> matches=<n> contracted=<n> non_exhaustive=<n> wildcard_closed_critical=<n>
+#   UNION <synthesized-enum-name>
+#   SUMMARY modules=<n> matches=<n> contracted=<n> non_exhaustive=<n> wildcard_closed_critical=<n> unions=<n>
 #
 # `non_exhaustive` counts contracted matches whose static coverage is
 # incomplete under critical (wildcard does not count); `wildcard_closed_critical`
@@ -30,6 +31,7 @@ use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.semantics.enum_contract.{
     EnumContractKind, EnumContract, enum_contract_table, enum_contract_check_module
 }
+use compiler.semantics.union_normalize.{union_normalize_module, union_synth_enum_names}
 use std.nogc_sync_mut.cli.{get_cli_args}
 
 var N_MODULES: i64 = 0
@@ -37,6 +39,7 @@ var N_MATCHES: i64 = 0
 var N_CONTRACTED: i64 = 0
 var N_NON_EXHAUSTIVE: i64 = 0
 var N_WILDCARD_CLOSED: i64 = 0
+var N_UNIONS: i64 = 0
 
 fn module_name_of(path: text) -> text:
     val parts: [text] = path.split("/")
@@ -54,7 +57,7 @@ fn contract_name(kind: EnumContractKind) -> text:
         case EnumContractKind.Closed: "closed"
         case EnumContractKind.Evolving(bits, unknown): "evolving"
 
-fn check_one(path: text) -> i64:
+fn closed_match_check_one(path: text) -> i64:
     val content = rt_file_read_text(path) ?? ""
     if content == "":
         print "PARSE-FAIL {path}"
@@ -63,7 +66,14 @@ fn check_one(path: text) -> i64:
     val pm = parse_full_frontend(content, path, mod_name, Logger(level: 0))
     val surfaces = ModuleSurfacesByName.empty()
     var lowering = hirlowering_for_module("", surfaces)
-    val hm: HirModule = lowering.lower_module(pm)
+    val hm0: HirModule = lowering.lower_module(pm)
+    # Lane S4: a structural union becomes a synthesized @closed enum BEFORE the
+    # contract table is built, so it is governed by the same machinery as a
+    # source-declared @closed enum -- no special case, and never Any.
+    val hm: HirModule = union_normalize_module(hm0)
+    for un in union_synth_enum_names(hm):
+        print "UNION {un}"
+        N_UNIONS = N_UNIONS + 1
     print "MODULE {mod_name} {path}"
     N_MODULES = N_MODULES + 1
 
@@ -105,10 +115,10 @@ fn main() -> i64:
                 for line in listing.split("\n"):
                     val entry = line.trim()
                     if entry != "":
-                        val _ = check_one(entry)
+                        val _ = closed_match_check_one(entry)
                 i = i + 1
         elif a.ends_with(".spl"):
-            val _ = check_one(a)
+            val _ = closed_match_check_one(a)
         i = i + 1
-    print "SUMMARY modules={N_MODULES} matches={N_MATCHES} contracted={N_CONTRACTED} non_exhaustive={N_NON_EXHAUSTIVE} wildcard_closed_critical={N_WILDCARD_CLOSED}"
+    print "SUMMARY modules={N_MODULES} matches={N_MATCHES} contracted={N_CONTRACTED} non_exhaustive={N_NON_EXHAUSTIVE} wildcard_closed_critical={N_WILDCARD_CLOSED} unions={N_UNIONS}"
     0

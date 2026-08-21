@@ -1,0 +1,138 @@
+"""
+# Union Normalization Unit Spec (Wave 2D lane S4)
+
+Proves a structural union type normalizes to a DETERMINISTIC canonical form
+and registers a synthesized `@closed` enum -- never `Any`.
+
+Plan: doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md
+Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+        §10.1, §10.3, §10.4, §8.4 (closed sum > Any).
+
+The determinism cases are the three ways two authors can spell the same union
+differently -- ORDER, DUPLICATES, NESTING -- plus `T?` as a member, which must
+mean `T | nil` and must NOT disturb a bare `T?` (that is Optional, not Union,
+so this pass never sees it and Option/Result lowering is untouched).
+"""
+# tag: unit
+
+use std.spec
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirEnum, HirVariantKind, hir_enum_has_attribute}
+use compiler.common.diagnostics.span.{Span}
+use std.fs.{read_file}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.semantics.enum_contract.{enum_contract_table}
+use compiler.semantics.union_normalize.{
+    union_normalize_module, union_synth_enum_names,
+    union_member_key, union_canonical_name, union_member_keys,
+    union_variant_name, union_normalize_members, synth_union_enum
+}
+
+fn sp() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "spec", length: 0)
+
+fn t(k: HirTypeKind) -> HirType:
+    HirType(kind: k, span: sp())
+
+fn ti64() -> HirType: t(HirTypeKind.Int(64, true))
+fn tf64() -> HirType: t(HirTypeKind.Float(64))
+fn tbool() -> HirType: t(HirTypeKind.Bool)
+fn ttext() -> HirType: t(HirTypeKind.Str)
+
+fn lower_union_fixture() -> HirModule:
+    val path = "test/fixtures/enum_contract/union_closed.spl"
+    val parsed = parse_full_frontend(read_file(path), path, "union_closed", Logger(level: 0))
+    var hl = HirLowering.with_filename(path)
+    hl.lower_module(parsed)
+
+describe "union canonical form":
+    it "names the plan's example union deterministically":
+        val name = union_canonical_name([ti64(), tf64(), tbool(), ttext()])
+        expect(name).to_equal("__Union_bool_f64_i64_text")
+
+    it "is order-insensitive":
+        val a = union_canonical_name([ti64(), ttext()])
+        val b = union_canonical_name([ttext(), ti64()])
+        expect(a).to_equal(b)
+        expect(a).to_equal("__Union_i64_text")
+
+    it "collapses duplicate members":
+        expect(union_canonical_name([ti64(), ti64(), ttext()])).to_equal("__Union_i64_text")
+        expect(union_normalize_members([ti64(), ti64(), ttext()]).len()).to_equal(2)
+
+    it "flattens a nested union":
+        val nested = t(HirTypeKind.Union([tf64(), ttext()]))
+        expect(union_canonical_name([ti64(), nested])).to_equal("__Union_f64_i64_text")
+
+    it "expands a `T?` member into T | nil":
+        val opt = t(HirTypeKind.Optional(ti64()))
+        expect(union_canonical_name([opt, ttext()])).to_equal("__Union_i64_nil_text")
+
+    it "keeps a bare Optional out of scope (Option lowering untouched)":
+        # Optional is not a Union: its member key is `opt_<inner>` and it is
+        # never rewritten by this pass.
+        expect(union_member_key(t(HirTypeKind.Optional(ti64())))).to_equal("opt_i64")
+
+    it "derives legal variant identifiers from member keys":
+        expect(union_variant_name("i64")).to_equal("I64")
+        expect(union_variant_name("text")).to_equal("Text")
+        expect(union_variant_name("nil")).to_equal("Nil")
+
+describe "synthesized closed enum":
+    it "carries @closed so the existing enum contract governs it":
+        val e = synth_union_enum([ti64(), ttext()], ti64())
+        expect(hir_enum_has_attribute(e, "closed")).to_equal(true)
+        expect(e.name).to_equal("__Union_i64_text")
+
+    it "has exactly one variant per member, in canonical order":
+        val e = synth_union_enum([ttext(), ti64(), ti64()], ti64())
+        expect(e.variants.len()).to_equal(2)
+        expect(e.variants[0].name).to_equal("I64")
+        expect(e.variants[1].name).to_equal("Text")
+
+    it "gives every variant a payload -- the narrowed member, never Any":
+        val e = synth_union_enum([ti64(), ttext()], ti64())
+        var payloads = 0
+        for v in e.variants:
+            match v.kind:
+                case HirVariantKind.Tuple(types):
+                    if types.len() == 1:
+                        payloads = payloads + 1
+                case _: pass
+        expect(payloads).to_equal(2)
+
+    it "is not a source enum: synthetic symbol ids sit above the reserved base":
+        val e = synth_union_enum([ti64(), ttext()], ti64())
+        expect(e.symbol.id > 900000000).to_equal(true)
+
+describe "end to end through the real pipeline":
+    # parse_full_frontend -> HirLowering.lower_module -> union_normalize_module.
+    # Before the flat-AST bridge learned the TYPE_UNION_BASE tag
+    # (10.frontend/_FlatAstBridge/convert_nodes.spl) a union in a signature
+    # became an opaque Named("<tag>") the HIR name resolver rejects -- i.e. it
+    # erased to Infer/Any, which §8.4 forbids. These cases fail if that
+    # regresses.
+    it "lowers a union in a signature to HirTypeKind.Union, not Any":
+        val hm = lower_union_fixture()
+        var unions = 0
+        for f in hm.functions.values():
+            for p in f.params:
+                match p.type_.kind:
+                    case HirTypeKind.Union(ms): unions = unions + 1
+                    case _: pass
+        expect(unions).to_equal(2)
+
+    it "registers ONE synthesized @closed enum for both spellings":
+        val hm = union_normalize_module(lower_union_fixture())
+        val names = union_synth_enum_names(hm)
+        expect(names.len()).to_equal(1)
+        expect(names[0]).to_equal("__Union_bool_f64_i64_text")
+
+    it "reaches the enum contract table as closed":
+        val hm = union_normalize_module(lower_union_fixture())
+        expect(enum_contract_table(hm).has("__Union_bool_f64_i64_text")).to_equal(true)
