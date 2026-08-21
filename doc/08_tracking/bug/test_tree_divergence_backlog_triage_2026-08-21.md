@@ -125,3 +125,60 @@ Proposed consolidation (reviewable, NOT done here):
 3. Once the baseline is empty, delete `test/unit/` and `test/integration/` in one reviewed
    commit and add an exclusion in the test runner so they cannot be re-created silently.
 Deleting a whole test tree is explicitly out of scope for an automated pass.
+
+## Second reconciliation pass — 2026-08-21 (working tree)
+
+Classification method unchanged (blob-history FF/REV/FORK), run over BOTH the
+806 baselined pairs and the 56 then-unbaselined ones.
+
+| measurement | before | after |
+|---|---|---|
+| diverged pairs (guard count) | 848 | **841** |
+| baselined | 806 | **798** |
+| NEW (unbaselined) divergence | 45 | **43** |
+| fixed-but-still-baselined (stale baseline) | 2 | **0** |
+| unallowlisted / stale mirror-only | 1 stale | **0** |
+
+Verdict now: `FAIL — 841 diverged vs 798 baselined (43 new, 0
+fixed-but-still-baselined); 1 mirror-only (0 unallowlisted, 0 stale-allowlist)`.
+Still FAIL, because the 43 genuine forks and the 798 baselined forks remain.
+
+### Applied (20 pairs + 2 `_test.spl` pairs, all provable fast-forwards)
+- **14 FF (canonical -> shadow)**, incl. the two `unit:fs_driver/*_test.spl`
+  pairs the previous pass's `*_spec.spl`-only enumeration had missed:
+  `integration:storage/dbfs/dbfs_hw_passthrough`,
+  `integration:storage/nvfs/nvfs_superblock_disk`,
+  `unit:app/cli/query_visibility_domain_blocks`,
+  `unit:compiler/dependency/visibility_integration`,
+  `unit:compiler/mir_opt/dead_code`,
+  `unit:compiler/mono/monomorphize_integration`,
+  `unit:lib/gc_async_mut/security/enforcement/security_enforcement_facade`,
+  `unit:lib/nogc_async_mut/engine/component/engine_component_facade`,
+  `unit:lib/nogc_async_mut/security/enforcement/security_enforcement_facade`,
+  `unit:os/apps/shell/shell_app`, `unit:os/apps/shell/shell_tools`,
+  `unit:os/services/vfs/dbfs_direct_io_blob_extent`,
+  `unit:fs_driver/capability_test`, `unit:fs_driver/mount_table_test`.
+- **7 REV (shadow -> canonical)** — the 6 the previous pass flagged as needing a
+  human decision, plus `integration:compiler/llvm_parity_spec.spl` and
+  `unit:compiler/mono/verify/post_mono_verify_spec.spl`. In each the CANONICAL
+  blob is a provable ancestor revision of the shadow, so the shadow is strictly
+  ahead and no assertion is lost. Decision taken here rather than deferred
+  again; the rule applied is mechanical (copy the provably newer leg over the
+  provably older one), never a merge.
+- **1 mirror-only mirrored**: `unit:runtime/time_epoch_convergence_spec.spl`
+  copied into `test/01_unit/`, and its now-stale line removed from
+  `scripts/check/test_tree_mirror_only_allowlist.txt`.
+
+### Baseline lines removed (8, each individually justified)
+The 6 REV pairs above that were baselined, plus two pairs that had become
+byte-identical and were therefore reported as stale baseline
+(`unit:lib/nogc_sync_mut/engine/render/gpu_lighting3d_spec.spl`,
+`unit:os/drivers/nvme/nvme_driver_probe_contract_spec.spl`).
+**The baseline was not regenerated**, and no test was deleted.
+
+### Finding: the baselined backlog contains no fast-forwards at all
+All 806 baselined pairs were classified. Result: **798 FORK, 6 REV, 2
+identical, 0 FF.** Step 2 of the consolidation proposal ("fast-forwards are
+mechanical") is therefore **complete and empty** — every remaining baselined
+pair is a genuine parallel-authoring fork needing per-file merge. No further
+mechanical pass can reduce this number.

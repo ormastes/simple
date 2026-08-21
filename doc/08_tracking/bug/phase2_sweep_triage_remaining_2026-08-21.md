@@ -77,3 +77,18 @@ Filed separately: `doc/08_tracking/bug/map_for_each_missing_on_dict_2026-08-21.m
 `rc` alone was never trusted; every verdict above is the spec run's own
 `Results:` / `SPEC FILE VERDICT` line. Re-runs were capped at 8 concurrent
 `bin/simple` processes.
+
+## Follow-up 2026-08-21 (test-infrastructure lane)
+
+Re-read against the tree; classifications above hold. Section 1
+(`normalize_type_segments`), section 2 (`rt_cpu_is_x86_64` unbacked extern),
+section 4 (intentional TDD RED) and the section-5 behavioural defects are all
+product-side and stay RED per `.claude/rules/testing.md` — none is a stale
+expectation or an env artefact, so none is fixable in the spec lane.
+
+The "load-induced flakes" table is corroborated and must not be treated as
+regressions.
+
+`digest_spec.spl` in section 5 is **superseded**: it is fixed and green
+(`14 total, 14 passed`) — see the RESOLVED section of
+`red_spec_triage_2026-08-21.md`.

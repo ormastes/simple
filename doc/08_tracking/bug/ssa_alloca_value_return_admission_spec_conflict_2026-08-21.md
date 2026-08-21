@@ -66,3 +66,26 @@ either (a) admit `Ret(Some(..))` into the alloca lane and update the two specs
 above with evidence that the staged-native payload read is safe, or (b) keep the
 rejection and retire the four reproducers with a written rationale. Do not do
 half of either.
+
+## Update 2026-08-21 (test-infrastructure lane) — no spec-side fix; decision still owed
+
+Re-examined for a spec-lane fix and there is none. Both sides of the conflict
+are legitimate artifacts under `.claude/rules/testing.md`:
+
+- The four reproducers assert behaviour the product does not have -> stay RED.
+- The two GREEN specs pin the current, deliberate rejection -> must not be
+  weakened.
+
+Weakening either side to make numbers move is exactly what the rules forbid, so
+nothing was changed. One observation worth recording for whoever takes the
+decision: `test/01_unit/compiler/driver/ssa_local_payload_source_spec.spl:33-39`
+pins the LITERAL SOURCE TEXT of `var_reassign_ssa.spl` (`fn
+ssa_term_has_value_return`, `case Ret(value): value != nil`, the diagnostic
+string). A source-text pin makes any refactor of that function a spec failure
+even when behaviour is preserved, which is a spec-design defect independent of
+the value-return decision. When option (a) is taken, replace that pin with a
+behavioural assertion through `ssa_alloca_transform_blocks` (the shape
+`test/unit/compiler/mir_opt/var_reassign_analysis_spec.spl:67` already uses)
+rather than editing the pinned strings.
+
+Owner of the unblock decision remains `src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl:1646`.

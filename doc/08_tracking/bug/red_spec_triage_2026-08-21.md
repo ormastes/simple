@@ -77,3 +77,22 @@ much larger call-site surface here.
 - "diag" and the second `inline_asm` spec were not disambiguated — there are 5
   `inline_asm*_spec.spl` files and ~20 `*diag*_spec.spl` files under
   `test/01_unit/`. Need the exact paths.
+
+## Follow-up 2026-08-21 (test-infrastructure lane)
+
+No new classification changes: every "Root-caused, NOT fixed" entry above was
+re-read and each remains correctly classified (real defect in seed/product, spec
+assertions correct, leave RED). Nothing in that list is a stale expectation or
+an env artefact, so there was no spec-side fix to make. The one item that WAS
+spec-side in this family lives in the sibling record and is now fixed:
+`lean_workflow_spec.spl` (`import io.fs as fs` -> real module), see
+`twelve_verification_assurance_specs_broken_not_flaky_2026-08-21.md`.
+
+Handoff for `src/compiler` owners, unchanged locations:
+- `src/compiler_rust/compiler/src/module_resolver/resolution.rs:288` —
+  `normalize_type_segments` is a private Rust `fn` with no Simple binding;
+  `test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl:1` (and
+  its `test/unit/` mirror line 9) cannot resolve it.
+- Raw-asm parsing: bare/unparenthesized `asm` bodies are evaluated as
+  expressions (`variable \`nop\` not found`), 4 failures in
+  `test/01_unit/compiler/native/inline_asm_spec.spl`.

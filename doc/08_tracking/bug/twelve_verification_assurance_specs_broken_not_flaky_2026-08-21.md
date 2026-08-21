@@ -107,3 +107,34 @@ on stdout, and piping through `tail` showed only stderr warnings and no
 
 - `doc/09_report/skipped_flaky_test_census_2026-08-21.md` §5
 - Daemon head-of-line blocking fix: `7a6f6459a81`
+
+## Update 2026-08-21 — item 2 fixed; it was NOT a broken import in the sense filed
+
+`verification/lean_workflow_spec.spl` went from **`executed=0`** to
+**`9 total, 3 passed, 6 failed`**. Root cause of the zero-signal state: the spec
+opened with `import io.fs as fs`, a module path that does not exist. Replaced
+with `use std.nogc_sync_mut.fs.{exists, read_text, dir_delete_all}` and the two
+call sites de-qualified (`fs.exist` -> `exists`, and note the product spelling is
+`exists`, not `exist`). Both `test/01_unit/` and `test/unit/` mirrors updated.
+
+A second, spec-side hygiene defect was fixed at the same time: the two temp-dir
+examples reused fixed paths (`/tmp/simple-lean-workflow-{unit,strict}`) that a
+previous run had already populated, so a re-run died with
+`error[GenLeanUnmarkedOverwrite]` and then `array index out of bounds: index is
+0 but length is 0`. Each now calls `dir_delete_all(temp_root)` first, which is
+what turned that example's verdict from a harness artefact into a real content
+assertion.
+
+**The 6 remaining failures are genuine product defects, now visible for the
+first time** (they were hidden behind `executed=0`). Handoff, with locations:
+
+| example | failure | owner |
+|---|---|---|
+| flags unproven goals and formats them | `method is_model_complete not found on type LeanCheckResult` | `src/.../verification/lean/runner` |
+| aggregates pass/fail and unproven counts | `method is_model_complete not found on type VerificationSummary` | same |
+| extracts obligations with stable identifiers | `Module "verification.models" does not export 'ContractExprKind'` | `verification/models` |
+| writes regenerated files to a temp directory | file written empty: `expected  to equal theorem demo : True := by rfl` — `regen.write_regenerated_files` | `verification/regenerate` |
+| hard-fails on files that still contain sorry | `unknown extern function: _rt_process_run` (unbacked extern, same class as `unregistered_extern_silent_nil_2026-08-01.md`) | runtime/seed |
+| flags missing validation targets as mismatches | `expected true to equal false` — `regen.validate_regeneration` | `verification/regenerate` |
+
+Items 1 and 3-12 are unchanged and still OPEN.

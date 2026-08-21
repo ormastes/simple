@@ -5,20 +5,20 @@
 
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry, SdoctestManifestEntry,
-    MANIFEST_VERSION, manifest_new, manifest_merge_roots
+    MANIFEST_VERSION, manifest_new, manifest_find_entry, manifest_merge_roots
 }
 use std.test_runner.doctest_runner.{extract_doctests}
 use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
 use std.io.{dir_walk_native}
 use std.io.{path_basename}
 use std.test_runner.test_level_detect.{test_level_of_path}
+use std.test_runner.mode_filter.{extract_directive_lines}
 
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 extern fn rt_file_stat(path: text) -> i64
 extern fn rt_file_size(path: text) -> i64
 use std.io_runtime.{time_now_unix_micros}
-use std.io_runtime.{env_get}
 
 # ============================================================================
 # Full Scan
@@ -29,12 +29,6 @@ fn manifest_full_scan(dirs: [text]) -> TestManifest:
     manifest.scan_timestamp = time_now_unix_micros()
     manifest.roots = manifest_merge_roots([], dirs)
 
-    # Local accumulators, fields assigned once — appending straight into a struct
-    # field array is a read-modify-write of the whole array on the interpreter
-    # path, i.e. quadratic in the number of test files. Same reason as
-    # manifest_incremental_update below.
-    var new_entries: [TestManifestEntry] = []
-    var new_sd: [SdoctestManifestEntry] = []
     for dir in dirs:
         val all_files = dir_walk_native(dir)
         for raw_f in all_files:
@@ -42,13 +36,11 @@ fn manifest_full_scan(dirs: [text]) -> TestManifest:
             val f = raw_f.replace("\\", "/")
             if is_spec_file(f):
                 val entry = scan_test_file(f)
-                new_entries.push(entry)
+                manifest.entries.push(entry)
             elif is_sdoctest_candidate(f):
                 val sd = scan_sdoctest_file(f)
                 if sd.block_count > 0:
-                    new_sd.push(sd)
-    manifest.entries = new_entries
-    manifest.sdoctest_entries = new_sd
+                    manifest.sdoctest_entries.push(sd)
 
     manifest
 
@@ -63,44 +55,16 @@ fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
     # outside `dirs` are carried over below.
     manifest.roots = manifest_merge_roots(old.roots, dirs)
 
-    # Path -> INDEX into old.entries, built once.
-    #
-    # This used to be a `{text: bool}` presence set that nothing ever read, while
-    # the walk below resolved each file with manifest_find_entry() /
-    # manifest_find_sdoctest_entry() — both full LINEAR scans of old.entries. That
-    # made the reindex O(walked_files x old_entries): ~4.2e8 text comparisons for
-    # the 20,552 spec files under test/, which is why `bin/simple test` sat at
-    # `[setup] discover: begin` for >1900s at 101% CPU and never printed the
-    # matching `discover: Nms` line (measured 2026-08-18, see
-    # doc/08_tracking/bug/test_discovery_hangs_on_large_targets_2026-08-18.md).
-    # Isolated probe of the lookup alone: 250 entries 23ms, 1000 526ms, 2000
-    # 1732ms, 4000 8935ms — quadratic — versus 5/34/95/233ms for this index.
-    #
-    # contains_key + bracket read only; Dict.len() stays unused
-    # (doc/07_guide/language/dict_native_pitfalls.md).
-    val _dbg = (env_get("SIMPLE_TEST_DISCOVERY_DEBUG") ?? "") == "1"
-    val _t_index_start = time_now_unix_micros()
-    var old_index: {text: i64} = {}
-    var oi = 0
+    # Build lookup set of old entries by path for quick access
+    var old_paths: {text: bool} = {}
     for entry in old.entries:
-        old_index[entry.path] = oi
-        oi = oi + 1
-    var old_sd_index: {text: i64} = {}
-    var osi = 0
+        old_paths[entry.path] = true
+    var old_sd_paths: {text: bool} = {}
     for sd in old.sdoctest_entries:
-        old_sd_index[sd.path] = osi
-        osi = osi + 1
-    if _dbg:
-        print "  [discover-debug] index built: {oi} entries, {osi} sdoctest, {(time_now_unix_micros() - _t_index_start) / 1000}ms"
+        old_sd_paths[sd.path] = true
 
     # Track which old paths we saw in the new walk (for deletion detection)
     var seen_paths: {text: bool} = {}
-
-    # Accumulate into LOCAL arrays; the struct fields are assigned once at the
-    # end. See the carry-over note below for why appending straight into
-    # `manifest.entries` is quadratic on the interpreter path.
-    var new_entries: [TestManifestEntry] = []
-    var new_sd: [SdoctestManifestEntry] = []
 
     for dir in dirs:
         val all_files = dir_walk_native(dir)
@@ -112,42 +76,32 @@ fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
                 val current_size = rt_file_size(f)
                 val current_mtime = rt_file_stat(f)
 
-                # Check if file exists in old manifest with same size+mtime.
-                # O(1) index lookup — see the note on old_index above.
-                var reused = false
-                if old_index.contains_key(f):
-                    val old_entry = old.entries[old_index[f]]
-                    if (old_entry.path != "" and
-                        old_entry.file_size == current_size and
-                        old_entry.file_mtime == current_mtime):
-                        # Unchanged — reuse old entry
-                        new_entries.push(old_entry)
-                        reused = true
-                if not reused:
+                # Check if file exists in old manifest with same size+mtime
+                val old_entry = manifest_find_entry(old, f)
+                if (old_entry.path != "" and
+                    old_entry.file_size == current_size and
+                    old_entry.file_mtime == current_mtime):
+                    # Unchanged — reuse old entry
+                    manifest.entries.push(old_entry)
+                else:
                     # New or changed — full rescan
                     val entry = scan_test_file(f)
-                    new_entries.push(entry)
+                    manifest.entries.push(entry)
 
             elif is_sdoctest_candidate(f):
                 seen_paths[f] = true
                 val current_size = rt_file_size(f)
                 val current_mtime = rt_file_stat(f)
 
-                var sd_reused = false
-                if old_sd_index.contains_key(f):
-                    val old_sd = old.sdoctest_entries[old_sd_index[f]]
-                    if (old_sd.path != "" and
-                        old_sd.file_size == current_size and
-                        old_sd.file_mtime == current_mtime):
-                        new_sd.push(old_sd)
-                        sd_reused = true
-                if not sd_reused:
+                val old_sd = manifest_find_sdoctest_entry(old, f)
+                if (old_sd.path != "" and
+                    old_sd.file_size == current_size and
+                    old_sd.file_mtime == current_mtime):
+                    manifest.sdoctest_entries.push(old_sd)
+                else:
                     val sd = scan_sdoctest_file(f)
                     if sd.block_count > 0:
-                        new_sd.push(sd)
-
-    if _dbg:
-        print "  [discover-debug] walk+reindex done: {new_entries.len()} entries, {(time_now_unix_micros() - manifest.scan_timestamp) / 1000}ms since scan start"
+                        manifest.sdoctest_entries.push(sd)
 
     # Deleted files are automatically excluded — they won't be in seen_paths.
     #
@@ -156,25 +110,12 @@ fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
     # subtree was tested last while leaving scan_timestamp fresh, so the next
     # run for any other path matched zero entries and reported
     # "No test files found" with exit 0 — a silent false green.
-    #
-    # Accumulate into LOCAL arrays and assign the struct fields once. Appending
-    # directly to `manifest.entries` inside this loop is a read-modify-write of
-    # the whole field array on the interpreter path (this module drops off the
-    # JIT — `unresolved external symbol 'char_code'`), which made the carry-over
-    # a second O(old_entries^2) term independent of the lookup fixed above:
-    # measured 2026-08-18, the same 20,552-element array is walked in 88ms when
-    # only read, but the carry-over loop ran for >15 minutes.
-    val _t_carry_start = time_now_unix_micros()
     for entry in old.entries:
         if not path_under_any(entry.path, dirs):
-            new_entries.push(entry)
+            manifest.entries.push(entry)
     for sd in old.sdoctest_entries:
         if not path_under_any(sd.path, dirs):
-            new_sd.push(sd)
-    manifest.entries = new_entries
-    manifest.sdoctest_entries = new_sd
-    if _dbg:
-        print "  [discover-debug] carry-over done: {new_entries.len()} entries, {(time_now_unix_micros() - _t_carry_start) / 1000}ms"
+            manifest.sdoctest_entries.push(sd)
 
     manifest
 
@@ -280,6 +221,34 @@ fn extract_tags(content: text) -> text:
                                 already = true
                         if not already:
                             tags.push(inner)
+    # Directive form: `# @tag: a, b` in a comment, or `@tag: a, b` inside a
+    # `"""` docstring. Values may be bracketed and/or quoted (`["a", 'b']`).
+    for trimmed in extract_directive_lines(content):
+        var rest = ""
+        if trimmed.starts_with("# @tag:"):
+            rest = trimmed[7:].trim()
+        elif trimmed.starts_with("@tag:"):
+            rest = trimmed[5:].trim()
+        else:
+            continue
+        for part in rest.split(","):
+            var inner = part.trim()
+            if inner.starts_with("["):
+                inner = inner[1:]
+            if inner.ends_with("]"):
+                inner = inner[0:inner.len() - 1]
+            inner = inner.trim()
+            if inner.len() >= 2:
+                val q = inner[0:1]
+                if q == "\"" or q == "'":
+                    inner = inner[1:inner.len() - 1]
+            if inner != "" and inner != "skip" and inner != "pending":
+                var seen = false
+                for t in tags:
+                    if t == inner:
+                        seen = true
+                if not seen:
+                    tags.push(inner)
     tags.join(",")
 
 fn extract_platform_tags(content: text) -> text:

@@ -19,6 +19,7 @@ use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOp
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
+use std.test_runner.mode_filter.{path_mode_matches}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -706,6 +707,13 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
     # Set runtime mode env var so skip_it/skip_on_interpreter can detect mode
     val mode_str = mode_to_str(options.mode)
     env_set("SIMPLE_RUNTIME_MODE", mode_str)
+
+    # File-level execution-mode filter: `# @mode: a, b` restricts a spec to the
+    # listed modes, `# @skip_mode: c` excludes it from those. A file the active
+    # mode is not valid for is SKIPPED for this mode, not run and failed.
+    if not path_mode_matches(file_path, mode_str):
+        val mode_skipped = count_skip_marker_cases(file_path)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: mode_skipped, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false)
     if options.assert_ran:
         env_set("SIMPLE_TEST_ASSERT_RAN", "1")
     else:
