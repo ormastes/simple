@@ -1,0 +1,67 @@
+# @cover src/compiler/10.frontend/desugar/suspension_analysis.spl
+# @cover src/compiler/10.frontend/desugar/spawn_analysis.spl
+#
+# Bug: doc/08_tracking/bug/async_desugar_binary_payload_order_swapped_2026-08-21.md
+#
+# `ExprKind.Binary` is declared `Binary(BinOp, Expr, Expr)` in
+# `src/compiler/10.frontend/parser_types_expr.spl:349` -- the OPERATOR is the
+# FIRST payload slot. Both async-desugar analyzers destructured it as if the
+# left operand came first:
+#
+#     case ExprKind.Binary(left, op, right):     # suspension_analysis
+#     case ExprKind.Binary(left, _, right):      # spawn_analysis
+#
+# so `left` was bound to the BinOp enum and `op` to the real left operand. The
+# very next line recursed with `self.visit_expr(left)`, handing a BinOp to a
+# function that immediately reads `expr.kind` -- which is a field on `Expr`,
+# not on `enum BinOp`. Any async function whose body contains a binary
+# expression therefore aborted the whole frontend with
+#
+#     error: semantic: undefined field: unknown property or method 'kind' on enum BinOp
+#
+# This is a FATAL, whole-build failure, not a warning: it killed a 192-module
+# self-hosted `native-build` of the lint entry closure at the end of step 1/6,
+# so no MIR/codegen/link phase could ever be reached. Located by enabling the
+# seed's `SIMPLE_DEBUG_FIELD_ACCESS=1` field-access trace, which printed
+# `recv_type=enum BinOp recv=BinOp::Lt ... -> desugar_async_function ->
+# analyze_suspensions -> visit_expr -> expr_kind`.
+#
+# spawn_analysis had the same swap; there it silently ANALYZED THE WRONG NODES
+# (the operator slot as the left operand, and the left operand as the right)
+# rather than crashing, so it dropped real callees/spawn sites.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+
+describe "async desugar binary-operand payload order":
+    it "parses an async fn whose body contains a binary comparison":
+        step("Verify: async fn with `a < b` survives suspension analysis")
+        # @req: REQ-COMPILER-FRONTEND-001
+        # Pre-fix this raised
+        # "undefined field: unknown property or method 'kind' on enum BinOp"
+        # from analyze_suspensions -> visit_expr -> expr_kind.
+        val src = "async fn cmp(a: i64, b: i64) -> bool:\n" +
+            "    a < b\n"
+        val parsed = parse_full_frontend(src, "testdata/abo1_cmp.spl", "abo1_cmp", Logger(level: 0))
+        expect(parsed.functions.contains("cmp")).to_equal(true)
+
+    it "parses an async fn whose body contains binary arithmetic around an await":
+        step("Verify: async fn with `x + 1` alongside await survives suspension analysis")
+        # @req: REQ-COMPILER-FRONTEND-001
+        val src = "async fn add_one(x: i64) -> i64:\n" +
+            "    val y = x + 1\n" +
+            "    y * 2\n"
+        val parsed = parse_full_frontend(src, "testdata/abo2_add.spl", "abo2_add", Logger(level: 0))
+        expect(parsed.functions.contains("add_one")).to_equal(true)
+
+    it "parses a non-async fn with a binary comparison (positive control)":
+        step("Verify: the sync path was never affected")
+        # @req: REQ-COMPILER-FRONTEND-001
+        # Control: the analyzers only run on async fns, so this passed
+        # both pre- and post-fix. It pins that the two cases above fail for
+        # the ASYNC path specifically, not because binary parsing is broken.
+        val src = "fn cmp_sync(a: i64, b: i64) -> bool:\n" +
+            "    a < b\n"
+        val parsed = parse_full_frontend(src, "testdata/abo3_sync.spl", "abo3_sync", Logger(level: 0))
+        expect(parsed.functions.contains("cmp_sync")).to_equal(true)
