@@ -54,7 +54,7 @@ fn _lint_profile_to_assurance_name(profile: Option<LintProfile>) -> text:
             return ""
     ""
 
-fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult]:
+fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintRunResult]:
     var results = linter.lint_source(path, content)
     if not path.ends_with(".spl"):
         return results
@@ -106,8 +106,8 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
                         parse_col = parsed_col
                     if reason != "":
                         parse_message = "{parse_message} ({reason})"
-        val lint = Lint.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, parse_message)
-        results.push(LintResult.new(path, parse_line, parse_col, lint))
+        val lint = LintDiag.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, parse_message)
+        results.push(LintRunResult.new(path, parse_line, parse_col, lint))
         return results
 
     val config = resolve_lint_config(linter.config, path, content)
@@ -119,15 +119,15 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
             continue
         val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
         val level = apply_config_level(config, warning.code, base_level)
-        val lint = Lint.new(warning.code, level, LintCategory.Style, warning.message)
+        val lint = LintDiag.new(warning.code, level, LintCategory.Style, warning.message)
             .with_fix(warning.hint)
-        results.push(LintResult.new(path, warning.line, 0, lint))
+        results.push(LintRunResult.new(path, warning.line, 0, lint))
     for warning in check_collection_patterns(decls):
         if not should_keep_lint_result(config, warning.code):
             continue
         val base_level = if warning.code == "COLL001" or warning.code == "COLL006": LintLevel.Deny else: LintLevel.Warn
         val level = apply_config_level(config, warning.code, base_level)
-        var lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+        var lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
         # Locate the offending line textually; the AST span pool is empty on
         # this path (verified: expr/stmt spans all read 0 and span_is_valid is
@@ -142,7 +142,7 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
                     lint = lint.with_easy_fix(fix)
                 case nil:
                     val _ = 0
-        results.push(LintResult.new(path, coll_line, 0, lint))
+        results.push(LintRunResult.new(path, coll_line, 0, lint))
     for warning in check_stub_impl(decls, stub_profile_name):
         # The line-scan text reimplementation in lint_checks.spl (`pass_todo`
         # substring scan) remains the ONE live STUB003 source for this CLI
@@ -160,9 +160,9 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
             continue
         val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
         val level = apply_config_level(config, warning.code, base_level)
-        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
-        results.push(LintResult.new(path, warning.line, 0, lint))
+        results.push(LintRunResult.new(path, warning.line, 0, lint))
     # REQC00x — WP-7: the AST-based `check_required_comment` (35.semantics)
     # is now the ONLY live REQC001-004 emitter. Its predicate walks the real
     # `pass_*`/`todo`/dangerous-keyword/wildcard-arm AST nodes rather than
@@ -178,24 +178,24 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
             if not should_keep_lint_result(config, warning.code):
                 continue
             val level = apply_config_level(config, warning.code, LintLevel.Warn)
-            val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+            val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
                 .with_fix(warning.hint)
-            results.push(LintResult.new(path, warning.line, 0, lint))
+            results.push(LintRunResult.new(path, warning.line, 0, lint))
     # W0406 already comes from the text EasyFix owner. Add only the parsed
     # export sibling here so wildcard imports are not reported twice.
     for warning in check_star_export_file(decls, path):
         if not should_keep_lint_result(config, warning.code):
             continue
         val level = apply_config_level(config, warning.code, LintLevel.Warn)
-        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
-        results.push(LintResult.new(path, lint_cli_find_decl_line(lines, "export ", warning.module_path), 0, lint))
+        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, warning.message)
+        results.push(LintRunResult.new(path, lint_cli_find_decl_line(lines, "export ", warning.module_path), 0, lint))
     for warning in check_wide_public_file(decls, path):
         if not should_keep_lint_result(config, warning.code):
             continue
         val level = apply_config_level(config, warning.code, LintLevel.Warn)
         val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
-        val lint = Lint.new(warning.code, level, LintCategory.Warning, message)
-        results.push(LintResult.new(path, warning.line, 0, lint))
+        val lint = LintDiag.new(warning.code, level, LintCategory.Warning, message)
+        results.push(LintRunResult.new(path, warning.line, 0, lint))
     # OPTME001 — a `me` (mutating) method called through a `T?` receiver
     # silently discards the write. Single-file index: this path only resolves
     # classes declared in the SAME file. The cross-file census (most real sites
@@ -208,8 +208,8 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
             continue
         val level = apply_config_level(config, warning.code, LintLevel.Warn)
         val message = "{warning.message} — {warning.hint}"
-        val lint = Lint.new(warning.code, level, LintCategory.Correctness, message)
-        results.push(LintResult.new(path, warning.line_num, 0, lint))
+        val lint = LintDiag.new(warning.code, level, LintCategory.Correctness, message)
+        results.push(LintRunResult.new(path, warning.line_num, 0, lint))
     results
 
 fn lint_cli_find_decl_line(lines: [text], prefix: text, module_path: text) -> i64:
@@ -533,7 +533,7 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
 
     return 0
 
-fn collect_easy_fixes(results: [LintResult], include_all: Bool) -> [EasyFix]:
+fn collect_easy_fixes(results: [LintRunResult], include_all: Bool) -> [EasyFix]:
     var fixes: [EasyFix] = []
     for result in results:
         match result.lint.easy_fix:
