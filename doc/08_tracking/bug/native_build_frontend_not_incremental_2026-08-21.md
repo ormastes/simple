@@ -244,6 +244,45 @@ and **silent** one. Therefore:
 > key and re-front-ends exactly the affected modules — which is also precisely
 > the acceptance criterion for the reproduce spec.
 
+## Progress (2026-08-21)
+
+Landed, in dependency order:
+- `58b6bc45e65` codec primitives + round-trip spec (12/12 green). Six element
+  types cover all 151 pools. Fails closed on truncated/negative/absurd length
+  headers. The spec caught a real defect on its first run (`to_i64()` parses,
+  it does not return a character code).
+- `6c29dccc915` `scripts/check/check-flat-ast-codec-complete.shs` — derives the
+  pool list from source on every run so a pool added tomorrow is covered the day
+  it lands. 5 fatal selftest fixtures; 0 pools is ERROR. It caught its own
+  author's stale exclusions immediately.
+- `98af874928a` dump/restore for all **151/151** pools. Guard green. A full
+  dump -> restore -> dump cycle returns `ok=true stable=true`; the fixture
+  native-build still exits 0.
+
+**Measured cost of the codec source itself: +18.1s (+19.6%)** on the 3-module
+fixture build (92.3s -> 110.3s, same tree, same binary, only the change
+toggled). ~500 added lines in four files the compiler re-parses on every process
+start. This is a transitional cost of source-read compiler layers, not of the
+design, and it is repaid many times over once the cache is wired — but until
+then it is a real regression for short one-off invocations and must not be
+cited as free.
+
+Still to do: the full-closure round-trip gate (parse a real module, dump, reset,
+restore, rebuild through the bridge, compare), the cache wiring at the `:379`
+hook, and parse sharding across `--threads` worker processes.
+
+## NEXT STEP (deferred, do not start before the prerequisite)
+
+Moving the object-cache lookup earlier — so an unchanged module skips
+parse/HIR/MIR entirely — is **deferred until transitive dep-hash keying
+exists**, per the correctness prerequisite above. `BuildCache.has_cached_object`
+today compares only the module's own content hash, so skipping the front end
+would silence type errors that a changed dependency interface currently still
+surfaces. The cheap sound version is to fold the transitive import closure's
+content hashes into each module's cache key using the fingerprints `BuildCache`
+already holds; that is also exactly what makes "edit one file -> re-front-end
+that module and its affected dependents" true rather than approximate.
+
 ## Status
 **Not fixed.** Instrumentation only (`146d987b1c0`). The front-end cache and the
 parse sharding are designed and sited above but not implemented: the codec must
