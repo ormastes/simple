@@ -17,12 +17,14 @@ I/O. Those decisions remain target-side and independently testable.
 3. **Load-plan owner:** the same pure capsule parses x86-64 ELF `PT_LOAD`
    metadata, enforces file/physical bounds and non-overlap, and requires the
    entry to lie in an executable segment inside one allowed UEFI RAM range.
-4. **UEFI adapter:** a future board capability supplies the current memory map,
+4. **UEFI adapter (not implemented):** a future board capability supplies the current memory map,
    reserves the mailbox/load ranges, performs copy/zero, exits boot services,
    parks APs, and invokes the existing Multiboot2 shim.
 5. **Storage-policy owner:** pure Simple admits one observed device and bounded
-   write request. A separate board storage capability performs write/flush/
-   readback; debugger MMIO is never a storage backend.
+   write request. The implemented UP2 NVMe adapter uses the common controller,
+   lease-backed block adapter, GPT, and FAT32 owners for write/flush/fresh-
+   adapter readback; debugger MMIO is never a storage backend. Physical-board
+   evidence remains separate from the passed QEMU scratch-device proof.
 6. **Evidence owner:** connection, load, boot, and storage receipts remain
    separate and cannot promote one another.
 7. **Free post-boot monitor:** `gdb_rsp_monitor.spl` owns packet, checksum,
@@ -65,3 +67,6 @@ boot, or storage writes. Hardware PASS requires the exact receipts in REQ-003,
 REQ-010, and REQ-011.
 OVMF may independently prove REQ-013 packet write/readback behavior; physical
 CN16 still requires a fresh board transcript.
+The mailbox parser/admission capsule alone does not satisfy REQ-006..008: those
+requirements remain open until an executable UEFI adapter publishes and
+consumes the mailbox and completes the handoff.

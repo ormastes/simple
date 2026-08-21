@@ -102,8 +102,12 @@ entry now explicitly initializes legacy COM1 I/O `0x3f8` before its first
 marker. The shared initializer drains the `0xAE` loopback-probe byte before
 normal input; otherwise the first command becomes `0xAEls /`. OVMF proves clean
 boot output and `ls /` after this fix, but physical CN16 remains unproven.
-Generic NVMe read/write/flush code exists,
-but the UP2 entry does not initialize it, so no physical storage claim follows.
+The UP2 entry now initializes the shared Pure-Simple NVMe driver read-only,
+prints exact Identify data, and exposes an identity-bound GPT/FAT32 provisioner.
+OVMF plus QEMU NVMe proved partitioning, format, flush, fresh-adapter readback,
+`ls /nvme`, and independent host `fdisk`/`mdir`/`mtype` interoperability. This
+does not prove the physical adapter/drive on original UP2; the board manual has
+no native M-key NVMe socket, so live PCI class `01:08` and Identify are required.
 
 The free post-boot memory gap is now implemented without expanding DCI claims.
 The linker reserves a 16 MiB writable `PT_LOAD` range at
@@ -114,3 +118,15 @@ breakpoint, continue, step, reset, and binary-write packets remain unsupported.
 The admitted Stage 3 compiler built the freestanding image, and OVMF wrote
 `SIMP`, read `53494d50`, detached, and returned to the shell. Physical CN16
 evidence remains missing because Tigard is disconnected.
+
+The selected resident-mailbox boot path remains incomplete. The repository has
+pure admission policy (`dci_mailbox.spl`) for descriptor replay protection,
+SHA-256, ELF segments, and storage bounds, but no UEFI image currently reserves
+and publishes that mailbox, double-snapshots the descriptor, copies/zeros the
+segments, exits boot services, parks APs, or transfers through the Multiboot2
+shim. OVMF proves the existing embedded GRUB/module boot and post-boot RSP
+staging range; neither is evidence of a DCI-authored preboot payload handoff.
+
+The current host inventory on 2026-08-22 again exposes only Smart KM Link
+`0ea0:2211`; Tigard `0403:6010`, `/dev/ttyUSB*`, Intel toolkit directories, and
+a retained DCI connection are absent.

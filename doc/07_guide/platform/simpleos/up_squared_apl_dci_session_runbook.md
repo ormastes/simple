@@ -68,6 +68,10 @@ Write payload bytes first, then a descriptor containing exact length and SHA-256
 last. Resume target code; it validates the descriptor, parses every `PT_LOAD`,
 zeros `p_memsz - p_filesz`, obtains the current memory map, exits boot services,
 constructs Multiboot state, and transfers through the existing 32-bit shim.
+This loader is **not implemented yet**. `dci_mailbox.spl` validates policy only;
+do not treat its tests or the post-boot RSP staging area as a boot loader. UEFI's
+Debug Support Table may help an external debugger find loaded images when
+firmware publishes it, but it does not supply the missing loader.
 
 Inspect the exact current ELF/receipt and obtain its segment manifest without
 touching hardware:
@@ -82,10 +86,17 @@ guess CR0/CR3/CR4/EFER, GDT, paging, stack, AP state, or firmware ownership.
 ## 5. Read/write storage
 
 DCI physical-memory DMA is only transport into RAM. A resident provisioner must
-use a real target-side eMMC/SATA/USB driver. Before write, display and confirm
+use a real target-side NVMe/eMMC/SATA/USB driver. Before write, display and confirm
 model, serial, transport, capacity, partition table, root/swap, mounts, holders,
 and byte bounds. Write, flush, re-enumerate, and hash exact readback. Never use
 debugger MMIO writes to operate a storage controller.
+
+The free SimpleOS NVMe path is executable. Run `nvme identify`, verify its PCI
+identity, model, serial, firmware, NSID, LBA size/count, and capacity, then enter
+only the exact printed `nvme format FORMAT:...` command. Successful output must
+report GPT/FAT32, flush, fresh-adapter readback, and `/nvme/proof.txt` from
+`ls /nvme`. The original board has no native M-key slot; an adapter is accepted
+only after live PCI class `01:08` and NVMe Identify, never by connector shape.
 
 Boot PASS still requires a fresh CN16 transcript through VFS-backed `ls /`.
 Storage PASS additionally requires the identity and readback receipt. A DCI
@@ -98,7 +109,10 @@ pin 10 goes to adapter RX; board pin 9 goes to adapter TX. Never attach CN16
 5-V pins 1/5, and never substitute the 1.8-V CN22 CPLD/BIOS header. Boot the
 admitted removable UEFI image with F7 and retain the entire UART transcript.
 
-The current SimpleOS tree does not yet contain a target GDB RSP stub or xHCI
-DbC transport. Host GDB, KGDB, CHIPSEC, and EDK II debug agents become useful
+The current tree contains a bounded memory-only GDB RSP monitor: enter `gdb`,
+then use checksummed `M`/`m` packets only within
+`0x0a000000..0x0b000000`; detach returns to the shell. Registers, breakpoints,
+continue, step, reset, and binary `X` remain unsupported. The tree still lacks
+an xHCI DbC transport. Host KGDB, CHIPSEC, and EDK II debug agents become useful
 only after corresponding target software starts. Record such evidence as
 software-debug, not DCI run-control or external-memory evidence.

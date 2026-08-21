@@ -17,7 +17,7 @@ scripts/check/check-up-squared-apl-dci.shs --inventory
 `blocked` is expected until a retained Intel-tool connection receipt exists.
 Never infer readiness from a connector or unknown USB VID/PID.
 
-## Current host checkpoint (2026-08-21)
+## Current host checkpoint (2026-08-22)
 
 The host is Ubuntu 24.04.4. No Intel System Debugger/System Bring-Up Toolkit
 installer, installation directory, or `/etc/udev/rules.d/99-dci.rules` is
@@ -76,18 +76,27 @@ publishes a staging mailbox, DCI writes the hash-bound image, and target code
 parses ELF, zeros BSS, exits firmware, parks cores, and constructs exact
 Multiboot state. Raw debugger-controlled register/CR/GDT/page-table setup is a
 last-resort design, not an operational command in this guide.
+That resident adapter is not implemented. The landed `dci_mailbox.spl` is an
+admission-policy capsule, while the RSP range is a post-boot data staging area.
+Neither can presently boot a DCI-uploaded ELF. UEFI's standardized Debug Support
+Table can aid loaded-image discovery but does not create this missing handoff.
 
 ## Read and write storage
 
 DCI may stage an image in RAM but does not write blocks. Use one of:
 
 - the existing identity-gated removable-media writer on the writer host; or
-- a trusted RAM/PXE Linux/provisioner on UP2 with a real device driver.
+- a trusted RAM/PXE Linux/provisioner on UP2 with a real device driver; or
+- the landed SimpleOS NVMe path: `nvme identify`, exact printed
+  `nvme format FORMAT:...`, then `ls /nvme` and verify `/nvme/proof.txt`.
 
 Before any write, bind model, serial, transport, capacity, partition layout,
 mount/holder state, and root/swap exclusion. Write only explicit bounds, flush,
 then hash the exact-length readback. Never program eMMC/SATA/USB controller MMIO
 through debugger memory writes. Never treat the M.2 E-key as generic NVMe.
+The original manual documents E-key, Mini Card, and SATA but no M-key socket;
+an attached adapter must first enumerate as PCI storage class `01:08` and pass
+NVMe Identify. The QEMU scratch proof is complete; physical UP2 is not.
 
 ## Open alternative
 

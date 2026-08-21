@@ -96,6 +96,13 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   `99-dci.rules`; Intel distributes the toolkit only after its CNDA/Registration
   Center request. Smart KM Link `0ea0:2211` enumerates as USB 2.0 HID/storage,
   not DCI. BIOS enablement is not inferred from cable presence.
+- **Capability evidence boundary (2026-08-22):** Intel's Target Connection
+  Agent matrix includes Apollo Lake, but that proves silicon/tool support rather
+  than UP2 port routing or BIOS consent. UEFI Debug Support and its discovery
+  table also do not implement a RAM mailbox or boot handoff. The current
+  `dci_mailbox.spl` is admission policy; direct DCI RAM boot remains incomplete
+  until a resident UEFI adapter reserves/publishes the mailbox, validates and
+  loads the ELF, exits boot services, and transfers control.
 - **Free UP2 debug boundary (2026-08-22):** no open tool found implements
   Apollo Lake's proprietary DCI ExI/JTAG/DMA plane. The practical free lane is
   removable UEFI boot plus CN16 UART, followed by a target-resident SimpleOS

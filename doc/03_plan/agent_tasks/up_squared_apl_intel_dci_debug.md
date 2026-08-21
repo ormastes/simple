@@ -1,5 +1,13 @@
 # Agent tasks: UP Squared Apollo Lake Intel DCI debug
 
+## Remaining implementation boundary (2026-08-22)
+
+- Implement the executable resident UEFI mailbox adapter; the landed
+  `dci_mailbox.spl` provides admission policy only.
+- Prove CN16 RSP and NVMe Identify/provision/readback on physical UP2 hardware.
+- Keep direct DCI RAM boot blocked until mailbox publication, replay-safe load,
+  final UEFI memory-map handoff, and entry transfer are executable and tested.
+
 ## Ownership
 
 - Shared interfaces: `DciMailboxDescriptor`, `DciMemoryRange`,
@@ -24,4 +32,3 @@
 
 No fail-fast placeholder is silently accepted. Hardware-only scenarios remain
 explicitly BLOCKED until their real oracle is available.
-

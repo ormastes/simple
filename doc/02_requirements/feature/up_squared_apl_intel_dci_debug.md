@@ -65,3 +65,15 @@ REQ-011. Those remain BLOCKED until the licensed Intel tool, qualified cable,
 and exact board connection exist.
 REQ-013 may pass under OVMF for protocol and RAM readback while physical CN16
 transport remains a separate hardware evidence gate.
+
+## Current implementation status (2026-08-22)
+
+- REQ-001..005: documented/admitted gates; physical DCI remains BLOCKED because
+  the licensed toolkit, cable, enabled board, and connection receipt are absent.
+- REQ-006..008: policy parser and ELF admission exist; the executable UEFI
+  mailbox publisher/consumer and boot transition do not exist yet.
+- REQ-009..010: the shared NVMe GPT/FAT32 provisioner passes on an isolated OVMF
+  scratch namespace; physical UP2 PCI/NVMe and persistence remain BLOCKED.
+- REQ-011: OVMF UART evidence passes; physical CN16 evidence is missing.
+- REQ-012: enforced by the current read-only boot and explicit challenges.
+- REQ-013: OVMF packet/write/readback passes; physical CN16 remains BLOCKED.

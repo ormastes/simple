@@ -53,6 +53,14 @@ mount, holder, non-persistent authorization, zero length, range overflow, or
 image-length mismatch. The adapter re-enumerates before write, writes exact
 bounds, flushes, re-enumerates again, and hashes exact readback.
 
+The landed UP2 NVMe provisioner is the first concrete hardware adapter. Boot
+performs PCI grant plus Identify only. `nvme format <exact live challenge>`
+creates mirrored GPT and a FAT32 partition lease, writes `PROOF.TXT`, flushes,
+constructs a fresh adapter, and verifies bytes before `ls /nvme` succeeds. It
+does not consume `DciStorageWrite` image-write admission because this operation
+formats a named filesystem rather than copying an external disk image; both
+paths preserve the same no-debugger-MMIO boundary.
+
 ## Error behavior
 
 All validation returns a stable reason. No validation function writes memory,
@@ -72,3 +80,12 @@ written byte back before replying `OK`.
 NACKs malformed/checksum-failed frames, handles Ctrl-C as an already-stopped
 monitor indication, and returns to the shell on detach. It performs no reset or
 execution transition.
+
+## Missing UEFI adapter
+
+No current executable consumes `DciMailboxDescriptor`. The required adapter
+must still reserve/publish storage through UEFI boot services, generate a
+per-boot nonce, snapshot the descriptor twice around SHA-256, apply the admitted
+ELF plan, obtain the final memory map, retry `ExitBootServices` only for a stale
+map key, park APs, and invoke the reviewed shim. Until that code and an OVMF
+producer/consumer test exist, the mailbox layer is policy evidence only.

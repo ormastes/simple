@@ -129,6 +129,39 @@ physically controlled lab target with no secrets, retain exact receipts, never
 unplug while halted, and disable debug consent after testing. Intel notes that
 disconnecting a halted target can lose context and crash it.
 
+## Primary-source capability audit (2026-08-22)
+
+Intel's public Target Connection Agent matrix explicitly lists Apollo Lake
+N4200, N3350, x7-E3950, and x5-39xx under **DCI USB 3.x Debug Class**. This is
+stronger than a generic processor-family inference, but it proves only that the
+silicon/tool combination is supported. It does not identify which original-UP2
+receptacle is routed for DCI, prove firmware consent, or prove that every DCI
+endpoint is exposed. Intel separately states that endpoint availability is
+product-dependent.
+
+Intel's current toolkit page still requires a signed corporate CNDA and an
+authenticated Registration Center download. An Intel support answer from 2025
+states that it is not available for private/individual use. Therefore there is
+no legitimate free installer to automate on this host; open tools can implement
+target-resident software debugging but cannot decode Intel's proprietary ExI
+run-control transport.
+
+UEFI 2.10 defines two useful but narrower mechanisms. The Debug Support and
+Debug Port protocols let a resident debug agent receive exception contexts and
+use a serial-like transport. The Debug Support Table gives an external hardware
+debugger a quiescent, memory-only route to the EFI system table and loaded-image
+database, beginning from a structure on a 4 MiB-aligned address. These improve
+symbol discovery after compliant firmware publishes them; they do not allocate
+a DCI mailbox, authenticate an ELF, or perform an OS handoff. A resident loader
+still must be built and executed explicitly.
+
+The original UP Squared manual identifies CN7 as M.2 E-key, CN8 as Mini Card,
+CN9/CN10 as SATA/data power, CN13 as USB3 OTG, CN14/CN15 as USB3, CN16 as the
+USB/UART panel, and CN22 as CPLD/BIOS update. It documents no native M-key NVMe
+socket. A physical NVMe connected through an adapter is accepted only if PCI
+enumeration reports class/subclass `01:08` and NVMe Identify succeeds; connector
+shape or an adapter label is not evidence.
+
 ## Primary sources
 
 - [Intel Debug Technology](https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/secure-coding/intel-debug-technology.html)
@@ -154,6 +187,9 @@ disconnecting a halted target can lose context and crash it.
 - [TRACE32 DCI.DbC backend license](https://www.lauterbach.com/products/LA-8971L)
 - [Linux xHCI DbC source](https://github.com/torvalds/linux/blob/master/drivers/usb/early/xhci-dbc.h)
 - [Intel Slim Bootloader ELF/Multiboot loader](https://github.com/slimbootloader/slimbootloader/blob/master/PayloadPkg/OsLoader/OsLoader.c)
+- [UEFI 2.10 debugger-support protocols and loaded-image table](https://uefi.org/specs/UEFI/2.10_A/18_Protocols_Debugger_Support.html)
+- [UEFI 2.10 boot services and memory-map transition](https://uefi.org/specs/UEFI/2.10_A/07_Services_Boot_Services.html)
+- [Intel support: toolkit unavailable for individual use](https://community.intel.com/t5/oneAPI-Registration-Download/How-to-get-download-Intel-System-Bring-up-Toolkit/td-p/1694982)
 - [Microsoft USB 3 debug-cable setup](https://github.com/MicrosoftDocs/windows-driver-docs/blob/staging/windows-driver-docs-pr/debugger/setting-up-a-usb-3-0-debug-cable-connection.md)
 - [UP community DCI discussion](https://forum.up-community.org/discussion/3701/dci-debug-for-upsquared) (community evidence)
 - [UP community firmware compatibility discussion](https://forum.up-community.org/discussion/4806/opensource-uefi-bios-by-intel-appears-to-be-unusable-now) (community evidence)

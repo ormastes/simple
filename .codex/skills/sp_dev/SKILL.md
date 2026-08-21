@@ -222,6 +222,14 @@ RAM allowlisting, and exact storage identity/challenge/bounds. Do not promote
 these host-independent checks to physical DCI, boot, or storage-readback PASS.
 Intel's System Bring-Up Toolkit is a CNDA/Registration Center download, not an
 APT package; missing authentic installer or `99-dci.rules` stays BLOCKED.
+Intel's Target Connection Agent matrix listing Apollo Lake establishes silicon
+and tool-family support only; it does not prove that a particular UP2 FAB routes
+the DCI port or that its BIOS enables and unlocks debug consent. Likewise, the
+UEFI Debug Support protocol and Debug Support Table aid a resident agent or an
+external debugger's memory discovery; they do not reserve a command mailbox,
+authenticate a payload, load ELF segments, exit boot services, or transfer
+control. Treat `dci_mailbox.spl` as admission policy, not a boot loader, until
+an executable UEFI adapter completes and proves that handoff.
 When Intel DCI is unavailable, do not claim that OpenOCD, CHIPSEC, KGDB, xHCI
 DbC, or host GDB replaces it. The free UP2 lane is removable UEFI boot plus a
 target-resident debugger over CN16 UART (and later xHCI DbC). Wire CN16 pin 8
