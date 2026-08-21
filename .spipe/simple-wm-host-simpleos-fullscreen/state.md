@@ -191,3 +191,12 @@ probe now links and returns exact framebuffer words. Direct ARM64 guest
 production proceeds further but stops because this Stage 2 binary predates the
 checked-in optional-float nil lowering fix. Do not change `parse_f64()` failure
 semantics: rebuild the compiler, then retry the canonical guest build.
+
+Three guarded compiler rebuild cycles were used. Cycle 1 exposed and fixed two
+unresolved source identifiers; cycle 2 reached link and fixed unresolved bare
+`assert` plus the missing `module_surface_promote` closure owner; cycle 3 built
+the compiler and reached admission, then the harness failed because
+`bootstrap_stage3_sanity_expect` did not exist. The harness now compares both
+candidate hashes directly. Per the hard cap, do not rerun bootstrap in this
+session; the next fresh session should issue a new bound receipt and resume the
+preserved cache, then continue ARM64 guest/QEMU screendump proof.

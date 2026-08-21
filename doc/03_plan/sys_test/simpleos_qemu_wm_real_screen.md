@@ -1239,3 +1239,9 @@ accepted full CLI before invoking the ARM64 attested producer.
   compiler with the existing `rt_is_none`/`rt_is_some` lowering before retrying.
 - Corrected stale compositor imports from removed `common.ui.theme_package` to
   the canonical `nogc_sync_mut.ui.theme_package` owner.
+- A guarded three-cycle bootstrap advanced through compiler code generation and
+  link. The final cycle produced the compiler and reached Stage 2 admission,
+  where an undefined shell helper (`bootstrap_stage3_sanity_expect`) stopped
+  immutable receipt publication. The verifier now performs direct before/after
+  candidate-hash comparisons. The iteration cap is exhausted for this session;
+  resume from the preserved native cache in a fresh session before guest build.
