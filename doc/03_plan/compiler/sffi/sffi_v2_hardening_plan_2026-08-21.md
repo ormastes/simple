@@ -329,6 +329,12 @@ tier as an input file. This is command-line setup work only; it does not enter
 compiled application or SFFI call paths. Production-launcher verification still
 requires redeploying the pure-Simple binary.
 
+The source-driven robust CLI gate now produces a terminal passing JSON verdict
+for the migrated HTTP-server and thread-pool modules. Its required-comment
+admission prefilter was repaired as a small allocation-free scan over the
+dangerous-keyword registry; this affects lint time only and avoids per-keyword
+temporary string construction.
+
 Thread-pool construction no longer treats a zero/invalid native worker handle
 as a successfully degraded pool. The unused duplicate thread-create extern was
 removed; the remaining spawn ABI is explicitly FFI-unsafe, called in a lexical
