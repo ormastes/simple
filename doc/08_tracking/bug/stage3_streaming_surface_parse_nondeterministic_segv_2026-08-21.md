@@ -2,10 +2,9 @@
 
 ## Status
 
-Additional concrete owner-lifecycle defect fixed locally; causal confirmation
-and bootstrap re-verification pending. A fresh admitted Stage-2 compiler still
-crashed while building Stage 3 before HIR lowering. No seed fallback is
-accepted.
+Resolved. The third receipt-bound run completed all 954 streaming surface
+parses and entered HIR lowering after the type-pool whole-owner fix. No seed
+fallback was accepted.
 
 ## Evidence
 
@@ -59,7 +58,6 @@ by `build/bootstrap/stage3/*/stage3-command.transcript`. Set
 
 ## Next investigation
 
-Run the third and final bounded verify/fix cycle: rebuild admitted Stage 2 and
-rerun receipt-bound Stage 3 once. Preserve the cache and verify that all Phase-2
-surface releases complete before evaluating HIR or Stage-4 convergence. Do not
-patch the file named by a final progress marker.
+The parser-lifetime issue needs no further bootstrap retry. Continue from the
+separate deterministic HIR import blocker recorded in
+`stage3_incremental_dir_import_resolution_2026-08-21.md`.
