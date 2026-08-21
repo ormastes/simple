@@ -236,7 +236,7 @@ The numeric block 015–022 is left reserved and untouched.
   manifest is written down rather than inferred precisely because "the script
   exists" is not evidence that it enforces anything.
 
-### Phase 9 — Release evidence and default escalation — `not started`
+### Phase 9 — Release evidence and default escalation — `partial` (receipt format + aggregate gate landed 2026-08-21; gate honestly RED)
 - Critical release requires all of: static coverage 100%, selected-complete coverage 100%, missing
   transitions 0, `Any` outside unsafe 0, `Any` escape 0, unresolved generic in MIR 0, silent fallback
   0, reachable unsupported 0, seed/self-host parity diff 0, interpreter/JIT/native diff 0, unverified
@@ -245,6 +245,48 @@ The numeric block 015–022 is left reserved and untouched.
   `PASS — <n> evidence receipt(s) checked, all fresh and bound to artifact+seal hash`.
 - Only then consider escalating compiler/loader defaults from robust-at-warning to robust-deny or
   critical for selected release lanes.
+- **Status 2026-08-21 (no default was escalated; nothing about severity changed):**
+  - `src/compiler/00.common/assurance/evidence_receipt.spl` — frozen `receipt/v1` shape
+    (`check_id`, `verdict_line`, `artifact_sha256`, `seal_hash`, `produced_at`,
+    `producer_identity`), canonical text + self-hash, `receipt_is_fresh(...)`, and the closed
+    `ReceiptReason` enum (Missing/Stale/ArtifactMismatch/SealMismatch/VerdictNotPass/Unparseable);
+    every match over it is exhaustive with no wildcard arm. Exported from the assurance package.
+  - `scripts/check/lib/emit_receipt.shs` — the WRITER. Sourced by nine existing gates, which now
+    mint `build/evidence/<check_id>.receipt` from their own verbatim verdict line plus the sha256
+    of `bin/simple` (resolved) and of `spec/compiler_schema/contract_lock.sdn`. Additive only: no
+    gate's verdict text or exit status changed, and a failure to write a receipt never fails a
+    gate — a missing receipt is caught downstream, where that failure belongs. Wired into
+    `check-{compiler-transition-coverage, critical-wildcard-ban, any-escape-census,
+    post-mono-invariants, closed-match-coverage, completeness-seal, aspect-seal,
+    compiler-schema-fresh, generated-visitors-fresh}`. The two `*-fresh` gates emit only for a
+    scan of the real repo root — their selftests drive the same function against fixture repos,
+    and a receipt about a temp dir is worse than no receipt.
+  - `src/app/check/critical_release_seal_census.spl` + `scripts/check/check-critical-release-seal.shs`
+    (fatal `--selftest`, 7 fixtures, one per `ReceiptReason` plus the happy path; ERROR on a
+    0-obligation list) with the obligation list at
+    `scripts/check/critical_release_required_receipts.txt`. The gate reads receipt FILES only: it
+    never runs a gate (a producer cannot audit itself) and never reads a report (§23.9).
+  - Specs: `test/01_unit/compiler/common/assurance/evidence_receipt_spec.spl` (12/12 green,
+    mirrored to `test/unit/`), `test/01_unit/scripts/critical_release_seal_gate_test.shs`
+    (`PASS — 5 case(s) checked`).
+  - **Evidence, measured 2026-08-21 — the gate is honestly RED, and the FAIL list IS the Phase 9
+    backlog:** `FAIL — 12 evidence receipt(s) checked, 6 not fresh:
+    check-critical-wildcard-ban(verdict-not-pass) check-any-escape-census(missing)
+    check-generated-visitors-fresh(missing) check-native-seed-parity(missing)
+    check-engine-differential(missing) check-reachable-unsupported(missing)`. Six obligations are
+    fresh and bound: transition-coverage (752 transitions, 0 missing), post-mono-invariants,
+    closed-match-coverage, completeness-seal, aspect-seal, compiler-schema-fresh.
+  - Remaining Phase 9 work, in ascending order of cost. (a) Wire two EXISTING but unwired
+    producers — `check-native-seed-parity.shs` (seed/self-host parity) and
+    `check-engine-differential.shs` (interpreter/JIT/native diff); both are owned by other lanes
+    and under active edit, so the one additive `emit_receipt` line belongs to those owners.
+    (b) Write `check-reachable-unsupported` — no producer for it exists anywhere in
+    `scripts/check/`. (c) Turn `check-critical-wildcard-ban` (`FAIL — 1796 file(s) checked,
+    forbidden=744 (baseline 745), 1 newly introduced bucket(s)`) and
+    `check-generated-visitors-fresh` (its own selftest is red: `fresh fixture did not PASS`)
+    green — both are red from other lanes, not from this one. (d) `check-any-escape-census` is
+    wired but slow (>10 min over its default scope) and had not produced a receipt when this
+    was measured.
 
 ---
 
@@ -266,7 +308,7 @@ SDN block (`id/allow/deny/inputs/outputs/red_tests/exit_gate`) and CI rejects ou
 | **2E** complete/dyn + aspects | D1 extension grammar, D2 manifest generator, D3 sealer, D4 loader admission, D5 atomic registry, D6 facet grammar/HIR, D7 witness/sidecar, D8 pointcut/weave plan, D9 typed weaver, D10 aspect-pack integration, D11 critical aspect policy, D12 aspect evidence. | `partial` — D2/D3/D4/D5 landed 2026-08-21 (`99.loader/completeness_seal/**`, `check-completeness-seal.shs`); catalog/container/routed-load slice exists (`doc/09_report/aspect_pack_design_coverage_2026-08-18.md`) |
 | **3** migration | P1..P12 package shards, one agent per package: census → convert → pin → engine+negative tests → no shared-root edits. | `partial` — the pin MECHANISM landed 2026-08-21 (model + census + exit gate, see Lane status); no package is pinnable critical yet |
 | **4** parallel validation | V1 structural mutation, V2 Any red-team, V3 mono red-team, V4 dynamic red-team, V5 aspect red-team, V6 engine differential, V7 bootstrap parity, V8 fuzz/property, V9 perf/memory, V10 evidence forgery, V11 formal, V12 parallel ownership. | `not started` |
-| **5** serial integration + release gate | I0 owns root exports, shared parser dispatch, driver ordering, profile severity table, registry inclusion, release aggregate, default escalation. R1 independently verifies: generated files reproducible, no out-of-scope edits, no bypass env flag honoured in critical, no checker ran advisory under critical, every receipt fresh and bound to artifact+seal hash. | `not started` |
+| **5** serial integration + release gate | I0 owns root exports, shared parser dispatch, driver ordering, profile severity table, registry inclusion, release aggregate, default escalation. R1 independently verifies: generated files reproducible, no out-of-scope edits, no bypass env flag honoured in critical, no checker ran advisory under critical, every receipt fresh and bound to artifact+seal hash. | `partial` — the R1 receipt-freshness half is now executable (`check-critical-release-seal.shs`, evidence receipts minted by 9 gates); honestly RED with 6 of 12 obligations unmet. No default was escalated. |
 
 Dependency graph (§21): `Wave 0 → {A1→C*, A2, A4→D2..D5→D6..D12, A5→Y1/Y2→Y3→Y4..Y7, mono
 contract→M1→M2/M3→M4/M5/M6→M7/M9, enum contract→S1→S2..S5→S6}` → package migration → red-team /

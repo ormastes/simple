@@ -1,0 +1,124 @@
+# critical_release_seal_census -- driver for
+# scripts/check/check-critical-release-seal.shs (hardening plan Phase 9).
+#
+# Reads the evidence receipts minted by the individual hardening gates (via
+# scripts/check/lib/emit_receipt.shs) and decides, per required check id,
+# whether a FRESH receipt exists that is bound to the artifact hash and the
+# seal hash of the release under consideration.
+#
+# It reads receipt FILES only. It never runs a gate, never infers a verdict
+# from an exit code, and never reads a report: a release obligation with no
+# receipt is `missing`, which is the honest answer and the one that makes the
+# backlog visible (§23.9 -- reports are not evidence).
+#
+# Output lines (the script reads only these):
+#   RECEIPT <check_id> status=<ok|missing|stale|artifact-mismatch|seal-mismatch|verdict-not-pass|unparseable> verdict=<line>
+#   SUMMARY required=<n> ok=<n> missing=<n> stale=<n> artifact_mismatch=<n> seal_mismatch=<n> verdict_not_pass=<n> unparseable=<n>
+#
+# Accumulators are module-level for the same reason closed_match_coverage.spl's
+# are: a returned aggregate is mis-typed by the seed at the call site
+# (doc/08_tracking/bug/seed_helper_return_type_mistyped_as_tuple_2026-08-21.md).
+
+use compiler.common.assurance.evidence_receipt.{
+    EvidenceReceipt, ReceiptReason, receipt_reason_name,
+    parse_evidence_receipt, receipt_failure_reason_at, evidence_receipt_file_name
+}
+use std.nogc_sync_mut.cli.{get_cli_args}
+
+var N_REQUIRED: i64 = 0
+var N_OK: i64 = 0
+var N_MISSING: i64 = 0
+var N_STALE: i64 = 0
+var N_ARTIFACT: i64 = 0
+var N_SEAL: i64 = 0
+var N_VERDICT: i64 = 0
+var N_UNPARSEABLE: i64 = 0
+
+var EVIDENCE_DIR: text = "build/evidence"
+var ARTIFACT_SHA: text = ""
+var SEAL_SHA: text = ""
+var MAX_AGE: i64 = 0
+var NOW: i64 = 0
+
+fn bump(reason_name: text) -> i64:
+    if reason_name == "stale":
+        N_STALE = N_STALE + 1
+    elif reason_name == "artifact-mismatch":
+        N_ARTIFACT = N_ARTIFACT + 1
+    elif reason_name == "seal-mismatch":
+        N_SEAL = N_SEAL + 1
+    elif reason_name == "verdict-not-pass":
+        N_VERDICT = N_VERDICT + 1
+    elif reason_name == "unparseable":
+        N_UNPARSEABLE = N_UNPARSEABLE + 1
+    elif reason_name == "missing":
+        N_MISSING = N_MISSING + 1
+    0
+
+fn check_one(check_id: text) -> i64:
+    N_REQUIRED = N_REQUIRED + 1
+    val path = EVIDENCE_DIR + "/" + evidence_receipt_file_name(check_id)
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        print "RECEIPT {check_id} status=missing verdict="
+        val _ = bump("missing")
+        return 0
+    val parsed = parse_evidence_receipt(content)
+    if parsed == nil:
+        print "RECEIPT {check_id} status=unparseable verdict="
+        val _ = bump("unparseable")
+        return 0
+    val r: EvidenceReceipt = parsed!
+    if r.check_id != check_id:
+        # A receipt filed under one id but minted for another is not evidence
+        # about this obligation at all. Report it as unparseable rather than
+        # honouring the file name -- the file name is not signed, the body is.
+        print "RECEIPT {check_id} status=unparseable verdict={r.verdict_line}"
+        val _ = bump("unparseable")
+        return 0
+    val reason = receipt_failure_reason_at(r, ARTIFACT_SHA, SEAL_SHA, MAX_AGE, NOW)
+    if reason == nil:
+        print "RECEIPT {check_id} status=ok verdict={r.verdict_line}"
+        N_OK = N_OK + 1
+        return 0
+    val name = receipt_reason_name(reason!)
+    print "RECEIPT {check_id} status={name} verdict={r.verdict_line}"
+    val _ = bump(name)
+    0
+
+fn main() -> i64:
+    val args = get_cli_args()
+    var ids: [text] = []
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--dir" and i + 1 < args.len():
+            EVIDENCE_DIR = args[i + 1]
+            i = i + 1
+        elif a == "--artifact" and i + 1 < args.len():
+            ARTIFACT_SHA = args[i + 1]
+            i = i + 1
+        elif a == "--seal" and i + 1 < args.len():
+            SEAL_SHA = args[i + 1]
+            i = i + 1
+        elif a == "--max-age" and i + 1 < args.len():
+            MAX_AGE = args[i + 1].to_i64()
+            i = i + 1
+        elif a == "--now" and i + 1 < args.len():
+            NOW = args[i + 1].to_i64()
+            i = i + 1
+        elif a == "--require" and i + 1 < args.len():
+            ids.push(args[i + 1])
+            i = i + 1
+        elif a == "--require-list" and i + 1 < args.len():
+            val listing = rt_file_read_text(args[i + 1]) ?? ""
+            for line in listing.split("\n"):
+                val entry = line.trim()
+                if entry != "" and not entry.starts_with("#"):
+                    ids.push(entry)
+            i = i + 1
+        i = i + 1
+    for id in ids:
+        val _ = check_one(id)
+    print "SUMMARY required={N_REQUIRED} ok={N_OK} missing={N_MISSING} stale={N_STALE} artifact_mismatch={N_ARTIFACT} seal_mismatch={N_SEAL} verdict_not_pass={N_VERDICT} unparseable={N_UNPARSEABLE}"
+    0

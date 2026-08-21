@@ -1,0 +1,175 @@
+# @cover src/compiler/00.common/assurance/evidence_receipt.spl 90%
+"""
+# Evidence receipts
+
+**Category:** Compiler
+**Status:** In Progress
+**Research:** doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md §15, §19, §22, §23.9
+**Plan:** doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md §Phase 9
+
+## Purpose and Audience
+
+`src/compiler/00.common/assurance/evidence_receipt.spl` is the frozen shape of a
+Phase 9 evidence receipt: a gate's verbatim verdict line bound to the sha256 of
+the artifact it examined and the sha256 of the seal it was examined against,
+with the time it was produced. §23.9 says a report is not evidence; this is what
+replaces the report.
+
+## Scope and Preconditions
+
+Pure serialization + classification. The only import is `sha256_text`; nothing
+here reads a file, runs a gate or reads a clock.
+
+## Primary Workflow
+
+A gate renders a receipt (`evidence_receipt_render`) after printing its verdict.
+The release census parses it back (`parse_evidence_receipt`) and asks
+`receipt_is_fresh` whether it is bound to the artifact and seal currently being
+released, within the allowed age, with a PASS verdict.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| binding | A receipt is evidence only about the (artifact, seal) pair it names |
+| freshness | binding + age + PASS verdict, all three |
+| `ReceiptReason` | Closed failure vocabulary; every match over it is exhaustive |
+
+## Related Specifications
+
+- test/01_unit/compiler/common/assurance/unsafe_capabilities_spec.spl
+
+## Evidence and Provenance
+
+The canonical text form is mirrored byte-for-byte by the shell writer
+`scripts/check/lib/emit_receipt.shs`; a drift shows up as an `unparseable`
+receipt in `check-critical-release-seal.shs`, never as a silent pass.
+
+## Recovery and Troubleshooting
+
+A receipt that does not satisfy an obligation is classified into exactly one
+`ReceiptReason`; re-running the producing gate is the fix for every one of them.
+
+## Compatibility and Limitations
+
+`receipt_is_fresh` reads the module clock (`evidence_receipt_set_now`) because
+00.common may not import a time module; callers that care about age set it.
+"""
+
+use std.spec.*
+use compiler.common.assurance.evidence_receipt.{
+    EvidenceReceipt, ReceiptReason, receipt_reason_name, all_receipt_reasons,
+    evidence_receipt_canonical_text, evidence_receipt_hash, evidence_receipt_render,
+    parse_evidence_receipt, receipt_verdict_is_pass, receipt_failure_reason_at,
+    receipt_is_fresh, receipt_is_fresh_at, evidence_receipt_set_now,
+    evidence_receipt_file_name
+}
+
+fn sample_receipt() -> EvidenceReceipt:
+    EvidenceReceipt(
+        check_id: "check-example",
+        verdict_line: "PASS — 12 thing(s) checked, bad=0",
+        artifact_sha256: "aaaa",
+        seal_hash: "bbbb",
+        produced_at: 1000,
+        producer_identity: "check-example.shs@host")
+
+describe "Evidence receipts":
+
+    it "round-trips through its canonical text form":
+        step("render a receipt and parse it back")
+        val r = sample_receipt()
+        val parsed = parse_evidence_receipt(evidence_receipt_render(r))
+        expect(parsed != nil).to_be_true()
+        step("every field survives, including a verdict line containing '='")
+        val back: EvidenceReceipt = parsed!
+        expect(back.check_id).to_equal("check-example")
+        expect(back.artifact_sha256).to_equal("aaaa")
+        expect(back.seal_hash).to_equal("bbbb")
+        expect(back.produced_at).to_equal(1000)
+        expect(back.verdict_line).to_equal("PASS — 12 thing(s) checked, bad=0")
+
+    it "hashes identically for identical content and differently for any change":
+        step("two receipts with the same fields hash the same")
+        expect(evidence_receipt_hash(sample_receipt())).to_equal(evidence_receipt_hash(sample_receipt()))
+        step("changing the artifact hash changes the receipt hash")
+        var other = sample_receipt()
+        other.artifact_sha256 = "cccc"
+        expect(evidence_receipt_hash(other) == evidence_receipt_hash(sample_receipt())).to_be_false()
+
+    it "accepts a receipt that is bound, timely and PASSing":
+        step("current artifact and seal, produced one minute ago")
+        expect(receipt_is_fresh_at(sample_receipt(), "aaaa", "bbbb", 3600, 1060)).to_be_true()
+
+    # The four binding/age failures. Each must classify to its OWN reason —
+    # collapsing them would make the release backlog unactionable.
+    it "classifies a receipt for a different artifact as ArtifactMismatch":
+        step("release a different artifact than the receipt names")
+        val why = receipt_failure_reason_at(sample_receipt(), "zzzz", "bbbb", 3600, 1060)
+        expect(why != nil).to_be_true()
+        expect(receipt_reason_name(why!)).to_equal("artifact-mismatch")
+
+    it "classifies a receipt for a different seal as SealMismatch":
+        step("same artifact, different seal")
+        val why = receipt_failure_reason_at(sample_receipt(), "aaaa", "zzzz", 3600, 1060)
+        expect(receipt_reason_name(why!)).to_equal("seal-mismatch")
+
+    it "classifies an old receipt as Stale":
+        step("produced far outside the allowed age")
+        val why = receipt_failure_reason_at(sample_receipt(), "aaaa", "bbbb", 60, 999999)
+        expect(receipt_reason_name(why!)).to_equal("stale")
+
+    # A receipt from the future is a clock error or a forged timestamp; either
+    # way it must not license a release.
+    it "classifies a receipt from the future as Stale":
+        step("now is BEFORE the receipt claims to have been produced")
+        val why = receipt_failure_reason_at(sample_receipt(), "aaaa", "bbbb", 60, 1)
+        expect(receipt_reason_name(why!)).to_equal("stale")
+
+    it "classifies a bound, timely FAIL verdict as VerdictNotPass":
+        step("a gate that ran and failed still mints a receipt")
+        var r = sample_receipt()
+        r.verdict_line = "FAIL — 12 thing(s) checked, bad=3"
+        expect(receipt_verdict_is_pass(r)).to_be_false()
+        val why = receipt_failure_reason_at(r, "aaaa", "bbbb", 3600, 1060)
+        expect(receipt_reason_name(why!)).to_equal("verdict-not-pass")
+        step("an ERROR verdict is not a pass either")
+        r.verdict_line = "ERROR — nothing was checked (no compiler)"
+        expect(receipt_verdict_is_pass(r)).to_be_false()
+
+    # Negative direction: a malformed file must be REJECTED, not defaulted.
+    # A defaulted field would compare unequal to everything and be misreported
+    # as a mismatch instead of the malformed file it is.
+    it "refuses to parse anything that is not canonical receipt/v1":
+        step("a report is not a receipt")
+        expect(parse_evidence_receipt("coverage is 100%\n") == nil).to_be_true()
+        step("a wrong magic line is rejected")
+        expect(parse_evidence_receipt("receipt/v2\ncheck_id=x\n") == nil).to_be_true()
+        step("a truncated receipt is rejected")
+        expect(parse_evidence_receipt("receipt/v1\ncheck_id=x\n") == nil).to_be_true()
+        step("a non-numeric timestamp is rejected, not coerced to 0")
+        val bad = "receipt/v1\ncheck_id=x\nartifact_sha256=a\nseal_hash=b\nproduced_at=soon\nproducer_identity=p\nverdict_line=PASS — ok\n"
+        expect(parse_evidence_receipt(bad) == nil).to_be_true()
+
+    it "names every reason in the closed vocabulary exactly once":
+        step("the table is non-vacuous")
+        expect(all_receipt_reasons().len()).to_equal(6)
+        step("no two reasons share a name")
+        var names: [text] = []
+        for reason in all_receipt_reasons():
+            val n = receipt_reason_name(reason)
+            expect(names.contains(n)).to_be_false()
+            names.push(n)
+        expect(names.len()).to_equal(6)
+
+    it "uses the module clock for the plan-named four-argument entry point":
+        step("with the clock set inside the window the receipt is fresh")
+        val _ = evidence_receipt_set_now(1060)
+        expect(receipt_is_fresh(sample_receipt(), "aaaa", "bbbb", 3600)).to_be_true()
+        step("moving the clock past the window makes the same receipt stale")
+        val _2 = evidence_receipt_set_now(999999)
+        expect(receipt_is_fresh(sample_receipt(), "aaaa", "bbbb", 60)).to_be_false()
+
+    it "derives the receipt file name from the check id":
+        step("the census looks a receipt up by check id alone")
+        expect(evidence_receipt_file_name("check-aspect-seal")).to_equal("check-aspect-seal.receipt")

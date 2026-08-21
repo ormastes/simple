@@ -1,0 +1,291 @@
+# Evidence receipts (hardening plan Phase 9, 2026-08-21).
+#
+# Plan:   doc/03_plan/compiler/hardening/critical_hardening_plan_2026-08-21.md §Phase 9
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §15 (Phase 9), §19 (verification strategy), §22 (acceptance criteria),
+#         §23.9 (reports are not evidence).
+#
+# ---------------------------------------------------------------------------
+# WHY A RECEIPT AND NOT A REPORT
+# ---------------------------------------------------------------------------
+# §23.9 is blunt: a report file is not evidence. A markdown page saying
+# "coverage is 100%" is a claim about some tree, at some time, produced by some
+# binary — and none of those three are recoverable from the page. Every wipe,
+# every stale-snapshot clobber and every fail-open guard in this repo's history
+# had a green-looking document sitting next to it.
+#
+# A receipt is the opposite shape. It records exactly four things that make a
+# verdict re-checkable by a third party:
+#
+#   verdict_line       the gate's OWN last-line verdict, verbatim — not a
+#                      paraphrase, not a boolean distilled from an exit code
+#   artifact_sha256    WHICH artifact was examined
+#   seal_hash          WHICH frozen contract/seal it was examined against
+#   produced_at        WHEN, so a receipt can go stale
+#
+# plus `producer_identity`, so a receipt minted by an unknown producer is
+# distinguishable from one minted by the deployed gate.
+#
+# Freshness is therefore not a property of the receipt alone: it is a BINDING
+# between the receipt and the current (artifact, seal) pair. A receipt that was
+# perfectly valid yesterday is stale the instant either hash moves, which is
+# the whole point — evidence must not survive the thing it describes.
+#
+# ---------------------------------------------------------------------------
+# CLOSED FAILURE VOCABULARY
+# ---------------------------------------------------------------------------
+# `ReceiptReason` is closed and every match over it in this file is exhaustive
+# with NO wildcard arm. That is a Phase 1/Phase 4 requirement applied to this
+# module itself: a wildcard here would let a future reason be added and
+# silently classified as one of the existing ones, which is precisely the
+# silent-fallback class this plan exists to eliminate.
+#
+# Imports are limited to `sha256_text`: 00.common is the low-dependency layer
+# and this table is read by the driver, the loader gates and the release
+# census alike.
+
+use std.common.crypto.sha256.{sha256_text}
+
+# ---------------------------------------------------------------------------
+# Shape
+# ---------------------------------------------------------------------------
+
+"""One evidence receipt: a gate's verdict bound to what it examined.
+
+`verdict_line` is the gate's verbatim last line of stdout (the repo verdict
+convention: `PASS — ...` / `FAIL — ...` / `ERROR — ...`). It is stored whole
+so a reader can re-derive the counts, not just the pass/fail bit.
+"""
+struct EvidenceReceipt:
+    check_id: text
+    verdict_line: text
+    artifact_sha256: text
+    seal_hash: text
+    produced_at: i64
+    producer_identity: text
+
+"""Why a receipt did not satisfy a critical-release obligation.
+
+Closed on purpose (see the header): every consumer matches this exhaustively
+and no arm may be a wildcard.
+"""
+enum ReceiptReason:
+    # No receipt file exists for the required check id.
+    Missing
+    # The receipt exists and binds correctly but is older than the allowed age.
+    Stale
+    # The receipt describes a different artifact than the one being released.
+    ArtifactMismatch
+    # The receipt describes a different seal/contract than the current one.
+    SealMismatch
+    # The receipt is bound and fresh, but its verdict is not a PASS.
+    VerdictNotPass
+    # The receipt file could not be parsed into the canonical shape.
+    Unparseable
+
+fn receipt_reason_name(reason: ReceiptReason) -> text:
+    match reason:
+        case ReceiptReason.Missing: "missing"
+        case ReceiptReason.Stale: "stale"
+        case ReceiptReason.ArtifactMismatch: "artifact-mismatch"
+        case ReceiptReason.SealMismatch: "seal-mismatch"
+        case ReceiptReason.VerdictNotPass: "verdict-not-pass"
+        case ReceiptReason.Unparseable: "unparseable"
+
+"""One-line human explanation for a reason. Exhaustive, no wildcard."""
+fn receipt_reason_detail(reason: ReceiptReason) -> text:
+    match reason:
+        case ReceiptReason.Missing: "no receipt file; the gate never ran or never emitted one"
+        case ReceiptReason.Stale: "receipt older than the allowed age"
+        case ReceiptReason.ArtifactMismatch: "receipt describes a different artifact hash"
+        case ReceiptReason.SealMismatch: "receipt describes a different seal hash"
+        case ReceiptReason.VerdictNotPass: "receipt verdict line is not a PASS"
+        case ReceiptReason.Unparseable: "receipt file is not in canonical receipt/v1 form"
+
+fn all_receipt_reasons() -> [ReceiptReason]:
+    [ReceiptReason.Missing, ReceiptReason.Stale, ReceiptReason.ArtifactMismatch,
+     ReceiptReason.SealMismatch, ReceiptReason.VerdictNotPass, ReceiptReason.Unparseable]
+
+# ---------------------------------------------------------------------------
+# Canonical text form
+# ---------------------------------------------------------------------------
+# Field order is FROZEN. `verdict_line` is last because it is the only field
+# that may legitimately contain `=`; every earlier field is parsed by splitting
+# on the first `=`, and the last field takes the whole remainder of the line.
+# The magic first line pins the format version so a future v2 cannot be read as
+# a v1 by accident.
+
+val EVIDENCE_RECEIPT_MAGIC: text = "receipt/v1"
+
+fn _rcpt_line(key: text, value: text) -> text:
+    key + "=" + value
+
+"""Canonical serialization of a receipt. This exact text is what gets hashed.
+
+Deliberately excludes the receipt hash itself, so `evidence_receipt_hash` is
+well defined and a stored file can carry the hash as a trailing line without
+becoming self-referential.
+"""
+fn evidence_receipt_canonical_text(r: EvidenceReceipt) -> text:
+    var lines: [text] = []
+    lines.push(EVIDENCE_RECEIPT_MAGIC)
+    lines.push(_rcpt_line("check_id", r.check_id))
+    lines.push(_rcpt_line("artifact_sha256", r.artifact_sha256))
+    lines.push(_rcpt_line("seal_hash", r.seal_hash))
+    lines.push(_rcpt_line("produced_at", r.produced_at.to_string()))
+    lines.push(_rcpt_line("producer_identity", r.producer_identity))
+    lines.push(_rcpt_line("verdict_line", r.verdict_line))
+    lines.join("\n") + "\n"
+
+"""sha256 of the canonical text. Two receipts hash equal iff every field matches."""
+fn evidence_receipt_hash(r: EvidenceReceipt) -> text:
+    sha256_text(evidence_receipt_canonical_text(r))
+
+"""The on-disk file form: canonical text plus a trailing self-hash line."""
+fn evidence_receipt_render(r: EvidenceReceipt) -> text:
+    evidence_receipt_canonical_text(r) + _rcpt_line("receipt_sha256", evidence_receipt_hash(r)) + "\n"
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+fn _rcpt_value(line: text, key: text) -> text:
+    val prefix = key + "="
+    if not line.starts_with(prefix):
+        return ""
+    line.substring(prefix.len(), line.len())
+
+fn _rcpt_is_digits(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+"""Parse canonical receipt text. Returns nil when the text is not receipt/v1.
+
+Strict by construction: a missing line, a reordered line or a non-numeric
+timestamp is `nil`, never a receipt with a defaulted field. A defaulted field
+would be a silent fallback, and a receipt whose artifact hash defaulted to ""
+would compare unequal to everything and be reported as a mismatch rather than
+as the malformed file it is.
+"""
+fn parse_evidence_receipt(content: text) -> EvidenceReceipt?:
+    val lines: [text] = content.split("\n")
+    if lines.len() < 7:
+        return nil
+    if lines[0].trim() != EVIDENCE_RECEIPT_MAGIC:
+        return nil
+    if not lines[1].starts_with("check_id="): return nil
+    if not lines[2].starts_with("artifact_sha256="): return nil
+    if not lines[3].starts_with("seal_hash="): return nil
+    if not lines[4].starts_with("produced_at="): return nil
+    if not lines[5].starts_with("producer_identity="): return nil
+    if not lines[6].starts_with("verdict_line="): return nil
+    val at_text = _rcpt_value(lines[4], "produced_at")
+    if not _rcpt_is_digits(at_text):
+        return nil
+    val check_id = _rcpt_value(lines[1], "check_id")
+    if check_id == "":
+        return nil
+    EvidenceReceipt(
+        check_id: check_id,
+        verdict_line: _rcpt_value(lines[6], "verdict_line"),
+        artifact_sha256: _rcpt_value(lines[2], "artifact_sha256"),
+        seal_hash: _rcpt_value(lines[3], "seal_hash"),
+        produced_at: at_text.to_i64(),
+        producer_identity: _rcpt_value(lines[5], "producer_identity"))
+
+# ---------------------------------------------------------------------------
+# Verdict classification
+# ---------------------------------------------------------------------------
+# The repo verdict convention is the contract: a PASS line starts with `PASS`.
+# Anything else — FAIL, ERROR, an empty line, or prose — is not a pass. There
+# is deliberately no "looks green enough" heuristic here.
+
+fn receipt_verdict_is_pass(r: EvidenceReceipt) -> bool:
+    r.verdict_line.trim().starts_with("PASS")
+
+# ---------------------------------------------------------------------------
+# Freshness = binding + age + verdict
+# ---------------------------------------------------------------------------
+# `EVIDENCE_RECEIPT_NOW` exists so the four-argument `receipt_is_fresh` named
+# by the plan can be called without threading a clock through every caller,
+# while keeping this module free of any time import (00.common layering). A
+# caller that cares about age sets it once from its own clock; left at 0 the
+# age test is skipped and only the binding and verdict are enforced, which is
+# reported honestly rather than silently treated as fresh.
+
+var EVIDENCE_RECEIPT_NOW: i64 = 0
+
+fn evidence_receipt_set_now(now: i64) -> i64:
+    EVIDENCE_RECEIPT_NOW = now
+    now
+
+fn evidence_receipt_now() -> i64:
+    EVIDENCE_RECEIPT_NOW
+
+"""First failing obligation for a receipt, or nil when it is fully fresh.
+
+Order is deliberate and is the order a human would want to hear: a receipt for
+the wrong artifact is reported as a mismatch even if it is also old, because
+re-running the gate is the fix in both cases and the mismatch is the more
+informative statement.
+"""
+fn receipt_failure_reason_at(r: EvidenceReceipt, artifact_sha256: text, seal_hash: text,
+                             max_age: i64, now: i64) -> ReceiptReason?:
+    if r.check_id == "":
+        return ReceiptReason.Unparseable
+    if r.artifact_sha256 == "" or r.artifact_sha256 != artifact_sha256:
+        return ReceiptReason.ArtifactMismatch
+    if r.seal_hash == "" or r.seal_hash != seal_hash:
+        return ReceiptReason.SealMismatch
+    if max_age > 0 and now > 0:
+        if r.produced_at <= 0:
+            return ReceiptReason.Stale
+        if now - r.produced_at > max_age:
+            return ReceiptReason.Stale
+        if r.produced_at > now + max_age:
+            # A receipt from the future is not fresh evidence, it is a clock
+            # or a forged timestamp. Either way it must not license a release.
+            return ReceiptReason.Stale
+    if not receipt_verdict_is_pass(r):
+        return ReceiptReason.VerdictNotPass
+    nil
+
+"""Plan-named entry point: bound to artifact+seal, not older than `max_age`.
+
+Uses the module clock set by `evidence_receipt_set_now`; see the note above.
+"""
+fn receipt_is_fresh(r: EvidenceReceipt, artifact_sha256: text, seal_hash: text, max_age: i64) -> bool:
+    receipt_failure_reason_at(r, artifact_sha256, seal_hash, max_age, EVIDENCE_RECEIPT_NOW) == nil
+
+fn receipt_is_fresh_at(r: EvidenceReceipt, artifact_sha256: text, seal_hash: text,
+                       max_age: i64, now: i64) -> bool:
+    receipt_failure_reason_at(r, artifact_sha256, seal_hash, max_age, now) == nil
+
+"""Canonical file name for a check id, relative to the evidence directory."""
+fn evidence_receipt_file_name(check_id: text) -> text:
+    check_id + ".receipt"
+
+export EvidenceReceipt
+export ReceiptReason
+export receipt_reason_name
+export receipt_reason_detail
+export all_receipt_reasons
+export EVIDENCE_RECEIPT_MAGIC
+export evidence_receipt_canonical_text
+export evidence_receipt_hash
+export evidence_receipt_render
+export parse_evidence_receipt
+export receipt_verdict_is_pass
+export receipt_failure_reason_at
+export receipt_is_fresh
+export receipt_is_fresh_at
+export evidence_receipt_set_now
+export evidence_receipt_now
+export evidence_receipt_file_name
