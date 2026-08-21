@@ -41,7 +41,7 @@ use std.fs_driver.error.{FsError}
 use std.fs_driver.mount_table.{PositionedDriverKind}
 use std.fs_driver.types.{FileHandle, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
-use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_leaf_for_canonical}
 use os.services.vfs.nvme_boot_runtime_owner.*
@@ -65,7 +65,7 @@ class VfsFileSize:
         self.bytes
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_root_fat32: Fat32Core? = nil
-var g_root_nvfs_hosted: NvfsHostedDriver? = nil
+var g_root_nvfs_hosted: NvfsPosixDriver? = nil
 var g_vfs_initialized: bool = false
 var g_vfs_boot_storage_provider: text = "not-mounted"
 var g_vfs_boot_storage_pure_simple: bool = false
@@ -84,7 +84,7 @@ fn vfs_state_reset_rootfs():
 fn vfs_state_mark_rootfs_ready():
     g_vfs_initialized = true
 
-fn vfs_state_commit_root_nvfs(driver: NvfsHostedDriver):
+fn vfs_state_commit_root_nvfs(driver: NvfsPosixDriver):
     g_root_nvfs_hosted = Some(driver)
 
 fn vfs_state_mount(path: text, driver: DriverInstance, options: MountOptions) -> Result<MountId, FsError>:
@@ -363,30 +363,10 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
         serial_println("[vfs-init] exec probe failed")
         return false
-    # BUG(codegen, freestanding entry-closure cranelift): BlockDevice
-    # trait-object dispatch performs an extra dereference — the indirect call
-    # in Fat32Core.read_boot_sector (+0x18, self._device_sector_size()) jumps
-    # to the callee's own first 8 code bytes read as an address
-    # (rip=cr2=0x0001e0ec8148e589 = "push rbp; mov rbp,rsp; sub rsp,0x1e0"),
-    # and the recovering fault handler then storms without progressing.
-    # Until that dispatch bug is fixed, skip the hosted SharedFat32Driver
-    # mount so the desktop keeps its degraded-but-rendering fallback. The
-    # scalar direct reader above has already validated geometry, version,
-    # and app-payload reads at their correct clusters.
-    #
-    # RE-VERIFIED 2026-07-17 (SEED-CODEGEN lane): re-enabling this call in a
-    # clean own-seed `--entry-closure --opt-level=aggressive` freestanding
-    # build reproduces the IDENTICAL fault signature (cr2=0x0001e0ec8148e589,
-    # incrementing by 2 per recovered fault — 29k+ occurrences in ~20s),
-    # confirming C8 is still open. A separate, real vtable-compaction bug was
-    # found and fixed while investigating (see bug doc C8 section addendum)
-    # but does not touch this dispatch site: NvmeBlockAdapter implements all
-    # 3 BlockDevice methods with no gap, so its vtable is byte-identical
-    # before/after that fix — it was never the cause here. Skip stays in
-    # place; C8's actual mechanism remains unresolved.
-    if true:
-        serial_println("[vfs-init] hosted fat32 mount skipped: blockdevice-dispatch-codegen-bug")
-        return false
+    # The direct reader above is only bootstrap evidence.  Completion requires
+    # publishing the same lease-backed adapter through the canonical shared
+    # FAT32 owner; returning success without this commit gave callers a
+    # path-only filesystem that could not issue MountTable execution authority.
     val pure_root_mount = nvme_boot_runtime_commit_system_fat32(adapter, lease)
     if pure_root_mount.is_ok():
         log_raw_println("[vfs-init] shared FAT32 root mounted after direct bootstrap")

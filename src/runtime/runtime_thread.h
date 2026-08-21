@@ -17,6 +17,8 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "runtime_any_ops.h"
+#include "runtime_string_ffi.h"
 
 /* ===== Thread Handle (opaque) ===== */
 

@@ -5,6 +5,11 @@
 
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_arm_init}
 use os.kernel.boot.boot_fs_mount.{boot_fs_mount_fat32_from_device}
+use os.services.vfs.vfs_boot_state.{vfs_state_reset_rootfs, vfs_state_mount}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{MountOptions}
+use std.fs_driver.ops.{FsDriver}
 use common.string_core.{str_char_at}
 use os.kernel.boot.mmio.{mmio_read32}
 use os.services.vfs.arm_fs_exec_alias.{_arm_exec_alias, arm_fs_exec_disk_alias, _arm_short_name_for_mapped_path}
@@ -68,6 +73,7 @@ fn _arm_vfs_log(msg: text):
 
 pub fn arm_fs_exec_vfs_boot_init() -> bool:
     arm_fs_exec_trace(211)
+    vfs_state_reset_rootfs()
     _arm_vfs_log("[vfs-init] Starting VirtIO-BLK FAT32 initialization...")
     _arm_vfs_log("[vfs-init] virtio mmio magic={mmio_read32(0x0A003E00)} version={mmio_read32(0x0A003E04)} device_id={mmio_read32(0x0A003E08)}")
     var dev = VirtioBlkDriver.arm_qemu_virt()
@@ -91,6 +97,18 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
     if mount_result.is_err():
         arm_fs_exec_trace(219)
         _arm_vfs_log("[vfs-init] kernel FAT32 publication failed")
+        return false
+    var execute_driver = FsFat32Driver.new("arm64-virtio-fat32", dev)
+    val execute_driver_mount = execute_driver.mount(MountOptions.default())
+    if execute_driver_mount.is_err():
+        arm_fs_exec_trace(220)
+        _arm_vfs_log("[vfs-init] canonical FAT32 driver mount failed")
+        return false
+    val canonical_mount = vfs_state_mount(
+        "/", DriverInstance.Fat32(execute_driver), MountOptions.default())
+    if canonical_mount.is_err():
+        arm_fs_exec_trace(221)
+        _arm_vfs_log("[vfs-init] canonical MountTable mount failed")
         return false
     _arm_vfs_log("[vfs-init] kernel FAT32 publication ready")
     arm_fs_exec_trace(214)

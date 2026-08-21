@@ -26,3 +26,10 @@ Inspect next:
 - `src/lib/common/contracts/execution/`
 - `src/os/services/wm/wm_service.spl`
 - `doc/05_design/simpleos_complete_os_hardening.md`
+
+Wave 4 note (2026-08-21): FAT32, NVMe/VFS, and per-ISA runtime shims are now
+split into bounded owners; all three 64-bit server entries require authenticated
+media authority. RV64 streamed loading rejects the legacy unauthenticated path.
+Multiarch `simpleos_tool` and LLVM media builders are construction lanes, not
+live guest proof; filesystem compile/run and complete server rows remain gated
+by fresh admitted QEMU evidence.

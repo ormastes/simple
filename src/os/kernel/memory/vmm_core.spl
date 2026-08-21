@@ -420,6 +420,32 @@ fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     true
 
+fn vmm_map_page_pte_bits(vaddr: u64, paddr: u64, requested_bits: u64) -> bool:
+    """Map a page from scalar values at early freestanding boundaries.
+
+    Callers must pass architecture PTE bits, not VmFlags bits.  This entrypoint
+    exists for boot owners that run before aggregate field metadata is ready.
+    It preserves the normal W^X rule and page-table ownership here."""
+    var pte_bits = requested_bits
+    if (pte_bits & PTE_WRITABLE) != 0 and (pte_bits & PTE_NO_EXECUTE) == 0:
+        pte_bits = pte_bits | PTE_NO_EXECUTE
+
+    val pml4_virt = _phys_to_virt(_vmm_pml4_phys)
+    val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+    val pd_virt = _ensure_table_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+    val pt_virt = _ensure_table_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+
+    val entry = (paddr & PTE_ADDR_MASK) | pte_bits
+    _write_pte(pt_virt, _pt_index(vaddr), entry)
+    _vmm_invalidate_tlb(vaddr)
+    true
+
 fn vmm_set_map_failure_after_for_test(successful_maps: i64):
     if not mmio_test_mode_enabled():
         return

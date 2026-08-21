@@ -39,6 +39,9 @@ LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 KERNEL_OUTPUT="build/os/simpleos_wm_x86_64.elf"
 HELLO_VALIDATOR="scripts/check/validate_simpleos_x86_64_wm_hello_ppm.spl"
 SCENE_VALIDATOR="scripts/check/validate_simpleos_x86_64_wm_ppm.spl"
+HELLO_VALIDATOR_BIN="build/os/validate_simpleos_x86_64_wm_hello_ppm"
+SCENE_VALIDATOR_BIN="build/os/validate_simpleos_x86_64_wm_ppm"
+VALIDATOR_BUILD_LOG="build/os/wm_hello_validator_build.log"
 PPM_OPEN="build/os/wm_hello_open.ppm"
 PPM_CLOSED="build/os/wm_hello_closed.ppm"
 ZOOM_PNG="build/os/wm_hello_body_zoom.png"
@@ -212,6 +215,30 @@ SPL
 fi
 echo "kernel: $KERNEL_OUTPUT ($(wc -c <"$KERNEL_OUTPUT") bytes)"
 
+# Stage-2 is intentionally a bootstrap compiler: its supported execution
+# surface is native-build, not the full CLI's `run` command.  Build the two
+# independent framebuffer oracles with the same admitted compiler and execute
+# the resulting host binaries.  This also keeps oracle execution fail-closed
+# under SIMPLE_NO_STUB_FALLBACK rather than silently selecting another runtime.
+: >"$VALIDATOR_BUILD_LOG"
+build_validator() {
+    _validator_source=$1
+    _validator_output=$2
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+        "$SIMPLE_BIN" native-build \
+        --source scripts/check --source src/lib \
+        --backend cranelift --mode dynload \
+        --entry-closure --entry "$_validator_source" \
+        -o "$_validator_output" >>"$VALIDATOR_BUILD_LOG" 2>&1
+    _validator_status=$?
+    if [ "$_validator_status" -ne 0 ] || [ ! -x "$_validator_output" ]; then
+        tail -20 "$VALIDATOR_BUILD_LOG"
+        fail_blocker "wm-validator-native-build-failed(source=$_validator_source,exit=$_validator_status,log=$VALIDATOR_BUILD_LOG)"
+    fi
+}
+build_validator "$HELLO_VALIDATOR" "$HELLO_VALIDATOR_BIN"
+build_validator "$SCENE_VALIDATOR" "$SCENE_VALIDATOR_BIN"
+
 # --- 2. Package the kernel as a self-contained UEFI boot app (OVMF pflash) --
 # Board-runnable rule (.claude/rules/board-runnable.md) forbids QEMU `-kernel`
 # fast-path semantics: grub-mkstandalone builds a self-contained BOOTX64.EFI
@@ -291,7 +318,7 @@ sleep 1  # paint settle
 # --- 5. OPEN GATE: screendump 1 -> Hello window pixel evidence --------------
 qmp "write_qmp(f, {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"$ROOT_DIR/$PPM_OPEN\"}})" >/dev/null 2>&1
 [ -s "$PPM_OPEN" ] || fail_blocker "screendump-1-empty:$PPM_OPEN"
-open_out="$(HELLO_PPM="$ROOT_DIR/$PPM_OPEN" HELLO_MODE=open "$SIMPLE_BIN" run "$HELLO_VALIDATOR" --mode=interpreter 2>/dev/null)"
+open_out="$(HELLO_PPM="$ROOT_DIR/$PPM_OPEN" HELLO_MODE=open "$HELLO_VALIDATOR_BIN" 2>/dev/null)"
 echo "--- hello OPEN validation (screendump 1) ---"
 printf '%s\n' "$open_out"
 if printf '%s\n' "$open_out" | grep -q "simpleos_x86_64_wm_hello_ppm_status=pass"; then
@@ -405,13 +432,13 @@ sleep 2  # close animation (6 frames) + recomposite settle
 qmp "write_qmp(f, {\"execute\": \"screendump\", \"arguments\": {\"filename\": \"$ROOT_DIR/$PPM_CLOSED\"}})" >/dev/null 2>&1
 [ -s "$PPM_CLOSED" ] || fail_blocker "screendump-2-empty:$PPM_CLOSED"
 closed_out="$(HELLO_PPM="$ROOT_DIR/$PPM_CLOSED" HELLO_MODE=closed HELLO_PPM_PREV="$ROOT_DIR/$PPM_OPEN" \
-    "$SIMPLE_BIN" run "$HELLO_VALIDATOR" --mode=interpreter 2>/dev/null)"
+    "$HELLO_VALIDATOR_BIN" 2>/dev/null)"
 echo "--- hello CLOSED validation (screendump 2 vs 1) ---"
 printf '%s\n' "$closed_out"
 printf '%s\n' "$closed_out" | grep -q "simpleos_x86_64_wm_hello_ppm_status=pass" || close_ok=0
 
 # The rest of the scene must still be intact after the recomposite
-scene_out="$(SIMPLEOS_X86_64_WM_PPM="$ROOT_DIR/$PPM_CLOSED" "$SIMPLE_BIN" run "$SCENE_VALIDATOR" --mode=interpreter 2>/dev/null)"
+scene_out="$(SIMPLEOS_X86_64_WM_PPM="$ROOT_DIR/$PPM_CLOSED" "$SCENE_VALIDATOR_BIN" 2>/dev/null)"
 echo "--- scene-intact validation (screendump 2) ---"
 printf '%s\n' "$scene_out"
 printf '%s\n' "$scene_out" | grep -q "simpleos_x86_64_wm_ppm_status=pass" || close_ok=0

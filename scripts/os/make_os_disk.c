@@ -149,6 +149,16 @@ int main(int argc, char **argv)
         return 1;
     }
     struct bytes servers_payload = read_file(getenv("SIMPLEOS_SERVERS_BINARY"));
+    struct bytes servers_manifest = read_file(getenv("SIMPLEOS_SERVERS_MANIFEST"));
+    struct bytes servers_admission = read_file(getenv("SIMPLEOS_SERVERS_ADMISSION"));
+    struct bytes servers_proof = read_file(getenv("SIMPLEOS_SERVERS_PROOF"));
+    struct bytes servers_trust_root = read_file(getenv("SIMPLEOS_SERVERS_TRUST_ROOT"));
+    if ((servers_manifest.len || servers_admission.len || servers_proof.len || servers_trust_root.len) &&
+        (!servers_payload.len || !servers_manifest.len || !servers_admission.len ||
+         !servers_proof.len || !servers_trust_root.len)) {
+        fprintf(stderr, "SERVERS.ELF requires manifest, admission, proof, and trust-root sidecars\n");
+        return 1;
+    }
     const char *server_credential_path = getenv("SIMPLEOS_SERVER_DB_CREDENTIAL_FILE");
     struct bytes server_credential = read_file(server_credential_path);
     if (servers_payload.len && (!server_credential_path || !server_credential_path[0] ||
@@ -326,14 +336,11 @@ int main(int argc, char **argv)
     int llvm_manifest_cluster = alloc_clusters(llvm_manifest.data, llvm_manifest.len);
     int clang_manifest_cluster = alloc_clusters(clang_manifest.data, clang_manifest.len);
     int rust_manifest_cluster = alloc_clusters(rust_manifest.data, rust_manifest.len);
-    /* TODO(simpleos-steam-staging): a steam manifest and a proof marker were
-     * once allocated here but never published into any directory — the clusters
-     * were allocated in the FAT and orphaned (fsck "Reclaimed unused clusters").
-     * The manifest named /usr/share/simpleos/games/steam_2048/marker.txt as its
-     * proof_marker, so the intended staging path exists but was never wired.
-     * The allocations are gone so the FAT stays consistent; the staging itself
-     * is still owed. Do NOT re-add alloc_clusters here without also adding the
-     * put_dir_entry that consumes it. */
+    /* Steam manifest/proof bytes are intentionally not allocated by this disk
+     * profile. Earlier code allocated them without publishing directory entries,
+     * creating orphan FAT clusters that fsck reclaimed. A future profile that
+     * owns Steam proof staging must allocate and publish both artifacts in the
+     * same change; this generic filesystem profile keeps the FAT closed now. */
     int steam_port_cluster = alloc_clusters(steam_port.data, steam_port.len);
     int llvm_ll_cluster = alloc_clusters(llvm_ll.data, llvm_ll.len);
     int llvm_s_cluster = alloc_clusters(llvm_s.data, llvm_s.len);
@@ -395,6 +402,10 @@ int main(int argc, char **argv)
     int authhello_proof_cluster = authhello_proof.len ? alloc_clusters(authhello_proof.data, authhello_proof.len) : 0;
     int authhello_trust_root_cluster = authhello_trust_root.len ? alloc_clusters(authhello_trust_root.data, authhello_trust_root.len) : 0;
     int servers_cluster = servers_payload.len ? alloc_clusters(servers_payload.data, servers_payload.len) : 0;
+    int servers_manifest_cluster = servers_manifest.len ? alloc_clusters(servers_manifest.data, servers_manifest.len) : 0;
+    int servers_admission_cluster = servers_admission.len ? alloc_clusters(servers_admission.data, servers_admission.len) : 0;
+    int servers_proof_cluster = servers_proof.len ? alloc_clusters(servers_proof.data, servers_proof.len) : 0;
+    int servers_trust_root_cluster = servers_trust_root.len ? alloc_clusters(servers_trust_root.data, servers_trust_root.len) : 0;
     int font_clusters[FONT_ASSET_COUNT];
     int font_metadata_clusters[FONT_ASSET_COUNT];
     int font_license_clusters[FONT_ASSET_COUNT];
@@ -472,8 +483,15 @@ int main(int argc, char **argv)
         put_dir_entry(root, &root_n, "AUTHHEL SIG", authhello_proof_cluster, authhello_proof.len, 0x20);
         put_dir_entry(root, &root_n, "AUTHHEL PUB", authhello_trust_root_cluster, authhello_trust_root.len, 0x20);
     }
-    if (servers_cluster)
+    if (servers_cluster) {
         put_dir_entry(root, &root_n, "SERVERS ELF", servers_cluster, servers_payload.len, 0x20);
+        if (servers_manifest_cluster) {
+            put_dir_entry(root, &root_n, "SERVER  MAN", servers_manifest_cluster, servers_manifest.len, 0x20);
+            put_dir_entry(root, &root_n, "SERVER  ADM", servers_admission_cluster, servers_admission.len, 0x20);
+            put_dir_entry(root, &root_n, "SERVER  SIG", servers_proof_cluster, servers_proof.len, 0x20);
+            put_dir_entry(root, &root_n, "SERVER  PUB", servers_trust_root_cluster, servers_trust_root.len, 0x20);
+        }
+    }
     put_dot_entries(efi, &efi_n, efi_cluster, 0);
     put_dot_entries(boot, &boot_n, boot_cluster, efi_cluster);
     put_dot_entries(sys, &sys_n, sys_cluster, 0);

@@ -1,0 +1,594 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os, is_macos}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+fn simpleos_objdump_symbol_name(line: text) -> text:
+    """`0000000000000000 <rt_foo>:` -> `rt_foo`."""
+    val open_parts = line.split("<")
+    if open_parts.len() < 2:
+        return ""
+    val close_parts = open_parts[open_parts.len() - 1].split(">")
+    close_parts[0]
+
+fn simpleos_objdump_normalized_insn(line: text) -> text:
+    """`4:<tab>xor    %eax,%eax` -> `xor %eax,%eax`; "" when not an instruction.
+
+    Operand text after a stray `:` (an x86 segment override) is dropped, which
+    can only make an instruction look LESS trivial -- the safe direction."""
+    if line.starts_with("Disassembly") or line.contains("file format"):
+        return ""
+    val colon_parts = line.split(":")
+    if colon_parts.len() < 2:
+        return ""
+    var flat = ""
+    for chunk in colon_parts[1].split("\t"):
+        flat = flat + " " + chunk
+    var toks: [text] = []
+    for tok in flat.split(" "):
+        if tok != "":
+            toks.push(tok)
+    toks.join(" ")
+
+fn simpleos_riscv_operands(insn: text) -> [text]:
+    """Comma-split operand list for one RISC-V instruction, spelling-agnostic.
+
+    The two disassemblers disagree on whitespace: llvm-objdump prints
+    `li a0, 0x0` (space after the comma) while GNU objdump prints `li a0,0`.
+    Token-position matching -- what the x86/aarch64 branches above do -- would
+    therefore work under one tool and silently fail under the other, and a
+    silent classifier failure is exactly the fail-open shape this guard exists
+    to remove. Rejoining and splitting on `,` makes both spellings yield the
+    same list.
+
+    A trailing GNU comment (`addi a0,a0,-1 # fff <sym+0xfc7>`) is dropped, but
+    only from a token that is EXACTLY `#` -- aarch64 writes its immediates as
+    an attached `#0`, and those must survive untouched."""
+    var toks: [text] = []
+    for tok in insn.split(" "):
+        if tok != "":
+            toks.push(tok)
+    var rest = ""
+    var i = 1
+    while i < toks.len():
+        if toks[i] == "#":
+            break
+        rest = rest + toks[i]
+        i = i + 1
+    var ops: [text] = []
+    for op in rest.split(","):
+        val t = op.trim()
+        if t != "":
+            ops.push(t)
+    ops
+
+fn simpleos_riscv_is_zero_reg(reg: text) -> bool:
+    """`zero` (ABI name) and `x0` (numeric name) are the same hardwired zero."""
+    reg == "zero" or reg == "x0"
+
+fn simpleos_riscv_canon_reg(reg: text) -> text:
+    """RISC-V ABI register spelling, normalized.
+
+    ABI names ONLY -- `x0`/`x10`/`x2` are deliberately NOT mapped to
+    `zero`/`a0`/`sp`. Both disassemblers print ABI names unless `-M numeric` is
+    passed, and this guard never passes it, so the numeric aliases bought
+    nothing; what they cost was measured and severe. aarch64 also has registers
+    spelled `x0`/`x1`, so mapping `x0 -> zero` made this analyzer read an
+    aarch64 `add x0, x0, #7` (`return arg + 7` -- real work) as "add zero to
+    zero", conclude the return register was never touched, and report the
+    function as fabricated. That is the false-positive direction, the one that
+    blocks legitimate links and got the first version of this guard rejected.
+
+    With ABI names only, no aarch64 or x86-64 body can ever make `a0` constant,
+    so this analyzer is structurally incapable of accepting a non-RISC-V body
+    -- without having to sniff the architecture. A genuine RISC-V body printed
+    with `-M numeric` simply goes undetected, which is the safe direction."""
+    if reg == "fp":
+        return "s0"
+    reg
+
+fn simpleos_riscv_mem_base(operand: text) -> text:
+    """`0x8(sp)` -> `sp`; `""` when the operand is not a base+displacement."""
+    val open_parts = operand.split("(")
+    if open_parts.len() < 2:
+        return ""
+    val close_parts = open_parts[1].split(")")
+    simpleos_riscv_canon_reg(close_parts[0].trim())
+
+fn simpleos_riscv_is_frame_base(reg: text) -> bool:
+    """Stack pointer / frame pointer. Traffic through these is frame
+    scaffolding; traffic through any OTHER base is real memory access and is
+    refused."""
+    reg == "sp" or reg == "s0"
+
+fn simpleos_riscv_reg_is_const(consts: {text: bool}, reg: text) -> bool:
+    """`zero` is constant by definition; everything else must have been proven
+    constant by a preceding instruction in this same body."""
+    val r = simpleos_riscv_canon_reg(reg)
+    if r == "zero":
+        return true
+    consts.has(r) and consts[r]
+
+fn simpleos_riscv_body_is_trivial_constant(insns: [text]) -> bool:
+    """Abstract-interprets a RISC-V body and answers "does it do nothing but set
+    up a frame and return a constant?".
+
+    WHY THIS IS NOT A PER-INSTRUCTION CLASSIFIER. The x86-64/aarch64 predicate
+    above works instruction-at-a-time because those ABIs materialize a constant
+    return in one instruction. RISC-V does not, and the production SimpleOS
+    stub objects are compiled WITHOUT -O (see the `riscv64-unknown-elf-gcc`
+    invocations in `link_simpleos_riscv64` / `link_simpleos_riscv32`: no -O
+    flag), so a `return 0x80000000ULL` is measured to disassemble as
+
+        addi sp, sp, -0x10      <- frame
+        sd   s0, 0x8(sp)        <- frame
+        addi s0, sp, 0x10       <- frame
+        li   a5, 0x1            <- constant, staged in a TEMPORARY
+        slli a5, a5, 0x1f       <- still constant
+        mv   a0, a5             <- constant reaches the return register
+        ld   s0, 0x8(sp)        <- frame
+        addi sp, sp, 0x10       <- frame
+        ret
+
+    No single instruction here says "constant return"; the fact only exists in
+    the chain li -> slli -> mv. A stateless classifier scored this body 0 of 4
+    on the bug's probe. Tracking which registers hold constants is the smallest
+    model that can see it.
+
+    SOUNDNESS (the fail-safe direction is what matters -- a false positive
+    blocks a legitimate link, which is what got the first version of this guard
+    rejected). Three independent conditions must ALL hold to return true:
+
+      1. Every instruction was recognised. Any unknown mnemonic returns false
+         immediately, so an unmodelled encoding makes the guard MISS a fake
+         rather than accuse a real implementation.
+      2. Memory traffic touches ONLY sp/s0. A store through any other base is
+         an observable side effect, so it is real work. This is what stops a
+         body like `*(int*)a0 = 5; return 0;` from being called fabricated.
+      3. `a0`/`a1` -- the only registers that outlive the call -- are each
+         either provably constant or never written. Provably constant means the
+         constant was traced from an immediate through this body; a value
+         reloaded from the stack is NOT constant, which is what stops the -O0
+         shape of `return arg` (`sd a0,off(s0); ld a5,off(s0); mv a0,a5`) from
+         being accused, and stops a body that computes a1 for real while
+         holding a0 at a constant.
+
+    Registers other than a0/a1 are dead at return, so their values need no
+    constraint beyond having been produced by a recognised instruction.
+
+    Never consults the symbol name, prefix, or linkage -- the body is the only
+    trustworthy evidence. A hand-supplied "verified real" list was measured to
+    contain `rt_dma_bytes_to_array`, which is literally `return 0;`, while
+    `rt_dma_virt_of` and `rt_file_read_bytes`, which nobody listed, are real."""
+    var consts: {text: bool} = {}
+    var saw_return = false
+    var recognized = 0
+    for raw in insns:
+        if raw == "":
+            continue
+        var toks: [text] = []
+        for tok in raw.split(" "):
+            if tok != "":
+                toks.push(tok)
+        if toks.len() == 0:
+            continue
+        val op = toks[0]
+        val ops = simpleos_riscv_operands(raw)
+        val n = ops.len()
+
+        # --- the return itself, and true no-ops -------------------------
+        if op == "ret" or op == "c.ret":
+            saw_return = true
+            recognized = recognized + 1
+            continue
+        if op == "nop" or op == "c.nop":
+            recognized = recognized + 1
+            continue
+        if op == "jr" or op == "c.jr":
+            if n == 1 and simpleos_riscv_canon_reg(ops[0]) == "ra":
+                saw_return = true
+                recognized = recognized + 1
+                continue
+            return false
+        if op == "jalr":
+            # `ret` is a pseudo for `jalr x0, ra, 0`, printed either as three
+            # operands or with the base folded into `0x0(ra)`.
+            var is_ret_form = false
+            if n == 3 and simpleos_riscv_canon_reg(ops[0]) == "zero" and simpleos_riscv_canon_reg(ops[1]) == "ra":
+                is_ret_form = true
+            if n == 2 and simpleos_riscv_canon_reg(ops[0]) == "zero" and simpleos_riscv_mem_base(ops[1]) == "ra":
+                is_ret_form = true
+            if not is_ret_form:
+                return false
+            saw_return = true
+            recognized = recognized + 1
+            continue
+
+        # --- frame traffic: stores define nothing, loads define a
+        # --- NON-constant (a reloaded value is not a proven constant).
+        if (op == "sd" or op == "sw" or op == "sh" or op == "sb" or
+                op == "fsd" or op == "fsw" or op == "c.sdsp" or
+                op == "c.swsp" or op == "c.sd" or op == "c.sw"):
+            if n != 2 or not simpleos_riscv_is_frame_base(simpleos_riscv_mem_base(ops[1])):
+                return false
+            recognized = recognized + 1
+            continue
+        if (op == "ld" or op == "lw" or op == "lwu" or op == "lh" or
+                op == "lhu" or op == "lb" or op == "lbu" or op == "fld" or
+                op == "flw" or op == "c.ldsp" or op == "c.lwsp" or
+                op == "c.ld" or op == "c.lw"):
+            if n != 2 or not simpleos_riscv_is_frame_base(simpleos_riscv_mem_base(ops[1])):
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = false
+            recognized = recognized + 1
+            continue
+
+        # --- constants straight out of an immediate ----------------------
+        if op == "li" or op == "c.li" or op == "lui" or op == "c.lui":
+            if n != 2:
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = true
+            recognized = recognized + 1
+            continue
+
+        # --- register moves and unary forms: constant iff the source is ---
+        if (op == "mv" or op == "c.mv" or op == "neg" or op == "not" or
+                op == "sext.w" or op == "zext.b" or op == "zext.h" or
+                op == "zext.w" or op == "sext.b" or op == "sext.h"):
+            if n != 2:
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = simpleos_riscv_reg_is_const(consts, ops[1])
+            recognized = recognized + 1
+            continue
+
+        # --- immediate ALU / shifts: constant iff the source is -----------
+        if (op == "addi" or op == "addiw" or op == "andi" or op == "ori" or
+                op == "xori" or op == "slli" or op == "srli" or op == "srai" or
+                op == "slliw" or op == "srliw" or op == "sraiw"):
+            if n == 3:
+                consts[simpleos_riscv_canon_reg(ops[0])] = simpleos_riscv_reg_is_const(consts, ops[1])
+                recognized = recognized + 1
+                continue
+            return false
+        if (op == "c.addi" or op == "c.addiw" or op == "c.andi" or
+                op == "c.slli" or op == "c.srli" or op == "c.srai" or
+                op == "c.addi16sp"):
+            # Compressed: the destination is also the source.
+            if n != 2:
+                return false
+            val cd = simpleos_riscv_canon_reg(ops[0])
+            consts[cd] = simpleos_riscv_reg_is_const(consts, cd)
+            recognized = recognized + 1
+            continue
+        if op == "c.addi4spn":
+            if n != 3:
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = false
+            recognized = recognized + 1
+            continue
+
+        # --- register-register ALU: constant iff BOTH sources are ---------
+        if (op == "add" or op == "addw" or op == "sub" or op == "subw" or
+                op == "and" or op == "or" or op == "xor" or op == "sll" or
+                op == "srl" or op == "sra" or op == "sllw" or op == "srlw" or
+                op == "sraw" or op == "c.add" or op == "c.sub" or
+                op == "c.and" or op == "c.or" or op == "c.xor" or
+                op == "c.addw" or op == "c.subw"):
+            if n == 3:
+                val both = simpleos_riscv_reg_is_const(consts, ops[1]) and simpleos_riscv_reg_is_const(consts, ops[2])
+                consts[simpleos_riscv_canon_reg(ops[0])] = both
+                recognized = recognized + 1
+                continue
+            if n == 2:
+                val cd2 = simpleos_riscv_canon_reg(ops[0])
+                val both2 = simpleos_riscv_reg_is_const(consts, cd2) and simpleos_riscv_reg_is_const(consts, ops[1])
+                consts[cd2] = both2
+                recognized = recognized + 1
+                continue
+            return false
+
+        # Unknown mnemonic -- branches, calls, CSR access, atomics, float
+        # math, anything at all. Real work by construction.
+        return false
+
+    if not saw_return or recognized == 0:
+        return false
+    # `a0` must be PROVABLY constant -- not merely "never written". Accepting
+    # "never written" was measured to be unsound: it is exactly the state a
+    # foreign-architecture body presents (an aarch64 function writes `x0`, and
+    # nothing here is called `a0`), so it turned every recognisable aarch64
+    # body into a false positive. Demanding proof also means a RISC-V void stub
+    # that never touches `a0` goes undetected, which is the safe direction.
+    if not simpleos_riscv_reg_is_const(consts, "a0"):
+        return false
+    # `a1` carries the upper half of a wide return on rv32. It may be untouched
+    # (narrow return), but if the body computed it for real the value escapes
+    # and the function is not a constant-returner.
+    if consts.has("a1") and not consts["a1"]:
+        return false
+    true
+
+fn simpleos_insn_is_prefix_token(tok: text) -> bool:
+    """Bare x86 instruction-prefix words that a disassembler prints AHEAD of the
+    mnemonic, as separate tokens.
+
+    Measured: GNU objdump renders clang's inter-function padding as
+    `data16 data16 data16 cs nopw 0x0(%rax,%rax,1)`, so the first token is
+    `data16`, not `nopw`. Treating token 0 as the mnemonic classified that
+    padding as real work, which alone was enough to make every -O2
+    constant-return body score 0 under GNU objdump -- the padding sits inside
+    the preceding function's disassembly range. llvm-objdump prints the same
+    bytes as `nopw %cs:(%rax,%rax)`, one token.
+
+    Skipping these can only EXPOSE the underlying mnemonic; if that mnemonic is
+    not one of the handful recognised below, the instruction still classifies as
+    real work. Segment names are included because objdump prints a bare `cs`
+    (etc.) for a prefixed instruction while an actual segment-relative operand
+    is written `%cs:...` and stays attached to its operand."""
+    (tok == "data16" or tok == "data32" or tok == "addr16" or tok == "addr32" or
+        tok == "cs" or tok == "ds" or tok == "es" or tok == "fs" or
+        tok == "gs" or tok == "ss")
+
+fn simpleos_x86_canon_mnemonic(op: text) -> text:
+    """x86 mnemonic with its operand-size suffix folded away.
+
+    The two disassemblers disagree on the suffix: llvm-objdump prints
+    `xorl`/`movl`/`retq`/`pushq` where GNU objdump prints `xor`/`mov`/`ret`/
+    `push`. Matching one spelling made the whole x86-64 channel inert under the
+    other -- and llvm-objdump is exactly what `find_objdump_portable` selects on
+    Linux, so the architecture this guard's baseline was measured on was the one
+    detecting nothing. A clang x86-64 object holding ten constant-return
+    functions scored 0. Same defect class as the RISC-V blindness fixed in
+    70c86f4b77b, on the most-used path
+    (doc/08_tracking/bug/simpleos_fabricated_rt_guard_x86_classifier_inert_2026-07-28.md).
+
+    An explicit table, NOT a generic trailing-b/w/l/q strip. A blind strip would
+    also rewrite unrelated x86 and aarch64 mnemonics (`bl` -> `b`, `sarl` ->
+    `sar`, `stlrb` -> `stlr`), and every rewrite is another chance to turn real
+    work into something this function recognises as trivial. Only mnemonics
+    already handled below are folded, so an unlisted spelling stays unlisted and
+    classifies as real work -- the safe direction."""
+    if op == "retq" or op == "retl" or op == "retw":
+        return "ret"
+    if op == "leaveq" or op == "leavel":
+        return "leave"
+    if op == "pushq" or op == "pushl" or op == "pushw":
+        return "push"
+    if op == "popq" or op == "popl" or op == "popw":
+        return "pop"
+    if (op == "movq" or op == "movl" or op == "movw" or op == "movb" or
+            op == "movabs" or op == "movabsq"):
+        return "mov"
+    if op == "xorq" or op == "xorl" or op == "xorw" or op == "xorb":
+        return "xor"
+    if op == "nopq" or op == "nopl" or op == "nopw" or op == "nopb":
+        return "nop"
+    op
+
+fn simpleos_insn_operands(toks: [text], start: i64) -> [text]:
+    """Comma-split operand list for one x86-64/aarch64 instruction,
+    spelling-agnostic.
+
+    Exists for the same reason `simpleos_riscv_operands` does: llvm-objdump
+    prints `xorl %eax, %eax` and `mov x0, xzr` (space after the comma) while GNU
+    objdump prints `xor %eax,%eax`. Token-POSITION matching -- what this branch
+    used to do, reading `toks[1]` and comparing it to `%eax,%eax` -- therefore
+    worked under exactly one tool and silently failed under the other. Rejoining
+    from `start` and splitting on `,` makes both spellings yield the same list,
+    so a future toolchain spacing change cannot re-open the hole.
+
+    Trailing disassembler comments are dropped: llvm-objdump x86 appends
+    `# imm = 0x100`, and both aarch64 backends append `// =1`. Only a token that
+    is EXACTLY `#` starts an x86/RISC-V comment -- aarch64 writes immediates as
+    an attached `#0x1`, and those must survive untouched.
+
+    A memory operand containing commas (`0x0(%rax,%rax,1)`) splits into several
+    entries. That is harmless and safe: every check below compares operands
+    against exact register spellings, so a split memory operand can only fail to
+    match, never match something it should not."""
+    var rest = ""
+    var i = start
+    while i < toks.len():
+        if toks[i] == "#" or toks[i].starts_with("//"):
+            break
+        rest = rest + toks[i]
+        i = i + 1
+    var ops: [text] = []
+    for op in rest.split(","):
+        val t = op.trim()
+        if t != "":
+            ops.push(t)
+    ops
+
+fn simpleos_a64_ret_reg(reg: text) -> bool:
+    """aarch64 return register, either width."""
+    reg == "w0" or reg == "x0"
+
+fn simpleos_a64_const_src(operand: text) -> bool:
+    """An aarch64 `mov` source that is constant BY CONSTRUCTION: a literal
+    immediate (`#0x1`, `#-0x1`) or the hardwired zero register (`wzr`/`xzr`).
+
+    Both halves are load-bearing and were measured. clang -O2 emits
+    `mov x0, xzr` for `return 0;`, so refusing the zero register would drop the
+    aarch64 channel from 10 detections to 9. Accepting a plain register source
+    (`mov w0, w1`) is the opposite error -- that is `return arg`, real work --
+    and the old token-position match did exactly that, since it only ever looked
+    at the DESTINATION token `w0,`. Neither is accepted here."""
+    operand.starts_with("#") or operand == "wzr" or operand == "xzr"
+
+fn simpleos_trivial_insn_class(insn: text) -> i64:
+    """0 = does real work, 1 = frame/no-op scaffolding, 2 = materializes a
+    constant return value. Covers x86-64 and aarch64 forms.
+
+    RISC-V is deliberately NOT handled here. Its constant returns span several
+    instructions and stage through temporaries, so no instruction-at-a-time
+    verdict can see them; `simpleos_riscv_body_is_trivial_constant` analyses
+    the whole body instead, and `simpleos_body_is_trivial_constant` dispatches
+    to it.
+
+    Mnemonic and operands are BOTH normalized before matching (see
+    `simpleos_x86_canon_mnemonic` / `simpleos_insn_operands`) so the verdict is
+    identical under llvm-objdump and GNU objdump. Verified against both on
+    clang -O0 and -O2 objects for x86-64 and aarch64; that dual-tool check is
+    what the RISC-V fix proved is mandatory, and skipping it here is what left
+    this channel inert.
+
+    Unknown mnemonics deliberately classify as 0 (does real work), so an
+    unrecognised encoding makes the guard MISS a fake rather than accuse a real
+    implementation. Every error here is a false negative by construction.
+
+    Never consults the symbol name, prefix, or linkage -- only the body."""
+    var toks: [text] = []
+    for tok in insn.split(" "):
+        if tok != "":
+            toks.push(tok)
+    var head = 0
+    while head < toks.len() and simpleos_insn_is_prefix_token(toks[head]):
+        head = head + 1
+    if head >= toks.len():
+        return 1
+    val op = simpleos_x86_canon_mnemonic(toks[head])
+    val ops = simpleos_insn_operands(toks, head + 1)
+    val n = ops.len()
+    if (op == "endbr64" or op == "endbr32" or op == "ret" or op == "leave" or
+            op == "nop" or op == "hlt"):
+        return 1
+    if op == "push" or op == "pop":
+        return if n == 1 and ops[0] == "%rbp": 1 else: 0
+    if op == "mov":
+        # x86-64 AT&T frame setup.
+        if n == 2 and ops[0] == "%rsp" and ops[1] == "%rbp":
+            return 1
+        # x86-64 AT&T immediate into the return register.
+        if n == 2 and ops[0].starts_with("$") and (ops[1] == "%eax" or ops[1] == "%rax"):
+            return 2
+        # aarch64 immediate / zero register into the return register.
+        if n == 2 and simpleos_a64_ret_reg(ops[0]) and simpleos_a64_const_src(ops[1]):
+            return 2
+        return 0
+    if op == "xor":
+        return if n == 2 and ops[0] == ops[1] and (ops[0] == "%eax" or ops[0] == "%rax"): 2 else: 0
+    if op == "movz" or op == "movn":
+        return if n >= 2 and simpleos_a64_ret_reg(ops[0]) and ops[1].starts_with("#"): 2 else: 0
+    0
+
+pub fn simpleos_body_is_trivial_constant(insns: [text]) -> bool:
+    """Does this already-normalized instruction sequence do nothing but set up a
+    frame and return a constant?
+
+    Split out of `simpleos_trivial_body_rt_symbols` so the predicate can be
+    tested against recorded disassembly without a cross-toolchain object on
+    disk. The guard shipped with no test at all, which is precisely how it went
+    a full architecture (RISC-V) without anyone noticing it detected nothing
+    there (doc/08_tracking/bug/simpleos_fabricated_rt_guard_riscv_classifier_inert_2026-07-28.md).
+
+    Two analyzers, each sound on its own, ORed together. The instruction-class
+    one covers x86-64/aarch64, where a constant return is a single recognisable
+    instruction. The RISC-V one abstract-interprets the body, because there a
+    constant return spans a chain (li -> slli -> mv) that no per-instruction
+    verdict can see. ORing is safe precisely BECAUSE each is individually
+    conservative: both answer false on anything they cannot fully account for,
+    so feeding an x86 body to the RISC-V analyzer (or the reverse) yields false
+    rather than a wrong accusation.
+
+    No arch is detected up front, deliberately. Sniffing the architecture would
+    be one more thing that can silently mis-fire; asking both analyzers cannot."""
+    var trivial = true
+    var constants = 0
+    var count = 0
+    for insn in insns:
+        if insn == "":
+            continue
+        count = count + 1
+        val cls = simpleos_trivial_insn_class(insn)
+        if cls == 2:
+            constants = constants + 1
+        elif cls == 0:
+            trivial = false
+    if trivial and count > 0 and constants <= 1:
+        return true
+    simpleos_riscv_body_is_trivial_constant(insns)
+
+pub fn simpleos_trivial_body_rt_symbols(objects: [text]) -> [text]:
+    """Defined `rt_*` whose body only sets up a frame and returns a constant.
+
+    GAP 1. A presence-only check ("is it defined outside auto_stubs.c?") is
+    structurally blind to the hand-written `return 0;` fakes in
+    `baremetal_stubs.c` / `baremetal_boot_stdout.c`: those are strong `T`
+    symbols in the shipped kernel whose bodies disassemble to
+    `xor %eax,%eax; ret` (`rt_pool_safepoint`, `rt_stderr_flush`, the whole
+    `rt_arm_elf64_pt_load_*` family). They are exactly as dangerous as the
+    generated weak ones and only a body-level predicate can see them.
+
+    A genuine constant-returning implementation trips this too; that is
+    intended. Such a symbol must be justified in
+    `simpleos_rt_symbol_is_optional_backend` or carried in the baseline, never
+    accepted silently."""
+    val objdump = find_objdump_portable()
+    if objdump == "":
+        return []
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    for obj in objects:
+        # `-r` is a SOUNDNESS requirement, not a convenience. A relocated
+        # immediate disassembles as a plain literal: `rt_baremetal_heap_start`
+        # is `return (uint64_t)(uintptr_t)_heap;` and prints as
+        # `movl $0x0, %eax; retq` -- indistinguishable from `return 0;` until
+        # the relocation is shown. Classifying it as fabricated would refuse a
+        # legitimate link, the false-positive direction that got the first
+        # version of this guard rejected. With `-r` the disassembler emits a
+        # relocation line inside the body, which normalizes to a token like
+        # `R_X86_64_32` -- an unrecognised mnemonic -- so the existing
+        # unknown-mnemonic fail-safe classifies the whole body as real work.
+        # That is exactly right: a body carrying a relocation references a
+        # link-time address, and the nil stubs this guard hunts never do.
+        val (dis, _derr, dcode) = process_run(objdump, ["-d", "-r", "--no-show-raw-insn", obj])
+        if dcode != 0:
+            continue
+        var sym = ""
+        var body: [text] = []
+        for raw in dis.split("\n"):
+            val line = raw.trim()
+            if line.ends_with(">:") and line.contains(" <"):
+                if sym.starts_with("rt_") and not seen.has(sym) and simpleos_body_is_trivial_constant(body):
+                    seen[sym] = true
+                    out.push(sym)
+                sym = simpleos_objdump_symbol_name(line)
+                body = []
+                continue
+            if sym == "":
+                continue
+            val insn = simpleos_objdump_normalized_insn(line)
+            if insn == "":
+                continue
+            body.push(insn)
+        if sym.starts_with("rt_") and not seen.has(sym) and simpleos_body_is_trivial_constant(body):
+            seen[sym] = true
+            out.push(sym)
+    out
+

@@ -1,0 +1,61 @@
+#!/bin/sh
+# Regression: the SimpleOS core archive owner must use the selected LLVM
+# archiver for both member extraction and final archive construction.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+mkdir -p "$TMP_DIR/source" "$TMP_DIR/bin"
+printf 'fn main(): 0\n' >"$TMP_DIR/source/fixture.spl"
+
+cat >"$TMP_DIR/bin/fake-simple" <<'EOF'
+#!/bin/sh
+set -eu
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) shift; output="$1" ;;
+  esac
+  shift
+done
+mkdir -p "$(dirname -- "$output")" "$TMPDIR/fake-object"
+printf 'fixture object\n' >"$TMPDIR/fake-object/fixture.o"
+/usr/bin/llvm-ar rcs "$output" "$TMPDIR/fake-object/fixture.o"
+EOF
+chmod +x "$TMP_DIR/bin/fake-simple"
+
+cat >"$TMP_DIR/bin/selected-llvm-ar" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$1" >>"$TMPDIR/archiver-calls"
+exec /usr/bin/llvm-ar "$@"
+EOF
+chmod +x "$TMP_DIR/bin/selected-llvm-ar"
+
+export TMPDIR="$TMP_DIR"
+SIMPLE_BINARY="$TMP_DIR/bin/fake-simple" \
+SIMPLE_CORE_SOURCE_DIR="$TMP_DIR/source" \
+SIMPLE_CORE_ARCHIVER="$TMP_DIR/bin/selected-llvm-ar" \
+  sh "$ROOT_DIR/scripts/os/simpleos-core-archive.shs" \
+    --target x86_64-unknown-linux-gnu \
+    --out-dir "$TMP_DIR/output" \
+    --backend cranelift >"$TMP_DIR/build.log"
+
+test -s "$TMP_DIR/output/libsimple_runtime.a"
+test "$(sed -n '1p' "$TMP_DIR/archiver-calls")" = x
+test "$(sed -n '2p' "$TMP_DIR/archiver-calls")" = rcs
+test "$(wc -l <"$TMP_DIR/archiver-calls" | tr -d ' ')" = 2
+
+if SIMPLE_BINARY="$TMP_DIR/bin/fake-simple" \
+   SIMPLE_CORE_SOURCE_DIR="$TMP_DIR/source" \
+   SIMPLE_CORE_ARCHIVER="$TMP_DIR/bin/does-not-exist" \
+   sh "$ROOT_DIR/scripts/os/simpleos-core-archive.shs" \
+     --target x86_64-unknown-linux-gnu \
+     --out-dir "$TMP_DIR/rejected" >"$TMP_DIR/rejected.log" 2>&1; then
+  echo "FAIL: missing configured archiver was accepted" >&2
+  exit 1
+fi
+grep -q 'configured archive tool not found' "$TMP_DIR/rejected.log"
+echo "PASS: SimpleOS core archive uses one resolved archiver and rejects missing overrides"

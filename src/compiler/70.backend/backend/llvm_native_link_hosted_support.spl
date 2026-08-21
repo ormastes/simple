@@ -1,0 +1,184 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os, is_macos}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use compiler.backend.backend.simpleos_native_guards.{simpleos_module_init_symbols}
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct NativeLinkOptions:
+    """Options for LLVM native linking."""
+    debug: bool
+    verbose: bool
+    pie: bool
+    bare_metal: bool
+    opt_level: i64
+    stage4_backend: text
+    stage4_compiler_hash: text
+
+impl NativeLinkOptions:
+    static fn default() -> NativeLinkOptions:
+        NativeLinkOptions(
+            debug: false,
+            verbose: false,
+            pie: true,
+            bare_metal: false,
+            opt_level: 3,
+            stage4_backend: "llvm",
+            stage4_compiler_hash: ""
+        )
+
+fn hosted_c_target_matches_host(target: text, host_os_name: text, host_arch_name: text) -> bool:
+    """Whether host-compiled C runtime and entry objects match an explicit target."""
+    if target == "" or target == "host" or target == "native":
+        return true
+
+    val target_arch_text = if target.contains("-"): target.split("-")[0] else: target
+    val target_arch = mir_target_context_normalize_arch(target_arch_text)
+    val host_arch_normalized = mir_target_context_normalize_arch(host_arch_name)
+    val hosted_riscv64_arch = target_arch_text == "riscv64" or target_arch_text == "riscv64gc" or target_arch_text == "rv64" or target_arch_text == "rv64gc"
+    val is_x86_64 = target_arch == "x86_64" and host_arch_normalized == "x86_64"
+    val is_aarch64 = target_arch == "aarch64" and host_arch_normalized == "aarch64"
+    val is_riscv64 = hosted_riscv64_arch and host_arch_normalized == "riscv64"
+    if not is_x86_64 and not is_aarch64 and not is_riscv64:
+        return false
+
+    # Architecture-only x86-64/AArch64 targets inherit the host OS. The
+    # current explicit RISC-V target contract is Linux-only.
+    if not target.contains("-"):
+        return not is_riscv64 or host_os_name == "linux"
+
+    val canonical_suffix = match host_os_name:
+        case "linux": "-unknown-linux-gnu"
+        case "macos" | "darwin": "-apple-darwin"
+        case "windows": "-pc-windows-msvc"
+        case "freebsd": if is_riscv64: "" else: "-unknown-freebsd"
+        case _: ""
+    if canonical_suffix == "":
+        return false
+    target.substring(target_arch_text.len()) == canonical_suffix
+
+# ============================================================================
+# C-Based Entry Point Compiler (no llc needed)
+# ============================================================================
+
+fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_level: i64, compiler: text = "") -> Result<text, text>:
+    """Compile entry point as C source (no llc needed)."""
+    val cc = if compiler != "": compiler else: find_c_compiler()
+    if cc == "":
+        return Err("No C compiler found")
+    val tmp_dir = _get_temp_dir()
+    val ext = _obj_ext()
+    # Deterministic entry-shim basename for reproducible builds: the C compiler
+    # embeds the source basename (STT_FILE) into the object, so a PID in the
+    # filename would leak into the binary and break bootstrap determinism. Keep
+    # the PID in the directory (concurrency-safe) and use a fixed basename.
+    val entry_dir = "{tmp_dir}/simple_entry_{pid}"
+    dir_create_all(entry_dir)
+    val entry_c = "{entry_dir}/simple_entry.c"
+    val entry_o = "{entry_dir}/simple_entry{ext}"
+    val init_names = simpleos_module_init_symbols(user_objects)
+    var c_source = "extern void spl_init_args(int argc, char** argv);\n"
+    # The startup owner is optional until a native artifact carries a decoded
+    # manifest.  Keeping this a weak ABI lets ordinary native binaries retain
+    # their existing entry closure while a manifest-aware generated module can
+    # bind the exact same pre-main slot.  The call deliberately precedes
+    # runtime/module initialization: declared argv and file preloads must be
+    # admitted before user code can observe process state.
+    c_source = c_source + "#if !defined(_MSC_VER)\n"
+    c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
+    c_source = c_source + "#endif\n"
+    c_source = c_source + "extern void __simple_runtime_init(void);\n"
+    c_source = c_source + "extern long long __simple_main(void);\n"
+    c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
+    for name in init_names:
+        c_source = c_source + "extern void {name}(void);\n"
+    c_source = c_source + "int main(int argc, char** argv) {\n"
+    c_source = c_source + "    spl_init_args(argc, argv);\n"
+    c_source = c_source + "#if !defined(_MSC_VER)\n"
+    c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"
+    c_source = c_source + "#endif\n"
+    c_source = c_source + "    __simple_runtime_init();\n"
+    for name in init_names:
+        c_source = c_source + "    {name}();\n"
+    c_source = c_source + "    long long result = __simple_main();\n"
+    c_source = c_source + "    __simple_runtime_shutdown();\n"
+    c_source = c_source + "    return (int)result;\n"
+    c_source = c_source + "}\n"
+    file_write(entry_c, c_source)
+
+    val use_msvc = _is_msvc_cc(cc)
+    var comp_args: [text] = []
+    if use_msvc:
+        var msvc_opt = "/Ox"
+        if opt_level <= 0:
+            msvc_opt = "/Od"
+        elif opt_level == 1:
+            msvc_opt = "/O1"
+        elif opt_level == 2:
+            msvc_opt = "/O2"
+        comp_args = ["/c", msvc_opt, "/Gy", "/Fo{entry_o}", entry_c]
+    else:
+        comp_args = ["-c"]
+        if not _is_windows():
+            comp_args.push("-fPIC")
+        var cc_opt = "-O3"
+        if opt_level <= 0:
+            cc_opt = "-O0"
+        elif opt_level == 1:
+            cc_opt = "-Oz"
+        elif opt_level == 2:
+            cc_opt = "-O2"
+        comp_args.push(cc_opt)
+        comp_args.push("-ffunction-sections")
+        comp_args.push("-fdata-sections")
+        comp_args.push("-o")
+        comp_args.push(entry_o)
+        comp_args.push(entry_c)
+
+    val (ep_out, ep_err, ep_code) = process_run(cc, comp_args)
+    file_delete(entry_c)
+    if ep_code != 0:
+        return Err("Entry point compilation failed: {ep_out}{ep_err}")
+    Ok(entry_o)
+
+# Narrow core runtime lanes must never acquire the Rust hosted archive merely
+# because SIMPLE_RUNTIME_PATH points at the bootstrap directory.
+fn native_all_allowed_for_runtime_bundle(bundle: text) -> bool:
+    match bundle:
+        case "simple-core": false
+        case "simple_core": false
+        case "core-c-bootstrap": false
+        case "core_c_bootstrap": false
+        case "runtime": false
+        case "core": false
+        case "core-c": false
+        case "core_c": false
+        case _: true

@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+stubs=$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c
+tail=$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_network_tail.inc.c
+media=$root/examples/09_embedded/simple_os/arch/riscv64/boot/rv64_fs_exec_media.inc.c
+loader=$root/examples/09_embedded/simple_os/arch/riscv64/boot/rv64_fs_exec_loader.inc.c
+entry=$root/examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl
+builder=$root/scripts/os/build_simpleos_fs_exec_probe.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/rv64-streamed-elf.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+fail() { echo "rv64-streamed-fat-elf: $*" >&2; exit 1; }
+need() { grep -Fq "$2" "$1" || fail "missing $3"; }
+reject() { ! grep -Fq "$2" "$1" || fail "obsolete $3 remains"; }
+
+need "$media" 'RV64_FS_ELF_MAX_FILE_BYTES' 'bounded large-file admission cap'
+need "$media" 'rv64_fat_read_range' 'streamed FAT range reader'
+need "$media" 'transitions > fat->data_clusters' 'cyclic FAT chain bound'
+need "$media" 'cached_cluster_index <= target_cluster_index' 'monotonic FAT cursor reuse'
+need "$loader" 'rv64_fs_arena_alloc(4096U, 4096U)' 'loader-owned dynamic page allocation'
+need "$loader" 'g_rv64_fs_exec_arena_used = checkpoint' 'failed-admission rollback'
+need "$loader" 'admitted_load_bytes > RV64_FS_ELF_MAX_LOAD_BYTES' 'aggregate PT_LOAD cap'
+need "$loader" 'memsz < filesz' 'PT_LOAD size validation'
+need "$loader" '((flags & 2U) && (flags & 1U))' 'W^X rejection'
+reject "$media" 'g_rv64_fs_exec_elf[8192]' 'whole-ELF 8 KiB buffer'
+reject "$loader" 'g_rv64_fs_exec_pages[65536]' 'fixed sixteen-page pool'
+need "$loader" 'return (RuntimeValue)-13;' 'legacy executor fail-closed result'
+[ "$(wc -l < "$media")" -le 800 ] || fail 'media unit exceeds 800 lines'
+[ "$(wc -l < "$loader")" -le 800 ] || fail 'loader unit exceeds 800 lines'
+[ "$(grep -Fc '#include "rv64_fs_exec_media.inc.c"' "$tail")" -eq 1 ] || fail 'media unit include count'
+[ "$(grep -Fc '#include "rv64_fs_exec_loader.inc.c"' "$tail")" -eq 1 ] || fail 'loader unit include count'
+for unit in "$stubs" "$root"/examples/09_embedded/simple_os/arch/riscv64/boot/*.inc.c; do
+    [ "$(wc -l < "$unit")" -le 800 ] || fail "changed C unit exceeds 800 lines: $unit"
+done
+need "$entry" 'rt_riscv_fs_legacy_exec_disabled()' 'production legacy-exec rejection'
+need "$entry" 'RV64_LEGACY_FSEXEC_DISABLED reason=missing-loader-authority-token' 'production rejection receipt'
+reject "$entry" 'val fs_exec_rc = rt_riscv_fs_exec_run()' 'unauthenticated production execution'
+
+cc=${RISCV64_ELF_CC:-riscv64-unknown-elf-gcc}
+nm_tool=${RISCV64_ELF_NM:-riscv64-unknown-elf-nm}
+command -v "$cc" >/dev/null 2>&1 || fail "missing cross C compiler: $cc"
+command -v "$nm_tool" >/dev/null 2>&1 || fail "missing cross nm: $nm_tool"
+"$cc" -std=gnu11 -ffreestanding -fno-builtin -march=rv64gc -mabi=lp64d \
+    -c "$stubs" -o "$work/rv64-stubs.o"
+symbols=$($nm_tool --defined-only "$work/rv64-stubs.o")
+[ "$(printf '%s\n' "$symbols" | awk '$3 == "rt_riscv_fs_exec_run" { n++ } END { print n + 0 }')" -eq 1 ] ||
+    fail 'rt_riscv_fs_exec_run must have exactly one linked owner'
+[ "$(printf '%s\n' "$symbols" | awk '$3 == "rt_riscv_fs_legacy_exec_disabled" { n++ } END { print n + 0 }')" -eq 1 ] ||
+    fail 'rt_riscv_fs_legacy_exec_disabled must have exactly one linked owner'
+
+SIMPLEOS_FS_EXEC_PROBE_PADDING_BYTES=4194304 \
+    sh "$builder" riscv64 "$work/large.elf" "$work/large.manifest" >/dev/null
+size=$(wc -c < "$work/large.elf" | tr -d ' ')
+[ "$size" -gt 4194304 ] || fail "large ELF was not materialized: $size"
+grep -Fq 'loader_test_padding_bytes=4194304' "$work/large.manifest" ||
+    fail 'large ELF manifest does not bind requested padding'
+machine=$(readelf -h "$work/large.elf" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')
+[ "$machine" = 'RISC-V' ] || fail "large ELF machine mismatch: $machine"
+load_bytes=$(readelf -W -l "$work/large.elf" | awk '$1 == "LOAD" { n += strtonum($6) } END { print n + 0 }')
+[ "$load_bytes" -gt 4194304 ] || fail "large PT_LOAD coverage missing: $load_bytes"
+
+echo "PASS RV64 streamed FAT ELF loader contract size=$size load_bytes=$load_bytes"

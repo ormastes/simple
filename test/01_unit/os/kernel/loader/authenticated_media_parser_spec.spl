@@ -1,0 +1,61 @@
+use std.spec.{describe, it, expect}
+use os.kernel.loader.authenticated_media_parser.{
+    authenticated_media_field_v1, authenticated_media_u64_field_v1,
+    authenticated_media_hex_bytes_v1
+}
+
+fn rv64_admission_record() -> text:
+    "schema=simpleos-executable-admission-v1\nmount_id=1\nfile_generation=7\n"
+
+fn x86_64_admission_record() -> text:
+    "schema=simpleos-executable-admission-v1\nmount_id=1\nfile_generation=7\n"
+
+describe "authenticated media parser architecture parity":
+    it "decodes RV64 and x86_64 admission fields identically":
+        val rv_mount = authenticated_media_u64_field_v1(rv64_admission_record(), "mount_id")
+        val x86_mount = authenticated_media_u64_field_v1(x86_64_admission_record(), "mount_id")
+        val rv_generation = authenticated_media_u64_field_v1(rv64_admission_record(), "file_generation")
+        val x86_generation = authenticated_media_u64_field_v1(x86_64_admission_record(), "file_generation")
+        expect(rv_mount.?).to_equal(true)
+        expect(x86_mount.?).to_equal(true)
+        expect(rv_mount.unwrap()).to_equal(x86_mount.unwrap())
+        expect(rv_generation.unwrap()).to_equal(x86_generation.unwrap())
+
+    it "rejects absent duplicate empty and malformed fields for both adapters":
+        expect(authenticated_media_field_v1("key=first\nkey=second\n", "key").?).to_equal(false)
+        expect(authenticated_media_field_v1("key=\n", "key").?).to_equal(false)
+        expect(authenticated_media_field_v1("other=value\n", "key").?).to_equal(false)
+        expect(authenticated_media_field_v1("key=value\n", "key=value").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("mount_id=-1\n", "mount_id").?).to_equal(false)
+
+    it "parses checked decimal u64 fields and enforces the mount zero policy":
+        val maximum = authenticated_media_u64_field_v1(
+            "file_id=18446744073709551615\n", "file_id")
+        expect(maximum.?).to_equal(true)
+        expect(maximum.unwrap()).to_equal(18446744073709551615u64)
+        expect(authenticated_media_u64_field_v1("mount_id=0\n", "mount_id").?).to_equal(false)
+        val zero_generation = authenticated_media_u64_field_v1(
+            "mount_generation=0\n", "mount_generation")
+        expect(zero_generation.?).to_equal(true)
+        expect(zero_generation.unwrap()).to_equal(0u64)
+
+    it "rejects alpha empty whitespace signed and overflowing u64 fields":
+        expect(authenticated_media_u64_field_v1("file_id=12a3\n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("file_id=\n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("file_id= 1\n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("file_id=1 \n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("file_id=1\t\n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("file_id=+1\n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1("file_id=-1\n", "file_id").?).to_equal(false)
+        expect(authenticated_media_u64_field_v1(
+            "file_id=18446744073709551616\n", "file_id").?).to_equal(false)
+
+    it "decodes canonical lowercase signature bytes and fails closed otherwise":
+        val decoded = authenticated_media_hex_bytes_v1("00a5ff")
+        expect(decoded.len()).to_equal(3)
+        expect(decoded[0]).to_equal(0u8)
+        expect(decoded[1]).to_equal(165u8)
+        expect(decoded[2]).to_equal(255u8)
+        expect(authenticated_media_hex_bytes_v1("abc").len()).to_equal(0)
+        expect(authenticated_media_hex_bytes_v1("AA").len()).to_equal(0)
+        expect(authenticated_media_hex_bytes_v1("0g").len()).to_equal(0)

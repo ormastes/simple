@@ -25,6 +25,7 @@ done
 case "$accelerator" in kvm|tcg) ;; *) printf '%s\n' 'x86_64-fs-exec-ovmf: accelerator must be kvm or tcg' >&2; exit 64 ;; esac
 
 qemu=${SIMPLEOS_X86_64_QEMU:-qemu-system-x86_64}
+memory=${SIMPLEOS_X86_64_MEMORY:-2048M}
 ovmf_code=${SIMPLEOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 ovmf_vars_source=${SIMPLEOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 command -v "$qemu" >/dev/null 2>&1 || { printf '%s\n' "x86_64-fs-exec-ovmf: missing QEMU: $qemu" >&2; exit 2; }
@@ -46,14 +47,16 @@ printf '%s\n' \
     'set default=0' \
     'insmod multiboot' \
     'menuentry "SimpleOS x86_64 filesystem execution" {' \
-    '  multiboot (hd0)/boot/kernel.elf' \
+    '  echo "[grub-uefi] multiboot loading embedded /boot/kernel.elf"' \
+    '  multiboot (memdisk)/boot/kernel.elf' \
     '  boot' \
     '}' > "$run_dir/grub.cfg"
 
 grub-mkstandalone --format=x86_64-efi \
     --output="$esp/EFI/BOOT/BOOTX64.EFI" \
     --modules="multiboot normal echo search search_fs_file part_gpt fat" \
-    "boot/grub/grub.cfg=$run_dir/grub.cfg"
+    "boot/grub/grub.cfg=$run_dir/grub.cfg" \
+    "boot/kernel.elf=$kernel"
 
 child=
 cleanup() {
@@ -63,7 +66,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 "$qemu" -no-user-config -monitor none -nographic -no-reboot \
-    -machine q35 -cpu qemu64 -m 512M -accel "$accelerator" \
+    -machine q35 -cpu qemu64 -m "$memory" -accel "$accelerator" \
     -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
     -drive "if=pflash,format=raw,file=$vars" \
     -drive "file=fat:rw:$esp,format=raw,id=esp,if=none" \

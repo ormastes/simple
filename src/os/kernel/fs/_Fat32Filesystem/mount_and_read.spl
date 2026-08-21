@@ -1,0 +1,462 @@
+# FAT32 mount, lookup, positioned-read, and cluster-chain operations.
+use os.kernel.fs.fat32.*
+
+    static fn new(device_id: u64) -> Fat32Filesystem:
+        """Create a driver bound to the given block device."""
+        Fat32Filesystem(
+            device_id: device_id,
+            bpb_parsed: false,
+            cluster_size: 0u32,
+            fat_start_sector: 0u32,
+            data_start_sector: 0u32,
+            root_cluster: 0u32,
+            sectors_per_cluster: 0u32,
+            bytes_per_sector: 512u32,
+            data_clusters: 0u32,
+            total_sectors: 0u32,
+            reserved_sectors: 0u32,
+            fat_size_sectors: 0u32,
+            fat_count: 0u32,
+            mutation_active: false,
+            root_dir_data: []
+        )
+
+    fn _mutation_enter(self) -> bool:
+        if self.mutation_active:
+            return false
+        self.mutation_active = true
+        true
+
+    fn _mutation_leave(self):
+        self.mutation_active = false
+
+    me mount(dev: BlockDevice) -> Result<(), i32>:
+        """Read sector 0, validate BPB, populate geometry fields."""
+        val read_result = dev.read_sector(0u64)
+        if read_result.is_err():
+            return Err(EIO)
+        val buf = read_result.unwrap()
+
+        val bpb_result = parse_bpb(buf)
+        if bpb_result.is_err():
+            return Err(bpb_result.unwrap_err())
+
+        val bpb = bpb_result.unwrap()
+        self.bpb_parsed          = true
+        self.fat_start_sector    = bpb.reserved_sectors.to_u32()
+        self.data_start_sector   = (bpb.reserved_sectors.to_u32() + bpb.num_fats.to_u32() * bpb.fat_size_32)
+        self.cluster_size        = bpb.sectors_per_cluster.to_u32() * bpb.bytes_per_sector.to_u32()
+        self.root_cluster        = bpb.root_cluster
+        self.sectors_per_cluster = bpb.sectors_per_cluster.to_u32()
+        self.bytes_per_sector    = bpb.bytes_per_sector.to_u32()
+        self.total_sectors       = bpb.total_sectors_32
+        self.reserved_sectors    = bpb.reserved_sectors.to_u32()
+        self.fat_size_sectors    = bpb.fat_size_32
+        self.fat_count           = bpb.num_fats.to_u32()
+        # Fuel for cluster-chain walk: total data sectors / sectors-per-cluster.
+        # A valid chain can never contain more clusters than this.
+        if bpb.total_sectors_32 > self.data_start_sector and self.sectors_per_cluster > 0u32:
+            self.data_clusters = (bpb.total_sectors_32 - self.data_start_sector) / self.sectors_per_cluster
+        else:
+            self.data_clusters = 0u32
+
+        # Recover the fixed SimpleOS atomic-replace journal before reading or
+        # publishing root_dir_data. Missing provisioning leaves ordinary FAT32
+        # available with the capability Unsupported; corrupt/ambiguous or I/O
+        # state fails mount closed so stale namespace bytes are never exposed.
+        val recovery = fat32_atomic_replace_recover_device(
+            dev, bpb.total_sectors_32, bpb.reserved_sectors.to_u32(),
+            self.fat_start_sector, bpb.fat_size_32, bpb.num_fats.to_u32(),
+            self.data_clusters, self.data_start_sector,
+            self.sectors_per_cluster, self.root_cluster)
+        if recovery.is_err():
+            if recovery.unwrap_err() == Fat32ReplaceError.Unsupported:
+                fat32_atomic_replace_publish_caps(false, false, false)
+            else:
+                fat32_atomic_replace_publish_caps(false, false, false)
+                return Err(EIO)
+        else:
+            fat32_atomic_replace_publish_caps(true, true, true)
+
+        # Stash root dir cluster sectors for readdir (wave-4b shortcut)
+        val root_lba = cluster_to_lba(bpb, bpb.root_cluster)
+        var sec_idx: u32 = 0
+        while sec_idx < bpb.sectors_per_cluster.to_u32():
+            val r = dev.read_sector(root_lba + sec_idx.to_u64())
+            if r.is_err():
+                return Err(EIO)
+            val sec_buf = r.unwrap()
+            var ci = 0
+            while ci < 512:
+                self.root_dir_data.push(sec_buf[ci])
+                ci = ci + 1
+            sec_idx = sec_idx + 1
+
+        Ok(())
+
+    fn unmount(self) -> i32:
+        """Flush dirty FAT sectors and release the block device."""
+        ENOSYS
+
+    fn open(self, path: text) -> Result<FileHandle, i32>:
+        """Open a root-dir 8.3 file by path (wave-4c, root-dir only).
+
+        Accepts paths of the form "/NAME.EXT". Walks stashed root-dir
+        entries to find the matching 8.3 name. Returns ENOENT(-2) if
+        not found.
+        """
+        val entry_result = self._find_root_entry(path)
+        if entry_result.is_err():
+            return Err(entry_result.unwrap_err())
+        val off_opt = entry_result.unwrap()
+        if off_opt.is_none():
+            return Err(ENOENT)
+        val off = off_opt.unwrap()
+        val cluster_high = (self.root_dir_data[off + 21].to_u32() << 8) | self.root_dir_data[off + 20].to_u32()
+        val cluster_low  = (self.root_dir_data[off + 27].to_u32() << 8) | self.root_dir_data[off + 26].to_u32()
+        val start = (cluster_high << 16) | cluster_low
+        val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
+                     (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
+        # Record the on-disk location of this directory entry so write() can
+        # persist first_cluster and file_size back to disk after each write.
+        # root_dir_data is a flat byte array covering sectors_per_cluster sectors
+        # starting at LBA = data_start_sector + (root_cluster - 2) * sectors_per_cluster.
+        val rc2 = self.root_cluster - 2u32
+        val rc2_u64 = rc2.to_u64()
+        val spc_u64 = self.sectors_per_cluster.to_u64()
+        val root_dir_lba = self.data_start_sector.to_u64() + rc2_u64 * spc_u64
+        val bps_i = self.bytes_per_sector.to_i32()
+        val d_sector_idx = off / bps_i
+        val d_sector_idx_u64 = d_sector_idx.to_u64()
+        val d_sector = root_dir_lba + d_sector_idx_u64
+        val d_offset = off % bps_i
+        Ok(FileHandle(
+            fd: 0u64,
+            start_cluster: start,
+            current_cluster: start,
+            offset: 0u64,
+            file_size: fsize.to_u64(),
+            is_open: true,
+            dirent_sector: d_sector,
+            dirent_offset: d_offset
+        ))
+
+    fn read_at(self, dev: BlockDevice, h: FileHandle, offset: u64, buf: [u8]) -> Result<u64, i32>:
+        """Read up to buf.len() bytes at an explicit file offset.
+
+        Walks the FAT32 cluster chain via read_cluster_chain(dev,
+        h.start_cluster), then reads each cluster's sectors from dev,
+        assembling file bytes in chain order.  Truncates at h.file_size
+        so the caller never sees cluster padding past the real EOF.
+
+        Never mutates h.offset. Returns the number of bytes actually copied.
+        Returns Ok(0) when already at EOF or buf is empty.
+        Returns Err(EIO=-5) on any block-device or chain-walk failure.
+        """
+        if offset >= h.file_size:
+            return Ok(0u64)
+        val remaining = h.file_size - offset
+        var to_read = buf.len().to_u64()
+        if remaining < to_read:
+            to_read = remaining
+        if to_read == 0u64:
+            return Ok(0u64)
+
+        # Walk the full chain from the file's start cluster.
+        val chain_result = self.read_cluster_chain(dev, h.start_cluster)
+        if chain_result.is_err():
+            return Err(EIO)
+        val chain = chain_result.unwrap()
+        if chain.len() == 0:
+            return Ok(0u64)
+
+        val cluster_bytes = self.cluster_size.to_u64()
+        val spc = self.sectors_per_cluster.to_u64()
+        val bps = self.bytes_per_sector.to_u64()
+
+        # Determine which cluster the explicit offset falls into,
+        # and the byte offset within that cluster.
+        var cluster_idx: u64 = offset / cluster_bytes
+        var byte_in_cluster: u64 = offset % cluster_bytes
+
+        var copied: u64 = 0u64
+        while copied < to_read and cluster_idx.to_i32() < chain.len():
+            val cluster = chain[cluster_idx.to_i32()]
+            # Compute the LBA of the first sector of this cluster.
+            val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
+            # Within this cluster, start reading from byte_in_cluster.
+            var sec_off: u64 = byte_in_cluster / bps
+            var byte_in_sec: u64 = byte_in_cluster % bps
+            while copied < to_read and sec_off < spc:
+                val lba = first_sector + sec_off
+                val sec_result = dev.read_sector(lba)
+                if sec_result.is_err():
+                    return Err(EIO)
+                val sec = sec_result.unwrap()
+                while copied < to_read and byte_in_sec < bps:
+                    buf[copied.to_i32()] = sec[byte_in_sec.to_i32()]
+                    copied = copied + 1u64
+                    byte_in_sec = byte_in_sec + 1u64
+                sec_off = sec_off + 1u64
+                byte_in_sec = 0u64
+            cluster_idx = cluster_idx + 1u64
+            byte_in_cluster = 0u64
+
+        Ok(copied)
+
+    fn read(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
+        """Sequential compatibility read starting at h.offset.
+
+        The positioned primitive owns the device traversal. This wrapper alone
+        advances the sequential cursor after a successful transfer.
+        """
+        val result = self.read_at(dev, h, h.offset, buf)
+        if result.is_err():
+            return Err(result.unwrap_err())
+        val copied = result.unwrap()
+        h.offset = h.offset + copied
+        Ok(copied)
+
+    fn stat(self, path: text) -> Result<FileStat, i32>:
+        """Return metadata for a root-dir 8.3 path (wave-4c).
+
+        Returns ENOENT(-2) if not found.
+        """
+        val entry_result = self._find_root_entry(path)
+        if entry_result.is_err():
+            return Err(entry_result.unwrap_err())
+        val off_opt = entry_result.unwrap()
+        if off_opt.is_none():
+            return Err(ENOENT)
+        val off = off_opt.unwrap()
+        val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
+                     (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
+        Ok(FileStat(
+            size: fsize.to_u64(),
+            is_dir: false,
+            mtime: 0u64
+        ))
+
+    fn _find_root_entry(self, path: text) -> Result<i32?, i32>:
+        """Walk stashed root_dir_data to find 8.3 entry matching path.
+
+        Returns Ok(Some(byte_offset)) on match, Ok(None) if not found.
+        Path must start with '/' followed by an 8.3 name.
+        """
+        # Strip leading '/'
+        var name = path
+        if name.len() > 0 and name.slice(0, 1) == "/":
+            name = name.slice(1, name.len())
+        val off = fat32_dir_find_entry(self.root_dir_data, name)
+        if off < 0:
+            return Ok(None)
+        Ok(Some(off))
+
+    fn _read_dir_data(self, dev: BlockDevice, cluster: u32) -> Result<[u8], i32>:
+        """Read a whole directory's bytes by walking its cluster chain.
+
+        Returns Err(EIO=-5) on an invalid start cluster or any device/chain
+        failure. The returned array is the concatenation of every cluster in
+        chain order, so a byte offset maps back to a cluster via
+        offset / cluster_size (see _dir_chain_for below).
+        """
+        if cluster < 2u32:
+            return Err(EIO)
+        val chain_result = self.read_cluster_chain(dev, cluster)
+        if chain_result.is_err():
+            return Err(EIO)
+        val chain = chain_result.unwrap()
+        val spc = self.sectors_per_cluster.to_u64()
+        val bps = self.bytes_per_sector.to_i32()
+        var out: [u8] = []
+        var ci = 0
+        while ci < chain.len():
+            val first_sector = self.data_start_sector.to_u64() + (chain[ci] - 2u32).to_u64() * spc
+            var s: u64 = 0u64
+            while s < spc:
+                val r = dev.read_sector(first_sector + s)
+                if r.is_err():
+                    return Err(EIO)
+                val sec = r.unwrap()
+                var bi = 0
+                while bi < bps:
+                    out.push(sec[bi])
+                    bi = bi + 1
+                s = s + 1u64
+            ci = ci + 1
+        Ok(out)
+
+    fn resolve_path(self, dev: BlockDevice, path: text) -> Result<Fat32DirEntryLoc, i32>:
+        """Resolve a nested absolute path such as "/A/B/C/FILE.O" (wave-4f).
+
+        Walks one component at a time: each non-final component must be a
+        directory (ATTR_DIRECTORY), and its first cluster becomes the next
+        directory to scan (via _read_dir_data, which follows the cluster
+        chain). "." is a no-op; ".." resolves through the on-disk ".." entry,
+        whose recorded cluster is 0 when the parent is the root directory —
+        that 0 is remapped to self.root_cluster, as FAT32 requires.
+
+        The root directory itself is read from the root_dir_data cache stashed
+        at mount() when present, otherwise from the device.
+
+        Returns Err(ENOENT=-2) when any component is missing or a non-final
+        component is not a directory; Err(EINVAL=-22) for a path with no
+        components (e.g. "/"); Err(EIO=-5) on device failure.
+        """
+        val parts = fat32_split_path(path)
+        if parts.len() == 0:
+            return Err(EINVAL)
+
+        var dir_cluster = self.root_cluster
+        var dir_chain: [u32] = [self.root_cluster]
+        var dir_data = self.root_dir_data
+        if dir_data.len() == 0:
+            val d = self._read_dir_data(dev, dir_cluster)
+            if d.is_err():
+                return Err(d.unwrap_err())
+            dir_data = d.unwrap()
+            val c = self.read_cluster_chain(dev, dir_cluster)
+            if c.is_err():
+                return Err(EIO)
+            dir_chain = c.unwrap()
+
+        val last = parts.len() - 1
+        var pi = 0
+        while pi <= last:
+            val comp = parts[pi]
+            if comp == ".":
+                pi = pi + 1
+                continue
+            val off = fat32_dir_find_entry(dir_data, comp)
+            if off < 0:
+                return Err(ENOENT)
+            val attr_bits = dir_data[off + 11].to_u32()
+            val is_dir = (attr_bits & FAT32_ATTR_DIRECTORY) != 0u32
+            var start = fat32_entry_start_cluster(dir_data, off)
+            if pi == last:
+                # Map the entry's flat offset back to an absolute LBA using the
+                # containing directory's own cluster chain.
+                val cluster_bytes = self.cluster_size.to_i32()
+                val chain_idx = off / cluster_bytes
+                val in_cluster = off % cluster_bytes
+                val bps_i = self.bytes_per_sector.to_i32()
+                val host_cluster = dir_chain[chain_idx]
+                val cluster_lba = self.data_start_sector.to_u64() +
+                                  (host_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+                val d_sector = cluster_lba + (in_cluster / bps_i).to_u64()
+                return Ok(Fat32DirEntryLoc(
+                    found: true,
+                    dir_cluster: dir_cluster,
+                    entry_offset: off,
+                    dirent_sector: d_sector,
+                    dirent_offset: in_cluster % bps_i,
+                    start_cluster: start,
+                    file_size: fat32_entry_file_size(dir_data, off),
+                    is_dir: is_dir
+                ))
+            # Non-final component: must be a directory we can descend into.
+            if not is_dir:
+                return Err(ENOENT)
+            if start == 0u32:
+                start = self.root_cluster      # ".." pointing at the root dir
+            val nd = self._read_dir_data(dev, start)
+            if nd.is_err():
+                return Err(nd.unwrap_err())
+            val nc = self.read_cluster_chain(dev, start)
+            if nc.is_err():
+                return Err(EIO)
+            dir_data = nd.unwrap()
+            dir_chain = nc.unwrap()
+            dir_cluster = start
+            pi = pi + 1
+        Err(ENOENT)
+
+    fn open_at(self, dev: BlockDevice, path: text) -> Result<FileHandle, i32>:
+        """Open a file at a nested path (wave-4f). Directories are rejected
+        with ENOENT — use resolve_path/stat_at to inspect them."""
+        val loc_result = self.resolve_path(dev, path)
+        if loc_result.is_err():
+            return Err(loc_result.unwrap_err())
+        val loc = loc_result.unwrap()
+        if loc.is_dir:
+            return Err(ENOENT)
+        Ok(FileHandle(
+            fd: 0u64,
+            start_cluster: loc.start_cluster,
+            current_cluster: loc.start_cluster,
+            offset: 0u64,
+            file_size: loc.file_size.to_u64(),
+            is_open: true,
+            dirent_sector: loc.dirent_sector,
+            dirent_offset: loc.dirent_offset
+        ))
+
+    fn stat_at(self, dev: BlockDevice, path: text) -> Result<FileStat, i32>:
+        """Metadata for a nested path (wave-4f). Unlike stat(), is_dir is real."""
+        val loc_result = self.resolve_path(dev, path)
+        if loc_result.is_err():
+            return Err(loc_result.unwrap_err())
+        val loc = loc_result.unwrap()
+        Ok(FileStat(
+            size: loc.file_size.to_u64(),
+            is_dir: loc.is_dir,
+            mtime: 0u64
+        ))
+
+    fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
+        """Read the 28-bit FAT32 entry for cluster from the FAT region on dev."""
+        val fat_offset = cluster * 4u32
+        val fat_sector = self.fat_start_sector.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
+        val entry_off  = (fat_offset % self.bytes_per_sector).to_i32()
+        val sec_result = dev.read_sector(fat_sector)
+        if sec_result.is_err():
+            return Err("fat32: failed to read FAT sector for cluster {cluster}")
+        val sec = sec_result.unwrap()
+        val raw = ((sec[entry_off + 3].to_u32() << 24) |
+                   (sec[entry_off + 2].to_u32() << 16) |
+                   (sec[entry_off + 1].to_u32() << 8)  |
+                    sec[entry_off].to_u32()) & 0x0FFFFFFFu32
+        Ok(raw)
+
+    fn read_cluster_chain(self, dev: BlockDevice, start: u32) -> Result<[u32], text>:
+        """Walk FAT chain from start cluster; return ordered cluster list.
+
+        Collects data cluster numbers until EOC (FAT entry >= 0x0FFFFFF8).
+        Returns Err on:
+          - start cluster < 2 (invalid)
+          - FREE (0x00000000) or BAD (0x0FFFFFF7) FAT entry mid-chain
+          - fuel exhaustion (> data_clusters steps) — cycle/corruption guard
+
+        Mirrors chainWalkGuarded in src/verification/fat32/Fat32/Basic.lean.
+        Fuel = self.data_clusters; a valid chain cannot exceed this count.
+        """
+        if start < 2u32:
+            return Err("fat32: invalid start cluster {start}")
+        var chain: [u32] = []
+        var current = start
+        var fuel = self.data_clusters
+        while current >= 2u32:
+            # Cycle / length guard — checked before consuming the current cluster
+            if fuel == 0u32:
+                return Err("fat32: cluster chain exceeds volume cluster count (cycle?)")
+            fuel = fuel - 1u32
+            # Append current data cluster
+            chain.push(current)
+            # Read FAT entry for current cluster to find next
+            val next_result = self._read_fat_entry(dev, current)
+            if next_result.is_err():
+                return next_result
+            val next = next_result.unwrap()
+            # EOC: >= 0x0FFFFFF8 — current was the last data cluster
+            if next >= 0x0FFFFFF8u32:
+                return Ok(chain)
+            # BAD cluster marker mid-chain — corruption
+            if next == 0x0FFFFFF7u32:
+                return Err("fat32: bad-cluster marker in chain from {start}")
+            # FREE cluster mid-chain — corruption
+            if next == 0x00000000u32:
+                return Err("fat32: free-cluster entry mid-chain from {start}")
+            # Valid next cluster; continue walk
+            current = next
+        Ok(chain)
+

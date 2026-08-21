@@ -1,0 +1,649 @@
+# FAT32 kernel filesystem driver — IF-07 wave-4a/4b/4c/4d.
+#
+# Wave-4a: BPB parse + cluster-to-lba arithmetic + real mount().
+# Wave-4b: readdir("/") via stashed root-dir data; read_cluster_chain (guarded, cycle-safe).
+# Wave-4c: open() + stat() for root-dir 8.3 names; read() wired through cluster-chain walk.
+# Wave-4d: cluster allocator (_write_fat_entry / allocate_cluster / append_cluster);
+#          write() wired through allocate+extend path.
+
+# -- Error codes ---------------------------------------------------------------
+
+use os.kernel.fs.fat32_atomic_replace.{Fat32ReplaceError, Fat32ReplaceState, Fat32ReplaceImage, Fat32ReplaceRecord, ReplaceReceipt, fat32_replace_image, fat32_atomic_replace_path_allowed, fat32_atomic_replace_route_allowed, fat32_atomic_replace_commit_device, fat32_atomic_replace_recover_device, fat32_atomic_replace_publish_caps}
+
+val EINVAL: i32 = -22   # bad signature
+val EIO: i32    = -5    # wrong FS type
+val ENOSYS: i32 = -38   # not implemented
+val ENOENT: i32 = -2    # file not found
+val ENOSPC: i32 = -28   # no space left on device
+val EEXIST: i32 = -17   # path already exists
+val ENOTDIR: i32 = -20  # a path component is not a directory
+val EISDIR: i32 = -21   # target is a directory where a file was expected
+val ENOTEMPTY: i32 = -39  # directory holds entries other than "." / ".."
+val EBUSY: i32 = -16
+val EFBIG: i32 = -27      # file exceeds FAT32's u32 size field
+
+val FAT32_MAX_FILE_SIZE: u64 = 0xFFFFFFFFu64
+val FAT32_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+# -- BPB boot sector signature -------------------------------------------------
+
+val FAT32_BOOT_SIG_0: u8 = 0x55
+val FAT32_BOOT_SIG_1: u8 = 0xAA
+
+# -- Public types --------------------------------------------------------------
+
+struct FileHandle:
+    """Open-file token returned by Fat32Filesystem.open()."""
+    fd: u64                 # Opaque descriptor
+    start_cluster: u32      # First cluster of the file
+    current_cluster: u32    # Cluster cursor for sequential reads
+    offset: u64             # Byte offset within file
+    file_size: u64          # Total file size in bytes
+    is_open: bool           # True when handle is valid
+    dirent_sector: u64      # LBA of the sector holding this file's 32-byte directory entry (0 = no dirent)
+    dirent_offset: i32      # Byte offset within dirent_sector where the 32-byte entry begins
+
+struct FileStat:
+    """Minimal file metadata returned by Fat32Filesystem.stat()."""
+    size: u64
+    is_dir: bool
+    mtime: u64              # POSIX seconds since epoch
+
+struct Fat32Bpb:
+    """BIOS Parameter Block — parsed from the first 512-byte sector."""
+    bytes_per_sector: u16
+    sectors_per_cluster: u8
+    reserved_sectors: u16
+    num_fats: u8
+    total_sectors_32: u32
+    fat_size_32: u32
+    root_cluster: u32
+    fs_info_sector: u16
+    bs_fat_type_label: [u8]     # 8 bytes: "FAT32   "
+    bs_boot_signature: u8
+    bs_volume_id: u32
+    bs_volume_label: [u8]       # 11 bytes
+    bs_fat32_signature: [u8]    # 2 bytes: 0x55 0xAA
+
+# -- Pure BPB parser -----------------------------------------------------------
+
+fn parse_bpb(sector0: [u8]) -> Result<Fat32Bpb, i32>:
+    """Parse the 512-byte boot sector into a Fat32Bpb.
+
+    Returns Err(EINVAL=-22) for a missing 0x55AA signature.
+    Returns Err(EIO=-5) if the FS-type label is not 'FAT32   '.
+    """
+    # Validate boot sector signature at bytes 510-511
+    val sig0 = sector0[510]
+    val sig1 = sector0[511]
+    if sig0 != FAT32_BOOT_SIG_0 or sig1 != FAT32_BOOT_SIG_1:
+        return Err(EINVAL)
+
+    # Validate FAT32 type label at offset 82 (8 bytes: "FAT32   ")
+    val l0 = sector0[82]
+    val l1 = sector0[83]
+    val l2 = sector0[84]
+    val l3 = sector0[85]
+    val l4 = sector0[86]
+    if (l0 != 0x46 or l1 != 0x41 or l2 != 0x54 or
+        l3 != 0x33 or l4 != 0x32):
+        return Err(EIO)
+
+    val bpb = Fat32Bpb(
+        bytes_per_sector:   (sector0[12].to_u16() << 8) | sector0[11].to_u16(),
+        sectors_per_cluster: sector0[13],
+        reserved_sectors:   (sector0[15].to_u16() << 8) | sector0[14].to_u16(),
+        num_fats:           sector0[16],
+        total_sectors_32:   ((sector0[35].to_u32() << 24) | (sector0[34].to_u32() << 16) | (sector0[33].to_u32() << 8) | sector0[32].to_u32()),
+        fat_size_32:        ((sector0[39].to_u32() << 24) | (sector0[38].to_u32() << 16) | (sector0[37].to_u32() << 8) | sector0[36].to_u32()),
+        root_cluster:       ((sector0[47].to_u32() << 24) | (sector0[46].to_u32() << 16) | (sector0[45].to_u32() << 8) | sector0[44].to_u32()),
+        fs_info_sector:     (sector0[49].to_u16() << 8) | sector0[48].to_u16(),
+        bs_fat_type_label:  [sector0[82], sector0[83], sector0[84], sector0[85],
+                             sector0[86], sector0[87], sector0[88], sector0[89]],
+        bs_boot_signature:  sector0[66],
+        bs_volume_id:       ((sector0[70].to_u32() << 24) | (sector0[69].to_u32() << 16) | (sector0[68].to_u32() << 8) | sector0[67].to_u32()),
+        bs_volume_label:    [sector0[71], sector0[72], sector0[73], sector0[74],
+                             sector0[75], sector0[76], sector0[77], sector0[78],
+                             sector0[79], sector0[80], sector0[81]],
+        bs_fat32_signature: [sector0[510], sector0[511]]
+    )
+    Ok(bpb)
+
+# -- Cluster arithmetic --------------------------------------------------------
+
+fn cluster_to_lba(bpb: Fat32Bpb, cluster: u32) -> u64:
+    """Convert a cluster number to an absolute LBA sector.
+
+    Formula: reserved_sectors + num_fats*fat_size_32 + (cluster-2)*sectors_per_cluster
+    """
+    val fat_region  = bpb.reserved_sectors.to_u64() + bpb.num_fats.to_u64() * bpb.fat_size_32.to_u64()
+    val data_offset = (cluster - 2u32).to_u64() * bpb.sectors_per_cluster.to_u64()
+    fat_region + data_offset
+
+# -- LFN (long-filename) helpers ----------------------------------------------
+# LFN slots use attr=0x0F and store UCS-2 code units across three regions of the
+# 32-byte entry: bytes 1-10 (5 chars), 14-25 (6 chars), 28-31 (2 chars).
+# Slots are stored in reverse sequence: the slot with the LAST 13 chars of the
+# name is stored first physically (highest sequence + 0x40 last-bit). Walking
+# forward through the directory we encounter highest-seq → lowest-seq → 8.3.
+
+fn fat32_decode_lfn_code_unit(entry_data: [u8], offset: i32) -> text:
+    val lo = entry_data[offset]
+    val hi = entry_data[offset + 1]
+    if hi == 0x00u8 and lo == 0x00u8:
+        return ""               # NUL terminator
+    if hi == 0xFFu8 and lo == 0xFFu8:
+        return ""               # padding past terminator
+    if hi != 0x00u8:
+        return "?"              # non-ASCII (BMP code unit > 0xFF)
+    lo.chr()
+
+fn fat32_parse_lfn_slot(entry_data: [u8], offset: i32) -> text:
+    var name = ""
+    val c1 = fat32_decode_lfn_code_unit(entry_data, offset + 1)
+    if c1 != "":
+        name = name + c1
+    val c2 = fat32_decode_lfn_code_unit(entry_data, offset + 3)
+    if c2 != "":
+        name = name + c2
+    val c3 = fat32_decode_lfn_code_unit(entry_data, offset + 5)
+    if c3 != "":
+        name = name + c3
+    val c4 = fat32_decode_lfn_code_unit(entry_data, offset + 7)
+    if c4 != "":
+        name = name + c4
+    val c5 = fat32_decode_lfn_code_unit(entry_data, offset + 9)
+    if c5 != "":
+        name = name + c5
+    val c6 = fat32_decode_lfn_code_unit(entry_data, offset + 14)
+    if c6 != "":
+        name = name + c6
+    val c7 = fat32_decode_lfn_code_unit(entry_data, offset + 16)
+    if c7 != "":
+        name = name + c7
+    val c8 = fat32_decode_lfn_code_unit(entry_data, offset + 18)
+    if c8 != "":
+        name = name + c8
+    val c9 = fat32_decode_lfn_code_unit(entry_data, offset + 20)
+    if c9 != "":
+        name = name + c9
+    val c10 = fat32_decode_lfn_code_unit(entry_data, offset + 22)
+    if c10 != "":
+        name = name + c10
+    val c11 = fat32_decode_lfn_code_unit(entry_data, offset + 24)
+    if c11 != "":
+        name = name + c11
+    val c12 = fat32_decode_lfn_code_unit(entry_data, offset + 28)
+    if c12 != "":
+        name = name + c12
+    val c13 = fat32_decode_lfn_code_unit(entry_data, offset + 30)
+    if c13 != "":
+        name = name + c13
+    name
+
+# -- Directory-entry attribute bits --------------------------------------------
+
+val FAT32_ATTR_DIRECTORY: u32 = 0x10
+
+# -- Path + directory-scan helpers (wave-4f: subdirectory traversal) -----------
+#
+# Free functions, not methods: the component walk in resolve_path() already
+# nests three loops deep, and keeping these out of the class keeps each call
+# frame shallow (kernel-stack budget).
+#
+# Text handling here uses `.slice()` / `.upper()`, exactly like the pre-existing
+# `_find_root_entry`.  That is safe for this class because it is NOT on the
+# freestanding kernel path today: the in-guest FS path goes through the
+# `simpleos_fat32_stream_open` C stub, and this driver has no `src/` caller.
+# The `[u8]`-via-`rt_bytes_u8_at` discipline required for freestanding code
+# cannot be used here — those externs are unregistered in the host interpreter
+# the specs run on, which would make every assertion vacuous.
+
+struct Fat32DirEntryLoc:
+    """Located 32-byte directory entry, plus its on-disk address.
+
+    `found` is carried explicitly rather than wrapping the offset in `i32?`:
+    an entry at byte offset 0 collides with the interpreter's nil/0 ambiguity
+    (see the note in test/01_unit/os/kernel/fs/fat32_dirent_spec.spl).
+    """
+    found: bool
+    dir_cluster: u32        # First cluster of the directory that holds the entry
+    entry_offset: i32       # Byte offset of the entry within that directory's data
+    dirent_sector: u64      # Absolute LBA of the sector holding the entry
+    dirent_offset: i32      # Byte offset of the entry within that sector
+    start_cluster: u32      # First cluster of the named file/dir
+    file_size: u32          # Size in bytes (0 for directories)
+    is_dir: bool            # ATTR_DIRECTORY bit
+
+fn fat32_split_path(path: text) -> [text]:
+    """Split "/A/B/C.O" into ["A", "B", "C.O"]. Empty components are dropped,
+    so "//A//B/" and "/A/B" split identically. "/" splits to []."""
+    var parts: [text] = []
+    var cur = ""
+    var i = 0
+    while i < path.len():
+        val ch = path.slice(i, i + 1)
+        if ch == "/":
+            if cur.len() > 0:
+                parts.push(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur.len() > 0:
+        parts.push(cur)
+    parts
+
+fn fat32_dir_find_entry(dir_data: [u8], name: text) -> i32:
+    """Scan one directory's raw bytes for `name`; return its byte offset, or -1.
+
+    Matches the accumulated long filename (LFN) first, then the 8.3 short name;
+    both case-insensitively. Honours the 0x00 end-of-directory marker and skips
+    0xE5 deleted entries (orphaning any partially accumulated LFN).
+    """
+    val upper = name.upper()
+    val total_entries = dir_data.len() / 32
+    var idx = 0
+    var lfn_name = ""
+    while idx < total_entries:
+        val off = idx * 32
+        val first_byte = dir_data[off]
+        if first_byte == 0x00u8:
+            return -1                   # end of directory — not found
+        if first_byte == 0xE5u8:
+            lfn_name = ""               # orphan any pending LFN
+            idx = idx + 1
+            continue                    # deleted entry
+        val attr = dir_data[off + 11]
+        if attr == 0x0Fu8:
+            # Walk highest-seq → lowest-seq: prepend each fragment.
+            val fragment = fat32_parse_lfn_slot(dir_data, off)
+            lfn_name = fragment + lfn_name
+            idx = idx + 1
+            continue
+        # 8.3 entry. Match accumulated LFN first (the long name),
+        # then fall back to the 8.3 short name.
+        if lfn_name.len() > 0 and lfn_name.upper() == upper:
+            return off
+        var entry_name = ""
+        var ni = 0
+        while ni < 8:
+            val ch = dir_data[off + ni]
+            if ch != 0x20u8 and ch != 0x00u8:
+                entry_name = entry_name + ch.chr()
+            ni = ni + 1
+        var ext = ""
+        var ei = 0
+        while ei < 3:
+            val ch = dir_data[off + 8 + ei]
+            if ch != 0x20u8 and ch != 0x00u8:
+                ext = ext + ch.chr()
+            ei = ei + 1
+        if ext.len() > 0:
+            entry_name = entry_name + "." + ext
+        if entry_name.upper() == upper:
+            return off
+        lfn_name = ""
+        idx = idx + 1
+    -1
+
+fn fat32_dir_list_entries(dir_data: [u8]) -> [text]:
+    """Enumerate every live (non-deleted) entry name in one directory's raw
+    bytes, in on-disk order — the readdir() primitive `fat32_dir_find_entry`
+    never needed. Reuses the same LFN-accumulation / 8.3-decode logic so a
+    name written by `_link_entry`'s LFN path reads back identically here.
+    Includes "." and ".." when present (real subdirectories carry them)."""
+    var names: [text] = []
+    val total_entries = dir_data.len() / 32
+    var idx = 0
+    var lfn_name = ""
+    while idx < total_entries:
+        val off = idx * 32
+        val first_byte = dir_data[off]
+        if first_byte == 0x00u8:
+            return names          # end of directory
+        if first_byte == 0xE5u8:
+            lfn_name = ""         # orphan any pending LFN
+            idx = idx + 1
+            continue
+        val attr = dir_data[off + 11]
+        if attr == 0x0Fu8:
+            val fragment = fat32_parse_lfn_slot(dir_data, off)
+            lfn_name = fragment + lfn_name
+            idx = idx + 1
+            continue
+        var name = ""
+        if lfn_name.len() > 0:
+            name = lfn_name
+        else:
+            var entry_name = ""
+            var ni = 0
+            while ni < 8:
+                val ch = dir_data[off + ni]
+                if ch != 0x20u8 and ch != 0x00u8:
+                    entry_name = entry_name + ch.chr()
+                ni = ni + 1
+            var ext = ""
+            var ei = 0
+            while ei < 3:
+                val ch = dir_data[off + 8 + ei]
+                if ch != 0x20u8 and ch != 0x00u8:
+                    ext = ext + ch.chr()
+                ei = ei + 1
+            if ext.len() > 0:
+                entry_name = entry_name + "." + ext
+            name = entry_name
+        names.push(name)
+        lfn_name = ""
+        idx = idx + 1
+    names
+
+fn fat32_entry_start_cluster(dir_data: [u8], off: i32) -> u32:
+    """Decode first-cluster (hi at +20..21, lo at +26..27) from a dirent."""
+    val cluster_high = (dir_data[off + 21].to_u32() << 8) | dir_data[off + 20].to_u32()
+    val cluster_low  = (dir_data[off + 27].to_u32() << 8) | dir_data[off + 26].to_u32()
+    (cluster_high << 16) | cluster_low
+
+fn fat32_entry_file_size(dir_data: [u8], off: i32) -> u32:
+    """Decode the u32 little-endian file size at dirent offset +28..31."""
+    ((dir_data[off + 31].to_u32() << 24) | (dir_data[off + 30].to_u32() << 16) |
+     (dir_data[off + 29].to_u32() << 8)  |  dir_data[off + 28].to_u32())
+
+# -- Name encoding for the WRITE path (wave-4g) --------------------------------
+#
+# The read side above only ever DECODES names. Everything below ENCODES them,
+# which is what a host-like filesystem needs: `/usr/bin/clang` and
+# `/home/user/proj/src/main.c` must be creatable with their real mixed-case,
+# long, dotted names rather than being flattened to uppercase 8.3 in the root
+# directory.
+#
+# All of these are free functions on plain `[u8]` / `text` so the call frames
+# stay shallow and no class construction happens on the encode path.
+
+val FAT32_ATTR_LFN: u8      = 0x0F
+val FAT32_ATTR_ARCHIVE: u8  = 0x20
+val FAT32_ATTR_DIR_BYTE: u8 = 0x10
+
+struct Fat32SlotAddr:
+    """Absolute address of one 32-byte directory slot."""
+    sector: u64
+    offset: i32
+
+fn fat32_upper_ascii(c: i32) -> i32:
+    """ASCII-only uppercase; leaves everything outside a-z untouched."""
+    if c >= 97 and c <= 122:
+        return c - 32
+    c
+
+fn fat32_digit_char(d: i32) -> text:
+    # NOT `(48 + d).to_u8().chr()`: `.chr()` on an integer expression in a
+    # nested call context is rejected ("method 'chr' not found on value of
+    # type i64"). A slice off a literal digit table has no such hazard.
+    val digits = "0123456789"
+    digits.slice(d, d + 1)
+
+fn fat32_seq_digits(n: i32) -> text:
+    """Decimal rendering of a 1..999 short-name collision counter."""
+    if n < 10:
+        return fat32_digit_char(n)
+    if n < 100:
+        return fat32_digit_char(n / 10) + fat32_digit_char(n % 10)
+    fat32_digit_char(n / 100) + fat32_digit_char((n / 10) % 10) + fat32_digit_char(n % 10)
+
+fn fat32_is_valid_8_3_char(c: i32) -> bool:
+    """True when `c` may appear literally in an 8.3 short-name field.
+
+    Rejects control codes, space, and the FAT-reserved punctuation
+    `" * + , . / : ; < = > ? [ \\ ] |`.
+    """
+    if c < 0x21:
+        return false                    # control codes and space (0x20)
+    if c == 0x22 or c == 0x2A or c == 0x2B or c == 0x2C:
+        return false                    # " * + ,
+    if c == 0x2E or c == 0x2F or c == 0x3A or c == 0x3B:
+        return false                    # . / : ;
+    if c == 0x3C or c == 0x3D or c == 0x3E or c == 0x3F:
+        return false                    # < = > ?
+    if c == 0x5B or c == 0x5C or c == 0x5D or c == 0x7C:
+        return false                    # [ \ ] |
+    if c > 0x7E:
+        return false                    # non-ASCII needs an LFN
+    true
+
+fn fat32_last_dot(name: text) -> i32:
+    """Index of the extension-separating dot, or -1. A leading dot is part of
+    the basename (".config"), never a separator."""
+    var dot = -1
+    var j = 1
+    while j < name.len():
+        if name.char_code_at(j) == 0x2E:
+            dot = j
+        j = j + 1
+    dot
+
+fn fat32_name_needs_lfn(name: text) -> bool:
+    """True when `name` cannot round-trip through an 8.3 short name alone.
+
+    Any lowercase letter forces an LFN: the 8.3 field has no case bits, so
+    "Main.c" stored as "MAIN.C" would come back uppercased and the caller's
+    path would no longer match byte-for-byte.
+    """
+    if name.len() == 0:
+        return true
+    if name.len() > 12:
+        return true
+    val dot = fat32_last_dot(name)
+    var i = 0
+    while i < name.len():
+        val c = name.char_code_at(i)
+        if c == 0x2E:
+            if i != dot:
+                return true             # more than one dot, or a leading dot
+        else:
+            if c >= 97 and c <= 122:
+                return true             # lowercase — needs an LFN to survive
+            if not fat32_is_valid_8_3_char(c):
+                return true
+        i = i + 1
+    var base_len = name.len()
+    var ext_len = 0
+    if dot >= 0:
+        base_len = dot
+        ext_len = name.len() - dot - 1
+    if base_len == 0 or base_len > 8:
+        return true
+    if ext_len > 3:
+        return true
+    false
+
+fn fat32_blank_field() -> [u8]:
+    var f: [u8] = []
+    var i = 0
+    while i < 11:
+        f.push(0x20u8)
+        i = i + 1
+    f
+
+fn fat32_short_field(name: text) -> [u8]:
+    """Encode an already-8.3-legal `name` into its 11-byte, space-padded field.
+
+    "." and ".." are the two names that are dots rather than have dots; they
+    are emitted literally because mkdir writes them into every new directory.
+    """
+    var f = fat32_blank_field()
+    if name == ".":
+        f[0] = 0x2Eu8
+        return f
+    if name == "..":
+        f[0] = 0x2Eu8
+        f[1] = 0x2Eu8
+        return f
+    val dot = fat32_last_dot(name)
+    var base_end = name.len()
+    if dot >= 0:
+        base_end = dot
+    var k = 0
+    while k < base_end and k < 8:
+        f[k] = fat32_upper_ascii(name.char_code_at(k)).to_u8()
+        k = k + 1
+    if dot >= 0:
+        var e = 0
+        while (dot + 1 + e) < name.len() and e < 3:
+            f[8 + e] = fat32_upper_ascii(name.char_code_at(dot + 1 + e)).to_u8()
+            e = e + 1
+    f
+
+fn fat32_gen_short_field(long: text, seq: i32) -> [u8]:
+    """Derive the `BASE~N.EXT` 8.3 alias for a long name.
+
+    Spaces and embedded dots are dropped, illegal bytes become '_', letters are
+    uppercased, and the basename is truncated so that the `~N` tail always
+    fits inside the 8-byte field. `seq` is the collision counter: callers try
+    1, then 2, ... until the resulting short name is unused in the directory.
+    """
+    var f = fat32_blank_field()
+    val dot = fat32_last_dot(long)
+    var base_end = long.len()
+    if dot >= 0:
+        base_end = dot
+    val suffix = "~" + fat32_seq_digits(seq)
+    val keep = 8 - suffix.len()
+    var w = 0
+    var k = 0
+    while k < base_end and w < keep:
+        val c = long.char_code_at(k)
+        if c != 0x20 and c != 0x2E:
+            var oc = fat32_upper_ascii(c)
+            if not fat32_is_valid_8_3_char(oc):
+                oc = 0x5F                   # '_'
+            f[w] = oc.to_u8()
+            w = w + 1
+        k = k + 1
+    if w == 0:
+        f[0] = 0x5Fu8
+        w = 1
+    var s = 0
+    while s < suffix.len():
+        f[w + s] = suffix.char_code_at(s).to_u8()
+        s = s + 1
+    if dot >= 0:
+        var e = 0
+        var p = dot + 1
+        while p < long.len() and e < 3:
+            val c2 = long.char_code_at(p)
+            if c2 != 0x20 and c2 != 0x2E:
+                var oc2 = fat32_upper_ascii(c2)
+                if not fat32_is_valid_8_3_char(oc2):
+                    oc2 = 0x5F
+                f[8 + e] = oc2.to_u8()
+                e = e + 1
+            p = p + 1
+    f
+
+fn fat32_short_field_to_text(f: [u8]) -> text:
+    """Render an 11-byte 8.3 field back as "BASE.EXT" (no padding spaces)."""
+    var n = ""
+    var i = 0
+    while i < 8:
+        if f[i] != 0x20u8:
+            n = n + f[i].chr()
+        i = i + 1
+    var e = ""
+    var j = 0
+    while j < 3:
+        if f[8 + j] != 0x20u8:
+            e = e + f[8 + j].chr()
+        j = j + 1
+    if e.len() > 0:
+        n = n + "." + e
+    n
+
+fn fat32_lfn_checksum(field: [u8]) -> u8:
+    """The one byte every LFN slot must carry to bind it to its 8.3 alias.
+
+    sum = rotate-right-8(sum) + field[i], over the 11 PADDED short-name bytes.
+    Getting this wrong is invisible to a permissive reader but makes the entry
+    vanish under Linux/Windows, so it is asserted against a fixed vector in the
+    spec rather than only re-derived.
+    """
+    var sum: u32 = 0u32
+    var i = 0
+    while i < 11:
+        val rot = ((sum & 1u32) << 7u32) | (sum >> 1u32)
+        sum = (rot + field[i].to_u32()) & 0xFFu32
+        i = i + 1
+    sum.to_u8()
+
+fn fat32_lfn_char_offset(k: i32) -> i32:
+    """Byte offset of the k-th (0..12) UCS-2 code unit inside an LFN slot."""
+    if k < 5:
+        return 1 + k * 2
+    if k < 11:
+        return 14 + (k - 5) * 2
+    28 + (k - 11) * 2
+
+fn fat32_lfn_slot_count(name: text) -> i32:
+    """Number of 32-byte LFN slots needed to carry `name` (13 chars each)."""
+    (name.len() + 12) / 13
+
+fn fat32_make_lfn_slot(long: text, seq: i32, total: i32, csum: u8) -> [u8]:
+    """Build one 32-byte LFN slot. `seq` is 1-based; the slot holding the LAST
+    fragment (seq == total) carries the 0x40 LAST_LONG_ENTRY flag."""
+    var e: [u8] = []
+    var i = 0
+    while i < 32:
+        e.push(0u8)
+        i = i + 1
+    var s = seq
+    if seq == total:
+        s = seq | 0x40
+    e[0]  = s.to_u8()
+    e[11] = FAT32_ATTR_LFN
+    e[12] = 0u8                          # type: always 0
+    e[13] = csum
+    e[26] = 0u8                          # first-cluster field is always 0
+    e[27] = 0u8
+    val base = (seq - 1) * 13
+    var k = 0
+    while k < 13:
+        val co = fat32_lfn_char_offset(k)
+        val ci = base + k
+        if ci < long.len():
+            e[co]     = long.char_code_at(ci).to_u8()
+            e[co + 1] = 0u8
+        else:
+            if ci == long.len():
+                e[co]     = 0u8          # NUL terminator
+                e[co + 1] = 0u8
+            else:
+                e[co]     = 0xFFu8       # padding past the terminator
+                e[co + 1] = 0xFFu8
+        k = k + 1
+    e
+
+fn fat32_make_dirent(field: [u8], attr: u8, cluster: u32, size: u32) -> [u8]:
+    """Build one 32-byte 8.3 directory entry, little-endian, byte-by-byte."""
+    var e: [u8] = []
+    var i = 0
+    while i < 32:
+        e.push(0u8)
+        i = i + 1
+    var k = 0
+    while k < 11:
+        e[k] = field[k]
+        k = k + 1
+    e[11] = attr
+    val hi = (cluster >> 16u32) & 0xFFFFu32
+    val lo = cluster & 0xFFFFu32
+    e[20] = (hi & 0xFFu32).to_u8()
+    e[21] = ((hi >> 8u32) & 0xFFu32).to_u8()
+    e[26] = (lo & 0xFFu32).to_u8()
+    e[27] = ((lo >> 8u32) & 0xFFu32).to_u8()
+    e[28] = (size & 0xFFu32).to_u8()
+    e[29] = ((size >> 8u32)  & 0xFFu32).to_u8()
+    e[30] = ((size >> 16u32) & 0xFFu32).to_u8()
+    e[31] = ((size >> 24u32) & 0xFFu32).to_u8()
+    e
+
+# -- Driver state --------------------------------------------------------------
+

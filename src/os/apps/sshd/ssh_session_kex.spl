@@ -1,7 +1,4 @@
-# SSH Session — Key Exchange Phase (Phase 2)
-#
-# Extracted from ssh_session.spl.
-# Contains: impl SshSession.do_kex()
+# SSH session key exchange; extracted from ssh_session.spl.
 
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32}
 use os.apps.sshd.ssh_hex.{format_hex}
@@ -10,7 +7,7 @@ use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh
 use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _append_byte, _push_bytes, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
-use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey, _zeroed_32_bytes}
+use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey, _zeroed_32_bytes}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
 use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_bytes_equal, dual_backend_choose_bytes, dual_backend_run_bytes}
@@ -190,8 +187,7 @@ fn _rv64_live_x25519_shared_alpha(server_private: [u8], client_public: [u8]) -> 
 
 
 fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], client_kexinit_payload: [u8]) -> [u8]:
-    # Baremetal live lane: use the fixed bootstrap scalar until the full
-    # exchange-hash-derived path is proven stable under RV64.
+    # Baremetal uses the fixed bootstrap scalar pending RV64 exchange-hash proof.
     if client_public.len() == 32:
         return _live_bootstrap_x25519_private_key()
     var seed_material: [u8] = []
@@ -200,12 +196,12 @@ fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], cli
     val stable_client_public = _copy_bytes_stable(client_public)
     var i: u64 = 0
     while i < stable_client_public.len():
-        seed_material.push(_u8_at(stable_client_public, i))
+        seed_material.push(ssh_session_u8_at(stable_client_public, i))
         i = i + 1
     val stable_kex_prefix = _copy_prefix_stable(client_kexinit_payload, 64)
     i = 0
     while i < stable_kex_prefix.len():
-        seed_material.push(_u8_at(stable_kex_prefix, i))
+        seed_material.push(ssh_session_u8_at(stable_kex_prefix, i))
         i = i + 1
     val digest = ssh_kex_compute_exchange_hash(
         [],
@@ -317,7 +313,7 @@ fn _push_bytes_live(buf: [u8], data: [u8]) -> [u8]:
     var out = buf
     var i: u64 = 0
     while i < data.len():
-        out = rt_push_byte(out, _u8_at(data, i).to_i64())
+        out = rt_push_byte(out, ssh_session_u8_at(data, i).to_i64())
         i = i + 1
     out
 
@@ -394,15 +390,13 @@ fn _derive_key_live_runtime_sha256(shared_secret: [u8], exchange_hash: [u8], let
     var result: [u8] = []
     var i: u64 = 0
     while i < needed:
-        result = _append_byte(result, _u8_at(key_material, i))
+        result = _append_byte(result, ssh_session_u8_at(key_material, i))
         i = i + 1
     result
 
 impl SshSession:
 
-    # ========================================================================
     # Phase 2: Key Exchange
-    # ========================================================================
 
     me do_kex() -> bool:
         """Perform key exchange (curve25519-sha256)."""
@@ -420,7 +414,7 @@ impl SshSession:
             log_info("[app.sshd] " + "[sshd-session] client kexinit missing")
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no KEXINIT received")
             return false
-        if _u8_at(client_payload, 0) == SSH_MSG_IGNORE or _u8_at(client_payload, 0) == SSH_MSG_DEBUG:
+        if ssh_session_u8_at(client_payload, 0) == SSH_MSG_IGNORE or ssh_session_u8_at(client_payload, 0) == SSH_MSG_DEBUG:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unexpected pre-kex control message")
             return false
         self.client_kexinit_payload = client_payload
@@ -663,7 +657,7 @@ impl SshSession:
             sig_blob.push(0x40)
             var sig_i: u64 = 0
             while sig_i < 64 and sig_i < sig_raw.len():
-                sig_blob.push(_u8_at(sig_raw, sig_i))
+                sig_blob.push(ssh_session_u8_at(sig_raw, sig_i))
                 sig_i = sig_i + 1
         else:
             log_info("[app.sshd] " + "[sshd-session] unexpected non-ed25519 host key algo={negotiated_hk_algo}")
@@ -781,7 +775,7 @@ impl SshSession:
         var client_newkeys_len: u64 = client_newkeys.len()
         var client_newkeys_type: u8 = 0
         if client_newkeys_len > 0:
-            client_newkeys_type = _u8_at(client_newkeys, 0)
+            client_newkeys_type = ssh_session_u8_at(client_newkeys, 0)
         if using_live_openssh_profile and client_newkeys_len == 1 and client_newkeys_type == 0:
             serial_println("[sshd-session] live NEWKEYS zero payload workaround")
             client_newkeys_type = 21

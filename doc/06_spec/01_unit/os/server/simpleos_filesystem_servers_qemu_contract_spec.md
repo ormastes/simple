@@ -17,5 +17,12 @@ QEMU gate; it does not itself claim a live guest pass.
   bind the first- and second-boot zeroization receipts by nonzero SHA-256.
 - Reject residual credential bytes, uncleared digest workspaces, unverified
   target cleanup, and host-only destruction of a credential-bearing image.
+- Wire the production payload producer for x86_64, ARM64, and RISC-V 64 target
+  triples, require no-stub compilation, reject unresolved strong symbols, and
+  validate the staged ELF machine before image admission. This scenario reads
+  the wiring; it does not invoke or prove a payload build.
+- Keep the x86_64 and RISC-V 64 filesystem-server boot entries on their
+  architecture scheduler/VFS owners and require explicit QEMU failure exits
+  when authenticated `/SERVERS.ELF` launch cannot complete.
 
 Production gate: `scripts/check/check-simpleos-filesystem-servers-qemu.shs`.

@@ -10,6 +10,13 @@ All notable changes to Simple Language will be documented in this file.
   admission, final EFI-map/Multiboot2 construction, embedded ELF32 shim, and
   x64-to-i386 handoff; add OVMF GDB admission/rejection, NVMe-only boot, and
   flushed image-provision receipts while keeping physical Intel DCI separate.
+- **SimpleOS multiarchitecture authenticated filesystem execution** — split
+  FAT32, NVMe, VFS, and per-ISA runtime responsibilities into bounded owners;
+  route x86_64, AArch64, and RV64 server media through authenticated execute
+  bindings; stream bounded RV64 FAT ELF ranges while rejecting the legacy
+  unauthenticated path; converge target builders on `simpleos_tool`; and add
+  fail-closed LLVM/media construction gates without claiming absent live QEMU
+  execution.
 - **Fail-closed MIR coverage evidence** — represent typed decision and condition
   probes explicitly, preserve their operand liveness through MIR optimization,
   serialize them deterministically, and reject unlowered probes in interpreter

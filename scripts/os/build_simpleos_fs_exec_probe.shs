@@ -9,6 +9,9 @@ for tool in "$clang" "$ld_lld" "${READELF:-readelf}"; do command -v "$tool" >/de
 work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-fs-exec-probe.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 placeholder=__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__
+padding_bytes=${SIMPLEOS_FS_EXEC_PROBE_PADDING_BYTES:-0}
+case "$padding_bytes" in ''|*[!0-9]*) fail "padding must be an unsigned decimal byte count" ;; esac
+[ "$padding_bytes" -le 16777216 ] || fail "padding exceeds 16 MiB test-artifact cap"
 case "$arch" in
  x86_32) triple=i386-unknown-none-elf; emulation=elf_i386
  cat > "$work/probe.S" <<EOF
@@ -123,6 +126,15 @@ EOF
  ;;
  *) fail "unsupported architecture: $arch" ;;
 esac
+if [ "$padding_bytes" -gt 0 ]; then
+    cat >> "$work/probe.S" <<EOF
+.section .rodata.large_loader_test,"a",@progbits
+.balign 4096
+.global simpleos_large_loader_test_payload
+simpleos_large_loader_test_payload:
+.zero $padding_bytes
+EOF
+fi
 "$clang" --target="$triple" -c -ffreestanding -nostdlib "$work/probe.S" -o "$work/probe.o"
 case "$arch" in
     x86_32) payload_link_flag=--image-base=0x40000000 ;;
@@ -139,6 +151,7 @@ arch=$arch
 marker=SIMPLEOS_FS_EXEC_OK arch=$arch nonce=<patched-nonce>
 nonce_slot_bytes=96
 nonce_placeholder=$placeholder
+loader_test_padding_bytes=$padding_bytes
 exit_status=37
 elf_size=$size
 template_sha256=$hash

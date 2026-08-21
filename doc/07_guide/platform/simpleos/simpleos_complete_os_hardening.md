@@ -80,3 +80,29 @@ consume-once authority token are verified against actual mounted-image bytes.
 
 The filesystem sync unblock contract is tracked in
 `doc/08_tracking/bug/simpleos_filesystem_durable_sync_barrier_gap_2026-08-20.md`.
+
+## Wave 4 operator status (2026-08-21)
+
+- FAT32 mount state now remains with one boot publication owner; FAT internals,
+  NVMe DMA/lease/positioned I/O, and VFS dispatch/write responsibilities are
+  split into bounded modules. This is ownership/static evidence, not three-FS
+  durability or live execution evidence.
+- x86_64, AArch64, and RV64 filesystem-server builds select authenticated media
+  entries. Path-only spawn/capture adapters are rejected; each entry must
+  consume loader-issued authority, wait, and collect. Complete live server
+  receipts are still required.
+- RV64 streams large FAT ELF ranges, bounds chain traversal and aggregate load
+  bytes, enforces W^X, and rolls back its allocation checkpoint. Its legacy
+  unauthenticated executor is fail-closed with
+  `missing-loader-authority-token`.
+- Architecture runtime shims are bounded single-owner units, and the three
+  64-bit builders converge on `src/app/simpleos_tool/main.spl`. Build output is
+  not proof that interpreter/compiler/loader launched from a mounted filesystem.
+- Real x86_64 target Clang/LLD/llvm-ar files exist and pass structural static
+  inspection. AArch64/RV64 provision remains artifact-dependent, and no live
+  filesystem hello receipt is claimed.
+- A fresh admitted host compiler and adjacent receipt exist at the path and
+  digest recorded in `doc/07_guide/os/simpleos_llvm_toolchain.md`; only its
+  four-argument environment ABI and 33-check core-C capsule are green. Because
+  it lacks `test`/`check` and recovery produced no deployable release runtime,
+  it does not unblock the full acceptance runner.

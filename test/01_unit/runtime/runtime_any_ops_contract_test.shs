@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$ROOT"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/runtime-any-ops.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+cc -std=c11 -Wall -Wextra -Werror -Isrc/runtime \
+    -include src/runtime/runtime_any_ops.h \
+    -include src/runtime/runtime_string_ffi.h \
+    src/runtime/runtime_any_ops.c \
+    src/runtime/runtime_string_ffi.c \
+    test/01_unit/runtime/runtime_any_ops_contract_test.c -lm -o "$TMP/contract"
+"$TMP/contract"
+
+SIMPLE_OWNER=src/runtime/simple_core/core_any_ops.spl
+for symbol in sub mul div mod lt gt le ge; do
+    grep -Fq "pub fn rt_any_${symbol}(" "$SIMPLE_OWNER" || {
+        echo "FAIL missing Simple owner: rt_any_${symbol}" >&2
+        exit 1
+    }
+done
+grep -Fq 'left == (-9223372036854775807 - 1) and right == -1' "$SIMPLE_OWNER" || {
+    echo 'FAIL Simple INT64_MIN/-1 guard missing' >&2
+    exit 1
+}
+grep -Fq '(l == INT64_MIN && r == -1)' src/runtime/runtime_any_ops.c || {
+    echo 'FAIL C INT64_MIN/-1 guard missing' >&2
+    exit 1
+}
+if grep -Eq 'runtime_(any_ops|string_ffi)\.h' src/runtime/runtime.h; then
+    echo 'FAIL bounded runtime headers leaked into monolithic runtime.h' >&2
+    exit 1
+fi
+grep -Fq '#include "runtime_any_ops.h"' src/runtime/runtime_thread.h || {
+    echo 'FAIL any-ops declaration is not routed through bounded runtime thread header' >&2
+    exit 1
+}
+grep -Fq '#include "runtime_string_ffi.h"' src/runtime/runtime_thread.h || {
+    echo 'FAIL string-FFI declaration is not routed through bounded runtime thread header' >&2
+    exit 1
+}
+grep -Fq '#include "runtime_any_ops.c"' src/runtime/runtime_contracts.c || {
+    echo 'FAIL any-ops implementation is not owned by core-C contracts TU' >&2
+    exit 1
+}
+grep -Fq '#include "runtime_string_ffi.c"' src/runtime/runtime_contracts.c || {
+    echo 'FAIL string-FFI implementation is not owned by core-C contracts TU' >&2
+    exit 1
+}
+for roster in \
+    src/compiler/70.backend/backend/runtime_compiler.spl \
+    src/compiler_rust/compiler/src/pipeline/native_project/tools.rs \
+    scripts/os/simpleos-sysroot-aarch64.shs \
+    scripts/os/simpleos-sysroot-riscv64.shs \
+    scripts/check/build-core-c-bootstrap-runtime-capsule.shs; do
+    if grep -Eq 'runtime_(any_ops|string_ffi)\.(c|h)' "$roster"; then
+        echo "FAIL duplicate wave runtime roster entry: $roster" >&2
+        exit 1
+    fi
+done
+grep -Fq 'int64_t rt_cstring_to_text(int64_t cstr_value);' src/runtime/runtime_string_ffi.h || {
+    echo 'FAIL cstring bridge declaration missing' >&2
+    exit 1
+}
+
+echo 'PASS runtime any-ops cross-runtime contract'

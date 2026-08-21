@@ -70,11 +70,26 @@ select_rows() {
 row_fields() {
     case "$1" in
         x86_32) echo 'examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl|examples/09_embedded/simple_os/arch/x86_32/linker.ld|i686-unknown-none|build/os/simpleos_x86_32_initrd_fs_exec_probe.elf|build/os/fat32-x86_32.img|llvm|32|false' ;;
-        x86_64) echo 'examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/x86_64/linker.ld|x86_64-unknown-none|build/os/simpleos_x86_64_fs_exec.elf|build/os/fat32-x86_64.img|cranelift|64|false' ;;
+        x86_64)
+            if [ "${SOSIX_QEMU_SERVERS:-0}" = 1 ]; then
+                echo 'examples/09_embedded/simple_os/arch/x86_64/filesystem_servers_entry.spl|examples/09_embedded/simple_os/arch/x86_64/linker.ld|x86_64-unknown-none|build/os/simpleos_x86_64_servers_fs_exec.elf|build/os/fat32-x86_64-servers.img|cranelift|64|false'
+            else
+                echo 'examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/x86_64/linker.ld|x86_64-unknown-none|build/os/simpleos_x86_64_fs_exec.elf|build/os/fat32-x86_64.img|cranelift|64|false'
+            fi ;;
         arm32) echo 'examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/arm32/fs_exec_linker.ld|armv7-unknown-none-eabihf|build/os/simpleos_arm32_fs_exec.elf|build/os/fat32-arm32.img|llvm|32|false' ;;
-        arm64) echo 'examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld|aarch64-unknown-none|build/os/simpleos_arm64_fs_exec.elf|build/os/fat32-arm64.img|cranelift|64|false' ;;
+        arm64)
+            if [ "${SOSIX_QEMU_SERVERS:-0}" = 1 ]; then
+                echo 'examples/09_embedded/simple_os/arch/arm64/servers_entry.spl|examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld|aarch64-unknown-none|build/os/simpleos_arm64_servers_fs_exec.elf|build/os/fat32-arm64-servers.img|cranelift|64|false'
+            else
+                echo 'examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl|examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld|aarch64-unknown-none|build/os/simpleos_arm64_fs_exec.elf|build/os/fat32-arm64.img|cranelift|64|false'
+            fi ;;
         riscv32) echo 'examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl|examples/09_embedded/simple_os/arch/riscv32/linker.ld|riscv32-unknown-none|build/os/simpleos_riscv32_smf_fs.elf|build/os/fat32-riscv32.img|llvm|32|false' ;;
-        riscv64) echo 'examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl|examples/09_embedded/simple_os/arch/riscv64/linker.ld|riscv64-unknown-none|build/os/simpleos_riscv64_smf_fs.elf|build/os/fat32-riscv64.img|llvm|64|false' ;;
+        riscv64)
+            if [ "${SOSIX_QEMU_SERVERS:-0}" = 1 ]; then
+                echo 'examples/09_embedded/simple_os/arch/riscv64/servers_entry.spl|examples/09_embedded/simple_os/arch/riscv64/linker.ld|riscv64-unknown-none|build/os/simpleos_riscv64_servers_fs_exec.elf|build/os/fat32-riscv64-servers.img|llvm|64|false'
+            else
+                echo 'examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl|examples/09_embedded/simple_os/arch/riscv64/linker.ld|riscv64-unknown-none|build/os/simpleos_riscv64_smf_fs.elf|build/os/fat32-riscv64.img|llvm|64|false'
+            fi ;;
         *) return 1 ;;
     esac
 }
@@ -234,11 +249,26 @@ run_row() {
     timeout_s=${SOSIX_QEMU_REBUILD_TIMEOUT_SECONDS:-900}
     require_descendant "$workspace" "$mutable_root"
     mkdir -p "$row_dir" "$cache_dir" "$tmp_dir" "$payload_dir" "$generated_dir" build/os/generated
-    if [ "$row" = riscv64 ]; then
-        signing_key=${SIMPLEOS_RV64_AUTH_SIGNING_KEY:-}
-        public_key=${SIMPLEOS_RV64_AUTH_PUBLIC_KEY:-}
+    if [ "$row" = riscv64 ] || [ "$row" = arm64 ] || [ "$row" = x86_64 ]; then
+        auth_prefix=RV64
+        auth_module=rv64_auth_trust_config
+        auth_key_id=rv64-qemu-acceptance-v1
+        auth_contract_entry=src/app/rv64_auth_contract/main.spl
+        if [ "$row" = x86_64 ]; then
+            auth_prefix=X86_64
+            auth_module=x86_64_auth_trust_config
+            auth_key_id=x86-64-qemu-acceptance-v1
+            auth_contract_entry=src/app/x86_64_auth_contract/main.spl
+        elif [ "$row" = arm64 ]; then
+            auth_prefix=ARM64
+            auth_module=arm64_auth_trust_config
+            auth_key_id=arm64-qemu-acceptance-v1
+            auth_contract_entry=src/app/arm64_auth_contract/main.spl
+        fi
+        eval "signing_key=\${SIMPLEOS_${auth_prefix}_AUTH_SIGNING_KEY:-}"
+        eval "public_key=\${SIMPLEOS_${auth_prefix}_AUTH_PUBLIC_KEY:-}"
         [ -s "$signing_key" ] && [ -s "$public_key" ] ||
-            fail 'riscv64 authenticated media requires SIMPLEOS_RV64_AUTH_SIGNING_KEY and SIMPLEOS_RV64_AUTH_PUBLIC_KEY'
+            fail "$row authenticated media requires signing/public key inputs"
         openssl pkey -pubin -in "$public_key" -outform DER -out "$tmp_dir/auth-root.der" >/dev/null 2>&1 ||
             fail 'invalid RV64 authenticated public key'
         root_size=$(wc -c < "$tmp_dir/auth-root.der" | tr -d ' ')
@@ -246,20 +276,30 @@ run_row() {
         dd if="$tmp_dir/auth-root.der" of="$tmp_dir/auth-root.raw" bs=1 skip=$((root_size - 32)) count=32 2>/dev/null
         root_hex=$(od -An -tx1 -v "$tmp_dir/auth-root.raw" | tr -d ' \n')
         root_hash=$(sha256_file "$tmp_dir/auth-root.raw")
+        if [ "$row" = riscv64 ]; then
+            auth_fn_prefix=rv64_authenticated
+        elif [ "$row" = arm64 ]; then
+            auth_fn_prefix=arm64_authenticated
+        else
+            auth_fn_prefix=x86_64_authenticated
+        fi
         {
-            echo 'pub fn rv64_authenticated_pinned_key_id_v1() -> text: "rv64-qemu-acceptance-v1"'
-            printf 'pub fn rv64_authenticated_pinned_public_key_hex_v1() -> text: "%s"\n' "$root_hex"
-            printf 'pub fn rv64_authenticated_pinned_public_key_hash_v1() -> text: "%s"\n' "$root_hash"
-            echo 'export rv64_authenticated_pinned_key_id_v1, rv64_authenticated_pinned_public_key_hex_v1, rv64_authenticated_pinned_public_key_hash_v1'
-        } > "$generated_dir/rv64_auth_trust_config.spl"
-        contract_tool="$workspace/rv64-auth-contract"
-        timeout "$timeout_s" env SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
-            "$compiler" native-build --cache-dir "$workspace/auth-contract-cache" \
-            --source src/os --source src/lib --source src/app \
-            --entry-closure --entry src/app/rv64_auth_contract/main.spl \
-            --backend llvm --opt-level=standard --output "$contract_tool" \
-            >"$row_dir/auth-contract-build.log" 2>&1 || fail 'RV64 Simple canonical-body producer build failed'
-        [ -x "$contract_tool" ] || fail 'RV64 Simple canonical-body producer missing'
+            printf 'pub fn %s_pinned_key_id_v1() -> text: "%s"\n' "$auth_fn_prefix" "$auth_key_id"
+            printf 'pub fn %s_pinned_public_key_hex_v1() -> text: "%s"\n' "$auth_fn_prefix" "$root_hex"
+            printf 'pub fn %s_pinned_public_key_hash_v1() -> text: "%s"\n' "$auth_fn_prefix" "$root_hash"
+            printf 'export %s_pinned_key_id_v1, %s_pinned_public_key_hex_v1, %s_pinned_public_key_hash_v1\n' "$auth_fn_prefix" "$auth_fn_prefix" "$auth_fn_prefix"
+        } > "$generated_dir/$auth_module.spl"
+        eval "contract_tool=\${SIMPLEOS_${auth_prefix}_AUTH_CONTRACT_TOOL:-}"
+        if [ -z "$contract_tool" ]; then
+            contract_tool="$workspace/$row-auth-contract"
+            timeout "$timeout_s" env SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+                "$compiler" native-build --cache-dir "$workspace/auth-contract-cache" \
+                --source src/os --source src/lib --source src/app \
+                --entry-closure --entry "$auth_contract_entry" \
+                --backend llvm --opt-level=standard --output "$contract_tool" \
+                >"$row_dir/auth-contract-build.log" 2>&1 || fail "$row Simple canonical-body producer build failed"
+        fi
+        [ -x "$contract_tool" ] || fail "$row Simple canonical-body producer missing"
     fi
     build_log="$row_dir/kernel-build.log"
     image_log="$row_dir/image-build.log"
@@ -282,13 +322,13 @@ run_row() {
                 "$compiler" native-build --cache-dir "$cache_dir" --source "$generated_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
         arm64)
             timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
-                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --opt-level=aggressive --log off --timeout 180 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+                "$compiler" native-build --cache-dir "$cache_dir" --source "$generated_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --opt-level=aggressive --log off --timeout 180 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
         x86_64)
             # x86_64 full boot providers: scheduler-owned fs-exec reaches rt_extras.c.
             # SIMPLE_BOOT_MINIMAL intentionally excludes that real runtime owner and
             # is valid only for the old C-probe closure. Keep strict no-stub fallback.
             timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
-                "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --cpu x86-64-v1 --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
+                "$compiler" native-build --cache-dir "$cache_dir" --source "$generated_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --cpu x86-64-v1 --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
         *)
             timeout "$timeout_s" env TMPDIR="$tmp_dir" SIMPLE_BINARY="$compiler" SIMPLE_BIN="$compiler" SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
                 "$compiler" native-build --cache-dir "$cache_dir" --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend "$backend" --opt-level=aggressive --log off --timeout 240 --entry-closure --entry "$entry" --target "$target" --output "$kernel" --linker-script "$linker" >"$build_log" 2>&1 ;;
@@ -299,6 +339,8 @@ run_row() {
     [ "$magic" = "7f454c46" ] || fail "$row kernel is not ELF"
     fsexec_env=""
     authhello_dir=""
+    servers_dir=""
+    server_credential=""
     case "$row" in
         x86_32|x86_64|arm32|arm64|riscv32|riscv64)
             sh scripts/os/build_simpleos_fs_exec_probe.shs "$row" \
@@ -306,7 +348,26 @@ run_row() {
             fsexec_env="$payload_dir/probe.elf"
             ;;
     esac
-    if [ "$row" = riscv64 ]; then
+    if [ "${SOSIX_QEMU_SERVERS:-0}" = 1 ] && { [ "$row" = riscv64 ] || [ "$row" = arm64 ] || [ "$row" = x86_64 ]; }; then
+        servers_dir="$payload_dir/servers"
+        mkdir -p "$servers_dir"
+        env SIMPLE_BUILD_COMPILER="$compiler" SIMPLE_NATIVE_BACKEND="$backend" \
+            sh scripts/os/build_simpleos_servers_payload.shs "$row" \
+            >"$row_dir/server-build.log" 2>&1 || fail "$row server payload build failed"
+        server_elf="build/os/${row}_servers/servers.elf"
+        [ -s "$server_elf" ] || fail "$row server payload missing"
+        server_credential="$servers_dir/.db-credential"
+        umask 077
+        dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' > "$server_credential"
+        env "SIMPLEOS_${auth_prefix}_AUTH_CONTRACT_TOOL=$contract_tool" \
+            "SIMPLEOS_${auth_prefix}_AUTH_MOUNT_ID=1" \
+            "SIMPLEOS_${auth_prefix}_AUTH_MOUNT_GENERATION=1" \
+            "SIMPLEOS_${auth_prefix}_AUTH_FILE_ID=4294967297" \
+            "SIMPLEOS_${auth_prefix}_AUTH_FILE_GENERATION=1" \
+            sh scripts/os/sign_simpleos_servers_payload.shs "$row" "$server_elf" "$kernel" \
+                "$servers_dir" "$signing_key" "$public_key" \
+            >"$row_dir/server-sign.log" 2>&1 || fail "$row server signing failed"
+    elif [ "$row" = riscv64 ]; then
         authhello_dir="$payload_dir/authhello"
         # Proven by rv64_authenticated_media_policy_spec: vfs_boot_reset makes
         # this the first mount, and the adapter execute-opens before any other
@@ -323,6 +384,15 @@ run_row() {
         sh scripts/os/build_rv64_authenticated_hello.shs \
             "$authhello_dir" "$kernel" "$signing_key" "$public_key" \
             >"$row_dir/authhello-build.log" 2>&1
+    elif [ "$row" = x86_64 ]; then
+        authhello_dir="$payload_dir/authhello"
+        env SIMPLEOS_X86_64_AUTH_CONTRACT_TOOL="$contract_tool" \
+        SIMPLEOS_X86_64_AUTH_MOUNT_ID=1 SIMPLEOS_X86_64_AUTH_MOUNT_GENERATION=1 \
+        SIMPLEOS_X86_64_AUTH_FILE_ID=4294967297 SIMPLEOS_X86_64_AUTH_FILE_GENERATION=1 \
+        sh scripts/os/build_x86_64_authenticated_fsexec.shs \
+            "$authhello_dir" "$kernel" "$signing_key" "$public_key" \
+            >"$row_dir/authhello-build.log" 2>&1
+        fsexec_env="$authhello_dir/FSEXEC.ELF"
     fi
     # The current writer has no no-write geometry planner.  Use one bounded
     # construction size that clears the measured 167 MiB x86_64 threshold and
@@ -345,25 +415,37 @@ run_row() {
         SIMPLEOS_AUTHHELLO_ADMISSION="${authhello_dir:+$authhello_dir/AUTHHEL.ADM}" \
         SIMPLEOS_AUTHHELLO_PROOF="${authhello_dir:+$authhello_dir/AUTHHEL.SIG}" \
         SIMPLEOS_AUTHHELLO_TRUST_ROOT="${authhello_dir:+$authhello_dir/AUTHHEL.PUB}" \
+        SIMPLEOS_SERVERS_BINARY="${server_elf:-}" \
+        SIMPLEOS_SERVERS_MANIFEST="${servers_dir:+$servers_dir/SERVER.MAN}" \
+        SIMPLEOS_SERVERS_ADMISSION="${servers_dir:+$servers_dir/SERVER.ADM}" \
+        SIMPLEOS_SERVERS_PROOF="${servers_dir:+$servers_dir/SERVER.SIG}" \
+        SIMPLEOS_SERVERS_TRUST_ROOT="${servers_dir:+$servers_dir/SERVER.PUB}" \
+        SIMPLEOS_SERVER_DB_CREDENTIAL_FILE="$server_credential" \
     TMPDIR="$tmp_dir" sh "$ROOT_DIR/scripts/os/make_os_disk.shs" "$image_mb" "$image" "$kernel" "$row" fs-exec >"$image_log" 2>&1
+    if [ -n "$server_credential" ]; then
+        rm -f "$server_credential"
+        server_credential=""
+    fi
     [ -s "$image" ] || fail "$row image missing after build"
     slots=$(LC_ALL=C grep -aob 'SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
     [ "$slots" -eq 1 ] || fail "$row image nonce-slot count=$slots"
     collector_slots=$(LC_ALL=C grep -aob 'SOSIX_COLLECTOR_RUN_NONCE=__SOSIX_COLLECTOR_RUN_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
     [ "$collector_slots" -eq 1 ] || fail "$row image collector-nonce-slot count=$collector_slots"
     payload_slots=$(LC_ALL=C grep -aob '__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__' "$image" | wc -l | tr -d ' ')
-    [ "$payload_slots" -eq 1 ] || fail "$row image fs-exec nonce-slot count=$payload_slots"
+    expected_payload_slots=1
+    [ "$row" = x86_64 ] && expected_payload_slots=0
+    [ "$payload_slots" -eq "$expected_payload_slots" ] || fail "$row image fs-exec nonce-slot count=$payload_slots expected=$expected_payload_slots"
 
     publish_symlink_atomic "$kernel" "$public_kernel" "$mutable_root"
     publish_symlink_atomic "$image" "$public_image" "$mutable_root"
-    if [ "$row" = riscv64 ]; then
+    if [ "$row" = riscv64 ] || [ "$row" = x86_64 ]; then
         publish_symlink_atomic "$authhello_dir/AUTHHELLO.ELF" \
-            build/os/authhello-riscv64.elf "$mutable_root"
+            "build/os/authhello-$row.elf" "$mutable_root"
     fi
 
     cp "$kernel" "$row_dir/kernel.elf"
     cp "$image" "$row_dir/disk.img"
-    if [ "$row" = riscv64 ]; then
+    if [ "$row" = riscv64 ] || [ "$row" = x86_64 ]; then
         cp "$authhello_dir/AUTHHELLO.ELF" "$row_dir/authenticated-program.elf"
         cp "$authhello_dir/AUTHHEL.MAN" "$row_dir/authenticated-program.manifest"
         cp "$authhello_dir/AUTHHEL.ADM" "$row_dir/authenticated-program.admission"
@@ -392,7 +474,7 @@ run_row() {
         printf 'collector_nonce_slots=%s\n' "$collector_slots"
         printf 'fs_exec_nonce_slots=%s\n' "$payload_slots"
         printf 'compiler_in_filesystem=%s\n' "$compiler_in_filesystem"
-        if [ "$row" = riscv64 ]; then
+        if [ "$row" = riscv64 ] || [ "$row" = x86_64 ]; then
             printf 'authenticated_program_path=%s\n' "$row_dir/authenticated-program.elf"
             printf 'authenticated_program_sha256=%s\n' "$(sha256_file "$row_dir/authenticated-program.elf")"
             printf 'authenticated_manifest_sha256=%s\n' "$(sha256_file "$row_dir/authenticated-program.manifest")"

@@ -324,3 +324,27 @@ Selected native budgets are defined in `doc/02_requirements/nfr/simpleos_complet
 ### Neutral
 
 - No new grammar is required. Visibility is enforced through tree-private modules, common contract extraction, facades, manifests, and review gates.
+
+<!-- codex-architecture -->
+## Wave 4 convergence record (2026-08-21)
+
+FAT32 is now a facade over cohesive mount/read, directory, allocation, and
+write owners. The boot capsule mounts and publishes the same mutable filesystem
+value. NVMe DMA allocation, boot runtime ownership, positioned direct I/O, and
+lease/performance accounting are split from VFS dispatch and write ownership.
+This preserves one `MountTable` namespace and shared FAT32/DBFS/NVFS execution
+interface instead of backend-specific launch trees.
+
+The x86_64, AArch64, and RV64 server/media entries now converge on authenticated
+execute-open authority, canonical signing material, ISA adoption, and scheduler
+collection. Architecture runtime helpers are bounded units with link-time
+single-owner checks. RV64's FAT ELF path streams bounded ranges, rejects W+X and
+overlong/cyclic layouts, rolls back failed allocation, and refuses its legacy
+unauthenticated execution route.
+
+Multiarch builders converge on the focused `simpleos_tool` entry and admitted
+self-hosted builder policy. The x86_64 LLVM artifacts are structurally real and
+static, while AArch64/RV64 provisioning remains conditional. Neither build
+receipts nor static tests authorize live guest claims. Fresh QEMU receipts for
+mounted-path Simple roles, LLVM compile/link/run, servers, filesystems, and WM
+remain the authoritative completion boundary.

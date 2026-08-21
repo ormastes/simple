@@ -1,0 +1,86 @@
+# Shared, stateless parsing helpers for authenticated executable media.
+#
+# These functions only decode records.  Architecture policy (target,
+# trust-root pin, firmware profile, authority namespace, and spawn recipe)
+# remains in each architecture adapter.  MountTable stays caller-owned and is
+# remains in each architecture adapter.  The VFS loan is isolated in the
+# sibling authenticated_media_reader module so pure parsing stays testable.
+
+pub fn authenticated_media_field_v1(record: text, key: text) -> text?:
+    if key == "" or key.contains("=") or key.contains("\n"): return nil
+    val prefix = key + "="
+    var found = ""
+    var count = 0
+    for line in record.split("\n"):
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+            count = count + 1
+    if count != 1 or found == "": return nil
+    Some(found)
+
+fn _authenticated_media_decimal_digit_v1(value: text) -> i64:
+    if value == "0": return 0
+    if value == "1": return 1
+    if value == "2": return 2
+    if value == "3": return 3
+    if value == "4": return 4
+    if value == "5": return 5
+    if value == "6": return 6
+    if value == "7": return 7
+    if value == "8": return 8
+    if value == "9": return 9
+    -1
+
+pub fn authenticated_media_u64_field_v1(record: text, key: text) -> u64?:
+    val value = authenticated_media_field_v1(record, key)
+    if not value.?: return nil
+    val digits = value.unwrap()
+    if digits == "": return nil
+    var parsed = 0u64
+    var i = 0
+    while i < digits.len():
+        val decoded_digit = _authenticated_media_decimal_digit_v1(digits.slice(i, i + 1))
+        if decoded_digit < 0: return nil
+        val digit = decoded_digit.to_u64()
+        # UINT64_MAX / 10 and UINT64_MAX % 10: check before arithmetic wraps.
+        if parsed > 1844674407370955161u64: return nil
+        if parsed == 1844674407370955161u64 and digit > 5u64: return nil
+        parsed = parsed * 10u64 + digit
+        i = i + 1
+    # MountTable reserves zero; generations and file identifiers may use zero.
+    if key == "mount_id" and parsed == 0u64: return nil
+    Some(parsed)
+
+fn _authenticated_media_hex_digit_v1(value: text) -> i64:
+    if value == "0": return 0
+    if value == "1": return 1
+    if value == "2": return 2
+    if value == "3": return 3
+    if value == "4": return 4
+    if value == "5": return 5
+    if value == "6": return 6
+    if value == "7": return 7
+    if value == "8": return 8
+    if value == "9": return 9
+    if value == "a": return 10
+    if value == "b": return 11
+    if value == "c": return 12
+    if value == "d": return 13
+    if value == "e": return 14
+    if value == "f": return 15
+    -1
+
+pub fn authenticated_media_hex_bytes_v1(value: text) -> [u8]:
+    if value.len() % 2 != 0: return []
+    var out: [u8] = []
+    var i = 0
+    while i + 1 < value.len():
+        val hi = _authenticated_media_hex_digit_v1(value.slice(i, i + 1))
+        val lo = _authenticated_media_hex_digit_v1(value.slice(i + 1, i + 2))
+        if hi < 0 or lo < 0: return []
+        out.push((hi * 16 + lo).to_u8())
+        i = i + 2
+    out
+
+export authenticated_media_field_v1, authenticated_media_u64_field_v1
+export authenticated_media_hex_bytes_v1

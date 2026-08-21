@@ -1,0 +1,281 @@
+# FAT32 authenticated atomic replacement transaction.
+use os.kernel.fs.fat32.*
+
+    fn _atomic_replace_at_locked(self, dev: BlockDevice, source_tmp: text, destination: text, expected_source_lba: u64, expected_source_offset: i32, expected_source_cluster: u32, expected_destination_exists: bool, expected_destination_lba: u64, expected_destination_offset: i32, expected_destination_cluster: u32) -> Result<ReplaceReceipt, i32>:
+        """Recoverably replace an allowlisted root database file.
+
+        This is intentionally not routed through rename_at. The temp chain is
+        flushed first, one bounded COMMITTED after-image set is published, and
+        the journal owner applies/reclaims/DONEs it before success returns.
+        """
+        if not fat32_atomic_replace_route_allowed(source_tmp, destination):
+            return Err(EINVAL)
+        val sr = self.resolve_path(dev, source_tmp)
+        val dr = self.resolve_path(dev, destination)
+        if sr.is_err():
+            return Err(ENOENT)
+        val source = sr.unwrap()
+        if source.dirent_sector != expected_source_lba or source.dirent_offset != expected_source_offset or source.start_cluster != expected_source_cluster:
+            return Err(EBUSY)
+        val root_scan_r = self._read_dir_data(dev, self.root_cluster)
+        if root_scan_r.is_err():
+            return Err(EIO)
+        val root_scan_data = root_scan_r.unwrap()
+        var destination_exists = dr.is_ok()
+        var dest = Fat32DirEntryLoc(found: false, dir_cluster: self.root_cluster,
+            entry_offset: 0, dirent_sector: 0u64, dirent_offset: 0,
+            start_cluster: 0u32, file_size: 0u32, is_dir: false)
+        if destination_exists:
+            dest = dr.unwrap()
+            if not expected_destination_exists or dest.dirent_sector != expected_destination_lba or dest.dirent_offset != expected_destination_offset or dest.start_cluster != expected_destination_cluster:
+                return Err(EBUSY)
+        else:
+            if expected_destination_exists:
+                return Err(EBUSY)
+            # First generation: reserve one existing free root 8.3 slot in the
+            # after-image only. Never grow/mutate the directory before COMMITTED.
+            var free_off = -1
+            var oi = 0
+            while oi + 31 < root_scan_data.len() and free_off < 0:
+                if root_scan_data[oi] == 0u8 or root_scan_data[oi] == 0xE5u8:
+                    free_off = oi
+                oi = oi + 32
+            if free_off < 0:
+                return Err(ENOSPC)
+            val root_lba = self.data_start_sector.to_u64() + (self.root_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+            dest = Fat32DirEntryLoc(found: false, dir_cluster: self.root_cluster,
+                entry_offset: free_off, dirent_sector: root_lba + (free_off / 512).to_u64(),
+                dirent_offset: free_off % 512, start_cluster: 0u32,
+                file_size: 0u32, is_dir: false)
+        if source.is_dir or dest.is_dir or source.dir_cluster != self.root_cluster or dest.dir_cluster != self.root_cluster:
+            return Err(EINVAL)
+        if source.start_cluster < 2u32 or source.start_cluster == dest.start_cluster:
+            return Err(EINVAL)
+        val source_chain_r = self.read_cluster_chain(dev, source.start_cluster)
+        if source_chain_r.is_err():
+            return Err(EIO)
+        val source_chain = source_chain_r.unwrap()
+        var dest_chain: [u32] = []
+        if dest.start_cluster >= 2u32:
+            val dest_chain_r = self.read_cluster_chain(dev, dest.start_cluster)
+            if dest_chain_r.is_err():
+                return Err(EIO)
+            dest_chain = dest_chain_r.unwrap()
+        var dci = 0
+        while dci < dest_chain.len():
+            var sci = 0
+            while sci < source_chain.len():
+                if dest_chain[dci] == source_chain[sci]:
+                    return Err(EINVAL)
+                sci = sci + 1
+            dci = dci + 1
+        # Reject aliases to any cluster in either full candidate chain. Raw
+        # aliases would make reclamation or source deletion cross-free data.
+        var scan = 0
+        while scan + 31 < root_scan_data.len():
+            val first = root_scan_data[scan]
+            val attr = root_scan_data[scan + 11]
+            if first != 0u8 and first != 0xE5u8 and attr != FAT32_ATTR_LFN:
+                val cluster = fat32_entry_start_cluster(root_scan_data, scan)
+                if cluster >= 2u32 and scan != source.entry_offset and (not destination_exists or scan != dest.entry_offset):
+                    val alias_chain_r = self.read_cluster_chain(dev, cluster)
+                    if alias_chain_r.is_err():
+                        return Err(EIO)
+                    val alias_chain = alias_chain_r.unwrap()
+                    var ai = 0
+                    while ai < alias_chain.len():
+                        var ci = 0
+                        while ci < source_chain.len():
+                            if alias_chain[ai] == source_chain[ci]:
+                                return Err(EINVAL)
+                            ci = ci + 1
+                        ci = 0
+                        while ci < dest_chain.len():
+                            if alias_chain[ai] == dest_chain[ci]:
+                                return Err(EINVAL)
+                            ci = ci + 1
+                        ai = ai + 1
+            scan = scan + 32
+        val root_chain_r = self.read_cluster_chain(dev, self.root_cluster)
+        if root_chain_r.is_err():
+            return Err(EIO)
+        val root_chain = root_chain_r.unwrap()
+        var rci = 0
+        while rci < root_chain.len():
+            var cci = 0
+            while cci < source_chain.len():
+                if root_chain[rci] == source_chain[cci]:
+                    return Err(EINVAL)
+                cci = cci + 1
+            cci = 0
+            while cci < dest_chain.len():
+                if root_chain[rci] == dest_chain[cci]:
+                    return Err(EINVAL)
+                cci = cci + 1
+            rci = rci + 1
+        # Continue the ownership scan through every reachable subdirectory.
+        # Directory aliases/cycles fail closed under the same volume fuel.
+        var dirs: [u32] = []
+        scan = 0
+        while scan + 31 < root_scan_data.len():
+            val first = root_scan_data[scan]
+            val attr = root_scan_data[scan + 11]
+            if first != 0u8 and first != 0xE5u8 and first != 0x2Eu8 and attr != FAT32_ATTR_LFN and (attr & FAT32_ATTR_DIR_BYTE) != 0u8:
+                val dc = fat32_entry_start_cluster(root_scan_data, scan)
+                if dc >= 2u32:
+                    dirs.push(dc)
+            scan = scan + 32
+        var visited_dirs: [u32] = []
+        var qi = 0
+        while qi < dirs.len():
+            if visited_dirs.len() >= self.data_clusters.to_i64():
+                return Err(EIO)
+            val dir_cluster = dirs[qi]
+            var seen_dir = false
+            var vi = 0
+            while vi < visited_dirs.len():
+                if visited_dirs[vi] == dir_cluster:
+                    seen_dir = true
+                vi = vi + 1
+            if seen_dir:
+                return Err(EINVAL)
+            visited_dirs.push(dir_cluster)
+            val directory_chain_r = self.read_cluster_chain(dev, dir_cluster)
+            if directory_chain_r.is_err():
+                return Err(EIO)
+            val directory_chain = directory_chain_r.unwrap()
+            var dki = 0
+            while dki < directory_chain.len():
+                var cki = 0
+                while cki < source_chain.len():
+                    if directory_chain[dki] == source_chain[cki]:
+                        return Err(EINVAL)
+                    cki = cki + 1
+                cki = 0
+                while cki < dest_chain.len():
+                    if directory_chain[dki] == dest_chain[cki]:
+                        return Err(EINVAL)
+                    cki = cki + 1
+                dki = dki + 1
+            val dir_data_r = self._read_dir_data(dev, dir_cluster)
+            if dir_data_r.is_err():
+                return Err(EIO)
+            val dir_data = dir_data_r.unwrap()
+            var di = 0
+            while di + 31 < dir_data.len():
+                val first = dir_data[di]
+                val attr = dir_data[di + 11]
+                if first != 0u8 and first != 0xE5u8 and first != 0x2Eu8 and attr != FAT32_ATTR_LFN:
+                    val cluster = fat32_entry_start_cluster(dir_data, di)
+                    if cluster >= 2u32:
+                        if (attr & FAT32_ATTR_DIR_BYTE) != 0u8:
+                            dirs.push(cluster)
+                        else:
+                            val alias_chain_r = self.read_cluster_chain(dev, cluster)
+                            if alias_chain_r.is_err():
+                                return Err(EIO)
+                            val alias_chain = alias_chain_r.unwrap()
+                            var ai = 0
+                            while ai < alias_chain.len():
+                                var ci = 0
+                                while ci < source_chain.len():
+                                    if alias_chain[ai] == source_chain[ci]:
+                                        return Err(EINVAL)
+                                    ci = ci + 1
+                                ci = 0
+                                while ci < dest_chain.len():
+                                    if alias_chain[ai] == dest_chain[ci]:
+                                        return Err(EINVAL)
+                                    ci = ci + 1
+                                ai = ai + 1
+                di = di + 32
+            qi = qi + 1
+        # The source was written through the filesystem before this call. A
+        # successful real device flush is the admission proof for COMMITTED.
+        val synced = dev.flush()
+        if synced.is_err() or not synced.unwrap():
+            return Err(EIO)
+        var old_next = 0x0FFFFFF8u32
+        if dest.start_cluster >= 2u32:
+            val old_next_r = self._read_fat_entry(dev, dest.start_cluster)
+            if old_next_r.is_err():
+                return Err(EIO)
+            old_next = old_next_r.unwrap()
+        var images: [Fat32ReplaceImage] = []
+        if source.dirent_sector == dest.dirent_sector:
+            val rr = dev.read_sector(dest.dirent_sector)
+            if rr.is_err():
+                return Err(EIO)
+            var sector = rr.unwrap()
+            if not destination_exists:
+                val name = fat32_split_path(destination)[0]
+                val entry = fat32_make_dirent(fat32_short_field(name), FAT32_ATTR_ARCHIVE, source.start_cluster, source.file_size)
+                var ei = 0
+                while ei < 32:
+                    sector[dest.dirent_offset + ei] = entry[ei]
+                    ei = ei + 1
+            val hi = (source.start_cluster >> 16u32) & 0xFFFFu32
+            val lo = source.start_cluster & 0xFFFFu32
+            val doff = dest.dirent_offset
+            sector[doff + 20] = (hi & 0xFFu32).to_u8()
+            sector[doff + 21] = ((hi >> 8u32) & 0xFFu32).to_u8()
+            sector[doff + 26] = (lo & 0xFFu32).to_u8()
+            sector[doff + 27] = ((lo >> 8u32) & 0xFFu32).to_u8()
+            sector[doff + 28] = (source.file_size & 0xFFu32).to_u8()
+            sector[doff + 29] = ((source.file_size >> 8u32) & 0xFFu32).to_u8()
+            sector[doff + 30] = ((source.file_size >> 16u32) & 0xFFu32).to_u8()
+            sector[doff + 31] = ((source.file_size >> 24u32) & 0xFFu32).to_u8()
+            sector[source.dirent_offset] = 0xE5u8
+            images.push(fat32_replace_image(dest.dirent_sector, sector).unwrap())
+        else:
+            val drr = dev.read_sector(dest.dirent_sector)
+            val srr = dev.read_sector(source.dirent_sector)
+            if drr.is_err() or srr.is_err():
+                return Err(EIO)
+            var dsector = drr.unwrap()
+            var ssector = srr.unwrap()
+            if not destination_exists:
+                val name = fat32_split_path(destination)[0]
+                val entry = fat32_make_dirent(fat32_short_field(name), FAT32_ATTR_ARCHIVE, source.start_cluster, source.file_size)
+                var ei = 0
+                while ei < 32:
+                    dsector[dest.dirent_offset + ei] = entry[ei]
+                    ei = ei + 1
+            val hi = (source.start_cluster >> 16u32) & 0xFFFFu32
+            val lo = source.start_cluster & 0xFFFFu32
+            val doff = dest.dirent_offset
+            dsector[doff + 20] = (hi & 0xFFu32).to_u8()
+            dsector[doff + 21] = ((hi >> 8u32) & 0xFFu32).to_u8()
+            dsector[doff + 26] = (lo & 0xFFu32).to_u8()
+            dsector[doff + 27] = ((lo >> 8u32) & 0xFFu32).to_u8()
+            dsector[doff + 28] = (source.file_size & 0xFFu32).to_u8()
+            dsector[doff + 29] = ((source.file_size >> 8u32) & 0xFFu32).to_u8()
+            dsector[doff + 30] = ((source.file_size >> 16u32) & 0xFFu32).to_u8()
+            dsector[doff + 31] = ((source.file_size >> 24u32) & 0xFFu32).to_u8()
+            ssector[source.dirent_offset] = 0xE5u8
+            images.push(fat32_replace_image(dest.dirent_sector, dsector).unwrap())
+            images.push(fat32_replace_image(source.dirent_sector, ssector).unwrap())
+        val record = Fat32ReplaceRecord(
+            bank: 0, state: Fat32ReplaceState.Committed, generation: 0u64,
+            destination_parent_cluster: dest.dir_cluster, destination_lba: dest.dirent_sector,
+            destination_offset: dest.dirent_offset, source_parent_cluster: source.dir_cluster,
+            source_lba: source.dirent_sector, source_offset: source.dirent_offset,
+            source_lfn_slots: 0, old_first_cluster: dest.start_cluster,
+            old_size: dest.file_size.to_u64(), new_first_cluster: source.start_cluster,
+            new_size: source.file_size.to_u64(), reclaim_current: dest.start_cluster,
+            reclaim_next: old_next, images: images)
+        val committed = fat32_atomic_replace_commit_device(
+            dev, record, self.total_sectors, self.reserved_sectors,
+            self.fat_start_sector, self.fat_size_sectors, self.fat_count,
+            self.data_clusters, self.data_start_sector,
+            self.sectors_per_cluster, self.root_cluster)
+        if committed.is_err():
+            return Err(EIO)
+        # Replay writes whole sectors behind the cache; reload before returning
+        # or publishing subsequent lookups.
+        val refreshed = self._read_dir_data(dev, self.root_cluster)
+        if refreshed.is_err():
+            return Err(EIO)
+        self.root_dir_data = refreshed.unwrap()
+        Ok(committed.unwrap())
+

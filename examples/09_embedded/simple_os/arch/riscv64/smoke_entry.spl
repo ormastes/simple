@@ -10,6 +10,7 @@ extern fn rt_riscv_native_gui_process_render() -> i64
 extern fn rt_riscv_harden_canary_value() -> i64
 extern fn rt_riscv_fs_exec_probe() -> i64
 extern fn rt_riscv_fs_exec_run() -> i64
+extern fn rt_riscv_fs_legacy_exec_disabled() -> i64
 extern fn rt_riscv_fs_list_apps() -> i64
 extern fn rt_riscv_fs_exec_malformed_selftest() -> i64
 extern fn rt_riscv_fs_exec_privilege_selftest() -> i64
@@ -87,17 +88,15 @@ fn spl_start():
     serial_println("RV64_ELF_ADMISSION_NEGATIVE_OK")
     serial_println("RV64_USER_ISOLATION_OK write_fault_cause=15")
     serial_println("RV64_SUPERVISOR_STATE_RESTORE_OK")
-    serial_println("FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=riscv64")
-    val fs_exec_rc = rt_riscv_fs_exec_run()
-    if fs_exec_rc != 37 or not rt_riscv_fs_reap_auth_ok():
-        serial_println("[riscv-fs-exec] child status={fs_exec_rc} trap={rt_riscv_fs_last_trap_cause()}")
-        serial_println("[riscv-fs-exec] sepc={rt_riscv_fs_last_trap_sepc()} stval={rt_riscv_fs_last_trap_stval()}")
+    # `/FSEXEC.ELF` is writable boot media and has no canonical loader-issued
+    # authority token.  Keep its parser/isolation checks as structural evidence,
+    # but never enter it from the production boot path.
+    if not rt_riscv_fs_legacy_exec_disabled():
+        serial_println("[riscv-fs-exec] unauthenticated legacy execution enabled")
         serial_println("TEST FAILED")
         rt_qemu_exit_failure()
         return
-    serial_println("FS_TASK_REAP generation={rt_riscv_fs_reaped_generation()} status=37")
-    serial_println("RV64_TASK_REAP_AUTH_EXACT_ONCE_OK")
-    serial_println("FS_PROGRAM_END rc=37 reaped=true")
+    serial_println("RV64_LEGACY_FSEXEC_DISABLED reason=missing-loader-authority-token")
     if not vfs_boot_init_riscv64_virtio_fat32() or
        not riscv64_authenticated_media_acceptance_v1(Scheduler.new(), g_mount_table):
         serial_println("[riscv-auth-exec] canonical loader fixture failed")

@@ -2,6 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* These bounded runtime owners are part of every core-C bundle.  Keeping the
+ * inclusion in an already-rostered translation unit prevents each compiler,
+ * sysroot, and capsule builder from growing a parallel source roster. */
+#include "runtime_any_ops.c"
+#include "runtime_string_ffi.c"
+
 static const char* simple_contract_kind_name(int64_t kind) {
     switch (kind) {
         case 1: return "Postcondition";

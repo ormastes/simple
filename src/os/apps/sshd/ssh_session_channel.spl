@@ -10,7 +10,7 @@ use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXI
 use os.apps.sshd.ssh_channel.{ChannelState, SSH_MSG_CHANNEL_REQUEST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION, DEFAULT_WINDOW_SIZE, ssh_parse_channel_data, ssh_build_channel_window_adjust}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_sftp_v3.{SftpSessionV3}
-use os.apps.sshd.ssh_session_helpers.{_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
+use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _copy_bytes_stable, _push_u32_be_stable, _read_u32_stable, _read_text_field_fast, _bytes_to_hex, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
 use os.kernel.log.klog_api.{log_info}
 use std.common.string_core.{text_to_bytes}
 
@@ -35,7 +35,7 @@ fn _build_channel_data_stable(recipient: u32, data: [u8]) -> [u8]:
     # for the reassignment helpers.
     var i: u64 = 0
     while i < data.len():
-        payload.push(_u8_at(data, i))
+        payload.push(ssh_session_u8_at(data, i))
         i = i + 1
     payload
 
@@ -50,7 +50,7 @@ fn _payload_field_equals_bytes_stable(payload: [u8], field_offset: u64, expected
         return false
     var i: u64 = 0
     while i < expected.len():
-        if _u8_at(payload, start + i) != _u8_at(expected, i):
+        if ssh_session_u8_at(payload, start + i) != ssh_session_u8_at(expected, i):
             return false
         i = i + 1
     true
@@ -58,18 +58,18 @@ fn _payload_field_equals_bytes_stable(payload: [u8], field_offset: u64, expected
 fn _is_live_channel_open_session(payload: [u8]) -> bool:
     if payload.len() < 24:
         return false
-    _u8_at(payload, 0) == 90 and
-        _u8_at(payload, 1) == 0 and
-        _u8_at(payload, 2) == 0 and
-        _u8_at(payload, 3) == 0 and
-        _u8_at(payload, 4) == 7 and
-        _u8_at(payload, 5) == 0x73 and
-        _u8_at(payload, 6) == 0x65 and
-        _u8_at(payload, 7) == 0x73 and
-        _u8_at(payload, 8) == 0x73 and
-        _u8_at(payload, 9) == 0x69 and
-        _u8_at(payload, 10) == 0x6F and
-        _u8_at(payload, 11) == 0x6E
+    ssh_session_u8_at(payload, 0) == 90 and
+        ssh_session_u8_at(payload, 1) == 0 and
+        ssh_session_u8_at(payload, 2) == 0 and
+        ssh_session_u8_at(payload, 3) == 0 and
+        ssh_session_u8_at(payload, 4) == 7 and
+        ssh_session_u8_at(payload, 5) == 0x73 and
+        ssh_session_u8_at(payload, 6) == 0x65 and
+        ssh_session_u8_at(payload, 7) == 0x73 and
+        ssh_session_u8_at(payload, 8) == 0x73 and
+        ssh_session_u8_at(payload, 9) == 0x69 and
+        ssh_session_u8_at(payload, 10) == 0x6F and
+        ssh_session_u8_at(payload, 11) == 0x6E
 
 fn _field_range_equals_bytes_stable(payload: [u8], start: u64, end: u64, expected: [u8]) -> bool:
     if end < start:
@@ -78,14 +78,14 @@ fn _field_range_equals_bytes_stable(payload: [u8], start: u64, end: u64, expecte
         return false
     var i: u64 = 0
     while i < expected.len():
-        if _u8_at(payload, start + i) != _u8_at(expected, i):
+        if ssh_session_u8_at(payload, start + i) != ssh_session_u8_at(expected, i):
             return false
         i = i + 1
     true
 
 pub fn ssh_channel_request_is_sftp(payload: [u8]) -> bool:
     """Recognize one exact RFC 4254 `subsystem` request for `sftp`."""
-    if payload.len() < 23 or _u8_at(payload, 0) != SSH_MSG_CHANNEL_REQUEST:
+    if payload.len() < 23 or ssh_session_u8_at(payload, 0) != SSH_MSG_CHANNEL_REQUEST:
         return false
     val request_len = _read_u32_stable(payload, 5).to_u64()
     val request_start: u64 = 9
@@ -177,7 +177,7 @@ fn _scp_read_file_bytes(path: text) -> ([u8], i64):
         return ([], -1)
     # Build the [u8] by reading each byte straight from the FAT buffer via
     # mmio_read8 (the proven Inc-1 raw-read idiom) — a Simple-native packed [u8]
-    # that _u8_at reads reliably at any stack depth. (`b` is bound before
+    # that ssh_session_u8_at reads reliably at any stack depth. (`b` is bound before
     # `.to_i64()` only for clarity; a chained form would work too.)
     var out: [u8] = []
     var i: u64 = 0
@@ -289,7 +289,7 @@ impl SshSession:
                 self.transition_closed()
                 return
 
-            val msg_type = _u8_at(payload, 0)
+            val msg_type = ssh_session_u8_at(payload, 0)
             serial_println("[sshd-session] interactive-inline msg_type=0x{format_hex(msg_type.to_i64())} len={payload_len} seq_c2s={self.cipher.seq_c2s}")
 
             if msg_type == 90:
@@ -332,7 +332,7 @@ impl SshSession:
 
     me _handle_channel_open(payload: [u8]):
         serial_println("[sshd-session] inline channel_open len={payload.len()}")
-        if payload.len() < 24 or _u8_at(payload, 0) != 90:
+        if payload.len() < 24 or ssh_session_u8_at(payload, 0) != 90:
             return
         if not _is_live_channel_open_session(payload):
             serial_println("[sshd-session] inline channel_open unsupported type payload={_bytes_to_hex(payload)}")
@@ -353,7 +353,7 @@ impl SshSession:
         self.send_packet(response)
 
     me _handle_channel_request(payload: [u8]):
-        if payload.len() < 11 or _u8_at(payload, 0) != 98:
+        if payload.len() < 11 or ssh_session_u8_at(payload, 0) != 98:
             return
         val recipient = _read_u32_stable(payload, 1)
         if 9 > payload.len():
@@ -363,7 +363,7 @@ impl SshSession:
         val request_end = request_start + request_len
         if request_end >= payload.len():
             return
-        val want_reply = _u8_at(payload, request_end) != 0
+        val want_reply = ssh_session_u8_at(payload, request_end) != 0
         val off = request_end + 1
         val reply_remote_id =
             if recipient == 0:
@@ -450,7 +450,7 @@ impl SshSession:
         # text-return-into-store heap-tag mangling (root cause tracked in
         # doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md). Send the
         # channel exit FIRST (spawn does not return on success; the connection drops).
-        if _u8_at(payload, off + 4) == 0x2Fu8:
+        if ssh_session_u8_at(payload, off + 4) == 0x2Fu8:
             serial_println("[sshd-session] exec ring3 DEFER absolute-path command={command}")
             # DEFER the ring-3 spawn out of this deep call stack. Spawning inline
             # here (many frames deep: run->loop->handle_packet->channel_request->
@@ -484,7 +484,7 @@ impl SshSession:
         # deep. So we store the intact `command` text here and let the
         # SHALLOW accept-loop frame (sshd.spl) tokenize it into argv; no
         # parsing happens in this deep frame (Phase 2e Inc 2).
-        if _u8_at(payload, off + 4) == 0x63u8:
+        if ssh_session_u8_at(payload, off + 4) == 0x63u8:
             serial_println("[sshd-session] exec ring3 DEFER command={command}")
             self.pending_ring3_exec_remote_id = remote_id
             self.pending_ring3_exec_local_id = local_id
@@ -499,7 +499,7 @@ impl SshSession:
         # the exit-status/close, so a byte-exact download works without an
         # interactive handshake. Detect 'g' (0x67) by raw byte (deep text
         # predicates are unreliable — see x64_freestanding_text_char_at bug).
-        if _u8_at(payload, off + 4) == 0x67u8:
+        if ssh_session_u8_at(payload, off + 4) == 0x67u8:
             val gpath_bytes = _scp_last_token_bytes(command)
             val gpath_text = rt_string_from_byte_array(gpath_bytes)
             val (gfile_bytes, gfsize) = _scp_read_file_bytes(gpath_text)
@@ -525,10 +525,10 @@ impl SshSession:
         # SAME session's packet loop to keep delivering
         # SSH_MSG_CHANNEL_DATA acks, so `state` must stay Interactive.
         if (payload.len() >= off + 8 and
-            _u8_at(payload, off + 4) == 0x73u8 and
-            _u8_at(payload, off + 5) == 0x63u8 and
-            _u8_at(payload, off + 6) == 0x70u8 and
-            _u8_at(payload, off + 7) == 0x20u8):
+            ssh_session_u8_at(payload, off + 4) == 0x73u8 and
+            ssh_session_u8_at(payload, off + 5) == 0x63u8 and
+            ssh_session_u8_at(payload, off + 6) == 0x70u8 and
+            ssh_session_u8_at(payload, off + 7) == 0x20u8):
             serial_println("[sshd-session] exec scp-source command={command}")
             val path_bytes = _scp_last_token_bytes(command)
             val name_bytes = _scp_basename_bytes(path_bytes)
@@ -633,7 +633,7 @@ impl SshSession:
         val data_len = _read_u32_stable(payload, 5).to_u64()
         if data_len < 1:
             return
-        val ack = _u8_at(payload, 9)
+        val ack = ssh_session_u8_at(payload, 9)
         serial_println("[sshd-session] scp step stage={self.scp_stage} ack=0x{format_hex(ack.to_i64())}")
         # One-shot the whole scp-source response on the client's first ready-ack:
         # C-record + file bytes + trailing 0x00, then exit-status/eof/close.

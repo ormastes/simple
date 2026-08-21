@@ -83,3 +83,18 @@ All missing live helpers fail explicitly and every ARM, UNO, and Linux row
 remains uncredited. SPipe/docgen and runtime execution have not been run because
 the current-source Stage-4 compiler/admission blocker remains; do not describe
 the authored mirror as generated evidence.
+
+## Wave 4 entry status (2026-08-21)
+
+The x86_64, AArch64, and RV64 rebuild plan now selects dedicated filesystem
+server entries. Each entry calls its authenticated-media adapter and omits the
+legacy path-only spawn/capture facade. ARM and RV fixtures require
+`/SERVERS.ELF` through a trusted execute-open; x86 consumes the equivalent
+loader-issued authenticated adoption. ARM waits and reaps the scheduler task.
+
+This closes entry-wiring and fail-closed static contracts only. A PASS row still
+requires a fresh boot of the identified signed media, mounted-file resolution,
+HTTP and database protocol oracles, persistence where selected, target exit,
+and retained raw evidence. The fresh admitted compiler described in the LLVM
+toolchain guide lacks `test`/`check`, and the self-host recovery yielded no
+deployable executable, so it does not convert these rows to live PASS.

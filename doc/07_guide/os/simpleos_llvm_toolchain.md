@@ -322,3 +322,29 @@ compile/link/run receipts remain required.
 proof of their own absence. They fail structural admission when asserted, but
 only a signed execution receipt binding the actual launch can authorize the
 corresponding negative claim.
+
+## Wave 4 artifact status (2026-08-21)
+
+The x86_64 construction lane currently has real SimpleOS clang-20, LLD, and
+llvm-ar artifacts under
+`build/os/llvm/cross-x86_64-unknown-simpleos/bin`. Inspection identifies them
+as static target `ET_EXEC` files with no program interpreter, dynamic-needed
+libraries, or unresolved symbols. This proves artifact structure, not that
+SimpleOS loaded the binaries or that Clang compiled a guest filesystem hello.
+
+`scripts/os/provision_simpleos_guest_llvm_fs.shs` provides the fail-closed
+AArch64/RV64 construction boundary: it requires target-machine executables,
+exact build-receipt digests, a target sysroot, and a non-seed builder, and emits
+`execution_claim=false`. No admitted ARM64/RV64 LLVM bundle or fresh guest
+compile/link/run receipt is present in this wave. Operators must keep these rows
+BLOCKED until `check-simpleos-guest-llvm-fs-hello-qemu.shs` proves exact mounted
+paths, object/link outputs, execution, and stdout in a fresh QEMU process.
+
+The available fresh compiler is
+`/mnt/data/bs2/fresh-admitted-f5c26e-20260821/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`
+(SHA-256 `04eba512d83fe36dc82bf5addbb6c3617d737ad7068627916c0fe0b4f8aa7924`)
+with adjacent `admission.env`. Its four-argument environment ABI and 33-check
+core-C capsule pass. It lacks the `test` and `check` CLI surfaces, however, and
+the production self-host recovery did not produce a deployable executable.
+It may be used only where the admission contract and supported command surface
+match; it is not evidence of a recovered release runtime or live guest LLVM.

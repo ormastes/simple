@@ -11,3 +11,10 @@ one target Simple payload -> all canonical role paths
 - No hosted executable cache or global preload substitution.
 - Filesystem is hosted policy; GOT is explicit bare-metal only.
 - Fake payloads, markers, skips, host work, and stale logs fail closed.
+- Wave 4 splits FAT/NVMe/VFS and architecture runtime state into bounded single
+  owners; x86_64/AArch64/RV64 server entries consume authenticated execute-open
+  authority rather than path-only spawn facades.
+- RV64 ELF reads are streamed and bounded; its legacy unauthenticated executor
+  is an explicit rejection path.
+- Multiarch `simpleos_tool` and LLVM provision receipts prove construction only;
+  guest filesystem execution still requires fresh QEMU receipts.

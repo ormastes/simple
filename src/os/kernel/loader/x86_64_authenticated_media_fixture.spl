@@ -1,0 +1,132 @@
+# x86_64 boot-media adapter for canonical authenticated executable adoption.
+
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.types.{ExecuteTrust}
+use os.kernel.loader.authenticated_media_reader.{authenticated_media_read_text_v1}
+use os.kernel.loader.authenticated_media_parser.{
+    authenticated_media_field_v1, authenticated_media_u64_field_v1,
+    authenticated_media_hex_bytes_v1
+}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableAdmissionDecisionV1, ExecutableAdmissionV1}
+use os.kernel.loader.executable_admission_pipeline.{ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1, executable_loader_admit_authenticated_open_binding_v1, executable_loader_authority_owner_initialize}
+use os.kernel.loader.executable_crypto_authority.{ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize}
+use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_authenticated_v1}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.loader.x86_64_authenticated_media_policy.{x86_64_authenticated_media_root_matches_pin_v1}
+use x86_64_auth_trust_config.{x86_64_authenticated_pinned_key_id_v1, x86_64_authenticated_pinned_public_key_hex_v1, x86_64_authenticated_pinned_public_key_hash_v1}
+
+fn _canonical_media_sidecar_set_v1(
+    executable_path: text, manifest_path: text, admission_path: text,
+    proof_path: text, root_path: text
+) -> bool:
+    # The generalized implementation accepts only complete platform-owned
+    # tuples. A caller cannot redirect the executable while retaining another
+    # image's proof set, or manufacture authority from arbitrary paths.
+    if executable_path == "/FSEXEC.ELF":
+        return manifest_path == "/AUTHHEL.MAN" and admission_path == "/AUTHHEL.ADM" and
+            proof_path == "/AUTHHEL.SIG" and root_path == "/AUTHHEL.PUB"
+    if executable_path == "/SERVERS.ELF":
+        return manifest_path == "/SERVER.MAN" and admission_path == "/SERVER.ADM" and
+            proof_path == "/SERVER.SIG" and root_path == "/SERVER.PUB"
+    false
+
+pub fn x86_64_authenticated_media_execute_path_v1(
+    scheduler: Scheduler, table: MountTable, executable_path: text,
+    manifest_path: text, admission_path: text, proof_path: text, root_path: text
+) -> i64:
+    """Admit and execute one named media image using its bound sidecar set."""
+    if not _canonical_media_sidecar_set_v1(
+        executable_path, manifest_path, admission_path, proof_path, root_path):
+        return -13
+    var owner = table
+    val binding_result = owner.open_for_execute(executable_path, ExecuteTrust.Trusted)
+    if binding_result.is_err(): return -13
+    val binding: ExecuteOpenBinding = binding_result.unwrap()
+    val manifest_record = authenticated_media_read_text_v1(owner, manifest_path, 8192)
+    val admission_record = authenticated_media_read_text_v1(owner, admission_path, 8192)
+    val proof_record = authenticated_media_read_text_v1(owner, proof_path, 1024)
+    val root_record = authenticated_media_read_text_v1(owner, root_path, 1024)
+    if not manifest_record.? or not admission_record.? or not proof_record.? or not root_record.?:
+        _ = owner.close(binding.file_handle)
+        return -13
+    val manifest_env = manifest_record.unwrap()
+    val admission_env = admission_record.unwrap()
+    val image_hash = authenticated_media_field_v1(manifest_env, "image_hash")
+    val manifest_hash = authenticated_media_field_v1(admission_env, "manifest_hash")
+    val kernel_hash = authenticated_media_field_v1(admission_env, "kernel_hash")
+    val trust_hash = authenticated_media_field_v1(admission_env, "trust_root_hash")
+    val mount_id = authenticated_media_u64_field_v1(admission_env, "mount_id")
+    val mount_generation = authenticated_media_u64_field_v1(admission_env, "mount_generation")
+    val file_id = authenticated_media_u64_field_v1(admission_env, "file_id")
+    val file_generation = authenticated_media_u64_field_v1(admission_env, "file_generation")
+    val key_id = x86_64_authenticated_pinned_key_id_v1()
+    val proof_key_id = authenticated_media_field_v1(proof_record.unwrap(), "signer_key_id")
+    val root_key_id = authenticated_media_field_v1(root_record.unwrap(), "key_id")
+    val signature_hex = authenticated_media_field_v1(proof_record.unwrap(), "signature_hex")
+    val public_key_hex = authenticated_media_field_v1(root_record.unwrap(), "public_key_hex")
+    if not image_hash.? or not manifest_hash.? or not kernel_hash.? or not trust_hash.? or
+       not mount_id.? or not mount_generation.? or not file_id.? or not file_generation.? or
+       not proof_key_id.? or not root_key_id.? or not signature_hex.? or not public_key_hex.? or
+       proof_key_id.unwrap() != key_id or root_key_id.unwrap() != key_id or
+       mount_id.unwrap() != binding.mount_id.id.to_u64() or
+       mount_generation.unwrap() != binding.mount_generation or
+       file_id.unwrap() != binding.file_handle.id or file_generation.unwrap() != binding.content_generation:
+        _ = owner.close(binding.file_handle)
+        return -13
+    if not x86_64_authenticated_media_root_matches_pin_v1(
+        key_id, x86_64_authenticated_pinned_public_key_hex_v1(),
+        x86_64_authenticated_pinned_public_key_hash_v1(), root_key_id.unwrap(),
+        public_key_hex.unwrap(), trust_hash.unwrap()):
+        _ = owner.close(binding.file_handle)
+        return -13
+    val target = ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+    val manifest = SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "elf", target: target, entrypoint: "main",
+        required_abi_features: ["elf64", "w_xor_x"], required_services: [], required_capabilities: 69u32,
+        resource_limits: ManifestResourceLimits(max_memory_bytes: 0, max_open_handles: 0, max_threads: 0, cpu_budget_us: 0),
+        namespace_template: "app_default", native_libraries: [], smf_libraries: [], interpreter: "",
+        argument_schema: [], startup_preloads: [], content_hashes: [image_hash.unwrap()],
+        signature: "ed25519:" + key_id, debug_identity: "")
+    val admission = ExecutableAdmissionV1(
+        schema_version: 1, admission_id: "x86-64-qemu-fs-exec-v1",
+        decision: ExecutableAdmissionDecisionV1.Admitted, rejection_reason: "",
+        image_hash: image_hash.unwrap(), manifest_hash: manifest_hash.unwrap(),
+        kernel_hash: kernel_hash.unwrap(), trust_root_hash: trust_hash.unwrap(), trust_epoch: 1u64,
+        target: target, firmware_profile: "ovmf-q35", compiler_identity: "admitted-stage2",
+        source_identity: "retained-source-tree", config_identity: "x86-64-authenticated-fs-exec-v1",
+        mount_id: mount_id.unwrap(), mount_generation: mount_generation.unwrap(),
+        file_id: file_id.unwrap(), file_generation: file_generation.unwrap(), effective_capabilities: 69u32)
+    val root_bytes = authenticated_media_hex_bytes_v1(x86_64_authenticated_pinned_public_key_hex_v1())
+    val signature_bytes = authenticated_media_hex_bytes_v1(signature_hex.unwrap())
+    if root_bytes.len() != 32 or signature_bytes.len() != 64 or
+       not executable_loader_trust_roots_initialize([ExecutableTrustedSignerV1(key_id: key_id, public_key: root_bytes)]):
+        _ = owner.close(binding.file_handle)
+        return -13
+    val authorities = executable_loader_authority_owner_initialize(4, 0x5838363441555448u64)
+    if authorities.is_err():
+        _ = owner.close(binding.file_handle)
+        return -13
+    val inputs = ExecutableLoaderVerificationInputsV1(
+        manifest: manifest, manifest_hash: manifest_hash.unwrap(), image_hash: image_hash.unwrap(),
+        trust_root_hash: trust_hash.unwrap(), target: target, format: "elf", role: "main-image",
+        verified_load_ranges: [], manifest_verified: true, signature_verified: true,
+        trust_root_verified: true, target_verified: true, format_verified: true,
+        ranges_verified: true, image_digest_verified: true)
+    val admitted = executable_loader_admit_authenticated_open_binding_v1(
+        owner, authorities.unwrap(), binding, inputs, admission,
+        ExecutableLoaderCryptographicProofV1(signer_key_id: key_id, signature: signature_bytes))
+    if admitted.is_err(): return -13
+    x86_64_fs_exec_spawn_authenticated_v1(
+        scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
+        executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+        admitted.unwrap().entry_point, 0, executable_path, SPAWN_RECIPE_APP_LAUNCHER)
+
+pub fn x86_64_authenticated_media_execute_v1(scheduler: Scheduler, table: MountTable) -> i64:
+    x86_64_authenticated_media_execute_path_v1(
+        scheduler, table, "/FSEXEC.ELF", "/AUTHHEL.MAN", "/AUTHHEL.ADM",
+        "/AUTHHEL.SIG", "/AUTHHEL.PUB")
+
+export x86_64_authenticated_media_execute_v1, x86_64_authenticated_media_execute_path_v1

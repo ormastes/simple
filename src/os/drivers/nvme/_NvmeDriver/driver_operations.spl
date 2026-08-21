@@ -8,12 +8,11 @@ use os.drivers.nvme.nvme_queue_resources.{NvmeQueueResources, nvme_queue_pair_fr
 use os.drivers.nvme.nvme_admin_command.{nvme_admin_identify_controller, nvme_admin_identify_namespace, nvme_admin_set_num_queues, nvme_admin_create_io_completion_queue, nvme_admin_create_io_submission_queue}
 use os.drivers.nvme.nvme_controller_contract.{NvmeControllerRegs, nvme_controller_facts, nvme_controller_refusal_reason, nvme_cap_dstrd, nvme_namespace_facts, nvme_namespace_refusal_reason}
 use os.drivers.nvme.nvme_storage_model.{nvme_queue_is_system_reserved}
+use os.drivers.nvme._NvmeDriver.dma_allocation.{nvme_alloc_dma}
 use os.kernel.log.klog_api.{log_info}
+use common.string_core.{char_from_code}
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
-extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
-extern fn rt_dma_virt_of(handle: i64) -> i64
-extern fn rt_dma_phys_of(handle: i64) -> i64
 extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
 extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
 
@@ -64,6 +63,32 @@ var g_nvme_system_queue_nsids: [u32; 8] = [0; 8]
 var g_nvme_current_device_identity: u64 = 0u64
 var g_nvme_current_device_generation: u64 = 0u64
 
+fn _nvme_identify_ascii(base: u64, offset: u64, width: u64) -> text:
+    """Read a fixed-width, space-padded NVMe Identify ASCII field.
+
+    NVMe serial/model/firmware fields are not NUL-terminated.  Trim trailing
+    spaces and NUL bytes while preserving every interior byte.  The bounded
+    width comes from the controller Identify layout, so no untrusted length is
+    used for MMIO reads.
+    """
+    var end = width
+    while end > 0u64:
+        val tail = mmio_read8(base + offset + end - 1u64)
+        if tail != 0u8 and tail != 32u8:
+            break
+        end = end - 1u64
+    var result: text = ""
+    var i = 0u64
+    while i < end:
+        val byte = mmio_read8(base + offset + i)
+        if byte == 0u8:
+            break
+        result = result + char_from_code(byte.to_i64())
+        i = i + 1u64
+    result
+
+export _nvme_identify_ascii
+
 pub fn nvme_current_device_identity() -> u64:
     g_nvme_current_device_identity
 
@@ -98,7 +123,6 @@ pub fn nvme_trusted_pci_identity(grant: DeviceGrant) -> Result<u64, text>:
         return Result.Err("NVMe: trusted device identity collapsed to zero")
     Ok(identity)
 
-# Timeout for controller ready transitions (spin iterations)
 impl NvmeDriver:
     static fn new() -> NvmeDriver:
         """Create an uninitialized NVMe driver."""
@@ -794,47 +818,8 @@ impl NvmeDriver:
         self.device_generation
 
     fn alloc_dma(size: u64) -> Result<DmaAddrs, text>:
-        """Allocate DMA-capable memory via syscall 84.
-
-        Returns both virtual and physical addresses.
-        The kernel writes phys_addr at result_ptr[0] and allocation_id at
-        result_ptr[1], and returns virt_addr as the syscall return value.
-        """
-        # Kernel protocol: arg0=size, arg1=pointer to 16-byte result buffer
-        # Result buffer layout: offset 0 = phys_addr, offset 8 = allocation_id.
-        # The syscall return value is the CPU virtual address.
-        var result_buf = DmaAddrs(virt: 0, phys: 0, handle: -1)
-        val result_ptr = unsafe_addr_of(result_buf)
-        val virt_result = syscall(SYS_ALLOC_DMA, size, result_ptr, 0, 0, 0)
-        if virt_result <= 0:
-            val handle = rt_dma_alloc(size.to_i64(), 2)
-            if handle < 0:
-                return Result.Err("DMA allocation failed")
-            val virt_fallback = rt_dma_virt_of(handle)
-            val phys_fallback = rt_dma_phys_of(handle)
-            if virt_fallback <= 0 or phys_fallback <= 0:
-                return Result.Err("DMA allocation returned zero address")
-            val fallback_addrs = DmaAddrs(virt: virt_fallback.to_u64(), phys: phys_fallback.to_u64(), handle: handle)
-            return Result.Ok(fallback_addrs)
-        val phys_addr = mmio_read64(result_ptr)
-        val virt_addr = virt_result as u64
-        if phys_addr == 0 or virt_addr == 0:
-            val handle = rt_dma_alloc(size.to_i64(), 2)
-            if handle < 0:
-                return Result.Err("DMA allocation returned zero address")
-            val virt_fallback = rt_dma_virt_of(handle)
-            val phys_fallback = rt_dma_phys_of(handle)
-            if virt_fallback <= 0 or phys_fallback <= 0:
-                return Result.Err("DMA allocation returned zero address")
-            return Result.Ok(DmaAddrs(virt: virt_fallback.to_u64(), phys: phys_fallback.to_u64(), handle: handle))
-        if size >= DMA_PAGE_SIZE:
-            if (phys_addr & (DMA_PAGE_SIZE - 1)) != 0:
-                return Result.Err("DMA physical address not page-aligned")
-            if (virt_addr & (DMA_PAGE_SIZE - 1)) != 0:
-                return Result.Err("DMA virtual address not page-aligned")
-        val allocation_id = mmio_read64(result_ptr + 8u64).to_i64()
-        val addrs = DmaAddrs(virt: virt_addr, phys: phys_addr, handle: allocation_id)
-        Result.Ok(addrs)
+        """Allocate a fresh DMA record without transferring driver ownership."""
+        nvme_alloc_dma(size)
 
     fn zero_memory(addr: u64, size: u64):
         """Zero out a region of memory using 32-bit MMIO writes."""

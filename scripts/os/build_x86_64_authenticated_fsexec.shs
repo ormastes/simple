@@ -1,0 +1,73 @@
+#!/bin/sh
+# Sign an existing nonce-patched x86_64 /FSEXEC.ELF for loader admission.
+set -eu
+
+fail() { echo "x86-64-auth-fsexec-builder: $*" >&2; exit 1; }
+[ "$#" -eq 4 ] || fail 'usage: OUTPUT_DIR KERNEL_ELF SIGNING_KEY_PEM PUBLIC_KEY_PEM'
+out=$1 kernel=$2 private_key=$3 public_key=$4
+[ -s "$kernel" ] && [ -s "$private_key" ] && [ -s "$public_key" ] || fail 'missing input'
+for tool in clang ld.lld openssl sha256sum awk od dd; do command -v "$tool" >/dev/null 2>&1 || fail "missing tool:$tool"; done
+mkdir -p "$out"
+mount_id=${SIMPLEOS_X86_64_AUTH_MOUNT_ID:-}
+mount_generation=${SIMPLEOS_X86_64_AUTH_MOUNT_GENERATION:-}
+file_id=${SIMPLEOS_X86_64_AUTH_FILE_ID:-}
+file_generation=${SIMPLEOS_X86_64_AUTH_FILE_GENERATION:-}
+for coordinate in "$mount_id" "$mount_generation" "$file_id" "$file_generation"; do
+    case "$coordinate" in ''|*[!0-9]*|0) fail 'explicit nonzero ExecuteOpenBinding coordinates required' ;; esac
+done
+work=$(mktemp -d "${TMPDIR:-/tmp}/x86-64-auth-fsexec.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cat > "$work/hello.S" <<'EOF'
+.section .text
+.global _start
+_start:
+  lea message(%rip),%r12
+  mov $message_len,%r13
+1: movzbq (%r12),%rdi
+  inc %r12
+  mov $60,%rax
+  syscall
+  dec %r13
+  jnz 1b
+  mov $37,%rdi
+  xor %rax,%rax
+  syscall
+2: hlt
+  jmp 2b
+.section .rodata
+message: .ascii "hello from SimpleOS LLVM\n"
+.set message_len,.-message
+EOF
+clang --target=x86_64-unknown-none-elf -c -ffreestanding -nostdlib "$work/hello.S" -o "$work/hello.o"
+ld.lld -m elf_x86_64 -static --build-id=none -z max-page-size=4096 -e _start -Ttext=0x201000 "$work/hello.o" -o "$work/FSEXEC.ELF"
+image_hash=$(sha256sum "$work/FSEXEC.ELF" | awk '{print $1}')
+kernel_hash=$(sha256sum "$kernel" | awk '{print $1}')
+openssl pkey -pubin -in "$public_key" -outform DER -out "$work/public.der" >/dev/null 2>&1
+pub_size=$(wc -c < "$work/public.der" | tr -d ' ')
+[ "$pub_size" -ge 32 ] || fail 'public key DER too short'
+dd if="$work/public.der" of="$work/public.raw" bs=1 skip=$((pub_size - 32)) count=32 2>/dev/null
+trust_hash=$(sha256sum "$work/public.raw" | awk '{print $1}')
+contract_tool=${SIMPLEOS_X86_64_AUTH_CONTRACT_TOOL:-}
+[ -x "$contract_tool" ] || fail 'SIMPLEOS_X86_64_AUTH_CONTRACT_TOOL must name the admitted Simple canonical-body producer'
+body=$work/signing.body
+"$contract_tool" "$body" "$image_hash" "$kernel_hash" "$trust_hash" \
+    "$mount_id" "$mount_generation" "$file_id" "$file_generation" || fail 'canonical body producer failed'
+[ "$(dd if="$body" bs=1 count=32 2>/dev/null)" = simpleos-executable-admission-v1 ] || fail 'canonical signing domain mismatch'
+if [ -n "${SIMPLEOS_X86_64_AUTH_BODY_OUTPUT:-}" ]; then
+    cp "$body" "$SIMPLEOS_X86_64_AUTH_BODY_OUTPUT"
+fi
+manifest_hash=$(sha256sum "$body" | awk '{print $1}')
+openssl pkeyutl -sign -rawin -inkey "$private_key" -in "$body" -out "$work/signature.raw" >/dev/null 2>&1 || fail 'Ed25519 signing failed'
+openssl pkeyutl -verify -rawin -pubin -inkey "$public_key" -sigfile "$work/signature.raw" -in "$body" >/dev/null 2>&1 || fail 'key mismatch'
+printf 'schema=simpleos-authhello-manifest-v1\nimage_hash=%s\n' "$image_hash" > "$work/AUTHHEL.MAN"
+printf 'schema=simpleos-authhello-admission-v1\nmanifest_hash=%s\nkernel_hash=%s\ntrust_root_hash=%s\nmount_id=%s\nmount_generation=%s\nfile_id=%s\nfile_generation=%s\n' \
+    "$manifest_hash" "$kernel_hash" "$trust_hash" "$mount_id" "$mount_generation" "$file_id" "$file_generation" > "$work/AUTHHEL.ADM"
+printf 'schema=simpleos-authhello-proof-v1\nsigner_key_id=x86-64-qemu-acceptance-v1\nsignature_hex=%s\n' \
+    "$(od -An -tx1 -v "$work/signature.raw" | tr -d ' \n')" > "$work/AUTHHEL.SIG"
+printf 'schema=simpleos-authhello-trust-root-v1\nkey_id=x86-64-qemu-acceptance-v1\npublic_key_hex=%s\n' \
+    "$(od -An -tx1 -v "$work/public.raw" | tr -d ' \n')" > "$work/AUTHHEL.PUB"
+cp "$work/FSEXEC.ELF" "$work/AUTHHELLO.ELF"
+for name in FSEXEC.ELF AUTHHELLO.ELF AUTHHEL.MAN AUTHHEL.ADM AUTHHEL.SIG AUTHHEL.PUB; do
+    cp "$work/$name" "$out/$name.tmp"; mv "$out/$name.tmp" "$out/$name"
+done
+echo "x86_64_auth_fsexec_built=pass image_sha256=$image_hash manifest_sha256=$manifest_hash"

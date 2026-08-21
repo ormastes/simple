@@ -7,7 +7,10 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 parser_types=$root/src/compiler/10.frontend/parser_types_expr.spl
-hir=$root/src/compiler/20.hir/hir_lowering/expressions.spl
+# The explicit-case refactor keeps the public `expressions.spl` umbrella thin;
+# semantic asm lowering, including operand-name/location transport, lives here.
+hir=$root/src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl
+hir_umbrella=$root/src/compiler/20.hir/hir_lowering/expressions.spl
 mir=$root/src/compiler/50.mir/_MirLowering/function_lowering.spl
 llvm=$root/src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl
 constraints=$root/src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl
@@ -15,14 +18,21 @@ spec=$root/test/01_unit/compiler/backend/llvm_inline_asm_template_spec.spl
 bridge_spec=$root/test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl
 parser=$root/src/compiler/10.frontend/core/_ParserPrimary/asm_raw_parsing.spl
 bridge=$root/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
-rv64_runtime=$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c
+rv64_runtime=$root/examples/09_embedded/simple_os/arch/riscv64/boot/rv64_fs_exec_loader.inc.c
+rv64_media=$root/examples/09_embedded/simple_os/arch/riscv64/boot/rv64_fs_exec_media.inc.c
+rv64_runtime_facade=$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_network_tail.inc.c
 rv64_entry=$root/examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl
 rv64_contract=$root/src/os/qemu_systest_contract.spl
 
 fail() { echo "rv64-inline-asm-operand-transport: $*" >&2; exit 1; }
 need() { grep -Fq "$2" "$1" || fail "missing $3"; }
+need_once() {
+    count=$(grep -Fc "$2" "$1")
+    [ "$count" -eq 1 ] || fail "$3 count=$count"
+}
 
 need "$parser_types" 'Imm         # Immediate value' 'frontend immediate location'
+need "$hir_umbrella" 'export use compiler.hir.hir_lowering._Expressions.block_and_asm_lowering.*' 'HIR asm lowering public projection'
 need "$hir" 'name: constraint.name,' 'HIR operand name transport'
 need "$hir" 'location: constraint.location,' 'HIR operand location transport'
 need "$mir" 'name: constraint.name,' 'MIR operand name transport'
@@ -42,38 +52,39 @@ need "$bridge_spec" 'retains clobbers ABI options and inout output through the t
 need "$bridge" 'case "imm": AsmLocation.Imm' 'typed immediate bridge'
 need "$bridge_spec" 'retains named RV64 register and immediate operands in the typed AST' 'parsed RV64 operand regression'
 need "$bridge_spec" 'expect(rv64_named_immediate_score(src)).to_equal(173)' 'typed RV64 operand assertions'
-need "$rv64_runtime" 'rv64_fs_exec_enter:' 'RV64 user entry owner'
-need "$rv64_runtime" 'rv64_fs_exec_trap_vector:' 'RV64 supervisor trap owner'
-need "$rv64_runtime" '"  sret\n"' 'RV64 privilege transition'
+need "$rv64_media" 'rv64_fs_exec_enter:' 'RV64 user entry owner'
+need "$rv64_media" 'rv64_fs_exec_trap_vector:' 'RV64 supervisor trap owner'
+need "$rv64_media" '"  sret\n"' 'RV64 privilege transition'
 need "$rv64_runtime" 'RuntimeValue rt_riscv_fs_exec_run(void)' 'RV64 FAT-to-ELF lifecycle owner'
+need_once "$rv64_runtime_facade" '#include "rv64_fs_exec_loader.inc.c"' 'RV64 loader capsule facade inclusion'
 need "$rv64_runtime" 'root[2] = rv64_pt_pte(0x80000000ULL' 'supervisor-only kernel Sv39 leaf'
 need "$rv64_runtime" '16U | 2U' 'user-only Sv39 mappings'
 need "$rv64_runtime" 'memsz < filesz' 'ELF memsz/filesz admission'
 need "$rv64_runtime" '((flags & 2U) && (flags & 1U))' 'ELF W^X admission'
 need "$rv64_runtime" 'rt_riscv_fs_exec_malformed_selftest' 'malformed ELF behavioral owner'
 need "$rv64_runtime" 'rv64_fs_map_user_elf(clean_root' 'known-good ELF admission before negative mutation'
-need "$rv64_runtime" 'chain_steps > cluster_limit' 'bounded FAT directory chain'
-need "$rv64_runtime" 'next >= 0x0ffffff8U' 'validated FAT EOC admission'
-need "$rv64_runtime" 'next < 2U || next >= 0x0ffffff0U' 'invalid FAT cluster rejection'
-need "$rv64_runtime" 'sd zero, 0(t0)' 'user kernel-write probe'
+need "$rv64_media" 'chain_steps > cluster_limit' 'bounded FAT directory chain'
+need "$rv64_media" 'next >= 0x0ffffff8U' 'validated FAT EOC admission'
+need "$rv64_media" 'next < 2U || next >= 0x0ffffff0U' 'invalid FAT cluster rejection'
+need "$rv64_media" 'sd zero, 0(t0)' 'user kernel-write probe'
 need "$rv64_runtime" 'g_rv64_fs_exec_trap_cause == 15U' 'user write-fault oracle'
 need "$rv64_runtime" 'g_rv64_fs_reaped_generation = generation' 'exact generation reap owner'
 need "$rv64_runtime" 'g_rv64_fs_completed_token != token' 'authenticated generation reap owner'
-need "$rv64_runtime" 'rv64_fs_reap(generation, token ^ 1U' 'wrong-token behavioral rejection'
-need "$rv64_runtime" 'rv64_fs_reap(generation, token, &duplicate_status)' 'exact-once behavioral rejection'
+need "$rv64_runtime" 'g_rv64_fs_reaped_generation == generation' 'duplicate-generation rejection'
+need "$rv64_runtime" 'g_rv64_fs_task_state != 2U' 'completion-state rejection'
+need "$rv64_runtime" 'g_rv64_fs_completed_generation != generation' 'wrong-generation rejection'
 need "$rv64_runtime" 'satp_after == satp_before' 'supervisor CSR restoration oracle'
 need "$rv64_runtime" 'g_rv64_fs_exec_trap_sepc == fault_va' 'exact fault PC oracle'
 need "$rv64_runtime" 'sepc_after == sepc_before' 'supervisor sepc restoration oracle'
 need "$rv64_runtime" 'g_rv64_fs_exec_trap_stval == 0x80200000ULL' 'exact fault address oracle'
-need "$rv64_runtime" 'csrw sepc, t0' 'supervisor sepc restoration'
+need "$rv64_media" 'csrw sepc, t0' 'supervisor sepc restoration'
 need "$rv64_runtime" 'table[index] & (2U | 4U | 8U)' 'intermediate leaf rejection'
 need "$rv64_runtime" 'memsz == 0' 'zero-length PT_LOAD rejection'
-need "$rv64_entry" 'val fs_exec_rc = rt_riscv_fs_exec_run()' 'RV64 source lifecycle invocation'
-need "$rv64_entry" 'FS_PROGRAM_END rc=37 reaped=true' 'RV64 exact reap receipt'
-need "$rv64_entry" 'RV64_TASK_REAP_AUTH_EXACT_ONCE_OK' 'authenticated exact-once reap receipt'
+need "$rv64_entry" 'rt_riscv_fs_legacy_exec_disabled()' 'legacy execution rejection'
+need "$rv64_entry" 'RV64_LEGACY_FSEXEC_DISABLED reason=missing-loader-authority-token' 'fail-closed boot receipt'
 need "$rv64_entry" 'RV64_SUPERVISOR_STATE_RESTORE_OK' 'supervisor state restoration receipt'
 need "$rv64_contract" 'RV64_ELF_ADMISSION_NEGATIVE_OK' 'malformed ELF system-test marker'
 need "$rv64_contract" 'RV64_USER_ISOLATION_OK write_fault_cause=15' 'user isolation system-test marker'
-need "$rv64_contract" 'FS_TASK_REAP generation=1 status=37' 'generation reap system-test marker'
+need "$rv64_contract" 'RV64_LEGACY_FSEXEC_DISABLED reason=missing-loader-authority-token' 'legacy rejection system-test marker'
 
 echo 'PASS RV64 named immediate operand transport static gate'

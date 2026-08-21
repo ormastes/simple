@@ -19,6 +19,7 @@ OUT_DIR=""
 BACKEND="${SIMPLE_CORE_BACKEND:-llvm}"
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
 CORE_SOURCE_DIR="${SIMPLE_CORE_SOURCE_DIR:-src/runtime/simple_core}"
+ARCHIVER="${SIMPLE_CORE_ARCHIVER:-${AR:-}}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -28,10 +29,36 @@ while [ "$#" -gt 0 ]; do
     --out-dir=*) OUT_DIR="${1#*=}" ;;
     --backend)  shift; BACKEND="$1" ;;
     --backend=*) BACKEND="${1#*=}" ;;
+    --archiver) shift; ARCHIVER="$1" ;;
+    --archiver=*) ARCHIVER="${1#*=}" ;;
     *) echo "error: unknown option '$1'" >&2; exit 1 ;;
   esac
   shift
 done
+
+# Keep archive creation and extraction on one explicitly resolved tool.  Using
+# the shell's literal `ar` here made a successful compiler --emit-archive step
+# fail later on hosts that only provision llvm-ar (the supported Simple native
+# toolchain layout).  Prefer llvm-ar, while retaining versioned LLVM installs
+# and POSIX ar as fallbacks.  An explicit override is fail-closed.
+if [ -n "$ARCHIVER" ]; then
+  command -v "$ARCHIVER" >/dev/null 2>&1 || {
+    echo "error: configured archive tool not found: $ARCHIVER" >&2
+    exit 1
+  }
+else
+  for candidate in llvm-ar llvm-ar-22 llvm-ar-21 llvm-ar-20 llvm-ar-19 \
+                   llvm-ar-18 llvm-ar-17 llvm-ar-16 ar; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      ARCHIVER="$candidate"
+      break
+    fi
+  done
+  [ -n "$ARCHIVER" ] || {
+    echo "error: simple-core archive requires llvm-ar or ar" >&2
+    exit 1
+  }
+fi
 
 [ -n "$TARGET" ] || { echo "error: --target is required" >&2; exit 1; }
 if [ -z "$OUT_DIR" ]; then
@@ -47,6 +74,7 @@ mkdir -p "$PART_DIR/objects"
 echo "Compiler: $SIMPLE_BINARY"
 echo "Target:   $TARGET"
 echo "Backend:  $BACKEND"
+echo "Archiver: $ARCHIVER"
 echo "Output:   $CORE_ARCHIVE"
 rm -f "$CORE_ARCHIVE"
 
@@ -74,7 +102,7 @@ for core_entry in "$CORE_SOURCE_DIR"/*.spl; do
     continue
   fi
   mkdir -p "$PART_DIR/objects/$part_name"
-  (cd "$PART_DIR/objects/$part_name" && ar x "../../$part_name.a")
+  (cd "$PART_DIR/objects/$part_name" && "$ARCHIVER" x "../../$part_name.a")
   BUILT=$((BUILT + 1))
   echo "part ok: $part_name"
 done
@@ -84,5 +112,5 @@ if [ "$FAILED" -ne 0 ] || [ "$BUILT" -eq 0 ]; then
   exit 1
 fi
 
-ar rcs "$CORE_ARCHIVE" "$PART_DIR"/objects/*/*.o
+"$ARCHIVER" rcs "$CORE_ARCHIVE" "$PART_DIR"/objects/*/*.o
 echo "archive=$CORE_ARCHIVE parts_built=$BUILT parts_failed=$FAILED"

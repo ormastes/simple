@@ -1,0 +1,618 @@
+# FAT32 directory mutation and namespace operations.
+use os.kernel.fs.fat32.*
+
+    fn _dirent_addr(self, chain: [u32], flat_off: i32) -> Fat32SlotAddr:
+        """Map a directory-relative flat byte offset to an absolute (LBA, offset).
+
+        Same arithmetic resolve_path uses to fill Fat32DirEntryLoc, kept in one
+        place so the read and write sides cannot drift apart.
+        """
+        val cluster_bytes = self.cluster_size.to_i32()
+        val bps = self.bytes_per_sector.to_i32()
+        val ci = flat_off / cluster_bytes
+        val in_c = flat_off % cluster_bytes
+        val cl = chain[ci]
+        val lba = self.data_start_sector.to_u64() +
+                  (cl - 2u32).to_u64() * self.sectors_per_cluster.to_u64() +
+                  (in_c / bps).to_u64()
+        Fat32SlotAddr(sector: lba, offset: in_c % bps)
+
+    fn _write_dir_bytes(self, dev: BlockDevice, chain: [u32], flat_off: i32, bytes: [u8]) -> Result<(), i32>:
+        """Read-modify-write `bytes` into a directory at flat offset `flat_off`.
+
+        Walks sector by sector so a run of entries may straddle both sector and
+        cluster boundaries.
+        """
+        val bps = self.bytes_per_sector.to_i32()
+        val cluster_bytes = self.cluster_size.to_i32()
+        var i = 0
+        while i < bytes.len():
+            val fo = flat_off + i
+            if (fo / cluster_bytes) >= chain.len():
+                return Err(EIO)
+            val addr = self._dirent_addr(chain, fo)
+            val r = dev.read_sector(addr.sector)
+            if r.is_err():
+                return Err(EIO)
+            var sec = r.unwrap()
+            var so = addr.offset
+            while i < bytes.len() and so < bps:
+                sec[so] = bytes[i]
+                i = i + 1
+                so = so + 1
+            val w = dev.write_sector(addr.sector, sec)
+            if w.is_err():
+                return Err(EIO)
+        Ok(())
+
+    fn _zero_cluster(self, dev: BlockDevice, cluster: u32) -> Result<(), i32>:
+        """Fill every sector of `cluster` with 0x00.
+
+        For a directory cluster the all-zero content IS the end-of-directory
+        marker, so this must happen BEFORE the cluster is linked into any
+        chain — otherwise a concurrent reader walks stale bytes and sees
+        garbage entries past the real end.
+        """
+        val spc = self.sectors_per_cluster.to_u64()
+        val bps = self.bytes_per_sector.to_i32()
+        var zero: [u8] = []
+        var i = 0
+        while i < bps:
+            zero.push(0u8)
+            i = i + 1
+        val first = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
+        var s: u64 = 0u64
+        while s < spc:
+            val w = dev.write_sector(first + s, zero)
+            if w.is_err():
+                return Err(EIO)
+            s = s + 1u64
+        Ok(())
+
+    fn _refresh_root_cache(self, dev: BlockDevice) -> Result<(), i32>:
+        """Re-read the cached first cluster of the root directory from disk.
+
+        resolve_path() prefers root_dir_data when it is non-empty, so any write
+        that touches the root directory must refresh it or the very next lookup
+        answers from a stale in-memory copy.
+        """
+        val spc = self.sectors_per_cluster.to_i32()
+        val bps = self.bytes_per_sector.to_i32()
+        val root_lba = self.data_start_sector.to_u64() +
+                       (self.root_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+        var out: [u8] = []
+        var s = 0
+        while s < spc:
+            val r = dev.read_sector(root_lba + s.to_u64())
+            if r.is_err():
+                return Err(EIO)
+            val sec = r.unwrap()
+            var bi = 0
+            while bi < bps:
+                out.push(sec[bi])
+                bi = bi + 1
+            s = s + 1
+        self.root_dir_data = out
+        Ok(())
+
+    fn _alloc_dirent_slots(self, dev: BlockDevice, dir_cluster: u32, count: i32) -> Result<i32, i32>:
+        """Reserve `count` CONSECUTIVE free 32-byte slots in a directory.
+
+        A slot is free when its first byte is 0x00 (never used — and therefore
+        the end-of-directory marker) or 0xE5 (deleted). An LFN chain plus its
+        8.3 alias must be contiguous, which is why the run has to be
+        consecutive rather than merely available.
+
+        END-OF-DIRECTORY handling: once the scan reaches the 0x00 terminator
+        every remaining slot in the ALLOCATED data is also 0x00, so the run
+        naturally extends to the end of the directory's clusters — but no
+        further. When the run is too short the directory is grown by a fresh
+        cluster which is zeroed BEFORE being linked, so the terminator is still
+        present immediately after whatever we go on to write.
+        """
+        if count <= 0:
+            return Err(EINVAL)
+        var attempts = 0
+        while attempts < 8:
+            val d = self._read_dir_data(dev, dir_cluster)
+            if d.is_err():
+                return Err(d.unwrap_err())
+            val dd = d.unwrap()
+            val total = dd.len() / 32
+            var run = 0
+            var run_start = -1
+            var idx = 0
+            while idx < total:
+                val off = idx * 32
+                val fb = dd[off]
+                if fb == 0x00u8 or fb == 0xE5u8:
+                    if run == 0:
+                        run_start = off
+                    run = run + 1
+                    if run >= count:
+                        return Ok(run_start)
+                else:
+                    run = 0
+                    run_start = -1
+                idx = idx + 1
+            # Not enough contiguous room — grow the directory by one cluster.
+            val ch = self._dir_chain(dev, dir_cluster)
+            if ch.is_err():
+                return Err(ch.unwrap_err())
+            val chain = ch.unwrap()
+            if chain.len() == 0:
+                return Err(EIO)
+            val nc_r = self.allocate_cluster(dev)
+            if nc_r.is_err():
+                return Err(nc_r.unwrap_err())
+            val nc = nc_r.unwrap()
+            val z = self._zero_cluster(dev, nc)
+            if z.is_err():
+                return Err(z.unwrap_err())
+            val ap = self.append_cluster(dev, chain[chain.len() - 1], nc)
+            if ap.is_err():
+                return Err(ap.unwrap_err())
+            attempts = attempts + 1
+        Err(ENOSPC)
+
+    fn _link_entry(self, dev: BlockDevice, dir_cluster: u32, name: text, attr: u8, cluster: u32, size: u32) -> Result<Fat32SlotAddr, i32>:
+        """Create one named entry in `dir_cluster`, emitting an LFN chain when
+        the name cannot survive as a bare 8.3 short name.
+
+        Returns the on-disk address of the 8.3 entry (NOT the first LFN slot),
+        which is what FileHandle.dirent_sector/_offset must point at so that
+        _update_dirent persists size and first-cluster to the right place.
+
+        Err(EEXIST=-17) when the name already exists in the directory.
+        """
+        val d0 = self._read_dir_data(dev, dir_cluster)
+        if d0.is_err():
+            return Err(d0.unwrap_err())
+        val dir_data = d0.unwrap()
+        if fat32_dir_find_entry(dir_data, name) >= 0:
+            return Err(EEXIST)
+
+        var field = fat32_blank_field()
+        var nslots = 0
+        if fat32_name_needs_lfn(name):
+            # ~1 / ~2 collision numbering: probe the directory with the READ
+            # path's own matcher, so "already taken" means exactly what a
+            # subsequent lookup would find.
+            var seq = 1
+            var picked = false
+            while seq <= 999 and not picked:
+                val cand = fat32_gen_short_field(name, seq)
+                if fat32_dir_find_entry(dir_data, fat32_short_field_to_text(cand)) < 0:
+                    field = cand
+                    picked = true
+                seq = seq + 1
+            if not picked:
+                return Err(ENOSPC)
+            nslots = fat32_lfn_slot_count(name)
+        else:
+            field = fat32_short_field(name)
+            nslots = 0
+
+        val total_slots = nslots + 1
+        val fo_r = self._alloc_dirent_slots(dev, dir_cluster, total_slots)
+        if fo_r.is_err():
+            return Err(fo_r.unwrap_err())
+        val flat_off = fo_r.unwrap()
+        val ch_r = self._dir_chain(dev, dir_cluster)
+        if ch_r.is_err():
+            return Err(ch_r.unwrap_err())
+        val chain = ch_r.unwrap()
+
+        # LFN slots are stored highest-sequence FIRST, which is the order the
+        # read side (fat32_dir_find_entry) prepends fragments in.
+        val csum = fat32_lfn_checksum(field)
+        var bytes: [u8] = []
+        var si = nslots
+        while si >= 1:
+            val slot = fat32_make_lfn_slot(name, si, nslots, csum)
+            var bi = 0
+            while bi < 32:
+                bytes.push(slot[bi])
+                bi = bi + 1
+            si = si - 1
+        val ent = fat32_make_dirent(field, attr, cluster, size)
+        var ei = 0
+        while ei < 32:
+            bytes.push(ent[ei])
+            ei = ei + 1
+
+        val wr = self._write_dir_bytes(dev, chain, flat_off, bytes)
+        if wr.is_err():
+            return Err(wr.unwrap_err())
+        val addr = self._dirent_addr(chain, flat_off + nslots * 32)
+        if dir_cluster == self.root_cluster:
+            val rc = self._refresh_root_cache(dev)
+            if rc.is_err():
+                return Err(rc.unwrap_err())
+        Ok(addr)
+
+    fn _parent_dir_cluster(self, dev: BlockDevice, path: text) -> Result<u32, i32>:
+        """First cluster of the directory that should CONTAIN `path`.
+
+        Single-component paths live in the root directory; anything deeper is
+        located with resolve_path() on the parent prefix.
+        """
+        val parts = fat32_split_path(path)
+        if parts.len() == 0:
+            return Err(EINVAL)
+        if parts.len() == 1:
+            return Ok(self.root_cluster)
+        var parent = ""
+        var i = 0
+        while i < parts.len() - 1:
+            parent = parent + "/" + parts[i]
+            i = i + 1
+        val loc_r = self.resolve_path(dev, parent)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+        if not loc.is_dir:
+            return Err(ENOTDIR)
+        var c = loc.start_cluster
+        if c == 0u32:
+            c = self.root_cluster        # ".."-style 0 means the root dir
+        Ok(c)
+
+    fn _create_at_locked(self, dev: BlockDevice, path: text) -> Result<FileHandle, i32>:
+        """Create an empty file at a nested path and return a writable handle.
+
+        The handle carries the address of the freshly written directory entry,
+        so the existing write() persists first-cluster and size into it with no
+        extra plumbing. The file starts with NO cluster allocated (start_cluster
+        0), exactly as a real empty FAT32 file does.
+        """
+        val parts = fat32_split_path(path)
+        if parts.len() == 0:
+            return Err(EINVAL)
+        val name = parts[parts.len() - 1]
+        if name == "." or name == "..":
+            return Err(EINVAL)
+        val pd = self._parent_dir_cluster(dev, path)
+        if pd.is_err():
+            return Err(pd.unwrap_err())
+        val addr_r = self._link_entry(dev, pd.unwrap(), name, FAT32_ATTR_ARCHIVE, 0u32, 0u32)
+        if addr_r.is_err():
+            return Err(addr_r.unwrap_err())
+        val addr = addr_r.unwrap()
+        Ok(FileHandle(
+            fd: 0u64,
+            start_cluster: 0u32,
+            current_cluster: 0u32,
+            offset: 0u64,
+            file_size: 0u64,
+            is_open: true,
+            dirent_sector: addr.sector,
+            dirent_offset: addr.offset
+        ))
+
+    fn _mkdir_at_locked(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        """Create a directory at a nested path.
+
+        Order of operations matters: the new cluster is allocated, zeroed, and
+        populated with its "." / ".." entries BEFORE it is linked into the
+        parent, so the directory is never briefly visible while empty of its
+        dot entries. Per FAT32, ".." records 0 — not the real cluster number —
+        when the parent is the root directory.
+        """
+        val parts = fat32_split_path(path)
+        if parts.len() == 0:
+            return Err(EINVAL)
+        val name = parts[parts.len() - 1]
+        if name == "." or name == "..":
+            return Err(EINVAL)
+        val pd = self._parent_dir_cluster(dev, path)
+        if pd.is_err():
+            return Err(pd.unwrap_err())
+        val dir_cluster = pd.unwrap()
+
+        # Check for a duplicate BEFORE allocating, so a rejected mkdir does not
+        # leak a cluster.
+        val d0 = self._read_dir_data(dev, dir_cluster)
+        if d0.is_err():
+            return Err(d0.unwrap_err())
+        if fat32_dir_find_entry(d0.unwrap(), name) >= 0:
+            return Err(EEXIST)
+
+        val nc_r = self.allocate_cluster(dev)
+        if nc_r.is_err():
+            return Err(nc_r.unwrap_err())
+        val nc = nc_r.unwrap()
+        val z = self._zero_cluster(dev, nc)
+        if z.is_err():
+            return Err(z.unwrap_err())
+
+        var parent_link = dir_cluster
+        if dir_cluster == self.root_cluster:
+            parent_link = 0u32
+        var dots: [u8] = []
+        val e_dot = fat32_make_dirent(fat32_short_field("."), FAT32_ATTR_DIR_BYTE, nc, 0u32)
+        var i = 0
+        while i < 32:
+            dots.push(e_dot[i])
+            i = i + 1
+        val e_dotdot = fat32_make_dirent(fat32_short_field(".."), FAT32_ATTR_DIR_BYTE, parent_link, 0u32)
+        var j = 0
+        while j < 32:
+            dots.push(e_dotdot[j])
+            j = j + 1
+        var self_chain: [u32] = [nc]
+        val wd = self._write_dir_bytes(dev, self_chain, 0, dots)
+        if wd.is_err():
+            return Err(wd.unwrap_err())
+
+        val addr_r = self._link_entry(dev, dir_cluster, name, FAT32_ATTR_DIR_BYTE, nc, 0u32)
+        if addr_r.is_err():
+            return Err(addr_r.unwrap_err())
+        Ok(())
+
+    fn _flush_locked(self, dev: BlockDevice, h: FileHandle) -> Result<(), i32>:
+        """Persist a handle's first-cluster and size into its directory entry.
+
+        write() already does this on every call; flush() exists so a caller
+        that mutated a handle out of band (or wants an explicit durability
+        point before close) can force the write-back rather than being told
+        ENOSYS and having to guess.
+        """
+        self._update_dirent(dev, h)
+
+    fn close(self, fd: u64) -> i32:
+        """Close — wave-4d."""
+        val _fd = fd
+        ENOSYS
+
+    fn readdir_at(self, dev: BlockDevice, path: text) -> Result<[text], i32>:
+        """List every live entry name in the directory at `path` ("/" for
+        root). Reuses resolve_path for nested directories and the stashed
+        root cluster for "/" itself (resolve_path only walks named
+        components, so it cannot resolve the root)."""
+        var cluster = self.root_cluster
+        if path != "/" and path.len() > 0:
+            val loc_r = self.resolve_path(dev, path)
+            if loc_r.is_err():
+                return Err(loc_r.unwrap_err())
+            val loc = loc_r.unwrap()
+            if not loc.is_dir:
+                return Err(ENOTDIR)
+            cluster = loc.start_cluster
+        val data_r = self._read_dir_data(dev, cluster)
+        if data_r.is_err():
+            return Err(data_r.unwrap_err())
+        Ok(fat32_dir_list_entries(data_r.unwrap()))
+
+    fn _mark_dirent_deleted(self, dev: BlockDevice, sector: u64, offset: i32) -> Result<(), i32>:
+        """Write the 0xE5 deleted-entry marker into byte 0 of a 32-byte dirent
+        and keep the stashed root_dir_data cache coherent — same cache-sync
+        guard as _update_dirent, so a delete on a cached root entry is visible
+        to a subsequent stat()/readdir_at() without a remount."""
+        val sec_result = dev.read_sector(sector)
+        if sec_result.is_err():
+            return Err(EIO)
+        var sec = sec_result.unwrap()
+        sec[offset] = 0xE5u8
+        val wr = dev.write_sector(sector, sec)
+        if wr.is_err():
+            return Err(EIO)
+        val root_dir_lba = self.data_start_sector.to_u64() + (self.root_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+        if sector < root_dir_lba:
+            return Ok(())
+        if sector >= root_dir_lba + self.sectors_per_cluster.to_u64():
+            return Ok(())
+        val cache_base = ((sector - root_dir_lba) * self.bytes_per_sector.to_u64()).to_i32() + offset
+        if cache_base >= 0 and cache_base < self.root_dir_data.len():
+            self.root_dir_data[cache_base] = 0xE5u8
+        Ok(())
+
+    fn _unlink_dirent_chain(self, dev: BlockDevice, loc: Fat32DirEntryLoc) -> Result<(), i32>:
+        """Mark a located entry deleted INCLUDING every LFN slot that precedes
+        its 8.3 alias.
+
+        `_mark_dirent_deleted` alone only clears the alias, which leaves the
+        LFN slots live on disk. That is not a cosmetic leak: `_alloc_dirent_slots`
+        treats the single freed alias slot as a reusable run of 1, so the very
+        next entry written there is preceded by the DELETED name's LFN chain —
+        and both readers (`fat32_dir_find_entry` / `fat32_dir_list_entries`)
+        accumulate LFN fragments straight into the following 8.3 entry. The new
+        file is then listed under the deleted file's long name (or under the two
+        names concatenated, when the new name carries LFN slots of its own), and
+        the deleted path stays resolvable. Neither reader validates the LFN
+        checksum byte against the alias, which is why this driver is corrupted
+        by orphan slots where a checksum-checking implementation would merely
+        ignore them.
+
+        Walks backward from the alias while the preceding slot is a live LFN
+        slot. The stop condition tests byte 0 for 0x00/0xE5 BEFORE the 0x0F
+        attribute, because a deleted LFN slot keeps attr 0x0F — only its first
+        byte changes — so an attr-only test would run on into an older,
+        already-deleted entry's slots.
+
+        Order is LFN-slots-first, alias last: a crash midway then leaves the
+        entry reachable under its bare 8.3 short name with no orphan slots,
+        which is strictly safer than the reverse.
+        """
+        val ch_r = self._dir_chain(dev, loc.dir_cluster)
+        if ch_r.is_err():
+            return Err(ch_r.unwrap_err())
+        val chain = ch_r.unwrap()
+        val d_r = self._read_dir_data(dev, loc.dir_cluster)
+        if d_r.is_err():
+            return Err(d_r.unwrap_err())
+        val dd = d_r.unwrap()
+        var flat = loc.entry_offset - 32
+        var walking = true
+        while walking and flat >= 0:
+            if flat + 11 >= dd.len():
+                walking = false
+            else:
+                val fb = dd[flat]
+                if fb == 0x00u8 or fb == 0xE5u8 or dd[flat + 11] != 0x0Fu8:
+                    walking = false
+                else:
+                    val a = self._dirent_addr(chain, flat)
+                    val mr = self._mark_dirent_deleted(dev, a.sector, a.offset)
+                    if mr.is_err():
+                        return Err(mr.unwrap_err())
+                    flat = flat - 32
+        self._mark_dirent_deleted(dev, loc.dirent_sector, loc.dirent_offset)
+
+    fn _unlink_at_locked(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        """Remove a file: free its whole cluster chain in the FAT, then mark
+        its directory entry deleted. Refuses a directory (EISDIR) — use
+        rmdir_at for those."""
+        val loc_r = self.resolve_path(dev, path)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+        if loc.is_dir:
+            return Err(EISDIR)
+        if loc.start_cluster >= 2u32:
+            val chain_r = self.read_cluster_chain(dev, loc.start_cluster)
+            if chain_r.is_err():
+                return Err(EIO)
+            var chain = chain_r.unwrap()
+            var ci = 0
+            while ci < chain.len():
+                val fr = self._write_fat_entry(dev, chain[ci], 0u32)
+                if fr.is_err():
+                    return Err(EIO)
+                ci = ci + 1
+        self._unlink_dirent_chain(dev, loc)
+
+    fn _rmdir_at_locked(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        """Remove a directory. Refuses ENOTDIR on a file and ENOTEMPTY unless
+        the directory holds only "." and "..". Frees the directory's own
+        cluster chain (its content clusters, not its parent's) before marking
+        the dirent deleted."""
+        val loc_r = self.resolve_path(dev, path)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+        if not loc.is_dir:
+            return Err(ENOTDIR)
+        val data_r = self._read_dir_data(dev, loc.start_cluster)
+        if data_r.is_err():
+            return Err(data_r.unwrap_err())
+        val names = fat32_dir_list_entries(data_r.unwrap())
+        var ni = 0
+        while ni < names.len():
+            if names[ni] != "." and names[ni] != "..":
+                return Err(ENOTEMPTY)
+            ni = ni + 1
+        if loc.start_cluster >= 2u32:
+            val chain_r = self.read_cluster_chain(dev, loc.start_cluster)
+            if chain_r.is_err():
+                return Err(EIO)
+            var chain = chain_r.unwrap()
+            var ci = 0
+            while ci < chain.len():
+                val fr = self._write_fat_entry(dev, chain[ci], 0u32)
+                if fr.is_err():
+                    return Err(EIO)
+                ci = ci + 1
+        self._unlink_dirent_chain(dev, loc)
+
+    fn _rename_at_locked(self, dev: BlockDevice, old_path: text, new_path: text) -> Result<(), i32>:
+        """Rename/move a file or directory (real FAT32 primitive, not
+        create+delete of the DATA — see honesty note below).
+
+        Implemented as link-new-entry, then delete-old-entry, reusing the
+        same tested `_link_entry` (LFN chain + 8.3 alias + checksum
+        generation, collision-numbered short names) and `_mark_dirent_deleted`
+        primitives `create_at`/`mkdir_at`/`unlink_at` already rely on.
+        Hand-rolling an in-place rewrite of a directory entry's name field(s)
+        was considered and rejected: an LFN name occupies a variable number of
+        32-byte slots (`fat32_lfn_slot_count`) plus a checksum byte derived
+        from the 8.3 short name, so renaming to a name needing a different
+        slot count cannot be a same-size in-place patch — it would still have
+        to free/relink slots, at which point it is not meaningfully more
+        atomic than the two-step approach below, just less tested.
+
+        ATOMICITY, HONESTLY (this is not a single-sector atomic operation):
+          - The file's DATA is never touched or copied. `_link_entry` copies
+            only the existing `start_cluster`/`file_size` into the new
+            directory entry; no cluster chain is walked, freed, or duplicated.
+          - The two directory-entry writes are NOT atomic as a pair. If the
+            kernel dies between "new entry linked" and "old entry marked
+            deleted", the directory graph holds BOTH names pointing at the
+            same start_cluster (recoverable — an fsck-equivalent would drop
+            one) — it never ends up with NEITHER name, and it never corrupts
+            the underlying file data. This applies to same-directory renames
+            too: this method does not special-case same-parent renames as a
+            single-sector patch, for the LFN slot-count reason above.
+          - Cross-directory moves of a DIRECTORY additionally patch the moved
+            directory's own ".." entry (a single dirent write, in its own
+            first cluster) to point at the new parent, so a later `cd ..`
+            resolves correctly. That patch happens after the new entry is
+            linked and before the old one is deleted, widening the crash
+            window by one more single-dirent write — documented, not hidden.
+
+        Destination-exists policy: returns EEXIST (via `_link_entry`'s own
+        duplicate check) rather than atomically replacing an existing
+        destination. POSIX `rename()` atomic-replace semantics are explicitly
+        OUT of scope here — supporting it would mean freeing the destination's
+        cluster chain as part of this already non-atomic two-step, which is a
+        strictly larger data-loss window than what this method already
+        documents above. Callers that need replace-semantics must unlink the
+        destination first (accepting the same non-atomicity that implies).
+
+        Moving a directory into itself or one of its own descendants is
+        rejected with EINVAL for the direct case (new parent == the directory
+        being moved); deeper cycles (moving into a grandchild) are not
+        detected — out of scope for this primitive, callers must not do that.
+        """
+        if old_path == new_path:
+            return Ok(())
+        val loc_r = self.resolve_path(dev, old_path)
+        if loc_r.is_err():
+            return Err(loc_r.unwrap_err())
+        val loc = loc_r.unwrap()
+
+        val new_parts = fat32_split_path(new_path)
+        if new_parts.len() == 0:
+            return Err(EINVAL)
+        val new_name = new_parts[new_parts.len() - 1]
+        if new_name == "." or new_name == "..":
+            return Err(EINVAL)
+
+        val pd = self._parent_dir_cluster(dev, new_path)
+        if pd.is_err():
+            return Err(pd.unwrap_err())
+        val dest_dir_cluster = pd.unwrap()
+
+        if loc.is_dir and dest_dir_cluster == loc.start_cluster:
+            return Err(EINVAL)  # moving a directory into itself
+
+        var attr = FAT32_ATTR_ARCHIVE
+        if loc.is_dir:
+            attr = FAT32_ATTR_DIR_BYTE
+
+        val link_r = self._link_entry(dev, dest_dir_cluster, new_name, attr, loc.start_cluster, loc.file_size)
+        if link_r.is_err():
+            return Err(link_r.unwrap_err())
+
+        if loc.is_dir and dest_dir_cluster != loc.dir_cluster:
+            # Cross-directory directory move: fix up the moved directory's own
+            # ".." entry (stored in ITS first cluster, offset 32) so it points
+            # at the new parent — otherwise a subsequent `cd ..` from inside it
+            # would resolve to the old parent. Root's own cluster number is
+            # never stored on disk (FAT32 records 0 for "parent is root").
+            var dotdot_link = dest_dir_cluster
+            if dest_dir_cluster == self.root_cluster:
+                dotdot_link = 0u32
+            val dotdot_entry = fat32_make_dirent(fat32_short_field(".."), FAT32_ATTR_DIR_BYTE, dotdot_link, 0u32)
+            var self_chain: [u32] = [loc.start_cluster]
+            val fix_r = self._write_dir_bytes(dev, self_chain, 32, dotdot_entry)
+            if fix_r.is_err():
+                return Err(fix_r.unwrap_err())
+
+        # Entry now exists at its new name/location; only now remove the old
+        # one — alias AND its LFN slots, otherwise the orphaned slots get
+        # re-adopted by whatever is written into the freed alias slot next.
+        # If this step fails or the kernel crashes here, both names remain
+        # live (see the ATOMICITY note above) — never neither.
+        self._unlink_dirent_chain(dev, loc)
+

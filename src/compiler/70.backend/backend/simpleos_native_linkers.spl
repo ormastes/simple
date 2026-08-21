@@ -1,0 +1,422 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os, is_macos}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
+use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, compile_simpleos_arm64, simpleos_spl_start_symbol}
+use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source}
+fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val pid = getpid()
+    val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
+    val stubs_o = "build/os/simpleos_arm64_baremetal_stubs_{pid}.o"
+    val scheduler_o = "build/os/simpleos_arm64_scheduler_runtime_owner_{pid}.o"
+    val value_o = "build/os/simpleos_arm64_value_runtime_owner_{pid}.o"
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/crt0.S", crt_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c", stubs_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/scheduler_runtime_owner.c", scheduler_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/value_runtime_owner.c", value_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    # GAP 3: this path previously never called the guard at all, and it links
+    # no auto_stubs.c -- so every fake here is a real body in
+    # arm64/boot/baremetal_stubs.c and ONLY the body-level predicate can see
+    # it. arm64/os_entry is the worst entry in the audit.
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o, scheduler_o, value_o]):
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            file_delete(scheduler_o)
+            file_delete(value_o)
+            return Err(e)
+        case Ok(_): pass
+    match simpleos_check_no_forbidden_allocators(user_objects, [crt_o, stubs_o, scheduler_o, value_o]):
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            file_delete(scheduler_o)
+            file_delete(value_o)
+            return Err(e)
+        case Ok(_): pass
+
+    val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "examples/09_embedded/simple_os/arch/arm64/linker.ld"
+    var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-o", output, crt_o, stubs_o, scheduler_o, value_o]
+    val spl_start = simpleos_spl_start_symbol(user_objects)
+    if spl_start != "":
+        args.push("--defsym=spl_start={spl_start}")
+    for obj in user_objects:
+        args.push(obj)
+    val (_out, err, code) = process_run("ld.lld", args)
+    file_delete(crt_o)
+    file_delete(stubs_o)
+    file_delete(scheduler_o)
+    file_delete(value_o)
+    if code != 0:
+        return Err("SimpleOS ARM64 freestanding link failed: {err}")
+    if verbose:
+        print "[llvm-link] SimpleOS ARM64 freestanding executable: {output}"
+    Ok(output)
+
+fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
+    val (_out, err, code) = process_run("cc", [
+        "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
+        "-o", obj, src
+    ])
+    if code != 0:
+        return Err("SimpleOS x86_64 asm compile failed for {src}: {err}")
+    Ok(obj)
+
+fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
+        val sysroot = simpleos_x86_64_sysroot()
+        val support = simpleos_x86_64_user_link_inputs(sysroot)
+        for path in support:
+            if not file_exists(path):
+                return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+        val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+        val linker_script = if configured_script != "": configured_script else: "{sysroot}/share/simpleos/simpleos.ld"
+        if not file_exists(linker_script):
+            return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+
+        val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level)
+        val entry_object = match entry_result:
+            case Ok(path): path
+            case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
+
+        val support0 = support[0]
+        var user_args: [text] = [
+            "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
+            "-o", output, support0, entry_object
+        ]
+        for obj in user_objects:
+            user_args.push(obj)
+        user_args.push("--start-group")
+        user_args.push(support[1])
+        user_args.push(support[2])
+        user_args.push("--end-group")
+        val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
+        val (_user_out, user_err, user_code) = process_run(linker, user_args)
+        file_delete(entry_object)
+        if user_code != 0:
+            return Err("SimpleOS x86_64 user executable link failed: {user_err}")
+        if verbose:
+            print "[llvm-link] SimpleOS x86_64 user executable: {output}"
+        return Ok(output)
+
+    # Legacy `*-unknown-none[-elf]` and filename-selected kernel builds keep
+    # their boot CRT/stub path. The canonical `*-simpleos` target above is a
+    # filesystem-launched user process and must use the installed sysroot.
+    val pid = getpid()
+    val crt_o = "build/os/simpleos_x86_64_crt0_{pid}.o"
+    val stubs_o = "build/os/simpleos_x86_64_baremetal_stubs_{pid}.o"
+    val registry_o = "build/os/simpleos_x86_64_freestanding_value_registry_{pid}.o"
+    val type_o = "build/os/simpleos_x86_64_type_stubs_{pid}.o"
+    val auto_o = "build/os/simpleos_x86_64_auto_stubs_{pid}.o"
+    val service_owners_o = "build/os/simpleos_x86_64_runtime_service_owners_{pid}.o"
+    val init_c = "build/os/simpleos_x86_64_module_init_{pid}.c"
+    val init_o = "build/os/simpleos_x86_64_module_init_{pid}.o"
+
+    match compile_simpleos_x86_64_asm("examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s", crt_o):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c", stubs_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/freestanding_value_registry.c", registry_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/type_stubs.c", type_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/auto_stubs.c", auto_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match compile_simpleos_x86_64_c("examples/09_embedded/simple_os/arch/x86_64/boot/runtime_service_owners.c", service_owners_o, opt_level):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    # crt0.s (`.weak __simple_call_module_inits`) and baremetal_stubs.c
+    # (`extern void __simple_call_module_inits(void) __attribute__((weak));`)
+    # both only ever reference this symbol as unresolved-weak, so it is
+    # always skipped. Emit a concrete definition that aggregates every
+    # discovered `__module_init_*` from the user's objects (see
+    # simpleos_module_init_symbols / simpleos_module_init_caller_source
+    # above) so the aggregation mechanism exists on the pure-Simple path the
+    # same way it does on the Rust seed's generate_init_caller.
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    file_write(init_c, simpleos_module_init_caller_source(module_init_names))
+    match compile_simpleos_x86_64_c(init_c, init_o, opt_level):
+        case Err(e):
+            file_delete(init_c)
+            return Err(e)
+        case Ok(_): pass
+    file_delete(init_c)
+
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o, service_owners_o, registry_o, type_o, init_o]):
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            file_delete(type_o)
+            file_delete(auto_o)
+            file_delete(init_o)
+            file_delete(service_owners_o)
+            return Err(e)
+        case Ok(_): pass
+    match simpleos_check_no_forbidden_allocators(user_objects, [crt_o, stubs_o, service_owners_o, registry_o, type_o, init_o]):
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            file_delete(type_o)
+            file_delete(auto_o)
+            file_delete(init_o)
+            file_delete(service_owners_o)
+            return Err(e)
+        case Ok(_): pass
+
+    val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if linker_script_env != "":
+        linker_script_env
+    else:
+        "examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+
+    var args: [text] = [
+        "-T", linker_script,
+        "-nostdlib", "--gc-sections", "-o", output,
+        crt_o, stubs_o, service_owners_o, registry_o, type_o, auto_o, init_o
+    ]
+    for obj in user_objects:
+        args.push(obj)
+    val (_link_out, link_err, link_code) = process_run("ld.lld", args)
+    file_delete(crt_o)
+    file_delete(stubs_o)
+    file_delete(registry_o)
+    file_delete(type_o)
+    file_delete(auto_o)
+    file_delete(init_o)
+    file_delete(service_owners_o)
+    if link_code != 0:
+        return Err("SimpleOS x86_64 freestanding link failed: {link_err}")
+    if verbose:
+        print "[llvm-link] SimpleOS x86_64 freestanding executable: {output}"
+    Ok(output)
+
+pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Result<text, text>:
+    link_simpleos_x86_64(user_objects, output, false, 2)
+
+fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    var is_smoke_entry = false
+    val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
+    val uses_freestanding_runtime = is_display_smoke or output.contains("simpleos_riscv64_host_gpu_probe")
+    for obj in user_objects:
+        if obj.contains("smoke_entry"):
+            is_smoke_entry = true
+    val entry_s = "build/os/simpleos_riscv64_entry.S"
+    val entry_o = "build/os/simpleos_riscv64_entry.o"
+    val runtime_o = "build/os/simpleos_riscv64_runtime.o"
+    val init_c = "build/os/simpleos_riscv64_module_init.c"
+    val init_o = "build/os/simpleos_riscv64_module_init.o"
+    val entry_symbol = if is_smoke_entry: "spl_start" else: "boot_main"
+    var entry_src = ".section .text.entry,\"ax\",@progbits\n"
+    entry_src = entry_src + ".globl __simple_riscv_entry\n"
+    entry_src = entry_src + "__simple_riscv_entry:\n"
+    entry_src = entry_src + "  mv s0, a0\n"
+    entry_src = entry_src + "  mv s1, a1\n"
+    entry_src = entry_src + "  la sp, _stack_top\n"
+    entry_src = entry_src + "  la t0, _sbss\n"
+    entry_src = entry_src + "  la t1, _ebss\n"
+    entry_src = entry_src + "1:\n"
+    entry_src = entry_src + "  bgeu t0, t1, 2f\n"
+    entry_src = entry_src + "  sd zero, 0(t0)\n"
+    entry_src = entry_src + "  addi t0, t0, 8\n"
+    entry_src = entry_src + "  j 1b\n"
+    entry_src = entry_src + "2:\n"
+    # RV64 kernel and userspace objects use the LP64D ABI; enable F/D and start
+    # with the ABI-default rounding mode before entering compiled S-mode code.
+    entry_src = entry_src + "  li t0, 0x6000\n"
+    entry_src = entry_src + "  csrc sstatus, t0\n"
+    entry_src = entry_src + "  li t0, 0x2000\n"
+    entry_src = entry_src + "  csrs sstatus, t0\n"
+    entry_src = entry_src + "  csrw fcsr, zero\n"
+    entry_src = entry_src + "  mv a0, s0\n"
+    entry_src = entry_src + "  mv a1, s1\n"
+    entry_src = entry_src + "  call " + entry_symbol + "\n"
+    entry_src = entry_src + "3:\n"
+    entry_src = entry_src + "  wfi\n"
+    entry_src = entry_src + "  j 3b\n"
+    file_write(entry_s, entry_src)
+    val (entry_out, entry_err, entry_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-ffreestanding", "-nostdlib",
+        "-o", entry_o, entry_s
+    ])
+    if entry_code != 0:
+        return Err("SimpleOS RISC-V entry compilation failed: {entry_out}{entry_err}")
+
+    val runtime_source = if uses_freestanding_runtime:
+        "src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"
+    else:
+        "examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c"
+    val (runtime_out, runtime_err, runtime_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
+        "-DSIMPLE_BOOT_MINIMAL=1", "-DSIMPLE_RUNTIME_NO_ENTRY=1", "-DSIMPLE_RUNTIME_NO_WEAK_HEAP=1",
+        "-o", runtime_o, runtime_source
+    ])
+    if runtime_code != 0:
+        return Err("SimpleOS RISC-V runtime compilation failed for {runtime_source}: {runtime_out}{runtime_err}")
+
+    # Always compiled because boot.spl's `__simple_call_module_inits()` call is an
+    # unconditional (non-weak) extern reference. `-mcmodel=medany` matches
+    # the Rust seed's generate_init_caller (linker.rs:882-891): the
+    # `if (__module_init_x) __module_init_x();` null-check pattern
+    # materializes each callee's ADDRESS as a value (not just a PC-relative
+    # call), which overflows medlow's +-2GB-from-zero window once this
+    # freestanding kernel is linked high (0x80200000+, see linker_script).
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    file_write(init_c, simpleos_module_init_caller_source(module_init_names))
+    val (init_out, init_err, init_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib",
+        "-o", init_o, init_c
+    ])
+    file_delete(init_c)
+    if init_code != 0:
+        return Err("SimpleOS RISC-V module-init caller compilation failed: {init_out}{init_err}")
+
+    # Task #97 guard. Deliberately NOT added until `simpleos_trivial_insn_class`
+    # could actually see RISC-V: it recognised only x86-64 and aarch64
+    # mnemonics, so `li a0,0; ret` classified as "does real work" and the guard
+    # detected ZERO of four unambiguous fakes in a probe object. Calling it here
+    # in that state would have been false assurance -- the same fail-open shape
+    # the guard exists to remove
+    # (doc/08_tracking/bug/simpleos_fabricated_rt_guard_riscv_classifier_inert_2026-07-28.md).
+    #
+    # rv64 links no auto_stubs.c, so channel 1 has nothing to find here and
+    # channel 2 (trivial bodies) is the only channel that applies -- which is
+    # precisely why the classifier had to be fixed first rather than the call
+    # site added first.
+    val riscv_real_objects = [entry_o, runtime_o, init_o]
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, riscv_real_objects):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match simpleos_check_no_forbidden_allocators(user_objects, riscv_real_objects):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "src/os/kernel/arch/riscv64/linker.ld"
+    var args: [text] = [
+        "-m", "elf64lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", linker_script,
+        "--entry=__simple_riscv_entry"
+    ]
+    val spl_start = simpleos_spl_start_symbol(user_objects)
+    if spl_start != "":
+        args.push("--defsym=spl_start={spl_start}")
+    args = args.push(entry_o)
+    for obj in user_objects:
+        args = args.push(obj)
+    args = args.push(runtime_o)
+    args = args.push(init_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS RISC-V link: ld.lld {joined_args}"
+    val (stdout, stderr, code) = process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RISC-V link failed: {stdout}{stderr}")
+    Ok(output)
+
+fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> Result<text, text>:
+    val stub_c = "build/os/simpleos_riscv32_link_stubs.c"
+    val stub_o = "build/os/simpleos_riscv32_link_stubs.o"
+    var stub_src = "#include <stdint.h>\n"
+    stub_src = stub_src + "#define UART0 ((volatile uint8_t*)0x10000000UL)\n"
+    stub_src = stub_src + "void rt_riscv_uart_put(uint64_t b){while(!(UART0[5]&0x20)){} UART0[0]=(uint8_t)b;}\n"
+    stub_src = stub_src + "long long rt_pool_safepoint(void){return 0;}\n"
+    file_write(stub_c, stub_src)
+    val (stub_out, stub_err, stub_code) = process_run("riscv64-unknown-elf-gcc", [
+        "-c", "-march=rv32imafdc", "-mabi=ilp32d", "-ffreestanding", "-nostdlib",
+        "-o", stub_o, stub_c
+    ])
+    if stub_code != 0:
+        return Err("SimpleOS RV32 stub compilation failed: {stub_out}{stub_err}")
+
+    # Task #97 guard -- see the matching call in `link_simpleos_riscv64` for why
+    # this could not be added before `simpleos_trivial_insn_class` learned
+    # RISC-V. On rv32 the classifier has to cope with a 64-bit return arriving
+    # in the a0/a1 PAIR (`li a0,0; li a1,0; ret`), which is one constant spread
+    # over two writes; `simpleos_riscv_ret_reg_rank` is what keeps that from
+    # looking like two independent constants. That matters immediately: the
+    # `rt_pool_safepoint` stub written into `stub_c` a few lines above is
+    # literally `return 0;` and is exactly the shape being detected.
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [stub_o]):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    match simpleos_check_no_forbidden_allocators(user_objects, [stub_o]):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
+    val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+    val linker_script = if linker_script_env != "":
+        linker_script_env
+    else:
+        "src/os/kernel/arch/riscv32/linker.ld"
+    var args: [text] = [
+        "-m", "elf32lriscv",
+        "--no-relax",
+        "-nostdlib",
+        "-T", linker_script
+    ]
+    for obj in user_objects:
+        args = args.push(obj)
+    args = args.push(stub_o)
+    args = args.push("-o")
+    args = args.push(output)
+
+    if verbose:
+        val joined_args = args.join(" ")
+        print "[llvm-link] SimpleOS RV32 link: ld.lld {joined_args}"
+    val (stdout, stderr, code) = process_run("ld.lld", args)
+    if code != 0:
+        return Err("SimpleOS RV32 link failed: {stdout}{stderr}")
+    Ok(output)
+
+# ============================================================================
+# Exports
+# ============================================================================

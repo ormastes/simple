@@ -1,0 +1,295 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.sysinfo_ops.{getpid}
+use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
+use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use std.platform.{host_arch, host_os, is_macos}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+# Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
+# facade already used by the sibling llvm_backend_tools.spl for process_run);
+# resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use compiler.backend.backend.simpleos_native_symbols.{simpleos_rt_symbol_is_optional_backend, simpleos_undefined_rt_symbols, simpleos_undefined_simple_module_symbols, simpleos_defined_symbols_any_binding}
+use compiler.backend.backend.simpleos_native_trivial_body.{simpleos_trivial_body_rt_symbols}
+fn simpleos_entry_key(output: text) -> text:
+    """Per-entry baseline key: the output binary's basename."""
+    val parts = output.split("/")
+    parts[parts.len() - 1]
+
+fn simpleos_fabricated_baseline(entry_key: text) -> {text: bool}:
+    """Shrink-only ratchet baseline for one entry point.
+
+    `config/simpleos_fabricated_rt_baseline.sdn`, one `<entry> <rt_symbol>` per
+    line, `#` comments. A missing file means an EMPTY baseline, i.e. maximum
+    strictness -- deleting the file can never weaken the gate.
+
+    This is NOT the allowlist. The allowlist
+    (`simpleos_rt_symbol_is_optional_backend`) is a permanent semantic claim
+    that nil is the correct answer; the baseline is a dated, per-entry,
+    shrink-only record of debt that must go away. Keeping them in separate
+    files is what stops migration pressure from converting an audited allowlist
+    into a rubber stamp."""
+    simpleos_baseline_entries("config/simpleos_fabricated_rt_baseline.sdn", entry_key)
+
+fn simpleos_simple_symbol_baseline(entry_key: text) -> {text: bool}:
+    """Shrink-only ratchet baseline for fabricated `lib__*` / `os__*` bodies.
+
+    Deliberately a SEPARATE file from the `rt_*` baseline: the two record
+    different debts (a missing freestanding C implementation vs. a pure-Simple
+    body that failed to reach the link), and mixing them lets migration
+    pressure on one quietly grow the other. Same shrink-only contract: a
+    missing file means an EMPTY baseline, so deleting it can never weaken the
+    gate."""
+    simpleos_baseline_entries("config/simpleos_fabricated_lib_baseline.sdn", entry_key)
+
+fn simpleos_baseline_entries(path: text, entry_key: text) -> {text: bool}:
+    """Read one `<entry> <symbol>` ratchet baseline file, filtered to `entry_key`."""
+    var allowed: {text: bool} = {}
+    if not file_exists(path):
+        return allowed
+    for raw in file_read(path).split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        var toks: [text] = []
+        for tok in line.split(" "):
+            if tok != "":
+                toks.push(tok)
+        if toks.len() < 2:
+            continue
+        if toks[0] == entry_key:
+            allowed[toks[1]] = true
+    allowed
+
+pub fn simpleos_check_no_forbidden_allocators(user_objects: [text], real_objects: [text]) -> Result<bool, text>:
+    """WP-15 (aerospace hardening plan) call-site wrapper: reads the live env
+    gate inputs (same `flight_closure` predicate as
+    `simpleos_check_no_fabricated_rt_stubs` below), extracts the `nm -u`
+    undefined-symbol references over the SAME `user_objects` + `real_objects`
+    closure that guard receives, and enforces via
+    `flight_allocator_scan_for_profile` (allocator_symbol_scan.spl, the
+    spec-covered seam). Non-flight profiles: no behavior change. Sits
+    alongside the fabricated-stub guard at each of its four call sites."""
+    var closure: [text] = []
+    for obj in user_objects:
+        closure.push(obj)
+    for obj in real_objects:
+        closure.push(obj)
+    flight_allocator_scan_for_profile(env_get("SIMPLE_SAFETY_PROFILE") ?? "", (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1", object_undefined_symbol_names(closure))
+
+pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [text], real_objects: [text]) -> Result<bool, text>:
+    """Task #97 guard, ported from the Rust seed
+    (linker/native_binary/stubs.rs:474-505), which the pure-Simple SimpleOS
+    link path never had -- which is why this class shipped silently.
+
+    auto_stubs.c fabricates ~4023 WEAK definitions that return NIL_VALUE (0x3)
+    so a freestanding link never fails on an unresolved cross-module ref. For
+    an optional accelerator that is intended; for a real ABI symbol it links
+    clean and only corrupts data at runtime. `rt_array_copy` had no
+    freestanding implementation, so in the guest EVERY `var x = <array-typed
+    place read>` -- which MIR lowers through it (mir_lowering_stmts.spl:240-254)
+    -- returned 0. An untagged 0 fails the inline array reader's `tag == 1`
+    check, which then yields its nil default, so every nested `.len()` read 0
+    with no fault and no diagnostic.
+
+    Fails the link rather than warning: a warning is what the weak stub already
+    is. `SIMPLE_NO_STUB_FALLBACK=1` also disables the debt baselines: strict
+    builds must contain no non-optional fabricated body, including previously
+    measured debt. There is deliberately NO env bypass (the seed has
+    SIMPLE_ALLOW_UNRESOLVED_RT=1); the in-tree escape hatch is
+    simpleos_rt_symbol_is_optional_backend, which is greppable and reviewable,
+    whereas an env var set once by a lane script is invisible silence again.
+
+    `real_objects` must NOT include the auto-stub object -- being satisfied
+    only by that object is precisely the condition being detected.
+
+    CLASSIFY BY BODY, NEVER BY LINKAGE OR BY NAME. A definition in
+    `real_objects` counts as real iff it is defined there (at ANY binding,
+    weak included -- `simpleos_defined_symbols_any_binding`) AND its
+    disassembled body is not a constant-return fake
+    (`simpleos_trivial_body_rt_symbols`). Both halves are load-bearing:
+    dropping weak definitions accused six real `baremetal_stubs.c`
+    implementations, and trusting presence alone missed the hand-written
+    `return 0;` fakes that sit right next to them in the same file
+    (`rt_dma_bytes_to_array` is literally `return 0; /* not called on x86_64
+    boot path */` while `rt_memcpy` two lines away is a real loop). Only the
+    body separates them."""
+    val strict_no_stub_fallback = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+    # WP-10 (aerospace hardening plan): a "flight closure" link -- the
+    # critical assurance profile active (SIMPLE_SAFETY_PROFILE), or the
+    # existing SIMPLE_NO_STUB_FALLBACK=1 escape hatch -- forbids fabricated
+    # weak-stub bodies: zero baseline exemption, so ANY fabricated symbol
+    # (including previously-baselined debt) is a hard link failure instead
+    # of a fabricated NIL-returning stub. Reuses the WP-3 canonical policy
+    # resolver rather than a hardcoded string compare.
+    val flight_closure_profile = env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+    val flight_closure = strict_no_stub_fallback or strictness_for_profile_name(flight_closure_profile).at_least(AssuranceStrictness.Critical)
+
+    # One disassembly pass over `real_objects` serves both channels.
+    val trivial_names = simpleos_trivial_body_rt_symbols(real_objects)
+    var trivial: {text: bool} = {}
+    for name in trivial_names:
+        trivial[name] = true
+
+    var real: {text: bool} = {}
+    for name in simpleos_defined_symbols_any_binding(real_objects):
+        if not trivial.has(name):
+            real[name] = true
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            real[symbol.name] = true
+
+    val referenced_names = simpleos_undefined_rt_symbols(user_objects)
+    var referenced: {text: bool} = {}
+    for name in referenced_names:
+        referenced[name] = true
+
+    var fabricated: [text] = []
+    var counted: {text: bool} = {}
+    # Channel 1 -- satisfied only by auto_stubs.c's weak NIL_VALUE stub.
+    for name in referenced_names:
+        if simpleos_rt_symbol_is_optional_backend(name):
+            continue
+        if real.has(name) or counted.has(name):
+            continue
+        counted[name] = true
+        fabricated.push(name)
+    # Channel 2 (GAP 1) -- hand-written trivial bodies. Channel 1 now sees most
+    # of these too (a trivial body is subtracted from `real` above), but this
+    # channel still catches the case where a user object ALSO defines the name,
+    # which puts it back in `real` presence-wise while the stub it actually
+    # binds is still a fake. Restricted to symbols the user objects actually
+    # reference, so --gc-sections'd stubs stay out of the report and the
+    # baseline tracks only what this entry really binds. Reuses the single
+    # disassembly pass computed above -- no second objdump sweep.
+    for name in trivial_names:
+        if simpleos_rt_symbol_is_optional_backend(name):
+            continue
+        if counted.has(name) or not referenced.has(name):
+            continue
+        counted[name] = true
+        fabricated.push(name)
+
+    # Channel 3 -- fabricated PURE-SIMPLE bodies (`lib__*` / `os__*`).
+    #
+    # Channels 1 and 2 only ever looked at `rt_*`, so every Simple method and
+    # free function has been unprotected since this guard was written. The stub
+    # generator does not care about the prefix: any name still undefined when
+    # the link set is assembled gets an 8-byte weak `xor %eax,%eax; ret`. For a
+    # `lib__*` body that is not a missing backend, it is a DROPPED
+    # IMPLEMENTATION -- there is no such thing as an "optional" pure-Simple
+    # function, which is why this channel has no allowlist counterpart to
+    # `simpleos_rt_symbol_is_optional_backend`, only the shrink-only baseline.
+    #
+    # Detected by reference-vs-definition rather than by body: a name the
+    # closure references and NOTHING in the closure (or the real objects)
+    # defines is, by construction, exactly what the stub generator will
+    # fabricate. That makes this channel independent of which fabricator ran,
+    # and it costs one `nm -u` pass -- no second objdump sweep.
+    #
+    # Definitions are collected at ANY binding for the same reason channel 1
+    # does: weak linkage does NOT imply fabricated.
+    val simple_referenced = simpleos_undefined_simple_module_symbols(user_objects)
+    var simple_novel: [text] = []
+    if simple_referenced.len() > 0:
+        var simple_defined: {text: bool} = {}
+        for name in simpleos_defined_symbols_any_binding(user_objects):
+            simple_defined[name] = true
+        for name in simpleos_defined_symbols_any_binding(real_objects):
+            simple_defined[name] = true
+        val simple_baseline = if flight_closure: {} else: simpleos_simple_symbol_baseline(entry_key)
+        var simple_counted: {text: bool} = {}
+        for name in simple_referenced:
+            if simple_defined.has(name) or simple_baseline.has(name):
+                continue
+            if simple_counted.has(name):
+                continue
+            simple_counted[name] = true
+            simple_novel.push(name)
+    if simple_novel.len() > 0:
+        simple_novel.sort()
+        return Err("SimpleOS freestanding link refused for entry '{entry_key}': {simple_novel.len()} pure-Simple symbol(s) are newly fabricated -- the closure REFERENCES them but nothing DEFINES them, so the stub generator emits an 8-byte weak nil-returning body and the guest silently takes the false/zero branch at every call site instead of failing here: {simple_novel.join(\", \")}. A pure-Simple function is never optional: find why its body did not reach the link (a stale cached object still referencing a pre-move mangled name is the known cause -- purge the object cache and rebuild) and fix that. This entry's fabricated set must stay a SUBSET of config/simpleos_fabricated_lib_baseline.sdn, which is shrink-only and records pre-existing debt, never new debt.")
+
+    val baseline = if flight_closure: {} else: simpleos_fabricated_baseline(entry_key)
+    var novel: [text] = []
+    for name in fabricated:
+        if not baseline.has(name):
+            novel.push(name)
+    if novel.len() == 0:
+        return Ok(true)
+    novel.sort()
+    Err("SimpleOS freestanding link refused for entry '{entry_key}': {novel.len()} rt_* extern(s) are newly fabricated -- they resolve to a zero/nil-returning stub (auto_stubs.c's weak NIL_VALUE definition, or a hand-written constant-return body) and would silently return nil at runtime instead of failing here (task #97): {novel.join(\", \")}. This entry's fabricated set must stay a SUBSET of config/simpleos_fabricated_rt_baseline.sdn. Implement each in the arch's boot/baremetal_stubs.c, or add it to simpleos_rt_symbol_is_optional_backend with a written rationale naming the caller that treats nil as 'unavailable'. Do NOT add it to the baseline -- the baseline is shrink-only and records pre-existing debt, never new debt.")
+
+fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
+    """Collect defined `__module_init` / `__module_init_<prefix>` symbols
+    across the user's compiled objects, sorted + deduped by name.
+
+    Mirrors the naming convention `module_init_symbol()` computes on the Rust
+    seed (src/compiler_rust/compiler/src/codegen/common_backend.rs, restored
+    by commit 4aab3c435b7) and the discovery step of the seed linker's
+    `generate_init_caller` (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs:786-812),
+    which sorts+dedups by symbol name rather than tracking a real dependency
+    graph -- there is no cross-module init ORDER guarantee beyond that, on
+    either backend. `extract_symbols_nm` already filters out undefined (U/u)
+    and weak (W/w/V/v) symbols, so only concretely DEFINED init functions are
+    collected here.
+
+    Pure-Simple MIR lowering emits one init body per module for supported
+    direct-call `val`/`var` initializers and preserves their source order
+    inside that body. This collector still sorts separate module init symbols
+    by name; cross-module dependency ordering remains unsupported. See
+    doc/08_tracking/bug/native_multiple_module_initializers_declaration_order_2026-07-19.md."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            var name = symbol.name
+            if name.starts_with("___module_init"):
+                name = name.substring(1)
+            if name == "__module_init" or name.starts_with("__module_init_"):
+                if not seen.has(name):
+                    seen[name] = true
+                    names.push(name)
+    names.sort()
+    names
+
+fn simpleos_module_init_caller_source(init_names: [text]) -> text:
+    """Generate the freestanding C source defining `__simple_call_module_inits`,
+    which calls every discovered `__module_init_*` function.
+
+    Always emits a concrete (non-weak) definition, even with zero names, so
+    the `.weak __simple_call_module_inits` reference in
+    examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s and the
+    `extern void __simple_call_module_inits(void) __attribute__((weak));`
+    guard in baremetal_stubs.c resolve to a real function instead of staying
+    permanently unresolved-weak (today both always skip the call). Each
+    callee is itself declared `weak` inside this generated translation unit
+    so a partial object set still links. Mirrors the non-clang-cl branch of
+    generate_init_caller (linker.rs:844-855)."""
+    var code = "// Auto-generated: calls all __module_init_* functions\n"
+    for name in init_names:
+        code = code + "extern void __attribute__((weak)) {name}(void);\n"
+    code = code + "void __simple_call_module_inits(void) {\n"
+    for name in init_names:
+        code = code + "    if ({name}) {name}();\n"
+    code = code + "}\n"
+    code

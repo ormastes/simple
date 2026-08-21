@@ -226,3 +226,30 @@ Backend dispatch is extracted into `mount_driver_dispatch.spl`, leaving
 `mount_table.spl` at 736 lines. `dbfs_driver.spl` remains above the 800-line
 maintainability limit; splitting its durability/replay owners is still a
 release blocker rather than a license to expand it further.
+
+## Wave 4 bounded-owner and evidence addendum (2026-08-21)
+
+The FAT facade delegates cohesive operations to `_Fat32Filesystem` modules, but
+the boot owner retains and publishes one mounted value. NVMe boot state and
+leases feed dedicated DMA and positioned-I/O owners; VFS performs bounded
+backend-neutral dispatch and mutation. These splits reduce file size and copy
+hazards without creating another mount namespace.
+
+Every x86_64/AArch64/RV64 server entry follows:
+
+```text
+authenticated media parse -> execute-open binding -> ISA task adoption
+-> scheduler wait/collect -> bounded exit/server receipt
+```
+
+No path-only compatibility call may bypass that chain. RV64 loads program
+ranges directly from FAT with bounded traversal, allocation checkpoint rollback,
+aggregate-size and W^X rejection. The retained legacy symbol is a fail-closed
+compatibility surface, not an executor.
+
+Target build scripts select the common `simpleos_tool` closure and validate the
+admitted builder plus target ELF. LLVM provisioning additionally validates
+static target binaries, sysroot inputs, and receipt digests, then explicitly
+records `execution_claim=false`. Promotion requires a fresh guest process to
+open the exact mounted paths and produce the compile, link, run, protocol, and
+exit oracles; static/source checks cannot fill those fields.

@@ -22,6 +22,8 @@ RECEIPT="$OUT_DIR/receipt.env"
 RECEIPT_SIGNATURE="$OUT_DIR/receipt.sig"
 SIGNING_KEY=${SIMPLEOS_FS_SERVERS_SIGNING_KEY:-}
 TRUST_KEY=${SIMPLEOS_FS_SERVERS_TRUST_KEY:-}
+MEDIA_SIGNING_KEY=${SIMPLEOS_ARM64_AUTH_SIGNING_KEY:-}
+MEDIA_PUBLIC_KEY=${SIMPLEOS_ARM64_AUTH_PUBLIC_KEY:-}
 TRUST_POLICY="$ROOT_DIR/scripts/check/policy/simpleos-filesystem-server-receipt.env"
 SERIAL1="$OUT_DIR/boot1.serial.log"
 SERIAL2="$OUT_DIR/boot2.serial.log"
@@ -56,6 +58,8 @@ chmod 700 "$OUT_DIR"
 for cmd in qemu-system-aarch64 nc socat timeout sha256sum readelf nm cc ss git cmp sed openssl; do require_cmd "$cmd"; done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || fail "regular signing key is required"
 [ -n "$TRUST_KEY" ] && [ -f "$TRUST_KEY" ] && [ ! -L "$TRUST_KEY" ] || fail "regular trust key is required"
+[ -s "$MEDIA_SIGNING_KEY" ] || fail "SIMPLEOS_ARM64_AUTH_SIGNING_KEY is required"
+[ -s "$MEDIA_PUBLIC_KEY" ] || fail "SIMPLEOS_ARM64_AUTH_PUBLIC_KEY is required"
 [ -f "$TRUST_POLICY" ] && [ ! -L "$TRUST_POLICY" ] || fail "regular trust policy is required"
 [ "$(receipt_field schema "$TRUST_POLICY")" = simpleos-filesystem-server-receipt-policy-v1 ] || fail "invalid trust policy schema"
 [ "$(receipt_field provisioning_status "$TRUST_POLICY")" = provisioned ] || fail "filesystem server trust policy is unprovisioned"
@@ -67,13 +71,15 @@ TRUST_KEY_SHA=$(receipt_field trusted_key_sha256 "$TRUST_POLICY") || fail "trust
 [ -n "$COMPILER_ADMISSION" ] || fail "SIMPLEOS_ARM64_SERVERS_COMPILER_ADMISSION_RECEIPT is required"
 [ -f "$COMPILER_ADMISSION" ] && [ ! -L "$COMPILER_ADMISSION" ] || fail "compiler admission receipt must be a regular non-symlink file"
 CURRENT_REVISION=$(git rev-parse HEAD)
-SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/lib/simpleos-server-zeroization-evidence.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/make_os_disk_support.inc.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
+SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/lib/simpleos-server-zeroization-evidence.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/build_simpleos_servers_payload.shs|scripts/os/sign_simpleos_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/make_os_disk_support.inc.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
 qemu_admission_source_snapshot \
     src/compiler src/lib src/os examples/09_embedded/simple_os \
     scripts/check/check-simpleos-arm64-servers-qemu.shs \
     scripts/check/lib/simpleos-server-zeroization-evidence.shs \
     scripts/check/simpleos-arm64-server-cap-status.spl \
     scripts/os/build_arm64_servers_payload.shs \
+    scripts/os/build_simpleos_servers_payload.shs \
+    scripts/os/sign_simpleos_servers_payload.shs \
     scripts/os/make_os_disk.shs scripts/os/make_os_disk.c scripts/os/make_os_disk_support.inc.c \
     config/simpleos_arm64_servers_weak_undefined_allowlist.sdn \
     || fail "current worktree content manifest failed"
@@ -173,6 +179,30 @@ fn simpleos_server_crash_seam_code() -> i64: -1
 fn simpleos_server_crash_occurrence() -> i64: 0
 SPL
 
+openssl pkey -pubin -in "$MEDIA_PUBLIC_KEY" -outform DER \
+    -out "$OUT_DIR/arm64-auth-root.der" >/dev/null 2>&1 || fail "invalid ARM64 media public key"
+AUTH_ROOT_SIZE=$(wc -c < "$OUT_DIR/arm64-auth-root.der" | tr -d ' ')
+[ "$AUTH_ROOT_SIZE" -ge 32 ] || fail "ARM64 media public key DER too short"
+dd if="$OUT_DIR/arm64-auth-root.der" of="$OUT_DIR/arm64-auth-root.raw" bs=1 \
+    skip=$((AUTH_ROOT_SIZE - 32)) count=32 2>/dev/null
+AUTH_ROOT_HEX=$(od -An -tx1 -v "$OUT_DIR/arm64-auth-root.raw" | tr -d ' \n')
+AUTH_ROOT_HASH=$(sha256_file "$OUT_DIR/arm64-auth-root.raw")
+cat > "$GENERATED_SOURCE/arm64_auth_trust_config.spl" <<EOF
+pub fn arm64_authenticated_pinned_key_id_v1() -> text: "arm64-qemu-acceptance-v1"
+pub fn arm64_authenticated_pinned_public_key_hex_v1() -> text: "$AUTH_ROOT_HEX"
+pub fn arm64_authenticated_pinned_public_key_hash_v1() -> text: "$AUTH_ROOT_HASH"
+export arm64_authenticated_pinned_key_id_v1, arm64_authenticated_pinned_public_key_hex_v1, arm64_authenticated_pinned_public_key_hash_v1
+EOF
+
+AUTH_CONTRACT_TOOL="$OUT_DIR/arm64-auth-contract"
+env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+    "$COMPILER" native-build --cache-dir "$OUT_DIR/auth-contract-cache" \
+    --source src/os --source src/lib --source src/app --entry-closure \
+    --entry src/app/arm64_auth_contract/main.spl --backend llvm \
+    --opt-level=standard --output "$AUTH_CONTRACT_TOOL" \
+    > "$OUT_DIR/auth-contract-build.log" 2>&1 || fail "ARM64 canonical-body producer build failed"
+[ -x "$AUTH_CONTRACT_TOOL" ] || fail "ARM64 canonical-body producer missing"
+
 rm -f "$KERNEL"
 env SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
     "$COMPILER" native-build --cache-dir "$CACHE" \
@@ -184,8 +214,21 @@ env SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
     || fail "ARM fs-exec server kernel build failed"
 [ -s "$KERNEL" ] || fail "kernel build produced no ELF"
 
+SERVER_SIDECARS="$OUT_DIR/server-sidecars"
+mkdir -p "$SERVER_SIDECARS"
+env SIMPLEOS_ARM64_AUTH_CONTRACT_TOOL="$AUTH_CONTRACT_TOOL" \
+    SIMPLEOS_ARM64_AUTH_MOUNT_ID=1 SIMPLEOS_ARM64_AUTH_MOUNT_GENERATION=1 \
+    SIMPLEOS_ARM64_AUTH_FILE_ID=4294967297 SIMPLEOS_ARM64_AUTH_FILE_GENERATION=1 \
+    sh scripts/os/sign_simpleos_servers_payload.shs arm64 "$SERVER_ELF" "$KERNEL" \
+        "$SERVER_SIDECARS" "$MEDIA_SIGNING_KEY" "$MEDIA_PUBLIC_KEY" \
+    > "$OUT_DIR/server-sign.log" 2>&1 || fail "ARM64 server media signing failed"
+
 rm -f "$IMAGE"
 env SIMPLEOS_SERVERS_BINARY="$SERVER_ELF" \
+    SIMPLEOS_SERVERS_MANIFEST="$SERVER_SIDECARS/SERVER.MAN" \
+    SIMPLEOS_SERVERS_ADMISSION="$SERVER_SIDECARS/SERVER.ADM" \
+    SIMPLEOS_SERVERS_PROOF="$SERVER_SIDECARS/SERVER.SIG" \
+    SIMPLEOS_SERVERS_TRUST_ROOT="$SERVER_SIDECARS/SERVER.PUB" \
     SIMPLEOS_FSEXEC_BINARY="$SERVER_ELF" \
     SIMPLEOS_SERVER_DB_CREDENTIAL_FILE="$CREDENTIAL_FILE" \
     sh scripts/os/make_os_disk.shs 256 "$IMAGE" "$KERNEL" arm64 fs-exec \
@@ -220,7 +263,7 @@ wait_ready() {
     serial=$1
     deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        if grep -Fq '[arm64-servers-user] http=:8080 db=:5433 ready=ok' "$serial" 2>/dev/null; then
+        if grep -Fq '[simpleos-servers-user] http=:8080 db=:5433 ready=ok' "$serial" 2>/dev/null; then
             simpleos_server_zeroization_canonical "$serial" >/dev/null ||
                 fail "target credential zeroization evidence missing or invalid: $serial"
             return 0
@@ -239,7 +282,7 @@ require_filesystem_launch_markers() {
         || fail "filesystem server scheduler spawn marker missing"
     grep -Fq 'path=/SERVERS.ELF' "$serial" \
         || fail "filesystem server launch path marker missing"
-    grep -Fq '[arm64-servers-user] executable=/SERVERS.ELF launch=ok' "$serial" \
+    grep -Fq '[simpleos-servers-user] executable=/SERVERS.ELF launch=ok' "$serial" \
         || fail "filesystem server user-entry marker missing"
 }
 

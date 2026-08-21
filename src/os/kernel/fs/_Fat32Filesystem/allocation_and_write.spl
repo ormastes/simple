@@ -1,0 +1,307 @@
+# FAT32 allocation and positioned-write operations.
+use os.kernel.fs.fat32.*
+
+    fn _write_fat_entry(self, dev: BlockDevice, cluster: u32, value: u32) -> Result<(), text>:
+        """Write a 28-bit FAT32 entry for cluster to the FAT region on dev.
+
+        Preserves the top 4 reserved bits of the existing on-disk word.
+        value must already be a 28-bit quantity (top 4 bits ignored).
+        """
+        val fat_offset = cluster * 4u32
+        val fat_sector = self.fat_start_sector.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
+        val entry_off  = (fat_offset % self.bytes_per_sector).to_i32()
+        # Read the current sector so we can preserve the top 4 reserved bits.
+        val sec_result = dev.read_sector(fat_sector)
+        if sec_result.is_err():
+            return Err("fat32: failed to read FAT sector for write to cluster {cluster}")
+        var sec = sec_result.unwrap()
+        # Preserve bits 28-31 of the existing entry; replace bits 0-27 with value.
+        val existing_top = sec[entry_off + 3].to_u32() & 0xF0u32
+        val masked = value & 0x0FFFFFFFu32
+        sec[entry_off]     = (masked & 0xFFu32).to_u8()
+        sec[entry_off + 1] = ((masked >> 8u32)  & 0xFFu32).to_u8()
+        sec[entry_off + 2] = ((masked >> 16u32) & 0xFFu32).to_u8()
+        sec[entry_off + 3] = (existing_top | ((masked >> 24u32) & 0x0Fu32)).to_u8()
+        val wr = dev.write_sector(fat_sector, sec)
+        if wr.is_err():
+            return Err("fat32: failed to write FAT sector for cluster {cluster}")
+        Ok(())
+
+    fn allocate_cluster(self, dev: BlockDevice) -> Result<u32, i32>:
+        """Scan FAT for a FREE entry starting at cluster 2; mark it EOC and return it.
+
+        crossLinkFree ordering: marks the new cluster EOC before the caller
+        links any predecessor to it, so no FREE cluster is ever linked.
+        Returns Err(ENOSPC=-28) when no free cluster exists.
+        Scan is bounded by data_clusters (no unbounded loops).
+        """
+        var candidate: u32 = 2u32
+        var limit = self.data_clusters
+        while limit > 0u32:
+            val entry_result = self._read_fat_entry(dev, candidate)
+            if entry_result.is_err():
+                return Err(EIO)
+            val entry = entry_result.unwrap()
+            if entry == 0x00000000u32:
+                # Found a FREE cluster — mark it EOC before returning.
+                val wr = self._write_fat_entry(dev, candidate, 0x0FFFFFFFu32)
+                if wr.is_err():
+                    return Err(EIO)
+                return Ok(candidate)
+            candidate = candidate + 1u32
+            limit = limit - 1u32
+        Err(ENOSPC)
+
+    fn append_cluster(self, dev: BlockDevice, chain_end: u32, new_cluster: u32) -> Result<(), i32>:
+        """Link chain_end -> new_cluster in the FAT.
+
+        crossLinkFree ORDERING CONTRACT:
+          new_cluster must already be marked EOC (done by allocate_cluster) before
+          this function is called.  We then overwrite chain_end's FAT entry to
+          point at new_cluster.  At no point does a FREE cluster appear mid-chain.
+        """
+        val wr = self._write_fat_entry(dev, chain_end, new_cluster)
+        if wr.is_err():
+            return Err(EIO)
+        Ok(())
+
+    fn _update_dirent(self, dev: BlockDevice, h: FileHandle) -> Result<(), i32>:
+        """Persist first_cluster and file_size into the on-disk directory entry.
+
+        Reads the 512-byte sector at h.dirent_sector, patches the 32-byte entry
+        at byte h.dirent_offset:
+          bytes +20..+21  cluster_high (bits 16-31 of start_cluster)
+          bytes +26..+27  cluster_low  (bits  0-15 of start_cluster)
+          bytes +28..+31  file_size    (u32 little-endian)
+        then writes the sector back.
+
+        Also updates self.root_dir_data cache at the corresponding flat offset
+        so that stat() and subsequent open() calls see the new values without
+        requiring a remount.
+
+        Does nothing (returns Ok) when h.dirent_sector == 0 (handles created
+        without a backing directory entry, e.g. test helpers).
+        """
+        if h.dirent_sector == 0u64:
+            return Ok(())
+        val sec_result = dev.read_sector(h.dirent_sector)
+        if sec_result.is_err():
+            return Err(EIO)
+        var sec = sec_result.unwrap()
+        val do_ = h.dirent_offset
+        val cl_high = (h.start_cluster >> 16u32) & 0xFFFFu32
+        val cl_low  = h.start_cluster & 0xFFFFu32
+        val fsz     = h.file_size.to_u32()
+        # cluster_high bytes (offsets +20, +21 within the 32-byte entry)
+        sec[do_ + 20] = (cl_high & 0xFFu32).to_u8()
+        sec[do_ + 21] = ((cl_high >> 8u32) & 0xFFu32).to_u8()
+        # cluster_low bytes (offsets +26, +27)
+        sec[do_ + 26] = (cl_low & 0xFFu32).to_u8()
+        sec[do_ + 27] = ((cl_low >> 8u32) & 0xFFu32).to_u8()
+        # file_size u32 little-endian (offsets +28..+31)
+        sec[do_ + 28] = (fsz & 0xFFu32).to_u8()
+        sec[do_ + 29] = ((fsz >> 8u32)  & 0xFFu32).to_u8()
+        sec[do_ + 30] = ((fsz >> 16u32) & 0xFFu32).to_u8()
+        sec[do_ + 31] = ((fsz >> 24u32) & 0xFFu32).to_u8()
+        val wr = dev.write_sector(h.dirent_sector, sec)
+        if wr.is_err():
+            return Err(EIO)
+        # Keep root_dir_data cache coherent.
+        # root_dir_data is laid out as contiguous sectors starting at
+        # LBA = data_start_sector + (root_cluster - 2) * sectors_per_cluster.
+        # h.dirent_sector is one of those LBAs; the flat cache offset is:
+        #   (h.dirent_sector - root_dir_lba) * bytes_per_sector + h.dirent_offset
+        #
+        # GUARD (wave-4g): only sectors that really belong to the cached root
+        # cluster may be patched.  Before this guard the subtraction below was
+        # unconditional, so a dirent in ANY subdirectory produced a nonsense
+        # (often wrapped) cache_base that could land inside root_dir_data and
+        # silently corrupt an unrelated ROOT entry.  Nested writes hit this on
+        # the first call.  root_dir_data holds exactly the FIRST cluster of the
+        # root directory (see mount()), i.e. sectors_per_cluster sectors
+        # starting at root_dir_lba.
+        val root_dir_lba = self.data_start_sector.to_u64() + (self.root_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+        if h.dirent_sector < root_dir_lba:
+            return Ok(())
+        if h.dirent_sector >= root_dir_lba + self.sectors_per_cluster.to_u64():
+            return Ok(())
+        val cache_base = ((h.dirent_sector - root_dir_lba) * self.bytes_per_sector.to_u64()).to_i32() + h.dirent_offset
+        if cache_base >= 0 and (cache_base + 31) < self.root_dir_data.len():
+            self.root_dir_data[cache_base + 20] = sec[do_ + 20]
+            self.root_dir_data[cache_base + 21] = sec[do_ + 21]
+            self.root_dir_data[cache_base + 26] = sec[do_ + 26]
+            self.root_dir_data[cache_base + 27] = sec[do_ + 27]
+            self.root_dir_data[cache_base + 28] = sec[do_ + 28]
+            self.root_dir_data[cache_base + 29] = sec[do_ + 29]
+            self.root_dir_data[cache_base + 30] = sec[do_ + 30]
+            self.root_dir_data[cache_base + 31] = sec[do_ + 31]
+        Ok(())
+
+    fn _write_zero_range(self, dev: BlockDevice, chain: [u32], offset: u64, count: u64) -> Result<(), i32>:
+        """Overwrite exactly count bytes with zero without disturbing adjacent bytes."""
+        val bps = self.bytes_per_sector.to_u64()
+        val spc = self.sectors_per_cluster.to_u64()
+        val cluster_bytes = self.cluster_size.to_u64()
+        var cleared = 0u64
+        var write_offset = offset
+        while cleared < count:
+            val cluster_idx = (write_offset / cluster_bytes).to_i32()
+            val byte_in_cluster = write_offset % cluster_bytes
+            if cluster_idx < 0 or cluster_idx >= chain.len():
+                return Err(EIO)
+            val cluster = chain[cluster_idx]
+            val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
+            var sec_off = byte_in_cluster / bps
+            var byte_in_sec = byte_in_cluster % bps
+            while cleared < count and sec_off < spc:
+                val lba = first_sector + sec_off
+                val sec_result = dev.read_sector(lba)
+                if sec_result.is_err():
+                    return Err(EIO)
+                var sec = sec_result.unwrap()
+                while cleared < count and byte_in_sec < bps:
+                    sec[byte_in_sec.to_i32()] = 0u8
+                    cleared = cleared + 1u64
+                    write_offset = write_offset + 1u64
+                    byte_in_sec = byte_in_sec + 1u64
+                val wr = dev.write_sector(lba, sec)
+                if wr.is_err():
+                    return Err(EIO)
+                sec_off = sec_off + 1u64
+                byte_in_sec = 0u64
+        Ok(())
+
+    fn _write_data_range(self, dev: BlockDevice, chain: [u32], offset: u64, buf: [u8]) -> Result<(), i32>:
+        """Overlay buf at offset without disturbing bytes outside the range."""
+        val bps = self.bytes_per_sector.to_u64()
+        val spc = self.sectors_per_cluster.to_u64()
+        val cluster_bytes = self.cluster_size.to_u64()
+        val n = buf.len().to_u64()
+        var written = 0u64
+        var write_offset = offset
+        while written < n:
+            val cluster_idx = (write_offset / cluster_bytes).to_i32()
+            val byte_in_cluster = write_offset % cluster_bytes
+            if cluster_idx < 0 or cluster_idx >= chain.len():
+                return Err(EIO)
+            val cluster = chain[cluster_idx]
+            val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
+            var sec_off = byte_in_cluster / bps
+            var byte_in_sec = byte_in_cluster % bps
+            while written < n and sec_off < spc:
+                val lba = first_sector + sec_off
+                val sec_result = dev.read_sector(lba)
+                if sec_result.is_err():
+                    return Err(EIO)
+                var sec = sec_result.unwrap()
+                while written < n and byte_in_sec < bps:
+                    sec[byte_in_sec.to_i32()] = buf[written.to_i32()]
+                    written = written + 1u64
+                    write_offset = write_offset + 1u64
+                    byte_in_sec = byte_in_sec + 1u64
+                val wr = dev.write_sector(lba, sec)
+                if wr.is_err():
+                    return Err(EIO)
+                sec_off = sec_off + 1u64
+                byte_in_sec = 0u64
+        Ok(())
+
+    fn _write_at_locked(self, dev: BlockDevice, h: FileHandle, offset: u64, buf: [u8]) -> Result<FileHandle, i32>:
+        """Positioned FAT32 write under the filesystem mutation owner.
+
+        Preserves h.offset, supports overwrite and extension, and writes zeros
+        across every gap between the prior EOF and an extending write. FAT32's
+        directory entry stores size as u32, so larger or overflowing ranges
+        fail before allocating or modifying any cluster.
+        """
+        if h.file_size > FAT32_MAX_FILE_SIZE:
+            return Err(EFBIG)
+        val n = buf.len().to_u64()
+        if n == 0u64:
+            return Ok(h)
+        if offset > FAT32_U64_MAX - n:
+            return Err(EFBIG)
+        val write_end = offset + n
+        if write_end > FAT32_MAX_FILE_SIZE:
+            return Err(EFBIG)
+        if self.cluster_size == 0u32 or self.bytes_per_sector == 0u32 or self.sectors_per_cluster == 0u32:
+            return Err(EIO)
+
+        var resulting_size = h.file_size
+        if write_end > resulting_size:
+            resulting_size = write_end
+        val cluster_bytes = self.cluster_size.to_u64()
+        var required_clusters = resulting_size / cluster_bytes
+        if resulting_size % cluster_bytes != 0u64:
+            required_clusters = required_clusters + 1u64
+
+        var chain_tail = 0u32
+        var file_clusters = 0u64
+        if h.start_cluster < 2u32:
+            val nc_result = self.allocate_cluster(dev)
+            if nc_result.is_err():
+                return Err(nc_result.unwrap_err())
+            h.start_cluster = nc_result.unwrap()
+            h.current_cluster = h.start_cluster
+            chain_tail = h.start_cluster
+            file_clusters = 1u64
+        else:
+            val chain_result = self.read_cluster_chain(dev, h.start_cluster)
+            if chain_result.is_err():
+                return Err(EIO)
+            val chain = chain_result.unwrap()
+            if chain.len() == 0:
+                return Err(EIO)
+            chain_tail = chain[chain.len() - 1]
+            file_clusters = chain.len().to_u64()
+
+        while file_clusters < required_clusters:
+            val nc_result = self.allocate_cluster(dev)
+            if nc_result.is_err():
+                return Err(nc_result.unwrap_err())
+            val nc = nc_result.unwrap()
+            val append_result = self.append_cluster(dev, chain_tail, nc)
+            if append_result.is_err():
+                return Err(append_result.unwrap_err())
+            chain_tail = nc
+            file_clusters = file_clusters + 1u64
+
+        val full_chain_result = self.read_cluster_chain(dev, h.start_cluster)
+        if full_chain_result.is_err():
+            return Err(EIO)
+        val full_chain = full_chain_result.unwrap()
+
+        if offset > h.file_size:
+            val zero_result = self._write_zero_range(dev, full_chain, h.file_size, offset - h.file_size)
+            if zero_result.is_err():
+                return Err(zero_result.unwrap_err())
+        val data_result = self._write_data_range(dev, full_chain, offset, buf)
+        if data_result.is_err():
+            return Err(data_result.unwrap_err())
+
+        h.file_size = resulting_size
+        val update_result = self._update_dirent(dev, h)
+        if update_result.is_err():
+            return Err(update_result.unwrap_err())
+        Ok(h)
+
+    fn _write_locked(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<FileHandle, i32>:
+        """Append-only compatibility path implemented through write_at."""
+        self._write_at_locked(dev, h, h.file_size, buf)
+
+    # -- Directory WRITE path (wave-4g) ----------------------------------------
+    #
+    # Everything below exists so that ordinary host-shaped paths can be
+    # CREATED, not merely read: `mkdir_at("/usr/bin")` then
+    # `create_at("/usr/bin/clang")`. The parent directory is always located by
+    # the existing read-path resolver (resolve_path) — there is deliberately no
+    # second path walker in this file.
+
+    fn _dir_chain(self, dev: BlockDevice, cluster: u32) -> Result<[u32], i32>:
+        """Cluster chain of a directory, with the chain-walker's text error
+        collapsed to EIO so callers stay in the i32 error domain."""
+        val c = self.read_cluster_chain(dev, cluster)
+        if c.is_err():
+            return Err(EIO)
+        Ok(c.unwrap())
+

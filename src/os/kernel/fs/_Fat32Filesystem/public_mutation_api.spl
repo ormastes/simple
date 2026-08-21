@@ -1,0 +1,208 @@
+# FAT32 public mutation gates and focused-test constructors.
+use os.kernel.fs.fat32.*
+
+    fn create_at(self, dev: BlockDevice, path: text) -> Result<FileHandle, i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._create_at_locked(dev, path)
+        self._mutation_leave()
+        result
+
+    fn write(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<FileHandle, i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._write_locked(dev, h, buf)
+        self._mutation_leave()
+        result
+
+    fn write_at(self, dev: BlockDevice, h: FileHandle, offset: u64, buf: [u8]) -> Result<FileHandle, i32>:
+        """Write buf at offset while preserving the handle's sequential cursor."""
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._write_at_locked(dev, h, offset, buf)
+        self._mutation_leave()
+        result
+
+    fn flush(self, dev: BlockDevice, h: FileHandle) -> Result<(), i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._flush_locked(dev, h)
+        self._mutation_leave()
+        result
+
+    fn mkdir_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._mkdir_at_locked(dev, path)
+        self._mutation_leave()
+        result
+
+    fn unlink_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._unlink_at_locked(dev, path)
+        self._mutation_leave()
+        result
+
+    fn rmdir_at(self, dev: BlockDevice, path: text) -> Result<(), i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._rmdir_at_locked(dev, path)
+        self._mutation_leave()
+        result
+
+    fn rename_at(self, dev: BlockDevice, old_path: text, new_path: text) -> Result<(), i32>:
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._rename_at_locked(dev, old_path, new_path)
+        self._mutation_leave()
+        result
+
+    fn atomic_replace_at(self, dev: BlockDevice, source_tmp: text, destination: text) -> Result<ReplaceReceipt, i32>:
+        """Resolve before locking, then revalidate immutable identities under the shared mutation owner."""
+        val pre_source_r = self.resolve_path(dev, source_tmp)
+        if pre_source_r.is_err():
+            return Err(pre_source_r.unwrap_err())
+        val pre_source = pre_source_r.unwrap()
+        val pre_dest_r = self.resolve_path(dev, destination)
+        var pre_dest_exists = false
+        var pre_dest_lba = 0u64
+        var pre_dest_offset = 0
+        var pre_dest_cluster = 0u32
+        if pre_dest_r.is_ok():
+            val pre_dest = pre_dest_r.unwrap()
+            pre_dest_exists = true
+            pre_dest_lba = pre_dest.dirent_sector
+            pre_dest_offset = pre_dest.dirent_offset
+            pre_dest_cluster = pre_dest.start_cluster
+        if not self._mutation_enter():
+            return Err(EBUSY)
+        val result = self._atomic_replace_at_locked(
+            dev, source_tmp, destination,
+            pre_source.dirent_sector, pre_source.dirent_offset, pre_source.start_cluster,
+            pre_dest_exists, pre_dest_lba, pre_dest_offset, pre_dest_cluster)
+        self._mutation_leave()
+        result
+
+    static fn make_for_chain_test(fat_start_sector: u32, bytes_per_sector: u32, data_clusters: u32) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for read_cluster_chain unit tests.
+
+        Sets geometry fields directly; caller supplies a mock BlockDevice to
+        read_cluster_chain.  Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   fat_start_sector + 8u32,
+            root_cluster:        2u32,
+            sectors_per_cluster: 1u32,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            total_sectors:       0u32,
+            reserved_sectors:    0u32,
+            fat_size_sectors:    0u32,
+            fat_count:           1u32,
+            mutation_active:     false,
+            root_dir_data:       []
+        )
+
+    static fn make_for_read_test(fat_start_sector: u32, data_start_sector: u32, bytes_per_sector: u32, sectors_per_cluster: u32, data_clusters: u32) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for read() unit tests.
+
+        Allows explicit data_start_sector and sectors_per_cluster so callers
+        can place data sectors at known LBAs.  Caller supplies a mock
+        BlockDevice to read().  Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector * sectors_per_cluster,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   data_start_sector,
+            root_cluster:        2u32,
+            sectors_per_cluster: sectors_per_cluster,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            total_sectors:       0u32,
+            reserved_sectors:    0u32,
+            fat_size_sectors:    8u32,
+            fat_count:           1u32,
+            mutation_active:     false,
+            root_dir_data:       []
+        )
+
+    static fn make_for_alloc_test(fat_start_sector: u32, data_start_sector: u32, bytes_per_sector: u32, sectors_per_cluster: u32, data_clusters: u32) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for allocator/write unit tests.
+
+        Same geometry as make_for_read_test; separated so alloc specs can evolve
+        independently.  Caller supplies a mock BlockDevice that supports both
+        read_sector and write_sector.  Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector * sectors_per_cluster,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   data_start_sector,
+            root_cluster:        2u32,
+            sectors_per_cluster: sectors_per_cluster,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            total_sectors:       0u32,
+            reserved_sectors:    0u32,
+            fat_size_sectors:    8u32,
+            fat_count:           1u32,
+            mutation_active:     false,
+            root_dir_data:       []
+        )
+
+    static fn make_for_dirent_test(fat_start_sector: u32, data_start_sector: u32, bytes_per_sector: u32, sectors_per_cluster: u32, data_clusters: u32, initial_root_dir: [u8]) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for dirent-persistence unit tests.
+
+        Same geometry as make_for_alloc_test but accepts a pre-populated
+        root_dir_data cache so _find_root_entry / open() can resolve 8.3 names.
+        Caller supplies a mock BlockDevice that provides the root-dir sector at
+        LBA data_start_sector (root_cluster=2, so no offset).
+        Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector * sectors_per_cluster,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   data_start_sector,
+            root_cluster:        2u32,
+            sectors_per_cluster: sectors_per_cluster,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            total_sectors:       0u32,
+            reserved_sectors:    0u32,
+            fat_size_sectors:    8u32,
+            fat_count:           1u32,
+            mutation_active:     false,
+            root_dir_data:       initial_root_dir
+        )
+
+# ============================================================================
+# Kernel-global mounted filesystem — published once at boot
+#
+# Mirrors the g_cwd_table lazy-scalar pattern in syscall_file.spl and the
+# vmm_publish_kernel_pml4 pattern in vmm_core.spl: freestanding kernel code
+# cannot rely on struct-literal module-level initializers (they never run —
+# see doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md), so
+# state is published imperatively into module scalars/nullable fields behind
+# a `bool` ready-flag instead of being constructed at declaration time.
+#
+# `Fat32Filesystem` and `BlockDevice` are both reference (class) types here,
+# so the Option-typed globals below hold a plain nullable pointer (0 = None)
+# rather than a boxed struct — the specific landmine #1 case the guide warns
+# about (an Option<struct> reading nil on the hit path) does not apply to a
+# pointer-sized reference type. No `if val` binding-if is used on them, only
+# explicit `!= nil` checks, per the guide's own workaround.
+# ============================================================================
+
+var g_fat32_mount_ready: bool = false
+var g_fat32_mount_fs: Fat32Filesystem? = nil
+var g_fat32_mount_dev: BlockDevice? = nil

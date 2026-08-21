@@ -11,7 +11,7 @@ When MIR lowering cannot resolve a callee, `symbol_to_operand`
 `unknown_<symbol-id>`. That is a deliberately undefined symbol: reaching the
 linker as `undefined symbol: unknown_7` is the LOUD, correct outcome.
 
-The riscv64 real-kernel link path then silenced exactly that signal with
+The riscv64 real-kernel link path once silenced exactly that signal with
 thirteen `--defsym=unknown_N=<real kernel function>` arguments, mapping the
 unknowns onto `rt_riscv_uart_put`, `_uart_put`, `_boot_banner`,
 `log_raw_println`, `rt_riscv_noalloc_pmm_init` and friends -- functions with
@@ -32,17 +32,14 @@ later, which is the regression this is really guarding against.
 ## The generalization
 
 The reproducer would have pinned the thirteen known aliases. This spec instead
-pins the RULE: on any link path, an `unknown_*` symbol may only ever be
-defsym'd to the trap. Any other target -- a function that does real work -- is
-a fail-open by construction, whatever its name.
+pins the stronger rule: no link path may defsym an `unknown_*` symbol at all.
+The undefined reference must remain visible so the link fails closed.
 """
 
 use std.spec.*
 use std.io_runtime.{process_run}
 
-val LINK_SRC: text = "src/compiler/70.backend/backend/llvm_native_link.spl"
-val TRAP_SYMBOL: text = "__simple_unresolved_call_trap"
-
+val LINK_SRC: text = "src/compiler/70.backend/backend/simpleos_native_linkers.spl"
 fn defsym_unknown_lines() -> text:
     # `grep` here is a wrapped ugrep honouring .gitignore; the source file is
     # tracked, so that is fine. Exit status is deliberately not read through a
@@ -54,17 +51,12 @@ fn defsym_unknown_lines() -> text:
 
 describe "an unresolved unknown_N symbol is never aliased onto a working function":
 
-    it "defsyms every unknown_N to the fail-closed trap and to nothing else":
+    it "leaves every unknown_N undefined so the link fails closed":
         step("Collect every --defsym=unknown_ site in the backend")
         val lines = defsym_unknown_lines()
 
-        step("Refuse to pass vacuously if the scan found no sites at all")
-        # If the defsym block is ever deleted outright this spec must be
-        # rewritten, not silently pass on an empty scan.
-        expect(lines).to_contain("--defsym=unknown_")
-
-        step("The trap is the alias target")
-        expect(lines).to_contain(TRAP_SYMBOL)
+        step("No backend link argument may manufacture an unknown_N definition")
+        expect(lines).to_equal("")
 
         step("None of the known fail-open targets is an alias target")
         # These are the exact five functions the incident aliased onto. Each is
@@ -79,16 +71,3 @@ describe "an unresolved unknown_N symbol is never aliased onto a working functio
         expect(lines.contains("=rt_riscv_qemu_heap_size")).to_equal(false)
         expect(lines.contains("=rt_riscv_qemu_reserved_end")).to_equal(false)
         expect(lines.contains("=rt_riscv_noalloc_pmm_init")).to_equal(false)
-
-    it "defines the trap it aliases to, so the link still resolves":
-        step("The trap must be EMITTED, not merely referenced")
-        # An alias to a symbol nobody defines would trade a silent wrong call
-        # for a broken build. The trap is generated into the riscv64 stub
-        # source in the same function that builds the defsym arguments.
-        # `grep -c` is deliberately NOT used: its count is compared as text and
-        # "10" contains "0", which would make the assertion silently wrong. The
-        # matched LINE is the unambiguous evidence.
-        val defined = process_run("sh", ["-c",
-            "/usr/bin/grep -n 'void " + TRAP_SYMBOL + "(void)' " + LINK_SRC + " || true"])
-        expect(defined.0).to_contain(TRAP_SYMBOL)
-        expect(defined.0).to_contain("wfi")

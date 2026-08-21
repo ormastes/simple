@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+fail() { echo "x86-64-fs-exec-exit-oracle: $*" >&2; exit 1; }
+
+entry=examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl
+runtime=examples/09_embedded/simple_os/arch/x86_64/boot/runtime_service_owners.c
+
+grep -Fq 'extern fn rt_debug_exit_failure()' "$entry" || fail 'failure exit is not declared'
+fail_body=$(sed -n '/^fn fail(reason: text):/,/^fn spl_start():/p' "$entry")
+printf '%s\n' "$fail_body" | grep -Fq 'rt_debug_exit_failure()' || fail 'failure path does not exit failure'
+if printf '%s\n' "$fail_body" | grep -Fq 'rt_debug_exit_success()'; then
+    fail 'failure path exits success'
+fi
+
+[ "$(grep -Fc 'rt_debug_exit_success()' "$entry")" -eq 2 ] ||
+    fail 'success exit must have exactly one declaration and one final-pass call'
+tail -8 "$entry" | grep -Fq 'serial_println("TEST PASSED")' || fail 'final pass marker missing'
+tail -8 "$entry" | grep -Fq 'rt_debug_exit_success()' || fail 'final success exit missing'
+
+grep -Fq 'RuntimeValue rt_debug_exit_failure(void)' "$runtime" || fail 'runtime failure exit missing'
+failure_runtime=$(sed -n '/RuntimeValue rt_debug_exit_failure(void)/,/^}/p' "$runtime")
+printf '%s\n' "$failure_runtime" | grep -Fq 'outb((uint16_t)0xF4, (uint8_t)1)' ||
+    fail 'runtime failure exit does not use distinct isa-debug-exit value'
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/x86-fs-exit-oracle.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+sed 's/rt_debug_exit_failure()/rt_debug_exit_success()/' "$entry" > "$tmp/sabotaged.spl"
+sabotaged_fail=$(sed -n '/^fn fail(reason: text):/,/^fn spl_start():/p' "$tmp/sabotaged.spl")
+if ! printf '%s\n' "$sabotaged_fail" | grep -Fq 'rt_debug_exit_success()'; then
+    fail 'sabotage did not alter failure oracle'
+fi
+
+echo 'PASS x86_64 filesystem execution exit oracle'

@@ -65,7 +65,7 @@ function Get-RowDescriptors([string]$RepoRoot) {
             ImageArg='build/os/fat32-riscv64.img'
             Spec=(Join-Path $spec 'sys_qemu_riscv64_fs_exec_spec.spl')
             Args=@('-machine','virt','-cpu','rv64','-m','2G','-nographic','-bios','__SOSIX_RISCV64_FIRMWARE__','-global','virtio-mmio.force-legacy=false','-drive','file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw','-device','virtio-blk-device,drive=rvdisk','-kernel','build/os/simpleos_riscv64_smf_fs.elf')
-            ExactReap='RV64_TASK_REAP_AUTH_EXACT_ONCE_OK'
+            ExactReap='RV64_LEGACY_FSEXEC_DISABLED reason=missing-loader-authority-token'
             CollectorNonceEcho=$true; RunContractReady=$false
             FirmwareMode='opensbi-bios'; FirmwareStages='opensbi-entry>opensbi-handoff>guest-entry'
         }

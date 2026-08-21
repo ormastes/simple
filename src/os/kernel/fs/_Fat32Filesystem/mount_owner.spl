@@ -1,0 +1,55 @@
+# Kernel-global FAT32 mount owner and mounted-filesystem adapters.
+use os.kernel.fs.fat32.*
+
+fn fat32_mount_publish(fs: Fat32Filesystem, dev: BlockDevice):
+    """Publish a freshly-mounted Fat32Filesystem + its backing BlockDevice as
+    kernel-global state. Called once from the boot filesystem-mount path
+    (see os.kernel.boot.boot_fs_mount.boot_fs_mount_fat32_from_device) after
+    `Fat32Filesystem.mount()` succeeds. Idempotent: a later call replaces the
+    previous mount (e.g. a remount), it does not stack."""
+    g_fat32_mount_fs = fs
+    g_fat32_mount_dev = dev
+    g_fat32_mount_ready = true
+
+fn fat32_mount_ready() -> bool:
+    """True once fat32_mount_publish has run. syscall_file.spl handlers must
+    check this before touching fat32_mount_fs()/fat32_mount_dev() — reading
+    either while false is a caller bug, not a recoverable error."""
+    g_fat32_mount_ready
+
+fn fat32_mount_fs() -> Fat32Filesystem:
+    """The published Fat32Filesystem. Caller MUST have checked
+    fat32_mount_ready() first."""
+    g_fat32_mount_fs.unwrap()
+
+fn fat32_mount_dev() -> BlockDevice:
+    """The published BlockDevice backing the mounted filesystem. Caller MUST
+    have checked fat32_mount_ready() first."""
+    g_fat32_mount_dev.unwrap()
+
+fn fat32_atomic_replace(source_tmp: text, destination: text) -> Result<ReplaceReceipt, i32>:
+    """Mounted-filesystem adapter used by the SimpleOS database runtime."""
+    if not g_fat32_mount_ready or g_fat32_mount_fs == nil or g_fat32_mount_dev == nil:
+        return Err(EIO)
+    g_fat32_mount_fs.unwrap().atomic_replace_at(g_fat32_mount_dev.unwrap(), source_tmp, destination)
+
+fn fat32_atomic_replace_recover() -> Result<ReplaceReceipt, i32>:
+    """Explicit recovery adapter; normal boot invokes this before publish."""
+    if not g_fat32_mount_ready or g_fat32_mount_fs == nil or g_fat32_mount_dev == nil:
+        return Err(EIO)
+    val fs = g_fat32_mount_fs.unwrap()
+    val rr = fat32_atomic_replace_recover_device(
+        g_fat32_mount_dev.unwrap(), fs.total_sectors, fs.reserved_sectors,
+        fs.fat_start_sector, fs.fat_size_sectors, fs.fat_count,
+        fs.data_clusters, fs.data_start_sector,
+        fs.sectors_per_cluster, fs.root_cluster)
+    if rr.is_err():
+        return Err(EIO)
+    Ok(rr.unwrap())
+
+fn fat32_mount_clear():
+    """Test-only: reset published mount state between specs so one test's
+    mount cannot leak into another's assertions."""
+    g_fat32_mount_ready = false
+    g_fat32_mount_fs = nil
+    g_fat32_mount_dev = nil
