@@ -1,0 +1,73 @@
+# Regression spec for the Stage-1 HIR cluster `unresolved type: CompileOptionsHash`
+# / `unresolved name: compile_options_hash_compute` (2026-08-21).
+#
+# The parser DISCARDS a function-local `use` outright
+# (10.frontend/core/parser_stmts.spl -> parse_use_stmt_inline returns a bare
+# `pass`), so a name imported inside a function body is never bound. Whether the
+# code then works depends on HOW the name is reached: an unrelated top-level
+# importer of the same module, or the HIR lowering's lazy bootstrap-global
+# fallback, can rescue it -- and when neither does, lowering dies with
+# `unresolved type` / `unresolved name`, attributed to whichever module was
+# being lowered rather than to the file that wrote the discarded import. That
+# is the same asymmetry recorded as the `unresolved type: ByteOrder` case in
+# 20.hir/hir_lowering/_Items/module_import_registration.spl.
+#
+# These files each had such an import. Before the fix, `compute_options_hash`
+# in driver_types.spl failed BOTH ways at once (return type and call); the rest
+# were latent. The fix hoists every one to module scope; none of the hoisted
+# modules imports back, so no cycle was introduced.
+extern fn rt_file_read_text(path: text) -> text
+
+fn function_local_use_spec_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn function_local_use_spec_indented_use_count(src: text) -> i64:
+    # A function-local `use` is an INDENTED `use` line. Module-scope imports
+    # start at column 0, so indentation alone separates the two forms.
+    var count: i64 = 0
+    for line in src.split("\n"):
+        val trimmed = line.trim_start()
+        if trimmed.starts_with("use ") and trimmed != line:
+            count = count + 1
+    count
+
+describe "driver imports discarded by the parser (repro)":
+    it "driver_types.spl imports CompileOptionsHash at module scope":
+        val src = function_local_use_spec_source("src/compiler/80.driver/driver_types.spl")
+        expect(src).to_contain("\nuse compiler.driver.cache.compile_options_hash.\{CompileOptionsHash, compile_options_hash_compute\}")
+        # Non-vacuity: both names are still actually used by the file.
+        assert_true(src.contains("-> CompileOptionsHash"))
+        assert_true(src.contains("compile_options_hash_compute("))
+
+describe "no function-local `use` remains under 80.driver (generalization)":
+    """Every import the parser would throw away is a latent `unresolved name`.
+    Scoped to the driver tier, where the Stage-1 cluster surfaced."""
+    it "driver_types.spl has none":
+        expect(function_local_use_spec_indented_use_count(
+            function_local_use_spec_source("src/compiler/80.driver/driver_types.spl"))).to_equal(0)
+
+    it "driver_api_project_build.spl has none":
+        expect(function_local_use_spec_indented_use_count(
+            function_local_use_spec_source("src/compiler/80.driver/driver_api_project_build.spl"))).to_equal(0)
+
+    it "project.spl has none":
+        expect(function_local_use_spec_indented_use_count(
+            function_local_use_spec_source("src/compiler/80.driver/project.spl"))).to_equal(0)
+
+    it "watcher/watcher_client.spl has none":
+        expect(function_local_use_spec_indented_use_count(
+            function_local_use_spec_source("src/compiler/80.driver/watcher/watcher_client.spl"))).to_equal(0)
+
+    it "cache/compile_options_hash.spl has none":
+        expect(function_local_use_spec_indented_use_count(
+            function_local_use_spec_source("src/compiler/80.driver/cache/compile_options_hash.spl"))).to_equal(0)
+
+    it "cache/cache_validator.spl has none":
+        expect(function_local_use_spec_indented_use_count(
+            function_local_use_spec_source("src/compiler/80.driver/cache/cache_validator.spl"))).to_equal(0)
+
+    it "the counter is not vacuously zero":
+        # A file that genuinely contains an indented `use` must be counted, so a
+        # broken scanner cannot pass the six checks above by returning 0 always.
+        expect(function_local_use_spec_indented_use_count(
+            "fn f():\n    use a.b.\{c\}\n    c()")).to_equal(1)
