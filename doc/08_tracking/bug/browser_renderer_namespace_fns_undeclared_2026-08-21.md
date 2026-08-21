@@ -1,5 +1,9 @@
 # browser_renderer_apply_namespaces / browser_renderer_drop_privileges never implemented
 
+## Status
+PARTIALLY RESOLVED (deferred, not implemented) — bd6ba8faae7 makes the selfcheck fail loudly at compile time via #ifndef SPL_HAS_BROWSER_RENDERER_NAMESPACES / #error instead of silently referencing undeclared functions, so check-c-runtime-compiles-push.shs no longer false-passes. This is a defer-with-visible-guard, not a fix: browser_renderer_apply_namespaces()/browser_renderer_drop_privileges() are still unimplemented in runtime_process.c. OPEN: implement both functions and define SPL_HAS_BROWSER_RENDERER_NAMESPACES.
+
+
 - Date: 2026-08-21
 - Found via: `sh scripts/check/check-c-runtime-compiles-push.shs` (the mandatory
   C-runtime-compiles pre-push guard, see `.claude/rules/vcs.md`), which reported

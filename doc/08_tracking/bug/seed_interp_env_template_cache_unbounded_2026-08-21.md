@@ -1,5 +1,9 @@
 # Seed interpreter burns ~12 GB RSS / 3.4x wall on one module — root cause OPEN
 
+## Status
+RESOLVED 2026-08-21 — 47ee75c7cf5 measured and refuted the cache-cap hypothesis; e73a0bec647 removed the per-call env-rebuild mechanism entirely. Evidence: driver_types 90s/2GB -> 23s/0.42GB, switch_operators_calls 759s/12GB -> 159s/0.66GB.
+
+
 > **2026-08-21 update, read the Numbers section first.** This was filed against
 > the unbounded env-template cache. That hypothesis has since been MEASURED AND
 > REFUTED: capping the cache (even to 64 entries) does not change peak RSS.

@@ -1,5 +1,9 @@
 # `_parse_duplicate_typed_arg_signature` returned nil on a non-optional return contract (2026-08-21)
 
+## Status
+RESOLVED 2026-08-21 — b02b5f7c6f3 (fix) + 47ee75c7cf5 (seed classifier follow-up). Evidence: see commit messages; _parse_duplicate_typed_arg_signature no longer returns nil on non-optional return contract.
+
+
 ## Symptom
 
 Running lint with a build that enforces the stricter SFFI-style return

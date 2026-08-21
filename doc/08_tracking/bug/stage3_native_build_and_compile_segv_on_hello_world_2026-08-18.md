@@ -1,5 +1,9 @@
 # bootstrap/stage3/simple SEGVs on both of its two commands (hello world)
 
+## Status
+PARTIALLY RESOLVED — c4b84dc9aaf defines rt_unwrap_or_trap in the C runtime (the SEGV cause) and 1d9cbaa2c2b makes the linker fail closed instead of fabricating weak stubs. OPEN: the tracked stage binaries (bootstrap/stage1..3/simple) are untracked as of d1b71d63732, so check-stage-binaries-runnable.shs now reports ERROR/nothing-tracked rather than a green PASS — re-deploy and re-verify the guard once stage binaries are re-tracked.
+
+
 - **Filed:** 2026-08-18
 - **Severity:** HIGH — the tracked stage3 artifact is non-functional
 - **Status:** OPEN (found while verifying an unrelated documented claim)

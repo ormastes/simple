@@ -1,5 +1,9 @@
 # Seed interpreter rebuilds the whole callee env per call (O(module globals))
 
+## Status
+PARTIALLY RESOLVED — 408fb57b109 landed the initial mitigation (misses down 6.5x, wall still far above target); superseded by e73a0bec647 (scope-chain CowEnv replaces per-call env clone). OPEN: confirm wall-clock now meets target on the original repro.
+
+
 Status: PARTIALLY FIXED (2026-08-21) — misses down 6.5x, wall still far above target.
 Area: Rust seed interpreter (`src/compiler_rust/compiler/src/interpreter_call/**`, `interpreter_state.rs`)
 Blocks: stage1 `native-build` of `src/app/cli/bootstrap_main.spl` (phase2 parse 20-50 s/file, 7200 s worker timeout expires)

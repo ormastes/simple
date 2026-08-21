@@ -1,6 +1,10 @@
 # Seed interpreter stall — poor-man's profile (2026-08-21)
 
 ## Status
+PARTIALLY RESOLVED — 01a3fa7e90d added level-gated stall counters (profiling only, no behavior fix); root cause subsequently addressed by e73a0bec647 (CowEnv). OPEN: confirm the profiled stall fully clears against these counters on a fresh run.
+
+
+## Status
 Profiled. **No fix landed** — no single defect was isolated with enough
 confidence to change hot-path semantics. Level-gated counters added so the
 next pass starts with numbers instead of guesses.

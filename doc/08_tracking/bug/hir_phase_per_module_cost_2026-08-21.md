@@ -1,5 +1,9 @@
 # HIR phase costs ~20x parse per module (full-registry rescans) — 2026-08-21
 
+## Status
+RESOLVED 2026-08-21 — a865dced154 memoizes frozen-registry owner scans in the package-dep and bootstrap-global resolvers. Evidence: per-module HIR lowering 0.28s -> 0.15s (61-module fixture), per commit message and hir_package_dependency_scan_memo_spec.spl.
+
+
 ## Symptom
 Stage1 bootstrap (self-hosted `src/compiler` interpreted by the Rust seed):
 parse finished 662 modules in ~50 min (~5 s/module); the HIR phase

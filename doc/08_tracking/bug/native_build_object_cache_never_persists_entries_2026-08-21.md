@@ -1,5 +1,9 @@
 # native-build object cache never persisted entries: second identical build = 0 hits (2026-08-21)
 
+## Status
+RESOLVED 2026-08-21 — 809ce6d4e71. Evidence: spec test/02_integration/compiler/driver/native_build_cache_second_build_hits_spec.spl (see body for verdict).
+
+
 **Status:** FIXED (working tree, stage-1 bootstrap lane); spec
 `test/02_integration/compiler/driver/native_build_cache_second_build_hits_spec.spl`.
 
