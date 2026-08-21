@@ -1164,3 +1164,31 @@ Do NOT start WM Track W2 (fault root-cause) tonight — unknown root cause,
 open-ended cost; it gates full acceptance but not rung (d).
 All three tracks are code-independent; blink and W1 can run in parallel; the
 board track shares only host resources.
+
+## 2026-08-21 ARM64 `Color` resume handoff
+
+The old `Color.rgb` crash was refined to ambiguous production type ownership,
+not a still-universal small-struct return failure.  Framebuffer consumers now
+use the explicit `FbColor` import alias.  An admitted Stage-2 compiler proved
+the duplicate-name fixture, the adjacent aggregate-return class, and the real
+`os.compositor.decorations` path with exact channel values.
+
+Current host readiness is PASS: macOS arm64, HVF, QEMU `virt`, and `ramfb`.
+The canonical attested producer stops before building with
+`canonical-pure-simple-compiler-unavailable`; Stage 2 intentionally exposes
+only `compile` and `native-build`, while the producer requires a provenance-
+accepted full CLI with `os build`.
+
+Resume without repeating the failed direct kernel diagnostic:
+
+1. Provide a current provenance-qualified full pure-Simple CLI accepted by
+   `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`.
+2. From the clean `dd4c-qemu` workspace, run that producer once and retain its
+   build and frozen-source manifests.
+3. Run `scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` once.  Require
+   `desktop-ready`, nonblank device-origin RAMFB capture, correlated real QMP
+   input, and the unchanged 2D/Web/GUI/WM assertions.
+
+Owner: ARM64 SimpleOS QEMU rendering lane. Merge owner and final reviewer:
+normal/highest-capability Codex. No generated manual or done mark is accepted
+until the live QEMU receipt exists.
