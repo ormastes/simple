@@ -91,7 +91,7 @@ names, and any temporary scenario oracle must use `fail(...)`.
 
 ## Phase
 
-dev-done
+implementation-blocked-by-bootstrap-authority
 
 ## Log
 
@@ -107,3 +107,16 @@ dev-done
 - verify: Focused tiering/ref-path test passed in 2s (real ref path 0s); Caret and sdoctest parser self-tests, Unix hook check, working/staged direct-env guards, shell syntax, and scoped diff checks passed.
 - blocker: A full bootstrap cannot start because no canonical admitted Stage 2 parent and planner-admission-v2 receipt exist in `build/bootstrap`; the deployed `bin/simple` is a Rust seed and was not accepted as verification evidence.
 - blocker-detail: The repository's open genesis defect confirms no production path writes `stage2-sanity.receipt` and `stage2-provenance.receipt`; the only admission producer requires those files, so a fresh tree cannot produce the receipt needed to start Stage 1.
+- harden: Restored the narrowly scoped `--full-bootstrap --stop-after-stage2`
+  measured trust-root lane and bound its parent markers to the immutable Stage-2
+  admission receipt. The planner producer now replays the full admission
+  verifier instead of accepting marker text or unreferenced digest strings.
+- verify: The isolated Slang + must-check branch passed the 41-case Slang setup
+  contract and the must-check tiering contract. The planner producer fixture
+  was not rerun after its third fix cycle; final verification remains pending.
+- blocker: The first isolated measured-genesis run stopped in the Rust authority
+  build before Stage 2. Current `origin/main` has duplicate
+  `eval_dict_for_each`, a missing `interpreter::dispatch_profile`, and a missing
+  `exec_block_closure_into` export. Those fixes are staged in another active
+  lane and were not appropriated. See
+  `doc/08_tracking/bug/bootstrap_rust_authority_compile_blockers_2026-08-21.md`.
