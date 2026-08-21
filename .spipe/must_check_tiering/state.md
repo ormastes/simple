@@ -251,3 +251,10 @@ implementation-blocked-by-bootstrap-authority
   scalar kind/field/dependency projection instead of retained Dict payloads.
   Qualified function/type bind and lookup now use aligned scalar first-write
   indexes, avoiding staged class-field Dict membership. Cycle count is 1/3.
+- verify-fail: Cycle 2 passed Stage 2 but Stage 3 faulted during surface
+  extraction after parsing `backend_port.spl`. The first composite projection
+  implementation reopened `composites[composite_name]` to build its scalar
+  rows, reproducing the rich Dict payload hazard inside Phase 2.
+- fix-pending-verification: Composite scalar rows are now emitted directly
+  from each parser class/actor/struct while its owner is live; surface
+  construction never reopens a composite Dict value. Cycle count is 2/3.
