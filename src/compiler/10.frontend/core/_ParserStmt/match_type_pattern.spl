@@ -1,0 +1,91 @@
+# Type-pattern match arms: `case i64 v:` / `case text s:` / `case Point p:`.
+#
+# Bug: doc/08_tracking/bug/union_narrowing_has_no_grammar_or_runtime_2026-08-21.md
+# Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#         §10.3 ("exhaustive narrowing" over a structural union). §10.3 states
+#         the REQUIREMENT but fixes no spelling, so the smallest grammar
+#         consistent with existing match arms is used: a type name followed by
+#         a binder, in the same arm position an enum-variant pattern occupies.
+#
+#     match x:                      # x: i64 | f64 | bool | text
+#         case i64 v: ...
+#         case text s: ...
+#         case nil: ...             # unchanged: the existing nil pattern
+#
+# Recognized HERE rather than in the expression parser for exactly the reason
+# `case complete b:` / `case dyn b:` are (parser_stmts.spl:1512): match
+# patterns are parsed with the general EXPRESSION parser, and two juxtaposed
+# identifiers are not an expression in any Simple grammar -- which is also why
+# stealing this shape cannot break existing code. The arm is lowered to the
+# marker call `__type_test(<Type>, <binder>)`, which convert_flat_pattern
+# turns into PatternKind.TypeTest; the marker mirrors the region-arm mechanism
+# instead of inventing a second one.
+#
+# The first token must LOOK like a type -- a builtin scalar name or an
+# uppercase-initial named type -- so an ordinary lowercase identifier followed
+# by an identifier still reaches the expression parser and its existing error,
+# rather than being silently reinterpreted as a narrowing arm.
+
+use compiler.frontend.core.parser.{par_kind_get, par_text_get, parser_advance}
+use compiler.frontend.core.lexer.{lex_token_end_get, lex_source_char_at, lex_source_len}
+use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.ast.{expr_ident, expr_call}
+
+fn parser_type_pattern_name_is_type(name: text) -> bool:
+    """True when `name` may head a type pattern.
+
+    Deliberately a NAME test, not a symbol-table lookup: the parser has no
+    resolved types yet. A wrong guess here is not silent -- HIR lowering
+    reports E-NARROW-001 when the scrutinee is not a union."""
+    if name == "i8" or name == "i16" or name == "i32" or name == "i64":
+        return true
+    if name == "u8" or name == "u16" or name == "u32" or name == "u64":
+        return true
+    if name == "f32" or name == "f64":
+        return true
+    if name == "bool" or name == "text" or name == "char" or name == "str":
+        return true
+    if name.len() == 0:
+        return false
+    val c = name.substring(0, 1)
+    c >= "A" and c <= "Z"
+
+fn parser_type_pattern_binder_follows() -> bool:
+    """True when the token after the current one is an identifier.
+
+    Raw-source lookahead, the same technique parse_match_region_marker() uses,
+    because the parser has no general two-token peek."""
+    var pos = lex_token_end_get()
+    val source_len = lex_source_len()
+    var saw_space = false
+    while pos < source_len:
+        val ch = lex_source_char_at(pos)
+        if ch == " " or ch == "\t":
+            saw_space = true
+            pos = pos + 1
+            continue
+        break
+    if not saw_space or pos >= source_len:
+        return false
+    val c = lex_source_char_at(pos)
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+fn parse_match_type_pattern() -> i64:
+    """`<Type> <binder>` in match-pattern position -> `__type_test(T, b)`.
+
+    Returns -1 having consumed NOTHING when the current tokens are not a type
+    pattern, exactly like parse_match_region_marker()."""
+    if par_kind_get() != TOK_IDENT:
+        return 0 - 1
+    val type_name = par_text_get()
+    if not parser_type_pattern_name_is_type(type_name):
+        return 0 - 1
+    if not parser_type_pattern_binder_follows():
+        return 0 - 1
+    parser_advance()
+    val binder = par_text_get()
+    parser_advance()
+    expr_call(expr_ident("__type_test", 0), [expr_ident(type_name, 0), expr_ident(binder, 0)], 0)
+
+export parser_type_pattern_name_is_type, parser_type_pattern_binder_follows
+export parse_match_type_pattern

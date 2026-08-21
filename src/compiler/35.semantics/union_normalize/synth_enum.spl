@@ -1,0 +1,203 @@
+# Synthesized `@closed` enums for structural union types (lane S4).
+#
+# One union type -> one `HirEnum` named by `union_canonical_name`, carrying the
+# `@closed` attribute so the EXISTING enum-contract machinery
+# (compiler.semantics.enum_contract) governs it with no special case: variant
+# coverage, E-CLOSED-001 on a wildcard that hides a member, and the tagged
+# layout MIR already gives an enum. Nothing here introduces `Any`; §8.4's
+# replacement priority (closed sum > Any) is the whole point of the lane.
+#
+# Registration appends into `module.enums` keyed by a synthetic SymbolId drawn
+# from a high, deterministic range so a synthesized enum can never collide with
+# a source-declared one, and re-registering the same union is idempotent (the
+# canonical name is the identity).
+
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{
+    HirEnum, HirVariant, HirVariantKind, HirAttribute, HirFunction, HirStmt,
+    HirStmtKind, HirBlock, HirExpr, HirExprKind
+}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.semantics.union_normalize.canonical.{
+    union_normalize_members, union_member_keys, union_canonical_name, union_variant_name
+}
+
+# Synthetic symbol ids live above this base so they cannot alias a real one.
+val UNION_SYNTH_SYMBOL_BASE: i64 = 900000000
+
+fn union_synth_symbol_id(name: text) -> i64:
+    """Deterministic synthetic symbol id for a canonical union name (FNV-1a)."""
+    var h: i64 = 2166136261
+    for ch in name:
+        h = h ^ ch.to_int()
+        h = (h * 16777619) % 2147483647
+        if h < 0:
+            h = 0 - h
+    UNION_SYNTH_SYMBOL_BASE + (h % 100000000)
+
+fn synth_union_enum(members: [HirType], span_from: HirType) -> HirEnum:
+    """Build the `@closed` enum for a structural union.
+
+    Variant i carries member i as a single tuple payload, so the variant INDEX
+    is the discriminant and the payload is the narrowed value -- exactly the
+    shape `HirPatternKind.Enum(type_, variant, payload)` and MIR's tagged enum
+    layout already consume."""
+    val norm = union_normalize_members(members)
+    val keys = union_member_keys(members)
+    val name = union_canonical_name(members)
+    var variants: [HirVariant] = []
+    var i = 0
+    for k in keys:
+        variants = variants.push(HirVariant(
+            symbol: SymbolId.new(union_synth_symbol_id(name + "::" + k)),
+            name: union_variant_name(k),
+            kind: HirVariantKind.Tuple([norm[i]]),
+            has_discriminant: false,
+            discriminant: HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: span_from, span: span_from.span),
+            span: span_from.span))
+        i = i + 1
+    HirEnum(
+        symbol: SymbolId.new(union_synth_symbol_id(name)),
+        name: name,
+        runtime_name: name,
+        type_params: [],
+        variants: variants,
+        visibility: Visibility.Private,
+        is_public: false,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: span_from.span,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {},
+        attributes: [HirAttribute(name: "closed", args: "")],
+        complete_open: false,
+        dyn_open: false)
+
+fn collect_union_types_in_type(t: HirType, acc: [HirType]) -> [HirType]:
+    """Every Union type reachable from `t`, outermost first."""
+    var out = acc
+    match t.kind:
+        case HirTypeKind.Union(members):
+            out = out.push(t)
+            for m in members:
+                out = collect_union_types_in_type(m, out)
+        case HirTypeKind.Optional(inner): out = collect_union_types_in_type(inner, out)
+        case HirTypeKind.Ref(inner, mutable): out = collect_union_types_in_type(inner, out)
+        case HirTypeKind.Ptr(inner, mutable): out = collect_union_types_in_type(inner, out)
+        case HirTypeKind.Slice(element): out = collect_union_types_in_type(element, out)
+        case HirTypeKind.Array(element, size): out = collect_union_types_in_type(element, out)
+        case HirTypeKind.Isolated(inner): out = collect_union_types_in_type(inner, out)
+        case HirTypeKind.Dict(key, value):
+            out = collect_union_types_in_type(key, out)
+            out = collect_union_types_in_type(value, out)
+        case HirTypeKind.Result(ok, err):
+            out = collect_union_types_in_type(ok, out)
+            out = collect_union_types_in_type(err, out)
+        case HirTypeKind.Tuple(elements):
+            for e in elements:
+                out = collect_union_types_in_type(e, out)
+        case HirTypeKind.Function(params, ret, effects):
+            for p in params:
+                out = collect_union_types_in_type(p, out)
+            out = collect_union_types_in_type(ret, out)
+        # NAMED and TypeParam carry nested types (generic arguments, bounds),
+        # so they recurse; the rest are LEAVES and are listed explicitly
+        # rather than swept under a `case _:` -- a HirTypeKind added tomorrow
+        # must fail this match visibly instead of silently contributing no
+        # unions (critical-wildcard ban, §11.6).
+        case HirTypeKind.Named(symbol, args):
+            for a in args:
+                out = collect_union_types_in_type(a, out)
+        case HirTypeKind.TypeParam(name, bounds):
+            for b in bounds:
+                out = collect_union_types_in_type(b, out)
+        case HirTypeKind.Projection(base, assoc_name):
+            out = collect_union_types_in_type(base, out)
+        case HirTypeKind.Tensor(element, dims, device):
+            out = collect_union_types_in_type(element, out)
+        case HirTypeKind.Int(bits, signed): out = out
+        case HirTypeKind.Float(bits): out = out
+        case HirTypeKind.Bool: out = out
+        case HirTypeKind.Char: out = out
+        case HirTypeKind.Str: out = out
+        case HirTypeKind.Unit: out = out
+        case HirTypeKind.DynTrait(trait_): out = out
+        case HirTypeKind.Infer(id, level): out = out
+        case HirTypeKind.Error: out = out
+        case HirTypeKind.Never: out = out
+        case HirTypeKind.Any: out = out
+        case HirTypeKind.Layer(input, output): out = out
+    out
+
+fn _collect_in_block(b: HirBlock, acc: [HirType]) -> [HirType]:
+    var out = acc
+    for s in b.stmts:
+        # Only a `let` carries a WRITTEN type annotation, which is the scope
+        # this pass claims (see collect_union_types' docstring). Every other
+        # statement kind is named by the catch-all binding rather than
+        # discarded silently, so the arm states a fact instead of hiding one.
+        match s.kind:
+            case HirStmtKind.Let(symbol, type_, init):
+                out = collect_union_types_in_type(type_, out)
+            case other_stmt_kind_without_written_type:
+                out = out
+    out
+
+fn collect_union_types(module: HirModule) -> [HirType]:
+    """Union types appearing in the module's function signatures and `let`
+    annotations.
+
+    Scope is stated rather than implied: signatures and annotated locals are
+    where a union is WRITTEN. An inferred union with no written type is out of
+    scope for this pass and contributes nothing (it never invents one)."""
+    var out: [HirType] = []
+    for f in module.functions.values():
+        for p in f.params:
+            out = collect_union_types_in_type(p.type_, out)
+        out = collect_union_types_in_type(f.return_type, out)
+        out = _collect_in_block(f.body, out)
+    out
+
+fn union_normalize_module(module: HirModule) -> HirModule:
+    """Register a synthesized `@closed` enum for every union in `module`.
+
+    Idempotent: the canonical name is the identity, so running the pass twice
+    (or two unions spelled differently that normalize alike) registers once."""
+    var out = module
+    var registered: [text] = []
+    for ut in collect_union_types(module):
+        var members: [HirType] = []
+        # collect_union_types only ever yields Union types; a non-union here
+        # would be a contract violation of that function, so the arm binds and
+        # names it rather than swallowing it, and the `< 2` guard below is what
+        # skips it.
+        match ut.kind:
+            case HirTypeKind.Union(ms): members = ms
+            case non_union_kind_from_collector: members = []
+        if members.len() < 2:
+            continue
+        val name = union_canonical_name(members)
+        var seen = false
+        for r in registered:
+            if r == name:
+                seen = true
+        if seen:
+            continue
+        registered = registered.push(name)
+        val e = synth_union_enum(members, ut)
+        out.enums[e.symbol] = e
+    out
+
+fn union_synth_enum_names(module: HirModule) -> [text]:
+    """Names of the synthesized union enums registered in `module`."""
+    var out: [text] = []
+    for e in module.enums.values():
+        if e.name.starts_with("__Union_"):
+            out = out.push(e.name)
+    out
+
+export UNION_SYNTH_SYMBOL_BASE, union_synth_symbol_id, synth_union_enum
+export collect_union_types_in_type, collect_union_types
+export union_normalize_module, union_synth_enum_names

@@ -89,6 +89,11 @@ impl HirLowering:
                 []
             case DynRegion(_):
                 []
+            case TypeTest(_, _):
+                # The binder Let is produced by the union rewrite, which turns
+                # this into an Enum pattern with a Binding payload. A TypeTest
+                # still here binds nothing (and its test below is loud).
+                []
 
     me literal_test_condition(value_expr: HirExpr, lit_expr: HirExpr, span: Span) -> HirExpr:
         """Build the boolean test for a Literal pattern. `1 | 2 | 3` in
@@ -362,6 +367,12 @@ impl HirLowering:
                 Some(HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span))
             case DynRegion(_):
                 self.error("E-HIR-MATCH-UNHANDLED-PATTERN: `case dyn b:` region arms are not lowered yet (HirPatternKind.DynRegion); refusing to lower it as an unconditional arm", pat.span)
+                Some(HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span))
+            case TypeTest(tt_type, tt_binder):
+                # Reaching MIR-facing lowering with a TypeTest still intact
+                # means the scrutinee was NOT a union, so the union rewrite
+                # left it alone. Loud, never an unconditional arm.
+                self.error("E-NARROW-001: type pattern `case " + tt_type + " " + tt_binder + ":` on non-union type; a type pattern narrows a union member and has no meaning here", pat.span)
                 Some(HirExpr(kind: HirExprKind.BoolLit(false), type_: nil, span: span))
 
     me build_if_chain(scrut_var: HirExpr, hir_arms: [HirMatchArm], idx: i64, span: Span) -> HirExpr:
@@ -718,6 +729,11 @@ impl HirLowering:
                 arm
 
     me build_match_expr(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
+        # `case i64 v:` narrowing arms become ordinary `__Union_...` enum arms
+        # BEFORE the fast-path decision below, so a union match takes the
+        # tested enum-match path instead of the general if-chain fallback
+        # (which would erase the MatchCase node exhaustiveness reads).
+        val hir_arms = self.union_narrow_arms(hir_scrutinee, hir_arms, span)
         var has_enum = false
         var needs_general_fallback = false
         for a in hir_arms:

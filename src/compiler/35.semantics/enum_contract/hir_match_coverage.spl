@@ -84,6 +84,8 @@ fn scan_pattern(p: HirPattern, acc: ArmScan) -> ArmScan:
             handled = true
         case HirPatternKind.Literal(value):
             # A literal arm names no enum variant and covers nothing else.
+            # (`case nil:` over a union IS a variant arm, but it is rewritten
+            # into one during HIR lowering, so it arrives here as an Enum.)
             handled = true
         case HirPatternKind.Range(start, end, inclusive):
             # A range arm names no enum variant and is never a wildcard.
@@ -97,6 +99,15 @@ fn scan_pattern(p: HirPattern, acc: ArmScan) -> ArmScan:
         case HirPatternKind.DynRegion(binder):
             # `case dyn b:` covers only the OPEN region; it is not a wildcard
             # over the static constructors (design §2).
+            handled = true
+        case HirPatternKind.TypeTest(tt_type, tt_binder):
+            # A `case i64 v:` arm over a UNION is rewritten into the
+            # equivalent `__Union_...` enum arm during HIR lowering (bug doc
+            # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md), so it
+            # normally never reaches this scan. One that does had a NON-union
+            # scrutinee -- already reported as E-NARROW-001 -- and names no
+            # variant. Emphatically NOT a wildcard: treating it as one would
+            # close a union match that misses a member.
             handled = true
     if not handled:
         enum_contract_walk_unhandled("HirPatternKind", p.span.line)

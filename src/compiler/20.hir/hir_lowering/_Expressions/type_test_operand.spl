@@ -1,0 +1,38 @@
+# `x is T`: deciding when the right-hand side of `is` NAMES A TYPE.
+#
+# Bug: doc/08_tracking/bug/union_narrowing_has_no_grammar_or_runtime_2026-08-21.md
+# ("`if x is i64:` parses, then miscompiles ... `i64` is lowered as a VALUE").
+#
+# `is` has two readings and the parser cannot tell them apart -- its right
+# operand is parsed with the ordinary expression parser, so `i64` arrives as an
+# identifier expression exactly like a variable would. The decision is made
+# here, on one narrow rule: a BARE identifier whose spelling is a builtin
+# scalar type or an uppercase-initial name is a TYPE; everything else keeps the
+# existing value-comparison lowering. The same name test the type-pattern
+# parser uses, so `x is i64` and `case i64 v:` can never disagree about what
+# counts as a type.
+
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, BinOp}
+use compiler.frontend.core._ParserStmt.match_type_pattern.{parser_type_pattern_name_is_type}
+
+fn binary_is_type_operand(op: BinOp, right: Expr) -> text:
+    """The type name `right` denotes for an `is` / `is not`, or "" for none.
+
+    "" (not an Option) because every caller's next step is a text comparison
+    and a nil-vs-empty distinction would carry no information here."""
+    var is_kind = false
+    match op:
+        case BinOp.Is: is_kind = true
+        case BinOp.IsNot: is_kind = true
+        case _: is_kind = false
+    if not is_kind:
+        return ""
+    match right.kind:
+        case ExprKind.Ident(name):
+            if parser_type_pattern_name_is_type(name):
+                name
+            else:
+                ""
+        case _: ""
+
+export binary_is_type_operand

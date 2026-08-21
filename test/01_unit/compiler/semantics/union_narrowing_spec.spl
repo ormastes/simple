@@ -1,0 +1,156 @@
+"""
+# Union Narrowing Unit Spec (Wave 2D lane S4 follow-up)
+
+Proves a structural union can be NARROWED in source, which lane S4 left
+impossible: `case i64 v:` was a parse error and `if x is i64:` lowered `i64`
+as a VALUE ("unresolved identifier 'i64'").
+
+Bug: doc/08_tracking/bug/union_narrowing_has_no_grammar_or_runtime_2026-08-21.md
+Design: doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+        §10.3 ("exhaustive narrowing"), §10.1, §8.4.
+
+The grammar is a type-pattern arm in the position an enum-variant arm already
+occupies:
+
+    match x:                      # x: i64 | f64 | bool | text
+        case i64 v: ...
+        case text s: ...
+        case nil: ...             # unchanged nil pattern; `T?` == `T | nil`
+
+The load-bearing claim is not that the arms parse but that they lower to
+variants of the SYNTHESIZED `__Union_...` enum, so exhaustiveness, the closed
+contract and E-CLOSED-001 govern them through the machinery that already
+exists. Each case below fails if that rewrite regresses to a wildcard, a
+binding, or an if-chain (all three of which would silently accept a match that
+misses a member).
+"""
+# tag: unit
+
+use std.spec
+use std.fs.{read_file}
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExprKind, HirPatternKind, HirMatchArm}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.semantics.union_normalize.{
+    union_normalize_module, union_narrow_variant_name,
+    union_narrow_member_key_for_type_name, union_narrow_error_text
+}
+use compiler.semantics.enum_contract.hir_match_coverage.{hir_enum_match_sites}
+
+fn lower_source(source: text, name: text) -> HirModule:
+    val path = "spec://" + name + ".spl"
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    var hl = HirLowering.with_filename(path)
+    union_normalize_module(hl.lower_module(parsed))
+
+describe "type-pattern name mapping":
+    it "maps a written type name to its union variant":
+        expect(union_narrow_variant_name("i64")).to_equal("I64")
+        expect(union_narrow_variant_name("f64")).to_equal("F64")
+        expect(union_narrow_variant_name("bool")).to_equal("Bool")
+
+    it "keys `str` and `text` to the SAME member, since both spell one type":
+        expect(union_narrow_member_key_for_type_name("str")).to_equal("text")
+        expect(union_narrow_member_key_for_type_name("text")).to_equal("text")
+
+    it "names E-NARROW-001 explicitly in its message":
+        expect(union_narrow_error_text("i64", "v").contains("E-NARROW-001")).to_equal(true)
+
+describe "grammar":
+    it "accepts `case i64 v:` where a variant arm goes -- and binds the value":
+        # A parse failure would surface as zero match sites below, and a
+        # pattern misread as a Binding or a Wildcard would surface as
+        # has_wildcard -- so this case pins the grammar through its effect,
+        # not through the parse tree shape.
+        val src = "fn f(x: i64 | text) -> i64:\n    match x:\n        case i64 v: v\n        case text s: 0\n"
+        val hm = lower_source(src, "g1")
+        var sites = 0
+        for site in hir_enum_match_sites(hm):
+            sites = sites + 1
+            expect(site.coverage.has_wildcard).to_equal(false)
+        expect(sites).to_equal(1)
+
+    it "does NOT steal `x is y` between two VALUES":
+        # The `is`-narrowing rule fires only when the right operand NAMES a
+        # type. A lowercase identifier is a value, and must keep the ordinary
+        # binary-comparison lowering.
+        val src = "fn f(a: i64, b: i64) -> bool:\n    a is b\n"
+        val hm = lower_source(src, "g2")
+        var binaries = 0
+        for f in hm.functions.values():
+            if f.body.has:
+                match f.body.value.kind:
+                    case HirExprKind.Binary(op, l, r): binaries = binaries + 1
+                    case other_expr_kind: binaries = binaries
+        expect(binaries).to_equal(1)
+
+describe "lowering to the synthesized union enum":
+    it "rewrites every narrowing arm into a `__Union_...` variant arm":
+        val src = "fn f(x: i64 | text) -> i64:\n    match x:\n        case i64 v: v\n        case text s: 0\n"
+        val hm = lower_source(src, "n1")
+        var enum_arms = 0
+        for site in hir_enum_match_sites(hm):
+            expect(site.coverage.enum_name).to_equal("__Union_i64_text")
+            enum_arms = enum_arms + site.coverage.covered_variant_ids.len()
+        expect(enum_arms).to_equal(2)
+
+    it "reports a match that misses a member as NON-exhaustive":
+        val src = "fn f(x: i64 | text | bool) -> i64:\n    match x:\n        case i64 v: v\n        case text s: 0\n"
+        val hm = lower_source(src, "n2")
+        var sites = 0
+        for site in hir_enum_match_sites(hm):
+            sites = sites + 1
+            expect(site.coverage.all_variant_ids.len()).to_equal(3)
+            expect(site.coverage.covered_variant_ids.len()).to_equal(2)
+            expect(site.coverage.has_wildcard).to_equal(false)
+        expect(sites).to_equal(1)
+
+    it "counts `case nil:` as the union's nil member, not as a wildcard":
+        val src = "fn f(x: i64? | text) -> i64:\n    match x:\n        case i64 v: v\n        case text s: 0\n        case nil: 9\n"
+        val hm = lower_source(src, "n3")
+        var sites = 0
+        for site in hir_enum_match_sites(hm):
+            sites = sites + 1
+            expect(site.coverage.enum_name).to_equal("__Union_i64_nil_text")
+            expect(site.coverage.covered_variant_ids.len()).to_equal(3)
+            expect(site.coverage.has_wildcard).to_equal(false)
+        expect(sites).to_equal(1)
+
+describe "non-union scrutinee":
+    it "reports E-NARROW-001 rather than silently accepting the arm":
+        # A type pattern narrows a UNION member. Over a plain `i64` it means
+        # nothing, and the failure mode that must never return is silence:
+        # before this change the arm did not parse at all, and the wrong fix
+        # would be to let it through as a catch-all.
+        val src = "fn f(x: i64) -> i64:\n    match x:\n        case i64 v: v\n        case _: 0\n"
+        val path = "spec://nn1.spl"
+        val parsed = parse_full_frontend(src, path, "nn1", Logger(level: 0))
+        var hl = HirLowering.with_filename(path)
+        val lowered = hl.lower_module(parsed)
+        var narrow_errors = 0
+        for e in hl.errors:
+            if e.message.contains("E-NARROW-001"):
+                narrow_errors = narrow_errors + 1
+        # At least one: the arm is reported where the union rewrite declines
+        # it, and again if it survives to match lowering. Both are loud; the
+        # claim is that NEITHER is silent.
+        expect(narrow_errors > 0).to_equal(true)
+
+describe "`x is T`":
+    it "lowers a type-named right operand to a TypeTest expression, not a value load":
+        val src = "fn f(x: i64 | text) -> bool:\n    x is i64\n"
+        val hm = lower_source(src, "is1")
+        var type_tests = 0
+        for f in hm.functions.values():
+            if f.body.has:
+                match f.body.value.kind:
+                    case HirExprKind.TypeTest(value, type_name):
+                        expect(type_name).to_equal("i64")
+                        type_tests = type_tests + 1
+                    case other_expr_kind: type_tests = type_tests
+        expect(type_tests).to_equal(1)

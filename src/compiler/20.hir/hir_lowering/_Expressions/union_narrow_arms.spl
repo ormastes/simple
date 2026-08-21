@@ -1,0 +1,147 @@
+# Union narrowing arms: `case i64 v:` -> the equivalent enum-variant arm.
+#
+# Bug: doc/08_tracking/bug/union_narrowing_has_no_grammar_or_runtime_2026-08-21.md
+# Design: §10.3 of doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#
+# S4 already turns `i64 | f64 | bool | text` into the synthesized `@closed`
+# enum `__Union_bool_f64_i64_text`, whose variant i carries member i as its
+# single tuple payload. A narrowing arm therefore denotes EXACTLY one variant
+# of that enum, so the rewrite here is a pure renaming: after it runs, the
+# match is an ordinary enum match and every downstream stage -- MIR's tagged
+# enum lowering, enum-contract coverage, E-CLOSED-001 -- governs it with no
+# union-specific machinery and no second exhaustiveness rule. That is the whole
+# point: narrowing is expressed in terms of a mechanism that already works.
+#
+# Done HERE, in HIR lowering, rather than in a later HIR->HIR pass, because
+# `build_match_expr` is the last point at which a match is still a match: an
+# arm kind MIR does not natively handle makes it desugar the whole match into
+# an if-chain, which erases the MatchCase node the coverage checker looks for.
+# Rewriting before that decision means the union match takes the tested
+# enum-match path instead of the general fallback.
+#
+# The scrutinee's type comes from the SYMBOL TABLE, not from `HirExpr.type_`:
+# expression types are not yet inferred at this point (`type_` is nil for a
+# plain `Var`), while a parameter's or annotated local's declared type is
+# already recorded. That bounds what can be narrowed -- a union-typed value
+# with no written type is not narrowable -- and the bound is reported, never
+# silent: a type pattern whose scrutinee is not a known union is E-NARROW-001.
+
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind}
+use compiler.hir.hir_definitions.{
+    HirExpr, HirExprKind, HirMatchArm, HirPattern, HirPatternKind, HirPatternPayload
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.semantics.union_normalize.canonical.{
+    union_normalize_members, union_member_keys, union_canonical_name, union_variant_name
+}
+use compiler.semantics.union_normalize.synth_enum.{union_synth_symbol_id}
+use compiler.semantics.union_normalize.narrow.{
+    union_narrow_variant_name, union_narrow_error_text
+}
+
+impl HirLowering:
+    me arms_have_type_test(hir_arms: [HirMatchArm]) -> bool:
+        """True when any arm is a `case <T> v:` type pattern."""
+        var found = false
+        for a in hir_arms:
+            match a.pattern.kind:
+                case HirPatternKind.TypeTest(_, _): found = true
+                case _: ()
+        found
+
+    me scrutinee_union_members(hir_scrutinee: HirExpr) -> [HirType]:
+        """The union members of the scrutinee's DECLARED type, or `[]`.
+
+        `[]` (not an Option) because every caller's next question is "how
+        many members", and an empty list answers it directly."""
+        var members: [HirType] = []
+        var sym_id = 0 - 1
+        match hir_scrutinee.kind:
+            # Both spellings of "a reference to a local/parameter": HIR
+            # lowering emits NamedVar while the symbol still carries its
+            # source name, and Var once it does not.
+            case HirExprKind.Var(symbol): sym_id = symbol.id
+            case HirExprKind.NamedVar(symbol, name): sym_id = symbol.id
+            case _: ()
+        if sym_id < 0:
+            return members
+        if val declared = self.symbols.get_symbol_type_raw(sym_id):
+            match declared.kind:
+                case HirTypeKind.Union(ms): members = ms
+                case _: ()
+        members
+
+    me union_narrow_arms(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> [HirMatchArm]:
+        """Rewrite `case <T> v:` arms into `__Union_...` enum-variant arms.
+
+        Returns the arms unchanged when there is no type pattern at all, so
+        the ordinary path pays nothing. A type pattern over a NON-union
+        scrutinee is reported as E-NARROW-001 and left alone -- left alone so
+        the later stages' own loud arms still fire, rather than being papered
+        over with a wildcard that would silently match everything."""
+        val members = self.scrutinee_union_members(hir_scrutinee)
+        if members.len() >= 2:
+            return self.union_rewrite_arms(members, hir_arms, span)
+        if not self.arms_have_type_test(hir_arms):
+            return hir_arms
+        for a in hir_arms:
+            match a.pattern.kind:
+                case HirPatternKind.TypeTest(tt_type, tt_binder):
+                    self.error(union_narrow_error_text(tt_type, tt_binder), a.pattern.span)
+                case _: ()
+        hir_arms
+
+    me union_rewrite_arms(members: [HirType], hir_arms: [HirMatchArm], span: Span) -> [HirMatchArm]:
+        """Every narrowing arm of a union match, as `__Union_...` enum arms.
+
+        `case nil:` is rewritten alongside `case i64 v:` because `T?` expands
+        to `T | nil` as a union MEMBER, so a nil arm over a union names the
+        `Nil` variant exactly as a type pattern names its own -- and if it were
+        left as a Literal the match would be judged non-exhaustive for a member
+        the source visibly handles."""
+        val enum_name = union_canonical_name(members)
+        val enum_type = HirType(
+            kind: HirTypeKind.Named(SymbolId.new(union_synth_symbol_id(enum_name)), []),
+            span: span)
+        val keys = union_member_keys(members)
+        var out: [HirMatchArm] = []
+        for a in hir_arms:
+            var rewritten = a
+            match a.pattern.kind:
+                case HirPatternKind.TypeTest(tt_type, tt_binder):
+                    val variant = union_narrow_variant_name(tt_type)
+                    var known = false
+                    for k in keys:
+                        if union_variant_name(k) == variant:
+                            known = true
+                    if not known:
+                        # A member the union does not have. Loud, and NOT
+                        # rewritten: an arm that names no variant of the
+                        # closed enum must not be smuggled in as one.
+                        self.error("E-NARROW-002: `case " + tt_type + " " + tt_binder + ":` is not a member of union " + enum_name, a.pattern.span)
+                    else:
+                        val binder_symbol = self.symbols.define(tt_binder, SymbolKind.Variable, nil, a.pattern.span, false, false, nil)
+                        val payload_pat = HirPattern(kind: HirPatternKind.Binding(binder_symbol, false), type_: nil, span: a.pattern.span)
+                        val new_pattern = HirPattern(
+                            kind: HirPatternKind.Enum(enum_type, variant, Some(HirPatternPayload.Tuple([payload_pat]))),
+                            type_: nil,
+                            span: a.pattern.span)
+                        rewritten = HirMatchArm(pattern: new_pattern, has_guard: a.has_guard, guard: a.guard, body: a.body, span: a.span)
+                case HirPatternKind.Literal(lit_expr):
+                    match lit_expr.kind:
+                        case HirExprKind.NilLit:
+                            var has_nil = false
+                            for k in keys:
+                                if k == "nil":
+                                    has_nil = true
+                            if has_nil:
+                                val nil_pattern = HirPattern(
+                                    kind: HirPatternKind.Enum(enum_type, union_variant_name("nil"), nil),
+                                    type_: nil,
+                                    span: a.pattern.span)
+                                rewritten = HirMatchArm(pattern: nil_pattern, has_guard: a.has_guard, guard: a.guard, body: a.body, span: a.span)
+                        case _: ()
+                case _: ()
+            out = out.push(rewritten)
+        out

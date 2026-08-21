@@ -7,6 +7,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering._Expressions.expression_support.{hir_expr_kind_disc, is_tuple_positional_field, parse_tuple_field_index, primitive_cast_type_kind, _hir_expr_symbol_or_invalid}
+use compiler.hir.hir_lowering._Expressions.type_test_operand.{binary_is_type_operand}
 
 impl HirLowering:
     me lower_hir_expr(e: Expr) -> HirExpr:
@@ -461,7 +462,22 @@ impl HirLowering:
                 val bin_left_t: Expr = left
                 val bin_right_t: Expr = right
                 val hir_op = self.lower_binop(bin_op_t, e.span)
-                HirExprKind.Binary(hir_op, self.lower_hir_expr(bin_left_t), self.lower_hir_expr(bin_right_t))
+                # `x is i64` / `x is not i64`: when the RIGHT side NAMES A
+                # TYPE it is a type TEST, not a value comparison. Lowering it
+                # as a value is the recorded defect (bug doc
+                # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md:
+                # "GlobalLoad: unresolved identifier 'i64'"). Only a bare
+                # identifier that looks like a type is taken; anything else
+                # keeps the existing Binary lowering, so `x is y` over two
+                # values is untouched.
+                val is_type_name = binary_is_type_operand(bin_op_t, bin_right_t)
+                if is_type_name != "":
+                    val tested = HirExpr(kind: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name), type_: nil, span: e.span)
+                    match bin_op_t:
+                        case BinOp.IsNot: HirExprKind.Unary(HirUnaryOp.Not, tested)
+                        case _: HirExprKind.TypeTest(self.lower_hir_expr(bin_left_t), is_type_name)
+                else:
+                    HirExprKind.Binary(hir_op, self.lower_hir_expr(bin_left_t), self.lower_hir_expr(bin_right_t))
 
             case ExprKind.Unary(op, operand):
                 val un_op_t: UnaryOp = op

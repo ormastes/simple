@@ -1,0 +1,54 @@
+# Union narrowing: `case i64 v:` arms as variants of the synthesized enum.
+#
+# Bug: doc/08_tracking/bug/union_narrowing_has_no_grammar_or_runtime_2026-08-21.md
+# Design: §10.3 ("exhaustive narrowing"), §10.1, §8.4 of
+#         doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md
+#
+# S4 made `i64 | f64 | bool | text` a synthesized `@closed` enum
+# `__Union_bool_f64_i64_text` whose variant i carries member i. A narrowing arm
+# `case i64 v:` therefore denotes EXACTLY variant `I64` of that enum -- so the
+# whole exhaustiveness story (coverage, E-CLOSED-001, the wildcard-closes-a-
+# closed-enum rule) is the one that already exists for enums, with no second
+# rule and no union-specific checker.
+#
+# This module owns only the NAME MAPPING between a written type name and that
+# variant, plus the E-NARROW-001 text. The mapping is deliberately the same
+# `union_member_key` the canonical name is built from, so a variant name and
+# the enum name it belongs to can never disagree.
+#
+# `case nil:` is NOT given new grammar: the existing nil pattern already
+# parses, and `nil_variant_name()` names the variant it denotes when the
+# scrutinee is a union carrying a `nil` member (`T?` expands to `T | nil`).
+
+use compiler.semantics.union_normalize.canonical.{union_variant_name}
+
+fn union_narrow_member_key_for_type_name(name: text) -> text:
+    """Canonical member key for a type name WRITTEN in a pattern.
+
+    Mirrors `union_member_key` over HirType, for the pre-resolution case where
+    only the spelled name is available. `str` is accepted as a spelling of
+    `text` because the lexer treats both as ordinary identifiers and the
+    frontend already accepts both. An unrecognised name is returned unchanged
+    and keyed as a named type would NOT be -- a named-type narrowing arm is
+    matched by variant NAME against the synthesized enum, which is exactly
+    what an unrecognised key produces."""
+    if name == "text" or name == "str":
+        return "text"
+    if name == "nil":
+        return "nil"
+    name
+
+fn union_narrow_variant_name(type_name: text) -> text:
+    """Variant of the synthesized `__Union_` enum a `case <T> v:` arm names."""
+    union_variant_name(union_narrow_member_key_for_type_name(type_name))
+
+fn union_narrow_nil_variant_name() -> text:
+    """Variant a bare `case nil:` arm names on a union carrying `nil`."""
+    union_variant_name("nil")
+
+fn union_narrow_error_text(type_name: text, binder: text) -> text:
+    """E-NARROW-001 message for a type pattern on a non-union scrutinee."""
+    "E-NARROW-001: type pattern `case " + type_name + " " + binder + ":` on non-union type; a type pattern narrows a union member and has no meaning here"
+
+export union_narrow_member_key_for_type_name, union_narrow_variant_name
+export union_narrow_nil_variant_name, union_narrow_error_text

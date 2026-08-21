@@ -1001,6 +1001,42 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     #     what adapts -- the same choice `??`, `?` and `if val` already made
     #     (see eval_option_binding_value above, eval_null_coalesce/eval_try in
     #     eval_access.spl).
+    # `case i64 v:` type-pattern arm (bug doc
+    # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md). The parser
+    # lowers it to the marker call `__type_test(<Type>, <binder>)`, so it
+    # arrives here as an EXPR_CALL and must be recognized BEFORE the
+    # enum-variant branch below -- otherwise `__type_test` would be looked up
+    # as a variant name and the arm would silently not match. The test is on
+    # the RUNTIME value kind, which is exactly the union's discriminant in
+    # this engine, and the binder is bound to the narrowed value.
+    if tag == EXPR_CALL:
+        val tt_callee = expr_get(e_node.left)
+        if tt_callee.tag == EXPR_IDENT and tt_callee.s_val == "__type_test":
+            if e_node.args.len() < 2:
+                return false
+            val tt_type_name = expr_get(e_node.args[0]).s_val
+            val tt_binder_name = expr_get(e_node.args[1]).s_val
+            val tt_kind = val_get_kind(value_id)
+            var tt_ok = false
+            if tt_type_name == "nil":
+                tt_ok = val_is_nil(value_id)
+            elif tt_type_name == "bool":
+                tt_ok = tt_kind == VAL_BOOL
+            elif tt_type_name == "text" or tt_type_name == "str":
+                tt_ok = tt_kind == VAL_TEXT
+            elif tt_type_name == "f32" or tt_type_name == "f64":
+                tt_ok = tt_kind == VAL_FLOAT
+            elif tt_type_name == "i8" or tt_type_name == "i16" or tt_type_name == "i32" or tt_type_name == "i64" or tt_type_name == "u8" or tt_type_name == "u16" or tt_type_name == "u32" or tt_type_name == "u64":
+                tt_ok = tt_kind == VAL_INT
+            else:
+                # A NAMED type: the runtime value is a struct whose recorded
+                # type name is the discriminator.
+                tt_ok = tt_kind == VAL_STRUCT and val_get_struct_name(value_id) == tt_type_name
+            if not tt_ok:
+                return false
+            env_define(tt_binder_name, value_id)
+            return true
+
     if tag == EXPR_CALL:
         val callee_variant = pattern_enum_variant_name(e_node.left, val_is_boxed_enum(value_id))
         if callee_variant != "":

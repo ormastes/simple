@@ -30,6 +30,7 @@ use compiler.core.types.{type_tag_name, int_to_str}
 use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
 use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
+use compiler.core.types.{is_union_tag, union_tag_to_id, union_type_get_members}
 use compiler.core.types.{is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem}
 use compiler.core.types.{is_option_generic_tag, option_generic_tag_to_id, option_generic_type_get_inner}
 use compiler.core.types.{is_isolated_tag, isolated_tag_to_id, isolated_type_get_inner}
@@ -484,6 +485,22 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         if weak_resource_name != "" and resource_is_declared(weak_resource_name):
             resource_registry_note_ownership(weak_resource_name, "weak")
         return Type(kind: TypeKind.Weak(weak_inner_type), span: make_span())
+    # Lane S4 (union normalization, hardening plan §10.3): a structural union
+    # `A | B | C` is registered by the parser in the TYPE_UNION_BASE registry
+    # exactly the way Dict<K,V>/Result<T,E>/(A,B) are. Before this arm the tag
+    # fell through to the `is_union_base_or_above` catch-all below and became
+    # an opaque `Named("<tag>")` that the HIR name resolver does not accept --
+    # i.e. the union erased to Infer/Any, which is precisely what §8.4 forbids
+    # (closed sum > Any). Rebuild the real member list so HIR lowering produces
+    # HirTypeKind.Union and union_normalize can synthesize its @closed enum.
+    # Must precede the catch-all: is_union_tag's range also satisfies it.
+    if is_union_tag(type_expr_idx):
+        val uid = union_tag_to_id(type_expr_idx)
+        var union_members: [Type] = []
+        for member_tag in union_type_get_members(uid):
+            union_members = union_members.push(convert_flat_type(member_tag))
+        if union_members.len() > 0:
+            return Type(kind: TypeKind.Union(union_members), span: make_span())
     if is_union_base_or_above(type_expr_idx):
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
     # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so
@@ -1397,6 +1414,20 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
             # `dyn` only the open region, so treating either as a catch-all
             # would silently close a match over a missing STATIC constructor --
             # the exact defect §3's E-COMPLETE-001 exists to stop.
+            # `case i64 v:` type-pattern arm -- the marker call
+            # parse_match_type_pattern() synthesizes. Like the region markers
+            # it is NOT an enum variant and must never degrade to a Binding
+            # (which would make the arm an unconditional catch-all).
+            if bare_variant == "__type_test":
+                var tt_type = ""
+                var tt_binder = ""
+                for t_eid in expr_get_args(pat_eid):
+                    if expr_get_tag(t_eid) == EXPR_IDENT:
+                        if tt_type == "":
+                            tt_type = expr_get_str(t_eid)
+                        else:
+                            tt_binder = expr_get_str(t_eid)
+                return Pattern(kind: PatternKind.TypeTest(tt_type, tt_binder), span: pspan)
             if bare_variant == "__complete_region" or bare_variant == "__dyn_region":
                 var region_binder = ""
                 for r_eid in expr_get_args(pat_eid):
@@ -1422,7 +1453,14 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         if nm == "_":
             return Pattern(kind: PatternKind.Wildcard, span: pspan)
         return Pattern(kind: PatternKind.Binding(nm, false), span: pspan)
-    elif ptag == EXPR_INT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT:
+    elif ptag == EXPR_INT_LIT or ptag == EXPR_STRING_LIT or ptag == EXPR_BOOL_LIT or ptag == EXPR_NIL_LIT:
+        # EXPR_NIL_LIT was NOT in this list and fell through to the Wildcard
+        # catch-all below, so `case nil:` silently became an UNCONDITIONAL arm
+        # matching every scrutinee -- the same class of defect the EXPR_BINARY
+        # and EXPR_TUPLE cases below were added to fix. It is a genuine
+        # literal test (`v == nil`), and over a union carrying a `nil` member
+        # it is the arm that names that member (bug doc
+        # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md).
         return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
     elif ptag == EXPR_BINARY:
         # `1 | 2 | 3` (or-pattern) parses as a chain of EXPR_BINARY(BitOr)

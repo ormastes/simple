@@ -22,7 +22,8 @@
 #   sh scripts/check/check-closed-match-coverage.shs --selftest      # fixtures only
 #
 # Verdict is ALWAYS the last line of stdout:
-#   PASS — <n> match(es) checked, non-exhaustive=0 wildcard-closed-critical=0   exit 0
+#   PASS — <n> match(es) checked, non-exhaustive=0 wildcard-closed-critical=0
+#          (<u> union sum(s), <c> contracted across <m> module(s))            exit 0
 #   FAIL — <n> match(es) checked, non-exhaustive=<k> wildcard-closed-critical=<m> [...]  exit 1
 #   ERROR — nothing was checked (<reason>)                                       exit 2
 #
@@ -45,7 +46,7 @@ DRIVER="src/app/check/closed_match_coverage.spl"
 FIXTURES="test/fixtures/enum_contract"
 # Default scope: the contract fixtures that are REQUIRED to be clean. A real
 # @closed enum in product code belongs on this list the day it lands.
-DEFAULT_SCOPE="$FIXTURES/closed_exhaustive.spl"
+DEFAULT_SCOPE="$FIXTURES/closed_exhaustive.spl $FIXTURES/union_closed.spl"
 
 MODE="scan"
 FILES=""
@@ -90,7 +91,7 @@ summary_field() {
 }
 
 # ---------------------------------------------------------------------------
-# SELFTEST — five fixtures, each a real .spl parsed, lowered and checked by
+# SELFTEST — six fixtures, each a real .spl parsed, lowered and checked by
 # the real pipeline:
 #   closed_exhaustive     @closed, every variant named      -> clean
 #   closed_wildcard       @closed, `case _` hides variants  -> E-CLOSED-001
@@ -98,12 +99,21 @@ summary_field() {
 #                         (that shape belongs to the plain exhaustiveness error)
 #   evolving_wildcard     @evolving, wildcard swallows Unknown -> E-EVOLVING-003
 #   undecorated_wildcard  no decorator, wildcard            -> contract=none, 0 diags
+#   union_nonexhaustive   union match naming 3 of 4 members, no wildcard
+#                         -> non-exhaustive (the negative half of narrowing)
+#   union_closed          `i64 | f64 | bool | text` in two DIFFERENT orders
+#                         -> exactly ONE synthesized @closed enum
+#                         __Union_bool_f64_i64_text (lane S4, plan §10.3/§8.4).
+#                         It has no match site by design: what it pins is that
+#                         a structural union reaches the contract table as a
+#                         CLOSED SUM and not as Any. Before the flat-AST bridge
+#                         learned the union tag, this fixture yielded unions=0.
 # The last one is the one that matters most: without it a checker that treats
 # every enum as @closed would pass the other four.
 # ---------------------------------------------------------------------------
 selftest() {
     _fail=0
-    for _f in closed_exhaustive closed_wildcard closed_missing_arm evolving_wildcard undecorated_wildcard; do
+    for _f in closed_exhaustive closed_wildcard closed_missing_arm evolving_wildcard undecorated_wildcard union_closed union_nonexhaustive; do
         if [ ! -f "$FIXTURES/$_f.spl" ]; then
             echo "selftest: missing fixture $FIXTURES/$_f.spl"
             _fail=1
@@ -122,6 +132,32 @@ selftest() {
         _nonex=$(summary_field "$TMPDIR_RUN/$_f.out" non_exhaustive)
         _wc=$(summary_field "$TMPDIR_RUN/$_f.out" wildcard_closed_critical)
         _ev3=$(count_lines "$TMPDIR_RUN/$_f.out" '^DIAG E-EVOLVING-003 ')
+        _unions=$(summary_field "$TMPDIR_RUN/$_f.out" unions)
+        if [ "$_f" = "union_nonexhaustive" ]; then
+            # NEGATIVE union fixture: three of four members named, no
+            # wildcard. The synthesized enum is @closed, so the EXISTING
+            # exhaustiveness rule must report the miss. A gate that stopped
+            # seeing union narrowing arms would report 0 matches here and go
+            # RED rather than silent -- which is the point of the fixture.
+            [ "${_unions:-0}" -eq 1 ] || { echo "selftest: union_nonexhaustive must synthesize exactly 1 union enum, got ${_unions:-none}"; _fail=1; continue; }
+            [ "${_matches:-0}" -eq 1 ] || { echo "selftest: union_nonexhaustive must expose exactly 1 narrowing match, got ${_matches:-none} (0 means the type-pattern arms were not recognized)"; _fail=1; continue; }
+            [ "${_nonex:-0}" -eq 1 ] && [ "${_wc:-0}" -eq 0 ] || { echo "selftest: union_nonexhaustive must be non-exhaustive WITHOUT a wildcard, got non_exhaustive=$_nonex wc=$_wc"; _fail=1; }
+            continue
+        fi
+        if [ "$_f" = "union_closed" ]; then
+            # This fixture pins the SUM *and* a real narrowing match site:
+            # `case i64 v:` / `case text s:` arms over the same union, every
+            # member named, which must come out exhaustive and silent. Before
+            # union narrowing had grammar there was no match here at all (bug
+            # doc union_narrowing_has_no_grammar_or_runtime_2026-08-21.md).
+            [ "${_unions:-0}" -eq 1 ] || { echo "selftest: union_closed must synthesize exactly 1 union enum, got ${_unions:-none} (0 means the union erased to Any again)"; _fail=1; continue; }
+            grep -q '^UNION __Union_bool_f64_i64_text$' "$TMPDIR_RUN/$_f.out" || { echo "selftest: union_closed must synthesize __Union_bool_f64_i64_text (canonical order/dedup across both spellings)"; _fail=1; }
+            grep -q '^ENUM __Union_bool_f64_i64_text contract=closed$' "$TMPDIR_RUN/$_f.out" || { echo "selftest: union_closed's synthesized enum must reach the contract table as contract=closed"; _fail=1; }
+            [ "${_matches:-0}" -eq 1 ] || { echo "selftest: union_closed must expose exactly 1 narrowing match, got ${_matches:-none} (0 means the type-pattern arms were not recognized)"; _fail=1; continue; }
+            [ "${_nonex:-0}" -eq 0 ] && [ "${_wc:-0}" -eq 0 ] || { echo "selftest: union_closed's narrowing match must be exhaustive and clean, got non_exhaustive=$_nonex wc=$_wc"; _fail=1; }
+            continue
+        fi
+        [ "${_unions:-0}" -eq 0 ] || { echo "selftest: $_f must synthesize no union enum, got $_unions"; _fail=1; continue; }
         [ "${_matches:-0}" -eq 1 ] || { echo "selftest: $_f must expose exactly 1 match, got ${_matches:-none}"; _fail=1; continue; }
         case "$_f" in
             closed_exhaustive)
@@ -146,7 +182,7 @@ if [ "$SELF_RC" -ne 0 ]; then
     exit 1
 fi
 if [ "$MODE" = "selftest" ]; then
-    echo "PASS — 5 fixture(s) checked, selftest only (no scan requested)"
+    echo "PASS — 7 fixture(s) checked, selftest only (no scan requested)"
     exit 0
 fi
 
@@ -171,12 +207,13 @@ if [ "$RC" -ne 0 ]; then
     head -20 "$TMPDIR_RUN/scan.out.err" >&2
     exit 2
 fi
-grep '^DIAG \|^MATCH \|^PARSE-FAIL ' "$TMPDIR_RUN/scan.out"
+grep '^DIAG \|^MATCH \|^UNION \|^PARSE-FAIL ' "$TMPDIR_RUN/scan.out"
 MODULES=$(summary_field "$TMPDIR_RUN/scan.out" modules)
 MATCHES=$(summary_field "$TMPDIR_RUN/scan.out" matches)
 CONTRACTED=$(summary_field "$TMPDIR_RUN/scan.out" contracted)
 NONEX=$(summary_field "$TMPDIR_RUN/scan.out" non_exhaustive)
 WC=$(summary_field "$TMPDIR_RUN/scan.out" wildcard_closed_critical)
+UNIONS=$(summary_field "$TMPDIR_RUN/scan.out" unions)
 PARSE_FAILS=$(count_lines "$TMPDIR_RUN/scan.out" '^PARSE-FAIL ')
 
 if [ -z "$MATCHES" ] || [ "${CONTRACTED:-0}" -eq 0 ]; then
@@ -184,12 +221,12 @@ if [ -z "$MATCHES" ] || [ "${CONTRACTED:-0}" -eq 0 ]; then
     exit 2
 fi
 if [ "$NONEX" -ne 0 ] || [ "$WC" -ne 0 ] || [ "$PARSE_FAILS" -ne 0 ]; then
-    VERDICT="FAIL — $MATCHES match(es) checked, non-exhaustive=$NONEX wildcard-closed-critical=$WC ($CONTRACTED contracted, $PARSE_FAILS parse failure(s), $MODULES module(s))"
+    VERDICT="FAIL — $MATCHES match(es) checked, non-exhaustive=$NONEX wildcard-closed-critical=$WC (${UNIONS:-0} union sum(s), $CONTRACTED contracted, $PARSE_FAILS parse failure(s), $MODULES module(s))"
     echo "$VERDICT"
     emit_receipt "check-closed-match-coverage" "$VERDICT" || true
     exit 1
 fi
-VERDICT="PASS — $MATCHES match(es) checked, non-exhaustive=0 wildcard-closed-critical=0 ($CONTRACTED contracted across $MODULES module(s))"
+VERDICT="PASS — $MATCHES match(es) checked, non-exhaustive=0 wildcard-closed-critical=0 (${UNIONS:-0} union sum(s), $CONTRACTED contracted across $MODULES module(s))"
 echo "$VERDICT"
 emit_receipt "check-closed-match-coverage" "$VERDICT" || true
 exit 0
