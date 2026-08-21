@@ -66,6 +66,11 @@ pub extern "C" fn rt_value_as_int(v: RuntimeValue) -> i64 {
 /// Bug: doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md
 #[no_mangle]
 pub extern "C" fn rt_value_unbox_int(v: RuntimeValue) -> i64 {
+    // Signed wide box FIRST: `from_int` produces `HeapObjectType::Int`, and
+    // both arms are total, so ordering only documents intent.
+    if let Some(value) = v.as_heap_i64() {
+        return value;
+    }
     if let Some(value) = v.as_heap_u64() {
         return value as i64;
     }

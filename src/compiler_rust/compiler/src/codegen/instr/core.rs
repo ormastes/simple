@@ -276,7 +276,21 @@ pub(crate) fn compile_binop<M: Module>(
             } else if lhs_signed == Some(false) {
                 builder.ins().udiv(lhs, rhs)
             } else {
-                builder.ins().sdiv(lhs, rhs)
+                // INT64_MIN / -1 overflows the signed quotient. x86 `idiv`
+                // raises #DE for it, so a bare `sdiv` here killed the process
+                // with SIGFPE (rc 136) while the interpreter wrapped to
+                // INT64_MIN. Wrapping is this language's documented integer
+                // rule -- `0 - INT64_MIN` and `INT64_MIN.abs()` already wrap on
+                // BOTH engines -- so the JIT was the wrong one. Divide by 1
+                // instead and negate, which wraps identically. Division by ZERO
+                // is deliberately left alone: it still traps, as before.
+                let ty = builder.func.dfg.value_type(lhs);
+                let is_neg_one = builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+                let one = builder.ins().iconst(ty, 1);
+                let safe_rhs = builder.ins().select(is_neg_one, one, rhs);
+                let quotient = builder.ins().sdiv(lhs, safe_rhs);
+                let negated = builder.ins().ineg(lhs);
+                builder.ins().select(is_neg_one, negated, quotient)
             }
         }
         BinOp::Mod => {
@@ -290,7 +304,16 @@ pub(crate) fn compile_binop<M: Module>(
                 if lhs_signed == Some(false) {
                     builder.ins().urem(lhs, rhs)
                 } else {
-                    builder.ins().srem(lhs, rhs)
+                    // Same #DE as Div above: `INT64_MIN % -1` faults on x86
+                    // even though its mathematical answer, 0, is representable.
+                    // `x % -1 == 0` for every x, so select it directly.
+                    let ty = builder.func.dfg.value_type(lhs);
+                    let is_neg_one = builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+                    let one = builder.ins().iconst(ty, 1);
+                    let safe_rhs = builder.ins().select(is_neg_one, one, rhs);
+                    let remainder = builder.ins().srem(lhs, safe_rhs);
+                    let zero = builder.ins().iconst(ty, 0);
+                    builder.ins().select(is_neg_one, zero, remainder)
                 }
             }
         }

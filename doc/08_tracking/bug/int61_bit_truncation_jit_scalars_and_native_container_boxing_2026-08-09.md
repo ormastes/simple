@@ -1,11 +1,10 @@
 # Integers needing 61+ bits are corrupted: JIT everywhere, native inside containers
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
-fixed in the C runtime + pure-Simple MIR lowering (`fa518a9148c`), awaiting a
-bootstrap redeploy for the native-lane re-measurement. Defect A (JIT scalars)
-FIXED in the Rust seed (Cranelift codegen + Rust runtime `RuntimeValue`) —
-see "Fix (Defect A)" at the end of this file.
+Status: RESOLVED 2026-08-21 — Defect A and Defect B both fixed and MEASURED on
+the interpret and jit lanes; the differential corpus reports 13/13 AGREE with
+zero baselined divergences. See "Resolution (2026-08-21)" at the end of this
+file for what was actually wrong, which is NOT what the earlier "Fix (Defect
+A)" section below claimed had landed.
 Found 2026-08-09 by the multi-engine differential harness
 (`scripts/check/check_engine_differential.spl`) on its first run.
 Binary under test: `bin/release/x86_64-unknown-linux-gnu/simple`, sha256
@@ -297,3 +296,105 @@ Test coverage run: `cargo test --release -p simple-runtime` (1117 pass) and
   landed via the C runtime; the LLVM `BoxInt`/`UnboxInt` inline shift should get
   the same `rt_value_int`/`rt_value_unbox_int` treatment for full parity.
 - The Cranelift fast path is a call, not an inlined range-check branch.
+
+## Resolution (2026-08-21) — the producer was never wired; only the readers were
+
+Re-measured at `origin/main` `f5823c5ab74` with a seed built from a clean
+worktree (sha256 `53af156a5bbac8db`). The differential harness reported
+`i64_boundary_values` **still DIVERGENT**, but not in the shape this file
+describes: `p60`/`p62`/`imax`/`inegmax` (scalars) were CORRECT on the JIT and
+only the `boxed_*` rows were wrong. That difference is the whole finding.
+
+**The earlier "Fix (Defect A)" section above overstated what landed.** Its
+codegen half is real and present: both Cranelift emitters call `rt_value_int` /
+`rt_value_unbox_int` rather than inlining `ishl 3`, and both are registered as
+codegen roots. Its RUNTIME half was not:
+
+```rust
+// runtime/src/value/core.rs, at origin/main
+pub fn from_int(i: i64) -> Self {
+    // Sign-extend to fit in 61 bits
+    // The tag is 0, so we just shift
+    Self((i as u64) << 3)          // <- no range check, ever
+}
+```
+
+`HeapInt`, `HeapObjectType::Int`, `as_heap_i64`, the display arm, the equality
+arm, the `value_kind`/`type_name` arms and the transient-free leaf entry all
+existed — a complete READER half with **no producer**. `fits_inline_int` existed
+too, and a doc comment on it said in as many words that `from_int` does not
+consult it and that `runtime/tests/boxed_int_wide_roundtrip.rs` was expected to
+be RED. It was: 3 of its 6 tests failed.
+
+Scalars looked fixed only because MIR never boxes them — `print("{big}")` on a
+local lowers to a direct `rt_raw_i64_to_string` with no `BoxInt` at all
+(confirmed with `SIMPLE_DUMP_MIR`). So a scalar probe exercised none of the
+fixed path, and reported green for the wrong reason. Anything entering a
+container hit `BoxInt -> rt_value_int -> from_int` and was truncated.
+
+### What changed
+
+- `runtime/src/value/core.rs` — `from_int` consults `fits_inline_int`: in-range
+  values keep the **bit-identical** `(i as u64) << 3` immediate, so every
+  consumer that pattern-matches `TAG_INT` or untags by hand is unaffected; only
+  what cannot fit allocates a `HeapInt`, mirroring `from_float`/`from_u64`
+  exactly (same `track_transient_heap`, same OOM fallback to the lossy inline
+  form rather than a crash). `as_int` decodes the box via `as_heap_i64` first —
+  required, because a wide box carries `TAG_HEAP` and the inline sign-extension
+  would otherwise return a raw POINTER. `is_int()` is deliberately UNCHANGED.
+- `runtime/src/value/sffi/value_ops.rs` — `rt_value_unbox_int` handled the
+  UNSIGNED box (`as_heap_u64`) but not the signed one, so a wide `HeapInt` fell
+  through to its verbatim arm. Added the `as_heap_i64` arm.
+- `compiler/src/codegen/llvm/functions.rs` — the LLVM lane's `BoxInt`/`UnboxInt`
+  still inlined the unchecked `shl 3` / select chain. Given the same treatment
+  as Cranelift, guarded to a 64-bit runtime int type so narrower targets keep
+  the old inline form. This is the follow-up the previous section listed as "Not
+  done"; it is **compile-verified only** — see "Still owed" below.
+
+### A second, independent defect found while testing the neighbours
+
+`INT64_MIN / -1` lowered to a bare `sdiv`. x86 `idiv` raises #DE for the one
+signed quotient it cannot represent, so the JIT died with **SIGFPE (rc 136)**
+while the interpreter wrapped to `INT64_MIN`. Wrapping is this language's
+integer rule — `0 - INT64_MIN` and shifts `>= 64` (masked count) already agreed
+on BOTH engines — so the JIT was the wrong engine, and a trap was never the
+documented semantics. `compiler/src/codegen/instr/core.rs` now divides by 1 and
+negates when the divisor is `-1`, and selects 0 for `%`. Division by ZERO is
+deliberately untouched: it still traps, exactly as before.
+
+### Evidence
+
+| | interpret | jit (before) | jit (after) |
+|---|---|---|---|
+| `p60`, `p62`, `imax`, `inegmax` (scalars) | correct | correct | correct |
+| `boxed_p60` | 1152921504606846976 | **-1152921504606846976** | 1152921504606846976 |
+| `boxed_p62` | 4611686018427387904 | **0** | 4611686018427387904 |
+| `boxed_imax` | 9223372036854775807 | **-1** | 9223372036854775807 |
+| `imin / -1` | -9223372036854775808 | **SIGFPE, rc 136** | -9223372036854775808 |
+
+Full corpus, `DIFF_LANES=interpret,jit`:
+`PASS — 13 fixture(s) compared across 2 lane(s), 0 new divergences (0 baselined, 0 lane error(s))`.
+
+Tests: `runtime/tests/boxed_int_wide_roundtrip.rs` 6/6 (was 3/6, RED by design —
+3 new tests added there: `rt_value_unbox_int` decode, value-not-pointer
+comparison, and an exact-boundary test asserting the in-range encoding is
+byte-identical to the pre-fix one). New `compiler/tests/i64_boundary_jit.rs`,
+3/3, executing real Cranelift: wide values through containers on both sides of
+2^60, signed div/rem at `INT64_MIN / -1` plus ordinary-value controls, and
+shift counts at and past the word width.
+
+### Still owed
+
+- **The native (LLVM AOT) lane was not measured.** It is a `LANE_ERROR` at this
+  tip for an unrelated pre-existing reason: `native-build` fails with
+  ``semantic: method `replace` not found on type `function` (function
+  'hash_text' was not called)`` before any fixture runs. The LLVM
+  `BoxInt`/`UnboxInt` change therefore has a `cargo check`/`build` behind it and
+  nothing more. Do not read this record as evidence about native.
+- `codegen/mir_interpreter.rs`'s `emit_box_int`/`emit_unbox_int` still do a bare
+  `<< 3` / `>> 3`. That emitter models values as plain `i64` with no heap at
+  all, so it is self-consistent (`box` then `unbox` is the identity) and no
+  differential lane runs it — but it cannot represent a wide box and would need
+  a different model to. Left alone deliberately.
+- The Cranelift and LLVM fast paths are a CALL, not an inlined range-check
+  branch with the call as the slow block.

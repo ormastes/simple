@@ -103,3 +103,75 @@ fn fits_inline_int_matches_the_actual_inline_capacity() {
         }
     }
 }
+
+/// `rt_value_unbox_int` is the decoder BOTH compiled lanes call for
+/// `MirInst::UnboxInt`, so a wide value that `from_int` heap-boxed must come
+/// back out of it too. Before the fix it handled the unsigned box
+/// (`HeapObjectType::UInt`) but not the signed one, so a wide `HeapInt` fell
+/// through to the verbatim arm and the lane got a raw POINTER back.
+#[test]
+fn rt_value_unbox_int_decodes_the_wide_box() {
+    for &v in &[
+        1i64 << 60,  // first value that does not fit inline
+        1i64 << 62,
+        i64::MAX,
+        i64::MIN,
+        -9_223_372_036_854_775_807,
+        -(1i64 << 60), // still inline: the last value that FITS
+        1i64 << 59,
+        0,
+        -1,
+        42,
+    ] {
+        assert_eq!(
+            simple_runtime::value::sffi::value_ops::rt_value_unbox_int(RuntimeValue::from_int(v)),
+            v,
+            "rt_value_unbox_int(from_int({v:#x})) must round-trip"
+        );
+    }
+}
+
+/// Identity, display and equality must all agree with `as_int` on a wide box,
+/// otherwise a value that round-trips numerically still prints or compares as
+/// something else -- the failure mode heap-boxed floats already had to fix.
+#[test]
+fn wide_boxes_compare_by_value_not_by_pointer() {
+    for &v in &[1i64 << 60, 1i64 << 62, i64::MAX, i64::MIN] {
+        let a = RuntimeValue::from_int(v);
+        let b = RuntimeValue::from_int(v);
+        assert_ne!(a.to_raw(), b.to_raw(), "{v:#x}: fixture is vacuous, both boxes are the same pointer");
+        assert_eq!(a.as_int(), b.as_int(), "{v:#x}: two boxes of the same value must agree");
+        assert_eq!(a.value_kind(), RuntimeValue::from_int(0).value_kind(), "{v:#x}: a wide int must still be an Int");
+    }
+}
+
+/// The inline/heap boundary is asymmetric, exactly as two's complement
+/// requires: `-2^60` fits, `2^60` does not. An off-by-one here silently either
+/// heap-boxes a value that did not need it (a perf regression) or truncates one
+/// that did (the bug).
+#[test]
+fn the_inline_boundary_is_exactly_where_it_is_claimed_to_be() {
+    let last_inline_pos = (1i64 << 60) - 1;
+    let first_heap_pos = 1i64 << 60;
+    let last_inline_neg = -(1i64 << 60);
+    let first_heap_neg = -(1i64 << 60) - 1;
+
+    assert!(RuntimeValue::from_int(last_inline_pos).is_int());
+    assert!(RuntimeValue::from_int(last_inline_neg).is_int());
+    assert!(!RuntimeValue::from_int(first_heap_pos).is_int());
+    assert!(!RuntimeValue::from_int(first_heap_neg).is_int());
+
+    for v in [last_inline_pos, first_heap_pos, last_inline_neg, first_heap_neg] {
+        assert_eq!(RuntimeValue::from_int(v).as_int(), v, "{v:#x} must round-trip on either side of the boundary");
+    }
+
+    // In-range values keep the BIT-IDENTICAL pre-fix encoding, so nothing that
+    // pattern-matches TAG_INT or untags by hand changes behaviour.
+    for v in [0i64, 1, -1, 42, last_inline_pos, last_inline_neg, 1 << 59] {
+        assert_eq!(
+            RuntimeValue::from_int(v).to_raw(),
+            (v as u64) << 3,
+            "{v:#x}: in-range encoding must be unchanged"
+        );
+    }
+}

@@ -238,9 +238,33 @@ impl RuntimeValue {
     /// Larger integers would need heap allocation.
     #[inline]
     pub fn from_int(i: i64) -> Self {
-        // Sign-extend to fit in 61 bits
-        // The tag is 0, so we just shift
-        Self((i as u64) << 3)
+        // The inline channel is a 61-bit SIGNED field (`i << 3`, tag 0). An
+        // unconditional shift silently destroyed everything wider: 2^60 came
+        // back with its sign flipped, 2^62 came back 0, i64::MAX came back -1 —
+        // no error, no crash, just a different number. Values that fit keep the
+        // BIT-IDENTICAL `i << 3` immediate, so in-range behaviour, and every
+        // consumer that pattern-matches on TAG_INT, is unchanged. Only what
+        // cannot fit is heap-boxed, mirroring `from_float`/`from_u64` exactly.
+        // doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md
+        // doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md
+        if Self::fits_inline_int(i) {
+            return Self((i as u64) << 3);
+        }
+        let size = std::mem::size_of::<super::heap::HeapInt>();
+        let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) else {
+            // Cannot describe the allocation: fall back to the lossy inline
+            // form rather than crash, exactly as `from_float` does.
+            return Self((i as u64) << 3);
+        };
+        unsafe {
+            let ptr = std::alloc::alloc(layout) as *mut super::heap::HeapInt;
+            if ptr.is_null() {
+                return Self((i as u64) << 3);
+            }
+            (*ptr).header = HeapHeader::new(HeapObjectType::Int, size as u32);
+            (*ptr).value = i;
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
+        }
     }
 
     /// Number of bits available to the inline signed-integer payload.
@@ -257,15 +281,13 @@ impl RuntimeValue {
     /// requires: `-2^60 ..= 2^60 - 1`. In particular `-(1 << 60)` fits and
     /// `1 << 60` does not.
     ///
-    /// NOTE (2026-08-17): this predicate is the *specification* of the inline
-    /// channel's capacity. `from_int` above does NOT consult it — it shifts
-    /// unconditionally and never heap-boxes, so wide values are still
-    /// truncated. `HeapInt` / `HeapObjectType::Int` / `as_heap_i64` exist as
-    /// readers with no producer. See
-    /// `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`
-    /// and `doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`.
-    /// The wide-int tests in `runtime/tests/boxed_int_wide_roundtrip.rs` are
-    /// therefore expected to be RED against this file; that is the point.
+    /// This predicate is the *specification* of the inline channel's capacity,
+    /// and `from_int` consults it: anything that fits keeps the bit-identical
+    /// inline `i << 3` encoding, anything that does not is heap-boxed into a
+    /// `HeapInt` (`HeapObjectType::Int`) and decoded again by `as_int` /
+    /// `as_heap_i64`. Pinned by `runtime/tests/boxed_int_wide_roundtrip.rs`.
+    /// `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`,
+    /// `doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`.
     #[inline]
     pub const fn fits_inline_int(i: i64) -> bool {
         const MIN: i64 = -(1i64 << (RuntimeValue::INLINE_INT_BITS - 1));
@@ -282,6 +304,14 @@ impl RuntimeValue {
     /// Get the integer value (undefined behavior if not an int)
     #[inline]
     pub fn as_int(self) -> i64 {
+        // A wide value produced by `from_int` lives in a `HeapInt` leaf and
+        // carries TAG_HEAP, so the inline sign-extension below would return a
+        // raw POINTER. `heap_type()` is an O(1) registry lookup performed
+        // BEFORE any dereference, so a stray i64 that happens to alias
+        // TAG_HEAP is never dereferenced.
+        if let Some(value) = self.as_heap_i64() {
+            return value;
+        }
         // Sign-extend from 61 bits
         (self.0 as i64) >> 3
     }

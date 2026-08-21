@@ -1,9 +1,19 @@
 # `RuntimeValue::from_int` still truncates to 61 bits at HEAD — the fix landed, was reverted, and only its readers and specs came back
 
 - **Filed:** 2026-08-17
-- **Status:** PARTIALLY FIXED 2026-08-17 — runtime choke point + JIT green
-  (`boxed_int_wide_roundtrip` 3/3, rc 0); LLVM backend and MIR interpreter still
-  TRUNCATING. See the note at the end. Do not close.
+- **Status:** RESOLVED 2026-08-21 — `from_int` now consults `fits_inline_int`
+  and heap-boxes what does not fit; `as_int` and `rt_value_unbox_int` decode it;
+  the LLVM backend's inline `shl 3`/select chain was replaced with the same
+  runtime calls Cranelift already used. `runtime/tests/boxed_int_wide_roundtrip.rs`
+  is 6/6 (was 3/6, RED by design). The MIR interpreter
+  (`codegen/mir_interpreter.rs`) is deliberately NOT fixed — it models values as
+  plain `i64` with no heap, so `box`/`unbox` is the identity there and it is
+  self-consistent; no engine-differential lane runs it. The LLVM half is
+  compile-verified only: the native lane is a pre-existing LANE_ERROR at this
+  tip. Full detail, including why this was mis-declared fixed before (the READER
+  half kept landing without the PRODUCER):
+  `doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md`
+  § "Resolution (2026-08-21)".
 - **Severity:** High, and mis-recorded as fixed. This defect has been declared
   resolved at least four times.
 - **Component:** `src/compiler_rust/runtime/src/value/core.rs`,

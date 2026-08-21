@@ -1948,10 +1948,34 @@ impl LlvmBackend {
                     let int_val = self
                         .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                         .into_int_value();
-                    let shifted = builder
-                        .build_left_shift(int_val, i64_type.const_int(3, false), "box_int")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("box_int shift", &e))?;
-                    vreg_map.insert(*dest, shifted.into());
+                    if i64_type.get_bit_width() == 64 {
+                        // An inline `ishl 3` steals the top 3 bits with NO range
+                        // check, so any value needing 61+ bits is silently
+                        // truncated and sign-extended back: 2^60 came back
+                        // negative, i64::MAX came back as -1, 2^62 as 0. The
+                        // runtime's `rt_value_int` range-checks and heap-boxes
+                        // what does not fit (`HeapObjectType::WideInt`), keeping
+                        // the bit-identical `i << 3` immediate in range. This
+                        // mirrors what the Cranelift emitter already does and
+                        // what `BoxFloat` has always done via `rt_value_float`.
+                        // doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md
+                        let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let func = module
+                            .get_function("rt_value_int")
+                            .unwrap_or_else(|| module.add_function("rt_value_int", fn_type, None));
+                        let call = builder
+                            .build_call(func, &[int_val.into()], "box_int")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("box_int call", &e))?;
+                        let boxed = call.try_as_basic_value().left().ok_or_else(|| {
+                            crate::error::factory::llvm_build_failed("box_int call", &"rt_value_int returned void")
+                        })?;
+                        vreg_map.insert(*dest, boxed);
+                    } else {
+                        let shifted = builder
+                            .build_left_shift(int_val, i64_type.const_int(3, false), "box_int")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("box_int shift", &e))?;
+                        vreg_map.insert(*dest, shifted.into());
+                    }
                 }
             }
             MirInst::UnboxInt { dest, value } => {
@@ -1960,6 +1984,27 @@ impl LlvmBackend {
                 let int_val = self
                     .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                     .into_int_value();
+                if i64_type.get_bit_width() == 64 {
+                    // Required, not optional, once BoxInt above can produce a
+                    // wide heap box: such a value carries TAG_HEAP and the
+                    // select chain below would take the passthrough arm and
+                    // return a raw POINTER as if it were the integer.
+                    // `rt_value_unbox_int` is a total, tag-aware decode (wide
+                    // box -> value, TAG_INT -> >>3, tagged bools -> 1/0,
+                    // anything else verbatim), so it subsumes the whole chain.
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    let func = module
+                        .get_function("rt_value_unbox_int")
+                        .unwrap_or_else(|| module.add_function("rt_value_unbox_int", fn_type, None));
+                    let call = builder
+                        .build_call(func, &[int_val.into()], "unbox_int")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int call", &e))?;
+                    let unboxed = call.try_as_basic_value().left().ok_or_else(|| {
+                        crate::error::factory::llvm_build_failed("unbox_int call", &"rt_value_unbox_int returned void")
+                    })?;
+                    vreg_map.insert(*dest, unboxed.into_int_value());
+                    return Ok(());
+                }
                 let shifted = builder
                     .build_right_shift(int_val, i64_type.const_int(3, false), true, "unbox_int")
                     .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int shift", &e))?;
