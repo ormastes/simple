@@ -1,0 +1,209 @@
+# Flat AST pool codec — shared encode/decode primitives.
+#
+# The core parser's AST is held in ~154 module-level flat POOLS (arrays of
+# i64/text and arrays-of-arrays of those) spread across four files:
+#   core/_Ast/decl_nodes.spl, core/_AstExpr/nodes.spl,
+#   core/ast_stmt.spl, core/types.spl
+# Every cross-reference between nodes is an integer INDEX into a sibling pool,
+# and the pools are reset per file, so one module's pools are a complete,
+# self-contained description of its parse. That is what makes a per-module
+# front-end cache possible at all: a cache hit restores the pools verbatim and
+# then runs the existing bridge (flat_ast_to_module) to rebuild the identical
+# ParserModule. See doc/08_tracking/bug/native_build_frontend_not_incremental_2026-08-21.md
+#
+# Measured 2026-08-21: parse_module_body + the desugar passes are 96-99% of
+# per-file front-end cost and the bridge is only 1-4%, so skipping the former
+# and keeping the latter is worth ~25x on parse.
+#
+# This file holds ONLY the format primitives. The per-file dump/restore
+# functions must live beside their pools (a pool var is module-private; even
+# reset_all_pools only resets types.spl's own 49). Completeness is enforced
+# mechanically by scripts/check/check-flat-ast-codec-complete.shs, which
+# derives the pool list from the four source files and fails when one is not
+# both encoded and decoded — an omitted pool is a SILENT MISCOMPILE, not a
+# loud failure, so it must never rely on review.
+#
+# FORMAT (version 1), line-oriented and self-delimiting:
+#   every scalar occupies one line; a list emits its length, then its elements.
+#   text is escaped (\\ -> \\\\, \n -> \\n) so a value can never split a line.
+# Escaping rather than byte-length prefixes is deliberate: Simple's len() is not
+# guaranteed to agree with byte offsets for non-ASCII, and source files do carry
+# UTF-8 in literals and comments, so an offset-based frame would corrupt them.
+
+val FLAT_POOL_CODEC_VERSION: text = "spl-flatpool-v1"
+
+# --- escaping ---------------------------------------------------------------
+
+pub fn flat_pool_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\n", "\\n")
+
+pub fn flat_pool_unescape(value: text) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if ch == "\\" and i + 1 < value.len():
+            val nxt = value[i + 1:i + 2]
+            if nxt == "n":
+                out = out + "\n"
+                i = i + 2
+                continue
+            if nxt == "\\":
+                out = out + "\\"
+                i = i + 2
+                continue
+        out = out + ch
+        i = i + 1
+    out
+
+# --- cursor over a line-split blob ------------------------------------------
+#
+# Decode reads through a pre-split line array with a caller-held cursor, so a
+# malformed or truncated blob runs off the end and is detected by the caller's
+# bounds check instead of silently yielding short pools.
+
+pub class FlatPoolReader:
+    var lines: [text]
+    var pos: i64
+    var ok: bool
+
+    fn new(blob: text) -> FlatPoolReader:
+        FlatPoolReader(lines: blob.split("\n"), pos: 0, ok: true)
+
+    me next() -> text:
+        if self.pos >= self.lines.len():
+            self.ok = false
+            return ""
+        val line = self.lines[self.pos]
+        self.pos = self.pos + 1
+        line
+
+    me next_i64() -> i64:
+        val raw = self.next()
+        if not self.ok:
+            return 0
+        flat_pool_parse_i64(raw)
+
+    # A length header that is negative, or larger than what is left in the
+    # blob, means the entry is corrupt. Catching it HERE (rather than looping
+    # on it) is what keeps a truncated cache file a miss instead of a hang.
+    me next_len() -> i64:
+        val n = self.next_i64()
+        if not self.ok:
+            return 0
+        if n < 0 or n > (self.lines.len() - self.pos):
+            self.ok = false
+            return 0
+        n
+
+pub fn flat_pool_parse_i64(raw: text) -> i64:
+    # text.to_i64() parses the whole numeric string, sign included. An earlier
+    # hand-rolled digit loop here used `ch.to_i64() - 48` on a one-char slice,
+    # which is wrong precisely BECAUSE to_i64() parses rather than returning a
+    # character code: "5".to_i64() is 5, not 53, so every value decoded to a
+    # negative near -48. The round-trip spec caught it on the first run.
+    if raw == "":
+        return 0
+    raw.to_i64()
+
+# --- encoders ---------------------------------------------------------------
+
+pub fn flat_pool_enc_i64(pool: [i64]) -> text:
+    var out = "{pool.len()}\n"
+    for v in pool:
+        out = out + "{v}\n"
+    out
+
+pub fn flat_pool_enc_bool(pool: [bool]) -> text:
+    var out = "{pool.len()}\n"
+    for v in pool:
+        out = out + (if v: "1\n" else: "0\n")
+    out
+
+pub fn flat_pool_enc_text(pool: [text]) -> text:
+    var out = "{pool.len()}\n"
+    for v in pool:
+        out = out + flat_pool_escape(v) + "\n"
+    out
+
+pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
+    var out = "{pool.len()}\n"
+    for inner in pool:
+        out = out + flat_pool_enc_i64(inner)
+    out
+
+pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
+    var out = "{pool.len()}\n"
+    for inner in pool:
+        out = out + flat_pool_enc_text(inner)
+    out
+
+pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
+    var out = "{pool.len()}\n"
+    for inner in pool:
+        out = out + flat_pool_enc_text_list(inner)
+    out
+
+# --- decoders ---------------------------------------------------------------
+
+pub fn flat_pool_dec_i64(r: FlatPoolReader) -> [i64]:
+    val n = r.next_len()
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(r.next_i64())
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_bool(r: FlatPoolReader) -> [bool]:
+    val n = r.next_len()
+    var out: [bool] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(r.next_i64() == 1)
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_text(r: FlatPoolReader) -> [text]:
+    val n = r.next_len()
+    var out: [text] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(flat_pool_unescape(r.next()))
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_i64_list(r: FlatPoolReader) -> [[i64]]:
+    val n = r.next_len()
+    var out: [[i64]] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(flat_pool_dec_i64(r))
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_text_list(r: FlatPoolReader) -> [[text]]:
+    val n = r.next_len()
+    var out: [[text]] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(flat_pool_dec_text(r))
+        i = i + 1
+    out
+
+pub fn flat_pool_dec_text_list_list(r: FlatPoolReader) -> [[[text]]]:
+    val n = r.next_len()
+    var out: [[[text]]] = []
+    var i: i64 = 0
+    while i < n:
+        out = out.push(flat_pool_dec_text_list(r))
+        i = i + 1
+    out
+
+export FLAT_POOL_CODEC_VERSION
+export flat_pool_escape, flat_pool_unescape, flat_pool_parse_i64
+export FlatPoolReader
+export flat_pool_enc_i64, flat_pool_enc_bool, flat_pool_enc_text
+export flat_pool_enc_i64_list, flat_pool_enc_text_list, flat_pool_enc_text_list_list
+export flat_pool_dec_i64, flat_pool_dec_bool, flat_pool_dec_text
+export flat_pool_dec_i64_list, flat_pool_dec_text_list, flat_pool_dec_text_list_list

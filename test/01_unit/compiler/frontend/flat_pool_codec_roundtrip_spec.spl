@@ -1,0 +1,126 @@
+use std.spec
+use compiler.frontend.core.flat_pool_codec.*
+
+# Round-trip gate for the flat-AST pool codec primitives
+# (doc/08_tracking/bug/native_build_frontend_not_incremental_2026-08-21.md).
+#
+# These six encoders/decoders carry EVERY value in the parsed AST of every
+# module once the per-module front-end cache is wired, and an encoding defect
+# is a SILENT MISCOMPILE of the bootstrap compiler rather than a loud failure.
+# The adversarial cases below are the ones that would actually corrupt a real
+# module: newlines and backslashes appear constantly in Simple source (string
+# literals, doc comments, escapes), and an empty-vs-missing confusion would
+# shift every subsequent index in a pool.
+
+describe "flat pool codec primitives":
+
+    it "round-trips an i64 pool including negatives and zero":
+        val original = [0, 1, -1, 42, -99999, 2147483648]
+        val decoded = flat_pool_dec_i64(FlatPoolReader.new(flat_pool_enc_i64(original)))
+        expect(decoded.len()).to_equal(original.len())
+        var i = 0
+        while i < original.len():
+            expect(decoded[i]).to_equal(original[i])
+            i = i + 1
+
+    it "round-trips an empty pool as empty, not as one blank element":
+        val decoded = flat_pool_dec_i64(FlatPoolReader.new(flat_pool_enc_i64([])))
+        expect(decoded.len()).to_equal(0)
+        val decoded_text = flat_pool_dec_text(FlatPoolReader.new(flat_pool_enc_text([])))
+        expect(decoded_text.len()).to_equal(0)
+
+    it "round-trips text containing newlines and backslashes":
+        # Exactly what a Simple string literal or doc comment carries. Without
+        # escaping, the embedded newline would split one value into two lines
+        # and desynchronise every later read in the blob.
+        val original = ["", "plain", "with\nnewline", "back\\slash",
+                        "both\\\nmixed", "trailing\n", "\n", "\\"]
+        val decoded = flat_pool_dec_text(FlatPoolReader.new(flat_pool_enc_text(original)))
+        expect(decoded.len()).to_equal(original.len())
+        var i = 0
+        while i < original.len():
+            expect(decoded[i]).to_equal(original[i])
+            i = i + 1
+
+    it "round-trips nested i64 lists preserving inner empties":
+        val original = [[1, 2, 3], [], [0], [-5, 7]]
+        val decoded = flat_pool_dec_i64_list(FlatPoolReader.new(flat_pool_enc_i64_list(original)))
+        expect(decoded.len()).to_equal(4)
+        expect(decoded[0].len()).to_equal(3)
+        expect(decoded[1].len()).to_equal(0)
+        expect(decoded[2][0]).to_equal(0)
+        expect(decoded[3][1]).to_equal(7)
+
+    it "round-trips nested text lists with awkward payloads":
+        val original = [["a", "b\nc"], [], [""]]
+        val decoded = flat_pool_dec_text_list(FlatPoolReader.new(flat_pool_enc_text_list(original)))
+        expect(decoded.len()).to_equal(3)
+        expect(decoded[0][1]).to_equal("b\nc")
+        expect(decoded[1].len()).to_equal(0)
+        expect(decoded[2].len()).to_equal(1)
+        expect(decoded[2][0]).to_equal("")
+
+    it "round-trips the triple-nested text pool (decl_type_param_constraints)":
+        val original = [[["Ord", "Eq"], []], [], [[""]]]
+        val decoded = flat_pool_dec_text_list_list(
+            FlatPoolReader.new(flat_pool_enc_text_list_list(original)))
+        expect(decoded.len()).to_equal(3)
+        expect(decoded[0][0][1]).to_equal("Eq")
+        expect(decoded[0][1].len()).to_equal(0)
+        expect(decoded[1].len()).to_equal(0)
+        expect(decoded[2][0][0]).to_equal("")
+
+    it "round-trips a bool pool":
+        val decoded = flat_pool_dec_bool(FlatPoolReader.new(flat_pool_enc_bool([true, false, true])))
+        expect(decoded.len()).to_equal(3)
+        expect(decoded[0]).to_equal(true)
+        expect(decoded[1]).to_equal(false)
+        expect(decoded[2]).to_equal(true)
+
+    it "preserves cursor position across consecutive pools in one blob":
+        # Real dumps concatenate ~154 pools into a single blob, so a decoder
+        # that over- or under-reads by one line corrupts every pool after it
+        # rather than failing where the defect is.
+        val blob = flat_pool_enc_i64([1, 2]) + flat_pool_enc_text(["x\ny"]) +
+                   flat_pool_enc_i64_list([[9]]) + flat_pool_enc_i64([7])
+        val r = FlatPoolReader.new(blob)
+        expect(flat_pool_dec_i64(r).len()).to_equal(2)
+        expect(flat_pool_dec_text(r)[0]).to_equal("x\ny")
+        expect(flat_pool_dec_i64_list(r)[0][0]).to_equal(9)
+        val last = flat_pool_dec_i64(r)
+        expect(last[0]).to_equal(7)
+        expect(r.ok).to_equal(true)
+
+describe "flat pool codec fails closed on corruption":
+
+    it "marks a truncated blob not-ok instead of hanging or short-reading":
+        # A cache file cut off mid-write must become a MISS. The length header
+        # says 5 elements but only 2 lines remain.
+        val r = FlatPoolReader.new("5\n1\n2\n")
+        val _ = flat_pool_dec_i64(r)
+        expect(r.ok).to_equal(false)
+
+    it "rejects a negative length header":
+        val r = FlatPoolReader.new("-3\n1\n2\n")
+        val _ = flat_pool_dec_i64(r)
+        expect(r.ok).to_equal(false)
+
+    it "rejects an absurd length header without allocating for it":
+        # The guard is bounds-relative, so a huge count fails immediately
+        # rather than looping millions of times against a short blob.
+        val r = FlatPoolReader.new("999999999\n1\n")
+        val _ = flat_pool_dec_i64(r)
+        expect(r.ok).to_equal(false)
+
+    it "reading past the end of a blob sets not-ok":
+        # Every encoded line ends in "\n", so split() yields one trailing empty
+        # element. That element is legitimately readable; it is the read AFTER
+        # it that must trip the guard.
+        val r = FlatPoolReader.new("1\n5\n")
+        val first = flat_pool_dec_i64(r)
+        expect(first[0]).to_equal(5)
+        expect(r.ok).to_equal(true)
+        val _trailing = r.next()
+        expect(r.ok).to_equal(true)
+        val _past = r.next()
+        expect(r.ok).to_equal(false)
