@@ -343,14 +343,12 @@ enforces the contract). Shards run ≤2 concurrent, output grepped for
 |---|---|---|
 | test/01_unit/compiler/frontend | 3460 | 0 |
 | test/01_unit/compiler/hir | 3520 | 0 |
-| test/01_unit/compiler/driver | 3584 | 0 |
+| test/01_unit/compiler/driver | 3171 | 0 |
 | test/01_unit/lib/common | 3859 | 0 |
-| test/01_unit/lib/nogc_sync_mut | 3682 | 0 |
+| test/01_unit/lib/nogc_sync_mut | 3260 | 0 |
 
-**Zero dynamic hits, all 5 shards complete.** Two caveats stated rather than
-glossed: `compiler/hir`
-and `compiler/driver` were each cut off by the shard's own 3000s `timeout`
-(rc=143) after 3520 and 3584 lines respectively, and
+**Zero dynamic hits.** Two caveats stated rather than glossed: `compiler/hir`
+was cut off by the shard's own 3000s `timeout` (rc=143) after 3520 lines, and
 the non-zero shard exit codes (rc=1, rc=42) are the **pre-existing SSPEC
 documentization score gate** ("SSPEC score gate: 38 below 80"), not contract
 aborts — every shard log greps to 0 for both the message and the code.
@@ -465,3 +463,73 @@ roots, each with a selftest fixture (19 fixtures, fatal, run before every scan):
   primitives, so its `rt_tuple_get` calls the `fn rt_array_get` defined in the
   same file, not the extern of that name. A same-file Simple definition now
   shadows the extern.
+
+## Fourth wrapper: compiler/00.common/config.spl `env_get` (2026-08-21, later same day)
+
+A strict-seed `native-build --source src/app --entry-closure --entry
+src/app/cli/bootstrap_main.spl` died before its first `[build] parse` line
+with `error: semantic: nil is forbidden by the non-optional return contract of
+'env_get'`. `src/compiler/00.common/config.spl:7-9` declared its own inline
+`env_get(key: text) -> text` (kept local "to avoid an L0->L7 layer violation"),
+forwarding `rt_env_get(key)` directly with no nil check -- the same defect
+shape as the three wrappers fixed earlier today (`7825f01def2`). It is called
+by `CompilerConfig.from_env()` (`driver_types.spl:506`) for `SIMPLE_PROFILE` /
+`SIMPLE_LOG` / `SIMPLE_DETERMINISTIC` / `SIMPLE_COVERAGE`, right at driver
+startup before parsing -- matching the "dies before parse" symptom exactly.
+All 5 call sites in that file already used the `if val x = env_get(...)`
+optional-safe pattern, so no caller changes were needed.
+
+Fix: `extern fn rt_env_get(key: text) -> text?` / `fn env_get(key: text) ->
+text?:` (both widened; the callers were already written for an optional).
+
+### Why the guard missed it
+
+`rt_env_get`'s Rust impl (`interpreter_extern/system.rs:332`) has no literal
+`Value::Nil` in its own body -- it calls a shared conversion helper,
+`runtime_to_value(result)` (`interpreter_extern/atomic.rs:531`), which is the
+one that actually returns `Value::Nil`. `derive_nil_externs`'s `nil.awk` only
+scanned for `Value::Nil` textually within a function's own body span, so a
+one-hop delegator was invisible to it -- exactly the shape that let
+`rt_env_get` (and, once fixed, 45 *other* pre-existing offenders of the same
+shape) escape detection.
+
+Fixed the guard: added `call.awk` (extracts `<caller> <callee>` pairs from a
+plain `identifier(` textual scan) and a bounded (5-iteration) fixpoint closure
+in `derive_nil_externs` that adds a fn to the nil-capable set if it calls
+another fn already known to be nil-capable. Selftest still green (19
+fixtures, unchanged).
+
+This closure immediately surfaced 46 pre-existing class (b) offenders (mostly
+other `env_get`/`env_cwd`/`args`/`file_mmap_read_bytes`/mutex-`.lock()`-style
+wrappers over `rt_*` calls that delegate through `runtime_to_value` or a
+similar helper) that were always real but had never been caught. They cannot
+all be fixed in one change, so -- matching the class (c) baseline convention
+already in this file -- added a class (b) baseline ratchet:
+`scripts/check/non_optional_nil_return_classb_baseline.txt` (46 entries,
+`<rel-file>:<fn>:<body>` keyed, line-number-free so it doesn't churn on
+unrelated edits), with the same FAIL-on-new / FAIL-on-stale rules as the
+class (c) leg. The one entry actually fixed here (`config.spl:env_get`) is
+NOT in the baseline (dropped out naturally once fixed). Guard now:
+
+    PASS — 1646 wrapper(s) checked against 185 nil-capable extern(s)
+    (46 baselined class (b)), 12475 file(s) scanned for hand-written nil
+    returns against a 10-entry baseline (0 new, 0 stale), 0 returning nil
+    through a non-optional type
+
+### Reproduce spec
+
+`test/01_unit/compiler/config/compiler_config_spec.spl` (mirrored to
+`test/unit/compiler/config/compiler_config_spec.spl`), new `describe
+"CompilerConfig.from_env"` block: calls `CompilerConfig.from_env()` under the
+strict seed. Confirmed FAILing pre-fix with the exact reported message
+(`semantic: nil is forbidden by the non-optional return contract of
+'env_get'`) and PASSing post-fix (32/32 examples).
+
+### Probe result
+
+Re-ran `SIMPLE_CACHE_SCOPE=envget <strict-seed> native-build --source src/app
+--entry-closure --entry src/app/cli/bootstrap_main.spl -o
+/mnt/data/seedperf/stage1.envget --threads 1`: no `env_get` non-optional
+contract error. Progressed through `load_sources` (958/958 files) and
+`source_closure` (666/666 files) cleanly in ~23s before being killed
+deliberately (probe purpose only, not a full build).

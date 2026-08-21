@@ -97,6 +97,34 @@ FNR==1 { cur="" }
 }
 AWKEOF
 
+# call.awk — <caller> <callee> pairs, one per line, for every plain
+# `identifier(` call textually inside a fn's body (heuristic, not a real
+# call graph: over-approximates by also matching keywords/macros, which is
+# fine here since callee names are filtered against a known nil-capable set
+# before use). Exists to catch a wrapper like `rt_env_get` whose OWN body has
+# no literal `Value::Nil` because it delegates to a shared helper
+# (`runtime_to_value`) that does -- nil.awk alone is blind to that one hop,
+# which is exactly how `rt_env_get` escaped this guard (see
+# non_optional_wrappers_return_nil_sweep_2026-08-21.md).
+cat > "$TMP/call.awk" <<'AWKEOF'
+FNR==1 { cur="" }
+/^[ \t]*(pub[ \t]*(\([a-z()]*\))?[ \t]*)?fn[ \t]+[A-Za-z_]/ {
+  if (match($0,/fn[ \t]+[A-Za-z0-9_]*/)) { f=substr($0,RSTART,RLENGTH); sub(/fn[ \t]+/,"",f) }
+  match($0,/^[ \t]*/); ci=RLENGTH; cur=f; next
+}
+{ if (cur=="") next
+  match($0,/^[ \t]*/); i=RLENGTH
+  if ($0 ~ /^[ \t]*\}/ && i<=ci) { cur=""; next }
+  if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
+  n=$0
+  while (match(n,/[A-Za-z_][A-Za-z0-9_]*\(/)) {
+    callee=substr(n,RSTART,RLENGTH-1)
+    print cur, callee
+    n=substr(n,RSTART+RLENGTH)
+  }
+}
+AWKEOF
+
 cat > "$TMP/classc.awk" <<'AWKEOF'
 # class (c): explicit `return nil` / bare-nil tail under a NON-OPTIONAL declared
 # return type. Not extern related -- a hand-written nil under `-> T` aborts the
@@ -163,6 +191,24 @@ derive_nil_externs() {
     [ -d "$_dir" ] || { : > "$_out"; return 0; }
     find "$_dir" -name '*.rs' -print0 2>/dev/null \
         | xargs -0 -n200 awk -f "$TMP/nil.awk" 2>/dev/null | sort -u > "$TMP/_nilfns.txt"
+    # One-hop (to fixpoint, bounded) transitive closure: a fn whose own body
+    # has no literal `Value::Nil` but that CALLS a fn already known to be
+    # nil-capable (e.g. a shared `runtime_to_value` conversion helper) is
+    # itself nil-capable. Without this, a thin delegator like `rt_env_get`
+    # is invisible to the direct scan above.
+    find "$_dir" -name '*.rs' -print0 2>/dev/null \
+        | xargs -0 -n200 awk -f "$TMP/call.awk" 2>/dev/null | sort -u > "$TMP/_calls.txt"
+    cp "$TMP/_nilfns.txt" "$TMP/_nilfns_prev.txt"
+    _iter=0
+    while [ "$_iter" -lt 5 ]; do
+        _iter=$((_iter + 1))
+        awk 'NR==FNR{nil[$1]=1;next} nil[$2]{print $1}' "$TMP/_nilfns_prev.txt" "$TMP/_calls.txt" \
+            >> "$TMP/_nilfns_prev.txt"
+        sort -u "$TMP/_nilfns_prev.txt" > "$TMP/_nilfns_next.txt"
+        cmp -s "$TMP/_nilfns_prev.txt" "$TMP/_nilfns_next.txt" 2>/dev/null && { mv "$TMP/_nilfns_next.txt" "$TMP/_nilfns_prev.txt"; break; }
+        mv "$TMP/_nilfns_next.txt" "$TMP/_nilfns_prev.txt"
+    done
+    mv "$TMP/_nilfns_prev.txt" "$TMP/_nilfns.txt"
     grep -rh 'insert_simple!("rt_' "$_dir" 2>/dev/null \
         | sed 's/.*insert_simple!("\(rt_[a-z0-9_]*\)"[, ]*\(.*\)/\1 \2/' \
         | sed 's/);*[ ]*$//' \
@@ -435,7 +481,35 @@ if [ "$WRAP_N" -eq 0 ]; then
 fi
 
 match_nil_callee "$TMP/nil.txt" "$TMP/wrap.txt" "$TMP/off_raw.txt"
-drop_locally_defined "$TMP/off_raw.txt" "$TMP/off.txt"
+drop_locally_defined "$TMP/off_raw.txt" "$TMP/off_all.txt"
+
+# Baseline ratchet, same convention/mechanism as the class (c) leg below: the
+# one-hop transitive nil-capability closure (added 2026-08-21, see
+# doc/08_tracking/bug/non_optional_wrappers_return_nil_sweep_2026-08-21.md)
+# newly surfaces offenders that were always real but invisible to the direct
+# `Value::Nil`-in-body scan (e.g. thin wrappers over `rt_env_get`, which
+# delegates its nil path through the shared `runtime_to_value` helper). They
+# cannot all be fixed in one change; baselining keeps the guard live against
+# NEW class (b) debt without pretending the pre-existing set is clean. A
+# baselined entry that is no longer an offender is a STALE baseline and also
+# FAILs, same as every other ratchet in this file.
+BASELINE_B="$SCRIPT_DIR/non_optional_nil_return_classb_baseline.txt"
+normalize_classc "$TMP/off_all.txt" "$TMP/off_norm.txt"
+if [ -f "$BASELINE_B" ]; then
+    grep -v '^#' "$BASELINE_B" | grep -v '^[[:space:]]*$' | sort -u > "$TMP/base_b.txt"
+else
+    : > "$TMP/base_b.txt"
+fi
+comm -23 "$TMP/off_norm.txt" "$TMP/base_b.txt" > "$TMP/off_new_keys.txt"
+comm -13 "$TMP/off_norm.txt" "$TMP/base_b.txt" > "$TMP/off_stale.txt"
+BASE_B_N=$(awk "END{print NR}" "$TMP/base_b.txt" 2>/dev/null); [ -n "$BASE_B_N" ] || BASE_B_N=0
+OFF_STALE_N=$(awk "END{print NR}" "$TMP/off_stale.txt" 2>/dev/null); [ -n "$OFF_STALE_N" ] || OFF_STALE_N=0
+# Re-expand the surviving (non-baselined) normalized keys back to full
+# file:line:fn:type:body rows for display, keyed the same way normalize_classc
+# built the key (<rel-file>:<fn>:<body>, collapsed colon-space runs).
+awk -F: -v root="$ROOT/" 'NR==FNR{k[$0]=1;next}
+    { f=$1; sub("^"root,"",f); key=f ":" $3 ":" $NF; gsub(/: */,":",key); if (key in k) print }' \
+    "$TMP/off_new_keys.txt" "$TMP/off_all.txt" > "$TMP/off.txt"
 OFF_N=$(awk "END{print NR}" "$TMP/off.txt" 2>/dev/null); [ -n "$OFF_N" ] || OFF_N=0
 
 # ------------------------------------------------------- class (c) leg
@@ -480,10 +554,14 @@ CLSC_N=$(awk "END{print NR}" "$TMP/classc_new.txt" 2>/dev/null); [ -n "$CLSC_N" 
 STALE_N=$(awk "END{print NR}" "$TMP/classc_stale.txt" 2>/dev/null); [ -n "$STALE_N" ] || STALE_N=0
 cp "$TMP/classc_new.txt" "$TMP/classc.txt"
 
-if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ]; then
+if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ] || [ "$OFF_STALE_N" -gt 0 ]; then
     if [ "$OFF_N" -gt 0 ]; then
-        echo "class (b) offenders (file:line:fn:return-type:body):"
+        echo "class (b) offenders NOT in the baseline (file:line:fn:return-type:body):"
         cat "$TMP/off.txt"
+    fi
+    if [ "$OFF_STALE_N" -gt 0 ]; then
+        echo "stale class (b) baseline entries (no longer offenders -- remove them from $BASELINE_B):"
+        cat "$TMP/off_stale.txt"
     fi
     if [ "$CLSC_N" -gt 0 ]; then
         echo "class (c) offenders NOT in the baseline (file:fn:kind):"
@@ -494,9 +572,9 @@ if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ]; then
         cat "$TMP/classc_stale.txt"
     fi
     NAMES=$( { [ "$OFF_N" -gt 0 ] && awk -F: '{print $3}' "$TMP/off.txt"; [ "$CLSC_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc.txt"; [ "$STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc_stale.txt"; } | sort -u | tr '\n' ' ' | sed 's/ $//')
-    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) and $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline, $OFF_N class (b) + $CLSC_N new class (c) + $STALE_N stale baseline entry(ies): $NAMES"
+    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) and $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline, $OFF_N new class (b) + $OFF_STALE_N stale class (b) + $CLSC_N new class (c) + $STALE_N stale baseline entry(ies): $NAMES"
     exit 1
 fi
 
-echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s), $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline (0 new, 0 stale), 0 returning nil through a non-optional type"
+echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) ($BASE_B_N baselined class (b)), $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline (0 new, 0 stale), 0 returning nil through a non-optional type"
 exit 0
