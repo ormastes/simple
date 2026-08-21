@@ -38,7 +38,7 @@ use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
-    TenantContext, ActorContext, SessionContext, CommandEnvelope, session_valid
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, session_valid, role_allows
 }
 use std.nogc_sync_mut.enterprise_sale.goods_sale.{
     sale_place_order, sale_pay_order, sale_order_status, sale_product_price
@@ -51,6 +51,7 @@ use app.enterprise_store_app.dashboard.{dashboard_handle}
 use app.enterprise_store_app.hcm_routes.{hcm_routes_handle}
 use app.enterprise_store_app.procurement_routes.{procurement_routes_handle}
 use app.enterprise_store_app.finance_routes.{finance_routes_handle}
+use app.enterprise_store_app.csrf.{csrf_required, csrf_ok}
 
 # =============================================================================
 # Cart — pure request-scoped model (no storage; checkout is the effect)
@@ -104,8 +105,26 @@ fn page_receipt(store: EnterpriseStore, tenant_id: text, order_id: text) -> text
 # Dispatcher — hardened route path
 # =============================================================================
 
+# write_gate_action maps a state-mutating route KNOWN TO THE DISPATCHER to the
+# action whose role policy the dispatcher pre-checks as defense in depth.
+# Returns "" for a non-mutating method or an unmapped route — those remain
+# gated by their own command's frozen rbac, which this never replaces. The
+# mapped action is IDENTICAL to the one the command re-enforces, so the gate
+# can only reject a request the command would also reject, never widen access.
+fn write_gate_action(method: text, path: text) -> text:
+    if method != "POST" and method != "PUT" and method != "PATCH" and method != "DELETE":
+        return ""
+    if match_route_pattern("/store/order", path):
+        return "sale.order.place"
+    if match_route_pattern("/store/pay", path):
+        return "sale.order.pay"
+    if match_route_pattern("/fin/period/close", path):
+        return "finance.period.close"
+    ""
+
 # store_app_handle dispatches one request through the hardened path:
-# limits -> path safety -> session auth -> route match -> guarded command.
+# limits -> path safety -> session auth -> CSRF -> write-gate -> route match
+# -> guarded command.
 fn store_app_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, headers: [(text, text)], body: text) -> HttpResponse:
     # 1. shared request limits / smuggling policy (http_core)
     val decision = body_decision(headers, MAX_BODY_SIZE, false)
@@ -123,6 +142,21 @@ fn store_app_handle(store: EnterpriseStore, session: SessionContext, tenant: Ten
     # 3. authenticated session — the ONLY auth scheme is the frozen one
     if not session_valid(session, tenant, who):
         return secured(HttpResponse.error(HttpStatus.Unauthorized, "invalid-session: authentication required"))
+    # 3b. CSRF double-submit — a state-changing request that rides an ambient
+    #     cookie session MUST echo the session's CSRF token in X-CSRF-Token.
+    #     Bearer-only API calls (no Cookie header) are exempt: they cannot
+    #     carry an ambient credential and so cannot be forged cross-site.
+    #     Rejected BEFORE any route/command runs. (Residual: cookie flow/CSRF.)
+    if csrf_required(method, headers) and not csrf_ok(session, headers):
+        return secured(HttpResponse.error(HttpStatus.Forbidden, "csrf: token missing or mismatched"))
+    # 3c. Route-level write gate (defense in depth) — a mutating route known to
+    #     the dispatcher requires the caller's role to satisfy the SAME policy
+    #     the command re-enforces, rejected here BEFORE the handler runs. This
+    #     does NOT replace the frozen in-command sequence (session -> rbac ->
+    #     validation -> idempotency); both must hold.
+    val gate_action = write_gate_action(method, path)
+    if gate_action != "" and not role_allows(who.role, gate_action):
+        return deny("forbidden", "write-gate:" + gate_action)
     # 4. routes (http_core pattern matching); sibling route families first
     if path.starts_with("/booking/"):
         return booking_routes_handle(store, session, tenant, who, method, path, body)

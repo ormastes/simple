@@ -30,7 +30,6 @@ use compiler.core.types.{type_tag_name, int_to_str}
 use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
 use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems}
-use compiler.core.types.{is_union_tag, union_tag_to_id, union_type_get_members}
 use compiler.core.types.{is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem}
 use compiler.core.types.{is_option_generic_tag, option_generic_tag_to_id, option_generic_type_get_inner}
 use compiler.core.types.{is_isolated_tag, isolated_tag_to_id, isolated_type_get_inner}
@@ -485,22 +484,6 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         if weak_resource_name != "" and resource_is_declared(weak_resource_name):
             resource_registry_note_ownership(weak_resource_name, "weak")
         return Type(kind: TypeKind.Weak(weak_inner_type), span: make_span())
-    # Lane S4 (union normalization, hardening plan §10.3): a structural union
-    # `A | B | C` is registered by the parser in the TYPE_UNION_BASE registry
-    # exactly the way Dict<K,V>/Result<T,E>/(A,B) are. Before this arm the tag
-    # fell through to the `is_union_base_or_above` catch-all below and became
-    # an opaque `Named("<tag>")` that the HIR name resolver does not accept --
-    # i.e. the union erased to Infer/Any, which is precisely what §8.4 forbids
-    # (closed sum > Any). Rebuild the real member list so HIR lowering produces
-    # HirTypeKind.Union and union_normalize can synthesize its @closed enum.
-    # Must precede the catch-all: is_union_tag's range also satisfies it.
-    if is_union_tag(type_expr_idx):
-        val uid = union_tag_to_id(type_expr_idx)
-        var union_members: [Type] = []
-        for member_tag in union_type_get_members(uid):
-            union_members = union_members.push(convert_flat_type(member_tag))
-        if union_members.len() > 0:
-            return Type(kind: TypeKind.Union(union_members), span: make_span())
     if is_union_base_or_above(type_expr_idx):
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
     # type_expr_idx falls in the tag-space hole (34..TYPE_UNION_BASE-1) here, so
