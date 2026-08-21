@@ -275,3 +275,8 @@ implementation-blocked-by-bootstrap-authority
   function-wide six-word `Span` after a pool safepoint. Enum construction now
   creates empty spans at each use instead of retaining that aggregate across
   the declaration walk. Fresh verification is pending.
+- cycle-1-progress: The enum-local Span refresh removed the SIGSEGV. Stage 3
+  released all 663 surfaces and failed closed on an explicit unsupported flat
+  expression tag 18 in `module_import_registration.spl`. Tag 18 is the general
+  `EXPR_BLOCK`; the bridge now converts it through the existing block helper
+  instead of reserving that support for if/lambda callers. Cycle count is 1/3.
