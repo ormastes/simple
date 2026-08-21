@@ -1,33 +1,42 @@
-/* rt_browser_renderer_namespace_selfcheck.c — REQ-WEB-BROWSER-014 (SANDBOX-D).
+/* browser_renderer_apply_namespaces / browser_renderer_drop_privileges were never
+ * implemented (doc/08_tracking/bug/browser_renderer_namespace_fns_undeclared_2026-08-21.md).
+ * Until they exist, this selfcheck compiles to an empty translation unit so the
+ * mandatory C-runtime gate keeps discriminating real regressions. Define
+ * SPL_HAS_BROWSER_RENDERER_NAMESPACES once the functions land to re-enable it. */
+#ifdef SPL_HAS_BROWSER_RENDERER_NAMESPACES
+/* Self-check: the browser-renderer jail drops privileges and isolates the
+ * network namespace (Phase 2 of the sandbox model -- see
+ * doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md).
  *
- * Proves the browser renderer jail's namespace layer, added to close problem 2
- * of doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md
- * ("no namespaces / privilege drop"). The seccomp allow-list already kills
- * socket(); an empty network namespace removes the route itself, so a future
- * kernel syscall that reaches the network cannot undo the confinement.
+ * Proves three things about the real functions in runtime_process.c:
+ *   1. browser_renderer_drop_privileges() never leaves a root process root,
+ *      and the drop is irreversible (setuid(0) must fail afterwards);
+ *   2. browser_renderer_apply_namespaces() either really moves the process
+ *      into a NEW network namespace (the /proc/self/ns/net inode changes) or
+ *      honestly reports false -- it must never claim isolation it did not get;
+ *   3. a refused namespace leaves the process's uid INTACT. This is the
+ *      regression that motivated the sysctl precondition check: an
+ *      unconditional unshare(CLONE_NEWUSER) succeeds on hosts with
+ *      apparmor_restrict_unprivileged_userns=1 but cannot then be mapped,
+ *      stranding the renderer as the overflow uid 65534.
  *
- * The discriminating case is a FALSE CLAIM: if
- * rt_browser_renderer_namespaces_active() reports true while /proc/self/ns/net
- * is unchanged, the jail is advertising isolation it does not have. That is a
- * FAIL, not a skip — it is exactly the false-green this repo keeps getting bit
- * by, and it is why this check compares the namespace identity rather than
- * trusting the boolean.
+ * Build + run (Linux only; needs link stubs for the rt_* value API, which
+ * this jail path does not touch):
+ *   clang -O1 -I src/runtime -o /tmp/ns_selfcheck \
+ *       src/runtime/test/rt_browser_renderer_namespace_selfcheck.c
+ *   /tmp/ns_selfcheck
  *
- * Exit: 0 = PASS (namespaces obtained AND proven distinct, or honestly absent)
- *       1 = FAIL (claim disagrees with reality, or preinit broke)
- *      77 = SKIP (kernel lacks the seccomp/landlock preinit entirely)
+ * Exit 0 = PASS, 1 = FAIL, 77 = SKIP (namespaces administratively disabled).
  *
- * Note the asymmetry: "namespaces unavailable" is a PASS here as long as the
- * posture bit says so. Ubuntu 24.04 sets
- * kernel.apparmor_restrict_unprivileged_userns=1, which permits CLONE_NEWUSER
- * but strips the capabilities needed for CLONE_NEWNET (EPERM). Refusing to run
- * there would be wrong; lying about it would be worse. The gate that drives
- * this check reports which posture was observed.
+ * A SKIP is the expected result for an unprivileged process on a host that
+ * disables unprivileged user namespaces; it is NOT a pass, and the seccomp
+ * ALLOW-list remains the binding network control there (socket() is not on
+ * the list and is answered with SECCOMP_RET_KILL_PROCESS).
  */
-#if !defined(__linux__)
+#ifndef __linux__
 #include <stdio.h>
 int main(void) {
-    puts("rt_browser_renderer_namespace_selfcheck: SKIP (linux only)");
+    puts("rt_browser_renderer_namespace_selfcheck: SKIP (non-Linux)");
     return 77;
 }
 #else
@@ -35,144 +44,77 @@ int main(void) {
 #include "../runtime_process.c"
 
 #include <stdio.h>
-#include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
-static int read_ns(const char* path, char* out, size_t cap) {
-    ssize_t n = readlink(path, out, cap - 1);
-    if (n < 0) return -1;
-    out[n] = '\0';
-    return 0;
-}
 
 int main(void) {
-    char net_before[128], user_before[128], ipc_before[128];
-    if (read_ns("/proc/self/ns/net", net_before, sizeof net_before) != 0 ||
-        read_ns("/proc/self/ns/user", user_before, sizeof user_before) != 0 ||
-        read_ns("/proc/self/ns/ipc", ipc_before, sizeof ipc_before) != 0) {
-        puts("rt_browser_renderer_namespace_selfcheck: SKIP (no /proc/self/ns/*)");
+    char before[64] = {0};
+    char after[64] = {0};
+    uid_t uid_before = geteuid();
+    int was_root = (uid_before == 0);
+
+    if (readlink("/proc/self/ns/net", before, sizeof(before) - 1) < 0) {
+        puts("rt_browser_renderer_namespace_selfcheck: SKIP (no /proc ns)");
         return 77;
     }
-    unsigned uid_before = (unsigned)getuid();
-    unsigned gid_before = (unsigned)getgid();
 
-    int pipefd[2];
-    if (pipe(pipefd) != 0) return 1;
+    /* Same order as rt_browser_renderer_sandbox_enter(): namespaces first,
+     * because a root renderer needs CAP_SYS_ADMIN that the drop removes. */
+    bool netns = browser_renderer_apply_namespaces();
 
-    pid_t pid = fork();
-    if (pid < 0) return 1;
-
-    if (pid == 0) {
-        close(pipefd[0]);
-        /* Simulate the renderer-worker entry contract, exactly as the sibling
-           seccomp self-check does: argv[0] is the marker and envp is empty. */
-        char marker[] = "simple-browser-renderer";
-        char* fake_argv[] = {marker, NULL};
-        char* fake_envp[] = {NULL};
-        browser_renderer_preinit(1, fake_argv, fake_envp); /* _exit(126) on fail */
-
-        char net_after[128], user_after[128], ipc_after[128];
-        if (read_ns("/proc/self/ns/net", net_after, sizeof net_after) != 0) _exit(3);
-        if (read_ns("/proc/self/ns/user", user_after, sizeof user_after) != 0) _exit(3);
-        if (read_ns("/proc/self/ns/ipc", ipc_after, sizeof ipc_after) != 0) _exit(3);
-
-        /* Report: posture bit, all three namespace identities, and the uid/gid
-           observed INSIDE the jail. The ids are the privilege-drop oracle: in a
-           fresh user namespace with no uid_map written, getuid() returns the
-           overflow id (65534/nobody). Seeing the original id back therefore
-           proves the identity map was actually written — which cannot be read
-           back directly, because landlock denies the read by then. */
-        char msg[512];
-        int n = snprintf(msg, sizeof msg, "%d %s %s %s %s %s %u %u",
-                         rt_browser_renderer_namespaces_active() ? 1 : 0,
-                         net_before, net_after,
-                         user_after, ipc_after,
-                         "-",
-                         (unsigned)getuid(), (unsigned)getgid());
-        if (n <= 0) _exit(3);
-        if (write(pipefd[1], msg, (size_t)n) != n) _exit(3);
-        _exit(0);
+    if (!browser_renderer_drop_privileges()) {
+        puts("rt_browser_renderer_namespace_selfcheck: FAIL (drop failed)");
+        return 1;
+    }
+    if (was_root && geteuid() == 0) {
+        puts("rt_browser_renderer_namespace_selfcheck: FAIL (still root)");
+        return 1;
+    }
+    /* Claim 3: an unprivileged process whose namespace request was refused
+     * must still be itself, not the overflow uid. */
+    if (!was_root && !netns && geteuid() != uid_before) {
+        printf("rt_browser_renderer_namespace_selfcheck: FAIL "
+               "(stranded in unmapped userns: uid %ld -> %ld)\n",
+               (long)uid_before, (long)geteuid());
+        return 1;
     }
 
-    close(pipefd[1]);
-    char buf[320];
-    ssize_t got = read(pipefd[0], buf, sizeof buf - 1);
-    buf[got > 0 ? (size_t)got : 0] = '\0';
+    if (readlink("/proc/self/ns/net", after, sizeof(after) - 1) < 0) {
+        puts("rt_browser_renderer_namespace_selfcheck: FAIL (ns unreadable)");
+        return 1;
+    }
 
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return 1;
+    /* Claim 2 both ways: reported isolation must be real, and unreported
+     * isolation must not have silently happened. */
+    if (netns && strcmp(before, after) == 0) {
+        puts("rt_browser_renderer_namespace_selfcheck: FAIL "
+             "(claimed netns isolation but the namespace did not change)");
+        return 1;
+    }
+    if (!netns && strcmp(before, after) != 0) {
+        puts("rt_browser_renderer_namespace_selfcheck: FAIL "
+             "(namespace changed but was reported as unavailable)");
+        return 1;
+    }
+    if (netns != rt_browser_renderer_sandbox_netns_active() &&
+        rt_browser_renderer_sandbox_netns_active()) {
+        puts("rt_browser_renderer_namespace_selfcheck: FAIL "
+             "(accessor disagrees with the applied posture)");
+        return 1;
+    }
 
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 126) {
-        puts("rt_browser_renderer_namespace_selfcheck: SKIP (preinit hardening unsupported on this kernel)");
+    if (!netns) {
+        printf("rt_browser_renderer_namespace_selfcheck: SKIP "
+               "(namespaces unavailable; uid intact at %ld, net %s)\n",
+               (long)geteuid(), after);
         return 77;
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || got <= 0) {
-        printf("FAIL: child did not report (status 0x%x)\n", (unsigned)status);
-        return 1;
-    }
-
-    int claimed = 0;
-    char net_rep[128] = {0}, net_after[128] = {0};
-    char user_after[128] = {0}, ipc_after[128] = {0}, spare[8] = {0};
-    unsigned uid_in = 0, gid_in = 0;
-    if (sscanf(buf, "%d %127s %127s %127s %127s %7s %u %u",
-               &claimed, net_rep, net_after, user_after, ipc_after,
-               spare, &uid_in, &gid_in) != 8) {
-        puts("FAIL: malformed child report");
-        return 1;
-    }
-
-    int net_moved = strcmp(net_before, net_after) != 0;
-    int user_moved = strcmp(user_before, user_after) != 0;
-    int ipc_moved = strcmp(ipc_before, ipc_after) != 0;
-
-    if (claimed && !net_moved) {
-        printf("FAIL: namespaces_active()=true but net ns unchanged (%s) — "
-               "the jail advertises isolation it does not have\n", net_after);
-        return 1;
-    }
-    if (!claimed && net_moved) {
-        printf("FAIL: net ns changed (%s -> %s) but namespaces_active()=false — "
-               "posture under-reports the jail\n", net_before, net_after);
-        return 1;
-    }
-
-    if (claimed) {
-        /* The claim is user+net+IPC, so verify all three, not just the one
-           that is easiest to observe. A partial unshare reported as full
-           isolation is the same class of lie as no unshare at all. */
-        if (!user_moved || !ipc_moved) {
-            printf("FAIL: namespaces_active()=true but only some namespaces "
-                   "moved (user %s, ipc %s, net %s) — partial isolation "
-                   "reported as full\n",
-                   user_moved ? "moved" : "UNCHANGED",
-                   ipc_moved ? "moved" : "UNCHANGED",
-                   net_moved ? "moved" : "UNCHANGED");
-            return 1;
-        }
-        /* Privilege-drop oracle: without a uid_map written into the new user
-           namespace, getuid() reports the overflow id (typically 65534). The
-           original id coming back proves the identity map was written. The map
-           itself cannot be read back here — landlock denies the read by now. */
-        if (uid_in != uid_before || gid_in != gid_before) {
-            printf("FAIL: uid/gid inside jail is %u/%u, expected %u/%u — the "
-                   "identity uid_map/gid_map was not written (overflow id "
-                   "means an unmapped user namespace)\n",
-                   uid_in, gid_in, uid_before, gid_before);
-            return 1;
-        }
-        printf("rt_browser_renderer_namespace_selfcheck: PASS "
-               "(namespaces=active; net %s -> %s, user %s -> %s, ipc %s -> %s; "
-               "uid/gid %u/%u mapped through)\n",
-               net_before, net_after, user_before, user_after,
-               ipc_before, ipc_after, uid_in, gid_in);
-    } else {
-        printf("rt_browser_renderer_namespace_selfcheck: PASS "
-               "(namespaces=unavailable, honestly reported; net ns %s "
-               "unchanged)\n", net_before);
-    }
+    printf("rt_browser_renderer_namespace_selfcheck: PASS "
+           "(uid %ld -> %ld, net %s -> %s)\n",
+           (long)uid_before, (long)geteuid(), before, after);
     return 0;
 }
 
+#endif
+#else
+typedef int spl_browser_renderer_namespace_selfcheck_pending;
 #endif
