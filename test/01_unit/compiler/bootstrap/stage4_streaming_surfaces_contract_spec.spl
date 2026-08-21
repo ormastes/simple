@@ -3,6 +3,8 @@ use std.spec.{describe, it, expect}
 
 val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
 val PARSER_TYPES = "src/compiler/10.frontend/parser_types.spl"
+val PARSER = "src/compiler/10.frontend/core/parser.spl"
+val FN_STRUCT_DECLS = "src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl"
 val MODULE_ASSEMBLY = "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl"
 val DESUGAR_ASYNC = "src/compiler/10.frontend/desugar/desugar_async.spl"
 val SOURCE_11 = "src/compiler/70.backend/backend/interpreter.spl"
@@ -169,13 +171,39 @@ describe "Stage4 streaming surface ownership":
         expect(rust_memory).to_contain("rt_transient_raw_scope_end")
         expect(rust_memory).to_contain("RT_TRANSIENT_RAW_OWNED_BIT")
 
-    it "clears parser roots before ending a transient scope":
+    it "ends a transient scope before replacing parser roots":
         val driver = file_read(SOURCE_PARSING)
         val start = driver.index_of("fn driver_end_transient_parse_scope")
         val end = driver.index_of("impl CompilerDriver:")
         val body = driver.substring(start, end)
-        val lexer_clear = body.index_of("lexer_release_parse_source_globals()")
-        val ast_clear = body.index_of("ast_reset()")
-        val scope_end = body.index_of("rt_transient_array_scope_end()")
+        val lexer_clear = body.index_of("\n    lexer_release_parse_source_globals()")
+        val ast_clear = body.index_of("\n    ast_reset()")
+        val scope_end = body.index_of("\n    val ended = rt_transient_array_scope_end()")
+        expect(lexer_clear).to_be_greater_than(scope_end)
         expect(ast_clear).to_be_greater_than(lexer_clear)
-        expect(scope_end).to_be_greater_than(ast_clear)
+        val assembly = file_read(MODULE_ASSEMBLY)
+        val assembly_start = assembly.index_of("pub fn parse_and_build_module_scoped")
+        val assembly_end = assembly.index_of("fn parse_and_build_module(source:")
+        val assembly_body = assembly.substring(assembly_start, assembly_end)
+        val assembly_scope_end = assembly_body.index_of("\n        val _ended = rt_transient_array_scope_end()")
+        val assembly_lexer_clear = assembly_body.index_of("\n        lexer_release_parse_source_globals()")
+        val assembly_ast_clear = assembly_body.index_of("\n        ast_reset()")
+        expect(assembly_lexer_clear).to_be_greater_than(assembly_scope_end)
+        expect(assembly_ast_clear).to_be_greater_than(assembly_lexer_clear)
+
+    it "replaces file-local parser owners before reading the next source":
+        val parser = file_read(PARSER)
+        val init_start = parser.index_of("fn parser_init_with_path")
+        val init_end = parser.index_of("# Per-token timing probe")
+        val init_body = parser.substring(init_start, init_end)
+        expect(init_body).to_contain("par_errors = []")
+        expect(init_body).to_contain("par_warnings = []")
+        expect(init_body).to_contain("par_struct_names = []")
+        expect(init_body.contains("par_errors.clear()")).to_equal(false)
+        expect(init_body.contains("par_warnings.clear()")).to_equal(false)
+        expect(init_body.contains("par_struct_names.clear()")).to_equal(false)
+        expect(init_body).to_contain("parser_generic_constraints_reset()")
+        val declarations = file_read(FN_STRUCT_DECLS)
+        expect(declarations).to_contain("fn parser_generic_constraints_reset():")
+        expect(declarations).to_contain("file_generic_constraints = {}")
+        expect(declarations).to_contain("file_generic_constraint_modes = {}")

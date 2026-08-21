@@ -160,3 +160,11 @@ implementation-blocked-by-bootstrap-authority
   ran successfully, disproving the last progress file as a deterministic source
   failure. The three-cycle cap is exhausted; see
   `stage3_streaming_surface_parse_nondeterministic_segv_2026-08-21.md`.
+- fix: Static lifecycle audit excluded cleanup ordering as the direct cause
+  because the scope was already paused. It instead found parser scratch arrays
+  reusing potentially reclaimed backing via `clear()`, plus file-local generic
+  constraint dictionaries retained across scopes without reset or promotion.
+  Parser init now replaces/resets those owner-local graphs; cleanup ordering is
+  separately canonicalized and both invariants have source contracts.
+  Re-verification is deferred because the current session exhausted its
+  three-cycle cap.
