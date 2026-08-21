@@ -250,6 +250,30 @@ require_fixed '../compiler/src/codegen/runtime_sffi.rs' \
 require_fixed 'compiler_registry_supplies_broad_runtime_abi_coverage' \
     src/compiler_rust/runtime/src/runtime_signature_scan.rs
 
+# Arena allocation previously declared two arguments in Simple while the Rust
+# provider consumed three. Keep the canonical arity and raw authority aligned.
+require_fixed 'RuntimeFuncSpec::new("rt_arena_alloc", &[I64, I64, I64], &[I64])' \
+    src/compiler_rust/compiler/src/codegen/runtime_sffi.rs
+require_fixed 'extern fn rt_arena_alloc(arena: i64, size: i64, align: i64) -> i64' \
+    src/compiler_rust/lib/std/src/infra/alloc.spl
+require_fixed 'rt_arena_alloc(self._handle, size, 8)' \
+    src/compiler_rust/lib/std/src/infra/alloc.spl
+require_fixed 'capabilities: [ffi, raw_ptr]' \
+    src/compiler_rust/lib/std/src/infra/alloc.spl
+
+arena_alloc_body=$(sed -n \
+    '/pub extern "C" fn rt_arena_alloc(/,/^}/p' \
+    "$root/src/compiler_rust/runtime/src/value/sffi/concurrent/arena.rs")
+arena_lock_count=$(printf '%s\n' "$arena_alloc_body" | rg -c 'ARENA_MAP\.lock\(' || true)
+if [ "$arena_lock_count" -ne 1 ]; then
+    echo "SFFI lint: arena allocation hot path must take exactly one registry lock" >&2
+    failed=1
+fi
+if printf '%s\n' "$arena_alloc_body" | rg -q 'HashMap::|Vec::|sha|dlsym'; then
+    echo "SFFI lint: arena allocation hot path gained allocation, hashing, or dynamic lookup" >&2
+    failed=1
+fi
+
 if [ "$failed" -ne 0 ]; then
     exit 1
 fi

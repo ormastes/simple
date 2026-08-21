@@ -595,3 +595,22 @@ Legacy multi-value networking tuples remain explicitly marked as improper C
 types and require status/out migration; their actual tuple signature is no
 longer hidden by a zero-argument declaration. All work is compile/admission
 time and leaves the static table and foreign-call hot paths unchanged.
+
+A zero-runtime-cost coverage gate now compares all 1,790 runtime symbol names
+with the compiler ABI registry and rejects new uncontracted symbols or lost
+coverage. The initial 1,009/781 covered/uncontracted baseline moved to
+1,015/775 by migrating all six arena functions. This census parses only actual
+list entries, so quoted comments cannot fabricate symbols.
+
+The arena migration also fixed a live ABI mismatch: Simple declared
+`rt_arena_alloc(handle, size)` while Rust consumed `(handle, size, align)`.
+Simple now passes an explicit alignment of eight and scopes raw calls under
+`unsafe(ffi, raw_ptr)`. Rust rejects non-positive capacity, negative sizes,
+zero/non-power-of-two alignment, overflow, allocation failure, and poisoned
+registry locks without unwinding across the ABI. The bump wrapper now obtains
+the arena's actual base allocation rather than treating an opaque handle as a
+pointer. Its per-allocation path remains local pointer arithmetic; the raw arena
+allocation path retains exactly one existing registry lock and adds no lookup,
+hashing, or allocation. Twelve focused arena tests pass. The legacy Simple file
+check remains blocked by six pre-existing direct `rt_pool_*` ownership errors
+outside this arena family.

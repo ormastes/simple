@@ -15,11 +15,17 @@
 
 
 # SFFI declarations for allocator operations
+@unsafe(reason: "raw arena handle may be zero and must not escape unchecked", capabilities: [ffi, raw_ptr])
 extern fn rt_arena_new(capacity: i64) -> i64
-extern fn rt_arena_alloc(arena: i64, size: i64) -> i64
+@unsafe(reason: "raw arena pointer may be zero and is valid only for the arena lifetime", capabilities: [ffi, raw_ptr])
+extern fn rt_arena_alloc(arena: i64, size: i64, align: i64) -> i64
+@unsafe(reason: "raw arena handle lifetime is caller-owned", capabilities: [ffi])
 extern fn rt_arena_reset(arena: i64)
+@unsafe(reason: "raw arena handle lifetime is caller-owned", capabilities: [ffi])
 extern fn rt_arena_free(arena: i64)
+@unsafe(reason: "raw arena handle must identify a live arena", capabilities: [ffi])
 extern fn rt_arena_used(arena: i64) -> i64
+@unsafe(reason: "raw arena handle must identify a live arena", capabilities: [ffi])
 extern fn rt_arena_capacity(arena: i64) -> i64
 
 extern fn rt_pool_new(object_size: i64, capacity: i64) -> i64
@@ -73,26 +79,32 @@ struct Arena:
 
     # Create a new arena with the given capacity in bytes.
     fn new(capacity: i64) -> Arena:
-        val handle = rt_arena_new(capacity)
+        var handle: i64 = 0
+        unsafe(capabilities: [ffi, raw_ptr]):
+            handle = rt_arena_new(capacity)
         return Arena(_handle: handle, _capacity: capacity)
 
     # Allocate raw bytes from the arena.
     # Returns 0 if the arena is full.
     fn alloc_raw(self, size: i64) -> i64:
-        return rt_arena_alloc(self._handle, size)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            return rt_arena_alloc(self._handle, size, 8)
 
     # Reset the arena, freeing all allocations.
     # Does not release the underlying memory.
     fn reset(self):
-        rt_arena_reset(self._handle)
+        unsafe(capabilities: [ffi]):
+            rt_arena_reset(self._handle)
 
     # Get the number of bytes currently used.
     fn used(self) -> i64:
-        return rt_arena_used(self._handle)
+        unsafe(capabilities: [ffi]):
+            return rt_arena_used(self._handle)
 
     # Get the total capacity in bytes.
     fn capacity(self) -> i64:
-        return rt_arena_capacity(self._handle)
+        unsafe(capabilities: [ffi]):
+            return rt_arena_capacity(self._handle)
 
     # Check if the arena has space for the given size.
     fn has_space(self, size: i64) -> bool:
@@ -100,7 +112,8 @@ struct Arena:
 
     # Free the arena and release underlying memory.
     fn free(self):
-        rt_arena_free(self._handle)
+        unsafe(capabilities: [ffi]):
+            rt_arena_free(self._handle)
 
     # Implement Allocator trait
     fn alloc(self, size: i64) -> i64:
@@ -541,20 +554,27 @@ struct TypedPool<T>:
 # ```
 
 struct BumpAllocator:
+    _arena_handle: i64
     _buffer: i64
     _capacity: i64
     _offset: i64
 
     fn new(capacity: i64) -> BumpAllocator:
-        val buffer = rt_arena_new(capacity)
+        var arena_handle: i64 = 0
+        var buffer: i64 = 0
+        unsafe(capabilities: [ffi, raw_ptr]):
+            arena_handle = rt_arena_new(capacity)
+            if arena_handle != 0:
+                buffer = rt_arena_alloc(arena_handle, capacity, 8)
         return BumpAllocator(
+            _arena_handle: arena_handle,
             _buffer: buffer,
             _capacity: capacity,
             _offset: 0
         )
 
     fn alloc(self, size: i64) -> i64:
-        if self._offset + size > self._capacity:
+        if self._buffer == 0 or size < 0 or self._offset > self._capacity - size:
             return 0
         val ptr = self._buffer + self._offset
         self._offset = self._offset + size
@@ -567,7 +587,8 @@ struct BumpAllocator:
         return self._offset
 
     fn free(self):
-        rt_arena_free(self._buffer)
+        unsafe(capabilities: [ffi]):
+            rt_arena_free(self._arena_handle)
 
     # =========================================================================
     # Helper Methods

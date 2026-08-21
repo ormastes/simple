@@ -227,6 +227,15 @@ const F64: types::Type = types::F64;
 /// All runtime SFFI function specifications.
 pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
+    // Arena allocation
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_arena_new", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arena_alloc", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arena_capacity", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arena_used", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_arena_reset", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_arena_free", &[I64], &[]),
+    // =========================================================================
     // AOP runtime operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),

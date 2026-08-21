@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+# Zero-runtime-cost coverage gate for the compiler-owned runtime ABI registry.
+# A runtime symbol without a RuntimeFuncSpec is not verified callable metadata;
+# new gaps fail this gate instead of silently receiving the legacy fn() anchor.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+
+names="$temp_dir/runtime-names"
+specs="$temp_dir/runtime-specs"
+covered="$temp_dir/covered"
+missing="$temp_dir/missing"
+
+awk '
+    /pub const RUNTIME_SYMBOL_NAMES/ { inside = 1; next }
+    inside && /^[[:space:]]*];/ { exit }
+    inside && /^[[:space:]]*"[A-Za-z0-9_.]+",?[[:space:]]*(\/\/.*)?$/ {
+        line = $0
+        sub(/^[[:space:]]*"/, "", line)
+        sub(/".*/, "", line)
+        print line
+    }
+' "$root/src/compiler_rust/common/src/runtime_symbols.rs" | sort -u > "$names"
+
+sed -n 's/.*RuntimeFuncSpec::new("\([^"]*\)".*/\1/p' \
+    "$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs" | \
+    sort -u > "$specs"
+
+comm -12 "$names" "$specs" > "$covered"
+comm -23 "$names" "$specs" > "$missing"
+
+name_count=$(wc -l < "$names" | tr -d ' ')
+spec_count=$(wc -l < "$specs" | tr -d ' ')
+covered_count=$(wc -l < "$covered" | tr -d ' ')
+missing_count=$(wc -l < "$missing" | tr -d ' ')
+
+# 2026-08-21 baseline. Additions must carry a contract; migrations reduce the
+# missing ceiling and raise the covered floor in the same commit.
+minimum_covered=1015
+maximum_missing=775
+
+failed=0
+if [ "$covered_count" -lt "$minimum_covered" ]; then
+    echo "runtime SFFI contract coverage regressed: $covered_count < $minimum_covered" >&2
+    failed=1
+fi
+if [ "$missing_count" -gt "$maximum_missing" ]; then
+    echo "uncontracted runtime SFFI symbols grew: $missing_count > $maximum_missing" >&2
+    echo "new/uncovered symbols:" >&2
+    head -20 "$missing" >&2
+    failed=1
+fi
+if [ $((covered_count + missing_count)) -ne "$name_count" ]; then
+    echo "runtime SFFI contract census is internally inconsistent" >&2
+    failed=1
+fi
+
+printf '%s\n' \
+    "runtime symbols: $name_count" \
+    "compiler ABI specs: $spec_count" \
+    "covered runtime symbols: $covered_count" \
+    "uncontracted runtime symbols: $missing_count"
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "runtime symbol contract coverage: PASS"

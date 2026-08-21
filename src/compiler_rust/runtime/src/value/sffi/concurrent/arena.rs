@@ -20,24 +20,31 @@ struct Arena {
 }
 
 impl Arena {
-    fn new(capacity: usize) -> Self {
-        Self {
-            buffer: vec![0; capacity],
+    fn try_new(capacity: usize) -> Option<Self> {
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(capacity).ok()?;
+        buffer.resize(capacity, 0);
+        Some(Self {
+            buffer,
             capacity,
             used: 0,
-        }
+        })
     }
 
     fn alloc(&mut self, size: usize, align: usize) -> Option<*mut u8> {
+        if align == 0 || !align.is_power_of_two() {
+            return None;
+        }
         let align_offset = (align - (self.used % align)) % align;
-        let aligned_start = self.used + align_offset;
+        let aligned_start = self.used.checked_add(align_offset)?;
+        let end = aligned_start.checked_add(size)?;
 
-        if aligned_start + size > self.capacity {
+        if end > self.capacity {
             return None;
         }
 
         let ptr = unsafe { self.buffer.as_mut_ptr().add(aligned_start) };
-        self.used = aligned_start + size;
+        self.used = end;
         Some(ptr)
     }
 
@@ -55,9 +62,23 @@ static ARENA_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI6
 /// Create a new arena allocator with given capacity
 #[no_mangle]
 pub extern "C" fn rt_arena_new(capacity: i64) -> i64 {
-    let arena = Box::new(Arena::new(capacity as usize));
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return 0;
+    };
+    if capacity == 0 {
+        return 0;
+    }
+    let Some(arena) = Arena::try_new(capacity).map(Box::new) else {
+        return 0;
+    };
     let handle = ARENA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    ARENA_MAP.lock().unwrap().insert(handle, arena);
+    if handle <= 0 {
+        return 0;
+    }
+    let Ok(mut arenas) = ARENA_MAP.lock() else {
+        return 0;
+    };
+    arenas.insert(handle, arena);
     handle
 }
 
@@ -65,11 +86,15 @@ pub extern "C" fn rt_arena_new(capacity: i64) -> i64 {
 /// Returns pointer to allocated memory, or 0 if allocation failed
 #[no_mangle]
 pub extern "C" fn rt_arena_alloc(handle: i64, size: i64, align: i64) -> i64 {
-    ARENA_MAP
-        .lock()
-        .unwrap()
+    let (Ok(size), Ok(align)) = (usize::try_from(size), usize::try_from(align)) else {
+        return 0;
+    };
+    let Ok(mut arenas) = ARENA_MAP.lock() else {
+        return 0;
+    };
+    arenas
         .get_mut(&handle)
-        .and_then(|arena| arena.alloc(size as usize, align as usize))
+        .and_then(|arena| arena.alloc(size, align))
         .map(|ptr| ptr as i64)
         .unwrap_or(0)
 }
@@ -77,9 +102,10 @@ pub extern "C" fn rt_arena_alloc(handle: i64, size: i64, align: i64) -> i64 {
 /// Get arena capacity
 #[no_mangle]
 pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
-    ARENA_MAP
-        .lock()
-        .unwrap()
+    let Ok(arenas) = ARENA_MAP.lock() else {
+        return 0;
+    };
+    arenas
         .get(&handle)
         .map(|arena| arena.capacity as i64)
         .unwrap_or(0)
@@ -88,9 +114,10 @@ pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
 /// Get arena used bytes
 #[no_mangle]
 pub extern "C" fn rt_arena_used(handle: i64) -> i64 {
-    ARENA_MAP
-        .lock()
-        .unwrap()
+    let Ok(arenas) = ARENA_MAP.lock() else {
+        return 0;
+    };
+    arenas
         .get(&handle)
         .map(|arena| arena.used as i64)
         .unwrap_or(0)
@@ -99,7 +126,10 @@ pub extern "C" fn rt_arena_used(handle: i64) -> i64 {
 /// Reset arena (clear all allocations)
 #[no_mangle]
 pub extern "C" fn rt_arena_reset(handle: i64) {
-    if let Some(arena) = ARENA_MAP.lock().unwrap().get_mut(&handle) {
+    let Ok(mut arenas) = ARENA_MAP.lock() else {
+        return;
+    };
+    if let Some(arena) = arenas.get_mut(&handle) {
         arena.reset();
     }
 }
@@ -107,7 +137,9 @@ pub extern "C" fn rt_arena_reset(handle: i64) {
 /// Free arena
 #[no_mangle]
 pub extern "C" fn rt_arena_free(handle: i64) {
-    ARENA_MAP.lock().unwrap().remove(&handle);
+    if let Ok(mut arenas) = ARENA_MAP.lock() {
+        arenas.remove(&handle);
+    }
 }
 
 /// Clear all arena handles (for test cleanup)
@@ -237,6 +269,20 @@ mod tests {
         assert_eq!(rt_arena_alloc(999999, 100, 1), 0);
         rt_arena_reset(999999); // Should not crash
         rt_arena_free(999999); // Should not crash
+    }
+
+    #[test]
+    fn test_arena_rejects_invalid_capacity_size_and_alignment() {
+        assert_eq!(rt_arena_new(0), 0);
+        assert_eq!(rt_arena_new(-1), 0);
+
+        let handle = rt_arena_new(64);
+        assert_ne!(handle, 0);
+        assert_eq!(rt_arena_alloc(handle, -1, 8), 0);
+        assert_eq!(rt_arena_alloc(handle, 8, 0), 0);
+        assert_eq!(rt_arena_alloc(handle, 8, 3), 0);
+        assert_eq!(rt_arena_used(handle), 0);
+        rt_arena_free(handle);
     }
 
     #[test]
