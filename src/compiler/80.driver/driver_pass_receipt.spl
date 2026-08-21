@@ -1,0 +1,54 @@
+# Pass-execution receipts for the profile-gated HIR/mono hardening passes.
+#
+# WHY THIS EXISTS. Before this file, `80.driver` recorded NOTHING about which
+# profile-gated passes actually ran: a grep for `pass_executed` / `receipt` /
+# `evidence` across `80.driver` found only cache-promotion receipts and VHDL
+# artifact evidence, neither of which observes the HIR pipeline. That made the
+# failure mode "the checker is advisory because it never ran" indistinguishable
+# from "the checker ran and found nothing" -- both look like silence.
+#
+# A receipt is emitted for EVERY invocation, including the zero-diagnostic and
+# the skipped-because-advisory cases, so absence of a receipt is positive proof
+# the pass did not execute. `SIMPLE_PASS_RECEIPT=<path>` additionally appends
+# the receipt lines to a file so a shell gate can assert on them without
+# parsing debug logs.
+#
+# Deliberately dependency-light, same rule as driver_safety_severity.spl: it
+# imports only the driver's own log helper, so adding a receipt call to a pass
+# can never drag a new module graph into the interpreter session that parses
+# source in the same process.
+
+use compiler.driver.driver_log_helpers.{log_debug}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+struct PassReceipt:
+    """One executed-pass record.
+
+    `executed` is false ONLY for a pass that was reached and deliberately
+    skipped (e.g. Advisory severity with no opt-in env knob). A pass that was
+    never reached emits no receipt at all, which is the distinction the whole
+    file exists to preserve."""
+    pass_name: text
+    profile: text
+    executed: bool
+    modules_checked: i64
+    diagnostics: i64
+    errors_raised: i64
+
+fn pass_receipt_line(r: PassReceipt) -> text:
+    val state = if r.executed: "executed" else: "skipped"
+    "pass_executed name={r.pass_name} state={state} profile={r.profile} modules={r.modules_checked} diagnostics={r.diagnostics} errors={r.errors_raised}"
+
+fn record_pass_receipt(r: PassReceipt) -> text:
+    """Emit `r` to the debug log and, when `SIMPLE_PASS_RECEIPT` names a file,
+    append it there. Returns the receipt line so a caller can also surface it."""
+    val line = pass_receipt_line(r)
+    log_debug(line)
+    val sink = rt_env_get("SIMPLE_PASS_RECEIPT") ?? ""
+    if sink != "":
+        val _appended = rt_file_append_text(sink, line + "\n")
+    line
+
+export PassReceipt, pass_receipt_line, record_pass_receipt

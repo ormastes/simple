@@ -142,46 +142,5 @@ pub(crate) fn exec_lambda(
         }
     }
 
-    // Write back mutated CAPTURED containers to the caller's bindings (6th write-back
-    // defect, 2026-08-19): a `var` local captured by a closure must behave as a shared
-    // mutable capture, but local_env is a value clone of captured_env, so a `me`-method
-    // self-mutation performed on a captured Object inside the closure body was lost to
-    // the enclosing scope. For every non-local overlay entry that was genuinely captured
-    // (present in captured_env before the call) and holds a container value, propagate
-    // the post-body value to the caller's env (when it binds the same name) and mirror
-    // into MODULE_GLOBALS when the name lives there (same policy as commit 47411747677).
-    if result.is_ok() {
-        let param_set: std::collections::HashSet<&str> = params.iter().map(|s| s.as_str()).collect();
-        for (name, value) in local_env.overlay_entries() {
-            if local_env.is_local(name) || param_set.contains(name.as_str()) {
-                continue;
-            }
-            if !captured_env.contains_key(name) {
-                continue;
-            }
-            if !matches!(
-                value,
-                Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-            ) {
-                continue;
-            }
-            if captured_env.get(name).map(|old| old == value).unwrap_or(false) {
-                continue;
-            }
-            // Keep the lambda's own captured snapshot current so a later call through
-            // the same env clone chain observes the mutation.
-            captured_env.insert(name.clone(), value.clone());
-            if call_env.contains_key(name) {
-                call_env.insert(name.clone(), value.clone());
-            }
-            crate::interpreter::MODULE_GLOBALS.with(|cell| {
-                let mut globals = cell.borrow_mut();
-                if globals.contains_key(name) {
-                    globals.insert(name.clone(), value.clone());
-                }
-            });
-        }
-    }
-
     result
 }

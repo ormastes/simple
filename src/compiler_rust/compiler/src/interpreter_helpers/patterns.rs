@@ -548,8 +548,13 @@ fn handle_method_call_with_self_update_inner(
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     // Sync to MODULE_GLOBALS if this variable lives there.
                                     MODULE_GLOBALS.with(|cell| {
+                                        // Peek before the write borrow: borrow_mut() on this generation-tracked
+                                        // cell invalidates every owned-env template (2026-08-21 stall record).
+                                        if !cell.borrow().contains_key(arr_name) {
+                                            return;
+                                        }
                                         let mut globals = cell.borrow_mut();
-                                        if globals.contains_key(arr_name) {
+                                        {
                                             globals.insert(arr_name.clone(), new_arr_val.clone());
                                         }
                                     });
@@ -583,8 +588,13 @@ fn handle_method_call_with_self_update_inner(
                                     let new_arr_val = Value::Array(Arc::new(new_arr));
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     MODULE_GLOBALS.with(|cell| {
+                                        // Peek before the write borrow: borrow_mut() on this generation-tracked
+                                        // cell invalidates every owned-env template (2026-08-21 stall record).
+                                        if !cell.borrow().contains_key(arr_name) {
+                                            return;
+                                        }
                                         let mut globals = cell.borrow_mut();
-                                        if globals.contains_key(arr_name) {
+                                        {
                                             globals.insert(arr_name.clone(), new_arr_val.clone());
                                         }
                                     });
@@ -659,8 +669,13 @@ fn handle_method_call_with_self_update_inner(
                     if let Some(new_root) = super::super::place::updated_root(env, &place, new_self) {
                         // Keep MODULE_GLOBALS in step, as the sibling paths do.
                         MODULE_GLOBALS.with(|cell| {
+                            // Peek before the write borrow: borrow_mut() on this generation-tracked
+                            // cell invalidates every owned-env template (2026-08-21 stall record).
+                            if !cell.borrow().contains_key(&place.root) {
+                                return;
+                            }
                             let mut globals = cell.borrow_mut();
-                            if globals.contains_key(&place.root) {
+                            {
                                 globals.insert(place.root.clone(), new_root.clone());
                             }
                         });

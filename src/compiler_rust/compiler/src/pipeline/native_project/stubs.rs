@@ -84,6 +84,40 @@ fn is_runtime_owned_symbol(sym: &str) -> bool {
     sym.trim_start_matches('_').starts_with("rt_")
 }
 
+/// Escape hatch for the undefined-runtime-symbol verdict below. Named
+/// separately from `linker/native_binary/stubs.rs`'s `SIMPLE_ALLOW_UNRESOLVED_RT`
+/// so the two linker lanes can be bypassed independently.
+pub(crate) const ALLOW_UNRESOLVED_RUNTIME_ENV: &str = "SIMPLE_ALLOW_UNRESOLVED_RUNTIME";
+
+/// True for a symbol owned by the runtime rather than by application code.
+///
+/// `src/runtime/runtime.h` exports exactly two prefixes: `rt_` (802 declarations)
+/// and `spl_` (99). Both are runtime property; an undefined reference to either
+/// is a missing runtime implementation, never an optional application function.
+/// Mach-O's extra leading underscore is stripped, matching `is_system_symbol`.
+fn is_runtime_prefixed_symbol(sym: &str) -> bool {
+    let bare = sym.trim_start_matches('_');
+    bare.starts_with("rt_") || bare.starts_with("spl_")
+}
+
+/// Runtime symbols that are GENUINELY optional -- a build may legitimately link
+/// without them because every call site is null-guarded or the symbol is a hook
+/// supplied only by some hosts.
+///
+/// This is the allowlist mechanism for the fail-closed check. Adding a name here
+/// is a claim that a NULL definition is CORRECT, not merely tolerable. Names that
+/// are simply not implemented yet do NOT belong here -- implement them, or run
+/// the bootstrap lane, which is exempt wholesale.
+const RT_OPTIONAL_SYMBOLS: &[&str] = &[
+    // Set only by hosts that pass argv through; call sites are `if (sym) sym();`.
+    "rt_set_args",
+];
+
+fn is_runtime_optional_symbol(sym: &str) -> bool {
+    let bare = sym.trim_start_matches('_');
+    RT_OPTIONAL_SYMBOLS.contains(&bare)
+}
+
 fn alias_gc_prelude(os: TargetOS) -> &'static str {
     if os == TargetOS::MacOS {
         ".subsections_via_symbols\n"
@@ -966,6 +1000,62 @@ pub(crate) fn generate_stub_object(
     // no undefined rt_* to stub there.
     let stub_missing_runtime = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
         || std::env::var("SIMPLE_STUB_MISSING_RT").as_deref() == Ok("1");
+
+    // FAIL CLOSED on undefined RUNTIME-owned symbols (task: 2026-08-21).
+    //
+    // `is_runtime_owned_symbol` deliberately keeps `rt_*` out of `needs_stub` --
+    // the runtime, not the stub generator, owns them. Until now that was the END
+    // of the story: the reference was simply left undefined and the final link
+    // tolerated it, leaving a NULL GOT slot. `rt_unwrap_or_trap` reached every
+    // self-hosted stage binary that way and SEGV'd on a three-line hello world
+    // while `--version` answered cleanly. A symbol nobody defines is not
+    // "optional", it is a call through address 0.
+    //
+    // This turns that silent tolerance into a verdict that NAMES the symbols.
+    // Genuinely optional externs stay tolerated through `RT_OPTIONAL_SYMBOLS`
+    // below (the allowlist mechanism, mirroring RT_KEEP in
+    // `linker/native_binary/stubs.rs`, which is the same policy on the other
+    // linker lane). Bootstrap/stub-missing-runtime lanes are exempt: they
+    // deliberately weak-stub the gap so the binary can LOAD.
+    let undefined_runtime: Vec<String> = undefined
+        .iter()
+        .filter(|s| !defined.contains(*s))
+        .filter(|s| is_runtime_prefixed_symbol(s))
+        .filter(|s| !is_optional_weak_hook_symbol(s))
+        .filter(|s| !is_compiler_provided_runtime_symbol(s))
+        .filter(|s| !is_linker_provided_symbol(s, &defined))
+        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_runtime_optional_symbol(s))
+        .cloned()
+        .collect();
+    if !undefined_runtime.is_empty() && !stub_missing_runtime {
+        let names = undefined_runtime.join(", ");
+        if std::env::var(ALLOW_UNRESOLVED_RUNTIME_ENV).as_deref() == Ok("1") {
+            eprintln!(
+                "Warning: {} runtime symbol(s) are undefined in this link and will be left \
+                 unresolved ({}=1 set): {}",
+                undefined_runtime.len(),
+                ALLOW_UNRESOLVED_RUNTIME_ENV,
+                names
+            );
+        } else {
+            return Err(format!(
+                "{} runtime symbol(s) referenced by generated code have no definition in any \
+linked object, runtime archive, or system library: {}\n\
+  The native link tolerates undefined symbols, so this would produce a binary with a NULL \
+GOT slot per name and SEGV on the first call -- exactly the failure that made every \
+self-hosted stage binary crash on hello world (rt_unwrap_or_trap, 2026-08-21).\n\
+  Fix: implement the symbol in the runtime (src/runtime/simple_core/*.spl for the \
+simple-core archive, src/runtime/*.c for the C runtime), correct the extern name, add it \
+to RT_OPTIONAL_SYMBOLS in pipeline/native_project/stubs.rs if it is genuinely optional, \
+or set {}=1 to bypass at your own risk.",
+                undefined_runtime.len(),
+                names,
+                ALLOW_UNRESOLVED_RUNTIME_ENV
+            ));
+        }
+    }
+
     let mut needs_stub: Vec<String> = undefined
         .into_iter()
         .filter(|s| !defined.contains(s))

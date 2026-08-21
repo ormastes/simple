@@ -734,13 +734,18 @@ pub(crate) fn exec_assignment(
                         if try_array_append_in_place(name, items, env, functions, classes, enums, impl_methods)? {
                             // Also sync to MODULE_GLOBALS if this name lives there.
                             MODULE_GLOBALS.with(|cell| {
-                                let mut globals = cell.borrow_mut();
-                                if globals.contains_key(name) {
-                                    if let Some(v) = env.get(name) {
-                                        globals.insert(name.clone(), v.clone());
-                                    }
+                                // Peek before taking the write borrow: `borrow_mut()` on this
+                                // generation-tracked cell invalidates every owned-env template,
+                                // and this path runs on EVERY local assignment. Until 2026-08-21
+                                // that made each intra-module call rebuild its env (~5 ms in a
+                                // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
+                                if !cell.borrow().contains_key(name) {
+                                    return;
                                 }
-                            });
+                                if let Some(v) = env.get(name) {
+                                    cell.borrow_mut().insert(name.clone(), v.clone());
+                                }
+                                });
                             return Ok(Control::Next);
                         }
                     }
@@ -762,13 +767,18 @@ pub(crate) fn exec_assignment(
                         )? {
                             None => {
                                 MODULE_GLOBALS.with(|cell| {
-                                    let mut globals = cell.borrow_mut();
-                                    if globals.contains_key(name) {
-                                        if let Some(v) = env.get(name) {
-                                            globals.insert(name.clone(), v.clone());
-                                        }
+                                    // Peek before taking the write borrow: `borrow_mut()` on this
+                                    // generation-tracked cell invalidates every owned-env template,
+                                    // and this path runs on EVERY local assignment. Until 2026-08-21
+                                    // that made each intra-module call rebuild its env (~5 ms in a
+                                    // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
+                                    if !cell.borrow().contains_key(name) {
+                                        return;
                                     }
-                                });
+                                    if let Some(v) = env.get(name) {
+                                        cell.borrow_mut().insert(name.clone(), v.clone());
+                                    }
+                                    });
                                 return Ok(Control::Next);
                             }
                             Some(rhs_val) => {
@@ -788,13 +798,18 @@ pub(crate) fn exec_assignment(
                                 env.remove(&temp_name);
                                 env.insert(name.clone(), result);
                                 MODULE_GLOBALS.with(|cell| {
-                                    let mut globals = cell.borrow_mut();
-                                    if globals.contains_key(name) {
-                                        if let Some(v) = env.get(name) {
-                                            globals.insert(name.clone(), v.clone());
-                                        }
+                                    // Peek before taking the write borrow: `borrow_mut()` on this
+                                    // generation-tracked cell invalidates every owned-env template,
+                                    // and this path runs on EVERY local assignment. Until 2026-08-21
+                                    // that made each intra-module call rebuild its env (~5 ms in a
+                                    // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
+                                    if !cell.borrow().contains_key(name) {
+                                        return;
                                     }
-                                });
+                                    if let Some(v) = env.get(name) {
+                                        cell.borrow_mut().insert(name.clone(), v.clone());
+                                    }
+                                    });
                                 return Ok(Control::Next);
                             }
                         }
@@ -848,11 +863,13 @@ pub(crate) fn exec_assignment(
 
                 // Also sync to MODULE_GLOBALS if it exists there (for module-level assignments)
                 MODULE_GLOBALS.with(|cell| {
-                    let mut globals = cell.borrow_mut();
-                    if globals.contains_key(name) {
-                        globals.insert(name.clone(), env.get(name).unwrap().clone());
+                    // Peek first (see the note above): an unconditional borrow_mut here
+                    // bumped the globals generation on every local assignment.
+                    if !cell.borrow().contains_key(name) {
+                        return;
                     }
-                });
+                    cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
+                    });
             }
         }
         Ok(Control::Next)

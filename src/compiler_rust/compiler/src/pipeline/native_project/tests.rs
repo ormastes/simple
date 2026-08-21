@@ -7699,3 +7699,79 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
         r3.cached
     );
 }
+
+/// The linker lane must FAIL CLOSED on an undefined runtime symbol.
+///
+/// Incident 2026-08-21: `rt_unwrap_or_trap` was emitted by codegen, defined by
+/// nothing in the link, and silently tolerated -- leaving a NULL GOT slot that
+/// SEGV'd every self-hosted stage binary on a three-line hello world while
+/// `--version` answered cleanly. The fixture object below reproduces exactly
+/// that shape: a `.o` that CALLS `rt_fixture_missing` with no provider anywhere.
+#[test]
+fn test_linker_fails_closed_on_undefined_runtime_symbol() {
+    // Shared with test_bootstrap_stub_mode_*: that test sets
+    // SIMPLE_STUB_MISSING_RT=1 process-wide, which is exactly the bypass this
+    // check honours. Without the lock the two race and this one sees the
+    // bypass.
+    let _guard = no_stub_fallback_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let prev_stub = std::env::var("SIMPLE_STUB_MISSING_RT").ok();
+    let prev_boot = std::env::var("SIMPLE_BOOTSTRAP").ok();
+    std::env::remove_var("SIMPLE_STUB_MISSING_RT");
+    std::env::remove_var("SIMPLE_BOOTSTRAP");
+
+    let cc = super::tools::find_c_compiler();
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("fixture.c");
+    std::fs::write(
+        &src,
+        "long rt_fixture_missing(long x);\nlong fixture_entry(long x) { return rt_fixture_missing(x); }\n",
+    )
+    .unwrap();
+    let obj = temp.path().join("fixture.o");
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        trait_impls: std::sync::Arc::new(std::collections::HashMap::new()),
+        vtable_type_owners: std::sync::Arc::new(std::collections::HashSet::new()),
+        vtable_symbols: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        unique_struct_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
+        fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+
+    let result = super::stubs::generate_stub_object(temp.path(), &[], &obj, &[], &imports);
+    if let Some(v) = prev_stub {
+        std::env::set_var("SIMPLE_STUB_MISSING_RT", v);
+    }
+    if let Some(v) = prev_boot {
+        std::env::set_var("SIMPLE_BOOTSTRAP", v);
+    }
+    let err = result.expect_err("undefined rt_* symbol must be a hard link error, not a silent stub");
+    assert!(
+        err.contains("rt_fixture_missing"),
+        "the verdict must NAME the symbol; got: {err}"
+    );
+    assert!(
+        err.contains("SIMPLE_ALLOW_UNRESOLVED_RUNTIME"),
+        "the verdict must state the escape hatch; got: {err}"
+    );
+}

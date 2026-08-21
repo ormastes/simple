@@ -315,7 +315,10 @@ pub struct CowEnv {
     /// Owner-qualified updates crossing frames from another module.
     forwarded_globals: HashMap<(Arc<str>, String), Value>,
     /// Local global name to defining module/name, including imported aliases.
-    global_bindings: HashMap<String, (Arc<str>, String)>,
+    // Arc-shared: a module function's env template carries thousands of
+    // imported-global bindings and is cloned on EVERY call; copy-on-write via
+    // Arc::make_mut keeps the per-call clone O(1) (2026-08-21 stall record).
+    global_bindings: Arc<HashMap<String, (Arc<str>, String)>>,
     /// Names written through this frame since the last `clear_dirty()`.
     /// Distinguishes actual frame writes from values merely present in a
     /// cloned environment, so block/closure write-back can be dirty-only.
@@ -338,7 +341,7 @@ impl CowEnv {
             block_local_bindings: HashMap::new(),
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
-            global_bindings: HashMap::new(),
+            global_bindings: Arc::new(HashMap::new()),
             dirty_names: HashSet::new(),
             uninit_names: HashSet::new(),
         }
@@ -387,7 +390,9 @@ impl CowEnv {
 
     pub fn mark_local(&mut self, name: impl Into<String>) {
         let name = name.into();
-        self.global_bindings.remove(&name);
+        if self.global_bindings.contains_key(&name) {
+            Arc::make_mut(&mut self.global_bindings).remove(&name);
+        }
         self.local_bindings.insert(name);
     }
 
@@ -509,6 +514,23 @@ impl CowEnv {
                 .count()
     }
 
+    /// Identity of this env for the owned-env template cache: `Some(0)` for a
+    /// fully empty env, `Some(ptr)` of the shared immutable base when the env
+    /// is exactly that base (no overlay, no tombstones), `None` otherwise.
+    /// Two envs with the same key see the same bindings, so a per-call env
+    /// template built from one is valid for the other (globals are guarded
+    /// separately by the module-globals generation).
+    /// doc/08_tracking/bug/bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
+    pub fn template_key(&self) -> Option<usize> {
+        if !self.overlay.is_empty() || !self.tombstones.is_empty() {
+            return None;
+        }
+        match &self.base {
+            None => Some(0),
+            Some(b) => Some(Arc::as_ptr(b) as *const u8 as usize),
+        }
+    }
+
     /// Check if the environment is empty.
     pub fn is_empty(&self) -> bool {
         if !self.overlay.is_empty() {
@@ -588,7 +610,7 @@ impl CowEnv {
 
     pub fn bind_global(&mut self, local_name: String, owner: Arc<str>, source_name: String) {
         if !self.is_local(&local_name) {
-            self.global_bindings.insert(local_name, (owner, source_name));
+            Arc::make_mut(&mut self.global_bindings).insert(local_name, (owner, source_name));
         }
     }
 
@@ -652,9 +674,9 @@ impl CowEnv {
                 env.overlay.insert(k.clone(), v.clone());
             }
         }
-        for (local_name, (owner, source_name)) in &self.global_bindings {
+        for (local_name, (owner, source_name)) in self.global_bindings.iter() {
             if names.contains(local_name.as_str()) {
-                env.global_bindings
+                Arc::make_mut(&mut env.global_bindings)
                     .insert(local_name.clone(), (Arc::clone(owner), source_name.clone()));
             }
         }
@@ -689,7 +711,7 @@ impl CowEnv {
             block_local_bindings: HashMap::new(),
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
-            global_bindings: HashMap::new(),
+            global_bindings: Arc::new(HashMap::new()),
             dirty_names: HashSet::new(),
             uninit_names: HashSet::new(),
         }
@@ -705,7 +727,7 @@ impl CowEnv {
             block_local_bindings: HashMap::new(),
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
-            global_bindings: HashMap::new(),
+            global_bindings: Arc::new(HashMap::new()),
             dirty_names: HashSet::new(),
             uninit_names: HashSet::new(),
         }
@@ -740,7 +762,9 @@ impl CowEnv {
         self.block_local_bindings.clear();
         self.refreshed_globals.clear();
         self.forwarded_globals.clear();
-        self.global_bindings.clear();
+        if !self.global_bindings.is_empty() {
+            self.global_bindings = Arc::new(HashMap::new());
+        }
         self.dirty_names.clear();
         self.uninit_names.clear();
         if let Some(ref base) = self.base {

@@ -57,7 +57,7 @@ fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
 //
 // Kill switch: SIMPLE_INTERP_ENV_CACHE=0 disables the cache entirely.
 thread_local! {
-    static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<Arc<str>, (u64, Env)>> =
+    static OWNED_ENV_TEMPLATE_CACHE: std::cell::RefCell<HashMap<(Arc<str>, usize), (u64, Env)>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -110,12 +110,21 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
         return initial_env;
     };
 
-    let cache_ok = *INTERP_ENV_CACHE_ENABLED && captured_env.is_empty();
+    // Cache key: the owner module plus the identity of the captured env's
+    // immutable base. Until 2026-08-21 only an EMPTY captured env was cached,
+    // so every intra-module call (module fn -> module fn, whose captured env
+    // is the module env snapshot) rebuilt the full env -- thousands of
+    // imported globals -- per call: ~5.5 ms/call in a driver module vs
+    // 0.08 ms in a light one, which made interpreted phase 1/2 of a stage
+    // build look like a hang.
+    let template_key = captured_env.template_key();
+    let cache_ok = *INTERP_ENV_CACHE_ENABLED && template_key.is_some();
+    let cache_key = (Arc::clone(&owner), template_key.unwrap_or(usize::MAX));
     if cache_ok {
         let generation = module_globals_generation();
         let cached = OWNED_ENV_TEMPLATE_CACHE.with(|cell| {
             cell.borrow()
-                .get(&owner)
+                .get(&cache_key)
                 .and_then(|(cached_gen, template)| (*cached_gen == generation).then(|| template.clone()))
         });
         if let Some(env) = cached {
@@ -194,7 +203,7 @@ pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &
         // actually reflects.
         let generation = module_globals_generation();
         OWNED_ENV_TEMPLATE_CACHE
-            .with(|cell| cell.borrow_mut().insert(Arc::clone(&owner), (generation, env.clone())));
+            .with(|cell| cell.borrow_mut().insert(cache_key, (generation, env.clone())));
     }
     env
 }

@@ -166,14 +166,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut verbose = false;
     let mut strip = false;
     let mut threads: Option<usize> = None;
-    // Must match NativeProjectConfig's library default (native_project/mod.rs:445 =
-    // 300). A stage2/stage3 binary links libsimple_native_all.a, so THIS is the
-    // per-file budget the self-hosted lane actually gets. At 60 the pure-Simple
-    // compiler timed out on src/app/io/mod.spl and
-    // src/compiler/10.frontend/core/__init__.spl during stage 3 while the faster
-    // Rust seed cleared them, so the trap only ever fired at stage 3 and later.
-    // doc/08_tracking/bug/bootstrap_stage4_segfault_and_native_all_60s_file_timeout_2026-08-17.md
-    let mut timeout: u64 = 300;
+    let mut timeout: u64 = 60;
     let mut incremental = true;
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
@@ -214,7 +207,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --verbose, -v       Verbose output");
                 println!("  --strip             Strip symbols from output");
                 println!("  --threads <n>       Number of compilation threads");
-                println!("  --timeout <secs>    Per-file timeout (default: 300)");
+                println!("  --timeout <secs>    Per-file timeout (default: 60)");
                 println!("  --no-incremental    Disable incremental compilation");
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");

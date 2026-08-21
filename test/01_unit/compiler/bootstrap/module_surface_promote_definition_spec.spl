@@ -1,0 +1,30 @@
+# Regression: `module_surface_registry.spl` was truncated mid-function, which
+# deleted both the tail of `module_surfaces_from_modules` and the whole
+# `module_surface_promote` definition. The `export use` re-export and the call
+# site in the driver survived, so the symbol became link-unresolved and the
+# native bootstrap binary called a NULL pointer right after `surface_freeze`
+# (SIGSEGV on hello world). See
+# doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md
+use std.spec
+use std.io.{file_read}
+
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
+val DRIVER = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+
+describe "module surface promotion symbol is defined":
+    it "defines module_surface_promote in the registry module":
+        val registry = file_read(REGISTRY)
+        expect(registry).to_contain("fn module_surface_promote(")
+        expect(registry).to_contain("rt_transient_heap_promote(surface)")
+
+    it "keeps the re-export and the driver call site backed by a definition":
+        val surface = file_read(SURFACE)
+        val driver = file_read(DRIVER)
+        expect(surface).to_contain("module_surface_promote")
+        expect(driver).to_contain("module_surface_promote(surface)")
+
+    it "does not leave module_surfaces_from_modules truncated":
+        val registry = file_read(REGISTRY)
+        expect(registry).to_contain("val origin_result = builder.resolve_export_origins()")
+        expect(registry).to_contain("builder.finish()")

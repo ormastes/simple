@@ -1,0 +1,371 @@
+#!/bin/sh
+# Guard: no unresolved runtime-prefixed symbols in tracked stage binaries, and
+# no codegen-emitted runtime entry point missing from the C runtime archive.
+#
+# Why this exists (incident 2026-08-18,
+# doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md):
+# codegen lowers `.unwrap()` to a call to `rt_unwrap_or_trap`
+# (codegen/instr/closures_structs.rs: `"unwrap" => "rt_unwrap_or_trap"`). That
+# symbol existed in the Rust runtime and in simple_core, but NOT in the C
+# runtime, which is what the bootstrap/native lane links. The link tolerates
+# unresolved symbols (bootstrap logs even printed "Unresolved symbol preview:
+# ..." and nothing failed), so the GOT slot stayed zero and the call went to
+# address 0 -> SIGSEGV on a three-line hello world.
+#
+# No existing guard catches this class:
+#   * check-c-runtime-compiles-push.shs runs `clang -fsyntax-only`, which never
+#     links -- its own header records "a declared-but-never-defined symbol still
+#     gets through". Here the symbol was not even declared, only CALLED, from
+#     generated code.
+#   * check-unbacked-extern-ratchet.shs classifies Simple `extern` declarations;
+#     a codegen-emitted call has no `extern` declaration to classify.
+#   * every other guard checks trees, ranges or source text.
+#
+# Two independent checks:
+#   1. LINKED BINARIES. For each tracked bootstrap/**/simple (or --bin/--rev),
+#      list undefined symbols (`nm -u` static + `nm -D --undefined-only`
+#      dynamic), keep only runtime-prefixed ones, and subtract everything the
+#      binary's own resolved shared libraries actually define (`ldd` ->
+#      `nm -D --defined-only`). Anything left is unresolved at runtime = FAIL.
+#   2. ARCHIVE, BEFORE ANY LINK. Extract the runtime entry names codegen emits
+#      and check each is defined (nm type T or W) in the static archive
+#      build/simple-core/libsimple_runtime.a. This catches the incident class
+#      before a binary is ever produced.
+#
+# Runtime prefixes are DERIVED from src/runtime/runtime.h's declarations, not
+# hardcoded to rt_ (measured: rt_, spl_, simple_).
+#
+# Verdict (always the last line of stdout):
+#   PASS  — <n> symbol(s) checked across <k> binary(ies) + archive, 0 unresolved
+#   FAIL  — ... <m> unresolved: <bin>:<sym> ...
+#   ERROR — nothing was checked (<reason>)
+# 0 binaries, missing `nm`, or an unreadable artifact is ERROR, never a pass:
+# absence of evidence is not evidence of absence.
+#
+# Exit-status discipline: every command's status is read on the line AFTER the
+# command, into a variable -- never through a pipe, whose $? is the LAST
+# element's status and has produced false greens in this repo before.
+#
+# Usage:
+#   sh scripts/check/check-no-unresolved-runtime-symbols.shs            # tracked stage blobs (working tree)
+#   sh scripts/check/check-no-unresolved-runtime-symbols.shs --rev <sha> # committed content
+#   sh scripts/check/check-no-unresolved-runtime-symbols.shs --bin <path> [--bin ...]
+#   sh scripts/check/check-no-unresolved-runtime-symbols.shs --selftest-only
+
+set -u
+
+ROOT_DIR="${ROOT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}"
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+REV=""
+SELFTEST_ONLY=0
+EXPLICIT_BINS=""
+ARCHIVE="${ARCHIVE:-build/simple-core/libsimple_runtime.a}"
+CODEGEN_DIR="${CODEGEN_DIR:-src/compiler_rust/compiler/src/codegen}"
+RUNTIME_H="${RUNTIME_H:-src/runtime/runtime.h}"
+SCAN_ROOT="$ROOT_DIR"
+ARCHIVE_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV="${2:-}"; shift 2 ;;
+        --bin) EXPLICIT_BINS="$EXPLICIT_BINS
+${2:-}"; shift 2 ;;
+        --root) SCAN_ROOT="${2:-}"; shift 2 ;;
+        --archive-only) ARCHIVE_ONLY=1; shift ;;
+        --selftest-only) SELFTEST_ONLY=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (bad argument)"; exit 2 ;;
+    esac
+done
+
+NM="${NM:-nm}"
+command -v "$NM" >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "ERROR — nothing was checked (nm unavailable)"
+    exit 2
+fi
+
+TMPROOT=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$TMPROOT"' EXIT INT TERM
+
+# ---------------------------------------------------------------- prefixes ---
+# Derive runtime symbol prefixes from runtime.h's own declarations.
+derive_prefixes() {
+    dp_h="$SCAN_ROOT/$RUNTIME_H"
+    if [ ! -r "$dp_h" ]; then
+        echo "rt_ spl_ simple_"
+        return 0
+    fi
+    dp_out=$("$GREP" -oE '\b[a-z]+_[a-z0-9_]*\(' "$dp_h" 2>/dev/null | sed 's/\(_[a-z0-9_]*\)\?(.*//' | sed 's/_.*//' | sort -u)
+    dp_res=""
+    for p in rt spl simple; do
+        case " $dp_out " in *" $p "*) dp_res="$dp_res ${p}_";; esac
+    done
+    [ -n "$dp_res" ] || dp_res=" rt_ spl_ simple_"
+    echo "$dp_res"
+}
+PREFIXES=$(derive_prefixes)
+PREFIX_RE=$(echo "$PREFIXES" | tr -s ' ' '\n' | "$GREP" -v '^$' | paste -sd'|' -)
+[ -n "$PREFIX_RE" ] || PREFIX_RE='rt_|spl_|simple_'
+
+# ------------------------------------------------------------ binary logic ---
+CHECKED_SYMS=0
+OFFENDERS=""
+OFFENDER_COUNT=0
+BIN_COUNT=0
+
+# Symbols provided by the binary's own resolved shared libraries (libc, libm,
+# libpthread, ld-linux, ...). Derived at runtime from `ldd`, never hand-listed.
+provided_by_libs() {
+    pl_bin=$1
+    pl_out="$TMPROOT/provided.$$"
+    : > "$pl_out"
+    pl_libs=$(ldd "$pl_bin" 2>/dev/null | "$GREP" -oE '/[^ ]+\.so[^ ]*' | sort -u)
+    for l in $pl_libs; do
+        [ -r "$l" ] || continue
+        "$NM" -D --defined-only "$l" 2>/dev/null | awk '{print $NF}' >> "$pl_out"
+    done
+    sort -u "$pl_out"
+}
+
+check_binary() {
+    cb_path=$1     # on-disk file to inspect
+    cb_label=$2    # name to report
+    if [ ! -r "$cb_path" ]; then
+        echo "ERROR — nothing was checked (unreadable artifact: $cb_label)"
+        exit 2
+    fi
+    cb_u="$TMPROOT/undef"
+    cb_all="$TMPROOT/allsyms"
+    "$NM" -a "$cb_path" >"$cb_all" 2>/dev/null
+    { "$NM" -u "$cb_path" 2>/dev/null; "$NM" -D --undefined-only "$cb_path" 2>/dev/null; } \
+        | awk '{print $NF}' | sort -u > "$cb_u"
+    # A fully STRIPPED artifact yields no symbol table at all. That is absence of
+    # EVIDENCE, not evidence of absence -- reporting PASS on it would be exactly
+    # the fail-open this guard exists to close. ERROR, never a pass.
+    if [ ! -s "$cb_u" ] && [ ! -s "$cb_all" ]; then
+        echo "ERROR — nothing was checked (no symbol table, stripped: $cb_label)"
+        exit 2
+    fi
+    cb_rt=$("$GREP" -E "^($PREFIX_RE)" "$cb_u" 2>/dev/null | sort -u)
+    cb_provided="$TMPROOT/prov"
+    provided_by_libs "$cb_path" > "$cb_provided"
+    BIN_COUNT=$((BIN_COUNT + 1))
+    for s in $cb_rt; do
+        CHECKED_SYMS=$((CHECKED_SYMS + 1))
+        "$GREP" -qx "$s" "$cb_provided"
+        if [ $? -ne 0 ]; then
+            OFFENDER_COUNT=$((OFFENDER_COUNT + 1))
+            OFFENDERS="$OFFENDERS $cb_label:$s"
+        fi
+    done
+}
+
+collect_binaries() {
+    if [ -n "$EXPLICIT_BINS" ]; then
+        echo "$EXPLICIT_BINS" | "$GREP" -v '^$'
+        return 0
+    fi
+    ( cd "$SCAN_ROOT" 2>/dev/null && git ls-files 'bootstrap/*simple' 'bootstrap/**/simple' 2>/dev/null ) \
+        | "$GREP" -E '(^|/)simple$' | sort -u
+}
+
+# ----------------------------------------------------------- archive logic ---
+# Narrow regex, and its precision stated honestly: we take a runtime name only
+# when the string literal is (a) an argument to a call/function-lookup emitter
+# (`call_runtime(`, `get_rt*(`, `get_function(`, `add_function(`, `emit*call*(`)
+# or (b) the RHS of a match-arm mapping `=> "rt_..."` -- which is the incident's
+# exact shape (`"unwrap" => "rt_unwrap_or_trap"`). It deliberately does NOT take
+# every "rt_*" literal under codegen/ (1402 of those, including prefix fragments
+# like "rt_actor_" and table keys that are never emitted as calls). This is a
+# lower bound on the emitted set: it can miss a name built by concatenation, but
+# every name it reports is genuinely handed to an emitter.
+ARCHIVE_MISSING=""
+ARCHIVE_MISSING_COUNT=0
+ARCHIVE_CHECKED=0
+ARCHIVE_STATUS="skipped"
+
+check_archive() {
+    case "$ARCHIVE" in
+        /*) ca_archive="$ARCHIVE" ;;
+        *)  ca_archive="$SCAN_ROOT/$ARCHIVE" ;;
+    esac
+    ca_cg="$SCAN_ROOT/$CODEGEN_DIR"
+    if [ ! -d "$ca_cg" ] || [ ! -r "$ca_archive" ]; then
+        ARCHIVE_STATUS="skipped(no archive or codegen dir)"
+        return 0
+    fi
+    # Staleness, fail-closed: an archive older than the newest src/runtime source
+    # describes a tree nobody is shipping, so a verdict from it is not evidence
+    # about the current runtime. The Rust native lane already refuses to LINK a
+    # stale archive ("error: runtime archive is STALE", native_project/tools.rs);
+    # this guard refuses to JUDGE one. Rebuild it before re-running.
+    ca_newer=$(find "$SCAN_ROOT/src/runtime" -maxdepth 1 -name '*.c' -newer "$ca_archive" -print 2>/dev/null | head -1)
+    if [ -n "$ca_newer" ]; then
+        echo "ERROR — nothing was checked (runtime archive is STALE: $ARCHIVE is older than $ca_newer)"
+        exit 2
+    fi
+    ca_names="$TMPROOT/cg_names"
+    "$GREP" -rhoE '(call_runtime|get_rt[a-z_]*|get_function|add_function|emit[a-z_]*call[a-z_]*)\(\s*"rt_[a-z0-9_]+"|=> *"rt_[a-z0-9_]+"' "$ca_cg" 2>/dev/null \
+        | "$GREP" -oE 'rt_[a-z0-9_]+' | sort -u > "$ca_names"
+    ca_defined="$TMPROOT/ar_defined"
+    "$NM" "$ca_archive" 2>/dev/null | awk '$2 ~ /^[TWtiIRD]$/ {print $3}' | sort -u > "$ca_defined"
+    if [ ! -s "$ca_defined" ]; then
+        echo "ERROR — nothing was checked (no defined symbols read from $ARCHIVE)"
+        exit 2
+    fi
+    while read -r n; do
+        [ -n "$n" ] || continue
+        ARCHIVE_CHECKED=$((ARCHIVE_CHECKED + 1))
+        "$GREP" -qx "$n" "$ca_defined"
+        if [ $? -ne 0 ]; then
+            ARCHIVE_MISSING_COUNT=$((ARCHIVE_MISSING_COUNT + 1))
+            ARCHIVE_MISSING="$ARCHIVE_MISSING $ARCHIVE:$n"
+        fi
+    done < "$ca_names"
+    ARCHIVE_STATUS="checked($ARCHIVE_CHECKED codegen-emitted names)"
+}
+
+# ---------------------------------------------------------------- selftest ---
+selftest() {
+    st_cc=""
+    for c in cc gcc clang; do
+        command -v "$c" >/dev/null 2>&1 && { st_cc=$c; break; }
+    done
+    if [ -z "$st_cc" ]; then
+        echo "selftest: ERROR — no C compiler available"
+        return 2
+    fi
+    st_dir="$TMPROOT/selftest"
+    mkdir -p "$st_dir" || return 2
+
+    # (a) all runtime symbols resolved -> PASS
+    cat > "$st_dir/a.c" <<'EOF'
+#include <stdio.h>
+long rt_fixture_present(long x) { return x + 1; }
+int main(void) { printf("%ld\n", rt_fixture_present(1)); return 0; }
+EOF
+    "$st_cc" -o "$st_dir/a.bin" "$st_dir/a.c" >/dev/null 2>&1 || return 2
+
+    # (b) incident replay: an ELF whose link tolerated an undefined runtime
+    # symbol, so the reference survives in the dynamic symbol table with no
+    # definition anywhere -- the shape that left a NULL GOT slot in the stage
+    # binaries. Built as a shared object because a PIE executable linked with
+    # --unresolved-symbols=ignore-all has the reference bound to 0 and DROPPED
+    # from the symbol table entirely (measured), leaving nothing to detect.
+    cat > "$st_dir/b.c" <<'EOF'
+#include <stdio.h>
+long rt_fixture_missing(long x);
+long fixture_entry(void) { return rt_fixture_missing(1); }
+EOF
+    "$st_cc" -shared -fPIC -o "$st_dir/b.bin" "$st_dir/b.c" -Wl,--unresolved-symbols=ignore-all >/dev/null 2>&1 || return 2
+
+    # (c) only libc undefined -> PASS
+    cat > "$st_dir/c.c" <<'EOF'
+#include <stdio.h>
+#include <math.h>
+int main(void) { printf("%f\n", sqrt(4.0)); return 0; }
+EOF
+    "$st_cc" -o "$st_dir/c.bin" "$st_dir/c.c" -lm >/dev/null 2>&1 || return 2
+
+    st_self="$ROOT_DIR/scripts/check/check-no-unresolved-runtime-symbols.shs"
+    st_fail=0
+
+    st_out=$(sh "$st_self" --bin "$st_dir/a.bin" 2>&1); st_rc=$?
+    if [ "$st_rc" -ne 0 ] || ! echo "$st_out" | "$GREP" -q '^PASS'; then
+        echo "selftest fixture (a) resolved-binary: FAILED (rc=$st_rc)"; st_fail=1
+    else echo "selftest fixture (a) resolved-binary: ok (PASS)"; fi
+
+    st_out=$(sh "$st_self" --bin "$st_dir/b.bin" 2>&1); st_rc=$?
+    if [ "$st_rc" -ne 1 ] || ! echo "$st_out" | "$GREP" -q 'rt_fixture_missing'; then
+        echo "selftest fixture (b) incident-replay: FAILED (rc=$st_rc) $st_out"; st_fail=1
+    else echo "selftest fixture (b) incident-replay: ok (FAIL names rt_fixture_missing)"; fi
+
+    st_out=$(sh "$st_self" --bin "$st_dir/c.bin" 2>&1); st_rc=$?
+    if [ "$st_rc" -ne 0 ] || ! echo "$st_out" | "$GREP" -q '^PASS'; then
+        echo "selftest fixture (c) libc-only: FAILED (rc=$st_rc)"; st_fail=1
+    else echo "selftest fixture (c) libc-only: ok (PASS)"; fi
+
+    # (e) a fully stripped artifact with NO symbol table -- the exact shape of
+    # the tracked stage blobs. Must be ERROR (no evidence), never PASS.
+    "$st_cc" -static -o "$st_dir/e.bin" "$st_dir/a.c" >/dev/null 2>&1 && strip -s "$st_dir/e.bin" >/dev/null 2>&1
+    if [ ! -x "$st_dir/e.bin" ]; then
+        echo "selftest fixture (e) stripped-binary: FAILED (could not build)"; st_fail=1
+    else
+        st_out=$(sh "$st_self" --bin "$st_dir/e.bin" 2>&1); st_rc=$?
+        if [ "$st_rc" -ne 2 ] || ! echo "$st_out" | "$GREP" -q '^ERROR'; then
+            echo "selftest fixture (e) stripped-binary: FAILED (rc=$st_rc)"; st_fail=1
+        else echo "selftest fixture (e) stripped-binary: ok (ERROR, no symbol table)"; fi
+    fi
+
+    st_empty="$TMPROOT/emptyrepo"
+    mkdir -p "$st_empty" && ( cd "$st_empty" && git init -q . >/dev/null 2>&1 )
+    st_out=$(ROOT_DIR="$ROOT_DIR" sh "$st_self" --root "$st_empty" 2>&1); st_rc=$?
+    if [ "$st_rc" -ne 2 ] || ! echo "$st_out" | "$GREP" -q '^ERROR'; then
+        echo "selftest fixture (d) empty-tracked-set: FAILED (rc=$st_rc)"; st_fail=1
+    else echo "selftest fixture (d) empty-tracked-set: ok (ERROR, 0 checked)"; fi
+
+    return $st_fail
+}
+
+# Selftest runs before every scan and is fatal -- unless we ARE a selftest
+# fixture invocation (--bin/--root), which must not recurse.
+if [ -z "$EXPLICIT_BINS" ] && [ "$SCAN_ROOT" = "$ROOT_DIR" ]; then
+    [ "$ARCHIVE_ONLY" -eq 1 ] || selftest
+    ST_RC=$?
+    if [ "$ST_RC" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    [ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — selftest only, 5 fixture(s) checked"; exit 0; }
+fi
+
+# ------------------------------------------------------------------- scan ----
+BINS=""
+[ "$ARCHIVE_ONLY" -eq 1 ] || BINS=$(collect_binaries)
+if [ "$ARCHIVE_ONLY" -eq 0 ] && [ -z "$BINS" ]; then
+    echo "ERROR — nothing was checked (no tracked bootstrap stage binary found)"
+    exit 2
+fi
+
+for b in $BINS; do
+    if [ -n "$EXPLICIT_BINS" ]; then
+        check_binary "$b" "$b"
+        continue
+    fi
+    src="$SCAN_ROOT/$b"
+    if [ -n "$REV" ] || [ ! -f "$src" ]; then
+        mat="$TMPROOT/mat.$(echo "$b" | tr '/' '_')"
+        ( cd "$SCAN_ROOT" && git cat-file blob "${REV:-HEAD}:$b" ) > "$mat" 2>/dev/null
+        rc=$?
+        if [ "$rc" -ne 0 ] || [ ! -s "$mat" ]; then
+            echo "ERROR — nothing was checked (cannot materialise ${REV:-HEAD}:$b)"
+            exit 2
+        fi
+        check_binary "$mat" "$b"
+    else
+        check_binary "$src" "$b"
+    fi
+done
+
+[ -n "$EXPLICIT_BINS" ] || check_archive
+
+TOTAL_CHECKED=$((CHECKED_SYMS + ARCHIVE_CHECKED))
+TOTAL_OFFENDERS=$((OFFENDER_COUNT + ARCHIVE_MISSING_COUNT))
+
+# Non-vacuity is measured in ARTIFACTS inspected, not symbols found: a binary
+# with zero runtime-prefixed undefined symbols is a genuine PASS, not a vacuum.
+if [ "$BIN_COUNT" -eq 0 ] && [ "$ARCHIVE_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 artifacts inspected)"
+    exit 2
+fi
+
+echo "archive=$ARCHIVE_STATUS"
+if [ "$TOTAL_OFFENDERS" -gt 0 ]; then
+    echo "FAIL — $TOTAL_CHECKED symbol(s) checked across $BIN_COUNT binary(ies) + archive, $TOTAL_OFFENDERS unresolved:$OFFENDERS$ARCHIVE_MISSING"
+    exit 1
+fi
+echo "PASS — $TOTAL_CHECKED symbol(s) checked across $BIN_COUNT binary(ies) + archive, 0 unresolved"
+exit 0

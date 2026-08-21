@@ -274,8 +274,13 @@ pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
 /// binding, matching what the identifier and two-level paths already do.
 fn sync_module_global(env: &Env, root: &str) {
     MODULE_GLOBALS.with(|cell| {
+        // Peek before the write borrow: borrow_mut() on this generation-tracked
+        // cell invalidates every owned-env template (2026-08-21 stall record).
+        if !cell.borrow().contains_key(root) {
+            return;
+        }
         let mut globals = cell.borrow_mut();
-        if globals.contains_key(root) {
+        {
             if let Some(updated) = env.get(root) {
                 globals.insert(root.to_string(), updated.clone());
             }
