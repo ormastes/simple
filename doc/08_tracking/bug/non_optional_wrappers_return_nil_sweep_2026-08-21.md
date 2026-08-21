@@ -1,6 +1,7 @@
 # Non-optional return contract (E-SFFI-016) — repo-wide sweep, 2026-08-21
 
-**Status:** class (a)/(b) CLOSED (guard green); class (c) CENSUSED, open.
+**Status:** class (a)/(b)/(c) CLOSED (guard green, 10 sites baselined behind an
+unrelated seed bug). Updated 2026-08-21.
 
 `2a59ff7f5e5` wired the seed's total return-contract validator. A Simple `fn`
 declared `-> T` where `T` is not optional now aborts when its body evaluates to
@@ -380,3 +381,85 @@ class-(b) sites above are fixed.
 `channel_try_recv_by_id` down the empty-channel path, plus a neighbor case
 proving a real value still round-trips after a nil poll. On the strict seed
 pre-fix the first two examples aborted the whole file; post-fix 5/5 pass.
+
+## Resolution, 2026-08-21
+
+### The 187-site census over-counted; the live number was 172
+
+The census parsed the declared return type by splitting the `fn` line on `:`
+and taking field 2, which mangles three shapes and reports all three as
+non-optional:
+
+- a TUPLE return type (`-> ({text: text}, i64)?` was read as `({text` -- the
+  `?` was in the part that got cut off, so an ALREADY-OPTIONAL function was
+  listed as an offender; `read_text_dict` and `_read_def_suffix` are this),
+- a closure PARAMETER carrying its own `->` (`predicate: fn(Any) -> bool`)
+  being mistaken for the function's return type -- `array_find` in all three
+  `array.spl` mirrors has no declared return type at all,
+- a `->` nested inside a GENERIC return type (`-> Option<fn() -> i64>`).
+
+A `nil` that is the tail of a nested closure rather than of the function body
+(`lazy_val.spl:199`, inside the thunk passed to `Lazy.new`) was also counted.
+The guard's class (c) leg parses the return type at paren/angle depth 0 and
+does not have these false positives. Live counts on the corrected scan:
+172 in `src/compiler` + `src/lib`, 24 in `src/app`, 0 in
+`src/runtime/simple_core`.
+
+### Sites fixed
+
+| batch | commit | `T?` | made total | other | not fixed |
+|---|---|---|---|---|---|
+| `src/compiler/**` | `2c8949e8f03` | 34 | 3 | — | 0 |
+| `src/compiler_rust/lib/std/**` (class (b)) | `79e45561d1e` | 2 | 3 | — | 0 |
+| `src/lib/common/**` + math/editor/tooling | `71255f9d3c2` | 19 | 1 | 2 bogus annotations removed | 10 |
+| `src/lib/{nogc_sync,nogc_async,gc_async}_mut/**` | `eb73528fc34` | 31 | 1 | — | 0 |
+| `src/app/**` (class (c) + class (b)) | `3bfd830c898` | 25 | 2 | — | 0 |
+
+`T?` was chosen wherever a caller already distinguished absent from a default
+(`if x != nil`, `x!`, `== nil`) or the docstring already said nil meant "not
+found"; otherwise the body was made total with a valid default. Two
+declarations (`option_filter -> bool`, `result_map -> i64`) were simply wrong
+about what their function returned -- they are generic passthroughs -- and the
+annotation was removed rather than invented.
+
+### The 10 sites that are NOT fixed, and why
+
+`json_parse` and the nine `date/` constructors (`from_ymd`, `from_days`,
+`parse_iso8601`, `add_days`, `nth_day_of_month`, `easter_date`, `good_friday`,
+`ash_wednesday`, `pentecost`) all return a TUPLE through `-> any`. `-> any?` is
+the correct declaration and nil there is a real "invalid date" / "malformed
+JSON" outcome. Widening them makes the strict seed wrap the returned tuple in
+an Option enum, so every downstream `.0`/`.1` access fails with "tuple index
+access on non-tuple type enum": measured 16 failures against the 5 the
+violation itself causes. That is the defect tracked in
+`doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md`, and these sites
+unblock the day it is fixed.
+
+They are recorded in `scripts/check/non_optional_nil_return_classc_baseline.txt`
+with that reasoning, and the guard FAILs on any NEW site and on any baselined
+site that stops being an offender (a stale baseline is how a ratchet silently
+stops ratcheting). The baseline must shrink to empty.
+
+### Guard
+
+`scripts/check/check-non-optional-nil-return.shs` now has a class (c) leg and
+scans `src/compiler`, `src/lib`, `src/app` and `src/runtime/simple_core`.
+Verdict:
+
+    PASS — 1705 wrapper(s) checked against 138 nil-capable extern(s),
+    12475 file(s) scanned for hand-written nil returns against a 10-entry
+    baseline (0 new, 0 stale), 0 returning nil through a non-optional type
+
+Three class (b) false-positive sources were found and fixed while widening the
+roots, each with a selftest fixture (19 fixtures, fatal, run before every scan):
+
+- the offender join was `grep -F -f`, a SUBSTRING match, so a nil-capable
+  shorter name convicted a wrapper forwarding a longer total one --
+  `rt_vulkan_free` vs `rt_vulkan_free_buffer`, which is why `vulkan_port_free`
+  was reported. It is now an exact-name join on the extracted callee.
+- the nil-capability scan kept a Rust fn "open" past its own closing brace, so
+  a `Value::Nil` belonging to whatever followed was attributed to it.
+- `src/runtime/simple_core` is the pure-Simple implementation OF the runtime
+  primitives, so its `rt_tuple_get` calls the `fn rt_array_get` defined in the
+  same file, not the extern of that name. A same-file Simple definition now
+  shadows the extern.

@@ -86,9 +86,74 @@ FNR==1 { cur="" }
 }
 { if (cur=="") next
   match($0,/^[ \t]*/); i=RLENGTH
+  # A closing brace at (or left of) the fn's own indent ENDS the fn. Without
+  # this the old exception for lines starting `}` or `)` kept the function
+  # "open" past its own closing brace, so a `Value::Nil` belonging to whatever
+  # followed (a const, an impl block, a nested helper) was attributed to it --
+  # which is how the total `rt_vulkan_free_buffer` was derived as nil-capable.
+  if ($0 ~ /^[ \t]*\}/ && i<=ci) { cur=""; next }
   if ($0 !~ /^[ \t]*$/ && i<=ci && $0 !~ /^[ \t]*[})]/) { cur=""; next }
   if ($0 ~ /Value::Nil/) { if(!found){print cur; found=1} }
 }
+AWKEOF
+
+cat > "$TMP/classc.awk" <<'AWKEOF'
+# class (c): explicit `return nil` / bare-nil tail under a NON-OPTIONAL declared
+# return type. Not extern related -- a hand-written nil under `-> T` aborts the
+# moment its branch is taken. `-> any` / `-> Any` are NON-OPTIONAL contracts
+# (sffi_return_contract classifies Type::Simple(_) as NonOptional with no escape
+# for any/Any), which is exactly why that bucket is the largest and most
+# surprising one.
+function toplevel_ret(l,   i,n,c,d,r) {
+  # the declared return type is the text after the LAST `->` that sits at paren
+  # depth 0. A closure PARAMETER (`predicate: fn(Any) -> bool`) carries its own
+  # `->` inside the argument list; taking the first or the textually-last `->`
+  # misreads those signatures, and misread them as non-optional.
+  d=0; r=""; n=length(l)
+  for (i=1;i<=n;i++) {
+    c=substr(l,i,1)
+    if (c=="-" && substr(l,i+1,1)==">") { if (d==0) r=substr(l,i+2); i++; continue }
+    if (c=="(" || c=="[" || c=="{" || c=="<") d++
+    else if (c==")" || c=="]" || c=="}" || c==">") d--
+  }
+  return r
+}
+function nonopt(t) {
+  gsub(/^[ \t]+|[ \t]+$/,"",t)
+  if (t=="") return 0
+  if (t ~ /\?$/) return 0
+  if (t=="()" || t=="void" || t=="unit" || t=="Unit" || t=="Never" || t=="never") return 0
+  if (t ~ /^(Option|Optional)</) return 0
+  return 1
+}
+function flush() {
+  if (curf!="" && nonopt(curr) && tailln>0 && tail=="nil")
+    printf "%s:%d:%s:%s:tail-nil\n", pf, tailln, curf, curr
+  curf=""; tail=""; tailln=0
+}
+FNR==1 { flush() }
+/^[ \t]*(pub[ \t]+)?fn[ \t]+[A-Za-z_]/ && /->/ {
+  flush()
+  match($0,/^[ \t]*/); curind=RLENGTH
+  line=$0
+  sub(/[ \t]*(#.*)?$/,"",line)
+  sub(/:[ \t]*$/,"",line)
+  rt=toplevel_ret(line)
+  fname=""
+  if (match($0,/fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) { fname=substr($0,RSTART,RLENGTH); sub(/fn[ \t]+/,"",fname) }
+  curf=fname; curr=rt; pf=FILENAME; tail=""; tailln=0; next
+}
+{
+  if (curf=="") next
+  if ($0 ~ /^[ \t]*$/) next
+  if ($0 ~ /^[ \t]*#/) next
+  match($0,/^[ \t]*/); i=RLENGTH
+  if (i<=curind) { flush(); next }
+  s=$0; gsub(/^[ \t]+|[ \t]+$/,"",s)
+  if (s ~ /^return[ \t]+nil[ \t]*$/ && nonopt(curr)) printf "%s:%d:%s:%s:return-nil\n", FILENAME, FNR, curf, curr
+  tail=s; tailln=FNR
+}
+END { flush() }
 AWKEOF
 
 # ------------------------------------------------------------------- functions
@@ -114,6 +179,61 @@ scan_wrappers() {
         | xargs -0 -n200 awk -f "$TMP/wrap.awk" 2>/dev/null > "$_out"
 }
 
+# scan_classc <spl_root> <out>  -- append class (c) sites found under <spl_root>
+scan_classc() {
+    _sroot="$1"; _out="$2"
+    [ -d "$_sroot" ] || return 0
+    find "$_sroot" -name '*.spl' -not -path '*/vendor/*' -print0 2>/dev/null \
+        | xargs -0 -n200 awk -f "$TMP/classc.awk" 2>/dev/null >> "$_out"
+}
+
+# normalize_classc <raw> <out>
+# Drop the absolute path prefix and the LINE NUMBER: line numbers churn on every
+# unrelated edit, so a line-keyed baseline goes stale for reasons that have
+# nothing to do with the defect. Key is <repo-relative file>:<fn>:<kind>.
+normalize_classc() {
+    awk -F: -v root="$ROOT/" '{
+        f=$1; sub("^" root, "", f)
+        print f ":" $3 ":" $NF
+    }' "$1" | sed 's/: */:/g' | sort -u > "$2"
+}
+
+# match_nil_callee <nil_set> <wrappers> <out>
+# Exact-name join on the forwarded callee. A substring match (`grep -F -f`) is
+# wrong here: runtime names nest (`rt_vulkan_free` is a prefix of
+# `rt_vulkan_free_buffer`), so a nil-capable SHORTER name silently convicted a
+# wrapper that forwards a different, total, longer-named extern.
+match_nil_callee() {
+    awk -F: 'NR==FNR { n[$0]=1; next }
+             { body=$NF
+               if (match(body,/rt_[a-z0-9_]+/)) { c=substr(body,RSTART,RLENGTH); if (c in n) print $0 } }' \
+        "$1" "$2" > "$3" 2>/dev/null
+}
+
+# drop_locally_defined <offenders_in> <offenders_out>
+# A file that DEFINES its own Simple `fn rt_x(...)` (src/runtime/simple_core is
+# the pure-Simple implementation OF the runtime primitives) is calling that
+# local definition, not the interpreter extern that happens to share the name.
+# Matching on the name alone reports those as offenders; the local definition
+# shadows the extern, so filter them out.
+drop_locally_defined() {
+    _in="$1"; _out="$2"
+    : > "$_out"
+    while IFS= read -r _ln; do
+        [ -n "$_ln" ] || continue
+        _f=${_ln%%:*}
+        _callee=$(printf '%s\n' "$_ln" | sed 's/.*[:  ]\(rt_[a-z0-9_]*\)(.*/\1/')
+        case "$_callee" in
+            rt_*) ;;
+            *) printf '%s\n' "$_ln" >> "$_out"; continue ;;
+        esac
+        if [ -f "$_f" ] && grep -qE "^[ \t]*(pub[ \t]+)?fn[ \t]+$_callee\(" "$_f" 2>/dev/null; then
+            continue
+        fi
+        printf '%s\n' "$_ln" >> "$_out"
+    done < "$_in"
+}
+
 # ------------------------------------------------------------------- selftest
 selftest() {
     _fail=0
@@ -128,8 +248,15 @@ pub fn rt_maybe_nil(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 pub fn rt_always_total(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(1))
+    for a in args {
+        if a.is_ok() {
+            return Ok(Value::Bool(true));
+        }
+    }
+    Ok(Value::Bool(false))
 }
+
+const SOME_TABLE: &[Value] = &[Value::Nil];
 RSEOF
     cat > "$_sd/rust/reg.rs" <<'RSEOF'
     insert_simple!("rt_maybe_nil", impls::rt_maybe_nil);
@@ -171,8 +298,30 @@ extern fn rt_always_total(k: text) -> i64
 fn fine_wrapper(k: text) -> i64:
     rt_always_total(k)
 SPEOF
+    # fixture: a file that defines its own `fn rt_maybe_nil` is calling that
+    # local definition, not the extern -- must NOT be flagged
+    # fixture: `rt_maybe_nil_ext` is TOTAL but has the nil-capable
+    # `rt_maybe_nil` as a strict prefix -- must NOT be flagged
+    cat > "$_sd/spl/prefix.spl" <<'SPEOF'
+extern fn rt_maybe_nil_ext(k: text) -> text
+
+fn prefix_wrapper(k: text) -> text:
+    rt_maybe_nil_ext(k)
+SPEOF
+    cat > "$_sd/spl/local_def.spl" <<'SPEOF'
+fn rt_maybe_nil(k: text) -> text:
+    if k == "":
+        return "fallback"
+    k
+
+fn local_def_wrapper(k: text) -> text:
+    rt_maybe_nil(k)
+SPEOF
     scan_wrappers "$_sd/spl" "$_sd/wrap.txt"
-    grep -F -f "$_sd/nil.txt" "$_sd/wrap.txt" > "$_sd/off.txt" 2>/dev/null
+    match_nil_callee "$_sd/nil.txt" "$_sd/wrap.txt" "$_sd/off_raw.txt"
+    drop_locally_defined "$_sd/off_raw.txt" "$_sd/off.txt"
+    grep -q ':prefix_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: a wrapper forwarding a total extern whose name merely CONTAINS a nil-capable name was flagged"; _fail=1; }
+    grep -q ':local_def_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: a wrapper calling a same-file Simple fn definition was wrongly flagged as forwarding the extern"; _fail=1; }
 
     grep -q ':bad_wrapper:' "$_sd/off.txt" 2>/dev/null || { echo "selftest FAIL: bad_wrapper not flagged"; _fail=1; }
     grep -q ':opt_wrapper:' "$_sd/off.txt" 2>/dev/null && { echo "selftest FAIL: opt_wrapper wrongly flagged"; _fail=1; }
@@ -183,6 +332,70 @@ SPEOF
     mkdir -p "$_sd/empty"
     scan_wrappers "$_sd/empty" "$_sd/empty.txt"
     if [ -s "$_sd/empty.txt" ]; then echo "selftest FAIL: empty tree produced wrappers"; _fail=1; fi
+    # ---- class (c) fixtures -------------------------------------------------
+    mkdir -p "$_sd/cls"
+    cat > "$_sd/cls/pos_return.spl" <<'SPEOF'
+fn c_bad_return(k: text) -> text:
+    if k == "":
+        return nil
+    k
+SPEOF
+    cat > "$_sd/cls/pos_tail_any.spl" <<'SPEOF'
+fn c_bad_tail(k: text) -> any:
+    if k != "":
+        return k
+    nil
+SPEOF
+    cat > "$_sd/cls/neg_opt.spl" <<'SPEOF'
+fn c_good_opt(k: text) -> text?:
+    if k == "":
+        return nil
+    k
+SPEOF
+    cat > "$_sd/cls/neg_void.spl" <<'SPEOF'
+fn c_good_void(k: text) -> void:
+    log(k)
+    nil
+SPEOF
+    cat > "$_sd/cls/neg_closure_param.spl" <<'SPEOF'
+fn c_good_closure_param(xs: [i64], p: fn(i64) -> bool):
+    for x in xs:
+        if p(x):
+            return x
+    nil
+SPEOF
+    cat > "$_sd/cls/neg_generic_ret.spl" <<'SPEOF'
+fn c_good_generic_ret(id: usize) -> Option<fn() -> i64>:
+    if id == 0:
+        return nil
+    nil
+SPEOF
+    : > "$_sd/cls_off.txt"
+    scan_classc "$_sd/cls" "$_sd/cls_off.txt"
+    grep -q ':c_bad_return:' "$_sd/cls_off.txt" 2>/dev/null || { echo "selftest FAIL: class (c) explicit 'return nil' under -> text not flagged"; _fail=1; }
+    grep -q ':c_bad_tail:' "$_sd/cls_off.txt" 2>/dev/null || { echo "selftest FAIL: class (c) bare-nil tail under -> any not flagged"; _fail=1; }
+    grep -q ':c_good_opt:' "$_sd/cls_off.txt" 2>/dev/null && { echo "selftest FAIL: class (c) optional return type wrongly flagged"; _fail=1; }
+    grep -q ':c_good_void:' "$_sd/cls_off.txt" 2>/dev/null && { echo "selftest FAIL: class (c) void return type wrongly flagged"; _fail=1; }
+    grep -q ':c_good_generic_ret:' "$_sd/cls_off.txt" 2>/dev/null && { echo "selftest FAIL: class (c) misread a -> nested inside a generic return type"; _fail=1; }
+    grep -q ':c_good_closure_param:' "$_sd/cls_off.txt" 2>/dev/null && { echo "selftest FAIL: class (c) misread a closure PARAMETER's -> as the declared return type"; _fail=1; }
+
+    # ---- baseline ratchet fixtures ------------------------------------------
+    # normalize_classc drops the absolute prefix and the line number, and the
+    # baseline comparison must surface BOTH a new offender and a stale entry.
+    printf '%s/a.spl:12:kept_fn: any:return-nil\n%s/b.spl:99:new_fn: text:tail-nil\n' "$ROOT" "$ROOT" > "$_sd/raw.txt"
+    normalize_classc "$_sd/raw.txt" "$_sd/norm.txt"
+    grep -qx 'a.spl:kept_fn:return-nil' "$_sd/norm.txt" || { echo "selftest FAIL: normalize_classc did not strip the root prefix and line number"; _fail=1; }
+    printf 'a.spl:kept_fn:return-nil\ngone.spl:removed_fn:tail-nil\n' | sort -u > "$_sd/base.txt"
+    comm -23 "$_sd/norm.txt" "$_sd/base.txt" > "$_sd/new.txt"
+    comm -13 "$_sd/norm.txt" "$_sd/base.txt" > "$_sd/stale.txt"
+    grep -qx 'b.spl:new_fn:tail-nil' "$_sd/new.txt" || { echo "selftest FAIL: a new class (c) offender was not reported against the baseline"; _fail=1; }
+    grep -qx 'a.spl:kept_fn:return-nil' "$_sd/new.txt" && { echo "selftest FAIL: a baselined class (c) offender was reported as new"; _fail=1; }
+    grep -qx 'gone.spl:removed_fn:tail-nil' "$_sd/stale.txt" || { echo "selftest FAIL: a stale baseline entry was not reported"; _fail=1; }
+
+    # an empty tree must yield 0 class (c) sites
+    : > "$_sd/cls_empty.txt"
+    scan_classc "$_sd/empty" "$_sd/cls_empty.txt"
+    if [ -s "$_sd/cls_empty.txt" ]; then echo "selftest FAIL: empty tree produced class (c) sites"; _fail=1; fi
 
     return $_fail
 }
@@ -193,7 +406,7 @@ if ! selftest; then
     exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — selftest only, 5 fixture(s) checked, 0 failures"
+    echo "PASS — selftest only, 19 fixture(s) checked, 0 failures"
     exit 0
 fi
 
@@ -205,25 +418,85 @@ if [ "$NIL_N" -eq 0 ]; then
     exit 2
 fi
 
-scan_wrappers "$ROOT/src/compiler" "$TMP/wrap_c.txt"
-scan_wrappers "$ROOT/src/lib" "$TMP/wrap_l.txt"
-cat "$TMP/wrap_c.txt" "$TMP/wrap_l.txt" > "$TMP/wrap.txt"
+# Roots scanned by BOTH legs. src/app and src/runtime/simple_core were added
+# 2026-08-21 once their class (b) siblings were fixed; a root that does not
+# exist is skipped, never an error.
+SCAN_ROOTS="src/compiler src/lib src/app src/runtime/simple_core"
+
+: > "$TMP/wrap.txt"
+for _r in $SCAN_ROOTS; do
+    scan_wrappers "$ROOT/$_r" "$TMP/wrap_one.txt"
+    cat "$TMP/wrap_one.txt" >> "$TMP/wrap.txt"
+done
 WRAP_N=$(awk "END{print NR}" "$TMP/wrap.txt" 2>/dev/null); [ -n "$WRAP_N" ] || WRAP_N=0
 if [ "$WRAP_N" -eq 0 ]; then
     echo "ERROR — nothing was checked (0 non-optional rt_* forwarding wrappers found under $ROOT/src/compiler + $ROOT/src/lib)"
     exit 2
 fi
 
-grep -F -f "$TMP/nil.txt" "$TMP/wrap.txt" > "$TMP/off.txt" 2>/dev/null
+match_nil_callee "$TMP/nil.txt" "$TMP/wrap.txt" "$TMP/off_raw.txt"
+drop_locally_defined "$TMP/off_raw.txt" "$TMP/off.txt"
 OFF_N=$(awk "END{print NR}" "$TMP/off.txt" 2>/dev/null); [ -n "$OFF_N" ] || OFF_N=0
 
-if [ "$OFF_N" -gt 0 ]; then
-    echo "offenders (file:line:fn:return-type:body):"
-    cat "$TMP/off.txt"
-    NAMES=$(awk -F: '{print $3}' "$TMP/off.txt" | sort -u | tr '\n' ' ' | sed 's/ $//')
-    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s), $OFF_N offender(s): $NAMES"
+# ------------------------------------------------------- class (c) leg
+# Hand-written `return nil` / bare-nil tail under a non-optional declared
+# return type. Independent of any extern: each such site aborts the moment its
+# branch is taken.
+: > "$TMP/classc.txt"
+CLSC_FILES=0
+for _r in $SCAN_ROOTS; do
+    [ -d "$ROOT/$_r" ] || continue
+    _n=$(find "$ROOT/$_r" -name '*.spl' -not -path '*/vendor/*' 2>/dev/null | awk 'END{print NR}')
+    [ -n "$_n" ] || _n=0
+    CLSC_FILES=$((CLSC_FILES + _n))
+    scan_classc "$ROOT/$_r" "$TMP/classc.txt"
+done
+if [ "$CLSC_FILES" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 .spl files found under $SCAN_ROOTS in $ROOT for the class (c) leg)"
+    exit 2
+fi
+normalize_classc "$TMP/classc.txt" "$TMP/classc_norm.txt"
+
+# Baseline: sites that are a REAL contract violation but cannot be fixed today,
+# each with a bug reference in the file. `T?` is the correct fix for all of
+# them and it regresses more than it fixes right now -- widening a tuple-valued
+# `-> any` to `any?` makes the seed wrap the tuple in an Option enum and break
+# `.0`/`.1` access (doc/08_tracking/bug/free_fn_optional_wrap_2026-06-26.md).
+# Recording them keeps the guard live against NEW debt without pretending these
+# are clean. Same convention as the other ratchets in this directory: a
+# baselined site that is no longer an offender is a STALE baseline and also
+# FAILs, because a baseline that no longer describes the tree is how a ratchet
+# silently stops ratcheting.
+BASELINE="$SCRIPT_DIR/non_optional_nil_return_classc_baseline.txt"
+if [ -f "$BASELINE" ]; then
+    grep -v '^#' "$BASELINE" | grep -v '^[[:space:]]*$' | sort -u > "$TMP/base.txt"
+else
+    : > "$TMP/base.txt"
+fi
+comm -23 "$TMP/classc_norm.txt" "$TMP/base.txt" > "$TMP/classc_new.txt"
+comm -13 "$TMP/classc_norm.txt" "$TMP/base.txt" > "$TMP/classc_stale.txt"
+BASE_N=$(awk "END{print NR}" "$TMP/base.txt" 2>/dev/null); [ -n "$BASE_N" ] || BASE_N=0
+CLSC_N=$(awk "END{print NR}" "$TMP/classc_new.txt" 2>/dev/null); [ -n "$CLSC_N" ] || CLSC_N=0
+STALE_N=$(awk "END{print NR}" "$TMP/classc_stale.txt" 2>/dev/null); [ -n "$STALE_N" ] || STALE_N=0
+cp "$TMP/classc_new.txt" "$TMP/classc.txt"
+
+if [ "$OFF_N" -gt 0 ] || [ "$CLSC_N" -gt 0 ] || [ "$STALE_N" -gt 0 ]; then
+    if [ "$OFF_N" -gt 0 ]; then
+        echo "class (b) offenders (file:line:fn:return-type:body):"
+        cat "$TMP/off.txt"
+    fi
+    if [ "$CLSC_N" -gt 0 ]; then
+        echo "class (c) offenders NOT in the baseline (file:fn:kind):"
+        cat "$TMP/classc.txt"
+    fi
+    if [ "$STALE_N" -gt 0 ]; then
+        echo "stale baseline entries (no longer offenders -- remove them):"
+        cat "$TMP/classc_stale.txt"
+    fi
+    NAMES=$( { [ "$OFF_N" -gt 0 ] && awk -F: '{print $3}' "$TMP/off.txt"; [ "$CLSC_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc.txt"; [ "$STALE_N" -gt 0 ] && awk -F: '{print $2}' "$TMP/classc_stale.txt"; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    echo "FAIL — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s) and $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline, $OFF_N class (b) + $CLSC_N new class (c) + $STALE_N stale baseline entry(ies): $NAMES"
     exit 1
 fi
 
-echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s), 0 returning nil through a non-optional type"
+echo "PASS — $WRAP_N wrapper(s) checked against $NIL_N nil-capable extern(s), $CLSC_FILES file(s) scanned for hand-written nil returns against a $BASE_N-entry baseline (0 new, 0 stale), 0 returning nil through a non-optional type"
 exit 0
