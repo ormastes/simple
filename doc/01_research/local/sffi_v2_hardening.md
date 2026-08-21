@@ -328,9 +328,10 @@ All caller-controlled C strings now reject embedded NUL, and the `dlopen`
 declarations use an explicit Rust unsafe extern block. The successful buffer
 path retains cached symbol resolution and one native call; no pixel copy or
 lookup was added. The GUI-feature focused test and source-only audit pass.
-This router is still an unverified dynamic provider because artifact signature
-admission is not yet wired here; its Rust calls therefore remain explicitly
-unsafe and it must not be classified as verified/critical-safe.
+At this stage the router was still an unverified dynamic provider. The
+subsequent sealed-admission work below authenticates its artifact, while its
+raw Rust calls correctly remain explicitly unsafe because signing does not
+prove provider semantics.
 
 The router also ignored `rt_winit_buffer_free`'s result and always reported
 success, while invalid or failed pixel readback became an empty array. The
@@ -351,9 +352,14 @@ mismatched, and tampered evidence fails closed. A generated-key test proves
 valid admission and both artifact/signature sabotage rejection. Verification
 is confined to the cached load path, so there is no per-call hash, signature,
 file I/O, or lookup. Development loading without evidence remains permitted
-but explicitly unsafe. Because path-based `dlopen` still has a check/use race,
-even sealed mode is not yet classified as critical-safe; immutable-handle load
-remains required for that assurance tier.
+but explicitly unsafe. On Linux, the loader now opens the artifact once,
+hashes bytes from that open file, and calls `dlopen` through
+`/proc/self/fd/<fd>` while retaining the file handle. This closes the
+path-replacement check/use race without changing the cached per-call path.
+Other Unix targets still load by pathname and therefore remain ineligible for
+critical-safe classification. Even on Linux, signature admission authenticates
+bytes but does not prove the provider's full semantic, ownership, ABI-registry,
+or provenance obligations.
 
 All 15 remaining legacy sign/verify declarations in the canonical signature
 module are now explicitly `unsafe(ffi)` and document their sentinel contract:

@@ -56,3 +56,10 @@ passing placeholder.
    checks; do not repeat an already-green check in the same session.
 6. Treat signing as separate artifact-admission evidence. Never label a
    provider semantically verified merely because its artifact is signed.
+7. Linux `spl_winit` admission uses an open-file descriptor for both hashing
+   and `dlopen`, with no hot-call work. Extend immutable-handle loading to
+   other supported platforms before granting their sealed providers the same
+   artifact-identity assurance.
+8. Continue the inventory by replacing remaining sentinel/nullable raw ABIs
+   with generated typed contracts and proof/test receipts; full SFFI remains
+   incomplete until every execution lane consumes the authoritative registry.

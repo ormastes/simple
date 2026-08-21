@@ -14,6 +14,10 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::fs::File;
+use std::io::Read;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::os::raw::{c_char, c_void};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -106,7 +110,7 @@ fn verify_artifact_seal(
         .map_err(|_| "spl_winit Ed25519 signature verification failed".to_string())
 }
 
-fn admit_provider(path: &str) -> Result<(), String> {
+fn admit_provider(path: &str, artifact: &mut File) -> Result<(), String> {
     let digest_path = format!("{path}.sha256");
     let signature_path = format!("{path}.sig");
     let public_key = std::env::var("SIMPLE_SPL_WINIT_ED25519_PUBKEY").ok();
@@ -117,12 +121,27 @@ fn admit_provider(path: &str) -> Result<(), String> {
         return Ok(());
     }
     let public_key = public_key.ok_or_else(|| "SIMPLE_SPL_WINIT_ED25519_PUBKEY is required".to_string())?;
-    let bytes = std::fs::read(path).map_err(|error| format!("cannot read provider artifact: {error}"))?;
+    let mut bytes = Vec::new();
+    artifact
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read provider artifact: {error}"))?;
     let expected_digest =
         std::fs::read_to_string(&digest_path).map_err(|error| format!("cannot read {digest_path}: {error}"))?;
     let signature =
         std::fs::read_to_string(&signature_path).map_err(|error| format!("cannot read {signature_path}: {error}"))?;
     verify_artifact_seal(&bytes, &expected_digest, &signature, &public_key)
+}
+
+#[cfg(target_os = "linux")]
+fn admitted_load_path(path: &str, artifact: &File) -> String {
+    let _ = path;
+    format!("/proc/self/fd/{}", artifact.as_raw_fd())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn admitted_load_path(path: &str, artifact: &File) -> String {
+    let _ = artifact;
+    path.to_string()
 }
 // Raw fn-pointer addresses (usize) are Send+Sync; the Mutex only guards the
 // HashMap's interior mutability during population, never re-entered after.
@@ -150,11 +169,22 @@ fn load_library() -> Result<LoadedLib, String> {
             tried.push(format!("{path}: artifact not found"));
             continue;
         }
-        if let Err(error) = admit_provider(&path) {
+        let mut artifact = match File::open(&path) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                tried.push(format!("{path}: cannot open provider artifact: {error}"));
+                continue;
+            }
+        };
+        if let Err(error) = admit_provider(&path, &mut artifact) {
             tried.push(format!("{path}: provider admission failed: {error}"));
             continue;
         }
-        let cpath = CString::new(path.clone())
+        // Linux resolves this descriptor path to the exact open file whose bytes
+        // were admitted above, preventing a path replacement between hashing and
+        // dlopen. Keep `artifact` alive until dlopen has acquired the object.
+        let load_path = admitted_load_path(&path, &artifact);
+        let cpath = CString::new(load_path)
             .map_err(|_| format!("spl_winit candidate path contains an embedded NUL: {path:?}"))?;
         let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         if handle.is_null() {
@@ -440,6 +470,8 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
+    #[cfg(target_os = "linux")]
+    use std::io::Write;
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -475,5 +507,18 @@ mod tests {
         let mut tampered_signature = signature.as_ref().to_vec();
         tampered_signature[0] ^= 1;
         assert!(verify_artifact_seal(bytes, &digest_hex, &hex(&tampered_signature), &public_key_hex).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_provider_handle_path_reads_same_bytes() {
+        let mut provider = tempfile::NamedTempFile::new().unwrap();
+        provider.write_all(b"verified provider bytes").unwrap();
+        provider.flush().unwrap();
+
+        let artifact = File::open(provider.path()).unwrap();
+        let descriptor_path = admitted_load_path(provider.path().to_str().unwrap(), &artifact);
+        assert!(descriptor_path.starts_with("/proc/self/fd/"));
+        assert_eq!(std::fs::read(descriptor_path).unwrap(), b"verified provider bytes");
     }
 }
