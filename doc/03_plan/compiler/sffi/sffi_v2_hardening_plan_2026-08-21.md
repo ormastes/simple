@@ -397,6 +397,11 @@ absence with non-null empty/static strings. One combined sabotage run passes
 all four matching null-contract tests (including SDL2). The added comparison is
 limited to text-return calls; graphics/event/scalar paths are unchanged.
 
+The screenshot interpreter now treats NULL owned-string returns from output-dir
+and capture-path queries as typed errors instead of successful empty paths. Its
+sabotage test passes, while the successful copy-then-provider-free ownership
+path remains unchanged. No new work occurs outside these infrequent getters.
+
 These are migration inputs, not 14,391 independent implementations. The audit
 now hashes normalized declaration shapes and groups them by symbol. The next
 tooling step replaces the text-derived shape with the resolved HIR ABI hash,

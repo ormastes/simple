@@ -55,13 +55,15 @@ fn capture_type_arg(args: &[Value], idx: usize, func: &str) -> Result<CaptureTyp
 }
 
 /// Take ownership of a runtime-allocated C string and free it via the runtime.
-fn take_owned_cstring(ptr: *mut c_char) -> String {
+fn take_owned_cstring(ptr: *mut c_char, symbol: &str) -> Result<String, CompileError> {
     if ptr.is_null() {
-        return String::new();
+        return Err(CompileError::runtime(format!(
+            "{symbol}: foreign owned-text contract returned null"
+        )));
     }
     let owned = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
     unsafe { rt::rt_screenshot_free_string(ptr) };
-    owned
+    Ok(owned)
 }
 
 fn text(value: String) -> Value {
@@ -101,7 +103,10 @@ pub fn rt_screenshot_set_output_dir(args: &[Value]) -> Result<Value, CompileErro
 }
 
 pub fn rt_screenshot_get_output_dir(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(text(take_owned_cstring(rt::rt_screenshot_get_output_dir())))
+    Ok(text(take_owned_cstring(
+        rt::rt_screenshot_get_output_dir(),
+        "rt_screenshot_get_output_dir",
+    )?))
 }
 
 pub fn rt_screenshot_set_context(args: &[Value]) -> Result<Value, CompileError> {
@@ -152,7 +157,10 @@ pub fn rt_screenshot_exists(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_screenshot_get_path(args: &[Value]) -> Result<Value, CompileError> {
     let ct = capture_type_arg(args, 0, "rt_screenshot_get_path")?;
-    Ok(text(take_owned_cstring(rt::rt_screenshot_get_path(ct))))
+    Ok(text(take_owned_cstring(
+        rt::rt_screenshot_get_path(ct),
+        "rt_screenshot_get_path",
+    )?))
 }
 
 pub fn rt_screenshot_capture_count(_args: &[Value]) -> Result<Value, CompileError> {
@@ -163,4 +171,15 @@ pub fn rt_screenshot_capture_count(_args: &[Value]) -> Result<Value, CompileErro
 /// a runtime allocation, so freeing is a no-op rather than a double free.
 pub fn rt_screenshot_free_string(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_owned_text_return_is_a_contract_error() {
+        let result = take_owned_cstring(std::ptr::null_mut(), "rt_screenshot_get_path");
+        assert!(result.is_err(), "null owned text must never become empty text");
+    }
 }
