@@ -1,0 +1,81 @@
+"""
+# Native ARM64 framebuffer color construction preserves all four channels
+
+This is the focused reproducer for the SimpleOS ARM64 QEMU failure that reached
+RAMFB and then faulted in `Color.rgb` before `desktop-ready`.  The interpreter
+control is useful, but the subprocess native build is the acceptance oracle.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+struct Arm64FramebufferColor:
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+
+impl Arm64FramebufferColor:
+    static fn rgb(r: u8, g: u8, b: u8) -> Arm64FramebufferColor:
+        Arm64FramebufferColor(r: r, g: g, b: b, a: 255)
+
+val PAINT_COLOR_SOURCE: text = ("pub class Color:\n" +
+    "    r: i64\n" +
+    "    g: i64\n" +
+    "    b: i64\n" +
+    "    a: i64\n")
+
+val FRAMEBUFFER_COLOR_SOURCE: text = ("pub struct Color:\n" +
+    "    r: u8\n" +
+    "    g: u8\n" +
+    "    b: u8\n" +
+    "    a: u8\n" +
+    "\n" +
+    "impl Color:\n" +
+    "    static fn rgb(r: u8, g: u8, b: u8) -> Color:\n" +
+    "        Color(r: r, g: g, b: b, a: 255)\n")
+
+val COLOR_REPRO_SOURCE: text = ("use paint_color.{Color as PaintColor}\n" +
+    "use framebuffer_color.{Color as FbColor}\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val paint = PaintColor(r: 1, g: 2, b: 3, a: 4)\n" +
+    "    print(paint.a)\n" +
+    "    val color = FbColor.rgb(17, 31, 47)\n" +
+    "    print(color.r)\n" +
+    "    print(color.g)\n" +
+    "    print(color.b)\n" +
+    "    print(color.a)\n")
+
+fn native_build_and_run_color() -> text:
+    val dir = "build/test-artifacts/native_arm64_framebuffer_color_return"
+    val src = dir + "/color_repro.spl"
+    val bin_out = dir + "/color_repro.bin"
+    var compiler = env_get("SIMPLE_BIN")
+    if compiler == "":
+        compiler = "bin/simple"
+    process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + bin_out])
+    file_write(dir + "/paint_color.spl", PAINT_COLOR_SOURCE)
+    file_write(dir + "/framebuffer_color.spl", FRAMEBUFFER_COLOR_SOURCE)
+    file_write(src, COLOR_REPRO_SOURCE)
+    val command = ("SIMPLE_BOOTSTRAP=1 " + compiler +
+        " native-build --source " + dir + " --entry " + src +
+        " --entry-closure --output " + bin_out + " >/dev/null 2>&1; " +
+        "test -x " + bin_out + " && ./" + bin_out + " 2>&1 || echo BUILD-FAILED")
+    val result = process_run("sh", ["-c", command])
+    result.0
+
+describe "native ARM64 framebuffer Color return ABI":
+    it "preserves channels in the interpreter control":
+        step("Construct the same four-u8 color returned by Color.rgb")
+        val color = Arm64FramebufferColor.rgb(17, 31, 47)
+        expect(color.r).to_equal(17)
+        expect(color.g).to_equal(31)
+        expect(color.b).to_equal(47)
+        expect(color.a).to_equal(255)
+
+    it "preserves channels in a native entry-closure binary":
+        step("Build and execute the exact small-struct return shape")
+        val output = native_build_and_run_color()
+        expect(output.contains("BUILD-FAILED")).to_be(false)
+        expect(output).to_contain("4\n17\n31\n47\n255")
