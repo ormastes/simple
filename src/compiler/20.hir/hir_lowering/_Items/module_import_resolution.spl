@@ -219,7 +219,9 @@ impl HirLowering:
             var glob_imp_idx = 0
             while glob_imp_idx < imported_mod.imports.len():
                 val glob_imp = imported_mod.imports[glob_imp_idx]
-                if glob_imp.items.len() == 0 and facade_shape:
+                val glob_item_start = imported_mod.import_item_offsets[glob_imp_idx]
+                val glob_item_end = imported_mod.import_item_offsets[glob_imp_idx + 1]
+                if glob_item_start == glob_item_end and facade_shape:
                     var nested_surface_index = -1
                     if glob_imp_idx < imported_mod.import_target_indices.len():
                         nested_surface_index = imported_mod.import_target_indices[glob_imp_idx]
@@ -231,15 +233,26 @@ impl HirLowering:
                             self.module_surfaces.surfaces[nested_surface_index], nested_key,
                             import_span, depth + 1, include_private_named_imports,
                             materialize_enums)
-                var glob_it = 0
-                while glob_it < glob_imp.items.len():
-                    val glob_item = glob_imp.items[glob_it]
-                    val glob_local = if glob_item.has_alias: glob_item.alias else: glob_item.name
-                    self.register_imported_symbol(imported_mod, imported_mod_name, glob_local, glob_local, import_span, materialize_enums)
+                var glob_it = glob_item_start
+                while glob_it < glob_item_end:
+                    val glob_name = imported_mod.import_item_names[glob_it]
+                    val glob_local = if imported_mod.import_item_has_alias[glob_it]:
+                        imported_mod.import_item_aliases[glob_it]
+                    else: glob_name
+                    self.register_imported_symbol(imported_mod, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
                     glob_it = glob_it + 1
                 glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
+        var importer_surface_index = self.surface_index_for_name(module.name)
+        if importer_surface_index < 0:
+            val importer_key = self.resolve_module_key(module.name)
+            if importer_key != "":
+                importer_surface_index = self.surface_index_for_name(importer_key)
+        if importer_surface_index < 0:
+            self.error("missing importing module surface for {module.name}", Span.empty())
+            return
+        val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
@@ -247,7 +260,8 @@ impl HirLowering:
             # winning key and read the value only with bracket indexing.
             var imported_key = if self.surface_index_for_name(imp.module) >= 0: imp.module else: ""
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[imp] importer={module.name} module={imp.module} items={imp.items.len()} found={imported_key != ""}")
+                val diag_item_count = importer_surface.import_item_offsets[import_idx + 1] - importer_surface.import_item_offsets[import_idx]
+                eprint("[imp] importer={module.name} module={imp.module} items={diag_item_count} found={imported_key != ""}")
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
@@ -303,7 +317,9 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
-                if imp.items.len() == 0:
+                val item_start = importer_surface.import_item_offsets[import_idx]
+                val item_end = importer_surface.import_item_offsets[import_idx + 1]
+                if item_start == item_end:
                     self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`. Its owner
@@ -320,11 +336,13 @@ impl HirLowering:
                         if module_alias != "" and not self.symbols.lookup_or_invalid(module_alias).is_valid():
                             self.symbols.define(module_alias, SymbolKind.Module, nil, imp.span, Visibility.Private, false, Some(imported_surface.module_name))
                 else:
-                    var item_idx = 0
-                    while item_idx < imp.items.len():
-                        val item = imp.items[item_idx]
-                        val local_name = if item.has_alias: item.alias else: item.name
-                        self.register_imported_symbol(imported_surface, resolved_module_name, item.name, local_name, imp.span, true)
+                    var item_idx = item_start
+                    while item_idx < item_end:
+                        val item_name = importer_surface.import_item_names[item_idx]
+                        val local_name = if importer_surface.import_item_has_alias[item_idx]:
+                            importer_surface.import_item_aliases[item_idx]
+                        else: item_name
+                        self.register_imported_symbol(imported_surface, resolved_module_name, item_name, local_name, imp.span, true)
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 

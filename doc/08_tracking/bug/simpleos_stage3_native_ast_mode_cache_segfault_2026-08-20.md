@@ -1099,3 +1099,42 @@ freeze must publish name/value arrays and all post-retention declaration
 membership and payload reads must use those arrays. This follows the existing
 route-array rule already documented on the class: no
 `Dict<text, aggregate>` crosses the native Stage-3 boundary.
+
+## Retained declaration payload Cycle 1 (2026-08-22)
+
+Commit `4576fa621848` published index-aligned declaration value arrays and
+migrated retained HIR lookups away from construction dictionaries. The first
+fresh admitted Stage-3 cycle cleared the previous declaration-length gate and
+entered HIR, but the first imported source (`compiler.driver.driver`) lost
+`CompileOptions`, `CompilerDriver`, and `CompileResult`. The failure broadened
+into unresolved imported declarations and ended with signal 11 at source 68.
+
+Array survival alone therefore does not prove aggregate payload survival. The
+next bounded cycle adds a pre-HIR invariant that compares every retained value
+payload's `name` with its aligned scalar name. It fails closed at the first
+corrupt aggregate, before imported-symbol lowering can cascade or crash. Only
+if names remain aligned may diagnosis move inward to nested type/parameter
+payload retention.
+
+Cycle 2 proved every retained aggregate `name` still matched its scalar key,
+yet reproduced the same source-1 unresolved-import cascade. The remaining
+retained read was earlier: `resolve_import_symbols` iterated each nested
+`ParserImport.items` array after per-file teardown. An invalid negative nested
+length makes both the glob and explicit-item branches perform no registration,
+which exactly explains why module routing succeeds while all named imports are
+missing.
+
+The owner fix publishes import-item offsets, names, aliases, and alias flags as
+flat scalar arrays on `ModuleSurface`. HIR now checks the aligned offsets and
+unwraps item positions only inside their validated range. The nested-glob path
+uses the same projection, so it cannot reintroduce the stale parser payload.
+Cycle 3 is the final permitted bootstrap verification cycle for this session.
+
+Cycle 3 rebuilt and passed Stage-2 sanity, then failed immediately after
+parsing the first Stage-3 source with SIGBUS (exit 138). The new projection had
+read `ImportItem.alias` unconditionally. Although desugared as `text`, the
+parser stores `nil` when `has_alias` is false; consuming that field before the
+presence check reproduces the struct/optional ABI hazard at surface creation.
+The queued correction unwraps `alias` only when `has_alias` is true and stores
+an empty scalar otherwise. It is intentionally unclaimed until a fresh scoped
+session runs the next admitted Stage-3 cycle.
